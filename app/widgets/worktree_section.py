@@ -67,7 +67,7 @@ class _WorktreeRow(QWidget):
         # 左侧竖线（加粗到 3px，配合更大圆点）
         bar = QFrame(self)
         bar.setFixedWidth(3)
-        bar.setStyleSheet("background-color: rgba(255,255,255,0.15);")
+        bar.setStyleSheet(f"background-color: {Colors.DIVIDER_COLOR};")
         layout.addWidget(bar)
 
         # 圆点（加大到 8x8，配合加粗的线）
@@ -85,9 +85,9 @@ class _WorktreeRow(QWidget):
 
         # 分支名（自动省略超长名称）
         if self._is_current:
-            branch_ss = f"color: #e6edf3; font-weight: 600; {get_font_family_css()} {font_size_css(12)}"
+            branch_ss = f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; {get_font_family_css()} {font_size_css(12)}"
         else:
-            branch_ss = f"color: #8b949e; {get_font_family_css()} {font_size_css(12)}"
+            branch_ss = f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)}"
 
         self._branch_label = QLabel(self._branch, self)
         self._branch_label.setStyleSheet(branch_ss)
@@ -100,8 +100,8 @@ class _WorktreeRow(QWidget):
         if self._is_main:
             tag = QLabel("main", self)
             tag.setStyleSheet(
-                f"color: rgba(255,255,255,0.35); {font_size_css(10)}"
-                f"background: rgba(255,255,255,0.06);"
+                f"color: {Colors.TEXT_MUTED}; {font_size_css(10)}"
+                f"background: {Colors.HOVER_BG};"
                 f"padding: 0 4px; border-radius: 2px;"
             )
             layout.addWidget(tag)
@@ -130,7 +130,7 @@ class _WorktreeRow(QWidget):
             btn = QLabel("切换", self)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(
-                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
                 f"padding: 0 4px;"
             )
             btn.mousePressEvent = lambda e: self.switched.emit(self._wt_path)
@@ -144,7 +144,7 @@ class _WorktreeRow(QWidget):
             self._del_btn.setCursor(Qt.PointingHandCursor)
             self._del_btn.setToolTip("删除 worktree")
             self._del_btn.setStyleSheet(
-                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
             self._del_btn.mousePressEvent = lambda e: self._on_delete_clicked()
             layout.addWidget(self._del_btn)
@@ -197,7 +197,7 @@ class _WorktreeRow(QWidget):
             self._del_btn.setText("✕")
             self._del_btn.setMinimumWidth(14)
             self._del_btn.setStyleSheet(
-                f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
             self._del_btn.setToolTip("删除 worktree")
 
@@ -289,12 +289,12 @@ class _AddWorktreeRow(QWidget):
         # 竖线（加粗到 3px，配合圆点尺寸）
         bar = QFrame(self)
         bar.setFixedWidth(3)
-        bar.setStyleSheet("background-color: rgba(255,255,255,0.15);")
+        bar.setStyleSheet(f"background-color: {Colors.DIVIDER_COLOR};")
         layout.addWidget(bar)
 
         add_label = QLabel("＋ 新建 worktree", self)
         add_label.setStyleSheet(
-            f"color: #ffffff; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
         )
         add_label.setCursor(Qt.PointingHandCursor)
         add_label.mousePressEvent = lambda e: self._on_add()

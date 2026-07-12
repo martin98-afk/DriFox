@@ -346,9 +346,10 @@ class LLMSettingsCard(SystemCardFrame):
         self._section_anchors["appearance"] = self._sep_appearance_label
         content_layout.addWidget(self._sep_appearance_label)
 
-        # 界面字号、主题风格
+        # 界面字号、浅色模式、主题风格
         self._setup_appearance_cards()
         content_layout.addWidget(self.uiFontSizeCard)
+        content_layout.addWidget(self.uiLightModeCard)
         content_layout.addWidget(self.uiThemeStyleCard)
 
         # 全局字体设置
@@ -411,6 +412,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg.llm_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_font_size.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
+        self.cfg.ui_light_mode.valueChanged.connect(self._on_light_mode_changed)
         self.cfg.llm_api_enabled.valueChanged.connect(self._on_llm_api_enabled_changed)
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
         self.cfg.pet_size.valueChanged.connect(self._on_settings_changed)
@@ -550,10 +552,17 @@ class LLMSettingsCard(SystemCardFrame):
             FONT_SIZE_OPTIONS,
             self,
         )
+        self.uiLightModeCard = SwitchSettingCard(
+            get_icon("主题风格"),
+            "浅色模式",
+            "切换为浅色界面配色",
+            self.cfg.ui_light_mode,
+            self,
+        )
         self.uiThemeStyleCard = AppearanceComboCard(
             get_icon("主题风格"),
             "主题风格",
-            "选择一套深色界面卡片配色",
+            "选择界面卡片配色方案",
             self.cfg,
             self.cfg.ui_theme_style,
             self._build_theme_options(),
@@ -562,12 +571,22 @@ class LLMSettingsCard(SystemCardFrame):
         )
 
     def _build_theme_options(self) -> dict:
-        """从 ThemeManager 动态构建主题选项"""
+        """从 ThemeManager 动态构建主题选项，按当前深浅模式过滤并加标识"""
         from app.utils.config import update_theme_options
 
         update_theme_options()
         themes = theme_manager.list_themes()
-        return {tid: {"label": name} for tid, name in themes.items()}
+        is_light = self.cfg.ui_light_mode.value
+
+        result = {}
+        for tid, name in themes.items():
+            theme_light = theme_manager.is_light_theme(tid)
+            # 按当前模式过滤
+            if is_light != theme_light:
+                continue
+            label = name
+            result[tid] = {"label": label}
+        return result
 
     def _setup_font_card(self):
         """创建字体设置卡片"""
@@ -674,6 +693,34 @@ class LLMSettingsCard(SystemCardFrame):
         """
         self._save_timer.start()
 
+    def _on_light_mode_changed(self, is_light: bool):
+        """浅色模式开关切换 — 自动选择对应模式的主题"""
+        if is_light:
+            target_theme = "lumia"
+        else:
+            target_theme = "fallout"
+        # 避免循环触发：只有真正需要切换时才改
+        if self.cfg.ui_theme_style.value != target_theme:
+            self.cfg.set(self.cfg.ui_theme_style, target_theme, save=True)
+        # 重建主题下拉列表（按模式过滤）
+        if hasattr(self, "uiThemeStyleCard") and hasattr(self.uiThemeStyleCard, "comboBox"):
+            card = self.uiThemeStyleCard
+            card.options = self._build_theme_options()
+            card._build_lookup_tables()
+            combo = card.comboBox
+            combo.currentTextChanged.disconnect(card._on_changed)
+            combo.clear()
+            combo.addItems([data["label"] for data in card.options.values()])
+            if target_theme in card.label_by_value:
+                combo.setCurrentText(card.label_by_value[target_theme])
+            elif card.options:
+                first_tid = next(iter(card.options))
+                combo.setCurrentText(card.options[first_tid]["label"])
+                self.cfg.set(self.cfg.ui_theme_style, first_tid, save=True)
+            combo.currentTextChanged.connect(card._on_changed)
+        # 触发全量刷新
+        self._on_config_changed()
+
     def _on_config_changed(self):
         """外观/模型相关设置变更 — 需要全量刷新"""
         # 失效字体/字号缓存，让后续渲染读取新配置
@@ -692,6 +739,11 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 刷新主题样式
         Colors.refresh()
+
+        # 浅/深色切换 → 清除浅色检测缓存（图标由 QIconEngine 自动适配）
+        from app.utils.theme_manager import theme_manager
+        theme_manager.on_theme_changed()
+
         if hasattr(self, "refresh_style"):
             self.refresh_style()
 
@@ -704,7 +756,7 @@ class LLMSettingsCard(SystemCardFrame):
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 刷新 AppearanceComboCard / FontSettingCard 的下拉样式（SettingCard 子类，不在以上遍历范围）
-        for card_name in ("uiFontSizeCard", "uiThemeStyleCard", "llmFontCard"):
+        for card_name in ("uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard"):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()

@@ -320,6 +320,7 @@ class Settings(QConfig):
         "fallout",
         OptionsValidator(["fallout"]),  # 运行时动态补充
     )
+    ui_light_mode = ConfigItem("UI", "LightMode", False, BoolValidator())
 
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())

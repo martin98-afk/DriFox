@@ -317,7 +317,7 @@ class _HistoryItemCard(SimpleCardWidget):
         if self._preview_label is None:
             self._preview_label = CaptionLabel("", self)
             self._preview_label.setStyleSheet(
-                f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
+                f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
             self._preview_label.setWordWrap(True)
             # 添加到主布局底部（bottom_row 下方），占满整行宽度
@@ -484,7 +484,7 @@ class _ArchivedItemCard(CardWidget):
         self.title_label = BodyLabel(title[:100], self)
         self.title_label.setWordWrap(True)
         body_size = scale_font_size(14)
-        self.title_label.setStyleSheet(f"color: white; font-size: {body_size}px; {get_font_family_css()}")
+        self.title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; {get_font_family_css()}")
         top_row.addWidget(self.title_label, 1)
 
         self.title_edit = QLineEdit(title[:100], self)
@@ -494,7 +494,7 @@ class _ArchivedItemCard(CardWidget):
                 background-color: rgba(0, 0, 0, 0.3);
                 border: 1px solid rgba(255, 180, 100, 0.5);
                 border-radius: 4px;
-                color: white;
+                color: {Colors.TEXT_PRIMARY};
                 padding: 2px 6px;
                 {get_font_family_css()}
             }}
@@ -563,7 +563,7 @@ class _ArchivedItemCard(CardWidget):
         caption_size = scale_font_size(12)
         self._preview_label = CaptionLabel(text, self)
         self._preview_label.setStyleSheet(
-            f"color: rgba(255, 255, 255, 0.4); font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
+            f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
         )
         self._preview_label.setWordWrap(True)
         # 添加到主布局底部（bottom_row 下方），占满整行宽度
@@ -1047,7 +1047,7 @@ class HistoryCard(QWidget):
                 text = item[1]
                 empty_label = QLabel(text)
                 empty_label.setAlignment(Qt.AlignCenter)
-                empty_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); padding: 16px;")
+                empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 16px;")
                 layout.insertWidget(layout.count() - 1, empty_label)
 
         if suspend_repaint:

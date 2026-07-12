@@ -1,0 +1,117 @@
+name: 玫瑰粉
+id: rosee
+mode: light
+window:
+  gradient_start: rgba(250, 232, 238, 255)
+  gradient_end: rgba(248, 224, 232, 255)
+background:
+  window_bg:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+  chat_list:
+    image: :/icons/fox_bg.png
+    opacity: 0.04
+    enabled: true
+colors:
+  card_bg: rgba(254, 243, 248, 238)
+  card_bg_solid: rgba(254, 243, 248, 252)
+  content_bg: '#f0dae4'
+  border: '#d8bcc8'
+  border_accent: '#db2777'
+  text_primary: '#2a0c1a'
+  text_secondary: rgba(42, 12, 26, 0.60)
+  text_muted: '#8c5a6e'
+  accent: '#db2777'
+  accent_warm: '#d97706'
+  hover_bg: rgba(219, 39, 119, 0.08)
+  selected_bg: rgba(219, 39, 119, 0.18)
+  capsule_bg: rgba(252, 238, 245, 215)
+  capsule_border: rgba(210, 180, 195, 200)
+
+  toolbar_bg: rgba(180, 30, 90, 0.06)
+  divider_color: rgba(0, 0, 0, 0.08)
+  hover_bg_strong: rgba(180, 30, 90, 0.08)
+  scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
+  scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
+  card_placeholder_text: '#a88898'
+
+  button_text_on_accent: '#ffffff'
+  status_info: '#db2777'
+  status_danger_bg: rgba(200, 50, 50, 0.8)
+  status_archive_bg: rgba(219, 39, 119, 0.8)
+  card_bg_dim: rgba(180, 30, 90, 0.04)
+  archived_card_bg: rgba(219, 39, 119, 0.10)
+  archived_card_border: rgba(219, 39, 119, 0.20)
+
+  syntax_step: '#059669'
+  syntax_tool: '#b45309'
+  syntax_success: '#16a34a'
+  syntax_error: '#dc2626'
+  syntax_result: '#7c3aed'
+
+  tag_accent: '#db2777'
+  tag_accent_text: '#be185d'
+  tag_purple: '#7c3aed'
+  tag_purple_text: '#6d28d9'
+  tag_orange: '#d97706'
+  tag_orange_text: '#b45309'
+  user_card_bg: rgba(248, 212, 228, 195)
+  user_card_accent: '#db2777'
+  user_card_text: '#2a0c1a'
+  user_card_muted: '#8c5a6e'
+  assistant_card_bg: rgba(254, 238, 245, 225)
+  assistant_card_accent: '#be185d'
+  assistant_card_text: '#1a0610'
+  assistant_card_muted: '#8c5a6e'
+  agent_btn_text: '#8c5a6e'
+  agent_btn_text_active: '#db2777'
+  agent_btn_bg_active: rgba(219, 39, 119, 0.12)
+  agent_btn_separator: rgba(200, 172, 185, 150)
+  input_bg_start: rgba(252, 238, 245, 210)
+  input_bg_end: rgba(248, 228, 240, 210)
+  input_focus_bg_start: rgba(252, 238, 245, 245)
+  input_focus_bg_end: rgba(248, 228, 240, 245)
+  input_text: '#2a0c1a'
+  input_focus_text: '#160410'
+  input_border: '#d8bcc8'
+  input_focus_border: '#db2777'
+  input_placeholder: rgba(42, 12, 26, 0.35)
+  glow_primary_alpha: 150
+  glow_primary_blur: 24
+  glow_ambient_alpha: 80
+  glow_ambient_blur: 32
+
+  toolbar_strip_bg: rgba(248, 228, 240, 210)
+  toolbar_strip_border: '#d8bcc8'
+  realtime_border: '#db2777'
+  realtime_accent: '#f472b6'
+  realtime_accent_warm: '#f59e0b'
+  realtime_success: '#10b981'
+  realtime_error: '#ef4444'
+  realtime_bg: rgba(248, 228, 240, 248)
+  realtime_text: '#2a0c1a'
+  realtime_text_secondary: rgba(42, 12, 26, 0.65)
+  realtime_tag_bg: rgba(219, 39, 119, 0.10)
+  realtime_tag_border: rgba(219, 39, 119, 0.22)
+  system_border: '#d8bcc8'
+  system_accent: '#db2777'
+  send_btn_start: "#db2777"
+  send_btn_end: "#be185d"
+  send_btn_hover_start: "#f472b6"
+  send_btn_hover_end: "#db2777"
+  send_btn_radius: 17
+  timeline_node: '#c8a8b8'
+  timeline_node_hover: '#db2777'
+  timeline_node_visible: '#10b981'
+  timeline_node_selected: '#d97706'
+  timeline_line: '#ecdde4'
+  timeline_line_progress: '#10b981'
+  ring_normal: '#db2777'
+  ring_warning: '#d97706'
+  ring_danger: '#ef4444'
+  ring_compacted: '#7c3aed'
+  branch_label_bg: rgba(219, 39, 119, 0.10)
+  branch_label_border: rgba(219, 39, 119, 0.22)
+  window_bg: rgba(219, 39, 119, 0.04)
+  input_glow_preset: "subtle"
