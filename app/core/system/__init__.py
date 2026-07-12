@@ -3,11 +3,9 @@
 from app.core.system.lock_screen_remote import (
     LockScreenRemoteManager,
     get_lock_screen_remote_manager,
-    register_command_handler,
 )
 
 __all__ = [
     "LockScreenRemoteManager",
     "get_lock_screen_remote_manager",
-    "register_command_handler",
 ]

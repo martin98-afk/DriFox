@@ -3,16 +3,25 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.6] - 2026-07-12
 
-自上一版本以来的变更 | 提交数：5 · 文件变更：15 · +556/-136 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：11 · 文件变更：18 · +669/-188 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
 - **上下文用量统计增强**: 当 API 未返回 usage 时，使用本地上下文计数补全消息 token 用量，确保上下文圆环和消息卡片中的统计保持准确；新增缺失 usage 场景的回归测试
 - **历史问题计数提示优化**: 为用户问题数量增加 InfoBadge，并在新建会话和输入用户消息时正确更新可见性；同步优化相关 tooltip 样式与上下文用量展示
+- **Hook Token 追踪与上下文用量堆叠图优化**: UIEngine 新增 hook token 追踪，并在上下文用量 Tooltip 的堆叠柱状图末尾显示占比百分比
+- **跨组件 Token 显示同步**: UIEngine、ChatWorker 与主窗口三组件的 token 显示统一同步，避免多处 UI 数字不一致并增强上下文处理
 
 ### 🐛 问题修复 (Bug Fixes)
 
 - **工具运行折叠框状态修复**: 修复工具调用与工具结果写入不同消息卡片时，运行折叠框偶尔无法转为完成态并持续累积的问题；通过 `tool_call_id` 关联所属卡片，并增加完成态恢复兜底与回归测试
+- **上下文圆环 token 防闪现修复**: 修复刷新上下文圆环时，因 `session.messages` 还未包含本轮新增消息（陈旧）而闪现异常小值的问题；以 worker 实时 token 量为下限兜底
+- **重载卡片 token 与上下文圆环同步**: 重载历史会话时，卡片底部 token 直接复用上下文圆环快照的 `used_tokens`（同一来源），避免基于 worker 估算导致显示远小于真实占用
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Lock Screen Remote 移除命令注册**: 移除 `register_command_handler` 与 `/lock-remote` 命令注册路径，统一由设置 UI 控制开关；同步清理 `app/core/system/__init__.py` 的导出与 `main_widget.py` 的调用点
+- **代码注释精简化**: 锁屏远程相关注释与单例/命令注册章节标题更新，可读性提升
 
 ### 🔧 其他 (Chores & Build)
 

@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.utils.design_tokens import _get_global_font
 from app.utils.utils import get_font_family_css
 
 
@@ -68,16 +69,19 @@ def _parse_color(value, fallback: str = "#212126") -> QColor:
 
 
 class _StackedBar(QWidget):
-    """单条堆叠比例条（带圆角裁剪）"""
+    """单条堆叠比例条（带圆角裁剪），末端显示百分比文字"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(14)
+        self.setFixedHeight(18)
         self._segments: List[tuple] = []  # [(fraction, color_str), ...]
         self._track = QColor(255, 255, 255, 28)
+        self._percent = 0
 
-    def set_segments(self, segments: List[tuple]):
+    def set_segments(self, segments: List[tuple], percent: int = 0):
+        """设置堆叠分段与整体百分比，百分比会在条末端显示"""
         self._segments = segments or []
+        self._percent = max(0, min(100, int(percent or 0)))
         self.update()
 
     def paintEvent(self, event):
@@ -87,6 +91,7 @@ class _StackedBar(QWidget):
 
         rect = self.rect()
         r = rect.height() / 2
+        w_total = rect.width()
 
         # 裁剪到圆角矩形，使分段看起来是一条圆角条
         clip = QPainterPath()
@@ -99,7 +104,6 @@ class _StackedBar(QWidget):
 
         # 各分段按「占整个上下文预算」的比例绘制，空闲部分留为轨道
         x = 0
-        w_total = rect.width()
         for frac, color in self._segments:
             if frac <= 0:
                 continue
@@ -115,6 +119,30 @@ class _StackedBar(QWidget):
             x += w
 
         painter.setClipping(False)
+
+        # — 百分比文字（最右侧） —
+        # 计算填充区域宽度，用于决定文字颜色（白 vs 半透明白）
+        fill_w = int(w_total * self._percent / 100.0)
+        if self._percent > 0:
+            fill_w = max(fill_w, int(r * 2))  # 最少显示圆头
+
+        font = QFont(_get_global_font(), 10)
+        font.setWeight(QFont.Bold)
+        painter.setFont(font)
+
+        pct_text = f"{self._percent}%"
+        fm = QFontMetrics(font)
+        text_w = fm.width(pct_text)
+        text_x = w_total - text_w - 6  # 距右边缘 6px
+        text_y = int((rect.height() + fm.ascent()) / 2) - 1
+
+        # 数字落在填充区上用纯白，否则用半透明白
+        if text_x < fill_w and self._percent > 0:
+            painter.setPen(Qt.white)
+        else:
+            painter.setPen(QColor(255, 255, 255, 180))
+        painter.drawText(text_x, text_y, pct_text)
+        painter.setPen(Qt.NoPen)
 
 
 class ContextBreakdownTooltip(QWidget):
@@ -198,7 +226,7 @@ class ContextBreakdownTooltip(QWidget):
             self._pct.setText("—")
             self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700; {get_font_family_css()}")
             self._usage.setText("未选择会话或模型")
-            self._bar.set_segments([])
+            self._bar.set_segments([], 0)
             self._rebuild_legend([], 0)
             self._extras.setText("")
             self._extras.setVisible(False)
@@ -231,7 +259,7 @@ class ContextBreakdownTooltip(QWidget):
             # 无明细：按占比画单色条
             frac = max(0.0, min(1.0, used / budget)) if budget else 0.0
             segments = [(frac, ring_color), (max(0.0, 1.0 - frac), "rgba(255,255,255,0.12)")]
-        self._bar.set_segments(segments)
+        self._bar.set_segments(segments, percent)
 
         # 图例
         self._rebuild_legend(breakdown, budget)
