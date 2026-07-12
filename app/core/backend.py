@@ -99,7 +99,7 @@ def _make_hook_message(event_name: str, output: str, status_message: str = "") -
     import datetime as _dt
 
     return {
-        "role": "assistant",
+        "role": "user",
         "content": _format_hook_output(event_name, output, status_message),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -414,7 +414,7 @@ class ChatBackend(QObject):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._pre_tool_message_queue.put(
                     {
-                        "role": "assistant",
+                        "role": "user",
                         "content": hook_output,
                         "_hook_event": event_name,
                     }
@@ -424,7 +424,7 @@ class ChatBackend(QObject):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._hook_message_queue.put(
                     {
-                        "role": "assistant",
+                        "role": "user",
                         "content": hook_output,
                         "_hook_event": event_name,
                     }

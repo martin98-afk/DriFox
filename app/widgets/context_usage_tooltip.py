@@ -190,6 +190,19 @@ class ContextBreakdownTooltip(QWidget):
         self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600;")
         self._usage.setStyleSheet(f"color: {self._text_secondary};")
         self._extras.setStyleSheet(f"color: {self._text_secondary};")
+
+        # 空状态：未选择会话 / 模型（刚进入软件时常见），给出友好引导而非空白
+        if data.get("empty"):
+            self._pct.setText("—")
+            self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700;")
+            self._usage.setText("未选择会话或模型")
+            self._bar.set_segments([])
+            self._rebuild_legend([], 0)
+            self._extras.setText("")
+            self._extras.setVisible(False)
+            self.adjustSize()
+            return
+
         used = int(data.get("used_tokens", 0) or 0)
         budget = int(data.get("budget_tokens", 0) or 0)
         percent = int(data.get("percent", 0) or 0)
@@ -293,32 +306,19 @@ class ContextBreakdownTooltip(QWidget):
             if note:
                 lines.append(note)
 
+        # 缓存统计：压缩为单行核心指标（命中率 + 节省成本），去掉冗余明细
         cache = data.get("cache") or {}
-        has_cache = (
-            cache.get("hit_rate", 0) > 0
-            or cache.get("read_tokens", 0) > 0
-            or cache.get("write_tokens", 0) > 0
-            or cache.get("cache_hits", 0) > 0
-        )
+        has_cache = cache.get("hit_rate", 0) > 0 or cache.get("cost_savings", 0) > 0
         if has_cache:
             if lines:
                 lines.append("")
-            lines.append("━" * 13)
-            lines.append("缓存统计")
-            lines.append(f"命中率: {cache.get('hit_rate', 0):.1%}")
-            requests = cache.get("requests", 0)
-            if requests > 0:
-                lines.append(
-                    f"请求命中: {cache.get('cache_hits', 0)}/{requests} "
-                    f"({cache.get('per_request_hit_rate', 0):.1%})"
-                )
-            if cache.get("total_input_hit_rate", 0) > 0:
-                lines.append(f"输入占比: {cache.get('total_input_hit_rate', 0):.1%}")
-            if cache.get("read_tokens", 0) > 0 or cache.get("write_tokens", 0) > 0:
-                avg = (cache.get("read_tokens", 0) + cache.get("write_tokens", 0)) / max(requests, 1)
-                lines.append(f"均次缓存: {int(avg):,} tokens")
+            parts = []
+            if cache.get("hit_rate", 0) > 0:
+                parts.append(f"缓存命中率 {cache.get('hit_rate', 0):.1%}")
             if cache.get("cost_savings", 0) > 0:
-                lines.append(f"节省成本: ${cache.get('cost_savings', 0):.4f}")
+                parts.append(f"节省 ${cache.get('cost_savings', 0):.3f}")
+            if parts:
+                lines.append(" · ".join(parts))
 
         self._extras.setText("\n".join(lines))
         self._extras.setVisible(bool(lines))

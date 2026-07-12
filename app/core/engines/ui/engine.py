@@ -503,6 +503,24 @@ class UIEngine(BaseEngine):
         # session.system_prompt 已在 context_builder.build_messages 中缓存，
         # session.messages 由 _on_messages_updated → set_messages 更新，两者都是现成的。
         system_prompt = getattr(session, "system_prompt", "") or ""
+        # 若 session 尚未缓存 system prompt（如刚创建、尚未 build_messages），
+        # 主动从 agent_manager 取当前 agent 的 system prompt，确保「系统提示」类别
+        # 始终被统计并显示，避免系统提示既不出现在 breakdown 也不计入总量。
+        if not system_prompt:
+            try:
+                am = self._get_agent_manager()
+                if am:
+                    system_prompt = am.get_agent_system_prompt(
+                        self._current_agent, is_subagent_call=False
+                    ) or ""
+                    # 缓存回 session，与 context_builder.build_messages 行为一致
+                    if system_prompt and not getattr(session, "system_prompt", ""):
+                        try:
+                            session.system_prompt = system_prompt
+                        except Exception:
+                            pass
+            except Exception:
+                system_prompt = ""
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
 
         approx_messages: List[Dict] = []

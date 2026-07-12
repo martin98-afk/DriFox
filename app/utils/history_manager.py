@@ -96,6 +96,9 @@ def extract_message_preview(messages: List[Dict], max_len: int = 50) -> str:
     if not messages:
         return ""
     for msg in reversed(messages):
+        # 跳过 hook 消息（role=user 但带 _hook_event），避免预览显示 hook 内容
+        if msg.get("_hook_event"):
+            continue
         role = msg.get("role", "")
         content = msg.get("content", "")
         if role == "user" and content:
@@ -131,6 +134,9 @@ def _build_archive_preview(messages: List[Dict], max_len: int = 50) -> str:
     if not messages:
         return ""
     for msg in reversed(messages):
+        # 跳过 hook 消息（role=user 但带 _hook_event），避免预览显示 hook 内容
+        if msg.get("_hook_event"):
+            continue
         if msg.get("role") != "user":
             continue
         content = msg.get("content", "")
@@ -269,7 +275,7 @@ class _ArchiveScanTask(QRunnable):
         messages = data.get("messages", []) or []
         msg_count = data.get(
             "message_count",
-            len([m for m in messages if m.get("role") == "user"]),
+            len([m for m in messages if m.get("role") == "user" and not m.get("_hook_event")]),
         )
         last_time = data.get("last_time") or data.get("saved_at", "")
         return {
@@ -491,7 +497,7 @@ class HistoryManager:
         last_msg_time = self._extract_last_message_time(merged_messages)
         if not title:
             for msg in merged_messages:
-                if msg.get("role") == "user":
+                if msg.get("role") == "user" and not msg.get("_hook_event"):
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         content = content_to_text(content)
@@ -547,14 +553,14 @@ class HistoryManager:
         if 0 <= index < len(self._history_sessions):
             session = self._history_sessions[index]
             messages = session.get("messages", [])
-            user_count = sum(1 for msg in messages if msg.get("role") == "user")
+            user_count = sum(1 for msg in messages if msg.get("role") == "user" and not msg.get("_hook_event"))
             return user_count >= 1
         return False
 
     def _count_conversation_pairs(self, messages: List[Dict]) -> int:
         count = 0
         for msg in messages:
-            if msg.get("role") == "user":
+            if msg.get("role") == "user" and not msg.get("_hook_event"):
                 count += 1
         return count
 
@@ -1128,6 +1134,8 @@ class HistoryManager:
         if 0 <= index < len(self._history_sessions):
             messages = self._history_sessions[index].get("messages", [])
             for msg in reversed(messages):
+                if msg.get("_hook_event"):
+                    continue
                 if msg.get("role") == "user":
                     content = msg.get("content", "")
                     if isinstance(content, list):

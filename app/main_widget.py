@@ -747,12 +747,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         mgr.register_card(
             self._window_id,
-            ContainerType.TOP,
+            ContainerType.BOTTOM,
             "history",
             self._history_card,
             system_card=True,
         )
-        self._top_card_container.add_card("history", self._history_card)
+        self._bottom_card_container.add_card("history", self._history_card)
 
         mgr.register_card(
             self._window_id,
@@ -1634,19 +1634,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_questions_btn.clicked.connect(self._toggle_history_questions_popup)
         right_layout.addWidget(self._history_questions_btn)
 
-        # 历史会话按钮
-        self.history_btn = TransparentToolButton(get_icon("历史对话"), self)
-        self.history_btn.setFixedSize(28, 28)
-        self.history_btn.setToolTip("历史会话")
-        self.history_btn.clicked.connect(self._toggle_history_card)
-        right_layout.addWidget(self.history_btn)
-
-        # 新建对话按钮
-        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self)
-        self.new_session_btn.setFixedSize(28, 28)
-        self.new_session_btn.setToolTip("新建对话")
-        self.new_session_btn.clicked.connect(self._create_new_session)
-        right_layout.addWidget(self.new_session_btn)
+        # 差异对比按钮（从右下移到右上）
+        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
+        self.diff_btn.setFixedSize(28, 28)
+        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.clicked.connect(self._open_diff_viewer)
+        right_layout.addWidget(self.diff_btn)
 
         right_layout.addSpacing(8)  # 右侧留白
 
@@ -1821,7 +1814,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "🔍 搜索会话...",
             lambda text: self._history_popup_card.set_search_filter(text),
         )
-        self._top_card_container.add_card("history", self._history_card)
+        self._bottom_card_container.add_card("history", self._history_card)
 
         # 分享卡片（BaseSettingsCard 包裹，按内容自适应高度）
         self._share_card_content = ShareCardContent(self)
@@ -2396,19 +2389,28 @@ class OpenAIChatToolWindow(ToolWindow):
         self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
         capsule_layout.addWidget(self.auto_loop_btn)
 
-        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self._toolbar_capsule)
-        self.diff_btn.setFixedSize(24, 24)
-        self.diff_btn.setStyleSheet(btn_capsule_style)
-        self.diff_btn.setToolTip("差异对比")
-        self.diff_btn.clicked.connect(self._open_diff_viewer)
-        capsule_layout.addWidget(self.diff_btn)
-
         self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
         self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
         self.memory_btn.setToolTip("长期记忆")
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
+
+        # 历史会话按钮（从右上移到右下）
+        self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
+        self.history_btn.setFixedSize(24, 24)
+        self.history_btn.setStyleSheet(btn_capsule_style)
+        self.history_btn.setToolTip("历史会话")
+        self.history_btn.clicked.connect(self._toggle_history_card)
+        capsule_layout.addWidget(self.history_btn)
+
+        # 新建对话按钮（从右上移到右下）
+        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
+        self.new_session_btn.setFixedSize(24, 24)
+        self.new_session_btn.setStyleSheet(btn_capsule_style)
+        self.new_session_btn.setToolTip("新建对话")
+        self.new_session_btn.clicked.connect(self._create_new_session)
+        capsule_layout.addWidget(self.new_session_btn)
 
         toolbar_layout.addWidget(self._toolbar_capsule)
 
@@ -4582,13 +4584,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
-        # 🛡️ 流式(工具迭代)中跳过，避免每次 finished_with_messages 都触发
-        # build_messages → compactor.compact 阻塞主线程。
-        # 流式结束后 _on_stream_finished 会将 _is_streaming 置 False，
-        # 此时 deferred QTimer 触发本方法会正常刷新。
-        if self._is_streaming:
-            return
-
+        # 注：历史上这里在 _is_streaming 时直接 return，以避免 build_messages →
+        # compactor.compact 阻塞主线程。但 engine.get_context_usage_snapshot 现在走
+        # 快速路径（仅用 session.system_prompt + session.messages + 缓存的 tools 估算，
+        # 不触发 build_messages/compact），不再阻塞；故移除该守卫。0.5s 节流已足以
+        # 限制刷新频率，使流式(工具迭代)期间也能实时补全各类型上下文占比 breakdown。
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
@@ -5677,7 +5677,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     messages = data.get("messages", [])
                     msg_count = data.get(
                         "message_count",
-                        len([m for m in messages if m.get("role") == "user"]),
+                        len([m for m in messages if m.get("role") == "user" and not m.get("_hook_event")]),
                     )
                     last_time = data.get("last_time", data.get("saved_at", ""))
                     preview = get_message_preview(messages) if messages else ""
@@ -7634,7 +7634,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         session = self.session_manager.get_current_session()
         if session:
-            return sum(1 for msg in session.messages if msg.get("role") == "user")
+            return sum(1 for msg in session.messages if msg.get("role") == "user" and not msg.get("_hook_event"))
         # fallback: 从布局计数
         return count_user_cards_in_layout(self.chat_layout)
 
@@ -10596,7 +10596,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
             if session:
-                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user")
+                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event"))
                 if user_msg_count == 1:
                     self._maybe_generate_topic_summary()
 
@@ -12092,7 +12092,11 @@ class OpenAIChatToolWindow(ToolWindow):
                             content = str(summary_msg.get("content", "") or "")
                             compacted_tokens = max(10, len(content) // 4)
                             normal_tokens = max(0, last_tc - compacted_tokens)
-                    ring.set_usage(percent, last_tc, last_lim, compaction_state, normal_tokens, compacted_tokens)
+                    ring.set_usage(
+                        percent, last_tc, last_lim, compaction_state,
+                        normal_tokens, compacted_tokens,
+                        breakdown=getattr(ring, "_breakdown", None) or [],
+                    )
                     # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
                     from PyQt5.QtCore import QTimer
 
@@ -12194,7 +12198,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 compacted_tokens = max(10, len(content) // 4)
                 normal_tokens = max(0, token_count - compacted_tokens)
 
-        ring.set_usage(percent, token_count, limit, compaction_state, normal_tokens, compacted_tokens)
+        ring.set_usage(
+            percent, token_count, limit, compaction_state,
+            normal_tokens, compacted_tokens,
+            breakdown=getattr(ring, "_breakdown", None) or [],
+        )
+        # 流式期间也调度一次补全各类型占比 breakdown（_refresh_context_usage_indicator
+        # 已不再在 _is_streaming 时拦截，0.5s 节流保护）
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
     def _on_user_message_added(self, user_text: str):
         """TODO: 实现用户消息添加时的回调处理"""
@@ -12485,7 +12498,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info("[Topic Summary] User edited title, skipping auto generation")
             return
 
-        user_messages = [m for m in session.messages if m.get("role") == "user"]
+        user_messages = [m for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")]
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
             return
@@ -13498,7 +13511,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
-        has_user_message = any(msg.get("role") == "user" for msg in session.messages)
+        has_user_message = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in session.messages)
         if not has_user_message:
             return
 
@@ -14308,8 +14321,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 包含 on_messages_updated 收集的完整消息（含 user + assistant + tool_calls）
         auto_loop_messages = list(messages or [])
 
-        # 确保 user 消息存在（第一条 user 消息）
-        has_user = any(msg.get("role") == "user" for msg in auto_loop_messages)
+        # 确保 user 消息存在（第一条 user 消息，排除 hook 消息）
+        has_user = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in auto_loop_messages)
         if not has_user and self._auto_loop_worker:
             task_prompt = self._auto_loop_worker.get_task_prompt()
             if task_prompt:

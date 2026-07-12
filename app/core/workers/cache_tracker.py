@@ -309,8 +309,7 @@ class CacheHitRateTracker:
         self._last_stats: Optional[CacheStats] = None
         self._last_model: str = ""
 
-        # 启发式估算状态
-        self._heuristic_mode: bool = False          # 是否进入启发式模式
+        # 启发式估算状态（均为会话级，start_session 会重置）
         self._last_prompt_tokens: int = 0            # 上一次 API 调用的 prompt_tokens
         self._has_anthropic_cache: bool = False       # 是否检测到 Anthropic 缓存字段
 
@@ -330,6 +329,10 @@ class CacheHitRateTracker:
         self._session_stats.reset()
         self._last_stats = None
         self._last_model = ""
+        # ⚠️ 必须重置启发式状态，否则上一会话若触发过可疑缓存探测，
+        # 本会话所有请求都会被误套用估算（污染真实 read/write token → 命中率失真）。
+        self._last_prompt_tokens = 0
+        self._has_anthropic_cache = False
         logger.info("[CacheTracker] Session started")
 
     def end_session(self) -> AggregatedCacheStats:
@@ -420,10 +423,11 @@ class CacheHitRateTracker:
         stats = self._parse_usage(usage)
         if stats:
             stats.model = self._last_model
+            # 仅当「本次请求」本身被判定为可疑缓存数据时才套用启发式估算。
+            # ⚠️ 不再依赖持久化的 _heuristic_mode 全局开关：否则一旦某次触发，
+            # 后续来自可靠 provider（Anthropic/OpenAI 带真实 cache_creation 字段）的
+            # 请求也会被改写，导致真实 read/write token 被污染、命中率失真。
             if self._is_suspicious_openai_cache(stats, usage):
-                self._heuristic_mode = True
-                self._apply_cache_heuristic(stats)
-            elif self._heuristic_mode and stats.cache_read_tokens > 0:
                 self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
@@ -439,10 +443,9 @@ class CacheHitRateTracker:
         stats = self._parse_usage_dict(usage_dict)
         if stats:
             stats.model = self._last_model
+            # 仅当「本次请求」本身被判定为可疑缓存数据时才套用启发式估算
+            # （同 record_usage：不再用持久化 _heuristic_mode 污染可靠 provider 的真实数据）。
             if self._is_suspicious_openai_cache(stats, usage_dict):
-                self._heuristic_mode = True
-                self._apply_cache_heuristic(stats)
-            elif self._heuristic_mode and stats.cache_read_tokens > 0:
                 self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats

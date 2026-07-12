@@ -129,8 +129,22 @@ class ContextUsageRing(QWidget):
         })
 
     def _show_tooltip(self):
-        if self._percent <= 0 and not self._breakdown and not self._cache_data:
-            return
+        # 即使没有会话 / 模型配置，也给出一个轻量提示，避免「hover 圆环却毫无反馈」。
+        # 仅当「既没有预算、也没有占比、也没有明细、也没有缓存」时，构造空状态引导文案。
+        if (self._budget_tokens <= 0 and self._percent <= 0
+                and not self._breakdown and not self._cache_data):
+            self._tooltip.set_data({
+                "used_tokens": 0,
+                "budget_tokens": 0,
+                "percent": 0,
+                "ring_color": self._ring_color.name(),
+                "compaction": {},
+                "normal_tokens": 0,
+                "compacted_tokens": 0,
+                "breakdown": [],
+                "cache": {},
+                "empty": True,
+            })
 
         self._tooltip.adjustSize()
         tip_size = self._tooltip.size()
