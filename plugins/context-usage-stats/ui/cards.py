@@ -141,15 +141,16 @@ def _make_chart_colors_from_context(ctx: dict) -> dict:
 def _fast_estimate_tokens(text: str) -> int:
     """快速估算文本的 token 数（无需 tiktoken 依赖）
 
-    经验公式：
-    - 1 token ≈ 4 英文/混合字符
-    - 1 token ≈ 2 中文字符
+    经验公式（cl100k_base 类分词器近似，覆盖 GPT/DeepSeek/Qwen/Claude）：
+    - 中文约 1.2 token/字
+    - 英文/代码约 1 token / 4 字符
+    ⚠️ 旧实现按「中文 2 字符=1 token」严重低估中文，已修正。
     """
     if not text:
         return 0
     chinese = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     non_chinese = len(text) - chinese
-    estimated = chinese // 2 + non_chinese // 4
+    estimated = int(chinese * 1.2 + non_chinese / 4.0)
     return max(1, estimated)
 
 

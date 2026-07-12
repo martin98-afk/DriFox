@@ -4591,7 +4591,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
-        snapshot = self.backend.get_context_usage_snapshot(session, llm_config)
+        api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        snapshot = self.backend.get_context_usage_snapshot(
+            session, llm_config, api_prompt_tokens=api_prompt_tokens
+        )
         ring.set_usage(
             snapshot.get("percent", 0),
             snapshot.get("used_tokens", 0),
@@ -4599,6 +4602,7 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("compaction", {}),
             snapshot.get("normal_tokens", 0),
             snapshot.get("compacted_tokens", 0),
+            breakdown=snapshot.get("breakdown", []),
         )
         self._last_context_refresh_time = now
 
@@ -12089,6 +12093,10 @@ class OpenAIChatToolWindow(ToolWindow):
                             compacted_tokens = max(10, len(content) // 4)
                             normal_tokens = max(0, last_tc - compacted_tokens)
                     ring.set_usage(percent, last_tc, last_lim, compaction_state, normal_tokens, compacted_tokens)
+                    # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
+                    from PyQt5.QtCore import QTimer
+
+                    QTimer.singleShot(0, self._refresh_context_usage_indicator)
                     return
 
         # 工具迭代中或没有 API 数据时：本地估算 + compaction 信息
@@ -12161,14 +12169,20 @@ class OpenAIChatToolWindow(ToolWindow):
         """实时上下文占用更新回调"""
         self._last_ctx_token_count = token_count
         self._last_ctx_limit = limit
+        # 记录最近一次 API 返回的 prompt_tokens，供快照作为权威占用值
+        session = self.session_manager.get_current_session()
+        if session is not None:
+            try:
+                session.last_api_prompt_tokens = token_count
+            except Exception:
+                pass
         ring = getattr(self, "context_usage_ring", None)
         if not ring or limit <= 0:
             return
         percent = min(100, int((token_count / limit) * 100))
 
         # 获取压缩状态，以便圆环 tooltip 显示压缩信息
-        session = self.session_manager.get_current_session()
-        compaction_state = dict(getattr(session, "compaction_state", {}) or {})
+        compaction_state = dict(getattr(session, "compaction_state", {}) or {}) if session else {}
         normal_tokens = token_count
         compacted_tokens = 0
         if compaction_state.get("active"):

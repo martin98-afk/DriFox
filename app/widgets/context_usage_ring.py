@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 
 from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
-from PyQt5.QtWidgets import QApplication, QToolTip, QWidget
+from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PyQt5.QtWidgets import QApplication, QWidget
 
-from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils.design_tokens import Colors
+from app.widgets.context_usage_tooltip import ContextBreakdownTooltip
 
 
 class ContextUsageRing(QWidget):
@@ -17,6 +18,11 @@ class ContextUsageRing(QWidget):
         self._normal_tokens = 0
         self._compacted_tokens = 0
 
+        self._used_tokens = 0
+        self._budget_tokens = 0
+        self._compaction = {}
+        self._breakdown = []
+
         self._cache_hit_rate = 0.0
         self._cache_per_request_hit_rate = 0.0
         self._cache_total_input_hit_rate = 0.0
@@ -26,18 +32,12 @@ class ContextUsageRing(QWidget):
         self._cache_hits = 0
         self._cache_misses = 0
         self._requests = 0
+        self._cache_data = {}
 
         self.setFixedSize(22, 22)
         self.setMouseTracking(True)
-        self.setStyleSheet("""
-            QToolTip {
-                border: none;
-                background: transparent;
-            }
-        """)
 
-        self._cache_lines: list = []
-        self._context_lines: list = []
+        self._tooltip = ContextBreakdownTooltip()
         self._tooltip_timer = QTimer(self)
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.timeout.connect(self._show_tooltip)
@@ -50,13 +50,16 @@ class ContextUsageRing(QWidget):
         compaction: dict = None,
         normal_tokens: int = 0,
         compacted_tokens: int = 0,
+        breakdown: list = None,
     ):
 
         self._percent = max(0, min(100, int(percent)))
+        self._used_tokens = used_tokens
+        self._budget_tokens = budget_tokens
         self._normal_tokens = normal_tokens
         self._compacted_tokens = compacted_tokens
-
-        from app.utils.design_tokens import Colors
+        self._compaction = compaction or {}
+        self._breakdown = breakdown or []
 
         Colors.refresh()
         ring_normal = QColor(Colors.RING_NORMAL)
@@ -72,41 +75,6 @@ class ContextUsageRing(QWidget):
             self._ring_color = ring_normal
         self._compacted_color = ring_compacted
 
-        lines = [
-            "当前上下文占用",
-            f"已用: {used_tokens:,} tokens",
-            f"预算: {budget_tokens:,} tokens",
-            f"占比: {self._percent}%",
-        ]
-
-        compaction = compaction or {}
-        total_tokens = normal_tokens + compacted_tokens
-        if compaction.get("active"):
-            if total_tokens > 0:
-                compact_ratio = int(compacted_tokens / total_tokens * 100)
-                actual_ratio = int(normal_tokens / total_tokens * 100)
-                lines.extend(
-                    [
-                        "",
-                        f"普通上下文: {normal_tokens:,} tokens ({actual_ratio}%)",
-                        f"压缩上下文: {compacted_tokens:,} tokens ({compact_ratio}%)",
-                        f"压缩条数: {compaction.get('summarized_count', 0)}",
-                        f"保留条数: {compaction.get('kept_count', 0)}",
-                    ]
-                )
-            else:
-                lines.extend(
-                    [
-                        "",
-                        f"压缩条数: {compaction.get('summarized_count', 0)}",
-                        f"保留条数: {compaction.get('kept_count', 0)}",
-                    ]
-                )
-            note = str(compaction.get("note", "") or "").strip()
-            if note:
-                lines.append(note)
-
-        self._context_lines = lines
         self._rebuild_tooltip()
         self.update()
 
@@ -132,119 +100,67 @@ class ContextUsageRing(QWidget):
         self._cache_misses = cache_misses
         self._requests = requests
 
-        has_data = (
-            self._cache_hit_rate > 0
-            or self._cache_read_tokens > 0
-            or self._cache_write_tokens > 0
-            or self._cache_hits > 0
-        )
-        if has_data:
-            lines = ["", "━" * 12, "缓存统计"]
-            lines.append(f"命中率: {self._cache_hit_rate:.1%}")
-            if self._requests > 0:
-                per_req = self._cache_per_request_hit_rate
-                lines.append(f"请求命中: {self._cache_hits}/{self._requests} ({per_req:.1%})")
-            if self._cache_total_input_hit_rate > 0:
-                lines.append(f"输入占比: {self._cache_total_input_hit_rate:.1%}")
-            if self._cache_read_tokens > 0 or self._cache_write_tokens > 0:
-                avg_prompt = (self._cache_read_tokens + self._cache_write_tokens) / max(self._requests, 1)
-                lines.append(f"均次缓存: {int(avg_prompt):,} tokens")
-            if self._cache_cost_savings > 0:
-                lines.append(f"节省成本: ${self._cache_cost_savings:.4f}")
-            self._cache_lines = lines
-        else:
-            self._cache_lines = []
+        self._cache_data = {
+            "hit_rate": self._cache_hit_rate,
+            "read_tokens": self._cache_read_tokens,
+            "write_tokens": self._cache_write_tokens,
+            "cost_savings": self._cache_cost_savings,
+            "per_request_hit_rate": self._cache_per_request_hit_rate,
+            "total_input_hit_rate": self._cache_total_input_hit_rate,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "requests": self._requests,
+        }
 
         self._rebuild_tooltip()
         self.update()
 
     def _rebuild_tooltip(self):
-        self._last_tooltip_lines = self._context_lines + self._cache_lines
+        self._tooltip.set_data({
+            "used_tokens": self._used_tokens,
+            "budget_tokens": self._budget_tokens,
+            "percent": self._percent,
+            "ring_color": self._ring_color.name(),
+            "compaction": self._compaction,
+            "normal_tokens": self._normal_tokens,
+            "compacted_tokens": self._compacted_tokens,
+            "breakdown": self._breakdown,
+            "cache": self._cache_data,
+        })
 
     def _show_tooltip(self):
-        lines = self._last_tooltip_lines
-        if not lines:
+        if self._percent <= 0 and not self._breakdown and not self._cache_data:
             return
 
-        tooltip_text = "\n".join(lines)
-
-        try:
-            Colors.refresh()
-            font_family = _get_global_font()
-            font_size = scale_font_size(12)
-            font_style = f"font-family: '{font_family}'; font-size: {font_size}px;"
-            card_bg = Colors.CARD_BG.format(alpha=240)
-            tooltip_css = f"""
-                QToolTip {{
-                    background-color: {card_bg};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    color: {Colors.TEXT_PRIMARY};
-                    {font_style}
-                }}
-            """
-        except Exception:
-            font_style = ""
-            tooltip_css = f"""
-                QToolTip {{
-                    background-color: {Colors.CARD_BG_SOLID};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 6px;
-                    padding: 8px 12px;
-                    color: #e0e4ef;
-                    {font_style}
-                }}
-            """
-
-        self.setStyleSheet(tooltip_css)
-
-        try:
-            app = QApplication.instance()
-            font = app.font()
-            font.setFamily(font_family)
-            font.setPointSize(font_size)
-            fm = QFontMetrics(font)
-            max_width = 0
-            for line in lines:
-                line_width = fm.width(line)
-                if line_width > max_width:
-                    max_width = line_width
-            tooltip_width = max_width + 24 + 2
-            tooltip_height = len(lines) * fm.height() + 16
-        except Exception:
-            tooltip_width = 220
-            tooltip_height = len(lines) * 20 + 16
+        self._tooltip.adjustSize()
+        tip_size = self._tooltip.size()
 
         # tooltip 定位：紧贴 widget 上方或下方显示
         widget_global = self.mapToGlobal(QPoint(0, 0))
         widget_center_x = widget_global.x() + self.width() // 2
-        # 限制定位用的宽度不超过 280px（避免字体度量高估导致偏左）
-        pos_width = min(tooltip_width, 280)
+        pos_width = max(tip_size.width(), 1)
 
-        # 判断 widget 是否在窗口下半区 → tooltip 显示在上方
         window = self.window()
         window_center = window.y() + window.height() / 2
         if widget_global.y() > window_center:
-            # 下半区：tooltip 显示在 widget 正上方
             x = widget_center_x - pos_width // 2
-            y = widget_global.y() - tooltip_height - 4
+            y = widget_global.y() - tip_size.height() - 4
         else:
-            # 上半区：tooltip 显示在 widget 正下方
             x = widget_center_x - pos_width // 2
             y = widget_global.y() + self.height() + 4
 
         screen_geom = self.screen().geometry() if self.screen() else QApplication.primaryScreen().geometry()
         if x < screen_geom.left():
             x = screen_geom.left() + 5
-        if x + tooltip_width > screen_geom.right():
-            x = screen_geom.right() - tooltip_width - 5
+        if x + pos_width > screen_geom.right():
+            x = screen_geom.right() - pos_width - 5
         if y < screen_geom.top():
             y = screen_geom.top() + 5
-        if y + tooltip_height > screen_geom.bottom():
-            y = screen_geom.bottom() - tooltip_height - 5
+        if y + tip_size.height() > screen_geom.bottom():
+            y = screen_geom.bottom() - tip_size.height() - 5
 
-        QToolTip.showText(QPoint(x, y), tooltip_text, self)
+        self._tooltip.move(x, y)
+        self._tooltip.show()
 
     def _is_dark_theme(self, app) -> bool:
         try:
@@ -260,7 +176,7 @@ class ContextUsageRing(QWidget):
 
     def leaveEvent(self, event):
         self._tooltip_timer.stop()
-        QToolTip.hideText()
+        self._tooltip.hide()
 
     def wheelEvent(self, event):
         event.ignore()
