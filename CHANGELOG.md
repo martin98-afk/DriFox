@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.6] - 2026-07-12
 
-自上一版本以来的变更 | 提交数：7 · 文件变更：16 · +620/-154 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：10 · 文件变更：18 · +662/-188 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -15,6 +15,13 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 
 - **工具运行折叠框状态修复**: 修复工具调用与工具结果写入不同消息卡片时，运行折叠框偶尔无法转为完成态并持续累积的问题；通过 `tool_call_id` 关联所属卡片，并增加完成态恢复兜底与回归测试
+- **上下文圆环 token 防闪现修复**: 修复刷新上下文圆环时，因 `session.messages` 还未包含本轮新增消息（陈旧）而闪现异常小值的问题；以 worker 实时 token 量为下限兜底
+- **重载卡片 token 与上下文圆环同步**: 重载历史会话时，卡片底部 token 直接复用上下文圆环快照的 `used_tokens`（同一来源），避免基于 worker 估算导致显示远小于真实占用
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Lock Screen Remote 移除命令注册**: 移除 `register_command_handler` 与 `/lock-remote` 命令注册路径，统一由设置 UI 控制开关；同步清理 `app/core/system/__init__.py` 的导出与 `main_widget.py` 的调用点
+- **代码注释精简化**: 锁屏远程相关注释与单例/命令注册章节标题更新，可读性提升
 
 ### 🔧 其他 (Chores & Build)
 
