@@ -24,6 +24,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.utils.utils import get_font_family_css
+
 
 def _parse_color(value, fallback: str = "#212126") -> QColor:
     """将主题色字符串解析为 QColor。
@@ -148,9 +150,9 @@ class ContextBreakdownTooltip(QWidget):
         header = QHBoxLayout()
         header.setSpacing(8)
         self._title = QLabel("上下文占用")
-        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600;")
+        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
         self._pct = QLabel("")
-        self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 600;")
+        self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
         header.addWidget(self._title)
         header.addStretch(1)
         header.addWidget(self._pct)
@@ -158,7 +160,7 @@ class ContextBreakdownTooltip(QWidget):
 
         # 占用数值行
         self._usage = QLabel("")
-        self._usage.setStyleSheet(f"color: {self._text_secondary};")
+        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
         self._layout.addWidget(self._usage)
 
         # 堆叠比例条
@@ -174,7 +176,7 @@ class ContextBreakdownTooltip(QWidget):
 
         # 附加信息（压缩 / 缓存）
         self._extras = QLabel("")
-        self._extras.setStyleSheet(f"color: {self._text_secondary};")
+        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
         self._extras.setTextFormat(Qt.PlainText)
         self._layout.addWidget(self._extras)
 
@@ -187,14 +189,14 @@ class ContextBreakdownTooltip(QWidget):
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
         self._load_theme_colors()
-        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600;")
-        self._usage.setStyleSheet(f"color: {self._text_secondary};")
-        self._extras.setStyleSheet(f"color: {self._text_secondary};")
+        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
+        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
 
         # 空状态：未选择会话 / 模型（刚进入软件时常见），给出友好引导而非空白
         if data.get("empty"):
             self._pct.setText("—")
-            self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700;")
+            self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700; {get_font_family_css()}")
             self._usage.setText("未选择会话或模型")
             self._bar.set_segments([])
             self._rebuild_legend([], 0)
@@ -211,7 +213,7 @@ class ContextBreakdownTooltip(QWidget):
 
         # 占比文字（变色）
         self._pct.setText(f"{percent}%")
-        self._pct.setStyleSheet(f"color: {ring_color}; font-weight: 700;")
+        self._pct.setStyleSheet(f"color: {ring_color}; font-weight: 700; {get_font_family_css()}")
 
         budget_txt = f"{budget:,}" if budget else "—"
         self._usage.setText(f"已用 {used:,} tokens · 预算 {budget_txt}")
@@ -267,13 +269,13 @@ class ContextBreakdownTooltip(QWidget):
             swatch.setStyleSheet(f"background: {color}; border-radius: 2px;")
 
             name = QLabel(label, row)
-            name.setStyleSheet(f"color: {self._text_primary};")
+            name.setStyleSheet(f"color: {self._text_primary}; {get_font_family_css()}")
 
             val = QLabel(f"{tokens:,}", row)
-            val.setStyleSheet(f"color: {self._text_secondary};")
+            val.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
 
             pc = QLabel(f"{pct:.0f}%", row)
-            pc.setStyleSheet(f"color: {self._text_secondary};")
+            pc.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
             pc.setFixedWidth(38)
             pc.setAlignment(Qt.AlignRight)
 

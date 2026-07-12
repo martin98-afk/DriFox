@@ -45,6 +45,8 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentIcon,
+    InfoBadge,
+    InfoBadgePosition,
     InfoBar,
     InfoBarPosition,
     PushButton,
@@ -1620,19 +1622,24 @@ class OpenAIChatToolWindow(ToolWindow):
         right_layout.setSpacing(2)
         right_layout.setAlignment(Qt.AlignVCenter)
 
-        # 分享按钮
-        self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
-        self._share_btn.setFixedSize(28, 28)
-        self._share_btn.setToolTip("分享当前对话")
-        self._share_btn.clicked.connect(self._on_share_clicked)
-        right_layout.addWidget(self._share_btn)
-
         # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
         self._history_questions_btn = TransparentToolButton(FluentIcon.MESSAGE, self)
         self._history_questions_btn.setFixedSize(28, 28)
         self._history_questions_btn.setToolTip("当前会话的用户提问历史")
         self._history_questions_btn.clicked.connect(self._toggle_history_questions_popup)
         right_layout.addWidget(self._history_questions_btn)
+        # 右上角 InfoBadge，显示用户问题总数（自动跟随按钮位置）
+        self._history_questions_badge = InfoBadge.attension(
+            0, parent=self, target=self._history_questions_btn, position=InfoBadgePosition.LEFT
+        )
+        self._history_questions_badge.setVisible(False)
+
+        # 分享按钮
+        self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
+        self._share_btn.setFixedSize(28, 28)
+        self._share_btn.setToolTip("分享当前对话")
+        self._share_btn.clicked.connect(self._on_share_clicked)
+        right_layout.addWidget(self._share_btn)
 
         # 差异对比按钮（从右下移到右上）
         self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
@@ -8375,6 +8382,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.node_preview.update_nodes(node_data)
         self._sync_node_preview_to_scroll()
+        # 同步更新历史问题徽章
+        self._update_history_questions_badge()
 
     def _sync_node_preview_to_scroll(self):
         """根据当前滚动位置同步时间线节点的高亮和进度条
@@ -8848,6 +8857,33 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._history_questions_card_content.set_questions(questions)
         self._card_manager.toggle_card("history_questions", self._window_id)
+
+    def _update_history_questions_badge(self):
+        """更新历史问题徽章计数（当前会话用户问题总数）"""
+        if not hasattr(self, "_history_questions_badge"):
+            return
+        session = self.session_manager.get_current_session()
+        if not session:
+            self._history_questions_badge.setVisible(False)
+            return
+
+        messages = consolidate_messages(session.messages)
+        count = sum(
+            1 for msg in messages
+            if msg.get("role") == "user" and not msg.get("_hook_event")
+        )
+
+        if count > 0:
+            self._history_questions_badge.setNum(count)
+            self._history_questions_badge.adjustSize()
+            # 重新定位（badge 尺寸变化后需刷新位置）
+            if self._history_questions_badge.manager:
+                self._history_questions_badge.move(
+                    self._history_questions_badge.manager.position()
+                )
+            self._history_questions_badge.setVisible(True)
+        else:
+            self._history_questions_badge.setVisible(False)
 
     def _on_history_question_clicked(self, index: int):
         """历史问题弹窗条目点击，跳转到对应位置（复用时间线节点跳转逻辑）"""
