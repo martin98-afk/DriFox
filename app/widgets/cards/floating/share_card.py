@@ -775,7 +775,9 @@ class ShareCardContent(QWidget):
         ext_map = {"markdown": "Markdown (*.md)", "json": "JSON (*.json)", "html": "HTML (*.html)"}
         filter_str = ext_map.get(fmt, "All Files (*)")
         ext = ".md" if fmt == "markdown" else f".{fmt}"
-        default_name = f"对话分享_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        title = (self._record.get("title") or _get_session_title(self._messages) or "对话分享").strip()
+        safe_title = "".join(c for c in title if c not in r'<>:"/\|?*').rstrip(". ") or "对话分享"
+        default_name = f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
         path, _ = QFileDialog.getSaveFileName(self, "保存文件", default_name, filter_str)
         if not path:
             return

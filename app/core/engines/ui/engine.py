@@ -561,19 +561,12 @@ class UIEngine(BaseEngine):
         ]
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
-        # ---- 优先采用 API 真实 prompt_tokens 作为权威占用值 ----
-        # API 返回的 prompt_tokens 是"实际发送给模型的 token 数"，不受本地分词近似、
-        # 漏算工具/注入上下文等影响，与手动估算相比可偏差数万 token。
-        # 有 API 值时以其为准；无 API 值时回退到本地估算（已修正中文低估）。
-        # 各类型占比按组件估算比例缩放，使其相加正好等于 API 真实总量。
-        if api_prompt_tokens and api_prompt_tokens > 0:
-            used_tokens = api_prompt_tokens
-        else:
-            used_tokens = est_total
-        est_sum = sum(b["tokens"] for b in breakdown) or 1
-        scale = used_tokens / est_sum
-        for b in breakdown:
-            b["tokens"] = int(round(b["tokens"] * scale))
+        # ---- 直接按消息列表计算（用户明确要求）----
+        # 各分段（系统提示 / 用户消息 / 助手消息 / 工具结果 / 工具定义）都是
+        # count_messages_tokens 对消息列表逐条、按角色实打实算出来的 token 数，
+        # 不做任何 API 真实占用缩放/覆盖。它们之和 = est_total，进度条按
+        # est_total / budget 填充，比例与数值都是消息列表的真实情况。
+        used_tokens = est_total
 
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 
