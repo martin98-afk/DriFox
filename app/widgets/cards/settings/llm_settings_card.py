@@ -302,7 +302,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard = SwitchSettingCard(
             FluentIcon.SYNC,
             "锁屏远程",
-            "锁屏后保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行",
+            "锁屏后保持系统唤醒、屏幕常亮。",
             configItem=self.cfg.lock_screen_remote_enabled,
             parent=self,
         )

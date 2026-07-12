@@ -164,6 +164,15 @@ def _role_meta(role: str, msg: Dict) -> tuple:
     return "💬", role, "avatar-other"
 
 
+def _message_snippet(msg: Dict, limit: int = 28) -> str:
+    """左侧导航用：取消息首段纯文本作为预览摘要"""
+    text = _content_to_plain(msg.get("content", "")).replace("\n", " ").strip()
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text or "（空消息）"
+
+
 def _render_message_body(blocks: List[Dict]) -> str:
     parts = []
     for block in blocks:
@@ -197,7 +206,7 @@ def _render_message_body(blocks: List[Dict]) -> str:
     return "".join(parts)
 
 
-def _render_message_card(msg: Dict) -> str:
+def _render_message_card(msg: Dict, index: int) -> str:
     role = msg.get("role", "unknown")
     ts = _format_timestamp(msg)
     blocks = _ensure_content_blocks(msg.get("content", ""))
@@ -205,7 +214,7 @@ def _render_message_card(msg: Dict) -> str:
     icon, label, avatar_cls = _role_meta(role, msg)
     ts_html = f'<span class="ts">{_escape_html(ts)}</span>' if ts else ""
     return (
-        f'<div class="msg-card msg-{role}">'
+        f'<div class="msg-card msg-{role}" id="msg-{index}">'
         f'<div class="msg-head">'
         f'<div class="avatar {avatar_cls}">{icon}</div>'
         f'<div class="role-name">{_escape_html(label)}</div>'
@@ -264,7 +273,25 @@ def _export_html(messages: List[Dict], record: Dict = None) -> str:
         f"</div>"
     )
 
-    cards_html = "".join(_render_message_card(m) for m in messages)
+    cards_html = "".join(_render_message_card(m, i) for i, m in enumerate(messages))
+
+    # ── 左侧导航栏 ──
+    nav_items = []
+    for i, m in enumerate(messages):
+        role = m.get("role", "unknown")
+        icon, label, _ = _role_meta(role, m)
+        snip = _escape_html(_message_snippet(m))
+        nav_items.append(
+            f'<a class="nav-item nav-{role}" href="#msg-{i}" data-target="msg-{i}">'
+            f'<span class="nav-icon">{icon}</span>'
+            f'<span class="nav-text">'
+            f'<span class="nav-role">{_escape_html(label)}</span>'
+            f'<span class="nav-snip">{snip}</span>'
+            f"</span>"
+            f"</a>"
+        )
+    nav_html = "".join(nav_items)
+    msg_count = len(messages)
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -285,16 +312,80 @@ def _export_html(messages: List[Dict], record: Dict = None) -> str:
     --accent-warm: {c["accent_warm"]};
 }}
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html {{ scroll-behavior: smooth; }}
 body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", Roboto, sans-serif;
     background: {page_bg};
     background-attachment: fixed;
     color: var(--text);
     line-height: 1.7;
-    padding: 28px 16px 60px;
     -webkit-font-smoothing: antialiased;
 }}
-.container {{ max-width: 820px; margin: 0 auto; }}
+.container {{ max-width: 1100px; margin: 0 auto; padding: 28px 16px 60px; }}
+
+/* ── 整体布局：左导航 + 右正文 ── */
+.layout {{ display: flex; gap: 24px; align-items: flex-start; }}
+.sidebar {{
+    width: 248px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 8px;
+    scrollbar-width: thin;
+}}
+.sidebar::-webkit-scrollbar {{ width: 6px; }}
+.sidebar::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
+.sidebar-title {{
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: 4px 10px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}}
+.sidebar-count {{ color: var(--accent); font-weight: 600; }}
+.nav-item {{
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text-secondary);
+    transition: background .12s ease, color .12s ease;
+    border-left: 2px solid transparent;
+}}
+.nav-item:hover {{ background: rgba(255, 255, 255, 0.04); color: var(--text); }}
+.nav-item.active {{
+    background: rgba(102, 198, 255, 0.10);
+    color: var(--text);
+    border-left-color: var(--accent);
+}}
+.nav-icon {{
+    width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.10);
+}}
+.nav-item.nav-user .nav-icon {{ background: rgba(102, 198, 255, 0.16); }}
+.nav-item.nav-assistant .nav-icon {{ background: rgba(245, 158, 11, 0.16); }}
+.nav-item.nav-tool .nav-icon {{ background: rgba(95, 209, 140, 0.16); }}
+.nav-item.nav-system .nav-icon {{ background: rgba(255, 255, 255, 0.16); }}
+.nav-text {{ display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }}
+.nav-role {{ font-size: 13px; font-weight: 600; white-space: nowrap; }}
+.nav-snip {{
+    font-size: 11px; color: var(--text-muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;
+}}
+.main {{ flex: 1; min-width: 0; }}
 
 /* ── 会话头部 ── */
 .session-header {{ margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
@@ -310,6 +401,16 @@ body {{
     color: var(--text-secondary);
 }}
 .chip-k {{ color: var(--text-muted); }}
+
+/* ── 移动端：导航转为顶部横向滚动条 ── */
+@media (max-width: 760px) {{
+    .layout {{ flex-direction: column; gap: 14px; }}
+    .sidebar {{
+        width: 100%; position: static; max-height: 160px;
+        display: flex; flex-direction: column;
+    }}
+    .sidebar-nav {{ display: flex; flex-direction: column; gap: 2px; }}
+}}
 
 /* ── 消息卡片（对齐 in-app CardWidget）── */
 .msg-card {{
@@ -440,9 +541,46 @@ details.reasoning summary {{ font-weight: 600; color: var(--text-muted); cursor:
 </head>
 <body>
 <div class="container">
+<div class="layout">
+<aside class="sidebar">
+<div class="sidebar-title">对话导航 · <span class="sidebar-count">{msg_count} 条</span></div>
+<nav class="sidebar-nav">
+{nav_html}
+</nav>
+</aside>
+<main class="main">
 {header_html}
 {cards_html}
+</main>
 </div>
+</div>
+<script>
+(function() {{
+    var items = Array.prototype.slice.call(document.querySelectorAll('.nav-item'));
+    var map = {{}};
+    items.forEach(function(a) {{
+        var id = a.getAttribute('data-target');
+        var el = document.getElementById(id);
+        if (el) map[id] = a;
+    }});
+    var targets = Object.keys(map).map(function(id) {{ return document.getElementById(id); }});
+    if (!('IntersectionObserver' in window) || !targets.length) return;
+    var current = null;
+    function setActive(id) {{
+        if (current === id) return;
+        current = id;
+        items.forEach(function(a) {{ a.classList.remove('active'); }});
+        if (map[id]) map[id].classList.add('active');
+    }}
+    var observer = new IntersectionObserver(function(entries) {{
+        // 取当前视口内最靠上的可见消息
+        var visible = entries.filter(function(e) {{ return e.isIntersecting; }})
+            .sort(function(a, b) {{ return a.boundingClientRect.top - b.boundingClientRect.top; }});
+        if (visible.length) setActive(visible[0].target.id);
+    }}, {{ rootMargin: '-15% 0px -70% 0px', threshold: 0 }});
+    targets.forEach(function(t) {{ observer.observe(t); }});
+}})();
+</script>
 </body>
 </html>"""
 
