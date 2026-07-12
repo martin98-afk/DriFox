@@ -145,6 +145,8 @@ class OpenAIChatWorker(QThread):
             initial_compaction_cache=initial_compaction_cache,
         )
         self._sync_state_from_state()  # 同步到旧属性名（向后兼容）
+        # 每轮 API 调用的有效输入上下文计数；API 不返回 usage 时供消息卡片回退显示。
+        self._last_context_token_count = 0
         # ============================================================
 
         # ========== 性能优化：HTTP 客户端和参数缓存 ==========
@@ -596,6 +598,11 @@ class OpenAIChatWorker(QThread):
                     current_message_text = content_to_text(msg.get("content", ""))
                     break
 
+            # 记录 trigger_event 前的队列大小，用于后续精确 drain
+            # 只排出本轮同步执行中入队的消息，不误伤其他路径（如 SubAgentFinished）放入的消息
+            _q = getattr(backend, "_hook_message_queue", None)
+            qsize_before = _q.qsize() if _q is not None else 0
+
             results = backend.hook_manager.trigger_event(
                 event_name,
                 context=ctx,
@@ -603,24 +610,25 @@ class OpenAIChatWorker(QThread):
                 trigger_async=False,
             )
 
-            # 🛡️ 排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
+            # 🛡️ 精确排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
             # on_hook_finished 回调将输出入队，但同步返回值已由下方 results 循环直接
             # 注入消息列表。若不排出，_inject_pending_hook_messages 会在下一轮循环顶部
             # 从队列取出再注入一次，导致重复（尤其是 PROMPT 类型 hook）。
+            # ★ 修复：只排出本轮 trigger_event 新增的消息，不误伤其他路径放入的消息
+            #   （如 SubAgentFinished，由主线程通过 _inject_subagent_completion_into_stream 放入）
             # 注意：PostToolUse 等事件由 tool_executor 的同步路径触发并通过队列传递，
             # 不经过 _trigger_worker_hook，不受此排出影响。
-            _q = getattr(backend, "_hook_message_queue", None)
             if _q is not None:
-                _drained = 0
-                while True:
+                qsize_after = _q.qsize()
+                to_drain = qsize_after - qsize_before
+                for _ in range(to_drain):
                     try:
                         _q.get_nowait()
-                        _drained += 1
                     except Exception:
                         break
-                if _drained:
+                if to_drain > 0:
                     logger.debug(
-                        f"[HookManager] Drained {_drained} msg(s) from hook queue"
+                        f"[HookManager] Drained {to_drain} msg(s) from hook queue"
                         f" after sync trigger_event({event_name})"
                     )
 
@@ -1425,6 +1433,10 @@ class OpenAIChatWorker(QThread):
                 )
 
                 # 使用 API 消息缓存（首次会重建，后续复用）
+                # usage 必须按 API 调用隔离，避免当前轮缺失 usage 时误用上一轮结果。
+                self._last_usage = None
+                self._state.session.last_usage = None
+                self._last_context_token_count = 0
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
                 if self._is_cancelled:
                     self._cancel_with_stop_hook(current_messages, current_session_messages)
@@ -1439,6 +1451,7 @@ class OpenAIChatWorker(QThread):
                         ctx_count = count_messages_tokens(current_messages, model=model_name)
                     except (ValueError, TypeError, RuntimeError):
                         ctx_count = 0
+                self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
                     self.context_updated.emit(ctx_count, budget)
                 # ==============================================
@@ -1539,6 +1552,10 @@ class OpenAIChatWorker(QThread):
 
                     # 真正结束：重置状态
                     self._stop_hook_active = False
+
+                    # ★ 退出前最后一次消费 _hook_message_queue，确保 SubAgentFinished
+                    # 等 hook 消息不被遗漏（子智能体可能在最后一轮 API 调用期间完成）
+                    self._inject_pending_hook_messages(session_messages_target=current_session_messages)
 
                     self._emit_with_callback(
                         "finished_with_messages", self.finished_with_messages, current_session_messages
@@ -1961,12 +1978,23 @@ class OpenAIChatWorker(QThread):
             sequence.append(empty)
 
         # ---- Phase 7: token_usage 注入 ----
+        usage = None
         if self._last_usage:
             usage = {
                 "input": self._last_usage.get("prompt_tokens", 0),
                 "output": self._last_usage.get("completion_tokens", 0),
                 "total": self._last_usage.get("total_tokens", 0),
             }
+        elif self._last_context_token_count > 0:
+            # API 未返回 usage：按用户可见口径，仅回退显示本地估算的输入上下文。
+            usage = {
+                "input": self._last_context_token_count,
+                "output": 0,
+                "total": self._last_context_token_count,
+                "estimated": True,
+            }
+
+        if usage:
             for msg in sequence:
                 if msg.get("role") == "assistant":
                     msg["token_usage"] = usage

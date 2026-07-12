@@ -487,6 +487,54 @@ def test_truncate_real_world_scenario():
     print("  ✓ 真实场景：卡死会话 → 发新消息 → 截断清理 → 继续对话，全流程通过")
 
 
+def _make_context_usage_worker():
+    """构造仅用于消息 token_usage 注入测试的 worker。"""
+    from app.core.workers.chat_worker import OpenAIChatWorker
+
+    worker = OpenAIChatWorker(
+        messages=[],
+        session_messages=[],
+        llm_config={"模型名称": "gpt-4"},
+    )
+    worker._response_content_blocks = [{"type": "text", "text": "完成"}]
+    return worker
+
+
+def test_response_uses_local_context_tokens_when_api_usage_missing():
+    """API 不返回 usage 时，应把本地上下文计数写入 assistant 消息。"""
+    worker = _make_context_usage_worker()
+    worker._last_usage = None
+    worker._last_context_token_count = 1234
+
+    sequence = worker._build_response_message_sequence()
+
+    assert sequence[0]["token_usage"] == {
+        "input": 1234,
+        "output": 0,
+        "total": 1234,
+        "estimated": True,
+    }
+
+
+def test_response_prefers_api_usage_over_local_context_tokens():
+    """API 返回 usage 时，继续显示 API 的精确 input/output/total。"""
+    worker = _make_context_usage_worker()
+    worker._last_context_token_count = 1234
+    worker._last_usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "total_tokens": 1200,
+    }
+
+    sequence = worker._build_response_message_sequence()
+
+    assert sequence[0]["token_usage"] == {
+        "input": 1000,
+        "output": 200,
+        "total": 1200,
+    }
+
+
 if __name__ == "__main__":
     test_compute_signature_is_stable_for_identical_calls()
     test_compute_signature_differs_for_different_args()

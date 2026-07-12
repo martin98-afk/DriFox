@@ -11408,7 +11408,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
         self.backend._hook_message_queue.put(
             {
-                "role": "assistant",
+                "role": "user",
                 "content": hook_content,
                 "_hook_event": "SubAgentFinished",
             }
