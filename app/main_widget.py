@@ -2282,7 +2282,8 @@ class OpenAIChatToolWindow(ToolWindow):
         btn_layout.setSpacing(4)
         self._model_btn_icon = QLabel(self.current_model_btn)
         self._model_btn_icon.setStyleSheet("background: transparent; border: none;")
-        self._model_btn_icon.setFixedSize(15, 15)
+        self._model_btn_icon.setFixedSize(18, 18)
+        self._model_btn_icon.setScaledContents(True)
         btn_layout.addWidget(self._model_btn_icon)
         self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
@@ -4624,10 +4625,12 @@ class OpenAIChatToolWindow(ToolWindow):
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
         api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
+        from_api = bool(getattr(session, "last_api_prompt_from_usage", False))
         snapshot = self.backend.get_context_usage_snapshot(
             session, llm_config,
             api_prompt_tokens=api_prompt_tokens,
             api_message_count=api_message_count,
+            from_api=from_api,
         )
         ring.set_usage(
             snapshot.get("percent", 0),
@@ -12420,7 +12423,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 通知桌宠：重试成功，回到 streaming
         self._set_ai_state("streaming")
 
-    def _on_context_updated(self, token_count: int, limit: int):
+    def _on_context_updated(self, token_count: int, limit: int, from_api: bool = False):
         """实时上下文占用更新回调"""
         self._last_ctx_token_count = token_count
         self._last_ctx_limit = limit
@@ -12430,6 +12433,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 session.last_api_prompt_tokens = token_count
                 session.last_api_message_count = len(session.messages)
+                session.last_api_prompt_from_usage = from_api
             except Exception:
                 pass
         ring = getattr(self, "context_usage_ring", None)

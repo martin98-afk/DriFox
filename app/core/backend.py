@@ -1843,6 +1843,7 @@ class ChatBackend(QObject):
         self, session, llm_config,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
+        from_api: bool = False,
     ) -> Dict:
         """获取上下文使用快照"""
         if self._chat_engine:
@@ -1850,6 +1851,7 @@ class ChatBackend(QObject):
                 session, llm_config,
                 api_prompt_tokens=api_prompt_tokens,
                 api_message_count=api_message_count,
+                from_api=from_api,
             )
         return {}
 

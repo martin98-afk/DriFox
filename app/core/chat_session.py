@@ -48,6 +48,7 @@ class ChatSession:
         self.context_usage: int = 0  # 消息列表估算 token 总数，保存时计算
         self.last_api_prompt_tokens: int = 0  # 最近一次 API 返回的 prompt_tokens，作为上下文占用权威值
         self.last_api_message_count: int = 0  # 上次 API 调用时的 session.messages 长度，用于增量估算
+        self.last_api_prompt_from_usage: bool = False  # last_api_prompt_tokens 是否来自真实 API usage（非本地估算）
         # 🛡️ 首发项目快照：用户在哪个项目下首发的对话。
         # 用于"对话进行中切换项目导致落盘错存"bug 的兜底：
         # 一旦锁定不再改变，即使后续切换项目，会话仍归属首发项目。
@@ -180,6 +181,9 @@ class ChatSession:
             "user_edited_title": self.user_edited_title,
             "metadata": self.metadata,
             "context_usage": self.context_usage,
+            "last_api_prompt_tokens": self.last_api_prompt_tokens,
+            "last_api_message_count": self.last_api_message_count,
+            "last_api_prompt_from_usage": self.last_api_prompt_from_usage,
             "originating_project": self.originating_project,
         }
 
@@ -202,6 +206,9 @@ class ChatSession:
         session.metadata = data.get("metadata", {}) or {}
         session.user_edited_title = data.get("user_edited_title", False)
         session.context_usage = data.get("context_usage", 0)
+        session.last_api_prompt_tokens = data.get("last_api_prompt_tokens", 0)
+        session.last_api_message_count = data.get("last_api_message_count", 0)
+        session.last_api_prompt_from_usage = data.get("last_api_prompt_from_usage", False)
         session.originating_project = data.get("originating_project", "") or ""
         return session
 
