@@ -2072,7 +2072,7 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry = UIPluginRegistry.get_instance()
             ui_registry.set_main_widget(self)
             # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
-            ui_registry.set_context_provider(self._build_ui_context)
+            ui_registry.set_context_provider(self._build_ui_context, self._window_id)
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
@@ -2282,7 +2282,8 @@ class OpenAIChatToolWindow(ToolWindow):
         btn_layout.setSpacing(4)
         self._model_btn_icon = QLabel(self.current_model_btn)
         self._model_btn_icon.setStyleSheet("background: transparent; border: none;")
-        self._model_btn_icon.setFixedSize(15, 15)
+        self._model_btn_icon.setFixedSize(18, 18)
+        self._model_btn_icon.setScaledContents(True)
         btn_layout.addWidget(self._model_btn_icon)
         self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
@@ -2768,14 +2769,31 @@ class OpenAIChatToolWindow(ToolWindow):
             - font_size:    UI 基础字号（px）
             - colors:       主题色字典，可直接用: colors["card_bg"]、colors["accent"]、colors["text_primary"] 等
         """
+        # ── 工作目录取值优先级 ──
+        # 1. tool_executor.get_workdir() — 用户显式设置的项目根目录（最优先）
+        # 2. _current_workdir 实例缓存 — 本窗口最后一次设置的工作目录
+        # 3. os.getcwd() — 最后兜底（在打包版中可能指向软件安装目录，不推荐）
+        from loguru import logger
+
         workdir = ""
         try:
             if self.backend and self.backend.tool_executor:
                 workdir = self.backend.tool_executor.get_workdir() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[_build_ui_context] get_workdir failed: {e}")
+
+        if not workdir:
+            project = getattr(self, "_current_project", "")
+            workdir = self._current_workdir.get(project, "")
+            if workdir:
+                logger.debug(f"[_build_ui_context] workdir from _current_workdir cache: {workdir}")
+
         if not workdir:
             workdir = os.getcwd()
+            logger.warning(
+                f"[_build_ui_context] workdir fallback to os.getcwd()={workdir}; "
+                f"tool_executor workdir may be unset. Consider calling set_workdir first."
+            )
 
         # 主题信息
         theme_id = ""
@@ -4607,10 +4625,12 @@ class OpenAIChatToolWindow(ToolWindow):
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
         api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
+        from_api = bool(getattr(session, "last_api_prompt_from_usage", False))
         snapshot = self.backend.get_context_usage_snapshot(
             session, llm_config,
             api_prompt_tokens=api_prompt_tokens,
             api_message_count=api_message_count,
+            from_api=from_api,
         )
         ring.set_usage(
             snapshot.get("percent", 0),
@@ -5937,15 +5957,73 @@ class OpenAIChatToolWindow(ToolWindow):
         # dispatch_refresh = 主题发生变更 → scope="theme"
         self._apply_runtime_ui_settings(scope="theme")
 
+    # ── 多窗口批处理：避免每个窗口重复执行全局操作 ──
+    _theme_batch_timer = None
+    _theme_batch_scope = None
+
     def _on_settings_config_changed(self):
-        """外观设置变更 → 读取 LLMSettingsCard 标记的变更类型，按需刷新"""
+        """外观设置变更 → 读取 LLMSettingsCard 标记的变更类型，按需刷新
+
+        多窗口优化：使用 debounce timer 批量处理所有窗口的刷新。
+        全局操作（Colors.refresh / setTheme）只执行一次，
+        然后逐个窗口执行 per-window 样式更新，避免竞态和重复开销。
+        """
         self._load_model_configs()
         # 从 LLMSettingsCard 读取变更类型（消双刷后，这是唯一触发路径）
         from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
         scope = LLMSettingsCard._last_change_type
         LLMSettingsCard._last_change_type = None
-        self._apply_runtime_ui_settings(scope=scope)
+
+        # 合并 scope：theme 优先级最高（涵盖颜色+字体），其次保留具体类型
+        cls = type(self)
+        previous = cls._theme_batch_scope
+        if scope == "theme" or previous == "theme":
+            cls._theme_batch_scope = "theme"
+        elif scope:
+            cls._theme_batch_scope = scope
+
+        # ── Debounce: 30ms 内的多次配置变更合并为一次刷新 ──
+        if cls._theme_batch_timer is not None:
+            cls._theme_batch_timer.stop()
+        from PyQt5.QtCore import QTimer
+        if cls._theme_batch_timer is None:
+            cls._theme_batch_timer = QTimer()  # 无 parent，跨窗口存活
+            cls._theme_batch_timer.setSingleShot(True)
+            cls._theme_batch_timer.timeout.connect(cls._execute_batched_theme_refresh)
+        cls._theme_batch_timer.start(30)
+
+    @classmethod
+    def _execute_batched_theme_refresh(cls):
+        """批量执行跨窗口主题刷新（debounce timer 回调）
+
+        1. 全局操作：Colors.refresh / setTheme / on_theme_changed 只执行一次
+        2. Per-window：迭代所有窗口执行样式更新
+        """
+        cls._theme_batch_timer = None
+        final_scope = cls._theme_batch_scope
+        cls._theme_batch_scope = None
+
+        # ── 全局操作：只执行一次 ──
+        Colors.refresh()
+        theme_manager.on_theme_changed()
+        try:
+            from qfluentwidgets import Theme, setTheme
+            if theme_manager.is_light_theme():
+                setTheme(Theme.LIGHT)
+            else:
+                setTheme(Theme.DARK)
+        except Exception:
+            pass
+
+        # ── Per-window：所有窗口执行样式更新 ──
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            if getattr(win, "_is_destroyed", False):
+                continue
+            try:
+                win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
+            except Exception as e:
+                logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -6222,7 +6300,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
-    def _apply_runtime_ui_settings(self, scope=None):
+    def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
         统一刷新 UI 外观，按变更类型分流。
 
@@ -6231,6 +6309,9 @@ class OpenAIChatToolWindow(ToolWindow):
           "theme"       — 仅颜色/主题相关，跳过字体操作
           "font_family" — 仅字体族相关，跳过颜色/主题操作
           "font_size"   — 仅字号相关，跳过颜色/主题操作
+
+        _skip_global   — 批处理模式：全局操作（Colors.refresh/setTheme）
+                         已由协调器执行，跳过来自本窗口的重复调用。
         """
         is_color = scope in (None, "theme")
         is_font_family = scope in (None, "font_family")
@@ -6239,9 +6320,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # Colors.refresh() 在 preamble 中无条件执行，
         # 保证后续公共块中所有 Colors.* 引用使用最新值。
-        # theme_manager.on_theme_changed() 包含图标缓存失效等副作用，
-        # 仅在颜色相关 scope 中触发。
-        Colors.refresh()
+        # 批处理模式下跳过（已由协调器执行）。
+        if not _skip_global:
+            Colors.refresh()
 
         # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
         # 避免后续 scope 分支中重复 findChildren 遍历全树
@@ -6255,17 +6336,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 1. 颜色/主题相关块 ──
         if is_color:
-            theme_manager.on_theme_changed()
+            if not _skip_global:
+                theme_manager.on_theme_changed()
 
-            # 同步 qfluentwidgets 基础主题
-            try:
-                from qfluentwidgets import Theme, setTheme
-                if theme_manager.is_light_theme():
-                    setTheme(Theme.LIGHT)
-                else:
-                    setTheme(Theme.DARK)
-            except Exception:
-                pass
+                # 同步 qfluentwidgets 基础主题
+                try:
+                    from qfluentwidgets import Theme, setTheme
+                    if theme_manager.is_light_theme():
+                        setTheme(Theme.LIGHT)
+                    else:
+                        setTheme(Theme.DARK)
+                except Exception:
+                    pass
 
             colors = theme_manager.get_current_colors()
 
@@ -6333,6 +6415,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 ring = getattr(self, ring_attr, None)
                 if ring and hasattr(ring, "refresh_font_size"):
                     ring.refresh_font_size()
+
+            # 分支标签（包含字号 + 颜色的样式，字体变化时需同步刷新）
+            if hasattr(self, "_project_label"):
+                self._refresh_project_branch_style()
 
         # ── 2.5 会话标题（颜色+字体，主题切换或字体变化时都要更新） ──
         if is_color or is_font:
@@ -6996,6 +7082,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                 above_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+                    self._message_batch[batch_idx] = None
 
             # ── 收集下方（未来方向）需要回收的卡片 ──
             below_widgets = []
@@ -7011,6 +7098,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                 below_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+                    self._message_batch[batch_idx] = None
 
             # ── 执行回收（从布局移除 + deleteLater）──
             if above_widgets:
@@ -7032,7 +7120,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 回收完成，如果有回收触发GC
             if recycled_count > 0 or lazy_render_count > 0:
-                logger.debug(f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次")
+                logger.debug(f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）")
                 if recycled_count > 0:
                     QTimer.singleShot(100, lambda: gc.collect())
 
@@ -7354,7 +7442,10 @@ class OpenAIChatToolWindow(ToolWindow):
         user_count = self._user_prefix_cache[global_batch_index]
 
         # 对于 assistant/tool batch，round_index 需要减 1
-        current_role = self._message_batch[global_batch_index][0].get("role")
+        batch = self._message_batch[global_batch_index]
+        if not batch:
+            return user_count
+        current_role = batch[0].get("role")
         if current_role != "user":
             user_count = max(0, user_count - 1)
 
@@ -12337,7 +12428,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 通知桌宠：重试成功，回到 streaming
         self._set_ai_state("streaming")
 
-    def _on_context_updated(self, token_count: int, limit: int):
+    def _on_context_updated(self, token_count: int, limit: int, from_api: bool = False):
         """实时上下文占用更新回调"""
         self._last_ctx_token_count = token_count
         self._last_ctx_limit = limit
@@ -12347,6 +12438,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 session.last_api_prompt_tokens = token_count
                 session.last_api_message_count = len(session.messages)
+                session.last_api_prompt_from_usage = from_api
             except Exception:
                 pass
         ring = getattr(self, "context_usage_ring", None)

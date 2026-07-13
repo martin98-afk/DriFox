@@ -86,16 +86,6 @@
             "id": "team_member_session_start"
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "探索代码优先使用内置 `codegraph_explore` 工具",
-            "add_output_to_context": true,
-            "id": "codegraph_explore_hint"
-          }
-        ]
       }
     ],
     "PreUserMessage": [

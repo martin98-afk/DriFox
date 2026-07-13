@@ -89,7 +89,7 @@ class OpenAIChatWorker(QThread):
     permission_approval_requested = pyqtSignal(str, str, dict)
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
-    context_updated = pyqtSignal(int, int)  # token_count, limit，每轮 API 调用后实时更新
+    context_updated = pyqtSignal(int, int, bool)  # token_count, limit, from_api，每轮 API 调用后实时更新
     _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
@@ -1443,8 +1443,10 @@ class OpenAIChatWorker(QThread):
                     return
                 # ====== 实时上下文占用更新（每轮 API 调用后）======
                 # 优先用 API 返回的精确 prompt_tokens，没有则估算
+                from_api = False
                 if self._last_usage and self._last_usage.get("prompt_tokens", 0) > 0:
                     ctx_count = self._last_usage["prompt_tokens"]
+                    from_api = True
                 else:
                     try:
                         model_name = str(self.llm_config.get("model", "") or "gpt-4")
@@ -1456,7 +1458,7 @@ class OpenAIChatWorker(QThread):
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
-                    self.context_updated.emit(ctx_count, budget)
+                    self.context_updated.emit(ctx_count, budget, from_api)
                 # ==============================================
                 if tool_calls_found and tool_args_pending:
                     # 🛡️ continue 之前检查取消状态，否则 while 循环直接退出绕过保存

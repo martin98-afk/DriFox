@@ -710,17 +710,16 @@ def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int
         round_start = start_idx
         for j in range(start_idx - 1, prev_boundary - 1, -1):
             msg = canonical_messages[j]
-            if msg.get("role") == "user":
-                break  # 遇到上一个 user，停止
             hook_event = msg.get("_hook_event")
-            if hook_event and hook_event != "SessionStart":
-                round_start = j  # 扩展起点到本 hook
-            elif hook_event == "SessionStart":
-                # SessionStart 是会话级，跳过不扩展
+            if hook_event:
+                if hook_event != "SessionStart":
+                    round_start = j  # 扩展起点到本 hook
+                # SessionStart: 会话级，跳过不扩展，继续向前
                 continue
-            else:
-                # 非 hook 消息，停止向前回溯
-                break
+            if msg.get("role") == "user":
+                break  # 遇到上一个真实 user（无 _hook_event），停止
+            # 非 hook 非 user 消息，停止向前回溯
+            break
         round_starts.append(round_start)
 
     # 第二遍：end = 下一个 round 的 start（最后一个 round 则是消息总数）

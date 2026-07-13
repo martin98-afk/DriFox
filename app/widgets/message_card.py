@@ -247,6 +247,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
     # 检测当前主题，选择对应图标资源前缀
     try:
         from app.utils.theme_manager import theme_manager
+
         _icon_prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
     except Exception:
         _icon_prefix = "qrc:/icons"
@@ -1021,7 +1022,7 @@ def _render_tool_streaming_block(
     # 合并预览文本 + 字符数进度（放在同一个 span 里，JS 更新 innerHTML 时一起走）
     preview_display = escape(preview) if preview else "准备中..."
     if not completed and char_count > 0:
-        preview_display += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+        preview_display += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
 
     streaming_state = "false" if completed else "true"
 
@@ -1031,7 +1032,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>
     </div>"""
@@ -1049,7 +1050,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
         preview = _get_think_preview(content)
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
@@ -1088,7 +1089,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
-        summary_right = f'<span style="color: {Colors.TEXT_SECONDARY}; font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
@@ -2338,6 +2339,7 @@ class CodeWebViewer(QWebEngineView):
         # 检测浅色/深色模式，用于行内差异框主题适配
         try:
             from app.utils.theme_manager import theme_manager
+
             _is_light_diff = theme_manager.is_light_theme()
         except Exception:
             _is_light_diff = False
@@ -2368,9 +2370,9 @@ class CodeWebViewer(QWebEngineView):
                     --text-muted: {theme["text_muted"]};
                     --accent: {theme["accent"]};
                     --accent-warm: {theme["accent_warm"]};
-                    --code-bg: {'var(--panel-soft)' if _is_light_diff else 'transparent'};
-                    --code-toolbar: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(255, 255, 255, 0.03)'};
-                    --code-border: {'var(--border)' if _is_light_diff else '#2a3447'};
+                    --code-bg: {"var(--panel-soft)" if _is_light_diff else "transparent"};
+                    --code-toolbar: {"rgba(0,0,0,0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.03)"};
+                    --code-border: {"var(--border)" if _is_light_diff else "#2a3447"};
                     --success: #5fd18c;
                     --danger: #ff7b7b;
                 }}
@@ -2738,7 +2740,7 @@ class CodeWebViewer(QWebEngineView):
                 /* 思考流式预览 — 默认静态色 */
                 .think-streaming-preview {{
                     position: relative;
-                    color: {Colors.TEXT_SECONDARY};
+                    color: var(--text-secondary);
                 }}
                 /* 流式状态：::after 伪元素叠加流动光效，不触碰文字层 */
                 .think-block[data-streaming="true"] .think-streaming-preview::after {{
@@ -2837,8 +2839,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-diff-inline {{
                     margin: 0;
-                    background: {'var(--panel-soft)' if _is_light_diff else 'rgba(13,17,23,0.40)'};
-                    border: 1px solid {'var(--border)' if _is_light_diff else 'rgba(48,54,61,0.25)'};
+                    background: {"var(--panel-soft)" if _is_light_diff else "rgba(13,17,23,0.40)"};
+                    border: 1px solid {"var(--border)" if _is_light_diff else "rgba(48,54,61,0.25)"};
                     border-radius: 8px;
                     overflow: hidden;
                 }}
@@ -2848,15 +2850,15 @@ class CodeWebViewer(QWebEngineView):
                     gap: 8px;
                     min-width: 0;
                     padding: 4px 10px;
-                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(22,27,34,0.40)'};
-                    border-bottom: 1px solid {'var(--border)' if _is_light_diff else 'rgba(48,54,61,0.25)'};
-                    color: {'var(--text-secondary)' if _is_light_diff else '#8b949e'};
+                    background: {"rgba(0,0,0,0.03)" if _is_light_diff else "rgba(22,27,34,0.40)"};
+                    border-bottom: 1px solid {"var(--border)" if _is_light_diff else "rgba(48,54,61,0.25)"};
+                    color: {"var(--text-secondary)" if _is_light_diff else "#8b949e"};
                     font-size: {small_font_size}px;
                     font-weight: 600;
                 }}
                 .tool-diff-inline__title {{
                     flex: 0 0 auto;
-                    color: {'var(--text)' if _is_light_diff else '#d0d7de'};
+                    color: {"var(--text)" if _is_light_diff else "#d0d7de"};
                     letter-spacing: 0;
                 }}
                 .tool-diff-inline__file {{
@@ -2865,7 +2867,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                     text-overflow: ellipsis;
                     white-space: nowrap;
-                    color: {'var(--text-secondary)' if _is_light_diff else '#8b949e'};
+                    color: {"var(--text-secondary)" if _is_light_diff else "#8b949e"};
                     font-weight: 500;
                 }}
                 .tool-diff-inline__summary {{
@@ -2898,25 +2900,25 @@ class CodeWebViewer(QWebEngineView):
                     border-bottom: 1px solid transparent;
                 }}
                 .tool-diff-inline .diff-ctx:hover {{
-                    background: {'rgba(0,0,0,0.04)' if _is_light_diff else 'rgba(255,255,255,0.035)'};
+                    background: {"rgba(0,0,0,0.04)" if _is_light_diff else "rgba(255,255,255,0.035)"};
                 }}
                 .tool-diff-inline .diff-add:hover {{
-                    background-color: {'rgba(63, 185, 80, 0.15)' if _is_light_diff else 'rgba(63, 185, 80, 0.18)'};
+                    background-color: {"rgba(63, 185, 80, 0.15)" if _is_light_diff else "rgba(63, 185, 80, 0.18)"};
                 }}
                 .tool-diff-inline .diff-del:hover {{
-                    background-color: {'rgba(248, 81, 73, 0.15)' if _is_light_diff else 'rgba(248, 81, 73, 0.18)'};
+                    background-color: {"rgba(248, 81, 73, 0.15)" if _is_light_diff else "rgba(248, 81, 73, 0.18)"};
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
                     min-width: 38px;
                     padding: 0 8px;
                     text-align: right;
-                    color: {'var(--text-muted)' if _is_light_diff else '#6e7681'};
+                    color: {"var(--text-muted)" if _is_light_diff else "#6e7681"};
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
-                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(13,17,23,0.18)'};
-                    border-right: 1px solid {'var(--border)' if _is_light_diff else 'rgba(139,148,158,0.16)'};
+                    background: {"rgba(0,0,0,0.03)" if _is_light_diff else "rgba(13,17,23,0.18)"};
+                    border-right: 1px solid {"var(--border)" if _is_light_diff else "rgba(139,148,158,0.16)"};
                 }}
                 .tool-diff-inline .line-sign {{
                     flex: none;
@@ -2940,7 +2942,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
-                    color: {'#1a7f37' if _is_light_diff else '#aff5b4'};
+                    color: {"#1a7f37" if _is_light_diff else "#aff5b4"};
                 }}
                 .tool-diff-inline .diff-del {{
                     background-color: rgba(248, 81, 73, 0.095);
@@ -2950,25 +2952,25 @@ class CodeWebViewer(QWebEngineView):
                     color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
-                    color: {'#cf222e' if _is_light_diff else '#ffdcd7'};
+                    color: {"#cf222e" if _is_light_diff else "#ffdcd7"};
                 }}
                 .tool-diff-inline .diff-ctx {{
-                    color: {'var(--text-secondary)' if _is_light_diff else '#adbac7'};
+                    color: {"var(--text-secondary)" if _is_light_diff else "#adbac7"};
                 }}
                 .tool-diff-inline .diff-hunk {{
-                    color: {'var(--text)' if _is_light_diff else '#79c0ff'};
-                    background: {'rgba(37, 99, 235, 0.06)' if _is_light_diff else 'rgba(56, 139, 253, 0.075)'};
+                    color: {"var(--text)" if _is_light_diff else "#79c0ff"};
+                    background: {"rgba(37, 99, 235, 0.06)" if _is_light_diff else "rgba(56, 139, 253, 0.075)"};
                 }}
                 .tool-diff-inline .diff-hunk .line-code {{
-                    color: {'var(--text)' if _is_light_diff else '#79c0ff'};
+                    color: {"var(--text)" if _is_light_diff else "#79c0ff"};
                 }}
                 .tool-diff-inline .diff-file-header .line-code {{
-                    color: {'var(--text)' if _is_light_diff else '#c9d1d9'};
+                    color: {"var(--text)" if _is_light_diff else "#c9d1d9"};
                     font-weight: 600;
                 }}
                 .tool-diff-inline .diff-truncated {{
-                    color: {'var(--text-muted)' if _is_light_diff else '#6e7681'};
-                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(139, 148, 158, 0.055)'};
+                    color: {"var(--text-muted)" if _is_light_diff else "#6e7681"};
+                    background: {"rgba(0,0,0,0.03)" if _is_light_diff else "rgba(139, 148, 158, 0.055)"};
                 }}
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
@@ -3088,8 +3090,8 @@ class CodeWebViewer(QWebEngineView):
                     word-break: break-word;
                 }}
                 .args-row.result-success {{
-                    border-top: 1px solid {'rgba(34, 197, 94, 0.3)' if _is_light_diff else 'rgba(95, 209, 140, 0.3)'};
-                    background: {'rgba(34, 197, 94, 0.05)' if _is_light_diff else 'rgba(95, 209, 140, 0.05)'};
+                    border-top: 1px solid {"rgba(34, 197, 94, 0.3)" if _is_light_diff else "rgba(95, 209, 140, 0.3)"};
+                    background: {"rgba(34, 197, 94, 0.05)" if _is_light_diff else "rgba(95, 209, 140, 0.05)"};
                 }}
                 .args-row.result-fail {{
                     border-top: 1px solid rgba(244, 67, 54, 0.3);
@@ -3663,6 +3665,7 @@ class CodeWebViewer(QWebEngineView):
         try:
             from app.utils.theme_manager import theme_manager
             from app.widgets.render_helpers import set_diff_highlight_style
+
             _style = "friendly" if theme_manager.is_light_theme() else "dracula"
             set_pygments_style(_style)
             set_diff_highlight_style(_style)
@@ -3767,6 +3770,44 @@ class CodeWebViewer(QWebEngineView):
         font_css = get_font_family_css()
         body_font_size = scale_font_size(14)
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
+
+    def refresh_theme(self):
+        """刷新主题颜色，响应全局主题切换"""
+        try:
+            from app.utils.theme_manager import theme_manager
+
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+
+        theme = current_theme()
+
+        # 通过 JS 更新 :root CSS 变量，使已有 DOM 即时反映新主题
+        js_code = f"""
+        (function() {{
+            var root = document.documentElement;
+            if (!root) return;
+            root.style.setProperty('--bg', 'transparent');
+            root.style.setProperty('--panel', '{theme["card_bg_solid"]}');
+            root.style.setProperty('--panel-elevated', '{theme["card_bg_solid"]}');
+            root.style.setProperty('--panel-soft', '{theme["content_bg"]}');
+            root.style.setProperty('--border', '{theme["border"]}');
+            root.style.setProperty('--border-strong', '{theme["border_accent"]}');
+            root.style.setProperty('--text', '{theme["text_primary"]}');
+            root.style.setProperty('--text-secondary', '{theme["text_secondary"]}');
+            root.style.setProperty('--text-muted', '{theme["text_muted"]}');
+            root.style.setProperty('--accent', '{theme["accent"]}');
+            root.style.setProperty('--accent-warm', '{theme["accent_warm"]}');
+            root.style.setProperty('--code-bg', '{"var(--panel-soft)" if _is_light else "transparent"}');
+            root.style.setProperty('--code-toolbar', '{"rgba(0,0,0,0.03)" if _is_light else "rgba(255, 255, 255, 0.03)"}');
+            root.style.setProperty('--code-border', '{"var(--border)" if _is_light else "#2a3447"}');
+        }})();
+        """
+        try:
+            if self.page():
+                self.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
 
     def _perform_update(self):
         try:
@@ -4466,7 +4507,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -4941,6 +4982,7 @@ class MessageCard(SimpleCardWidget):
         # 按窗口透明度调整背景色 alpha
         if _win_opacity < 1.0 and theme["bg"].startswith("rgba("):
             import re
+
             m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", theme["bg"])
             if m:
                 r, g, b, a = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
@@ -6532,7 +6574,7 @@ class MessageCard(SimpleCardWidget):
         _text_only = preview is None
         preview_content = escape(preview) if preview else "准备中..."
         if not completed and char_count > 0:
-            preview_content += f'<span style="color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+            preview_content += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
 
         # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
         _cache_key = (tool_call_id, completed)
@@ -6972,7 +7014,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):

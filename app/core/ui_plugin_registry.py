@@ -88,7 +88,9 @@ class UIPluginRegistry:
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
-        self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 全局上下文提供者
+        self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 向后兼容，单例上下文提供者
+        # 多窗口隔离：每个窗口独立上下文提供者 (window_id → provider)
+        self._context_providers: Dict[str, Callable[[], Dict[str, Any]]] = {}
         # 多窗口隔离：window_id → main_widget 映射，用于 unload 时正确清理容器
         self._window_main_widgets: Dict[str, Any] = {}
 
@@ -290,7 +292,7 @@ class UIPluginRegistry:
             #   1. set_context_provider(provider) — 拉模型，卡片自行按需调用
             #   2. set_context(context)          — 推模型，向后兼容旧卡片
             #   3. widget._card_context           — 兜底属性
-            ctx_provider = self._make_context_provider(card_info)
+            ctx_provider = self._make_context_provider(card_info, window_id)
             if hasattr(widget, "set_context_provider") and callable(widget.set_context_provider):
                 widget.set_context_provider(ctx_provider)
             elif hasattr(widget, "set_context") and callable(widget.set_context):
@@ -540,8 +542,9 @@ class UIPluginRegistry:
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
-    def set_context_provider(self, provider: Callable[[], Dict[str, Any]]) -> None:
-        """设置全局上下文提供者
+    def set_context_provider(self, provider: Callable[[], Dict[str, Any]],
+                             window_id: str = None) -> None:
+        """设置上下文提供者（多窗口隔离：按 window_id 存储）
 
         UI 浮动卡片首次显示时，会调用此 provider 获取上下文 dict，
         然后通过 ``widget.set_context(context)`` 传递给卡片。
@@ -549,13 +552,19 @@ class UIPluginRegistry:
         Args:
             provider: 无参可调用对象，返回包含上下文键值对的 dict。
                       建议至少提供：project_root, project_name, session_id, window_id。
+            window_id: 窗口唯一标识。传入时注册为窗口专属 provider；
+                      不传则仅设置向后兼容的全局 provider。
         """
-        self._context_provider = provider
+        if window_id:
+            self._context_providers[window_id] = provider
+        else:
+            self._context_provider = provider
 
-    def _build_card_context(self, card_info: FloatingCardInfo) -> Dict[str, Any]:
+    def _build_card_context(self, card_info: FloatingCardInfo,
+                            window_id: str = None) -> Dict[str, Any]:
         """构建卡片上下文 dict
 
-        优先级：卡片专属 context_provider > 全局 context_provider。
+        优先级：卡片专属 context_provider > 窗口级 provider > 全局兼容 provider。
         最后叠加卡片元信息（plugin_name, card_id），不会被覆盖。
 
         Returns:
@@ -565,6 +574,8 @@ class UIPluginRegistry:
         try:
             if card_info.context_provider is not None:
                 ctx.update(card_info.context_provider())
+            elif window_id and window_id in self._context_providers:
+                ctx.update(self._context_providers[window_id]())
             elif self._context_provider is not None:
                 ctx.update(self._context_provider())
         except Exception:
@@ -574,18 +585,21 @@ class UIPluginRegistry:
         ctx.setdefault("card_id", card_info.card_id)
         return ctx
 
-    def _make_context_provider(self, card_info: FloatingCardInfo) -> Callable[[], Dict[str, Any]]:
+    def _make_context_provider(self, card_info: FloatingCardInfo,
+                               window_id: str = None) -> Callable[[], Dict[str, Any]]:
         """创建一个上下文提供函数（闭包），供卡片按需拉取最新上下文
 
         返回的无参函数每次调用都会通过 _build_card_context 重新构建上下文，
         反映当前最新的 project_root / session_id / theme 等状态。
+
+        多窗口隔离：window_id 用于查找对应窗口的专属 context_provider。
 
         新卡片应实现 ``set_context_provider(provider)`` 接口，
         在 showEvent / show_card 等时机自行调用 provider 获取最新上下文。
         """
 
         def _provider() -> Dict[str, Any]:
-            return self._build_card_context(card_info)
+            return self._build_card_context(card_info, window_id)
 
         return _provider
 

@@ -99,7 +99,7 @@ class UIEngine(BaseEngine):
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
         self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
         self._adapter.stream_started.connect(lambda: self._emit("stream_started"))
-        self._adapter.context_updated.connect(lambda tc, lim: self._emit("context_updated", tc, lim))
+        self._adapter.context_updated.connect(lambda tc, lim, fa=False: self._emit("context_updated", tc, lim, fa))
 
         # 调用父类构造
         super().__init__(self._conversation_core, self._conversation_executor)
@@ -484,6 +484,7 @@ class UIEngine(BaseEngine):
         llm_config: Optional[Dict] = None,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
+        from_api: bool = False,
     ) -> Dict[str, int]:
         session = session or self._session_manager.get_current_session()
         llm_config = llm_config or self._get_model_config()
@@ -511,8 +512,19 @@ class UIEngine(BaseEngine):
             try:
                 am = self._get_agent_manager()
                 if am:
+                    # 构建 extra_context，与 context_builder.build_messages 行为一致
+                    # （否则 ProjectNotesHook 等依赖 project_root/project_name 的 hook 会拿到空值）
+                    extra_context: Dict[str, Any] = {}
+                    try:
+                        if self._tool_executor and hasattr(self._tool_executor, "get_workdir"):
+                            extra_context["project_root"] = self._tool_executor.get_workdir() or ""
+                        if self._backend and hasattr(self._backend, "current_project"):
+                            extra_context["project_name"] = self._backend.current_project or ""
+                    except Exception:
+                        pass
                     system_prompt = am.get_agent_system_prompt(
-                        self._current_agent, is_subagent_call=False
+                        self._current_agent, is_subagent_call=False,
+                        extra_context=extra_context,
                     ) or ""
                     # 缓存回 session，与 context_builder.build_messages 行为一致
                     if system_prompt and not getattr(session, "system_prompt", ""):
@@ -590,7 +602,11 @@ class UIEngine(BaseEngine):
         # 优先使用 API 返回的精确 prompt_tokens 作为权威值；
         # 若有 message_count 且新增了消息，估算增量：API值 + 新增消息估算
         # 若无 API 返回值（冷启动、无活跃对话），回退到本地估算。
-        if api_prompt_tokens > 0:
+        # ⚠️ from_api=False 表示 api_prompt_tokens 来自本地估算
+        #   （count_messages_tokens），其覆盖口径（built_messages 的压缩子集）
+        #   与 api_message_count（len(session.messages) 全量）不匹配，
+        #   此时 delta 增量路径会导致严重低估甚至越来越小，直接跳过。
+        if api_prompt_tokens > 0 and from_api:
             current_msg_count = len(session.messages)
             if api_message_count > 0 and current_msg_count > api_message_count:
                 # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算

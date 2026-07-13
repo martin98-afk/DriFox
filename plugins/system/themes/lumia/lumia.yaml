@@ -2,8 +2,8 @@ name: 光感白
 id: lumia
 mode: light
 window:
-  gradient_start: rgba(230, 236, 245, 255)
-  gradient_end: rgba(222, 230, 240, 255)
+  gradient_start: '#ffffff'
+  gradient_end: '#f5f5f5'
 background:
   window_bg:
     image: :/icons/fox_bg.png
@@ -14,9 +14,9 @@ background:
     opacity: 0.04
     enabled: true
 colors:
-  card_bg: rgba(242, 247, 255, 238)
-  card_bg_solid: rgba(242, 247, 255, 252)
-  content_bg: '#dce5f0'
+  card_bg: rgba(255, 255, 255, 242)
+  card_bg_solid: rgba(255, 255, 255, 252)
+  content_bg: '#e8e8e8'
   border: '#bcc7d6'
   border_accent: '#2563eb'
   text_primary: '#0f172a'
@@ -26,12 +26,12 @@ colors:
   accent_warm: '#d97706'
   hover_bg: rgba(37, 99, 235, 0.08)
   selected_bg: rgba(37, 99, 235, 0.18)
-  capsule_bg: rgba(238, 243, 252, 215)
-  capsule_border: rgba(175, 190, 210, 200)
+  capsule_bg: rgba(245, 245, 245, 220)
+  capsule_border: rgba(180, 180, 180, 200)
 
-  toolbar_bg: rgba(30, 60, 120, 0.06)
+  toolbar_bg: rgba(0, 0, 0, 0.04)
   divider_color: rgba(0, 0, 0, 0.08)
-  hover_bg_strong: rgba(30, 60, 120, 0.08)
+  hover_bg_strong: rgba(0, 0, 0, 0.06)
   scrollbar_handle_bg: rgba(0, 0, 0, 0.15)
   scrollbar_handle_hover_bg: rgba(0, 0, 0, 0.25)
   card_placeholder_text: '#90a0b8'
@@ -40,7 +40,7 @@ colors:
   status_info: '#2563eb'
   status_danger_bg: rgba(220, 38, 38, 0.8)
   status_archive_bg: rgba(124, 58, 237, 0.8)
-  card_bg_dim: rgba(30, 60, 120, 0.04)
+  card_bg_dim: rgba(0, 0, 0, 0.03)
   archived_card_bg: rgba(217, 119, 6, 0.10)
   archived_card_border: rgba(217, 119, 6, 0.20)
 
@@ -60,7 +60,7 @@ colors:
   user_card_accent: '#2563eb'
   user_card_text: '#0f172a'
   user_card_muted: '#5b6e8e'
-  assistant_card_bg: rgba(255, 251, 230, 225)
+  assistant_card_bg: '#ffffff'
   assistant_card_accent: '#d97706'
   assistant_card_text: '#3d2000'
   assistant_card_muted: '#64748b'
@@ -68,10 +68,10 @@ colors:
   agent_btn_text_active: '#2563eb'
   agent_btn_bg_active: rgba(37, 99, 235, 0.12)
   agent_btn_separator: rgba(170, 185, 205, 150)
-  input_bg_start: rgba(235, 242, 252, 210)
-  input_bg_end: rgba(228, 237, 248, 210)
-  input_focus_bg_start: rgba(235, 242, 252, 245)
-  input_focus_bg_end: rgba(228, 237, 248, 245)
+  input_bg_start: rgba(255, 255, 255, 230)
+  input_bg_end: rgba(245, 245, 245, 230)
+  input_focus_bg_start: rgba(255, 255, 255, 250)
+  input_focus_bg_end: rgba(248, 248, 248, 250)
   input_text: '#0f172a'
   input_focus_text: '#060e1e'
   input_border: '#bcc7d6'
@@ -82,14 +82,14 @@ colors:
   glow_ambient_alpha: 80
   glow_ambient_blur: 32
 
-  toolbar_strip_bg: rgba(228, 237, 248, 210)
+  toolbar_strip_bg: rgba(255, 255, 255, 220)
   toolbar_strip_border: '#bcc7d6'
   realtime_border: '#2563eb'
   realtime_accent: '#3b82f6'
   realtime_accent_warm: '#f59e0b'
   realtime_success: '#10b981'
   realtime_error: '#ef4444'
-  realtime_bg: rgba(228, 237, 248, 248)
+  realtime_bg: rgba(245, 245, 245, 250)
   realtime_text: '#0f172a'
   realtime_text_secondary: rgba(15, 23, 42, 0.65)
   realtime_tag_bg: rgba(37, 99, 235, 0.10)
@@ -113,5 +113,5 @@ colors:
   ring_compacted: '#7c3aed'
   branch_label_bg: rgba(37, 99, 235, 0.10)
   branch_label_border: rgba(37, 99, 235, 0.22)
-  window_bg: rgba(37, 99, 235, 0.04)
+  window_bg: rgba(0, 0, 0, 0.0)
   input_glow_preset: "subtle"
