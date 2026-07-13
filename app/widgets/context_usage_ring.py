@@ -201,8 +201,29 @@ class ContextUsageRing(QWidget):
         return QColor(255, 255, 255, 40)
 
     def refresh_theme(self):
-        """主题切换后刷新轨道颜色及 tooltip 主题色"""
+        """主题切换后刷新环颜色、轨道颜色及 tooltip 主题色
+
+        调用者保证在调用前 Colors 已 refresh（dispatch_refresh 或 _apply_runtime_ui_settings
+        的 preamble 中均会调用），因此此处直接读取 Colors 缓存值。
+        """
+        # 重新读取环主色（Colors 随主题变化）
+        ring_normal = QColor(Colors.RING_NORMAL)
+        ring_warning = QColor(Colors.RING_WARNING)
+        ring_danger = QColor(Colors.RING_DANGER)
+        ring_compacted = QColor(Colors.RING_COMPACTED)
+
+        if self._percent >= 90:
+            self._ring_color = ring_danger
+        elif self._percent >= 70:
+            self._ring_color = ring_warning
+        else:
+            self._ring_color = ring_normal
+        self._compacted_color = ring_compacted
+
+        # 轨道颜色
         self._track_color = self._compute_track_color()
+
+        # tooltip 主题色随主题变化
         self._rebuild_tooltip()
         self.update()
 
