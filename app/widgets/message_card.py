@@ -4890,6 +4890,17 @@ class MessageCard(SimpleCardWidget):
 
     def _build_theme(self, role: str, error: bool = False) -> Dict[str, str]:
         Colors.refresh()
+
+        # 获取当前窗口透明度（OpacitySlider 控制），用于调整卡片背景色 alpha
+        try:
+            win = self.window()
+            if win is not None:
+                _win_opacity = win.windowOpacity()
+            else:
+                _win_opacity = 1.0
+        except Exception:
+            _win_opacity = 1.0
+
         themes = {
             "assistant": {
                 "avatar": "AI",
@@ -4926,6 +4937,16 @@ class MessageCard(SimpleCardWidget):
             },
         }
         theme = dict(themes.get(role, themes["assistant"]))
+
+        # 按窗口透明度调整背景色 alpha
+        if _win_opacity < 1.0 and theme["bg"].startswith("rgba("):
+            import re
+            m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*(\d+)\)", theme["bg"])
+            if m:
+                r, g, b, a = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+                new_a = max(0, min(255, int(a * _win_opacity)))
+                theme["bg"] = f"rgba({r}, {g}, {b}, {new_a})"
+
         if error:
             bg = Colors.ERROR  # 使用语义色
             theme["bg"] = "#2A1F1F"

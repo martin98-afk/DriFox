@@ -1290,6 +1290,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        # 更新消息卡片背景色透明度
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item is None:
+                continue
+            card = item.widget()
+            if card is not None and isinstance(card, MessageCard):
+                card.refresh_theme()
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
