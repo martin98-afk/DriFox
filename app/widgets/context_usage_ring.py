@@ -129,10 +129,14 @@ class ContextUsageRing(QWidget):
         })
 
     def _show_tooltip(self):
+        # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步
+        self._rebuild_tooltip()
+
         # 即使没有会话 / 模型配置，也给出一个轻量提示，避免「hover 圆环却毫无反馈」。
         # 仅当「既没有预算、也没有占比、也没有明细、也没有缓存」时，构造空状态引导文案。
         if (self._budget_tokens <= 0 and self._percent <= 0
                 and not self._breakdown and not self._cache_data):
+            # 空状态覆盖 _rebuild_tooltip 设置的数据
             self._tooltip.set_data({
                 "used_tokens": 0,
                 "budget_tokens": 0,
@@ -197,8 +201,9 @@ class ContextUsageRing(QWidget):
         return QColor(255, 255, 255, 40)
 
     def refresh_theme(self):
-        """主题切换后刷新轨道颜色"""
+        """主题切换后刷新轨道颜色及 tooltip 主题色"""
         self._track_color = self._compute_track_color()
+        self._rebuild_tooltip()
         self.update()
 
     def enterEvent(self, event):

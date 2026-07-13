@@ -151,17 +151,34 @@ def _get_lexer_cached(lang: str):
     return lex
 
 
+# Pygments 高亮风格切换（深色→dracula，浅色→friendly）
+_current_pygments_style = "dracula"
+
+
+def set_pygments_style(style_name: str):
+    """设置 Pygments 高亮风格并清除缓存"""
+    global _current_pygments_style
+    if style_name != _current_pygments_style:
+        _current_pygments_style = style_name
+        _FORMATTER_CACHE["font_size"] = None  # 强制重建
+
+
 def _get_formatter_cached():
-    """HtmlFormatter 单例，字号变化时重建"""
+    """HtmlFormatter 单例，字号或风格变化时重建"""
     fs = scale_font_size(13)
-    if _FORMATTER_CACHE["font_size"] != fs:
+    style = _current_pygments_style
+    cache_key = (fs, style)
+    if _FORMATTER_CACHE.get("cache_key") != cache_key:
+        # 浅色风格用深色默认文字
+        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
+        _FORMATTER_CACHE["cache_key"] = cache_key
         _FORMATTER_CACHE["font_size"] = fs
         _FORMATTER_CACHE["formatter"] = HtmlFormatter(
-            style="dracula",
+            style=style,
             linenos=False,
             noclasses=True,
             cssclass="code-block",
-            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:#D4D4D4;",
+            prestyles=f"margin:0; padding:0; background:transparent; font-family: Consolas, monospace; font-size:{fs}px; color:{pre_color};",
         )
     return _FORMATTER_CACHE["formatter"]
 
@@ -2311,6 +2328,12 @@ class CodeWebViewer(QWebEngineView):
             }
         """
         theme = current_theme()
+        # 检测浅色/深色模式，用于行内差异框主题适配
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light_diff = theme_manager.is_light_theme()
+        except Exception:
+            _is_light_diff = False
         body_font_size = scale_font_size(14)
         code_font_size = scale_font_size(13)
         tag_font_size = scale_font_size(12)
@@ -2338,9 +2361,9 @@ class CodeWebViewer(QWebEngineView):
                     --text-muted: {theme["text_muted"]};
                     --accent: {theme["accent"]};
                     --accent-warm: {theme["accent_warm"]};
-                    --code-bg: transparent;
-                    --code-toolbar: rgba(255, 255, 255, 0.03);
-                    --code-border: #2a3447;
+                    --code-bg: {'var(--panel-soft)' if _is_light_diff else 'transparent'};
+                    --code-toolbar: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(255, 255, 255, 0.03)'};
+                    --code-border: {'var(--border)' if _is_light_diff else '#2a3447'};
                     --success: #5fd18c;
                     --danger: #ff7b7b;
                 }}
@@ -2424,7 +2447,7 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 12px;
                     text-align: left;
                     font-weight: 600;
-                    color: #fff !important;
+                    color: var(--text) !important;
                     border-bottom: 1px solid var(--border-strong);
                 }}
                 table:not(.code-table) td {{
@@ -2477,7 +2500,7 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 12px;
                     text-align: left;
                     font-weight: 600;
-                    color: #fff !important;
+                    color: var(--text) !important;
                     border-bottom: 1px solid var(--border-strong);
                 }}
                 .table-scroll-wrapper > table td {{
@@ -2807,8 +2830,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .tool-diff-inline {{
                     margin: 0;
-                    background: rgba(13,17,23,0.40);
-                    border: 1px solid rgba(48,54,61,0.25);
+                    background: {'var(--panel-soft)' if _is_light_diff else 'rgba(13,17,23,0.40)'};
+                    border: 1px solid {'var(--border)' if _is_light_diff else 'rgba(48,54,61,0.25)'};
                     border-radius: 8px;
                     overflow: hidden;
                 }}
@@ -2818,15 +2841,15 @@ class CodeWebViewer(QWebEngineView):
                     gap: 8px;
                     min-width: 0;
                     padding: 4px 10px;
-                    background: rgba(22,27,34,0.40);
-                    border-bottom: 1px solid rgba(48,54,61,0.25);
-                    color: #8b949e;
+                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(22,27,34,0.40)'};
+                    border-bottom: 1px solid {'var(--border)' if _is_light_diff else 'rgba(48,54,61,0.25)'};
+                    color: {'var(--text-secondary)' if _is_light_diff else '#8b949e'};
                     font-size: {small_font_size}px;
                     font-weight: 600;
                 }}
                 .tool-diff-inline__title {{
                     flex: 0 0 auto;
-                    color: #d0d7de;
+                    color: {'var(--text)' if _is_light_diff else '#d0d7de'};
                     letter-spacing: 0;
                 }}
                 .tool-diff-inline__file {{
@@ -2835,7 +2858,7 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                     text-overflow: ellipsis;
                     white-space: nowrap;
-                    color: #8b949e;
+                    color: {'var(--text-secondary)' if _is_light_diff else '#8b949e'};
                     font-weight: 500;
                 }}
                 .tool-diff-inline__summary {{
@@ -2868,25 +2891,25 @@ class CodeWebViewer(QWebEngineView):
                     border-bottom: 1px solid transparent;
                 }}
                 .tool-diff-inline .diff-ctx:hover {{
-                    background: rgba(255,255,255,0.035);
+                    background: {'rgba(0,0,0,0.04)' if _is_light_diff else 'rgba(255,255,255,0.035)'};
                 }}
                 .tool-diff-inline .diff-add:hover {{
-                    background-color: rgba(63, 185, 80, 0.18);
+                    background-color: {'rgba(63, 185, 80, 0.15)' if _is_light_diff else 'rgba(63, 185, 80, 0.18)'};
                 }}
                 .tool-diff-inline .diff-del:hover {{
-                    background-color: rgba(248, 81, 73, 0.18);
+                    background-color: {'rgba(248, 81, 73, 0.15)' if _is_light_diff else 'rgba(248, 81, 73, 0.18)'};
                 }}
                 .tool-diff-inline .line-num {{
                     flex: none;
                     min-width: 38px;
                     padding: 0 8px;
                     text-align: right;
-                    color: #6e7681;
+                    color: {'var(--text-muted)' if _is_light_diff else '#6e7681'};
                     user-select: none;
                     font-size: {tag_font_size - 1}px;
                     box-sizing: border-box;
-                    background: rgba(13,17,23,0.18);
-                    border-right: 1px solid rgba(139,148,158,0.16);
+                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(13,17,23,0.18)'};
+                    border-right: 1px solid {'var(--border)' if _is_light_diff else 'rgba(139,148,158,0.16)'};
                 }}
                 .tool-diff-inline .line-sign {{
                     flex: none;
@@ -2910,7 +2933,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #56d364;
                 }}
                 .tool-diff-inline .diff-add .line-code {{
-                    color: #aff5b4;
+                    color: {'#1a7f37' if _is_light_diff else '#aff5b4'};
                 }}
                 .tool-diff-inline .diff-del {{
                     background-color: rgba(248, 81, 73, 0.095);
@@ -2920,25 +2943,25 @@ class CodeWebViewer(QWebEngineView):
                     color: #ff7b72;
                 }}
                 .tool-diff-inline .diff-del .line-code {{
-                    color: #ffdcd7;
+                    color: {'#cf222e' if _is_light_diff else '#ffdcd7'};
                 }}
                 .tool-diff-inline .diff-ctx {{
-                    color: #adbac7;
+                    color: {'var(--text-secondary)' if _is_light_diff else '#adbac7'};
                 }}
                 .tool-diff-inline .diff-hunk {{
-                    color: #79c0ff;
-                    background: rgba(56, 139, 253, 0.075);
+                    color: {'var(--text)' if _is_light_diff else '#79c0ff'};
+                    background: {'rgba(37, 99, 235, 0.06)' if _is_light_diff else 'rgba(56, 139, 253, 0.075)'};
                 }}
                 .tool-diff-inline .diff-hunk .line-code {{
-                    color: #79c0ff;
+                    color: {'var(--text)' if _is_light_diff else '#79c0ff'};
                 }}
                 .tool-diff-inline .diff-file-header .line-code {{
-                    color: #c9d1d9;
+                    color: {'var(--text)' if _is_light_diff else '#c9d1d9'};
                     font-weight: 600;
                 }}
                 .tool-diff-inline .diff-truncated {{
-                    color: #6e7681;
-                    background: rgba(139, 148, 158, 0.055);
+                    color: {'var(--text-muted)' if _is_light_diff else '#6e7681'};
+                    background: {'rgba(0,0,0,0.03)' if _is_light_diff else 'rgba(139, 148, 158, 0.055)'};
                 }}
                 .tool-diff-inline .diff-truncated .line-code {{
                     text-align: center;
@@ -3020,7 +3043,7 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 .tool-section-label {{
-                    color: #888;
+                    color: var(--text-muted);
                     font-size: {small_font_size}px;
                     font-weight: 500;
                     padding: 8px 12px 4px;
@@ -3037,14 +3060,14 @@ class CodeWebViewer(QWebEngineView):
                     display: flex;
                     align-items: flex-start;
                     padding: 6px 12px;
-                    border-bottom: 1px solid rgba(58, 63, 71, 0.4);
+                    border-bottom: 1px solid var(--border);
                     font-size: {tag_font_size}px;
                 }}
                 .args-row:last-child {{
                     border-bottom: none;
                 }}
                 .args-row.empty {{
-                    color: #666;
+                    color: var(--text-muted);
                     font-style: italic;
                     padding: 8px 12px;
                 }}
@@ -3052,14 +3075,14 @@ class CodeWebViewer(QWebEngineView):
                     flex: 0 0 auto;
                     min-width: 80px;
                     max-width: 120px;
-                    color: #9C9C9C;
+                    color: var(--text-secondary);
                     font-weight: 500;
                     margin-right: 12px;
                     word-break: break-word;
                 }}
                 .args-row.result-success {{
-                    border-top: 1px solid rgba(95, 209, 140, 0.3);
-                    background: rgba(95, 209, 140, 0.05);
+                    border-top: 1px solid {'rgba(34, 197, 94, 0.3)' if _is_light_diff else 'rgba(95, 209, 140, 0.3)'};
+                    background: {'rgba(34, 197, 94, 0.05)' if _is_light_diff else 'rgba(95, 209, 140, 0.05)'};
                 }}
                 .args-row.result-fail {{
                     border-top: 1px solid rgba(244, 67, 54, 0.3);
@@ -3067,14 +3090,14 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .args-value {{
                     flex: 1 1 auto;
-                    color: #d4d4d4;
+                    color: var(--text);
                     word-break: break-all;
                     font-family: {mono_font};
                     font-size: {small_font_size}px;
                 }}
                 .result-content {{
                     padding: 6px 12px 10px;
-                    color: #d4d4d4;
+                    color: var(--text);
                     font-size: {tag_font_size}px;
                     line-height: 1.5;
                     word-break: break-word;
@@ -3084,7 +3107,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .result-empty {{
                     padding: 6px 12px 10px;
-                    color: #666;
+                    color: var(--text-muted);
                     font-style: italic;
                     font-size: {tag_font_size}px;
                 }}
@@ -3629,6 +3652,15 @@ class CodeWebViewer(QWebEngineView):
         """
         # 刷新字体（响应系统字体设置变化）
         self._refresh_viewer_font_css()
+        # 根据主题切换代码高亮风格（通用代码块 + 行内 diff）
+        try:
+            from app.utils.theme_manager import theme_manager
+            from app.widgets.render_helpers import set_diff_highlight_style
+            _style = "friendly" if theme_manager.is_light_theme() else "dracula"
+            set_pygments_style(_style)
+            set_diff_highlight_style(_style)
+        except Exception:
+            pass
 
         if not self._streaming:
             # 非流式模式：直接渲染，所有 <think> 都是已完成的

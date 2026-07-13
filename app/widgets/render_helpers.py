@@ -21,8 +21,29 @@ from pygments import highlight as _pyg_highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
 
-# 行内 diff 专用 formatter：nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
-_DIFF_FORMATTER = HtmlFormatter(nowrap=True, style="dracula", noclasses=True)
+# 行内 diff 专用 formatter（缓存）：按风格切换，nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
+_DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
+
+
+# 行内 diff 高亮风格（与 message_card.py 同步，由 set_diff_highlight_style 切换）
+_current_diff_style = "dracula"
+
+
+def set_diff_highlight_style(style_name: str):
+    """设置 diff 高亮风格并清除缓存"""
+    global _current_diff_style
+    if style_name != _current_diff_style:
+        _current_diff_style = style_name
+        _DIFF_FORMATTER_CACHE["style"] = None
+
+
+def _get_diff_formatter():
+    """获取当前 diff 高亮 formatter，随主题风格切换重建"""
+    style = _current_diff_style
+    if _DIFF_FORMATTER_CACHE["style"] != style:
+        _DIFF_FORMATTER_CACHE["style"] = style
+        _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=True)
+    return _DIFF_FORMATTER_CACHE["formatter"]
 _TEXT_LEXER = TextLexer()
 _DIFF_LEXER_CACHE: dict = {}
 
@@ -124,7 +145,7 @@ def _highlight_code_line(text: str, lexer) -> str:
     if lexer is None or lexer is _TEXT_LEXER:
         return escape(text)
     try:
-        return _pyg_highlight(text, lexer, _DIFF_FORMATTER).rstrip("\n")
+        return _pyg_highlight(text, lexer, _get_diff_formatter()).rstrip("\n")
     except Exception:
         return escape(text)
 

@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
 _ITEM_MIN_H = 46
@@ -64,14 +65,18 @@ class _QuestionItem(QWidget):
 
     def _apply_style(self):
         Colors.refresh()
+        _is_light = theme_manager.is_light_theme()
         bg = Colors.HOVER_BG_STRONG if self._hovered else "transparent"
-        dot_bg = Colors.TEXT_ACCENT if self._hovered else "rgba(255, 255, 255, 0.10)"
+        dot_bg = Colors.TEXT_ACCENT if self._hovered else (
+            "rgba(0, 0, 0, 0.08)" if _is_light else "rgba(255, 255, 255, 0.10)"
+        )
+        dot_text_color = "#1a1a1a" if _is_light else "#ffffff"
         text_color = Colors.TEXT_PRIMARY
         arrow_color = Colors.TEXT_ACCENT
 
         self.setStyleSheet(f"background: {bg}; border-radius: 8px;")
         self._dot.setStyleSheet(
-            f"background: {dot_bg}; color: #ffffff; border-radius: 11px;{get_font_family_css()} {font_size_css(11)}"
+            f"background: {dot_bg}; color: {dot_text_color}; border-radius: 11px;{get_font_family_css()} {font_size_css(11)}"
         )
         self._label.setStyleSheet(
             f"color: {text_color}; background: transparent;{get_font_family_css()} {font_size_css(13)}"
