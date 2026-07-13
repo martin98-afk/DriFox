@@ -60,7 +60,7 @@ colors:
   user_card_accent: '#7c3aed'
   user_card_text: '#180a32'
   user_card_muted: '#7a6898'
-  assistant_card_bg: rgba(242, 235, 250, 225)
+  assistant_card_bg: rgba(234, 224, 249, 225)
   assistant_card_accent: '#6d28d9'
   assistant_card_text: '#0e0420'
   assistant_card_muted: '#7a6898'
