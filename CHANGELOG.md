@@ -3,19 +3,24 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.8] - 2026-07-13
 
-自上一版本以来的变更 | 提交数：7 · 文件变更：16 · +659/-310 | 贡献者：mading
+自上一版本以来的变更 | 提交数：6 · 文件变更：18 · +239/-147 | 贡献者：dingma
 
-### ✨ 新功能 (New Features)
-
-- **浅色主题 UI 组件全面适配**: 新增浅色主题 SVG 图标，优化文本颜色函数适配深色/浅色主题切换，增强 placeholder 样式和搜索框背景在文件树卡片中的主题响应能力
-- **卡片样式系统与占位符颜色解析**: 统一卡片样式使用 CardStyles，新增占位符颜色解析，提升多种设置卡片的样式一致性
-- **字号变更时主题样式同步刷新**: 在字号变化时自动刷新项目分支样式，同步更新助手卡片背景色
-- **API Prompt 追踪增强**: 为上下文用量快照新增 `from_api` 标记，更新会话属性以支持 API Prompt 使用追踪
+> 本版本为重新发布，修复了上一版 v0.3.8 之后发现的问题并补入性能与重构改进。
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **上下文用量快照工作目录检测修复**: 修复 `get_context_usage_snapshot` 未传递 `extra_context` 导致 ProjectNotesHook 工作目录检测失败的问题
-- **虚拟滚动内存泄漏修复**: 虚拟滚动回收时同步清理 `_message_batch` 数据，防止内存泄漏
+- **message_card 正则匹配灾难性回溯修复**: 修复 `message_card` 中部分正则模式因使用 `.*+DOTALL` 而吞掉整行文本的问题，避免当用户消息包含 `<system-reminder>` 时出现卡片解析灾难性损坏
+- **JSON 序列化兼容性与可读性修复**: 切换 JSON 序列化选项为 `OPT_SORT_KEYS` 并解码为 UTF-8，提升跨平台序列化稳定性与可读性
+
+### ⚡ 性能优化 (Performance)
+
+- **Token 估算缓存性能优化**: 优化 `token_estimator` 的 token 缓存实现，减少重复计算开销并提升统计清晰度，同步调整 `main.py` 调用入口
+
+### ♻️ 代码重构 (Refactoring)
+
+- **核心代码结构可读性优化**: 重构 `message_content`、`token_estimator`、`chat_worker` 等核心模块代码结构，提升可读性与可维护性
+- **锁屏远程与本地服务 API 入口整理**: 简化 `lock_screen_remote` 与 `local_service/api_server` 入口逻辑，统一调用风格
+- **ProviderIconWidget 绘制逻辑简化**: 精简 `ProviderIconWidget` 的 `paintEvent` 实现，统一多个 SVG 图标尺寸规格，提升跨图标视觉一致性
 
 ### 🔧 其他 (Chores & Build)
 
