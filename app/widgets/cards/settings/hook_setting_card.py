@@ -34,7 +34,7 @@ from qfluentwidgets import (
 from typing import Dict
 
 from app.tools.tool_name_mapper import ToolNameMapper
-from app.utils.design_tokens import ButtonStyles, Colors, ComboBoxStyles, Sizes, SwitchStyles, scale_font_size
+from app.utils.design_tokens import ButtonStyles, CardStyles, Colors, ComboBoxStyles, Sizes, SwitchStyles, scale_font_size
 from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
 from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
@@ -402,11 +402,12 @@ class HookEditCard(QWidget):
     def _apply_edit_card_style(self):
         """应用 EDIT_CARD_STYLE + 设置 placeholder 颜色（含 QLineEdit / QPlainTextEdit）"""
         Colors.refresh()
-        self.setStyleSheet(EDIT_CARD_STYLE)
-        # QLineEdit::placeholder 由 EDIT_CARD_STYLE CSS 覆盖，但仍设置 palette 确保兼容
+        style = CardStyles.edit_card_style()
+        self.setStyleSheet(style)
+        # QLineEdit::placeholder 由 CSS 覆盖，但仍设置 palette 确保兼容
         from PyQt5.QtGui import QColor, QPalette
 
-        ph_color = QColor(Colors.INPUT_PLACEHOLDER)
+        ph_color = self._parse_placeholder_color()
         for le in self._line_edits:
             try:
                 p = le.palette()
@@ -414,7 +415,7 @@ class HookEditCard(QWidget):
                 le.setPalette(p)
             except RuntimeError:
                 pass
-        # QPlainTextEdit 不支持 CSS ::placeholder 伪选择器，通过 palette 设置
+        # QPlainTextEdit 不支持 CSS ::placeholder，通过 palette 设置
         for pte in self._plain_text_edits:
             try:
                 p = pte.palette()
@@ -422,6 +423,23 @@ class HookEditCard(QWidget):
                 pte.setPalette(p)
             except RuntimeError:
                 pass
+
+    @staticmethod
+    def _parse_placeholder_color() -> "QColor":
+        """解析 Colors.INPUT_PLACEHOLDER 为 QColor（兼容 rgba/css 格式）"""
+        from PyQt5.QtGui import QColor
+
+        s = Colors.INPUT_PLACEHOLDER.strip()
+        if s.startswith("rgba("):
+            parts = s[5:-1].split(",")
+            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
+            a = int(float(parts[3].strip()) * 255)
+            return QColor(r, g, b, a)
+        if s.startswith("rgb("):
+            parts = s[4:-1].split(",")
+            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
+            return QColor(r, g, b)
+        return QColor(s)
 
     def refresh_style(self):
         """主题切换时刷新编辑卡片的所有样式"""

@@ -104,15 +104,15 @@ class MCPEditCard(QWidget):
     def _apply_edit_card_style(self):
         """应用 EDIT_CARD_STYLE 到自身 + 设置 QPlainTextEdit placeholder 颜色"""
         Colors.refresh()
-        self.setStyleSheet(EDIT_CARD_STYLE)
+        style = CardStyles.edit_card_style()
+        self.setStyleSheet(style)
         # jsonEdit 在 _init_ui 中有独立的 setStyleSheet，需单独刷新
         if hasattr(self, "jsonEdit"):
-            self.jsonEdit.setStyleSheet(EDIT_CARD_STYLE)
-        # QPlainTextEdit 不支持 CSS ::placeholder 伪选择器，
-        # 需通过 QPalette::PlaceholderText role 设置
+            self.jsonEdit.setStyleSheet(style)
+        # QPlainTextEdit 不支持 CSS ::placeholder，通过 palette 设置
         from PyQt5.QtGui import QColor, QPalette
 
-        ph_color = QColor(Colors.INPUT_PLACEHOLDER)
+        ph_color = self._parse_placeholder_color()
         for pte in self._plain_text_edits:
             try:
                 p = pte.palette()
@@ -120,6 +120,23 @@ class MCPEditCard(QWidget):
                 pte.setPalette(p)
             except RuntimeError:
                 pass
+
+    @staticmethod
+    def _parse_placeholder_color() -> "QColor":
+        """解析 Colors.INPUT_PLACEHOLDER 为 QColor（兼容 rgba/css 格式）"""
+        from PyQt5.QtGui import QColor
+
+        s = Colors.INPUT_PLACEHOLDER.strip()
+        if s.startswith("rgba("):
+            parts = s[5:-1].split(",")
+            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
+            a = int(float(parts[3].strip()) * 255)
+            return QColor(r, g, b, a)
+        if s.startswith("rgb("):
+            parts = s[4:-1].split(",")
+            r, g, b = int(parts[0].strip()), int(parts[1].strip()), int(parts[2].strip())
+            return QColor(r, g, b)
+        return QColor(s)
 
     def refresh_style(self):
         """主题切换时刷新编辑卡片的所有样式"""
