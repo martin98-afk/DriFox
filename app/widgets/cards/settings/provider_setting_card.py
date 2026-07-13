@@ -177,20 +177,7 @@ class ProviderIconWidget(IconWidget):
 
     def paintEvent(self, event):
         if not hasattr(self, "_text") or not self._text:
-            # 使用 KeepAspectRatio 确保非方形 SVG 不变形
-            painter = QPainter(self)
-            painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-            icon = self.getIcon()
-            if icon and not icon.isNull():
-                pm = icon.pixmap(self.width(), self.height())
-                if pm.width() != pm.height():
-                    pm = pm.scaled(self.width(), self.height(),
-                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                x = (self.width() - pm.width()) // 2
-                y = (self.height() - pm.height()) // 2
-                painter.drawPixmap(x, y, pm)
-            else:
-                super().paintEvent(event)
+            super().paintEvent(event)
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
