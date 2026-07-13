@@ -1,6 +1,26 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.8] - 2026-07-13
+
+自上一版本以来的变更 | 提交数：7 · 文件变更：16 · +659/-310 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **浅色主题 UI 组件全面适配**: 新增浅色主题 SVG 图标，优化文本颜色函数适配深色/浅色主题切换，增强 placeholder 样式和搜索框背景在文件树卡片中的主题响应能力
+- **卡片样式系统与占位符颜色解析**: 统一卡片样式使用 CardStyles，新增占位符颜色解析，提升多种设置卡片的样式一致性
+- **字号变更时主题样式同步刷新**: 在字号变化时自动刷新项目分支样式，同步更新助手卡片背景色
+- **API Prompt 追踪增强**: 为上下文用量快照新增 `from_api` 标记，更新会话属性以支持 API Prompt 使用追踪
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **上下文用量快照工作目录检测修复**: 修复 `get_context_usage_snapshot` 未传递 `extra_context` 导致 ProjectNotesHook 工作目录检测失败的问题
+- **虚拟滚动内存泄漏修复**: 虚拟滚动回收时同步清理 `_message_batch` 数据，防止内存泄漏
+
+### 🔧 其他 (Chores & Build)
+
+- 更新版本号至 v0.3.8
+
 ## [v0.3.7] - 2026-07-13
 
 自上一版本以来的变更 | 提交数：13 · 文件变更：106 · +6653/-758 | 贡献者：dingma, mading
