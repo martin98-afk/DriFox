@@ -2601,7 +2601,8 @@ class CommandCard(QWidget):
             # 卡片不可见：仅标记脏，下次 show_card 重建
             self._cache_dirty = True
             return
-        # 卡片可见：重建数据
+        # 卡片可见：先标记缓存脏，确保 _refresh_data 跳过缓存重建
+        self._cache_dirty = True
         self._refresh_data()
         if self._detail_mode:
             # detail 模式：重建 detail 视图（参数描述、参数列表）以反映命令变更

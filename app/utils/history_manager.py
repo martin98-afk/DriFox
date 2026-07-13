@@ -436,6 +436,8 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
+        last_api_prompt_tokens: int = 0,
+        last_api_message_count: int = 0,
     ):
         """保存会话"""
         if not messages:
@@ -451,6 +453,8 @@ class HistoryManager:
             system_prompt=system_prompt,
             project=project,
             worktree_path=worktree_path,
+            last_api_prompt_tokens=last_api_prompt_tokens,
+            last_api_message_count=last_api_message_count,
         )
         new_session_id = session_record["session_id"]
 
@@ -488,6 +492,8 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
+        last_api_prompt_tokens: int = 0,
+        last_api_message_count: int = 0,
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -521,6 +527,8 @@ class HistoryManager:
             "user_edited_title": False,
             "worktree_path": worktree_path or "",
             "context_usage": count_messages_tokens(merged_messages),
+            "last_api_prompt_tokens": last_api_prompt_tokens,
+            "last_api_message_count": last_api_message_count,
         }
 
     def get_current_title(self, index: int) -> str:

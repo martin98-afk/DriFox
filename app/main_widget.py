@@ -85,6 +85,7 @@ from app.utils.design_tokens import (
     apply_font_size_to_widget,
     font_size_css,
     scale_font_size,
+    scale_icon_size,
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon
@@ -1289,6 +1290,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
+        # 更新消息卡片背景色透明度
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if item is None:
+                continue
+            card = item.widget()
+            if card is not None and isinstance(card, MessageCard):
+                card.refresh_theme()
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
@@ -4597,8 +4606,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         llm_config = self._get_current_model_config()
         api_prompt_tokens = int(getattr(session, "last_api_prompt_tokens", 0) or 0)
+        api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
         snapshot = self.backend.get_context_usage_snapshot(
-            session, llm_config, api_prompt_tokens=api_prompt_tokens
+            session, llm_config,
+            api_prompt_tokens=api_prompt_tokens,
+            api_message_count=api_message_count,
         )
         ring.set_usage(
             snapshot.get("percent", 0),
@@ -5922,11 +5934,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
-        self._apply_runtime_ui_settings()
+        # dispatch_refresh = 主题发生变更 → scope="theme"
+        self._apply_runtime_ui_settings(scope="theme")
 
     def _on_settings_config_changed(self):
+        """外观设置变更 → 读取 LLMSettingsCard 标记的变更类型，按需刷新"""
         self._load_model_configs()
-        self._apply_runtime_ui_settings()
+        # 从 LLMSettingsCard 读取变更类型（消双刷后，这是唯一触发路径）
+        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+        scope = LLMSettingsCard._last_change_type
+        LLMSettingsCard._last_change_type = None
+        self._apply_runtime_ui_settings(scope=scope)
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -6203,87 +6222,176 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
-    def _apply_runtime_ui_settings(self):
+    def _apply_runtime_ui_settings(self, scope=None):
+        """
+        统一刷新 UI 外观，按变更类型分流。
+
+        scope 取值：
+          None          — 全量刷新（未知变化）
+          "theme"       — 仅颜色/主题相关，跳过字体操作
+          "font_family" — 仅字体族相关，跳过颜色/主题操作
+          "font_size"   — 仅字号相关，跳过颜色/主题操作
+        """
+        is_color = scope in (None, "theme")
+        is_font_family = scope in (None, "font_family")
+        is_font_size = scope in (None, "font_size")
+        is_font = scope in (None, "font_family", "font_size")
+
+        # Colors.refresh() 在 preamble 中无条件执行，
+        # 保证后续公共块中所有 Colors.* 引用使用最新值。
+        # theme_manager.on_theme_changed() 包含图标缓存失效等副作用，
+        # 仅在颜色相关 scope 中触发。
         Colors.refresh()
 
-        # 浅/深色模式切换 → 清除图标缓存和浅色检测缓存
-        theme_manager.on_theme_changed()
+        # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
+        # 避免后续 scope 分支中重复 findChildren 遍历全树
+        _message_cards = self.findChildren(MessageCard)
+        _base_settings = self.findChildren(BaseSettingsCard)
+        from qfluentwidgets import SettingCard
+        _setting_cards = self.findChildren(SettingCard)
+        from app.widgets.worktree_section import WorktreeSectionWidget
+        _worktree_widgets = self.findChildren(WorktreeSectionWidget)
+        _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
 
-        # 同步 qfluentwidgets 基础主题（浅色主题 → Theme.LIGHT）
-        try:
-            from qfluentwidgets import Theme, setTheme
-            if theme_manager.is_light_theme():
-                setTheme(Theme.LIGHT)
-            else:
-                setTheme(Theme.DARK)
-        except Exception:
-            pass
+        # ── 1. 颜色/主题相关块 ──
+        if is_color:
+            theme_manager.on_theme_changed()
 
-        colors = theme_manager.get_current_colors()
+            # 同步 qfluentwidgets 基础主题
+            try:
+                from qfluentwidgets import Theme, setTheme
+                if theme_manager.is_light_theme():
+                    setTheme(Theme.LIGHT)
+                else:
+                    setTheme(Theme.DARK)
+            except Exception:
+                pass
 
-        # 窗口淡背景（保留原始 alpha）
-        window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
-        self._window_bg_color = window_bg  # 保存供透明度变化时使用
+            colors = theme_manager.get_current_colors()
 
-        import re
+            # 窗口淡背景
+            window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
+            self._window_bg_color = window_bg
 
-        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
-        if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-            from PyQt5.QtGui import QColor, QPalette
+            import re
+            m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
+            if m:
+                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
+                from PyQt5.QtGui import QColor, QPalette
+                color = QColor(r, g, b, alpha)
+                p = QPalette()
+                p.setColor(QPalette.Window, color)
+                self.setPalette(p)
+                self.setAutoFillBackground(True)
 
-            color = QColor(r, g, b, alpha)
-            p = QPalette()
-            p.setColor(QPalette.Window, color)
-            self.setPalette(p)
-            self.setAutoFillBackground(True)
+            # 分支标签
+            if hasattr(self, "_project_label"):
+                self._refresh_project_branch_style()
 
-        if hasattr(self, "_project_label"):
-            self._refresh_project_branch_style()
-        if hasattr(self, "title_edit"):
-            font_css = get_font_family_css()
-            title_style = f"""QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {font_size_css(15)}
-                font-weight: bold;
-                padding: 6px 4px;
-                border-radius: 10px;
-                background-color: transparent;
-                {font_css}
-            }}
-            QLabel:hover {{
-                background-color: {Colors.HOVER_BG};
-            }}
-            QLineEdit {{
-                color: {Colors.TEXT_PRIMARY};
-                {font_size_css(15)}
-                font-weight: bold;
-                padding: 6px 4px;
-                border-radius: 10px;
-                background-color: transparent;
-                border: none;
-                {font_css}
-            }}
-            QLineEdit:focus {{
-                background-color: {Colors.HOVER_BG_STRONG};
-                border: 1px solid {Colors.BORDER};
-            }}
-            """
-            self.title_edit.setStyleSheet(title_style)
-        # 刷新窗口标题栏（标题文字 + 内存显示）
+            # 背景图片
+            self._apply_bg_from_theme()
+
+            # 分支标签（git worktree）
+            if hasattr(self, "_update_branch"):
+                self._update_branch()
+
+            # 时间线节点
+            if hasattr(self, "node_preview") and hasattr(self.node_preview, "refresh_theme"):
+                self.node_preview.refresh_theme()
+
+            # 上下文圆环 + 编码计划圆环（轨道颜色随深浅模式变化）
+            for ring_attr in ("context_usage_ring", "coding_plan_ring"):
+                ring = getattr(self, ring_attr, None)
+                if ring and hasattr(ring, "refresh_theme"):
+                    ring.refresh_theme()
+
+            # 消息卡片主题
+            for card in _message_cards:
+                if hasattr(card, "refresh_theme"):
+                    card.refresh_theme()
+
+        # ── 2. 字体相关块（font_family + font_size + 全量） ──
+        if is_font:
+            # 输入区字体
+            if hasattr(self, "input_area"):
+                setFont(self.input_area, scale_font_size(15))
+
+            # 递归刷新所有 qfluentwidgets 组件字体大小
+            apply_font_size_to_widget(self, 14)
+
+            # 设置弹窗字体
+            if self._settings_popup:
+                apply_font_size_to_widget(self._settings_popup, 14)
+
+            # WorktreeSectionWidget 主题（含字体）
+            for wt_widget in _worktree_widgets:
+                wt_widget.refresh_style()
+
+            # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
+            for ring_attr in ("context_usage_ring", "coding_plan_ring"):
+                ring = getattr(self, ring_attr, None)
+                if ring and hasattr(ring, "refresh_font_size"):
+                    ring.refresh_font_size()
+
+        # ── 2.5 会话标题（颜色+字体，主题切换或字体变化时都要更新） ──
+        if is_color or is_font:
+            if hasattr(self, "title_edit"):
+                font_css = get_font_family_css()
+                title_style = f"""QLabel {{
+                    color: {Colors.TEXT_PRIMARY};
+                    {font_size_css(15)}
+                    font-weight: bold;
+                    padding: 6px 4px;
+                    border-radius: 10px;
+                    background-color: transparent;
+                    {font_css}
+                }}
+                QLabel:hover {{
+                    background-color: {Colors.HOVER_BG};
+                }}
+                QLineEdit {{
+                    color: {Colors.TEXT_PRIMARY};
+                    {font_size_css(15)}
+                    font-weight: bold;
+                    padding: 6px 4px;
+                    border-radius: 10px;
+                    background-color: transparent;
+                    border: none;
+                    {font_css}
+                }}
+                QLineEdit:focus {{
+                    background-color: {Colors.HOVER_BG_STRONG};
+                    border: 1px solid {Colors.BORDER};
+                }}
+                """
+                self.title_edit.setStyleSheet(title_style)
+
+        # ── 3. 字号专属块（仅 font_size + 全量，不涉及字族变化） ──
+        if is_font_size:
+            # 所有 SettingCard 图标大小随字号缩放
+            icon_sz = scale_icon_size(16)
+            for card in _setting_cards:
+                card.setIconSize(icon_sz, icon_sz)
+
+        # ── 4. 消息卡 viewer 渲染（仅 font_family + 全量，字族变化需重渲） ──
+        if is_font_family:
+            for card in _message_cards:
+                viewer = getattr(card, "viewer", None)
+                if viewer and hasattr(viewer, "_schedule_render"):
+                    viewer._schedule_render(immediate=True)
+
+        # ── 5. 总是执行的公共块（轻量，样式表用缓存值） ──
+        # 窗口标题栏
         title_bar = self.get_title_bar()
         if hasattr(title_bar, "refresh_style"):
             title_bar.refresh_style()
-        # 刷新输入卡片背景
-        # 关键：保持仅上圆角 + border-bottom: none，与下方工具栏条拼接
-        # 成一张完整圆角卡（输入卡顶部圆角 + 工具栏底部圆角 = 整体胶囊）
+        # 输入卡片 + 底部工具栏条背景
         if hasattr(self, "_input_card"):
             self._apply_bottom_input_stack_style()
-        # 刷新底部工具栏条背景（独立 token，与输入卡片解耦）
-        # 同样保持仅下圆角 + border-top: none，与输入卡拼接成一张卡
         if hasattr(self, "_bottom_toolbar_strip"):
             self._apply_bottom_input_stack_style()
+        # 模型按钮容器
         if hasattr(self, "_model_btn_container"):
             self._model_btn_container.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
@@ -6292,60 +6400,53 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
-        if hasattr(self, "_model_btn_container"):
-            self._model_btn_container.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
-                border: none;
-                border-radius: 8px;
-            """)
         if hasattr(self, "_toolbar_capsule"):
             self._toolbar_capsule.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
-        if hasattr(self, "input_area"):
-            setFont(self.input_area, scale_font_size(15))
-            if hasattr(self.input_area, "refresh_style"):
-                self.input_area.refresh_style()
-        # 刷新设置弹出层 — 递归刷新 qfluentwidgets 组件字体大小
-        # 刷新发送按钮
+        # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
+        if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
+            self.input_area.refresh_style()
+        # 发送按钮
         if hasattr(self, "input_area") and hasattr(self.input_area, "_apply_send_btn_style"):
             self.input_area._apply_send_btn_style()
-        # 刷新背景图片
-        self._apply_bg_from_theme()
-        # 刷新分支标签
-        if hasattr(self, "_update_branch"):
-            self._update_branch()
-        # 刷新时间线节点
-        if hasattr(self, "node_preview") and hasattr(self.node_preview, "refresh_theme"):
-            self.node_preview.refresh_theme()
-
-        if self._settings_popup:
-            apply_font_size_to_widget(self._settings_popup, 14)
-            # 同时刷新所有子设置卡片的主题样式
-            for frame in self._settings_popup.findChildren(SystemCardFrame):
-                if hasattr(frame, "refresh_style"):
-                    frame.refresh_style()
-        # 刷新智能体切换按钮样式
+        # 智能体切换按钮
         if hasattr(self, "_agent_switch_widget"):
             self._agent_switch_widget.setStyleSheet(f"""
                 background: {Colors.TOOLBAR_BG};
                 border: none;
                 border-radius: 8px;
             """)
-        # 刷新设置卡片
-        for card in self.findChildren(BaseSettingsCard):
+        # 设置弹窗 — 子卡片主题样式
+        if self._settings_popup:
+            for frame in _popup_frames:
+                if hasattr(frame, "refresh_style"):
+                    frame.refresh_style()
+            # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
+            for card_name in (
+                "uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard",
+                "llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard",
+            ):
+                card = getattr(self._settings_popup, card_name, None)
+                if card is not None and hasattr(card, "refresh_style"):
+                    card.refresh_style()
+            # 刷新设置弹窗分隔标签
+            if hasattr(self._settings_popup, "_refresh_sep_labels"):
+                self._settings_popup._refresh_sep_labels()
+        # 设置卡片（全窗口递归）
+        for card in _base_settings:
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
         if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
             self._settings_popup.refresh_style()
-        # 刷新 AutoLoop 卡片主题
+        # AutoLoop 卡片
         if self._auto_loop_config_card and hasattr(self._auto_loop_config_card, "_refresh_theme_style"):
             self._auto_loop_config_card._refresh_theme_style()
         if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, "_refresh_theme_style"):
             self._auto_loop_running_card._refresh_theme_style()
-        # 刷新实时卡片主题（todo/question/sub_agent/compact）
+        # 浮动卡片
         for card in (
             self._todo_floating_widget,
             self._question_floating_widget,
@@ -6353,50 +6454,25 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
+            self._undo_delete_card,
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
-        # 刷新卡片容器主题（浮动卡片的背景 + 边框随主题变化）
-        if (
-            hasattr(self, "_top_card_container")
-            and self._top_card_container
-            and hasattr(self._top_card_container, "refresh_style")
-        ):
+        # 卡片容器
+        if hasattr(self, "_top_card_container") and self._top_card_container and hasattr(self._top_card_container, "refresh_style"):
             self._top_card_container.refresh_style()
-        if (
-            hasattr(self, "_bottom_card_container")
-            and self._bottom_card_container
-            and hasattr(self._bottom_card_container, "refresh_style")
-        ):
+        if hasattr(self, "_bottom_card_container") and self._bottom_card_container and hasattr(self._bottom_card_container, "refresh_style"):
             self._bottom_card_container.refresh_style()
-        # 刷新命令卡片主题（detail 模式参数列表 / 值选择列表的字体颜色需随主题变化）
+        # 命令卡片
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
-        # 刷新上下文圆环 + 编码计划圆环主题（轨道颜色随深浅模式变化）
-        for ring_attr in ("context_usage_ring", "coding_plan_ring"):
-            ring = getattr(self, ring_attr, None)
-            if ring and hasattr(ring, "refresh_theme"):
-                ring.refresh_theme()
-        # 刷新消息卡片主题
-        for card in self.findChildren(MessageCard):
-            if hasattr(card, "refresh_theme"):
-                card.refresh_theme()
-            viewer = getattr(card, "viewer", None)
-            if viewer and hasattr(viewer, "_schedule_render"):
-                viewer._schedule_render(immediate=True)
-        # 递归刷新所有 qfluentwidgets 组件字体大小
-        apply_font_size_to_widget(self, 14)
-        # 刷新 WorktreeSectionWidget 主题（用于系统字体大小切换）
-        from app.widgets.worktree_section import WorktreeSectionWidget
-
-        for wt_widget in self.findChildren(WorktreeSectionWidget):
-            wt_widget.refresh_style()
-        # 刷新模型选择卡片和项目弹窗主题
+        # 模型选择卡片
         if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
             self._model_selector_card_content.refresh_style()
         if hasattr(self, "_model_selector_card"):
             self._model_selector_card.refresh_style()
             self._update_model_selector_header()
+        # 项目选择卡片
         if hasattr(self, "_project_selector_card_content"):
             self._project_selector_card_content.refresh_style()
         if hasattr(self, "_project_selector_card"):
@@ -6419,10 +6495,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     color: {Colors.INPUT_PLACEHOLDER};
                 }}
             """)
-        # 刷新记忆卡片主题
+        # 记忆卡片
         if hasattr(self, "_memory_card_popup") and hasattr(self._memory_card_popup, "refresh_style"):
             self._memory_card_popup.refresh_style()
-        # 刷新工具控制卡片主题
+        # 工具控制卡片
         if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
             self._tool_control_card.refresh_style()
 
@@ -12270,6 +12346,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if session is not None:
             try:
                 session.last_api_prompt_tokens = token_count
+                session.last_api_message_count = len(session.messages)
             except Exception:
                 pass
         ring = getattr(self, "context_usage_ring", None)

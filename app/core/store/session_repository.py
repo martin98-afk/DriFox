@@ -100,6 +100,8 @@ class SessionRepository:
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",
             "context_usage": d.get("context_usage", 0),
+            "last_api_prompt_tokens": d.get("last_api_prompt_tokens", 0),
+            "last_api_message_count": d.get("last_api_message_count", 0),
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time")
@@ -153,6 +155,8 @@ class SessionRepository:
                 "worktree_path": session.get("worktree_path", "") or "",
                 "preview": session.get("preview", "") or "",
                 "context_usage": session.get("context_usage", 0),
+                "last_api_prompt_tokens": session.get("last_api_prompt_tokens", 0),
+                "last_api_message_count": session.get("last_api_message_count", 0),
             }
 
             success, result = self._execute(
@@ -160,9 +164,11 @@ class SessionRepository:
                 INSERT OR REPLACE INTO {self.TABLE_NAME}
                 (session_id, title, project, messages, system_prompt,
                  compaction_state, compaction_cache, message_count, user_edited_title,
-                 worktree_path, preview, context_usage, created_at, updated_at)
+                 worktree_path, preview, context_usage,
+                 last_api_prompt_tokens, last_api_message_count,
+                 created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?,
+                    ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             """,
@@ -179,6 +185,8 @@ class SessionRepository:
                     session_data["worktree_path"],
                     session_data["preview"],
                     session_data["context_usage"],
+                    session_data["last_api_prompt_tokens"],
+                    session_data["last_api_message_count"],
                     session_id,  # for coalesce
                     now,  # created_at default
                     now,  # updated_at

@@ -21,7 +21,7 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
-from app.core.token_estimator import count_messages_tokens, count_tools_tokens
+from app.core.token_estimator import count_messages_tokens, count_tools_tokens, get_model_token_ratio
 from app.tools import get_builtin_tools_schema
 
 
@@ -483,6 +483,7 @@ class UIEngine(BaseEngine):
         session: Optional[ChatSession] = None,
         llm_config: Optional[Dict] = None,
         api_prompt_tokens: int = 0,
+        api_message_count: int = 0,
     ) -> Dict[str, int]:
         session = session or self._session_manager.get_current_session()
         llm_config = llm_config or self._get_model_config()
@@ -551,7 +552,7 @@ class UIEngine(BaseEngine):
             if system_prompt
             else 0
         )
-        tools_tokens = count_tools_tokens(available_tools, model) if available_tools else 0
+        tools_tokens = int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model)) if available_tools else 0
 
         # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
@@ -585,12 +586,27 @@ class UIEngine(BaseEngine):
         ]
         breakdown = [b for b in breakdown if b["tokens"] > 0]
 
-        # ---- 直接按消息列表计算（用户明确要求）----
-        # 各分段（系统提示 / 用户消息 / 助手消息 / 工具结果 / 工具定义）都是
-        # count_messages_tokens 对消息列表逐条、按角色实打实算出来的 token 数，
-        # 不做任何 API 真实占用缩放/覆盖。它们之和 = est_total，进度条按
-        # est_total / budget 填充，比例与数值都是消息列表的真实情况。
-        used_tokens = est_total
+        # ---- 确定上下文占用量 ----
+        # 优先使用 API 返回的精确 prompt_tokens 作为权威值；
+        # 若有 message_count 且新增了消息，估算增量：API值 + 新增消息估算
+        # 若无 API 返回值（冷启动、无活跃对话），回退到本地估算。
+        if api_prompt_tokens > 0:
+            current_msg_count = len(session.messages)
+            if api_message_count > 0 and current_msg_count > api_message_count:
+                # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
+                new_msgs = session.messages[api_message_count:]
+                delta = count_messages_tokens(new_msgs, model)
+                used_tokens = api_prompt_tokens + delta
+            else:
+                used_tokens = api_prompt_tokens
+            # 按最终总量与本地估算的比例，等比缩放 breakdown 分量，
+            # 保持视觉占比关系不变，总量锚定最终值。
+            if est_total > 0:
+                scale = used_tokens / est_total
+                for b in breakdown:
+                    b["tokens"] = max(1, int(b["tokens"] * scale))
+        else:
+            used_tokens = est_total
 
         percent = max(0, min(100, int((used_tokens / budget_tokens) * 100)))
 

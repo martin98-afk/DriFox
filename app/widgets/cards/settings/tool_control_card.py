@@ -275,7 +275,7 @@ class ToolControlCardContent(QWidget):
         enabled_count = sum(1 for t in tool_names if all_toggles.get(t, True))
         label = QLabel(f"{group_name} ({enabled_count}/{len(tool_names)})")
         label.setStyleSheet(
-            f"color: #ddd; font-weight: 600; background: transparent; border: none; "
+            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; background: transparent; border: none; "
             f"{font_size_css(12)} {get_font_family_css()}"
         )
         header_layout.addWidget(label)
@@ -330,7 +330,7 @@ class ToolControlCardContent(QWidget):
 
         name_label = QLabel(tool_name)
         name_label.setStyleSheet(
-            f"color: #ccc; background: transparent; border: none; "
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none; "
             f"{font_size_css(12)} {get_font_family_css()}"
         )
         row_layout.addWidget(name_label)
@@ -339,7 +339,7 @@ class ToolControlCardContent(QWidget):
         desc_label = _ElidedLabel(desc)
         desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
-            f"color: #666; background: transparent; border: none; "
+            f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; "
             f"{font_size_css(10)} {get_font_family_css()}"
         )
         row_layout.addWidget(desc_label)

@@ -323,6 +323,8 @@ class SessionStore:
                         {"name": "updated_at", "type": "TEXT"},
                         {"name": "worktree_path", "type": "TEXT", "default": ""},
                         {"name": "context_usage", "type": "INTEGER", "default": 0},
+                        {"name": "last_api_prompt_tokens", "type": "INTEGER", "default": 0},
+                        {"name": "last_api_message_count", "type": "INTEGER", "default": 0},
                     ],
                 )
 
@@ -397,6 +399,7 @@ class SessionStore:
                 self._migrate_add_worktree_path_column()
                 self._migrate_add_preview_column()
                 self._migrate_add_context_usage_column()
+                self._migrate_add_api_context_columns()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -551,6 +554,25 @@ class SessionStore:
                 logger.info("[SessionStore] context_usage 列迁移完成")
         except Exception as e:
             logger.warning(f"[SessionStore] context_usage 列迁移失败(可能已存在): {e}")
+
+    def _migrate_add_api_context_columns(self):
+        """迁移：添加 last_api_prompt_tokens / last_api_message_count 列
+
+        持久化 API 返回的精确上下文占用值，供历史会话加载时校准显示。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        for col in ("last_api_prompt_tokens", "last_api_message_count"):
+            try:
+                columns = self._db.get_table_info(self.TABLE_NAME)
+                col_names = [c.get("name", "") for c in columns]
+                if col not in col_names:
+                    logger.info(f"[SessionStore] 迁移：添加 {col} 列")
+                    self._db.execute_sql(
+                        f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0"
+                    )
+            except Exception as e:
+                logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:

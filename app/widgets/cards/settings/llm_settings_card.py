@@ -170,6 +170,7 @@ class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
     _autostart_toggling = False  # 类级防重入标志
+    _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
     closed = pyqtSignal()
     configChanged = pyqtSignal()
 
@@ -726,10 +727,25 @@ class LLMSettingsCard(SystemCardFrame):
         # 失效字体/字号缓存，让后续渲染读取新配置
         invalidate_font_cache()
         invalidate_font_family_css_cache()
+
+        # 检测变更类型，传递给主窗口按需刷新
+        sender = self.sender()
+        if sender is self.cfg.ui_theme_style:
+            LLMSettingsCard._last_change_type = "theme"
+        elif sender is self.cfg.ui_light_mode:
+            # 浅色模式开关切换 → 实质是换主题
+            LLMSettingsCard._last_change_type = "theme"
+        elif sender is self.cfg.llm_font_family:
+            LLMSettingsCard._last_change_type = "font_family"
+        elif sender is self.cfg.ui_font_size:
+            LLMSettingsCard._last_change_type = "font_size"
+        else:
+            LLMSettingsCard._last_change_type = None  # 未知类型，全量刷新
+
         self.configChanged.emit()
         self._save_timer.start()
-        # 立即刷新字体大小和主题样式（不等待保存定时器）
-        QTimer.singleShot(0, self._refresh_appearance_from_config)
+        # 注意：不再通过 QTimer 调用 _refresh_appearance_from_config
+        # 所有刷新由主窗口 _on_settings_config_changed 统一处理
 
     def _refresh_appearance_from_config(self):
         """根据当前配置刷新外观样式"""

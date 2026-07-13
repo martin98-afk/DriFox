@@ -34,7 +34,7 @@ class UndoDeleteCard(QWidget):
         self.setVisible(False)
         self._setup_ui()
 
-    def _refresh_style(self):
+    def refresh_style(self):
         """刷新样式（主题切换时调用）"""
         Colors.refresh()
         self.setStyleSheet(f"""
@@ -47,12 +47,20 @@ class UndoDeleteCard(QWidget):
                 border-top-right-radius: 8px;
             }}
         """)
+        if hasattr(self, "_hint_label") and self._hint_label:
+            self._hint_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    {get_font_family_css()} {font_size_css(13)};
+                    background: transparent;
+                }}
+            """)
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFixedHeight(30)
 
-        self._refresh_style()
+        self.refresh_style()
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 0, 12, 0)
@@ -61,13 +69,14 @@ class UndoDeleteCard(QWidget):
         # 提示文字
         self._hint_label = QLabel("消息已删除", self)
         self._hint_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._hint_label.setStyleSheet(f"""
-            QLabel {{
-                color: rgba(255, 255, 255, 0.7);
-                {get_font_family_css()} {font_size_css(13)};
-                background: transparent;
-            }}
-        """)
+        if hasattr(self, "_hint_label") and self._hint_label:
+            self._hint_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {Colors.TEXT_SECONDARY};
+                    {get_font_family_css()} {font_size_css(13)};
+                    background: transparent;
+                }}
+            """)
         layout.addWidget(self._hint_label)
 
         layout.addStretch()

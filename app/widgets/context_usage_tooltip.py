@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.utils.design_tokens import _get_global_font
+from app.utils.design_tokens import _get_global_font, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
 
@@ -76,7 +76,22 @@ class _StackedBar(QWidget):
         self.setFixedHeight(18)
         self._segments: List[tuple] = []  # [(fraction, color_str), ...]
         self._track = QColor(255, 255, 255, 28)
+        self._text_on_fill = Qt.white
+        self._text_on_empty = QColor(255, 255, 255, 180)
         self._percent = 0
+
+    def set_theme_colors(
+        self,
+        track_color: QColor,
+        text_on_fill: QColor = Qt.white,
+        text_on_empty: QColor = QColor(255, 255, 255, 180),
+    ):
+        """设置主题感知的轨道底色和文字颜色"""
+        self._track = track_color
+        self._text_on_fill = text_on_fill
+        self._text_on_empty = text_on_empty
+        # 主动触发重绘（仅 set_segments 也调用 update，但若仅切主题时分段不变则不会重绘）
+        self.update()
 
     def set_segments(self, segments: List[tuple], percent: int = 0):
         """设置堆叠分段与整体百分比，百分比会在条末端显示"""
@@ -126,7 +141,7 @@ class _StackedBar(QWidget):
         if self._percent > 0:
             fill_w = max(fill_w, int(r * 2))  # 最少显示圆头
 
-        font = QFont(_get_global_font(), 10)
+        font = QFont(_get_global_font(), scale_font_size(10))
         font.setWeight(QFont.Bold)
         painter.setFont(font)
 
@@ -136,11 +151,11 @@ class _StackedBar(QWidget):
         text_x = w_total - text_w - 6  # 距右边缘 6px
         text_y = int((rect.height() + fm.ascent()) / 2) - 1
 
-        # 数字落在填充区上用纯白，否则用半透明白
+        # 数字落在填充区上用 fill 色，否则用 empty 色（随主题自适应）
         if text_x < fill_w and self._percent > 0:
-            painter.setPen(Qt.white)
+            painter.setPen(self._text_on_fill)
         else:
-            painter.setPen(QColor(255, 255, 255, 180))
+            painter.setPen(self._text_on_empty)
         painter.drawText(text_x, text_y, pct_text)
         painter.setPen(Qt.NoPen)
 
@@ -178,9 +193,9 @@ class ContextBreakdownTooltip(QWidget):
         header = QHBoxLayout()
         header.setSpacing(8)
         self._title = QLabel("上下文占用")
-        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
+        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}")
         self._pct = QLabel("")
-        self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
+        self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}")
         header.addWidget(self._title)
         header.addStretch(1)
         header.addWidget(self._pct)
@@ -188,7 +203,7 @@ class ContextBreakdownTooltip(QWidget):
 
         # 占用数值行
         self._usage = QLabel("")
-        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
         self._layout.addWidget(self._usage)
 
         # 堆叠比例条
@@ -204,7 +219,7 @@ class ContextBreakdownTooltip(QWidget):
 
         # 附加信息（压缩 / 缓存）
         self._extras = QLabel("")
-        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
         self._extras.setTextFormat(Qt.PlainText)
         self._layout.addWidget(self._extras)
 
@@ -217,15 +232,28 @@ class ContextBreakdownTooltip(QWidget):
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
         self._load_theme_colors()
-        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}")
-        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
-        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+        # 触发 paintEvent 重绘卡片背景/边框（_card_bg / _border 在 _load_theme_colors 中更新）
+        self.update()
+        self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}")
+        self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
+        self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
 
         # 空状态：未选择会话 / 模型（刚进入软件时常见），给出友好引导而非空白
         if data.get("empty"):
             self._pct.setText("—")
-            self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700; {get_font_family_css()}")
+            self._pct.setStyleSheet(f"color: {self._text_primary}; font-weight: 700; {get_font_family_css()} {font_size_css(13)}")
             self._usage.setText("未选择会话或模型")
+            # 空状态也更新进度条主题色
+            try:
+                from app.utils.theme_manager import theme_manager
+                _is_light = theme_manager.is_light_theme()
+            except Exception:
+                _is_light = False
+            self._bar.set_theme_colors(
+                QColor(0, 0, 0, 40) if _is_light else QColor(255, 255, 255, 28),
+                _parse_color(self._text_primary, "#1a1a1a") if _is_light else Qt.white,
+                _parse_color(self._text_secondary, "rgba(0,0,0,0.4)") if _is_light else QColor(255, 255, 255, 180),
+            )
             self._bar.set_segments([], 0)
             self._rebuild_legend([], 0)
             self._extras.setText("")
@@ -241,10 +269,26 @@ class ContextBreakdownTooltip(QWidget):
 
         # 占比文字（变色）
         self._pct.setText(f"{percent}%")
-        self._pct.setStyleSheet(f"color: {ring_color}; font-weight: 700; {get_font_family_css()}")
+        self._pct.setStyleSheet(f"color: {ring_color}; font-weight: 700; {get_font_family_css()} {font_size_css(13)}")
 
         budget_txt = f"{budget:,}" if budget else "—"
         self._usage.setText(f"已用 {used:,} tokens · 预算 {budget_txt}")
+
+        # ── 进度条主题色（轨道底色 + 百分比文字色） ──
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+        if _is_light:
+            _bar_track = QColor(0, 0, 0, 40)  # 浅色模式用深色半透明轨道
+            _bar_text_fill = _parse_color(self._text_primary, "#1a1a1a")
+            _bar_text_empty = _parse_color(self._text_secondary, "rgba(0,0,0,0.4)")
+        else:
+            _bar_track = QColor(255, 255, 255, 28)  # 深色模式用白色半透明轨道
+            _bar_text_fill = Qt.white
+            _bar_text_empty = QColor(255, 255, 255, 180)
+        self._bar.set_theme_colors(_bar_track, _bar_text_fill, _bar_text_empty)
 
         # 堆叠条：按「占整个上下文预算」的比例绘制，剩余部分显示为空闲轨道
         if breakdown and budget > 0:
@@ -297,13 +341,13 @@ class ContextBreakdownTooltip(QWidget):
             swatch.setStyleSheet(f"background: {color}; border-radius: 2px;")
 
             name = QLabel(label, row)
-            name.setStyleSheet(f"color: {self._text_primary}; {get_font_family_css()}")
+            name.setStyleSheet(f"color: {self._text_primary}; {get_font_family_css()} {font_size_css(11)}")
 
             val = QLabel(f"{tokens:,}", row)
-            val.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+            val.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
 
             pc = QLabel(f"{pct:.0f}%", row)
-            pc.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()}")
+            pc.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
             pc.setFixedWidth(38)
             pc.setAlignment(Qt.AlignRight)
 
