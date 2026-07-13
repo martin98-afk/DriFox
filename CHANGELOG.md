@@ -1,6 +1,25 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.7] - 2026-07-13
+
+自上一版本以来的变更 | 提交数：13 · 文件变更：106 · +6653/-758 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **浅色主题与图标资源**: 新增浅色主题（light theme）及对应图标资源，统一多个主题配色提升整体观感一致性，并同步刷新主题相关配置
+- **主题管理与样式刷新机制全面优化**: 细化主题管理 UI 刷新逻辑、增加变更类型检测；优化组件树遍历与主题处理性能，增强样式刷新对主题切换的响应；统一 tooltip 字号管理并在主题变更时同步刷新
+- **主题感知组件样式与代码高亮增强**: 多种组件（卡片、设置、tooltip 等）实现主题感知样式；增强 Pygments 语法高亮在多主题下的视觉一致性
+- **会话上下文使用追踪增强**: 为 `ChatSession` 新增 `last_api_message_count` 与 `last_api_prompt_tokens` 字段，并实现模型 token 比率计算，强化上下文用量与 API 使用情况的追踪能力
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **message_card 主题适配修复**: 修复 `message_card` 背景色透明度未跟随系统透明度变化、代码框按钮图标在浅色主题下显示异常的问题
+
+### 🔧 其他 (Chores & Build)
+
+- 更新版本号至 v0.3.7
+
 ## [v0.3.6] - 2026-07-12
 
 自上一版本以来的变更 | 提交数：11 · 文件变更：18 · +669/-188 | 贡献者：dingma
