@@ -97,7 +97,33 @@ class MCPEditCard(QWidget):
         self._is_edit = bool(server_data)
         self._original_name = self._server_data.get("name")  # 记录原始名称用于更新定位
         self._json_mode = False
+        # 收集所有 QPlainTextEdit 引用用于 refresh_style 时更新 palette
+        self._plain_text_edits = []
         self._init_ui()
+
+    def _apply_edit_card_style(self):
+        """应用 EDIT_CARD_STYLE 到自身 + 设置 QPlainTextEdit placeholder 颜色"""
+        Colors.refresh()
+        self.setStyleSheet(EDIT_CARD_STYLE)
+        # jsonEdit 在 _init_ui 中有独立的 setStyleSheet，需单独刷新
+        if hasattr(self, "jsonEdit"):
+            self.jsonEdit.setStyleSheet(EDIT_CARD_STYLE)
+        # QPlainTextEdit 不支持 CSS ::placeholder 伪选择器，
+        # 需通过 QPalette::PlaceholderText role 设置
+        from PyQt5.QtGui import QColor, QPalette
+
+        ph_color = QColor(Colors.INPUT_PLACEHOLDER)
+        for pte in self._plain_text_edits:
+            try:
+                p = pte.palette()
+                p.setColor(QPalette.PlaceholderText, ph_color)
+                pte.setPalette(p)
+            except RuntimeError:
+                pass
+
+    def refresh_style(self):
+        """主题切换时刷新编辑卡片的所有样式"""
+        self._apply_edit_card_style()
 
     def _build_json_preview(self) -> str:
         """从表单构建 JSON 预览文本（标准 mcpServers 格式）"""
@@ -131,7 +157,7 @@ class MCPEditCard(QWidget):
     modeChanged = pyqtSignal(bool)  # True=JSON模式, False=表单模式
 
     def _init_ui(self):
-        self.setStyleSheet(EDIT_CARD_STYLE)
+        self._apply_edit_card_style()
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 2, 4, 2)
@@ -189,6 +215,7 @@ class MCPEditCard(QWidget):
 
         # ── Headers（sse/http） ──
         self.headersEdit = QPlainTextEdit()
+        self._plain_text_edits.append(self.headersEdit)
         self.headersEdit.setMaximumHeight(100)
         self.headersEdit.setMinimumHeight(48)
         self.headersEdit.setPlaceholderText('可选 JSON，例如: {"Authorization": "Bearer xxx"}')
@@ -200,6 +227,7 @@ class MCPEditCard(QWidget):
 
         # ── 环境变量（stdio） ──
         self.envEdit = QPlainTextEdit()
+        self._plain_text_edits.append(self.envEdit)
         self.envEdit.setMinimumHeight(48)
         self.envEdit.setPlaceholderText('可选 JSON，例如: {"API_KEY": "xxx"}')
         saved_env = self._server_data.get("env")
@@ -217,6 +245,7 @@ class MCPEditCard(QWidget):
         json_layout = QVBoxLayout(self._json_page)
         json_layout.setContentsMargins(0, 0, 0, 0)
         self.jsonEdit = QPlainTextEdit()
+        self._plain_text_edits.append(self.jsonEdit)
         self.jsonEdit.setStyleSheet(EDIT_CARD_STYLE)
         self.jsonEdit.setPlaceholderText(
             "粘贴标准 MCP 配置（支持两种格式）:\n\n"

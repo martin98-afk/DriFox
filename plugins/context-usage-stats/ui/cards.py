@@ -61,7 +61,10 @@ def _find_db() -> Optional[Path]:
 
 
 def _text_color(secondary: bool = False) -> str:
-    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色"""
+    """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色
+    
+    根据当前深浅模式返回适配的文字颜色。
+    """
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
@@ -70,9 +73,15 @@ def _text_color(secondary: bool = False) -> str:
 def _chart_colors() -> dict:
     """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色
 
-    注意：浮动卡片背景偏暗，fallback 统一使用浅色文字，
-    不依赖 isDarkTheme()，避免 qfluentwidgets 主题状态不同步导致黑色字。
+    根据当前深浅模式返回适配的文字颜色。
     """
+    dark = isDarkTheme()
+    if dark:
+        text_color = QColor(255, 255, 255, 200)
+        text_secondary = QColor(255, 255, 255, 150)
+    else:
+        text_color = QColor(30, 30, 30, 220)
+        text_secondary = QColor(80, 80, 80, 200)
     return {
         "bar_fill": QColor(98, 160, 234, 200),
         "bar_border": QColor(98, 160, 234),
@@ -80,8 +89,8 @@ def _chart_colors() -> dict:
         "line_fill": QColor(80, 227, 194, 60),
         "point": QColor(80, 227, 194),
         "grid": QColor(255, 255, 255, 30),
-        "text": QColor(255, 255, 255, 200),
-        "text_secondary": QColor(255, 255, 255, 150),
+        "text": text_color,
+        "text_secondary": text_secondary,
         "card_bg": QColor(255, 255, 255, 20),
         "accent": QColor(98, 160, 234),
         "accent_fill": QColor(98, 160, 234, 60),
@@ -115,16 +124,24 @@ def _make_chart_colors_from_context(ctx: dict) -> dict:
 
     accent = _qcolor("accent", "#2878dc", "#62a0ea")
     success = _qcolor("success", "#00a888", "#50e3c2")
-    # 注意：浮动卡片容器背景偏暗，text 颜色固定用白色，不依赖 is_dark / 主题色
+    # 文字颜色根据深浅模式动态适配：
+    # 深色模式：白色文字（与暗色浮动卡片背景对比）
+    # 浅色模式：深色文字（与亮色浮动卡片背景对比）
+    if is_dark:
+        text_color = QColor(255, 255, 255, 200)
+        text_secondary = QColor(255, 255, 255, 150)
+    else:
+        text_color = QColor(30, 30, 30, 220)
+        text_secondary = QColor(80, 80, 80, 200)
     return {
         "bar_fill": accent.lighter(110),
         "bar_border": accent,
         "line": success,
         "line_fill": QColor(success.red(), success.green(), success.blue(), 60),
         "point": success,
-        "grid": _qcolor("border", "#cccccc80", "#ffffff1e"),
-        "text": QColor(255, 255, 255, 200),
-        "text_secondary": QColor(255, 255, 255, 150),
+        "grid": _qcolor("border", "#cccccc80", "#0000001e"),
+        "text": text_color,
+        "text_secondary": text_secondary,
         "card_bg": _qcolor("card_bg", "#00000014", "#ffffff14"),
         "accent": accent,
         "accent_fill": QColor(accent.red(), accent.green(), accent.blue(), 60),

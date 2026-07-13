@@ -892,10 +892,12 @@ class FileTreeCard(QWidget):
         self._tree_widget.setFrameShape(QFrame.NoFrame)
         self._tree_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-        # 占位提示
+        # 占位提示（初始颜色根据当前主题，后续 _apply_placeholder_style 覆盖）
+        _dark = isDarkTheme()
+        _ph_color = "rgba(255,255,255,0.4)" if _dark else "rgba(0,0,0,0.4)"
         self._placeholder = QLabel("正在加载文件树...", self._tree_widget)
         self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet("color: rgba(255,255,255,0.4);")
+        self._placeholder.setStyleSheet(f"color: {_ph_color};")
         self._placeholder.setWordWrap(True)
 
         self._scroll_area.setWidget(self._tree_widget)
@@ -970,10 +972,13 @@ class FileTreeCard(QWidget):
             f"}}"
         )
 
-        # 搜索框
+        # 搜索框（背景色根据深浅模式适配）
+        is_dark = ctx.get("is_dark", True)
+        search_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
+        hover_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
         self._search_input.setStyleSheet(
             f"#file-tree-search {{"
-            f"  background: rgba(255,255,255,0.08);"
+            f"  background: {search_bg};"
             f"  border: 1px solid {border_c.name()};"
             f"  border-radius: 6px;"
             f"  padding: 0 10px;"
@@ -1005,7 +1010,7 @@ class FileTreeCard(QWidget):
             f"  color: {tc_hex};"
             f"}}"
             f"#file-tree-widget::item:hover {{"
-            f"  background: rgba(255,255,255,0.08);"
+            f"  background: {hover_bg};"
             f"}}"
         )
 
@@ -1020,8 +1025,15 @@ class FileTreeCard(QWidget):
         self._search_input.setFont(QFont(font_family, font_size - 3))
 
     def _apply_placeholder_style(self):
-        """占位提示的样式"""
-        self._placeholder.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 14px;")
+        """占位提示的样式（跟随深浅模式适配）"""
+        is_dark = True
+        if hasattr(self, "_colors") and self._colors:
+            is_dark = self._colors.get("is_dark", True)
+        else:
+            from qfluentwidgets import isDarkTheme as _isdark
+            is_dark = _isdark()
+        color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
+        self._placeholder.setStyleSheet(f"color: {color}; font-size: 14px;")
 
     # ── 异步加载 ──────────────────────────────────────────
 

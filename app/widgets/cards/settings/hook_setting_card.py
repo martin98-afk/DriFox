@@ -390,11 +390,47 @@ class HookEditCard(QWidget):
         self._syncing_matcher = False  # 防递归同步标志
         self._source_display = ""  # 来源显示名称（供外部卡片标题栏展示）
         self._agents_populated = False  # 防止 _populate_agent_combo 重复填充
+        # 收集所有 QPlainTextEdit / QLineEdit 引用，供 refresh_style 更新 palette
+        self._plain_text_edits = []
+        self._line_edits = []
         self._setup_ui()
         if not self._is_new:
             self._load_data()
         # 初始化后同步 matcher 状态
         self._sync_matcher_text_from_checks()
+
+    def _apply_edit_card_style(self):
+        """应用 EDIT_CARD_STYLE + 设置 placeholder 颜色（含 QLineEdit / QPlainTextEdit）"""
+        Colors.refresh()
+        self.setStyleSheet(EDIT_CARD_STYLE)
+        # QLineEdit::placeholder 由 EDIT_CARD_STYLE CSS 覆盖，但仍设置 palette 确保兼容
+        from PyQt5.QtGui import QColor, QPalette
+
+        ph_color = QColor(Colors.INPUT_PLACEHOLDER)
+        for le in self._line_edits:
+            try:
+                p = le.palette()
+                p.setColor(QPalette.PlaceholderText, ph_color)
+                le.setPalette(p)
+            except RuntimeError:
+                pass
+        # QPlainTextEdit 不支持 CSS ::placeholder 伪选择器，通过 palette 设置
+        for pte in self._plain_text_edits:
+            try:
+                p = pte.palette()
+                p.setColor(QPalette.PlaceholderText, ph_color)
+                pte.setPalette(p)
+            except RuntimeError:
+                pass
+
+    def refresh_style(self):
+        """主题切换时刷新编辑卡片的所有样式"""
+        self._apply_edit_card_style()
+        # 刷新 matcher 勾选框 toggle 样式（_rebuild_matcher_checks 使用主题色）
+        current_event = self.eventCombo.currentText()
+        self._rebuild_matcher_checks(current_event)
+        # 刷新 matcher 勾选同步
+        self._sync_matcher_checks_from_text(self.matcherEdit.text())
 
     def _is_agent_identity_hook(self) -> bool:
         """判断当前编辑的是否为 inject_agent_identity 系统 hook"""
@@ -488,7 +524,7 @@ class HookEditCard(QWidget):
         return self._source_display
 
     def _setup_ui(self):
-        self.setStyleSheet(EDIT_CARD_STYLE)
+        self._apply_edit_card_style()
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 2, 4, 2)
@@ -511,12 +547,14 @@ class HookEditCard(QWidget):
         # ── 状态消息（statusMessage，Hook 触发时显示在消息中）──
         # 放在类型之后、命令之前（用户要求：排在类型之后）
         self.statusMessageEdit = QLineEdit()
+        self._line_edits.append(self.statusMessageEdit)
         self.statusMessageEdit.setPlaceholderText("如：正在注入智能体身份...")
         status_row, _ = _make_row("状态消息:", self.statusMessageEdit)
         main_layout.addLayout(status_row)
 
         # ── 命令 ──
         self.commandEdit = _CompactTextEdit()
+        self._plain_text_edits.append(self.commandEdit)
         self.commandEdit.setMinimumHeight(28)
         self.commandEdit.setPlaceholderText('如: echo "Hello" 或 python script.py')
         self.commandEdit.textChanged.connect(self._update_path_var_hint)
@@ -535,6 +573,7 @@ class HookEditCard(QWidget):
 
         # ── Windows 命令（仅编辑已有 commandWindows 的 hook 时显示） ──
         self.commandWindowsEdit = _CompactTextEdit()
+        self._plain_text_edits.append(self.commandWindowsEdit)
         self.commandWindowsEdit.setMinimumHeight(28)
         self.commandWindowsEdit.setPlaceholderText("Windows 专用命令（可选）")
         # 用 QFrame 承载整行以便整体 setVisible（layout 本身没有 setVisible）
@@ -572,6 +611,7 @@ class HookEditCard(QWidget):
         # 文本输入框（放在 toggle 区上方）
         # 用 QFrame 承载整行（含 label），便于 inject_agent_identity hook 时整行隐藏
         self.matcherEdit = QLineEdit()
+        self._line_edits.append(self.matcherEdit)
         self.matcherEdit.setPlaceholderText("选择事件后此处显示对应的匹配示例")
         self.matcherEdit.textChanged.connect(self._on_matcher_text_changed)
         self._matcher_row_frame = QFrame()

@@ -3768,6 +3768,43 @@ class CodeWebViewer(QWebEngineView):
         body_font_size = scale_font_size(14)
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
 
+    def refresh_theme(self):
+        """刷新主题颜色，响应全局主题切换"""
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+
+        theme = current_theme()
+
+        # 通过 JS 更新 :root CSS 变量，使已有 DOM 即时反映新主题
+        js_code = f"""
+        (function() {{
+            var root = document.documentElement;
+            if (!root) return;
+            root.style.setProperty('--bg', 'transparent');
+            root.style.setProperty('--panel', '{theme["card_bg_solid"]}');
+            root.style.setProperty('--panel-elevated', '{theme["card_bg_solid"]}');
+            root.style.setProperty('--panel-soft', '{theme["content_bg"]}');
+            root.style.setProperty('--border', '{theme["border"]}');
+            root.style.setProperty('--border-strong', '{theme["border_accent"]}');
+            root.style.setProperty('--text', '{theme["text_primary"]}');
+            root.style.setProperty('--text-secondary', '{theme["text_secondary"]}');
+            root.style.setProperty('--text-muted', '{theme["text_muted"]}');
+            root.style.setProperty('--accent', '{theme["accent"]}');
+            root.style.setProperty('--accent-warm', '{theme["accent_warm"]}');
+            root.style.setProperty('--code-bg', '{'var(--panel-soft)' if _is_light else 'transparent'}');
+            root.style.setProperty('--code-toolbar', '{'rgba(0,0,0,0.03)' if _is_light else 'rgba(255, 255, 255, 0.03)'}');
+            root.style.setProperty('--code-border', '{'var(--border)' if _is_light else '#2a3447'}');
+        }})();
+        """
+        try:
+            if self.page():
+                self.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
     def _perform_update(self):
         try:
             if not self.page():

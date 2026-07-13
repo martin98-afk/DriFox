@@ -268,6 +268,7 @@ class _CacheItemRow(QWidget):
         self._font_family = ""
         self._font_size = 0
         self._accent_color = "#62a0ea"
+        self._is_dark = isDarkTheme()
         self._setup_ui()
         self.setFixedHeight(42)
 
@@ -281,6 +282,11 @@ class _CacheItemRow(QWidget):
         """设置主题色并刷新勾选框样式"""
         self._accent_color = color
         self._update_checkbox_style()
+
+    def set_dark_mode(self, is_dark: bool):
+        """设置深浅模式并刷新文字颜色"""
+        self._is_dark = is_dark
+        self._update_styles()
 
     def _setup_ui(self):
         self.setStyleSheet("background: transparent;")
@@ -302,17 +308,19 @@ class _CacheItemRow(QWidget):
         self._icon_label.setStyleSheet("background: transparent; font-size: 15px;")
         layout.addWidget(self._icon_label)
 
-        # 名称
+        # 名称（初始颜色根据当前主题，后续 _update_styles 覆盖）
+        _tc_init = "rgba(255,255,255,0.88)" if self._is_dark else "rgba(0,0,0,0.88)"
         self._name_label = QLabel(self._label, self)
-        self._name_label.setStyleSheet("color: rgba(255,255,255,0.88); background: transparent; font-size: 13px;")
+        self._name_label.setStyleSheet(f"color: {_tc_init}; background: transparent; font-size: 13px;")
         layout.addWidget(self._name_label)
 
         layout.addStretch(1)
 
-        # 大小
+        # 大小（初始颜色根据当前主题，后续 _update_styles 覆盖）
+        _tcs_init = "rgba(255,255,255,0.45)" if self._is_dark else "rgba(0,0,0,0.45)"
         self._size_label = QLabel("扫描中…", self)
         self._size_label.setStyleSheet(
-            "color: rgba(255,255,255,0.45); background: transparent; font-size: 13px; font-weight: 500;"
+            f"color: {_tcs_init}; background: transparent; font-size: 13px; font-weight: 500;"
         )
         layout.addWidget(self._size_label)
 
@@ -324,8 +332,17 @@ class _CacheItemRow(QWidget):
         checked = self._checkbox.isChecked()
         opacity = 1.0 if checked else 0.35
 
-        tc = f"rgba(255,255,255,{0.88 * opacity})"
-        tcs = f"rgba(255,255,255,{0.45 * opacity})"
+        # _is_dark 兜底（极端情况：构建后从未调用 set_dark_mode）
+        if not hasattr(self, "_is_dark"):
+            self._is_dark = isDarkTheme()
+
+        # 文字颜色根据深浅模式适配
+        if self._is_dark:
+            tc = f"rgba(255,255,255,{0.88 * opacity})"
+            tcs = f"rgba(255,255,255,{0.45 * opacity})"
+        else:
+            tc = f"rgba(0,0,0,{0.88 * opacity})"
+            tcs = f"rgba(0,0,0,{0.45 * opacity})"
 
         font_qss = f"font-family: '{ff}';" if ff else ""
         self._name_label.setStyleSheet(
@@ -465,6 +482,7 @@ class SystemCleanerCard(QWidget):
         colors = _ctx_colors(ctx)
         accent = colors.get("accent", "#62a0ea")
         danger = colors.get("danger", "#e34c4c") or colors.get("accent_warm", "#e34c4c")
+        is_dark = ctx.get("is_dark", True)
         self._ctx_accent = accent
         self._ctx_danger = danger
 
@@ -484,7 +502,7 @@ class SystemCleanerCard(QWidget):
         # ── 内存释放按钮 ──
         try:
             if hasattr(self, "_mem_release_btn"):
-                self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(accent))
+                self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(accent, is_dark))
         except RuntimeError:
             pass
 
@@ -500,15 +518,16 @@ class SystemCleanerCard(QWidget):
         except RuntimeError:
             pass
 
-        # ── 缓存行字体 + 主题色 ──
+        # ── 缓存行字体 + 主题色 + 深浅模式 ──
         for row in self._cache_rows.values():
             row.set_font_ctx(ff, fs)
             row.set_accent_color(accent)
+            row.set_dark_mode(is_dark)
 
         # ── 清理缓存按钮 ──
         try:
             if hasattr(self, "_clean_cache_btn"):
-                self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(accent))
+                self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(accent, is_dark))
         except RuntimeError:
             pass
 
@@ -535,10 +554,22 @@ class SystemCleanerCard(QWidget):
                 self._status_lb.setStyleSheet(f"color: {tcs}; background: transparent; {font_qss}")
         except RuntimeError:
             pass
+        # ── 分区标题 ──
+        try:
+            if hasattr(self, "_section_title_lb"):
+                self._section_title_lb.setStyleSheet(
+                    f"color: {tcs}; background: transparent; "
+                    f"font-size: 11px; letter-spacing: 2px; padding: 12px 16px 4px; {font_qss}"
+                )
+        except RuntimeError:
+            pass
 
     # ── 按钮样式工厂 ──
 
-    def _mem_release_btn_style(self, accent: str) -> str:
+    def _mem_release_btn_style(self, accent: str, is_dark: bool = True) -> str:
+        _text_color = "#ffffff"
+        _disabled_text = "rgba(255,255,255,0.5)" if is_dark else "rgba(0,0,0,0.4)"
+        _disabled_bg = "rgba(128,128,128,0.3)" if is_dark else "rgba(0,0,0,0.12)"
         return f"""
         QPushButton {{
             background: qlineargradient(
@@ -546,7 +577,7 @@ class SystemCleanerCard(QWidget):
                 stop:0 {accent},
                 stop:1 {_adjust_color(accent, -20)}
             );
-            color: #ffffff;
+            color: {_text_color};
             border: none;
             border-radius: 6px;
             font-size: 12px;
@@ -561,30 +592,46 @@ class SystemCleanerCard(QWidget):
             );
         }}
         QPushButton:disabled {{
-            background: rgba(128,128,128,0.3);
-            color: rgba(255,255,255,0.5);
+            background: {_disabled_bg};
+            color: {_disabled_text};
         }}
         """
 
-    def _clean_cache_btn_style(self, accent: str) -> str:
+    def _clean_cache_btn_style(self, accent: str, is_dark: bool = True) -> str:
+        if is_dark:
+            _bg = "rgba(255,255,255,0.08)"
+            _color = "rgba(255,255,255,0.85)"
+            _hover_bg = "rgba(255,255,255,0.14)"
+            _hover_color = "#ffffff"
+            _border = "rgba(255,255,255,0.12)"
+            _disabled_bg = "rgba(128,128,128,0.15)"
+            _disabled_color = "rgba(255,255,255,0.3)"
+        else:
+            _bg = "rgba(0,0,0,0.06)"
+            _color = "rgba(0,0,0,0.85)"
+            _hover_bg = "rgba(0,0,0,0.10)"
+            _hover_color = "#1a1a1a"
+            _border = "rgba(0,0,0,0.12)"
+            _disabled_bg = "rgba(0,0,0,0.06)"
+            _disabled_color = "rgba(0,0,0,0.3)"
         return f"""
         QPushButton {{
-            background: rgba(255,255,255,0.08);
-            color: rgba(255,255,255,0.85);
-            border: 1px solid rgba(255,255,255,0.12);
+            background: {_bg};
+            color: {_color};
+            border: 1px solid {_border};
             border-radius: 8px;
             font-size: 13px;
             font-weight: 500;
             padding: 12px 0;
         }}
         QPushButton:hover {{
-            background: rgba(255,255,255,0.14);
+            background: {_hover_bg};
             border-color: {accent};
-            color: #ffffff;
+            color: {_hover_color};
         }}
         QPushButton:disabled {{
-            background: rgba(128,128,128,0.15);
-            color: rgba(255,255,255,0.3);
+            background: {_disabled_bg};
+            color: {_disabled_color};
             border-color: transparent;
         }}
         """
@@ -650,6 +697,9 @@ class SystemCleanerCard(QWidget):
         self._build_footer()
 
     def _build_header(self, root: QVBoxLayout):
+        _dark = isDarkTheme()
+        _tc = "rgba(255,255,255,0.9)" if _dark else "rgba(0,0,0,0.85)"
+        _tcs = "rgba(255,255,255,0.45)" if _dark else "rgba(0,0,0,0.45)"
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         hly = QHBoxLayout(header)
@@ -662,11 +712,11 @@ class SystemCleanerCard(QWidget):
         hly.addWidget(ic)
 
         self._header_title = StrongBodyLabel("系统清理", header)
-        self._header_title.setStyleSheet("color: rgba(255,255,255,0.9); background: transparent;")
+        self._header_title.setStyleSheet(f"color: {_tc}; background: transparent;")
         hly.addWidget(self._header_title)
 
         self._status_lb = QLabel("", header)
-        self._status_lb.setStyleSheet("color: rgba(255,255,255,0.45); font-size: 12px; background: transparent;")
+        self._status_lb.setStyleSheet(f"color: {_tcs}; font-size: 12px; background: transparent;")
         hly.addWidget(self._status_lb)
 
         hly.addStretch(1)
@@ -686,13 +736,16 @@ class SystemCleanerCard(QWidget):
 
     def _build_memory_row(self):
         """内存占用显示行 + 释放按钮（同一行，按钮在右侧）"""
+        _dark = isDarkTheme()
+        _mem_bg = "rgba(255,255,255,0.04)" if _dark else "rgba(0,0,0,0.04)"
+        _mem_tc = "rgba(255,255,255,0.85)" if _dark else "rgba(0,0,0,0.85)"
         container = QWidget(self._content)
         container.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(container)
         layout.setContentsMargins(16, 8, 16, 4)
 
         mem_bg = QWidget(container)
-        mem_bg.setStyleSheet("background: rgba(255,255,255,0.04); border-radius: 8px;")
+        mem_bg.setStyleSheet(f"background: {_mem_bg}; border-radius: 8px;")
         mem_layout = QHBoxLayout(mem_bg)
         mem_layout.setContentsMargins(14, 8, 6, 8)
         mem_layout.setSpacing(8)
@@ -702,7 +755,7 @@ class SystemCleanerCard(QWidget):
         mem_layout.addWidget(mem_icon)
 
         self._mem_label = QLabel("DriFox 进程内存", mem_bg)
-        self._mem_label.setStyleSheet("color: rgba(255,255,255,0.85); background: transparent; font-size: 13px;")
+        self._mem_label.setStyleSheet(f"color: {_mem_tc}; background: transparent; font-size: 13px;")
         mem_layout.addWidget(self._mem_label)
 
         mem_layout.addStretch(1)
@@ -715,7 +768,7 @@ class SystemCleanerCard(QWidget):
         self._mem_release_btn = QPushButton("⚡ 释放内存", mem_bg)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
         self._mem_release_btn.setFixedSize(100, 32)
-        self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent))
+        self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent, isDarkTheme()))
         self._mem_release_btn.clicked.connect(self._on_memory_release)
         mem_layout.addWidget(self._mem_release_btn)
 
@@ -733,10 +786,12 @@ class SystemCleanerCard(QWidget):
 
         # 分隔标题
         section_title = QLabel("—— 可清理缓存 ——", container)
+        _init_tcs = "rgba(255,255,255,0.35)" if isDarkTheme() else "rgba(0,0,0,0.35)"
         section_title.setStyleSheet(
-            "color: rgba(255,255,255,0.35); background: transparent; "
+            f"color: {_init_tcs}; background: transparent; "
             "font-size: 11px; letter-spacing: 2px; padding: 12px 16px 4px;"
         )
+        self._section_title_lb = section_title
         layout.addWidget(section_title)
 
         # 缓存清理按钮（放到列表之上）
@@ -748,7 +803,7 @@ class SystemCleanerCard(QWidget):
         self._clean_cache_btn = QPushButton("🗑️ 一键清理选中缓存", btn_container)
         self._clean_cache_btn.setCursor(Qt.PointingHandCursor)
         self._clean_cache_btn.setMinimumHeight(42)
-        self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent))
+        self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, isDarkTheme()))
         self._clean_cache_btn.clicked.connect(self._on_clean_cache_clicked)
         btn_layout.addWidget(self._clean_cache_btn)
 
@@ -765,24 +820,27 @@ class SystemCleanerCard(QWidget):
 
     def _build_footer(self):
         """底部状态栏"""
+        _dark = isDarkTheme()
+        _tcs = "rgba(255,255,255,0.35)" if _dark else "rgba(0,0,0,0.35)"
+        _sep = "rgba(255,255,255,0.06)" if _dark else "rgba(0,0,0,0.06)"
         container = QWidget(self._content)
         container.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(container)
         layout.setContentsMargins(16, 8, 16, 12)
 
         self._last_clean_lb = QLabel("尚未清理过", container)
-        self._last_clean_lb.setStyleSheet("color: rgba(255,255,255,0.35); background: transparent; font-size: 11px;")
+        self._last_clean_lb.setStyleSheet(f"color: {_tcs}; background: transparent; font-size: 11px;")
         layout.addWidget(self._last_clean_lb)
 
         layout.addStretch(1)
 
         self._count_lb = QLabel("共 5 项", container)
-        self._count_lb.setStyleSheet("color: rgba(255,255,255,0.35); background: transparent; font-size: 11px;")
+        self._count_lb.setStyleSheet(f"color: {_tcs}; background: transparent; font-size: 11px;")
         layout.addWidget(self._count_lb)
 
         footer_sep = QFrame(self._content)
         footer_sep.setFrameShape(QFrame.HLine)
-        footer_sep.setStyleSheet("background: rgba(255,255,255,0.06); max-height: 1px;")
+        footer_sep.setStyleSheet(f"background: {_sep}; max-height: 1px;")
         self._content_layout.addWidget(footer_sep)
 
         self._content_layout.addWidget(container)

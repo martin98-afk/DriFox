@@ -10,7 +10,7 @@ import time
 from typing import Dict
 
 from PyQt5.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPainter, QPixmap
+from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.utils.design_tokens import Colors
-from app.utils.utils import get_font_family_css, get_unified_font
+from app.utils.utils import _is_current_theme_light, get_font_family_css, get_unified_font
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
@@ -36,9 +36,11 @@ class _RotatingIcon(QWidget):
 
     def __init__(self, svg_path: str, size: int = 16, parent=None):
         super().__init__(parent)
+        self._svg_path = svg_path
         self._renderer = QSvgRenderer(svg_path)
         self._size = size
         self._angle = 0
+        self._tint = None  # 浅色主题叠加色 (None=不叠加)
         self.setFixedSize(size, size)
         self._last_pixmap = QPixmap(size, size)
         self._last_pixmap.fill(Qt.transparent)
@@ -47,6 +49,21 @@ class _RotatingIcon(QWidget):
         self._angle = degrees
         self.update()
         self._redraw()
+
+    def set_svg_path(self, svg_path: str):
+        """切换 SVG 资源（用于主题切换）"""
+        if svg_path == self._svg_path:
+            return
+        self._svg_path = svg_path
+        self._renderer = QSvgRenderer(svg_path)
+        self._redraw()
+        self.update()
+
+    def set_tint(self, color: str = None):
+        """设置主题叠加色（用于浅色主题下加深图标）"""
+        self._tint = color
+        self._redraw()
+        self.update()
 
     def _redraw(self):
         self._last_pixmap.fill(Qt.transparent)
@@ -60,6 +77,14 @@ class _RotatingIcon(QWidget):
             self._renderer.render(p, QRectF(0, 0, self._size, self._size))
         finally:
             p.end()
+        # 浅色主题叠加：在 SVG 形状上叠加半透明黑色，使浅色图标在亮背景下可见
+        if self._tint is not None:
+            tp = QPainter(self._last_pixmap)
+            try:
+                tp.setCompositionMode(QPainter.CompositionMode_SourceAtop)
+                tp.fillRect(self._last_pixmap.rect(), QColor(self._tint))
+            finally:
+                tp.end()
 
     def current_pixmap(self) -> QPixmap:
         return self._last_pixmap
@@ -90,8 +115,10 @@ class _AgentTaskRow(QFrame):
         self._is_expanded = False
         self._context_info = ""  # 上下文用量信息（如 token 数）
 
-        # 旋转图标
+        # 旋转图标（浅色主题时叠加半透明黑色以适配亮背景）
         self._rotating_icon = _RotatingIcon(":/icons/执行中.svg", size=16, parent=self)
+        if _is_current_theme_light():
+            self._rotating_icon.set_tint("#88000000")
         # 成功后显示的静态图标
         self._success_pixmap = QPixmap(16, 16)
         self._success_pixmap.fill(Qt.transparent)
@@ -408,6 +435,9 @@ class _AgentTaskRow(QFrame):
     def refresh_row_style(self):
         """响应主题切换，刷新所有标签颜色"""
         Colors.refresh()
+        # 更新旋转图标叠加色（浅色主题下加深图标）
+        if self.is_running and hasattr(self, "_rotating_icon"):
+            self._rotating_icon.set_tint("#88000000" if _is_current_theme_light() else None)
         self.setStyleSheet("""
             #AgentTaskRow {{
                 background: rgba(255,255,255,0.03);

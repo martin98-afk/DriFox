@@ -124,6 +124,8 @@ class ProviderEditCard(QWidget):
         self._original_info = (provider_info or {}).copy()
         self._fetched_models = []
         self._auto_config_name = ""
+        # 收集 SearchableEditableComboBox 引用用于刷新
+        self._searchable_combos = []
         self._init_ui()
 
         # 连接信号
@@ -131,24 +133,7 @@ class ProviderEditCard(QWidget):
         self.fetchFailed.connect(self._on_fetch_failed)
 
     def _init_ui(self):
-        Colors.refresh()
-        self.setStyleSheet(f"""
-            QWidget {{
-                background: transparent;
-            }}
-            QLineEdit {{
-                background-color: {Colors.CONTENT_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 4px 8px;
-                {get_font_family_css()}
-                font-size: {font_size_css(12)};
-            }}
-            QLineEdit:focus {{
-                border-color: {Colors.INPUT_FOCUS_BORDER};
-            }}
-        """)
+        self._apply_style()
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 6, 4, 6)
@@ -165,6 +150,7 @@ class ProviderEditCard(QWidget):
             name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             name_row.addWidget(name_label)
             self.nameCombo = SearchableEditableComboBox()
+            self._searchable_combos.append(self.nameCombo)
             self.nameCombo.setMaxVisibleItems(10)
             for provider_name in FREE_PROVIDERS.keys():
                 icon_name = PROVIDER_ICONS.get(provider_name, "大模型")
@@ -207,6 +193,7 @@ class ProviderEditCard(QWidget):
         url_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         url_row.addWidget(url_label)
         self.apiUrlCombo = SearchableEditableComboBox()
+        self._searchable_combos.append(self.apiUrlCombo)
         # 传入当前服务商名称和模板URL，加载预设URL列表
         self._load_preset_urls(provider_name=current_provider, template_url=template_url)
         current_url = self.provider_info.get("API_URL", template_url)
@@ -242,6 +229,7 @@ class ProviderEditCard(QWidget):
         model_row = QHBoxLayout()
         model_row.addWidget(BodyLabel("默认模型:"))
         self.modelCombo = SearchableEditableComboBox()
+        self._searchable_combos.append(self.modelCombo)
         self.modelCombo.setMaxVisibleItems(10)
         self.modelCombo.setDisabled(False)
         current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
@@ -372,6 +360,36 @@ class ProviderEditCard(QWidget):
         # 新建时调用一次初始化
         if self.is_new:
             self._on_provider_changed(self.nameCombo.currentText())
+
+    def _apply_style(self):
+        """应用主题感知的基础样式"""
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: transparent;
+            }}
+            QLineEdit {{
+                background-color: {Colors.CONTENT_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                padding: 4px 8px;
+                {get_font_family_css()}
+                font-size: {font_size_css(12)};
+            }}
+            QLineEdit:focus {{
+                border-color: {Colors.INPUT_FOCUS_BORDER};
+            }}
+        """)
+
+    def refresh_style(self):
+        """主题切换时刷新编辑卡片样式 + 子 SearchableEditableComboBox"""
+        self._apply_style()
+        for combo in self._searchable_combos:
+            try:
+                combo.refresh_style()
+            except RuntimeError:
+                pass
 
     def _load_preset_urls(self, provider_name: str = None, template_url: str = ""):
         """加载预设的 API URL 端点"""
