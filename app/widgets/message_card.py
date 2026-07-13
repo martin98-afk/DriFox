@@ -1604,11 +1604,11 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
 
 # ===== _inject_hook_blocks 预编译正则（流式时每周期调用，避免重复编译） =====
 _RE_SYS_REMINDER_FULL = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>.*", re.DOTALL)
+_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>")
 _RE_HOOK_TAG_FULL = re.compile(r"<([a-z0-9-]+-hook)>.*?</\1>", re.DOTALL)
-_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>.*", re.DOTALL)
+_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>")
 _RE_HOOK_EVENT_FULL = re.compile(r'<hook\s+event="[^"]+">.*?</hook>', re.DOTALL)
-_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">.*', re.DOTALL)
+_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">')
 
 
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
@@ -1618,11 +1618,14 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
     注入，不应暴露给用户。该函数现在不再渲染任何 hook 块，只做"剥壳清空"：
 
     1. <system-reminder>...</system-reminder> 整段丢
-    2. 半截 <system-reminder>...</末尾> 也要丢（流式中间态防线）
+    2. 半截 <system-reminder> 标签丢（流式中间态防线，仅删标签本身不吞下文）
     3. <xxx-hook>...</xxx-hook> 兜底丢
-    4. 半截 <xxx-hook>...</末尾> 也要丢
+    4. 半截 <xxx-hook> 标签丢（仅删标签本身不吞下文）
     5. <hook event="Xxx">...</hook> 旧格式丢
-    6. 半截 <hook event=...>...</末尾> 也要丢
+    6. 半截 <hook event=...> 标签丢（仅删标签本身不吞下文）
+
+    注意：半截标签不匹配后续内容（仅删标签名），避免误吞用户正文中的 <system-reminder>。
+    核心 bug 修复：旧版用 .* (re.DOTALL) 会从用户正文中出现的 <system-reminder> 一路吞到末尾。
 
     Args:
         md_text: 原始 markdown 文本
