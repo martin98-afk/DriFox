@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import collections
 import re
 import threading
 from typing import Any, Dict, List, Optional
@@ -6,22 +7,46 @@ from typing import Any, Dict, List, Optional
 import orjson as json
 from loguru import logger
 
-# ========== consolidate_messages 脏标记缓存 ==========
+# ========== consolidate_messages 多入口 LRU 缓存 ==========
+# 旧实现为单入口缓存（key=None/result=None），交替处理不同消息列表时
+# 互相踢出。升级为 4-entry LRU，覆盖多数场景（主消息列表 + 临时列表）。
+# 主键：(id, len, fp) — fp 为 O(1) 首尾角色指纹，防 id 被 GC 回收后复用导致脏命中。
+# 逐出策略为最久未命中。
+_MAX_CONSOLIDATE_ENTRIES = 4
 _consolidate_cache_local = threading.local()
 
 
+def _msg_role_fingerprint(messages: list) -> int:
+    """O(1) 消息列表角色指纹：首尾消息 role 的 hash，防 id 复用脏命中"""
+    if not messages:
+        return 0
+    first_role = str(messages[0].get("role", "")) if isinstance(messages[0], dict) else ""
+    if len(messages) > 1:
+        last = messages[-1]
+        last_role = str(last.get("role", "")) if isinstance(last, dict) else ""
+    else:
+        last_role = first_role
+    return hash((first_role, last_role))
+
+
 def _get_consolidate_cache() -> dict:
+    """获取 thread-local 的 LRU 缓存（OrderedDict 模拟 LRU）"""
     cache = getattr(_consolidate_cache_local, "cache", None)
     if cache is None:
-        cache = {"key": None, "result": None}
+        cache = {"_entries": collections.OrderedDict()}
         _consolidate_cache_local.cache = cache
     return cache
 
 
-def _set_consolidate_cache(list_id: int, list_len: int, result: list):
+def _set_consolidate_cache(list_id: int, list_len: int, result: list, fingerprint: int):
+    """写入 LRU 缓存；超上限时逐出最久未命中条目"""
     cache = _get_consolidate_cache()
-    cache["key"] = (list_id, list_len)
-    cache["result"] = result
+    key = (list_id, list_len, fingerprint)
+    entries = cache["_entries"]
+    entries[key] = result
+    entries.move_to_end(key)
+    if len(entries) > _MAX_CONSOLIDATE_ENTRIES:
+        entries.popitem(last=False)  # FIFO 逐出最旧条目
 
 
 # ==========
@@ -658,13 +683,16 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     使用脏标记缓存：调用方传入同一个列表对象且长度未变时不重复计算。
     消息列表只追加（长度增加）或整体替换（id 变化），不原地修改内容，此策略安全。
     """
-    # 脏标记缓存：key=(id, len)，仅对非空列表有效
+    # 多入口 LRU 缓存：key=(id, len)，仅对非空列表有效
     # 消息从不原地修改内容，只追加或整体替换，此策略正确
     if messages is not None:
-        cache_key = (id(messages), len(messages))
+        cache_key = (id(messages), len(messages), _msg_role_fingerprint(messages))
         _cache = _get_consolidate_cache()
-        if _cache["key"] == cache_key:
-            return _cache["result"]
+        entries = _cache["_entries"]
+        cached = entries.get(cache_key)
+        if cached is not None:
+            entries.move_to_end(cache_key)  # 更新 LRU 位置
+            return cached
 
     normalized: List[Dict[str, Any]] = []
     for message in messages or []:
@@ -673,7 +701,7 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             normalized.append(item)
 
     if messages is not None:
-        _set_consolidate_cache(id(messages), len(messages), normalized)
+        _set_consolidate_cache(id(messages), len(messages), normalized, _msg_role_fingerprint(messages))
 
     return normalized
 

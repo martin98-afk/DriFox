@@ -758,7 +758,8 @@ class OpenAIChatWorker(QThread):
             # 但无对应 tool 结果，在持久化前清理，避免下次 API 调用触发 2013 错误
             # 和重复的自动修复开销
             current_messages, _ = self._fix_tool_result_order(current_messages)
-            current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
+            if current_session_messages is not current_messages:
+                current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
             self._current_session_messages = list(current_session_messages)
             self.full_response = "".join(self._response_chunks)
             # ====== Stop hook：取消退出前触发 ======
@@ -1368,7 +1369,8 @@ class OpenAIChatWorker(QThread):
             # 🛡️ 防御性清理：移除可能来自上次取消/中断的 orphaned tool_calls
             # （assistant 有 tool_calls 但无对应 tool result），避免 API 2013 错误和重复自动修复开销
             current_messages, _ = self._fix_tool_result_order(current_messages)
-            current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
+            if current_session_messages is not current_messages:
+                current_session_messages, _ = self._fix_tool_result_order(current_session_messages)
             self._current_session_messages = list(current_session_messages)
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）

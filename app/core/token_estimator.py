@@ -168,23 +168,46 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     return _fast_estimate_tokens(text)
 
 
-# ========== count_messages_tokens 脏标记缓存 ==========
-# 基于 id+len+model 的缓存，避免同列表反复遍历
+# ========== count_messages_tokens 多入口 is 缓存 ==========
+# 旧实现为单入口 `is` 身份比较缓存（obj=None/result=0）。
+# 升级为 4-entry 列表缓存，保留 `is` 身份比较彻底防 id 复用脏命中。
+# 每轮对话中循环 `count_messages_tokens([msg])` 时，[msg] 是全新列表 →
+# 必然 MISS，不会被上一条同角色消息的旧结果污染。
+# 列表扫描 O(4)=O(1)，逐出策略 FIFO。
+_MAX_TOKEN_CACHE_ENTRIES = 4
 _token_count_cache_local = threading.local()
 
 
-def _get_token_cache() -> dict:
+def _get_token_cache() -> list:
+    """获取 thread-local 的 is 列表缓存"""
     cache = getattr(_token_count_cache_local, "cache", None)
     if cache is None:
-        cache = {"obj": None, "result": 0}
+        cache = []
         _token_count_cache_local.cache = cache
     return cache
 
 
-def _set_token_cache(obj, result: int):
+def _set_token_cache(messages: list, model: str, tools_sig: int, result: int):
+    """写入 is 列表缓存；超上限时逐出最旧条目"""
     cache = _get_token_cache()
-    cache["obj"] = obj
-    cache["result"] = result
+    # 移除同一对象的旧条目（若有）
+    cache[:] = [e for e in cache if e[0] is not messages]
+    cache.append((messages, model, tools_sig, result))
+    if len(cache) > _MAX_TOKEN_CACHE_ENTRIES:
+        cache.pop(0)
+
+
+def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | None:
+    """is 身份扫描；命中时返回缓存结果"""
+    for entry in _get_token_cache():
+        obj, m, ts, result = entry
+        if obj is messages and m == model and ts == tools_sig:
+            # 命中后移到末尾保活（LRU）
+            cache = _get_token_cache()
+            cache.remove(entry)
+            cache.append(entry)
+            return result
+    return None
 # ==========
 
 
@@ -214,14 +237,12 @@ def count_messages_tokens(
     if not messages:
         return 0
 
-    # 脏标记缓存：仅对「完全相同的列表对象」命中。
-    # ⚠️ 旧实现用 id(messages) 作缓存键，但循环里频繁新建的临时列表
-    # （如 [msg]）在上一轮被 GC 后 id 会被复用，导致命中上一条消息的旧结果，
-    # 使逐条统计的 token 数全部串味、各角色占比失真。改用对象身份 `is` 比较，
-    # 只有真的是同一个列表对象才命中，彻底规避 id 复用导致的脏命中。
-    _cache = _get_token_cache()
-    if _cache["obj"] is messages:
-        return _cache["result"]
+    # 多入口 is 缓存：身份比较，彻底防 id 复用脏命中
+    # 循环内 [msg] 临时列表每次全新对象 → 必然 MISS → 正确
+    tools_sig = hash(str(tools)) if tools else 0
+    cached = _lookup_token_cache(messages, model, tools_sig)
+    if cached is not None:
+        return cached
 
     total = 0
 
@@ -289,7 +310,7 @@ def count_messages_tokens(
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
-    _set_token_cache(messages, result)
+    _set_token_cache(messages, model, tools_sig, result)
     return result
 
 

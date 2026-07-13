@@ -166,7 +166,7 @@ class LockScreenRemoteManager:
         self._lock = threading.Lock()
 
     # ---- 公共接口 ----
-    def enable(self, lock_now: bool = True, keep_display_on: bool = True) -> Dict[str, object]:
+    def enable(self, lock_now: bool = False, keep_display_on: bool = True) -> Dict[str, object]:
         """开启锁屏远程。
 
         Args:

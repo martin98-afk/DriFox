@@ -1604,11 +1604,11 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
 
 # ===== _inject_hook_blocks 预编译正则（流式时每周期调用，避免重复编译） =====
 _RE_SYS_REMINDER_FULL = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>.*", re.DOTALL)
+_RE_SYS_REMINDER_HALF = re.compile(r"<system-reminder>")
 _RE_HOOK_TAG_FULL = re.compile(r"<([a-z0-9-]+-hook)>.*?</\1>", re.DOTALL)
-_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>.*", re.DOTALL)
+_RE_HOOK_TAG_HALF = re.compile(r"<[a-z0-9-]+-hook>")
 _RE_HOOK_EVENT_FULL = re.compile(r'<hook\s+event="[^"]+">.*?</hook>', re.DOTALL)
-_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">.*', re.DOTALL)
+_RE_HOOK_EVENT_HALF = re.compile(r'<hook\s+event="[^"]+">')
 
 
 def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
@@ -1618,11 +1618,14 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
     注入，不应暴露给用户。该函数现在不再渲染任何 hook 块，只做"剥壳清空"：
 
     1. <system-reminder>...</system-reminder> 整段丢
-    2. 半截 <system-reminder>...</末尾> 也要丢（流式中间态防线）
+    2. 半截 <system-reminder> 标签丢（流式中间态防线，仅删标签本身不吞下文）
     3. <xxx-hook>...</xxx-hook> 兜底丢
-    4. 半截 <xxx-hook>...</末尾> 也要丢
+    4. 半截 <xxx-hook> 标签丢（仅删标签本身不吞下文）
     5. <hook event="Xxx">...</hook> 旧格式丢
-    6. 半截 <hook event=...>...</末尾> 也要丢
+    6. 半截 <hook event=...> 标签丢（仅删标签本身不吞下文）
+
+    注意：半截标签不匹配后续内容（仅删标签名），避免误吞用户正文中的 <system-reminder>。
+    核心 bug 修复：旧版用 .* (re.DOTALL) 会从用户正文中出现的 <system-reminder> 一路吞到末尾。
 
     Args:
         md_text: 原始 markdown 文本
@@ -1656,7 +1659,7 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
 _LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=64)  # 256→64：实际唯一渲染内容通常 < 32 条，64 覆盖 2 个会话绰绰有余
 def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
@@ -1704,14 +1707,19 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
     return _render_markdown_to_html_cached_impl(raw_md, reasoning)
 
 
+# ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
+# 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
+# 缓存键：(is_light, theme_fingerprint, font_family)
+_skeleton_cache: Dict[tuple, str] = {}
+
+
 def clear_global_render_cache():
-    """清理全局 Markdown 渲染 LRU 缓存
+    """清理全局 Markdown 渲染 LRU 缓存 + 骨架 HTML 缓存
 
     应在会话切换、清空聊天区域时调用，释放缓存的 HTML 字符串。
-    LRU maxsize=256，每个缓存条目为大段 HTML，长期运行可累积数 MB。
-    超过 50KB 的大文本渲染会直接绕过缓存，因此缓存条目规模可控。
     """
     _render_markdown_to_html_cached_impl.cache_clear()
+    _skeleton_cache.clear()
 
 
 def get_random_greeting() -> str:
@@ -2288,6 +2296,33 @@ class CodeWebViewer(QWebEngineView):
             f"{get_font_family_css()} font-family: {font_family}, sans-serif; font-size: {scale_font_size(14)}px;"
         )
 
+        # ── 骨架全局缓存：多张卡片共享同一份 HTML 模板 ──
+        # 缓存键由主题色 + 字体 + light 模式组成，最多 ~8 条 × 54KB ≈ 432KB
+        theme = current_theme()
+        body_font_size = scale_font_size(14)
+        code_font_size = scale_font_size(13)
+        tag_font_size = scale_font_size(12)
+        small_font_size = scale_font_size(11)
+        tiny_font_size = scale_font_size(10)
+        font_family_global = _get_global_font()
+
+        theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
+        cache_key = (
+            self._light_skeleton,
+            theme_fp,
+            font_family,
+            font_family_global,
+            body_font_size,
+            code_font_size,
+            tag_font_size,
+            small_font_size,
+            tiny_font_size,
+        )
+        cached = _skeleton_cache.get(cache_key)
+        if cached is not None:
+            self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
+            return
+
         tag_css = []
         for act, col in ACTION_COLOR_MAP.items():
             tag_css.append(
@@ -2335,7 +2370,6 @@ class CodeWebViewer(QWebEngineView):
                 scrollbar-color: #3a3f50 #1a1f2e;
             }
         """
-        theme = current_theme()
         # 检测浅色/深色模式，用于行内差异框主题适配
         try:
             from app.utils.theme_manager import theme_manager
@@ -2343,13 +2377,7 @@ class CodeWebViewer(QWebEngineView):
             _is_light_diff = theme_manager.is_light_theme()
         except Exception:
             _is_light_diff = False
-        body_font_size = scale_font_size(14)
-        code_font_size = scale_font_size(13)
-        tag_font_size = scale_font_size(12)
-        small_font_size = scale_font_size(11)
-        tiny_font_size = scale_font_size(10)
-        mono_font = f"{_get_global_font()}, Consolas, monospace"
-        font_family = _get_global_font()
+        mono_font = f"{font_family_global}, Consolas, monospace"
 
         html = f"""
         <!DOCTYPE html>
@@ -3574,6 +3602,8 @@ class CodeWebViewer(QWebEngineView):
         </body>
         </html>
         """
+        # 存入全局骨架缓存，避免后续卡片重复构造同一 HTML 模板
+        _skeleton_cache[cache_key] = html
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
@@ -3945,13 +3975,19 @@ class CodeWebViewer(QWebEngineView):
     def _cleanup_render_cache(self):
         """清理渲染缓存，降低内存占用（流式完成后调用）
 
+        流式结束后清空 Python 端缓存字段，但保留 _lazy_markdown_cb 回调，
+        以便主题切换或卡片复用时能从 MessageCard._content_data 按需重新生成
+        _markdown_text，避免常驻两份等价的文本数据。
+
         🐛 修复：JS 未就绪时不清除 _lazy_markdown_cb，防止流式完成早于
         _on_js_ready 时丢失内容引用，导致卡片永久空白。
         """
         self._last_rendered_html = None
-        # 只有在 JS 已就绪的情况下才清除懒回调——因为 _on_js_ready 还需要它
-        if self._is_js_ready:
-            self._lazy_markdown_cb = None
+        self._last_rendered_markdown = ""
+        self._markdown_text = ""
+        # 不再清除 _lazy_markdown_cb——主题切换 / 卡片复用需要按需从
+        # MessageCard._content_data 重新生成 markdown，避免 2 份等价文本常驻。
+        # 真正释放卡片时才由 cleanup() 统一置 None。
 
     @staticmethod
     def clear_global_cache():

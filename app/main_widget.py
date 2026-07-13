@@ -407,8 +407,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._incremental_visible_batch_count = 8
         self._history_load_threshold = 48
         # 虚拟滚动：可见范围外前后保留多少个增量批次（缓冲区）
+        # 增加缓冲区：保留 1 倍可视区域批次数量的额外卡片，减少 WebEngine 重建
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
-        # 1 表示：可见区域 + 前方1个buffer + 后方1个buffer 的卡片保留
         self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
@@ -422,7 +422,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 滚动停止后延迟回收
         self._virtual_scroll_timer = QTimer(self)
         self._virtual_scroll_timer.setSingleShot(True)
-        self._virtual_scroll_timer.setInterval(300)
+        self._virtual_scroll_timer.setInterval(500)  # 滚动停止 500ms 后再回收，避免连续滚动反复重建
         self._virtual_scroll_timer.timeout.connect(self._recycle_out_of_view_batches)
         self._suspend_auto_scroll = False
         self._gen_thread_pool = QThreadPool()
@@ -651,7 +651,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
             if self.cfg.lock_screen_remote_enabled.value:
-                get_lock_screen_remote_manager().enable(lock_now=True, keep_display_on=True)
+                get_lock_screen_remote_manager().enable(lock_now=False, keep_display_on=True)
         except Exception as e:
             logger.warning(f"[MainWidget] 锁屏远程初始化失败: {e}")
 
@@ -4578,7 +4578,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 icon = get_icon(icon_name)
 
         if icon and not icon.isNull():
-            self._model_btn_icon.setPixmap(icon.pixmap(18, 18))
+            pm = icon.pixmap(15, 15)
+            if pm.width() != pm.height():
+                pm = pm.scaled(15, 15, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._model_btn_icon.setPixmap(pm)
         else:
             self._model_btn_icon.clear()
 
