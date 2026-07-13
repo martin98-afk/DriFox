@@ -2303,7 +2303,7 @@ class CodeWebViewer(QWebEngineView):
         tiny_font_size = scale_font_size(10)
         font_family_global = _get_global_font()
 
-        theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, sort_keys=True)
+        theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
         cache_key = (
             self._light_skeleton,
             theme_fp,
