@@ -227,6 +227,16 @@ class ContextUsageRing(QWidget):
         self._rebuild_tooltip()
         self.update()
 
+    def refresh_font_size(self):
+        """字号变化后刷新 tooltip 内 QLabel 字号
+
+        ContextBreakdownTooltip 不是 main_window 的子组件（独立 Tooltip 窗口），
+        apply_font_size_to_widget() 的 findChildren 找不到它，所以这里手动触发
+        _rebuild_tooltip() 让 _refresh() 用新的 font_size_css(N) 重新设置 stylesheet。
+        """
+        self._rebuild_tooltip()
+        self.update()
+
     def enterEvent(self, event):
         self._tooltip_timer.start(300)
 

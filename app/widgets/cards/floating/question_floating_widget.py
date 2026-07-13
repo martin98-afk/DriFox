@@ -618,9 +618,9 @@ class QuestionFloatingWidget(QWidget):
         self._ignore_btn.setCursor(Qt.PointingHandCursor)
         self._ignore_btn.setFont(get_unified_font(10))
         self._ignore_btn.clicked.connect(self._on_ignore)
-        self._ignore_btn.setStyleSheet("""
-            QPushButton { color: rgba(255,255,255,0.4); background: transparent; border: none; padding: 6px 0; }
-            QPushButton:hover { color: rgba(255,255,255,0.7); }
+        self._ignore_btn.setStyleSheet(f"""
+            QPushButton {{ color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; padding: 6px 0; }}
+            QPushButton:hover {{ color: {Colors.TEXT_SECONDARY_HOVER}; }}
         """)
 
         self._preview_btn = QPushButton("预览参数")
@@ -675,6 +675,15 @@ class QuestionFloatingWidget(QWidget):
         """)
         self._question_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT};background:transparent;")
         self._hint_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
+        if hasattr(self, "_ignore_btn") and self._ignore_btn:
+            self._ignore_btn.setStyleSheet(f"""
+                QPushButton {{ color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; padding: 6px 0; }}
+                QPushButton:hover {{ color: {Colors.TEXT_SECONDARY_HOVER}; }}
+            """)
+
+    def refresh_style(self):
+        """刷新样式（主题/深浅切换时调用）"""
+        self._apply_card_style()
 
     def eventFilter(self, obj, event):
         # 窗口 resize → 动态更新各区域最大高度

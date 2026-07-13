@@ -90,6 +90,8 @@ class _StackedBar(QWidget):
         self._track = track_color
         self._text_on_fill = text_on_fill
         self._text_on_empty = text_on_empty
+        # 主动触发重绘（仅 set_segments 也调用 update，但若仅切主题时分段不变则不会重绘）
+        self.update()
 
     def set_segments(self, segments: List[tuple], percent: int = 0):
         """设置堆叠分段与整体百分比，百分比会在条末端显示"""
@@ -230,6 +232,8 @@ class ContextBreakdownTooltip(QWidget):
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
         self._load_theme_colors()
+        # 触发 paintEvent 重绘卡片背景/边框（_card_bg / _border 在 _load_theme_colors 中更新）
+        self.update()
         self._title.setStyleSheet(f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}")
         self._usage.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")
         self._extras.setStyleSheet(f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}")

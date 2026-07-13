@@ -6348,8 +6348,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 输入区字体
             if hasattr(self, "input_area"):
                 setFont(self.input_area, scale_font_size(15))
-                if hasattr(self.input_area, "refresh_style"):
-                    self.input_area.refresh_style()
 
             # 递归刷新所有 qfluentwidgets 组件字体大小
             apply_font_size_to_widget(self, 14)
@@ -6361,6 +6359,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # WorktreeSectionWidget 主题（含字体）
             for wt_widget in _worktree_widgets:
                 wt_widget.refresh_style()
+
+            # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
+            for ring_attr in ("context_usage_ring", "coding_plan_ring"):
+                ring = getattr(self, ring_attr, None)
+                if ring and hasattr(ring, "refresh_font_size"):
+                    ring.refresh_font_size()
 
         # ── 3. 字号专属块（仅 font_size + 全量，不涉及字族变化） ──
         if is_font_size:
@@ -6401,6 +6405,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 border-radius: 8px;
             """)
+        # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
+        if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
+            self.input_area.refresh_style()
         # 发送按钮
         if hasattr(self, "input_area") and hasattr(self.input_area, "_apply_send_btn_style"):
             self.input_area._apply_send_btn_style()
@@ -6446,6 +6453,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
+            self._undo_delete_card,
         ):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
