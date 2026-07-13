@@ -6235,6 +6235,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 仅在颜色相关 scope 中触发。
         Colors.refresh()
 
+        # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
+        # 避免后续 scope 分支中重复 findChildren 遍历全树
+        _message_cards = self.findChildren(MessageCard)
+        _base_settings = self.findChildren(BaseSettingsCard)
+        from qfluentwidgets import SettingCard
+        _setting_cards = self.findChildren(SettingCard)
+        from app.widgets.worktree_section import WorktreeSectionWidget
+        _worktree_widgets = self.findChildren(WorktreeSectionWidget)
+        _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
+
         # ── 1. 颜色/主题相关块 ──
         if is_color:
             theme_manager.on_theme_changed()
@@ -6289,7 +6299,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     ring.refresh_theme()
 
             # 消息卡片主题
-            for card in self.findChildren(MessageCard):
+            for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
                     card.refresh_theme()
 
@@ -6341,21 +6351,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 apply_font_size_to_widget(self._settings_popup, 14)
 
             # WorktreeSectionWidget 主题（含字体）
-            from app.widgets.worktree_section import WorktreeSectionWidget
-            for wt_widget in self.findChildren(WorktreeSectionWidget):
+            for wt_widget in _worktree_widgets:
                 wt_widget.refresh_style()
 
         # ── 3. 字号专属块（仅 font_size + 全量，不涉及字族变化） ──
         if is_font_size:
             # 所有 SettingCard 图标大小随字号缩放
-            from qfluentwidgets import SettingCard
             icon_sz = scale_icon_size(16)
-            for card in self.findChildren(SettingCard):
+            for card in _setting_cards:
                 card.setIconSize(icon_sz, icon_sz)
 
         # ── 4. 消息卡 viewer 渲染（仅 font_family + 全量，字族变化需重渲） ──
         if is_font_family:
-            for card in self.findChildren(MessageCard):
+            for card in _message_cards:
                 viewer = getattr(card, "viewer", None)
                 if viewer and hasattr(viewer, "_schedule_render"):
                     viewer._schedule_render(immediate=True)
@@ -6397,7 +6405,7 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         # 设置弹窗 — 子卡片主题样式
         if self._settings_popup:
-            for frame in self._settings_popup.findChildren(SystemCardFrame):
+            for frame in _popup_frames:
                 if hasattr(frame, "refresh_style"):
                     frame.refresh_style()
             # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
@@ -6412,7 +6420,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self._settings_popup, "_refresh_sep_labels"):
                 self._settings_popup._refresh_sep_labels()
         # 设置卡片（全窗口递归）
-        for card in self.findChildren(BaseSettingsCard):
+        for card in _base_settings:
             if hasattr(card, "refresh_style"):
                 card.refresh_style()
         if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):

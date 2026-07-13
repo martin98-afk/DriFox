@@ -30,6 +30,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 from app.utils.utils import get_icon
+from app.utils.utils import _is_current_theme_light
 
 
 class ToolWindowTitleBar(QWidget):
@@ -534,15 +535,15 @@ class LockButtonWidget(QWidget):
             )
             self._btn.setStyleSheet(f"""
                 QToolButton {{
-                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 200);
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 255);
                     border-radius: 4px;
                     color: {Colors.TEXT_SECONDARY};
                 }}
                 QToolButton:hover {{
-                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 240);
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 255);
                 }}
                 QToolButton:pressed {{
-                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 180);
+                    background-color: rgba({_accent_r}, {_accent_g}, {_accent_b}, 200);
                 }}
             """)
         else:
@@ -569,11 +570,14 @@ class LockButtonWidget(QWidget):
         return self._is_locked
 
     def paintEvent(self, e):
-        # 深色背景，和标题栏风格一致
+        # 背景色跟随主题：浅色模式用浅色，深色模式用深色
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
-        bg_color = QColor(45, 45, 45)  # 深色背景
+        if _is_current_theme_light():
+            bg_color = QColor(230, 221, 204)  # 浅色模式用浅暖灰
+        else:
+            bg_color = QColor(45, 45, 45)  # 深色模式保持深色
         painter.setBrush(bg_color)
         painter.drawRoundedRect(self.rect(), 4, 4)
 

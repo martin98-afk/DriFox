@@ -117,38 +117,49 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     content_scaled = scale_font_size(11)
     font_family = _get_global_font()
 
+    # ── 单次遍历，同时完成：setFont + 按类型分类 ──
+    # 替代之前 4 次独立 findChildren（QWidget / SettingCard / ExpandSettingCard / SwitchButton）
+    from qfluentwidgets.components.settings.setting_card import SettingCard
+    from qfluentwidgets.components.settings.expand_setting_card import ExpandSettingCard
+    from qfluentwidgets.components.widgets.switch_button import SwitchButton
+
+    setting_cards = []
+    switches = []
+
     for child in widget.findChildren(QWidget):
+        # setFont 覆盖递归字体
         child_font = child.font()
         child_font.setPixelSize(scaled)
         child_font.setFamily(font_family)
         child.setFont(child_font)
 
-    # qfluentwidgets SettingCard / ExpandSettingCard 的 titleLabel / contentLabel
-    # 使用硬编码 QSS（font: 14px / font: 11px），setFont 无法覆盖，必须用 stylesheet 强制
-    from qfluentwidgets.components.settings.expand_setting_card import ExpandSettingCard
-    from qfluentwidgets.components.settings.setting_card import SettingCard
-    from qfluentwidgets.components.widgets.switch_button import SwitchButton
+        # 分类：后续 stylesheet 覆盖仅对特定类型执行
+        if isinstance(child, SettingCard):
+            setting_cards.append(child)
+        if isinstance(child, SwitchButton):
+            switches.append(child)
 
-    for card in widget.findChildren(SettingCard):
+    # ── SettingCard / ExpandSettingCard ──
+    # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
+    for card in setting_cards:
         card.titleLabel.setStyleSheet(f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
         card.contentLabel.setStyleSheet(
             f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
         )
 
-    for card in widget.findChildren(ExpandSettingCard):
-        # ExpandSettingCard 内部的 HeaderSettingCard 继承 SettingCard，已在上面处理
-        # 但其 titleLabel objectName 是 "titleLabel"，需要额外用 objectName 选择器覆盖
-        if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
-            card.card.titleLabel.setStyleSheet(
-                f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
-            )
-        if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
-            card.card.contentLabel.setStyleSheet(
-                f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
-            )
+        # ExpandSettingCard 内部的 HeaderSettingCard 需额外覆盖
+        if isinstance(card, ExpandSettingCard):
+            if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
+                card.card.titleLabel.setStyleSheet(
+                    f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
+                )
+            if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
+                card.card.contentLabel.setStyleSheet(
+                    f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
+                )
 
-    # SwitchButton 内部 QLabel 也硬编码了 font: 14px
-    for switch in widget.findChildren(SwitchButton):
+    # ── SwitchButton ──
+    for switch in switches:
         switch.setStyleSheet(f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
 
 
