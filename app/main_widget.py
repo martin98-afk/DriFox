@@ -408,8 +408,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_load_threshold = 48
         # 虚拟滚动：可见范围外前后保留多少个增量批次（缓冲区）
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
-        # 1 表示：可见区域 + 前方1个buffer + 后方1个buffer 的卡片保留
-        self._virtual_scroll_buffer = 1
+        # 0 表示：仅保留当前可见区域内的卡片，滚动时重建更频繁但内存最低
+        self._virtual_scroll_buffer = 0
         self._message_batch: List[List[Dict[str, Any]]] = []
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
@@ -4578,7 +4578,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 icon = get_icon(icon_name)
 
         if icon and not icon.isNull():
-            self._model_btn_icon.setPixmap(icon.pixmap(18, 18))
+            pm = icon.pixmap(15, 15)
+            if pm.width() != pm.height():
+                pm = pm.scaled(15, 15, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._model_btn_icon.setPixmap(pm)
         else:
             self._model_btn_icon.clear()
 
