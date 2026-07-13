@@ -6313,7 +6313,29 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
-            # 标题编辑框（包含字号 + 字族的样式）
+            # 输入区字体
+            if hasattr(self, "input_area"):
+                setFont(self.input_area, scale_font_size(15))
+
+            # 递归刷新所有 qfluentwidgets 组件字体大小
+            apply_font_size_to_widget(self, 14)
+
+            # 设置弹窗字体
+            if self._settings_popup:
+                apply_font_size_to_widget(self._settings_popup, 14)
+
+            # WorktreeSectionWidget 主题（含字体）
+            for wt_widget in _worktree_widgets:
+                wt_widget.refresh_style()
+
+            # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
+            for ring_attr in ("context_usage_ring", "coding_plan_ring"):
+                ring = getattr(self, ring_attr, None)
+                if ring and hasattr(ring, "refresh_font_size"):
+                    ring.refresh_font_size()
+
+        # ── 2.5 会话标题（颜色+字体，主题切换或字体变化时都要更新） ──
+        if is_color or is_font:
             if hasattr(self, "title_edit"):
                 font_css = get_font_family_css()
                 title_style = f"""QLabel {{
@@ -6344,27 +6366,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 }}
                 """
                 self.title_edit.setStyleSheet(title_style)
-
-            # 输入区字体
-            if hasattr(self, "input_area"):
-                setFont(self.input_area, scale_font_size(15))
-
-            # 递归刷新所有 qfluentwidgets 组件字体大小
-            apply_font_size_to_widget(self, 14)
-
-            # 设置弹窗字体
-            if self._settings_popup:
-                apply_font_size_to_widget(self._settings_popup, 14)
-
-            # WorktreeSectionWidget 主题（含字体）
-            for wt_widget in _worktree_widgets:
-                wt_widget.refresh_style()
-
-            # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
-            for ring_attr in ("context_usage_ring", "coding_plan_ring"):
-                ring = getattr(self, ring_attr, None)
-                if ring and hasattr(ring, "refresh_font_size"):
-                    ring.refresh_font_size()
 
         # ── 3. 字号专属块（仅 font_size + 全量，不涉及字族变化） ──
         if is_font_size:

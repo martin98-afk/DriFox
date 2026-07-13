@@ -21,7 +21,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
+from app.utils.design_tokens import Colors, _get_global_font, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
 # 各层对应的标签和颜色基调
@@ -229,7 +229,7 @@ class CodingPlanTooltip(QWidget):
         # 标题
         self._title = QLabel("套餐用量")
         self._title.setStyleSheet(
-            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}"
+            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}"
         )
         self._layout.addWidget(self._title)
 
@@ -248,12 +248,12 @@ class CodingPlanTooltip(QWidget):
 
             label_w = QLabel(cfg["label"], container)
             label_w.setStyleSheet(
-                f"color: {self._text_primary}; {get_font_family_css()}"
+                f"color: {self._text_primary}; {get_font_family_css()} {font_size_css(12)}"
             )
 
             reset_w = QLabel("", container)
             reset_w.setStyleSheet(
-                f"color: {self._text_secondary}; {get_font_family_css()}"
+                f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}"
             )
 
             hrow.addWidget(label_w)
@@ -275,7 +275,7 @@ class CodingPlanTooltip(QWidget):
         """layers: {"rolling": {"percent": int, "reset_sec": int}, ...}"""
         self._load_theme_colors()
         self._title.setStyleSheet(
-            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()}"
+            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}"
         )
 
         has_any = False
@@ -295,6 +295,14 @@ class CodingPlanTooltip(QWidget):
                 bar.set_data(pct_int, _rate_color(QColor(cfg["hue"]), pct_int))
             else:
                 container.setVisible(False)
+
+            # 随主题切换刷新标签样式（颜色可能变化）
+            label_w.setStyleSheet(
+                f"color: {self._text_primary}; {get_font_family_css()} {font_size_css(12)}"
+            )
+            reset_w.setStyleSheet(
+                f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}"
+            )
 
         self._title.setVisible(has_any)
         self.adjustSize()
@@ -411,8 +419,19 @@ class CodingPlanRing(QWidget):
         return QColor(255, 255, 255, 40)
 
     def refresh_theme(self):
-        """主题切换后刷新轨道颜色"""
+        """主题切换后刷新轨道颜色及 tooltip 主题色"""
         self._track_color = self._compute_track_color()
+        self._rebuild_tooltip()
+        self.update()
+
+    def refresh_font_size(self):
+        """字号变化后刷新 tooltip 内 QLabel 字号
+
+        CodingPlanTooltip 不是 main_window 的子组件（独立 Tooltip 窗口），
+        apply_font_size_to_widget() 的 findChildren 找不到它，所以这里手动触发
+        _rebuild_tooltip() 让 set_data() 用新的 font_size_css(N) 重新设置 stylesheet。
+        """
+        self._rebuild_tooltip()
         self.update()
 
     # ── 工具提示 ─────────────────────────────────────
@@ -424,7 +443,8 @@ class CodingPlanRing(QWidget):
         if not self._has_data:
             return
 
-        self._tooltip.adjustSize()
+        # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步
+        self._rebuild_tooltip()
         tip_size = self._tooltip.size()
         pos_width = max(tip_size.width(), 1)
 
