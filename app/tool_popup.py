@@ -845,6 +845,9 @@ class ToolPopupDialog(QDialog):
 
         时长 200ms，OutCubic 缓动，整体克制不浮夸。
         仅首次显示触发，后续 show 不再做动画（响应迅速优先）。
+
+        🛡️ 安全兜底：动画若因任何原因未完成（finished 信号未触发），
+        350ms 后的安全定时器确保窗口恢复可见，防止窗口永久消失。
         """
         try:
             # 等待几何稳定（_restore_geometry 已调用）
@@ -879,20 +882,42 @@ class ToolPopupDialog(QDialog):
             self._show_anim.finished.connect(self._on_show_anim_finished)
             self._show_anim.start()
             self._fade_anim.start()
+
+            # 🛡️ 安全兜底：350ms 后强制恢复可见（动画理论 200ms 完成）
+            # 防止 setWindowOpacity(0.0) 后动画因任何原因未触发 finished 信号，
+            # 导致窗口永久不可见（仅 LockButtonWidget 独立窗口可见）。
+            QTimer.singleShot(350, self._restore_opacity_safe)
         except Exception as e:
             # 动画异常时降级：直接显示
             logger.warning(f"[ToolPopupDialog] 首次显示动画失败，降级: {e}")
             self.setWindowOpacity(1.0)
             self._anim_target_geometry = None
 
+    def _restore_opacity_safe(self):
+        """安全兜底：确保窗口 opacity 已恢复为 1.0
+
+        如果动画未完成或 _on_show_anim_finished 未正确设置 opacity，
+        此兜底确保窗口可见，防止"窗口消失"bug。
+        """
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self):
+                return
+            if self.windowOpacity() < 0.99:
+                logger.warning("[ToolPopupDialog] 安全兜底：恢复窗口透明度")
+                self.setWindowOpacity(1.0)
+        except Exception:
+            pass
+
     def _on_show_anim_finished(self):
         """首次显示动画结束回调：确保最终状态正确
 
         若动画期间外部修改了几何（如最大化、用户拖拽），尊重新几何而非强制重置。
         """
+        self._anim_safety_disarmed = True
         try:
-            if (self._anim_target_geometry is not None
-                    and self.geometry() == self._anim_target_geometry):
+            if self._anim_target_geometry is not None and self.geometry() == self._anim_target_geometry:
                 # 几何未被外部修改，确保透明度完全恢复
                 self.setWindowOpacity(1.0)
             elif self._anim_target_geometry is not None:
@@ -1121,7 +1146,7 @@ class ToolPopupDialog(QDialog):
             border_color = theme_border
         elif self._border_color.startswith("hsl("):
             # 🛡️ GRK 字符串边框（团队模式 zfdms 标识色），格式: grk(g, r%, k%)
-            g, r, k = map(float, re.findall(r'\d+', self._border_color))
+            g, r, k = map(float, re.findall(r"\d+", self._border_color))
             border_color = QColor.fromHslF(g / 360, r / 100, k / 100)
             border_color.setAlpha(int(255 * opacity))
         else:
