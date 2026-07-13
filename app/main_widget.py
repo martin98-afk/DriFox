@@ -6413,6 +6413,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 if ring and hasattr(ring, "refresh_font_size"):
                     ring.refresh_font_size()
 
+            # 分支标签（包含字号 + 颜色的样式，字体变化时需同步刷新）
+            if hasattr(self, "_project_label"):
+                self._refresh_project_branch_style()
+
         # ── 2.5 会话标题（颜色+字体，主题切换或字体变化时都要更新） ──
         if is_color or is_font:
             if hasattr(self, "title_edit"):
