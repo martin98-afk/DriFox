@@ -7082,6 +7082,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                 above_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+                    self._message_batch[batch_idx] = None
 
             # ── 收集下方（未来方向）需要回收的卡片 ──
             below_widgets = []
@@ -7097,6 +7098,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                 below_widgets.append(card)
                         recycled_count += 1
                     self._batch_cards[batch_idx] = None
+                    self._message_batch[batch_idx] = None
 
             # ── 执行回收（从布局移除 + deleteLater）──
             if above_widgets:
@@ -7118,7 +7120,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 回收完成，如果有回收触发GC
             if recycled_count > 0 or lazy_render_count > 0:
-                logger.debug(f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次")
+                logger.debug(f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）")
                 if recycled_count > 0:
                     QTimer.singleShot(100, lambda: gc.collect())
 
@@ -7440,7 +7442,10 @@ class OpenAIChatToolWindow(ToolWindow):
         user_count = self._user_prefix_cache[global_batch_index]
 
         # 对于 assistant/tool batch，round_index 需要减 1
-        current_role = self._message_batch[global_batch_index][0].get("role")
+        batch = self._message_batch[global_batch_index]
+        if not batch:
+            return user_count
+        current_role = batch[0].get("role")
         if current_role != "user":
             user_count = max(0, user_count - 1)
 
