@@ -10,7 +10,6 @@ Token 估算模块 - 提供精确的 token 计数功能
 自动降级到快速估算算法如果 tiktoken 不可用。
 """
 
-import collections
 import re
 import threading
 from functools import lru_cache
@@ -169,58 +168,46 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     return _fast_estimate_tokens(text)
 
 
-# ========== count_messages_tokens 多入口 LRU 缓存 ==========
-# 旧实现为单入口缓存（obj=None/result=0），限制为 `is` 身份比较。
-# 升级为 8-entry LRU：key=（id, len, model, tools_sig, fp），
-# fp 为 O(1) 首尾角色指纹，防 id 被 GC 回收后复用导致脏命中。
-# 覆盖多列表交替 + 同列表多 model 调用的场景。
-# 逐出策略：最久未命中（FIFO）。
-_MAX_TOKEN_CACHE_ENTRIES = 8
+# ========== count_messages_tokens 多入口 is 缓存 ==========
+# 旧实现为单入口 `is` 身份比较缓存（obj=None/result=0）。
+# 升级为 4-entry 列表缓存，保留 `is` 身份比较彻底防 id 复用脏命中。
+# 每轮对话中循环 `count_messages_tokens([msg])` 时，[msg] 是全新列表 →
+# 必然 MISS，不会被上一条同角色消息的旧结果污染。
+# 列表扫描 O(4)=O(1)，逐出策略 FIFO。
+_MAX_TOKEN_CACHE_ENTRIES = 4
 _token_count_cache_local = threading.local()
 
 
-def _msg_role_fingerprint_tokens(messages: list) -> int:
-    """O(1) 消息列表角色指纹：首尾消息 role 的 hash，防 id 复用脏命中"""
-    if not messages:
-        return 0
-    first_role = str(messages[0].get("role", "")) if isinstance(messages[0], dict) else ""
-    if len(messages) > 1:
-        last = messages[-1]
-        last_role = str(last.get("role", "")) if isinstance(last, dict) else ""
-    else:
-        last_role = first_role
-    return hash((first_role, last_role))
-
-
-def _get_token_cache() -> dict:
-    """获取 thread-local 的 LRU 缓存"""
+def _get_token_cache() -> list:
+    """获取 thread-local 的 is 列表缓存"""
     cache = getattr(_token_count_cache_local, "cache", None)
     if cache is None:
-        cache = {"_entries": collections.OrderedDict()}
+        cache = []
         _token_count_cache_local.cache = cache
     return cache
 
 
-def _set_token_cache(obj_id: int, obj_len: int, model: str, tools_sig: int, fp: int, result: int):
-    """写入 LRU 缓存；超上限时逐出最久未命中条目"""
+def _set_token_cache(messages: list, model: str, tools_sig: int, result: int):
+    """写入 is 列表缓存；超上限时逐出最旧条目"""
     cache = _get_token_cache()
-    key = (obj_id, obj_len, model, tools_sig, fp)
-    entries = cache["_entries"]
-    entries[key] = result
-    entries.move_to_end(key)
-    if len(entries) > _MAX_TOKEN_CACHE_ENTRIES:
-        entries.popitem(last=False)
+    # 移除同一对象的旧条目（若有）
+    cache[:] = [e for e in cache if e[0] is not messages]
+    cache.append((messages, model, tools_sig, result))
+    if len(cache) > _MAX_TOKEN_CACHE_ENTRIES:
+        cache.pop(0)
 
 
-def _lookup_token_cache(obj_id: int, obj_len: int, model: str, tools_sig: int, fp: int) -> int | None:
-    """查找 LRU 缓存；命中时更新 LRU 位置"""
-    cache = _get_token_cache()
-    entries = cache["_entries"]
-    key = (obj_id, obj_len, model, tools_sig, fp)
-    result = entries.get(key)
-    if result is not None:
-        entries.move_to_end(key)
-    return result
+def _lookup_token_cache(messages: list, model: str, tools_sig: int) -> int | None:
+    """is 身份扫描；命中时返回缓存结果"""
+    for entry in _get_token_cache():
+        obj, m, ts, result = entry
+        if obj is messages and m == model and ts == tools_sig:
+            # 命中后移到末尾保活（LRU）
+            cache = _get_token_cache()
+            cache.remove(entry)
+            cache.append(entry)
+            return result
+    return None
 # ==========
 
 
@@ -250,11 +237,10 @@ def count_messages_tokens(
     if not messages:
         return 0
 
-    # 多入口 LRU 缓存：key=(id, len, model, tools_sig, fp)
-    # id+len 主键，model+tools+fp 防脏命中（id 复用需同时命中模型、工具、角色指纹）
+    # 多入口 is 缓存：身份比较，彻底防 id 复用脏命中
+    # 循环内 [msg] 临时列表每次全新对象 → 必然 MISS → 正确
     tools_sig = hash(str(tools)) if tools else 0
-    fp = _msg_role_fingerprint_tokens(messages)
-    cached = _lookup_token_cache(id(messages), len(messages), model, tools_sig, fp)
+    cached = _lookup_token_cache(messages, model, tools_sig)
     if cached is not None:
         return cached
 
@@ -324,7 +310,7 @@ def count_messages_tokens(
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
-    _set_token_cache(id(messages), len(messages), model, tools_sig, fp, result)
+    _set_token_cache(messages, model, tools_sig, result)
     return result
 
 
