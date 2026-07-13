@@ -10,6 +10,7 @@ Token 估算模块 - 提供精确的 token 计数功能
 自动降级到快速估算算法如果 tiktoken 不可用。
 """
 
+import collections
 import re
 import threading
 from functools import lru_cache
@@ -168,23 +169,58 @@ def estimate_tokens(text: str, model: str = "gpt-4") -> int:
     return _fast_estimate_tokens(text)
 
 
-# ========== count_messages_tokens 脏标记缓存 ==========
-# 基于 id+len+model 的缓存，避免同列表反复遍历
+# ========== count_messages_tokens 多入口 LRU 缓存 ==========
+# 旧实现为单入口缓存（obj=None/result=0），限制为 `is` 身份比较。
+# 升级为 8-entry LRU：key=（id, len, model, tools_sig, fp），
+# fp 为 O(1) 首尾角色指纹，防 id 被 GC 回收后复用导致脏命中。
+# 覆盖多列表交替 + 同列表多 model 调用的场景。
+# 逐出策略：最久未命中（FIFO）。
+_MAX_TOKEN_CACHE_ENTRIES = 8
 _token_count_cache_local = threading.local()
 
 
+def _msg_role_fingerprint_tokens(messages: list) -> int:
+    """O(1) 消息列表角色指纹：首尾消息 role 的 hash，防 id 复用脏命中"""
+    if not messages:
+        return 0
+    first_role = str(messages[0].get("role", "")) if isinstance(messages[0], dict) else ""
+    if len(messages) > 1:
+        last = messages[-1]
+        last_role = str(last.get("role", "")) if isinstance(last, dict) else ""
+    else:
+        last_role = first_role
+    return hash((first_role, last_role))
+
+
 def _get_token_cache() -> dict:
+    """获取 thread-local 的 LRU 缓存"""
     cache = getattr(_token_count_cache_local, "cache", None)
     if cache is None:
-        cache = {"obj": None, "result": 0}
+        cache = {"_entries": collections.OrderedDict()}
         _token_count_cache_local.cache = cache
     return cache
 
 
-def _set_token_cache(obj, result: int):
+def _set_token_cache(obj_id: int, obj_len: int, model: str, tools_sig: int, fp: int, result: int):
+    """写入 LRU 缓存；超上限时逐出最久未命中条目"""
     cache = _get_token_cache()
-    cache["obj"] = obj
-    cache["result"] = result
+    key = (obj_id, obj_len, model, tools_sig, fp)
+    entries = cache["_entries"]
+    entries[key] = result
+    entries.move_to_end(key)
+    if len(entries) > _MAX_TOKEN_CACHE_ENTRIES:
+        entries.popitem(last=False)
+
+
+def _lookup_token_cache(obj_id: int, obj_len: int, model: str, tools_sig: int, fp: int) -> int | None:
+    """查找 LRU 缓存；命中时更新 LRU 位置"""
+    cache = _get_token_cache()
+    entries = cache["_entries"]
+    key = (obj_id, obj_len, model, tools_sig, fp)
+    result = entries.get(key)
+    if result is not None:
+        entries.move_to_end(key)
+    return result
 # ==========
 
 
@@ -214,14 +250,13 @@ def count_messages_tokens(
     if not messages:
         return 0
 
-    # 脏标记缓存：仅对「完全相同的列表对象」命中。
-    # ⚠️ 旧实现用 id(messages) 作缓存键，但循环里频繁新建的临时列表
-    # （如 [msg]）在上一轮被 GC 后 id 会被复用，导致命中上一条消息的旧结果，
-    # 使逐条统计的 token 数全部串味、各角色占比失真。改用对象身份 `is` 比较，
-    # 只有真的是同一个列表对象才命中，彻底规避 id 复用导致的脏命中。
-    _cache = _get_token_cache()
-    if _cache["obj"] is messages:
-        return _cache["result"]
+    # 多入口 LRU 缓存：key=(id, len, model, tools_sig, fp)
+    # id+len 主键，model+tools+fp 防脏命中（id 复用需同时命中模型、工具、角色指纹）
+    tools_sig = hash(str(tools)) if tools else 0
+    fp = _msg_role_fingerprint_tokens(messages)
+    cached = _lookup_token_cache(id(messages), len(messages), model, tools_sig, fp)
+    if cached is not None:
+        return cached
 
     total = 0
 
@@ -289,7 +324,7 @@ def count_messages_tokens(
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
-    _set_token_cache(messages, result)
+    _set_token_cache(id(messages), len(messages), model, tools_sig, fp, result)
     return result
 
 

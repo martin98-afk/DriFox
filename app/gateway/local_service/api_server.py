@@ -247,10 +247,10 @@ class LLMAPIService:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"模块不可用: {e}")
 
-            lock_now = True
+            lock_now = False
             keep_display_on = True
             if request:
-                lock_now = bool(request.get("lock_now", True))
+                lock_now = bool(request.get("lock_now", False))
                 keep_display_on = bool(request.get("keep_display_on", True))
 
             result = get_lock_screen_remote_manager().enable(

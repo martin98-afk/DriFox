@@ -147,10 +147,10 @@ def main():
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
     _guard = SingleInstanceGuard("Drifox")
-    if not _guard.try_lock():
-        _guard.request_show_window()
-        _guard.cleanup()
-        return
+    # if not _guard.try_lock():
+    #     _guard.request_show_window()
+    #     _guard.cleanup()
+    #     return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme

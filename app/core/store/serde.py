@@ -69,7 +69,9 @@ def serialize(data) -> bytes:
     """
     序列化数据为带格式魔数的字节流
 
-    流程：orjson.dumps → bytes → zstd.compress → magic + version + payload
+    流程：orjson.dumps（SORT_KEYS）→ bytes → zstd.compress → magic + version + payload
+
+    使用 orjson.OPT_SORT_KEYS 排序键名，提升 zstd 压缩率（确定性键序 → 更多模式匹配）。
 
     Args:
         data: 任意可 JSON 序列化的对象（dict / list / str / int / None 等）
@@ -77,7 +79,7 @@ def serialize(data) -> bytes:
     Returns:
         bytes: 可直接存进 SQLite 的字节流
     """
-    raw = orjson.dumps(data)
+    raw = orjson.dumps(data, option=orjson.OPT_SORT_KEYS)
     compressed = _zstd_compress(raw)
     return _MAGIC_ZSTD + _VERSION_V1 + compressed
 
