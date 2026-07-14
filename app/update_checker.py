@@ -81,8 +81,14 @@ class UpdateChecker(QWidget):
                 return parent
         return super().parent()
 
-    def check_update(self):
-        """检查更新入口"""
+    def check_update(self, silent=False):
+        """检查更新入口
+
+        Args:
+            silent: 静默模式。True 表示自动检查（启动时），不弹"已是最新"提示；
+                     False 表示手动检查（用户点击），已最新时也弹 InfoBar 告知用户。
+        """
+        self._silent_check = silent
         # 安全检查：确保 parent 仍然有效（C++ 对象未删除）
         parent = self.parent_widget()
         if parent is None:
@@ -108,9 +114,16 @@ class UpdateChecker(QWidget):
             latest_version = latest_release.get("tag_name", "").lstrip("v")
             if self._compare_versions(latest_version, self.current_version) > 0:
                 self._show_update_infobar(latest_release)
-            else:
-                # 仅在手动触发时提示“已是最新”
-                pass
+            elif not self._silent_check:
+                # 手动触发且已是最新 → 弹 InfoBar 告知用户
+                parent = self.parent_widget() or self
+                InfoBar.success(
+                    title="已是最新版本",
+                    content=f"当前版本 {self.current_version} 已是最新",
+                    position=InfoBarPosition.BOTTOM,
+                    duration=3000,
+                    parent=parent,
+                ).show()
 
     def _show_update_infobar(self, latest_release):
         """保持原有的 InfoBar 交互方式，并增加查看详情按钮"""

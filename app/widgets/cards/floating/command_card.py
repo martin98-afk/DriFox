@@ -998,6 +998,7 @@ class CommandCard(QWidget):
         lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.NoTextInteraction)
+        lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)  # 顶部对齐，避免 VCenter 平分多余空间导致上下 padding 不均
         shadow = QGraphicsDropShadowEffect(lbl)
         shadow.setBlurRadius(14)
         shadow.setOffset(0, 3)
@@ -1078,9 +1079,9 @@ class CommandCard(QWidget):
         else:
             doc.setPlainText(text)
         doc.setTextWidth(inner_w)
-        text_h = int(doc.size().height())
-        # 上下 margin(6+6) + 上下 padding(6+6) = 24px；+2 作为子像素安全余量，避免裁切
-        total = 24 + text_h + 2
+        text_h = round(doc.size().height())
+        # 上下 margin(6+6) + 上下 padding(6+6) = 24px
+        total = 24 + text_h
         if max_lines and max_lines > 0:
             fm = self._desc_tooltip_label.fontMetrics()
             line_h = fm.lineSpacing()
@@ -1148,13 +1149,15 @@ class CommandCard(QWidget):
                         parts.append(safe[pos:])
                     safe = "".join(parts)
         lbl.setText(safe)
-        lbl.setVisible(True)
         self._has_tooltip_text = True
-        # 气泡为独立悬浮窗口，宽度就绪后定位即可；宽度未就绪时延后重算
+        # 先定位再显示，避免 tooltip 在错误位置闪现
+        # 若卡片尚未布局（width<=0），延迟到 layout 完成后再定位+显示
         if self.width() <= 0:
+            lbl.setVisible(False)
             QTimer.singleShot(0, self._update_desc_tooltip)
             return
         self._position_desc_tooltip()
+        lbl.setVisible(True)
 
     def _apply_list_height(self):
         """统一刷新卡片总高度：仅命令列表高度（含分区分隔线）
@@ -2670,6 +2673,9 @@ class CommandCard(QWidget):
         self.setVisible(has_items)
         if was_detail:
             self.updateGeometry()
+        # 延迟一帧到 layout 完成后刷新悬浮气泡位置，解决首次显示时
+        # mapToGlobal 尚未反映卡片最终布局位置的问题
+        QTimer.singleShot(0, self._sync_desc_tooltip_position)
 
     def invalidate_cache(self):
         """使缓存失效，下次 show_card 时自动重建

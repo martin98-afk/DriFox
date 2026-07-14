@@ -580,7 +580,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新单例的 parent，确保 InfoBar 显示在正确的父窗口上
         checker = UpdateChecker.get_instance(self)
-        checker.check_update()
+        checker.check_update(silent=True)
 
     def _setup_engine_callbacks(self):
         """设置 ChatEngine 的回调"""
@@ -1734,6 +1734,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "team": self._handle_team_command,
+            "toggle-window": self._handle_toggle_window_command,
+            "clear": self._handle_clear_command,
         }
 
         # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
@@ -2870,6 +2872,10 @@ class OpenAIChatToolWindow(ToolWindow):
             for cmd_type, cmd_def in entries.items():
                 if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
                     qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                    # toggle-window 设为 ApplicationShortcut (1)，窗口隐藏时仍能唤醒
+                    if cmd_def.name == "toggle-window":
+                        qs.setContext(1)
+
                     name = cmd_def.name
 
                     def _on_shortcut(n=name):
@@ -11344,6 +11350,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _handle_toggle_window_command(self, args: str):
+        """/toggle-window 命令：切换窗口隐藏/显示"""
+        win = self.window()  # 获取 ToolPopupDialog 顶层窗口
+        if win and win.isVisible():
+            win.hide()
+        elif win:
+            win.show()
+            win.activateWindow()
+            win.raise_()
+
+    def _handle_clear_command(self, args: str):
+        """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
+        self._on_clear_shortcut()
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""
