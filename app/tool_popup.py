@@ -179,6 +179,21 @@ class ToolWindowTitleBar(QWidget):
     def _on_popup_clicked(self):
         self.popupRequested.emit()
 
+    def mousePressEvent(self, event):
+        """标题栏鼠标事件：Shift+左键快速切换窗口分组选中状态
+
+        在标题栏层面直接处理 Shift+click，不依赖事件穿透 _fade_container
+        传播到 ToolPopupDialog，避免 QGraphicsOpacityEffect 导致的
+        事件传播不稳定问题。
+        """
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier:
+            top_window = self.window()
+            if isinstance(top_window, ToolPopupDialog):
+                TrayManager.get_instance()._on_window_shift_clicked(top_window)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
     def refresh_style(self):
         """主题/字体变更时刷新标题栏样式"""
         Colors.refresh()

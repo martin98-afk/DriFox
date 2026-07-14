@@ -9893,6 +9893,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         处理工具差异对比请求
 
+        优先通过 file_recorder 的备份文件生成差异；
+        若备份文件缺失，则从会话消息中提取内嵌 diff 内容作为 fallback。
+
         Args:
             tool_call_id: 工具调用 ID
         """
@@ -9907,7 +9910,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 检查是否有 file_recorder
         if not self.backend.tool_executor or not self.backend.file_recorder:
-            logger.warning("[LLMChatter] file_recorder 未初始化")
+            logger.warning("[LLMChatter] file_recorder 未初始化，尝试从消息内容回退")
+            self._show_diff_from_message_content(session, tool_call_id)
             return
 
         try:
@@ -9919,13 +9923,11 @@ class OpenAIChatToolWindow(ToolWindow):
             # 使用辅助函数获取第一个文件操作
             success, backup_path, _ = get_first_file_operation(operations)
             if not success:
-                InfoBar.warning(
-                    "无差异信息",
-                    "此工具没有修改任何文件，或备份信息已丢失",
-                    duration=3000,
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                # 🛡️ Fallback：备份文件缺失时，从会话消息中提取内嵌 diff
+                logger.info(
+                    f"[LLMChatter] file_recorder 无操作记录 (tool_call_id={tool_call_id[:12]})，回退到消息内嵌 diff"
                 )
+                self._show_diff_from_message_content(session, tool_call_id)
                 return
 
             # 使用辅助函数读取备份文件和生成 diff
@@ -9935,8 +9937,58 @@ class OpenAIChatToolWindow(ToolWindow):
             # 显示差异
             show_diff_viewer(self, html)
 
+        except FileNotFoundError:
+            # 备份文件被清理或不存在，回退到消息内嵌 diff
+            logger.info(f"[LLMChatter] 备份文件不存在 (tool_call_id={tool_call_id[:12]})，回退到消息内嵌 diff")
+            self._show_diff_from_message_content(session, tool_call_id)
         except Exception as e:
             logger.error(f"[LLMChatter] 显示工具差异失败: {e}")
+            InfoBar.error(
+                "差异显示失败",
+                str(e),
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _show_diff_from_message_content(self, session, tool_call_id: str):
+        """从会话消息内容中提取内嵌 diff 并显示（file_recorder 无数据时的 fallback）
+
+        遍历 session.messages 查找 role==tool 且 tool_call_id 匹配的消息，
+        提取其 diff 字段，生成 HTML 报告并展示。
+        """
+        from app.utils.diff_viewer import DiffHtmlGenerator
+
+        diff_content = None
+
+        for msg in session.messages:
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("tool_call_id") != tool_call_id:
+                # 兼容 content 字符串格式中的 tool_call_id
+                content = msg.get("content", "")
+                if isinstance(content, str) and f"tool_call_id: {tool_call_id}" in content:
+                    pass  # 字符串格式匹配，继续提取
+                else:
+                    continue
+            diff_content = msg.get("diff")
+            break
+
+        if not diff_content:
+            InfoBar.warning(
+                "无差异信息",
+                "此工具没有修改任何文件，或差异数据已丢失",
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        try:
+            html = DiffHtmlGenerator.generate_html_report(diff_content)
+            show_diff_viewer(self, html)
+        except Exception as e:
+            logger.error(f"[LLMChatter] 消息内嵌 diff 显示失败: {e}")
             InfoBar.error(
                 "差异显示失败",
                 str(e),
@@ -10547,6 +10599,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """根据 session_id 切换到对应会话（始终从最新源加载，保证跨窗口数据一致）"""
         if not session_id:
             return
+
+        # 🛡️ 切换前保存当前会话：防止流式刚结束时用户立即切换会话，
+        # _do_post_stream_cleanup 的延迟保存尚未触发导致 AI 回复丢失。
+        if self.history_manager:
+            self._save_current_session_to_history()
+            self.history_manager.flush()
 
         # 切换前先清理当前会话的资源
         if self._is_streaming and self.backend.chat_engine:
@@ -12212,6 +12270,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
+
+        # 🛡️ 立即持久化会话，防止用户在延迟保存窗口内切换会话导致
+        # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
+        # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
+        # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
+        # 其内部的 _save_current_session_to_history 因内容哈希缓存命中而跳过。
+        if self.history_manager and not getattr(self, "_session_switched", False):
+            self._save_current_session_to_history()
+            self.history_manager.flush()
 
         # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
         # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致

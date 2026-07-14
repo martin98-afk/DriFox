@@ -23,6 +23,45 @@ from typing import Callable, Optional
 
 from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.result import ToolResult
+from loguru import logger
+
+# ── findstr 管道符修复 ────────────────────────────────────────────────
+# Windows cmd.exe 即使在双引号内也会把 | 当管道解析，导致
+# findstr /n "pattern1|pattern2" 静默失败。自动转换为 /c: 语法。
+
+
+def _fix_findstr_pipe(command: str) -> str:
+    """将 findstr 正则中的 | 转换为 /c: 语法，避免被 cmd.exe 当管道。
+
+    findstr /n "mousePressEvent|mouseReleaseEvent" file
+    → findstr /n /c:"mousePressEvent" /c:"mouseReleaseEvent" file
+
+    注意：re.search 而非 re.match，以支持管道和复合命令中的 findstr。
+    """
+    if sys.platform != "win32":
+        return command
+
+    # 如果命令已包含 /c: 语法，跳过避免双重转换
+    if "/c:" in command:
+        return command
+
+    FINDSTR_RE = re.compile(r'(findstr\s+(?:\S+\s+)*)"([^"]+)"', re.IGNORECASE)
+    m = FINDSTR_RE.search(command)
+    if not m:
+        return command
+
+    prefix = command[: m.start(1)] + m.group(1)  # 含 findstr 标志
+    pattern = m.group(2)                          # "error|warning"
+    suffix = command[m.end():]                    # 剩余部分
+
+    if "|" not in pattern:
+        return command
+
+    parts = pattern.split("|")
+    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{p}"' for p in parts) + suffix
+    logger.debug(f"[Bash] findstr pipe fix: {command[:80]}... → {rebuilt[:80]}...")
+    return rebuilt
+
 
 # ── 内联脚本自动转临时文件 ──────────────────────────────────────────────
 # Windows cmd 无法可靠处理多行/嵌套引号的 python -c "..." 等内联脚本，
@@ -99,6 +138,10 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     """
     检测内联脚本命令，有多行/引号嵌套时自动写入临时文件。
 
+    支持两种场景：
+    1. 命令以解释器开头: python -c "多行脚本"
+    2. 链式命令中包含: cd xxx && python -c "多行脚本"
+
     Args:
         command: 原始命令
 
@@ -107,7 +150,9 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     """
     parsed = _parse_inline_script(command)
     if not parsed:
-        return command, None
+        # 命令不是以解释器开头，尝试扫描整个命令找内联脚本
+        command, tmp = _scan_and_rewrite_chain(command)
+        return command, tmp
 
     script = parsed["script"]
 
@@ -136,6 +181,87 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     if parsed["rest"]:
         new_cmd += f" {parsed['rest']}"
     return new_cmd, tmp_path
+
+
+def _scan_and_rewrite_chain(command: str) -> tuple[str, Optional[str]]:
+    """扫描链式命令中的内联脚本并改写为临时文件。
+
+    例如: cd xxx && python -c "多行脚本" → cd xxx && python "temp.py"
+    """
+    if sys.platform != "win32":
+        return command, None
+
+    # 构建解释器+标志的搜索模式: python -c, node -e, 等等
+    interp_pattern = "|".join(_INTERPRETERS)
+    flag_pattern = "|".join(_SCRIPT_FLAGS)
+    # 找到命令中任意位置的 解释器 标志 组合
+    pattern = re.compile(rf"\b({interp_pattern})\s+({flag_pattern})\s+", re.IGNORECASE)
+
+    result_cmd = command
+    any_rewritten = False
+    tmp_files = []
+
+    # 从后往前替换，避免偏移问题
+    matches = list(pattern.finditer(result_cmd))
+    for m in reversed(matches):
+        interp = m.group(1)
+        flag = m.group(2)
+        start = m.end()  # 引号开始位置
+
+        # 找引号内的脚本
+        rest = result_cmd[start:]
+        quote_char = None
+        script_start = -1
+        for i, ch in enumerate(rest):
+            if ch in ('"', "'"):
+                quote_char = ch
+                script_start = i + 1
+                break
+        if quote_char is None or script_start >= len(rest):
+            continue
+
+        # 找匹配的结束引号
+        script_end = -1
+        i = script_start
+        while i < len(rest):
+            ch = rest[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote_char:
+                script_end = i
+                break
+            i += 1
+
+        if script_end == -1:
+            continue
+
+        script = rest[script_start:script_end]
+        if "\n" not in script:
+            continue  # 无换行，不需要改写
+
+        # 改写为临时文件
+        script = script.replace("\\\\", "\\").replace('\\"', '"')
+        ext = _SCRIPT_EXT.get(interp.lower(), ".py")
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="drifox_inline_", text=True)
+        try:
+            os.write(fd, script.encode("utf-8"))
+        finally:
+            os.close(fd)
+        tmp_files.append(tmp_path)
+
+        safe_path = tmp_path.replace("\\", "/")
+        # 替换原文中的内联脚本部分（去掉 -c/-e 标志，直接用脚本文件）
+        # m.start() = "python" 的起始位置，m.end() = "-c " 之后的引号前位置
+        before = result_cmd[: m.start()]  # "cd xxx && " 部分
+        after = result_cmd[start + script_end + 1:]  # 跳过结束引号
+        result_cmd = f'{before}{interp} "{safe_path}"{after}'
+        any_rewritten = True
+        logger.debug(f"[Bash] chain inline script → temp: {tmp_path}")
+
+    if any_rewritten:
+        return result_cmd, tmp_files[0] if len(tmp_files) == 1 else tmp_files[0]
+    return command, None
 
 
 def _cleanup_script_temp(path: Optional[str]) -> None:
@@ -532,6 +658,9 @@ class TerminalTools:
 
             # ── 内联脚本自动转临时文件（Windows cmd 无法可靠处理多行/嵌套引号）──
             command, tmp_script = _rewrite_inline_script(command)
+
+            # ── findstr 管道符修复（cmd.exe 把引号内 | 当管道）──
+            command = _fix_findstr_pipe(command)
 
             use_shell = needs_shell(command)
 
