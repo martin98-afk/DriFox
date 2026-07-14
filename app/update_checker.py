@@ -3,7 +3,6 @@ import os
 import platform
 import plistlib
 import subprocess
-import sys
 import tempfile
 import time
 import weakref
@@ -18,7 +17,6 @@ from qfluentwidgets import (
 )
 
 from app.utils.config import Settings
-from app.utils.incremental_updater import IncrementalUpdater
 from app.utils.utils import AsyncUpdateChecker, DownloadThread
 
 
@@ -194,19 +192,10 @@ class UpdateChecker(QWidget):
         return None
 
     def _start_download(self, latest_release):
-        """优先走增量更新，不支持时回退全量下载。"""
+        """下载并安装新版本。"""
         assets = latest_release.get("assets", []) or []
 
-        # --- 增量更新路径（需用户开启 + Release 包含增量资源） ---
-        if self.cfg.enable_incremental_update.value:
-            manifest_asset = self._find_asset(assets, "manifest.json")
-            files_zip_asset = self._find_asset(assets, "files.zip")
-
-            if manifest_asset and files_zip_asset:
-                self._start_incremental_update(latest_release, manifest_asset, files_zip_asset)
-                return
-
-        # --- 全量更新路径（保持原有逻辑不变） ---
+        # --- 全量更新路径 ---
         update_url = None
         exe_name = f"Update_{latest_release['tag_name']}.exe"
 
@@ -249,128 +238,6 @@ class UpdateChecker(QWidget):
         self.download_thread.finished_signal.connect(self._handle_download_finished)
         self.download_thread.error_signal.connect(self._handle_download_error)
         self.download_thread.start()
-
-    # ------------------------------------------------------------------
-    # 增量更新
-    # ------------------------------------------------------------------
-
-    def _start_incremental_update(self, latest_release, manifest_asset, zip_asset):
-        """启动增量更新流程。"""
-        # 获取安装目录（Drifox.exe 所在目录）
-        install_dir = os.path.dirname(sys.executable)
-
-        # 显示进度对话框
-        self.progress_dialog = QProgressDialog(
-            "正在准备增量更新...", "取消", 0, 100, self.parent_widget() or self
-        )
-        self.progress_dialog.setWindowTitle("软件更新")
-        self.progress_dialog.setWindowModality(Qt.WindowModal)
-        self.progress_dialog.canceled.connect(self._cancel_incremental)
-
-        # 创建增量更新引擎
-        self.inc_updater = IncrementalUpdater(self)
-        self.inc_updater.manifest_url = manifest_asset["browser_download_url"]
-        self.inc_updater.files_zip_url = zip_asset["browser_download_url"]
-        self.inc_updater.install_dir = install_dir
-        self.inc_updater.token = self.token
-        self.inc_updater.remote_version = latest_release.get("tag_name", "")
-
-        # 连接信号
-        self.inc_updater.stage_changed.connect(self._on_inc_stage)
-        self.inc_updater.progress.connect(self._on_inc_progress)
-        self.inc_updater.error.connect(self._on_inc_error)
-        self.inc_updater.finished.connect(self._on_inc_finished)
-
-        self.inc_updater.start()
-
-    def _cancel_incremental(self):
-        """取消增量更新。"""
-        if hasattr(self, "inc_updater") and self.inc_updater:
-            self.inc_updater.cancel()
-        if self.progress_dialog:
-            self.progress_dialog.close()
-
-    def _on_inc_stage(self, stage: str):
-        """增量更新阶段变化 → 更新进度对话框文字。"""
-        if not self.progress_dialog:
-            return
-
-        stage_labels = {
-            "comparing": "正在对比文件差异...",
-            "downloading": "正在下载增量包...",
-            "extracting": "正在解压文件...",
-            "installing": "正在替换文件...",
-            "done": "更新完成！",
-        }
-        label = stage_labels.get(stage, stage)
-        self.progress_dialog.setLabelText(label)
-
-        if stage == "done":
-            self.progress_dialog.setValue(100)
-
-    def _on_inc_progress(self, cur_files: int, total_files: int, dl_bytes: int, total_bytes: int):
-        """增量更新进度。"""
-        if not self.progress_dialog:
-            return
-
-        if total_bytes > 0:
-            # 下载阶段：按字节百分比
-            pct = int(dl_bytes / total_bytes * 100)
-        elif total_files > 0:
-            # 解压/安装阶段：按文件数百分比
-            pct = int(cur_files / total_files * 100)
-        else:
-            # 对比阶段：不确定进度
-            self.progress_dialog.setRange(0, 0)
-            return
-
-        self.progress_dialog.setRange(0, 100)
-        self.progress_dialog.setValue(pct)
-
-    def _on_inc_error(self, msg: str):
-        """增量更新出错 → 关闭进度对话框，显示错误。"""
-        if self.progress_dialog:
-            self.progress_dialog.close()
-        self.create_errorbar("增量更新失败", msg)
-
-    def _on_inc_finished(self, success: bool, locked_files: list):
-        """增量更新完成。"""
-        if self.progress_dialog:
-            self.progress_dialog.close()
-
-        if not success:
-            # 增量失败 → 提示用户，不自动回退全量（避免静默大流量下载）
-            InfoBar.warning(
-                title="更新失败",
-                content="增量更新失败，请稍后重试或前往官网下载完整安装包",
-                position=InfoBarPosition.BOTTOM,
-                duration=5000,
-                parent=self.parent_widget() or self,
-            ).show()
-            return
-
-        if locked_files:
-            # 有锁定文件 → updater 脚本已启动，主程序退出
-            InfoBar.success(
-                title="更新准备完成",
-                content="主程序即将重启以完成更新...",
-                position=InfoBarPosition.BOTTOM,
-                duration=2000,
-                parent=self.parent_widget() or self,
-            ).show()
-            # 给 InfoBar 一点时间显示，然后优雅退出
-            QApplication.processEvents()
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(500, QApplication.quit)
-        else:
-            # 无锁定文件，原地完成
-            InfoBar.success(
-                title="更新完成",
-                content="已成功更新，无需重启",
-                position=InfoBarPosition.BOTTOM,
-                duration=3000,
-                parent=self.parent_widget() or self,
-            ).show()
 
     # ------------------------------------------------------------------
     # 全量更新

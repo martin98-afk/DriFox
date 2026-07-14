@@ -2,7 +2,6 @@
 import os
 import platform
 import shutil
-import sys
 from pathlib import Path
 
 import PyInstaller.__main__
@@ -306,91 +305,6 @@ def post_build_cleanup(dist_path):
                         print(f"  [Cleanup] remove cache {d} failed: {e}")
 
 
-def _get_version() -> str:
-    """获取当前版本号：优先 git tag，否则从 config 读取。"""
-    import subprocess as sp
-
-    try:
-        tag = sp.check_output(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            cwd=base_dir,
-            text=True,
-        ).strip()
-        if tag:
-            return tag
-    except Exception:
-        pass
-
-    # 回退：从 config.py 中提取
-    import re
-
-    config_path = os.path.join(base_dir, "app", "utils", "config.py")
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            content = f.read()
-        match = re.search(r'current_version\s*=\s*"([^"]+)"', content)
-        if match:
-            return match.group(1)
-    except Exception:
-        pass
-
-    return "unknown"
-
-
-def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
-    """生成 manifest.json 和 files.zip，供增量更新使用。"""
-    import json
-    import zipfile
-
-    print(f"[Build] Generating manifest for version {version}...")
-
-    # 1. 直接导入 generate_manifest 模块调用，避免子进程跨平台路径问题
-    scripts_dir = os.path.join(base_dir, "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-
-    try:
-        import generate_manifest as gm  # noqa: F811
-    except ImportError as e:
-        print(f"[Build] generate_manifest module not found: {e}, skipping manifest generation")
-        return
-
-    try:
-        manifest = gm.generate_manifest(dist_final, version)
-    except Exception as e:
-        print(f"[Build] Manifest generation failed: {e}")
-        return
-
-    # 2. 写入 manifest.json
-    manifest_output = os.path.join("dist", f"Drifox-{version}-manifest.json")
-    os.makedirs(os.path.dirname(manifest_output) or ".", exist_ok=True)
-    with open(manifest_output, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-
-    print(f"[INFO] file_count: {manifest['file_count']}")
-    print(f"[INFO] total_size: {manifest['total_size']:,} bytes ({manifest['total_size'] / 1024 / 1024:.1f} MB)")
-    print(f"[INFO] written: {manifest_output}")
-
-    # 3. 生成 files.zip（onedir 目录打包）
-    zip_path = os.path.join("dist", f"Drifox-{version}-incremental.zip")
-    print(f"[Build] Creating {zip_path}...")
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(dist_final):
-            # 跳过缓存目录
-            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".mypy_cache")]
-            for f in files:
-                full = os.path.join(root, f)
-                # 跳过断链符号链接等（post_build_cleanup 删除 .dylib 后残留的 symlink）
-                if not os.path.isfile(full):
-                    continue
-                arcname = os.path.relpath(full, os.path.dirname(dist_final))
-                zf.write(full, arcname)
-
-    zip_size = os.path.getsize(zip_path)
-    print(f"[Build] {zip_path} created ({zip_size / 1024 / 1024:.1f} MB)")
-
-
 if __name__ == "__main__":
     print("[Build] Starting PyInstaller build for Drifox...")
 
@@ -401,8 +315,6 @@ if __name__ == "__main__":
     dist_final = os.path.join("dist", "Drifox")
     if os.path.exists(dist_final):
         post_build_cleanup(dist_final)
-        version = _get_version()
-        _generate_manifest_and_zip(dist_final, version)
 
     print("[Build] Build completed successfully!")
 

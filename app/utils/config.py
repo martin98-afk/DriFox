@@ -268,9 +268,6 @@ class Settings(QConfig):
     github_repo = "martin98-afk/DriFox"
     github_token = ConfigItem("Patch", "GitHub/Token", "")
 
-    # 增量更新
-    enable_incremental_update = ConfigItem("Patch", "IncrementalUpdate", True, BoolValidator())
-
     # ========== 大模型对话默认配置 ==========
     llm_model = ConfigItem("LLM", "Model", "qwen/qwen3-30b-a3b-2507")
     llm_api_key = ConfigItem("LLM", "APIKey", "")
