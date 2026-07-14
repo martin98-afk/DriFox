@@ -6,11 +6,18 @@
 import math
 import platform
 import uuid
+from pathlib import Path
 
+import keyboard
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
+
+
+class _HotkeyBridge(QObject):
+    """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
+    toggle_all_windows = pyqtSignal()
 
 
 class TrayManager(QObject):
@@ -75,6 +82,13 @@ class TrayManager(QObject):
         self._tray_icon.messageClicked.connect(self._on_message_clicked)
 
         self._tray_icon.show()
+
+        # ========== 全局热键 ==========
+        self._hotkey_bridge = _HotkeyBridge()
+        self._hotkey_bridge.toggle_all_windows.connect(self._toggle_all_windows)
+        self._hotkey_handle = None
+        self._registered_hotkey = None
+        self._setup_global_hotkey()
 
         # ========== 多窗口选中管理 ==========
         self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
@@ -619,8 +633,121 @@ class TrayManager(QObject):
         except Exception as e:
             logger.error(f"[_show_or_create] 显示窗口失败: {e}")
 
+    # ========== 全局热键支持（一键隐藏/显示所有窗口） ==========
+
+    @staticmethod
+    def _read_hotkey_from_command() -> str:
+        """从 toggle-window 命令文件的 shortcut 字段读取全局热键
+
+        命令文件路径：plugins/system/commands/toggle-window.md
+        优点：用户直接改 .md 文件的 shortcut 字段即可热修改快捷键，无需重启。
+        """
+        try:
+            cmd_path = Path(__file__).parents[1] / "plugins" / "system" / "commands" / "toggle-window.md"
+            if not cmd_path.exists():
+                return ""
+            content = cmd_path.read_text(encoding="utf-8")
+            if not content.startswith("---"):
+                return ""
+            lines = content.splitlines()
+            close_idx = None
+            for i in range(1, len(lines)):
+                if lines[i].strip() == "---":
+                    close_idx = i
+                    break
+            if close_idx is None:
+                return ""
+            frontmatter = "\n".join(lines[1:close_idx])
+            import yaml
+            meta = yaml.safe_load(frontmatter)
+            if not meta:
+                return ""
+            return (meta.get("shortcut", "") or "").strip()
+        except Exception:
+            return ""
+
+    def _setup_global_hotkey(self, hotkey_str: str = None):
+        """注册全局热键
+
+        使用 keyboard 库实现跨进程全局热键，即使窗口全部隐藏也能响应。
+        热键回调通过 _HotkeyBridge 信号桥接到 Qt 主线程。
+        快捷键来源：从 commands/toggle-window.md 的 shortcut 字段读取（支持热修改）。
+
+        Args:
+            hotkey_str: 热键字符串，如 "alt+z"。None 则从命令定义读取。
+        """
+        if hotkey_str is None:
+            hotkey_str = self._read_hotkey_from_command()
+        if not hotkey_str:
+            hotkey_str = "alt+z"
+
+        hotkey_str = hotkey_str.lower()
+        if self._hotkey_handle is not None and hotkey_str == self._registered_hotkey:
+            return  # 已注册相同热键，跳过
+
+        try:
+            new_handle = keyboard.add_hotkey(
+                hotkey_str,
+                self._hotkey_bridge.toggle_all_windows.emit,
+                suppress=True,
+            )
+        except Exception as exc:
+            logger.warning(f"[TrayManager] 全局热键 {hotkey_str} 注册失败: {exc}")
+            return
+
+        # 释放旧热键
+        self._release_global_hotkey()
+
+        self._hotkey_handle = new_handle
+        self._registered_hotkey = hotkey_str
+        logger.info(f"[TrayManager] 全局热键已注册: {hotkey_str}")
+
+    def _release_global_hotkey(self):
+        """释放已注册的全局热键"""
+        if self._hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+            self._hotkey_handle = None
+            self._registered_hotkey = None
+
+    def _toggle_all_windows(self):
+        """切换所有窗口的隐藏/显示状态
+
+        任意窗口可见 → 全部隐藏
+        全部已隐藏 → 全部显示并激活
+        """
+        valid_windows = [w for w in self._windows if self._is_window_valid(w)]
+        if not valid_windows:
+            return
+
+        # 检查是否有任何窗口可见
+        any_visible = any(w.isVisible() for w in valid_windows)
+
+        if any_visible:
+            # 全部隐藏
+            for w in valid_windows:
+                try:
+                    w.hide()
+                except RuntimeError:
+                    pass
+        else:
+            # 全部显示并激活最后一个窗口
+            for w in valid_windows:
+                try:
+                    w.show()
+                    w.activateWindow()
+                    if w.isMinimized():
+                        w.showNormal()
+                    w.raise_()
+                except RuntimeError:
+                    pass
+
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""
+        # 释放全局热键
+        self._release_global_hotkey()
         # 先注销所有窗口，防止 closeEvent 再次调用 unregister
         all_windows = list(self._windows)
         self._windows.clear()

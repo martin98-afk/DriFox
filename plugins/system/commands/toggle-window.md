@@ -1,5 +1,5 @@
 ---
-description: 切换窗口隐藏/显示（隐藏后从任务栏消失，可通过托盘图标恢复）
+description: 一键隐藏/显示所有 DriFox 窗口
 type: function
-shortcut: Ctrl+Shift+D
+shortcut: alt+z
 ---
