@@ -46,7 +46,7 @@ class CardContainer(QWidget):
         self.setMaximumHeight(0)  # 默认折叠
 
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setContentsMargins(0, 0, 8, 0)  # 右 padding 8px，让卡片内容不贴右边缘
         self._layout.setSpacing(0)
 
         # 应用主题背景
