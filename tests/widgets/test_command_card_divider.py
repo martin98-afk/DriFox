@@ -91,28 +91,27 @@ def _card_with_tooltip():
 
 class TestCommandCardDivider:
 
-    def test_tooltip_divider_height_included(self):
-        """tooltip 可见时 _apply_list_height 计入 tooltip_divider 的 1px
+    def test_floating_tooltip_does_not_affect_card_height(self):
+        """悬浮描述气泡为独立顶层窗口，不应计入命令卡片自身高度
 
-        layout 链：tooltip_label → tooltip_divider(1px) → scroll_area。
-        若 _apply_list_height 只加 tooltip_h 而漏 divider_h，scroll_area 被挤少 1px。
+        重构后顶部描述以「悬浮气泡」形式浮在卡片上方（覆盖聊天区），
+        不再位于卡片布局内，因此卡片高度只等于命令列表高度（含分区分隔线），
+        描述多长都不会挤占列表剩余空间。
         """
         _ensure_qapp()
         from app.widgets.cards.floating.command_card import (
             MAX_VISIBLE_ITEMS, ITEM_HEIGHT,
         )
         card = _card_with_tooltip()
-        assert card._desc_tooltip_label.isVisible(), "tooltip 应可见"
-        assert card._desc_tooltip_divider.isVisible(), "divider 应可见"
+        # 悬浮气泡作为独立窗口可见，且自身高度 > 0
+        assert card._desc_tooltip_label.isVisible(), "悬浮气泡应可见"
+        assert card._desc_tooltip_label.height() > 0, "悬浮气泡应有高度"
 
-        # 检查 setFixedHeight 是否包含 divider 高度
-        t_h = card._desc_tooltip_label.height()
-        d_h = card._desc_tooltip_divider.height()
+        # 卡片自身高度只等于列表高度（含分隔线），不含气泡
         total = len(card._item_widgets) + len(card._dividers)
         list_h = min(total, MAX_VISIBLE_ITEMS) * ITEM_HEIGHT + len(card._dividers)
-        expected = list_h + t_h + d_h
-        assert card.height() == expected, (
-            f"card h {card.height()} != {list_h}(list)+{t_h}(tooltip)+{d_h}(divider)={expected}"
+        assert card.height() == list_h, (
+            f"card h {card.height()} 应 == 列表高度 {list_h}（气泡为独立悬浮窗口，不计入）"
         )
 
     def test_incremental_false_full_render(self):
@@ -250,18 +249,18 @@ class TestCommandCardDivider:
             f"多 items 高度 {card.height()} != {expected}"
         )
 
-    def test_short_window_hides_tooltip_and_compresses(self):
-        """矮窗口下：命令卡片进入预算压缩，隐藏次要 tooltip 并减少可见项
+    def test_short_window_compresses_list_not_tooltip(self):
+        """矮窗口下：命令列表进入预算压缩，但悬浮描述气泡仍独立可见
 
-        回归：窗口很矮时，tooltip + 至多 8 项会超过可用空间，挤掉输入框/聊天区。
-        预期：_available_card_budget 远小于自然高度时，_apply_list_height 隐藏
-        tooltip，并把可见项压缩到预算内（剩余项在滚动区滚动）。
+        重构后描述以悬浮气泡呈现，不参与卡片布局高度，因此矮窗口下
+        不会被隐藏——列表按预算压缩可见项数量，气泡照常浮在卡片上方。
+        回归：窗口很矮时，列表 + 气泡不应挤掉输入框/聊天区，且气泡不占列表空间。
         """
         _ensure_qapp()
         from app.widgets.cards.floating.command_card import (
             MAX_VISIBLE_ITEMS, ITEM_HEIGHT,
         )
-        card = _card_with_tooltip()  # 600px 窗口，tooltip 可见，25 items
+        card = _card_with_tooltip()  # 600px 窗口，气泡可见，25 items
         # 压扁窗口到 150px，触发预算压缩（测试无 _input_card，预留仅 CARD_RESIZE_RESERVE）
         top = card.window()
         top.resize(600, 150)
@@ -269,17 +268,11 @@ class TestCommandCardDivider:
         for _ in range(15):
             app.processEvents()
 
-        # 矮窗口：次要的 tooltip 应被隐藏，腾出空间给列表
-        assert not card._desc_tooltip_label.isVisible(), "矮窗口下 tooltip 应被隐藏"
-        assert not card._desc_tooltip_divider.isVisible(), "矮窗口下分隔线应被隐藏"
+        # 矮窗口下：悬浮气泡仍可见（它浮在卡片上方，独立窗口，不被预算隐藏）
+        assert card._desc_tooltip_label.isVisible(), "矮窗口下悬浮气泡仍应可见"
 
-        # 卡片高度应远小于"完整 8 项 + tooltip"的自然高度
-        full_natural = (
-            MAX_VISIBLE_ITEMS * ITEM_HEIGHT
-            + len(card._dividers)
-            + card._tooltip_natural_height
-            + 1
-        )
+        # 卡片（列表）高度应远小于"完整 8 项"的自然高度（被预算压缩）
+        full_natural = MAX_VISIBLE_ITEMS * ITEM_HEIGHT + len(card._dividers)
         assert card.height() < full_natural, (
             f"矮窗口未压缩: card {card.height()} 应 < 自然高度 {full_natural}"
         )

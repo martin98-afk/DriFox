@@ -11,10 +11,11 @@ import html
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QMouseEvent, QTextDocument
+from PyQt5.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QTextDocument
 from PyQt5.QtWidgets import (
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -43,6 +44,68 @@ MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
 CARD_MIN_VISIBLE_ITEMS = 1  # 矮到极致时仍保留的最少可见 item 数
 CARD_MIN_HEIGHT = ITEM_HEIGHT * 2 + 1  # 矮到极致时至少保留 2 行 item 的高度
 CARD_RESIZE_RESERVE = 120  # 顶部工具栏 + 最小聊天区预留高度（px）
+
+
+def _qcolor_from_rgba(s: str) -> QColor:
+    """将 Colors 中的 rgba(...) 字符串解析为 QColor
+
+    Qt5 的 QColor 仅支持 #RRGGBB / 颜色名，不支持 rgba(r,g,b,a) 函数式写法，
+    直接 QColor("rgba(33,33,38,250)") 会得到无效颜色（渲染成黑色）。
+    这里手动解析元组构造 QColor，兼容 rgb()/rgba() 与十六进制/颜色名回退。
+    """
+    s = (s or "").strip()
+    if s.startswith("rgb(") or s.startswith("rgba("):
+        inner = s[s.index("(") + 1: s.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        if len(parts) >= 3:
+            r, g, b = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+            a = 255
+            if len(parts) >= 4:
+                af = float(parts[3])
+                a = int(af * 255) if af <= 1.0 else int(af)
+            return QColor(r, g, b, a)
+    return QColor(s)
+
+
+class _DescTooltipBubble(QLabel):
+    """悬浮描述气泡：自绘圆角主题实底背景
+
+    背景说明（关键）：顶层窗口设置了 WA_TranslucentBackground 后，Qt 会跳过
+    QStyle 的背景填充，导致样式表的 background 不绘制、窗口完全透明、文字看不清。
+    因此这里在 paintEvent 中手动用 QPainter 绘制圆角实底背景 + 边框，保证背景
+    始终可见；文字仍由基类 QLabel 渲染（含富文本关键字高亮）。
+    圆角外的区域保持透明，阴影效果（QGraphicsDropShadowEffect）贴合圆角形状。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bg = _qcolor_from_rgba(Colors.CARD_BG_SOLID)
+        self._border = _qcolor_from_rgba(Colors.DIVIDER_COLOR)
+        self._radius = 6
+
+    def setBrushColors(self, bg: str, border: str):
+        """刷新背景/边框颜色（主题切换时调用）"""
+        self._bg = _qcolor_from_rgba(bg)
+        self._border = _qcolor_from_rgba(border)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        r = self._radius
+        # 背景实底
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._bg)
+        painter.drawRoundedRect(rect, r, r)
+        # 边框
+        pen = QPen(self._border)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, r, r)
+        # 文字（含富文本高亮）由基类绘制，位于背景之上
+        super().paintEvent(event)
 
 
 class CommandItemWidget(QWidget):
@@ -686,28 +749,13 @@ class CommandCard(QWidget):
 
         # 描述 tooltip（列表模式下显示当前选中项的完整描述）
         # 设计目的：item 行的 _ElidedLabel 描述在宽度不足时会省略（中间省略），
-        # 用户难以阅读完整说明。此 tooltip 在卡片顶部用完整文本展示，宽度充裕，
-        # 因此换行后能读完整内容；空描述/详情模式下隐藏。
-        self._desc_tooltip_label = QLabel()
-        self._desc_tooltip_label.setWordWrap(True)
-        self._desc_tooltip_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._desc_tooltip_label.setVisible(False)
-        self._desc_tooltip_label.setTextInteractionFlags(Qt.NoTextInteraction)
-        layout.addWidget(self._desc_tooltip_label)
-
-        # tooltip 与列表之间的细分隔线（视觉分组）
-        self._desc_tooltip_divider = QFrame()
-        self._desc_tooltip_divider.setFrameShape(QFrame.HLine)
-        self._desc_tooltip_divider.setFixedHeight(1)
-        self._desc_tooltip_divider.setVisible(False)
-        self._desc_tooltip_divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self._desc_tooltip_divider)
-        self._apply_desc_tooltip_style()
-        # 记录上次用于计算 tooltip 高度的卡片宽度，窗口/卡片宽度变化时触发重算
+        # 用户难以阅读完整说明。此 tooltip 以「悬浮气泡」形式浮在卡片上方
+        # （覆盖聊天区），不参与卡片布局，因此无论描述多长都不会挤占命令列表
+        # 的剩余空间；空描述/详情模式下隐藏。
+        # 延迟到首次显示时再创建（需要顶层窗口作为父级，__init__ 阶段尚无窗口）。
+        self._desc_tooltip_label: Optional[QLabel] = None
         self._last_tip_width = -1
-        # 矮窗口自适应相关状态
         self._has_tooltip_text = False  # 当前选中项是否有可展示的描述文本
-        self._tooltip_natural_height = 0  # 描述 tooltip 的自然高度（px），供预算判断
         self._window_resize_hooked = False  # 是否已给顶层窗口安装 resize 事件过滤器
         self._resize_recompute_timer: Optional[QTimer] = None  # 窗口 resize 防抖重算
 
@@ -902,29 +950,99 @@ class CommandCard(QWidget):
         """)
 
     def _apply_desc_tooltip_style(self):
-        """刷新列表顶部描述 tooltip 的样式
+        """刷新悬浮描述 tooltip（气泡）的样式
 
         视觉规范：
-        - 浅色半透明背景（HOVER_BG 系），与卡片主体轻微分层形成"tooltip"质感
-        - 圆角 + 上下内边距让它读起来像独立信息条
+        - 主题实底背景（CARD_BG_SOLID，卡片表面色），保证在任意聊天背景上都清晰可读
+        - 圆角 + 细分隔边框 + 阴影，营造悬浮信息气泡质感
         - 文字保持 TEXT_PRIMARY，确保一眼可读
+        - 气泡以独立顶层窗口（WA_TranslucentBackground）悬浮在卡片上方，
+          由 _position_desc_tooltip 定位；圆角外的区域保持透明，阴影贴合圆角形状
         """
         Colors.refresh()
-        if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
+        if getattr(self, "_desc_tooltip_label", None) is None:
             return
+        # 背景/边框由 _DescTooltipBubble.paintEvent 自绘（WA_TranslucentBackground 下
+        # 样式表 background 不绘制），此处通过 setBrushColors 传入主题色。
+        self._desc_tooltip_label.setBrushColors(Colors.CARD_BG_SOLID, Colors.DIVIDER_COLOR)
         self._desc_tooltip_label.setStyleSheet(f"""
             QLabel {{
                 color: {Colors.TEXT_PRIMARY};
                 {get_font_family_css()} {font_size_css(11)};
-                background: {Colors.HOVER_BG};
                 border: none;
-                border-radius: 4px;
-                margin: 6px 8px 4px 8px;
+                border-radius: 6px;
+                margin: 6px 8px 6px 8px;
                 padding: 6px 10px;
             }}
         """)
-        if hasattr(self, "_desc_tooltip_divider") and self._desc_tooltip_divider is not None:
-            self._desc_tooltip_divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+        # 字体/主题变化可能改变换行高度，重新定位气泡
+        if self._desc_tooltip_label.isVisible():
+            self._position_desc_tooltip()
+
+    # ── 悬浮描述气泡（顶层窗口，浮于卡片上方，不占卡片布局高度） ──
+
+    def _ensure_desc_tooltip(self):
+        """惰性创建悬浮描述气泡（需要顶层窗口作为父级）
+
+        将气泡创建为独立顶层窗口（Frameless + ToolTip + 透明背景），
+        浮在卡片上方覆盖聊天区，鼠标穿透，带阴影营造悬浮感。
+        """
+        if getattr(self, "_desc_tooltip_label", None) is not None:
+            return
+        top = self.window()
+        if top is None:
+            return
+        lbl = _DescTooltipBubble(top)
+        lbl.setWindowFlags(Qt.FramelessWindowHint | Qt.ToolTip | Qt.WindowDoesNotAcceptFocus)
+        lbl.setAttribute(Qt.WA_TranslucentBackground, True)
+        lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lbl.setWordWrap(True)
+        lbl.setTextInteractionFlags(Qt.NoTextInteraction)
+        shadow = QGraphicsDropShadowEffect(lbl)
+        shadow.setBlurRadius(14)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(0, 0, 0, 110))
+        lbl.setGraphicsEffect(shadow)
+        self._desc_tooltip_label = lbl
+        self._apply_desc_tooltip_style()
+        # 气泡位置在每次显示/窗口变化时由 _position_desc_tooltip 计算
+
+    def _position_desc_tooltip(self):
+        """将悬浮气泡定位到卡片正上方（覆盖聊天区），并自适应宽度/高度
+
+        气泡底部与卡片顶边保留 GAP 间距；宽度对齐卡片宽度。
+        高度按当前宽度精确测量换行后高度（含样式 margin/padding），
+        并受可用上方空间约束，避免极端长描述溢出屏幕顶部。
+        """
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is None or not lbl.isVisible():
+            return
+        top = self.window()
+        if top is None:
+            return
+        card_global = self.mapToGlobal(QPoint(0, 0))
+        win_global = top.mapToGlobal(QPoint(0, 0))
+        gap = 6
+        # 对齐卡片宽度（气泡比卡片窄 2px 以贴合圆角边框）
+        w = max(1, self.width() - 2)
+        lbl.setFixedWidth(w)
+        # 可用上方空间（窗口顶部到卡片顶边，减去间距）
+        available_above = max(0, (card_global.y() - win_global.y()) - gap)
+        if available_above > 60:
+            line_h = lbl.fontMetrics().lineSpacing()
+            allowed = max(2, (available_above - 22) // line_h)
+            tip_h = self._compute_desc_tooltip_height(max_lines=min(16, allowed))
+        else:
+            tip_h = self._compute_desc_tooltip_height(max_lines=16)
+        # 安全兜底：气泡高度不超过卡片上方可用空间，避免溢出屏幕顶部
+        if available_above > 0:
+            tip_h = min(tip_h, available_above)
+        lbl.setFixedHeight(tip_h)
+        gx = card_global.x() + 1
+        gy = card_global.y() - tip_h - gap
+        if gy < win_global.y():
+            gy = win_global.y()
+        lbl.move(gx, gy)
 
     def _compute_desc_tooltip_height(self, max_lines: int = 16) -> int:
         """计算描述 tooltip 的高度（像素）
@@ -947,7 +1065,7 @@ class CommandCard(QWidget):
             label_w = self.width() - 2
         if label_w <= 0:
             return 0
-        # 样式表：margin 6px 8px 4px 8px + padding 6px 10px
+        # 样式表：margin 6px 8px 6px 8px + padding 6px 10px
         # → 文本实际渲染宽度 = label 宽度 - 左右 margin(8*2) - 左右 padding(10*2)
         inner_w = max(1, label_w - 36)
         # 用 QTextDocument 复现 QLabel 的换行高度（documentMargin=0 表示只量文本本身，
@@ -961,26 +1079,28 @@ class CommandCard(QWidget):
             doc.setPlainText(text)
         doc.setTextWidth(inner_w)
         text_h = int(doc.size().height())
-        # 上下 margin(6+4) + 上下 padding(6+6) = 22px；+2 作为子像素安全余量，避免裁切
-        total = 22 + text_h + 2
+        # 上下 margin(6+6) + 上下 padding(6+6) = 24px；+2 作为子像素安全余量，避免裁切
+        total = 24 + text_h + 2
         if max_lines and max_lines > 0:
             fm = self._desc_tooltip_label.fontMetrics()
             line_h = fm.lineSpacing()
-            total = min(total, 22 + int(max_lines * line_h))
+            total = min(total, 24 + int(max_lines * line_h))
         return total
 
     def _update_desc_tooltip(self, item: Optional[Dict[str, str]] = None):
-        """根据当前选中项更新 tooltip 文本与可见性
+        """根据当前选中项更新悬浮气泡文本与可见性
 
         Args:
             item: 可选的选中项数据；为 None 时从 _filtered_items 与 _selected_index 推导
         """
-        if not hasattr(self, "_desc_tooltip_label") or self._desc_tooltip_label is None:
+        # 延迟创建悬浮气泡（需要顶层窗口）
+        self._ensure_desc_tooltip()
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is None:
             return
         # 仅在列表模式下显示 tooltip；detail 模式自带描述区，无需重复
         if self._detail_mode:
-            self._desc_tooltip_label.setVisible(False)
-            self._desc_tooltip_divider.setVisible(False)
+            lbl.setVisible(False)
             # detail 模式的高度由 _adjust_detail_height 控制，此处不刷新
             return
         if item is None:
@@ -990,12 +1110,9 @@ class CommandCard(QWidget):
                 item = None
         desc = (item or {}).get("description", "") if item else ""
         if not desc.strip():
-            # 空描述：隐藏（不显示空白 tooltip），并刷新卡片高度（清除旧 tooltip 占用空间）
+            # 空描述：隐藏（不显示空白气泡）；气泡独立窗口，无布局高度需刷新
             self._has_tooltip_text = False
-            self._tooltip_natural_height = 0
-            self._desc_tooltip_label.setVisible(False)
-            self._desc_tooltip_divider.setVisible(False)
-            self._apply_list_height()
+            lbl.setVisible(False)
             return
         # HTML 转义 + 多关键字高亮（与 _ElidedLabel._update_display 对齐）
         safe = html.escape(desc)
@@ -1030,33 +1147,25 @@ class CommandCard(QWidget):
                     if pos < len(safe):
                         parts.append(safe[pos:])
                     safe = "".join(parts)
-        self._desc_tooltip_label.setText(safe)
-        self._desc_tooltip_label.setVisible(True)
-        self._desc_tooltip_divider.setVisible(True)
-        # 文本更新后重算 tooltip 自然高度（供 _apply_list_height 做矮窗口预算判断），
-        # 再由 _apply_list_height 统一决定 tooltip 可见性与卡片总高度
-        tip_h = self._compute_desc_tooltip_height()
+        lbl.setText(safe)
+        lbl.setVisible(True)
         self._has_tooltip_text = True
-        self._tooltip_natural_height = tip_h
-        if tip_h > 0:
-            self._desc_tooltip_label.setFixedHeight(tip_h)
+        # 气泡为独立悬浮窗口，宽度就绪后定位即可；宽度未就绪时延后重算
         if self.width() <= 0:
-            # 宽度尚未就绪（首次布局前）：label 为 Fixed 垂直策略，若不设高度会按单行
-            # sizeHint 折叠导致文字裁切。延后到下一轮布局完成再测算。
             QTimer.singleShot(0, self._update_desc_tooltip)
-        self._apply_list_height()
+            return
+        self._position_desc_tooltip()
 
     def _apply_list_height(self):
-        """统一刷新卡片总高度：列表高度 + 顶部描述 tooltip 高度（若可见）
+        """统一刷新卡片总高度：仅命令列表高度（含分区分隔线）
 
         由 _render / 选中变更 / detail→list 切换等多个入口复用。
         当卡片空列表时直接置 0（卡片可见性由 _filtered_items 控制，调用方负责）。
 
-        矮窗口自适应：若自然高度（tooltip + 至多 MAX_VISIBLE_ITEMS 项）超过可用
-        预算（见 _available_card_budget），则优先保留列表（主内容）、牺牲次要的
-        描述 tooltip；若仍放不下则减少可见项数量（剩余项在滚动区滚动）。
-        正常/高窗口下预算充足，行为与旧版一致。detail 模式由 _adjust_detail_height
-        控制高度，此处不干预。
+        顶部描述 tooltip 已改为「悬浮气泡」（独立顶层窗口，见 _desc_tooltip_label），
+        不在卡片布局内，因此不占用卡片高度预算——无论描述多长，命令列表始终拥有
+        完整可用空间。矮窗口自适应仅压缩列表可见项数量（剩余项在滚动区滚动）。
+        detail 模式由 _adjust_detail_height 控制高度，此处不干预。
         """
         item_count = len(self._item_widgets)
         divider_count = len(self._dividers)
@@ -1067,58 +1176,33 @@ class CommandCard(QWidget):
         if self._detail_mode:
             return
 
-        # 顶部描述 tooltip：仅列表模式 + 有描述文本时"希望"显示
-        want_tooltip = self._has_tooltip_text
-        tip_h = 0
-        if want_tooltip and self.width() > 0:
-            # 以当前宽度重新测量，保证矮窗口放宽/窗口缩放后高度是最新的
-            tip_h = self._compute_desc_tooltip_height()
-            self._tooltip_natural_height = tip_h
-            if tip_h > 0:
-                self._desc_tooltip_label.setFixedHeight(tip_h)
-        div_h = 1 if tip_h > 0 else 0
-
         visible = min(total_items, MAX_VISIBLE_ITEMS)
-        list_full = visible * ITEM_HEIGHT + divider_count * 1
-        natural = list_full + tip_h + div_h
+        natural = visible * ITEM_HEIGHT + divider_count * 1
 
         budget = self._available_card_budget()
         if natural <= budget:
-            # 正常/高窗口：完整展示 tooltip + 至多 MAX_VISIBLE_ITEMS 项
-            self._set_tooltip_visible(tip_h > 0)
+            # 正常/高窗口：完整展示至多 MAX_VISIBLE_ITEMS 项
             self.setFixedHeight(natural)
+            self._sync_desc_tooltip_position()
             return
 
-        # ── 矮窗口自适应压缩 ──
-        if want_tooltip and tip_h > 0:
-            tip_total = tip_h + div_h
-            # 优先保留 tooltip，仅压缩可见项数量
-            list_budget_with_tip = budget - tip_total
-            if list_budget_with_tip >= ITEM_HEIGHT:
-                visible_fit = max(
-                    CARD_MIN_VISIBLE_ITEMS,
-                    min(total_items, MAX_VISIBLE_ITEMS, list_budget_with_tip // ITEM_HEIGHT),
-                )
-                list_h = visible_fit * ITEM_HEIGHT + divider_count * 1
-                if list_h + tip_total <= budget:
-                    self._set_tooltip_visible(True)
-                    self.setFixedHeight(list_h + tip_total)
-                    return
-            # tooltip 与任何列表都无法共存：隐藏 tooltip，把空间全给列表
-            self._set_tooltip_visible(False)
-            visible_fit = max(
-                CARD_MIN_VISIBLE_ITEMS,
-                min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
-            )
-            self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
-            return
-
-        # 无 tooltip：直接按预算压缩可见项数量
+        # ── 矮窗口自适应压缩：仅压缩可见项数量 ──
         visible_fit = max(
             CARD_MIN_VISIBLE_ITEMS,
             min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
         )
         self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
+        self._sync_desc_tooltip_position()
+
+    def _sync_desc_tooltip_position(self):
+        """卡片几何变化（高度/位置）后，将悬浮气泡重新锚定到卡片上方
+
+        气泡以卡片顶边为锚点，卡片底部固定、高度变化时顶边随之移动，
+        因此需要同步重定位，避免气泡悬空或覆盖卡片。
+        """
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is not None and lbl.isVisible():
+            self._position_desc_tooltip()
 
     def _available_card_budget(self) -> int:
         """命令卡片在矮窗口下允许占用的最大高度（px）
@@ -1141,13 +1225,6 @@ class CommandCard(QWidget):
         budget = top.height() - reserve
         return max(CARD_MIN_HEIGHT, budget)
 
-    def _set_tooltip_visible(self, show: bool):
-        """统一控制顶部描述 tooltip 与其分隔线的可见性"""
-        if getattr(self, "_desc_tooltip_label", None) is not None:
-            self._desc_tooltip_label.setVisible(show)
-        if getattr(self, "_desc_tooltip_divider", None) is not None:
-            self._desc_tooltip_divider.setVisible(show)
-
     def _ensure_window_resize_hook(self):
         """给顶层窗口安装一次性的 resize 事件过滤器，窗口高度变化时按预算重算卡片高度"""
         if self._window_resize_hooked:
@@ -1159,29 +1236,50 @@ class CommandCard(QWidget):
         self._window_resize_hooked = True
 
     def eventFilter(self, obj, event):
-        """监听顶层窗口 resize：高度变化（宽度可能不变，卡片自身收不到 resizeEvent）
-        时按最新预算重算卡片高度，保证矮窗口压缩/放宽实时生效。
+        """监听顶层窗口 resize / move：
+
+        - resize：高度/宽度变化（卡片自身收不到的窗口级 resize）时按最新预算
+          重算卡片高度，并重定位悬浮气泡，保证矮窗口压缩/放宽实时生效。
+        - move：窗口被拖动时，悬浮气泡（独立顶层窗口）需同步跟随重定位。
         """
-        if obj is self.window() and event.type() == QEvent.Resize:
+        if obj is self.window() and event.type() in (QEvent.Resize, QEvent.Move):
             if self._resize_recompute_timer is None:
                 self._resize_recompute_timer = QTimer(self)
                 self._resize_recompute_timer.setSingleShot(True)
                 self._resize_recompute_timer.setInterval(0)
-                self._resize_recompute_timer.timeout.connect(self._apply_list_height)
+                self._resize_recompute_timer.timeout.connect(self._on_window_geom_changed)
             self._resize_recompute_timer.start()
             return False
         return super().eventFilter(obj, event)
 
-    def resizeEvent(self, event):
-        """卡片宽度变化（或首帧布局）时，重算顶部描述 tooltip 高度与卡片总高度。
+    def _on_window_geom_changed(self):
+        """窗口尺寸/位置变化后的统一处理：重算卡片高度 + 重定位悬浮气泡"""
+        self._apply_list_height()
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is not None and lbl.isVisible():
+            self._position_desc_tooltip()
 
-        描述 tooltip 是固定高度、按宽度换行的 QLabel。若卡片宽度改变
-        （如窗口缩放）而 tooltip 高度未同步，换行行数会变但高度不变，
-        导致文字被裁切（首行也可能只显示半截）。此处按宽度变化重算，
-        并同步按矮窗口预算（_available_card_budget）刷新卡片高度。
+    def moveEvent(self, event):
+        """卡片因布局（如底部锚定、高度变化）移动时，将悬浮气泡重新锚定到卡片上方"""
+        super().moveEvent(event)
+        self._sync_desc_tooltip_position()
+
+    def hideEvent(self, event):
+        """卡片隐藏时同步隐藏悬浮气泡（气泡为独立窗口，不会随卡片自动隐藏）"""
+        super().hideEvent(event)
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is not None:
+            lbl.hide()
+
+    def resizeEvent(self, event):
+        """卡片宽度变化（或首帧布局）时，重算并定位悬浮描述气泡 + 刷新卡片总高度。
+
+        悬浮气泡是独立顶层窗口、按宽度换行的 QLabel。若卡片宽度改变
+        （如窗口缩放）而气泡高度未同步，换行行数会变但高度不变，
+        导致文字被裁切（首行也可能只显示半截）。此处按宽度变化重算并定位。
         窗口纯高度变化（宽度不变，卡片自身收不到 resizeEvent）由
         eventFilter 监听顶层窗口 resize 处理。
-        仅当宽度真正变化时才重入 tooltip 重算，避免 setFixedHeight 触发的
+        仅当宽度真正变化时才重入气泡重算，避免 setFixedHeight 触发的
         高度变化再次进入本方法形成自激。
         """
         super().resizeEvent(event)
@@ -1190,13 +1288,12 @@ class CommandCard(QWidget):
         if new_w == getattr(self, "_last_tip_width", -1):
             return
         self._last_tip_width = new_w
-        if (
-            getattr(self, "_desc_tooltip_label", None) is not None
-            and not self._desc_tooltip_label.isHidden()
-        ):
-            self._update_desc_tooltip()
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is not None and lbl.isVisible():
+            # 宽度变化：重新测算气泡换行高度并定位（_position_desc_tooltip 内含重算）
+            self._position_desc_tooltip()
         else:
-            # tooltip 当前因预算被隐藏：仍按新宽度/新预算重算卡片高度
+            # 气泡未显示：仍按新宽度/新预算重算卡片高度
             self._apply_list_height()
 
     def _apply_detail_positional_hint_style(self):
@@ -1352,10 +1449,9 @@ class CommandCard(QWidget):
         # 隐藏列表，显示 detail
         self._scroll_area.setVisible(False)
         self._detail_container.setVisible(True)
-        # detail 模式下隐藏顶部描述 tooltip（detail 自带描述区，无需重复）
-        if hasattr(self, "_desc_tooltip_label") and self._desc_tooltip_label is not None:
+        # detail 模式下隐藏悬浮描述气泡（detail 自带描述区，无需重复）
+        if getattr(self, "_desc_tooltip_label", None) is not None:
             self._desc_tooltip_label.setVisible(False)
-            self._desc_tooltip_divider.setVisible(False)
         self._visible = True
         self.setVisible(True)
 
@@ -2549,10 +2645,9 @@ class CommandCard(QWidget):
         self._reset_detail_mode()
         self._visible = False
         self.setVisible(False)
-        # 关闭时清空 tooltip 文本，避免下次 show_card 闪现旧描述
-        if hasattr(self, "_desc_tooltip_label") and self._desc_tooltip_label is not None:
+        # 关闭时隐藏并清空悬浮气泡文本，避免下次 show_card 闪现旧描述
+        if getattr(self, "_desc_tooltip_label", None) is not None:
             self._desc_tooltip_label.setVisible(False)
-            self._desc_tooltip_divider.setVisible(False)
             self._desc_tooltip_label.setText("")
         self.dismissed.emit()
 
