@@ -367,9 +367,9 @@ def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
     with open(manifest_output, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    print(f"[INFO] 文件数: {manifest['file_count']}")
-    print(f"[INFO] 总大小: {manifest['total_size']:,} 字节 ({manifest['total_size'] / 1024 / 1024:.1f} MB)")
-    print(f"[INFO] 已输出: {manifest_output}")
+    print(f"[INFO] file_count: {manifest['file_count']}")
+    print(f"[INFO] total_size: {manifest['total_size']:,} bytes ({manifest['total_size'] / 1024 / 1024:.1f} MB)")
+    print(f"[INFO] written: {manifest_output}")
 
     # 3. 生成 files.zip（onedir 目录打包）
     zip_path = os.path.join("dist", f"Drifox-{version}-incremental.zip")
