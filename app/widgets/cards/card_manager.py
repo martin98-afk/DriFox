@@ -187,7 +187,10 @@ class CardManager:
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             # 系统卡片激活时，隐藏所有可见的非系统卡片（跨容器），
             # 例如 BOTTOM 容器的 command/file_mention 应随 TOP 容器 settings 打开而关闭
-            self._hide_non_system_cards(window_id)
+            for ct in ContainerType:
+                vid = win_data["visible_cards"].get(ct)
+                if vid and vid not in win_data["system_cards"]:
+                    self.hide_card(vid, window_id)
             # 系统卡片激活，压制非系统卡片
             win_data["suppressed_by_system"] = True
         else:
@@ -351,23 +354,6 @@ class CardManager:
             return
         for container_type in ContainerType:
             self._hide_same_container_cards(window_id, container_type)
-
-    def _hide_non_system_cards(self, window_id: str):
-        """隐藏窗口内所有可见的非系统卡片（跨容器）
-
-        用于系统卡片激活时关闭其他容器的非系统卡片，
-        如 settings（TOP 容器）打开时自动关闭 command/file_mention（BOTTOM 容器）。
-        """
-        if window_id not in self._window_data:
-            return
-        win_data = self._window_data[window_id]
-        for container_type in ContainerType:
-            visible_id = win_data["visible_cards"].get(container_type)
-            if visible_id is None:
-                continue
-            if visible_id in win_data["system_cards"]:
-                continue
-            self.hide_card(visible_id, window_id)
 
     def _hide_same_container_cards(self, window_id: str, container_type: ContainerType, exclude_card_id: str = None):
         """隐藏同容器的所有卡片"""

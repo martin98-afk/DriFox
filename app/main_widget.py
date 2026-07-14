@@ -580,7 +580,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新单例的 parent，确保 InfoBar 显示在正确的父窗口上
         checker = UpdateChecker.get_instance(self)
-        checker.check_update()
+        checker.check_update(silent=True)
 
     def _setup_engine_callbacks(self):
         """设置 ChatEngine 的回调"""

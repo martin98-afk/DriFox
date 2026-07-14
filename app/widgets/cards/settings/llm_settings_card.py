@@ -122,6 +122,7 @@ class ManualUpdateCard(SettingCard):
         self.updateBtn = PrimaryPushButton("检查更新", self)
         self.updateBtn.setFixedWidth(100)
         self.updateBtn.setStyleSheet(ButtonStyles.primary_action())
+        self.updateBtn.setFocusPolicy(Qt.NoFocus)  # 不参与焦点链，防止禁用时焦点转移导致滚动跳转
         self.updateBtn.clicked.connect(self._on_check_update)
         self.hBoxLayout.addWidget(self.updateBtn, 0, Qt.AlignRight)
 
