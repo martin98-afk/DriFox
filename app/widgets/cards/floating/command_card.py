@@ -1030,21 +1030,32 @@ class CommandCard(QWidget):
                     if pos < len(safe):
                         parts.append(safe[pos:])
                     safe = "".join(parts)
+        if self.width() <= 0:
+            # 宽度尚未就绪（首次布局前）：先保存文本和状态，延后到下一轮布局完成再更新可见性。
+            # 此时不设 setVisible(True) / setFixedHeight / _has_tooltip_text，
+            # 避免 _apply_list_height 读到 tip_h=0 错误地隐藏 tooltip，
+            # 同时避免容器以"无 tooltip"的高度展开后，tooltip 位置与实际不符。
+            self._desc_tooltip_label.setText(safe)
+            self._desc_tooltip_label.setVisible(False)
+            self._desc_tooltip_divider.setVisible(False)
+            QTimer.singleShot(0, self._update_desc_tooltip)
+            return
+
+        # 宽度已就绪：立即显示 tooltip，并计算正确高度
         self._desc_tooltip_label.setText(safe)
         self._desc_tooltip_label.setVisible(True)
         self._desc_tooltip_divider.setVisible(True)
-        # 文本更新后重算 tooltip 自然高度（供 _apply_list_height 做矮窗口预算判断），
-        # 再由 _apply_list_height 统一决定 tooltip 可见性与卡片总高度
         tip_h = self._compute_desc_tooltip_height()
         self._has_tooltip_text = True
         self._tooltip_natural_height = tip_h
         if tip_h > 0:
             self._desc_tooltip_label.setFixedHeight(tip_h)
-        if self.width() <= 0:
-            # 宽度尚未就绪（首次布局前）：label 为 Fixed 垂直策略，若不设高度会按单行
-            # sizeHint 折叠导致文字裁切。延后到下一轮布局完成再测算。
-            QTimer.singleShot(0, self._update_desc_tooltip)
         self._apply_list_height()
+        # 显式通知父容器更新高度（即使 setFixedHeight 触发了 resize，
+        # 容器动画运行中可能忽略 resize 事件，导致 tooltip 位置滞后一拍）
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_schedule_expand"):
+            parent._schedule_expand()
 
     def _apply_list_height(self):
         """统一刷新卡片总高度：列表高度 + 顶部描述 tooltip 高度（若可见）

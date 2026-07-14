@@ -225,7 +225,7 @@ class CardContainer(QWidget):
             if skip_anim:
                 self.setMaximumHeight(natural_h)
                 return
-            self._animate_height(current_h, natural_h, on_finished=None)
+            self._animate_height(current_h, natural_h, on_finished=lambda: self._schedule_expand())
         else:
             # ── 折叠：snap 或动画到 0，结束后锁定 maxHeight=0 ──
             # 折叠前 maxHeight 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实 height
