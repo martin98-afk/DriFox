@@ -373,6 +373,9 @@ def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
             dirs[:] = [d for d in dirs if d not in ("__pycache__", ".mypy_cache")]
             for f in files:
                 full = os.path.join(root, f)
+                # 跳过断链符号链接等（post_build_cleanup 删除 .dylib 后残留的 symlink）
+                if not os.path.isfile(full):
+                    continue
                 arcname = os.path.relpath(full, os.path.dirname(dist_final))
                 zf.write(full, arcname)
 
