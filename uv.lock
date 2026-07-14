@@ -370,6 +370,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "html2text" },
     { name = "httpx" },
+    { name = "keyboard" },
     { name = "loguru" },
     { name = "lsprotocol" },
     { name = "markdown" },
@@ -436,6 +437,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "html2text", specifier = ">=2020.1.16" },
     { name = "httpx", specifier = ">=0.25.0" },
+    { name = "keyboard", specifier = ">=0.13.5" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "lsprotocol" },
     { name = "markdown" },
@@ -659,6 +661,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "keyboard"
+version = "0.13.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/79/75/c969f2258e908c39aadfc57d1cb78247dc49e6d36371bb3a48c194640c01/keyboard-0.13.5.zip", hash = "sha256:63ed83305955939ca5c9a73755e5cc43e8242263f5ad5fd3bb7e0b032f3d308b", size = 71798, upload-time = "2020-03-23T21:47:06.614Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/88/287159903c5b3fc6d47b651c7ab65a54dcf9c9916de546188a7f62870d6d/keyboard-0.13.5-py3-none-any.whl", hash = "sha256:8e9c2422f1217e0bd84489b9ecd361027cc78415828f4fe4f88dd4acd587947b", size = 58098, upload-time = "2020-03-23T21:47:05.023Z" },
 ]
 
 [[package]]

@@ -2230,6 +2230,10 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
+        # 🛡️ 截断后发送标志：用户撤销消息后又快速发送新消息时置 True，
+        # 用于 _on_finalize_complete / _on_messages_updated 识别并丢弃旧 worker 的过期回调。
+        self._pending_send_after_truncation = False
+
         # （内置命令已在上方注册）更新命令 --model= 参数描述
         self._update_subagents_param_description()
         self._update_title_gen_param_description()
@@ -9999,7 +10003,6 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.widgets.ui_helpers import (
                 collect_operations_for_round,
                 normalize_lines,
-                read_backup_files,
             )
 
             all_call_ids = self._get_tool_call_ids_in_round(round_index)
@@ -10053,16 +10056,45 @@ class OpenAIChatToolWindow(ToolWindow):
             file_summaries: list[str] = []
 
             for file_key, ops in file_ops.items():
-                # 首操作的备份 = 编辑前的原始内容；尾操作编辑后的内容 = 最终状态
+                # 首操作的备份 = 编辑前的原始内容；末态 = 编辑后的最终内容
                 first_bp = ops[0].get("backup_path", "")
                 last_bp = ops[-1].get("backup_path", "")
+                last_file_path = ops[-1].get("file_path", "") or file_key
+
+                # --- 编辑前内容：直接读首操作的前置备份，不再经 read_backup_files。
+                # read_backup_files 会强制要求首操作的 .after.bak 存在，但此处只需要
+                # old_content，强依赖 .after.bak 属于误伤，会导致本可审查的文件被跳过。---
+                old_content = ""
                 try:
-                    old_content, _, _ = read_backup_files(first_bp)
-                    last_after = str(Path(last_bp).with_suffix(".after.bak"))
-                    with open(last_after, "r", encoding="utf-8", errors="replace") as f:
-                        new_content = f.read()
+                    if first_bp and Path(first_bp).exists():
+                        with open(first_bp, "r", encoding="utf-8", errors="replace") as f:
+                            old_content = f.read()
                 except Exception as exc:
-                    logger.warning(f"[card-review] 跳过文件 {file_key}: 读取备份失败 {exc}")
+                    logger.warning(f"[card-review] 跳过文件 {file_key}: 读取编辑前备份失败 {exc}")
+                    continue
+
+                # --- 编辑后内容：优先读 .after.bak 快照；缺失时回退读磁盘实时文件。
+                # 必须与页脚差异统计 compute_diff_stats 的口径保持一致——后者始终对比
+                # 实时文件，因此 .after.bak 缺失（编辑后备份静默失败/被清理/竞态）时，
+                # 若这里不回退，就会出现“有差异统计却无可审查内容”的不一致。---
+                new_content = None
+                last_after = str(Path(last_bp).with_suffix(".after.bak")) if last_bp else ""
+                try:
+                    if last_after and Path(last_after).exists():
+                        with open(last_after, "r", encoding="utf-8", errors="replace") as f:
+                            new_content = f.read()
+                    elif last_file_path and Path(last_file_path).exists():
+                        with open(last_file_path, "r", encoding="utf-8", errors="replace") as f:
+                            new_content = f.read()
+                        logger.debug(f"[card-review] {file_key}: .after.bak 缺失，回退读实时文件")
+                except Exception as exc:
+                    logger.warning(f"[card-review] 跳过文件 {file_key}: 读取编辑后内容失败 {exc}")
+                    continue
+
+                if new_content is None:
+                    logger.warning(
+                        f"[card-review] 跳过文件 {file_key}: 编辑后内容不可得（.after.bak 与实时文件均缺失）"
+                    )
                     continue
 
                 old_lines = normalize_lines(old_content)
@@ -10787,8 +10819,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_streaming:
             self._on_stop_clicked()
 
-        # 清除截断哨兵，避免拦截新对话的首条响应
-        self._truncation_sentinel = None
+        # 🛡️ 不清除截断哨兵！若此前发生过截断（撤销/删除），哨兵仍然有效，
+        # 可在 event loop 后续处理中拦截旧 worker 的 finished_with_messages 回调（先于
+        # 本函数返回后的 timer 事件到达），防止旧 worker 的过期数据覆盖已截断的会话。
+        # 哨兵将在 _do_deferred_send 中新 worker 启动前被清除（见其内部逻辑）。
+        if self._truncation_sentinel is not None:
+            self._pending_send_after_truncation = True
 
         self._hide_welcome_cards()
 
@@ -10818,6 +10854,19 @@ class OpenAIChatToolWindow(ToolWindow):
         def _do_deferred_send():
             if getattr(self, "_is_destroyed", False):
                 return
+
+            # 🛡️ 不清除截断哨兵！哨兵继续守卫 `_on_messages_updated`，在 event loop
+            # 中拦截旧 worker 延迟到达的 finished_with_messages 回调。新 worker 的消息
+            # 通过 `_on_messages_updated` 中的 `_pending_send_after_truncation` 标志
+            # + 用户消息数比对来识别放行（旧 worker 含截断前的用户，数量多于当前会话）。
+            # 旧 worker 的 finalize 回调（_interrupt_complete）由 `_on_finalize_complete`
+            # 中的同一标志直接丢弃。
+            if self._pending_send_after_truncation:
+                from loguru import logger
+                logger.debug(
+                    "[DeferredSend] _pending_send_after_truncation=True，哨兵持续保护中"
+                )
+
             # 关键修复：确保 ToolExecutor 使用正确的 session_id
             if session and self.backend.tool_executor:
                 self.backend.set_session_context(session.session_id)
@@ -12311,16 +12360,69 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注意：不清除哨兵，由 _on_finalize_complete 负责清除；
         # 若提前清除，_on_finalize_complete 的哨兵检查会失效，
         # 导致其调用 _on_messages_updated(interrupted_messages) 覆盖正确截断的会话。
+        #
+        # ⚠️ 当 _pending_send_after_truncation 为 True（截断后又发送了新消息），
+        # 新 worker 的消息也会被哨兵拦截。此时通过比较用户消息数来区分：
+        #   旧 worker → incoming_users > current_users（含截断掉的用户消息）
+        #   新 worker → incoming_users ≤ current_users（不包含截断掉的用户消息）
         sentinel = self._truncation_sentinel
         if sentinel and sentinel.get("session_id") == session.session_id:
-            from loguru import logger
+            # 如果截断后发送了新消息，检查这是否是新 worker
+            if self._pending_send_after_truncation:
+                incoming_users = sum(
+                    1 for m in messages if m.get("role") == "user" and not m.get("_hook_event")
+                )
+                current_users = sum(
+                    1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
+                )
+                if incoming_users > current_users:
+                    from loguru import logger
 
-            logger.warning(
-                "[MessagesUpdated] 检测到截断哨兵，丢弃 worker 返回的过期消息："
-                f"worker_len={len(messages)}, current_len={len(session.messages)}, "
-                f"session_id={session.session_id[:8]}"
+                    logger.warning(
+                        "[MessagesUpdated] 哨兵拦截 + pending_send：旧 worker 的过期消息（用户数更多），丢弃："
+                        f"incoming_users={incoming_users}, current_users={current_users}"
+                    )
+                    return  # 旧 worker，丢弃
+                # 新 worker：清除哨兵 + 标志，继续处理
+                from loguru import logger
+
+                logger.info(
+                    "[MessagesUpdated] 哨兵拦截 + pending_send：新 worker 消息到达，放行并清除哨兵："
+                    f"incoming_users={incoming_users}, current_users={current_users}"
+                )
+                self._truncation_sentinel = None
+                self._pending_send_after_truncation = False
+                # 继续下面的正常处理
+            else:
+                from loguru import logger
+
+                logger.warning(
+                    "[MessagesUpdated] 检测到截断哨兵，丢弃 worker 返回的过期消息："
+                    f"worker_len={len(messages)}, current_len={len(session.messages)}, "
+                    f"session_id={session.session_id[:8]}"
+                )
+                return
+
+        # 🛡️ 截断后发送标志落下但哨兵已被旧 worker 的 _on_finalize_complete 消耗（罕见）：
+        # 旧 worker 的 finished_with_messages 仍可能在长阻塞后到达。
+        # 通过比较用户消息数识别：旧 worker 含截断前的用户消息（数量多于当前会话）。
+        if self._pending_send_after_truncation:
+            incoming_users = sum(
+                1 for m in messages if m.get("role") == "user" and not m.get("_hook_event")
             )
-            return
+            current_users = sum(
+                1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
+            )
+            if incoming_users > current_users:
+                from loguru import logger
+
+                logger.warning(
+                    "[MessagesUpdated] 检测到旧 worker 的过期消息（用户数更多），丢弃："
+                    f"incoming_users={incoming_users}, current_users={current_users}"
+                )
+                return
+            # 新 worker，清除标志继续处理
+            self._pending_send_after_truncation = False
 
         self._history_preview_messages = None
         # 注意：preserve_compaction=False
@@ -14247,6 +14349,22 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"session_id={current_session.session_id[:8]}"
             )
             self._persist_stop_elapsed()  # 只写 elapsed，不 save
+            return
+
+        # 🛡️ 截断后发送标志：用户撤销消息后快速发送了新消息，
+        # 旧 worker 的 finalize 回调是过期数据，必须丢弃（哨兵已被 _do_deferred_send 清除）。
+        if self._pending_send_after_truncation:
+            self._pending_send_after_truncation = False
+            if current_session and current_session.messages:
+                logger.warning(
+                    "[FinalizeStop] 检测到截断后发送标志，丢弃旧 worker 的 finalize 回调："
+                    f"worker_len={len(interrupted_messages) if interrupted_messages else 0}, "
+                    f"current_len={len(current_session.messages)}"
+                )
+                self._persist_stop_elapsed()  # 只写 elapsed，不 save
+            if self.history_manager:
+                self._save_current_session_to_history()
+                self.history_manager.flush()
             return
 
         if interrupted_messages:
