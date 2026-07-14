@@ -12633,31 +12633,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._pending_send_after_truncation = False
             self._pending_send_user_text = None
 
-        # 🛡️ 截断二次防御：在 sentinel 已被消耗（如上方的 _on_finalize_complete
-        # 清除了哨兵）后，on_messages_updated 中 sentinel 检查失效。
-        # 此时通过比较消息长度做前缀匹配，识别并丢弃旧 worker 的过期消息。
-        # 规则：若 incoming 消息数 > 当前 session 消息数，且当前 session
-        # 是 incoming 的前缀（当前消息都在 incoming 中），说明 incoming 包含
-        # 已被截断/删除的旧消息 → 丢弃。
-        if len(messages) > len(session.messages) and session.messages:
-            _current_len = len(session.messages)
-            _is_prefix = True
-            for i in range(_current_len):
-                curr = session.messages[i]
-                inci = messages[i]
-                # 快速比较：role 不同或内容不同 → 不是前缀
-                if curr.get("role") != inci.get("role"):
-                    _is_prefix = False
-                    break
-            if _is_prefix:
-                from loguru import logger
-
-                logger.warning(
-                    "[MessagesUpdated] 二次防御：旧 worker 消息（前缀匹配），丢弃："
-                    f"incoming={len(messages)}, current={_current_len}"
-                )
-                return
-
+        # 哨兵+user_count 已在上方完成过期消息拦截，正常流到此处的
+        # messages 为合法的新 worker 消息，直接更新 session。
         self._history_preview_messages = None
         # 注意：preserve_compaction=False
         # worker 送回来的 current_session_messages 是原始未压缩消息，
@@ -14576,13 +14553,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         current_session = self.session_manager.get_current_session()
         sentinel = self._truncation_sentinel
-        # 无论后续走哪条分支，截断哨兵是单次使用的，进来立即清空，
-        # 避免后续异步 finalize 重复误判。
-        self._truncation_sentinel = None
 
         # 截断命中：用户在 finalize 期间发生了删除/截断。
         # Worker 送回的快照可能污染已截断的正确状态，必须丢弃。
-        # 但仍然补一次 _persist_stop_elapsed，否则 stop 时长统计会丢（修复前是 bug）。
+        # 🛡️ 关键修复：不清空哨兵！让其继续守卫，防止旧 worker 的
+        # _on_messages_updated 回调晚到并覆盖已截断的 session。
+        # 哨兵将由 _on_messages_updated 识别出新 worker 时清空，
+        # 或由下一个 _on_send_clicked 清零。
         if sentinel and current_session and sentinel.get("session_id") == current_session.session_id:
             logger.warning(
                 "[FinalizeStop] 检测到截断哨兵，丢弃覆盖以保护会话状态："
@@ -14593,9 +14570,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._persist_stop_elapsed()  # 只写 elapsed，不 save
             return
 
+        # 未命中截断：安全清空哨兵，允许后续逻辑正常执行
+        self._truncation_sentinel = None
+
         # 🛡️ 截断后发送标志：用户撤销消息后快速发送了新消息，
         # 旧 worker 的 finalize 回调是过期数据，必须丢弃。
-        # 哨兵已在本函数开头被清空（_truncation_sentinel = None），或由先到的
+        # 哨兵已在上面被安全清空（未命中截断），或由先到的
         # _on_messages_updated 在识别出新 worker 时已清除。
         #
         # 守护场景：_on_messages_updated 中 sentinel 被其他旧 worker 消耗

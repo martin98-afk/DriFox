@@ -641,7 +641,7 @@ class DiffHtmlGenerator:
 
         tree_html = ""
         blocks_html = ""
-        preload_n = 1 if lazy_load and total_files > 1 else total_files
+        preload_n = total_files
         files_meta = cls._gen_files_meta(files)
 
         for i, fi in enumerate(files):
