@@ -339,31 +339,39 @@ def _get_version() -> str:
 
 def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
     """生成 manifest.json 和 files.zip，供增量更新使用。"""
-    import subprocess as sp
+    import json
     import zipfile
 
     print(f"[Build] Generating manifest for version {version}...")
 
-    # 1. 生成 manifest.json
-    manifest_script = os.path.join(base_dir, "scripts", "generate_manifest.py")
-    manifest_output = os.path.join("dist", f"Drifox-{version}-manifest.json")
+    # 1. 直接导入 generate_manifest 模块调用，避免子进程跨平台路径问题
+    scripts_dir = os.path.join(base_dir, "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
 
-    if os.path.exists(manifest_script):
-        result = sp.run(
-            [sys.executable, manifest_script, dist_final, version, "-o", manifest_output],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            print(result.stdout)
-        else:
-            print(f"[Build] Manifest generation failed: {result.stderr}")
-            return
-    else:
-        print("[Build] generate_manifest.py not found, skipping manifest generation")
+    try:
+        import generate_manifest as gm  # noqa: F811
+    except ImportError as e:
+        print(f"[Build] generate_manifest module not found: {e}, skipping manifest generation")
         return
 
-    # 2. 生成 files.zip（onedir 目录打包）
+    try:
+        manifest = gm.generate_manifest(dist_final, version)
+    except Exception as e:
+        print(f"[Build] Manifest generation failed: {e}")
+        return
+
+    # 2. 写入 manifest.json
+    manifest_output = os.path.join("dist", f"Drifox-{version}-manifest.json")
+    os.makedirs(os.path.dirname(manifest_output) or ".", exist_ok=True)
+    with open(manifest_output, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    print(f"[INFO] 文件数: {manifest['file_count']}")
+    print(f"[INFO] 总大小: {manifest['total_size']:,} 字节 ({manifest['total_size'] / 1024 / 1024:.1f} MB)")
+    print(f"[INFO] 已输出: {manifest_output}")
+
+    # 3. 生成 files.zip（onedir 目录打包）
     zip_path = os.path.join("dist", f"Drifox-{version}-incremental.zip")
     print(f"[Build] Creating {zip_path}...")
 
