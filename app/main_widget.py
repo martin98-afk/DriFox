@@ -2233,6 +2233,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 截断后发送标志：用户撤销消息后又快速发送新消息时置 True，
         # 用于 _on_finalize_complete / _on_messages_updated 识别并丢弃旧 worker 的过期回调。
         self._pending_send_after_truncation = False
+        self._pending_send_user_text = None  # 截断后发送的用户消息文本（用于指纹比对）
 
         # （内置命令已在上方注册）更新命令 --model= 参数描述
         self._update_subagents_param_description()
@@ -8094,6 +8095,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._show_initial_welcome()
             logger.info("[DEBUG-diagnose-welcome] After _show_initial_welcome")
             self._refresh_context_usage_indicator()
+            # 会话被删/撤销至空：此分支不经过 _update_node_preview，需显式刷新
+            # 历史问题徽章，否则徽章会残留删除前的旧计数（count=0 时应隐藏）。
+            self._update_history_questions_badge()
             return
 
         logger.info("[DEBUG-diagnose-welcome] Session is NOT empty, skipping welcome card")
@@ -9391,6 +9395,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新视图
         self._invalidate_current_session_card_cache()
         self._display_current_session()
+
+        # 恢复后消息数变化，显式刷新历史问题徽章（不依赖 _display_current_session
+        # 的内部分支路由，保证 badge 计数与恢复后的会话一致）
+        self._update_history_questions_badge()
 
         # 确保用户看到恢复后的最后一条消息
         QTimer.singleShot(200, self._scroll_to_bottom)
@@ -10825,6 +10833,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 哨兵将在 _do_deferred_send 中新 worker 启动前被清除（见其内部逻辑）。
         if self._truncation_sentinel is not None:
             self._pending_send_after_truncation = True
+            # 保存用户消息文本指纹，用于后续区分新旧 worker 的消息
+            # （当新旧 worker 用户消息数相同时，通过检查消息是否包含此文本来识别）
+            self._pending_send_user_text = user_text
 
         self._hide_welcome_cards()
 
@@ -10858,14 +10869,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ 不清除截断哨兵！哨兵继续守卫 `_on_messages_updated`，在 event loop
             # 中拦截旧 worker 延迟到达的 finished_with_messages 回调。新 worker 的消息
             # 通过 `_on_messages_updated` 中的 `_pending_send_after_truncation` 标志
-            # + 用户消息数比对来识别放行（旧 worker 含截断前的用户，数量多于当前会话）。
+            # + 用户消息数比对 / 文本指纹来识别放行（旧 worker 含截断前的用户消息，
+            # 数量多于当前会话；数量相等时通过检查是否含新发文本来判断）。
             # 旧 worker 的 finalize 回调（_interrupt_complete）由 `_on_finalize_complete`
             # 中的同一标志直接丢弃。
-            if self._pending_send_after_truncation:
-                from loguru import logger
-                logger.debug(
-                    "[DeferredSend] _pending_send_after_truncation=True，哨兵持续保护中"
-                )
 
             # 关键修复：确保 ToolExecutor 使用正确的 session_id
             if session and self.backend.tool_executor:
@@ -12326,6 +12333,26 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._update_node_preview()
 
+    @staticmethod
+    def _count_user_messages(messages: List[Dict]) -> int:
+        """统计非 hook 的用户消息数量（用于截断后新旧 worker 识别）"""
+        return sum(1 for m in messages if m.get("role") == "user" and not m.get("_hook_event"))
+
+    @staticmethod
+    def _contains_user_text(messages: List[Dict], text: str) -> bool:
+        """检查消息列表中是否包含指定文本的用户消息（用于文本指纹比对）"""
+        for msg in messages:
+            if msg.get("role") != "user" or msg.get("_hook_event"):
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and content == text:
+                return True
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text" and part.get("text") == text:
+                        return True
+        return False
+
     def _on_messages_updated(self, messages: List[Dict[str, Any]]):
         # 🛡️ 关闭窗口路径守护：强制停止后 closeEvent 同步清理 backend，
         # 跨线程 queued 的 finished_with_messages 可能在 widget 已 _is_destroyed 后才被
@@ -12356,33 +12383,46 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session:
             return
 
-        # 🛡️ 检查截断哨兵：若在 worker 运行期间发生了删除/截断，丢弃 worker 的过期数据
-        # 注意：不清除哨兵，由 _on_finalize_complete 负责清除；
-        # 若提前清除，_on_finalize_complete 的哨兵检查会失效，
-        # 导致其调用 _on_messages_updated(interrupted_messages) 覆盖正确截断的会话。
+        # 🛡️ 截断保护：old worker 过期消息识别与丢弃
         #
-        # ⚠️ 当 _pending_send_after_truncation 为 True（截断后又发送了新消息），
-        # 新 worker 的消息也会被哨兵拦截。此时通过比较用户消息数来区分：
-        #   旧 worker → incoming_users > current_users（含截断掉的用户消息）
-        #   新 worker → incoming_users ≤ current_users（不包含截断掉的用户消息）
+        # 截断哨兵（_truncation_sentinel）：由 _persist_session_after_mutation 在截断时设置，
+        # 拦截 old worker 延迟到达的 finished_with_messages 回调。哨兵由 _on_finalize_complete
+        # 负责清除（单次使用），此处只读取不修改。
+        #
+        # pending_send 标志（_pending_send_after_truncation）：截断后用户在 old worker 结束前
+        # 发送了新消息时置 True。此时 new worker（W2）的消息也会被哨兵拦截，通过以下两层区分：
+        #   第1层：用户消息数比对 — old worker 含截断前消息，数量通常多于当前会话
+        #   第2层：文本指纹比对 — 数量相等时（截断1条+新发1条），检查消息列表是否含新发文本
         sentinel = self._truncation_sentinel
+
         if sentinel and sentinel.get("session_id") == session.session_id:
-            # 如果截断后发送了新消息，检查这是否是新 worker
             if self._pending_send_after_truncation:
-                incoming_users = sum(
-                    1 for m in messages if m.get("role") == "user" and not m.get("_hook_event")
-                )
-                current_users = sum(
-                    1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
-                )
+                # === 哨兵拦截 + pending_send：检查是 old worker 还是 new worker ===
+                incoming_users = self._count_user_messages(messages)
+                current_users = self._count_user_messages(session.messages)
+
+                # 第1层：用户数更多 → 含截断前消息 → old worker
                 if incoming_users > current_users:
                     from loguru import logger
 
                     logger.warning(
-                        "[MessagesUpdated] 哨兵拦截 + pending_send：旧 worker 的过期消息（用户数更多），丢弃："
+                        "[MessagesUpdated] 哨兵拦截 + pending_send：旧 worker（用户数更多），丢弃："
                         f"incoming_users={incoming_users}, current_users={current_users}"
                     )
-                    return  # 旧 worker，丢弃
+                    return
+
+                # 第2层：用户数相等 → 可能截断1条后新发1条，新旧用户数相同
+                # 通过文本指纹判断消息列表是否包含新发的用户文本
+                if incoming_users == current_users and self._pending_send_user_text is not None:
+                    if not self._contains_user_text(messages, self._pending_send_user_text):
+                        from loguru import logger
+
+                        logger.warning(
+                            "[MessagesUpdated] 哨兵拦截 + pending_send：旧 worker（等用户数+缺新文本），丢弃："
+                            f"incoming_users={incoming_users}"
+                        )
+                        return
+
                 # 新 worker：清除哨兵 + 标志，继续处理
                 from loguru import logger
 
@@ -12392,7 +12432,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 self._truncation_sentinel = None
                 self._pending_send_after_truncation = False
-                # 继续下面的正常处理
+                self._pending_send_user_text = None
             else:
                 from loguru import logger
 
@@ -12403,26 +12443,36 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 return
 
-        # 🛡️ 截断后发送标志落下但哨兵已被旧 worker 的 _on_finalize_complete 消耗（罕见）：
-        # 旧 worker 的 finished_with_messages 仍可能在长阻塞后到达。
-        # 通过比较用户消息数识别：旧 worker 含截断前的用户消息（数量多于当前会话）。
-        if self._pending_send_after_truncation:
-            incoming_users = sum(
-                1 for m in messages if m.get("role") == "user" and not m.get("_hook_event")
-            )
-            current_users = sum(
-                1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
-            )
+        elif self._pending_send_after_truncation:
+            # === 哨兵已被 old worker 的 _on_finalize_complete 消耗（罕见路径）===
+            # old worker 的 finished_with_messages 在长阻塞后延迟到达。
+            incoming_users = self._count_user_messages(messages)
+            current_users = self._count_user_messages(session.messages)
+
+            # 第1层：用户数更多 → old worker
             if incoming_users > current_users:
                 from loguru import logger
 
                 logger.warning(
-                    "[MessagesUpdated] 检测到旧 worker 的过期消息（用户数更多），丢弃："
+                    "[MessagesUpdated] 哨兵已消耗 + pending_send：旧 worker（用户数更多），丢弃："
                     f"incoming_users={incoming_users}, current_users={current_users}"
                 )
                 return
-            # 新 worker，清除标志继续处理
+
+            # 第2层：用户数相等 + 缺新文本 → old worker
+            if incoming_users == current_users and self._pending_send_user_text is not None:
+                if not self._contains_user_text(messages, self._pending_send_user_text):
+                    from loguru import logger
+
+                    logger.warning(
+                        "[MessagesUpdated] 哨兵已消耗 + pending_send：旧 worker（等用户数+缺新文本），丢弃："
+                        f"incoming_users={incoming_users}"
+                    )
+                    return
+
+            # 新 worker：清除标志，继续处理
             self._pending_send_after_truncation = False
+            self._pending_send_user_text = None
 
         self._history_preview_messages = None
         # 注意：preserve_compaction=False
@@ -14352,9 +14402,16 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 🛡️ 截断后发送标志：用户撤销消息后快速发送了新消息，
-        # 旧 worker 的 finalize 回调是过期数据，必须丢弃（哨兵已被 _do_deferred_send 清除）。
+        # 旧 worker 的 finalize 回调是过期数据，必须丢弃。
+        # 哨兵已在本函数开头被清空（_truncation_sentinel = None），或由先到的
+        # _on_messages_updated 在识别出新 worker 时已清除。
+        #
+        # 守护场景：_on_messages_updated 中 sentinel 被其他旧 worker 消耗
+        # （非本 finalize 对应的 worker）但 _pending_send_after_truncation 仍为 True，
+        # 此时需丢弃本 finalize 的过期数据。
         if self._pending_send_after_truncation:
             self._pending_send_after_truncation = False
+            self._pending_send_user_text = None
             if current_session and current_session.messages:
                 logger.warning(
                     "[FinalizeStop] 检测到截断后发送标志，丢弃旧 worker 的 finalize 回调："
