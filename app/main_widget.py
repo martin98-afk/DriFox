@@ -1734,6 +1734,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "compact": self._handle_compact_command,
             "todos": self._handle_todos_command,
             "team": self._handle_team_command,
+            "toggle-window": self._handle_toggle_window_command,
+            "clear": self._handle_clear_command,
         }
 
         # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
@@ -2860,6 +2862,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
         self._clear_command_shortcuts()
 
+        from PyQt5.QtCore import Qt
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
@@ -2869,7 +2872,10 @@ class OpenAIChatToolWindow(ToolWindow):
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
+                    # toggle-window 设为 ApplicationShortcut，窗口隐藏时仍能唤醒
+                    context = Qt.ApplicationShortcut if cmd_def.name == "toggle-window" else Qt.WindowShortcut
                     qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                    qs.setContext(context)
                     name = cmd_def.name
 
                     def _on_shortcut(n=name):
@@ -11344,6 +11350,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _handle_toggle_window_command(self, args: str):
+        """/toggle-window 命令：切换窗口隐藏/显示"""
+        win = self.window()  # 获取 ToolPopupDialog 顶层窗口
+        if win and win.isVisible():
+            win.hide()
+        elif win:
+            win.show()
+            win.activateWindow()
+            win.raise_()
+
+    def _handle_clear_command(self, args: str):
+        """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
+        self._on_clear_shortcut()
 
     def _update_subagents_param_description(self):
         """更新 /subagents 命令的 --model= 参数描述，反映当前默认值"""

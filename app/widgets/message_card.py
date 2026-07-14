@@ -5002,8 +5002,8 @@ class MessageCard(SimpleCardWidget):
                 "side": "left",
             },
             "user": {
-                "avatar": "你",
-                "title": "你",
+                "avatar": "User",
+                "title": "User",
                 "subtitle": "Prompt",
                 "bg": Colors.USER_CARD_BG,
                 "border": "none",
