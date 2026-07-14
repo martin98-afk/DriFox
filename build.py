@@ -2,6 +2,7 @@
 import os
 import platform
 import shutil
+import sys
 from pathlib import Path
 
 import PyInstaller.__main__
@@ -345,7 +346,7 @@ def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
 
     # 1. 生成 manifest.json
     manifest_script = os.path.join(base_dir, "scripts", "generate_manifest.py")
-    manifest_output = os.path.join("dist", f"Drifox_{version}_manifest.json")
+    manifest_output = os.path.join("dist", f"Drifox-{version}-manifest.json")
 
     if os.path.exists(manifest_script):
         result = sp.run(
@@ -363,7 +364,7 @@ def _generate_manifest_and_zip(dist_final: str, version: str) -> None:
         return
 
     # 2. 生成 files.zip（onedir 目录打包）
-    zip_path = os.path.join("dist", f"Drifox_{version}_files.zip")
+    zip_path = os.path.join("dist", f"Drifox-{version}-incremental.zip")
     print(f"[Build] Creating {zip_path}...")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
