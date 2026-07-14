@@ -2862,7 +2862,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
         self._clear_command_shortcuts()
 
-        from PyQt5.QtCore import Qt
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
@@ -2872,10 +2871,11 @@ class OpenAIChatToolWindow(ToolWindow):
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
-                    # toggle-window 设为 ApplicationShortcut，窗口隐藏时仍能唤醒
-                    context = Qt.ApplicationShortcut if cmd_def.name == "toggle-window" else Qt.WindowShortcut
                     qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
-                    qs.setContext(context)
+                    # toggle-window 设为 ApplicationShortcut (1)，窗口隐藏时仍能唤醒
+                    if cmd_def.name == "toggle-window":
+                        qs.setContext(1)
+
                     name = cmd_def.name
 
                     def _on_shortcut(n=name):
