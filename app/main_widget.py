@@ -1484,7 +1484,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return div
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setContentsMargins(1, 1, 8, 1)
         layout.setSpacing(0)
 
         # 创建卡片容器

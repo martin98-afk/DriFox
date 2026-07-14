@@ -998,6 +998,7 @@ class CommandCard(QWidget):
         lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.NoTextInteraction)
+        lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)  # 顶部对齐，避免 VCenter 平分多余空间导致上下 padding 不均
         shadow = QGraphicsDropShadowEffect(lbl)
         shadow.setBlurRadius(14)
         shadow.setOffset(0, 3)
@@ -1078,9 +1079,9 @@ class CommandCard(QWidget):
         else:
             doc.setPlainText(text)
         doc.setTextWidth(inner_w)
-        text_h = int(doc.size().height())
-        # 上下 margin(6+6) + 上下 padding(6+6) = 24px；+2 作为子像素安全余量，避免裁切
-        total = 24 + text_h + 2
+        text_h = round(doc.size().height())
+        # 上下 margin(6+6) + 上下 padding(6+6) = 24px
+        total = 24 + text_h
         if max_lines and max_lines > 0:
             fm = self._desc_tooltip_label.fontMetrics()
             line_h = fm.lineSpacing()
