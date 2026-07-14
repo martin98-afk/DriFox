@@ -4557,16 +4557,24 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_footer_model_label_clicked(self, provider_name: str, model_name: str):
         """用户点击消息卡片页脚的模型标签 — 自动切换为对应的服务商和模型"""
-        # 查找匹配的 config_id
+        # 🛡️ 优先使用卡片存储的精确 config_id（UUID），
+        # 解决多服务商同名时 display_name 匹配到错误配置的问题。
+        sender = self.sender()
+        precise_config_id = getattr(sender, "_provider_config_id", None) if sender else None
+
         config_id = None
-        for cid, info in self._valid_configs.items():
-            info_display = info.get("display_name", info.get("provider_name", cid))
-            if info_display == provider_name:
-                config_id = cid
-                break
-            if info.get("provider_name") == provider_name:
-                config_id = cid
-                break
+        if precise_config_id and precise_config_id in self._valid_configs:
+            config_id = precise_config_id
+
+        if not config_id:
+            for cid, info in self._valid_configs.items():
+                info_display = info.get("display_name", info.get("provider_name", cid))
+                if info_display == provider_name:
+                    config_id = cid
+                    break
+                if info.get("provider_name") == provider_name:
+                    config_id = cid
+                    break
 
         if not config_id:
             # 尝试直接作为 config_id 查找
@@ -7857,13 +7865,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 if role == "assistant":
                     provider_name = batch[0].get("provider_name")
                     effective_model_name = model_name
+                    history_config_id = batch[0].get("config_id")
                 else:
                     provider_name = None
                     effective_model_name = model_name  # 可能在前面已从 assistant 消息提取
+                    history_config_id = None
                     for m in batch:
                         if m.get("role") == "assistant":
                             if m.get("provider_name"):
                                 provider_name = m["provider_name"]
+                            if m.get("config_id"):
+                                history_config_id = m["config_id"]
                             if not effective_model_name and m.get("model_name"):
                                 effective_model_name = m["model_name"]
                             break
@@ -7874,6 +7886,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     round_index=round_index,
                     model_name=effective_model_name,
                     provider_name=provider_name,
+                    config_id=history_config_id,
                 )
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
@@ -8632,6 +8645,7 @@ class OpenAIChatToolWindow(ToolWindow):
         round_index: Optional[int] = None,
         model_name: str = None,
         provider_name: str = None,
+        config_id: str = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
@@ -8686,6 +8700,7 @@ class OpenAIChatToolWindow(ToolWindow):
             round_index=(round_index if round_index is not None else self._current_assistant_round_index),
             model_name=model_name,
             provider_name=provider_name,
+            config_id=config_id,
             on_action=self._on_code_action,
             on_context_action=on_context_action,
             on_tool_diff=self._on_tool_diff_requested,
@@ -11063,6 +11078,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
+            config_id=self._current_provider_name,
         )
 
         # 先设置当前卡片（必须在 send_message 之前，否则回调触发时 _current_assistant_card 为 None）
@@ -11138,10 +11154,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._is_streaming = True
-        self._response_start_time = time.time()
+        # 🛡️ 不覆盖首次设置的 _response_start_time（_on_send_clicked 已设），
+        # 避免多个 worker 迭代（如工具执行后重开 API 调用）时耗时被重置。
+        if self._response_start_time is None:
+            self._response_start_time = time.time()
         self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
-            self._current_assistant_card.start_elapsed_tracking()
+            # 🛡️ 只在尚未开始计时时启动，避免重复调用重置计数器。
+            if self._current_assistant_card._elapsed_start_time is None:
+                self._current_assistant_card.start_elapsed_tracking()
         self._accumulated_content = ""
         # 每个新的流式轮次清空工具结果去重集合
         self._processed_tool_result_ids: set = set()
@@ -12040,6 +12061,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 创建助手消息卡片（用于接收 LLM 的流式响应）
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
+            config_id=self._current_provider_name,
         )
 
         # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
@@ -12241,7 +12263,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 解析当前服务商显示名称
                 config = self._valid_configs.get(self._current_provider_name, {})
                 current_provider_name = config.get("display_name", self._current_provider_name)
-                self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
+                self._current_assistant_card.set_model_name(
+                    current_model_name, provider_name=current_provider_name,
+                    config_id=self._current_provider_name,
+                )
                 # 🛡️ 只更新最后一条 assistant 消息的模型元信息。
                 # 不再批量回填所有缺失 provider_name 的旧消息（会错误地把旧消息
                 # 指向当前服务商），由 _auto_save_current_session 在落库前统一
@@ -12253,6 +12278,8 @@ class OpenAIChatToolWindow(ToolWindow):
                             msg["model_name"] = current_model_name
                             if not msg.get("provider_name"):
                                 msg["provider_name"] = current_provider_name
+                            if not msg.get("config_id"):
+                                msg["config_id"] = self._current_provider_name
                             break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
@@ -12708,12 +12735,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
         # 清空缓存让下一次 ContextBudgetAllocator 从原始消息正确重新压缩。
 
-        # ⚠️ 写入 elapsed 必须在 set_messages 之前：set_messages 内部 consolidate
+        # ⚠️ 写入 elapsed 和 config_id 必须在 set_messages 之前：set_messages 内部 consolidate
         # 会创建新 dict，之后修改参数 messages 不会反映到 session.messages
         if self._response_start_time is not None:
             for msg in reversed(messages):
-                if msg.get("role") == "assistant" and "elapsed" not in msg:
-                    msg["elapsed"] = round(time.time() - self._response_start_time, 1)
+                if msg.get("role") == "assistant":
+                    if "elapsed" not in msg:
+                        msg["elapsed"] = round(time.time() - self._response_start_time, 1)
+                    if not msg.get("config_id") and self._current_provider_name:
+                        msg["config_id"] = self._current_provider_name
                     break
 
         session.set_messages(messages or [], preserve_compaction=False)
@@ -12789,8 +12819,11 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.session_manager.get_current_session()
             if session and session.messages:
                 for msg in reversed(session.messages):
-                    if msg.get("role") == "assistant" and "elapsed" not in msg:
-                        msg["elapsed"] = round(elapsed, 1)
+                    if msg.get("role") == "assistant":
+                        if "elapsed" not in msg:
+                            msg["elapsed"] = round(elapsed, 1)
+                        if not msg.get("config_id") and self._current_provider_name:
+                            msg["config_id"] = self._current_provider_name
                         break
             self._response_start_time = None
 
@@ -14556,8 +14589,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session or not session.messages:
             return
         for msg in reversed(session.messages):
-            if msg.get("role") == "assistant" and "elapsed" not in msg:
-                msg["elapsed"] = round(self._stop_elapsed, 1)
+            if msg.get("role") == "assistant":
+                if "elapsed" not in msg:
+                    msg["elapsed"] = round(self._stop_elapsed, 1)
+                if not msg.get("config_id") and self._current_provider_name:
+                    msg["config_id"] = self._current_provider_name
                 break
 
     def _apply_interrupted_messages_to_session(self, interrupted_messages: List[Dict[str, Any]]) -> bool:

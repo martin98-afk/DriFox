@@ -37,6 +37,7 @@ def _fix_findstr_pipe(command: str) -> str:
     → findstr /n /c:"mousePressEvent" /c:"mouseReleaseEvent" file
 
     注意：re.search 而非 re.match，以支持管道和复合命令中的 findstr。
+    正则支持 \\" 转义引号，避免遇到 \\"elapsed\\" 时提前截断。
     """
     if sys.platform != "win32":
         return command
@@ -45,7 +46,8 @@ def _fix_findstr_pipe(command: str) -> str:
     if "/c:" in command:
         return command
 
-    FINDSTR_RE = re.compile(r'(findstr\s+(?:\S+\s+)*)"([^"]+)"', re.IGNORECASE)
+    # 匹配 findstr [flags] "pattern" — 支持 \" 转义引号
+    FINDSTR_RE = re.compile(r'(findstr\s+(?:\S+\s+)*)"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
     m = FINDSTR_RE.search(command)
     if not m:
         return command
@@ -58,7 +60,11 @@ def _fix_findstr_pipe(command: str) -> str:
         return command
 
     parts = pattern.split("|")
-    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{p}"' for p in parts) + suffix
+    # cmd.exe 中双引号内 " 需要写成 "" ，重建 /c:"..." 时做转义
+    def _cmd_escape(s: str) -> str:
+        return s.replace('"', '""')
+
+    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{_cmd_escape(p)}"' for p in parts) + suffix
     logger.debug(f"[Bash] findstr pipe fix: {command[:80]}... → {rebuilt[:80]}...")
     return rebuilt
 
@@ -398,18 +404,31 @@ class BackgroundTask:
             self.output_buffer = self.output_buffer[-5000:]
 
 
-def _prepare_windows_encoding(command: str) -> str:
+def _prepare_windows_encoding(command: str, workdir: Optional[Path] = None) -> str:
     """Windows 上设置 UTF-8 编码前缀（仅当需要 shell=True 路径时使用）
 
     通过 chcp 65001 将 cmd.exe 代码页切换为 UTF-8，确保内置命令（dir/type 等）
     输出 UTF-8 而非 GBK。
 
+    如果项目有 .venv，将其 Scripts 目录加入 PATH 前缀，解决 Windows App
+    Execution Alias（WindowsApps 下的 python.exe）在 cmd.exe 中无法解析的问题。
+
     注意：只重定向 stdout 到 NUL，保留 stderr。如果 chcp 失败（如无控制台），
     stderr 可被捕获，且 execute_bash 会检查 returncode 报告错误。
     """
-    if sys.platform == "win32":
-        return f"chcp 65001 >nul && {command}"
-    return command
+    if sys.platform != "win32":
+        return command
+
+    prefix = "chcp 65001 >nul"
+
+    # 将项目 .venv/Scripts 加入 PATH 前缀，确保 python/pip 等在 cmd.exe 中可解析
+    if workdir:
+        venv_scripts = workdir / ".venv" / "Scripts"
+        if venv_scripts.is_dir():
+            vs = str(venv_scripts).replace("\\", "/")
+            prefix += f' && set "PATH={vs};%PATH%"'
+
+    return f"{prefix} && {command}"
 
 
 class BackgroundTaskManager:
@@ -463,7 +482,7 @@ class BackgroundTaskManager:
 
             if use_shell:
                 # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
-                cmd = _prepare_windows_encoding(command)
+                cmd = _prepare_windows_encoding(command, self.workdir)
                 process = run_with_shell(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -666,7 +685,7 @@ class TerminalTools:
 
             if use_shell:
                 # Path B: 需要 shell 特性（管道、重定向等）
-                cmd = _prepare_windows_encoding(command)
+                cmd = _prepare_windows_encoding(command, self.workdir)
                 process = run_with_shell(
                     cmd,
                     stdout=subprocess.PIPE,

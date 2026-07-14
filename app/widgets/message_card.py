@@ -4921,12 +4921,14 @@ class MessageCard(SimpleCardWidget):
         reasoning_content: str = "",
         model_name: str = None,
         provider_name: str = None,
+        config_id: str = None,
     ):
         super().__init__(parent)
         self._parent = parent
         self.role = role
         self.model_name = model_name
         self.provider_name = provider_name
+        self._provider_config_id = config_id  # UUID key in _valid_configs, for precise provider lookup
         self.timestamp = timestamp or datetime.now().strftime("%m-%d %H:%M")
         # 历史数据 timestamp 格式为 %Y-%m-%d %H:%M:%S，转为 %m-%d %H:%M
         if self.timestamp and len(self.timestamp) >= 19:
@@ -5116,12 +5118,13 @@ class MessageCard(SimpleCardWidget):
         """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""
         return self.model_name or ""
 
-    def set_model_name(self, model_name: str, provider_name: str = None):
+    def set_model_name(self, model_name: str, provider_name: str = None, config_id: str = None):
         """设置模型名称显示（用于助手卡片）
 
         Args:
             model_name: 模型名称
-            provider_name: 服务商名称（可选，用于页脚显示"服务商 · 模型"格式）
+            provider_name: 服务商显示名（可选）
+            config_id: 服务商配置 UUID（可选，用于精确导航到对应配置）
         """
         if self.role != "assistant":
             return
@@ -5130,6 +5133,8 @@ class MessageCard(SimpleCardWidget):
         self.model_name = model_name
         if provider_name is not None:
             self.provider_name = provider_name
+        if config_id is not None:
+            self._provider_config_id = config_id
         footer_text = self._get_footer_model_text()
         if hasattr(self, "_ts_label"):
             self._ts_label.setText(model_name)
@@ -5362,9 +5367,13 @@ class MessageCard(SimpleCardWidget):
         )
 
     def _on_footer_model_clicked(self, event):
-        """用户点击页脚模型标签时，发出 modelLabelClicked 信号"""
-        if self.provider_name and self.model_name:
-            self.modelLabelClicked.emit(self.provider_name, self.model_name)
+        """用户点击页脚模型标签时，发出 modelLabelClicked 信号
+
+        即使 provider_name 为空也 emit（下游有按 model_name 反查的兜底逻辑），
+        避免旧会话数据无 provider_name 时点击无反应。
+        """
+        if self.model_name:
+            self.modelLabelClicked.emit(self.provider_name or "", self.model_name)
 
     def _refresh_footer_separators(self):
         """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
