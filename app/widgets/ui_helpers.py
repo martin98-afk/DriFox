@@ -602,7 +602,7 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
 
-    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n")
+    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n", n=10)
 
     diff_output = "".join(diff)
     return DiffHtmlGenerator.generate_html_report(diff_output, "")
@@ -638,7 +638,7 @@ def generate_multi_file_diff_html(operations: list) -> str:
         new_lines = normalize_lines(new_content)
 
         diff = difflib.unified_diff(
-            old_lines, new_lines, fromfile=f"a/{backup_file.name}", tofile=f"b/{backup_file.name}", lineterm="\n"
+            old_lines, new_lines, fromfile=f"a/{backup_file.name}", tofile=f"b/{backup_file.name}", lineterm="\n", n=10
         )
         diff_output = "".join(diff)
         if diff_output:

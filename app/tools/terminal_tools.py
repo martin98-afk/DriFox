@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
+from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.result import ToolResult
 
 # ── 内联脚本自动转临时文件 ──────────────────────────────────────────────
@@ -224,14 +224,10 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         }
     )
 
-    cmd_lower = command.lower().strip()
-
-    # 判断是否是已知输出 UTF-8 的工具
-    is_utf8_tool = False
-    for tool in UTF8_TOOLS:
-        if cmd_lower.startswith(tool + " ") or cmd_lower.startswith(tool + ".exe "):
-            is_utf8_tool = True
-            break
+    # 使用与 command_safety 一致的命令名提取逻辑，
+    # 可处理路径前缀（如 C:\\Python\\python.exe）和裸命令（如 python）
+    cmd_name = _extract_cmd_name(command)
+    is_utf8_tool = cmd_name is not None and cmd_name in UTF8_TOOLS
 
     # 如果命令明确是 UTF-8 工具，优先尝试 UTF-8
     if is_utf8_tool:
@@ -279,11 +275,14 @@ class BackgroundTask:
 def _prepare_windows_encoding(command: str) -> str:
     """Windows 上设置 UTF-8 编码前缀（仅当需要 shell=True 路径时使用）
 
-    替代方案：通过 Python 的 env 传递编码，避免嵌入 chcp 命令。
-    但某些 Windows 程序仍需要控制台代码页，所以保留 chcp 前缀。
+    通过 chcp 65001 将 cmd.exe 代码页切换为 UTF-8，确保内置命令（dir/type 等）
+    输出 UTF-8 而非 GBK。
+
+    注意：只重定向 stdout 到 NUL，保留 stderr。如果 chcp 失败（如无控制台），
+    stderr 可被捕获，且 execute_bash 会检查 returncode 报告错误。
     """
     if sys.platform == "win32":
-        return f"chcp 65001 >nul 2>&1 && {command}"
+        return f"chcp 65001 >nul && {command}"
     return command
 
 
@@ -599,6 +598,14 @@ class TerminalTools:
             stderr = _smart_decode(stderr_bytes, command).strip()
 
             combined = "\n".join(filter(None, [stdout, stderr]))
+
+            # 检查进程退出码
+            if process.returncode != 0:
+                detail = combined if combined else "(no output)"
+                return ToolResult(
+                    False,
+                    error=f"Command exited with code {process.returncode}:\n{detail}",
+                )
 
             # Shell 输出压缩（减少 token 消耗）
             from app.tools.shell_compressor import compress

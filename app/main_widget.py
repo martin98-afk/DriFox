@@ -6196,7 +6196,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6261,7 +6261,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6272,11 +6272,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
                 from app.tray_manager import TrayManager
+
                 tray = TrayManager.get_instance()
                 tray._setup_global_hotkey()
             except Exception:
@@ -6296,7 +6297,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6330,7 +6331,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6371,7 +6372,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6398,7 +6399,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -9501,7 +9502,45 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 刷新视图
         self._invalidate_current_session_card_cache()
-        self._display_current_session()
+        try:
+            self._display_current_session()
+        except Exception as e:
+            logger.error(f"[RESTORE] _display_current_session failed: {e}")
+            # fallback: 强制重建
+            try:
+                self._clear_chat_area()
+                self._message_batch = group_messages_for_display(session.messages)
+                self._batch_cards = [None for _ in self._message_batch]
+                self._build_user_prefix_cache()
+                if self._message_batch:
+                    self._visible_batch_end = len(self._message_batch)
+                    self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                    self._load_message_batch(initial=True)
+                    self._sync_batch_structures()
+            except Exception as e2:
+                logger.error(f"[RESTORE] Fallback render also failed: {e2}")
+
+        # 🛡️ 验证恢复是否成功：检查 _display_current_session 后布局中是否有消息卡片
+        # 若 chat_layout 中没有消息卡片（可能被某些边缘情况重置），强制重建
+        if self.chat_layout.count() == 0 or not any(
+            isinstance(self.chat_layout.itemAt(i).widget(), MessageCard)
+            for i in range(self.chat_layout.count())
+            if self.chat_layout.itemAt(i) and self.chat_layout.itemAt(i).widget()
+        ):
+            if session.messages and not getattr(self, "_is_destroyed", False):
+                logger.warning("[RESTORE] Display session produced no cards, forcing rebuild")
+                try:
+                    self._clear_chat_area()
+                    self._message_batch = group_messages_for_display(session.messages)
+                    self._batch_cards = [None for _ in self._message_batch]
+                    self._build_user_prefix_cache()
+                    if self._message_batch:
+                        self._visible_batch_end = len(self._message_batch)
+                        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                        self._load_message_batch(initial=True)
+                        self._sync_batch_structures()
+                except Exception as e:
+                    logger.error(f"[RESTORE] Force rebuild failed: {e}")
 
         # 恢复后消息数变化，显式刷新历史问题徽章（不依赖 _display_current_session
         # 的内部分支路由，保证 badge 计数与恢复后的会话一致）
@@ -9627,6 +9666,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步剩余卡片的 _round_index（删除后后面卡片的 round 会偏移）
         self._refresh_all_cards_round_index()
         self._finalize_local_session_mutation()
+
+        # 显式更新历史问题徽章（_finalize_local_session_mutation 通过 _update_node_preview
+        # 间接调用，但异常路径可能跳过，此处确保徽章同步）
+        self._update_history_questions_badge()
 
     def _undo_from_message(self, card: MessageCard):
         if card.role != "user":
@@ -9777,6 +9820,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)
+
+        # 撤销后消息数变化，显式刷新历史问题徽章
+        self._update_history_questions_badge()
 
     def _get_last_tool_call_id_after_round(self, round_index: int) -> Optional[str]:
         """获取指定 round_index 之后最后一个 tool_call_id"""
@@ -12587,6 +12633,31 @@ class OpenAIChatToolWindow(ToolWindow):
             self._pending_send_after_truncation = False
             self._pending_send_user_text = None
 
+        # 🛡️ 截断二次防御：在 sentinel 已被消耗（如上方的 _on_finalize_complete
+        # 清除了哨兵）后，on_messages_updated 中 sentinel 检查失效。
+        # 此时通过比较消息长度做前缀匹配，识别并丢弃旧 worker 的过期消息。
+        # 规则：若 incoming 消息数 > 当前 session 消息数，且当前 session
+        # 是 incoming 的前缀（当前消息都在 incoming 中），说明 incoming 包含
+        # 已被截断/删除的旧消息 → 丢弃。
+        if len(messages) > len(session.messages) and session.messages:
+            _current_len = len(session.messages)
+            _is_prefix = True
+            for i in range(_current_len):
+                curr = session.messages[i]
+                inci = messages[i]
+                # 快速比较：role 不同或内容不同 → 不是前缀
+                if curr.get("role") != inci.get("role"):
+                    _is_prefix = False
+                    break
+            if _is_prefix:
+                from loguru import logger
+
+                logger.warning(
+                    "[MessagesUpdated] 二次防御：旧 worker 消息（前缀匹配），丢弃："
+                    f"incoming={len(messages)}, current={_current_len}"
+                )
+                return
+
         self._history_preview_messages = None
         # 注意：preserve_compaction=False
         # worker 送回来的 current_session_messages 是原始未压缩消息，
@@ -14228,7 +14299,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -14255,7 +14326,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

@@ -22,7 +22,8 @@ from loguru import logger
 SHELL_META = re.compile(r'[|;&`$()<>]')
 
 # Windows 上的额外 cmd.exe 元字符
-WINDOWS_SHELL_META = re.compile(r'[|;&`$()<>\^@!%]')
+# 注意：\\ 匹配字面反斜杠（Windows 路径分隔符），\^ 匹配字面 ^
+WINDOWS_SHELL_META = re.compile(r'[|;&`$()<>\\\^@!%]')
 
 # ============================================================
 # Windows Shell 内置命令（必须通过 shell 执行）
@@ -209,15 +210,28 @@ def run_safe(command: str, **kwargs) -> "subprocess.Popen":
 
     参数与 subprocess.Popen 一致。
     返回 Popen 对象，调用方负责 communicate/wait。
+
+    Windows 特殊处理：如果命令找不到（FileNotFoundError），自动回退到
+    cmd /c 包装，以支持 PATHEXT 解析（如 pip → pip.exe、tsc → tsc.cmd）。
     """
     args = split_command(command)
     if not args:
         raise ValueError(f"Cannot split command: {command}")
-    return subprocess.Popen(
-        args,
-        shell=False,
-        **_ensure_no_window(kwargs),
-    )
+
+    no_window_kwargs = _ensure_no_window(kwargs)
+    try:
+        return subprocess.Popen(args, shell=False, **no_window_kwargs)
+    except FileNotFoundError:
+        # Windows 上 shell=False 不会解析 PATHEXT（.exe/.cmd/.bat 扩展名），
+        # 导致 pip/npm/tsc 等命令找不到。回退到 cmd /c 包装。
+        if sys.platform == "win32" and args:
+            logger.info(f"run_safe: '{args[0]}' not found as executable, retrying with cmd /c")
+            return subprocess.Popen(
+                ["cmd", "/c"] + args,
+                shell=False,
+                **no_window_kwargs,
+            )
+        raise
 
 
 def run_with_shell(command: str, **kwargs) -> "subprocess.Popen":
