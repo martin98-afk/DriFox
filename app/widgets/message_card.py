@@ -6190,24 +6190,27 @@ class MessageCard(SimpleCardWidget):
             except RuntimeError:
                 pass
 
-    def sync_width(self, force: bool = False):
+    def sync_width(self, force: bool = False, target_width: int | None = None):
         """同步卡片宽度
 
         Args:
             force: 是否强制更新，即使宽度没变化
+            target_width: 显式指定目标宽度（用于 resize 期间绕过循环依赖）。
+                          传入时直接使用此宽度，不再从 parent 推算。
         """
-        parent = self.parentWidget()
-        if not parent:
-            return
-        parent_width = parent.width()
-        if self.role == "welcome":
-            horizontal_margin = 20
-        elif self.role == "user":
-            horizontal_margin = 180
-        else:
-            horizontal_margin = 20
+        if target_width is None:
+            parent = self.parentWidget()
+            if not parent:
+                return
+            parent_width = parent.width()
+            if self.role == "welcome":
+                horizontal_margin = 20
+            elif self.role == "user":
+                horizontal_margin = 180
+            else:
+                horizontal_margin = 20
 
-        target_width = max(320, parent_width - horizontal_margin)
+            target_width = max(320, parent_width - horizontal_margin)
 
         # 性能优化：只有宽度真正变化时才更新
         if not force and target_width == self._last_synced_width:

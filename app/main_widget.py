@@ -470,10 +470,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
-        # resize 防抖定时器 - 性能优化：增加防抖时间减少卡顿
+        # resize 防抖定时器 - 性能优化：16ms 约 60fps，肉眼丝滑
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
-        self._resize_debounce_timer.setInterval(30)  # 30ms 防抖，及时响应 resize
+        self._resize_debounce_timer.setInterval(16)  # 16ms 防抖，约60fps视觉刷新
         self._resize_debounce_timer.timeout.connect(self._do_debounced_resize)
         # resize 完成后更新所有卡片的定时器（延迟更新非可见区域卡片）
         self._resize_complete_timer = QTimer(self)
@@ -4641,7 +4641,8 @@ class OpenAIChatToolWindow(ToolWindow):
         api_message_count = int(getattr(session, "last_api_message_count", 0) or 0)
         from_api = bool(getattr(session, "last_api_prompt_from_usage", False))
         snapshot = self.backend.get_context_usage_snapshot(
-            session, llm_config,
+            session,
+            llm_config,
             api_prompt_tokens=api_prompt_tokens,
             api_message_count=api_message_count,
             from_api=from_api,
@@ -5816,19 +5817,30 @@ class OpenAIChatToolWindow(ToolWindow):
             item.widget().set_resize_preview_mode(enabled)
 
     def _do_debounced_resize(self):
-        """防抖执行卡片宽度同步 - resize 期间同步所有可见卡片宽度"""
+        """防抖执行卡片宽度同步 — resize 期间仅同步可见卡片。
+
+        关键修复：使用 viewport 宽度直接计算目标宽度，避免循环依赖：
+        卡片 minimumWidth 阻止 chat_container 缩小 → parent.width() 卡在旧值
+        → sync_width 算出旧宽度 → 死锁。绕过方式：从视口直接推算。
+        """
         self._pending_resize_sync = False
 
-        # 获取滚动区域视口
         scroll_area = getattr(self, "chat_scroll_area", None)
-        if scroll_area:
-            viewport_width = scroll_area.viewport().width()
-            if viewport_width <= 0:
-                return
-            self._last_chat_viewport_width = viewport_width
-            viewport_rect = scroll_area.viewport().rect()
-            viewport_top = scroll_area.verticalScrollBar().value()
-            viewport_bottom = viewport_top + viewport_rect.height()
+        if not scroll_area:
+            return
+        viewport_width = scroll_area.viewport().width()
+        if viewport_width <= 0:
+            return
+        self._last_chat_viewport_width = viewport_width
+
+        viewport_rect = scroll_area.viewport().rect()
+        viewport_top = scroll_area.verticalScrollBar().value()
+        viewport_bottom = viewport_top + viewport_rect.height()
+
+        # 预计算各类卡片的 margin，避免 per-card 重复
+        welcome_margin = 20
+        user_margin = 180
+        assistant_margin = 20
 
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
@@ -5837,13 +5849,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
             card = item.widget()
 
-            # resize 期间同步所有卡片的宽度，不做可见性过滤
-            # 占位符模式下只更新宽高，不触发复杂重绘
-            card.sync_width()
+            # 仅同步可见区域附近（缓冲 400px）的卡片，大幅降低 resize 期间 CPU 开销
+            card_rect = card.geometry()
+            if card_rect.bottom() < viewport_top - 400 or card_rect.top() > viewport_bottom + 400:
+                continue
+
+            if card.role == "welcome":
+                margin = welcome_margin
+            elif card.role == "user":
+                margin = user_margin
+            else:
+                margin = assistant_margin
+
+            # 从视口宽度直接推算目标宽度，绕过循环依赖
+            card.sync_width(target_width=max(320, viewport_width - margin))
 
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
+        viewport_width = 0
         if scroll_area:
             viewport_width = scroll_area.viewport().width()
             if viewport_width > 0:
@@ -5854,7 +5878,12 @@ class OpenAIChatToolWindow(ToolWindow):
             item = self.chat_layout.itemAt(i)
             if item and item.widget() and isinstance(item.widget(), MessageCard):
                 try:
-                    item.widget().sync_width(force=True)
+                    card = item.widget()
+                    if viewport_width > 0:
+                        margin = 20 if card.role != "user" else 180
+                        card.sync_width(force=True, target_width=max(320, viewport_width - margin))
+                    else:
+                        card.sync_width(force=True)
                 except RuntimeError:
                     pass
 
@@ -6001,6 +6030,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if cls._theme_batch_timer is not None:
             cls._theme_batch_timer.stop()
         from PyQt5.QtCore import QTimer
+
         if cls._theme_batch_timer is None:
             cls._theme_batch_timer = QTimer()  # 无 parent，跨窗口存活
             cls._theme_batch_timer.setSingleShot(True)
@@ -6023,6 +6053,7 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.on_theme_changed()
         try:
             from qfluentwidgets import Theme, setTheme
+
             if theme_manager.is_light_theme():
                 setTheme(Theme.LIGHT)
             else:
@@ -6115,7 +6146,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6180,7 +6211,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6191,7 +6222,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
@@ -6208,7 +6239,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6242,7 +6273,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6283,7 +6314,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6310,7 +6341,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -6343,8 +6374,10 @@ class OpenAIChatToolWindow(ToolWindow):
         _message_cards = self.findChildren(MessageCard)
         _base_settings = self.findChildren(BaseSettingsCard)
         from qfluentwidgets import SettingCard
+
         _setting_cards = self.findChildren(SettingCard)
         from app.widgets.worktree_section import WorktreeSectionWidget
+
         _worktree_widgets = self.findChildren(WorktreeSectionWidget)
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
 
@@ -6356,6 +6389,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 同步 qfluentwidgets 基础主题
                 try:
                     from qfluentwidgets import Theme, setTheme
+
                     if theme_manager.is_light_theme():
                         setTheme(Theme.LIGHT)
                     else:
@@ -6370,11 +6404,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_bg_color = window_bg
 
             import re
+
             m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
             if m:
                 r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
                 from PyQt5.QtGui import QColor, QPalette
+
                 color = QColor(r, g, b, alpha)
                 p = QPalette()
                 p.setColor(QPalette.Window, color)
@@ -6526,8 +6562,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     frame.refresh_style()
             # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
             for card_name in (
-                "uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard",
-                "llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard",
+                "uiFontSizeCard",
+                "uiLightModeCard",
+                "uiThemeStyleCard",
+                "llmFontCard",
+                "llmSkillsCard",
+                "llmProviderCard",
+                "mcpListCard",
+                "lspListCard",
             ):
                 card = getattr(self._settings_popup, card_name, None)
                 if card is not None and hasattr(card, "refresh_style"):
@@ -6559,9 +6601,17 @@ class OpenAIChatToolWindow(ToolWindow):
             if card and hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 卡片容器
-        if hasattr(self, "_top_card_container") and self._top_card_container and hasattr(self._top_card_container, "refresh_style"):
+        if (
+            hasattr(self, "_top_card_container")
+            and self._top_card_container
+            and hasattr(self._top_card_container, "refresh_style")
+        ):
             self._top_card_container.refresh_style()
-        if hasattr(self, "_bottom_card_container") and self._bottom_card_container and hasattr(self._bottom_card_container, "refresh_style"):
+        if (
+            hasattr(self, "_bottom_card_container")
+            and self._bottom_card_container
+            and hasattr(self._bottom_card_container, "refresh_style")
+        ):
             self._bottom_card_container.refresh_style()
         # 命令卡片
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
@@ -7134,7 +7184,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 回收完成，如果有回收触发GC
             if recycled_count > 0 or lazy_render_count > 0:
-                logger.debug(f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）")
+                logger.debug(
+                    f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）"
+                )
                 if recycled_count > 0:
                     QTimer.singleShot(100, lambda: gc.collect())
 
@@ -7678,9 +7730,9 @@ class OpenAIChatToolWindow(ToolWindow):
         sid = getattr(session, "session_id", None) if session else None
         if used is None or _reload_sid != sid:
             try:
-                used = self.backend.get_context_usage_snapshot(
-                    session, self._get_current_model_config()
-                ).get("used_tokens", 0)
+                used = self.backend.get_context_usage_snapshot(session, self._get_current_model_config()).get(
+                    "used_tokens", 0
+                )
             except Exception:
                 used = 0
             self._reload_ctx_used_tokens = used
@@ -9094,19 +9146,14 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         messages = consolidate_messages(session.messages)
-        count = sum(
-            1 for msg in messages
-            if msg.get("role") == "user" and not msg.get("_hook_event")
-        )
+        count = sum(1 for msg in messages if msg.get("role") == "user" and not msg.get("_hook_event"))
 
         if count > 0:
             self._history_questions_badge.setNum(count)
             self._history_questions_badge.adjustSize()
             # 重新定位（badge 尺寸变化后需刷新位置）
             if self._history_questions_badge.manager:
-                self._history_questions_badge.move(
-                    self._history_questions_badge.manager.position()
-                )
+                self._history_questions_badge.move(self._history_questions_badge.manager.position())
             self._history_questions_badge.setVisible(True)
         else:
             self._history_questions_badge.setVisible(False)
@@ -10906,7 +10953,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
             if session:
-                user_msg_count = sum(1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event"))
+                user_msg_count = sum(
+                    1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
+                )
                 if user_msg_count == 1:
                     self._maybe_generate_topic_summary()
             # 用户问题已写入 session，立即刷新徽章（无需等流式结束）
@@ -12519,8 +12568,12 @@ class OpenAIChatToolWindow(ToolWindow):
                             compacted_tokens = max(10, len(content) // 4)
                             normal_tokens = max(0, last_tc - compacted_tokens)
                     ring.set_usage(
-                        percent, last_tc, last_lim, compaction_state,
-                        normal_tokens, compacted_tokens,
+                        percent,
+                        last_tc,
+                        last_lim,
+                        compaction_state,
+                        normal_tokens,
+                        compacted_tokens,
                         breakdown=getattr(ring, "_breakdown", None) or [],
                     )
                     # 卡片底部 token 显示与上下文圆环同步（同一 last_tc）
@@ -12631,8 +12684,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 normal_tokens = max(0, token_count - compacted_tokens)
 
         ring.set_usage(
-            percent, token_count, limit, compaction_state,
-            normal_tokens, compacted_tokens,
+            percent,
+            token_count,
+            limit,
+            compaction_state,
+            normal_tokens,
+            compacted_tokens,
             breakdown=getattr(ring, "_breakdown", None) or [],
         )
         # 卡片底部 token 显示与上下文圆环同步（同一 token_count）
@@ -14107,7 +14164,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -14134,7 +14191,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
