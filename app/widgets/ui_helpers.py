@@ -602,7 +602,7 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
 
-    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n")
+    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n", n=10)
 
     diff_output = "".join(diff)
     return DiffHtmlGenerator.generate_html_report(diff_output, "")
@@ -638,7 +638,7 @@ def generate_multi_file_diff_html(operations: list) -> str:
         new_lines = normalize_lines(new_content)
 
         diff = difflib.unified_diff(
-            old_lines, new_lines, fromfile=f"a/{backup_file.name}", tofile=f"b/{backup_file.name}", lineterm="\n"
+            old_lines, new_lines, fromfile=f"a/{backup_file.name}", tofile=f"b/{backup_file.name}", lineterm="\n", n=10
         )
         diff_output = "".join(diff)
         if diff_output:
@@ -1714,6 +1714,7 @@ def create_assistant_card_widget(
     round_index: int,
     model_name: str = None,
     provider_name: str = None,
+    config_id: str = None,
     on_action=None,
     on_context_action=None,
     on_tool_diff=None,
@@ -1731,7 +1732,8 @@ def create_assistant_card_widget(
         timestamp: 时间戳
         round_index: 轮次索引
         model_name: 模型名称（显示在卡片头部）
-        provider_name: 服务商名称（显示在页脚"服务商 · 模型"格式）
+        provider_name: 服务商显示名（用于页脚）
+        config_id: 服务商配置 UUID（用于精确导航）
         on_action: 动作回调
         on_context_action: 上下文动作回调
         on_tool_diff: 工具差异回调
@@ -1746,7 +1748,8 @@ def create_assistant_card_widget(
         配置好的 MessageCard
     """
     card = MessageCard(
-        parent=parent, role="assistant", timestamp=timestamp, model_name=model_name, provider_name=provider_name
+        parent=parent, role="assistant", timestamp=timestamp, model_name=model_name,
+        provider_name=provider_name, config_id=config_id,
     )
     card._round_index = round_index
     if immediate_render:

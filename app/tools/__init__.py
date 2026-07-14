@@ -8,6 +8,7 @@ for manual method forwarding in a shallow facade.
 """
 
 import copy
+import platform
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -1143,6 +1144,13 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         if schema["function"]["name"] == "subagent_dag":
             if subagent_names:
                 schema["function"]["description"] += "\n\n可用子智能体见系统提示 ## Available Subagents。"
+            break
+
+    # 动态注入当前平台信息到 bash 工具描述
+    current_platform = platform.system()  # Windows / Darwin / Linux
+    for schema in schemas:
+        if schema["function"]["name"] == "bash":
+            schema["function"]["description"] += f"\n\n当前平台: {current_platform}。"
             break
 
     # 动态注入 MCP 工具 schema

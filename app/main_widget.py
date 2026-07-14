@@ -72,6 +72,7 @@ from app.core import (
     get_user_round_ranges,
     group_messages_for_display,
 )
+from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
@@ -2885,12 +2886,51 @@ class OpenAIChatToolWindow(ToolWindow):
 
                     def _on_shortcut(n=name):
                         try:
-                            self._execute_command(n)
+                            # ⚠️ 用户插件 FUNCTION 命令无 Python 处理器注册，
+                            # 直接调用 _execute_command 会静默失败。
+                            # 检测到无处理器时，回退到在输入框插入 /command 文本，
+                            # 与命令卡片点击行为一致。
+                            if self._has_command_handler(n):
+                                self._execute_command(n)
+                            else:
+                                self._insert_command_text_fallback(n)
                         except RuntimeError:
                             pass
 
                     qs.activated.connect(_on_shortcut)
                     self._command_shortcuts.append(qs)
+
+    def _has_command_handler(self, name: str) -> bool:
+        """检查命令名是否有对应的 Python 处理器
+
+        用于区分系统内置 function 命令（有 handler）和用户插件 function 命令（无 handler）。
+        后者通过快捷键触发时回退到插入命令文本。
+        """
+        # 窗口级处理器
+        handlers = getattr(self, "_function_command_handlers", {})
+        if name in handlers:
+            return True
+        # 全局注册的处理器
+        if FunctionCommandHandlers.has(name):
+            return True
+        # 硬编码内置命令
+        if name in ("new", "new-window", "branch", "remember"):
+            return True
+        return False
+
+    def _insert_command_text_fallback(self, command_name: str):
+        """当 function 命令快捷键无处理器时，在输入框插入 /command 文本
+
+        用户插件命令（type: function + shortcut）没有 Python 处理器注册，
+        快捷键按下后无法直接执行。回退行为：将当前输入替换为 /{command_name}
+        并聚焦，用户按 Enter 后走正常发送流程（与命令卡片选中效果类似）。
+        """
+        insert = f"/{command_name} "
+        self.input_area.setPlainText(insert)
+        cursor = self.input_area.textCursor()
+        cursor.movePosition(cursor.End)
+        self.input_area.setTextCursor(cursor)
+        self.input_area.setFocus()
 
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
@@ -2907,8 +2947,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if handler:
             handler(args)
             return
-
-        from app.core.builtin_commands import FunctionCommandHandlers
 
         # 回退到全局注册的处理器（兼容旧代码路径）
         handler = FunctionCommandHandlers.get(command_name)
@@ -4517,64 +4555,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("model_selector", self._window_id)
 
-    def _on_footer_model_label_clicked(self, provider_name: str, model_name: str):
-        """用户点击消息卡片页脚的模型标签 — 自动切换为对应的服务商和模型"""
-        # 查找匹配的 config_id
-        config_id = None
-        for cid, info in self._valid_configs.items():
-            info_display = info.get("display_name", info.get("provider_name", cid))
-            if info_display == provider_name:
-                config_id = cid
-                break
-            if info.get("provider_name") == provider_name:
-                config_id = cid
-                break
-
-        if not config_id:
-            # 尝试直接作为 config_id 查找
-            if provider_name in self._valid_configs:
-                config_id = provider_name
-
-        if not config_id:
-            # 🛡️ 兜底：通过 model_name 查找唯一匹配的服务商（兼容旧会话数据
-            # provider_name 丢失/错误的场景）
-            for cid, info in self._valid_configs.items():
-                if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                    if config_id is None:
-                        config_id = cid
-                    elif config_id != cid:
-                        # 多个服务商都有同名模型 → 不明确，放弃兜底
-                        config_id = None
-                        break
-
-        if not config_id:
+    def _on_footer_model_label_clicked(self, model_name: str, config_id: str = ""):
+        """用户点击消息卡片页脚的模型标签 — 按 UUID 精确切换到对应服务商和模型"""
+        if not config_id or config_id not in self._valid_configs:
             InfoBar.warning(
                 "未找到服务商",
-                f"未找到服务商「{provider_name}」，可能已被移除",
+                f"未找到服务商「{model_name}」，可能已被移除",
                 parent=self,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
             return
-
-        # 检查该服务商是否包含此模型
-        provider_config = self._valid_configs.get(config_id, {})
-        available_models = provider_config.get("模型列表", [])
-        current_model = provider_config.get("模型名称", "")
-
-        if available_models and model_name not in available_models:
-            InfoBar.warning(
-                "模型不可用",
-                f"服务商「{provider_name}」下没有模型「{model_name}」，可能已被移除",
-                parent=self,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        # 调用已有的模型切换逻辑
-        # 🛡️ 传 config_id 而非 provider_name（显示名），避免 _on_model_selected_from_popup
-        # 内部通过 _display_to_config_id 二次解析时因字典未构建而解析失败或匹配到错误的配置
         self._on_model_selected_from_popup(config_id, model_name)
 
     def _get_model_btn_text_style(self) -> str:
@@ -6236,6 +6227,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     win._register_command_shortcuts()
                 except RuntimeError, AttributeError:
                     pass
+            # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
+            try:
+                from app.tray_manager import TrayManager
+
+                tray = TrayManager.get_instance()
+                tray._setup_global_hotkey()
+            except Exception:
+                pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
         # 技能变更：广播刷新所有窗口的技能列表（settings popup + 卡片 token 估算）
@@ -7811,13 +7810,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 if role == "assistant":
                     provider_name = batch[0].get("provider_name")
                     effective_model_name = model_name
+                    history_config_id = batch[0].get("config_id")
                 else:
                     provider_name = None
                     effective_model_name = model_name  # 可能在前面已从 assistant 消息提取
+                    history_config_id = None
                     for m in batch:
                         if m.get("role") == "assistant":
                             if m.get("provider_name"):
                                 provider_name = m["provider_name"]
+                            if m.get("config_id"):
+                                history_config_id = m["config_id"]
                             if not effective_model_name and m.get("model_name"):
                                 effective_model_name = m["model_name"]
                             break
@@ -7828,6 +7831,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     round_index=round_index,
                     model_name=effective_model_name,
                     provider_name=provider_name,
+                    config_id=history_config_id,
                 )
                 if assistant_card:
                     # 设置 message_index 用于卡片差异功能
@@ -8586,32 +8590,29 @@ class OpenAIChatToolWindow(ToolWindow):
         round_index: Optional[int] = None,
         model_name: str = None,
         provider_name: str = None,
+        config_id: str = None,
     ) -> MessageCard:
         session = self.session_manager.get_current_session()
         if session:
             self._displayed_session_id = session.session_id
 
-        # 如果消息没有 provider_name，尝试从 model_name 反查唯一匹配的服务商
-        if not provider_name and model_name and self._valid_configs:
-            matched_display = None
-            # 优先匹配当前选中的服务商（新流式场景下当前服务商即创建者，正确；但
-            # 加载旧会话时当前服务商可能非原始创建者，若匹配则会错误赋值。
-            # 🛡️ 因此此处仅当 model_name 在当前服务商下能找到且同时没有其他服务商
-            # 也有同款模型时才算明确匹配。多服务商同名模型 → 不赋值，保持 provider_name=None.)
-            if self._current_provider_name:
-                cfg = self._valid_configs.get(self._current_provider_name, {})
+        # 🛡️ 解析 config_id：如果未传入则从 _valid_configs 反查。
+        # 整个导航逻辑只依赖 UUID，不依赖 display_name / provider_name。
+        if not config_id and self._valid_configs:
+            if self._current_provider_name and self._current_provider_name in self._valid_configs:
+                cfg = self._valid_configs[self._current_provider_name]
                 if cfg.get("模型名称") == model_name or model_name in (cfg.get("模型列表") or []):
-                    # 临时标记当前服务商匹配，但后续仍需检查是否有其他服务商也匹配
-                    matched_display = cfg.get("display_name", self._current_provider_name)
-            for cid, info in self._valid_configs.items():
+                    config_id = self._current_provider_name
+        if not config_id and model_name and self._valid_configs:
+            for c, info in self._valid_configs.items():
                 if info.get("模型名称") == model_name or model_name in (info.get("模型列表") or []):
-                    if matched_display is None:
-                        matched_display = info.get("display_name", info.get("provider_name", cid))
-                    elif matched_display != info.get("display_name", info.get("provider_name", cid)):
-                        matched_display = None  # 多于一个实际匹配 → 不明确，跳过
+                    if config_id is None:
+                        config_id = c
+                    elif config_id != c:
+                        config_id = None
                         break
-            if matched_display:
-                provider_name = matched_display
+        if not config_id and self._current_provider_name and self._current_provider_name in self._valid_configs:
+            config_id = self._current_provider_name
 
         # 使用辅助函数创建卡片
         def on_context_action(action, context):
@@ -8640,6 +8641,7 @@ class OpenAIChatToolWindow(ToolWindow):
             round_index=(round_index if round_index is not None else self._current_assistant_round_index),
             model_name=model_name,
             provider_name=provider_name,
+            config_id=config_id,
             on_action=self._on_code_action,
             on_context_action=on_context_action,
             on_tool_diff=self._on_tool_diff_requested,
@@ -9456,7 +9458,45 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 刷新视图
         self._invalidate_current_session_card_cache()
-        self._display_current_session()
+        try:
+            self._display_current_session()
+        except Exception as e:
+            logger.error(f"[RESTORE] _display_current_session failed: {e}")
+            # fallback: 强制重建
+            try:
+                self._clear_chat_area()
+                self._message_batch = group_messages_for_display(session.messages)
+                self._batch_cards = [None for _ in self._message_batch]
+                self._build_user_prefix_cache()
+                if self._message_batch:
+                    self._visible_batch_end = len(self._message_batch)
+                    self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                    self._load_message_batch(initial=True)
+                    self._sync_batch_structures()
+            except Exception as e2:
+                logger.error(f"[RESTORE] Fallback render also failed: {e2}")
+
+        # 🛡️ 验证恢复是否成功：检查 _display_current_session 后布局中是否有消息卡片
+        # 若 chat_layout 中没有消息卡片（可能被某些边缘情况重置），强制重建
+        if self.chat_layout.count() == 0 or not any(
+            isinstance(self.chat_layout.itemAt(i).widget(), MessageCard)
+            for i in range(self.chat_layout.count())
+            if self.chat_layout.itemAt(i) and self.chat_layout.itemAt(i).widget()
+        ):
+            if session.messages and not getattr(self, "_is_destroyed", False):
+                logger.warning("[RESTORE] Display session produced no cards, forcing rebuild")
+                try:
+                    self._clear_chat_area()
+                    self._message_batch = group_messages_for_display(session.messages)
+                    self._batch_cards = [None for _ in self._message_batch]
+                    self._build_user_prefix_cache()
+                    if self._message_batch:
+                        self._visible_batch_end = len(self._message_batch)
+                        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                        self._load_message_batch(initial=True)
+                        self._sync_batch_structures()
+                except Exception as e:
+                    logger.error(f"[RESTORE] Force rebuild failed: {e}")
 
         # 恢复后消息数变化，显式刷新历史问题徽章（不依赖 _display_current_session
         # 的内部分支路由，保证 badge 计数与恢复后的会话一致）
@@ -9582,6 +9622,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步剩余卡片的 _round_index（删除后后面卡片的 round 会偏移）
         self._refresh_all_cards_round_index()
         self._finalize_local_session_mutation()
+
+        # 显式更新历史问题徽章（_finalize_local_session_mutation 通过 _update_node_preview
+        # 间接调用，但异常路径可能跳过，此处确保徽章同步）
+        self._update_history_questions_badge()
 
     def _undo_from_message(self, card: MessageCard):
         if card.role != "user":
@@ -9733,6 +9777,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)
 
+        # 撤销后消息数变化，显式刷新历史问题徽章
+        self._update_history_questions_badge()
+
     def _get_last_tool_call_id_after_round(self, round_index: int) -> Optional[str]:
         """获取指定 round_index 之后最后一个 tool_call_id"""
         session = self.session_manager.get_current_session()
@@ -9802,6 +9849,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         处理工具差异对比请求
 
+        优先通过 file_recorder 的备份文件生成差异；
+        若备份文件缺失，则从会话消息中提取内嵌 diff 内容作为 fallback。
+
         Args:
             tool_call_id: 工具调用 ID
         """
@@ -9816,7 +9866,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 检查是否有 file_recorder
         if not self.backend.tool_executor or not self.backend.file_recorder:
-            logger.warning("[LLMChatter] file_recorder 未初始化")
+            logger.warning("[LLMChatter] file_recorder 未初始化，尝试从消息内容回退")
+            self._show_diff_from_message_content(session, tool_call_id)
             return
 
         try:
@@ -9828,13 +9879,11 @@ class OpenAIChatToolWindow(ToolWindow):
             # 使用辅助函数获取第一个文件操作
             success, backup_path, _ = get_first_file_operation(operations)
             if not success:
-                InfoBar.warning(
-                    "无差异信息",
-                    "此工具没有修改任何文件，或备份信息已丢失",
-                    duration=3000,
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                # 🛡️ Fallback：备份文件缺失时，从会话消息中提取内嵌 diff
+                logger.info(
+                    f"[LLMChatter] file_recorder 无操作记录 (tool_call_id={tool_call_id[:12]})，回退到消息内嵌 diff"
                 )
+                self._show_diff_from_message_content(session, tool_call_id)
                 return
 
             # 使用辅助函数读取备份文件和生成 diff
@@ -9844,8 +9893,58 @@ class OpenAIChatToolWindow(ToolWindow):
             # 显示差异
             show_diff_viewer(self, html)
 
+        except FileNotFoundError:
+            # 备份文件被清理或不存在，回退到消息内嵌 diff
+            logger.info(f"[LLMChatter] 备份文件不存在 (tool_call_id={tool_call_id[:12]})，回退到消息内嵌 diff")
+            self._show_diff_from_message_content(session, tool_call_id)
         except Exception as e:
             logger.error(f"[LLMChatter] 显示工具差异失败: {e}")
+            InfoBar.error(
+                "差异显示失败",
+                str(e),
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+
+    def _show_diff_from_message_content(self, session, tool_call_id: str):
+        """从会话消息内容中提取内嵌 diff 并显示（file_recorder 无数据时的 fallback）
+
+        遍历 session.messages 查找 role==tool 且 tool_call_id 匹配的消息，
+        提取其 diff 字段，生成 HTML 报告并展示。
+        """
+        from app.utils.diff_viewer import DiffHtmlGenerator
+
+        diff_content = None
+
+        for msg in session.messages:
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("tool_call_id") != tool_call_id:
+                # 兼容 content 字符串格式中的 tool_call_id
+                content = msg.get("content", "")
+                if isinstance(content, str) and f"tool_call_id: {tool_call_id}" in content:
+                    pass  # 字符串格式匹配，继续提取
+                else:
+                    continue
+            diff_content = msg.get("diff")
+            break
+
+        if not diff_content:
+            InfoBar.warning(
+                "无差异信息",
+                "此工具没有修改任何文件，或差异数据已丢失",
+                duration=3000,
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        try:
+            html = DiffHtmlGenerator.generate_html_report(diff_content)
+            show_diff_viewer(self, html)
+        except Exception as e:
+            logger.error(f"[LLMChatter] 消息内嵌 diff 显示失败: {e}")
             InfoBar.error(
                 "差异显示失败",
                 str(e),
@@ -10457,6 +10556,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session_id:
             return
 
+        # 🛡️ 切换前保存当前会话：防止流式刚结束时用户立即切换会话，
+        # _do_post_stream_cleanup 的延迟保存尚未触发导致 AI 回复丢失。
+        if self.history_manager:
+            self._save_current_session_to_history()
+            self.history_manager.flush()
+
         # 切换前先清理当前会话的资源
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
@@ -10767,14 +10872,21 @@ class OpenAIChatToolWindow(ToolWindow):
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
-                    # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
-                    self.input_area.clear()
-                    self._clear_attachments()
-                    # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
-                    if not self._is_streaming:
-                        self.input_area.toggle_send_button(True)
-                    self._execute_command(cmd_result.command_name, cmd_result.remainder)
-                    return
+                    # 用户插件 FUNCTION 命令无 Python 处理器注册
+                    # （如插件 .md 文件定义了 type: function + shortcut 但无可执行代码）
+                    # → 不拦截、不清理输入，让命令走正常 prompt 发送流程，
+                    #    /xxx 文本会作为普通用户消息发送给 AI。
+                    if not self._has_command_handler(cmd_result.command_name):
+                        cmd_result = None  # 重置标记，走后续 skill / 普通发送流程
+                    else:
+                        # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
+                        self.input_area.clear()
+                        self._clear_attachments()
+                        # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
+                        if not self._is_streaming:
+                            self.input_area.toggle_send_button(True)
+                        self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                        return
                 case CommandType.SUBAGENT:
                     # 子智能体命令：触发子智能体任务，不替换提示词
                     # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
@@ -10907,6 +11019,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
+            config_id=self._current_provider_name,
         )
 
         # 先设置当前卡片（必须在 send_message 之前，否则回调触发时 _current_assistant_card 为 None）
@@ -10982,10 +11095,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         self._is_streaming = True
-        self._response_start_time = time.time()
+        # 🛡️ 不覆盖首次设置的 _response_start_time（_on_send_clicked 已设），
+        # 避免多个 worker 迭代（如工具执行后重开 API 调用）时耗时被重置。
+        if self._response_start_time is None:
+            self._response_start_time = time.time()
         self._set_ai_state("streaming")  # 桌宠：开始回复
         if self._current_assistant_card:
-            self._current_assistant_card.start_elapsed_tracking()
+            # 🛡️ 只在尚未开始计时时启动，避免重复调用重置计数器。
+            if self._current_assistant_card._elapsed_start_time is None:
+                self._current_assistant_card.start_elapsed_tracking()
         self._accumulated_content = ""
         # 每个新的流式轮次清空工具结果去重集合
         self._processed_tool_result_ids: set = set()
@@ -11884,6 +12002,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 创建助手消息卡片（用于接收 LLM 的流式响应）
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
+            config_id=self._current_provider_name,
         )
 
         # 设置当前卡片（必须在 send_message 之前，否则流式回调触发时 _current_assistant_card 为 None）
@@ -12082,22 +12201,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             current_model_name = getattr(self, "_current_model_name", "") or ""
             if current_model_name:
-                # 解析当前服务商显示名称
-                config = self._valid_configs.get(self._current_provider_name, {})
-                current_provider_name = config.get("display_name", self._current_provider_name)
-                self._current_assistant_card.set_model_name(current_model_name, provider_name=current_provider_name)
-                # 🛡️ 只更新最后一条 assistant 消息的模型元信息。
-                # 不再批量回填所有缺失 provider_name 的旧消息（会错误地把旧消息
-                # 指向当前服务商），由 _auto_save_current_session 在落库前统一
-                # 按 model_name 做唯一匹配补齐。
+                provider_display = self._valid_configs.get(self._current_provider_name, {}).get(
+                    "display_name", self._current_provider_name
+                )
+                self._current_assistant_card.set_model_name(
+                    current_model_name,
+                    provider_name=provider_display,
+                    config_id=self._current_provider_name,
+                )
                 session = self.session_manager.get_current_session()
-                if session and session.messages and current_provider_name:
+                if session and session.messages:
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
                             if not msg.get("provider_name"):
-                                msg["provider_name"] = current_provider_name
-                            break
+                                msg["provider_name"] = provider_display
+                            if not msg.get("config_id") and self._current_provider_name:
+                                msg["config_id"] = self._current_provider_name
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
         if self._response_start_time is not None:
@@ -12114,6 +12234,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
+
+        # 🛡️ 立即持久化会话，防止用户在延迟保存窗口内切换会话导致
+        # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
+        # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
+        # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
+        # 其内部的 _save_current_session_to_history 因内容哈希缓存命中而跳过。
+        if self.history_manager and not getattr(self, "_session_switched", False):
+            self._save_current_session_to_history()
+            self.history_manager.flush()
 
         # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
         # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
@@ -12535,19 +12664,23 @@ class OpenAIChatToolWindow(ToolWindow):
             self._pending_send_after_truncation = False
             self._pending_send_user_text = None
 
+        # 哨兵+user_count 已在上方完成过期消息拦截，正常流到此处的
+        # messages 为合法的新 worker 消息，直接更新 session。
         self._history_preview_messages = None
         # 注意：preserve_compaction=False
         # worker 送回来的 current_session_messages 是原始未压缩消息，
         # 保留旧的压缩缓存会导致 state 不一致（缓存说"已压缩"但消息已膨胀）。
         # 清空缓存让下一次 ContextBudgetAllocator 从原始消息正确重新压缩。
 
-        # ⚠️ 写入 elapsed 必须在 set_messages 之前：set_messages 内部 consolidate
+        # ⚠️ 写入 elapsed 和 config_id 必须在 set_messages 之前：set_messages 内部 consolidate
         # 会创建新 dict，之后修改参数 messages 不会反映到 session.messages
         if self._response_start_time is not None:
             for msg in reversed(messages):
-                if msg.get("role") == "assistant" and "elapsed" not in msg:
-                    msg["elapsed"] = round(time.time() - self._response_start_time, 1)
-                    break
+                if msg.get("role") == "assistant":
+                    if "elapsed" not in msg:
+                        msg["elapsed"] = round(time.time() - self._response_start_time, 1)
+                    if not msg.get("config_id") and self._current_provider_name:
+                        msg["config_id"] = self._current_provider_name
 
         session.set_messages(messages or [], preserve_compaction=False)
 
@@ -12622,9 +12755,11 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.session_manager.get_current_session()
             if session and session.messages:
                 for msg in reversed(session.messages):
-                    if msg.get("role") == "assistant" and "elapsed" not in msg:
-                        msg["elapsed"] = round(elapsed, 1)
-                        break
+                    if msg.get("role") == "assistant":
+                        if "elapsed" not in msg:
+                            msg["elapsed"] = round(elapsed, 1)
+                        if not msg.get("config_id") and self._current_provider_name:
+                            msg["config_id"] = self._current_provider_name
             self._response_start_time = None
 
         # 🔧 异常时保存已生成的部分消息到历史记录
@@ -12727,6 +12862,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_assistant_round_index = self._get_current_user_round_index()
         new_card = self._append_assistant_message(
             model_name=self._current_model_name,
+            config_id=self._current_provider_name,
         )
         new_card.update_content(str(content))
         new_card.finish_streaming()
@@ -14389,9 +14525,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session or not session.messages:
             return
         for msg in reversed(session.messages):
-            if msg.get("role") == "assistant" and "elapsed" not in msg:
-                msg["elapsed"] = round(self._stop_elapsed, 1)
-                break
+            if msg.get("role") == "assistant":
+                if "elapsed" not in msg:
+                    msg["elapsed"] = round(self._stop_elapsed, 1)
+                if not msg.get("config_id") and self._current_provider_name:
+                    msg["config_id"] = self._current_provider_name
 
     def _apply_interrupted_messages_to_session(self, interrupted_messages: List[Dict[str, Any]]) -> bool:
         """将 worker 中断时的快照应用到当前 session（同步）。
@@ -14453,13 +14591,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         current_session = self.session_manager.get_current_session()
         sentinel = self._truncation_sentinel
-        # 无论后续走哪条分支，截断哨兵是单次使用的，进来立即清空，
-        # 避免后续异步 finalize 重复误判。
-        self._truncation_sentinel = None
 
         # 截断命中：用户在 finalize 期间发生了删除/截断。
         # Worker 送回的快照可能污染已截断的正确状态，必须丢弃。
-        # 但仍然补一次 _persist_stop_elapsed，否则 stop 时长统计会丢（修复前是 bug）。
+        # 🛡️ 关键修复：不清空哨兵！让其继续守卫，防止旧 worker 的
+        # _on_messages_updated 回调晚到并覆盖已截断的 session。
+        # 哨兵将由 _on_messages_updated 识别出新 worker 时清空，
+        # 或由下一个 _on_send_clicked 清零。
         if sentinel and current_session and sentinel.get("session_id") == current_session.session_id:
             logger.warning(
                 "[FinalizeStop] 检测到截断哨兵，丢弃覆盖以保护会话状态："
@@ -14470,9 +14608,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._persist_stop_elapsed()  # 只写 elapsed，不 save
             return
 
+        # 未命中截断：安全清空哨兵，允许后续逻辑正常执行
+        self._truncation_sentinel = None
+
         # 🛡️ 截断后发送标志：用户撤销消息后快速发送了新消息，
         # 旧 worker 的 finalize 回调是过期数据，必须丢弃。
-        # 哨兵已在本函数开头被清空（_truncation_sentinel = None），或由先到的
+        # 哨兵已在上面被安全清空（未命中截断），或由先到的
         # _on_messages_updated 在识别出新 worker 时已清除。
         #
         # 守护场景：_on_messages_updated 中 sentinel 被其他旧 worker 消耗

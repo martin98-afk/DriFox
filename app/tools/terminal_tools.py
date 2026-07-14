@@ -21,8 +21,53 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
+from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.result import ToolResult
+from loguru import logger
+
+# ── findstr 管道符修复 ────────────────────────────────────────────────
+# Windows cmd.exe 即使在双引号内也会把 | 当管道解析，导致
+# findstr /n "pattern1|pattern2" 静默失败。自动转换为 /c: 语法。
+
+
+def _fix_findstr_pipe(command: str) -> str:
+    """将 findstr 正则中的 | 转换为 /c: 语法，避免被 cmd.exe 当管道。
+
+    findstr /n "mousePressEvent|mouseReleaseEvent" file
+    → findstr /n /c:"mousePressEvent" /c:"mouseReleaseEvent" file
+
+    注意：re.search 而非 re.match，以支持管道和复合命令中的 findstr。
+    正则支持 \\" 转义引号，避免遇到 \\"elapsed\\" 时提前截断。
+    """
+    if sys.platform != "win32":
+        return command
+
+    # 如果命令已包含 /c: 语法，跳过避免双重转换
+    if "/c:" in command:
+        return command
+
+    # 匹配 findstr [flags] "pattern" — 支持 \" 转义引号
+    FINDSTR_RE = re.compile(r'(findstr\s+(?:\S+\s+)*)"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
+    m = FINDSTR_RE.search(command)
+    if not m:
+        return command
+
+    prefix = command[: m.start(1)] + m.group(1)  # 含 findstr 标志
+    pattern = m.group(2)                          # "error|warning"
+    suffix = command[m.end():]                    # 剩余部分
+
+    if "|" not in pattern:
+        return command
+
+    parts = pattern.split("|")
+    # cmd.exe 中双引号内 " 需要写成 "" ，重建 /c:"..." 时做转义
+    def _cmd_escape(s: str) -> str:
+        return s.replace('"', '""')
+
+    rebuilt = prefix.rstrip() + " " + " ".join(f'/c:"{_cmd_escape(p)}"' for p in parts) + suffix
+    logger.debug(f"[Bash] findstr pipe fix: {command[:80]}... → {rebuilt[:80]}...")
+    return rebuilt
+
 
 # ── 内联脚本自动转临时文件 ──────────────────────────────────────────────
 # Windows cmd 无法可靠处理多行/嵌套引号的 python -c "..." 等内联脚本，
@@ -99,6 +144,10 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     """
     检测内联脚本命令，有多行/引号嵌套时自动写入临时文件。
 
+    支持两种场景：
+    1. 命令以解释器开头: python -c "多行脚本"
+    2. 链式命令中包含: cd xxx && python -c "多行脚本"
+
     Args:
         command: 原始命令
 
@@ -107,7 +156,9 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     """
     parsed = _parse_inline_script(command)
     if not parsed:
-        return command, None
+        # 命令不是以解释器开头，尝试扫描整个命令找内联脚本
+        command, tmp = _scan_and_rewrite_chain(command)
+        return command, tmp
 
     script = parsed["script"]
 
@@ -136,6 +187,87 @@ def _rewrite_inline_script(command: str) -> tuple[str, Optional[str]]:
     if parsed["rest"]:
         new_cmd += f" {parsed['rest']}"
     return new_cmd, tmp_path
+
+
+def _scan_and_rewrite_chain(command: str) -> tuple[str, Optional[str]]:
+    """扫描链式命令中的内联脚本并改写为临时文件。
+
+    例如: cd xxx && python -c "多行脚本" → cd xxx && python "temp.py"
+    """
+    if sys.platform != "win32":
+        return command, None
+
+    # 构建解释器+标志的搜索模式: python -c, node -e, 等等
+    interp_pattern = "|".join(_INTERPRETERS)
+    flag_pattern = "|".join(_SCRIPT_FLAGS)
+    # 找到命令中任意位置的 解释器 标志 组合
+    pattern = re.compile(rf"\b({interp_pattern})\s+({flag_pattern})\s+", re.IGNORECASE)
+
+    result_cmd = command
+    any_rewritten = False
+    tmp_files = []
+
+    # 从后往前替换，避免偏移问题
+    matches = list(pattern.finditer(result_cmd))
+    for m in reversed(matches):
+        interp = m.group(1)
+        flag = m.group(2)
+        start = m.end()  # 引号开始位置
+
+        # 找引号内的脚本
+        rest = result_cmd[start:]
+        quote_char = None
+        script_start = -1
+        for i, ch in enumerate(rest):
+            if ch in ('"', "'"):
+                quote_char = ch
+                script_start = i + 1
+                break
+        if quote_char is None or script_start >= len(rest):
+            continue
+
+        # 找匹配的结束引号
+        script_end = -1
+        i = script_start
+        while i < len(rest):
+            ch = rest[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote_char:
+                script_end = i
+                break
+            i += 1
+
+        if script_end == -1:
+            continue
+
+        script = rest[script_start:script_end]
+        if "\n" not in script:
+            continue  # 无换行，不需要改写
+
+        # 改写为临时文件
+        script = script.replace("\\\\", "\\").replace('\\"', '"')
+        ext = _SCRIPT_EXT.get(interp.lower(), ".py")
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="drifox_inline_", text=True)
+        try:
+            os.write(fd, script.encode("utf-8"))
+        finally:
+            os.close(fd)
+        tmp_files.append(tmp_path)
+
+        safe_path = tmp_path.replace("\\", "/")
+        # 替换原文中的内联脚本部分（去掉 -c/-e 标志，直接用脚本文件）
+        # m.start() = "python" 的起始位置，m.end() = "-c " 之后的引号前位置
+        before = result_cmd[: m.start()]  # "cd xxx && " 部分
+        after = result_cmd[start + script_end + 1:]  # 跳过结束引号
+        result_cmd = f'{before}{interp} "{safe_path}"{after}'
+        any_rewritten = True
+        logger.debug(f"[Bash] chain inline script → temp: {tmp_path}")
+
+    if any_rewritten:
+        return result_cmd, tmp_files[0] if len(tmp_files) == 1 else tmp_files[0]
+    return command, None
 
 
 def _cleanup_script_temp(path: Optional[str]) -> None:
@@ -224,14 +356,10 @@ def _smart_decode(data: bytes, command: str = "") -> str:
         }
     )
 
-    cmd_lower = command.lower().strip()
-
-    # 判断是否是已知输出 UTF-8 的工具
-    is_utf8_tool = False
-    for tool in UTF8_TOOLS:
-        if cmd_lower.startswith(tool + " ") or cmd_lower.startswith(tool + ".exe "):
-            is_utf8_tool = True
-            break
+    # 使用与 command_safety 一致的命令名提取逻辑，
+    # 可处理路径前缀（如 C:\\Python\\python.exe）和裸命令（如 python）
+    cmd_name = _extract_cmd_name(command)
+    is_utf8_tool = cmd_name is not None and cmd_name in UTF8_TOOLS
 
     # 如果命令明确是 UTF-8 工具，优先尝试 UTF-8
     if is_utf8_tool:
@@ -276,15 +404,31 @@ class BackgroundTask:
             self.output_buffer = self.output_buffer[-5000:]
 
 
-def _prepare_windows_encoding(command: str) -> str:
+def _prepare_windows_encoding(command: str, workdir: Optional[Path] = None) -> str:
     """Windows 上设置 UTF-8 编码前缀（仅当需要 shell=True 路径时使用）
 
-    替代方案：通过 Python 的 env 传递编码，避免嵌入 chcp 命令。
-    但某些 Windows 程序仍需要控制台代码页，所以保留 chcp 前缀。
+    通过 chcp 65001 将 cmd.exe 代码页切换为 UTF-8，确保内置命令（dir/type 等）
+    输出 UTF-8 而非 GBK。
+
+    如果项目有 .venv，将其 Scripts 目录加入 PATH 前缀，解决 Windows App
+    Execution Alias（WindowsApps 下的 python.exe）在 cmd.exe 中无法解析的问题。
+
+    注意：只重定向 stdout 到 NUL，保留 stderr。如果 chcp 失败（如无控制台），
+    stderr 可被捕获，且 execute_bash 会检查 returncode 报告错误。
     """
-    if sys.platform == "win32":
-        return f"chcp 65001 >nul 2>&1 && {command}"
-    return command
+    if sys.platform != "win32":
+        return command
+
+    prefix = "chcp 65001 >nul"
+
+    # 将项目 .venv/Scripts 加入 PATH 前缀，确保 python/pip 等在 cmd.exe 中可解析
+    if workdir:
+        venv_scripts = workdir / ".venv" / "Scripts"
+        if venv_scripts.is_dir():
+            vs = str(venv_scripts).replace("\\", "/")
+            prefix += f' && set "PATH={vs};%PATH%"'
+
+    return f"{prefix} && {command}"
 
 
 class BackgroundTaskManager:
@@ -338,7 +482,7 @@ class BackgroundTaskManager:
 
             if use_shell:
                 # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
-                cmd = _prepare_windows_encoding(command)
+                cmd = _prepare_windows_encoding(command, workdir)
                 process = run_with_shell(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -534,11 +678,14 @@ class TerminalTools:
             # ── 内联脚本自动转临时文件（Windows cmd 无法可靠处理多行/嵌套引号）──
             command, tmp_script = _rewrite_inline_script(command)
 
+            # ── findstr 管道符修复（cmd.exe 把引号内 | 当管道）──
+            command = _fix_findstr_pipe(command)
+
             use_shell = needs_shell(command)
 
             if use_shell:
                 # Path B: 需要 shell 特性（管道、重定向等）
-                cmd = _prepare_windows_encoding(command)
+                cmd = _prepare_windows_encoding(command, self.workdir)
                 process = run_with_shell(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -599,6 +746,14 @@ class TerminalTools:
             stderr = _smart_decode(stderr_bytes, command).strip()
 
             combined = "\n".join(filter(None, [stdout, stderr]))
+
+            # 检查进程退出码
+            if process.returncode != 0:
+                detail = combined if combined else "(no output)"
+                return ToolResult(
+                    False,
+                    error=f"Command exited with code {process.returncode}:\n{detail}",
+                )
 
             # Shell 输出压缩（减少 token 消耗）
             from app.tools.shell_compressor import compress

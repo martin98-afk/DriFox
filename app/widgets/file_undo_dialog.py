@@ -246,7 +246,8 @@ class FileUndoPreviewDialog(QDialog):
                 new_lines,
                 fromfile=Path(file_path).name,
                 tofile=Path(file_path).name,
-                lineterm='\n'
+                lineterm='\n',
+                n=10,
             )
 
             diff_output = ''.join(diff)

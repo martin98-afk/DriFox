@@ -637,11 +637,24 @@ class TrayManager(QObject):
 
     @staticmethod
     def _read_hotkey_from_command() -> str:
-        """从 toggle-window 命令文件的 shortcut 字段读取全局热键
+        """从 toggle-window 命令读取全局热键
 
-        命令文件路径：plugins/system/commands/toggle-window.md
-        优点：用户直接改 .md 文件的 shortcut 字段即可热修改快捷键，无需重启。
+        优先级：
+        1. CommandManager 中已注册的 shortcut（支持用户插件覆盖）
+        2. 系统插件 toggle-window.md 文件的 shortcut 字段（兜底）
         """
+        try:
+            # 优先从 CommandManager 读取（支持用户插件覆盖系统命令）
+            from app.core.command_manager import CommandManager
+
+            cmd_mgr = CommandManager.get_instance()
+            toggle_cmd = cmd_mgr.get_command("toggle-window")
+            if toggle_cmd and toggle_cmd.shortcut:
+                return toggle_cmd.shortcut
+        except Exception:
+            pass
+
+        # 兜底：直接从系统文件读取
         try:
             cmd_path = Path(__file__).parents[1] / "plugins" / "system" / "commands" / "toggle-window.md"
             if not cmd_path.exists():

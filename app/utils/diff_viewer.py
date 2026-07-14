@@ -28,6 +28,9 @@ from PyQt5.QtWidgets import QDialog, QHBoxLayout
 
 from app.core.webengine_profile import create_transient_web_profile
 
+# Pygments 语法高亮（与 render_helpers 一致，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
+from app.widgets.render_helpers import _highlight_code_line, _highlighted_word_diff_html, _get_diff_lexer
+
 try:
     import psutil
 except Exception:
@@ -638,7 +641,7 @@ class DiffHtmlGenerator:
 
         tree_html = ""
         blocks_html = ""
-        preload_n = 1 if lazy_load and total_files > 1 else total_files
+        preload_n = total_files
         files_meta = cls._gen_files_meta(files)
 
         for i, fi in enumerate(files):
@@ -1089,10 +1092,30 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             <div class="diff-unified" data-view="unified" style="display:none">{rows["u"]}</div>
             <div class="diff-split" data-view="split">{rows["s"]}</div></div>'''
 
+    # ---- Per-line Pygments highlighting helpers ----
+    @classmethod
+    def _pyg_highlight_line(cls, text: str, lexer) -> str:
+        """对单行代码做 Pygments 语法高亮；lexer 为 TextLexer 时等效于 escape_html"""
+        try:
+            return _highlight_code_line(text, lexer)
+        except Exception:
+            return cls.escape_html(text)
+
+    @classmethod
+    def _pyg_word_diff(cls, old_text: str, new_text: str, lexer) -> tuple:
+        """词级差异高亮 + Pygments 语法着色，返回 (old_html, new_html)"""
+        try:
+            return _highlighted_word_diff_html(old_text, new_text, lexer)
+        except Exception:
+            return cls._word_diff(old_text, new_text)
+
     @classmethod
     def _gen_rows(cls, fi: Dict) -> Dict[str, str]:
         """生成统一视图和分列视图的行 HTML。核心逻辑：块状聚合。"""
         lines = fi["lines"]
+        lexer = _get_diff_lexer(fi["path"])
+        _h = lambda t: cls._pyg_highlight_line(t, lexer)  # noqa: E731
+        _wd = lambda o, n: cls._pyg_word_diff(o, n, lexer)  # noqa: E731
         u = []
         s = []
         oln = 1; nln = 1; i = 0
@@ -1135,55 +1158,55 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                     if dc == 1: cls_suffix = "del-e"
                     # 仅在可配对的行上做 word-diff
                     if k < pc:
-                        o_h, n_h = cls._word_diff(del_texts[k], add_texts[k])
+                        o_h, n_h = _wd(del_texts[k], add_texts[k])
                         u.append(f'<div class="du-row {cls_suffix}" data-type="deleted">'
                                  f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
                                  f'<span class="du-sign">-</span><span class="du-code">{o_h}</span></div>')
                     else:
                         u.append(f'<div class="du-row {cls_suffix}" data-type="deleted">'
                                  f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
-                                 f'<span class="du-sign">-</span><span class="du-code">{cls.escape_html(del_texts[k])}</span></div>')
+                                 f'<span class="du-sign">-</span><span class="du-code">{_h(del_texts[k])}</span></div>')
                 for k in range(ac):
                     cls_suffix = "add-s" if (k == 0 and ac > 1) else ("add-e" if k == ac - 1 else "add-m")
                     if ac == 1: cls_suffix = "add-e"
                     if k < pc:
-                        o_h, n_h = cls._word_diff(del_texts[k], add_texts[k])
+                        o_h, n_h = _wd(del_texts[k], add_texts[k])
                         u.append(f'<div class="du-row {cls_suffix}" data-type="added">'
                                  f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
                                  f'<span class="du-sign">+</span><span class="du-code">{n_h}</span></div>')
                     else:
                         u.append(f'<div class="du-row {cls_suffix}" data-type="added">'
                                  f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
-                                 f'<span class="du-sign">+</span><span class="du-code">{cls.escape_html(add_texts[k])}</span></div>')
+                                 f'<span class="du-sign">+</span><span class="du-code">{_h(add_texts[k])}</span></div>')
 
                 # ===== SPLIT: 修改行做 word-diff，纯删/纯增行 做空对侧 =====
                 for k in range(dc):
                     if k < pc:
-                        o_h, n_h = cls._word_diff(del_texts[k], add_texts[k])
+                        o_h, n_h = _wd(del_texts[k], add_texts[k])
                         s.append(f'<div class="ds-pair mod" data-type="modified">'
                                  f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{o_h}</span></div>'
                                  f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{n_h}</span></div></div>')
                     else:
                         s.append(f'<div class="ds-pair del" data-type="deleted">'
-                                 f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{cls.escape_html(del_texts[k])}</span></div>'
+                                 f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{_h(del_texts[k])}</span></div>'
                                  f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
                 for k in range(pc, ac):
                     s.append(f'<div class="ds-pair add" data-type="added">'
                              f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                             f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{cls.escape_html(add_texts[k])}</span></div></div>')
+                             f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{_h(add_texts[k])}</span></div></div>')
 
             elif ln.startswith("+") and not ln.startswith("+++"):
                 # 孤立新增（前面没有删除行）— 无底部边框
                 u.append(f'<div class="du-row add-m" data-type="added">'
                          f'<span class="du-num"></span><span class="du-num">{nln}</span>'
-                         f'<span class="du-sign">+</span><span class="du-code">{cls.escape_html(ln[1:])}</span></div>')
+                         f'<span class="du-sign">+</span><span class="du-code">{_h(ln[1:])}</span></div>')
                 s.append(f'<div class="ds-pair add" data-type="added">'
                          f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{cls.escape_html(ln[1:])}</span></div></div>')
+                         f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{_h(ln[1:])}</span></div></div>')
                 nln += 1; i += 1
 
             elif ln.startswith(" "):
-                ct = cls.escape_html(ln[1:] if ln else "")
+                ct = _h(ln[1:] if ln else "")
                 u.append(f'<div class="du-row ctx" data-type="context">'
                          f'<span class="du-num">{oln}</span><span class="du-num">{nln}</span>'
                          f'<span class="du-sign"></span><span class="du-code">{ct}</span></div>')
@@ -1193,7 +1216,7 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                 oln += 1; nln += 1; i += 1
 
             else:
-                esc = cls.escape_html(ln)
+                esc = _h(ln)
                 u.append(f'<div class="du-row ctx" data-type="context">'
                          f'<span class="du-num"></span><span class="du-num"></span>'
                          f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>')
