@@ -482,7 +482,7 @@ class BackgroundTaskManager:
 
             if use_shell:
                 # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
-                cmd = _prepare_windows_encoding(command, self.workdir)
+                cmd = _prepare_windows_encoding(command, workdir)
                 process = run_with_shell(
                     cmd,
                     stdout=subprocess.PIPE,

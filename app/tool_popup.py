@@ -179,21 +179,6 @@ class ToolWindowTitleBar(QWidget):
     def _on_popup_clicked(self):
         self.popupRequested.emit()
 
-    def mousePressEvent(self, event):
-        """标题栏鼠标事件：Shift+左键快速切换窗口分组选中状态
-
-        在标题栏层面直接处理 Shift+click，不依赖事件穿透 _fade_container
-        传播到 ToolPopupDialog，避免 QGraphicsOpacityEffect 导致的
-        事件传播不稳定问题。
-        """
-        if event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier:
-            top_window = self.window()
-            if isinstance(top_window, ToolPopupDialog):
-                TrayManager.get_instance()._on_window_shift_clicked(top_window)
-                event.accept()
-                return
-        super().mousePressEvent(event)
-
     def refresh_style(self):
         """主题/字体变更时刷新标题栏样式"""
         Colors.refresh()
@@ -704,7 +689,6 @@ class ToolPopupDialog(QDialog):
         # 混合使用 UpdateLayeredWindow / SetLayeredWindowAttributes 导致
         # 窗口永久不可见（仅 LockButtonWidget 独立窗口可见）。
         self._fade_container = QWidget(self)
-        self._fade_container.installEventFilter(self)  # 拦截 _fade_container 上的鼠标事件，兜底 Shift+点击
         fade_layout = QVBoxLayout(self._fade_container)
         fade_layout.setContentsMargins(0, 0, 0, 0)
         fade_layout.setSpacing(0)
@@ -936,23 +920,17 @@ class ToolPopupDialog(QDialog):
             self._anim_target_geometry = None
 
     def _restore_opacity_safe(self):
-        """安全兜底：确保内容容器已清除 QGraphicsOpacityEffect
-
-        注意：必须无条件执行 setGraphicsEffect(None)，不能用
-        `self._fade_opacity_effect is not None` 做守卫——
-        _on_fade_anim_finished 可能在之前就把 _fade_opacity_effect 置为 None，
-        但 setGraphicsEffect(None) 实际未生效（异常被静默吞掉），
-        导致效果永久残留、持续影响鼠标事件命中检测。
-        """
+        """安全兜底：确保内容容器已清除 QGraphicsOpacityEffect"""
         try:
             from PyQt5 import sip
 
             if sip.isdeleted(self):
                 return
-            # 不论 _fade_opacity_effect 引用状态，无条件清除 graphicsEffect
-            if self._fade_container is not None:
+            # 先确认容器本身存活（防止窗口关闭后 _fade_container 已被 C++ 析构）
+            if self._fade_container is not None and self._fade_opacity_effect is not None:
+                logger.warning("[ToolPopupDialog] 安全兜底：清除内容淡入效果")
                 self._fade_container.setGraphicsEffect(None)
-            self._fade_opacity_effect = None
+                self._fade_opacity_effect = None
         except RuntimeError:
             pass  # 对象已销毁，忽略
         except Exception:
@@ -1501,16 +1479,6 @@ class ToolPopupDialog(QDialog):
             self._hide_opacity_slider()
 
     def eventFilter(self, obj, event):
-        # ── Shift+点击 _fade_container 时切换窗口分组选中 ──
-        # 当 QGraphicsOpacityEffect 导致鼠标事件被发到 _fade_container
-        # 而非 ToolWindowTitleBar 时，在此兜底处理。
-        if obj is self._fade_container and event.type() == QEvent.MouseButtonPress:
-            mouse_ev = event if isinstance(event, QMouseEvent) else None
-            if mouse_ev and mouse_ev.button() == Qt.LeftButton and mouse_ev.modifiers() & Qt.ShiftModifier:
-                tray = TrayManager.get_instance()
-                tray._on_window_shift_clicked(self)
-                return True  # 消费事件，阻止进一步传播
-
         # macOS: 监听应用激活事件，当 Dock 图标被点击时恢复窗口
         if platform.system() == "Darwin":
             if event.type() == QEvent.ApplicationActivate:
