@@ -1148,13 +1148,15 @@ class CommandCard(QWidget):
                         parts.append(safe[pos:])
                     safe = "".join(parts)
         lbl.setText(safe)
-        lbl.setVisible(True)
         self._has_tooltip_text = True
-        # 气泡为独立悬浮窗口，宽度就绪后定位即可；宽度未就绪时延后重算
+        # 先定位再显示，避免 tooltip 在错误位置闪现
+        # 若卡片尚未布局（width<=0），延迟到 layout 完成后再定位+显示
         if self.width() <= 0:
+            lbl.setVisible(False)
             QTimer.singleShot(0, self._update_desc_tooltip)
             return
         self._position_desc_tooltip()
+        lbl.setVisible(True)
 
     def _apply_list_height(self):
         """统一刷新卡片总高度：仅命令列表高度（含分区分隔线）
@@ -2670,6 +2672,9 @@ class CommandCard(QWidget):
         self.setVisible(has_items)
         if was_detail:
             self.updateGeometry()
+        # 延迟一帧到 layout 完成后刷新悬浮气泡位置，解决首次显示时
+        # mapToGlobal 尚未反映卡片最终布局位置的问题
+        QTimer.singleShot(0, self._sync_desc_tooltip_position)
 
     def invalidate_cache(self):
         """使缓存失效，下次 show_card 时自动重建
