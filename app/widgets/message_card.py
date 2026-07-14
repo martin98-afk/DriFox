@@ -2336,47 +2336,85 @@ class CodeWebViewer(QWebEngineView):
             # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN
             cdn_libs = _get_vendor_script_tags()
 
-        scrollbar_css = """
-            /* 统一滚动条样式 - 深色模式适配 */
-            ::-webkit-scrollbar {
-                width: 6px;
-                height: 6px;
-            }
-            ::-webkit-scrollbar-track {
-                background: #1a1f2e;
-                border-radius: 3px;
-                margin: 2px 0;
-            }
-            ::-webkit-scrollbar-track:hover {
-                background: #1e2435;
-            }
-            ::-webkit-scrollbar-thumb {
-                background: #3a3f50;
-                border-radius: 3px;
-                min-height: 24px;
-            }
-            ::-webkit-scrollbar-thumb:hover {
-                background: #4a4f62;
-            }
-            ::-webkit-scrollbar-thumb:active {
-                background: #5a5f72;
-            }
-            ::-webkit-scrollbar-corner {
-                background: #1a1f2e;
-            }
-            /* Firefox 滚动条 */
-            * {
-                scrollbar-width: thin;
-                scrollbar-color: #3a3f50 #1a1f2e;
-            }
-        """
-        # 检测浅色/深色模式，用于行内差异框主题适配
+        # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
             from app.utils.theme_manager import theme_manager
 
-            _is_light_diff = theme_manager.is_light_theme()
+            _is_light = theme_manager.is_light_theme()
         except Exception:
-            _is_light_diff = False
+            _is_light = False
+
+        if _is_light:
+            # 浅色模式滚动条 — 半透明灰色，在不同浅色主題背景上都自然
+            scrollbar_css = """
+                ::-webkit-scrollbar {
+                    width: 6px;
+                    height: 6px;
+                }
+                ::-webkit-scrollbar-track {
+                    background: transparent;
+                    border-radius: 3px;
+                    margin: 2px 0;
+                }
+                ::-webkit-scrollbar-track:hover {
+                    background: rgba(0, 0, 0, 0.04);
+                }
+                ::-webkit-scrollbar-thumb {
+                    background: rgba(0, 0, 0, 0.18);
+                    border-radius: 3px;
+                    min-height: 24px;
+                }
+                ::-webkit-scrollbar-thumb:hover {
+                    background: rgba(0, 0, 0, 0.28);
+                }
+                ::-webkit-scrollbar-thumb:active {
+                    background: rgba(0, 0, 0, 0.35);
+                }
+                ::-webkit-scrollbar-corner {
+                    background: transparent;
+                }
+                /* Firefox 滚动条 */
+                * {
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+                }
+            """
+        else:
+            # 深色模式滚动条 — 保留原有的精致深色风格
+            scrollbar_css = """
+                ::-webkit-scrollbar {
+                    width: 6px;
+                    height: 6px;
+                }
+                ::-webkit-scrollbar-track {
+                    background: #1a1f2e;
+                    border-radius: 3px;
+                    margin: 2px 0;
+                }
+                ::-webkit-scrollbar-track:hover {
+                    background: #1e2435;
+                }
+                ::-webkit-scrollbar-thumb {
+                    background: #3a3f50;
+                    border-radius: 3px;
+                    min-height: 24px;
+                }
+                ::-webkit-scrollbar-thumb:hover {
+                    background: #4a4f62;
+                }
+                ::-webkit-scrollbar-thumb:active {
+                    background: #5a5f72;
+                }
+                ::-webkit-scrollbar-corner {
+                    background: #1a1f2e;
+                }
+                /* Firefox 滚动条 */
+                * {
+                    scrollbar-width: thin;
+                    scrollbar-color: #3a3f50 #1a1f2e;
+                }
+            """
+        _is_light_diff = _is_light
         mono_font = f"{font_family_global}, Consolas, monospace"
 
         html = f"""
@@ -6152,24 +6190,27 @@ class MessageCard(SimpleCardWidget):
             except RuntimeError:
                 pass
 
-    def sync_width(self, force: bool = False):
+    def sync_width(self, force: bool = False, target_width: int | None = None):
         """同步卡片宽度
 
         Args:
             force: 是否强制更新，即使宽度没变化
+            target_width: 显式指定目标宽度（用于 resize 期间绕过循环依赖）。
+                          传入时直接使用此宽度，不再从 parent 推算。
         """
-        parent = self.parentWidget()
-        if not parent:
-            return
-        parent_width = parent.width()
-        if self.role == "welcome":
-            horizontal_margin = 20
-        elif self.role == "user":
-            horizontal_margin = 180
-        else:
-            horizontal_margin = 20
+        if target_width is None:
+            parent = self.parentWidget()
+            if not parent:
+                return
+            parent_width = parent.width()
+            if self.role == "welcome":
+                horizontal_margin = 20
+            elif self.role == "user":
+                horizontal_margin = 180
+            else:
+                horizontal_margin = 20
 
-        target_width = max(320, parent_width - horizontal_margin)
+            target_width = max(320, parent_width - horizontal_margin)
 
         # 性能优化：只有宽度真正变化时才更新
         if not force and target_width == self._last_synced_width:

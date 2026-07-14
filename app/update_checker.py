@@ -184,8 +184,18 @@ class UpdateChecker(QWidget):
         info_bar.close()
         self._start_download(latest_release)
 
+    def _find_asset(self, assets: list, name_contains: str) -> dict | None:
+        """在 Release assets 列表中按名称片段查找资产。"""
+        for asset in assets:
+            if name_contains in asset.get("name", ""):
+                return asset
+        return None
+
     def _start_download(self, latest_release):
-        """根据平台寻找安装文件并下载"""
+        """下载并安装新版本。"""
+        assets = latest_release.get("assets", []) or []
+
+        # --- 全量更新路径 ---
         update_url = None
         exe_name = f"Update_{latest_release['tag_name']}.exe"
 
@@ -193,7 +203,7 @@ class UpdateChecker(QWidget):
         system = platform.system().lower()
 
         # 遍历 Release 资产定位安装文件
-        for asset in latest_release.get("assets", []) or []:
+        for asset in assets:
             asset_name = asset["name"].lower()
             if system == "darwin" and asset_name.endswith(".dmg"):
                 # macOS 下载 dmg
@@ -228,6 +238,10 @@ class UpdateChecker(QWidget):
         self.download_thread.finished_signal.connect(self._handle_download_finished)
         self.download_thread.error_signal.connect(self._handle_download_error)
         self.download_thread.start()
+
+    # ------------------------------------------------------------------
+    # 全量更新
+    # ------------------------------------------------------------------
 
     def _handle_download_finished(self):
         """下载完成：直接开始安装（不再弹窗确认）"""

@@ -1,6 +1,29 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.9] - 2026-07-14
+
+自上一版本以来的变更 | 提交数：11 · 文件变更：20 · +1400/-340 | 贡献者：dingma
+
+### ✨ 新功能 (New Features)
+
+- **消息处理用户文本指纹识别**: 增强消息处理流程，基于用户文本生成指纹用于 worker 身份识别，便于会话回溯与调试定位
+- **toggle-window 与 clear 命令及快捷键**: 新增 `toggle-window`（隐藏/显示主窗口）与 `clear`（清空当前会话）两条内置命令及其快捷键支持，同步更新对应的命令说明文档
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **卡片宽度同步循环依赖优化**: 重构 `main_widget` 与 `message_card` 在窗口 resize 时的宽度同步逻辑，避免信号相互触发导致的循环依赖问题，提升大窗口拖动时的稳定性
+- **toggle-window 命令启动崩溃与全局热键支持**: 解决注册 `toggle-window` 命令后应用启动时偶发的崩溃问题，并实现全局热键注册以支持系统级快捷键唤起主窗口
+- **MessageCard 用户头像与标题本地化**: 将 `MessageCard` 中硬编码的用户头像与标题替换为本地化文本，匹配界面整体语言切换
+- **check_update 静默模式与用户反馈**: 重构 `update_checker` 的 `check_update` 方法以支持静默模式，优化检查过程中的用户反馈提示；同步精简 `CardManager` 中的冗余调用
+- **布局边距与命令卡片对齐优化**: 调整 `OpenAIChatToolWindow`、`CardContainer`、`bottom_input_area` 的布局边距以改进整体间距；将命令卡片标签对齐到顶部避免不均匀的内边距；新增 `CardManager` 方法支持跨容器隐藏非系统卡片
+- **command_card tooltip 首次显示延迟**: 修复 `command_card` 中 tooltip 在首次显示时的位置延迟问题，提升交互即时感
+
+### ♻️ 代码重构 (Refactoring)
+
+- **浮动 tooltip 独立窗口化**: 将命令卡片中的浮动 tooltip 重构为独立窗口实现，统一布局与可见性管理逻辑，便于跨组件复用
+- **ToolPopupDialog 平滑淡入动画**: 在 `ToolPopupDialog` 中引入 `QGraphicsOpacityEffect` 实现更平滑的渐隐淡入动画效果，替换原有硬切换过渡
+
 ## [v0.3.8] - 2026-07-13
 
 自上一版本以来的变更 | 提交数：6 · 文件变更：18 · +239/-147 | 贡献者：dingma

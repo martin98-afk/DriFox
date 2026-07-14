@@ -112,7 +112,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Setup-$tag.exe"
+          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
           if (-not (Test-Path $installer)) {
             Write-Error "❌ 安装包未生成: $installer"
             exit 1
@@ -124,16 +124,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Setup-$tag.exe"
+          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Setup-$tag.exe"
+          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Windows-Setup-$tag.exe"
           Write-Host "✅ SHA256: $hash"
 
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
           name: Drifox-Windows-${{ steps.version.outputs.tag }}
-          path: dist/output/*
+          path: |
+            dist/output/*
           if-no-files-found: error
           retention-days: 30
 
@@ -252,7 +253,7 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          dmg="dist/Drifox-${tag}.dmg"
+          dmg="dist/Drifox-macOS-${tag}.dmg"
           if [ ! -f "$dmg" ]; then
             echo "❌ DMG 未生成: $dmg"
             exit 1
@@ -264,7 +265,7 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          sha256sum "dist/Drifox-${tag}.dmg" | tee dist/SHA256SUMS
+          sha256sum "dist/Drifox-macOS-${tag}.dmg" | tee dist/SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (macOS)
@@ -272,7 +273,7 @@ jobs:
         with:
           name: Drifox-macOS-${{ steps.version.outputs.tag }}
           path: |
-            dist/Drifox-*.dmg
+            dist/Drifox-macOS-*.dmg
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
@@ -435,7 +436,7 @@ jobs:
             }}
           generate_release_notes: false
           files: |
-            release-assets/Drifox-Setup-*.exe
-            release-assets/Drifox-*.dmg
+            release-assets/Drifox-Windows-Setup-*.exe
+            release-assets/Drifox-macOS-*.dmg
             release-assets/Drifox-Linux-*.tar.gz
             release-assets/SHA256SUMS

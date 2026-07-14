@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.3.8"
+version = "0.3.9"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -43,6 +43,8 @@ dependencies = [
     # 桌面自动化 (pynput + mss 组合)
     "pynput>=1.7.6",
     "mss>=9.0.1",
+    # 全局热键
+    "keyboard>=0.13.5",
     # MCP (Model Context Protocol)
     "mcp>=1.0.0",
     # 插件热更新

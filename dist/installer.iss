@@ -4,7 +4,7 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.3.8"
+  #define MyAppVersion "v0.3.9"
 #endif
 #define MyAppPublisher "Jinshan Psychiatric Hospital"
 #define MyAppURL "https://Drifox-sphinx-build.readthedocs.io/zh-cn/latest/"
@@ -26,7 +26,7 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-OutputBaseFilename=Drifox-Setup-{#MyAppVersion}
+OutputBaseFilename=Drifox-Windows-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 SetupIconFile=drifox.ico
