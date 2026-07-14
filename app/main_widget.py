@@ -72,6 +72,7 @@ from app.core import (
     get_user_round_ranges,
     group_messages_for_display,
 )
+from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
@@ -2885,12 +2886,51 @@ class OpenAIChatToolWindow(ToolWindow):
 
                     def _on_shortcut(n=name):
                         try:
-                            self._execute_command(n)
+                            # ⚠️ 用户插件 FUNCTION 命令无 Python 处理器注册，
+                            # 直接调用 _execute_command 会静默失败。
+                            # 检测到无处理器时，回退到在输入框插入 /command 文本，
+                            # 与命令卡片点击行为一致。
+                            if self._has_command_handler(n):
+                                self._execute_command(n)
+                            else:
+                                self._insert_command_text_fallback(n)
                         except RuntimeError:
                             pass
 
                     qs.activated.connect(_on_shortcut)
                     self._command_shortcuts.append(qs)
+
+    def _has_command_handler(self, name: str) -> bool:
+        """检查命令名是否有对应的 Python 处理器
+
+        用于区分系统内置 function 命令（有 handler）和用户插件 function 命令（无 handler）。
+        后者通过快捷键触发时回退到插入命令文本。
+        """
+        # 窗口级处理器
+        handlers = getattr(self, "_function_command_handlers", {})
+        if name in handlers:
+            return True
+        # 全局注册的处理器
+        if FunctionCommandHandlers.has(name):
+            return True
+        # 硬编码内置命令
+        if name in ("new", "new-window", "branch", "remember"):
+            return True
+        return False
+
+    def _insert_command_text_fallback(self, command_name: str):
+        """当 function 命令快捷键无处理器时，在输入框插入 /command 文本
+
+        用户插件命令（type: function + shortcut）没有 Python 处理器注册，
+        快捷键按下后无法直接执行。回退行为：将当前输入替换为 /{command_name}
+        并聚焦，用户按 Enter 后走正常发送流程（与命令卡片选中效果类似）。
+        """
+        insert = f"/{command_name} "
+        self.input_area.setPlainText(insert)
+        cursor = self.input_area.textCursor()
+        cursor.movePosition(cursor.End)
+        self.input_area.setTextCursor(cursor)
+        self.input_area.setFocus()
 
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令
@@ -2907,8 +2947,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if handler:
             handler(args)
             return
-
-        from app.core.builtin_commands import FunctionCommandHandlers
 
         # 回退到全局注册的处理器（兼容旧代码路径）
         handler = FunctionCommandHandlers.get(command_name)
@@ -6158,7 +6196,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6223,7 +6261,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6234,8 +6272,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
+            # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
+            try:
+                from app.tray_manager import TrayManager
+                tray = TrayManager.get_instance()
+                tray._setup_global_hotkey()
+            except Exception:
+                pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
         # 技能变更：广播刷新所有窗口的技能列表（settings popup + 卡片 token 估算）
@@ -6251,7 +6296,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6285,7 +6330,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6326,7 +6371,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6353,7 +6398,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -10767,14 +10812,21 @@ class OpenAIChatToolWindow(ToolWindow):
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
-                    # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
-                    self.input_area.clear()
-                    self._clear_attachments()
-                    # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
-                    if not self._is_streaming:
-                        self.input_area.toggle_send_button(True)
-                    self._execute_command(cmd_result.command_name, cmd_result.remainder)
-                    return
+                    # 用户插件 FUNCTION 命令无 Python 处理器注册
+                    # （如插件 .md 文件定义了 type: function + shortcut 但无可执行代码）
+                    # → 不拦截、不清理输入，让命令走正常 prompt 发送流程，
+                    #    /xxx 文本会作为普通用户消息发送给 AI。
+                    if not self._has_command_handler(cmd_result.command_name):
+                        cmd_result = None  # 重置标记，走后续 skill / 普通发送流程
+                    else:
+                        # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
+                        self.input_area.clear()
+                        self._clear_attachments()
+                        # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
+                        if not self._is_streaming:
+                            self.input_area.toggle_send_button(True)
+                        self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                        return
                 case CommandType.SUBAGENT:
                     # 子智能体命令：触发子智能体任务，不替换提示词
                     # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
@@ -14176,7 +14228,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -14203,7 +14255,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
