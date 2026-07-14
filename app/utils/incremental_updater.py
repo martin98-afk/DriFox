@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -130,7 +131,12 @@ class IncrementalUpdater(QThread):
         # ② 加载/生成本地 manifest
         local_manifest = self._load_local_manifest()
 
-        # ③ 对比差异
+        # ③ 版本跨度保护：跳 3+ minor 或跨大版本 → 强制全量
+        if not self._check_version_span(local_manifest, remote_manifest):
+            self._fallback_full_update("版本跨度太大，建议全量更新")
+            return
+
+        # ④ 对比差异
         diff = self._compare_manifests(local_manifest, remote_manifest)
         if diff.is_empty:
             logger.info("[IncrementalUpdater] 本地文件已是最新，无需下载")
@@ -168,6 +174,10 @@ class IncrementalUpdater(QThread):
 
         # ⑦ 处理锁定文件
         if locked_files:
+            # 保存 remote manifest 供 updater 脚本使用
+            manifest_src = os.path.join(extract_dir, "_remote_manifest.json")
+            with open(manifest_src, "w", encoding="utf-8") as f:
+                json.dump(remote_manifest, f, ensure_ascii=False, indent=2)
             self._handle_locked_files(locked_files, extract_dir, self.install_dir)
             # 有锁定文件 → 需要重启才能完成
             self.stage_changed.emit("done")
@@ -222,6 +232,48 @@ class IncrementalUpdater(QThread):
         except Exception as e:
             logger.warning(f"[IncrementalUpdater] 保存本地 manifest 失败: {e}")
 
+    @staticmethod
+    def _parse_version(version_str: str) -> tuple[int, int, int]:
+        """解析版本号 v0.3.8 → (0, 3, 8)。"""
+        import re
+
+        v = version_str.lstrip("v").strip()
+        match = re.match(r"(\d+)\.(\d+)\.(\d+)", v)
+        if match:
+            return int(match.group(1)), int(match.group(2)), int(match.group(3))
+        return 0, 0, 0
+
+    def _check_version_span(self, local: dict, remote: dict) -> bool:
+        """检查版本跨度：跨大版本或跳 3+ minor → 返回 False（建议全量）。
+
+        阈值: major 不同 或 minor 差距 >= 3 → 强制全量。
+        首次安装（无本地 manifest）→ 允许增量。
+        """
+        local_ver = local.get("version", "")
+        remote_ver = remote.get("version", self.remote_version)
+
+        # 首次安装，本地无版本号 → 允许增量
+        if local_ver == "local" or not local_ver:
+            return True
+
+        l_major, l_minor, _ = self._parse_version(local_ver)
+        r_major, r_minor, _ = self._parse_version(remote_ver)
+
+        if l_major != r_major:
+            logger.info(
+                f"[IncrementalUpdater] 跨大版本 {local_ver} → {remote_ver}，强制全量"
+            )
+            return False
+
+        span = abs(r_minor - l_minor)
+        if span >= 3:
+            logger.info(
+                f"[IncrementalUpdater] minor 跨度 {span} ({local_ver} → {remote_ver})，强制全量"
+            )
+            return False
+
+        return True
+
     def _scan_local_files(self) -> dict:
         """扫描安装目录，生成本地文件清单。跳过 __pycache__ 等。"""
         files = {}
@@ -253,6 +305,26 @@ class IncrementalUpdater(QThread):
     # Diff 对比
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _sanitize_path(path: str) -> str | None:
+        """确保路径安全：拒绝绝对路径和 .. 遍历。"""
+        # 绝对路径：os.path.isabs + Unix/Windows 前缀兜底
+        if os.path.isabs(path) or path.startswith("/") or path.startswith("\\"):
+            return None
+
+        # 检查路径组件中是否包含 ..
+        parts = path.replace("\\", "/").split("/")
+        for part in parts:
+            if part == "..":
+                return None
+
+        # 规范化确认
+        normalized = os.path.normpath(path).replace("\\", "/")
+        if os.path.isabs(normalized):
+            return None
+
+        return normalized
+
     def _compare_manifests(self, local: dict, remote: dict) -> DiffReport:
         """对比本地和远程 manifest，生成差异报告。"""
         local_files: dict = local.get("files", {})
@@ -260,11 +332,15 @@ class IncrementalUpdater(QThread):
         diff = DiffReport()
 
         for path, info in remote_files.items():
-            if path not in local_files:
-                diff.added.append(path)
+            safe = self._sanitize_path(path)
+            if safe is None:
+                logger.warning(f"[IncrementalUpdater] 跳过不安全路径: {path}")
+                continue
+            if safe not in local_files:
+                diff.added.append(safe)
                 diff.total_download_size += info.get("size", 0)
-            elif local_files[path].get("sha256") != info.get("sha256"):
-                diff.modified.append(path)
+            elif local_files[safe].get("sha256") != info.get("sha256"):
+                diff.modified.append(safe)
                 diff.total_download_size += info.get("size", 0)
 
         for path in local_files:
@@ -299,9 +375,6 @@ class IncrementalUpdater(QThread):
                                 return False
                             f.write(chunk)
                             downloaded += len(chunk)
-
-                            # 进度报告：files 维度不准确（zip 层面），报告字节进度
-                            pct = int(downloaded / max(total, 1) * 100)
                             self.progress.emit(0, 0, downloaded, total)
 
             return True
@@ -468,7 +541,7 @@ class IncrementalUpdater(QThread):
         lines = [
             "@echo off",
             "chcp 65001 >nul",
-            "cd /d " + dst_dir,
+            f'cd /d "{dst_dir}"',
             "",
             ":: 等待主进程退出（最多 30 秒）",
             "set /a count=0",
@@ -493,16 +566,14 @@ class IncrementalUpdater(QThread):
             dst_new = dst + ".new"
 
             if os.path.isfile(dst_new):
-                lines.append(f'echo 替换: {rel_path}')
+                lines.append(f'echo 替换: {shlex.quote(rel_path)}')
                 lines.append(f'copy /Y "{dst_new}" "{dst}" >nul')
                 lines.append(f'del "{dst_new}" 2>nul')
             elif os.path.isfile(src):
-                lines.append(f'echo 替换: {rel_path}')
+                lines.append(f'echo 替换: {shlex.quote(rel_path)}')
                 lines.append(f'copy /Y "{src}" "{dst}" >nul')
 
         # 清理临时目录
-        up_pending = os.path.join(dst_dir, "_update_pending")
-        lines.append(f'if exist "{up_pending}" rmdir /s /q "{up_pending}"')
         lines.append(f'if exist "{src_dir}" rmdir /s /q "{src_dir}"')
 
         # 保存本地 manifest
@@ -525,9 +596,7 @@ class IncrementalUpdater(QThread):
         subprocess.Popen(
             ["cmd.exe", "/c", script_path],
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-            | subprocess.DETACHED_PROCESS
-            if platform.system() == "Windows"
-            else 0,
+            | subprocess.DETACHED_PROCESS,
         )
 
         logger.info("[IncrementalUpdater] updater.bat 已生成并启动")
@@ -561,18 +630,18 @@ class IncrementalUpdater(QThread):
             dst_new = dst + ".new"
 
             if os.path.isfile(dst_new):
-                lines.append(f'cp -f "{dst_new}" "{dst}" && rm -f "{dst_new}"')
+                lines.append(f'cp -f {shlex.quote(dst_new)} {shlex.quote(dst)} && rm -f {shlex.quote(dst_new)}')
             elif os.path.isfile(src):
-                lines.append(f'cp -f "{src}" "{dst}"')
+                lines.append(f'cp -f {shlex.quote(src)} {shlex.quote(dst)}')
 
         # 清理
-        lines.append(f'rm -rf "{src_dir}"')
+        lines.append(f'rm -rf {shlex.quote(src_dir)}')
 
-        # 重启
-        lines.append(f'open "{dst_dir}"')
+        # 重启：使用 .app bundle 路径
+        lines.append(f'open {shlex.quote(dst_dir)}')
 
         # 自毁
-        lines.append(f'rm -f "{script_path}"')
+        lines.append(f'rm -f {shlex.quote(script_path)}')
 
         with open(script_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -593,11 +662,9 @@ class IncrementalUpdater(QThread):
     # ------------------------------------------------------------------
 
     def _create_temp_dir(self) -> str:
-        """在安装目录旁创建临时目录。"""
+        """在安装目录旁创建安全的临时目录。"""
         base = os.path.dirname(self.install_dir)
-        tmp = os.path.join(base, "_update_pending")
-        os.makedirs(tmp, exist_ok=True)
-        return tmp
+        return tempfile.mkdtemp(prefix="_update_", dir=base)
 
     def _fallback_full_update(self, reason: str) -> None:
         """增量更新失败，通知调用方走全量更新。"""

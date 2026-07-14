@@ -129,11 +129,32 @@ jobs:
           Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Setup-$tag.exe"
           Write-Host "✅ SHA256: $hash"
 
+      # ── 增量更新资源 ──
+      - name: Verify incremental update assets
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $manifest = "dist/Drifox_${tag}_manifest.json"
+          $filesZip = "dist/Drifox_${tag}_files.zip"
+          if (-not (Test-Path $manifest)) {
+            Write-Error "❌ manifest.json 未生成: $manifest"
+            exit 1
+          }
+          if (-not (Test-Path $filesZip)) {
+            Write-Error "❌ files.zip 未生成: $filesZip"
+            exit 1
+          }
+          Write-Host "✅ manifest.json: $((Get-Item $manifest).Length) bytes"
+          Write-Host "✅ files.zip: $([math]::Round((Get-Item $filesZip).Length / 1MB, 1)) MB"
+
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
           name: Drifox-Windows-${{ steps.version.outputs.tag }}
-          path: dist/output/*
+          path: |
+            dist/output/*
+            dist/Drifox_*_manifest.json
+            dist/Drifox_*_files.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -393,6 +414,10 @@ jobs:
           find artifacts -type f \
             \( -name "*.exe" -o -name "*.dmg" -o -name "*.tar.gz" \) \
             -exec cp {} release-assets/ \;
+          # 收集增量更新资源（manifest + files.zip）
+          find artifacts -type f \
+            \( -name "*_manifest.json" -o -name "*_files.zip" \) \
+            -exec cp {} release-assets/ \;
           # 合并所有平台 SHA256SUMS（避免平台间相互覆盖）
           find artifacts -type f -name "SHA256SUMS" -exec cat {} \; \
             > release-assets/SHA256SUMS
@@ -438,4 +463,6 @@ jobs:
             release-assets/Drifox-Setup-*.exe
             release-assets/Drifox-*.dmg
             release-assets/Drifox-Linux-*.tar.gz
+            release-assets/*_manifest.json
+            release-assets/*_files.zip
             release-assets/SHA256SUMS

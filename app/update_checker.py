@@ -358,11 +358,10 @@ class UpdateChecker(QWidget):
                 duration=2000,
                 parent=self.parent_widget() or self,
             ).show()
-            # 给 InfoBar 一点时间显示，然后退出
+            # 给 InfoBar 一点时间显示，然后优雅退出
             QApplication.processEvents()
-            time.sleep(0.5)
-            QApplication.quit()
-            os._exit(0)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(500, QApplication.quit)
         else:
             # 无锁定文件，原地完成
             InfoBar.success(
