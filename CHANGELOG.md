@@ -1,11 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.3.9] - 2026-07-14
+## [v0.3.9] - 2026-07-15
 
-> 本版本为重新发布，**补入 v0.3.9 标签之后遗漏的 6 个修复 commit**（命令处理增强、命令安全加固、Windows PATHEXT 回退、diff 回退机制、provider 配置优化、变量使用修正）。
+> 本版本为重新发布，**补入 v0.3.9 标签之后遗漏的 6 个修复 commit**（命令处理增强、命令安全加固、Windows PATHEXT 回退、diff 回退机制、provider 配置优化、变量使用修正）及后续 1 个模型标签点击修复。
 
-自上一版本以来的变更 | 提交数：17 · 文件变更：28 · +2004/-1514 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：30 · 文件变更：29 · +1996/-1560 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - **diff 生成会话消息回退机制**: 实现从会话消息生成 diff 的回退路径，当工具调用结果不可用时仍能生成可读 diff；同步新增 `app.tools` 模块相关 diff 生成入口
 - **provider 配置处理与消息卡片交互优化**: 增强 `main_widget` 中 provider 配置的处理逻辑；改进 `tool_popup`、`terminal_tools`、`message_card` 等模块的交互流程，提升多 provider 切换与命令触发场景下的稳定性
 - **BackgroundTaskManager 命令编码变量修正**: 修正 `BackgroundTaskManager` 中命令编码相关的变量使用，避免编码错误引发的隐性 bug
+- **模型标签点击使用 config_id 而非 provider_name**: 修复 `message_card` 中模型标签点击事件使用 `provider_name` 而非 `config_id` 的问题，确保在多配置场景下正确切换模型
 
 ### ♻️ 代码重构 (Refactoring)
 
