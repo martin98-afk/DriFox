@@ -609,6 +609,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["model_name"] = str(message.get("model_name"))
         if message.get("provider_name"):
             normalized["provider_name"] = str(message.get("provider_name"))
+        if message.get("config_id"):
+            normalized["config_id"] = str(message.get("config_id"))
         if message.get("elapsed") is not None:
             normalized["elapsed"] = float(message["elapsed"])
         if isinstance(message.get("token_usage"), dict):

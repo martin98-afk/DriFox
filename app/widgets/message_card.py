@@ -4910,7 +4910,7 @@ class MessageCard(SimpleCardWidget):
     reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
-    modelLabelClicked = pyqtSignal(str, str)  # provider_name, model_name — 用户点击页脚模型标签时触发
+    modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
 
     def __init__(
         self,
@@ -5367,13 +5367,12 @@ class MessageCard(SimpleCardWidget):
         )
 
     def _on_footer_model_clicked(self, event):
-        """用户点击页脚模型标签时，发出 modelLabelClicked 信号
-
-        即使 provider_name 为空也 emit（下游有按 model_name 反查的兜底逻辑），
-        避免旧会话数据无 provider_name 时点击无反应。
-        """
+        """用户点击页脚模型标签时，发出 modelLabelClicked(model_name, config_id)"""
         if self.model_name:
-            self.modelLabelClicked.emit(self.provider_name or "", self.model_name)
+            self.modelLabelClicked.emit(
+                self.model_name,
+                getattr(self, "_provider_config_id", "") or "",
+            )
 
     def _refresh_footer_separators(self):
         """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
@@ -7096,6 +7095,7 @@ class MessageCard(SimpleCardWidget):
             self.reviewRequested,
             self.saveFileRequested,
             self.lazyRenderCompleted,
+            self.modelLabelClicked,
         ]
         for sig in signals:
             try:
