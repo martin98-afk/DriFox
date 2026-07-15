@@ -10,7 +10,6 @@ from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -683,11 +682,7 @@ class ToolPopupDialog(QDialog):
         else:
             title_bar._min_btn.clicked.connect(self.showMinimized)
 
-        # ── 内容容器（用于 QGraphicsOpacityEffect 淡入动画） ──
-        # 替代直接使用 setWindowOpacity(0.0) + QPropertyAnimation，
-        # 避免 WA_TranslucentBackground 与 setWindowOpacity 在 Windows 上
-        # 混合使用 UpdateLayeredWindow / SetLayeredWindowAttributes 导致
-        # 窗口永久不可见（仅 LockButtonWidget 独立窗口可见）。
+        # ── 内容容器 ──
         self._fade_container = QWidget(self)
         fade_layout = QVBoxLayout(self._fade_container)
         fade_layout.setContentsMargins(0, 0, 0, 0)
@@ -695,7 +690,7 @@ class ToolPopupDialog(QDialog):
         fade_layout.addWidget(title_bar)
         fade_layout.addWidget(tool_instance, 1)
         main_layout.addWidget(self._fade_container, 1)
-        self._fade_opacity_effect: QGraphicsOpacityEffect | None = None
+        self._fade_opacity_effect = None
         self._fade_anim: QPropertyAnimation | None = None
 
         self.destroyed.connect(self._on_destroyed)
@@ -854,87 +849,52 @@ class ToolPopupDialog(QDialog):
             self._lock_btn_widget.hide()
 
     def _play_show_animation(self):
-        """首次显示动画：92% → 100% 缩放 + 透明度淡入
+        """首次显示动画：极轻微缩放（98% → 100%），120ms
 
-        时长 200ms，OutCubic 缓动，整体克制不浮夸。
-        仅首次显示触发，后续 show 不再做动画（响应迅速优先）。
+        移除透明淡入（QGraphicsOpacityEffect），内容立即可见。
+        WA_TranslucentBackground 与 setWindowOpacity 在 Windows 上混用
+        可能导致窗口不可见；QGraphicsOpacityEffect 虽可绕开，但会将
+        内容淡入期间（200ms）暴露纯色/透明背景给用户，造成「先白屏
+        后出内容」的观感。
 
-        🛡️ 安全兜底：动画若因任何原因未完成（finished 信号未触发），
-        350ms 后的安全定时器确保窗口恢复可见，防止窗口永久消失。
+        现在改为纯几何缩放：98% → 100%，120ms，克制不浮夸。
+        仅首次显示触发，后续 show 不再做动画。
         """
         try:
-            # 等待几何稳定（_restore_geometry 已调用）
             target_rect = self.geometry()
             self._anim_target_geometry = QRect(target_rect)
 
-            # 计算起点（以中心点不变，缩到 92%）
+            # 计算起点（以中心点不变，缩到 98% — 极轻微，几乎无感）
             cx = target_rect.center().x()
             cy = target_rect.center().y()
-            start_w = max(int(target_rect.width() * 0.92), self.minimumWidth())
-            start_h = max(int(target_rect.height() * 0.92), self.minimumHeight())
+            start_w = max(int(target_rect.width() * 0.98), self.minimumWidth())
+            start_h = max(int(target_rect.height() * 0.98), self.minimumHeight())
             start_x = cx - start_w // 2
             start_y = cy - start_h // 2
             start_rect = QRect(start_x, start_y, start_w, start_h)
 
-            # 几何动画（缩放）
+            # 几何动画（微缩放）
             self._show_anim = QPropertyAnimation(self, b"geometry", self)
-            self._show_anim.setDuration(200)
+            self._show_anim.setDuration(120)
             self._show_anim.setStartValue(start_rect)
             self._show_anim.setEndValue(target_rect)
             self._show_anim.setEasingCurve(QEasingCurve.OutCubic)
 
-            # ── 内容淡入动画（QGraphicsOpacityEffect） ──
-            # 使用 QGraphicsOpacityEffect 而非 setWindowOpacity(0.0)，
-            # 避免 WA_TranslucentBackground（UpdateLayeredWindow）与
-            # setWindowOpacity（SetLayeredWindowAttributes）在 Windows 上
-            # 混合使用导致分层窗口渲染状态混乱、窗口永久不可见。
-            # 清除旧 effect（防御：防止 _play_show_animation 被重入）
+            # 内容立即可见：移除 QGraphicsOpacityEffect，不再透明淡入
             if self._fade_opacity_effect is not None:
                 self._fade_container.setGraphicsEffect(None)
                 self._fade_opacity_effect = None
-            self._fade_opacity_effect = QGraphicsOpacityEffect(self._fade_container)
-            self._fade_container.setGraphicsEffect(self._fade_opacity_effect)
-            self._fade_opacity_effect.setOpacity(0.0)
-            self._fade_anim = QPropertyAnimation(self._fade_opacity_effect, b"opacity", self)
-            self._fade_anim.setDuration(200)
-            self._fade_anim.setStartValue(0.0)
-            self._fade_anim.setEndValue(1.0)
-            self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._fade_opacity_effect = None
+            if self._fade_anim is not None:
+                self._fade_anim = None
 
             # 动画结束回调
             self._show_anim.finished.connect(self._on_show_anim_finished)
-            self._fade_anim.finished.connect(self._on_fade_anim_finished)
             self._show_anim.start()
-            self._fade_anim.start()
-
-            # 🛡️ 安全兜底：350ms 后强制移除 opacity effect（动画理论 200ms 完成）
-            # 防止 QGraphicsOpacityEffect 因任何原因未触发 finished 信号，
-            # 导致内容容器残留透明度效果、窗口显示为空白。
-            QTimer.singleShot(350, self._restore_opacity_safe)
         except Exception as e:
             # 动画异常时降级：直接显示
             logger.warning(f"[ToolPopupDialog] 首次显示动画失败，降级: {e}")
-            if self._fade_container:
-                self._fade_container.setGraphicsEffect(None)
-            self._fade_opacity_effect = None
             self._anim_target_geometry = None
-
-    def _restore_opacity_safe(self):
-        """安全兜底：确保内容容器已清除 QGraphicsOpacityEffect"""
-        try:
-            from PyQt5 import sip
-
-            if sip.isdeleted(self):
-                return
-            # 先确认容器本身存活（防止窗口关闭后 _fade_container 已被 C++ 析构）
-            if self._fade_container is not None and self._fade_opacity_effect is not None:
-                logger.warning("[ToolPopupDialog] 安全兜底：清除内容淡入效果")
-                self._fade_container.setGraphicsEffect(None)
-                self._fade_opacity_effect = None
-        except RuntimeError:
-            pass  # 对象已销毁，忽略
-        except Exception:
-            pass
 
     def _on_show_anim_finished(self):
         """几何缩放动画结束回调"""
@@ -949,20 +909,6 @@ class ToolPopupDialog(QDialog):
             pass
         finally:
             self._show_anim = None
-            # 防御性清理：若 _fade_anim.finished 未触发（极低概率），
-            # 在此确保引用释放，避免内存泄漏或后续状态混乱
-            if self._fade_anim is not None:
-                self._fade_anim = None
-
-    def _on_fade_anim_finished(self):
-        """内容淡入动画完成：移除 QGraphicsOpacityEffect，恢复标准渲染"""
-        try:
-            if self._fade_container:
-                self._fade_container.setGraphicsEffect(None)
-        except Exception as e:
-            logger.debug(f"[ToolPopupDialog] 清除淡入效果时异常（窗口可能已关闭）: {e}")
-        self._fade_opacity_effect = None
-        self._fade_anim = None
 
     def _restore_geometry(self):
         from PyQt5.QtCore import QSettings

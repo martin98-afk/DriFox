@@ -8,7 +8,6 @@ from app.widgets.bottom_input_area import AttachmentChip, SendableTextEdit
 from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
 
 # 悬浮组件（已迁移到 cards/floating/）
-from app.widgets.cards.floating.sub_agent_floating_widget import SubAgentFloatingWidget
 from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
@@ -39,7 +38,6 @@ __all__ = [
     "create_welcome_card",
     "ModelConfigCard",
     # 悬浮组件
-    "SubAgentFloatingWidget",
     "TodoFloatingWidget",
     "QuestionFloatingWidget",
     # 对话组件

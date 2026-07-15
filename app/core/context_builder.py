@@ -15,6 +15,7 @@
 from typing import Any, Dict, List, Optional
 
 import anyio
+from loguru import logger
 
 from app.core.message_content import consolidate_messages
 from app.core.token_estimator import count_messages_tokens

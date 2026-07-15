@@ -111,9 +111,7 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
-from app.widgets.cards.floating.sub_agent_floating_widget import (
-    SubAgentFloatingWidget,
-)
+
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.floating.todo_floating_widget import (
@@ -469,6 +467,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 会话脏标记：会话 messages 自上次保存后是否有过变更。
+        # 用于跳过无实际变更的重复持久化（如：流式完成后 _do_post_stream_cleanup
+        # 再次调用 _save_current_session_to_history、或新建会话/关闭窗口时
+        # _auto_save_current_session 对已保存的无变更会话做无意义保存）。
+        # 在 _on_send_clicked / _on_messages_updated / _on_finalize_complete
+        # 等会修改会话内容的地方置 True；在成功保存后置 False。
+        self._session_dirty: bool = False
         # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session / _on_compact_finished
         # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
         # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
@@ -563,6 +568,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 注册到全局实例列表（用于多窗口事件广播）
         OpenAIChatToolWindow._instances.append(self)
+
+        # 【性能优化】延迟构建重型卡片内容（记忆/历史/模型选择等），
+        # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
+        # 100ms 延迟确保 ToolPopupDialog 显示在先，骨架可见后再填充内容。
+        QTimer.singleShot(100, self._deferred_build_cards)
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
@@ -741,14 +751,6 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
-            "sub_agent",
-            self._sub_agent_floating_widget,
-        )
-        self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
             "sub_agent_compact",
             self._sub_agent_compact_widget,
         )
@@ -835,6 +837,100 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重新 add_card 注册 _on_card_shown/_on_card_hidden 回调
         # 初始化时 add_card 先执行（L1318），但当时 _card_manager 尚未绑定，回调未生效
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
+
+    def _deferred_build_cards(self):
+        """【性能优化】延迟构建重型卡片内容
+
+        在 setup_ui 中仅创建卡片的轻量框架（BaseSettingsCard），
+        而卡片内部的重量级内容 widget 在本方法中创建并填充。
+        由 __init__ 末尾的 QTimer.singleShot(100, ...) 触发，
+        确保 ToolPopupDialog 窗口先显示（骨架），内容随后渐进加载。
+        """
+        # ── ① 历史会话卡片 ──
+        try:
+            self._history_popup_card = HistoryCard()
+            self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
+            self._history_popup_card.sessionArchived.connect(self._archive_history_session)
+            self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
+            self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
+            self._history_popup_card.sessionImported.connect(self._on_session_imported)
+            self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
+            self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
+            self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
+            self._history_card.set_extra_button_handler(
+                self._history_popup_card.get_import_button_handler(),
+                tooltip="导入会话",
+            )
+            self._history_card.content_layout.addWidget(self._history_popup_card)
+            self._history_card.set_search_handler(
+                "🔍 搜索会话...",
+                lambda text: self._history_popup_card.set_search_filter(text),
+            )
+        except Exception:
+            logger.exception("[DeferredBuild] HistoryCard 构建失败")
+
+        # ── ② 分享卡片 ──
+        try:
+            self._share_card_content = ShareCardContent(self)
+            self._share_card.content_layout.addWidget(self._share_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] ShareCard 构建失败")
+
+        # ── ③ 历史问题卡片 ──
+        try:
+            self._history_questions_card_content = HistoryQuestionsCardContent(self)
+            self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
+            self._history_questions_card_content.questionClicked.connect(
+                lambda: self._card_manager.hide_card("history_questions", self._window_id)
+            )
+            self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
+
+        # ── ④ 记忆管理卡片 ──
+        try:
+            self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
+            self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
+            self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
+            self._memory_card_popup.set_project(self._current_project)
+            self._memory_card.content_layout.addWidget(self._memory_card_popup)
+            self._memory_card.set_search_handler(
+                "🔍 搜索条目记忆...",
+                lambda text: self._memory_card_popup.set_search_filter(text),
+            )
+        except Exception:
+            logger.exception("[DeferredBuild] MemoryCard 构建失败")
+
+        # ── ⑤ 模型配置卡片 ──
+        try:
+            self._model_config_popup = ModelConfigCard()
+            self._model_config_popup.configApplied.connect(self._on_config_applied)
+            self._model_config_card.content_layout.addWidget(self._model_config_popup)
+        except Exception:
+            logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
+
+        # ── ⑥ 模型选择卡片 ──
+        try:
+            self._model_selector_card_content = ModelSelectorCardContent()
+            self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
+            self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
+            self._model_selector_card.set_search_handler(
+                "搜索模型...",
+                self._model_selector_card_content.set_search_filter,
+            )
+            self._model_selector_card.add_header_button(
+                FluentIcon.ADD,
+                "添加服务商",
+                self._on_add_provider_from_card,
+            )
+            self._model_selector_card.add_header_button(
+                get_icon("配置管理"),
+                "配置服务商",
+                self._on_configure_providers_from_card,
+            )
+            self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1291,9 +1387,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新设置卡片
         if self._settings_popup:
             self._settings_popup.set_opacity(opacity)
-        # 更新子智能体悬浮框
-        if hasattr(self, "_sub_agent_floating_widget") and self._sub_agent_floating_widget:
-            self._sub_agent_floating_widget.set_opacity(opacity)
         # 更新子智能体紧凑悬浮框
         if hasattr(self, "_sub_agent_compact_widget") and self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.set_opacity(opacity)
@@ -1731,9 +1824,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
 
-        self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
-        self._sub_agent_floating_widget.setVisible(False)
-
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
@@ -1751,9 +1841,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "clear": self._handle_clear_command,
         }
 
-        # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
+        # 下方卡片容器 - 添加 SubAgentCompact
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
-        self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
 
         # 上方卡片容器 - 添加 Todo
         self._top_card_container.add_card("todo", self._todo_floating_widget)
@@ -1800,7 +1889,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 下方卡片容器
         layout.addWidget(self._bottom_card_container)
 
-        # 历史会话卡片
+        # 历史会话卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
         self._history_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置历史/归档标签
@@ -1816,24 +1905,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_card.set_current_tab("history")
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
 
-        self._history_popup_card = HistoryCard()
-        self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
-        self._history_popup_card.sessionArchived.connect(self._archive_history_session)
-        self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
-        self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
-        self._history_popup_card.sessionImported.connect(self._on_session_imported)
-        # 归档会话相关信号
-        self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
-        self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
-        self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
-        # 设置导入按钮的处理器
-        self._history_card.set_extra_button_handler(
-            self._history_popup_card.get_import_button_handler(),
-            tooltip="导入会话",
-        )
-
-        # 历史会话卡片
-        self._history_card.content_layout.addWidget(self._history_popup_card)
+        # 内容 widget 将在 deferred 阶段创建
+        self._history_popup_card = None
         self._history_card.setVisible(False)
         self._history_card.closed.connect(
             lambda: (
@@ -1841,38 +1914,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._restore_after_system_close(),
             )
         )
-        # 搜索框（历史会话和归档标签都显示）
-        self._history_card.set_search_handler(
-            "🔍 搜索会话...",
-            lambda text: self._history_popup_card.set_search_filter(text),
-        )
         self._bottom_card_container.add_card("history", self._history_card)
 
-        # 分享卡片（BaseSettingsCard 包裹，按内容自适应高度）
-        self._share_card_content = ShareCardContent(self)
+        # 分享卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
-        self._share_card.content_layout.addWidget(self._share_card_content)
         self._share_card.set_height_mode("content")
         self._share_card.setVisible(False)
         self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
         self._top_card_container.add_card("share", self._share_card)
+        self._share_card_content = None
 
-        # 历史问题卡片（BaseSettingsCard 包裹，按内容自适应高度）
-        self._history_questions_card_content = HistoryQuestionsCardContent(self)
-        self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
-        self._history_questions_card_content.questionClicked.connect(
-            lambda: self._card_manager.hide_card("history_questions", self._window_id)
-        )
+        # 历史问题卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
-        self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         self._history_questions_card.set_height_mode("content")
         self._history_questions_card.setVisible(False)
         self._history_questions_card.closed.connect(
             lambda: self._card_manager.hide_card("history_questions", self._window_id)
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
+        self._history_questions_card_content = None
 
-        # 记忆管理卡片
+        # 记忆管理卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
         self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
@@ -1887,17 +1949,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
         # 强制触发首次 tab 渲染
         self._memory_card.set_current_tab("entries")
-        # 搜索框（三个tab都显示）
-        self._memory_card.set_search_handler(
-            "🔍 搜索条目记忆...",
-            lambda text: self._memory_card_popup.set_search_filter(text),
-        )
-        self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
-        self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
-        # 工作目录变更 → 同步到工具执行器
-        self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
-        self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
-        self._memory_card.content_layout.addWidget(self._memory_card_popup)
+        # 内容 widget 将在 deferred 阶段创建
+        self._memory_card_popup = None
         self._memory_card.setVisible(False)
         self._memory_card.closed.connect(
             lambda: (
@@ -1907,13 +1960,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
 
-        # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
+        # 模型配置卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
         self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
         self._model_config_card.set_height_mode("content")  # 按内容自适应高度
-        self._model_config_popup = ModelConfigCard()
-        self._model_config_popup.configApplied.connect(self._on_config_applied)
-        self._model_config_card.content_layout.addWidget(self._model_config_popup)
+        self._model_config_popup = None  # 将在 deferred 阶段创建
         self._model_config_card.setVisible(False)
         self._model_config_card.closed.connect(
             lambda: (
@@ -1940,32 +1991,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
         self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
-        # 模型选择卡片（底部卡片形式）
+        # 模型选择卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._model_selector_card = BaseSettingsCard("", "", self)
         self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
-        self._model_selector_card_content = ModelSelectorCardContent()
-        self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
-        # 吸顶服务商名称：滚动到哪个服务商区域，标题就显示那个服务商名
-        self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
-
-        # 搜索框移到标题栏
-        self._model_selector_card.set_search_handler(
-            "搜索模型...",
-            self._model_selector_card_content.set_search_filter,
-        )
-        # 操作按钮移到标题栏
-        self._model_selector_card.add_header_button(
-            FluentIcon.ADD,
-            "添加服务商",
-            self._on_add_provider_from_card,
-        )
-        self._model_selector_card.add_header_button(
-            get_icon("配置管理"),
-            "配置服务商",
-            self._on_configure_providers_from_card,
-        )
-
-        self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+        self._model_selector_card_content = None  # 将在 deferred 阶段创建
         self._model_selector_card.setVisible(False)
         self._model_selector_card.closed.connect(
             lambda: (
@@ -2083,7 +2112,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
         self._init_builtin_commands()
 
-        # ===== UI 插件系统集成 =====
+        # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
+        # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
+        # 让窗口外壳尽快出现，压缩首次启动感知耗时
         try:
             from app.core.ui_plugin_registry import UIPluginRegistry
 
@@ -2091,31 +2122,9 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry.set_main_widget(self)
             # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
             ui_registry.set_context_provider(self._build_ui_context, self._window_id)
-            # 加载所有已启用的 UI 插件
-            self._load_all_ui_plugins()
-            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
-            ui_registry.re_register_all_commands()
-            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
-            # 这样在旧窗口触发命令时，卡片在旧窗口显示，而不是被新窗口覆盖
-            for card_id, card_info in ui_registry.get_floating_cards().items():
-                # 计算命令名（与 UIPluginRegistry._register_command_for_card 一致的逻辑）
-                if ":" in card_id:
-                    cmd_name = card_id
-                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
-                    cmd_name = card_id
-                else:
-                    cmd_name = f"{card_info.plugin_name}:{card_id}"
-                # 跳过已注册的（如内置 subagents 等）
-                if cmd_name in self._function_command_handlers:
-                    continue
-
-                # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
-                def _make_handler(cid=card_id, mw=self):
-                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
-
-                self._function_command_handlers[cmd_name] = _make_handler()
+            QTimer.singleShot(0, self._init_ui_plugins_deferred)
         except Exception as e:
-            logger.error(f"[MainWidget] UI plugin init failed: {e}")
+            logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
@@ -2745,6 +2754,34 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
         self._command_shortcuts = []
+
+    def _init_ui_plugins_deferred(self):
+        """延迟加载 UI 插件（首帧渲染后执行，避免阻塞窗口出现）"""
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            ui_registry = UIPluginRegistry.get_instance()
+            # 加载所有已启用的 UI 插件
+            self._load_all_ui_plugins()
+            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
+            ui_registry.re_register_all_commands()
+            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
+            for card_id, card_info in ui_registry.get_floating_cards().items():
+                if ":" in card_id:
+                    cmd_name = card_id
+                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
+                    cmd_name = card_id
+                else:
+                    cmd_name = f"{card_info.plugin_name}:{card_id}"
+                if cmd_name in self._function_command_handlers:
+                    continue
+
+                def _make_handler(cid=card_id, mw=self):
+                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
+
+                self._function_command_handlers[cmd_name] = _make_handler()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -6618,7 +6655,6 @@ class OpenAIChatToolWindow(ToolWindow):
         for card in (
             self._todo_floating_widget,
             self._question_floating_widget,
-            self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
@@ -6927,8 +6963,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
 
-        if self._sub_agent_floating_widget:
-            self._sub_agent_floating_widget.setVisible(False)
         if self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.clear()
             self._sub_agent_compact_widget.setVisible(False)
@@ -8124,6 +8158,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if idx is not None:
                     self.history_manager.archive_history(idx)
                 self._current_session_id = None
+            self._session_dirty = False
             return
 
         if self.history_manager:
@@ -8136,6 +8171,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id,
                 project_fallback=self._current_project,
             )
+            # 🛡️ 直接保存已处理，清除脏标记防冗余
+            self._session_dirty = False
 
         # 🛡️ 记录截断哨兵：用于 _on_finalize_complete 识别"是否在异步 finalize 等待
         # 期间发生过截断"，避免 worker 返回的旧消息序列复活已被撤销的内容。
@@ -9100,7 +9137,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 注入消息数据后显示（构建与归档一致的完整 session 记录）
         record = self._build_share_record(session, messages)
-        self._share_card_content.set_messages(record, session.name or "")
+        if self._share_card_content:
+            self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
 
     def _build_share_record(self, session, merged_messages: list) -> dict:
@@ -9321,6 +9359,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 3. 截断 session.messages ===
         session.set_messages(session.messages[:cutoff_index], preserve_compaction=False)
+        self._session_dirty = True  # 🛡️ 截断修改了消息列表，脏标记兜底
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -9413,6 +9452,7 @@ class OpenAIChatToolWindow(ToolWindow):
         insert_at = min(cache["insert_index"], len(messages))
         messages[insert_at:insert_at] = cache["messages"]
         session.set_messages(messages, preserve_compaction=False)
+        self._session_dirty = True  # 🛡️ 消息被恢复，脏标记兜底
 
         # 保存并刷新视图
         if self._current_session_id != session.session_id:
@@ -9970,7 +10010,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_subagent_log_requested(self, task_ids_str: str):
         """
-        处理子智能体日志查看请求
+        处理子智能体日志查看请求 — 使用紧凑卡片显示任务信息
 
         Args:
             task_ids_str: 逗号分隔的任务ID列表
@@ -9978,60 +10018,47 @@ class OpenAIChatToolWindow(ToolWindow):
         if not task_ids_str:
             return
 
-        # 解析 task_ids
         task_ids = [tid.strip() for tid in task_ids_str.split(",") if tid.strip()]
         if not task_ids:
             return
 
-        # 获取 sub_agent_manager
         sub_agent_mgr = self.backend.sub_agent_manager
         if not sub_agent_mgr:
             logger.warning("[LLMChatter] sub_agent_manager 未初始化")
             return
 
-        # 如果只有一个任务，直接显示
-        if len(task_ids) == 1:
-            task_id = task_ids[0]
-            task_data = sub_agent_mgr.get_task_logs(task_id)
-            if not task_data.get("found"):
-                InfoBar.warning(
-                    "任务不存在",
-                    f"未找到任务: {task_id[:8]}...",
-                    duration=3000,
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
+        compact = self._sub_agent_compact_widget
+        found_any = False
 
-            # 显示日志
-            self._sub_agent_floating_widget.show_task_from_data(task_data)
-            return
-
-        # 多个任务：收集所有任务的日志
-        all_logs = []
         for task_id in task_ids:
             task_data = sub_agent_mgr.get_task_logs(task_id)
-            if task_data.get("found"):
-                all_logs.append(task_data)
+            if not task_data.get("found"):
+                continue
 
-        if not all_logs:
-            InfoBar.warning(
-                "任务不存在",
-                "未找到任何任务日志",
-                duration=3000,
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
+            found_any = True
+            summary = task_data.get("summary", {})
+            agent_name = summary.get("agent_name", task_data.get("agent_name", "未知"))
+            task_desc = summary.get("task_description", task_data.get("task_description", ""))
+            tool_count = summary.get("tool_call_count", 0)
+            elapsed = summary.get("elapsed_seconds", 0)
+            model_name = summary.get("model_name", task_data.get("model_name", ""))
+            ctx_usage = summary.get("context_usage", "")
+
+            # 已在 compact 中则跳过
+            if task_id in compact._task_rows:
+                continue
+
+            compact.show_completed_task(task_id, agent_name, task_desc,
+                                        model_name=model_name,
+                                        tool_call_count=tool_count,
+                                        elapsed_seconds=elapsed,
+                                        context_usage=ctx_usage)
+
+        if not found_any:
             return
 
-        # 清空现有面板并逐个添加任务
-        for i, task_data in enumerate(all_logs):
-            task_id = task_data.get("task_id", task_data.get("summary", {}).get("task_id", "unknown"))
-            # 首次清空，后续追加
-            self._sub_agent_floating_widget.show_task_from_data(task_data, clear_first=(i == 0))
-
-        # 显示面板
-        self._sub_agent_floating_widget.setVisible(True)
+        # 显示紧凑卡片
+        self._card_manager.show_card("sub_agent_compact", self._window_id)
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -11076,16 +11103,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     image_paths=_image_paths,
                     model_name=_model_name,
                 )
-
             # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
             engine_kwargs = {}
             if _user_content is not None:
                 engine_kwargs["_user_content"] = _user_content
+            # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
+            # add_user_message 修改 session.messages。即使后续被 / 命令拦截
+            # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
+            self._session_dirty = True
             if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
                 self._is_streaming = False
                 self._toggle_send_stop(False)
                 assistant_card.deleteLater()
                 return
+
 
             # 同步 batch 结构：_message_batch 已包含新 user batch
             self._sync_batch_structures()
@@ -11227,6 +11258,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+        # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
+        if hasattr(self, "_card_manager"):
+            self._card_manager.hide_card("sub_agent_compact", self._window_id)
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
@@ -11282,7 +11316,7 @@ class OpenAIChatToolWindow(ToolWindow):
         summary["status"] = status
         summary["agent_name"] = agent_name
 
-        # 弹出会话对话框
+        # 弹出会话对话框（传入 logs_provider 实现运行中实时更新）
         from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
 
         dialog = SubAgentSessionDialog(
@@ -11291,6 +11325,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logs=logs,
             summary=summary,
             parent=self,
+            logs_provider=lambda: sub_agent_mgr.get_task_logs(task_id),
         )
         dialog.exec_()
 
@@ -11462,33 +11497,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # ---- --detail：显示详细日志面板 ----
-        if args == "--detail":
-            sub_agent_mgr = self.backend.sub_agent_manager
-            running_tasks = sub_agent_mgr._running_tasks
-
-            if not running_tasks:
-                InfoBar.warning(
-                    title="暂无子智能体任务",
-                    content="当前没有正在执行的子智能体任务",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            detailed = self._sub_agent_floating_widget
-            # 确保面板已填充数据
-            if not detailed._batch_started:
-                detailed.clear()
-                for task_id, executor in running_tasks.items():
-                    detailed.add_task(task_id, executor.agent_name, executor.task_description)
-                detailed._batch_started = True
-
-            self._card_manager.show_card("sub_agent", self._window_id)
-            return
-
-        # ---- 无参数：显示紧凑卡片（原行为）----
+        # ---- 无参数：显示紧凑卡片 ----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
 
@@ -11657,7 +11666,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         策略：
         - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
-        - 详细卡片（sub_agent_floating_widget）：后台默默收集日志，仅用户点击"查看日志"按钮时才显示
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -11687,33 +11695,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not compact.isVisible():
             compact.setVisible(True)
 
-        # ── 详细卡片：后台收集日志，但不自动显示 ──
-        detailed = self._sub_agent_floating_widget
-        if not detailed._batch_started:
-            detailed.clear()
-            detailed.setVisible(False)  # 不自动显示
-        detailed._batch_started = True
-        detailed.add_task(task_id, agent_name, task_description)
-        detailed.setVisible(False)  # 立即隐藏，只保留日志数据
-
-        # 连接 executor 信号（紧凑卡片 + 详细卡片都需要）
+        # 连接 executor 信号（紧凑卡片实时更新）
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
-            executor.progress_updated.connect(
-                lambda tid, msg: (
-                    self._sub_agent_floating_widget.update_progress(tid, msg)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.tool_call_started.connect(
-                lambda tid, name, args: (
-                    self._sub_agent_floating_widget.add_tool_call(tid, name, args)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
             executor.tool_call_started.connect(
                 lambda tid, name, args: (
                     self._sub_agent_compact_widget.add_tool_call(tid, name, args)
@@ -11721,23 +11706,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     else None
                 )
             )
-            executor.tool_result_received.connect(
-                lambda tid, name, result, success: (
-                    self._sub_agent_floating_widget.add_tool_result(tid, name, result, success)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
             executor.token_usage_updated.connect(
                 lambda tid, pt, ct, tt: (
                     self._on_sub_agent_token_usage(tid, pt, ct, tt)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.thinking_received.connect(
-                lambda tid, thinking: (
-                    self._sub_agent_floating_widget.add_thinking(tid, thinking)
                     if not getattr(self, "_is_destroyed", False)
                     else None
                 )
@@ -11774,8 +11745,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 而不是依赖结果内容中的关键词（这会导致误判）
         execution_error = getattr(executor, "_execution_error", None) if executor else None
         success = execution_error is None or execution_error == ""
-
-        self._sub_agent_floating_widget.finish_task(task_id, result, success)
 
         # 更新紧凑卡片
         if hasattr(self, "_sub_agent_compact_widget"):
@@ -12254,7 +12223,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
         # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
         # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
-        # 其内部的 _save_current_session_to_history 因内容哈希缓存命中而跳过。
+        # 其内部的 _save_current_session_to_history 因 _session_dirty=False 而跳过。
         if self.history_manager and not getattr(self, "_session_switched", False):
             self._save_current_session_to_history()
             self.history_manager.flush()
@@ -12481,6 +12450,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not saved_messages:
             return
 
+        # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，
+        # 避免 _do_post_stream_cleanup 等延迟清理路径重复持久化。
+        # 脏标记由 _on_send_clicked / _on_messages_updated / _on_finalize_complete
+        # / AutoLoop 等消息修改点置 True，由本 save 函数置 False。
+        if not self._session_dirty:
+            return
+
         system_prompt = getattr(session, "system_prompt", "") or ""
         # 优先使用已有的 topic_summary，避免被用户消息前30字覆盖
         session_title = getattr(session, "topic_summary", "") or ""
@@ -12536,6 +12512,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             self._current_session_id = session.session_id if session else None
 
+        # 🛡️ 成功保存后清除脏标记，后续无变更的重复 save 将被跳过
+        self._session_dirty = False
         self._update_node_preview()
 
     @staticmethod
@@ -12698,6 +12676,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         msg["config_id"] = self._current_provider_name
 
         session.set_messages(messages or [], preserve_compaction=False)
+        # 🛡️ Worker 回传了完整消息列表，标记会话脏以确保后续持久化。
+        self._session_dirty = True
 
         # 注：卡片底部 token 显示不再从这里驱动——统一由上下文圆环的快照
         # （_refresh_context_usage_indicator）驱动，保证两者数字完全一致。
@@ -13872,8 +13852,9 @@ class OpenAIChatToolWindow(ToolWindow):
         }
         if search_input:
             search_input.setPlaceholderText(placeholders.get(tab_id, "🔍 搜索..."))
-        # 切换内容
-        self._memory_card_popup.switch_tab(tab_id)
+        # 切换内容（_deferred_build_cards 可能尚未运行）
+        if self._memory_card_popup:
+            self._memory_card_popup.switch_tab(tab_id)
 
     def _on_working_dir_changed(self, file_path: str):
         """工作目录变更 → 更新实例缓存 + 同步到工具执行器 + 刷新分支标签
@@ -14171,6 +14152,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if not has_user_message:
             return
 
+        # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
+        # 避免新建会话/加载历史/关闭窗口时对已持久化的会话做无意义重复保存。
+        # 脏标记由各个消息修改点置 True，由本 save 函数置 False。
+        if not self._session_dirty:
+            return
+
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
         # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
         current_provider_display = ""
@@ -14248,6 +14235,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id
+
+        # 🛡️ 成功保存后清除脏标记
+        self._session_dirty = False
 
         # 立即落盘，确保退出前数据写入 SQLite
         if self.history_manager:
@@ -14651,6 +14641,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if interrupted_messages:
             self._apply_interrupted_messages_to_session(interrupted_messages)
+            # 🛡️ 中断消息已应用到 session，标记脏以便后续 save 不跳过。
+            self._session_dirty = True
             # _apply_interrupted_messages_to_session 不写入 elapsed
             self._persist_stop_elapsed()  # 只写 elapsed，不 save
         else:
@@ -15021,6 +15013,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新会话（preserve_compaction=True 避免压缩状态被破坏）
         session.set_messages(auto_loop_messages, preserve_compaction=True)
+        self._session_dirty = True
 
         logger.info(f"[AutoLoop] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
 

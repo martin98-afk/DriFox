@@ -41,7 +41,7 @@ from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages, messages_to_api, to_api_message
 from app.core.model_capabilities import get_model_capabilities
-from app.core.provider_profile import get_provider_profile
+from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -422,7 +422,9 @@ class OpenAIChatWorker(QThread):
             return self._api_messages_cache
 
         # 首次构建：处理所有历史消息
-        self._api_messages_cache = messages_to_api(self.messages, supports_vision=self._supports_vision)
+        self._api_messages_cache = messages_to_api(
+            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+        )
         self._api_messages_built = True
         return self._api_messages_cache
 
@@ -435,12 +437,16 @@ class OpenAIChatWorker(QThread):
             new_messages: 新增的消息列表
         """
         if self._api_messages_cache is None:
-            self._api_messages_cache = messages_to_api(new_messages, supports_vision=self._supports_vision)
+            self._api_messages_cache = messages_to_api(
+                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            )
             return
 
         # 只转换新消息并追加
         for msg in new_messages:
-            api_msg = to_api_message(msg, supports_vision=self._supports_vision)
+            api_msg = to_api_message(
+                msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            )
             if api_msg:
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
@@ -1374,7 +1380,9 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
-            self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
+            self._api_messages_cache = messages_to_api(
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            )
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
             self._accumulated_tokens = 0  # 重置 token 累加，每个新的对话从零开始
@@ -1727,7 +1735,9 @@ class OpenAIChatWorker(QThread):
                     # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
+                    self._api_messages_cache = messages_to_api(
+                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                    )
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
                 else:
@@ -1843,6 +1853,8 @@ class OpenAIChatWorker(QThread):
                     "name": func.get("name"),
                     "arguments": func.get("arguments", "{}"),
                 },
+                # 🔧 透传 Gemini thought_signature，供下一轮回传避免 400
+                "thought_signature": tc.get("thought_signature"),
             }
 
         # 来源2: _tool_calls_buffer（补充缺失项）
@@ -1857,6 +1869,7 @@ class OpenAIChatWorker(QThread):
                     "name": func.get("name", ""),
                     "arguments": func.get("arguments", "{}"),
                 },
+                "thought_signature": buf.get("thought_signature"),
             }
 
         # 来源3: tool_results 中未记录的回填
@@ -2167,7 +2180,9 @@ class OpenAIChatWorker(QThread):
         # 但 _api_messages_cache 仍是旧版本（无图片）。
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
-            self._api_messages_cache = messages_to_api(current_messages, supports_vision=self._supports_vision)
+            self._api_messages_cache = messages_to_api(
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            )
             self._api_messages_built = True
         except Exception as cache_e:
             logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
@@ -2320,6 +2335,22 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _is_gemini_model(self) -> bool:
+        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
+        try:
+            if detect_provider_family(self.llm_config) == "gemini":
+                return True
+        except Exception:
+            pass
+        # 兜底：模型名含 gemini（如 models/gemini-3-flash-preview 的 startswith 判断会漏）
+        try:
+            model = str((self.llm_config or {}).get("模型名称", "") or "").lower()
+            if "gemini" in model:
+                return True
+        except Exception:
+            pass
+        return False
+
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """
         发起 API 调用。
@@ -2341,7 +2372,9 @@ class OpenAIChatWorker(QThread):
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
         else:
-            sanitized = messages_to_api(messages, supports_vision=self._supports_vision)
+            sanitized = messages_to_api(
+                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            )
             if use_cache:
                 self._api_messages_cache = sanitized
                 self._api_messages_built = True
@@ -2415,7 +2448,9 @@ class OpenAIChatWorker(QThread):
                     fixed_messages, was_fixed = self._fix_tool_result_order(req_kwargs["messages"])
 
                     if was_fixed:
-                        fixed_sanitized = messages_to_api(fixed_messages, supports_vision=self._supports_vision)
+                        fixed_sanitized = messages_to_api(
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                        )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -2441,7 +2476,9 @@ class OpenAIChatWorker(QThread):
                     fixed_messages = self._try_recover_tool_arguments(req_kwargs["messages"])
 
                     if fixed_messages is not None:
-                        fixed_sanitized = messages_to_api(fixed_messages, supports_vision=self._supports_vision)
+                        fixed_sanitized = messages_to_api(
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                        )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -2597,6 +2634,23 @@ class OpenAIChatWorker(QThread):
         # 4. 只做绝对上限保护（避免明显错误的极值）
         return min(requested_int, absolute_limit)
 
+    @staticmethod
+    def _extract_thought_signature(tc) -> Optional[str]:
+        """从 OpenAI 兼容的 tool_call delta/对象中提取 Gemini thought_signature。
+
+        Gemini OpenAI 兼容端点在 tool_call 上返回 extra_content.google.thought_signature。
+        由于 openai SDK 的 BaseModel 配置了 extra='allow'，该字段会被保留在 model_extra，
+        可通过 getattr 直接读取。无则返回 None。
+        """
+        ec = getattr(tc, "extra_content", None)
+        if not ec or not isinstance(ec, dict):
+            return None
+        google = ec.get("google")
+        if not isinstance(google, dict):
+            return None
+        sig = google.get("thought_signature")
+        return sig if sig else None
+
     def _process_response(self, response):
         # 🛡️ 保存响应引用，供 cancel() 关闭底层 HTTP 连接以中断流式等待
         self._current_response = response
@@ -2716,6 +2770,14 @@ class OpenAIChatWorker(QThread):
                             self._tool_calls_index_to_id[tc_index] = tc_id
 
                     buffer = self._tool_calls_buffer[tc_id]
+                    # 🔧 Gemini thought_signature：必须随 tool call 透传，否则多轮工具调用会 400。
+                    # 签名可能出现在任意 delta（通常与 id+name 同片，也可能在 arguments 之后的独立片），
+                    # 这里每次 delta 都尝试提取并落到 buffer / _current_tool_calls。
+                    sig = self._extract_thought_signature(tc)
+                    if sig:
+                        buffer["thought_signature"] = sig
+                        if tc_id in self._current_tool_calls:
+                            self._current_tool_calls[tc_id]["thought_signature"] = sig
                     tool_name = ""
                     if tc.function and tc.function.name:
                         buffer["function"]["name"] = tc.function.name
@@ -2730,6 +2792,7 @@ class OpenAIChatWorker(QThread):
                                     "name": tool_name,
                                     "arguments": "",
                                 },
+                                "thought_signature": buffer.get("thought_signature"),
                             }
 
                         if (
@@ -3004,6 +3067,7 @@ class OpenAIChatWorker(QThread):
                                 "name": buffer["function"]["name"],
                                 "arguments": args_str,
                             },
+                            "thought_signature": buffer.get("thought_signature"),
                             "_args_parsed": True,
                         }
                     else:
@@ -3042,6 +3106,7 @@ class OpenAIChatWorker(QThread):
                                     "name": buffer["function"]["name"],
                                     "arguments": args_str,  # 保留原始字符串
                                 },
+                                "thought_signature": buffer.get("thought_signature"),
                             }
                         # fix: 放弃解析时标记参数不再 pending，允许继续执行
                         tool_args_pending = False

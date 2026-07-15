@@ -107,10 +107,11 @@ class SubAgentExecutor(QThread):
         self._tool_call_count = 0
         self._log_store_callback = None  # 日志存储回调
         self._get_history_messages = None  # 获取主智能体历史消息的回调
-        # Token 用量追踪（每次 API 调用累加）
-        self._total_prompt_tokens: int = 0
-        self._total_completion_tokens: int = 0
-        self._total_tokens: int = 0
+        # Token 用量追踪
+        self._total_prompt_tokens: int = 0      # 累计 prompt tokens
+        self._total_completion_tokens: int = 0  # 累计 completion tokens
+        self._total_tokens: int = 0             # 累计总 tokens（用于计费统计）
+        self._peak_total_tokens: int = 0        # 单次 API 调用的峰值总 tokens（反映上下文窗口压力）
 
     @property
     def total_tokens(self) -> int:
@@ -282,6 +283,15 @@ class SubAgentExecutor(QThread):
         import time
 
         elapsed = int(time.time() - self._start_time) if self._start_time else 0
+        # 从 llm_config 提取模型名称
+        _model = ""
+        if isinstance(self.llm_config, dict):
+            _model = str(self.llm_config.get("模型名称", "") or self.llm_config.get("model", "") or "")
+        # token 显示（使用单次 API 调用的峰值，反映上下文窗口压力而非累计计费）
+        _ctx_display = ""
+        if self._peak_total_tokens > 0:
+            t = self._peak_total_tokens
+            _ctx_display = f"{t / 1000:.1f}K tokens" if t >= 1000 else f"{t} tokens"
         return {
             "task_id": self.task_id,
             "agent_name": self.agent_name,
@@ -290,6 +300,9 @@ class SubAgentExecutor(QThread):
             "elapsed_seconds": elapsed,
             "result": self._last_result,
             "error": self._execution_error,
+            "model_name": _model,
+            "context_usage": _ctx_display,
+            "total_tokens": self._peak_total_tokens,
         }
 
     def run(self):
@@ -875,6 +888,8 @@ class SubAgentExecutor(QThread):
                 self._total_prompt_tokens += pt
                 self._total_completion_tokens += ct
                 self._total_tokens += tt
+                if tt > self._peak_total_tokens:
+                    self._peak_total_tokens = tt
                 self.token_usage_updated.emit(self.task_id, pt, ct, tt)
         except Exception:
             pass

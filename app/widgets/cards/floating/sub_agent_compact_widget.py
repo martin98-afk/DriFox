@@ -527,6 +527,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._time_timer.timeout.connect(self._update_all_times)
         self._time_timer.setInterval(1000)
 
+        self._reflow_deferred_guard = False  # 防止 deferred reflow 无限循环
         self._setup_ui()
 
     # ── UI 初始化 ──────────────────────────────────────
@@ -848,6 +849,67 @@ class SubAgentCompactFloatingWidget(QWidget):
             self._start_hide_timer()
         self._reflow()
 
+    def show_completed_task(
+        self,
+        task_id: str,
+        agent_name: str,
+        task_description: str,
+        model_name: str = "",
+        tool_call_count: int = 0,
+        elapsed_seconds: int = 0,
+        context_usage: str = "",
+    ):
+        """显示一个已完成的任务（从历史数据加载，无旋转动画）
+
+        Args:
+            task_id: 任务ID
+            agent_name: 智能体名称
+            task_description: 任务描述
+            model_name: 模型名（可选）
+            tool_call_count: 工具调用次数
+            elapsed_seconds: 已用秒数
+            context_usage: 上下文用量文字（如 "12.5K tokens"）
+        """
+        if task_id in self._task_rows:
+            return
+
+        row = _AgentTaskRow(task_id, agent_name, task_description, model_name, self._scroll_content)
+        row.toggled.connect(self._on_row_toggled)
+        row.enter_session_requested.connect(self._on_enter_session_requested)
+        self._task_rows[task_id] = row
+        self._body_layout.addWidget(row)
+
+        # 设置统计数据
+        if tool_call_count > 0:
+            for _ in range(tool_call_count):
+                row.increment_tool_count()
+        # 设置已用时间（直接设置 label，因为 update_elapsed 在 _is_finished 后是空操作）
+        if elapsed_seconds > 0:
+            import time as _time
+
+            row._start_time = _time.time() - elapsed_seconds
+            mins = elapsed_seconds // 60
+            secs = elapsed_seconds % 60
+            time_str = f"{mins:02d}:{secs:02d}"
+            row.time_label.setText(f"⏱{time_str}")
+            if hasattr(row, "_elapsed_label_detail") and row._elapsed_label_detail:
+                row._elapsed_label_detail.setText(time_str)
+
+        # 设置模型名称（详情面板显示）
+        if model_name:
+            row.set_model_name(model_name)
+        # 设置上下文用量
+        if context_usage:
+            row.set_context_info(context_usage)
+
+        # 标记为已完成（替换旋转图标为对号，停止计时器更新）
+        row.finish(success=True)
+
+        # 确保卡片可见
+        self.setVisible(True)
+        self._update_status_text()
+        self._reflow()
+
     def add_tool_call(self, task_id: str, tool_name: str, args: dict = None):
         """记录一次工具调用（更新对应行的工具计数）"""
         row = self._task_rows.get(task_id)
@@ -919,13 +981,19 @@ class SubAgentCompactFloatingWidget(QWidget):
         任务行自然高度小于视口则无滚动条，大于视口则出现滚动条。
         """
         # 计算内容自然高度（所有任务行的 sizeHint 之和 + 间距）
+        # 注意：当 widget 未显示（隐藏状态）时，Qt 尚未处理子 widget 的布局，
+        # sizeHint() 可能返回极小值（如 15-20px）。为确保卡片不会在首次显示时
+        # 因 height 过小而被锁死在矮小尺寸，对每个未展开行强制最低 28px。
+        _MIN_ROW_HEIGHT = 28
         content_height = 0
         for _, row in self._task_rows.items():
             sh = row.sizeHint()
+            row_h = 0
             if sh.isValid():
-                content_height += sh.height()
-            else:
-                content_height += 28  # 默认一行高度
+                row_h = sh.height()
+            if row_h < _MIN_ROW_HEIGHT:
+                row_h = _MIN_ROW_HEIGHT
+            content_height += row_h
         if len(self._task_rows) > 1:
             content_height += self._body_layout.spacing() * (len(self._task_rows) - 1)
 
@@ -938,6 +1006,13 @@ class SubAgentCompactFloatingWidget(QWidget):
         else:
             self.setFixedHeight(max(36, total_height))
 
+        # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
+        # 上述 sizeHint 可能不可靠。调度一次延迟重算，确保在 widget 显示后、
+        # 布局就绪时纠正高度。
+        if not self.isVisible() and not self._reflow_deferred_guard:
+            self._reflow_deferred_guard = True
+            QTimer.singleShot(0, self._reflow_after_layout)
+
     # ── 显示/隐藏 ──────────────────────────────────────
 
     def _start_hide_timer(self):
@@ -949,6 +1024,11 @@ class SubAgentCompactFloatingWidget(QWidget):
         self.setVisible(False)
         self.closed.emit()
 
+    def _reflow_after_layout(self):
+        """延迟重算：由 _reflow 或 showEvent 调度，在 Qt 事件循环处理完布局后执行"""
+        self._reflow_deferred_guard = False
+        self._reflow()
+
     def _on_close(self):
         """手动关闭"""
         self._hide_timer.stop()
@@ -959,3 +1039,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         super().showEvent(event)
         if self._has_running and not self._rotation_timer.isActive():
             self._start_rotation()
+        # widget 变为可见后，子 widget 布局才被 Qt 真正处理，
+        # 调度延迟重算以纠正之前隐藏状态下计算的过小高度
+        if not self._reflow_deferred_guard:
+            self._reflow_deferred_guard = True
+            QTimer.singleShot(0, self._reflow_after_layout)
