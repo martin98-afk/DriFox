@@ -11282,7 +11282,7 @@ class OpenAIChatToolWindow(ToolWindow):
         summary["status"] = status
         summary["agent_name"] = agent_name
 
-        # 弹出会话对话框
+        # 弹出会话对话框（传入 logs_provider 实现运行中实时更新）
         from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
 
         dialog = SubAgentSessionDialog(
@@ -11291,6 +11291,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logs=logs,
             summary=summary,
             parent=self,
+            logs_provider=lambda: sub_agent_mgr.get_task_logs(task_id),
         )
         dialog.exec_()
 

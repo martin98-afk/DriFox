@@ -6,12 +6,13 @@
 包括思考过程、AI 回复、工具调用和结果。
 
 优化：左侧导览栏 + 右侧详细消息布局，参考会话分享 HTML 结构。
+支持 logs_provider 回调实现实时更新（子智能体执行中自动轮询刷新）。
 """
 
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QCursor, QMouseEvent
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
@@ -98,12 +99,26 @@ class SubAgentSessionDialog(QDialog):
         logs: List[Dict[str, Any]],
         summary: Dict[str, Any] = None,
         parent=None,
+        logs_provider: Optional[Callable[[], Dict]] = None,
     ):
+        """
+        Args:
+            task_id: 任务ID
+            agent_name: 智能体名称
+            logs: 初始日志列表
+            summary: 任务摘要
+            parent: 父窗口
+            logs_provider: 可选。获取最新日志的回调，返回 get_task_logs() 的 dict。
+                          提供后若任务状态为 running，自动启动定时轮询实现实时更新。
+        """
         super().__init__(parent)
         self._task_id = task_id
         self._agent_name = agent_name
         self._logs = logs
         self._summary = summary or {}
+        self._logs_provider = logs_provider
+        self._last_log_count = len(logs)
+        self._result_appended = bool(self._summary.get("result") or self._summary.get("error"))
 
         self.setWindowTitle(f"🤖 {agent_name} - 会话日志")
         self.setMinimumSize(800, 520)
@@ -113,6 +128,17 @@ class SubAgentSessionDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._setup_ui()
         self._render_logs()
+
+        # ── 如果任务还在运行且提供了 logs_provider，启动定时轮询 ──
+        status = self._summary.get("status", "finished")
+        if status == "running" and logs_provider is not None:
+            self._poll_timer = QTimer(self)
+            self._poll_timer.setInterval(2000)  # 2 秒轮询
+            self._poll_timer.timeout.connect(self._poll_update)
+            self._poll_timer.setSingleShot(False)
+            self._poll_timer.start()
+        else:
+            self._poll_timer = None
 
     def _setup_ui(self):
         """初始化 UI"""
@@ -164,6 +190,164 @@ class SubAgentSessionDialog(QDialog):
         grip.setStyleSheet("background: transparent;")
         footer_layout.addWidget(grip, 0, Qt.AlignBottom | Qt.AlignRight)
         main_layout.addWidget(footer)
+
+    def closeEvent(self, event):
+        """关闭时停止定时器"""
+        self._stop_polling()
+        super().closeEvent(event)
+
+    def reject(self):
+        """取消时停止定时器（ESC 按键）"""
+        self._stop_polling()
+        super().reject()
+
+    def _stop_polling(self):
+        """停止轮询定时器"""
+        if self._poll_timer is not None:
+            try:
+                self._poll_timer.stop()
+            except Exception:
+                pass
+            self._poll_timer = None
+
+    def _poll_update(self):
+        """轮询最新日志并增量更新右侧内容"""
+        if self._logs_provider is None:
+            self._stop_polling()
+            return
+
+        try:
+            data = self._logs_provider()
+            if not data or not data.get("found"):
+                return
+
+            logs = data.get("logs", [])
+            summary = data.get("summary", {})
+            status = data.get("status", summary.get("status", "running"))
+
+            log_count = len(logs)
+            if log_count == self._last_log_count:
+                # 无新日志，检查任务是否结束
+                if status != "running":
+                    self._summary = summary
+                    self._update_summary_bar()
+                    self._stop_polling()
+                return
+
+            # ── 有更新 → 检查用户是否在底部（自动滚动） ──
+            self._check_and_update(logs, summary, status)
+
+        except Exception as e:
+            import logging
+
+            logging.warning(f"[SubAgentSessionDialog] 轮询更新失败: {e}")
+
+    def _check_and_update(self, logs, summary, status):
+        """检查用户滚动位置后执行更新"""
+        # 先用 JS 检查用户是否在底部区域
+        self._web_view.page().runJavaScript(
+            """(function() {
+                var m = document.getElementById('mainContent');
+                if (!m) return true;
+                return (m.scrollHeight - m.scrollTop - m.clientHeight) < 120;
+            })()""",
+            lambda near_bottom: self._apply_update(logs, summary, status, bool(near_bottom)),
+        )
+
+    def _apply_update(self, logs, summary, status, near_bottom: bool):
+        """增量更新 — 只追加新增日志，不重建页面，导航和滚动位置不变"""
+        new_logs = logs[self._last_log_count:]
+        has_new_logs = len(new_logs) > 0
+
+        # 生成新增日志的 HTML
+        nav_items_html = ""
+        content_sections_html = ""
+        if has_new_logs:
+            start_idx = self._last_log_count
+            for i, log in enumerate(new_logs):
+                idx = start_idx + i
+                nav_items_html += self._build_nav_item(
+                    log.get("type", "progress"), log.get("content", ""), log, idx
+                )
+                content_sections_html += self._build_content_section(
+                    log.get("type", "progress"), log.get("content", ""), log, idx
+                )
+
+        # 检查是否有结果需要追加（任务刚完成）
+        result = summary.get("result", "")
+        error = summary.get("error", "")
+        just_finished = status != "running" and not self._result_appended
+        result_nav = ""
+        result_content = ""
+        if just_finished and (bool(result) or bool(error)):
+            self._result_appended = True
+            if result:
+                result_nav = self._build_result_nav_item("✅ 执行结果", len(logs))
+                result_content = self._build_result_section("✅ 执行结果", result, "#4CAF50", len(logs))
+            elif error:
+                result_nav = self._build_result_nav_item("❌ 执行失败", len(logs))
+                result_content = self._build_result_section("❌ 执行失败", error, "#F44336", len(logs))
+
+        # 更新内存状态
+        self._logs = logs
+        self._summary = summary
+        self._last_log_count = len(logs)
+
+        # 通过 JS 增量追加
+        total_count = len(logs) + (1 if self._result_appended and just_finished else 0)
+        combined_nav = nav_items_html + result_nav
+        combined_content = content_sections_html + result_content
+        if combined_nav or combined_content:
+            import json as _json
+
+            nav_json = _json.dumps(combined_nav)
+            content_json = _json.dumps(combined_content)
+            js = f"window._appendLogs({nav_json}, {content_json}, {total_count});"
+            try:
+                self._web_view.page().runJavaScript(js)
+            except RuntimeError:
+                pass  # 页面已销毁
+
+        # 更新摘要栏
+        self._update_summary_bar()
+
+        # 如果用户在底部，自动滚动到最新内容
+        if near_bottom and (has_new_logs or just_finished):
+            self._auto_scroll_latest()
+
+        # 如果任务完成，停止轮询
+        if status != "running":
+            self._stop_polling()
+
+    def _auto_scroll_latest(self):
+        """增量更新后自动滚动到最底部（最新日志）"""
+        QTimer.singleShot(100, lambda: self._web_view.page().runJavaScript(
+            """(function() {
+                var m = document.getElementById('mainContent');
+                if (m) m.scrollTop = m.scrollHeight;
+            })()""",
+        ))
+
+    def _update_summary_bar(self):
+        """更新摘要栏的状态显示（任务结束时刷新）"""
+        # 在 Qt Widget 层面更新摘要栏中的状态标签
+        if not hasattr(self, '_status_lbl'):
+            return
+        status = self._summary.get("status", "finished")
+        status_text = "✅ 已完成" if status == "finished" else "⏳ 执行中"
+        self._status_lbl.setText(status_text)
+
+        # 更新工具调用次数
+        tool_count = self._summary.get("tool_call_count", 0)
+        if hasattr(self, '_tool_count_lbl'):
+            self._tool_count_lbl.setText(f"🔧 {tool_count} 次工具调用")
+
+        # 更新耗时
+        elapsed = self._summary.get("elapsed_seconds", 0)
+        mins = elapsed // 60
+        secs = elapsed % 60
+        if hasattr(self, '_elapsed_lbl'):
+            self._elapsed_lbl.setText(f"⏱ {mins:02d}:{secs:02d}")
 
     def _build_header(self) -> QWidget:
         """构建标题栏"""
@@ -219,7 +403,7 @@ class SubAgentSessionDialog(QDialog):
         Colors.refresh()
         bar.setStyleSheet(f"""
             #SessionSummary {{
-                background-color: {Colors.CARD_BG_DIM};
+                background-color: rgba(0, 0, 0, 0.06);
                 border-bottom: 1px solid {Colors.REALTIME_BORDER};
             }}
         """)
@@ -228,29 +412,29 @@ class SubAgentSessionDialog(QDialog):
         layout.setContentsMargins(16, 6, 16, 6)
         layout.setSpacing(16)
 
-        # 状态
+        # 状态（存引用供 _update_summary_bar 实时更新）
         status = self._summary.get("status", "finished")
         status_text = "✅ 已完成" if status == "finished" else "⏳ 执行中"
-        status_lbl = QLabel(status_text, bar)
-        status_lbl.setFont(get_unified_font(9))
-        status_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-        layout.addWidget(status_lbl)
+        self._status_lbl = QLabel(status_text, bar)
+        self._status_lbl.setFont(get_unified_font(9))
+        self._status_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+        layout.addWidget(self._status_lbl)
 
         # 工具调用次数
         tool_count = self._summary.get("tool_call_count", 0)
-        tool_lbl = QLabel(f"🔧 {tool_count} 次工具调用", bar)
-        tool_lbl.setFont(get_unified_font(9))
-        tool_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-        layout.addWidget(tool_lbl)
+        self._tool_count_lbl = QLabel(f"🔧 {tool_count} 次工具调用", bar)
+        self._tool_count_lbl.setFont(get_unified_font(9))
+        self._tool_count_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+        layout.addWidget(self._tool_count_lbl)
 
         # 耗时
         elapsed = self._summary.get("elapsed_seconds", 0)
         mins = elapsed // 60
         secs = elapsed % 60
-        elapsed_lbl = QLabel(f"⏱ {mins:02d}:{secs:02d}", bar)
-        elapsed_lbl.setFont(get_unified_font(9))
-        elapsed_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
-        layout.addWidget(elapsed_lbl)
+        self._elapsed_lbl = QLabel(f"⏱ {mins:02d}:{secs:02d}", bar)
+        self._elapsed_lbl.setFont(get_unified_font(9))
+        self._elapsed_lbl.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
+        layout.addWidget(self._elapsed_lbl)
 
         # 任务描述
         desc = self._summary.get("task_description", "")
@@ -654,14 +838,14 @@ class SubAgentSessionDialog(QDialog):
     'use strict';
     var navItems = document.querySelectorAll('.nav-item');
     var sections = document.querySelectorAll('.content-section, .result-section');
-
-    // 滚动观察器 — 监听当前可见区，自动高亮对应导览项
     var mainContent = document.getElementById('mainContent');
-    var observer = new IntersectionObserver(function(entries) {{
+
+    // 滚动观察器（存全局供 _appendLogs 复用）
+    window._logObserver = new IntersectionObserver(function(entries) {{
         entries.forEach(function(entry) {{
             if (entry.isIntersecting) {{
                 var id = entry.target.id;
-                navItems.forEach(function(item) {{
+                document.querySelectorAll('.nav-item').forEach(function(item) {{
                     if (item.getAttribute('data-target') === id) {{
                         item.classList.add('active');
                     }} else {{
@@ -677,23 +861,45 @@ class SubAgentSessionDialog(QDialog):
     }});
 
     // 对所有内容区启动观察
-    sections.forEach(function(sec) {{
-        observer.observe(sec);
-    }});
+    sections.forEach(function(sec) {{ window._logObserver.observe(sec); }});
+
+    // ── 增量追加日志（供 Python 端 _apply_update 调用）──
+    window._appendLogs = function(navHtml, contentHtml, totalCount) {{
+        // 追加导览项
+        document.querySelector('.sidebar-nav').insertAdjacentHTML('beforeend', navHtml);
+        // 追加内容区
+        document.getElementById('mainContent').insertAdjacentHTML('beforeend', contentHtml);
+        // 更新计数
+        var countEl = document.querySelector('.sidebar-title .count');
+        if (countEl) countEl.textContent = totalCount;
+        // 观察新内容区
+        document.querySelectorAll('.content-section, .result-section').forEach(function(el) {{
+            if (!el.dataset.observed) {{
+                el.dataset.observed = '1';
+                window._logObserver.observe(el);
+            }}
+        }});
+        // 新导航项绑定点击事件
+        document.querySelectorAll('.nav-item:not([data-bound])').forEach(function(item) {{
+            item.dataset.bound = '1';
+            item.addEventListener('click', function(e) {{
+                e.preventDefault();
+                var tid = this.getAttribute('data-target');
+                if (tid) window._scrollTo(tid);
+            }});
+        }});
+    }};
 
     function scrollTo(targetId) {{
         var target = document.getElementById(targetId);
         if (target) {{
             target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
-            // 脉冲高亮闪烁
             target.classList.remove('pulse');
             void target.offsetWidth;
             target.classList.add('pulse');
         }}
-        // 更新导览项状态
-        navItems.forEach(function(item) {{
-            var target = item.getAttribute('data-target');
-            if (target === targetId) {{
+        document.querySelectorAll('.nav-item').forEach(function(item) {{
+            if (item.getAttribute('data-target') === targetId) {{
                 item.classList.add('active');
                 var sidebar = item.closest('.sidebar-nav');
                 if (sidebar) {{
@@ -708,33 +914,32 @@ class SubAgentSessionDialog(QDialog):
             }}
         }});
     }}
+    window._scrollTo = scrollTo;  // 暴露给 _appendLogs 新追加的导航项
 
     // 点击导览项 → 滚动到对应内容区
     navItems.forEach(function(item) {{
         item.addEventListener('click', function(e) {{
             e.preventDefault();
             var targetId = this.getAttribute('data-target');
-            if (targetId) {{
-                scrollTo(targetId);
-            }}
+            if (targetId) scrollTo(targetId);
         }});
     }});
 
-    // 初始激活：检测第一个可见内容区
+    // 初始激活
     function initActive() {{
         var firstVisible = null;
         var mainRect = mainContent.getBoundingClientRect();
-        sections.forEach(function(sec) {{
+        document.querySelectorAll('.content-section, .result-section').forEach(function(sec) {{
             var rect = sec.getBoundingClientRect();
             if (rect.top >= mainRect.top && rect.top < mainRect.top + 100) {{
                 firstVisible = sec.id;
             }}
         }});
-        if (!firstVisible && sections.length > 0) {{
-            firstVisible = sections[0].id;
+        if (!firstVisible && document.querySelectorAll('.content-section, .result-section').length > 0) {{
+            firstVisible = document.querySelectorAll('.content-section, .result-section')[0].id;
         }}
         if (firstVisible) {{
-            navItems.forEach(function(item) {{
+            document.querySelectorAll('.nav-item').forEach(function(item) {{
                 if (item.getAttribute('data-target') === firstVisible) {{
                     item.classList.add('active');
                 }}
@@ -753,10 +958,8 @@ class SubAgentSessionDialog(QDialog):
             if (idx === -1) return;
             var nextIdx = (e.key === 'ArrowDown') ? idx + 1 : idx - 1;
             if (nextIdx >= 0 && nextIdx < siblings.length) {{
-                var targetId = siblings[nextIdx].getAttribute('data-target');
-                if (targetId) {{
-                    scrollTo(targetId);
-                }}
+                var tid = siblings[nextIdx].getAttribute('data-target');
+                if (tid) scrollTo(tid);
             }}
             e.preventDefault();
         }}
