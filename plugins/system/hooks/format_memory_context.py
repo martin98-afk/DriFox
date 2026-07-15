@@ -41,7 +41,7 @@ _CREATE_NO_WINDOW = (
 # Git 状态收集（移植自 .drifox/plugins/git-status/hooks/git_status.py）
 # ============================================================
 
-_GIT_TIMEOUT = 3
+_GIT_TIMEOUT = 1.5
 _MAX_CONTEXT_LENGTH = 2000
 _MAX_STAGED_ITEMS = 30
 _MAX_UNSTAGED_ITEMS = 30
@@ -107,14 +107,50 @@ def _is_git_repo(cwd: str) -> bool:
     return code == 0
 
 
-def _auto_git_init(cwd: str, project_name: str | None = None) -> bool:
+def _resolve_pyinstaller_path(cwd: str) -> str:
+    """处理 PyInstaller 打包后的路径问题
+
+    PyInstaller 打包后运行在 _internal 临时目录中，此时：
+    - cwd 可能是 _internal/.drifox/workspaces/xxx/，而非真实项目目录
+    - 真实的 git 仓库在 exe 同级目录或用户指定的源码目录
+
+    返回可用的真实项目路径。如果找不到，返回原始 cwd。
+    """
+    resolved = str(Path(cwd).resolve())
+
+    # 如果不在 _internal 目录下，直接返回
+    if "_internal" not in resolved:
+        return resolved
+
+    # 在 _internal 下，尝试向上查找可能的真实项目目录
+    # 常见模式：xxx/_internal/.drifox/workspaces/项目名
+    #           xxx/_internal/项目名/（单项目打包）
+    #           xxx/_internal/（直接运行在 _internal 内）
+
+    # 尝试向上查找真实项目目录
+    internal_dir = Path(resolved).parent  # 向上到 _internal
+    parent_of_internal = internal_dir.parent
+    project_name = Path(resolved).name
+
+    # 检查 _internal 同级是否有同名目录（源码）
+    potential_src = parent_of_internal / project_name
+    if potential_src.exists() and potential_src.is_dir():
+        logger.info(f"[format_memory_context] PyInstaller 检测：使用源码目录 {potential_src}")
+        return str(potential_src)
+
+    # 检查 _internal 同级是否有 .git
+    if (parent_of_internal / ".git").exists():
+        logger.info(f"[format_memory_context] PyInstaller 检测：使用父目录 {parent_of_internal}")
+        return str(parent_of_internal)
+
+    # 返回 resolved，让后续逻辑自然失败并 fallback
+    return resolved
+
+
+def _auto_git_init(cwd: str) -> bool:
     """若项目不是 git 仓库但系统装了 git，则自动 git init + 空 commit
 
     用于让 model 在非 git 项目里也能感知到默认分支名（init 后立刻有 main/master）。
-
-    Args:
-        cwd: 项目根目录路径
-        project_name: 项目名称（用于安全性校验，防止误在父目录创建 .git）
 
     Returns:
         True  → 项目已经是 git 仓库（无论是否本次 init）
@@ -123,20 +159,20 @@ def _auto_git_init(cwd: str, project_name: str | None = None) -> bool:
     if not cwd:
         return False
 
-    # 统一使用 resolved 绝对路径
     resolved = str(Path(cwd).resolve())
 
-    # 安全性校验：如果 project_name 有效且与目录名不匹配，很可能是 cwd 传错了
-    # （例如 project_root 意外指向了父目录而非项目根目录），跳过自动 init。
-    # 匹配成功或 project_name 为空/默认值时，继续正常的 git init 流程。
-    if project_name is not None and project_name not in ("默认项目", ""):
-        dir_name = Path(resolved).name
-        if dir_name != project_name:
-            logger.warning(
-                f"[format_memory_context] 安全拦截：cwd 目录名 '{dir_name}' "
-                f"与 project_name '{project_name}' 不匹配，跳过自动 git init"
-            )
-            return False
+    # PyInstaller 打包后处理：尝试找到真实源码目录
+    resolved = _resolve_pyinstaller_path(resolved)
+
+    # 安全检查：避免在根目录 / 家目录 / PyInstaller 临时目录中 init
+    resolved_path = Path(resolved)
+    dangerous_parents = {Path("/"), Path.home(), Path(sys.executable).parent if getattr(sys, "frozen", False) else None}
+    dangerous_parents.discard(None)
+    if resolved_path in dangerous_parents or "_internal" in resolved:
+        logger.warning(
+            f"[format_memory_context] 安全检查：拒绝在危险位置 git init: {resolved}"
+        )
+        return False
 
     if _is_git_repo(resolved):
         return True
@@ -567,7 +603,7 @@ def _auto_generate_or_append_gitignore(cwd: str) -> dict[str, Any]:
         return {"action": "noop", "added": 0, "sections": []}
 
 
-def _build_git_status_block(cwd: str, project_name: str | None = None) -> list[str] | None:
+def _build_git_status_block(cwd: str) -> list[str] | None:
     """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）
 
     一次性从 _collect_all_git 拿到所有数据（已并发 + 已缓存），
@@ -575,7 +611,7 @@ def _build_git_status_block(cwd: str, project_name: str | None = None) -> list[s
     """
     # 统一使用 resolved 绝对路径，确保与 _auto_git_init 内部一致
     resolved = str(Path(cwd).resolve())
-    if not _auto_git_init(resolved, project_name):
+    if not _auto_git_init(resolved):
         return None
     info = _collect_all_git(resolved)
     branch = info["branch"]
@@ -636,30 +672,21 @@ def _build_git_status_block(cwd: str, project_name: str | None = None) -> list[s
 
 
 def hook(event: str, context: dict) -> str:
-    """将条目记忆、关键文档、worktree 信息格式化为字符串
+    """注入条目记忆 + 关键文档（长期记忆）
 
     Args:
         event: 事件名称（PreUserMessage）
         context: 由 backend 预取的上下文，含：
             - entry_memories: list[str] 条目记忆列表
             - key_documents: list[dict] 关键文档列表
-            - project_root: str 当前窗口工作目录
-            - project_name: str 当前项目名
-            - worktree: dict (可选) repo_name/current_branch/workdir/is_worktree/other_branches
 
     Returns:
-        格式化的长期记忆 + 项目上下文字符串
+        格式化的长期记忆字符串
     """
     entry_memories = context.get("entry_memories", [])
     key_documents = context.get("key_documents", [])
-    project_root = context.get("project_root", "")
-    project_name = context.get("project_name", "")
-    worktree = context.get("worktree")
 
-    parts = []
-
-    # ====== 条目记忆 ======
-    mem_lines = ["## 长期记忆", "", "### 条目记忆"]
+    mem_lines = ["### 条目记忆"]
     if entry_memories:
         for content in entry_memories:
             mem_lines.append(f"- {content}")
@@ -667,7 +694,6 @@ def hook(event: str, context: dict) -> str:
         mem_lines.append("- 暂无条目记忆")
     mem_lines.append("")
 
-    # ====== 关键文档 ======
     mem_lines.append("### 关键文档")
     if key_documents:
         for doc in key_documents:
@@ -684,38 +710,49 @@ def hook(event: str, context: dict) -> str:
     else:
         mem_lines.append("- 暂无关键文档")
 
-    parts.append("\n".join(mem_lines))
+    if not entry_memories and not key_documents:
+        return ""
+    return "\n".join(mem_lines)
 
-    # ====== 项目上下文（动态，每次 PreUserMessage 更新） ======
-    if project_root:
-        ctx_lines = ["## 项目上下文", ""]
-        ctx_lines.append(f"- 项目根目录: {project_root}")
-        ctx_lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
-        ctx_lines.append("- 根目录外：用绝对路径")
 
-        # 优先复用 Git 状态（与 .drifox/plugins/git-status 同款格式）
-        # 传入 project_name 用于安全性校验，防止误在父目录初始化 git 仓库
-        git_block = _build_git_status_block(project_root, project_name) if project_root else None
-        if git_block:
-            ctx_lines.append("")
-            ctx_lines.extend(git_block)
-        elif worktree:
-            # fallback：git 不可用时回到 backend 预取的 worktree 字段
-            ctx_lines.append("")
-            ctx_lines.append("### 当前 Worktree")
-            ctx_lines.append(f"- 仓库: {worktree.get('repo_name', '')}")
-            ctx_lines.append(f"- 当前分支: {worktree.get('current_branch', '')}")
-            ctx_lines.append(f"- 工作目录: {worktree.get('workdir', project_root)}")
-            if worktree.get("is_worktree"):
-                ctx_lines.append("- ⚠️ 当前在 worktree 分支上工作，文件操作不影响主仓库代码")
-            other_branches = worktree.get("other_branches", [])
-            if other_branches:
-                ctx_lines.append(f"- 其他分支: {', '.join(other_branches)}")
+def hook_git(event: str, context: dict) -> str:
+    """注入项目上下文 + Git 仓库状态
 
-        parts.append("\n".join(ctx_lines))
+    Args:
+        event: 事件名称（PreUserMessage）
+        context: 由 backend 预取的上下文，含：
+            - project_root: str 当前窗口工作目录
+            - project_name: str 当前项目名
+            - worktree: dict (可选) repo_name/current_branch/workdir/is_worktree/other_branches
 
-    # 如果没有任何内容，返回空（让 backend 跳过注入）
-    if not entry_memories and not key_documents and not project_root:
+    Returns:
+        格式化的项目上下文字符串（含 Git 状态）
+    """
+    project_root = context.get("project_root", "")
+    worktree = context.get("worktree")
+
+    if not project_root:
         return ""
 
-    return "\n\n".join(parts)
+    ctx_lines = []
+    ctx_lines.append(f"- 项目根目录: {project_root}")
+    ctx_lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
+    ctx_lines.append("- 根目录外：用绝对路径")
+
+    git_block = _build_git_status_block(project_root) if project_root else None
+    if git_block:
+        ctx_lines.append("")
+        ctx_lines.extend(git_block)
+    elif worktree:
+        ctx_lines.append("")
+        ctx_lines.append("### 当前 Worktree")
+        ctx_lines.append(f"- 仓库: {worktree.get('repo_name', '')}")
+        ctx_lines.append(f"- 当前分支: {worktree.get('current_branch', '')}")
+        ctx_lines.append(f"- 工作目录: {worktree.get('workdir', project_root)}")
+        if worktree.get("is_worktree"):
+            ctx_lines.append("- ⚠️ 当前在 worktree 分支上工作，文件操作不影响主仓库代码")
+        other_branches = worktree.get("other_branches", [])
+        if other_branches:
+            ctx_lines.append(f"- 其他分支: {', '.join(other_branches)}")
+
+    return "\n".join(ctx_lines)

@@ -60,7 +60,7 @@ def format_relative_time(time_str: str) -> str:
             return f"{diff.days}天前"
         else:
             return time_str[5:10] if len(time_str) >= 10 else time_str
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
 
 
@@ -484,7 +484,9 @@ class _ArchivedItemCard(CardWidget):
         self.title_label = BodyLabel(title[:100], self)
         self.title_label.setWordWrap(True)
         body_size = scale_font_size(14)
-        self.title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; {get_font_family_css()}")
+        self.title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; {get_font_family_css()}"
+        )
         top_row.addWidget(self.title_label, 1)
 
         self.title_edit = QLineEdit(title[:100], self)
@@ -848,7 +850,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "更早"
 
     def _clear_content(self):
@@ -1408,10 +1410,111 @@ class HistoryCard(QWidget):
         """返回一个可调用的导入处理函数，供外部设置"""
 
         def handle_import():
-            from PyQt5.QtWidgets import QFileDialog
+            from PyQt5.QtWidgets import QFileDialog, QMenu, QAction
+            from PyQt5.QtGui import QCursor
 
-            files, _ = QFileDialog.getOpenFileNames(self, "导入会话", "", "JSON 文件 (*.json)")
-            if files:
-                self._handle_import_files(files)
+            menu = QMenu(self)
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: palette(window);
+                    border: 1px solid palette(mid);
+                    border-radius: 6px;
+                    padding: 4px;
+                }
+                QMenu::item {
+                    padding: 6px 24px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: palette(highlight);
+                    color: palette(highlighted-text);
+                }
+            """)
+
+            action_file = QAction("📁  从文件导入", self)
+            action_url = QAction("🔗  从URL导入", self)
+            menu.addAction(action_file)
+            menu.addAction(action_url)
+
+            action = menu.exec_(QCursor.pos())
+
+            if action == action_file:
+                files, _ = QFileDialog.getOpenFileNames(self, "导入会话", "", "JSON 文件 (*.json)")
+                if files:
+                    self._handle_import_files(files)
+            elif action == action_url:
+                self._on_import_from_url()
 
         return handle_import
+
+    def _on_import_from_url(self):
+        """从URL导入会话JSON"""
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
+
+        dialog = SingleInputDialog(
+            title="🔗 从URL导入会话",
+            hint="请输入会话 JSON 文件的分享链接",
+            placeholder="https://gitee.com/.../xxx.json",
+            default_text="https://",
+            confirm_text="导入",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._on_url_import_confirmed)
+        dialog.exec_()
+
+    def _on_url_import_confirmed(self, url: str):
+        """URL确认后的导入处理"""
+        url = url.strip()
+        if not url:
+            return
+
+        # 补全协议前缀
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "https://" + url
+
+        import tempfile
+        import json
+
+        try:
+            import requests
+
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            content = resp.text
+        except Exception as e:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.error(
+                title="导入失败",
+                content=f"无法从URL获取数据: {e}",
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+                parent=self,
+            )
+            return
+
+        # 验证是否是有效的JSON
+        try:
+            json.loads(content)
+        except json.JSONDecodeError:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.error(
+                title="导入失败",
+                content="URL内容不是有效的JSON格式",
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+                parent=self,
+            )
+            return
+
+        # 保存到临时文件，复用现有导入流程
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".json", prefix="drifox_import_url_", delete=False, mode="w", encoding="utf-8"
+        )
+        tmp.write(content)
+        tmp_path = tmp.name
+        tmp.close()
+
+        self._handle_import_files([tmp_path])

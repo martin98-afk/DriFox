@@ -8,7 +8,6 @@
 
 import json
 import markdown
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,7 +40,7 @@ def _format_timestamp(msg: Dict[str, Any]) -> str:
         try:
             dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return dt.strftime("%m-%d %H:%M")
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return ts
     return ""
 
@@ -186,7 +185,7 @@ def _render_message_body(blocks: List[Dict]) -> str:
             content = block.get("content", "") or block.get("text", "")
             parts.append(
                 '<details class="reasoning" open>'
-                '<summary>💭 思考过程</summary>'
+                "<summary>💭 思考过程</summary>"
                 f'<div class="reasoning-body md">{_md_to_html(content)}</div>'
                 "</details>"
             )
@@ -258,7 +257,7 @@ def _export_html(messages: List[Dict], record: Dict = None) -> str:
     if record.get("last_time"):
         meta_chips.append(("时间", str(record["last_time"])))
     if record.get("message_count") is not None:
-        meta_chips.append(("消息", f'{record["message_count"]} 轮'))
+        meta_chips.append(("消息", f"{record['message_count']} 轮"))
     model_name = next((m.get("model_name") for m in messages if m.get("model_name")), None)
     if model_name:
         meta_chips.append(("模型", str(model_name)))
@@ -799,40 +798,48 @@ class ShareCardContent(QWidget):
         fmt = self._selected_format
         ext_map = {"markdown": ".md", "json": ".json", "html": ".html"}
         ext = ext_map.get(fmt, ".txt")
+
+        # 自动保存到 ~/.drifox/shared/
+        shared_dir = Path.home() / ".drifox" / "shared"
         try:
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=ext, prefix="drifox_share_", delete=False, mode="w", encoding="utf-8"
-            )
-            tmp.write(text)
-            tmp_path = tmp.name
-            tmp.close()
+            shared_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            self._show_info(f"写入临时文件失败: {e}", "error")
+            self._show_info(f"创建分享目录失败: {e}", "error")
             return
+
+        title = (self._record.get("title") or _get_session_title(self._messages) or "对话分享").strip()
+        safe_title = "".join(c for c in title if c not in r'<>:"/\|?*').rstrip(". ") or "对话分享"
+        filename = f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        save_path = shared_dir / filename
+
+        try:
+            save_path.write_text(text, encoding="utf-8")
+        except Exception as e:
+            self._show_info(f"保存分享文件失败: {e}", "error")
+            return
+
         try:
             from app.gateway.utils.gitee_uploader import GiteeUploader
 
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
                 self._show_info("Gitee 未配置（缺少 token/owner/repo）", "warning")
-                Path(tmp_path).unlink(missing_ok=True)
+                # 已保存到本地，不删除
                 return
             self._upload_btn.setEnabled(False)
             self._upload_btn.setText("⏳ 上传中…")
-            url, err = uploader.upload_file(tmp_path)
-            Path(tmp_path).unlink(missing_ok=True)
+            url, err = uploader.upload_file(str(save_path))
             self._upload_btn.setEnabled(True)
             self._upload_btn.setText("🔗 生成链接")
             if err:
-                self._show_info(f"上传失败: {err}", "error")
+                self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
                 return
             QApplication.clipboard().setText(url)
-            self._show_info("链接已复制到剪贴板", "success")
+            self._show_info(f"链接已复制到剪贴板\n本地备份: {save_path.name}", "success")
         except Exception as e:
             self._upload_btn.setEnabled(True)
             self._upload_btn.setText("🔗 生成链接")
-            Path(tmp_path).unlink(missing_ok=True)
-            self._show_info(f"上传异常: {e}", "error")
+            self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
 
     def _show_info(self, message: str, level: str = "info"):
         parent = self.window() or self.parent()

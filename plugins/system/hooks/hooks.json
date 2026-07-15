@@ -115,6 +115,17 @@
         "hooks": [
           {
             "type": "python",
+            "function": ".format_memory_context:hook_git",
+            "add_output_to_context": true,
+            "statusMessage": "项目上下文:",
+            "id": "7a3e8d1f5b2c4a6e9d0f1a2b3c4d5e6f"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
             "function": ".inject_command_prompt:hook",
             "add_output_to_context": true,
             "statusMessage": "命令提示词:",
