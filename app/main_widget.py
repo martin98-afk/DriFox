@@ -2066,7 +2066,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
         self._init_builtin_commands()
 
-        # ===== UI 插件系统集成 =====
+        # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
+        # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
+        # 让窗口外壳尽快出现，压缩首次启动感知耗时
         try:
             from app.core.ui_plugin_registry import UIPluginRegistry
 
@@ -2074,31 +2076,9 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry.set_main_widget(self)
             # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
             ui_registry.set_context_provider(self._build_ui_context, self._window_id)
-            # 加载所有已启用的 UI 插件
-            self._load_all_ui_plugins()
-            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
-            ui_registry.re_register_all_commands()
-            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
-            # 这样在旧窗口触发命令时，卡片在旧窗口显示，而不是被新窗口覆盖
-            for card_id, card_info in ui_registry.get_floating_cards().items():
-                # 计算命令名（与 UIPluginRegistry._register_command_for_card 一致的逻辑）
-                if ":" in card_id:
-                    cmd_name = card_id
-                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
-                    cmd_name = card_id
-                else:
-                    cmd_name = f"{card_info.plugin_name}:{card_id}"
-                # 跳过已注册的（如内置 subagents 等）
-                if cmd_name in self._function_command_handlers:
-                    continue
-
-                # 注册当前窗口的处理器：传入 main_widget=self 确保卡片显示在本窗口
-                def _make_handler(cid=card_id, mw=self):
-                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
-
-                self._function_command_handlers[cmd_name] = _make_handler()
+            QTimer.singleShot(0, self._init_ui_plugins_deferred)
         except Exception as e:
-            logger.error(f"[MainWidget] UI plugin init failed: {e}")
+            logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
@@ -2728,6 +2708,34 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
         self._command_shortcuts = []
+
+    def _init_ui_plugins_deferred(self):
+        """延迟加载 UI 插件（首帧渲染后执行，避免阻塞窗口出现）"""
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            ui_registry = UIPluginRegistry.get_instance()
+            # 加载所有已启用的 UI 插件
+            self._load_all_ui_plugins()
+            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
+            ui_registry.re_register_all_commands()
+            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
+            for card_id, card_info in ui_registry.get_floating_cards().items():
+                if ":" in card_id:
+                    cmd_name = card_id
+                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
+                    cmd_name = card_id
+                else:
+                    cmd_name = f"{card_info.plugin_name}:{card_id}"
+                if cmd_name in self._function_command_handlers:
+                    continue
+
+                def _make_handler(cid=card_id, mw=self):
+                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
+
+                self._function_command_handlers[cmd_name] = _make_handler()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
