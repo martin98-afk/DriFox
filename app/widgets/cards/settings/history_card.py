@@ -9,11 +9,12 @@ from typing import Dict, List, Optional
 
 from pypinyin import lazy_pinyin
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QDragEnterEvent
+from PyQt5.QtGui import QColor, QDragEnterEvent
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +23,9 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     FluentIcon,
+    MaskDialogBase,
+    PrimaryPushButton,
+    PushButton,
     SimpleCardWidget,
     TransparentToolButton,
 )
@@ -1410,42 +1414,20 @@ class HistoryCard(QWidget):
         """返回一个可调用的导入处理函数，供外部设置"""
 
         def handle_import():
-            from PyQt5.QtWidgets import QFileDialog, QMenu, QAction
-            from PyQt5.QtGui import QCursor
-
-            menu = QMenu(self)
-            menu.setStyleSheet("""
-                QMenu {
-                    background-color: palette(window);
-                    border: 1px solid palette(mid);
-                    border-radius: 6px;
-                    padding: 4px;
-                }
-                QMenu::item {
-                    padding: 6px 24px;
-                    border-radius: 4px;
-                }
-                QMenu::item:selected {
-                    background-color: palette(highlight);
-                    color: palette(highlighted-text);
-                }
-            """)
-
-            action_file = QAction("📁  从文件导入", self)
-            action_url = QAction("🔗  从URL导入", self)
-            menu.addAction(action_file)
-            menu.addAction(action_url)
-
-            action = menu.exec_(QCursor.pos())
-
-            if action == action_file:
-                files, _ = QFileDialog.getOpenFileNames(self, "导入会话", "", "JSON 文件 (*.json)")
-                if files:
-                    self._handle_import_files(files)
-            elif action == action_url:
-                self._on_import_from_url()
+            dialog = ImportOptionDialog(parent=self.window())
+            dialog.fileImportRequested.connect(self._on_import_from_file)
+            dialog.urlImportRequested.connect(self._on_import_from_url)
+            dialog.exec_()
 
         return handle_import
+
+    def _on_import_from_file(self):
+        """从文件导入"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        files, _ = QFileDialog.getOpenFileNames(self, "导入会话", "", "JSON 文件 (*.json)")
+        if files:
+            self._handle_import_files(files)
 
     def _on_import_from_url(self):
         """从URL导入会话JSON"""
@@ -1518,3 +1500,147 @@ class HistoryCard(QWidget):
         tmp.close()
 
         self._handle_import_files([tmp_path])
+
+
+class ImportOptionDialog(MaskDialogBase):
+    """导入选项弹框：从文件导入 / 从URL导入，与 SingleInputDialog 同款样式"""
+
+    fileImportRequested = pyqtSignal()
+    urlImportRequested = pyqtSignal()
+
+    DEFAULT_WIDTH = 400
+    DEFAULT_HEIGHT = 300
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("importOptionDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #importOptionDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        # 标题
+        title_label = BodyLabel("📥 导入会话", self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
+        )
+        layout.addWidget(title_label)
+
+        # 从文件导入
+        file_btn = QPushButton("📁  从文件导入", self.widget)
+        file_btn.setCursor(Qt.PointingHandCursor)
+        file_btn.setFixedHeight(56)
+        file_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 8px 16px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(14)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """)
+        file_btn.clicked.connect(lambda: self._on_choose("file"))
+        layout.addWidget(file_btn)
+
+        # 文件导入说明
+        file_hint = CaptionLabel("选择本地 JSON 会话文件导入", self.widget)
+        file_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(file_hint)
+
+        # 从URL导入
+        url_btn = QPushButton("🔗  从URL导入", self.widget)
+        url_btn.setCursor(Qt.PointingHandCursor)
+        url_btn.setFixedHeight(56)
+        url_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 8px 16px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(14)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """)
+        url_btn.clicked.connect(lambda: self._on_choose("url"))
+        layout.addWidget(url_btn)
+
+        # URL导入说明
+        url_hint = CaptionLabel("输入会话 JSON 文件的分享链接", self.widget)
+        url_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(url_hint)
+
+        layout.addStretch()
+
+        # 取消按钮
+        cancel_btn = PushButton("取消", self.widget)
+        cancel_btn.setStyleSheet(f"""
+            PushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.close)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        self._center_widget()
+
+    def _center_widget(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()
+
+    def _on_choose(self, choice: str):
+        self.close()
+        if choice == "file":
+            self.fileImportRequested.emit()
+        else:
+            self.urlImportRequested.emit()

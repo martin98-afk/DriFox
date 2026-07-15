@@ -1827,7 +1827,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
         self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
         # 设置导入按钮的处理器
-        self._history_card.set_extra_button_handler(self._history_popup_card.get_import_button_handler())
+        self._history_card.set_extra_button_handler(
+            self._history_popup_card.get_import_button_handler(),
+            tooltip="导入会话",
+        )
 
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)

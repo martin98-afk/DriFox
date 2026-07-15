@@ -776,8 +776,10 @@ class ShareCardContent(QWidget):
         ext = ".md" if fmt == "markdown" else f".{fmt}"
         title = (self._record.get("title") or _get_session_title(self._messages) or "对话分享").strip()
         safe_title = "".join(c for c in title if c not in r'<>:"/\|?*').rstrip(". ") or "对话分享"
-        default_name = f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
-        path, _ = QFileDialog.getSaveFileName(self, "保存文件", default_name, filter_str)
+        shared_dir = Path.home() / ".drifox" / "shared"
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        default_path = str(shared_dir / f"{safe_title}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
+        path, _ = QFileDialog.getSaveFileName(self, "保存文件", default_path, filter_str)
         if not path:
             return
         try:
