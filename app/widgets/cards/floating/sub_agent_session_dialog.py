@@ -133,7 +133,7 @@ class SubAgentSessionDialog(QDialog):
         status = self._summary.get("status", "finished")
         if status == "running" and logs_provider is not None:
             self._poll_timer = QTimer(self)
-            self._poll_timer.setInterval(2000)  # 2 秒轮询
+            self._poll_timer.setInterval(3000)  # 3 秒轮询（减少卡顿）
             self._poll_timer.timeout.connect(self._poll_update)
             self._poll_timer.setSingleShot(False)
             self._poll_timer.start()
@@ -265,13 +265,14 @@ class SubAgentSessionDialog(QDialog):
         if has_new_logs:
             start_idx = self._last_log_count
             for i, log in enumerate(new_logs):
+                log_type = log.get("type", "progress")
+                content = log.get("content", "")
+                # 跳过无内容的 ai_response/thinking
+                if log_type in ("ai_response", "thinking") and not content:
+                    continue
                 idx = start_idx + i
-                nav_items_html += self._build_nav_item(
-                    log.get("type", "progress"), log.get("content", ""), log, idx
-                )
-                content_sections_html += self._build_content_section(
-                    log.get("type", "progress"), log.get("content", ""), log, idx
-                )
+                nav_items_html += self._build_nav_item(log_type, content, log, idx)
+                content_sections_html += self._build_content_section(log_type, content, log, idx)
 
         # 检查是否有结果需要追加（任务刚完成）
         result = summary.get("result", "")
@@ -453,15 +454,21 @@ class SubAgentSessionDialog(QDialog):
     def _render_logs(self):
         """以 MessageCard 同款样式渲染日志"""
         if not self._logs:
-            self._web_view.setHtml(self._build_empty_html())
+            status = self._summary.get("status", "")
+            if status == "finished":
+                # 已完成但日志为空 — DB 可能无数据，显示友好提示
+                self._web_view.setHtml(self._build_empty_html(msg="该任务已完成，但日志记录为空（可能是旧数据）。"))
+            else:
+                self._web_view.setHtml(self._build_empty_html())
             return
 
         html = self._build_html()
         self._web_view.setHtml(html)
 
-    def _build_empty_html(self) -> str:
+    def _build_empty_html(self, msg: str = "") -> str:
         """构建无日志时的 HTML"""
         Colors.refresh()
+        display_msg = msg or "暂无会话日志"
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -475,10 +482,16 @@ class SubAgentSessionDialog(QDialog):
         padding: 40px 20px;
         text-align: center;
     }}
+    .hint {{
+        font-size: 13px;
+        color: {Colors.TEXT_SECONDARY};
+        margin-top: 8px;
+    }}
 </style>
 </head>
 <body>
-    <p>暂无会话日志</p>
+    <p>📋 {self._escape_html(display_msg)}</p>
+    <p class="hint">任务状态：{self._summary.get("status", "unknown")}</p>
 </body>
 </html>"""
 
@@ -496,6 +509,9 @@ class SubAgentSessionDialog(QDialog):
         for i, log in enumerate(self._logs):
             log_type = log.get("type", "progress")
             content = log.get("content", "")
+            # 跳过无内容的 ai_response/thinking（纯工具调用轮次无文本）
+            if log_type in ("ai_response", "thinking") and not content:
+                continue
 
             nav_items_html += self._build_nav_item(log_type, content, log, i)
             content_sections_html += self._build_content_section(log_type, content, log, i)
@@ -751,6 +767,14 @@ class SubAgentSessionDialog(QDialog):
         margin: 6px 0;
     }}
     .log-content p {{
+        margin: 6px 0;
+    }}
+    .log-content .content-text {{
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: var(--font);
+        font-size: {scale_font_size(13)}px;
+        line-height: 1.7;
         margin: 6px 0;
     }}
     .result-section {{
@@ -1071,21 +1095,26 @@ class SubAgentSessionDialog(QDialog):
 
     def _format_content_full(self, log_type: str, content: str, log: Dict) -> str:
         """格式化日志内容（完整显示，供右侧内容区使用）"""
+        # 无内容时显示占位，而非完全空白
         if not content:
-            return ""
+            if log_type in ("thinking", "ai_response"):
+                return '<p style="color: var(--text-muted); font-style: italic;">（无文本内容）</p>'
+            return '<p style="color: var(--text-muted); font-style: italic;">（空）</p>'
+
+        # 限制超长内容的显示，防止 DOM 过大导致卡顿
+        if log_type in ("thinking", "ai_response") and len(content) > 10000:
+            escaped = self._escape_html(content[:10000])
+            return f"<div class=\"content-text\">{escaped}…</div><p style=\"color: var(--text-muted); font-size: 11px;\">（内容过长，仅显示前 10000 字符）</p>"
 
         escaped = self._escape_html(content)
 
         if log_type == "thinking":
-            # 思考内容：完整显示
-            return f"<pre>{escaped}</pre>"
+            return f"<div class=\"content-text\">{escaped}</div>"
 
         elif log_type == "ai_response":
-            # AI 回复：完整显示
-            return f"<pre>{escaped}</pre>"
+            return f"<div class=\"content-text\">{escaped}</div>"
 
         elif log_type == "tool_call":
-            # 工具调用：工具名 + 参数
             args = log.get("args")
             args_html = ""
             if args:
@@ -1093,17 +1122,25 @@ class SubAgentSessionDialog(QDialog):
 
                 try:
                     args_str = json.dumps(args, option=json.OPT_INDENT_2).decode("utf-8")
+                    if len(args_str) > 3000:
+                        args_str = args_str[:3000] + "\n…（参数过长，已截断）"
                     args_html = f"<pre>{self._escape_html(args_str)}</pre>"
                 except Exception:
-                    args_html = f"<pre>{self._escape_html(str(args))}</pre>"
+                    args_html = f"<pre>{self._escape_html(str(args)[:3000])}</pre>"
             return f"<p><strong>工具：</strong>{escaped}</p>{args_html}"
 
         elif log_type == "tool_result":
-            # 工具结果：完整显示
             success = log.get("success", True)
             icon = "✅" if success else "❌"
             result_text = str(log.get("result", content))
-            return f"<p>{icon} <strong>{escaped}</strong></p><pre>{self._escape_html(result_text)}</pre>"
+            truncated = False
+            if len(result_text) > 2000:
+                result_text = result_text[:2000]
+                truncated = True
+            html = f"<p>{icon} <strong>{escaped}</strong></p><div class=\"content-text\">{self._escape_html(result_text)}</div>"
+            if truncated:
+                html += '<p style="color: var(--text-muted); font-size: 11px;">（结果过长，仅显示前 2000 字符）</p>'
+            return html
 
         elif log_type == "progress":
             return f"<p>{escaped}</p>"

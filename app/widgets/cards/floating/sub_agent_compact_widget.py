@@ -848,9 +848,18 @@ class SubAgentCompactFloatingWidget(QWidget):
             self._start_hide_timer()
         self._reflow()
 
-    def show_completed_task(self, task_id: str, agent_name: str, task_description: str, model_name: str = ""):
-        """显示一个已完成的任务（从历史数据加载，无旋转动画）"""
-        # 如果任务已存在，跳过
+    def show_completed_task(self, task_id: str, agent_name: str, task_description: str,
+                            model_name: str = "", tool_call_count: int = 0, elapsed_seconds: int = 0):
+        """显示一个已完成的任务（从历史数据加载，无旋转动画）
+
+        Args:
+            task_id: 任务ID
+            agent_name: 智能体名称
+            task_description: 任务描述
+            model_name: 模型名（可选）
+            tool_call_count: 工具调用次数
+            elapsed_seconds: 已用秒数
+        """
         if task_id in self._task_rows:
             return
 
@@ -859,6 +868,15 @@ class SubAgentCompactFloatingWidget(QWidget):
         row.enter_session_requested.connect(self._on_enter_session_requested)
         self._task_rows[task_id] = row
         self._body_layout.addWidget(row)
+
+        # 设置统计数据
+        if tool_call_count > 0:
+            for _ in range(tool_call_count):
+                row.increment_tool_count()
+        # 设置已用时间（覆盖默认的 time.time() 差值）
+        if elapsed_seconds > 0:
+            import time as _time
+            row._start_time = _time.time() - elapsed_seconds
 
         # 标记为已完成（替换旋转图标为对号，停止计时器更新）
         row.finish(success=True)

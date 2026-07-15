@@ -9979,12 +9979,15 @@ class OpenAIChatToolWindow(ToolWindow):
             summary = task_data.get("summary", {})
             agent_name = summary.get("agent_name", task_data.get("agent_name", "未知"))
             task_desc = summary.get("task_description", task_data.get("task_description", ""))
+            tool_count = summary.get("tool_call_count", 0)
+            elapsed = summary.get("elapsed_seconds", 0)
 
             # 已在 compact 中则跳过
             if task_id in compact._task_rows:
                 continue
 
-            compact.show_completed_task(task_id, agent_name, task_desc)
+            compact.show_completed_task(task_id, agent_name, task_desc,
+                                        tool_call_count=tool_count, elapsed_seconds=elapsed)
 
         if not found_any:
             return
