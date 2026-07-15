@@ -377,9 +377,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend = ChatBackend(window_id=self._window_id)
         # 注入工具权限控制器（在 initialize 之前,engine 创建时会用到）
         self.backend.set_tool_permission_controller(self._tool_permission_controller)
+        # 在 PyInstaller (frozen) 环境中不传默认 workdir，
+        # 避免把 _internal 临时目录误当作项目根目录。
+        # 实际 workdir 由 _sync_working_directory() 在 showEvent 中设置。
+        if getattr(sys, "frozen", False):
+            initial_workdir = None
+        else:
+            initial_workdir = str(Path(__file__).resolve().parent.parent)
         self.backend.initialize(
             get_model_config=self._get_current_model_config,
-            workdir=str(Path(__file__).resolve().parent.parent),
+            workdir=initial_workdir,
         )
         # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
         # 此时 controller 还没建好,需要延迟绑定)
@@ -942,6 +949,11 @@ class OpenAIChatToolWindow(ToolWindow):
             new_instance.backend._current_project = self._current_project
             if new_instance.backend.tool_executor:
                 new_instance.backend.tool_executor.set_current_project(self._current_project)
+                # 同步工作目录到新窗口的 tool_executor，避免因跳过
+                # _sync_working_directory 而导致 project_root 残留为 _internal
+                wd = self._current_workdir.get(self._current_project)
+                if wd:
+                    new_instance.backend.tool_executor.set_workdir(wd)
             if hasattr(new_instance, "_project_label"):
                 new_instance._project_label.setText(self._current_project)
 
@@ -1815,7 +1827,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
         self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
         # 设置导入按钮的处理器
-        self._history_card.set_extra_button_handler(self._history_popup_card.get_import_button_handler())
+        self._history_card.set_extra_button_handler(
+            self._history_popup_card.get_import_button_handler(),
+            tooltip="导入会话",
+        )
 
         # 历史会话卡片
         self._history_card.content_layout.addWidget(self._history_popup_card)

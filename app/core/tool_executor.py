@@ -643,8 +643,14 @@ class ToolExecutor:
 
         规范化：用 Path 解析后转为 str，避免 Windows 路径带尾随反斜杠
         （如 'D:\\work\\DriFoxx\\' 导致 os.path.basename 返回空字符串）。
+
+        PyInstaller 打包后：使用 exe 所在目录，而非 _internal 临时解压目录。
         """
         try:
+            if getattr(sys, "frozen", False):
+                # PyInstaller: _MEIPASS 指向 _internal 临时目录，不可作为项目根。
+                # 改用 sys.executable 所在目录（exe 的安装目录）。
+                return str(Path(sys.executable).resolve().parent)
             from app.utils.utils import resource_path
 
             return str(Path(resource_path("")).resolve())

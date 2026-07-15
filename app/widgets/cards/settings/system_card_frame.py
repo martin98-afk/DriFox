@@ -361,14 +361,24 @@ class SystemCardFrame(QFrame):
             btn.setStyleSheet(TabStyles.active() if tab_id == self._current_tab else TabStyles.inactive())
             btn.setFont(get_unified_font(12))
 
-    def set_extra_button_handler(self, handler):
+    def set_extra_button_handler(self, handler, icon=None, tooltip=""):
+        """设置标题栏额外按钮（通用方法）
+
+        Args:
+            handler: 按钮点击回调
+            icon: 图标（FluentIcon 或 QIcon，默认"导入"图标）
+            tooltip: 悬浮提示文字
+        """
         while self._extra_buttons_container.count():
             item = self._extra_buttons_container.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        btn = TransparentToolButton(get_icon("导入"), self)
-        btn.setToolTip("导入会话")
+        if icon is None:
+            icon = get_icon("导入")
+        btn = TransparentToolButton(icon, self)
+        btn.setFixedSize(26, 26)
+        btn.setToolTip(tooltip or "导入会话")
         btn.clicked.connect(handler)
         self._extra_buttons_container.addWidget(btn)
 

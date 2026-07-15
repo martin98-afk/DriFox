@@ -8,6 +8,7 @@
 """
 
 import html
+import math
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -55,7 +56,7 @@ def _qcolor_from_rgba(s: str) -> QColor:
     """
     s = (s or "").strip()
     if s.startswith("rgb(") or s.startswith("rgba("):
-        inner = s[s.index("(") + 1: s.rindex(")")]
+        inner = s[s.index("(") + 1 : s.rindex(")")]
         parts = [p.strip() for p in inner.split(",")]
         if len(parts) >= 3:
             r, g, b = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
@@ -1079,9 +1080,12 @@ class CommandCard(QWidget):
         else:
             doc.setPlainText(text)
         doc.setTextWidth(inner_w)
-        text_h = round(doc.size().height())
+        text_h = math.ceil(doc.size().height())
         # 上下 margin(6+6) + 上下 padding(6+6) = 24px
-        total = 24 + text_h
+        # 额外加 4px 容差：QTextDocument 无父级时使用默认 DPI 做字体度量，
+        # 与 QLabel 实际屏幕渲染存在亚像素差异（尤其是 125%+ 缩放时），
+        # 导致短文本最后一行底部被吞 1/3，加 4px 安全边距补偿。
+        total = 28 + text_h
         if max_lines and max_lines > 0:
             fm = self._desc_tooltip_label.fontMetrics()
             line_h = fm.lineSpacing()
