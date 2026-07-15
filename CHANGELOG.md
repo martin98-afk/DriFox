@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.11] - 2026-07-15
 
-自上一版本以来的变更 | 提交数：19 · 文件变更：24 · +2684/-2183 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：21 · 文件变更：26 · +2700/-2116 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - **会话摘要背景色修正**: 更新会话摘要背景色，统一使用实时标签样式
 - **SubAgentSessionDialog 布局重构**: 重构对话框布局，新增侧边栏导航与内容分区，提升使用体验
 - **移除过期记忆文件并修复命令崩溃**: 删除过期 memory 文件，修复 toggle-window 命令偶发崩溃与内容差异问题
+- **托盘 toggle-window 快捷键修复**: 修复托盘 toggle-window 快捷键间歇性失效问题，增加热键健康检查与 QShortcut 回退机制
 
 ### ♻️ 代码重构 (Refactoring)
 
