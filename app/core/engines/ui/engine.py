@@ -8,7 +8,6 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 
 import os
 import threading
-import time
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -334,7 +333,6 @@ class UIEngine(BaseEngine):
         架构：主线程快速验证 → 启动 PreSendWorker(QThread) → QEventLoop 等待（处理 UI）
         → 主线程继续 executor.execute()。
         """
-        _t0 = time.perf_counter()
         if self._conversation_executor.is_streaming:
             logger.warning("[ChatEngine] Already streaming, ignoring new message")
             return False
@@ -423,8 +421,6 @@ class UIEngine(BaseEngine):
             return False
 
         # Worker 已完成，session.messages 已注入 hook 输出（worker 线程安全写入）
-        _t_build = time.perf_counter()
-        logger.debug(f"[ChatEngine] ⏱ hooks+build (bg thread): {(_t_build - _t0)*1000:.1f}ms")
 
         # 通知 UI 刷新（主线程 emit）
         if self._backend and hook_mgr:
@@ -441,9 +437,6 @@ class UIEngine(BaseEngine):
             tools=available_tools,
             callbacks=callbacks,
         )
-        _t_total = time.perf_counter()
-        logger.debug(f"[ChatEngine] ⏱ executor.execute: {(_t_total - _t_build)*1000:.1f}ms")
-        logger.info(f"[ChatEngine] ⏱ send_message TOTAL: {(_t_total - _t0)*1000:.1f}ms")
         return success
 
     # ========== 消息构建 ==========

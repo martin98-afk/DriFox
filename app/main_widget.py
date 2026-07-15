@@ -11020,7 +11020,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 再开始执行 hook 注入 + LLM 消息构建（这两步会同步阻塞主线程）。
         # 用户立即看到"等待 AI"状态，AI 响应在下一 tick 启动 → 消除"卡一下"的感知。
         def _do_deferred_send():
-            _td0 = time.perf_counter()
             if getattr(self, "_is_destroyed", False):
                 return
 
@@ -11044,10 +11043,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     image_paths=_image_paths,
                     model_name=_model_name,
                 )
-            _t_img = time.perf_counter()
-            if _image_paths:
-                logger.debug(f"[MainWidget] ⏱ image encoding: {(_t_img - _td0)*1000:.1f}ms")
-
             # 如果 send_message 返回 False（通常是 LLM 配置无效），回滚 UI 状态
             engine_kwargs = {}
             if _user_content is not None:
@@ -11058,11 +11053,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 assistant_card.deleteLater()
                 return
 
-            _t_engine = time.perf_counter()
-            logger.debug(
-                f"[MainWidget] ⏱ send_message_to_engine: "
-                f"{(_t_engine - (_t_img if _image_paths else _td0))*1000:.1f}ms"
-            )
 
             # 同步 batch 结构：_message_batch 已包含新 user batch
             self._sync_batch_structures()
