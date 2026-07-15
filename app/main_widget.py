@@ -2929,9 +2929,6 @@ class OpenAIChatToolWindow(ToolWindow):
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
-                    # toggle-window 由 TrayManager 全局热键（keyboard库）处理，跳过 QShortcut
-                    if cmd_def.name == "toggle-window":
-                        continue
                     qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
 
                     name = cmd_def.name
