@@ -849,7 +849,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._reflow()
 
     def show_completed_task(self, task_id: str, agent_name: str, task_description: str,
-                            model_name: str = "", tool_call_count: int = 0, elapsed_seconds: int = 0):
+                            model_name: str = "", tool_call_count: int = 0,
+                            elapsed_seconds: int = 0, context_usage: str = ""):
         """显示一个已完成的任务（从历史数据加载，无旋转动画）
 
         Args:
@@ -859,6 +860,7 @@ class SubAgentCompactFloatingWidget(QWidget):
             model_name: 模型名（可选）
             tool_call_count: 工具调用次数
             elapsed_seconds: 已用秒数
+            context_usage: 上下文用量文字（如 "12.5K tokens"）
         """
         if task_id in self._task_rows:
             return
@@ -883,6 +885,13 @@ class SubAgentCompactFloatingWidget(QWidget):
             row.time_label.setText(f"⏱{time_str}")
             if hasattr(row, '_elapsed_label_detail') and row._elapsed_label_detail:
                 row._elapsed_label_detail.setText(time_str)
+
+        # 设置模型名称（详情面板显示）
+        if model_name:
+            row.set_model_name(model_name)
+        # 设置上下文用量
+        if context_usage:
+            row.set_context_info(context_usage)
 
         # 标记为已完成（替换旋转图标为对号，停止计时器更新）
         row.finish(success=True)

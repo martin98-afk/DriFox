@@ -353,7 +353,7 @@ class AgentManager:
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
                         self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def reload_agents(self):
@@ -473,7 +473,7 @@ class AgentManager:
                     if hooks_dir.exists() and hooks_dir.is_dir():
                         self._hook_manager._clear_config_watcher(str(hooks_file))
                         self._hook_manager.unregister_skill_hooks(plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def cleanup_plugin_artifacts(self, plugin_name: str):
@@ -510,7 +510,7 @@ class AgentManager:
                     self._hook_manager.load_hooks_from_directory_flat(
                         hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
@@ -672,15 +672,28 @@ class AgentManager:
 
         perm_resolver = PermissionResolver(agent.permission, global_permission or {}, agent.tools)
 
-        # 团队协作工具始终允许（工具内部会检查团队模式，非团队模式返回错误）
+        # 团队协作工具：仅当当前窗口已加入团队时才暴露
+        # 避免浪费 token 和误导 LLM（非团队成员看到也用不了）
+        is_in_team = False
+        if self._builtin_tools:
+            window_id = getattr(self._builtin_tools, "_team_window_id", "")
+            if window_id:
+                try:
+                    from app.core.team_manager import TeamManager
+
+                    is_in_team = TeamManager.get_instance().is_team_member(window_id)
+                except Exception:
+                    pass  # 团队管理器未就绪时，不暴露团队工具
+
         team_tools = {"team_send_message", "team_list_members"}
 
         filtered_tools = []
         for tool in all_tools:
             tool_name = tool["function"]["name"].lower()
-            # 团队工具不受 agent 工具白名单限制（运行时自检）
+            # 团队工具：仅团队成员可见
             if tool_name in team_tools:
-                filtered_tools.append(tool)
+                if is_in_team:
+                    filtered_tools.append(tool)
                 continue
             permission = perm_resolver.resolve(tool_name)
             if permission in ("allow", "ask"):
@@ -713,6 +726,7 @@ class AgentManager:
         if not is_subagent_call and agent_name in ("build", "", None):
             try:
                 from app.utils.config import Settings
+
                 primary_agent = Settings.get_instance().llm_primary_agent.value
                 if primary_agent and primary_agent != agent_name:
                     if self.get_agent(primary_agent):
