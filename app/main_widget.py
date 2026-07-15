@@ -9979,13 +9979,12 @@ class OpenAIChatToolWindow(ToolWindow):
             summary = task_data.get("summary", {})
             agent_name = summary.get("agent_name", task_data.get("agent_name", "未知"))
             task_desc = summary.get("task_description", task_data.get("task_description", ""))
-            model_name = ""
 
             # 已在 compact 中则跳过
             if task_id in compact._task_rows:
                 continue
 
-            compact.show_completed_task(task_id, agent_name, task_desc, model_name)
+            compact.show_completed_task(task_id, agent_name, task_desc)
 
         if not found_any:
             return
@@ -11187,6 +11186,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
+        # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
+        if hasattr(self, "_card_manager"):
+            self._card_manager.hide_card("sub_agent_compact", self._window_id)
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""

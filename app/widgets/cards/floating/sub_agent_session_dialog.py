@@ -520,6 +520,14 @@ class SubAgentSessionDialog(QDialog):
         text_muted = Colors.TEXT_MUTED
         accent_color = Colors.REALTIME_ACCENT
 
+        # 获取系统字体名称（get_font_family_css() 返回完整 CSS 声明，这里只需字体名）
+        try:
+            from app.utils.config import Settings
+
+            _font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            _font_name = "Segoe UI"
+
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -534,7 +542,7 @@ class SubAgentSessionDialog(QDialog):
         --text-secondary: {text_secondary};
         --text-muted: {text_muted};
         --accent: {accent_color};
-        --font: {get_font_family_css()}, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        --font: '{_font_name}', -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         --mono-font: "Cascadia Code", "Fira Code", "Consolas", "SFMono-Regular", monospace;
         --font-size: {scale_font_size(14)}px;
     }}
