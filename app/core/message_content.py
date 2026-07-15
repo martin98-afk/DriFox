@@ -7,6 +7,17 @@ from typing import Any, Dict, List, Optional
 import orjson as json
 from loguru import logger
 
+# ========== Gemini thought_signature 适配 ==========
+# Gemini 2.5+/3 在多轮工具调用时，要求把模型返回 functionCall 时携带的
+# thought_signature（思考签名）原样回传，否则报 400：
+#   "Function call is missing a thought_signature in functionCall parts..."
+# OpenAI 兼容端点把该签名放在 tool_call 的 extra_content.google.thought_signature。
+# 内部消息用 tool_calls[i]["thought_signature"] 承载真实签名；只有从 Gemini 响应
+# 解析出来的 tool call 才会带此字段，因此回传时注入是天然按厂商隔离的。
+# 兜底：旧历史/迁移会话缺失真实签名时，用 Google 官方占位串绕过 400 校验
+# （仅略微降低推理质量，不会中断对话）。
+GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
 # ========== consolidate_messages 多入口 LRU 缓存 ==========
 # 旧实现为单入口缓存（key=None/result=None），交替处理不同消息列表时
 # 互相踢出。升级为 4-entry LRU，覆盖多数场景（主消息列表 + 临时列表）。
@@ -569,6 +580,10 @@ def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
             "arguments": json.dumps(parsed_arguments).decode("utf-8"),
         },
     }
+    # 🔧 透传 Gemini thought_signature（历史存档/加载也走 normalize_message，必须保留）
+    sig = tool_call.get("thought_signature")
+    if sig:
+        normalized["thought_signature"] = sig
     return normalized
 
 
@@ -852,7 +867,11 @@ def group_messages_for_display(
     return batches
 
 
-def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dict[str, Any]:
+def to_api_message(
+    message: Dict[str, Any],
+    supports_vision: bool = True,
+    is_gemini: bool = False,
+) -> Dict[str, Any]:
     """
     将内部消息格式转换为标准API请求格式。
     用于发送给API的消息构建。
@@ -861,6 +880,7 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
         message: 内部消息字典
         supports_vision: 当前模型是否支持视觉输入。若为 False，
             图片块将被替换为 [图片] 文本占位符，避免不支持视觉的模型报 400 错误。
+        is_gemini: 是否为 Gemini 模型（用于 thought_signature 兜底注入）。
 
     支持 multimodal 内容（含 image_url 块的列表）。
     """
@@ -906,7 +926,9 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
             api_msg["content"] = text
         tool_calls = normalized_message.get("tool_calls")
         if tool_calls:
-            api_msg["tool_calls"] = tool_calls
+            api_msg["tool_calls"] = [
+                _build_api_tool_call(tc, is_gemini=is_gemini) for tc in tool_calls
+            ]
         # DeepSeek V4 thinking mode: 传递 reasoning_content
         reasoning = normalized_message.get("reasoning_content")
         if reasoning:
@@ -943,22 +965,53 @@ def to_api_message(message: Dict[str, Any], supports_vision: bool = True) -> Dic
     }
 
 
-def messages_to_api(messages: List[Dict[str, Any]], supports_vision: bool = True) -> List[Dict[str, Any]]:
+def messages_to_api(
+    messages: List[Dict[str, Any]],
+    supports_vision: bool = True,
+    is_gemini: bool = False,
+) -> List[Dict[str, Any]]:
     """将内部消息列表转换为标准API请求格式列表。
 
     Args:
         messages: 内部消息列表
         supports_vision: 当前模型是否支持视觉输入。若为 False，
             图片块将被替换为 [图片] 文本占位符。
+        is_gemini: 是否为 Gemini 模型。为 True 时，缺失真实 thought_signature
+            的 assistant tool_calls 会用官方占位串兜底，避免 Gemini 3 多轮工具
+            调用报 400。
     """
     api_messages: List[Dict[str, Any]] = []
     for message in messages:
-        api_message = to_api_message(message, supports_vision=supports_vision)
+        api_message = to_api_message(message, supports_vision=supports_vision, is_gemini=is_gemini)
         if api_message:
             if api_message.get("role") == "user" and not api_message.get("content"):
                 continue
             api_messages.append(api_message)
     return api_messages
+
+
+def _build_api_tool_call(tc: Dict[str, Any], is_gemini: bool = False) -> Dict[str, Any]:
+    """将内部 tool_call 转换为标准 API tool_call 格式。
+
+    会剥离内部专用字段（如 _args_parsed），并按需注入 Gemini thought_signature：
+    - 内部携带真实 thought_signature → 用真实签名
+    - 未携带且目标为 Gemini → 用官方占位串兜底
+    """
+    func = tc.get("function") or {}
+    out: Dict[str, Any] = {
+        "id": tc.get("id"),
+        "type": tc.get("type", "function"),
+        "function": {
+            "name": func.get("name"),
+            "arguments": func.get("arguments", "{}"),
+        },
+    }
+    sig = tc.get("thought_signature")
+    if sig:
+        out["extra_content"] = {"google": {"thought_signature": sig}}
+    elif is_gemini:
+        out["extra_content"] = {"google": {"thought_signature": GEMINI_DUMMY_THOUGHT_SIGNATURE}}
+    return out
 
 
 def _extract_text_content(content: Any) -> str:
