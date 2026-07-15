@@ -1,6 +1,42 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.11] - 2026-07-15
+
+自上一版本以来的变更 | 提交数：19 · 文件变更：24 · +2684/-2183 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **后台线程加载余额与 URL 导入**: 将余额获取与 URL 导入操作移至后台线程，避免阻塞 UI 主线程，显著提升界面响应流畅度
+- **Gemini 模型 thought_signature 支持**: 增强 Gemini 模型消息处理，兼容 thought_signature 字段，提升多模型兼容性
+- **会话脏标记机制**: 引入会话脏标记（dirty flag），仅在内容变更时持久化消息，避免冗余保存操作
+- **重型卡片内容延迟加载**: 对重型卡片内容实施延迟加载策略，优化初始窗口显示速度
+- **UI 插件延迟加载与浮动组件回流优化**: 实现 UI 插件懒加载，并优化 SubAgentCompactFloatingWidget 回流处理，提升布局准确性
+- **性能日志与 Token 跟踪增强**: UI 消息处理及上下文构建增加性能日志；SubAgentExecutor 及相关组件增强 Token 跟踪与上下文用量显示
+- **实时日志流与任务统计增强**: SubAgentSessionDialog 增加实时日志流（logs_provider），并补充任务统计信息与日志渲染优化
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **日志过滤增强**: 优化 SubAgentSessionDialog 日志过滤逻辑，跳过空的 ai_response/thinking 条目，减少无效展示
+- **字体兼容性修复**: 更新 SubAgentSessionDialog 字体处理方式，提升跨平台兼容性
+- **会话摘要背景色修正**: 更新会话摘要背景色，统一使用实时标签样式
+- **SubAgentSessionDialog 布局重构**: 重构对话框布局，新增侧边栏导航与内容分区，提升使用体验
+- **移除过期记忆文件并修复命令崩溃**: 删除过期 memory 文件，修复 toggle-window 命令偶发崩溃与内容差异问题
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除 tooltip 阴影效果**: 移除 QGraphicsDropShadowEffect，防止分层窗口上的渲染异常
+- **移除冗余计时代码**: 清理 context builder、UI engine 和 main widget 中已不再使用的计时逻辑
+- **代码结构优化**: 重构多处代码结构，提升可读性与可维护性
+
+### 📚 文档 (Docs)
+
+- **性能优化实施方案**: 新增完整的性能优化实施计划文档，涵盖 P0/P1/P2 共 10 项优化任务
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号更新至 v0.3.11，同步更新 pyproject.toml、配置文件和安装脚本
+
 ## [v0.3.10] - 2026-07-15
 
 > 本版本为 v0.3.9 重大 bug 修复版。补入 v0.3.9 标签之后遗漏的 3 个修复 commit：导入功能重构、PyInstaller 路径处理优化、命令卡片 tooltip 短文本裁切修复。
