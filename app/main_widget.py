@@ -111,9 +111,7 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
-from app.widgets.cards.floating.sub_agent_floating_widget import (
-    SubAgentFloatingWidget,
-)
+
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.floating.todo_floating_widget import (
@@ -741,14 +739,6 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
-            "sub_agent",
-            self._sub_agent_floating_widget,
-        )
-        self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
             "sub_agent_compact",
             self._sub_agent_compact_widget,
         )
@@ -1291,9 +1281,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新设置卡片
         if self._settings_popup:
             self._settings_popup.set_opacity(opacity)
-        # 更新子智能体悬浮框
-        if hasattr(self, "_sub_agent_floating_widget") and self._sub_agent_floating_widget:
-            self._sub_agent_floating_widget.set_opacity(opacity)
         # 更新子智能体紧凑悬浮框
         if hasattr(self, "_sub_agent_compact_widget") and self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.set_opacity(opacity)
@@ -1731,9 +1718,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
 
-        self._sub_agent_floating_widget = SubAgentFloatingWidget(self)
-        self._sub_agent_floating_widget.setVisible(False)
-
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
@@ -1751,9 +1735,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "clear": self._handle_clear_command,
         }
 
-        # 下方卡片容器 - 添加 SubAgentCompact 和 SubAgent(详细日志)
+        # 下方卡片容器 - 添加 SubAgentCompact
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
-        self._bottom_card_container.add_card("sub_agent", self._sub_agent_floating_widget)
 
         # 上方卡片容器 - 添加 Todo
         self._top_card_container.add_card("todo", self._todo_floating_widget)
@@ -6618,7 +6601,6 @@ class OpenAIChatToolWindow(ToolWindow):
         for card in (
             self._todo_floating_widget,
             self._question_floating_widget,
-            self._sub_agent_floating_widget,
             self._sub_agent_compact_widget,
             self._share_card_content,
             self._history_questions_card_content,
@@ -6927,8 +6909,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
 
-        if self._sub_agent_floating_widget:
-            self._sub_agent_floating_widget.setVisible(False)
         if self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.clear()
             self._sub_agent_compact_widget.setVisible(False)
@@ -9970,7 +9950,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_subagent_log_requested(self, task_ids_str: str):
         """
-        处理子智能体日志查看请求
+        处理子智能体日志查看请求 — 使用紧凑卡片显示任务信息
 
         Args:
             task_ids_str: 逗号分隔的任务ID列表
@@ -9978,60 +9958,40 @@ class OpenAIChatToolWindow(ToolWindow):
         if not task_ids_str:
             return
 
-        # 解析 task_ids
         task_ids = [tid.strip() for tid in task_ids_str.split(",") if tid.strip()]
         if not task_ids:
             return
 
-        # 获取 sub_agent_manager
         sub_agent_mgr = self.backend.sub_agent_manager
         if not sub_agent_mgr:
             logger.warning("[LLMChatter] sub_agent_manager 未初始化")
             return
 
-        # 如果只有一个任务，直接显示
-        if len(task_ids) == 1:
-            task_id = task_ids[0]
-            task_data = sub_agent_mgr.get_task_logs(task_id)
-            if not task_data.get("found"):
-                InfoBar.warning(
-                    "任务不存在",
-                    f"未找到任务: {task_id[:8]}...",
-                    duration=3000,
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
+        compact = self._sub_agent_compact_widget
+        found_any = False
 
-            # 显示日志
-            self._sub_agent_floating_widget.show_task_from_data(task_data)
-            return
-
-        # 多个任务：收集所有任务的日志
-        all_logs = []
         for task_id in task_ids:
             task_data = sub_agent_mgr.get_task_logs(task_id)
-            if task_data.get("found"):
-                all_logs.append(task_data)
+            if not task_data.get("found"):
+                continue
 
-        if not all_logs:
-            InfoBar.warning(
-                "任务不存在",
-                "未找到任何任务日志",
-                duration=3000,
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
+            found_any = True
+            summary = task_data.get("summary", {})
+            agent_name = summary.get("agent_name", task_data.get("agent_name", "未知"))
+            task_desc = summary.get("task_description", task_data.get("task_description", ""))
+            model_name = ""
+
+            # 已在 compact 中则跳过
+            if task_id in compact._task_rows:
+                continue
+
+            compact.show_completed_task(task_id, agent_name, task_desc, model_name)
+
+        if not found_any:
             return
 
-        # 清空现有面板并逐个添加任务
-        for i, task_data in enumerate(all_logs):
-            task_id = task_data.get("task_id", task_data.get("summary", {}).get("task_id", "unknown"))
-            # 首次清空，后续追加
-            self._sub_agent_floating_widget.show_task_from_data(task_data, clear_first=(i == 0))
-
-        # 显示面板
-        self._sub_agent_floating_widget.setVisible(True)
+        # 显示紧凑卡片
+        self._card_manager.show_card("sub_agent_compact", self._window_id)
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -11463,33 +11423,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # ---- --detail：显示详细日志面板 ----
-        if args == "--detail":
-            sub_agent_mgr = self.backend.sub_agent_manager
-            running_tasks = sub_agent_mgr._running_tasks
-
-            if not running_tasks:
-                InfoBar.warning(
-                    title="暂无子智能体任务",
-                    content="当前没有正在执行的子智能体任务",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            detailed = self._sub_agent_floating_widget
-            # 确保面板已填充数据
-            if not detailed._batch_started:
-                detailed.clear()
-                for task_id, executor in running_tasks.items():
-                    detailed.add_task(task_id, executor.agent_name, executor.task_description)
-                detailed._batch_started = True
-
-            self._card_manager.show_card("sub_agent", self._window_id)
-            return
-
-        # ---- 无参数：显示紧凑卡片（原行为）----
+        # ---- 无参数：显示紧凑卡片 ----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
 
@@ -11658,7 +11592,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         策略：
         - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
-        - 详细卡片（sub_agent_floating_widget）：后台默默收集日志，仅用户点击"查看日志"按钮时才显示
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -11688,33 +11621,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not compact.isVisible():
             compact.setVisible(True)
 
-        # ── 详细卡片：后台收集日志，但不自动显示 ──
-        detailed = self._sub_agent_floating_widget
-        if not detailed._batch_started:
-            detailed.clear()
-            detailed.setVisible(False)  # 不自动显示
-        detailed._batch_started = True
-        detailed.add_task(task_id, agent_name, task_description)
-        detailed.setVisible(False)  # 立即隐藏，只保留日志数据
-
-        # 连接 executor 信号（紧凑卡片 + 详细卡片都需要）
+        # 连接 executor 信号（紧凑卡片实时更新）
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id)
         if executor:
-            executor.progress_updated.connect(
-                lambda tid, msg: (
-                    self._sub_agent_floating_widget.update_progress(tid, msg)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.tool_call_started.connect(
-                lambda tid, name, args: (
-                    self._sub_agent_floating_widget.add_tool_call(tid, name, args)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
             executor.tool_call_started.connect(
                 lambda tid, name, args: (
                     self._sub_agent_compact_widget.add_tool_call(tid, name, args)
@@ -11722,23 +11632,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     else None
                 )
             )
-            executor.tool_result_received.connect(
-                lambda tid, name, result, success: (
-                    self._sub_agent_floating_widget.add_tool_result(tid, name, result, success)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
             executor.token_usage_updated.connect(
                 lambda tid, pt, ct, tt: (
                     self._on_sub_agent_token_usage(tid, pt, ct, tt)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.thinking_received.connect(
-                lambda tid, thinking: (
-                    self._sub_agent_floating_widget.add_thinking(tid, thinking)
                     if not getattr(self, "_is_destroyed", False)
                     else None
                 )
@@ -11775,8 +11671,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 而不是依赖结果内容中的关键词（这会导致误判）
         execution_error = getattr(executor, "_execution_error", None) if executor else None
         success = execution_error is None or execution_error == ""
-
-        self._sub_agent_floating_widget.finish_task(task_id, result, success)
 
         # 更新紧凑卡片
         if hasattr(self, "_sub_agent_compact_widget"):

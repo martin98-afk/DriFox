@@ -403,7 +403,7 @@ class SubAgentSessionDialog(QDialog):
         Colors.refresh()
         bar.setStyleSheet(f"""
             #SessionSummary {{
-                background-color: {Colors.REALTIME_TAG_BG};
+                background-color: {Colors.CONTENT_BG};
                 border-bottom: 1px solid {Colors.REALTIME_BORDER};
             }}
         """)

@@ -848,6 +848,27 @@ class SubAgentCompactFloatingWidget(QWidget):
             self._start_hide_timer()
         self._reflow()
 
+    def show_completed_task(self, task_id: str, agent_name: str, task_description: str, model_name: str = ""):
+        """显示一个已完成的任务（从历史数据加载，无旋转动画）"""
+        # 如果任务已存在，跳过
+        if task_id in self._task_rows:
+            return
+
+        row = _AgentTaskRow(task_id, agent_name, task_description, model_name, self._scroll_content)
+        row.toggled.connect(self._on_row_toggled)
+        row.enter_session_requested.connect(self._on_enter_session_requested)
+        self._task_rows[task_id] = row
+        self._body_layout.addWidget(row)
+
+        # 标记为已完成（替换旋转图标为对号，停止计时器更新）
+        row.finish(success=True)
+        row.update_elapsed()
+
+        # 确保卡片可见
+        self.setVisible(True)
+        self._update_status_text()
+        self._reflow()
+
     def add_tool_call(self, task_id: str, tool_name: str, args: dict = None):
         """记录一次工具调用（更新对应行的工具计数）"""
         row = self._task_rows.get(task_id)
