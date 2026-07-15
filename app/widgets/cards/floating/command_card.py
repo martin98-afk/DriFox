@@ -16,7 +16,6 @@ from PyQt5.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QTextDocument
 from PyQt5.QtWidgets import (
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -75,7 +74,7 @@ class _DescTooltipBubble(QLabel):
     QStyle 的背景填充，导致样式表的 background 不绘制、窗口完全透明、文字看不清。
     因此这里在 paintEvent 中手动用 QPainter 绘制圆角实底背景 + 边框，保证背景
     始终可见；文字仍由基类 QLabel 渲染（含富文本关键字高亮）。
-    圆角外的区域保持透明，阴影效果（QGraphicsDropShadowEffect）贴合圆角形状。
+    圆角外的区域保持透明。
     """
 
     def __init__(self, parent=None):
@@ -955,10 +954,10 @@ class CommandCard(QWidget):
 
         视觉规范：
         - 主题实底背景（CARD_BG_SOLID，卡片表面色），保证在任意聊天背景上都清晰可读
-        - 圆角 + 细分隔边框 + 阴影，营造悬浮信息气泡质感
+        - 圆角 + 细分隔边框，营造悬浮信息气泡质感
         - 文字保持 TEXT_PRIMARY，确保一眼可读
         - 气泡以独立顶层窗口（WA_TranslucentBackground）悬浮在卡片上方，
-          由 _position_desc_tooltip 定位；圆角外的区域保持透明，阴影贴合圆角形状
+          由 _position_desc_tooltip 定位；圆角外的区域保持透明
         """
         Colors.refresh()
         if getattr(self, "_desc_tooltip_label", None) is None:
@@ -1000,11 +999,11 @@ class CommandCard(QWidget):
         lbl.setWordWrap(True)
         lbl.setTextInteractionFlags(Qt.NoTextInteraction)
         lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)  # 顶部对齐，避免 VCenter 平分多余空间导致上下 padding 不均
-        shadow = QGraphicsDropShadowEffect(lbl)
-        shadow.setBlurRadius(14)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(0, 0, 0, 110))
-        lbl.setGraphicsEffect(shadow)
+        # ⚠️ 注意：不在顶层 WA_TranslucentBackground 窗口上使用 QGraphicsDropShadowEffect。
+        # Windows 分层窗口（Layered Window）下，QGraphicsDropShadowEffect 的 bounding rect
+        # 会延伸到窗口边界之外，导致 Qt 传给 UpdateLayeredWindowIndirect 的脏区域包含负坐标，
+        # Windows 拒绝该参数并报 "参数错误"（UpdateLayeredWindowIndirect failed）。
+        # 气泡已通过 paintEvent 自绘圆角实底 + 边框，视觉上足够清晰。
         self._desc_tooltip_label = lbl
         self._apply_desc_tooltip_style()
         # 气泡位置在每次显示/窗口变化时由 _position_desc_tooltip 计算

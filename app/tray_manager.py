@@ -5,6 +5,7 @@
 """
 import math
 import platform
+import time
 import uuid
 from pathlib import Path
 
@@ -42,10 +43,18 @@ class TrayManager(QObject):
         return len(valid_windows)
 
     def _is_window_valid(self, w) -> bool:
-        """检查窗口是否仍然有效"""
+        """检查窗口是否仍然有效（C++ 对象是否存活）
+
+        通过调用 isVisible() 验证底层 QWidget 是否已被销毁，
+        与 _prune_dead_windows 使用相同模式。
+        """
         try:
-            return w is not None
-        except Exception:
+            if w is None:
+                return False
+            # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
+            w.isVisible()
+            return True
+        except (RuntimeError, Exception):
             return False
 
     def __init__(self, parent=None):
@@ -88,7 +97,13 @@ class TrayManager(QObject):
         self._hotkey_bridge.toggle_all_windows.connect(self._toggle_all_windows)
         self._hotkey_handle = None
         self._registered_hotkey = None
+        self._last_toggle_time = 0.0  # 防重复触发时间戳
         self._setup_global_hotkey()
+
+        # 定时重建全局热键（应对 sleep/resume 等导致的钩子丢失）
+        self._hotkey_health_timer = QTimer(self)
+        self._hotkey_health_timer.timeout.connect(self._health_check_hotkey)
+        self._hotkey_health_timer.start(300000)  # 5分钟
 
         # ========== 多窗口选中管理 ==========
         self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
@@ -731,34 +746,69 @@ class TrayManager(QObject):
         任意窗口可见 → 全部隐藏
         全部已隐藏 → 全部显示并激活
         """
-        valid_windows = [w for w in self._windows if self._is_window_valid(w)]
-        if not valid_windows:
+        # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
+        now = time.perf_counter()
+        if now - self._last_toggle_time < 0.5:
             return
+        self._last_toggle_time = now
 
-        # 检查是否有任何窗口可见
-        any_visible = any(w.isVisible() for w in valid_windows)
+        try:
+            # 过滤有效窗口，同时剔除已销毁的 C++ 对象
+            valid_windows = []
+            for w in self._windows:
+                try:
+                    if w is None:
+                        continue
+                    # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
+                    w.isVisible()
+                    valid_windows.append(w)
+                except (RuntimeError, Exception):
+                    continue
 
-        if any_visible:
-            # 全部隐藏
-            for w in valid_windows:
-                try:
-                    w.hide()
-                except RuntimeError:
-                    pass
-        else:
-            # 全部显示并激活最后一个窗口
-            for w in valid_windows:
-                try:
-                    w.show()
-                    w.activateWindow()
-                    if w.isMinimized():
-                        w.showNormal()
-                    w.raise_()
-                except RuntimeError:
-                    pass
+            if not valid_windows:
+                return
+
+            # 检查是否有任何窗口可见
+            any_visible = any(w.isVisible() for w in valid_windows)
+
+            if any_visible:
+                # 全部隐藏
+                for w in valid_windows:
+                    try:
+                        w.hide()
+                    except RuntimeError:
+                        pass
+            else:
+                # 全部显示并激活最后一个窗口
+                for w in valid_windows:
+                    try:
+                        w.show()
+                        w.activateWindow()
+                        if w.isMinimized():
+                            w.showNormal()
+                        w.raise_()
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            logger.error(f"[TrayManager] _toggle_all_windows 异常: {e}")
+
+    def _health_check_hotkey(self):
+        """定期检查并重建全局热键
+
+        底层 keyboard 库的低级钩子可能因 sleep/resume、UAC 弹窗等场景丢失。
+        定时重建确保热键始终可用。
+        """
+        if self._hotkey_handle is not None:
+            self._release_global_hotkey()
+        self._setup_global_hotkey()
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""
+        # 停止定时器
+        try:
+            self._hotkey_health_timer.stop()
+        except Exception:
+            pass
         # 释放全局热键
         self._release_global_hotkey()
         # 先注销所有窗口，防止 closeEvent 再次调用 unregister

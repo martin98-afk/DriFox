@@ -4,11 +4,12 @@
 """
 
 import datetime
+import json
 import os
 from typing import Dict, List, Optional
 
 from pypinyin import lazy_pinyin
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
 from PyQt5.QtGui import QColor, QDragEnterEvent
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -41,6 +42,34 @@ from app.utils.design_tokens import (
 from app.utils.utils import get_icon
 
 
+class _UrlImportThread(QThread):
+    """后台线程：从 URL 拉取并校验导入内容，避免最长 30s 的同步请求冻结 UI。
+
+    finished 信号携带 (content, error)，二者有且仅有一个非空。
+    """
+
+    finished = pyqtSignal(str, str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self._url = url
+
+    def run(self):
+        try:
+            import requests
+
+            resp = requests.get(self._url, timeout=30)
+            resp.raise_for_status()
+            content = resp.text
+            # 验证是否是有效的 JSON
+            json.loads(content)
+            self.finished.emit(content, "")
+        except json.JSONDecodeError:
+            self.finished.emit("", "URL内容不是有效的JSON格式")
+        except Exception as e:
+            self.finished.emit("", f"无法从URL获取数据: {e}")
+
+
 def format_relative_time(time_str: str) -> str:
     """将时间字符串转换为相对时间显示"""
     if not time_str or time_str == "未知":
@@ -64,7 +93,7 @@ def format_relative_time(time_str: str) -> str:
             return f"{diff.days}天前"
         else:
             return time_str[5:10] if len(time_str) >= 10 else time_str
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
 
 
@@ -854,7 +883,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return "更早"
 
     def _clear_content(self):
@@ -1446,7 +1475,7 @@ class HistoryCard(QWidget):
         dialog.exec_()
 
     def _on_url_import_confirmed(self, url: str):
-        """URL确认后的导入处理"""
+        """URL确认后的导入处理（请求在后台线程执行，不阻塞 UI）"""
         url = url.strip()
         if not url:
             return
@@ -1455,36 +1484,21 @@ class HistoryCard(QWidget):
         if not (url.startswith("http://") or url.startswith("https://")):
             url = "https://" + url
 
-        import tempfile
-        import json
+        # 在后台线程拉取并校验，避免最长 30s 同步请求冻结界面
+        self._url_import_thread = _UrlImportThread(url)
+        self._url_import_thread.finished.connect(self._on_url_import_result)
+        self._url_import_thread.finished.connect(self._url_import_thread.deleteLater)
+        self._url_import_thread.start()
 
-        try:
-            import requests
-
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            content = resp.text
-        except Exception as e:
+    @pyqtSlot(str, str)
+    def _on_url_import_result(self, content: str, error: str):
+        """后台导入线程完成后的回调（主线程执行）"""
+        if error:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.error(
                 title="导入失败",
-                content=f"无法从URL获取数据: {e}",
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-                parent=self,
-            )
-            return
-
-        # 验证是否是有效的JSON
-        try:
-            json.loads(content)
-        except json.JSONDecodeError:
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            InfoBar.error(
-                title="导入失败",
-                content="URL内容不是有效的JSON格式",
+                content=error,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
                 parent=self,
@@ -1492,6 +1506,8 @@ class HistoryCard(QWidget):
             return
 
         # 保存到临时文件，复用现有导入流程
+        import tempfile
+
         tmp = tempfile.NamedTemporaryFile(
             suffix=".json", prefix="drifox_import_url_", delete=False, mode="w", encoding="utf-8"
         )

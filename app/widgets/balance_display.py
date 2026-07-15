@@ -5,7 +5,7 @@
 from typing import Optional
 
 import requests
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.utils.design_tokens import scale_font_size
@@ -29,6 +29,57 @@ BALANCE_APIS = {
 SUPPORTED_PROVIDERS = list(BALANCE_APIS.keys())
 
 
+class _BalanceFetchThread(QThread):
+    """后台线程：执行余额查询 HTTP 请求，避免阻塞主线程（最长 10s 冻结 UI）。
+
+    结果通过 result_ready 信号（QueuedConnection）回主线程，Qt 会在
+    BalanceDisplay 析构时自动断开该连接，避免悬空回调。
+    """
+
+    result_ready = pyqtSignal(dict)  # {"balance", "currency", "provider"} | {"hide", "provider", "tooltip"}
+
+    def __init__(self, url: str, api_key: str, balance_key: str, currency: str, provider_name: str):
+        super().__init__()
+        self._url = url
+        self._api_key = api_key
+        self._balance_key = balance_key
+        self._currency = currency
+        self._provider_name = provider_name
+
+    def run(self):
+        try:
+            headers = {"Authorization": f"Bearer {self._api_key}"}
+            resp = requests.get(self._url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if self._balance_key == "total_balance":
+                    balance_infos = data.get("balance_infos", [])
+                    balance_str = balance_infos[0].get("total_balance", "") if balance_infos else ""
+                else:
+                    data_obj = data.get("data", data)
+                    balance_str = data_obj.get(self._balance_key, "")
+                if balance_str:
+                    self.result_ready.emit({
+                        "balance": float(balance_str),
+                        "currency": self._currency,
+                        "provider": self._provider_name,
+                    })
+                    return
+                self.result_ready.emit({"hide": True, "provider": self._provider_name})
+                return
+            self.result_ready.emit({
+                "hide": True,
+                "provider": self._provider_name,
+                "tooltip": f"余额查询失败 (HTTP {resp.status_code})",
+            })
+        except requests.exceptions.Timeout:
+            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": "余额查询超时"})
+        except requests.exceptions.ConnectionError:
+            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": "连接失败"})
+        except Exception as e:
+            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": f"余额查询异常: {e}"})
+
+
 class BalanceDisplay(QWidget):
     """余额显示组件"""
 
@@ -41,6 +92,7 @@ class BalanceDisplay(QWidget):
         self._currency = "¥"
         self._loading = False
         self._current_provider = ""
+        self._fetch_thread = None  # 后台余额查询线程
 
         # 布局：图标 + 金额
         layout = QHBoxLayout(self)
@@ -123,7 +175,7 @@ class BalanceDisplay(QWidget):
             self._load_timer.start(100)  # 快速刷新
 
     def _do_fetch_balance(self):
-        """实际执行余额查询"""
+        """实际执行余额查询（在后台线程中进行，避免阻塞 UI）"""
         if not hasattr(self, "_provider_name") or not hasattr(self, "_api_key"):
             return
 
@@ -140,38 +192,39 @@ class BalanceDisplay(QWidget):
         self._icon_label.setText("⏳")
         self.setVisible(True)
 
-        try:
-            headers = {"Authorization": f"Bearer {api_key}"}
-            response = requests.get(config["url"], headers=headers, timeout=10)
+        # 取消仍在进行中的上一次查询
+        if self._fetch_thread is not None and self._fetch_thread.isRunning():
+            self._fetch_thread.quit()
+            self._fetch_thread.wait(200)
 
-            if response.status_code == 200:
-                data = response.json()
-                balance = self._extract_balance(data, config)
-                if balance is not None:
-                    self._balance = float(balance)
-                    self._currency = config["currency"]
-                    self._update_display()
-                    self.setToolTip(f"{provider_name} 余额")
-                    self.balance_updated.emit(self._balance, self._currency)
-                else:
-                    self.setVisible(False)
-                    self.setToolTip("获取余额失败")
-            else:
-                self.setVisible(False)
-                self.setToolTip(f"余额查询失败 (HTTP {response.status_code})")
+        thread = _BalanceFetchThread(
+            config["url"], api_key, config["balance_key"], config["currency"], provider_name
+        )
+        thread.result_ready.connect(self._on_balance_result)
+        thread.finished.connect(thread.deleteLater)
+        self._fetch_thread = thread
+        thread.start()
 
-        except requests.exceptions.Timeout:
+    @pyqtSlot(dict)
+    def _on_balance_result(self, res: dict):
+        """后台线程查询完成后的回调（主线程执行）。"""
+        # 过期结果（用户已切换服务商）直接忽略
+        if res.get("provider") != self._current_provider:
+            return
+        self._loading = False
+        self._icon_label.setText("💰")
+
+        if res.get("hide"):
             self.setVisible(False)
-            self.setToolTip("余额查询超时")
-        except requests.exceptions.ConnectionError:
-            self.setVisible(False)
-            self.setToolTip("连接失败")
-        except Exception as e:
-            self.setVisible(False)
-            self.setToolTip(f"余额查询异常: {str(e)}")
-        finally:
-            self._loading = False
-            self._icon_label.setText("💰")
+            if res.get("tooltip"):
+                self.setToolTip(res["tooltip"])
+            return
+
+        self._balance = res["balance"]
+        self._currency = res["currency"]
+        self._update_display()
+        self.setToolTip(f"{res['provider']} 余额")
+        self.balance_updated.emit(self._balance, self._currency)
 
     def _extract_balance(self, data: dict, config: dict) -> Optional[float]:
         """从响应数据中提取余额"""
