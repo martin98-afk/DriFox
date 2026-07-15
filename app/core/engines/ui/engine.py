@@ -7,9 +7,12 @@ UI 对话引擎 — 处理桌面 LLM 对话的核心逻辑
 """
 
 import os
+import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
+from PyQt5.QtCore import QEventLoop, QThread
 
 from app.core.agent import PermissionResolver
 from app.core.chat_session import (
@@ -326,6 +329,12 @@ class UIEngine(BaseEngine):
     # ========== 消息发送 ==========
 
     def send_message(self, user_text: str, *args, **kwargs) -> bool:
+        """发送用户消息（非阻塞：hooks + build_messages 在后台线程执行，主线程处理 UI 事件）
+
+        架构：主线程快速验证 → 启动 PreSendWorker(QThread) → QEventLoop 等待（处理 UI）
+        → 主线程继续 executor.execute()。
+        """
+        _t0 = time.perf_counter()
         if self._conversation_executor.is_streaming:
             logger.warning("[ChatEngine] Already streaming, ignoring new message")
             return False
@@ -344,58 +353,20 @@ class UIEngine(BaseEngine):
         # ---- 提取多模态内容（含图片的 _user_content），用于 session 存储和 LLM 消息构建 ----
         _user_content = kwargs.pop("_user_content", None)
         content_to_store = _user_content or user_text
-        # user_text 始终是纯文本版本，用于 hook 触发和 UI 显示
 
-        # 公共辅助方法：同步触发 hook 并收集输出
-        # 多窗口隔离：使用当前窗口的工作目录，不依赖进程级 os.getcwd()
+        # ---- 主线程准备 context（无 I/O，纯数据组装） ----
         _window_workdir = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
         if not _window_workdir:
             _window_workdir = os.getcwd()
 
-        def _trigger_and_inject(hook_mgr, event_name, extra_context=None, msg_text=None, inject_to_session=None):
-            """同步触发 hook，收集输出并注入 session.messages（只追加不删除）"""
-            if extra_context is None:
-                extra_context = {}
-            ctx = {
-                "project_root": _window_workdir,
-                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
-                "current_role": "primary",
-                "is_subagent_call": False,
-            }
-            ctx.update(extra_context)
-            results = hook_mgr.trigger_event(
-                event_name,
-                context=ctx,
-                current_message=msg_text or user_text,
-                trigger_async=False,  # 关键：同步执行，确保输出在返回值中
-            )
-            # 收集成功执行的 hook 输出，注入 session
-            if inject_to_session:
-                from app.core.backend import _inject_hook_to_session
-
-                for r in results:
-                    if r.success and r.output:
-                        _inject_hook_to_session(inject_to_session, event_name, r.output, r.status_message)
-
-        # 获取 session_id（用于 hook context；必须先于 hook 触发块赋值，
-        # 否则 L365/L378 会在 Python 编译期被识别为"先读后写"的局部变量，触发 UnboundLocalError）
         _session_id = session.session_id if session else ""
-
-        # 多窗口隔离：始终使用当前窗口 Backend 的 HookManager
         hook_mgr = getattr(self._backend, "hook_manager", None) if self._backend else None
 
+        # 预构建 hook context dicts（主线程，快速；实际 hook 执行在 worker 线程）
+        user_prompt_ctx = {"message": user_text, "session_id": _session_id} if hook_mgr else None
+
+        pre_user_ctx = None
         if hook_mgr:
-            # UserPromptSubmit: 最先触发，用户刚提交原始 prompt
-            _trigger_and_inject(
-                hook_mgr,
-                "UserPromptSubmit",
-                {
-                    "message": user_text,
-                    "session_id": _session_id,
-                },
-                inject_to_session=session,
-            )
-            # PreUserMessage: 注入条目记忆 + 关键文档 + worktree 上下文
             memory_ctx = {}
             worktree_ctx = {}
             try:
@@ -404,8 +375,7 @@ class UIEngine(BaseEngine):
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
-            # 🆕 读取 main_widget 存下的 pending_command/pending_skill，
-            # 传递给 PreUserMessage hook 进行注入
+            # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
             pending_cmd = session.metadata.pop("_pending_command", None) if session else None
             pending_skill = session.metadata.pop("_pending_skill", None) if session else None
 
@@ -419,38 +389,51 @@ class UIEngine(BaseEngine):
                 pre_user_ctx["pending_command"] = pending_cmd
             if pending_skill:
                 pre_user_ctx["pending_skill"] = pending_skill
-            _trigger_and_inject(hook_mgr, "PreUserMessage", pre_user_ctx, inject_to_session=session)
 
-        session.add_user_message(content=content_to_store)
+        post_user_ctx = {"message": user_text, "session_id": _session_id} if hook_mgr else None
+        if post_user_ctx and _user_content is not None and _user_content != user_text:
+            post_user_ctx["user_content"] = _user_content
 
-        if hook_mgr:
-            post_user_ctx = {
-                "message": user_text,
-                "session_id": _session_id,
-            }
-            # 补充多模态内容（如有图片）
-            if _user_content is not None and _user_content != user_text:
-                post_user_ctx["user_content"] = _user_content
-            _trigger_and_inject(hook_mgr, "PostUserMessage", post_user_ctx, inject_to_session=session)
-
-            # 通知 UI 刷新（预对话 hook 已注入 session.messages）
-            if self._backend:
-                self._backend._hook_messages_updated.emit()
-
-        messages = self._adapter.build_messages(
-            self._session_manager.get_current_session(),
-            llm_config,
+        # ---- 启动后台 Worker：hooks + build_messages ----
+        worker = _PreSendWorker(
+            hook_mgr=hook_mgr,
+            session=session,
+            user_text=user_text,
+            content_to_store=content_to_store,
+            user_prompt_ctx=user_prompt_ctx,
+            pre_user_ctx=pre_user_ctx,
+            post_user_ctx=post_user_ctx,
+            llm_config=llm_config,
+            adapter=self._adapter,
             current_agent=self._current_agent,
+            window_workdir=_window_workdir,
+            agent_manager=self._get_agent_manager(),
+            tool_executor=self._tool_executor,
         )
-        if self._current_agent:
-            available_tools = self._get_agent_manager().get_agent_tools_schema(self._current_agent)
-        else:
-            available_tools = get_builtin_tools_schema(
-                self._get_agent_manager(),
-                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
-            )
+        worker.start()
 
-        # 使用 ConversationExecutor 执行
+        # ---- QEventLoop 等待：主线程不阻塞，可处理 UI 事件 ----
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)
+        loop.exec()  # 处理 UI 事件直到 worker 完成
+
+        if worker._error:
+            logger.error(f"[ChatEngine] PreSendWorker failed: {worker._error}")
+            self._emit("error", f"消息预处理失败: {worker._error}")
+            return False
+
+        # Worker 已完成，session.messages 已注入 hook 输出（worker 线程安全写入）
+        _t_build = time.perf_counter()
+        logger.debug(f"[ChatEngine] ⏱ hooks+build (bg thread): {(_t_build - _t0)*1000:.1f}ms")
+
+        # 通知 UI 刷新（主线程 emit）
+        if self._backend and hook_mgr:
+            self._backend._hook_messages_updated.emit()
+
+        messages = worker._messages
+        available_tools = worker._available_tools
+
+        # ---- 使用 ConversationExecutor 执行（主线程，创建 QThread worker） ----
         callbacks = self._adapter.get_callbacks()
         success = self._conversation_executor.execute(
             messages=messages,
@@ -458,6 +441,9 @@ class UIEngine(BaseEngine):
             tools=available_tools,
             callbacks=callbacks,
         )
+        _t_total = time.perf_counter()
+        logger.debug(f"[ChatEngine] ⏱ executor.execute: {(_t_total - _t_build)*1000:.1f}ms")
+        logger.info(f"[ChatEngine] ⏱ send_message TOTAL: {(_t_total - _t0)*1000:.1f}ms")
         return success
 
     # ========== 消息构建 ==========
@@ -788,3 +774,127 @@ class UIEngine(BaseEngine):
     def get_current_worker(self):
         """获取当前 Worker 实例（供外部获取缓存统计等）"""
         return getattr(self._conversation_executor, "_current_worker", None)
+
+
+# ============================================================
+# _PreSendWorker — 后台线程执行 hooks + build_messages
+# ============================================================
+
+class _PreSendWorker(QThread):
+    """在后台线程执行消息预处理的 Worker。
+
+    负责：hook 触发 + session 注入 + build_messages + tool schema 获取。
+    所有操作不涉及 GUI，可以在非主线程安全执行。
+
+    QEventLoop + QThread 模式：主线程通过 loop.exec() 等待，
+    期间可继续处理 UI 事件（绘制、鼠标、定时器）。
+    """
+
+    def __init__(
+        self,
+        *,
+        hook_mgr,
+        session,
+        user_text: str,
+        content_to_store,
+        user_prompt_ctx: dict | None,
+        pre_user_ctx: dict | None,
+        post_user_ctx: dict | None,
+        llm_config: dict,
+        adapter,
+        current_agent: str | None,
+        window_workdir: str,
+        agent_manager,
+        tool_executor,
+    ):
+        super().__init__()
+        self._hook_mgr = hook_mgr
+        self._session = session
+        self._user_text = user_text
+        self._content_to_store = content_to_store
+        self._user_prompt_ctx = user_prompt_ctx
+        self._pre_user_ctx = pre_user_ctx
+        self._post_user_ctx = post_user_ctx
+        self._llm_config = llm_config
+        self._adapter = adapter
+        self._current_agent = current_agent
+        self._window_workdir = window_workdir
+        self._agent_manager = agent_manager
+        self._tool_executor = tool_executor
+
+        # 结果
+        self._messages: list = []
+        self._available_tools: list = []
+        self._error: str | None = None
+
+        # 线程安全锁（保护 _session.messages 写入）
+        self._lock = threading.Lock()
+
+    def run(self):
+        """在后台线程执行所有预处理工作。"""
+        try:
+            self._do_hooks_and_build()
+        except Exception as e:
+            logger.exception(f"[PreSendWorker] Unexpected error: {e}")
+            self._error = str(e)
+
+    def _do_hooks_and_build(self):
+        """执行 hooks → 注入 session → build_messages → tools"""
+        from app.core.backend import _inject_hook_to_session
+        from app.tools import get_builtin_tools_schema
+
+        hook_mgr = self._hook_mgr
+        session = self._session
+        user_text = self._user_text
+        window_workdir = self._window_workdir
+
+        # ---- 辅助：触发 hook 并注入 session ----
+        def _trigger_and_inject(event_name, extra_context, inject_to_session):
+            if hook_mgr is None or inject_to_session is None:
+                return
+            ctx = {
+                "project_root": window_workdir,
+                "current_role": "primary",
+                "is_subagent_call": False,
+            }
+            if extra_context:
+                ctx.update(extra_context)
+            results = hook_mgr.trigger_event(
+                event_name,
+                context=ctx,
+                current_message=user_text,
+                trigger_async=False,
+            )
+            with self._lock:
+                for r in results:
+                    if r.success and r.output:
+                        _inject_hook_to_session(inject_to_session, event_name, r.output, r.status_message)
+
+        # ---- 1. UserPromptSubmit hooks ----
+        _trigger_and_inject("UserPromptSubmit", self._user_prompt_ctx, session)
+
+        # ---- 2. PreUserMessage hooks ----
+        _trigger_and_inject("PreUserMessage", self._pre_user_ctx, session)
+
+        # ---- 3. 添加用户消息 ----
+        with self._lock:
+            session.add_user_message(content=self._content_to_store)
+
+        # ---- 4. PostUserMessage hooks ----
+        _trigger_and_inject("PostUserMessage", self._post_user_ctx, session)
+
+        # ---- 5. build_messages ----
+        self._messages = self._adapter.build_messages(
+            self._session,  # 使用捕获的 session，避免 loop.exec() 期间会话切换导致不一致
+            self._llm_config,
+            current_agent=self._current_agent,
+        )
+
+        # ---- 6. 获取 tool schema ----
+        if self._current_agent:
+            self._available_tools = self._agent_manager.get_agent_tools_schema(self._current_agent)
+        else:
+            self._available_tools = get_builtin_tools_schema(
+                self._agent_manager,
+                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            )

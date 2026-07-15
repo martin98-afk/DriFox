@@ -12,9 +12,11 @@
 - 实际压缩逻辑委托给 HistoryCompactor，避免重复
 """
 
+import time
 from typing import Any, Dict, List, Optional
 
 import anyio
+from loguru import logger
 
 from app.core.message_content import consolidate_messages
 from app.core.token_estimator import count_messages_tokens
@@ -98,6 +100,7 @@ class ContextBudgetAllocator:
         Returns:
             消息列表
         """
+        _t0 = time.time()
         messages: List[Dict[str, Any]] = []
 
         # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
@@ -129,6 +132,8 @@ class ContextBudgetAllocator:
             # 缓存起来，后续 tool iteration 直接复用
             session.system_prompt = full_system_content
             session._system_prompt_agent = current_agent
+            _t_sp = time.time()
+            logger.debug(f"[ContextBuilder] ⏱ system_prompt (no cache): {(_t_sp - _t0)*1000:.1f}ms")
 
         messages.append({
             "role": "system",
@@ -150,6 +155,7 @@ class ContextBudgetAllocator:
 
         # 上下文压缩 - 使用分配器计算的预算
         budget = self._allocate_history_budget(full_system_content, llm_config)
+        _t_compact_start = time.time()
         history_for_api, compaction_state, compaction_cache = anyio.run(
             anyio.to_thread.run_sync,
             lambda: self._compactor.compact(
@@ -159,6 +165,8 @@ class ContextBudgetAllocator:
                 allow_llm_summary=allow_llm_summary,
             )
         )
+        _t_compact = time.time()
+        logger.debug(f"[ContextBuilder] ⏱ compaction: {(_t_compact - _t_compact_start)*1000:.1f}ms")
         session.set_compaction_state(compaction_state)
         session.set_compaction_cache(compaction_cache)
 
@@ -180,6 +188,8 @@ class ContextBudgetAllocator:
         #   - PreUserMessage: 长期记忆、系统时间、命令/技能提示词
         #   - SessionStart: 仅会话生命周期事件（其他插件可能监听）
         # system prompt 中不再有任何硬编码的上下文注入。
+        _t_end = time.time()
+        logger.debug(f"[ContextBuilder] ⏱ build_messages TOTAL: {(_t_end - _t0)*1000:.1f}ms (msgs={len(messages)})")
         return messages
 
     def _allocate_history_budget(self, system_content: str, llm_config: Dict) -> int:
