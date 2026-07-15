@@ -467,6 +467,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 会话脏标记：会话 messages 自上次保存后是否有过变更。
+        # 用于跳过无实际变更的重复持久化（如：流式完成后 _do_post_stream_cleanup
+        # 再次调用 _save_current_session_to_history、或新建会话/关闭窗口时
+        # _auto_save_current_session 对已保存的无变更会话做无意义保存）。
+        # 在 _on_send_clicked / _on_messages_updated / _on_finalize_complete
+        # 等会修改会话内容的地方置 True；在成功保存后置 False。
+        self._session_dirty: bool = False
         # 🛡️ 会话钩子注入标记：_create_new_session / _clear_session / _on_compact_finished
         # 在触发 SessionStart hook 前置 True，让 _on_messages_updated 能识别出这是
         # 合法的新会话 hook 输出而非旧 worker 的过期回调，避免被 _session_switched 误拦截。
@@ -8151,6 +8158,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if idx is not None:
                     self.history_manager.archive_history(idx)
                 self._current_session_id = None
+            self._session_dirty = False
             return
 
         if self.history_manager:
@@ -8163,6 +8171,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_session_id,
                 project_fallback=self._current_project,
             )
+            # 🛡️ 直接保存已处理，清除脏标记防冗余
+            self._session_dirty = False
 
         # 🛡️ 记录截断哨兵：用于 _on_finalize_complete 识别"是否在异步 finalize 等待
         # 期间发生过截断"，避免 worker 返回的旧消息序列复活已被撤销的内容。
@@ -9349,6 +9359,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # === 3. 截断 session.messages ===
         session.set_messages(session.messages[:cutoff_index], preserve_compaction=False)
+        self._session_dirty = True  # 🛡️ 截断修改了消息列表，脏标记兜底
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
         self._message_batch = group_messages_for_display(session.messages)
@@ -9441,6 +9452,7 @@ class OpenAIChatToolWindow(ToolWindow):
         insert_at = min(cache["insert_index"], len(messages))
         messages[insert_at:insert_at] = cache["messages"]
         session.set_messages(messages, preserve_compaction=False)
+        self._session_dirty = True  # 🛡️ 消息被恢复，脏标记兜底
 
         # 保存并刷新视图
         if self._current_session_id != session.session_id:
@@ -11095,6 +11107,10 @@ class OpenAIChatToolWindow(ToolWindow):
             engine_kwargs = {}
             if _user_content is not None:
                 engine_kwargs["_user_content"] = _user_content
+            # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
+            # add_user_message 修改 session.messages。即使后续被 / 命令拦截
+            # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
+            self._session_dirty = True
             if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
                 self._is_streaming = False
                 self._toggle_send_stop(False)
@@ -12207,7 +12223,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
         # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
         # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
-        # 其内部的 _save_current_session_to_history 因内容哈希缓存命中而跳过。
+        # 其内部的 _save_current_session_to_history 因 _session_dirty=False 而跳过。
         if self.history_manager and not getattr(self, "_session_switched", False):
             self._save_current_session_to_history()
             self.history_manager.flush()
@@ -12434,6 +12450,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not saved_messages:
             return
 
+        # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，
+        # 避免 _do_post_stream_cleanup 等延迟清理路径重复持久化。
+        # 脏标记由 _on_send_clicked / _on_messages_updated / _on_finalize_complete
+        # / AutoLoop 等消息修改点置 True，由本 save 函数置 False。
+        if not self._session_dirty:
+            return
+
         system_prompt = getattr(session, "system_prompt", "") or ""
         # 优先使用已有的 topic_summary，避免被用户消息前30字覆盖
         session_title = getattr(session, "topic_summary", "") or ""
@@ -12489,6 +12512,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             self._current_session_id = session.session_id if session else None
 
+        # 🛡️ 成功保存后清除脏标记，后续无变更的重复 save 将被跳过
+        self._session_dirty = False
         self._update_node_preview()
 
     @staticmethod
@@ -12651,6 +12676,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         msg["config_id"] = self._current_provider_name
 
         session.set_messages(messages or [], preserve_compaction=False)
+        # 🛡️ Worker 回传了完整消息列表，标记会话脏以确保后续持久化。
+        self._session_dirty = True
 
         # 注：卡片底部 token 显示不再从这里驱动——统一由上下文圆环的快照
         # （_refresh_context_usage_indicator）驱动，保证两者数字完全一致。
@@ -14125,6 +14152,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if not has_user_message:
             return
 
+        # 🛡️ 跳过无变更保存：自上次保存后会话没有被修改，
+        # 避免新建会话/加载历史/关闭窗口时对已持久化的会话做无意义重复保存。
+        # 脏标记由各个消息修改点置 True，由本 save 函数置 False。
+        if not self._session_dirty:
+            return
+
         # 🛡️ 落库前回填：给有 model_name 但缺 provider_name 的 assistant 消息补上
         # 策略：优先精确匹配当前选中的服务商，其次模糊匹配
         current_provider_display = ""
@@ -14202,6 +14235,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id
+
+        # 🛡️ 成功保存后清除脏标记
+        self._session_dirty = False
 
         # 立即落盘，确保退出前数据写入 SQLite
         if self.history_manager:
@@ -14605,6 +14641,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if interrupted_messages:
             self._apply_interrupted_messages_to_session(interrupted_messages)
+            # 🛡️ 中断消息已应用到 session，标记脏以便后续 save 不跳过。
+            self._session_dirty = True
             # _apply_interrupted_messages_to_session 不写入 elapsed
             self._persist_stop_elapsed()  # 只写 elapsed，不 save
         else:
@@ -14975,6 +15013,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新会话（preserve_compaction=True 避免压缩状态被破坏）
         session.set_messages(auto_loop_messages, preserve_compaction=True)
+        self._session_dirty = True
 
         logger.info(f"[AutoLoop] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
 
