@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.3.11] - 2026-07-15
 
-自上一版本以来的变更 | 提交数：21 · 文件变更：26 · +2700/-2116 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：23 · 文件变更：31 · +2805/-2472 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -23,11 +23,16 @@ All notable changes to this project will be documented in this file.
 - **SubAgentSessionDialog 布局重构**: 重构对话框布局，新增侧边栏导航与内容分区，提升使用体验
 - **移除过期记忆文件并修复命令崩溃**: 删除过期 memory 文件，修复 toggle-window 命令偶发崩溃与内容差异问题
 - **托盘 toggle-window 快捷键修复**: 修复托盘 toggle-window 快捷键间歇性失效问题，增加热键健康检查与 QShortcut 回退机制
+- **搜索引擎切换 Tavily + TinyFish**: 因 DuckDuckGo 搜索引擎失效，全面切换至 Tavily（主要）+ TinyFish（备用）双搜索引擎，重写 web_tools 搜索逻辑，更新配置项与使用文档
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **移除 tooltip 阴影效果**: 移除 QGraphicsDropShadowEffect，防止分层窗口上的渲染异常
 - **移除冗余计时代码**: 清理 context builder、UI engine 和 main widget 中已不再使用的计时逻辑
+
+### 🔧 其他 (Chores & Build)
+
+- **清理废弃文件**: 移除过期的 app_line_counts.txt 和工作记忆文件
 - **代码结构优化**: 重构多处代码结构，提升可读性与可维护性
 
 ### 📚 文档 (Docs)

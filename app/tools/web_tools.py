@@ -4,7 +4,7 @@
 
 支持：
 - fetch_web: 获取网页内容，支持 markdown/html/text 格式
-- search_web: 搜索网页，支持 DuckDuckGo
+- search_web: 搜索网页，支持 Tavily / TinyFish 双引擎互备
 """
 import os
 import re
@@ -23,9 +23,6 @@ from app.utils.config import Settings
 # ========== 性能优化：预编译正则表达式 ==========
 _NEWLINE_PATTERN = re.compile(r"\n+")
 _MULTI_NEWLINE_PATTERN = re.compile(r"\n{3,}")
-_TITLE_PATTERN = re.compile(r'class="result__title"[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
-_SNIPPET_PATTERN = re.compile(r'class="result__snippet"[^>]*>(.*?)</div>', re.DOTALL)
-_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 
 # 共享的 HTTP headers 配置
 _DEFAULT_HEADERS = {
@@ -137,7 +134,7 @@ class WebTools:
         num_results: int = 10,
     ) -> ToolResult:
         """
-        搜索网络，支持 SerpAPI 或 DuckDuckGo 回退
+        搜索网络，支持 Tavily → TinyFish 双引擎互备
 
         Args:
             query: 搜索关键词
@@ -146,110 +143,101 @@ class WebTools:
         return self._search_sync(query, num_results)
 
     def _search_sync(self, query: str, num_results: int) -> ToolResult:
-        """同步搜索"""
-        api_key = (
-            os.environ.get("SERPAPI_KEY") or Settings.get_instance().SERPAPI_KEY.value
+        """同步搜索（Tavily → TinyFish 双引擎互备）"""
+        # ── 1. Tavily（独立索引，含全文内容，AI 友好）──
+        tavily_key = (
+            os.environ.get("TAVILY_API_KEY")
+            or Settings.get_instance().TAVILY_API_KEY.value
         )
-
-        if api_key == "your-serpapi-key-here" or not api_key:
-            return self._search_duckduckgo_sync(query, num_results)
-
-        # 快速格式校验：SerpAPI key 是字母数字组合，长度通常 > 20
-        # 不匹配时直接跳过，避免无效 key 浪费网络请求
-        if not re.fullmatch(r'[A-Za-z0-9]{20,}', api_key):
-            logger.warning(f"SerpAPI key 格式异常（长度={len(api_key)}），跳过重试")
-            return self._search_duckduckgo_sync(query, num_results)
-
-        try:
-            proxies = None
-            http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-            if http_proxy:
-                proxies = {"http": http_proxy, "https": http_proxy}
-
-            params = {
-                "engine": "duckduckgo",
-                "q": query,
-                "kl": "us-en",
-                "api_key": api_key,
-            }
-
-            client = _get_http_client()
-            if proxies:
-                # SerpAPI 需要单独的 proxy 配置时创建临时客户端
-                response = httpx.get(
-                    "https://serpapi.com/search",
-                    params=params,
-                    proxies=proxies,
-                    timeout=8,
-                    follow_redirects=True,
+        if tavily_key:
+            try:
+                client = _get_http_client()
+                response = client.post(
+                    "https://api.tavily.com/search",
+                    headers={
+                        "Authorization": f"Bearer {tavily_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "query": query,
+                        "search_depth": "basic",
+                        "max_results": num_results,
+                        "include_answer": False,
+                    },
+                    timeout=15,
                 )
-            else:
+
+                if response.status_code == 401:
+                    logger.warning("Tavily key invalid")
+                elif response.status_code == 429:
+                    logger.warning("Tavily rate limited")
+                else:
+                    response.raise_for_status()
+                    data = response.json()
+                    results = []
+                    for item in data.get("results", [])[:num_results]:
+                        title = item.get("title", "")
+                        link = item.get("url", "")
+                        content = item.get("content", "")
+                        if title and link:
+                            results.append(f"**{title}**\n{link}\n{content}")
+                    if results:
+                        return ToolResult(True, content="\n\n".join(results))
+                    logger.warning("Tavily returned empty results")
+
+            except httpx.TimeoutException:
+                logger.warning("Tavily timeout")
+            except httpx.RequestError as e:
+                logger.warning(f"Tavily request failed: {e}")
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Tavily HTTP error: {e.response.status_code}")
+            except Exception as e:
+                logger.warning(f"Tavily error: {e}")
+
+        # ── 2. TinyFish（无限免费兜底）──
+        tinyfish_key = (
+            os.environ.get("TINYFISH_API_KEY")
+            or Settings.get_instance().TINYFISH_API_KEY.value
+        )
+        if tinyfish_key:
+            try:
+                client = _get_http_client()
                 response = client.get(
-                    "https://serpapi.com/search",
-                    params=params,
-                    timeout=8,
+                    "https://api.search.tinyfish.ai",
+                    headers={"X-API-Key": tinyfish_key},
+                    params={"query": query, "count": min(num_results, 20)},
+                    timeout=15,
                 )
 
-            if response.status_code == 401:
-                logger.warning("SerpAPI key invalid, falling back to DuckDuckGo")
-                return self._search_duckduckgo_sync(query, num_results)
-            if response.status_code == 403:
-                logger.warning("SerpAPI quota exceeded, falling back to DuckDuckGo")
-                return self._search_duckduckgo_sync(query, num_results)
+                if response.status_code == 401:
+                    logger.warning("TinyFish key invalid")
+                elif response.status_code == 429:
+                    logger.warning("TinyFish rate limited")
+                else:
+                    response.raise_for_status()
+                    data = response.json()
+                    results = []
+                    for item in data.get("results", [])[:num_results]:
+                        title = item.get("title", "")
+                        link = item.get("url", "")
+                        snippet = item.get("snippet", "")
+                        if title and link:
+                            results.append(f"**{title}**\n{link}\n{snippet}")
+                    if results:
+                        return ToolResult(True, content="\n\n".join(results))
+                    logger.warning("TinyFish returned empty results")
 
-            response.raise_for_status()
-            data = response.json()
+            except httpx.TimeoutException:
+                logger.warning("TinyFish timeout")
+            except httpx.RequestError as e:
+                logger.warning(f"TinyFish request failed: {e}")
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"TinyFish HTTP error: {e.response.status_code}")
+            except Exception as e:
+                logger.warning(f"TinyFish error: {e}")
 
-            results = []
-            for item in data.get("organic_results", [])[:num_results]:
-                title = item.get("title", "")
-                link = item.get("link", "")
-                snippet = item.get("snippet", "")
-                if title and link:
-                    results.append(f"- {title}\n  {link}\n  {snippet}")
-
-            return ToolResult(
-                True, content="\n\n".join(results) if results else "No results found"
-            )
-
-        except httpx.TimeoutException:
-            logger.warning("SerpAPI timeout, falling back to DuckDuckGo")
-            return self._search_duckduckgo_sync(query, num_results)
-        except httpx.RequestError as e:
-            logger.warning(f"SerpAPI request failed: {e}, falling back to DuckDuckGo")
-            return self._search_duckduckgo_sync(query, num_results)
-        except httpx.HTTPStatusError as e:
-            logger.warning(
-                f"SerpAPI HTTP error: {e.response.status_code}, falling back to DuckDuckGo"
-            )
-            return self._search_duckduckgo_sync(query, num_results)
-        except Exception as e:
-            logger.warning(f"SerpAPI error: {e}, falling back to DuckDuckGo")
-            return self._search_duckduckgo_sync(query, num_results)
-
-    def _search_duckduckgo_sync(self, query: str, num_results: int) -> ToolResult:
-        """DuckDuckGo 同步搜索"""
-        try:
-            url = "https://html.duckduckgo.com/html/"
-            client = _get_http_client()
-            r = client.get(
-                url,
-                params={"q": query},
-            )
-            titles = _TITLE_PATTERN.findall(r.text)
-            snippets = _SNIPPET_PATTERN.findall(r.text)
-            results = []
-            for i, (link, title) in enumerate(titles[:num_results]):
-                t = _HTML_TAG_PATTERN.sub("", title).strip()
-                s = (
-                    _HTML_TAG_PATTERN.sub("", snippets[i]).strip()
-                    if i < len(snippets)
-                    else ""
-                )
-                results.append(f"**{t}**\n{link}\n{s}")
-            return ToolResult(
-                True, content="\n\n".join(results) if results else "No results found"
-            )
-        except Exception as e:
-            logger.error(f"DuckDuckGo search failed: {e}")
-            return ToolResult(False, error=f"DuckDuckGo search failed: {str(e)}")
+        # ── 3. 所有搜索引擎均不可用 ──
+        return ToolResult(
+            False,
+            error="All search backends unavailable (Tavily → TinyFish both failed)",
+        )

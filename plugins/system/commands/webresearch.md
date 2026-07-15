@@ -39,7 +39,7 @@ prompt_sections:
 
 ```
 1. 检查 mcp__tavily__search 是否可用 → 用 Tavily 搜索（更精准）
-2. 否则使用 search_web（DriFox 原生，支持 SerpAPI/DuckDuckGo 双回退）
+2. 否则使用 search_web（DriFox 原生，支持 Tavily → TinyFish 双引擎互备）
 3. 永远不要直接报"工具不可用"——总有降级路径
 ```
 

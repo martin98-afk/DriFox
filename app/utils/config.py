@@ -341,11 +341,16 @@ class Settings(QConfig):
     # ========== 插件系统配置 ==========
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
 
-    # ========== 云组件库API ==========
-    SERPAPI_KEY = ConfigItem(
+    # ========== AI搜索引擎API ==========
+    TAVILY_API_KEY = ConfigItem(
         "CloudAPI",
-        "SerpAPI",
-        "42e2b2817bf48352d3caa227212ebb82d6f8839cdd39b304c68cf58b42961c27",
+        "Tavily",
+        "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",
+    )
+    TINYFISH_API_KEY = ConfigItem(
+        "CloudAPI",
+        "TinyFish",
+        "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU",
     )
 
     # ========== Gateway 通讯平台配置 ==========
