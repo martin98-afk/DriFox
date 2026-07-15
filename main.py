@@ -54,12 +54,12 @@ def main():
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
-    # 注册 Qt 资源文件中的图标 — 尽早导入，确保 widget 能引用图标资源
-    from app.utils import icons_rc  # noqa: F401
-    from app.utils import icons_light_rc  # noqa: F401
-
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
+
+    # 注册 Qt 资源文件中的图标 — 在 QApp 就绪后尽快导入
+    from app.utils import icons_rc  # noqa: F401
+    from app.utils import icons_light_rc  # noqa: F401
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")

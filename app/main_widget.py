@@ -562,6 +562,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注册到全局实例列表（用于多窗口事件广播）
         OpenAIChatToolWindow._instances.append(self)
 
+        # 【性能优化】延迟构建重型卡片内容（记忆/历史/模型选择等），
+        # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
+        # 100ms 延迟确保 ToolPopupDialog 显示在先，骨架可见后再填充内容。
+        QTimer.singleShot(100, self._deferred_build_cards)
+
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
 
@@ -825,6 +830,100 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重新 add_card 注册 _on_card_shown/_on_card_hidden 回调
         # 初始化时 add_card 先执行（L1318），但当时 _card_manager 尚未绑定，回调未生效
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
+
+    def _deferred_build_cards(self):
+        """【性能优化】延迟构建重型卡片内容
+
+        在 setup_ui 中仅创建卡片的轻量框架（BaseSettingsCard），
+        而卡片内部的重量级内容 widget 在本方法中创建并填充。
+        由 __init__ 末尾的 QTimer.singleShot(100, ...) 触发，
+        确保 ToolPopupDialog 窗口先显示（骨架），内容随后渐进加载。
+        """
+        # ── ① 历史会话卡片 ──
+        try:
+            self._history_popup_card = HistoryCard()
+            self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
+            self._history_popup_card.sessionArchived.connect(self._archive_history_session)
+            self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
+            self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
+            self._history_popup_card.sessionImported.connect(self._on_session_imported)
+            self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
+            self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
+            self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
+            self._history_card.set_extra_button_handler(
+                self._history_popup_card.get_import_button_handler(),
+                tooltip="导入会话",
+            )
+            self._history_card.content_layout.addWidget(self._history_popup_card)
+            self._history_card.set_search_handler(
+                "🔍 搜索会话...",
+                lambda text: self._history_popup_card.set_search_filter(text),
+            )
+        except Exception:
+            logger.exception("[DeferredBuild] HistoryCard 构建失败")
+
+        # ── ② 分享卡片 ──
+        try:
+            self._share_card_content = ShareCardContent(self)
+            self._share_card.content_layout.addWidget(self._share_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] ShareCard 构建失败")
+
+        # ── ③ 历史问题卡片 ──
+        try:
+            self._history_questions_card_content = HistoryQuestionsCardContent(self)
+            self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
+            self._history_questions_card_content.questionClicked.connect(
+                lambda: self._card_manager.hide_card("history_questions", self._window_id)
+            )
+            self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
+
+        # ── ④ 记忆管理卡片 ──
+        try:
+            self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
+            self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
+            self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
+            self._memory_card_popup.set_project(self._current_project)
+            self._memory_card.content_layout.addWidget(self._memory_card_popup)
+            self._memory_card.set_search_handler(
+                "🔍 搜索条目记忆...",
+                lambda text: self._memory_card_popup.set_search_filter(text),
+            )
+        except Exception:
+            logger.exception("[DeferredBuild] MemoryCard 构建失败")
+
+        # ── ⑤ 模型配置卡片 ──
+        try:
+            self._model_config_popup = ModelConfigCard()
+            self._model_config_popup.configApplied.connect(self._on_config_applied)
+            self._model_config_card.content_layout.addWidget(self._model_config_popup)
+        except Exception:
+            logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
+
+        # ── ⑥ 模型选择卡片 ──
+        try:
+            self._model_selector_card_content = ModelSelectorCardContent()
+            self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
+            self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
+            self._model_selector_card.set_search_handler(
+                "搜索模型...",
+                self._model_selector_card_content.set_search_filter,
+            )
+            self._model_selector_card.add_header_button(
+                FluentIcon.ADD,
+                "添加服务商",
+                self._on_add_provider_from_card,
+            )
+            self._model_selector_card.add_header_button(
+                get_icon("配置管理"),
+                "配置服务商",
+                self._on_configure_providers_from_card,
+            )
+            self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+        except Exception:
+            logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1783,7 +1882,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 下方卡片容器
         layout.addWidget(self._bottom_card_container)
 
-        # 历史会话卡片
+        # 历史会话卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
         self._history_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置历史/归档标签
@@ -1799,24 +1898,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_card.set_current_tab("history")
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
 
-        self._history_popup_card = HistoryCard()
-        self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
-        self._history_popup_card.sessionArchived.connect(self._archive_history_session)
-        self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
-        self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
-        self._history_popup_card.sessionImported.connect(self._on_session_imported)
-        # 归档会话相关信号
-        self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
-        self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
-        self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
-        # 设置导入按钮的处理器
-        self._history_card.set_extra_button_handler(
-            self._history_popup_card.get_import_button_handler(),
-            tooltip="导入会话",
-        )
-
-        # 历史会话卡片
-        self._history_card.content_layout.addWidget(self._history_popup_card)
+        # 内容 widget 将在 deferred 阶段创建
+        self._history_popup_card = None
         self._history_card.setVisible(False)
         self._history_card.closed.connect(
             lambda: (
@@ -1824,38 +1907,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._restore_after_system_close(),
             )
         )
-        # 搜索框（历史会话和归档标签都显示）
-        self._history_card.set_search_handler(
-            "🔍 搜索会话...",
-            lambda text: self._history_popup_card.set_search_filter(text),
-        )
         self._bottom_card_container.add_card("history", self._history_card)
 
-        # 分享卡片（BaseSettingsCard 包裹，按内容自适应高度）
-        self._share_card_content = ShareCardContent(self)
+        # 分享卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
-        self._share_card.content_layout.addWidget(self._share_card_content)
         self._share_card.set_height_mode("content")
         self._share_card.setVisible(False)
         self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
         self._top_card_container.add_card("share", self._share_card)
+        self._share_card_content = None
 
-        # 历史问题卡片（BaseSettingsCard 包裹，按内容自适应高度）
-        self._history_questions_card_content = HistoryQuestionsCardContent(self)
-        self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
-        self._history_questions_card_content.questionClicked.connect(
-            lambda: self._card_manager.hide_card("history_questions", self._window_id)
-        )
+        # 历史问题卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
-        self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         self._history_questions_card.set_height_mode("content")
         self._history_questions_card.setVisible(False)
         self._history_questions_card.closed.connect(
             lambda: self._card_manager.hide_card("history_questions", self._window_id)
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
+        self._history_questions_card_content = None
 
-        # 记忆管理卡片
+        # 记忆管理卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
         self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
         # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
@@ -1870,17 +1942,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
         # 强制触发首次 tab 渲染
         self._memory_card.set_current_tab("entries")
-        # 搜索框（三个tab都显示）
-        self._memory_card.set_search_handler(
-            "🔍 搜索条目记忆...",
-            lambda text: self._memory_card_popup.set_search_filter(text),
-        )
-        self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
-        self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
-        # 工作目录变更 → 同步到工具执行器
-        self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
-        self._memory_card_popup.set_project(self._current_project)  # 初始化时设置当前项目
-        self._memory_card.content_layout.addWidget(self._memory_card_popup)
+        # 内容 widget 将在 deferred 阶段创建
+        self._memory_card_popup = None
         self._memory_card.setVisible(False)
         self._memory_card.closed.connect(
             lambda: (
@@ -1890,13 +1953,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
 
-        # 模型配置卡片（高度由 ModelConfigCard 根据字段数动态调整）
+        # 模型配置卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
         self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
         self._model_config_card.set_height_mode("content")  # 按内容自适应高度
-        self._model_config_popup = ModelConfigCard()
-        self._model_config_popup.configApplied.connect(self._on_config_applied)
-        self._model_config_card.content_layout.addWidget(self._model_config_popup)
+        self._model_config_popup = None  # 将在 deferred 阶段创建
         self._model_config_card.setVisible(False)
         self._model_config_card.closed.connect(
             lambda: (
@@ -1923,32 +1984,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
         self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
-        # 模型选择卡片（底部卡片形式）
+        # 模型选择卡片（框架先创建，内容在 _deferred_build_cards 中填充）
         self._model_selector_card = BaseSettingsCard("", "", self)
         self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
-        self._model_selector_card_content = ModelSelectorCardContent()
-        self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
-        # 吸顶服务商名称：滚动到哪个服务商区域，标题就显示那个服务商名
-        self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
-
-        # 搜索框移到标题栏
-        self._model_selector_card.set_search_handler(
-            "搜索模型...",
-            self._model_selector_card_content.set_search_filter,
-        )
-        # 操作按钮移到标题栏
-        self._model_selector_card.add_header_button(
-            FluentIcon.ADD,
-            "添加服务商",
-            self._on_add_provider_from_card,
-        )
-        self._model_selector_card.add_header_button(
-            get_icon("配置管理"),
-            "配置服务商",
-            self._on_configure_providers_from_card,
-        )
-
-        self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+        self._model_selector_card_content = None  # 将在 deferred 阶段创建
         self._model_selector_card.setVisible(False)
         self._model_selector_card.closed.connect(
             lambda: (
@@ -9088,7 +9127,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 注入消息数据后显示（构建与归档一致的完整 session 记录）
         record = self._build_share_record(session, messages)
-        self._share_card_content.set_messages(record, session.name or "")
+        if self._share_card_content:
+            self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
 
     def _build_share_record(self, session, merged_messages: list) -> dict:
@@ -13785,8 +13825,9 @@ class OpenAIChatToolWindow(ToolWindow):
         }
         if search_input:
             search_input.setPlaceholderText(placeholders.get(tab_id, "🔍 搜索..."))
-        # 切换内容
-        self._memory_card_popup.switch_tab(tab_id)
+        # 切换内容（_deferred_build_cards 可能尚未运行）
+        if self._memory_card_popup:
+            self._memory_card_popup.switch_tab(tab_id)
 
     def _on_working_dir_changed(self, file_path: str):
         """工作目录变更 → 更新实例缓存 + 同步到工具执行器 + 刷新分支标签
