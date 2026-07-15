@@ -1,6 +1,18 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.3.10] - 2026-07-15
+
+> 本版本为 v0.3.9 重大 bug 修复版。补入 v0.3.9 标签之后遗漏的 3 个修复 commit：导入功能重构、PyInstaller 路径处理优化、命令卡片 tooltip 短文本裁切修复。
+
+自上一版本以来的变更 | 提交数：3 · 文件变更：11 · +456/-135 | 贡献者：mading
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **PyInstaller 路径处理与 Git 超时配置优化**: 改进 `PyInstaller` 打包路径处理逻辑，修正打包后资源定位问题；同步调整 Git 相关超时设置，避免长时间无响应阻塞
+- **导入功能增强（专用对话框与 tooltip 支持）**: 引入专用导入对话框替换原有简易流程，配合 tooltip 提示提升用户操作引导；同步支持更完整的导入预览与确认步骤
+- **command_card tooltip 短文本底部 1/3 裁切修复**: 修复 `command_card` 中 tooltip 在显示短文本时底部 1/3 区域被裁切的问题，改用 `math.ceil` 计算并增加 4px 安全边距，确保不同长度文本均能完整显示
+
 ## [v0.3.9] - 2026-07-15
 
 > 本版本为重新发布，**补入 v0.3.9 标签之后遗漏的 6 个修复 commit**（命令处理增强、命令安全加固、Windows PATHEXT 回退、diff 回退机制、provider 配置优化、变量使用修正）及后续 1 个模型标签点击修复。
