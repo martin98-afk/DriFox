@@ -873,14 +873,19 @@ class SubAgentCompactFloatingWidget(QWidget):
         if tool_call_count > 0:
             for _ in range(tool_call_count):
                 row.increment_tool_count()
-        # 设置已用时间（覆盖默认的 time.time() 差值）
+        # 设置已用时间（直接设置 label，因为 update_elapsed 在 _is_finished 后是空操作）
         if elapsed_seconds > 0:
             import time as _time
             row._start_time = _time.time() - elapsed_seconds
+            mins = elapsed_seconds // 60
+            secs = elapsed_seconds % 60
+            time_str = f"{mins:02d}:{secs:02d}"
+            row.time_label.setText(f"⏱{time_str}")
+            if hasattr(row, '_elapsed_label_detail') and row._elapsed_label_detail:
+                row._elapsed_label_detail.setText(time_str)
 
         # 标记为已完成（替换旋转图标为对号，停止计时器更新）
         row.finish(success=True)
-        row.update_elapsed()
 
         # 确保卡片可见
         self.setVisible(True)

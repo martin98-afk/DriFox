@@ -267,8 +267,8 @@ class SubAgentSessionDialog(QDialog):
             for i, log in enumerate(new_logs):
                 log_type = log.get("type", "progress")
                 content = log.get("content", "")
-                # 跳过无内容的 ai_response/thinking
-                if log_type in ("ai_response", "thinking") and not content:
+                # 跳过无内容的 ai_response/thinking（纯工具调用轮次无文本或仅有空白）
+                if log_type in ("ai_response", "thinking") and not (content or "").strip():
                     continue
                 idx = start_idx + i
                 nav_items_html += self._build_nav_item(log_type, content, log, idx)
@@ -509,8 +509,8 @@ class SubAgentSessionDialog(QDialog):
         for i, log in enumerate(self._logs):
             log_type = log.get("type", "progress")
             content = log.get("content", "")
-            # 跳过无内容的 ai_response/thinking（纯工具调用轮次无文本）
-            if log_type in ("ai_response", "thinking") and not content:
+            # 跳过无内容的 ai_response/thinking（纯工具调用轮次无文本或仅有空白）
+            if log_type in ("ai_response", "thinking") and not (content or "").strip():
                 continue
 
             nav_items_html += self._build_nav_item(log_type, content, log, i)
@@ -797,16 +797,18 @@ class SubAgentSessionDialog(QDialog):
         white-space: pre-wrap;
         word-wrap: break-word;
     }}
-    .result-content pre {{
+    .result-content .content-text {{
         background: rgba(0,0,0,0.06);
         border-radius: 6px;
         padding: 10px 14px;
         overflow-x: auto;
-        font-family: var(--mono-font);
-        font-size: {scale_font_size(12)}px;
-        line-height: 1.45;
+        font-family: var(--font);
+        font-size: {scale_font_size(13)}px;
+        line-height: 1.65;
         border: 1px solid rgba(255,255,255,0.06);
         margin: 6px 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
     }}
 
     /* ── 空状态 ── */
@@ -1062,10 +1064,9 @@ class SubAgentSessionDialog(QDialog):
     def _build_result_section(self, title: str, content: str, color: str, index: int) -> str:
         """构建最终结果内容区"""
         escaped = self._escape_html(content)
-        # 对于结果也渲染为 pre 块以保持格式
         return f"""<div class="result-section" id="section-result">
     <div class="result-title" style="color: {color};">{title}</div>
-    <div class="result-content"><pre>{escaped}</pre></div>
+    <div class="result-content"><div class="content-text">{escaped}</div></div>
 </div>"""
 
     def _make_snippet(self, log_type: str, content: str, log: Dict, max_len: int = 40) -> str:
