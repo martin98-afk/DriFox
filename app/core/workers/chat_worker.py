@@ -1096,6 +1096,71 @@ class OpenAIChatWorker(QThread):
 
         return sanitized
 
+    @staticmethod
+    def _detect_vision_tool_loop(messages: List[Dict], threshold: int = 3) -> bool:
+        """
+        检测最近 N 轮 assistant 是否仅调用了视觉相关工具（screenshot/read）
+        且没有任何文本输出，判断模型是否陷入"视觉工具死循环"。
+
+        与 _detect_repetitive_tool_loop 的区别：
+        - 后者检测完全相同签名的重复调用（同工具+同参数）
+        - 本方法检测仅视觉工具的连续调用（即使轮换不同视觉工具或不同参数）
+          如: screenshot → read → screenshot（参数不同，但都是视觉工具）
+
+        判断标准：
+        1. 最近 N 轮 assistant 消息全部含 tool_calls
+        2. 每轮的 tool_calls 名称全部属于视觉工具集 {"screenshot", "read"}
+        3. 都没有文本 content 输出
+
+        Args:
+            messages: 消息列表
+            threshold: 连续视觉工具轮次阈值（默认 3）
+
+        Returns:
+            True 表示检测到了视觉工具死循环
+        """
+        vision_tools = {"screenshot", "read"}
+
+        # 从后往前扫，收集最近的 assistant 消息
+        recent_assistants: List[Dict] = []
+        for msg in reversed(messages):
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                # 有文本输出的 assistant 消息 → 视觉循环已中断
+                break
+            recent_assistants.append(msg)
+            if len(recent_assistants) >= threshold:
+                break
+
+        if len(recent_assistants) < threshold:
+            return False
+
+        # 检查每轮的所有 tool_calls 是否都是视觉工具
+        for msg in recent_assistants:
+            tool_calls = msg.get("tool_calls") or []
+            # 检查是否有文本输出（如果有 content 且非空，说明模型插入了文本，不是纯工具循环）
+            content = msg.get("content", "")
+            if content and isinstance(content, str) and content.strip():
+                return False
+            if content and isinstance(content, list):
+                # multimodal content blocks
+                has_text = any(
+                    isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip()
+                    for b in content
+                )
+                if has_text:
+                    return False
+            # 检查所有 tool_calls 是否都是视觉工具
+            for tc in tool_calls:
+                func = tc.get("function") or {}
+                name = (func.get("name") or "").strip()
+                if name not in vision_tools:
+                    return False
+
+        return True
+
     def _get_reasoning_content(self) -> str:
         """获取当前的 reasoning_content（从累积的 chunks 合成）"""
         if self._reasoning_chunks:
@@ -1428,6 +1493,25 @@ class OpenAIChatWorker(QThread):
                     )
                     self._current_session_messages = list(current_session_messages)
                     # 作废 API 缓存，下一轮 _make_api_call 会从清理后的 current_messages 重建
+                    self._api_messages_cache = None
+                    self._api_messages_built = False
+                    continue
+
+                # ⚠️ 视觉工具循环检测：检测最近 N 轮是否只有截图/读取而无任何文本输出
+                # 即使轮换调用不同视觉工具（screenshot→read→screenshot），签名不同无法被
+                # 上面的通用循环检测捕获，但同样会浪费大量 token。检测到了就强制截断退出。
+                if OpenAIChatWorker._detect_vision_tool_loop(current_messages, threshold=3):
+                    logger.warning(
+                        "[VisionToolLoop] 检测到连续多轮仅视觉工具调用（无文本输出），"
+                        "静默清理视觉工具轮次后继续。"
+                    )
+                    current_session_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
+                        current_session_messages, OpenAIChatWorker._TOOL_LOOP_THRESHOLD
+                    )
+                    current_messages = OpenAIChatWorker._truncate_repetitive_tool_calls(
+                        current_messages, OpenAIChatWorker._TOOL_LOOP_THRESHOLD
+                    )
+                    self._current_session_messages = list(current_session_messages)
                     self._api_messages_cache = None
                     self._api_messages_built = False
                     continue
@@ -2175,6 +2259,38 @@ class OpenAIChatWorker(QThread):
             self._inject_images_to_user_message(session_messages, data_uris)
 
         logger.info(f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}")
+
+        # ---- 在 tool result 内容中追加视觉提示，防止 LLM 重复截图/读取 ----
+        # 从 tool_results 中找出本轮已注入图片的 screenshot / read 工具名，
+        # 在对应的 tool result 消息 content 末尾追加一条明确提示，告知 LLM
+        # 图片已自动以 base64 形式注入视觉上下文，无需再次截图/读取。
+        _tools_injected = set()
+        for r in tool_results:
+            if isinstance(r, dict) and r.get("success"):
+                tn = r.get("name", "")
+                if tn in ("screenshot", "read"):
+                    _tools_injected.add(tn)
+        if _tools_injected:
+            _vision_hint = (
+                "\n\n[Vision Notice] The screenshot/image has been automatically "
+                "injected into your visual context as an image. You can now see "
+                "the visual content directly — no need to capture/read again."
+            )
+            # 在 current_messages 中找到最后一个 role=tool 且 name 匹配的消息
+            for msg in reversed(current_messages):
+                if msg.get("role") == "tool" and msg.get("name") in _tools_injected:
+                    existing = msg.get("content", "")
+                    if isinstance(existing, str) and _vision_hint not in existing:
+                        msg["content"] = existing + _vision_hint
+                    break
+            # 同步更新 session_messages 中的同样位置
+            if session_messages is not None:
+                for msg in reversed(session_messages):
+                    if msg.get("role") == "tool" and msg.get("name") in _tools_injected:
+                        existing = msg.get("content", "")
+                        if isinstance(existing, str) and _vision_hint not in existing:
+                            msg["content"] = existing + _vision_hint
+                        break
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
         # 但 _api_messages_cache 仍是旧版本（无图片）。
