@@ -1220,9 +1220,19 @@ class OpenAIChatToolWindow(ToolWindow):
             # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 FREE_PROVIDERS 的部分默认值）
             config = apply_model_defaults(config, self._current_model_name)
             # 叠加用户按模型名覆盖的参数（最高优先级）
+            # key = "服务商名||模型名"，按服务商隔离同名模型
             model_overrides = getattr(self.cfg, "llm_model_overrides", None)
             if model_overrides and self._current_model_name:
-                overrides = (model_overrides.value or {}).get(self._current_model_name, {})
+                override_data = model_overrides.value or {}
+                overrides = None
+                if self._current_provider_name:
+                    pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                        "provider_name", self._current_provider_name
+                    )
+                    overrides = override_data.get(f"{pname}||{self._current_model_name}")
+                # 向后兼容：旧格式（纯模型名）兜底
+                if overrides is None:
+                    overrides = override_data.get(self._current_model_name, {})
                 if overrides:
                     config.update(overrides)
             return config
@@ -5654,9 +5664,19 @@ class OpenAIChatToolWindow(ToolWindow):
         config = apply_model_defaults(config, self._current_model_name)
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
+        # 按「服务商名||模型名」隔离同名模型
         model_overrides = getattr(self.cfg, "llm_model_overrides", None)
         if model_overrides and self._current_model_name:
-            overrides = (model_overrides.value or {}).get(self._current_model_name, {})
+            override_data = model_overrides.value or {}
+            overrides = None
+            if self._current_provider_name:
+                pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                    "provider_name", self._current_provider_name
+                )
+                overrides = override_data.get(f"{pname}||{self._current_model_name}")
+            # 向后兼容：旧格式（纯模型名）兜底
+            if overrides is None:
+                overrides = override_data.get(self._current_model_name, {})
             if overrides:
                 config.update(overrides)
 
@@ -6035,14 +6055,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"[_on_config_applied] 连接级字段 -> saved_providers[{current_name}]: {list(conn_fields.keys())}"
             )
 
-        # 2. 模型级字段 → 写入 model_overrides[模型名]
+        # 2. 模型级字段 → 写入 model_overrides[服务商名||模型名]
         if model_fields and current_model_name:
-            existing = model_overrides.get(current_model_name, {}).copy()
+            provider_name = self._valid_configs.get(current_name, {}).get("provider_name", current_name)
+            override_key = f"{provider_name}||{current_model_name}"
+            existing = model_overrides.get(override_key, {}).copy()
             existing.update(model_fields)
-            model_overrides[current_model_name] = existing
+            model_overrides[override_key] = existing
             self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
             logger.debug(
-                f"[_on_config_applied] 模型级字段 -> model_overrides[{current_model_name}]: {list(model_fields.keys())}"
+                f"[_on_config_applied] 模型级字段 -> model_overrides[{override_key}]: {list(model_fields.keys())}"
             )
 
         self._load_model_configs()
@@ -6199,7 +6221,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6264,7 +6286,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6275,7 +6297,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -6300,7 +6322,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6334,7 +6356,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6375,7 +6397,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6402,7 +6424,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -10046,11 +10068,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if task_id in compact._task_rows:
                 continue
 
-            compact.show_completed_task(task_id, agent_name, task_desc,
-                                        model_name=model_name,
-                                        tool_call_count=tool_count,
-                                        elapsed_seconds=elapsed,
-                                        context_usage=ctx_usage)
+            compact.show_completed_task(
+                task_id,
+                agent_name,
+                task_desc,
+                model_name=model_name,
+                tool_call_count=tool_count,
+                elapsed_seconds=elapsed,
+                context_usage=ctx_usage,
+            )
 
         if not found_any:
             return
@@ -11114,7 +11140,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._toggle_send_stop(False)
                 assistant_card.deleteLater()
                 return
-
 
             # 同步 batch 结构：_message_batch 已包含新 user batch
             self._sync_batch_structures()
@@ -14315,7 +14340,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -14342,7 +14367,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
