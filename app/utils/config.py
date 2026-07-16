@@ -369,7 +369,7 @@ class Settings(QConfig):
         OptionsValidator(["beep", "short", "none"]),
     )
     # 全局字体设置
-    llm_font_family = ConfigItem("LLM", "FontFamily", "微软雅黑")
+    llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
 
     # ========== UI appearance ==========
     ui_font_size = OptionsConfigItem(
