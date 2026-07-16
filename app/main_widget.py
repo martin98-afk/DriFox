@@ -4689,7 +4689,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            self.current_model_btn.setToolTip(f"{display} · {self._current_model_name}")
+            note = get_model_capabilities(self._current_model_name).get("note", "")
+            tooltip = f"{display} · {self._current_model_name}"
+            if note:
+                tooltip += f"\n{note}"
+            self.current_model_btn.setToolTip(tooltip)
         elif self._current_provider_name:
             self._model_btn_text.setText(display)
             self.current_model_btn.setToolTip(display)
