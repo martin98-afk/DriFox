@@ -4488,11 +4488,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 "display_name", self._current_provider_name
             )
 
+        # 收集模型描述（来自 models.dev / 硬编码能力字典）
+        model_notes = {}
+        for _, models, _ in provider_models_data:
+            for model_name in models:
+                if model_name not in model_notes:
+                    caps = get_model_capabilities(model_name)
+                    note = (caps.get("note", "") or "").strip()
+                    model_notes[model_name] = note
+
         self._model_selector_card_content.set_providers_data(
             provider_models_data,
             current_display,
             self._current_model_name or "",
             self._display_to_provider_name,
+            model_notes=model_notes,
         )
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"

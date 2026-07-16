@@ -2,6 +2,7 @@
 """
 模型选择卡片内容 - 底部卡片形式展示所有服务商的模型列表
 """
+
 from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -18,6 +19,7 @@ from PyQt5.QtWidgets import (
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+from app.widgets.elided_label import _ElidedLabel
 
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度
@@ -72,18 +74,22 @@ class ProviderHeader(QWidget):
 
     def _apply_name_style(self):
         Colors.refresh()
-        self.name_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;")
+        self.name_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
+        )
 
 
 class ModelItem(QWidget):
-    """单个模型项 - 可点击"""
+    """单个模型项 - 可点击，模型名同行显示描述副标题"""
+
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    def __init__(self, provider_name: str, model_name: str, is_active: bool = False, parent=None):
+    def __init__(self, provider_name: str, model_name: str, is_active: bool = False, note: str = "", parent=None):
         super().__init__(parent)
         self.provider_name = provider_name
         self.model_name = model_name
         self.is_active = is_active
+        self._note = note
         self.setFixedHeight(34)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -91,33 +97,50 @@ class ModelItem(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(30, 0, 12, 0)
+        layout.setContentsMargins(20, 0, 12, 0)
         layout.setSpacing(8)
 
         # 选中状态指示点
         self.dot = QLabel("●", self)
         self.dot.setStyleSheet(
-            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};" if self.is_active else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
+            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};"
+            if self.is_active
+            else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
         self.dot.setFixedWidth(14)
         layout.addWidget(self.dot)
 
-        # 模型名
+        # 模型名（不压缩，保持完整显示）
         self.name_label = QLabel(self.model_name, self)
+        self.name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         self._apply_name_style()
-        layout.addWidget(self.name_label, 1)
+        layout.addWidget(self.name_label, 0)
+
+        # 描述副标题（ElidedLabel 自动省略，参考 CommandItemWidget 模式）
+        if self._note:
+            self.note_label = _ElidedLabel(self._note)
+            self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.note_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+            self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            layout.addWidget(self.note_label, 1)
 
     def _apply_name_style(self):
         Colors.refresh()
         if self.is_active:
-            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};")
+            self.name_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; {get_font_family_css()} {font_size_css(15)};"
+            )
         else:
-            self.name_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(13)};")
+            self.name_label.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(15)};"
+            )
 
     def set_active(self, active: bool):
         self.is_active = active
         self.dot.setStyleSheet(
-            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};" if active else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
+            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};"
+            if active
+            else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
         self._apply_name_style()
 
@@ -127,7 +150,7 @@ class ModelItem(QWidget):
 
     def enterEvent(self, event):
         if not self.is_active:
-            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)};")
+            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(15)};")
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -151,6 +174,13 @@ class ModelSelectorCardContent(QWidget):
         self._active_model_item: Optional[ModelItem] = None
         self._provider_headers: List[Tuple[QWidget, str]] = []  # (header_widget, provider_name)
         self._search_text = ""  # 搜索过滤文本，由标题栏搜索框设置
+        self._model_notes: dict = {}  # 模型名 → 描述文本，搜索刷新时保留
+        self._display_to_provider_name: dict = {}  # display_name → icon provider_name，搜索重建时保留
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._do_rebuild)
+        self._pending_search_text = ""
         self._setup_ui()
 
     def _setup_ui(self):
@@ -202,6 +232,7 @@ class ModelSelectorCardContent(QWidget):
         current_provider: str,
         current_model: str,
         display_to_provider_name: Optional[dict] = None,
+        model_notes: Optional[dict] = None,  # 模型名 → 描述文本
     ):
         """设置服务商和模型数据
 
@@ -215,6 +246,8 @@ class ModelSelectorCardContent(QWidget):
         self._current_provider = current_provider
         self._current_model = current_model
         self._provider_models = [(p, m) for p, m, _ in provider_models]
+        self._model_notes = model_notes or {}
+        self._display_to_provider_name = display_to_provider_name or {}
         self._model_widgets.clear()
         self._all_model_items.clear()
         self._provider_headers.clear()
@@ -232,13 +265,21 @@ class ModelSelectorCardContent(QWidget):
         name_map = display_to_provider_name or {}
 
         for provider_name, models, is_current_provider in provider_models:
+            # 去重（保留首次出现的顺序），防止内部数据积累重复
+            seen = set()
+            deduped = []
+            for m in models:
+                key = m.strip().lower()
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(m)
             # 过滤
             if search_text:
-                filtered_models = [m for m in models if search_text in m.lower()]
+                filtered_models = [m for m in deduped if search_text in m.lower()]
                 if not filtered_models:
                     continue
             else:
-                filtered_models = models
+                filtered_models = deduped
 
             # 服务商标题：显示名是 display_name，图标查找用 icon_provider_name
             icon_name = name_map.get(provider_name, provider_name)
@@ -248,10 +289,9 @@ class ModelSelectorCardContent(QWidget):
 
             # 模型列表
             for model_name in filtered_models:
-                is_active = (
-                    provider_name == current_provider and model_name == current_model
-                )
-                item = ModelItem(provider_name, model_name, is_active, self.content_widget)
+                is_active = provider_name == current_provider and model_name == current_model
+                note = (model_notes or {}).get(model_name, "") if model_notes else ""
+                item = ModelItem(provider_name, model_name, is_active, note, self.content_widget)
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
@@ -261,7 +301,7 @@ class ModelSelectorCardContent(QWidget):
 
         # 如果没有匹配的模型
         if not self._all_model_items and search_text:
-            no_result = QLabel(f"未找到匹配 \"{search_text}\" 的模型", self.content_widget)
+            no_result = QLabel(f'未找到匹配 "{search_text}" 的模型', self.content_widget)
             no_result.setAlignment(Qt.AlignCenter)
             no_result.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)}; padding: 20px;"
@@ -350,8 +390,13 @@ class ModelSelectorCardContent(QWidget):
         self.stickyProviderChanged.emit(sticky_name or "")
 
     def _on_search_changed(self, text: str):
-        """搜索文本变化时刷新列表"""
-        self._search_text = text.strip().lower()
+        """搜索文本变化时刷新列表（150ms 防抖）"""
+        self._pending_search_text = text.strip().lower()
+        self._search_timer.start()
+
+    def _do_rebuild(self):
+        """防抖到期后执行真正的列表重建"""
+        self._search_text = self._pending_search_text
         provider_models_with_flag = []
         for prov, models in self._provider_models:
             is_cur = prov == self._current_provider
@@ -361,6 +406,8 @@ class ModelSelectorCardContent(QWidget):
             provider_models_with_flag,
             self._current_provider,
             self._current_model,
+            self._display_to_provider_name,
+            model_notes=self._model_notes,
         )
 
     def _on_model_clicked(self, provider_name: str, model_name: str):
