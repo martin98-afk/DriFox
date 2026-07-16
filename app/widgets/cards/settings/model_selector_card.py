@@ -21,6 +21,10 @@ from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.elided_label import _ElidedLabel
 
+# 模型能力 emoji 标记
+_MODEL_TAG_THINKING = "🧠"  # 支持思考控制
+_MODEL_TAG_VISION = "🖼️"  # 支持多模态（图片）
+
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
@@ -80,7 +84,7 @@ class ProviderHeader(QWidget):
 
 
 class ModelItem(QWidget):
-    """单个模型项 - 可点击，模型名同行显示描述副标题"""
+    """单个模型项 - 可点击，模型名同行显示描述副标题和能力标记"""
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
@@ -93,7 +97,24 @@ class ModelItem(QWidget):
         self.setFixedHeight(34)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 查询模型能力
+        self._caps = self._get_caps()
         self._setup_ui()
+
+    def _get_caps(self):
+        """查询模型能力（thinking + vision）"""
+        from app.core.model_capabilities import get_model_capabilities
+
+        return get_model_capabilities(self.model_name)
+
+    def _tag_emoji(self) -> str:
+        """组装能力 emoji 标签"""
+        tags = []
+        if self._caps.get("supports_thinking"):
+            tags.append(_MODEL_TAG_THINKING)
+        if self._caps.get("supports_vision"):
+            tags.append(_MODEL_TAG_VISION)
+        return " ".join(tags)
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -115,6 +136,14 @@ class ModelItem(QWidget):
         self.name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         self._apply_name_style()
         layout.addWidget(self.name_label, 0)
+
+        # 能力 emoji 标记（思考、多模态）
+        tag = self._tag_emoji()
+        if tag:
+            self.tag_label = QLabel(tag, self)
+            self.tag_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)};")
+            self.tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            layout.addWidget(self.tag_label, 0)
 
         # 描述副标题（ElidedLabel 自动省略，参考 CommandItemWidget 模式）
         if self._note:

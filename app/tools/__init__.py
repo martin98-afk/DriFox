@@ -9,8 +9,9 @@ for manual method forwarding in a shallow facade.
 
 import copy
 import platform
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject
@@ -1106,6 +1107,16 @@ TOOL_SCHEMAS = [
 ]
 
 
+# ── 短时缓存 ──────────────────────────────────────────
+# get_builtin_tools_schema 在单次对话流程中被多次重复调用（上下文环刷新、
+# PreSendWorker、agent 工具获取等），但子智能体列表/MCP/LSP 状态在数秒内不会变化。
+# 用 5 秒 TTL 缓存避免重复 deepcopy + 动态注入，同时用 deepcopy 返回防止调用方
+# 的 description 改写污染缓存。
+_cache_result: Optional[List[Dict]] = None
+_cache_timestamp: float = 0.0
+_CACHE_TTL = 5.0  # 秒
+
+
 def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dict]:
     """获取内置工具的 schema 定义（用于给 LLM 调用）
 
@@ -1113,6 +1124,13 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         agent_manager: AgentManager 实例，用于动态注入可用子智能体列表
         builtin_tools: BuiltinTools 实例，用于动态注入 MCP 工具 schema
     """
+    global _cache_result, _cache_timestamp
+
+    # 短时缓存：避免同一事件循环中多次重复 deepcopy + 动态注入
+    now = time.monotonic()
+    if _cache_result is not None and now - _cache_timestamp < _CACHE_TTL:
+        return copy.deepcopy(_cache_result)
+
     # 动态获取子智能体名称列表
     subagent_names = []
     if agent_manager and hasattr(agent_manager, "list_subagent_names"):
@@ -1158,7 +1176,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         mcp_schemas = builtin_tools._mcp_manager.get_tool_schemas()
         if mcp_schemas:
             schemas.extend(mcp_schemas)
-            logger.info(f"[BuiltinTools] 注入 {len(mcp_schemas)} 个 MCP 工具 schema")
+            logger.debug(f"[BuiltinTools] 注入 {len(mcp_schemas)} 个 MCP 工具 schema")
 
     # 动态注入 LSP 服务器状态到 lsp 工具描述
     try:
@@ -1175,5 +1193,9 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
                     break
     except Exception:
         pass
+
+    # 写入缓存
+    _cache_result = schemas
+    _cache_timestamp = now
 
     return schemas

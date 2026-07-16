@@ -633,9 +633,9 @@ class ChatBackend(QObject):
     def _init_plugin_system(self):
         """初始化 PluginManager，加载所有插件
 
-        首次初始化时全量加载智能体和主题；
-        后续窗口创建时 PluginManager 已初始化，跳过重复刷新。
-        首次初始化后自动启动插件文件变更监听（watchfiles 热更新）。
+        [PERF] 拆分为关键路径和非关键路径：
+        - 关键路径：PluginManager 扫描 + AgentManager 重载（必须同步，智能体/命令需要）
+        - 非关键路径：主题刷新 + 热更新监听 + LSP 初始化 → 延迟到窗口就绪后执行
         """
         try:
             from app.core.plugin_manager import PluginManager
@@ -648,34 +648,17 @@ class ChatBackend(QObject):
             was_initialized = pm.is_initialized()
             pm.initialize(app_data_dir)
 
-            # 首次初始化时才需要全量重载智能体和主题
+            # 首次初始化时才需要全量重载智能体
             # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:
-                # AgentManager 重新从已启用插件加载智能体
+                # AgentManager 重新从已启用插件加载智能体（关键路径）
                 if self._agent_manager:
                     self._agent_manager.reload_agents()
 
-                # 插件系统初始化后，必须刷新主题
-                self._reload_themes_from_plugins()
-
-                # 启动插件文件变更监听（热更新，仅启动一次）
-                self._start_plugin_watcher()
-
-                # ── 初始化 LSP 管理器（仅首次，多窗口共享单例）──
-                try:
-                    from app.core.lsp.lsp_manager import LspManager
-
-                    lsp_mgr = LspManager.get_instance()
-                    lsp_configs = pm.get_lsp_configs()
-                    # 使用项目根目录作为 LSP workspace root，而非 os.getcwd()
-                    # 避免 pyright 扫描整个上级目录（如 d:\work 下所有项目）
-                    # backend.py 位于 app/core/backend.py，项目根在其上 3 层
-                    workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                    lsp_mgr.initialize(workdir, lsp_configs)
-                    logger.info(f"[ChatBackend] LspManager 初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
-                    lsp_mgr.start_all_background()
-                except Exception as e:
-                    logger.error(f"[ChatBackend] LspManager 初始化失败: {e}")
+                # ── 非关键路径：延迟到窗口就绪后执行 ──
+                # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示
+                # 使用 QTimer 推迟执行（backend 本身不依赖 Qt，由调用方确保）
+                self._defer_non_critical_plugin_init(pm)
 
             logger.info(
                 f"[ChatBackend] PluginManager 初始化完成，"
@@ -685,6 +668,42 @@ class ChatBackend(QObject):
 
         except Exception as e:
             logger.error(f"[ChatBackend] PluginManager 初始化失败: {e}")
+
+    def _defer_non_critical_plugin_init(self, pm):
+        """非关键插件初始化：主题/LSP/热更新，延迟执行不阻塞 UI"""
+        # 使用 QTimer 延迟执行（backend 提供 _deferred_timer 供调用方关联到 Qt 事件循环）
+        from PyQt5.QtCore import QTimer
+
+        def _do_deferred():
+            # 刷新主题
+            try:
+                self._reload_themes_from_plugins()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 延迟主题刷新失败: {e}")
+
+            # 启动插件文件变更监听（热更新，仅启动一次）
+            try:
+                self._start_plugin_watcher()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 延迟启动插件监听失败: {e}")
+
+            # 初始化 LSP 管理器（仅首次，多窗口共享单例）
+            try:
+                from app.core.lsp.lsp_manager import LspManager
+
+                lsp_mgr = LspManager.get_instance()
+                lsp_configs = pm.get_lsp_configs()
+                workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                lsp_mgr.initialize(workdir, lsp_configs)
+                logger.info(
+                    f"[ChatBackend] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器"
+                )
+                lsp_mgr.start_all_background()
+            except Exception as e:
+                logger.error(f"[ChatBackend] LSP 延迟初始化失败: {e}")
+
+        # 延迟 2 秒执行，让窗口首帧 + 用户交互先就绪
+        QTimer.singleShot(2000, _do_deferred)
 
     def _reload_themes_from_plugins(self):
         """插件系统初始化后，重新加载插件主题"""

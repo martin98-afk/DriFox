@@ -108,10 +108,10 @@ class SubAgentExecutor(QThread):
         self._log_store_callback = None  # 日志存储回调
         self._get_history_messages = None  # 获取主智能体历史消息的回调
         # Token 用量追踪
-        self._total_prompt_tokens: int = 0      # 累计 prompt tokens
+        self._total_prompt_tokens: int = 0  # 累计 prompt tokens
         self._total_completion_tokens: int = 0  # 累计 completion tokens
-        self._total_tokens: int = 0             # 累计总 tokens（用于计费统计）
-        self._peak_total_tokens: int = 0        # 单次 API 调用的峰值总 tokens（反映上下文窗口压力）
+        self._total_tokens: int = 0  # 累计总 tokens（用于计费统计）
+        self._peak_total_tokens: int = 0  # 单次 API 调用的峰值总 tokens（反映上下文窗口压力）
 
     @property
     def total_tokens(self) -> int:
@@ -1287,8 +1287,6 @@ class SubAgentManager(QObject):
                 "agent_name": agent_name,
                 "session_id": task_session_id,
             }
-            if on_finished:
-                on_finished(error_msg)
             if on_error:
                 on_error(error_msg)
             return False
@@ -1303,8 +1301,6 @@ class SubAgentManager(QObject):
                 "agent_name": agent_name,
                 "session_id": task_session_id,
             }
-            if on_finished:
-                on_finished(error_msg)
             if on_error:
                 on_error(error_msg)
             return False
