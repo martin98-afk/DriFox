@@ -2167,12 +2167,13 @@ class OpenAIChatWorker(QThread):
             "_hook_event": "vision_inject",
         }
 
-        # hook 注入模式：仅加入 API 缓存和 session_messages
+        # hook 注入模式：与 _inject_pending_hook_messages 一致的流程
+        # 1) API 缓存（LLM 可见） 2) _current_session_messages（持久化）
+        # 3) session_messages（UI 回调） 4) current_messages（后续轮次可见）
         self._append_to_api_cache([vision_msg])
+        self._current_session_messages.append(vision_msg)
         if session_messages is not None:
             session_messages.append(dict(vision_msg))
-
-        # 同时追加到 current_messages 确保后续轮次继续可见
         current_messages.append(vision_msg)
 
         logger.info(
