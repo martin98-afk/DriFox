@@ -9486,6 +9486,12 @@ class OpenAIChatToolWindow(ToolWindow):
             }
             self._on_stop_clicked()
 
+        # 🛡️ 先清理 CardManager 中残留的可见状态（上次恢复时 _on_restore_clicked
+        # 直接调 setVisible(False) 绕过了 CardManager），再设新缓存，防止后续
+        # hide_card → dismissed → _on_undo_delete_dismissed 清空刚设好的缓存。
+        if self._card_manager.is_card_visible("undo_delete", self._window_id):
+            self._card_manager.hide_card("undo_delete", self._window_id)
+
         # === 缓存删除数据，用于撤销恢复（只缓存一步）===
         if session and card._round_index is not None:
             try:
@@ -9511,7 +9517,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 self._undo_delete_cache = {}
 
-        # 执行删除
+        # 执行删除（清理状态后才设缓存，此时 hide_card 的清空效果对本次缓存无害）
         self._delete_user_round(card)
 
         # 非流式场景：_on_finalize_complete 不会运行，手动清除哨兵
@@ -9661,6 +9667,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 确保用户看到恢复后的最后一条消息
         QTimer.singleShot(200, self._scroll_to_bottom)
 
+        # 🛡️ 恢复成功后同步 CardManager 状态：_on_restore_clicked 直接调了
+        # setVisible(False) 绕过 CardManager，这里通知 CardManager 更新状态，
+        # 防止下次删除时 hide_card → dismissed 清空新缓存。
+        if self._card_manager.is_card_visible("undo_delete", self._window_id):
+            self._card_manager.hide_card("undo_delete", self._window_id)
+
     def _on_undo_delete_dismissed(self):
         """撤销删除卡片自动消失或被关闭时，清空缓存"""
         if self._undo_delete_cache:
@@ -9800,6 +9812,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步 _current_session_id（与 _delete_user_round 保持一致）
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
+
+        # 🛡️ 先清理 CardManager 中残留的可见状态（与 _delete_message 同理，
+        # _on_restore_clicked 直接调 setVisible(False) 绕过了 CardManager），
+        # 防止后续显示撤销卡片时 hide_card → dismissed 清空缓存。
+        if self._card_manager.is_card_visible("undo_delete", self._window_id):
+            self._card_manager.hide_card("undo_delete", self._window_id)
 
         # 获取当前 session 的 round_ranges，用于验证 round_index
         canonical_now = consolidate_messages(session.messages)
