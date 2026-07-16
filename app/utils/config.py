@@ -157,9 +157,8 @@ class Settings(QConfig):
     def _ensure_default_opencode_provider(cls, instance):
         """确保内置 OpenCode 免费默认配置存在。
 
-        - 只注入一次：用 llm_default_opencode_injected flag 标记。
-        - 防重复：若 saved_providers 中已有同 (URL, API_KEY) 或同 name 的配置，不再注入。
-        - 用户手动删除后，flag 已置位，不会再次自动创建。
+        - 防重复：若 saved_providers 中已有同 name 的配置，不再注入。
+        - 用户手动删除后，下次启动会自动恢复。
         """
         from app.constants import FREE_PROVIDERS, OPENCODE_SHARED_API_KEY
         from app.core.provider_profile import compute_provider_config_id
@@ -178,21 +177,13 @@ class Settings(QConfig):
         if not isinstance(saved_providers, dict):
             saved_providers = {}
 
-        # 兜底：已存在同名或同 (URL, key) 的配置，不再注入
+        # 已存在同名配置则保持不动（允许用户改名来永久隐藏默认配置）
         for info in saved_providers.values():
             if not isinstance(info, dict):
                 continue
             if info.get("name") == config_name:
                 instance.llm_default_opencode_injected.value = True
                 return
-            if (info.get("API_URL", "") or "").strip() == api_url and (
-                info.get("API_KEY", "") or ""
-            ).strip() == api_key:
-                instance.llm_default_opencode_injected.value = True
-                return
-
-        if instance.llm_default_opencode_injected.value:
-            return
 
         free_models = [
             "deepseek-v4-flash-free",

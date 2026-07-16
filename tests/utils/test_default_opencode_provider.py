@@ -64,13 +64,14 @@ def test_inject_when_empty():
     assert "config_id" in info
 
 
-def test_skip_when_already_injected():
-    """flag 已置位时不应重复注入。"""
+def test_recreate_after_deleted():
+    """flag 已置位但配置被删除后，应重新注入。"""
     instance = _FakeInstance(saved_providers={}, injected=True)
     Settings._ensure_default_opencode_provider(instance)
 
-    assert _find_opencode_config(instance.llm_saved_providers.value) is None
-    assert instance._saved is False
+    info = _find_opencode_config(instance.llm_saved_providers.value)
+    assert info is not None
+    assert instance._saved is True
 
 
 def test_skip_when_same_name_exists():
@@ -85,13 +86,14 @@ def test_skip_when_same_name_exists():
     assert instance._saved is False
 
 
-def test_skip_when_same_url_key_exists():
-    """已存在同 (URL, key) 配置时，只置 flag 不注入。"""
+def test_create_when_same_url_key_but_different_name():
+    """已存在同 (URL, key) 但不同 name 的配置时，仍会创建默认配置。"""
     key = OPENCODE_SHARED_API_KEY
     saved = {"abc123": {"provider_name": "OpenCode Zen", "API_URL": "https://opencode.ai/zen/v1", "API_KEY": key}}
     instance = _FakeInstance(saved_providers=saved, injected=False)
     Settings._ensure_default_opencode_provider(instance)
 
     assert instance.llm_default_opencode_injected.value is True
-    assert len(instance.llm_saved_providers.value) == 1
-    assert instance._saved is False
+    assert len(instance.llm_saved_providers.value) == 2
+    assert instance._saved is True
+    assert _find_opencode_config(instance.llm_saved_providers.value) is not None
