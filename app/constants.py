@@ -1,5 +1,8 @@
 MAX_SESSION_CARD_CACHE_SIZE = 10
 
+# OpenCode 免费公用 API key，用于默认服务商配置，让用户下载后开箱即用
+OPENCODE_SHARED_API_KEY = "sk-zAIZkBM2o3MMKHzryhxmIWPffHyhxSwrpPjtIlyaxBIaCNbOkH2Qx0QXEOJlIRre"
+
 # ============================================================
 # 可识别的图片扩展名（统一常量，多处复用）
 # 注意：gateway/base.py 中额外包含 .svg，用途不同，不纳入此集合
@@ -220,7 +223,9 @@ PROVIDER_MODELS = {
     ],
     "OpenCode Zen": [
         "deepseek-v4-flash-free",
-        "nemotron-3-super-free",
+        "mimo-v2.5-free",
+        "nemotron-3-ultra-free",
+        "north-mini-code-free",
         "big-pickle",
         "glm-5.1",
         "glm-5",

@@ -90,6 +90,8 @@ class Settings(QConfig):
                 cls._config_loaded = True  # 标记配置成功加载
                 # 迁移旧格式的服务商配置
                 cls._migrate_saved_providers(cls._instance)
+                # 确保内置 OpenCode 免费默认配置存在
+                cls._ensure_default_opencode_provider(cls._instance)
             except Exception:
                 logger.exception("无法加载配置文件")
                 cls._config_loaded = False
@@ -150,6 +152,68 @@ class Settings(QConfig):
         logger.info(
             f"已迁移 {len(saved_providers)} 个服务商配置到 apikey hash 格式 （合并后 {len(new_saved_providers)} 条）"
         )
+
+    @classmethod
+    def _ensure_default_opencode_provider(cls, instance):
+        """确保内置 OpenCode 免费默认配置存在。
+
+        - 只注入一次：用 llm_default_opencode_injected flag 标记。
+        - 防重复：若 saved_providers 中已有同 (URL, API_KEY) 或同 name 的配置，不再注入。
+        - 用户手动删除后，flag 已置位，不会再次自动创建。
+        """
+        from app.constants import FREE_PROVIDERS, OPENCODE_SHARED_API_KEY
+        from app.core.provider_profile import compute_provider_config_id
+
+        provider_name = "OpenCode Zen"
+        default_config = FREE_PROVIDERS.get(provider_name)
+        if not default_config:
+            return
+
+        api_url = default_config.get("API_URL", "")
+        api_key = OPENCODE_SHARED_API_KEY
+        model_name = "deepseek-v4-flash-free"
+        config_name = "opencode免费模型"
+
+        saved_providers = instance.llm_saved_providers.value
+        if not isinstance(saved_providers, dict):
+            saved_providers = {}
+
+        # 兜底：已存在同名或同 (URL, key) 的配置，不再注入
+        for info in saved_providers.values():
+            if not isinstance(info, dict):
+                continue
+            if info.get("name") == config_name:
+                instance.llm_default_opencode_injected.value = True
+                return
+            if (info.get("API_URL", "") or "").strip() == api_url and (
+                info.get("API_KEY", "") or ""
+            ).strip() == api_key:
+                instance.llm_default_opencode_injected.value = True
+                return
+
+        if instance.llm_default_opencode_injected.value:
+            return
+
+        provider_info = {
+            "provider_name": provider_name,
+            "name": config_name,
+            "API_URL": api_url,
+            "API_KEY": api_key,
+            "模型名称": model_name,
+        }
+        # 继承 FREE_PROVIDERS 中的其他默认参数（温度、最大Token、认证方式等）
+        for key, value in default_config.items():
+            if key not in provider_info:
+                provider_info[key] = value
+
+        config_id = compute_provider_config_id(provider_info)
+        provider_info["config_id"] = config_id
+        saved_providers[config_id] = provider_info
+
+        instance.llm_saved_providers.value = saved_providers
+        instance.llm_default_opencode_injected.value = True
+        instance.save()
+        logger.info(f"已自动注入默认 OpenCode 免费服务商配置: {config_name} ({config_id})")
 
     @classmethod
     def _extend_theme_validator_before_load(cls):
@@ -276,6 +340,8 @@ class Settings(QConfig):
     llm_temperature = ConfigItem("LLM", "Temperature", 0.7, RangeValidator(0, 1))
     # 保存的免费/自定义服务商配置
     llm_saved_providers = ConfigItem("LLM", "SavedProviders", {})
+    # 默认 OpenCode 免费配置是否已注入（防止用户删除后反复自动创建）
+    llm_default_opencode_injected = ConfigItem("LLM", "DefaultOpencodeInjected", False, BoolValidator())
     # 按模型名覆盖的参数（最大Token、温度、思考相关等），key=模型名
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
