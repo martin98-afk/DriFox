@@ -2043,32 +2043,6 @@ class OpenAIChatWorker(QThread):
     # ========== 视觉模型图片注入 ==========
 
     @staticmethod
-    def _inject_images_to_user_message(messages: List[Dict], data_uris: List[str]) -> bool:
-        """
-        将图片 data_uri 注入到 messages 列表中最后一个 user 消息的 content 中。
-
-        纯文本 content 转为 multimodal list（text + image_url），
-        已有 list 则追加 image_url 块。
-
-        Returns:
-            True 成功注入，False 未找到 user 消息
-        """
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                for data_uri in data_uris:
-                    if isinstance(content, str):
-                        content = [
-                            {"type": "text", "text": content},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ]
-                        msg["content"] = content
-                    elif isinstance(content, list):
-                        content.append({"type": "image_url", "image_url": {"url": data_uri}})
-                return True
-        return False
-
     def _try_inject_vision_content(
         self, tool_results, current_messages, session_messages: Optional[List[Dict]] = None
     ) -> bool:
@@ -2165,16 +2139,47 @@ class OpenAIChatWorker(QThread):
         if not data_uris:
             return False
 
-        # ---- 注入到 current_messages（用于本轮 API 调用） ----
-        injected = self._inject_images_to_user_message(current_messages, data_uris)
-        if not injected:
-            return False
+        # ---- 用 hook 注入模式插入一条 user 消息承载图片 ----
+        # 根因：之前将图片注入到旧 user message，LLM 无法将图片与工具调用关联。
+        # LLM 调用 read/screenshot 后看到工具结果是文本描述，认为"任务未完成"，
+        # 继续循环调用工具。即使图片已注入旧消息，LLM 也不把它视为工具调用结果。
+        # 修复方案：新建一条 user 消息用标准 image_url 格式承载图片，采用与 hook
+        # 相同的注入模式（仅加入 API 缓存和 session_messages，不加 current_messages），
+        # 避免被 UI 渲染为多余卡片，同时让 LLM 以常规方式看到图片。
+        tool_names_str = ", ".join(
+            r.get("name", "") for r in tool_results if isinstance(r, dict) and r.get("success")
+        )
+        vision_content: List[Dict] = [
+            {
+                "type": "text",
+                "text": (
+                    f"[System] The following image(s) were obtained via {tool_names_str}. "
+                    "Please analyze the visual content directly."
+                ),
+            },
+        ]
+        for du in data_uris:
+            vision_content.append({"type": "image_url", "image_url": {"url": du}})
 
-        # ---- 同步注入到 session_messages（跨轮持久化） ----
+        vision_msg: Dict = {
+            "role": "user",
+            "content": vision_content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "_injected_vision": True,
+        }
+
+        # hook 注入模式：仅加入 API 缓存和 session_messages
+        self._append_to_api_cache([vision_msg])
         if session_messages is not None:
-            self._inject_images_to_user_message(session_messages, data_uris)
+            session_messages.append(dict(vision_msg))
 
-        logger.info(f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}")
+        # 同时追加到 current_messages 确保后续轮次继续可见
+        current_messages.append(vision_msg)
+
+        logger.info(
+            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern "
+            f"for {model_name} (tools: {tool_names_str})"
+        )
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
         # 但 _api_messages_cache 仍是旧版本（无图片）。
