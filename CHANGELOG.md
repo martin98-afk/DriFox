@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.1] - 2026-07-16
 
-自上一版本以来的变更 | 提交数：12 · 文件变更：5 · +323/-207 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：13 · 文件变更：7 · +428/-208 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - **Hook 消息确认规则增强**: 补充系统提醒确认规则，防止 hook 消息被误判为用户输入，确保 agent 等待用户真实响应
 - **会话切换 sentinel 保护**: 实现会话切换哨兵机制，防止会话间消息内容互相覆盖
 - **视觉注入文本包裹优化**: 将视觉注入文本包裹在 system-reminder 标签中，保持上下文一致性
+- **图片体积自动压缩防止 API 400**: 为 `screenshot`/`read` 工具结果注入和用户图片附件添加 >5MB 自动压缩（基于 PyQt5 QImage 等比缩小 + JPEG quality=85），避免 4K 截图因 base64 过大导致 API "media exceeds size limit" 错误，解决 PyInstaller 打包后因 PIL 缺失 PNG 略大而更容易触发的问题
 
 ### ♻️ 代码重构 (Refactoring)
 
