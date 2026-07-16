@@ -2,6 +2,7 @@
 """
 余额显示组件 - 支持 DeepSeek 和 SiliconFlow
 """
+
 from typing import Optional
 
 import requests
@@ -59,19 +60,23 @@ class _BalanceFetchThread(QThread):
                     data_obj = data.get("data", data)
                     balance_str = data_obj.get(self._balance_key, "")
                 if balance_str:
-                    self.result_ready.emit({
-                        "balance": float(balance_str),
-                        "currency": self._currency,
-                        "provider": self._provider_name,
-                    })
+                    self.result_ready.emit(
+                        {
+                            "balance": float(balance_str),
+                            "currency": self._currency,
+                            "provider": self._provider_name,
+                        }
+                    )
                     return
                 self.result_ready.emit({"hide": True, "provider": self._provider_name})
                 return
-            self.result_ready.emit({
-                "hide": True,
-                "provider": self._provider_name,
-                "tooltip": f"余额查询失败 (HTTP {resp.status_code})",
-            })
+            self.result_ready.emit(
+                {
+                    "hide": True,
+                    "provider": self._provider_name,
+                    "tooltip": f"余额查询失败 (HTTP {resp.status_code})",
+                }
+            )
         except requests.exceptions.Timeout:
             self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": "余额查询超时"})
         except requests.exceptions.ConnectionError:
@@ -193,13 +198,16 @@ class BalanceDisplay(QWidget):
         self.setVisible(True)
 
         # 取消仍在进行中的上一次查询
-        if self._fetch_thread is not None and self._fetch_thread.isRunning():
-            self._fetch_thread.quit()
-            self._fetch_thread.wait(200)
+        if self._fetch_thread is not None:
+            try:
+                if self._fetch_thread.isRunning():
+                    self._fetch_thread.quit()
+                    self._fetch_thread.wait(200)
+            except RuntimeError:
+                # C++ 对象已被销毁（deleteLater 处理后），忽略
+                self._fetch_thread = None
 
-        thread = _BalanceFetchThread(
-            config["url"], api_key, config["balance_key"], config["currency"], provider_name
-        )
+        thread = _BalanceFetchThread(config["url"], api_key, config["balance_key"], config["currency"], provider_name)
         thread.result_ready.connect(self._on_balance_result)
         thread.finished.connect(thread.deleteLater)
         self._fetch_thread = thread
@@ -245,7 +253,7 @@ class BalanceDisplay(QWidget):
                 if balance_str:
                     return float(balance_str)
             return None
-        except (ValueError, TypeError, KeyError):
+        except ValueError, TypeError, KeyError:
             return None
 
     def _update_display(self):

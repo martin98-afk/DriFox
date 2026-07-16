@@ -175,12 +175,14 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     reasoning = bool(model_info.get("reasoning", False))
     reasoning_options = model_info.get("reasoning_options") or []
     reasoning_type = None
-    if reasoning_options and isinstance(reasoning_options, list):
+    # reasoning_options 为空 → 模型有思考能力但不可控，不暴露开关
+    has_thinking_controls = bool(
+        reasoning_options and isinstance(reasoning_options, list) and len(reasoning_options) > 0
+    )
+    if reasoning and has_thinking_controls:
         first_opt = reasoning_options[0]
         if isinstance(first_opt, dict):
             reasoning_type = first_opt.get("type")
-
-    if reasoning:
         thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type) or DEFAULT_REASONING_PARAM
     else:
         thinking_param = None
@@ -198,7 +200,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     result: Dict[str, Any] = {
         "context_limit": context_limit,
         "supports_vision": supports_vision,
-        "supports_thinking": reasoning,
+        "supports_thinking": reasoning and has_thinking_controls,
         "source": "models.dev",
         "note": model_info.get("description", ""),
         "release_date": model_info.get("release_date"),
