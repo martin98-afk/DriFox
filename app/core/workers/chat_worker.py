@@ -3621,6 +3621,29 @@ class OpenAIChatWorker(QThread):
                      供 _try_inject_vision_content 等需要结构化数据的场景使用
         """
         raw_content = getattr(result_obj, "content", None) if result_obj else None
+
+        # ---- 根据模型能力为 screenshot 工具结果追加提示 ----
+        # 目的：防止 LLM 反复截图。程序侧知道模型是否支持视觉，而 LLM 不知道。
+        # - 视觉模型：告知截图已自动以图片形式注入上下文，无需重复截图
+        # - 非视觉模型：告知本模型无法看到图像内容，截图只能获得文件路径
+        if tool_name == "screenshot" and success:
+            try:
+                from app.core.model_capabilities import get_model_capabilities
+                _model_name = str(self.llm_config.get("模型名称", "") or "")
+                _caps = get_model_capabilities(_model_name)
+                if _caps.get("supports_vision"):
+                    result_content = str(result_content) + (
+                        "\n\n[Vision Notice] 截图已自动以图片形式注入你的视觉上下文，"
+                        "你现在已经能看到屏幕内容了，不需要再次截图。"
+                    )
+                else:
+                    result_content = str(result_content) + (
+                        "\n\n[Notice] 本模型不支持视觉识别，你无法从截图中看到图像内容，"
+                        "只能获得文件路径。"
+                    )
+            except Exception:
+                pass  # 降级：不加额外提示
+
         result = {
             "role": "tool",
             "tool_call_id": tool_call_id,
