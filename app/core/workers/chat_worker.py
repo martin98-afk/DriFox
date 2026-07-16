@@ -2071,6 +2071,34 @@ class OpenAIChatWorker(QThread):
         model_name = str(self.llm_config.get("模型名称", "") or "")
         caps = get_model_capabilities(model_name)
         if not caps.get("supports_vision"):
+            # 不支持视觉的模型：在已构建的 tool 消息 content 追加提示，防止模型幻觉
+            _non_vision_tools = set()
+            for r in tool_results:
+                if not isinstance(r, dict) or not r.get("success"):
+                    continue
+                tn = r.get("name", "")
+                if tn == "screenshot":
+                    _non_vision_tools.add(tn)
+                elif tn == "read" and isinstance(r.get("image_data"), dict) and r["image_data"].get("data"):
+                    _non_vision_tools.add(tn)
+            if _non_vision_tools:
+                _nv_hint = (
+                    "\n\n<system-reminder>\n"
+                    "Tool executed successfully, but this model does not support vision. "
+                    "You cannot see images. Only describe what you know from the text.\n"
+                    "</system-reminder>"
+                )
+                for msg in current_messages:
+                    if msg.get("role") == "tool" and msg.get("name") in _non_vision_tools:
+                        existing = msg.get("content", "")
+                        if isinstance(existing, str) and _nv_hint not in existing:
+                            msg["content"] = existing + _nv_hint
+                if session_messages is not None:
+                    for msg in session_messages:
+                        if msg.get("role") == "tool" and msg.get("name") in _non_vision_tools:
+                            existing = msg.get("content", "")
+                            if isinstance(existing, str) and _nv_hint not in existing:
+                                msg["content"] = existing + _nv_hint
             return False
 
         # ---- 收集所有可注入的图片 data_uri ----
