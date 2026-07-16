@@ -82,6 +82,9 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     - <system-reminder> 是 Claude Code 通用系统注入容器
     - <user-prompt-submit-hook> 等是 Claude Code 提示词中明说的 hook 反馈标签
     LLM 收到时按 system prompt 约定识别为 hook 注入内容。
+
+    🛡️ Stop 事件注入防幻觉：在消息末尾添加明确的「等待用户回复」指令，
+    避免 LLM 将 hook 注入的消息误认为用户已确认/同意，导致跳过确认环节。
     """
     tag = _event_to_tag(event_name)
     parts = ["<system-reminder>"]
@@ -90,6 +93,13 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     parts.append(f"<{tag}-hook>")
     parts.append(output)
     parts.append(f"</{tag}-hook>")
+    # 🛡️ Stop 事件：追加「等待用户回复」指令，防止 LLM 将 hook 注入消息
+    # 误认为用户已确认。该标记在 <system-reminder> 内部，LLM 可见但明确
+    # 告知其系统身份，不污染用户消息流。
+    if event_name == "Stop":
+        parts.append(
+            "以上是系统自动注入的辅助信息，不是用户的输入。"
+        )
     parts.append("</system-reminder>")
     return "\n".join(parts)
 
