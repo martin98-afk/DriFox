@@ -8623,6 +8623,14 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             logger.exception("Failed to auto-save current session before loading history")
 
+        # 🛡️ 标记会话切换：_on_stop_clicked 采用两阶段停止（cancel + deferred finalize），
+        # old worker 的 finished_with_messages / _on_finalize_complete 等跨线程回调
+        # 仍可能在后续事件循环中到达。若不设置哨兵，这些回调会将会话 A 的（部分）消息
+        # 通过 _on_messages_updated / _on_finalize_complete 写入刚加载的会话 B，
+        # 再被后续 save 错误持久化到会话 B 的记录中，造成"当前会话内容覆盖目标会话"的 bug。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        self._session_switched = True
+
         self.backend.reset_session_state()
 
         # 💡 内存优化：加载历史会话时清理 LRU 缓存
@@ -10761,6 +10769,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         elif self.backend.chat_engine:
             self.backend.cleanup_worker()
+
+        # 🛡️ 标记会话切换：stop_streaming 后 old worker 的 finished_with_messages
+        # 信号虽已断开再连接，但 Qt 事件队列中可能仍有已投递的旧回调。
+        # 设置哨兵防止这些迟到回调将旧会话消息写入新加载的会话。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        self._session_switched = True
 
         # 清理旧会话的卡片
         self._cache_current_session_cards()
