@@ -1194,7 +1194,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     cards.append(widget)
         return cards
 
-    def _get_current_model_config(self) -> Dict[str, Any]:
+    def _ensure_thinking_fields(self, config: dict):
+        """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
+
+        在 model_overrides 叠加后调用，防止旧覆盖数据回补思考字段。
+        """
+        if not self._current_model_name:
+            return
+        from app.core.model_capabilities import get_model_capabilities
+
+        caps = get_model_capabilities(self._current_model_name)
+        if not caps.get("supports_thinking", False):
+            config.pop("思考模式", None)
+            config.pop("思考等级", None)
+            config.pop("思考预算", None)
+
+    def _get_current_model_config(self):
         """获取当前选中的模型配置，实时从系统配置读取
 
         多窗口隔离：使用 _current_model_name 覆盖全局配置中的模型名称，
@@ -1235,6 +1250,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     overrides = override_data.get(self._current_model_name, {})
                 if overrides:
                     config.update(overrides)
+            # 模型覆盖数据可能回补思考字段，以 models.dev 为准重新检查
+            self._ensure_thinking_fields(config)
             return config
 
         return {}
@@ -5589,10 +5606,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
-        self._card_manager.toggle_card("model_config", self._window_id)
-        # 显示时刷新模型配置数据
         if self._card_manager.is_card_visible("model_config", self._window_id):
+            # 已可见 → 隐藏
+            self._card_manager.hide_card("model_config", self._window_id)
+        else:
+            # 先加载数据再显示卡片，确保 CardContainer._do_expand()
+            # 计算展开高度时内容已填充完毕，不会因参数字段在 ScrollArea
+            # 内部增长而错过 Resize 事件，导致卡片高度锁死无法完全展开
             self._load_model_config_to_card()
+            self._card_manager.show_card("model_config", self._window_id)
             # 确保顶层窗口从最小化恢复并激活
             top_window = self.window()
             if top_window:
@@ -5679,6 +5701,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 overrides = override_data.get(self._current_model_name, {})
             if overrides:
                 config.update(overrides)
+        # 模型覆盖数据可能回补思考字段，以 models.dev 为准重新检查
+        self._ensure_thinking_fields(config)
 
         # 移除连接信息、元数据字段和无关的额外字段
         for pop_key in [
