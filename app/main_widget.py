@@ -11037,6 +11037,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 ext = os.path.splitext(img_path)[1].lower()
                 mime = _MIME_MAP.get(ext, "image/png")
                 data_uri = f"data:{mime};base64,{img_b64}"
+
+                # 图片大小检查：超过 5MB 自动压缩，防止 API 400
+                if len(img_b64) > 5 * 1024 * 1024:
+                    from app.core.workers.chat_worker import compress_data_uri
+                    compressed = compress_data_uri(data_uri)
+                    if compressed != data_uri:
+                        data_uri = compressed
+                        logger.info(f"[ImageAttach] 附件图片已压缩: {img_path}")
+
                 image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
             except Exception as e:
                 logger.warning(f"处理图片附件失败 {img_path}: {e}")
