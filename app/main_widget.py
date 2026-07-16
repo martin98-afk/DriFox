@@ -77,9 +77,7 @@ from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
-from app.tools.tool_classifier import (
-    get_tool_counts,
-)
+# [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
     Colors,
@@ -90,6 +88,9 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon
+# ── App Widget 导入 ──
+# Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
+# 方法级导入无法跨方法共享。仅将重型导入 app.tools.tool_classifier 移入方法。
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
     AttachmentChip,
@@ -111,7 +112,6 @@ from app.widgets.cards.floating.question_floating_widget import (
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
-
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
 from app.widgets.cards.floating.todo_floating_widget import (
@@ -124,13 +124,6 @@ from app.widgets.cards.settings.base_settings_card import (
 from app.widgets.cards.settings.history_card import (
     HistoryCard,
     get_message_preview,
-)
-from app.widgets.cards.settings.hook_setting_card import HookEditCard
-from app.widgets.cards.settings.llm_settings_card import (
-    LLMSettingsCard,
-)
-from app.widgets.cards.settings.mcp_setting_card import (
-    MCPEditCard,
 )
 from app.widgets.cards.settings.memory_card import (
     TAB_KEY_DOCUMENTS,
@@ -148,10 +141,13 @@ from app.widgets.cards.settings.project_selector_card import (
     extract_project_initials,
     get_project_color,
 )
+from app.widgets.cards.settings.hook_setting_card import HookEditCard
+from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
 from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
-from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
+from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
 )
@@ -5681,6 +5677,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _refresh_tool_toggle_btn(self):
         """刷新工具开关按钮上的数字和 agent 覆盖指示"""
+        # [PERF] 延迟导入，避免模块加载时触发 app.tools 全量导入（~2s）
+        from app.tools.tool_classifier import get_tool_counts
+
         toggles = self._tool_permission_controller.get_toggles()
         dangerous, safe = get_tool_counts(toggles)
         self._tool_danger_label.setText(str(dangerous))
