@@ -2152,8 +2152,10 @@ class OpenAIChatWorker(QThread):
             {
                 "type": "text",
                 "text": (
-                    f"[System] The following image(s) were obtained via {tool_names_str}. "
-                    "Please analyze the visual content directly."
+                    f"<system-reminder>\n"
+                    f"The following image(s) were obtained via {tool_names_str}. "
+                    "Please analyze the visual content directly.\n"
+                    f"</system-reminder>"
                 ),
             },
         ]
