@@ -2174,37 +2174,6 @@ class OpenAIChatWorker(QThread):
         if session_messages is not None:
             self._inject_images_to_user_message(session_messages, data_uris)
 
-        # ---- 在 tool result 内容中追加视觉提示，防止 LLM 重复截图 ----
-        # 从 current_messages 中找到本轮刚刚追加的 tool result 消息，
-        # 在其 content 末尾追加一条明确提示，告知 LLM 截图已以图片形式注入视觉上下文。
-        # 这样 LLM 在下一轮 API 调用时就会看到 "截图已注入" 的提示，不会再重复调用 screenshot。
-        _tool_names_injected = set()
-        for r in tool_results:
-            if isinstance(r, dict) and r.get("success"):
-                tn = r.get("name", "")
-                if tn == "screenshot":
-                    _tool_names_injected.add(tn)
-        if "screenshot" in _tool_names_injected:
-            _vision_hint = (
-                "\n\n[Vision Notice] 以上截图已自动以图片形式注入你的视觉上下文，"
-                "你现在已经能看到屏幕内容了，不需要再次截图。"
-            )
-            # 在 current_messages 中找到最后一个 role=tool 且 name=screenshot 的消息
-            for msg in reversed(current_messages):
-                if msg.get("role") == "tool" and msg.get("name") == "screenshot":
-                    existing = msg.get("content", "")
-                    if isinstance(existing, str) and _vision_hint not in existing:
-                        msg["content"] = existing + _vision_hint
-                    break
-            # 同步更新 session_messages 中的同样位置
-            if session_messages is not None:
-                for msg in reversed(session_messages):
-                    if msg.get("role") == "tool" and msg.get("name") == "screenshot":
-                        existing = msg.get("content", "")
-                        if isinstance(existing, str) and _vision_hint not in existing:
-                            msg["content"] = existing + _vision_hint
-                        break
-
         logger.info(f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}")
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
