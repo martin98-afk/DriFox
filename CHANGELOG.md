@@ -1,6 +1,40 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.0] - 2026-07-16
+
+自上一版本以来的变更 | 提交数：19 · 文件变更：48 · +1492/-435 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **models.dev 同步与动态模型能力集成**: 实现 models.dev 平台同步机制，支持动态模型能力（capabilities）的自动获取与集成，增强多平台模型兼容性
+- **OpenCode Go 增强与代码格式化**: 增强 provider 对 OpenCode Go 的支持，同时改进代码格式化输出效果
+- **默认 OpenCode 免费 Provider 自动注入**: 新增默认 OpenCode 免费 provider，对所有用户自动注入，并限制仅开放 4 个免费模型
+- **模型参数按 Provider 隔离**: 实现模型参数按 provider 独立管理，增强多 provider 场景下的配置隔离性与灵活性
+- **模型能力处理增强与 thinking 字段一致性**: 增强模型 capabilities 处理逻辑，确保 thinking 相关字段在不同模型间的一致表现
+- **模型选择器信息增强**: 为模型项添加能力 emoji 图标、模型描述信息和增强 tooltip，显著提升选模型时的信息密度与直观性
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **单实例检查修复**: 修复主应用流程中单实例检查的逻辑问题，确保多开窗口按预期运行
+- **工具 Schema 5s TTL 缓存**: 为 `get_builtin_tools_schema` 添加 5 秒 TTL 缓存，减少重复构建开销；将 MCP 注入日志降级为 debug 级别，减少日志噪声
+- **CardManager 撤销操作缓存清空修复**: 修复撤销操作时 CardManager 状态处理不当导致缓存被意外清空的问题
+- **默认 OpenCode Provider 用户删除后重建**: 修复用户删除默认 OpenCode 免费 provider 后未正确重建，再次创建时出现竞态条件的问题
+- **LLM 默认字体族优化**: 将默认 LLM 字体族依次更新为微软雅黑和楷体，优化中文显示效果
+
+### ⚡ 性能优化 (Performance)
+
+- **非关键插件与 WebEngine 延迟初始化**: 将非关键插件初始化、共享 WebEngine Profile 设置延迟至主窗口显示后，显著提升 UI 启动响应速度
+- **get_tool_counts 延迟导入**: 延迟导入 `get_tool_counts` 函数调用，减少模块加载阶段的初始化开销
+
+### ♻️ 代码重构 (Refactoring)
+
+- **多处代码结构可读性优化**: 重构多处代码结构，提升整体可读性与可维护性
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号更新至 v0.4.0，同步更新 pyproject.toml、配置文件和安装脚本
+
 ## [v0.3.11] - 2026-07-15
 
 自上一版本以来的变更 | 提交数：23 · 文件变更：31 · +2805/-2472 | 贡献者：dingma, mading
