@@ -194,12 +194,19 @@ class Settings(QConfig):
         if instance.llm_default_opencode_injected.value:
             return
 
+        free_models = [
+            "deepseek-v4-flash-free",
+            "mimo-v2.5-free",
+            "nemotron-3-ultra-free",
+            "north-mini-code-free",
+        ]
         provider_info = {
             "provider_name": provider_name,
             "name": config_name,
             "API_URL": api_url,
             "API_KEY": api_key,
             "模型名称": model_name,
+            "模型列表": free_models,
         }
         # 继承 FREE_PROVIDERS 中的其他默认参数（温度、最大Token、认证方式等）
         for key, value in default_config.items():

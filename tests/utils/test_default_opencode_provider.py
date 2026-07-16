@@ -55,6 +55,12 @@ def test_inject_when_empty():
     assert info["API_URL"] == "https://opencode.ai/zen/v1"
     assert info["模型名称"] == "deepseek-v4-flash-free"
     assert info["API_KEY"] == OPENCODE_SHARED_API_KEY
+    assert info["模型列表"] == [
+        "deepseek-v4-flash-free",
+        "mimo-v2.5-free",
+        "nemotron-3-ultra-free",
+        "north-mini-code-free",
+    ]
     assert "config_id" in info
 
 
