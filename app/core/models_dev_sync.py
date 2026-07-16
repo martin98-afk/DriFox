@@ -40,6 +40,7 @@ def _default_cache_path() -> Path:
         # 兜底：项目根目录下的 .drifox/cache/
         return Path(__file__).resolve().parent.parent.parent / ".drifox" / "cache" / "models_dev_cache.json"
 
+
 # DriFox 服务商名 -> models.dev provider id
 MODELS_DEV_PROVIDER_MAP = {
     "OpenAI": "openai",
@@ -53,6 +54,7 @@ MODELS_DEV_PROVIDER_MAP = {
     "Groq": "groq",
     "Ollama": "ollama-cloud",
     "OpenCode Zen": "opencode",
+    "OpenCode Go": "opencode-go",
 }
 
 # models.dev reasoning_options type -> DriFox thinking_param
@@ -161,7 +163,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     try:
         context_limit = int(context_limit)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     if context_limit <= 0:
         return None
@@ -190,7 +192,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
             max_output_tokens = int(max_output_tokens)
             if max_output_tokens <= 0:
                 max_output_tokens = None
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             max_output_tokens = None
 
     result: Dict[str, Any] = {

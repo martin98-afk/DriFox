@@ -9,10 +9,15 @@ IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 # ============================================================
 # 套餐用量查询字段（与模型参数无关，仅用于配额查询，不得泄漏到模型参数或 API 请求）
 # ============================================================
-QUOTA_EXCLUDE_KEYS = frozenset({
-    "server_id", "cookie", "workspace_id",
-    "csrf_token", "x_web_id",
-})
+QUOTA_EXCLUDE_KEYS = frozenset(
+    {
+        "server_id",
+        "cookie",
+        "workspace_id",
+        "csrf_token",
+        "x_web_id",
+    }
+)
 
 # ============================================================
 # 统一参数 schema：定义所有模型参数的 UI 表现与 API 映射
@@ -132,14 +137,7 @@ MODEL_LEVEL_KEYS = frozenset(
 
 
 PROVIDER_MODELS = {
-    "火山方舟": [
-        "doubao-seed-code",
-        "kimi-k2.6 ",
-        "kimi-k2.5",
-        "minimax-m2.7",
-        "glm-4.7",
-        "glm5.1"
-    ],
+    "火山方舟": ["doubao-seed-code", "kimi-k2.6 ", "kimi-k2.5", "minimax-m2.7", "glm-4.7", "glm5.1"],
     "MiniMax": [
         "MiniMax-M2.7",
         "MiniMax-M2.7-highspeed",
@@ -237,6 +235,27 @@ PROVIDER_MODELS = {
         "qwen3.6-plus",
         "qwen3.5-plus",
     ],
+    "OpenCode Go": [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.2",
+        "kimi-k2.5",
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+        "mimo-v2-omni",
+        "mimo-v2-pro",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "minimax-m2.5",
+        "minimax-m2.7",
+        "minimax-m3",
+        "qwen3.5-plus",
+        "qwen3.6-plus",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+    ],
 }
 
 FREE_PROVIDERS = {
@@ -253,6 +272,15 @@ FREE_PROVIDERS = {
         "API_URL": "https://opencode.ai/zen/v1",
         "API_KEY": "",
         "模型名称": "deepseek-v4-flash-free",
+        "温度": 0.7,
+        "最大Token": 200000,
+        "认证方式": "bearer",
+        "获取地址": "https://opencode.ai/auth",
+    },
+    "OpenCode Go": {
+        "API_URL": "https://opencode.ai/zen/go/v1",
+        "API_KEY": "",
+        "模型名称": "deepseek-v4-flash",
         "温度": 0.7,
         "最大Token": 200000,
         "认证方式": "bearer",
@@ -377,6 +405,7 @@ PROVIDER_ICONS = {
     "Anthropic (Claude)": "Anthropic",
     "Google Gemini": "gemini-ai",
     "OpenCode Zen": "opencode",
+    "OpenCode Go": "opencode",
 }
 
 
