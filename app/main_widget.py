@@ -696,35 +696,8 @@ class OpenAIChatToolWindow(ToolWindow):
         mgr.register_card(self._window_id, ContainerType.TOP, "todo", self._todo_floating_widget)
         self._top_card_container.add_card("todo", self._todo_floating_widget)
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "mcp_edit",
-            self._mcp_edit_card,
-            system_card=True,
-        )
-        self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
-
-        # 注：settings 弹窗已改为懒构建（_build_settings_popup，首帧后），
-        # 其 CardManager 注册与容器 add_card 一并移入该方法，避免此处引用尚未构建的对象。
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "provider_edit",
-            self._provider_edit_card,
-            system_card=True,
-        )
-        self._top_card_container.add_card("provider_edit", self._provider_edit_card)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "hook_edit",
-            self._hook_edit_card,
-            system_card=True,
-        )
-        self._top_card_container.add_card("hook_edit", self._hook_edit_card)
+        # 注：mcp_edit/provider_edit/hook_edit 三张编辑卡片已改为懒创建，
+        # 注册/入容器在 _ensure_xxx_card() 中按需执行，避免 setup_ui 关键路径上构建。
 
         # 项目选择卡片（Top 容器，与 settings 同容器互斥）
         mgr.register_card(
@@ -954,11 +927,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_btn = TransparentToolButton(FluentIcon.SETTING, self)
         self._settings_btn.setFixedSize(28, 28)
         self._settings_btn.setToolTip("设置")
-        self._settings_btn.clicked.connect(self._toggle_settings_card)
+        # 设置弹窗已改为懒构建（1500ms 后），
+        # 使用 _open_settings_popup 确保若弹窗尚未构建则先构建再切换
+        self._settings_btn.clicked.connect(self._open_settings_popup)
         title_bar.insert_button(2, self._settings_btn)
 
     def _toggle_settings_card(self):
         """切换设置卡片的显示"""
+        # 确保懒构建的设置弹窗已就绪
+        self._build_settings_popup()
         self._card_manager.toggle_card("settings", self._window_id)
 
     def _open_api_docs(self):
@@ -1287,11 +1264,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if is_duplicate:
             QTimer.singleShot(0, lambda: self._safe_timer_call(self._on_initialization_complete))
         else:
-            QTimer.singleShot(100, lambda: self._safe_timer_call(self._load_model_configs))
+            # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
+            # _load_model_configs 遍历所有服务商配置（50-200ms），
+            # _sync_working_directory 文件系统检测（20-50ms），
+            # 均匀分散到 500ms-900ms 窗口内，避免同时爆发导致 UI 冻结
+            QTimer.singleShot(500, lambda: self._safe_timer_call(self._load_model_configs))
             # 初始化当前项目的工作目录
-            QTimer.singleShot(200, lambda: self._safe_timer_call(self._sync_working_directory))
+            QTimer.singleShot(700, lambda: self._safe_timer_call(self._sync_working_directory))
             # 初始化完成后解除保护
-            QTimer.singleShot(300, lambda: self._safe_timer_call(self._on_initialization_complete))
+            QTimer.singleShot(900, lambda: self._safe_timer_call(self._on_initialization_complete))
         self._connect_opacity_signal()
         super().showEvent(event)
 
@@ -1804,49 +1785,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
-        # 延迟到首帧绘制后再构建，让窗口外壳先出现，压缩"打开/复制窗口"的出现耗时。
-        QTimer.singleShot(0, self._build_settings_popup)
+        # 大幅延迟到窗口可交互之后再构建（1500ms），让窗口外壳先出现 + 用户能先打字
+        QTimer.singleShot(1500, self._build_settings_popup)
 
-        # Hook 编辑卡片
-        self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
-        self._hook_edit_card.setMinimumHeight(200)
-        self._hook_edit_card.set_height_mode("proportional")  # 按窗口比例自适应高度
-        self._hook_edit_popup = HookEditCard(parent=self)
-        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
-        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
-        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
-        self._hook_edit_card.set_save_button_handler(self._hook_edit_popup._on_save)
-        self._hook_edit_card.setVisible(False)
-        self._hook_edit_card.closed.connect(self._on_hook_edit_card_closed)
-        # Hook Edit 卡片已添加到容器，不再需要直接 layout.addWidget
-
-        # 服务商编辑卡片
-        self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
-        self._provider_edit_card.setMinimumHeight(300)
-        self._provider_edit_card.set_height_mode("content")  # 按内容自适应高度
-        self._provider_edit_popup = ProviderEditCard(parent=self)
-        # 默认是新建流程（ProviderEditCard 内部 is_new 默认 True）
-        self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
-        )
-        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        # 照抄历史卡片的导入按钮模式：在标题栏加保存按钮，信号连到内容组件
-        # 获取 ProviderEditCard 实例的保存方法
-        save_handler = self._provider_edit_popup._on_save
-        self._provider_edit_card.set_save_button_handler(save_handler)
-        self._provider_edit_card.setVisible(False)
-        self._provider_edit_card.closed.connect(self._on_provider_edit_card_closed)
-        # Provider Edit 卡片已添加到容器，不再需要直接 layout.addWidget
-
-        # MCP 编辑卡片
-        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
-        self._mcp_edit_card.setMinimumHeight(200)
-        self._mcp_edit_card.set_height_mode("proportional")  # 按窗口比例自适应高度
+        # ── 隐藏编辑卡片懒创建标记 ──
+        # hook/provider/mcp 三张编辑卡片从直接创建改为首次显示时懒创建，
+        # 避免在 setup_ui 关键路径上构建设置子卡片（每张 ~20-50ms）
+        self._hook_edit_card = None
+        self._hook_edit_popup = None
+        self._provider_edit_card = None
+        self._provider_edit_popup = None
+        self._mcp_edit_card = None
         self._mcp_edit_popup = None
-        self._mcp_edit_card.setVisible(False)
-        self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
-        # MCP Edit 卡片已添加到容器，不再需要直接 layout.addWidget
 
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
@@ -1874,14 +1824,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 上方卡片容器 - 添加 Todo
         self._top_card_container.add_card("todo", self._todo_floating_widget)
 
-        # 上方卡片容器 - 添加 MCP Edit
-        self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
-
-        # 上方卡片容器 - 添加 Hook Edit
-        self._top_card_container.add_card("hook_edit", self._hook_edit_card)
-
-        # 上方卡片容器 - 添加 Provider Edit
-        self._top_card_container.add_card("provider_edit", self._provider_edit_card)
+        # 注：mcp_edit/hook_edit/provider_edit 三张编辑卡片已改为懒创建，
+        # 在 _ensure_xxx_card() 中按需添加至容器，此处跳过避免访问 None。
 
         layout.addWidget(self._top_card_container)
 
@@ -5008,6 +4952,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_provider_add_card(self):
         """显示添加服务商卡片"""
+        self._ensure_provider_edit_card()
         # 隐藏设置卡片
         self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
@@ -5033,6 +4978,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_hook_add_card(self):
         """显示添加 Hook 卡片"""
+        self._ensure_hook_edit_card()
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", self._window_id)
@@ -5056,6 +5002,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_hook_edit_card(self, hook_id: str, hook_data: dict):
         """显示编辑 Hook 卡片"""
+        self._ensure_hook_edit_card()
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", self._window_id)
@@ -5151,6 +5098,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
         """显示编辑服务商卡片"""
+        self._ensure_provider_edit_card()
         # 隐藏设置卡片
         self._card_manager.hide_card("settings", self._window_id)
         # 设置卡片标题
@@ -5186,6 +5134,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_mcp_add_card(self):
         """显示添加 MCP 服务器卡片"""
+        self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", self._window_id)
         self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
         self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self)
@@ -5204,6 +5153,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
         """显示编辑 MCP 服务器卡片"""
+        self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", self._window_id)
         self._card_manager.show_card("mcp_edit", self._window_id)
         self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
@@ -5309,6 +5259,67 @@ class OpenAIChatToolWindow(ToolWindow):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
         self._card_manager.hide_card("mcp_edit", self._window_id)
         self._card_manager.show_card("settings", self._window_id)
+
+    # ── 编辑卡片懒创建（避免 setup_ui 关键路径构建隐藏卡片） ──
+
+    def _ensure_hook_edit_card(self):
+        """确保 Hook 编辑卡片已创建并注册到 CardManager"""
+        if self._hook_edit_card is not None:
+            return
+        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+
+        self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
+        self._hook_edit_card.setMinimumHeight(200)
+        self._hook_edit_card.set_height_mode("proportional")
+        self._hook_edit_popup = HookEditCard(parent=self)
+        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
+        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
+        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
+        self._hook_edit_card.set_save_button_handler(self._hook_edit_popup._on_save)
+        self._hook_edit_card.setVisible(False)
+        self._hook_edit_card.closed.connect(self._on_hook_edit_card_closed)
+        # 注册到 CardManager 和容器
+        mgr = self._card_manager
+        mgr.register_card(self._window_id, ContainerType.TOP, "hook_edit", self._hook_edit_card, system_card=True)
+        self._top_card_container.add_card("hook_edit", self._hook_edit_card)
+
+    def _ensure_provider_edit_card(self):
+        """确保服务商编辑卡片已创建并注册到 CardManager"""
+        if self._provider_edit_card is not None:
+            return
+        self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
+        self._provider_edit_card.setMinimumHeight(300)
+        self._provider_edit_card.set_height_mode("content")
+        self._provider_edit_popup = ProviderEditCard(parent=self)
+        self._provider_edit_popup.saved.connect(
+            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
+        )
+        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
+        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
+        self._provider_edit_card.set_save_button_handler(self._provider_edit_popup._on_save)
+        self._provider_edit_card.setVisible(False)
+        self._provider_edit_card.closed.connect(self._on_provider_edit_card_closed)
+        # 注册到 CardManager 和容器
+        mgr = self._card_manager
+        mgr.register_card(
+            self._window_id, ContainerType.TOP, "provider_edit", self._provider_edit_card, system_card=True
+        )
+        self._top_card_container.add_card("provider_edit", self._provider_edit_card)
+
+    def _ensure_mcp_edit_card(self):
+        """确保 MCP 编辑卡片已创建并注册到 CardManager"""
+        if self._mcp_edit_card is not None:
+            return
+        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
+        self._mcp_edit_card.setMinimumHeight(200)
+        self._mcp_edit_card.set_height_mode("proportional")
+        self._mcp_edit_popup = None
+        self._mcp_edit_card.setVisible(False)
+        self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
+        # 注册到 CardManager 和容器
+        mgr = self._card_manager
+        mgr.register_card(self._window_id, ContainerType.TOP, "mcp_edit", self._mcp_edit_card, system_card=True)
+        self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
 
     def _on_hook_toggled(self):
         """Hook 开关/增删 → 广播到所有窗口刷新列表"""

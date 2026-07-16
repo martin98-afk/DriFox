@@ -112,6 +112,14 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
 
+        # 初始化共享 WebEngine Profile（轻量，不启动 Chromium 进程）
+        # [PERF] 从主线程关键路径移到这里，首帧不再阻塞
+        try:
+            from app.core.webengine_profile import init_shared_web_profile
+            init_shared_web_profile(parent=app)
+        except Exception:
+            logger.exception("[DeferredStartup] init_shared_web_profile 失败")
+
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
             try:
@@ -166,10 +174,10 @@ def main():
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
     _guard = SingleInstanceGuard("Drifox")
-    # if not _guard.try_lock():
-    #     _guard.request_show_window()
-    #     _guard.cleanup()
-    #     return
+    if not _guard.try_lock():
+        _guard.request_show_window()
+        _guard.cleanup()
+        return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
@@ -181,10 +189,6 @@ def main():
             setTheme(Theme.DARK)
     except Exception:
         setTheme(Theme.DARK)
-
-    # 初始化共享 WebEngine Profile
-    from app.core.webengine_profile import init_shared_web_profile
-    init_shared_web_profile(parent=app)
 
     # 获取全局字体配置
     from app.utils.config import Settings
