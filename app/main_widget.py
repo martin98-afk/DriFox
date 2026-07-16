@@ -60,8 +60,8 @@ from app.constants import (
     IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
-    PROVIDER_MODELS,
     QUOTA_EXCLUDE_KEYS,
+    get_merged_provider_models,
 )
 from app.core import (
     ChatBackend,
@@ -1194,7 +1194,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     cards.append(widget)
         return cards
 
-    def _get_current_model_config(self) -> Dict[str, Any]:
+    def _ensure_thinking_fields(self, config: dict):
+        """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
+
+        在 model_overrides 叠加后调用，防止旧覆盖数据回补思考字段。
+        """
+        if not self._current_model_name:
+            return
+        from app.core.model_capabilities import get_model_capabilities
+
+        caps = get_model_capabilities(self._current_model_name)
+        if not caps.get("supports_thinking", False):
+            config.pop("思考模式", None)
+            config.pop("思考等级", None)
+            config.pop("思考预算", None)
+
+    def _get_current_model_config(self):
         """获取当前选中的模型配置，实时从系统配置读取
 
         多窗口隔离：使用 _current_model_name 覆盖全局配置中的模型名称，
@@ -1220,11 +1235,23 @@ class OpenAIChatToolWindow(ToolWindow):
             # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 FREE_PROVIDERS 的部分默认值）
             config = apply_model_defaults(config, self._current_model_name)
             # 叠加用户按模型名覆盖的参数（最高优先级）
+            # key = "服务商名||模型名"，按服务商隔离同名模型
             model_overrides = getattr(self.cfg, "llm_model_overrides", None)
             if model_overrides and self._current_model_name:
-                overrides = (model_overrides.value or {}).get(self._current_model_name, {})
+                override_data = model_overrides.value or {}
+                overrides = None
+                if self._current_provider_name:
+                    pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                        "provider_name", self._current_provider_name
+                    )
+                    overrides = override_data.get(f"{pname}||{self._current_model_name}")
+                # 向后兼容：旧格式（纯模型名）兜底
+                if overrides is None:
+                    overrides = override_data.get(self._current_model_name, {})
                 if overrides:
                     config.update(overrides)
+            # 模型覆盖数据可能回补思考字段，以 models.dev 为准重新检查
+            self._ensure_thinking_fields(config)
             return config
 
         return {}
@@ -4421,6 +4448,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_model_selector_to_card(self):
         """加载模型数据到模型选择卡片"""
         provider_models_data = []
+        merged_provider_models = get_merged_provider_models()
         # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
         self._display_to_config_id: dict[str, str] = {}
         # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
@@ -4442,8 +4470,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         saved_models = []
                 if isinstance(saved_models, list):
                     model_list = list(saved_models)
-            elif pname in PROVIDER_MODELS:
-                model_list = list(PROVIDER_MODELS[pname])
+            elif pname in merged_provider_models:
+                model_list = list(merged_provider_models[pname])
             cur_model = config.get("模型名称", "")
             if cur_model and cur_model not in model_list:
                 model_list.insert(0, cur_model)
@@ -4460,11 +4488,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 "display_name", self._current_provider_name
             )
 
+        # 收集模型描述（来自 models.dev / 硬编码能力字典）
+        model_notes = {}
+        for _, models, _ in provider_models_data:
+            for model_name in models:
+                if model_name not in model_notes:
+                    caps = get_model_capabilities(model_name)
+                    note = (caps.get("note", "") or "").strip()
+                    model_notes[model_name] = note
+
         self._model_selector_card_content.set_providers_data(
             provider_models_data,
             current_display,
             self._current_model_name or "",
             self._display_to_provider_name,
+            model_notes=model_notes,
         )
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
@@ -4651,7 +4689,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            self.current_model_btn.setToolTip(f"{display} · {self._current_model_name}")
+            note = get_model_capabilities(self._current_model_name).get("note", "")
+            tooltip = f"{display} · {self._current_model_name}"
+            if note:
+                tooltip += f"\n{note}"
+            self.current_model_btn.setToolTip(tooltip)
         elif self._current_provider_name:
             self._model_btn_text.setText(display)
             self.current_model_btn.setToolTip(display)
@@ -5578,10 +5620,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
-        self._card_manager.toggle_card("model_config", self._window_id)
-        # 显示时刷新模型配置数据
         if self._card_manager.is_card_visible("model_config", self._window_id):
+            # 已可见 → 隐藏
+            self._card_manager.hide_card("model_config", self._window_id)
+        else:
+            # 先加载数据再显示卡片，确保 CardContainer._do_expand()
+            # 计算展开高度时内容已填充完毕，不会因参数字段在 ScrollArea
+            # 内部增长而错过 Resize 事件，导致卡片高度锁死无法完全展开
             self._load_model_config_to_card()
+            self._card_manager.show_card("model_config", self._window_id)
             # 确保顶层窗口从最小化恢复并激活
             top_window = self.window()
             if top_window:
@@ -5653,11 +5700,23 @@ class OpenAIChatToolWindow(ToolWindow):
         config = apply_model_defaults(config, self._current_model_name)
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
+        # 按「服务商名||模型名」隔离同名模型
         model_overrides = getattr(self.cfg, "llm_model_overrides", None)
         if model_overrides and self._current_model_name:
-            overrides = (model_overrides.value or {}).get(self._current_model_name, {})
+            override_data = model_overrides.value or {}
+            overrides = None
+            if self._current_provider_name:
+                pname = self._valid_configs.get(self._current_provider_name, {}).get(
+                    "provider_name", self._current_provider_name
+                )
+                overrides = override_data.get(f"{pname}||{self._current_model_name}")
+            # 向后兼容：旧格式（纯模型名）兜底
+            if overrides is None:
+                overrides = override_data.get(self._current_model_name, {})
             if overrides:
                 config.update(overrides)
+        # 模型覆盖数据可能回补思考字段，以 models.dev 为准重新检查
+        self._ensure_thinking_fields(config)
 
         # 移除连接信息、元数据字段和无关的额外字段
         for pop_key in [
@@ -6034,14 +6093,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"[_on_config_applied] 连接级字段 -> saved_providers[{current_name}]: {list(conn_fields.keys())}"
             )
 
-        # 2. 模型级字段 → 写入 model_overrides[模型名]
+        # 2. 模型级字段 → 写入 model_overrides[服务商名||模型名]
         if model_fields and current_model_name:
-            existing = model_overrides.get(current_model_name, {}).copy()
+            provider_name = self._valid_configs.get(current_name, {}).get("provider_name", current_name)
+            override_key = f"{provider_name}||{current_model_name}"
+            existing = model_overrides.get(override_key, {}).copy()
             existing.update(model_fields)
-            model_overrides[current_model_name] = existing
+            model_overrides[override_key] = existing
             self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
             logger.debug(
-                f"[_on_config_applied] 模型级字段 -> model_overrides[{current_model_name}]: {list(model_fields.keys())}"
+                f"[_on_config_applied] 模型级字段 -> model_overrides[{override_key}]: {list(model_fields.keys())}"
             )
 
         self._load_model_configs()
@@ -6198,7 +6259,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6263,7 +6324,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6274,7 +6335,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -6299,7 +6360,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6333,7 +6394,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6374,7 +6435,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6401,7 +6462,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -10045,11 +10106,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if task_id in compact._task_rows:
                 continue
 
-            compact.show_completed_task(task_id, agent_name, task_desc,
-                                        model_name=model_name,
-                                        tool_call_count=tool_count,
-                                        elapsed_seconds=elapsed,
-                                        context_usage=ctx_usage)
+            compact.show_completed_task(
+                task_id,
+                agent_name,
+                task_desc,
+                model_name=model_name,
+                tool_call_count=tool_count,
+                elapsed_seconds=elapsed,
+                context_usage=ctx_usage,
+            )
 
         if not found_any:
             return
@@ -11113,7 +11178,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._toggle_send_stop(False)
                 assistant_card.deleteLater()
                 return
-
 
             # 同步 batch 结构：_message_batch 已包含新 user batch
             self._sync_batch_structures()
@@ -14314,7 +14378,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -14341,7 +14405,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

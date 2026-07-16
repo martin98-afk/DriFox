@@ -16,16 +16,21 @@
 
 查找优先级（resolve_context_limit）：
     L1: 用户在 llm_config 显式填的最大Token / context_limit / 上下文长度
-    L2: MODEL_CAPABILITIES[模型名].context_limit      ← 本模块
-    L3: FREE_PROVIDERS[provider_name].最大Token       ← 服务商默认
-    L4: PROVIDER_CAPABILITIES[family].context_limit   ← family 兜底
+    L2: models.dev 动态数据（覆盖 L3 同名 key）
+    L3: MODEL_CAPABILITIES[模型名].context_limit      ← 本模块硬编码
+    L4: FREE_PROVIDERS[provider_name].最大Token       ← 服务商默认
+    L5: PROVIDER_CAPABILITIES[family].context_limit   ← family 兜底
+
+get_model_capabilities 返回值的优先级：
+    models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES
+    （动态数据更准确，同名 key 用动态值覆盖，硬编码独有字段保留）
 
 用户自调节值：
     在 model_overrides 字典里按模型名持久化，UI 加载时叠加。
     该机制与本模块的"内置默认"是两个独立层：内置默认只是初值。
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.constants import FREE_PROVIDERS
 from app.core.provider_profile import get_provider_profile
@@ -70,198 +75,339 @@ DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
 # 找不到的模型走 L3 服务商默认 / L4 family 兜底
 # =============================================================================
 MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
-
     # ========== OpenCode Go 真实模型（用户 2026-06-02 给出 + models.dev 验证） ==========
     # OpenCode Go 是付费服务（首月 $5，之后 $10/月），这些是它真实提供的模型。
     "kimi-k2.5": {
-        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "models.dev", "note": "Moonshot Kimi K2.5，2026-01-27 发布；API 用 thinking:enabled/disabled",
+        "context_limit": 262144,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "Moonshot Kimi K2.5，2026-01-27 发布；API 用 thinking:enabled/disabled",
     },
     "kimi-k2.6": {
-        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "models.dev", "note": "Moonshot Kimi K2.6，2026-04-20/21 发布；API 用 thinking:enabled/disabled",
+        "context_limit": 262144,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "Moonshot Kimi K2.6，2026-04-20/21 发布；API 用 thinking:enabled/disabled",
     },
     "glm-5": {
-        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "models.dev", "note": "智谱 GLM-5，2026-02-12 发布，200K 上下文，interleaved reasoning_content",
+        "context_limit": 204800,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "智谱 GLM-5，2026-02-12 发布，200K 上下文，interleaved reasoning_content",
     },
     "glm-5.1": {
-        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "models.dev", "note": "智谱 GLM-5.1，2026-03-27/28 发布，200K 上下文",
+        "context_limit": 204800,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "智谱 GLM-5.1，2026-03-27/28 发布，200K 上下文",
     },
     "mimo-v2.5-pro": {
-        "context_limit": 1000000, "supports_vision": True,
-        "source": "vendor_official", "note": "小米 MiMo-V2.5-Pro，2026-04-23 公测，2026-04-27 开源；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
+        "context_limit": 1000000,
+        "supports_vision": True,
+        "source": "vendor_official",
+        "note": "小米 MiMo-V2.5-Pro，2026-04-23 公测，2026-04-27 开源；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
     },
     "mimo-v2.5": {
-        "context_limit": 1000000, "supports_vision": True,
-        "source": "vendor_official", "note": "小米 MiMo-V2.5 全模态通用模型，2026-04-23 公测；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
+        "context_limit": 1000000,
+        "supports_vision": True,
+        "source": "vendor_official",
+        "note": "小米 MiMo-V2.5 全模态通用模型，2026-04-23 公测；OpenCode Go 提供。思考控制参数未确认，暂不开放开关",
     },
     "minimax-m2.5": {
-        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
-        "source": "models.dev", "note": "MiniMax M2.5，2026-02-12 发布",
+        "context_limit": 204800,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "thinking_enable_value": "adaptive",
+        "source": "models.dev",
+        "note": "MiniMax M2.5，2026-02-12 发布",
     },
     "minimax-m2.7": {
-        "context_limit": 196608, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
-        "source": "models.dev", "note": "MiniMax M2.7，2026-03-18 发布",
+        "context_limit": 196608,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "thinking_enable_value": "adaptive",
+        "source": "models.dev",
+        "note": "MiniMax M2.7，2026-03-18 发布",
     },
     "minimax-m3": {
-        "context_limit": 512000, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive", "supports_vision": True,
-        "source": "models.dev", "note": "MiniMax M3，2026-05-31 发布，全模态",
+        "context_limit": 512000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "thinking_enable_value": "adaptive",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "MiniMax M3，2026-05-31 发布，全模态",
     },
     "qwen3.6-plus": {
-        "context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "models.dev", "note": "通义 Qwen3.6-Plus，2026-04-02 发布；API 格式同 DashScope 系",
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "models.dev",
+        "note": "通义 Qwen3.6-Plus，2026-04-02 发布；API 格式同 DashScope 系",
     },
     "qwen3.5-plus": {
-        "context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "inferred", "note": "OpenCode Zen 提供；thinking 控制方式同 qwen3.6-plus",
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "inferred",
+        "note": "OpenCode Zen 提供；thinking 控制方式同 qwen3.6-plus",
     },
     "qwen3.7-max": {
-        "context_limit": 1000000, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "vendor_official", "note": "通义 Qwen3.7-Max，2026-05-20 阿里云峰会发布；API 格式同 DashScope 系",
+        "context_limit": 1000000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "vendor_official",
+        "note": "通义 Qwen3.7-Max，2026-05-20 阿里云峰会发布；API 格式同 DashScope 系",
     },
     "deepseek-v4-pro": {
-        "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "DeepSeek-V4-Pro，2026-04-24 发布，1.6T 总参 / 49B 激活",
+        "context_limit": 1048576,
+        "supports_thinking": True,
+        "thinking_param": "reasoning_effort",
+        "source": "models.dev",
+        "note": "DeepSeek-V4-Pro，2026-04-24 发布，1.6T 总参 / 49B 激活",
     },
     "deepseek-v4-flash": {
-        "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "models.dev", "note": "DeepSeek-V4-Flash，2026-04-24 发布",
+        "context_limit": 1048576,
+        "supports_thinking": True,
+        "thinking_param": "reasoning_effort",
+        "source": "models.dev",
+        "note": "DeepSeek-V4-Flash，2026-04-24 发布",
     },
     "deepseek-v4-flash-free": {
-        "context_limit": 1048576, "supports_thinking": True, "thinking_param": "reasoning_effort",
-        "source": "inferred", "note": "OpenCode Zen 免费档转发 DeepSeek-V4-Flash；thinking_param 沿用 deepseek-v4-flash",
+        "context_limit": 1048576,
+        "supports_thinking": True,
+        "thinking_param": "reasoning_effort",
+        "source": "inferred",
+        "note": "OpenCode Zen 免费档转发 DeepSeek-V4-Flash；thinking_param 沿用 deepseek-v4-flash",
     },
-
     # ========== OpenCode Zen 真实免费模型（来自 opencode/xxx 系列） ==========
     # 注意：big-pickle / gpt-5-nano 的精确 context length 没在 models.dev 公开，
     # 用户确认它们是 OpenCode Zen 的免费档，所以这里不填具体值，让它们走
     # L3 服务商默认（200k）。如未来核实到精确值再加。
     "kimi-k2.5-free": {
-        "context_limit": 262144, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "user_provided", "note": "OpenCode Zen 免费档，转发到 Kimi K2.5",
+        "context_limit": 262144,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "user_provided",
+        "note": "OpenCode Zen 免费档，转发到 Kimi K2.5",
     },
     "minimax-m2.5-free": {
-        "context_limit": 204800, "supports_thinking": True, "thinking_param": "thinking", "thinking_enable_value": "adaptive",
-        "source": "user_provided", "note": "OpenCode Zen 免费档，转发到 MiniMax M2.5",
+        "context_limit": 204800,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "thinking_enable_value": "adaptive",
+        "source": "user_provided",
+        "note": "OpenCode Zen 免费档，转发到 MiniMax M2.5",
     },
     # "glm-5-free" - 是 GLM-5 的 OpenCode Zen 代理，context 推测与 glm-5 一致
     "glm-5-free": {
-        "context_limit": 202752, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-        "source": "inferred", "note": "OpenCode Zen 免费档转发 GLM-5；context 沿用 glm-5",
+        "context_limit": 202752,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "inferred",
+        "note": "OpenCode Zen 免费档转发 GLM-5；context 沿用 glm-5",
     },
-
     # ========== OpenAI（Anthropic/Gemini/DeepSeek 同下） ==========
-    "gpt-4o":          {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
-    "gpt-4o-mini":     {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
-    "gpt-4-turbo":     {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
-    "gpt-4":           {"context_limit": 8192,                          "source": "openai_official"},
-    "gpt-3.5-turbo":   {"context_limit": 16385,                         "source": "openai_official"},
-
+    "gpt-4o": {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
+    "gpt-4o-mini": {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
+    "gpt-4-turbo": {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
+    "gpt-4": {"context_limit": 8192, "source": "openai_official"},
+    "gpt-3.5-turbo": {"context_limit": 16385, "source": "openai_official"},
     # ========== Anthropic Claude ==========
-    "claude-sonnet-4-20250514": {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude Sonnet 4，支持 extended thinking"},
-    "claude-3-5-sonnet-latest": {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3.5 Sonnet，支持 extended thinking"},
-    "claude-3-5-haiku-latest":  {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3.5 Haiku，支持 extended thinking"},
-    "claude-3-opus-latest":     {"context_limit": 200000, "supports_vision": True, "supports_thinking": True, "thinking_param": "thinking", "source": "anthropic_official", "note": "Claude 3 Opus，支持 extended thinking"},
-    "claude-3-haiku-latest":    {"context_limit": 200000, "supports_vision": True, "source": "anthropic_official", "note": "Claude 3 Haiku，**不支持** extended thinking（轻量型号，定位快速低成本）"},
-
+    "claude-sonnet-4-20250514": {
+        "context_limit": 200000,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "anthropic_official",
+        "note": "Claude Sonnet 4，支持 extended thinking",
+    },
+    "claude-3-5-sonnet-latest": {
+        "context_limit": 200000,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "anthropic_official",
+        "note": "Claude 3.5 Sonnet，支持 extended thinking",
+    },
+    "claude-3-5-haiku-latest": {
+        "context_limit": 200000,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "anthropic_official",
+        "note": "Claude 3.5 Haiku，支持 extended thinking",
+    },
+    "claude-3-opus-latest": {
+        "context_limit": 200000,
+        "supports_vision": True,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "anthropic_official",
+        "note": "Claude 3 Opus，支持 extended thinking",
+    },
+    "claude-3-haiku-latest": {
+        "context_limit": 200000,
+        "supports_vision": True,
+        "source": "anthropic_official",
+        "note": "Claude 3 Haiku，**不支持** extended thinking（轻量型号，定位快速低成本）",
+    },
     # ========== Google Gemini ==========
     "gemini-2.5-pro-preview-06-05": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
-    "gemini-2.0-flash":            {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
-    "gemini-1.5-pro":              {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
-    "gemini-1.5-flash":            {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
-    "gemini-1.5-flash-8b":         {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
-
+    "gemini-2.0-flash": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
+    "gemini-1.5-pro": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
+    "gemini-1.5-flash": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
+    "gemini-1.5-flash-8b": {"context_limit": 1000000, "supports_vision": True, "source": "google_official"},
     # ========== DeepSeek（官方 API） ==========
     # 注意：2026-04-24 DeepSeek V4 已经发布（deepseek-v4-flash / deepseek-v4-pro，1M context）。
     # deepseek-chat（原 V3）和 deepseek-reasoner（原 R1）在当前 API 中的映射关系不明确，
     # 不在此录入，让它们走 L3（FREE_PROVIDERS["DeepSeek"]["最大Token"]=40960）或
     # L4（PROVIDER_CAPABILITIES["deepseek"]["context_limit"]=320000）兜底。
-
     # ========== 智谱 AI GLM-4 系列 ==========
-    "glm-4-flash":  {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
-                     "source": "zhipu_official"},
-    "glm-4-flashx": {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
-                     "source": "zhipu_official"},
-    "glm-4-plus":   {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
-                     "source": "zhipu_official"},
-    "glm-4-pro":    {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
-                     "source": "zhipu_official"},
-    "glm-4":        {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking",
-                     "source": "zhipu_official"},
-    "glm-5-turbo":  {"context_limit": 128000, "supports_thinking": True, "thinking_param": "thinking", "supports_vision": True,
-                     "source": "zhipu_official"},
-
+    "glm-4-flash": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "zhipu_official",
+    },
+    "glm-4-flashx": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "zhipu_official",
+    },
+    "glm-4-plus": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "zhipu_official",
+    },
+    "glm-4-pro": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "zhipu_official",
+    },
+    "glm-4": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "source": "zhipu_official",
+    },
+    "glm-5-turbo": {
+        "context_limit": 128000,
+        "supports_thinking": True,
+        "thinking_param": "thinking",
+        "supports_vision": True,
+        "source": "zhipu_official",
+    },
     # ========== 通义千问 Qwen2.5（开源版） ==========
-    "qwen2.5-7b-instruct":   {"context_limit": 32768, "source": "alibaba_official"},
-    "qwen2.5-14b-instruct":  {"context_limit": 32768, "source": "alibaba_official"},
-    "qwen2.5-72b-instruct":  {"context_limit": 32768, "source": "alibaba_official"},
+    "qwen2.5-7b-instruct": {"context_limit": 32768, "source": "alibaba_official"},
+    "qwen2.5-14b-instruct": {"context_limit": 32768, "source": "alibaba_official"},
+    "qwen2.5-72b-instruct": {"context_limit": 32768, "source": "alibaba_official"},
     "qwen2.5-7b-instruct-awq": {"context_limit": 32768, "source": "alibaba_official"},
-
     # ========== Meta Llama 3.1/3.3（Groq 等平台代理） ==========
     "llama-3.1-70b-versatile": {"context_limit": 131072, "source": "meta_official"},
-    "llama-3.1-8b-versatile":  {"context_limit": 131072, "source": "meta_official"},
+    "llama-3.1-8b-versatile": {"context_limit": 131072, "source": "meta_official"},
     "llama-3.3-70b-versatile": {"context_limit": 131072, "source": "meta_official"},
     "llama-4-scout-17b-16e-instruct": {"context_limit": 131072, "source": "meta_official"},
     "meta-llama/llama-4-scout-17b-16e-instruct": {"context_limit": 131072, "source": "meta_official"},
-    "meta-llama/meta-llama-3.1-70b-instruct":     {"context_limit": 131072, "source": "meta_official"},
-    "meta-llama/meta-llama-3.1-8b-instruct":      {"context_limit": 131072, "source": "meta_official"},
-
+    "meta-llama/meta-llama-3.1-70b-instruct": {"context_limit": 131072, "source": "meta_official"},
+    "meta-llama/meta-llama-3.1-8b-instruct": {"context_limit": 131072, "source": "meta_official"},
     # ========== Groq 平台上的特殊模型 ==========
-    "openai/gpt-oss-120b":      {"context_limit": 131072, "supports_thinking": True, "source": "models.dev",
-                                 "note": "OpenAI gpt-oss-120b 开源模型，2025-08-05 发布"},
-    "openai/gpt-oss-20b":       {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
-    "gpt-oss:120b":             {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
-    "gpt-oss:20b":              {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
+    "openai/gpt-oss-120b": {
+        "context_limit": 131072,
+        "supports_thinking": True,
+        "source": "models.dev",
+        "note": "OpenAI gpt-oss-120b 开源模型，2025-08-05 发布",
+    },
+    "openai/gpt-oss-20b": {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
+    "gpt-oss:120b": {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
+    "gpt-oss:20b": {"context_limit": 131072, "supports_thinking": True, "source": "models.dev"},
     "moonshotai/kimi-k2-instruct-0905": {"context_limit": 131072, "source": "models.dev"},
-    "groq/compound":            {"context_limit": 131072, "source": "models.dev"},
-
+    "groq/compound": {"context_limit": 131072, "source": "models.dev"},
     # ========== 百度千帆（文心） ==========
-    "ernie-3.5-8k":     {"context_limit": 8192,   "source": "baidu_official"},
-    "ernie-3.5-4k":     {"context_limit": 4096,   "source": "baidu_official"},
-    "ernie-speed-8k":   {"context_limit": 8192,   "source": "baidu_official"},
+    "ernie-3.5-8k": {"context_limit": 8192, "source": "baidu_official"},
+    "ernie-3.5-4k": {"context_limit": 4096, "source": "baidu_official"},
+    "ernie-speed-8k": {"context_limit": 8192, "source": "baidu_official"},
     "ernie-speed-128k": {"context_limit": 128000, "source": "baidu_official"},
-
     # ========== 火山方舟 Doubao ==========
-    "doubao-seed-code": {"context_limit": 200000, "source": "vendor_official",
-                         "note": "火山方舟编程模型"},
-    "doubao-pro-32k":   {"context_limit": 32000,  "source": "vendor_official"},
-
+    "doubao-seed-code": {"context_limit": 200000, "source": "vendor_official", "note": "火山方舟编程模型"},
+    "doubao-pro-32k": {"context_limit": 32000, "source": "vendor_official"},
     # ========== SiliconFlow（硅基流动）上的 Qwen / GLM / DeepSeek ==========
-    "deepseek-ai/deepseek-r1":       {"context_limit": 200000, "supports_thinking": True,
-                                       "thinking_param": "thinking_budget", "source": "vendor_official"},
-    "deepseek-ai/deepseek-v2-chat":  {"context_limit": 32000,  "source": "vendor_official"},
-    "thudm/glm4-9b-chat":            {"context_limit": 32768,  "source": "vendor_official"},
-    "qwen/qwen2-72b-instruct":       {"context_limit": 32768,  "source": "vendor_official"},
-
+    "deepseek-ai/deepseek-r1": {
+        "context_limit": 200000,
+        "supports_thinking": True,
+        "thinking_param": "thinking_budget",
+        "source": "vendor_official",
+    },
+    "deepseek-ai/deepseek-v2-chat": {"context_limit": 32000, "source": "vendor_official"},
+    "thudm/glm4-9b-chat": {"context_limit": 32768, "source": "vendor_official"},
+    "qwen/qwen2-72b-instruct": {"context_limit": 32768, "source": "vendor_official"},
     # ========== Ollama（本地模型） ==========
-    "llama3":         {"context_limit": 8192,   "source": "ollama_official", "note": "Meta Llama 3 8B 默认 8k"},
-    "llama3.1":       {"context_limit": 131072, "source": "ollama_official", "note": "Meta Llama 3.1"},
-    "qwen2.5":        {"context_limit": 32768,  "source": "ollama_official", "note": "Qwen2.5 默认 32k"},
-    "qwen2.5-coder":  {"context_limit": 32768,  "source": "ollama_official"},
-    "mistral":        {"context_limit": 32768,  "source": "ollama_official"},
-    "phi3":           {"context_limit": 4096,   "source": "ollama_official"},
+    "llama3": {"context_limit": 8192, "source": "ollama_official", "note": "Meta Llama 3 8B 默认 8k"},
+    "llama3.1": {"context_limit": 131072, "source": "ollama_official", "note": "Meta Llama 3.1"},
+    "qwen2.5": {"context_limit": 32768, "source": "ollama_official", "note": "Qwen2.5 默认 32k"},
+    "qwen2.5-coder": {"context_limit": 32768, "source": "ollama_official"},
+    "mistral": {"context_limit": 32768, "source": "ollama_official"},
+    "phi3": {"context_limit": 4096, "source": "ollama_official"},
 }
 
 
-def get_model_capabilities(model_name: str) -> Dict[str, Any]:
-    """按模型名精确查表，返回能力 dict；查不到返回空 dict。
+def _get_dynamic_model_capabilities(model_name: str) -> Optional[Dict[str, Any]]:
+    """从 models.dev 动态缓存中查询模型能力，失败返回 None。"""
+    try:
+        from app.core.models_dev_sync import get_dynamic_models
 
-    匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。两种都查不到返回空。
-    不会做任何前缀/子串猜测——找不到就找不到，让调用方走兜底。
+        dynamic = get_dynamic_models()
+        return dynamic.model_capabilities.get(model_name) or dynamic.model_capabilities.get(model_name.lower())
+    except Exception:
+        return None
+
+
+def get_model_capabilities(model_name: str) -> Dict[str, Any]:
+    """按模型名查表，返回能力 dict；查不到返回空 dict。
+
+    匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
+    优先级：models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
+    动态数据更准确（可修正硬编码错误），同名 key 用动态值覆盖。
+    硬编码独有的字段（如 thinking_enable_value）保留作为补充。
     """
     if not model_name:
         return {}
     name = model_name.strip()
     if not name:
         return {}
+
+    # 先从硬编码取
+    result: Dict[str, Any] = {}
     if name in MODEL_CAPABILITIES:
-        return MODEL_CAPABILITIES[name]
-    name_lower = name.lower()
-    if name_lower in MODEL_CAPABILITIES:
-        return MODEL_CAPABILITIES[name_lower]
-    return {}
+        result = MODEL_CAPABILITIES[name]
+    else:
+        name_lower = name.lower()
+        if name_lower in MODEL_CAPABILITIES:
+            result = MODEL_CAPABILITIES[name_lower]
+
+    # models.dev 动态数据覆盖硬编码（动态数据更准确，可修正硬编码错误）
+    dynamic_caps = _get_dynamic_model_capabilities(name)
+    if dynamic_caps is not None:
+        # 动态数据覆盖同名 key，硬编码独有字段保留
+        result = {**result, **dynamic_caps}
+
+    return result
 
 
 def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> int:
@@ -285,7 +431,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     # L2: 模型名查表
@@ -294,7 +440,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     # L3: 服务商默认
@@ -304,14 +450,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if v not in (None, ""):
             try:
                 return max(1, int(v))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 
@@ -335,13 +481,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 

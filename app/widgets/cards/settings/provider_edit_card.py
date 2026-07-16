@@ -2,6 +2,7 @@
 """
 服务商编辑卡片 - 将弹窗改为卡片形式（保留文字标签）
 """
+
 import threading
 
 import requests
@@ -23,7 +24,7 @@ from qfluentwidgets import (
 from app.constants import (
     FREE_PROVIDERS,
     PROVIDER_ICONS,
-    PROVIDER_MODELS,
+    get_merged_provider_models,
 )
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
@@ -39,15 +40,42 @@ def _is_text_chat_model(model_id: str) -> bool:
     model_lower = model_id.lower()
     non_text_keywords = [
         # 图片生成/视觉模型
-        'dall-e', 'dalle', 'stable-diffusion', 'sd-', 'imagen', 'flux',
-        'image', 'diffusion', 'kandinsky', 'midjourney', 'wan', 'vision',
-        'vl', 'llava', 'seance', 'cogview', 'cogvideo', 'pixart', 'visual',
+        "dall-e",
+        "dalle",
+        "stable-diffusion",
+        "sd-",
+        "imagen",
+        "flux",
+        "image",
+        "diffusion",
+        "kandinsky",
+        "midjourney",
+        "wan",
+        "vision",
+        "vl",
+        "llava",
+        "seance",
+        "cogview",
+        "cogvideo",
+        "pixart",
+        "visual",
         # 音频模型
-        'whisper', 'tts', 'speech', 'audio', 'piper', 'voice',
+        "whisper",
+        "tts",
+        "speech",
+        "audio",
+        "piper",
+        "voice",
         # 词嵌入模型
-        'embedding', 'embed', 'text-embedding', 'bge',
+        "embedding",
+        "embed",
+        "text-embedding",
+        "bge",
         # 其他非聊天模型
-        'moderation', 'rerank', 'search', 'retrieval',
+        "moderation",
+        "rerank",
+        "search",
+        "retrieval",
     ]
     for keyword in non_text_keywords:
         if keyword in model_lower:
@@ -235,20 +263,23 @@ class ProviderEditCard(QWidget):
         current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
         saved_models = self.provider_info.get("模型列表", [])
 
+        merged_provider_models = get_merged_provider_models()
         if self.is_new:
             selected_provider = self.nameCombo.currentText()
             if saved_models and isinstance(saved_models, list):
                 self.modelCombo.addItems(saved_models)
-            elif selected_provider in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[selected_provider])
-            elif "DeepSeek" in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS["DeepSeek"])
+            elif selected_provider in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[selected_provider])
+            elif "DeepSeek" in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models["DeepSeek"])
         else:
-            has_saved_models = "模型列表" in self.provider_info and isinstance(saved_models, list) and len(saved_models) > 0
+            has_saved_models = (
+                "模型列表" in self.provider_info and isinstance(saved_models, list) and len(saved_models) > 0
+            )
             if has_saved_models:
                 self.modelCombo.addItems(saved_models)
-            elif self.provider_name in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[self.provider_name])
+            elif self.provider_name in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[self.provider_name])
             elif self.provider_name in FREE_PROVIDERS:
                 default_model = FREE_PROVIDERS[self.provider_name].get("模型名称", "")
                 if default_model:
@@ -328,7 +359,7 @@ class ProviderEditCard(QWidget):
 
         # 记录每个字段属于哪个组，以及对应的行 widget
         self._extra_field_rows: dict = {}  # internal_key -> QWidget (row container)
-        self._field_to_group: dict = {}    # internal_key -> group name
+        self._field_to_group: dict = {}  # internal_key -> group name
 
         for group_name, fields in self._extra_field_defs.items():
             for internal_key, label, placeholder in fields:
@@ -438,6 +469,9 @@ class ProviderEditCard(QWidget):
             elif provider_name == "OpenCode Zen":
                 preset_urls = [
                     "https://opencode.ai/zen/v1",
+                ]
+            elif provider_name == "OpenCode Go":
+                preset_urls = [
                     "https://opencode.ai/zen/go/v1",
                 ]
             elif provider_name in FREE_PROVIDERS:
@@ -472,10 +506,11 @@ class ProviderEditCard(QWidget):
             else:
                 self.apiUrlCombo.setCurrentText(preset_url)
 
+            merged_provider_models = get_merged_provider_models()
             self.modelCombo.blockSignals(True)
             self.modelCombo.clear()
-            if name in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[name])
+            if name in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[name])
             default_model = template.get("模型名称", "")
             if default_model:
                 self.modelCombo.addItem(default_model)
@@ -516,6 +551,7 @@ class ProviderEditCard(QWidget):
         """打开帮助链接"""
         if name in FREE_PROVIDERS:
             import webbrowser
+
             url = FREE_PROVIDERS[name].get("获取地址", "")
             if url:
                 webbrowser.open(url)
@@ -529,11 +565,15 @@ class ProviderEditCard(QWidget):
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
 
         if not api_url or not api_key:
-            InfoBar.warning("提示", "请先填写 API URL 和 Key", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM)
+            InfoBar.warning(
+                "提示", "请先填写 API URL 和 Key", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+            )
             return
 
         self.fetchBtn.setEnabled(False)
-        InfoBar.info("获取中", "正在获取模型列表...", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM)
+        InfoBar.info(
+            "获取中", "正在获取模型列表...", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+        )
 
         def do_fetch():
             return fetch_provider_models(api_url, api_key, provider_name)
@@ -565,13 +605,19 @@ class ProviderEditCard(QWidget):
             self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
         self.modelCombo.blockSignals(False)
         from qfluentwidgets import InfoBar
-        InfoBar.success("成功", f"获取到 {len(models)} 个模型", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM)
+
+        InfoBar.success(
+            "成功", f"获取到 {len(models)} 个模型", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+        )
 
     def _on_fetch_failed(self):
         """获取失败（主线程）"""
         self.fetchBtn.setEnabled(True)
         from qfluentwidgets import InfoBar
-        InfoBar.error("失败", "获取模型列表失败，请检查配置", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM)
+
+        InfoBar.error(
+            "失败", "获取模型列表失败，请检查配置", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+        )
 
     def _on_manage_models(self):
         """打开模型列表管理对话框"""

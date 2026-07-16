@@ -44,6 +44,8 @@ def _get_diff_formatter():
         _DIFF_FORMATTER_CACHE["style"] = style
         _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=True)
     return _DIFF_FORMATTER_CACHE["formatter"]
+
+
 _TEXT_LEXER = TextLexer()
 _DIFF_LEXER_CACHE: dict = {}
 
@@ -392,7 +394,7 @@ def _parse_subagent_task_ids(result: str) -> str:
                 return ",".join(task_ids)
         elif isinstance(data, list):
             return ",".join(data)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         pass
 
     # 尝试从文本中提取 task_id（UUID 格式）
@@ -782,7 +784,7 @@ def _extract_screenshot_image_path(result: str) -> str:
             path = data.get("absolute_path") or data.get("path") or ""
             if path and os.path.isfile(path):
                 return path
-    except (ValueError, SyntaxError, MemoryError):
+    except ValueError, SyntaxError, MemoryError:
         pass
 
     # 策略2: 正则提取 'absolute_path': '...' 或 'path': '...'
@@ -1282,7 +1284,7 @@ def _parse_questions_field(questions_raw) -> list:
                 return [_normalize_question_item(q) for q in parsed]
             elif isinstance(parsed, dict):
                 return [_normalize_question_item(parsed)]
-        except (json.JSONDecodeError, ValueError):
+        except json.JSONDecodeError, ValueError:
             pass
         # JSON 解析失败（可能被截断），作为单个问题展示原始文本
         return [{"question": questions_raw, "options": [], "multiple": False}]
@@ -1436,6 +1438,8 @@ def render_tool_block(
 ) -> str:
     """渲染工具块，参数横向表格展示（左列参数名，右列结果值）"""
 
+    _gf = _get_global_font()  # 用户主题全局字体
+
     # 检测是否为 MCP 工具（mcp__ 前缀或 mcp_list_servers）
     is_mcp_tool = tool_name.startswith("mcp__") or tool_name == "mcp_list_servers"
 
@@ -1569,7 +1573,7 @@ def render_tool_block(
                     <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
                 </span>
             </div>
-            <div class="tool-diff-inline__body" style="font-family: Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
+            <div class="tool-diff-inline__body" style="font-family: '{_gf}', Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
                 {diff_body}
             </div>
         </div>"""

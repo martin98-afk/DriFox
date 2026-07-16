@@ -9,10 +9,15 @@ IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 # ============================================================
 # 套餐用量查询字段（与模型参数无关，仅用于配额查询，不得泄漏到模型参数或 API 请求）
 # ============================================================
-QUOTA_EXCLUDE_KEYS = frozenset({
-    "server_id", "cookie", "workspace_id",
-    "csrf_token", "x_web_id",
-})
+QUOTA_EXCLUDE_KEYS = frozenset(
+    {
+        "server_id",
+        "cookie",
+        "workspace_id",
+        "csrf_token",
+        "x_web_id",
+    }
+)
 
 # ============================================================
 # 统一参数 schema：定义所有模型参数的 UI 表现与 API 映射
@@ -132,14 +137,7 @@ MODEL_LEVEL_KEYS = frozenset(
 
 
 PROVIDER_MODELS = {
-    "火山方舟": [
-        "doubao-seed-code",
-        "kimi-k2.6 ",
-        "kimi-k2.5",
-        "minimax-m2.7",
-        "glm-4.7",
-        "glm5.1"
-    ],
+    "火山方舟": ["doubao-seed-code", "kimi-k2.6 ", "kimi-k2.5", "minimax-m2.7", "glm-4.7", "glm5.1"],
     "MiniMax": [
         "MiniMax-M2.7",
         "MiniMax-M2.7-highspeed",
@@ -237,6 +235,27 @@ PROVIDER_MODELS = {
         "qwen3.6-plus",
         "qwen3.5-plus",
     ],
+    "OpenCode Go": [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "glm-5",
+        "glm-5.1",
+        "glm-5.2",
+        "kimi-k2.5",
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+        "mimo-v2-omni",
+        "mimo-v2-pro",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "minimax-m2.5",
+        "minimax-m2.7",
+        "minimax-m3",
+        "qwen3.5-plus",
+        "qwen3.6-plus",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+    ],
 }
 
 FREE_PROVIDERS = {
@@ -253,6 +272,15 @@ FREE_PROVIDERS = {
         "API_URL": "https://opencode.ai/zen/v1",
         "API_KEY": "",
         "模型名称": "deepseek-v4-flash-free",
+        "温度": 0.7,
+        "最大Token": 200000,
+        "认证方式": "bearer",
+        "获取地址": "https://opencode.ai/auth",
+    },
+    "OpenCode Go": {
+        "API_URL": "https://opencode.ai/zen/go/v1",
+        "API_KEY": "",
+        "模型名称": "deepseek-v4-flash",
         "温度": 0.7,
         "最大Token": 200000,
         "认证方式": "bearer",
@@ -377,4 +405,47 @@ PROVIDER_ICONS = {
     "Anthropic (Claude)": "Anthropic",
     "Google Gemini": "gemini-ai",
     "OpenCode Zen": "opencode",
+    "OpenCode Go": "opencode",
 }
+
+
+# ============================================================
+# models.dev 动态同步：白名单与合并
+# ============================================================
+# 从 app.core.models_dev_sync 导入白名单，避免两处维护
+from app.core.models_dev_sync import MODELS_DEV_PROVIDER_MAP
+
+
+def get_merged_provider_models() -> Dict[str, List[str]]:
+    """返回 PROVIDER_MODELS 与 models.dev 动态数据的合并结果。
+
+    合并规则：
+      - 硬编码模型始终保留，且排在前面。
+      - 动态模型按服务商追加，去重（不区分大小写）。
+      - models.dev 未覆盖的服务商保持原样。
+      - 同步失败或禁用时，完全回退到硬编码。
+    """
+    try:
+        from app.core.models_dev_sync import get_dynamic_models
+
+        dynamic = get_dynamic_models()
+        dynamic_providers = dynamic.provider_models
+    except Exception:
+        # 同步模块异常时不影响主程序，直接回退到硬编码
+        return dict(PROVIDER_MODELS)
+
+    merged: Dict[str, List[str]] = {}
+    for provider_name, static_models in PROVIDER_MODELS.items():
+        merged_models: List[str] = list(static_models)
+        seen_lower = {m.strip().lower() for m in merged_models}
+
+        dynamic_models = dynamic_providers.get(provider_name, [])
+        for model in dynamic_models:
+            key = model.strip().lower()
+            if key and key not in seen_lower:
+                merged_models.append(model)
+                seen_lower.add(key)
+
+        merged[provider_name] = merged_models
+
+    return merged
