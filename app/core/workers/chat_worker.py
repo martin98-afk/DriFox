@@ -2042,7 +2042,6 @@ class OpenAIChatWorker(QThread):
 
     # ========== 视觉模型图片注入 ==========
 
-    @staticmethod
     def _try_inject_vision_content(
         self, tool_results, current_messages, session_messages: Optional[List[Dict]] = None
     ) -> bool:
@@ -2165,7 +2164,7 @@ class OpenAIChatWorker(QThread):
             "role": "user",
             "content": vision_content,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "_injected_vision": True,
+            "_hook_event": "vision_inject",
         }
 
         # hook 注入模式：仅加入 API 缓存和 session_messages
