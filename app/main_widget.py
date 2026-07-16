@@ -4123,16 +4123,30 @@ class OpenAIChatToolWindow(ToolWindow):
             # 普通 compact 完成后触发 SessionStart state="compact"
             on_finished_cb = lambda tid, result, _sid=session.session_id: self._on_compact_finished(tid, result, _sid)
 
-        sub_agent_mgr.execute_task(
+        success = sub_agent_mgr.execute_task(
             task_id=f"compact_{uuid.uuid4().hex[:8]}",
             agent_name="compaction",
             task_description=task_description,
             parent_context="",
             share_context=True,  # 接入主智能体完整上下文
             on_finished=on_finished_cb,
-            on_error=None,
+            on_error=lambda err: InfoBar.error(
+                "压缩失败",
+                str(err)[:100],
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            ),
             session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
         )
+
+        if not success:
+            # execute_task 返回 False 时显示启动失败（agent 缺失 / LLM 未配置等）
+            InfoBar.error(
+                "压缩失败",
+                "无法启动压缩任务，请检查 LLM 配置",
+                parent=self,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _on_auto_compact_requested(self, ratio: float):
         """自动上下文压缩请求处理
@@ -4169,11 +4183,21 @@ class OpenAIChatToolWindow(ToolWindow):
         sub_agent_mgr = self.backend.sub_agent_manager
         executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
         if executor is None:
-            # 任务从未启动（agent 缺失 / mode 不允许 / 未进入 _running_tasks）— 不清空
-            return
-        execution_error = getattr(executor, "_execution_error", None)
-        if execution_error:
-            return
+            # executor 可能已被 get_finished_tasks() 从 _running_tasks 移除（竞态条件）
+            # 此时检查 _finished_tasks：有明确错误则不清空，否则继续尝试清空
+            if sub_agent_mgr and task_id in sub_agent_mgr._finished_tasks:
+                task_info = sub_agent_mgr._finished_tasks.get(task_id, {})
+                if task_info.get("error"):
+                    # 有明确错误（agent 缺失 / mode 不允许 / staled / timeout）— 不清空
+                    return
+                # 无错误：可能是竞态条件，继续尝试清空
+            else:
+                # 无任何记录 — 任务从未启动 / 已被丢弃，不清空
+                return
+        else:
+            execution_error = getattr(executor, "_execution_error", None)
+            if execution_error:
+                return
 
         # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
         # 避免用户在子智能体执行期间切换会话后误清空当前会话）
@@ -9416,7 +9440,10 @@ class OpenAIChatToolWindow(ToolWindow):
         cutoff_index = round_ranges[round_index][0]
 
         # === 3. 截断 session.messages ===
-        session.set_messages(session.messages[:cutoff_index], preserve_compaction=False)
+        # 🛡️ 使用 canonical_messages 而非 session.messages，确保 cutoff_index（来自
+        # canonical 的 round_ranges）与截断目标一致。consolidate_messages 可能过滤掉
+        # 非标准消息，直接对 session.messages 切片会导致取错位置。
+        session.set_messages(canonical_messages[:cutoff_index], preserve_compaction=False)
         self._session_dirty = True  # 🛡️ 截断修改了消息列表，脏标记兜底
 
         # === 4. 同步 _message_batch 和 _batch_cards 到 session 的新状态 ===
@@ -9473,6 +9500,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         "insert_index": start_idx,
                         "count": msg_count,
                     }
+                    logger.debug(
+                        "[DELETE] Cache set: "
+                        f"session_id={session.session_id!r}, "
+                        f"start_idx={start_idx}, end_idx={end_idx}, "
+                        f"msg_count={msg_count}, "
+                        f"session_messages_len={len(session.messages)}, "
+                        f"canonical_len={len(canonical_messages)}"
+                    )
             except Exception:
                 self._undo_delete_cache = {}
 
@@ -9502,7 +9537,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         session = self.session_manager.get_current_session()
         if not session or session.session_id != cache["session_id"]:
-            logger.warning("[RESTORE] Session changed, cannot restore")
+            logger.warning(
+                "[RESTORE] Session changed, cannot restore: "
+                f"cache_session_id={cache['session_id']!r}, "
+                f"current_session_id={session.session_id if session else None!r}, "
+                f"session_exists={session is not None}, "
+                f"cache_insert_index={cache.get('insert_index')}, "
+                f"cache_msg_count={cache.get('count')}, "
+                f"session_messages_len={len(session.messages) if session else 0}"
+            )
             return
 
         # 恢复消息到 session
@@ -9620,6 +9663,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_undo_delete_dismissed(self):
         """撤销删除卡片自动消失或被关闭时，清空缓存"""
+        if self._undo_delete_cache:
+            logger.debug(
+                "[UNDO-DISMISS] Cache cleared without restore: "
+                f"session_id={self._undo_delete_cache.get('session_id')!r}, "
+                f"count={self._undo_delete_cache.get('count')}"
+            )
         self._undo_delete_cache = {}
 
     def _delete_user_round(self, card: MessageCard):
@@ -9796,14 +9845,25 @@ class OpenAIChatToolWindow(ToolWindow):
         # === 缓存撤销数据，用于恢复（只缓存一步）===
         try:
             # 撤销：删除从该 round 到末尾的所有消息
+            # 🛡️ 使用 canonical_now 而非 session.messages，确保索引一致。
+            # consolidate_messages 可能过滤掉非标准消息，导致 session.messages
+            # 与 canonical_now 长度不一致，直接使用 session.messages 切片会取错位置。
             start_idx = round_ranges_now[round_index][0]
-            msg_count = len(session.messages) - start_idx
+            msg_count = len(canonical_now) - start_idx
             self._undo_delete_cache = {
                 "session_id": session.session_id,
-                "messages": list(session.messages[start_idx:]),  # 从 round 开始到末尾
+                "messages": list(canonical_now[start_idx:]),  # 使用 canonical 消息
                 "insert_index": start_idx,
                 "count": msg_count,
             }
+            logger.debug(
+                "[UNDO] Cache set: "
+                f"session_id={session.session_id!r}, "
+                f"start_idx={start_idx}, "
+                f"msg_count={msg_count}, "
+                f"session_messages_len={len(session.messages)}, "
+                f"canonical_len={len(canonical_now)}"
+            )
         except Exception:
             self._undo_delete_cache = {}
 
