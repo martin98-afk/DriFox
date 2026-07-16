@@ -25,7 +25,7 @@
     该机制与本模块的"内置默认"是两个独立层：内置默认只是初值。
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.constants import FREE_PROVIDERS
 from app.core.provider_profile import get_provider_profile
@@ -245,10 +245,25 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _get_dynamic_model_capabilities(model_name: str) -> Optional[Dict[str, Any]]:
+    """从 models.dev 动态缓存中查询模型能力，失败返回 None。"""
+    try:
+        from app.core.models_dev_sync import get_dynamic_models
+
+        dynamic = get_dynamic_models()
+        return (
+            dynamic.model_capabilities.get(model_name)
+            or dynamic.model_capabilities.get(model_name.lower())
+        )
+    except Exception:
+        return None
+
+
 def get_model_capabilities(model_name: str) -> Dict[str, Any]:
     """按模型名精确查表，返回能力 dict；查不到返回空 dict。
 
-    匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。两种都查不到返回空。
+    匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
+    硬编码条目优先级高于 models.dev 动态数据。
     不会做任何前缀/子串猜测——找不到就找不到，让调用方走兜底。
     """
     if not model_name:
@@ -261,6 +276,12 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
     name_lower = name.lower()
     if name_lower in MODEL_CAPABILITIES:
         return MODEL_CAPABILITIES[name_lower]
+
+    # 硬编码未命中，尝试 models.dev 动态数据
+    dynamic_caps = _get_dynamic_model_capabilities(name)
+    if dynamic_caps is not None:
+        return dynamic_caps
+
     return {}
 
 

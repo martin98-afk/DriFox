@@ -112,6 +112,25 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
 
+        # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
+        def _sync_models_dev():
+            try:
+                from app.core.models_dev_sync import load_dynamic_models
+                result = load_dynamic_models()
+                dynamic_count = sum(len(v) for v in result.provider_models.values())
+                logger.info(
+                    f"[DeferredStartup] models.dev 同步完成: {dynamic_count} 个动态模型, "
+                    f"from_cache={result.from_cache}, fetched_at={result.fetched_at}"
+                )
+            except Exception:
+                logger.exception("[DeferredStartup] models.dev 同步失败")
+
+        try:
+            import threading
+            threading.Thread(target=_sync_models_dev, daemon=True).start()
+        except Exception:
+            logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
+
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     from loguru import logger as _logger
     from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
@@ -147,10 +166,10 @@ def main():
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
     _guard = SingleInstanceGuard("Drifox")
-    if not _guard.try_lock():
-        _guard.request_show_window()
-        _guard.cleanup()
-        return
+    # if not _guard.try_lock():
+    #     _guard.request_show_window()
+    #     _guard.cleanup()
+    #     return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme

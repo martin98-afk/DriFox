@@ -23,7 +23,7 @@ from qfluentwidgets import (
 from app.constants import (
     FREE_PROVIDERS,
     PROVIDER_ICONS,
-    PROVIDER_MODELS,
+    get_merged_provider_models,
 )
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
@@ -235,20 +235,21 @@ class ProviderEditCard(QWidget):
         current_model = self.provider_info.get("模型名称", template.get("模型名称", ""))
         saved_models = self.provider_info.get("模型列表", [])
 
+        merged_provider_models = get_merged_provider_models()
         if self.is_new:
             selected_provider = self.nameCombo.currentText()
             if saved_models and isinstance(saved_models, list):
                 self.modelCombo.addItems(saved_models)
-            elif selected_provider in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[selected_provider])
-            elif "DeepSeek" in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS["DeepSeek"])
+            elif selected_provider in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[selected_provider])
+            elif "DeepSeek" in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models["DeepSeek"])
         else:
             has_saved_models = "模型列表" in self.provider_info and isinstance(saved_models, list) and len(saved_models) > 0
             if has_saved_models:
                 self.modelCombo.addItems(saved_models)
-            elif self.provider_name in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[self.provider_name])
+            elif self.provider_name in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[self.provider_name])
             elif self.provider_name in FREE_PROVIDERS:
                 default_model = FREE_PROVIDERS[self.provider_name].get("模型名称", "")
                 if default_model:
@@ -472,10 +473,11 @@ class ProviderEditCard(QWidget):
             else:
                 self.apiUrlCombo.setCurrentText(preset_url)
 
+            merged_provider_models = get_merged_provider_models()
             self.modelCombo.blockSignals(True)
             self.modelCombo.clear()
-            if name in PROVIDER_MODELS:
-                self.modelCombo.addItems(PROVIDER_MODELS[name])
+            if name in merged_provider_models:
+                self.modelCombo.addItems(merged_provider_models[name])
             default_model = template.get("模型名称", "")
             if default_model:
                 self.modelCombo.addItem(default_model)

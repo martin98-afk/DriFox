@@ -378,3 +378,45 @@ PROVIDER_ICONS = {
     "Google Gemini": "gemini-ai",
     "OpenCode Zen": "opencode",
 }
+
+
+# ============================================================
+# models.dev 动态同步：白名单与合并
+# ============================================================
+# 从 app.core.models_dev_sync 导入白名单，避免两处维护
+from app.core.models_dev_sync import MODELS_DEV_PROVIDER_MAP
+
+
+def get_merged_provider_models() -> Dict[str, List[str]]:
+    """返回 PROVIDER_MODELS 与 models.dev 动态数据的合并结果。
+
+    合并规则：
+      - 硬编码模型始终保留，且排在前面。
+      - 动态模型按服务商追加，去重（不区分大小写）。
+      - models.dev 未覆盖的服务商保持原样。
+      - 同步失败或禁用时，完全回退到硬编码。
+    """
+    try:
+        from app.core.models_dev_sync import get_dynamic_models
+
+        dynamic = get_dynamic_models()
+        dynamic_providers = dynamic.provider_models
+    except Exception:
+        # 同步模块异常时不影响主程序，直接回退到硬编码
+        return dict(PROVIDER_MODELS)
+
+    merged: Dict[str, List[str]] = {}
+    for provider_name, static_models in PROVIDER_MODELS.items():
+        merged_models: List[str] = list(static_models)
+        seen_lower = {m.strip().lower() for m in merged_models}
+
+        dynamic_models = dynamic_providers.get(provider_name, [])
+        for model in dynamic_models:
+            key = model.strip().lower()
+            if key and key not in seen_lower:
+                merged_models.append(model)
+                seen_lower.add(key)
+
+        merged[provider_name] = merged_models
+
+    return merged

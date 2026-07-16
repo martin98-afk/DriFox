@@ -60,8 +60,8 @@ from app.constants import (
     IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
     PROVIDER_ICONS,
-    PROVIDER_MODELS,
     QUOTA_EXCLUDE_KEYS,
+    get_merged_provider_models,
 )
 from app.core import (
     ChatBackend,
@@ -4421,6 +4421,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_model_selector_to_card(self):
         """加载模型数据到模型选择卡片"""
         provider_models_data = []
+        merged_provider_models = get_merged_provider_models()
         # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
         self._display_to_config_id: dict[str, str] = {}
         # 维护 display_name → provider_name 映射，用于 model_selector 找 icon
@@ -4442,8 +4443,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         saved_models = []
                 if isinstance(saved_models, list):
                     model_list = list(saved_models)
-            elif pname in PROVIDER_MODELS:
-                model_list = list(PROVIDER_MODELS[pname])
+            elif pname in merged_provider_models:
+                model_list = list(merged_provider_models[pname])
             cur_model = config.get("模型名称", "")
             if cur_model and cur_model not in model_list:
                 model_list.insert(0, cur_model)
