@@ -573,8 +573,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 【性能优化】延迟构建重型卡片内容（记忆/历史/模型选择等），
         # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
-        # 100ms 延迟确保 ToolPopupDialog 显示在先，骨架可见后再填充内容。
-        QTimer.singleShot(100, self._deferred_build_cards)
+        # 800ms 延迟让首帧绘制完成后再开始填充内容。
+        # 卡片内部进一步按 singleShot(0) 链式逐个构建，避免一次冻结 UI。
+        QTimer.singleShot(800, self._deferred_build_cards)
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
@@ -814,14 +815,35 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
 
     def _deferred_build_cards(self):
-        """【性能优化】延迟构建重型卡片内容
+        """【性能优化】延迟构建重型卡片内容（分批渐进式）
 
         在 setup_ui 中仅创建卡片的轻量框架（BaseSettingsCard），
         而卡片内部的重量级内容 widget 在本方法中创建并填充。
-        由 __init__ 末尾的 QTimer.singleShot(100, ...) 触发，
-        确保 ToolPopupDialog 窗口先显示（骨架），内容随后渐进加载。
+
+        性能优化：每个卡片使用独立的 QTimer.singleShot(0) 调度，
+        让 Qt 事件循环在卡片创建之间有机会处理绘制事件，
+        避免 6 张卡片连续同步创建导致 UI 冻结数秒。
         """
-        # ── ① 历史会话卡片 ──
+        self._deferred_card_build_step = 0
+        self._deferred_card_steps = [
+            self._build_deferred_card_history,
+            self._build_deferred_card_share,
+            self._build_deferred_card_history_questions,
+            self._build_deferred_card_memory,
+            self._build_deferred_card_model_config,
+            self._build_deferred_card_model_selector,
+        ]
+        self._schedule_next_deferred_card()
+
+    def _schedule_next_deferred_card(self):
+        """调度下一个卡片构建步骤（每次 yield 给事件循环）"""
+        if self._deferred_card_build_step < len(self._deferred_card_steps):
+            step = self._deferred_card_steps[self._deferred_card_build_step]
+            self._deferred_card_build_step += 1
+            QTimer.singleShot(0, step)
+
+    def _build_deferred_card_history(self):
+        """── ① 历史会话卡片 ──"""
         try:
             self._history_popup_card = HistoryCard()
             self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
@@ -843,15 +865,21 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         except Exception:
             logger.exception("[DeferredBuild] HistoryCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ② 分享卡片 ──
+    def _build_deferred_card_share(self):
+        """── ② 分享卡片 ──"""
         try:
             self._share_card_content = ShareCardContent(self)
             self._share_card.content_layout.addWidget(self._share_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ShareCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ③ 历史问题卡片 ──
+    def _build_deferred_card_history_questions(self):
+        """── ③ 历史问题卡片 ──"""
         try:
             self._history_questions_card_content = HistoryQuestionsCardContent(self)
             self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
@@ -861,8 +889,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         except Exception:
             logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ④ 记忆管理卡片 ──
+    def _build_deferred_card_memory(self):
+        """── ④ 记忆管理卡片 ──"""
         try:
             self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
             self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
@@ -875,16 +906,22 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         except Exception:
             logger.exception("[DeferredBuild] MemoryCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ⑤ 模型配置卡片 ──
+    def _build_deferred_card_model_config(self):
+        """── ⑤ 模型配置卡片 ──"""
         try:
             self._model_config_popup = ModelConfigCard()
             self._model_config_popup.configApplied.connect(self._on_config_applied)
             self._model_config_card.content_layout.addWidget(self._model_config_popup)
         except Exception:
             logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ⑥ 模型选择卡片 ──
+    def _build_deferred_card_model_selector(self):
+        """── ⑥ 模型选择卡片 ──"""
         try:
             self._model_selector_card_content = ModelSelectorCardContent()
             self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
@@ -906,6 +943,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1269,12 +1308,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
             # _load_model_configs 遍历所有服务商配置（50-200ms），
             # _sync_working_directory 文件系统检测（20-50ms），
-            # 均匀分散到 500ms-900ms 窗口内，避免同时爆发导致 UI 冻结
-            QTimer.singleShot(500, lambda: self._safe_timer_call(self._load_model_configs))
+            # 均匀分散到 1.5s-2.5s 窗口内，避免同时爆发导致 UI 冻结
+            QTimer.singleShot(1500, lambda: self._safe_timer_call(self._load_model_configs))
             # 初始化当前项目的工作目录
-            QTimer.singleShot(700, lambda: self._safe_timer_call(self._sync_working_directory))
+            QTimer.singleShot(2000, lambda: self._safe_timer_call(self._sync_working_directory))
             # 初始化完成后解除保护
-            QTimer.singleShot(900, lambda: self._safe_timer_call(self._on_initialization_complete))
+            QTimer.singleShot(2500, lambda: self._safe_timer_call(self._on_initialization_complete))
         self._connect_opacity_signal()
         super().showEvent(event)
 
@@ -7141,6 +7180,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
 
     def _create_new_session(self):
+        import time as _time
+        _t0 = _time.perf_counter()
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before session creation, skipping")
@@ -7186,8 +7227,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_save_current_session()
         except Exception:
             logger.exception("Failed to auto-save current session before creating a new session")
+        _t1 = _time.perf_counter()
 
         self._cache_current_session_cards()
+        _t2 = _time.perf_counter()
         # 清空批量渲染索引，避免虚拟滚动定时器触发时遍历到已移出布局的旧卡片产生虚假警告
         self._batch_cards = []
         self._message_batch = []
@@ -7207,6 +7250,7 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.backend.create_session()
         finally:
             self._pending_session_hook = False
+        _t3 = _time.perf_counter()
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
         # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
@@ -7226,6 +7270,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_tool_call_id = None
         self._load_agent_list()
         self._release_inactive_session_messages()
+        _t4 = _time.perf_counter()
+
+        logger.info(
+            f"[Perf-CreateSession] "
+            f"auto_save={(_t1-_t0)*1000:.0f}ms "
+            f"cache_cards={(_t2-_t1)*1000:.0f}ms "
+            f"backend_create={(_t3-_t2)*1000:.0f}ms "
+            f"ui_cleanup={(_t4-_t3)*1000:.0f}ms "
+            f"total={(_t4-_t0)*1000:.0f}ms"
+        )
 
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
         self._refresh_context_usage_indicator()

@@ -343,6 +343,8 @@ class ChatBackend(QObject):
             agent_manager: 已有的 AgentManager（可选）
             workdir: 工作目录
         """
+        import time as _time
+        _t0 = _time.perf_counter()
         logger.info("[ChatBackend] 初始化中...")
 
         self._get_model_config = get_model_config
@@ -353,7 +355,7 @@ class ChatBackend(QObject):
 
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
-        logger.info("[ChatBackend] SessionManager 创建完成")
+        logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter()-_t0)*1000:.0f}ms)")
 
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
         from app.core.memory_manager import MemoryManagerCore
@@ -577,6 +579,10 @@ class ChatBackend(QObject):
 
         # 10. 初始化 MCP 连接
         self._init_mcp_connections()
+
+        # 后台预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）
+        project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
+        self._warm_git_cache(project_root)
 
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成")
@@ -2191,11 +2197,11 @@ class ChatBackend(QObject):
         # 项目笔记由 read_project_notes hook（BuildSystemPrompt）从本地 AGENTS.md 直接读取，
         # SessionStart 不再预取 notes 内容
 
-        # Worktree / git 分支信息
+        # Worktree / git 分支信息（仅从缓存读取，由 _warm_git_cache 后台线程预热）
         try:
             from app.utils.git_worktree import GitWorktreeDetector
 
-            repo_info = GitWorktreeDetector.get_repo_info(project_root)
+            repo_info = GitWorktreeDetector._cache_get(GitWorktreeDetector._info_cache, project_root)
             if repo_info and repo_info.worktrees:
                 ctx["worktree"] = {
                     "repo_name": os.path.basename(repo_info.root),
@@ -2208,6 +2214,22 @@ class ChatBackend(QObject):
             pass
 
         return ctx
+
+    def _warm_git_cache(self, project_root: str):
+        """后台线程预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）"""
+        if not project_root:
+            return
+        import threading
+
+        def _warm():
+            try:
+                from app.utils.git_worktree import GitWorktreeDetector
+
+                GitWorktreeDetector.get_repo_info(project_root)
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm, daemon=True).start()
 
     def create_session(self, trigger_hook: bool = True) -> ChatSession:
         """创建新会话
