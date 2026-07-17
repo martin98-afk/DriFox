@@ -526,16 +526,19 @@ class FileTreeWidget(QTreeWidget):
                 tc = colors.get("text", QColor(255, 255, 255))
                 accent = colors.get("accent", QColor(102, 198, 255))
                 border = colors.get("border", QColor(61, 61, 61))
+                font_size = colors.get("font_size", 14)
             else:
                 bg = QColor(33, 33, 38)
                 tc = QColor(255, 255, 255)
                 accent = QColor(102, 198, 255)
                 border = QColor(61, 61, 61)
+                font_size = 14
         else:
             bg = QColor(33, 33, 38)
             tc = QColor(255, 255, 255)
             accent = QColor(102, 198, 255)
             border = QColor(61, 61, 61)
+            font_size = 14
 
         # QMessageBox 在 Windows 上使用原生渲染，QSS 背景色无效
         # → 改用自定义 QDialog 完全控制样式
@@ -592,7 +595,7 @@ class FileTreeWidget(QTreeWidget):
             f"}}"
             f"#file-tree-dialog QLabel {{"
             f"  color: {tc.name()};"
-            f"  font-size: 14px;"
+            f"  font-size: {font_size - 1}px;"
             f"}}"
             f"#file-tree-dialog QPushButton {{"
             f"  background-color: #3a3a3a;"
@@ -602,7 +605,7 @@ class FileTreeWidget(QTreeWidget):
             f"  padding: 6px 24px;"
             f"  min-width: 80px;"
             f"  min-height: 30px;"
-            f"  font-size: 13px;"
+            f"  font-size: {font_size - 2}px;"
             f"}}"
             f"#file-tree-dialog QPushButton:hover {{"
             f"  background-color: {accent.name()};"
@@ -961,6 +964,9 @@ class FileTreeCard(QWidget):
         tc_qcolor = self._colors.get("text", QColor(255, 255, 255))
         border_c = self._colors.get("border", QColor(255, 255, 255, 30))
 
+        font_family = ctx.get("font_family", "Microsoft YaHei")
+        font_size = ctx.get("font_size", 14)
+
         # 标题
         self._title_label.setStyleSheet(f"color: {tc}; background: transparent;")
 
@@ -983,7 +989,7 @@ class FileTreeCard(QWidget):
             f"  border-radius: 6px;"
             f"  padding: 0 10px;"
             f"  color: {tc};"
-            f"  font-size: 13px;"
+            f"  font-size: {font_size - 3}px;"
             f"}}"
             f"#file-tree-search:focus {{"
             f"  border: 1px solid {self._colors['accent'].name()};"
@@ -999,7 +1005,7 @@ class FileTreeCard(QWidget):
             f"  background: {bg_hex};"
             f"  border: none;"
             f"  color: {tc_hex};"
-            f"  font-size: 13px;"
+            f"  font-size: {font_size - 2}px;"
             f"}}"
             f"#file-tree-widget::item {{"
             f"  padding: 4px 8px;"
@@ -1018,9 +1024,7 @@ class FileTreeCard(QWidget):
         self._scroll_area.setStyleSheet("#file-tree-scroll {  background: transparent;  border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
 
-        # 刷新字体设置
-        font_family = ctx.get("font_family", "Microsoft YaHei")
-        font_size = ctx.get("font_size", 14)
+        # 设置字体
         self._tree_widget.setFont(QFont(font_family, font_size - 2))
         self._search_input.setFont(QFont(font_family, font_size - 3))
 
@@ -1033,7 +1037,8 @@ class FileTreeCard(QWidget):
             from qfluentwidgets import isDarkTheme as _isdark
             is_dark = _isdark()
         color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
-        self._placeholder.setStyleSheet(f"color: {color}; font-size: 14px;")
+        ph_font_size = self._colors.get("font_size", 14) if hasattr(self, "_colors") and self._colors else 14
+        self._placeholder.setStyleSheet(f"color: {color}; font-size: {ph_font_size - 1}px;")
 
     # ── 异步加载 ──────────────────────────────────────────
 

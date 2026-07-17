@@ -2460,7 +2460,12 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 {scrollbar_css}
 
-                #content-placeholder {{ color: var(--text); }}
+                #content-placeholder {{
+                    color: var(--text);
+                    /* 平滑过渡：全量渲染时内容以轻微透明度淡入替代生硬闪烁 */
+                    transition: opacity 150ms ease;
+                    will-change: opacity;
+                }}
                 #content-placeholder * {{ color: inherit; }}
                 /* 图片自适应卡片宽度 */
                 #content-placeholder img {{
@@ -3405,8 +3410,29 @@ class CodeWebViewer(QWebEngineView):
                         var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
                         var _prevScrollTop = document.body.scrollTop;
                         var _wasUserScrolled = window._userScrolledWithin;
+                        // ── 平滑过渡：新内容以轻微透明度淡入，替代生硬闪烁 ──
+                        // 在全量 DOM 替换前设 opacity 略低，替换后在 rAF 中恢复全透明，
+                        // CSS transition 驱动平滑淡入效果，减轻 innerHTML 重建的视觉突兀感。
+                        // 🛡️ 竞态防护：取消上轮残留的清理定时器
+                        if (window._fadeCleanupTimer) {{
+                            clearTimeout(window._fadeCleanupTimer);
+                        }}
+                        // 先切 transition=none，强制 opacity 跳变到 0.88（避免上一轮 transition
+                        // 未清理时产生 1→0.88 的淡出动画），再立即恢复 transition 用于后续淡入。
+                        container.style.transition = 'none';
+                        container.style.opacity = '0.88';
+                        void container.offsetHeight;  // 强制同步样式，使跳变立即生效
+                        container.style.transition = 'opacity 120ms ease';
                         window._suppressScrollEvent = true;
-                        container.innerHTML = newHtml;
+                        try {{
+                            container.innerHTML = newHtml;
+                        }} catch(e) {{
+                            // innerHTML 替换异常时恢复透明度，避免永久半透明残影
+                            container.style.opacity = '1';
+                            container.style.transition = '';
+                            console.error('updateContent innerHTML failed:', e);
+                            throw e;
+                        }}
                         // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
@@ -3489,6 +3515,24 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
+
+                        // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
+                        // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
+                        // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
+                        window._fadeToken = (window._fadeToken || 0) + 1;
+                        var _thisFadeToken = window._fadeToken;
+                        requestAnimationFrame(function() {{
+                            container.style.opacity = '1';
+                            // 动画完成后清理 transition，避免影响后续 resize 等操作
+                            window._fadeCleanupTimer = setTimeout(function() {{
+                                if (window._fadeToken === _thisFadeToken) {{
+                                    container.style.transition = '';
+                                }}
+                                window._fadeCleanupTimer = null;
+                            }}, 130);
+                            // 本轮清理定时器已注册，若下一轮 updateContent 在 130ms 内到达，
+                            // 会在开头 clearTimeout 取消此定时器，同时 _fadeToken 递增使回调跳过。
+                        }});
 
                         // 使用延迟报告，确保浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
@@ -3679,20 +3723,35 @@ class CodeWebViewer(QWebEngineView):
             escaped = escape(text_clean)
             js = f"""
             (function() {{
+                var text = {json.dumps(escaped)};
                 var c = document.getElementById('content-placeholder');
-                if (!c) return;
-                var last = c.lastElementChild;
-                if (last && last.tagName === 'P') {{
-                    last.textContent += {json.dumps(escaped)};
-                }} else if (last && last.classList.contains('think-block')) {{
-                    // 最后是思考块：追加到思考块之后的新段落
+                if (!c || !text) return;
+                // ── 智能段落处理 ──
+                // 检测 chunk 是否以换行开头（对应 Markdown 段落分隔），
+                // 让增量文本的段落结构与最终 Markdown 渲染对齐，
+                // 减少全量渲染时因段落重组引起的视觉跳跃。
+                var startsWithNewline = text.length > 0 && (text[0] === '\\n' || text[0] === '\\r');
+                if (startsWithNewline) {{
+                    // 新段落：去掉前导换行，创建独立 <p>（即使内容为空也创建空段落，
+                    // 保持与全量 Markdown 渲染的段落结构一致，避免段落计数偏移）
+                    var clean = text.replace(/^[\\n\\r]+/, '');
                     var p = document.createElement('p');
-                    p.textContent = {json.dumps(escaped)};
+                    p.textContent = clean;
                     c.appendChild(p);
                 }} else {{
-                    var p = document.createElement('p');
-                    p.textContent = {json.dumps(escaped)};
-                    c.appendChild(p);
+                    var last = c.lastElementChild;
+                    if (last && last.tagName === 'P') {{
+                        last.textContent += text;
+                    }} else if (last && last.classList.contains('think-block')) {{
+                        // 最后是思考块：追加到思考块之后的新段落
+                        var p = document.createElement('p');
+                        p.textContent = text;
+                        c.appendChild(p);
+                    }} else {{
+                        var p = document.createElement('p');
+                        p.textContent = text;
+                        c.appendChild(p);
+                    }}
                 }}
                 // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
@@ -3806,16 +3865,18 @@ class CodeWebViewer(QWebEngineView):
         # 流式模式下 _append_text_incremental 已在 JS 侧即时显示文本，
         # 全量渲染仅用于保证 markdown 格式正确（代码块、思考块等），
         # 因此间隔可以大幅放宽以避免不必要的全量重渲染。
+        # 注意：间隔已加大，因为增量文本提供了即时可读性，
+        # 降低全量渲染频率可减少 DOM 重建带来的视觉跳跃。
         if self._streaming:
             content_len = len(self._markdown_text)
             if content_len > 100000:
-                interval = 500
+                interval = 800
             elif content_len > 50000:
-                interval = 300
+                interval = 500
             elif content_len > 10000:
-                interval = 200
+                interval = 350
             else:
-                interval = 100
+                interval = 250
         else:
             interval = 40
 
@@ -5078,8 +5139,6 @@ class MessageCard(SimpleCardWidget):
         self._base_bg = self._theme["bg"]
         self._base_border = self._theme["border"]
         self._apply_card_style()
-        # 触发背景动画更新，使模板方法 _normalBackgroundColor 使用新主题颜色
-        self._updateBackgroundColor()
         # 更新头像
         if hasattr(self, "_av_label"):
             self._av_label.setStyleSheet(self._build_avatar_style())
@@ -5116,47 +5175,22 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
 
-    # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色背景）──
+    # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
+    # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
 
     def _normalBackgroundColor(self):
-        """使用主题颜色作为卡片正常态背景，替代 CardWidget 的固定白色覆盖层"""
+        """返回透明色，让 CSS background-color 透出"""
         from PyQt5.QtGui import QColor
-        import re
 
-        try:
-            bg = self._theme.get("bg", "")
-            if bg:
-                # 尝试 QColor 直接解析（#hex / named color）
-                color = QColor(bg)
-                if color.isValid():
-                    return color
-                # 兜底解析 rgba(r, g, b, a) / rgb(r, g, b)
-                m = re.match(
-                    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)",
-                    bg,
-                )
-                if m:
-                    return QColor(
-                        int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                        int(m.group(4)) if m.group(4) else 255,
-                    )
-        except Exception:
-            pass
-        # 兜底：qfluentwidgets 默认
-        from qfluentwidgets import isDarkTheme
-        return QColor(255, 255, 255, 13 if isDarkTheme() else 170)
+        return QColor(0, 0, 0, 0)
 
     def _hoverBackgroundColor(self):
-        """悬停态：比正常态略亮"""
-        color = self._normalBackgroundColor()
-        color.setAlpha(min(255, color.alpha() + 25))
-        return color
+        """返回透明色，让 CSS background-color 透出"""
+        return QColor(0, 0, 0, 0)
 
     def _pressedBackgroundColor(self):
-        """按下态：比正常态略暗"""
-        color = self._normalBackgroundColor()
-        color.setAlpha(max(0, color.alpha() - 15))
-        return color
+        """返回透明色，让 CSS background-color 透出"""
+        return QColor(0, 0, 0, 0)
 
     def _get_footer_model_text(self) -> str:
         """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""

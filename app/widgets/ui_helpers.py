@@ -1387,6 +1387,13 @@ def restore_input_from_card(input_area, card) -> None:
     from PyQt5.QtGui import QTextCursor
 
     user_input = card.get_plain_text()
+
+    # 🛡️ 撤回的命令已经是完整命令，不需要再弹出命令卡片
+    # setPlainText 会触发 textChanged → _on_slash_trigger_check，
+    # 如果恢复的文本以 / 开头会导致命令卡片错误弹出
+    if user_input.startswith("/"):
+        input_area._suppress_slash_trigger = True
+
     input_area.setPlainText(user_input)
     input_area.moveCursor(QTextCursor.End)
     input_area._on_text_changed()
