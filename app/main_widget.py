@@ -78,6 +78,7 @@ from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
+
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -89,6 +90,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon
+
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
 # 方法级导入无法跨方法共享。仅将重型导入 app.tools.tool_classifier 移入方法。
@@ -2101,6 +2103,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
+        # ===== UI 插件左侧边缘入口 =====
+        # 浮层子控件（不参与主布局 sizeHint），通过 update_geometry 在 resizeEvent 中重定位
+        try:
+            from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
+
+            self._ui_plugin_edge_launcher = UIPluginEdgeLauncher(self, main_widget=self)
+            self._ui_plugin_edge_launcher.hide()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin edge launcher init failed: {e}")
+            self._ui_plugin_edge_launcher = None
+
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -2757,6 +2770,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._function_command_handlers[cmd_name] = _make_handler()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
+        finally:
+            # 通知左侧边缘入口刷新插件列表（无论加载成功与否都要调用，
+            # 以便失败时隐藏入口、清理残留菜单）
+            launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+            if launcher is not None and hasattr(self, "chat_scroll_area"):
+                launcher.refresh_plugins()
+                launcher.update_geometry(self.chat_scroll_area.geometry())
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -4539,9 +4559,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs[config_id]["模型列表"] = free_models
 
         # 如果当前模型选择器已打开，刷新显示
-        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible(
-            "model_selector", self._window_id
-        ):
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible("model_selector", self._window_id):
             self._load_model_selector_to_card()
 
         # 更新模型选择按钮标签
@@ -6021,6 +6039,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+        # 重新定位 UI 插件左侧边缘入口（基于 chat_scroll_area 几何）
+        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+        if launcher is not None and hasattr(self, "chat_scroll_area"):
+            launcher.update_geometry(self.chat_scroll_area.geometry())
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
             self.pixel_pet.resize_handle(self.width(), self.height())
@@ -6575,6 +6597,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
+            # 通知每个窗口的左侧边缘入口重新读取插件列表
+            # （热重载可能新增 / 卸载了 UI 插件）
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    launcher = getattr(win, "_ui_plugin_edge_launcher", None)
+                    if launcher is not None:
+                        launcher.refresh_plugins()
+                except RuntimeError, AttributeError:
+                    pass
+            logger.debug("[HotReload] UI 插件边缘入口已刷新")
+
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
         统一刷新 UI 外观，按变更类型分流。
@@ -6880,6 +6915,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具控制卡片
         if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
             self._tool_control_card.refresh_style()
+        # UI 插件左侧边缘入口：主题切换后刷新颜色
+        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+        if launcher is not None and hasattr(launcher, "apply_theme"):
+            launcher.apply_theme()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -11116,6 +11155,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 图片大小检查：超过 5MB 自动压缩，防止 API 400
                 if len(img_b64) > 5 * 1024 * 1024:
                     from app.core.workers.chat_worker import compress_data_uri
+
                     compressed = compress_data_uri(data_uri)
                     if compressed != data_uri:
                         data_uri = compressed

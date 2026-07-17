@@ -244,6 +244,19 @@ class UIPluginRegistry:
 
         FunctionCommandHandlers.register(cmd_name, _handler)
 
+    def toggle_floating_card(self, card_id: str, main_widget=None) -> None:
+        """切换浮动卡片显示（公开的窗口级入口，供 Launcher / 外部触发器调用）
+
+        内部直接复用 ``_show_floating_card()`` 的创建 + toggle 逻辑，
+        不改变现有卡片缓存、互斥、关闭行为。已有斜杠命令继续走原 handler。
+
+        Args:
+            card_id: 卡片唯一 ID（与 ``FloatingCardInfo.card_id`` 一致）
+            main_widget: 目标主窗口（多窗口隔离用）。None 时退回到
+                         ``self._main_widget``（单例兼容路径）。
+        """
+        self._show_floating_card(card_id, main_widget=main_widget)
+
     def _show_floating_card(self, card_id: str, main_widget=None) -> None:
         """显示浮动卡片
 
@@ -469,7 +482,8 @@ class UIPluginRegistry:
             # 此处主动调用恢复逻辑，确保无论回调链是否断裂，输入区都能正确恢复。
             try:
                 from loguru import logger
-                if mw is not None and hasattr(mw, '_on_system_card_closed'):
+
+                if mw is not None and hasattr(mw, "_on_system_card_closed"):
                     # 先检查是否还有其他系统卡片可见
                     card_manager = getattr(mw, "_card_manager", None)
                     wnd_id = window_id
@@ -486,9 +500,7 @@ class UIPluginRegistry:
                             all_closed = not card_manager.is_card_visible(card_id, wnd_id)
                         if all_closed and getattr(mw, "_system_cards_open", False):
                             mw._on_system_card_closed(card_id)
-                            logger.debug(
-                                f"[UIPluginRegistry] 兜底恢复输入区（card={card_id}, window={window_id}）"
-                            )
+                            logger.debug(f"[UIPluginRegistry] 兜底恢复输入区（card={card_id}, window={window_id}）")
             except Exception:
                 pass
         except RuntimeError:
@@ -542,8 +554,7 @@ class UIPluginRegistry:
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
 
-    def set_context_provider(self, provider: Callable[[], Dict[str, Any]],
-                             window_id: str = None) -> None:
+    def set_context_provider(self, provider: Callable[[], Dict[str, Any]], window_id: str = None) -> None:
         """设置上下文提供者（多窗口隔离：按 window_id 存储）
 
         UI 浮动卡片首次显示时，会调用此 provider 获取上下文 dict，
@@ -560,8 +571,7 @@ class UIPluginRegistry:
         else:
             self._context_provider = provider
 
-    def _build_card_context(self, card_info: FloatingCardInfo,
-                            window_id: str = None) -> Dict[str, Any]:
+    def _build_card_context(self, card_info: FloatingCardInfo, window_id: str = None) -> Dict[str, Any]:
         """构建卡片上下文 dict
 
         优先级：卡片专属 context_provider > 窗口级 provider > 全局兼容 provider。
@@ -585,8 +595,9 @@ class UIPluginRegistry:
         ctx.setdefault("card_id", card_info.card_id)
         return ctx
 
-    def _make_context_provider(self, card_info: FloatingCardInfo,
-                               window_id: str = None) -> Callable[[], Dict[str, Any]]:
+    def _make_context_provider(
+        self, card_info: FloatingCardInfo, window_id: str = None
+    ) -> Callable[[], Dict[str, Any]]:
         """创建一个上下文提供函数（闭包），供卡片按需拉取最新上下文
 
         返回的无参函数每次调用都会通过 _build_card_context 重新构建上下文，
@@ -637,3 +648,7 @@ class UIPluginRegistry:
         self._card_widget_instances.clear()
         self._context_provider = None
         self._window_main_widgets.clear()
+        self._context_providers.clear()
+        # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
+        # 避免测试间残留 _instance 上的实例属性
+        UIPluginRegistry._instance = None
