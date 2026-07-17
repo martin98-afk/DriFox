@@ -481,7 +481,13 @@ def update_theme_options():
             settings = Settings.get_instance()
             settings.ui_theme_style.validator.__init__(themes)
             if settings.ui_theme_style.value not in themes:
-                settings.ui_theme_style.value = themes[0]
+                # 当前值不在列表中时，检查 PluginManager 是否已初始化
+                # 未初始化 → 插件主题尚未加载，暂不重置（等后续 _reload_themes_from_plugins 重试）
+                from app.core.plugin_manager import PluginManager
+
+                pm = PluginManager.get_instance()
+                if pm.is_initialized():
+                    settings.ui_theme_style.value = themes[0]
     except Exception as e:
         import logging
 
