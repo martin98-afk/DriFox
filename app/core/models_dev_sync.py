@@ -213,6 +213,153 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     return result
 
 
+# ============================================================
+# OpenCode Zen 免费模型同步
+# ============================================================
+# OpenCode Zen 的 /v1/models 端点会返回用户账号下可用的模型列表，
+# 其中包括带 -free 后缀的免费模型。这里单独拉取并合并到 models.dev 数据中，
+# 比仅靠 models.dev 更实时。
+def _fetch_opencode_zen_free_models(api_key: str = "") -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """从 OpenCode Zen /v1/models 获取带 -free 后缀的免费模型列表。
+
+    返回 (free_model_names, model_capabilities)。
+    网络失败或 API 异常时返回空，不影响主流程。
+    """
+    if not api_key:
+        try:
+            from app.constants import OPENCODE_SHARED_API_KEY
+
+            api_key = OPENCODE_SHARED_API_KEY
+        except Exception:
+            logger.warning("[models.dev] 无法获取 OpenCode 共享 API Key，跳过免费模型同步")
+            return [], {}
+
+    url = "https://opencode.ai/zen/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        import httpx
+
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            resp = client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.warning(f"[models.dev] OpenCode Zen API 调用失败: {e}")
+        return [], {}
+
+    # OpenAI-compatible 格式: {data: [{id: "model-name", ...}, ...]}
+    models_data: list = []
+    if isinstance(data, dict):
+        if "data" in data:
+            models_data = data["data"]
+        elif "models" in data:
+            models_data = data["models"]
+    elif isinstance(data, list):
+        models_data = data
+
+    free_models: List[str] = []
+    caps: Dict[str, Dict[str, Any]] = {}
+    for item in models_data:
+        if isinstance(item, dict):
+            model_id = item.get("id", "") or item.get("name", "")
+        elif isinstance(item, str):
+            model_id = item
+        else:
+            continue
+
+        model_id = model_id.strip()
+        if not model_id or not model_id.endswith("-free"):
+            continue
+
+        free_models.append(model_id)
+        # 简单模式：只写基础能力，具体值由 family 兜底（PROVIDER_CAPABILITIES["opencode"]）
+        caps[model_id] = {
+            "context_limit": 200000,
+            "supports_thinking": True,
+            "thinking_param": "reasoning_effort",
+            "source": "opencode_api",
+            "note": f"OpenCode Zen 免费模型（via {url}）",
+        }
+
+    if free_models:
+        logger.info(f"[models.dev] OpenCode Zen 免费模型: {free_models}")
+
+    return free_models, caps
+
+
+# ============================================================
+# OpenCode 免费模型：按服务商实例异步刷新
+# ============================================================
+# 与上面 _fetch_opencode_zen_free_models 的区别：
+#   - 上面那个用共享 key 拉统一的 OpenCode Zen 端点，目的是补齐"模型能力元数据"；
+#   - 下面这个按每个服务商实例各自的 API_URL / API_KEY 去拉，目的是刷新
+#     "该实例可用的免费模型列表"（支持 OpenCode Zen #2/#3 等多实例）。
+# 网络 + 解析逻辑放 core 层，线程调度与 UI 刷新由调用方（main_widget）负责。
+def fetch_opencode_free_models_for_providers(
+    targets: List[Tuple[str, str, str]],
+    timeout: float = 15.0,
+) -> Dict[str, List[str]]:
+    """按服务商实例批量拉取 OpenCode 免费模型列表（-free 后缀）。
+
+    参数 targets: [(config_id, api_url, api_key), ...]，每个元素对应一个
+        服务商实例（可能多个 OpenCode Zen #2/#3 等）。
+    返回: {config_id: [free_model_names]}，只含成功获取且非空的实例。
+
+    同步执行（配合 threading 调用，不阻塞主线程）。单个实例失败不影响其他。
+    """
+    from app.constants import OPENCODE_SHARED_API_KEY
+
+    results: Dict[str, List[str]] = {}
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("[models.dev] 未安装 httpx，跳过实例级免费模型刷新")
+        return results
+
+    with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+        for cid, base_url, key in targets:
+            if not base_url:
+                continue
+            if not key:
+                key = OPENCODE_SHARED_API_KEY
+            try:
+                url = f"{base_url.rstrip('/')}/models"
+                headers = {"Authorization": f"Bearer {key}"}
+                resp = client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+            except Exception as e:
+                logger.debug(f"[OpenCode] 实例 {cid[:12]}... 获取免费模型失败: {e}")
+                continue
+
+            # 解析 OpenAI-compatible 响应
+            raw_ids: List[str] = []
+            if isinstance(data, dict):
+                if "data" in data:
+                    raw_ids = [
+                        m.get("id", "") or m.get("name", "")
+                        for m in data["data"]
+                        if isinstance(m, dict)
+                    ]
+                elif "models" in data:
+                    raw_ids = [
+                        m.get("id", "") or m.get("name", "")
+                        for m in data["models"]
+                        if isinstance(m, dict)
+                    ]
+            elif isinstance(data, list):
+                raw_ids = [m if isinstance(m, str) else "" for m in data]
+
+            free_models = [m.strip() for m in raw_ids if m.strip().endswith("-free")]
+            if free_models:
+                results[cid] = free_models
+                logger.info(f"[OpenCode] 实例 {cid[:12]}... 免费模型: {free_models}")
+
+    return results
+
+
 def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """解析 models.dev 数据，返回 (provider_models, model_capabilities)。
 
@@ -256,11 +403,12 @@ def load_dynamic_models(
     force: bool = False,
     cache_path: Optional[Path] = None,
 ) -> DynamicModelsResult:
-    """加载 models.dev 动态模型配置。
+    """加载 models.dev 动态模型配置（含 OpenCode Zen 免费模型同步）。
 
     逻辑：
       1. 若 force=True 或缓存不存在/过期，尝试远程拉取。
-      2. 远程拉取成功：更新缓存，解析返回。
+      2. 远程拉取成功：解析 models.dev 数据，再叠加 OpenCode Zen 免费模型，
+         合入缓存后返回。
       3. 远程拉取失败：若缓存存在（即使过期），用缓存；否则返回空结果。
       4. 若 force=False 且缓存有效：直接读取缓存。
 
@@ -274,6 +422,20 @@ def load_dynamic_models(
         remote_data = _fetch_remote()
         if remote_data is not None:
             provider_models, model_capabilities = _parse_models_dev_data(remote_data)
+
+            # ── 叠加 OpenCode Zen 免费模型 ──
+            opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models()
+            if opencode_free_models:
+                if "OpenCode Zen" not in provider_models:
+                    provider_models["OpenCode Zen"] = []
+                seen = {m.strip().lower() for m in provider_models["OpenCode Zen"]}
+                for model in opencode_free_models:
+                    key = model.strip().lower()
+                    if key and key not in seen:
+                        provider_models["OpenCode Zen"].append(model)
+                        seen.add(key)
+                model_capabilities.update(opencode_free_caps)
+
             cache = {
                 "_cached_at": time.time(),
                 "_url": MODELS_DEV_API_URL,

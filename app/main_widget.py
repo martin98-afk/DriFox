@@ -27,6 +27,7 @@ from PyQt5.QtCore import (
     QTimer,
     QUrl,
     pyqtSignal,
+    pyqtSlot,
 )
 from PyQt5.QtGui import QColor, QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
@@ -326,6 +327,8 @@ class OpenAIChatToolWindow(ToolWindow):
     ai_state_changed = pyqtSignal(str)
     # 套餐用量查询结果桥接信号（后台线程 → 主线程）
     _coding_plan_result_ready = pyqtSignal(object)
+    # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
+    _opencode_models_ready = pyqtSignal(object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -435,6 +438,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._interrupt_complete.connect(self._on_finalize_complete)
         # 线程安全桥接：套餐用量查询结果回主线程
         self._coding_plan_result_ready.connect(self._on_coding_plan_result)
+        # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
+        self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：后台 git 分支检测结果回主线程
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
@@ -1279,6 +1284,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
         self._start_subagent_log_cleanup()
+
+        # 延迟启动 OpenCode Zen 免费模型异步刷新（避免与启动期其他网络请求争抢）
+        QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
 
     def _start_subagent_log_cleanup(self):
         """定期清理子智能体日志，避免无限堆积"""
@@ -4432,8 +4440,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         saved_models = ast.literal_eval(saved_models)
                     except Exception:
                         saved_models = []
-                if isinstance(saved_models, list):
+                if isinstance(saved_models, list) and saved_models:
                     model_list = list(saved_models)
+                # 模型列表存在但为空（[]）→ 回退到 merged_provider_models，
+                # 避免刚注入默认配置时模型选择器一片空白
+                if not model_list and pname in merged_provider_models:
+                    model_list = list(merged_provider_models[pname])
             elif pname in merged_provider_models:
                 model_list = list(merged_provider_models[pname])
             cur_model = config.get("模型名称", "")
@@ -4471,6 +4483,69 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
         self._update_model_selector_header()
+
+    # ──────────────────────────────────────────────
+    # OpenCode Zen 免费模型异步刷新
+    # ──────────────────────────────────────────────
+    def _async_refresh_opencode_models(self):
+        """后台线程异步刷新所有 OpenCode Zen 服务的免费模型列表（-free 后缀）。
+
+        启动后立即返回，不阻塞 UI。网络与解析逻辑在 app.core.models_dev_sync
+        的 fetch_opencode_free_models_for_providers，本方法只负责收集实例、
+        调度线程、把结果经信号回主线程刷新 UI。
+        """
+        import threading
+
+        from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
+
+        # 收集所有 OpenCode Zen 服务商（可能有多个实例 #2/#3 等）
+        targets: list[tuple[str, str, str]] = []
+        for config_id, config in self._valid_configs.items():
+            pname = config.get("provider_name", "")
+            if "opencode" not in pname.lower():
+                continue
+            api_url = config.get("API_URL", "")
+            api_key = config.get("API_KEY", "")
+            if api_url:
+                targets.append((config_id, api_url, api_key))
+
+        if not targets:
+            return
+
+        def _do_fetch():
+            """后台线程执行：批量拉取各实例免费模型，逐个回传主线程"""
+            results = fetch_opencode_free_models_for_providers(targets)
+            for config_id, free_models in results.items():
+                self._opencode_models_ready.emit((config_id, free_models))
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    @pyqtSlot(object)
+    def _on_opencode_models_ready(self, result: tuple):
+        """主线程处理 OpenCode Zen 免费模型异步刷新结果。"""
+        config_id, free_models = result
+
+        if config_id not in self._valid_configs:
+            return
+
+        # 更新持久化配置
+        saved = self.cfg.llm_saved_providers.value
+        if isinstance(saved, dict) and config_id in saved:
+            saved[config_id]["模型列表"] = free_models
+            self.cfg.llm_saved_providers.value = saved
+            self.cfg.save()
+
+        # 更新本地缓存
+        self._valid_configs[config_id]["模型列表"] = free_models
+
+        # 如果当前模型选择器已打开，刷新显示
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible(
+            "model_selector", self._window_id
+        ):
+            self._load_model_selector_to_card()
+
+        # 更新模型选择按钮标签
+        self._update_model_selector_btn()
 
     def _update_model_selector_header(self):
         """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）
@@ -7355,7 +7430,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "提示",
                     "当前没有活动会话",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7365,7 +7440,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "提示",
                     "工具执行器未初始化",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7377,11 +7452,11 @@ class OpenAIChatToolWindow(ToolWindow):
             operations = file_recorder.get_all_operations_for_session(session_id)
 
             if not operations:
-                InfoBar.info(
+                InfoBar.warning(
                     "提示",
                     "当前会话没有文件修改记录",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7389,11 +7464,11 @@ class OpenAIChatToolWindow(ToolWindow):
             file_paths = list({op.get("file_path") for op in operations if op.get("file_path")})
 
             if not file_paths:
-                InfoBar.info(
+                InfoBar.warning(
                     "提示",
                     "未找到修改的文件",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7420,19 +7495,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         except ImportError as e:
             logger.error(f"[DiffViewer] 导入模块失败: {e}")
-            InfoBar.error(
+            InfoBar.warning(
                 "错误",
                 f"功能加载失败: {str(e)}",
                 parent=self,
-                position=InfoBarPosition.BOTTOM,
+                position=InfoBarPosition.TOP_RIGHT,
             )
         except Exception as e:
             logger.exception(f"[DiffViewer] 打开差异查看器失败: {e}")
-            InfoBar.error(
+            InfoBar.warning(
                 "错误",
                 f"打开差异查看器失败: {str(e)}",
                 parent=self,
-                position=InfoBarPosition.BOTTOM,
+                position=InfoBarPosition.TOP_RIGHT,
             )
 
     def _clear_chat_area(self, delete_widgets: bool = True):
