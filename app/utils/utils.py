@@ -572,6 +572,7 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
         "description": description,
         "plugin_name": plugin_name,
         "is_system": is_system,
+        "path": str(skill_dir.resolve()),
     }
 
 
@@ -637,6 +638,17 @@ def load_skill(name: str) -> tuple[bool, str, str]:
         if path.exists():
             found_path = path
             break
+
+    # 回退：按 frontmatter name 查找（处理 name ≠ 文件夹名的场景）
+    if not found_path:
+        skill_info = get_skill_by_name(name)
+        if skill_info:
+            skill_dir = Path(skill_info["path"])
+            for fname in ("SKILL.md", "skill.md"):
+                p = skill_dir / fname
+                if p.exists():
+                    found_path = p
+                    break
 
     if not found_path:
         return (False, f"Skill not found: {raw_name}", "")
