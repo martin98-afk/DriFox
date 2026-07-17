@@ -577,10 +577,21 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
 
 
 def get_skill_by_name(name: str) -> dict | None:
-    """根据名称获取技能信息"""
+    """根据名称获取技能信息
+
+    支持两种匹配：
+    1. skill["name"] — frontmatter 中定义的 name（主匹配）
+    2. skill["path"] 的文件夹名 — 技能文件夹名（回退匹配）
+    """
     skills = get_local_skills()
+    # 第一轮：按 frontmatter name 精确匹配
     for skill in skills:
         if skill["name"] == name:
+            return skill
+    # 第二轮：按文件夹名回退匹配（处理用文件夹名调用技能的场景）
+    for skill in skills:
+        folder_name = Path(skill.get("path", "")).name
+        if folder_name == name:
             return skill
     return None
 
