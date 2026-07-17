@@ -3,6 +3,7 @@
 全局唯一托盘图标管理器（单例）
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
+import ctypes
 import math
 import platform
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import keyboard
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
@@ -19,6 +20,67 @@ from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 class _HotkeyBridge(QObject):
     """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
     toggle_all_windows = pyqtSignal()
+
+
+# ========== Windows 原生全局热键（RegisterHotKey）相关 ==========
+# 使用 RegisterHotKey 而非 keyboard 库的 LL 钩子：前者是 Windows 官方的
+# 应用级热键机制，不受 LL 钩子被 Windows 静默移除（睡眠/锁屏/UAC/300ms 超时）
+# 的影响，是唯一能根治 toggle-window 热键“用久了失效”的方案。
+if platform.system() == "Windows":
+    _user32 = ctypes.windll.user32
+    _RegisterHotKey = _user32.RegisterHotKey
+    _RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+    _RegisterHotKey.restype = ctypes.c_bool
+    _UnregisterHotKey = _user32.UnregisterHotKey
+    _UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _UnregisterHotKey.restype = ctypes.c_bool
+    _VkKeyScanW = _user32.VkKeyScanW
+    _VkKeyScanW.argtypes = [ctypes.c_wchar]
+    _VkKeyScanW.restype = ctypes.c_short
+
+    WM_HOTKEY = 0x0312
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    MOD_WIN = 0x0008
+    MOD_NOREPEAT = 0x4000  # 按住不重复触发
+    _HOTKEY_ID = 0x0001  # 线程关联热键，id 用 0x0000~0xBFFF
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class _MSG(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", ctypes.c_void_p),
+            ("message", ctypes.c_uint),
+            ("wParam", ctypes.c_void_p),
+            ("lParam", ctypes.c_void_p),
+            ("time", ctypes.c_uint),
+            ("pt", _POINT),
+        ]
+
+
+class _HotkeyNativeFilter(QAbstractNativeEventFilter):
+    """拦截主线程消息循环中的 WM_HOTKEY，桥接到 Qt 信号
+
+    RegisterHotKey 把 WM_HOTKEY 投递到调用线程（Qt 主线程）的消息队列，
+    通过 QAbstractNativeEventFilter 即可在 Qt 处理前捕获，无需子类化窗口。
+    """
+
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    def nativeEventFilter(self, eventType, message):
+        if platform.system() == "Windows" and eventType == "windows_generic_MSG":
+            try:
+                msg = ctypes.cast(int(message), ctypes.POINTER(_MSG))[0]
+                if msg.message == WM_HOTKEY and int(msg.wParam) == _HOTKEY_ID:
+                    self._callback()
+                    return (True, 0)  # 已处理，停止继续分发
+            except Exception:
+                pass
+        return (False, 0)
 
 
 class TrayManager(QObject):
@@ -96,8 +158,16 @@ class TrayManager(QObject):
         self._hotkey_bridge = _HotkeyBridge()
         self._hotkey_bridge.toggle_all_windows.connect(self._toggle_all_windows)
         self._hotkey_handle = None
+        self._hotkey_id = None
+        self._hotkey_mode = None  # "win"=原生RegisterHotKey / "kbd"=keyboard兜底钩子
+        self._hotkey_filter = None
+        self._hotkey_failed_once = False
+        self._hotkey_failed_hotkey = None
         self._registered_hotkey = None
         self._last_toggle_time = 0.0  # 防重复触发时间戳
+        # Windows: 安装 WM_HOTKEY 原生事件过滤器（需在 QApplication 存在后）
+        if platform.system() == "Windows":
+            self._install_hotkey_filter()
         self._setup_global_hotkey()
 
         # 定时重建全局热键（应对 sleep/resume 等导致的钩子丢失）
@@ -697,48 +767,217 @@ class TrayManager(QObject):
     def _setup_global_hotkey(self, hotkey_str: str = None):
         """注册全局热键
 
-        使用 keyboard 库实现跨进程全局热键，即使窗口全部隐藏也能响应。
-        热键回调通过 _HotkeyBridge 信号桥接到 Qt 主线程。
+        Windows: 使用原生 Win32 RegisterHotKey（官方应用级热键，睡眠/锁屏/UAC
+          均不会静默失效，是根治 toggle-window 热键“用久了失效”的方案）。
+        其它平台: 沿用 keyboard 库的 LL 钩子实现（保持原有行为）。
         快捷键来源：从 commands/toggle-window.md 的 shortcut 字段读取（支持热修改）。
 
         Args:
-            hotkey_str: 热键字符串，如 "alt+z"。None 则从命令定义读取。
+            hotkey_str: 热键字符串，如 'alt+z'。None 则从命令定义读取。
         """
         if hotkey_str is None:
             hotkey_str = self._read_hotkey_from_command()
         if not hotkey_str:
-            hotkey_str = "alt+z"
+            hotkey_str = 'alt+z'
 
         hotkey_str = hotkey_str.lower()
-        if self._hotkey_handle is not None and hotkey_str == self._registered_hotkey:
-            return  # 已注册相同热键，跳过
 
+        if platform.system() == 'Windows':
+            self._win_register_hotkey(hotkey_str)
+        else:
+            self._kbd_register_hotkey(hotkey_str)
+
+    def _release_global_hotkey(self):
+        """释放已注册的全局热键（兼容 win / kbd 两种模式）"""
+        if platform.system() == 'Windows':
+            self._win_unregister_hotkey()
+        self._kbd_release()
+        self._hotkey_mode = None
+        self._registered_hotkey = None
+
+    # ---------- Windows: 原生 RegisterHotKey 实现 ----------
+
+    def _win_register_hotkey(self, hotkey_str: str):
+        """用 Win32 RegisterHotKey 注册/重注册全局热键
+
+        优先尝试 OS 原生注册（最稳健：睡眠/锁屏/UAC 均不会静默失效）。
+        若该组合已被其它程序占用（RegisterHotKey 返回 0 + 错误码 1409），
+        则【自动回退】到 keyboard 库的 LL 钩子，与占用方共存（行为同旧版），
+        保证用户的热键始终可用，而非彻底失效。
+        """
         try:
-            new_handle = keyboard.add_hotkey(
+            modifiers, vk = self._parse_hotkey(hotkey_str)
+        except ValueError as exc:
+            logger.warning(f'[TrayManager] 热键字符串解析失败({hotkey_str}): {exc}')
+            return
+
+        self._win_unregister_hotkey()
+        ok = _RegisterHotKey(None, _HOTKEY_ID, modifiers, vk)
+        if ok:
+            self._hotkey_id = _HOTKEY_ID
+            self._registered_hotkey = hotkey_str
+            self._hotkey_mode = 'win'
+            # 升级到原生热键成功 → 释放可能残留的 keyboard 兜底钩子
+            self._kbd_release()
+            self._hotkey_failed_once = False
+            logger.info(f'[TrayManager] 原生全局热键已注册: {hotkey_str}')
+            return
+
+        # —— 注册失败：组合键被占用，回退到 keyboard LL 钩子 ——
+        err = ctypes.GetLastError()
+        logger.warning(
+            f'[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}'
+            f'（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）'
+        )
+        # 仅首次失败 / 更换组合时弹一次托盘提示，引导用户换键
+        if not getattr(self, '_hotkey_failed_once', False) or self._hotkey_failed_hotkey != hotkey_str:
+            self._hotkey_failed_once = True
+            self._hotkey_failed_hotkey = hotkey_str
+            try:
+                self.notify(
+                    '全局快捷键被占用',
+                    f'「{hotkey_str}」已被其它程序占用（常见于 NVIDIA GeForce Experience 的 Alt+Z）。'
+                    f'已自动回退到兼容模式，功能正常；如需彻底规避，可在 toggle-window 的 shortcut 换为 ctrl+alt+z。',
+                )
+            except Exception:
+                pass
+        self._kbd_register_hotkey(hotkey_str)
+
+    def _win_unregister_hotkey(self):
+        """注销已注册的原生热键（幂等安全）"""
+        if getattr(self, '_hotkey_id', None) is not None:
+            try:
+                _UnregisterHotKey(None, self._hotkey_id)
+            except Exception:
+                pass
+            self._hotkey_id = None
+
+    # ---------- 兜底：keyboard 库 LL 钩子（组合键被占用/非 Windows 时使用） ----------
+
+    def _kbd_register_hotkey(self, hotkey_str: str):
+        """用 keyboard 库 LL 钩子注册全局热键（RegisterHotKey 的兼容兜底）
+
+        与占用方（如 NVIDIA）共存，行为同旧版。仅在 RegisterHotKey 抢不到
+        组合键时启用。自带幂等：相同组合已注册则直接跳过，避免重复回调导致
+        一次按键触发多次切换。
+        """
+        # 幂等：同模式 + 同组合 + 句柄有效 → 跳过
+        if (
+            getattr(self, '_hotkey_mode', None) == 'kbd'
+            and getattr(self, '_registered_hotkey', None) == hotkey_str
+            and getattr(self, '_hotkey_handle', None) is not None
+        ):
+            return
+        self._kbd_release()
+        try:
+            handle = keyboard.add_hotkey(
                 hotkey_str,
                 self._hotkey_bridge.toggle_all_windows.emit,
                 suppress=True,
             )
+            self._hotkey_handle = handle
+            self._registered_hotkey = hotkey_str
+            self._hotkey_mode = 'kbd'
+            logger.info(f'[TrayManager] 兜底（keyboard 钩子）热键已注册: {hotkey_str}')
         except Exception as exc:
-            logger.warning(f"[TrayManager] 全局热键 {hotkey_str} 注册失败: {exc}")
-            return
+            logger.warning(f'[TrayManager] keyboard 兜底热键注册失败({hotkey_str}): {exc}')
 
-        # 释放旧热键
-        self._release_global_hotkey()
-
-        self._hotkey_handle = new_handle
-        self._registered_hotkey = hotkey_str
-        logger.info(f"[TrayManager] 全局热键已注册: {hotkey_str}")
-
-    def _release_global_hotkey(self):
-        """释放已注册的全局热键"""
-        if self._hotkey_handle is not None:
+    def _kbd_release(self):
+        """释放 keyboard 库兜底热键（幂等安全）"""
+        if getattr(self, '_hotkey_handle', None) is not None:
             try:
                 keyboard.remove_hotkey(self._hotkey_handle)
             except Exception:
                 pass
             self._hotkey_handle = None
-            self._registered_hotkey = None
+        if getattr(self, '_hotkey_mode', None) == 'kbd':
+            self._hotkey_mode = None
+
+    # ---------- 热键字符串解析 ----------
+
+    def _parse_hotkey(self, hotkey_str: str):
+        """将 'alt+z' 之类字符串解析为 (modifiers, vk)
+
+        modifiers: MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN 的组合（含 MOD_NOREPEAT）
+        vk: 主键的虚拟键码
+        """
+        parts = [p.strip() for p in hotkey_str.lower().split('+') if p.strip()]
+        modifiers = 0
+        vk = None
+        for p in parts:
+            if p in ('alt', 'menu'):
+                modifiers |= MOD_ALT
+            elif p in ('ctrl', 'control'):
+                modifiers |= MOD_CONTROL
+            elif p == 'shift':
+                modifiers |= MOD_SHIFT
+            elif p in ('win', 'super', 'meta'):
+                modifiers |= MOD_WIN
+            else:
+                vk = self._key_to_vk(p)
+        if vk is None:
+            raise ValueError(f'缺少主键: {hotkey_str}')
+        modifiers |= MOD_NOREPEAT
+        return modifiers, vk
+
+    def _key_to_vk(self, key: str):
+        """将单个按键名转为虚拟键码（vk）"""
+        named = {
+            'backspace': 0x08, 'tab': 0x09, 'enter': 0x0D, 'return': 0x0D,
+            'shift': 0x10, 'ctrl': 0x11, 'control': 0x11, 'alt': 0x12, 'menu': 0x12,
+            'pause': 0x13, 'capslock': 0x14, 'esc': 0x1B, 'escape': 0x1B,
+            'space': 0x20, 'pgup': 0x21, 'pgdn': 0x22, 'end': 0x23, 'home': 0x24,
+            'left': 0x25, 'up': 0x26, 'right': 0x27, 'down': 0x28,
+            'insert': 0x2D, 'delete': 0x2E, 'del': 0x2E,
+            '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+            '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+            'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45, 'f': 0x46,
+            'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A, 'k': 0x4B, 'l': 0x4C,
+            'm': 0x4D, 'n': 0x4E, 'o': 0x4F, 'p': 0x50, 'q': 0x51, 'r': 0x52,
+            's': 0x53, 't': 0x54, 'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58,
+            'y': 0x59, 'z': 0x5A,
+            'numpad0': 0x60, 'numpad1': 0x61, 'numpad2': 0x62, 'numpad3': 0x63,
+            'numpad4': 0x64, 'numpad5': 0x65, 'numpad6': 0x66, 'numpad7': 0x67,
+            'numpad8': 0x68, 'numpad9': 0x69,
+            'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74,
+            'f6': 0x75, 'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79,
+            'f11': 0x7A, 'f12': 0x7B,
+            'numlock': 0x90, 'scrolllock': 0x91,
+            'semicolon': 0xBA, 'equal': 0xBB, 'comma': 0xBC, 'minus': 0xBD,
+            'period': 0xBE, 'slash': 0xBF, 'backquote': 0xC0,
+            'lbracket': 0xDB, 'backslash': 0xDC, 'rbracket': 0xDD,
+            'quote': 0xDE,
+        }
+        key = key.lower()
+        if key in named:
+            return named[key]
+        if len(key) == 1:
+            return _VkKeyScanW(key) & 0xFF
+        if key.startswith('f') and key[1:].isdigit() and 1 <= int(key[1:]) <= 12:
+            return 0x70 + int(key[1:]) - 1
+        raise ValueError(f'未知按键: {key}')
+
+    # ---------- 原生事件过滤器安装 ----------
+
+    def _install_hotkey_filter(self):
+        """安装 WM_HOTKEY 原生事件过滤器（仅 Windows）
+
+        必须在 QApplication 实例存在后调用。若此时尚未获得实例，则延后到
+        下一个事件循环再试（保证 RegisterHotKey 所在的线程有消息循环）。
+        """
+        if self._hotkey_filter is not None:
+            return
+        try:
+            app = QApplication.instance()
+            if app is None:
+                # 尚未就绪，下一轮事件循环再安装
+                QTimer.singleShot(0, self._install_hotkey_filter)
+                return
+            self._hotkey_filter = _HotkeyNativeFilter(self._hotkey_bridge.toggle_all_windows.emit)
+            app.installNativeEventFilter(self._hotkey_filter)
+            logger.info('[TrayManager] WM_HOTKEY 原生过滤器已安装')
+        except Exception as exc:
+            logger.warning(f'[TrayManager] 安装 WM_HOTKEY 过滤器失败: {exc}')
 
     def _toggle_all_windows(self):
         """切换所有窗口的隐藏/显示状态
@@ -792,15 +1031,88 @@ class TrayManager(QObject):
         except Exception as e:
             logger.error(f"[TrayManager] _toggle_all_windows 异常: {e}")
 
+    def _ensure_listener_alive(self):
+        """检测 keyboard 库监听线程是否存活，若死亡则尝试重启
+
+        仅在「keyboard 兜底模式」(_hotkey_mode == 'kbd')下需要：
+        RegisterHotKey 原生模式没有监听线程，无需此检查。
+        """
+        if getattr(self, '_hotkey_mode', None) != 'kbd':
+            return
+        try:
+            listener = keyboard._listener
+            thread = getattr(listener, 'listening_thread', None)
+            if thread is not None and not thread.is_alive():
+                logger.warning('[TrayManager] keyboard 监听线程已死亡，尝试重启...')
+                listener.listening = False
+                listener.init()
+                listener.start_if_necessary()
+                logger.info('[TrayManager] keyboard 监听线程重启完成')
+        except Exception as exc:
+            logger.debug(f'[TrayManager] 监听线程检查失败（非致命）: {exc}')
+
     def _health_check_hotkey(self):
         """定期检查并重建全局热键
 
-        底层 keyboard 库的低级钩子可能因 sleep/resume、UAC 弹窗等场景丢失。
-        定时重建确保热键始终可用。
+        Windows(RegisterHotKey): 注销+重注册，幂等且能在任何极端场景下自愈。
+          若组合键被占用则自动回退到 keyboard 兜底（见 _win_register_hotkey）；
+          若后续组合键空闲（占用方关闭），此处会重新升级为原生热键。
+        其它平台(keyboard LL 钩子): 确认监听线程存活（否则重启）后无竞态重建。
         """
-        if self._hotkey_handle is not None:
-            self._release_global_hotkey()
-        self._setup_global_hotkey()
+        try:
+            hotkey_str = self._read_hotkey_from_command()
+            if not hotkey_str:
+                hotkey_str = 'alt+z'
+            hotkey_str = hotkey_str.lower()
+
+            if platform.system() == 'Windows':
+                # 幂等重注册：RegisterHotKey 失败会自动回退到 keyboard 兜底；
+                # 组合键空闲后此处会重新升级为原生 RegisterHotKey。
+                self._win_register_hotkey(hotkey_str)
+                # keyboard 兜底模式下，确保监听线程存活（否则热键会静默失效）
+                self._ensure_listener_alive()
+                return
+
+            # 非 Windows：沿用 keyboard 库的重建逻辑
+            self._ensure_listener_alive()
+
+            old_handle = self._hotkey_handle
+            old_hotkey = self._registered_hotkey
+
+            new_handle = None
+            for attempt in range(3):
+                try:
+                    new_handle = keyboard.add_hotkey(
+                        hotkey_str,
+                        self._hotkey_bridge.toggle_all_windows.emit,
+                        suppress=True,
+                    )
+                    break  # 成功
+                except Exception as exc:
+                    if attempt < 2:
+                        logger.warning(f'[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}')
+                        import time as _time
+
+                        _time.sleep(1)
+                    else:
+                        logger.warning(f'[TrayManager] 热键注册失败（已重试3次）: {exc}')
+
+            if new_handle is not None:
+                if old_handle is not None:
+                    try:
+                        keyboard.remove_hotkey(old_handle)
+                    except Exception:
+                        pass
+                self._hotkey_handle = new_handle
+                self._registered_hotkey = hotkey_str
+                logger.debug(f'[TrayManager] 热键健康检查完成: {hotkey_str}')
+            else:
+                if self._hotkey_handle is None and old_handle is not None:
+                    self._hotkey_handle = old_handle
+                    self._registered_hotkey = old_hotkey
+                    logger.debug('[TrayManager] 热键健康检查失败，保留旧热键')
+        except Exception as exc:
+            logger.debug(f'[TrayManager] 健康检查异常（非致命）: {exc}')
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""
@@ -809,6 +1121,15 @@ class TrayManager(QObject):
             self._hotkey_health_timer.stop()
         except Exception:
             pass
+        # 移除原生事件过滤器
+        if self._hotkey_filter is not None:
+            try:
+                app = QApplication.instance()
+                if app is not None:
+                    app.removeNativeEventFilter(self._hotkey_filter)
+            except Exception:
+                pass
+            self._hotkey_filter = None
         # 释放全局热键
         self._release_global_hotkey()
         # 先注销所有窗口，防止 closeEvent 再次调用 unregister

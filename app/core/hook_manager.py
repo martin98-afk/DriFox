@@ -25,9 +25,6 @@ from uuid import uuid4
 from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
-from app.tools.tool_name_mapper import ToolNameMapper
-
-
 # 常见脚本扩展名（用于从 hook command 中解析脚本路径，以确定 cwd）
 _SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
 
@@ -291,7 +288,8 @@ class HookMatchRule:
         if self.matcher.startswith("tool:"):
             pattern = self.matcher[5:]
             actual = context.get("tool_name", "")
-            # 两边都用 ToolNameMapper 归一化
+            # 两边都用 ToolNameMapper 归一化（懒导入，避免触发 app.tools 全量加载）
+            from app.tools.tool_name_mapper import ToolNameMapper
             return ToolNameMapper.to_native(pattern) == ToolNameMapper.to_native(actual)
 
         # 正则匹配用户消息

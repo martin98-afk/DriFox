@@ -37,7 +37,6 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -78,6 +77,7 @@ from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
+
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -89,6 +89,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon
+
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
 # 方法级导入无法跨方法共享。仅将重型导入 app.tools.tool_classifier 移入方法。
@@ -572,8 +573,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 【性能优化】延迟构建重型卡片内容（记忆/历史/模型选择等），
         # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
-        # 100ms 延迟确保 ToolPopupDialog 显示在先，骨架可见后再填充内容。
-        QTimer.singleShot(100, self._deferred_build_cards)
+        # 800ms 延迟让首帧绘制完成后再开始填充内容。
+        # 卡片内部进一步按 singleShot(0) 链式逐个构建，避免一次冻结 UI。
+        QTimer.singleShot(800, self._deferred_build_cards)
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
@@ -813,14 +815,35 @@ class OpenAIChatToolWindow(ToolWindow):
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
 
     def _deferred_build_cards(self):
-        """【性能优化】延迟构建重型卡片内容
+        """【性能优化】延迟构建重型卡片内容（分批渐进式）
 
         在 setup_ui 中仅创建卡片的轻量框架（BaseSettingsCard），
         而卡片内部的重量级内容 widget 在本方法中创建并填充。
-        由 __init__ 末尾的 QTimer.singleShot(100, ...) 触发，
-        确保 ToolPopupDialog 窗口先显示（骨架），内容随后渐进加载。
+
+        性能优化：每个卡片使用独立的 QTimer.singleShot(0) 调度，
+        让 Qt 事件循环在卡片创建之间有机会处理绘制事件，
+        避免 6 张卡片连续同步创建导致 UI 冻结数秒。
         """
-        # ── ① 历史会话卡片 ──
+        self._deferred_card_build_step = 0
+        self._deferred_card_steps = [
+            self._build_deferred_card_history,
+            self._build_deferred_card_share,
+            self._build_deferred_card_history_questions,
+            self._build_deferred_card_memory,
+            self._build_deferred_card_model_config,
+            self._build_deferred_card_model_selector,
+        ]
+        self._schedule_next_deferred_card()
+
+    def _schedule_next_deferred_card(self):
+        """调度下一个卡片构建步骤（每次 yield 给事件循环）"""
+        if self._deferred_card_build_step < len(self._deferred_card_steps):
+            step = self._deferred_card_steps[self._deferred_card_build_step]
+            self._deferred_card_build_step += 1
+            QTimer.singleShot(0, step)
+
+    def _build_deferred_card_history(self):
+        """── ① 历史会话卡片 ──"""
         try:
             self._history_popup_card = HistoryCard()
             self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
@@ -842,15 +865,21 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         except Exception:
             logger.exception("[DeferredBuild] HistoryCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ② 分享卡片 ──
+    def _build_deferred_card_share(self):
+        """── ② 分享卡片 ──"""
         try:
             self._share_card_content = ShareCardContent(self)
             self._share_card.content_layout.addWidget(self._share_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ShareCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ③ 历史问题卡片 ──
+    def _build_deferred_card_history_questions(self):
+        """── ③ 历史问题卡片 ──"""
         try:
             self._history_questions_card_content = HistoryQuestionsCardContent(self)
             self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
@@ -860,8 +889,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         except Exception:
             logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ④ 记忆管理卡片 ──
+    def _build_deferred_card_memory(self):
+        """── ④ 记忆管理卡片 ──"""
         try:
             self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
             self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
@@ -874,16 +906,22 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         except Exception:
             logger.exception("[DeferredBuild] MemoryCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ⑤ 模型配置卡片 ──
+    def _build_deferred_card_model_config(self):
+        """── ⑤ 模型配置卡片 ──"""
         try:
             self._model_config_popup = ModelConfigCard()
             self._model_config_popup.configApplied.connect(self._on_config_applied)
             self._model_config_card.content_layout.addWidget(self._model_config_popup)
         except Exception:
             logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
-        # ── ⑥ 模型选择卡片 ──
+    def _build_deferred_card_model_selector(self):
+        """── ⑥ 模型选择卡片 ──"""
         try:
             self._model_selector_card_content = ModelSelectorCardContent()
             self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
@@ -905,6 +943,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
 
     def _setup_title_bar(self):
         """设置标题栏按钮"""
@@ -1268,12 +1308,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
             # _load_model_configs 遍历所有服务商配置（50-200ms），
             # _sync_working_directory 文件系统检测（20-50ms），
-            # 均匀分散到 500ms-900ms 窗口内，避免同时爆发导致 UI 冻结
-            QTimer.singleShot(500, lambda: self._safe_timer_call(self._load_model_configs))
+            # 均匀分散到 1.5s-2.5s 窗口内，避免同时爆发导致 UI 冻结
+            QTimer.singleShot(1500, lambda: self._safe_timer_call(self._load_model_configs))
             # 初始化当前项目的工作目录
-            QTimer.singleShot(700, lambda: self._safe_timer_call(self._sync_working_directory))
+            QTimer.singleShot(2000, lambda: self._safe_timer_call(self._sync_working_directory))
             # 初始化完成后解除保护
-            QTimer.singleShot(900, lambda: self._safe_timer_call(self._on_initialization_complete))
+            QTimer.singleShot(2500, lambda: self._safe_timer_call(self._on_initialization_complete))
         self._connect_opacity_signal()
         super().showEvent(event)
 
@@ -2101,6 +2141,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
+        # ===== UI 插件左侧边缘入口 =====
+        # 独立窗口模式左侧入口（浮层，不参与主布局，自动跟踪位置）
+        try:
+            from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
+
+            self._ui_plugin_edge_launcher = UIPluginEdgeLauncher(main_widget=self)
+            self._ui_plugin_edge_launcher.hide()
+        except Exception as e:
+            logger.error(f"[MainWidget] UI plugin edge launcher init failed: {e}")
+            self._ui_plugin_edge_launcher = None
+
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -2757,6 +2808,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._function_command_handlers[cmd_name] = _make_handler()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
+        finally:
+            # 通知左侧边缘入口刷新插件列表（无论加载成功与否都要调用，
+            # 以便失败时隐藏入口、清理残留菜单）
+            launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+            if launcher is not None and hasattr(self, "chat_scroll_area"):
+                launcher.refresh_plugins()
+                launcher.update_geometry(self.chat_scroll_area.geometry())
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -2892,37 +2950,38 @@ class OpenAIChatToolWindow(ToolWindow):
         return None
 
     def _register_command_shortcuts(self):
-        """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
+        """为所有有 shortcut 配置的命令注册 QShortcut
+
+        FUNCTION 命令：有处理器时直接执行，无处理器时回退到插入 /command 文本
+        PROMPT/AGENT 命令：回退到插入 /command 文本（无处理器），用户按 Enter 后走正常发送流程
+        """
         self._clear_command_shortcuts()
 
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.command_manager import CommandManager
 
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
-                if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
-                    qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                if not cmd_def.shortcut:
+                    continue
+                qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
 
-                    name = cmd_def.name
+                name = cmd_def.name
 
-                    def _on_shortcut(n=name):
-                        try:
-                            # ⚠️ 用户插件 FUNCTION 命令无 Python 处理器注册，
-                            # 直接调用 _execute_command 会静默失败。
-                            # 检测到无处理器时，回退到在输入框插入 /command 文本，
-                            # 与命令卡片点击行为一致。
-                            if self._has_command_handler(n):
-                                self._execute_command(n)
-                            else:
-                                self._insert_command_text_fallback(n)
-                        except RuntimeError:
-                            pass
+                def _on_shortcut(n=name):
+                    try:
+                        if self._has_command_handler(n):
+                            self._execute_command(n)
+                        else:
+                            self._insert_command_text_fallback(n)
+                    except RuntimeError:
+                        pass
 
-                    qs.activated.connect(_on_shortcut)
-                    self._command_shortcuts.append(qs)
+                qs.activated.connect(_on_shortcut)
+                self._command_shortcuts.append(qs)
 
     def _has_command_handler(self, name: str) -> bool:
         """检查命令名是否有对应的 Python 处理器
@@ -3269,14 +3328,23 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team.template_schema import TemplateError
 
         # ⚠ 破坏性操作：先弹确认框，避免用户误操作导致正在进行的任务被无感切换
-        reply = QMessageBox.question(
-            self,
-            "加载团队模板",
-            f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_load_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="加载团队模板",
+            content=f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
+            confirm_text="确认",
+            cancel_text="取消",
+            parent=self,
         )
-        if reply != QMessageBox.Yes:
+        _dialog.confirmed.connect(_on_load_confirm)
+        _dialog.exec_()
+        if not _confirmed[0]:
             return
 
         try:
@@ -4488,21 +4556,23 @@ class OpenAIChatToolWindow(ToolWindow):
     # OpenCode Zen 免费模型异步刷新
     # ──────────────────────────────────────────────
     def _async_refresh_opencode_models(self):
-        """后台线程异步刷新所有 OpenCode Zen 服务的免费模型列表（-free 后缀）。
+        """后台线程异步刷新内置默认 OpenCode 免费服务商（name="opencode免费模型"）的模型列表。
 
-        启动后立即返回，不阻塞 UI。网络与解析逻辑在 app.core.models_dev_sync
-        的 fetch_opencode_free_models_for_providers，本方法只负责收集实例、
+        只刷新内置默认，不碰用户自己添加的 OpenCode 实例，避免覆盖用户自定义模型列表。
+        启动后立即返回，不阻塞 UI。
+        网络与解析逻辑在 app.core.models_dev_sync 的
+        fetch_opencode_free_models_for_providers，本方法只负责收集实例、
         调度线程、把结果经信号回主线程刷新 UI。
         """
         import threading
 
         from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
 
-        # 收集所有 OpenCode Zen 服务商（可能有多个实例 #2/#3 等）
+        # 只刷新内置默认的 OpenCode 免费服务商（name="opencode免费模型"），
+        # 不动用户自己添加的 OpenCode 实例，防止覆盖用户自定义模型列表。
         targets: list[tuple[str, str, str]] = []
         for config_id, config in self._valid_configs.items():
-            pname = config.get("provider_name", "")
-            if "opencode" not in pname.lower():
+            if config.get("name") != "opencode免费模型":
                 continue
             api_url = config.get("API_URL", "")
             api_key = config.get("API_KEY", "")
@@ -4539,9 +4609,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._valid_configs[config_id]["模型列表"] = free_models
 
         # 如果当前模型选择器已打开，刷新显示
-        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible(
-            "model_selector", self._window_id
-        ):
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible("model_selector", self._window_id):
             self._load_model_selector_to_card()
 
         # 更新模型选择按钮标签
@@ -4974,18 +5042,17 @@ class OpenAIChatToolWindow(ToolWindow):
             new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)
         except ProviderConfigCollision:
             # 撞 id 冲突：弹简单提示，保留表单让用户修改
-            from qfluentwidgets import MessageBox
+            from app.widgets.common_dialogs import InfoDialog
 
-            w = MessageBox(
-                "配置冲突",
-                "该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
+            _dialog = InfoDialog(
+                title="配置冲突",
+                content="该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
                 "同名服务商可以使用不同 base_url 分别配置（如 coding plan / 普通 plan），\n"
                 "但 (URL, KEY) 必须唯一。",
-                self.window(),
+                confirm_text="知道了",
+                parent=self.window(),
             )
-            w.yesButton.setText("知道了")
-            w.cancelButton.hide()
-            w.exec_()
+            _dialog.exec_()
             return  # 不隐藏表单，用户继续编辑
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
@@ -6021,6 +6088,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
+        # 重新定位 UI 插件左侧边缘入口（基于 chat_scroll_area 几何）
+        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+        if launcher is not None and hasattr(self, "chat_scroll_area"):
+            launcher.update_geometry(self.chat_scroll_area.geometry())
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
             self.pixel_pet.resize_handle(self.width(), self.height())
@@ -6575,6 +6646,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
+            # 通知每个窗口的左侧边缘入口重新读取插件列表
+            # （热重载可能新增 / 卸载了 UI 插件）
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    launcher = getattr(win, "_ui_plugin_edge_launcher", None)
+                    if launcher is not None:
+                        launcher.refresh_plugins()
+                except RuntimeError, AttributeError:
+                    pass
+            logger.debug("[HotReload] UI 插件边缘入口已刷新")
+
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
         统一刷新 UI 外观，按变更类型分流。
@@ -6880,6 +6964,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具控制卡片
         if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
             self._tool_control_card.refresh_style()
+        # UI 插件左侧边缘入口：主题切换后刷新颜色
+        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
+        if launcher is not None and hasattr(launcher, "apply_theme"):
+            launcher.apply_theme()
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -7093,6 +7181,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._agent_buttons[agent_name]["btn"].setToolTip(tooltip)
 
     def _create_new_session(self):
+        import time as _time
+
+        _t0 = _time.perf_counter()
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before session creation, skipping")
@@ -7138,8 +7229,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._auto_save_current_session()
         except Exception:
             logger.exception("Failed to auto-save current session before creating a new session")
+        _t1 = _time.perf_counter()
 
         self._cache_current_session_cards()
+        _t2 = _time.perf_counter()
         # 清空批量渲染索引，避免虚拟滚动定时器触发时遍历到已移出布局的旧卡片产生虚假警告
         self._batch_cards = []
         self._message_batch = []
@@ -7159,6 +7252,7 @@ class OpenAIChatToolWindow(ToolWindow):
             session = self.backend.create_session()
         finally:
             self._pending_session_hook = False
+        _t3 = _time.perf_counter()
 
         # 💡 内存优化：释放旧会话在 HistoryManager 中的消息数据（可被 SQLite 恢复）
         # 在 create_session 之后执行，确保 _evict_if_needed 已淘汰旧会话
@@ -7178,6 +7272,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._question_tool_call_id = None
         self._load_agent_list()
         self._release_inactive_session_messages()
+        _t4 = _time.perf_counter()
+
+        logger.info(
+            f"[Perf-CreateSession] "
+            f"auto_save={(_t1 - _t0) * 1000:.0f}ms "
+            f"cache_cards={(_t2 - _t1) * 1000:.0f}ms "
+            f"backend_create={(_t3 - _t2) * 1000:.0f}ms "
+            f"ui_cleanup={(_t4 - _t3) * 1000:.0f}ms "
+            f"total={(_t4 - _t0) * 1000:.0f}ms"
+        )
 
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
         self._refresh_context_usage_indicator()
@@ -8612,14 +8716,24 @@ class OpenAIChatToolWindow(ToolWindow):
         ## 触发警示动画
         if self.pixel_pet:
             self.pixel_pet.set_state("warning")
-        from qfluentwidgets import MessageBox
+        from app.widgets.common_dialogs import ConfirmDialog
 
         # 确认对话框
-        msg_box = MessageBox("确认删除", "确定要彻底删除这个归档会话吗？此操作不可恢复。", self)
-        msg_box.yesButton.setText("删除")
-        msg_box.cancelButton.setText("取消")
+        _confirmed: list[bool] = [False]
 
-        if msg_box.exec() != MessageBox.Accepted:
+        def _on_delete_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="确认删除",
+            content="确定要彻底删除这个归档会话吗？此操作不可恢复。",
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self,
+        )
+        _dialog.confirmed.connect(_on_delete_confirm)
+        _dialog.exec_()
+        if not _confirmed[0]:
             # 取消操作，恢复正常状态
             if self.pixel_pet:
                 self.pixel_pet.set_state("idle")
@@ -11116,6 +11230,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 图片大小检查：超过 5MB 自动压缩，防止 API 400
                 if len(img_b64) > 5 * 1024 * 1024:
                     from app.core.workers.chat_worker import compress_data_uri
+
                     compressed = compress_data_uri(data_uri)
                     if compressed != data_uri:
                         data_uri = compressed
@@ -13954,59 +14069,31 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from PyQt5.QtWidgets import QInputDialog
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
 
-        # ── 弹出输入对话框 ──
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("📁 新建项目")
-        dialog.setLabelText("项目名称：\n（将自动绑定此文件夹为项目根目录）")
-        dialog.setTextValue(folder_name)
-        dialog.setOkButtonText("创建")
-        dialog.setCancelButtonText("取消")
-        # 应用主题样式
-        Colors.refresh()
-        dialog.setStyleSheet(f"""
-            QInputDialog {{
-                background-color: {Colors.CARD_BG.format(alpha=240)};
-                color: {Colors.TEXT_PRIMARY};
-            }}
-            QInputDialog QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(13)};
-            }}
-            QLineEdit {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 6px 10px;
-                {font_size_css(13)}
-                {get_font_family_css()}
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.TEXT_ACCENT};
-            }}
-            QPushButton {{
-                background-color: {Colors.BORDER_ACCENT};
-                color: {Colors.BUTTON_TEXT_ON_ACCENT};
-                border: 1px solid {Colors.BORDER_ACCENT};
-                border-radius: 4px;
-                padding: 6px 18px;
-                min-width: 64px;
-                {get_font_family_css()} {font_size_css(13)};
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.SEND_BTN_HOVER_START};
-            }}
-        """)
-        ok = dialog.exec_()
-        project_name = dialog.textValue().strip()
+        # ── 弹出输入对话框（统一样式） ──
+        _project_name: list[str] = [""]
 
-        if not ok or not project_name:
+        def _on_project_created(name: str):
+            _project_name[0] = name
+
+        _dialog = SingleInputDialog(
+            title="📁 新建项目",
+            hint="将自动绑定此文件夹为项目根目录",
+            placeholder="项目名称",
+            default_text=folder_name,
+            confirm_text="创建",
+            cancel_text="取消",
+            parent=self,
+        )
+        _dialog.confirmed.connect(_on_project_created)
+        _dialog.exec_()
+        project_name = _project_name[0]
+
+        if not project_name:
             return
 
         # ── 检查项目名是否已存在 ──

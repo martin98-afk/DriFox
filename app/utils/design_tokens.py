@@ -8,8 +8,6 @@
 
 from PyQt5.QtCore import QSize
 
-from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css
 
 # ─── 字体/字号缓存 ──────────────────────────────────────────
 # 渲染热路径中 scale_font_size 每帧调用 15-50 次，
@@ -45,6 +43,12 @@ def _get_global_font() -> str:
         except Exception:
             _cached_font_family = "Segoe UI"
     return _cached_font_family
+
+
+def _get_font_family_css() -> str:
+    """懒导入 get_font_family_css，避免 app.utils.utils 模块级加载（含 pypinyin 等重型包）"""
+    from app.utils.utils import get_font_family_css
+    return get_font_family_css()
 
 
 FONT_SIZE_OPTIONS = {
@@ -165,11 +169,13 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
 def current_theme() -> dict:
     """获取当前主题的扁平 colors 字典"""
+    from app.utils.theme_manager import theme_manager
     return theme_manager.get_current_colors()
 
 
 def get_window_style() -> str:
     """获取窗口渐变背景样式"""
+    from app.utils.theme_manager import theme_manager
     window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
     return f"""
     #OpenAIChatToolWindow {{
@@ -527,8 +533,10 @@ class Colors:
         return True
 
 
-# 初始化 Colors
-Colors.refresh()
+# Colors.refresh() 已延迟到首次调用时执行（ThemeManager 懒加载），
+# 在 setup_ui 等入口点由显式 Colors.refresh() 调用触发。
+# 移除模块级调用以加速 import 阶段。
+# Colors 类默认值（暗色主题）在 theme 加载前即可安全使用。
 
 
 class BorderRadius:
@@ -754,7 +762,7 @@ class CardStyles:
             border: 1px solid {Colors.BORDER};
             border-radius: 4px;
             padding: 4px 8px;
-            {get_font_family_css()}
+            {_get_font_family_css()}
             {font_size_css(12)}
         }}
         QLineEdit:focus {{
@@ -769,7 +777,7 @@ class CardStyles:
             border: 1px solid {Colors.BORDER};
             border-radius: 4px;
             padding: 4px 8px;
-            {get_font_family_css()}
+            {_get_font_family_css()}
             {font_size_css(12)}
         }}
         QPlainTextEdit:focus {{

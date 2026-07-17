@@ -35,11 +35,10 @@ from app.utils.design_tokens import (
     Colors,
     apply_font_size_to_widget,
     font_size_css,
-    get_font_family_css,
     get_ui_font_size,
     scale_font_size,
 )
-from app.utils.utils import get_icon
+from app.utils.utils import get_font_family_css, get_icon
 
 
 class _UrlImportThread(QThread):
@@ -1093,7 +1092,9 @@ class HistoryCard(QWidget):
                 text = item[1]
                 empty_label = QLabel(text)
                 empty_label.setAlignment(Qt.AlignCenter)
-                empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 16px;")
+                empty_label.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}"
+                )
                 layout.insertWidget(layout.count() - 1, empty_label)
 
         if suspend_repaint:

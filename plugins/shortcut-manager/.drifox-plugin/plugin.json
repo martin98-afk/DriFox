@@ -1,0 +1,15 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "shortcut-manager",
+    "description": "管理系统命令的快捷键，支持自定义快捷键覆盖系统配置",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "components": {
+        "ui": true
+    }
+}

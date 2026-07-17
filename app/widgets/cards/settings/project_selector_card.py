@@ -568,77 +568,21 @@ class ProjectSelectorCardContent(QWidget):
 
     def _on_archive_clicked(self, project_name: str):
         """归档按钮被点击"""
-        from PyQt5.QtWidgets import QMessageBox
+        from app.widgets.common_dialogs import ConfirmDialog
 
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("归档确认")
-        msg_box.setText(f"确定归档项目「{project_name}」吗？\n归档后该项目的所有会话将移动到归档区。")
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg_box.setDefaultButton(QMessageBox.No)
-        # 应用主题样式（避免深色主题下黑底黑字）
-        Colors.refresh()
-        # 1) 先设 QMessageBox 自身 stylesheet（背景、文字）
-        msg_box.setStyleSheet(f"""
-            QMessageBox {{
-                background-color: {Colors.CARD_BG.format(alpha=240)};
-                color: {Colors.TEXT_PRIMARY};
-            }}
-            QMessageBox QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(13)};
-                background: transparent;
-            }}
-        """)
-        # 2) Windows 原生对话框样式下按钮不受 stylesheet 控制，
-        #    必须直接遍历按钮单独设置样式
-        for btn in msg_box.findChildren(QMessageBox.StandardButton.__class__) if False else []:
-            pass  # 上面那行仅占位，避免导入循环；真正遍历见下方
-        button_style_default = f"""
-            QPushButton {{
-                background-color: {Colors.BORDER_ACCENT};
-                color: {Colors.BUTTON_TEXT_ON_ACCENT};
-                border: 1px solid {Colors.BORDER_ACCENT};
-                border-radius: 4px;
-                padding: 6px 18px;
-                min-width: 64px;
-                {get_font_family_css()} {font_size_css(13)};
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.SEND_BTN_HOVER_START};
-                border-color: {Colors.SEND_BTN_HOVER_START};
-            }}
-            QPushButton:pressed {{
-                background-color: {Colors.SELECTED_BG};
-            }}
-        """
-        button_style_normal = f"""
-            QPushButton {{
-                background-color: {Colors.TOOLBAR_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                padding: 6px 18px;
-                min-width: 64px;
-                {get_font_family_css()} {font_size_css(13)};
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.HOVER_BG};
-                border-color: {Colors.BORDER_ACCENT};
-            }}
-            QPushButton:pressed {{
-                background-color: {Colors.SELECTED_BG};
-            }}
-        """
-        # 3) 找到所有按钮并单独应用样式（"是" 是默认按钮，用强调色）
-        default_btn = msg_box.defaultButton()
-        for button in msg_box.buttons():
-            if button is default_btn:
-                button.setStyleSheet(button_style_default)
-            else:
-                button.setStyleSheet(button_style_normal)
-            # 强制使用样式背景（Windows 原生渲染下必须显式开启）
-            button.setAutoFillBackground(True)
-        reply = msg_box.exec_()
-        if reply == QMessageBox.Yes:
+        _confirmed: list[bool] = [False]
+
+        def _on_archive_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="归档确认",
+            content=f"确定归档项目「{project_name}」吗？\n归档后该项目的所有会话将移动到归档区。",
+            confirm_text="归档",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        _dialog.confirmed.connect(_on_archive_confirm)
+        _dialog.exec_()
+        if _confirmed[0]:
             self.archiveProject.emit(project_name)

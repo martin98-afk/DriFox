@@ -56,11 +56,11 @@ colors:
   tag_purple_text: '#6d28d9'
   tag_orange: '#d97706'
   tag_orange_text: '#b45309'
-  user_card_bg: rgba(209, 225, 250, 195)
+  user_card_bg: rgba(209, 225, 250, 180)
   user_card_accent: '#2563eb'
   user_card_text: '#0f172a'
   user_card_muted: '#5b6e8e'
-  assistant_card_bg: '#ffffff'
+  assistant_card_bg: rgba(255, 255, 255, 180)
   assistant_card_accent: '#d97706'
   assistant_card_text: '#3d2000'
   assistant_card_muted: '#64748b'
@@ -68,8 +68,8 @@ colors:
   agent_btn_text_active: '#2563eb'
   agent_btn_bg_active: rgba(37, 99, 235, 0.12)
   agent_btn_separator: rgba(170, 185, 205, 150)
-  input_bg_start: rgba(255, 255, 255, 230)
-  input_bg_end: rgba(245, 245, 245, 230)
+  input_bg_start: rgba(255, 255, 255, 180)
+  input_bg_end: rgba(245, 245, 245, 180)
   input_focus_bg_start: rgba(255, 255, 255, 250)
   input_focus_bg_end: rgba(248, 248, 248, 250)
   input_text: '#0f172a'
@@ -100,7 +100,7 @@ colors:
   send_btn_end: "#1d4ed8"
   send_btn_hover_start: "#3b82f6"
   send_btn_hover_end: "#2563eb"
-  send_btn_radius: 17
+  send_btn_radius: 8
   timeline_node: '#94a3b8'
   timeline_node_hover: '#2563eb'
   timeline_node_visible: '#10b981'

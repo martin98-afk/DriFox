@@ -310,7 +310,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.4.1"
+    current_version = "v0.4.2"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -472,7 +472,12 @@ class Settings(QConfig):
 
 
 def update_theme_options():
-    """从 ThemeManager 动态更新主题选项验证器"""
+    """从 ThemeManager 动态更新主题选项验证器
+
+    注意：此函数只更新验证器选项列表，**不重置当前值**。
+    即使当前值不在列表中（插件主题尚未加载），也不在此处回退。
+    由 _reload_themes_from_plugins() 中的安全网在插件主题加载完成后统一恢复。
+    """
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -480,8 +485,6 @@ def update_theme_options():
         if themes:
             settings = Settings.get_instance()
             settings.ui_theme_style.validator.__init__(themes)
-            if settings.ui_theme_style.value not in themes:
-                settings.ui_theme_style.value = themes[0]
     except Exception as e:
         import logging
 

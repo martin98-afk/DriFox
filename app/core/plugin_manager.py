@@ -77,6 +77,42 @@ class PluginInfo:
         """检查插件是否声明了某组件"""
         return self.components.get(name, False)
 
+    @property
+    def icon_config(self) -> Optional[dict]:
+        """返回 {"light": Path, "dark": Path} 或 None
+
+        从 manifest 的 "icon" 字段解析插件图标路径。
+        支持三种形式：
+        1. 字符串 "icon.svg" → 同一文件用于深浅主题
+        2. 字典 {"light": "a.svg", "dark": "b.svg"} → 分别指定
+        3. 无 "icon" 字段 → 检查插件根目录 icon.svg 兜底（文件需实际存在）
+        """
+        raw = self.manifest.get("icon")
+        if not raw:
+            default = self.path / "icon.svg"
+            if default.exists():
+                return {"light": default, "dark": default}
+            return None
+        if isinstance(raw, str):
+            p = self.path / raw
+            if p.exists():
+                return {"light": p, "dark": p}
+            return None
+        if isinstance(raw, dict):
+            result: dict = {}
+            for theme in ("light", "dark"):
+                path_str = raw.get(theme)
+                if path_str:
+                    p = (self.path / path_str).resolve()
+                    if p.exists():
+                        result[theme] = p
+            # 单主题补齐：只有一个主题时补齐另一个
+            if "light" not in result and "dark" in result:
+                result["light"] = result["dark"]
+            if "dark" not in result and "light" in result:
+                result["dark"] = result["light"]
+            return result if result else None
+
 
 # ============================================================
 # 插件管理器（单例）

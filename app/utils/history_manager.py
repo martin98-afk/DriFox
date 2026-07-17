@@ -321,6 +321,7 @@ class HistoryManager:
 
         # 内存缓存
         self._history_sessions: List[Dict] = []
+        self._history_loaded = False  # 懒加载标记：首次访问 _history_sessions 时从 SQLite 加载
 
         # === 异步归档扫描（性能优化）===
         # _archive_meta_cache：file_path → (mtime, info_dict)
@@ -369,16 +370,8 @@ class HistoryManager:
                     self._use_sqlite = True
                     logger.info("[HistoryManager] SQLite 存储已启用")
 
-                    # 💡 内存优化：使用轻量模式加载，不含完整 messages 数据
-                    # 每条的 messages 在启动时为空列表，仅在显示具体会话时按需加载
-                    self._history_sessions = self._session_store.get_sessions_lightweight(limit=500)
-
-                    # 去重
-                    self._deduplicate_history_sessions()
-
-                    # 检查是否需要迁移旧 JSON 数据
-                    self._migrate_if_needed()
-
+                    # 懒加载：启动时不查 SQLite，首次访问 _history_sessions 时再加载
+                    # 避免启动时 SELECT 500 条会话拖慢 UI 首帧
                     return
                 else:
                     logger.warning("[HistoryManager] SQLite 初始化失败，回退 JSON")
@@ -596,6 +589,18 @@ class HistoryManager:
                 most_recent = session
         return most_recent
 
+    def _ensure_history_loaded(self):
+        """懒加载历史会话数据（首次访问时从 SQLite 加载）"""
+        if self._history_loaded or not self._use_sqlite:
+            return
+        self._history_loaded = True
+        try:
+            self._history_sessions = self._session_store.get_sessions_lightweight(limit=500)
+            self._deduplicate_history_sessions()
+            self._migrate_if_needed()
+        except Exception as e:
+            logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
+
     def get_history_list(self, project: str = None, with_messages: bool = False) -> List[Dict]:
         """获取历史会话列表，可选按项目过滤，按最后对话时间排序
 
@@ -603,6 +608,7 @@ class HistoryManager:
             project: 项目名过滤
             with_messages: 是否包含完整消息数组（为 False 时返回轻量列表）
         """
+        self._ensure_history_loaded()
         # 先去重
         self._deduplicate_history_sessions()
 

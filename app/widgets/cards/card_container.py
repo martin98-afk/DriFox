@@ -124,6 +124,7 @@ class CardContainer(QWidget):
         # 窗口拖拽过程中跳过容器展开/折叠，防止布局级联干扰
         try:
             from app.tool_popup import ToolPopupDialog
+
             if ToolPopupDialog._any_window_dragging:
                 return
         except ImportError:
@@ -160,7 +161,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除 minHeight 限制，确保折叠动画能跑到 0
@@ -192,7 +193,7 @@ class CardContainer(QWidget):
                 # 🛠️ 父级布局强制激活（仅在此重测路径中），让容器 height()
                 # 反映正确的分配；主展开路径不激活父级，以保留动画触发时机。
                 p = self.parent()
-                pl = p.layout() if hasattr(p, 'layout') else None
+                pl = p.layout() if hasattr(p, "layout") else None
                 if pl is not None:
                     pl.invalidate()
                     pl.activate()
@@ -252,6 +253,7 @@ class CardContainer(QWidget):
         self._expand_animation.setStartValue(start_h)
         self._expand_animation.setEndValue(end_h)
         if on_finished is not None:
+
             def _on_done():
                 try:
                     on_finished()
@@ -259,8 +261,9 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
+
             self._expand_animation.finished.connect(_on_done)
         self._expand_animation.start()
 
@@ -277,7 +280,7 @@ class CardContainer(QWidget):
             self._card_manager.on_card_hidden(self._window_id, card_id, self._on_card_hidden)
 
         # 连接卡片内部高度变化信号 → 容器重新展开（支持拖拽、自适应等动态高度）
-        if hasattr(card_widget, 'heightChanged'):
+        if hasattr(card_widget, "heightChanged"):
             card_widget.heightChanged.connect(self._schedule_expand)
 
     def remove_card(self, card_id: str):

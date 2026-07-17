@@ -33,9 +33,7 @@ from loguru import logger
 
 # Windows 专属：防止 subprocess 调 git 时弹出黑色 cmd 窗口
 # CREATE_NO_WINDOW = 0x08000000，仅 Windows 有效
-_CREATE_NO_WINDOW = (
-    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-)
+_CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # ============================================================
 # Git 状态收集（移植自 .drifox/plugins/git-status/hooks/git_status.py）
@@ -92,7 +90,7 @@ def _is_git_available() -> bool:
     global _GIT_AVAILABLE
     if _GIT_AVAILABLE is None:
         _, _, code = _run_git(".", "--version")
-        _GIT_AVAILABLE = (code == 0)
+        _GIT_AVAILABLE = code == 0
     return _GIT_AVAILABLE
 
 
@@ -169,9 +167,7 @@ def _auto_git_init(cwd: str) -> bool:
     dangerous_parents = {Path("/"), Path.home(), Path(sys.executable).parent if getattr(sys, "frozen", False) else None}
     dangerous_parents.discard(None)
     if resolved_path in dangerous_parents or "_internal" in resolved:
-        logger.warning(
-            f"[format_memory_context] 安全检查：拒绝在危险位置 git init: {resolved}"
-        )
+        logger.warning(f"[format_memory_context] 安全检查：拒绝在危险位置 git init: {resolved}")
         return False
 
     if _is_git_repo(resolved):
@@ -303,24 +299,39 @@ def _collect_all_git(cwd: str) -> dict[str, Any]:
             return val
 
     empty: dict[str, Any] = {
-        "branch": "", "ahead": 0, "behind": 0, "is_detached": False,
+        "branch": "",
+        "ahead": 0,
+        "behind": 0,
+        "is_detached": False,
         "files": {"staged": [], "unstaged": [], "untracked": []},
-        "diff_stats": {}, "stash_count": 0, "commits": [],
+        "diff_stats": {},
+        "stash_count": 0,
+        "commits": [],
     }
 
     def _branch_and_status() -> str:
         out, _, code = _run_git(
-            cwd, "status", "--porcelain=v1", "--branch", "-uall", "--no-renames",
+            cwd,
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "-uall",
+            "--no-renames",
         )
         return out if code == 0 else ""
 
     def _diff() -> str:
-        out, _, code = _run_git(cwd, "diff", "--numstat")
+        out, _, code = _run_git(cwd, "-c", "core.quotepath=false", "diff", "--numstat")
         return out if code == 0 else ""
 
     def _commits() -> str:
         out, _, code = _run_git(
-            cwd, "log", f"-n{_MAX_RECENT_COMMITS}", "--pretty=format:%h %s (%cr)",
+            cwd,
+            "log",
+            f"-n{_MAX_RECENT_COMMITS}",
+            "--pretty=format:%h %s (%cr)",
         )
         return out if code == 0 else ""
 
@@ -484,7 +495,7 @@ _GITIGNORE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             ".project",
             ".pycpath",
         ),
-    )
+    ),
 )
 # 同一 cwd 只处理一次 .gitignore（避免每轮用户消息都写文件）
 _GITIGNORE_UPDATED: set[str] = set()
@@ -624,9 +635,7 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
 
     parts: list[str] = [
         "## Git 仓库状态",
-        f"**当前分支**: `{branch}`"
-        + (f" ↑{ahead}" if ahead else "")
-        + (f" ↓{behind}" if behind else ""),
+        f"**当前分支**: `{branch}`" + (f" ↑{ahead}" if ahead else "") + (f" ↓{behind}" if behind else ""),
     ]
     if stash_count:
         parts.append(f"**Stash**: {stash_count} 条未保存的工作")
@@ -640,8 +649,7 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
         n = gi["added"]
         parts.append("")
         parts.append(
-            f"✅ 已自动创建 `.gitignore`（{n} 条规则，覆盖 "
-            f"{len(gi['sections'])} 类：{'、'.join(gi['sections'])}）"
+            f"✅ 已自动创建 `.gitignore`（{n} 条规则，覆盖 {len(gi['sections'])} 类：{'、'.join(gi['sections'])}）"
         )
     elif gi["action"] == "appended":
         n = gi["added"]

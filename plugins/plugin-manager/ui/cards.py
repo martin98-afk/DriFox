@@ -46,7 +46,7 @@ from qfluentwidgets import (
 )
 from loguru import logger
 
-from ._squircle_avatar import SquircleAvatar, extract_initials, name_color
+from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
 
 
 # ── 路径常量 ──────────────────────────────────────────────
@@ -319,14 +319,8 @@ class _PluginRow(QFrame):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        # 插件头像：椭方块形 + 名称缩写 + 哈希色（智能提取关键字）
-        plugin_name = self._plugin.name or "?"
-        self._avatar = SquircleAvatar(
-            extract_initials(plugin_name),
-            name_color(plugin_name),
-            self,
-            font_size=self._font_size,
-        )
+        # 插件图标：SVG icon 优先，无图标则用缩写头像
+        self._avatar = self._create_icon_widget()
         layout.addWidget(self._avatar)
 
         # 信息区
@@ -453,10 +447,38 @@ class _PluginRow(QFrame):
         self._busy = False
         self._build_buttons()
 
+    def _create_icon_widget(self) -> QWidget:
+        """创建插件图标组件：SVG icon 优先，无图标则用缩写头像"""
+        plugin = self._plugin
+        if hasattr(plugin, "path") and plugin.path:
+            import json as _json
+
+            for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                _mp = plugin.path / _meta_dir / "plugin.json"
+                if _mp.exists():
+                    try:
+                        _m = _json.loads(_mp.read_text(encoding="utf-8"))
+                        return PluginIconWidget(
+                            plugin_dir=plugin.path,
+                            manifest=_m,
+                            font_size=self._font_size,
+                            parent=self,
+                        )
+                    except Exception:
+                        pass
+                    break
+        # Fallback to initials avatar
+        return SquircleAvatar(
+            extract_initials(plugin.name or "?"),
+            name_color(plugin.name or "?"),
+            self,
+            font_size=self._font_size,
+        )
+
     def set_font_size(self, font_size: int):
         """根据上下文字体大小动态调整头像尺寸"""
         self._font_size = font_size
-        if self._avatar is not None:
+        if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
             self._avatar.set_font_size(font_size)
 
 
@@ -474,6 +496,7 @@ class PluginManagerCard(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
         self._plugins: list[PluginInfo] = []
+        self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
@@ -486,8 +509,25 @@ class PluginManagerCard(QWidget):
     def show_card(self):
         """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._async_refresh()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标"""
+        if self._context_provider is None or self._header_icon is None:
+            return
+        try:
+            from PyQt5.QtGui import QIcon
+
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                self._header_icon.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     def _apply_latest_theme(self):
         """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
@@ -612,6 +652,7 @@ class PluginManagerCard(QWidget):
         ic = IconWidget(FluentIcon.ALIGNMENT, header)
         ic.setFixedSize(22, 22)
         hly.addWidget(ic)
+        self._header_icon = ic
 
         tl = StrongBodyLabel("插件管理", header)
         tl.setStyleSheet(f"color: {_text_color()}; background: transparent;")

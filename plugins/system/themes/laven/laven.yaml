@@ -56,11 +56,11 @@ colors:
   tag_purple_text: '#9333ea'
   tag_orange: '#d97706'
   tag_orange_text: '#b45309'
-  user_card_bg: rgba(225, 212, 248, 195)
+  user_card_bg: rgba(225, 212, 248, 180)
   user_card_accent: '#7c3aed'
   user_card_text: '#180a32'
   user_card_muted: '#7a6898'
-  assistant_card_bg: rgba(234, 224, 249, 225)
+  assistant_card_bg: rgba(234, 224, 249, 180)
   assistant_card_accent: '#6d28d9'
   assistant_card_text: '#0e0420'
   assistant_card_muted: '#7a6898'
@@ -68,8 +68,8 @@ colors:
   agent_btn_text_active: '#7c3aed'
   agent_btn_bg_active: rgba(124, 58, 237, 0.12)
   agent_btn_separator: rgba(178, 165, 205, 150)
-  input_bg_start: rgba(244, 238, 252, 210)
-  input_bg_end: rgba(236, 228, 250, 210)
+  input_bg_start: rgba(244, 238, 252, 180)
+  input_bg_end: rgba(236, 228, 250, 180)
   input_focus_bg_start: rgba(244, 238, 252, 245)
   input_focus_bg_end: rgba(236, 228, 250, 245)
   input_text: '#180a32'

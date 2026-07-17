@@ -1166,11 +1166,14 @@ class ToolPopupDialog(QDialog):
         # 检测底部边缘
         elif y > h - self._edge_size:
             edge |= ResizeEdge.EDGE_BOTTOM
-        # 检测左边缘
+        # 检测左边缘：仅用于对角 resize（左下/左上角），禁用纯左边缘横向 resize
+        # 因为左侧区域被 UI 插件边缘入口(launcher)占用，纯左边缘 resize 会与 launcher 冲突。
         if x < self._edge_size:
-            edge |= ResizeEdge.EDGE_LEFT
+            # 仅当同时命中顶部或底部时添加左边缘，构成对角 resize
+            if edge & (ResizeEdge.EDGE_TOP | ResizeEdge.EDGE_BOTTOM):
+                edge |= ResizeEdge.EDGE_LEFT
         # 检测右边缘
-        elif x > w - self._edge_size:
+        if x > w - self._edge_size:
             edge |= ResizeEdge.EDGE_RIGHT
 
         return edge

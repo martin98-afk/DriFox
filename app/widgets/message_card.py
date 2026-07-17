@@ -2005,6 +2005,8 @@ class CodeWebViewer(QWebEngineView):
 
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
+        # 流式思考首 chunk 标志：首 chunk 渲染"深度思考中..." spinner，后续静默累积不更新 DOM
+        self._reasoning_streaming_started = False
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -2460,7 +2462,12 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 {scrollbar_css}
 
-                #content-placeholder {{ color: var(--text); }}
+                #content-placeholder {{
+                    color: var(--text);
+                    /* 平滑过渡：全量渲染时内容以轻微透明度淡入替代生硬闪烁 */
+                    transition: opacity 150ms ease;
+                    will-change: opacity;
+                }}
                 #content-placeholder * {{ color: inherit; }}
                 /* 图片自适应卡片宽度 */
                 #content-placeholder img {{
@@ -2773,7 +2780,41 @@ class CodeWebViewer(QWebEngineView):
                     transition: border-color 220ms ease, background 220ms ease;
                 }}
                 .think-streaming[data-streaming="true"] {{
-                    background: rgba(255, 200, 50, 0.05);
+                    background: transparent;
+                }}
+                /* 思考轮播提示文字 — 从左到右脉冲渐变色动画 */
+                .think-streaming-tip {{
+                    background: linear-gradient(
+                        90deg,
+                        var(--text-secondary) 0%,
+                        var(--accent) 45%,
+                        var(--accent-warm) 55%,
+                        var(--text-secondary) 100%
+                    );
+                    background-size: 200% 100%;
+                    background-clip: text;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    animation: think-tip-sweep 2.5s ease-in-out infinite;
+                }}
+                @keyframes think-tip-sweep {{
+                    0% {{ background-position: 200% 0; }}
+                    100% {{ background-position: -200% 0; }}
+                }}
+                /* 工具运行卡片的参数预览 — 流式态脉冲渐变色动画 */
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{
+                    background: linear-gradient(
+                        90deg,
+                        var(--text-secondary) 0%,
+                        var(--accent) 45%,
+                        var(--accent-warm) 55%,
+                        var(--text-secondary) 100%
+                    );
+                    background-size: 200% 100%;
+                    background-clip: text;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    animation: think-tip-sweep 2.5s ease-in-out infinite;
                 }}
                 .think-content {{
                     padding: 8px 10px;
@@ -3405,8 +3446,29 @@ class CodeWebViewer(QWebEngineView):
                         var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
                         var _prevScrollTop = document.body.scrollTop;
                         var _wasUserScrolled = window._userScrolledWithin;
+                        // ── 平滑过渡：新内容以轻微透明度淡入，替代生硬闪烁 ──
+                        // 在全量 DOM 替换前设 opacity 略低，替换后在 rAF 中恢复全透明，
+                        // CSS transition 驱动平滑淡入效果，减轻 innerHTML 重建的视觉突兀感。
+                        // 🛡️ 竞态防护：取消上轮残留的清理定时器
+                        if (window._fadeCleanupTimer) {{
+                            clearTimeout(window._fadeCleanupTimer);
+                        }}
+                        // 先切 transition=none，强制 opacity 跳变到 0.88（避免上一轮 transition
+                        // 未清理时产生 1→0.88 的淡出动画），再立即恢复 transition 用于后续淡入。
+                        container.style.transition = 'none';
+                        container.style.opacity = '0.88';
+                        void container.offsetHeight;  // 强制同步样式，使跳变立即生效
+                        container.style.transition = 'opacity 120ms ease';
                         window._suppressScrollEvent = true;
-                        container.innerHTML = newHtml;
+                        try {{
+                            container.innerHTML = newHtml;
+                        }} catch(e) {{
+                            // innerHTML 替换异常时恢复透明度，避免永久半透明残影
+                            container.style.opacity = '1';
+                            container.style.transition = '';
+                            console.error('updateContent innerHTML failed:', e);
+                            throw e;
+                        }}
                         // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
@@ -3489,6 +3551,24 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
+
+                        // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
+                        // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
+                        // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
+                        window._fadeToken = (window._fadeToken || 0) + 1;
+                        var _thisFadeToken = window._fadeToken;
+                        requestAnimationFrame(function() {{
+                            container.style.opacity = '1';
+                            // 动画完成后清理 transition，避免影响后续 resize 等操作
+                            window._fadeCleanupTimer = setTimeout(function() {{
+                                if (window._fadeToken === _thisFadeToken) {{
+                                    container.style.transition = '';
+                                }}
+                                window._fadeCleanupTimer = null;
+                            }}, 130);
+                            // 本轮清理定时器已注册，若下一轮 updateContent 在 130ms 内到达，
+                            // 会在开头 clearTimeout 取消此定时器，同时 _fadeToken 递增使回调跳过。
+                        }});
 
                         // 使用延迟报告，确保浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
@@ -3636,6 +3716,73 @@ class CodeWebViewer(QWebEngineView):
                     requestAnimationFrame(_animateThinkSnake);
                 }}
                 _animateThinkSnake();
+
+                // ===== 深度思考轮播提示（减少等待焦虑，类似 CodeBuddy 设计理念）=====
+                // 当 .think-streaming[data-streaming="true"] 存在时，定时轮换显示
+                // 说明信息，让用户在等待期间能获取有用提示，而不是只盯着转圈。
+                const _thinkTips = [
+                    "正在深度思考中...",
+                    "分析上下文关联...",
+                    "检索相关知识库...",
+                    "正在综合推理...",
+                    "组织回答结构...",
+                    "即将输出结果...",
+                    "梳理关键信息...",
+                    "对比多个方案...",
+                    "校验逻辑完整性...",
+                    "回溯历史消息...",
+                    "推理最佳路径...",
+                    "整合分析结果...",
+                    "审查边缘场景...",
+                    "串联上下文线索...",
+                    "构建最终输出...",
+                    "准备呈现答案..."
+                ];
+                let _tipIndex = 0;
+                let _tipTimer = null;
+
+                function _startTipRotation() {{
+                    _stopTipRotation();
+                    // 首次启动时给文字 span 加上脉冲渐变色 class
+                    const el0 = document.querySelector('.think-streaming[data-streaming="true"]');
+                    if (el0) {{
+                        const s0 = el0.querySelector('span > span:last-child');
+                        if (s0) s0.classList.add('think-streaming-tip');
+                    }}
+                    _tipTimer = setInterval(() => {{
+                        const el = document.querySelector('.think-streaming[data-streaming="true"]');
+                        if (!el) {{ _stopTipRotation(); return; }}
+                        // 🐛 修复：不能用 span:last-child — 外层 span（唯一子元素）也会命中，
+                        // 导致 textContent 替换时清掉 spinner SVG。改为精确选择内层文字 span。
+                        const tipSpan = el.querySelector('span > span:last-child');
+                        if (tipSpan) {{
+                            _tipIndex = (_tipIndex + 1) % _thinkTips.length;
+                            tipSpan.textContent = _thinkTips[_tipIndex];
+                        }}
+                    }}, 3500);
+                }}
+
+                function _stopTipRotation() {{
+                    if (_tipTimer) {{
+                        clearInterval(_tipTimer);
+                        _tipTimer = null;
+                    }}
+                }}
+
+                // 通过 MutationObserver 监听 content-placeholder 变化，
+                // 自动启停轮播（兼容 updateContent 全量重建 DOM 的场景）。
+                const _tipObserver = new MutationObserver(() => {{
+                    const hasStreaming = !!document.querySelector('.think-streaming[data-streaming="true"]');
+                    if (hasStreaming && !_tipTimer) {{
+                        _startTipRotation();
+                    }} else if (!hasStreaming && _tipTimer) {{
+                        _stopTipRotation();
+                    }}
+                }});
+                const _tipTarget = document.getElementById('content-placeholder');
+                if (_tipTarget) {{
+                    _tipObserver.observe(_tipTarget, {{ childList: true, subtree: true }});
+                }}
             </script>
         </body>
         </html>
@@ -3679,20 +3826,35 @@ class CodeWebViewer(QWebEngineView):
             escaped = escape(text_clean)
             js = f"""
             (function() {{
+                var text = {json.dumps(escaped)};
                 var c = document.getElementById('content-placeholder');
-                if (!c) return;
-                var last = c.lastElementChild;
-                if (last && last.tagName === 'P') {{
-                    last.textContent += {json.dumps(escaped)};
-                }} else if (last && last.classList.contains('think-block')) {{
-                    // 最后是思考块：追加到思考块之后的新段落
+                if (!c || !text) return;
+                // ── 智能段落处理 ──
+                // 检测 chunk 是否以换行开头（对应 Markdown 段落分隔），
+                // 让增量文本的段落结构与最终 Markdown 渲染对齐，
+                // 减少全量渲染时因段落重组引起的视觉跳跃。
+                var startsWithNewline = text.length > 0 && (text[0] === '\\n' || text[0] === '\\r');
+                if (startsWithNewline) {{
+                    // 新段落：去掉前导换行，创建独立 <p>（即使内容为空也创建空段落，
+                    // 保持与全量 Markdown 渲染的段落结构一致，避免段落计数偏移）
+                    var clean = text.replace(/^[\\n\\r]+/, '');
                     var p = document.createElement('p');
-                    p.textContent = {json.dumps(escaped)};
+                    p.textContent = clean;
                     c.appendChild(p);
                 }} else {{
-                    var p = document.createElement('p');
-                    p.textContent = {json.dumps(escaped)};
-                    c.appendChild(p);
+                    var last = c.lastElementChild;
+                    if (last && last.tagName === 'P') {{
+                        last.textContent += text;
+                    }} else if (last && last.classList.contains('think-block')) {{
+                        // 最后是思考块：追加到思考块之后的新段落
+                        var p = document.createElement('p');
+                        p.textContent = text;
+                        c.appendChild(p);
+                    }} else {{
+                        var p = document.createElement('p');
+                        p.textContent = text;
+                        c.appendChild(p);
+                    }}
                 }}
                 // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
@@ -3806,16 +3968,18 @@ class CodeWebViewer(QWebEngineView):
         # 流式模式下 _append_text_incremental 已在 JS 侧即时显示文本，
         # 全量渲染仅用于保证 markdown 格式正确（代码块、思考块等），
         # 因此间隔可以大幅放宽以避免不必要的全量重渲染。
+        # 注意：间隔已加大，因为增量文本提供了即时可读性，
+        # 降低全量渲染频率可减少 DOM 重建带来的视觉跳跃。
         if self._streaming:
             content_len = len(self._markdown_text)
             if content_len > 100000:
-                interval = 500
+                interval = 800
             elif content_len > 50000:
-                interval = 300
+                interval = 500
             elif content_len > 10000:
-                interval = 200
+                interval = 350
             else:
-                interval = 100
+                interval = 250
         else:
             interval = 40
 
@@ -3911,19 +4075,22 @@ class CodeWebViewer(QWebEngineView):
                 js_code = (
                     "(function(){"
                     "var _finished=" + _safe_finished + ";"
+                    "var _c=document.getElementById('content-placeholder');"
                     "var _sbs=[];"
-                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                    "});"
+                    "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                    "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
+                    "}});}"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                    "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
                     "var _bk=_t.firstElementChild;if(_bk){"
                     "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                     "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                    "_c.appendChild(_bk);}}});}"
+                    "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                    "}}});}}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -3969,19 +4136,22 @@ class CodeWebViewer(QWebEngineView):
             js_code = (
                 "(function(){"
                 "var _finished=" + _safe_finished + ";"
+                "var _c=document.getElementById('content-placeholder');"
                 "var _sbs=[];"
-                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                "});"
+                "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
+                "}});}"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
                 "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                 "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                "_c.appendChild(_bk);}}});}"
+                "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                "}}});}}"
                 # 🐛 修复：工具块 restore 后 scrollHeight 可能增加（流式工具块推送新内容），
                 # 但 scrollTop 仍停留在 restore 前的位置，导致"滚不到底部"。
                 # 追加 auto-scroll：用户未滚动 -> 强制滚底；已滚动但接近底部 -> 粘性滚底
@@ -4033,10 +4203,59 @@ class CodeWebViewer(QWebEngineView):
         clear_global_render_cache()
 
     def get_plain_text(self) -> str:
-        return self._markdown_text
+        """获取消息纯文本内容
+
+        优先返回缓存的 _markdown_text（性能最优），
+        若已被 _cleanup_render_cache 清空，则尝试从 _lazy_markdown_cb 重新生成，
+        最后兜底从父级 MessageCard 获取 content_to_text 纯文本。
+        """
+        if self._markdown_text:
+            return self._markdown_text
+        # _markdown_text 被 _cleanup_render_cache 清空后的兜底
+        if self._lazy_markdown_cb:
+            try:
+                fresh = self._lazy_markdown_cb()
+                if fresh:
+                    self._markdown_text = fresh
+                    return fresh
+            except Exception:
+                pass
+        # 从父 MessageCard 兜底
+        p = self.parent()
+        while p:
+            if hasattr(p, "get_plain_text") and not isinstance(p, CodeWebViewer):
+                try:
+                    return p.get_plain_text()
+                except Exception:
+                    pass
+                break
+            p = p.parent()
+        return ""
 
     def get_html(self) -> str:
-        return self._markdown_text
+        """获取消息的完整 HTML 页面（非流式/导出用）
+
+        优先返回已缓存的 _last_rendered_html（含工具块等全量 DOM 等效 HTML），
+        否则从 _markdown_text 或 _lazy_markdown_cb 重新生成。
+
+        注意：_last_rendered_html 在流式渲染注入 JS 后会被清空以节省内存，
+        因此导出时多数走 markdown→HTML 路径。
+        """
+        # 优先：已缓存的完整 HTML 直接返回（含工具展开块等，最完整）
+        if self._last_rendered_html:
+            return self._last_rendered_html
+        # 次优：从 _markdown_text 转换
+        md = self._markdown_text
+        if not md and self._lazy_markdown_cb:
+            try:
+                md = self._lazy_markdown_cb()
+                if md:
+                    self._markdown_text = md
+            except Exception:
+                pass
+        if md:
+            return self._convert_md_to_html(md)
+        return ""
 
     def _show_context_menu(self, pos):
         """显示大模型卡片右键菜单：查看差异、复制"""
@@ -4095,20 +4314,28 @@ class CodeWebViewer(QWebEngineView):
             parent = parent.parent()
 
     def _copy_to_clipboard(self):
-        """复制内容到剪贴板（使用系统原生 API）"""
+        """复制内容到剪贴板（使用系统原生 API）
+
+        🐛 修复：使用 get_plain_text() 替代直接读 _markdown_text，
+        因为 _cleanup_render_cache 会将 _markdown_text 清空。
+        get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
+        """
+        text = self.get_plain_text()
+        if not text:
+            return
         try:
             import win32clipboard
 
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(self._markdown_text or "", win32clipboard.CF_UNICODETEXT)
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
             win32clipboard.CloseClipboard()
         except Exception:
             # 兜底：使用 PyQt5 剪贴板
             from PyQt5.QtWidgets import QApplication
 
             clipboard = QApplication.clipboard()
-            clipboard.setText(self._markdown_text or "")
+            clipboard.setText(text)
 
     def _get_default_filename(self) -> str:
         """生成默认导出文件名：会话名_时间戳"""
@@ -4137,7 +4364,12 @@ class CodeWebViewer(QWebEngineView):
         return f"{session_name}_{ts}"
 
     def _export_message(self):
-        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
+        """导出消息为 Markdown、HTML 或 PNG 图片文件
+
+        🐛 修复：使用 get_plain_text()/get_html() 替代直接读 _markdown_text，
+        因为 _cleanup_render_cache 会将 _markdown_text 清空。
+        get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
+        """
         from PyQt5.QtWidgets import QFileDialog
 
         default_name = self._get_default_filename()
@@ -4147,8 +4379,6 @@ class CodeWebViewer(QWebEngineView):
 
         if not file_path:
             return
-
-        content = self._markdown_text or ""
 
         try:
             is_png = "PNG" in selected_filter or file_path.lower().endswith(".png")
@@ -4160,7 +4390,11 @@ class CodeWebViewer(QWebEngineView):
             elif is_html:
                 if not file_path.lower().endswith(".html"):
                     file_path += ".html"
-                html_content = self._convert_md_to_html(content)
+                html_content = self.get_html()
+                if not html_content:
+                    logger.warning("导出 HTML 失败：无法获取消息内容")
+                    self._show_save_error("无法获取消息内容")
+                    return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 logger.info(f"消息已导出到: {file_path}")
@@ -4168,8 +4402,13 @@ class CodeWebViewer(QWebEngineView):
             else:
                 if not file_path.lower().endswith(".md"):
                     file_path += ".md"
+                md_content = self.get_plain_text()
+                if not md_content:
+                    logger.warning("导出 Markdown 失败：无法获取消息内容")
+                    self._show_save_error("无法获取消息内容")
+                    return
                 with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                    f.write(md_content)
                 logger.info(f"消息已导出到: {file_path}")
                 self._show_save_success(file_path)
         except Exception as e:
@@ -5113,6 +5352,23 @@ class MessageCard(SimpleCardWidget):
         # 刷新用户卡片纯文本视图颜色（PlainTextViewer 没有 _refresh_viewer_font）
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
+
+    # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
+    # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析
+
+    def _normalBackgroundColor(self):
+        """返回透明色，让 CSS background-color 透出"""
+        from PyQt5.QtGui import QColor
+
+        return QColor(0, 0, 0, 0)
+
+    def _hoverBackgroundColor(self):
+        """返回透明色，让 CSS background-color 透出"""
+        return QColor(0, 0, 0, 0)
+
+    def _pressedBackgroundColor(self):
+        """返回透明色，让 CSS background-color 透出"""
+        return QColor(0, 0, 0, 0)
 
     def _get_footer_model_text(self) -> str:
         """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""
@@ -6608,9 +6864,10 @@ class MessageCard(SimpleCardWidget):
         使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
-        # 新一轮思考开始，重置 viewer 的 finalized 标志
+        # 新一轮思考开始，重置 viewer 的 finalized 和 streaming 标志
         if self.viewer:
             self.viewer._thinking_finalized = False
+            self.viewer._reasoning_streaming_started = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
         if self.viewer and getattr(self.viewer, "page", None):
@@ -6986,15 +7243,19 @@ class MessageCard(SimpleCardWidget):
         # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
         self._content_just_loaded = True
 
-        # 始终走增量 JS 更新（无论内容大小），确保思考文本即时显示，
-        # 蛇形动画已改为 requestAnimationFrame 驱动，不受后续全量渲染影响
-        self._update_thinking_incremental(text)
-        # 性能优化：通过 _lazy_markdown_cb 将 content_to_markdown 延迟到
-        # _perform_update 执行（渲染定时器自带防抖，多 chunk 合并转换一次）
-        # 这同时修复了旧代码的 bug：渲染定时器激活时跳过 markdown 更新，
-        # 导致最后几个 chunk 内容丢失
-        self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
-        self.viewer._schedule_render(immediate=False)
+        # 🆕 方案B：首个 reasoning chunk 渲染"深度思考中..." spinner，后续静默累积
+        # 不更新 DOM / 不触发渲染定时器 / 不更新高度，等 thinking 结束后的全量渲染
+        # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
+        if not self.viewer._reasoning_streaming_started:
+            self.viewer._reasoning_streaming_started = True
+            # 首 chunk：增量高度 + 立即全量渲染显示 spinner
+            self._update_thinking_incremental(text)
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            self.viewer._schedule_render(immediate=True)
+        else:
+            # 后续 chunk：只累积到 _content_data，静默不触发任何 DOM 操作
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            # 不调用 _schedule_render / _update_thinking_incremental
 
     def _update_thinking_incremental(self, new_text: str):
         """流式思考增量更新（仅触发布局高度重算）

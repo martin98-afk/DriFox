@@ -116,17 +116,19 @@ class ContextUsageRing(QWidget):
         self.update()
 
     def _rebuild_tooltip(self):
-        self._tooltip.set_data({
-            "used_tokens": self._used_tokens,
-            "budget_tokens": self._budget_tokens,
-            "percent": self._percent,
-            "ring_color": self._ring_color.name(),
-            "compaction": self._compaction,
-            "normal_tokens": self._normal_tokens,
-            "compacted_tokens": self._compacted_tokens,
-            "breakdown": self._breakdown,
-            "cache": self._cache_data,
-        })
+        self._tooltip.set_data(
+            {
+                "used_tokens": self._used_tokens,
+                "budget_tokens": self._budget_tokens,
+                "percent": self._percent,
+                "ring_color": self._ring_color.name(),
+                "compaction": self._compaction,
+                "normal_tokens": self._normal_tokens,
+                "compacted_tokens": self._compacted_tokens,
+                "breakdown": self._breakdown,
+                "cache": self._cache_data,
+            }
+        )
 
     def _show_tooltip(self):
         # 每次显示前刷新 tooltip 数据，确保主题色/字体等与当前主题同步
@@ -134,21 +136,22 @@ class ContextUsageRing(QWidget):
 
         # 即使没有会话 / 模型配置，也给出一个轻量提示，避免「hover 圆环却毫无反馈」。
         # 仅当「既没有预算、也没有占比、也没有明细、也没有缓存」时，构造空状态引导文案。
-        if (self._budget_tokens <= 0 and self._percent <= 0
-                and not self._breakdown and not self._cache_data):
+        if self._budget_tokens <= 0 and self._percent <= 0 and not self._breakdown and not self._cache_data:
             # 空状态覆盖 _rebuild_tooltip 设置的数据
-            self._tooltip.set_data({
-                "used_tokens": 0,
-                "budget_tokens": 0,
-                "percent": 0,
-                "ring_color": self._ring_color.name(),
-                "compaction": {},
-                "normal_tokens": 0,
-                "compacted_tokens": 0,
-                "breakdown": [],
-                "cache": {},
-                "empty": True,
-            })
+            self._tooltip.set_data(
+                {
+                    "used_tokens": 0,
+                    "budget_tokens": 0,
+                    "percent": 0,
+                    "ring_color": self._ring_color.name(),
+                    "compaction": {},
+                    "normal_tokens": 0,
+                    "compacted_tokens": 0,
+                    "breakdown": [],
+                    "cache": {},
+                    "empty": True,
+                }
+            )
 
         self._tooltip.adjustSize()
         tip_size = self._tooltip.size()
@@ -177,6 +180,9 @@ class ContextUsageRing(QWidget):
         if y + tip_size.height() > screen_geom.bottom():
             y = screen_geom.bottom() - tip_size.height() - 5
 
+        # 预创建原生窗口句柄，确保 move 直接作用于 HWND，
+        # 避免 hide() 后 show() 新建窗口时 WM 在默认位置闪一帧。
+        self._tooltip.winId()
         self._tooltip.move(x, y)
         self._tooltip.show()
 
@@ -194,6 +200,7 @@ class ContextUsageRing(QWidget):
         """计算轨道颜色：浅色主题用深色半透明，深色主题用白色半透明"""
         try:
             from app.utils.theme_manager import theme_manager
+
             if theme_manager.is_light_theme():
                 return QColor(0, 0, 0, 40)
         except Exception:
