@@ -2782,6 +2782,25 @@ class CodeWebViewer(QWebEngineView):
                 .think-streaming[data-streaming="true"] {{
                     background: transparent;
                 }}
+                /* 思考轮播提示文字 — 从左到右脉冲渐变色动画 */
+                .think-streaming-tip {{
+                    background: linear-gradient(
+                        90deg,
+                        var(--text-secondary) 0%,
+                        var(--accent) 45%,
+                        var(--accent-warm) 55%,
+                        var(--text-secondary) 100%
+                    );
+                    background-size: 200% 100%;
+                    background-clip: text;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    animation: think-tip-sweep 2.5s ease-in-out infinite;
+                }}
+                @keyframes think-tip-sweep {{
+                    0% {{ background-position: 200% 0; }}
+                    100% {{ background-position: -200% 0; }}
+                }}
                 .think-content {{
                     padding: 8px 10px;
                     border-top: 1px solid var(--border);
@@ -3699,6 +3718,12 @@ class CodeWebViewer(QWebEngineView):
 
                 function _startTipRotation() {{
                     _stopTipRotation();
+                    // 首次启动时给文字 span 加上脉冲渐变色 class
+                    const el0 = document.querySelector('.think-streaming[data-streaming="true"]');
+                    if (el0) {{
+                        const s0 = el0.querySelector('span > span:last-child');
+                        if (s0) s0.classList.add('think-streaming-tip');
+                    }}
                     _tipTimer = setInterval(() => {{
                         const el = document.querySelector('.think-streaming[data-streaming="true"]');
                         if (!el) {{ _stopTipRotation(); return; }}

@@ -620,13 +620,14 @@ class ShortcutManagerCard(QWidget):
     # ── 全屏高度 ──
 
     def sizeHint(self):
-        """填充整個容器高度（與其他全屏 UI 插件一致）"""
+        """返回極大值，讓容器分配所有可用空間"""
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
-            return QSize(max(base.width(), 200), win.height())
+            # 返回 10000，容器 layout 會把剩餘空間全部分配給卡片
+            return QSize(max(base.width(), 200), 10000)
         return base
 
     def showEvent(self, event):
