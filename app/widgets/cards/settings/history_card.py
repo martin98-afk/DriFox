@@ -983,6 +983,17 @@ class HistoryCard(QWidget):
 
         return True
 
+    def get_history_at_index(self, index: int) -> Optional[Dict]:
+        """安全获取历史会话缓存在 index 位置的记录
+
+        返回 _all_history 中缓存的轻量记录（不含 messages），
+        供 main_widget 通过 session_id 加载完整数据。
+        避免外部直接访问私有属性 _all_history。
+        """
+        if index < 0 or index >= len(self._all_history):
+            return None
+        return self._all_history[index]
+
     def set_archived_sessions(self, archived_list: List[Dict]):
         """设置归档会话列表"""
         self._archived_sessions = archived_list

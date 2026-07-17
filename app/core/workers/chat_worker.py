@@ -34,7 +34,8 @@ from openai import (
     OpenAI,
     RateLimitError,
 )
-from PyQt5.QtCore import QCoreApplication, QThread, pyqtSignal
+from PyQt5.QtCore import QBuffer, QIODevice, QThread, QByteArray, pyqtSignal
+from PyQt5.QtGui import QImage
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 
@@ -72,6 +73,86 @@ def _check_team_member(backend) -> bool:
         return TeamManager.get_instance().is_team_member(wid)
     except Exception:
         return False
+
+
+def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
+    """压缩 data URI 图片，确保 base64 数据不超过 max_bytes。
+
+    使用 PyQt5 QImage（Python/PyInstaller 均可用）加载并等比缩小，
+    避免依赖 PIL（PyInstaller 打包时已被移除）。
+
+    Args:
+        data_uri: 原始 data URI（如 data:image/png;base64,xxx）
+        max_bytes: 压缩后 base64 部分的最大字节数（默认 5MB）
+
+    Returns:
+        压缩后的 data URI（若原图未超限则原样返回）
+    """
+    # 解析 data URI
+    header_end = data_uri.find(",")
+    if header_end == -1:
+        return data_uri
+    b64_data = data_uri[header_end + 1:]
+
+    # 检查是否需要压缩
+    if len(b64_data) <= max_bytes:
+        return data_uri
+
+    try:
+        import base64
+        img_bytes = base64.b64decode(b64_data)
+        img = QImage.fromData(QByteArray(img_bytes))
+        if img.isNull():
+            logger.warning("[Vision] QImage 解码失败，跳过压缩")
+            return data_uri
+
+        orig_w, orig_h = img.width(), img.height()
+        logger.warning(
+            f"[Vision] 图片过大: base64={len(b64_data)} bytes, "
+            f"原始尺寸={orig_w}x{orig_h}，开始压缩..."
+        )
+
+        # 等比缩小：按面积比例估算缩放因子，留 20% 余量避免反复压缩
+        # base64 ≈ 原始字节 × 4/3，原始字节 ≈ b64_data × 3/4
+        raw_size_est = len(b64_data) * 3 // 4
+        target_raw = max_bytes * 3 // 4
+        scale = (target_raw / raw_size_est) ** 0.5 * 0.8  # 面积平方根 + 余量
+        scale = max(0.1, min(1.0, scale))  # 限制在 [0.1, 1.0]
+
+        new_w = max(64, int(orig_w * scale))
+        new_h = max(64, int(orig_h * scale))
+
+        # 缩放（Qt.FastTransformation 优先保证性能）
+        scaled = img.scaled(new_w, new_h, aspectRatioMode=1, transformMode=0)  # KeepAspectRatio, FastTransformation
+
+        # 编码为 JPEG（相比 PNG 压缩率更高），质量 85 平衡体积与画质
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        try:
+            if not scaled.save(buf, "JPEG", 85):
+                # 回退 PNG
+                buf.close()
+                ba.clear()
+                buf = QBuffer(ba)
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                if not scaled.save(buf, "PNG"):
+                    logger.warning("[Vision] 图片压缩编码失败，返回原始图片")
+                    return data_uri
+        finally:
+            buf.close()
+
+        compressed_b64 = base64.b64encode(ba.data()).decode("utf-8")
+        logger.warning(
+            f"[Vision] 图片压缩完成: {orig_w}x{orig_h} → {new_w}x{new_h}, "
+            f"base64: {len(b64_data)} → {len(compressed_b64)} bytes "
+            f"({(1 - len(compressed_b64) / len(b64_data)) * 100:.1f}%)"
+        )
+        return f"data:image/jpeg;base64,{compressed_b64}"
+
+    except Exception as e:
+        logger.warning(f"[Vision] 图片压缩异常: {e}，返回原始图片")
+        return data_uri
 
 
 class OpenAIChatWorker(QThread):
@@ -2042,33 +2123,6 @@ class OpenAIChatWorker(QThread):
 
     # ========== 视觉模型图片注入 ==========
 
-    @staticmethod
-    def _inject_images_to_user_message(messages: List[Dict], data_uris: List[str]) -> bool:
-        """
-        将图片 data_uri 注入到 messages 列表中最后一个 user 消息的 content 中。
-
-        纯文本 content 转为 multimodal list（text + image_url），
-        已有 list 则追加 image_url 块。
-
-        Returns:
-            True 成功注入，False 未找到 user 消息
-        """
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                for data_uri in data_uris:
-                    if isinstance(content, str):
-                        content = [
-                            {"type": "text", "text": content},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ]
-                        msg["content"] = content
-                    elif isinstance(content, list):
-                        content.append({"type": "image_url", "image_url": {"url": data_uri}})
-                return True
-        return False
-
     def _try_inject_vision_content(
         self, tool_results, current_messages, session_messages: Optional[List[Dict]] = None
     ) -> bool:
@@ -2098,6 +2152,34 @@ class OpenAIChatWorker(QThread):
         model_name = str(self.llm_config.get("模型名称", "") or "")
         caps = get_model_capabilities(model_name)
         if not caps.get("supports_vision"):
+            # 不支持视觉的模型：在已构建的 tool 消息 content 追加提示，防止模型幻觉
+            _non_vision_tools = set()
+            for r in tool_results:
+                if not isinstance(r, dict) or not r.get("success"):
+                    continue
+                tn = r.get("name", "")
+                if tn == "screenshot":
+                    _non_vision_tools.add(tn)
+                elif tn == "read" and isinstance(r.get("image_data"), dict) and r["image_data"].get("data"):
+                    _non_vision_tools.add(tn)
+            if _non_vision_tools:
+                _nv_hint = (
+                    "\n\n<system-reminder>\n"
+                    "Tool executed successfully, but this model does not support vision. "
+                    "You cannot see images. Only describe what you know from the text.\n"
+                    "</system-reminder>"
+                )
+                for msg in current_messages:
+                    if msg.get("role") == "tool" and msg.get("name") in _non_vision_tools:
+                        existing = msg.get("content", "")
+                        if isinstance(existing, str) and _nv_hint not in existing:
+                            msg["content"] = existing + _nv_hint
+                if session_messages is not None:
+                    for msg in session_messages:
+                        if msg.get("role") == "tool" and msg.get("name") in _non_vision_tools:
+                            existing = msg.get("content", "")
+                            if isinstance(existing, str) and _nv_hint not in existing:
+                                msg["content"] = existing + _nv_hint
             return False
 
         # ---- 收集所有可注入的图片 data_uri ----
@@ -2165,16 +2247,64 @@ class OpenAIChatWorker(QThread):
         if not data_uris:
             return False
 
-        # ---- 注入到 current_messages（用于本轮 API 调用） ----
-        injected = self._inject_images_to_user_message(current_messages, data_uris)
-        if not injected:
-            return False
+        # ---- 图片大小检查：超过 5MB 的自动压缩，防止 API 400 (media exceeds size limit) ----
+        # 根因：4K 屏截图 PNG 可达 5-12MB，base64 后 7-16MB，超过 MiniMax 等 API 的 10MB 限制。
+        # PyInstaller 环境下因缺少 PIL 等可选库，PNG 略大，更易触发。
+        compressed_count = 0
+        for i, du in enumerate(data_uris):
+            b64_part = du.split(",", 1)[1] if "," in du else ""
+            if len(b64_part) > 5 * 1024 * 1024:  # 5MB 阈值（留余量给 API 10MB 限制）
+                compressed = compress_data_uri(du)
+                if compressed != du:
+                    data_uris[i] = compressed
+                    compressed_count += 1
+        if compressed_count:
+            logger.info(f"[Vision] 已压缩 {compressed_count}/{len(data_uris)} 张图片以避免 API 大小限制")
 
-        # ---- 同步注入到 session_messages（跨轮持久化） ----
+        # ---- 用 hook 注入模式插入一条 user 消息承载图片 ----
+        # 根因：之前将图片注入到旧 user message，LLM 无法将图片与工具调用关联。
+        # LLM 调用 read/screenshot 后看到工具结果是文本描述，认为"任务未完成"，
+        # 继续循环调用工具。即使图片已注入旧消息，LLM 也不把它视为工具调用结果。
+        # 修复方案：新建一条 user 消息用标准 image_url 格式承载图片，采用与 hook
+        # 相同的注入模式（仅加入 API 缓存和 session_messages，不加 current_messages），
+        # 避免被 UI 渲染为多余卡片，同时让 LLM 以常规方式看到图片。
+        tool_names_str = ", ".join(
+            r.get("name", "") for r in tool_results if isinstance(r, dict) and r.get("success")
+        )
+        vision_content: List[Dict] = [
+            {
+                "type": "text",
+                "text": (
+                    f"<system-reminder>\n"
+                    f"The following image(s) were obtained via {tool_names_str}. "
+                    "Please analyze the visual content directly.\n"
+                    f"</system-reminder>"
+                ),
+            },
+        ]
+        for du in data_uris:
+            vision_content.append({"type": "image_url", "image_url": {"url": du}})
+
+        vision_msg: Dict = {
+            "role": "user",
+            "content": vision_content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "_hook_event": "vision_inject",
+        }
+
+        # hook 注入模式：与 _inject_pending_hook_messages 一致的流程
+        # 1) API 缓存（LLM 可见） 2) _current_session_messages（持久化）
+        # 3) session_messages（UI 回调） 4) current_messages（后续轮次可见）
+        self._append_to_api_cache([vision_msg])
+        self._current_session_messages.append(vision_msg)
         if session_messages is not None:
-            self._inject_images_to_user_message(session_messages, data_uris)
+            session_messages.append(dict(vision_msg))
+        current_messages.append(vision_msg)
 
-        logger.info(f"[Vision] Injected {len(data_uris)} image(s) into user message for {model_name}")
+        logger.info(
+            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern "
+            f"for {model_name} (tools: {tool_names_str})"
+        )
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
         # 但 _api_messages_cache 仍是旧版本（无图片）。

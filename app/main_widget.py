@@ -8468,15 +8468,19 @@ class OpenAIChatToolWindow(ToolWindow):
         ## 触发警示动画
         if self.pixel_pet:
             self.pixel_pet.set_state("warning")
-        history_list = self.history_manager.get_history_list(self._current_project)
-        if index < 0 or index >= len(history_list):
-            # 参数无效，恢复状态
+
+        # 🛡️ 使用历史面板缓存的 _all_history 列表查找 session_id，
+        # 避免因流式保存导致排序变化后 index 偏移指向错误会话。
+        session_record = self._history_popup_card.get_history_at_index(index)
+        if not session_record:
             if self.pixel_pet:
                 self.pixel_pet.set_state("idle")
             return
-
-        session_record = history_list[index]
         session_id = session_record.get("session_id")
+        if not session_id:
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
+            return
         # 通过 session_id 找到全量列表中的真实 index
         full_index = self.history_manager.find_index_by_session_id(session_id)
         if full_index is None:
@@ -8547,16 +8551,18 @@ class OpenAIChatToolWindow(ToolWindow):
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
             return
-        history_list = self.history_manager.get_history_list(self._current_project)
-        if 0 <= index < len(history_list):
-            session_record = history_list[index]
-            session_id = session_record.get("session_id")
-            if session_id:
-                session = self.history_manager.get_session_by_session_id(session_id)
-                if session:
-                    idx = self.history_manager.find_index_by_session_id(session_id)
-                    if idx is not None:
-                        self.history_manager.update_session_title(idx, new_title)
+        # 🛡️ 使用历史面板缓存的 _all_history 列表查找 session_id，
+        # 避免因流式保存导致排序变化后 index 偏移指向错误会话。
+        session_record = self._history_popup_card.get_history_at_index(index)
+        if not session_record:
+            return
+        session_id = session_record.get("session_id")
+        if session_id:
+            session = self.history_manager.get_session_by_session_id(session_id)
+            if session:
+                idx = self.history_manager.find_index_by_session_id(session_id)
+                if idx is not None:
+                    self.history_manager.update_session_title(idx, new_title)
         # 刷新历史会话卡片
         refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
@@ -8739,13 +8745,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 💡 内存优化：加载历史会话时清理 LRU 缓存
         _cleanup_global_lru_caches()
 
-        history_list = self.history_manager.get_history_list(self._current_project)
-        if index < 0 or index >= len(history_list):
+        # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
+        # 而非重新调用 get_history_list()。原因是：流式对话结束时当前会话被保存
+        # 到历史列表头部，若在此处重新获取列表，保存的 index 会因新会话插入而
+        # 偏移指向错误的会话（点击会话 C 却加载了会话 B）。
+        # 使用面板内缓存的列表保证 index 与渲染时一致，再通过 session_id
+        # 从 history_manager 获取完整数据。
+        session_record = self._history_popup_card.get_history_at_index(index)
+        if not session_record:
             return
-
-        session_record = history_list[index]
         session_id = session_record.get("session_id")
-        # 通过 session_id 获取会话消息，而非通过 index
+        if not session_id:
+            return
+        # 通过 session_id 获取会话消息，确保即使列表顺序变化也能加载正确的会话
         messages = self.history_manager.get_session_messages(session_id)
         if not messages:
             return
@@ -11128,6 +11140,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 ext = os.path.splitext(img_path)[1].lower()
                 mime = _MIME_MAP.get(ext, "image/png")
                 data_uri = f"data:{mime};base64,{img_b64}"
+
+                # 图片大小检查：超过 5MB 自动压缩，防止 API 400
+                if len(img_b64) > 5 * 1024 * 1024:
+                    from app.core.workers.chat_worker import compress_data_uri
+                    compressed = compress_data_uri(data_uri)
+                    if compressed != data_uri:
+                        data_uri = compressed
+                        logger.info(f"[ImageAttach] 附件图片已压缩: {img_path}")
+
                 image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
             except Exception as e:
                 logger.warning(f"处理图片附件失败 {img_path}: {e}")
