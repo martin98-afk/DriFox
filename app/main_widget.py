@@ -37,7 +37,6 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -3289,14 +3288,23 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team.template_schema import TemplateError
 
         # ⚠ 破坏性操作：先弹确认框，避免用户误操作导致正在进行的任务被无感切换
-        reply = QMessageBox.question(
-            self,
-            "加载团队模板",
-            f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_load_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="加载团队模板",
+            content=f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
+            confirm_text="确认",
+            cancel_text="取消",
+            parent=self,
         )
-        if reply != QMessageBox.Yes:
+        _dialog.confirmed.connect(_on_load_confirm)
+        _dialog.exec_()
+        if not _confirmed[0]:
             return
 
         try:
@@ -4508,21 +4516,23 @@ class OpenAIChatToolWindow(ToolWindow):
     # OpenCode Zen 免费模型异步刷新
     # ──────────────────────────────────────────────
     def _async_refresh_opencode_models(self):
-        """后台线程异步刷新所有 OpenCode Zen 服务的免费模型列表（-free 后缀）。
+        """后台线程异步刷新内置默认 OpenCode 免费服务商（name="opencode免费模型"）的模型列表。
 
-        启动后立即返回，不阻塞 UI。网络与解析逻辑在 app.core.models_dev_sync
-        的 fetch_opencode_free_models_for_providers，本方法只负责收集实例、
+        只刷新内置默认，不碰用户自己添加的 OpenCode 实例，避免覆盖用户自定义模型列表。
+        启动后立即返回，不阻塞 UI。
+        网络与解析逻辑在 app.core.models_dev_sync 的
+        fetch_opencode_free_models_for_providers，本方法只负责收集实例、
         调度线程、把结果经信号回主线程刷新 UI。
         """
         import threading
 
         from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
 
-        # 收集所有 OpenCode Zen 服务商（可能有多个实例 #2/#3 等）
+        # 只刷新内置默认的 OpenCode 免费服务商（name="opencode免费模型"），
+        # 不动用户自己添加的 OpenCode 实例，防止覆盖用户自定义模型列表。
         targets: list[tuple[str, str, str]] = []
         for config_id, config in self._valid_configs.items():
-            pname = config.get("provider_name", "")
-            if "opencode" not in pname.lower():
+            if config.get("name") != "opencode免费模型":
                 continue
             api_url = config.get("API_URL", "")
             api_key = config.get("API_KEY", "")
@@ -4992,18 +5002,17 @@ class OpenAIChatToolWindow(ToolWindow):
             new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)
         except ProviderConfigCollision:
             # 撞 id 冲突：弹简单提示，保留表单让用户修改
-            from qfluentwidgets import MessageBox
+            from app.widgets.common_dialogs import InfoDialog
 
-            w = MessageBox(
-                "配置冲突",
-                "该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
+            _dialog = InfoDialog(
+                title="配置冲突",
+                content="该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
                 "同名服务商可以使用不同 base_url 分别配置（如 coding plan / 普通 plan），\n"
                 "但 (URL, KEY) 必须唯一。",
-                self.window(),
+                confirm_text="知道了",
+                parent=self.window(),
             )
-            w.yesButton.setText("知道了")
-            w.cancelButton.hide()
-            w.exec_()
+            _dialog.exec_()
             return  # 不隐藏表单，用户继续编辑
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
@@ -8651,14 +8660,24 @@ class OpenAIChatToolWindow(ToolWindow):
         ## 触发警示动画
         if self.pixel_pet:
             self.pixel_pet.set_state("warning")
-        from qfluentwidgets import MessageBox
+        from app.widgets.common_dialogs import ConfirmDialog
 
         # 确认对话框
-        msg_box = MessageBox("确认删除", "确定要彻底删除这个归档会话吗？此操作不可恢复。", self)
-        msg_box.yesButton.setText("删除")
-        msg_box.cancelButton.setText("取消")
+        _confirmed: list[bool] = [False]
 
-        if msg_box.exec() != MessageBox.Accepted:
+        def _on_delete_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="确认删除",
+            content="确定要彻底删除这个归档会话吗？此操作不可恢复。",
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self,
+        )
+        _dialog.confirmed.connect(_on_delete_confirm)
+        _dialog.exec_()
+        if not _confirmed[0]:
             # 取消操作，恢复正常状态
             if self.pixel_pet:
                 self.pixel_pet.set_state("idle")
@@ -13994,59 +14013,31 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from PyQt5.QtWidgets import QInputDialog
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
 
-        # ── 弹出输入对话框 ──
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("📁 新建项目")
-        dialog.setLabelText("项目名称：\n（将自动绑定此文件夹为项目根目录）")
-        dialog.setTextValue(folder_name)
-        dialog.setOkButtonText("创建")
-        dialog.setCancelButtonText("取消")
-        # 应用主题样式
-        Colors.refresh()
-        dialog.setStyleSheet(f"""
-            QInputDialog {{
-                background-color: {Colors.CARD_BG.format(alpha=240)};
-                color: {Colors.TEXT_PRIMARY};
-            }}
-            QInputDialog QLabel {{
-                color: {Colors.TEXT_PRIMARY};
-                {get_font_family_css()} {font_size_css(13)};
-            }}
-            QLineEdit {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 6px 10px;
-                {font_size_css(13)}
-                {get_font_family_css()}
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.TEXT_ACCENT};
-            }}
-            QPushButton {{
-                background-color: {Colors.BORDER_ACCENT};
-                color: {Colors.BUTTON_TEXT_ON_ACCENT};
-                border: 1px solid {Colors.BORDER_ACCENT};
-                border-radius: 4px;
-                padding: 6px 18px;
-                min-width: 64px;
-                {get_font_family_css()} {font_size_css(13)};
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.SEND_BTN_HOVER_START};
-            }}
-        """)
-        ok = dialog.exec_()
-        project_name = dialog.textValue().strip()
+        # ── 弹出输入对话框（统一样式） ──
+        _project_name: list[str] = [""]
 
-        if not ok or not project_name:
+        def _on_project_created(name: str):
+            _project_name[0] = name
+
+        _dialog = SingleInputDialog(
+            title="📁 新建项目",
+            hint="将自动绑定此文件夹为项目根目录",
+            placeholder="项目名称",
+            default_text=folder_name,
+            confirm_text="创建",
+            cancel_text="取消",
+            parent=self,
+        )
+        _dialog.confirmed.connect(_on_project_created)
+        _dialog.exec_()
+        project_name = _project_name[0]
+
+        if not project_name:
             return
 
         # ── 检查项目名是否已存在 ──
