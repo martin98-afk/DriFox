@@ -288,6 +288,78 @@ def _fetch_opencode_zen_free_models(api_key: str = "") -> Tuple[List[str], Dict[
     return free_models, caps
 
 
+# ============================================================
+# OpenCode 免费模型：按服务商实例异步刷新
+# ============================================================
+# 与上面 _fetch_opencode_zen_free_models 的区别：
+#   - 上面那个用共享 key 拉统一的 OpenCode Zen 端点，目的是补齐"模型能力元数据"；
+#   - 下面这个按每个服务商实例各自的 API_URL / API_KEY 去拉，目的是刷新
+#     "该实例可用的免费模型列表"（支持 OpenCode Zen #2/#3 等多实例）。
+# 网络 + 解析逻辑放 core 层，线程调度与 UI 刷新由调用方（main_widget）负责。
+def fetch_opencode_free_models_for_providers(
+    targets: List[Tuple[str, str, str]],
+    timeout: float = 15.0,
+) -> Dict[str, List[str]]:
+    """按服务商实例批量拉取 OpenCode 免费模型列表（-free 后缀）。
+
+    参数 targets: [(config_id, api_url, api_key), ...]，每个元素对应一个
+        服务商实例（可能多个 OpenCode Zen #2/#3 等）。
+    返回: {config_id: [free_model_names]}，只含成功获取且非空的实例。
+
+    同步执行（配合 threading 调用，不阻塞主线程）。单个实例失败不影响其他。
+    """
+    from app.constants import OPENCODE_SHARED_API_KEY
+
+    results: Dict[str, List[str]] = {}
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("[models.dev] 未安装 httpx，跳过实例级免费模型刷新")
+        return results
+
+    with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+        for cid, base_url, key in targets:
+            if not base_url:
+                continue
+            if not key:
+                key = OPENCODE_SHARED_API_KEY
+            try:
+                url = f"{base_url.rstrip('/')}/models"
+                headers = {"Authorization": f"Bearer {key}"}
+                resp = client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+            except Exception as e:
+                logger.debug(f"[OpenCode] 实例 {cid[:12]}... 获取免费模型失败: {e}")
+                continue
+
+            # 解析 OpenAI-compatible 响应
+            raw_ids: List[str] = []
+            if isinstance(data, dict):
+                if "data" in data:
+                    raw_ids = [
+                        m.get("id", "") or m.get("name", "")
+                        for m in data["data"]
+                        if isinstance(m, dict)
+                    ]
+                elif "models" in data:
+                    raw_ids = [
+                        m.get("id", "") or m.get("name", "")
+                        for m in data["models"]
+                        if isinstance(m, dict)
+                    ]
+            elif isinstance(data, list):
+                raw_ids = [m if isinstance(m, str) else "" for m in data]
+
+            free_models = [m.strip() for m in raw_ids if m.strip().endswith("-free")]
+            if free_models:
+                results[cid] = free_models
+                logger.info(f"[OpenCode] 实例 {cid[:12]}... 免费模型: {free_models}")
+
+    return results
+
+
 def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """解析 models.dev 数据，返回 (provider_models, model_capabilities)。
 

@@ -4490,10 +4490,13 @@ class OpenAIChatToolWindow(ToolWindow):
     def _async_refresh_opencode_models(self):
         """后台线程异步刷新所有 OpenCode Zen 服务的免费模型列表（-free 后缀）。
 
-        启动后立即返回，不阻塞 UI。获取完成后通过 _opencode_models_ready 信号
-        回到主线程，更新配置并刷新模型选择器。
+        启动后立即返回，不阻塞 UI。网络与解析逻辑在 app.core.models_dev_sync
+        的 fetch_opencode_free_models_for_providers，本方法只负责收集实例、
+        调度线程、把结果经信号回主线程刷新 UI。
         """
         import threading
+
+        from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
 
         # 收集所有 OpenCode Zen 服务商（可能有多个实例 #2/#3 等）
         targets: list[tuple[str, str, str]] = []
@@ -4503,48 +4506,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             api_url = config.get("API_URL", "")
             api_key = config.get("API_KEY", "")
-            if api_url and api_key:
+            if api_url:
                 targets.append((config_id, api_url, api_key))
 
         if not targets:
             return
 
         def _do_fetch():
-            """后台线程执行：调 OpenCode API 获取模型列表，筛选 -free 模型"""
-            import requests as _requests
-
-            for cid, base_url, key in targets:
-                try:
-                    url = f"{base_url.rstrip('/')}/models"
-                    headers = {"Authorization": f"Bearer {key}"}
-                    resp = _requests.get(url, headers=headers, timeout=15)
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
-                    # 解析 OpenAI-compatible 响应
-                    raw_ids: list[str] = []
-                    if isinstance(data, dict):
-                        if "data" in data:
-                            raw_ids = [
-                                m.get("id", "") or m.get("name", "")
-                                for m in data["data"]
-                                if isinstance(m, dict)
-                            ]
-                        elif "models" in data:
-                            raw_ids = [
-                                m.get("id", "") or m.get("name", "")
-                                for m in data["models"]
-                                if isinstance(m, dict)
-                            ]
-                    elif isinstance(data, list):
-                        raw_ids = [m if isinstance(m, str) else "" for m in data]
-
-                    free_models = [m.strip() for m in raw_ids if m.strip().endswith("-free")]
-                    if free_models:
-                        self._opencode_models_ready.emit((cid, free_models))
-                        logger.info(f"[OpenCode] 异步获取免费模型成功 ({cid[:12]}...): {free_models}")
-                except Exception as e:
-                    logger.debug(f"[OpenCode] 异步获取免费模型失败 ({cid[:12]}...): {e}")
+            """后台线程执行：批量拉取各实例免费模型，逐个回传主线程"""
+            results = fetch_opencode_free_models_for_providers(targets)
+            for config_id, free_models in results.items():
+                self._opencode_models_ready.emit((config_id, free_models))
 
         threading.Thread(target=_do_fetch, daemon=True).start()
 
