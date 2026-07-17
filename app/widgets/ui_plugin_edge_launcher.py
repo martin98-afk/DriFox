@@ -256,10 +256,10 @@ class UIPluginEdgeLauncher(QWidget):
         # 生命周期：主窗口销毁时自动清理（无 Qt parent 时需手动）
         if self._main_widget is not None:
             self._main_widget.destroyed.connect(self.deleteLater)
-        # 定时保险：200ms 同步 + 置顶（与 LockButtonWidget 一致）
+        # 定时保险：低频率仅做 raise_ 防遮挡（位置跟踪靠事件过滤器）
         self._sync_timer = QTimer(self)
-        self._sync_timer.timeout.connect(self._sync_position)
-        self._sync_timer.start(200)
+        self._sync_timer.timeout.connect(self._sync_keepalive)
+        self._sync_timer.start(1000)
 
     # ── 公开 API ────────────────────────────────────────────
     def update_geometry(self, chat_rect: QRect = QRect()) -> None:
@@ -319,9 +319,10 @@ class UIPluginEdgeLauncher(QWidget):
             self.raise_()
 
     def showEvent(self, event) -> None:  # noqa: N802
-        """显示时同步一次位置"""
+        """显示时同步一次位置（仅在首次显示或窗口恢复时触发）"""
         super().showEvent(event)
-        self._sync_position()
+        # refresh_plugins 已先 sync 再 show，此处不再重复 sync
+        self.raise_()
 
     # ── 位置同步（独立窗口全局坐标定位）──────────────────
     def _sync_position(self) -> None:
@@ -344,14 +345,21 @@ class UIPluginEdgeLauncher(QWidget):
         global_center = mw.mapToGlobal(mw.rect().center())
         y = global_center.y() - h // 2
 
-        # 用 move+resize 定位（与 LockButtonWidget 一致）
-        self.move(int(x), int(y))
-        self.resize(TRIGGER_ZONE_WIDTH, int(h))
-        # 视觉层尺寸
-        self._visual.setGeometry(0, 0, CAPSULE_WIDTH, int(h))
+        # 用 setGeometry 一次完成定位+resize（比 move+resize 少一次 WM 事件）
+        new_geo = QRect(int(x), int(y), TRIGGER_ZONE_WIDTH, int(h))
+        if self.geometry() != new_geo:
+            self.setGeometry(new_geo)
+            self._visual.setGeometry(0, 0, CAPSULE_WIDTH, int(h))
         # 置顶
         if self.isVisible():
             self.raise_()
+
+    def _sync_keepalive(self) -> None:
+        """低频率 keepalive：仅置顶，防止被其他窗口遮挡
+
+        位置跟踪靠事件过滤器在 Move/Resize 时实时同步，
+        此定时器仅作为安全网，不做全量定位（避免拖动时竞态）。
+        """
         if self.isVisible():
             self.raise_()
 
@@ -467,19 +475,34 @@ class UIPluginEdgeLauncher(QWidget):
             action.triggered.connect(lambda checked=False, cid=card_id: self._on_menu_action(cid))
             menu.addAction(action)
 
-        # 定位：菜单仅向右展开 — 起点为胶囊右上角（紧贴右边缘 + 4px 间距）
-        # 菜单完全在胶囊右侧，不会向左扩张
-        global_pos = self.mapToGlobal(QPoint(CAPSULE_WIDTH + 4, 0))
-        # 调整：如果超出屏幕底部则向上偏移
-        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        # 定位：菜单在胶囊右侧，垂直居中于 Launcher
+        # 计算菜单预估高度
+        item_count = len(self._card_infos)
+        est_menu_h = min(MENU_MAX_HEIGHT, max(80, item_count * 32 + 24))
+        # 水平：胶囊右边缘 + 4px 间距
+        x = self.mapToGlobal(QPoint(CAPSULE_WIDTH + 4, 0)).x()
+        # 垂直：Launcher 中心对齐（向上下均等展开）
+        launcher_center_y = self.mapToGlobal(QPoint(0, self.height() // 2)).y()
+        y = launcher_center_y - est_menu_h // 2
+
+        # 屏幕边界修正：不超出可用区域
+        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
-            menu_height_hint = min(
-                MENU_MAX_HEIGHT,
-                max(80, len(self._card_infos) * 32 + 24),
-            )
-            if global_pos.y() + menu_height_hint > avail.bottom():
-                global_pos.setY(max(avail.top() + 8, avail.bottom() - menu_height_hint))
+            # 超出右边缘 → 左移
+            if x + MENU_MIN_WIDTH > avail.right():
+                x = avail.right() - MENU_MIN_WIDTH - 8
+            # 超出顶部 → 对齐顶部
+            if y < avail.top() + 4:
+                y = avail.top() + 4
+            # 超出底部 → 对齐底部
+            if y + est_menu_h > avail.bottom() - 4:
+                y = avail.bottom() - est_menu_h - 4
+
+        # 设置最大高度（超出自动滚轮）
+        menu.setMaximumHeight(MENU_MAX_HEIGHT)
+
+        global_pos = QPoint(int(x), int(y))
 
         # 关闭联动：菜单关闭（点击外部 / Esc / 选中项）后回到 EXPANDED/COLLAPSED
         menu.aboutToHide.connect(self._on_menu_about_to_hide)
