@@ -2005,6 +2005,8 @@ class CodeWebViewer(QWebEngineView):
 
         # 思考已完成标志：工具调用开始时置 True，阻止 _render_markdown_to_html 继续剥离 </think>
         self._thinking_finalized = False
+        # 流式思考首 chunk 标志：首 chunk 渲染"深度思考中..." spinner，后续静默累积不更新 DOM
+        self._reasoning_streaming_started = False
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -6755,9 +6757,10 @@ class MessageCard(SimpleCardWidget):
         使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
-        # 新一轮思考开始，重置 viewer 的 finalized 标志
+        # 新一轮思考开始，重置 viewer 的 finalized 和 streaming 标志
         if self.viewer:
             self.viewer._thinking_finalized = False
+            self.viewer._reasoning_streaming_started = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
         if self.viewer and getattr(self.viewer, "page", None):
@@ -7133,15 +7136,19 @@ class MessageCard(SimpleCardWidget):
         # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
         self._content_just_loaded = True
 
-        # 始终走增量 JS 更新（无论内容大小），确保思考文本即时显示，
-        # 蛇形动画已改为 requestAnimationFrame 驱动，不受后续全量渲染影响
-        self._update_thinking_incremental(text)
-        # 性能优化：通过 _lazy_markdown_cb 将 content_to_markdown 延迟到
-        # _perform_update 执行（渲染定时器自带防抖，多 chunk 合并转换一次）
-        # 这同时修复了旧代码的 bug：渲染定时器激活时跳过 markdown 更新，
-        # 导致最后几个 chunk 内容丢失
-        self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
-        self.viewer._schedule_render(immediate=False)
+        # 🆕 方案B：首个 reasoning chunk 渲染"深度思考中..." spinner，后续静默累积
+        # 不更新 DOM / 不触发渲染定时器 / 不更新高度，等 thinking 结束后的全量渲染
+        # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
+        if not self.viewer._reasoning_streaming_started:
+            self.viewer._reasoning_streaming_started = True
+            # 首 chunk：增量高度 + 立即全量渲染显示 spinner
+            self._update_thinking_incremental(text)
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            self.viewer._schedule_render(immediate=True)
+        else:
+            # 后续 chunk：只累积到 _content_data，静默不触发任何 DOM 操作
+            self.viewer._lazy_markdown_cb = lambda: content_to_markdown(self._content_data)
+            # 不调用 _schedule_render / _update_thinking_incremental
 
     def _update_thinking_incremental(self, new_text: str):
         """流式思考增量更新（仅触发布局高度重算）
