@@ -2801,6 +2801,21 @@ class CodeWebViewer(QWebEngineView):
                     0% {{ background-position: 200% 0; }}
                     100% {{ background-position: -200% 0; }}
                 }}
+                /* 工具运行卡片的参数预览 — 流式态脉冲渐变色动画 */
+                .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{
+                    background: linear-gradient(
+                        90deg,
+                        var(--text-secondary) 0%,
+                        var(--accent) 45%,
+                        var(--accent-warm) 55%,
+                        var(--text-secondary) 100%
+                    );
+                    background-size: 200% 100%;
+                    background-clip: text;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    animation: think-tip-sweep 2.5s ease-in-out infinite;
+                }}
                 .think-content {{
                     padding: 8px 10px;
                     border-top: 1px solid var(--border);
@@ -3711,7 +3726,17 @@ class CodeWebViewer(QWebEngineView):
                     "检索相关知识库...",
                     "正在综合推理...",
                     "组织回答结构...",
-                    "即将输出结果..."
+                    "即将输出结果...",
+                    "梳理关键信息...",
+                    "对比多个方案...",
+                    "校验逻辑完整性...",
+                    "回溯历史消息...",
+                    "推理最佳路径...",
+                    "整合分析结果...",
+                    "审查边缘场景...",
+                    "串联上下文线索...",
+                    "构建最终输出...",
+                    "准备呈现答案..."
                 ];
                 let _tipIndex = 0;
                 let _tipTimer = null;
