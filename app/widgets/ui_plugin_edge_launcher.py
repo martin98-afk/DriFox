@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import (
     QAction,
@@ -421,7 +421,6 @@ class UIPluginEdgeLauncher(QWidget):
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         menu.setStyleSheet(self._menu_stylesheet())
         menu.setMinimumWidth(MENU_MIN_WIDTH)
-        menu.setIconSize(QSize(20, 20))
 
         for card_id, title, plugin_name in self._card_infos:
             label = title
