@@ -1,4 +1,8 @@
 {
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
     "name": "context-usage-stats",
     "description": "对话上下文用量统计 — 展示最近对话的 token 用量、消息数量趋势、会话活跃度图表",
     "version": "0.1.0",

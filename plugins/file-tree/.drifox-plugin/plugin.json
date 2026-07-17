@@ -1,4 +1,8 @@
 {
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
     "name": "file-tree",
     "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持右键菜单与实时文件监听",
     "version": "0.1.0",

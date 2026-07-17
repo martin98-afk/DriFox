@@ -1,4 +1,8 @@
 {
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
     "name": "system",
     "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks 和 MCP 配置",
     "version": "1.0.0",
