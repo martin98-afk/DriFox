@@ -2,7 +2,7 @@
 """ShortcutManager 浮动卡片 — 管理系统命令的快捷键
 
 功能：
-- 显示所有系统命令及其当前快捷键
+- 显示系统内建命令及 UI 插件命令
 - 自定义快捷键：覆盖同名命令到 user-custom 插件
 - 恢复系统配置：删除 user-custom 下的对应文件
 - 实时搜索过滤
@@ -40,173 +40,90 @@ from loguru import logger
 
 # ── 常量 ────────────────────────────────────────────────
 
-# 用户自定义命令目录（相对 get_app_data_dir）
 _USER_CUSTOM_CMD_REL = "plugins/user-custom/commands"
 
+# 主题色定义
+_LIGHT = {
+    "card_bg": "rgba(255,255,255,0.92)",
+    "card_border": "rgba(0,0,0,0.06)",
+    "row_hover": "rgba(0,0,0,0.03)",
+    "row_active": "rgba(0,0,0,0.06)",
+    "text_primary": "rgba(0,0,0,0.82)",
+    "text_secondary": "rgba(0,0,0,0.45)",
+    "text_muted": "rgba(0,0,0,0.28)",
+    "shortcut_bg": "rgba(0,0,0,0.04)",
+    "shortcut_border": "rgba(0,0,0,0.08)",
+    "badge_bg": "rgba(0,0,0,0.05)",
+    "badge_text": "rgba(0,0,0,0.50)",
+    "badge_plugin_bg": "rgba(66,133,244,0.08)",
+    "badge_plugin_text": "rgba(66,133,244,0.72)",
+    "search_bg": "rgba(0,0,0,0.03)",
+    "search_border": "rgba(0,0,0,0.06)",
+    "search_focus_border": "rgba(66,133,244,0.35)",
+    "sep_color": "rgba(0,0,0,0.05)",
+    "tip_text": "rgba(0,0,0,0.38)",
+    "empty_text": "rgba(0,0,0,0.30)",
+}
 
-# ── 主题色辅助 ──────────────────────────────────────────
+_DARK = {
+    "card_bg": "rgba(30,30,40,0.94)",
+    "card_border": "rgba(255,255,255,0.06)",
+    "row_hover": "rgba(255,255,255,0.04)",
+    "row_active": "rgba(255,255,255,0.07)",
+    "text_primary": "rgba(255,255,255,0.88)",
+    "text_secondary": "rgba(255,255,255,0.50)",
+    "text_muted": "rgba(255,255,255,0.25)",
+    "shortcut_bg": "rgba(255,255,255,0.06)",
+    "shortcut_border": "rgba(255,255,255,0.08)",
+    "badge_bg": "rgba(255,255,255,0.06)",
+    "badge_text": "rgba(255,255,255,0.45)",
+    "badge_plugin_bg": "rgba(66,133,244,0.12)",
+    "badge_plugin_text": "rgba(130,170,255,0.80)",
+    "search_bg": "rgba(255,255,255,0.04)",
+    "search_border": "rgba(255,255,255,0.06)",
+    "search_focus_border": "rgba(100,140,255,0.35)",
+    "sep_color": "rgba(255,255,255,0.05)",
+    "tip_text": "rgba(255,255,255,0.32)",
+    "empty_text": "rgba(255,255,255,0.22)",
+}
 
 
-def _text_color(secondary: bool = False) -> str:
-    """fallback 文字颜色（无上下文时使用）"""
-    if isDarkTheme():
-        return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
-    return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
+def _theme() -> dict:
+    return _DARK if isDarkTheme() else _LIGHT
 
 
 def _ctx_font(ctx: dict) -> tuple:
-    """从上下文提取 font_family 和 font_size"""
     ff = ctx.get("font_family", "Microsoft YaHei")
     fs = ctx.get("font_size", 14)
     return ff, fs
 
 
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
-    """从上下文 colors 中获取文字颜色"""
     colors = ctx.get("colors", {})
     key = "text_secondary" if secondary else "text_primary"
     val = colors.get(key, "")
     if val:
         return val
-    return _text_color(secondary)
+    t = _theme()
+    return t["text_secondary"] if secondary else t["text_primary"]
 
 
 def _ctx_border_color(ctx: dict) -> str:
-    """从上下文 colors 中获取边框颜色"""
-    return ctx.get("colors", {}).get("border", "rgba(128,128,128,0.15)")
-
-
-def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: str = "") -> str:
-    """生成带字体的 QSS 样式串"""
-    parts = [f"color: {color};"]
-    if font_family:
-        parts.append(f"font-family: '{font_family}';")
-    if font_size:
-        parts.append(f"font-size: {font_size}px;")
-    if extra:
-        parts.append(extra)
-    return " ".join(parts)
+    return ctx.get("colors", {}).get("border", _theme()["card_border"])
 
 
 # ── 工具函数 ────────────────────────────────────────────
 
 
 def _get_user_custom_cmd_dir() -> Path:
-    """获取 user-custom 插件的 commands 目录路径
-
-    开发环境: .drifox/plugins/user-custom/commands/
-    打包环境: ~/.drifox/plugins/user-custom/commands/
-    """
     from app.utils.utils import get_app_data_dir
-
     return get_app_data_dir() / _USER_CUSTOM_CMD_REL
 
 
-def _display_type_to_yaml(display_type: str) -> str:
-    """将 display type 转换为 YAML frontmatter type
-
-    to_display_dict 中的 type:
-    - "command" → "function"
-    - "prompt" → "prompt"
-    - "agent" → "agent"
-    - "skill"  → "function"（技能保存为 function 类型，快捷鍵插入 /命令）
-    """
-    mapping = {
-        "command": "function",
-        "prompt": "prompt",
-        "agent": "agent",
-        "skill": "function",
-    }
-    return mapping.get(display_type, "function")
-
-
-def _load_all_items() -> list:
-    """获取所有命令+技能，排序与命令卡片一致
-
-    排序规则（与 CommandCard._sort_key 保持一致）：
-    0 = 系统内建命令 (command)
-    1 = UI 插件命令 (command + subtype=ui_plugin)
-    2 = 技能 (skill)
-    3 = 智能体/提示词 (agent/prompt)
-
-    Returns:
-        [{name, description, type, shortcut, subtype?, display_name?}, ...]
-    """
-    from app.core.command_manager import CommandManager
-    from app.core.ui_plugin_registry import UIPluginRegistry
-    from app.utils.utils import get_local_skills
-
-    items = []
-
-    # 1. 加载命令
-    cmd_mgr = CommandManager.get_instance()
-    commands = cmd_mgr.get_all_commands()
-
-    # 标记 UI 插件命令（用于排序）
-    ui_cmd_names = UIPluginRegistry.get_instance().get_ui_command_names()
-    for cmd in commands:
-        if cmd["name"] in ui_cmd_names:
-            cmd["subtype"] = "ui_plugin"
-    items.extend(commands)
-
-    # 2. 加载技能
-    try:
-        skills = get_local_skills()
-        for s in skills:
-            items.append(
-                {
-                    "name": s.get("qualified_name", s["name"]),
-                    "description": s.get("description", ""),
-                    "type": "skill",
-                }
-            )
-    except Exception:
-        pass
-
-    # 3. 重名检测加后缀（与命令卡片一致）
-    name_type_map = {}
-    for item in items:
-        name_type_map.setdefault(item["name"], set()).add(item["type"])
-
-    suffix_map = {
-        "skill": "-skill",
-        "prompt": "-prompt",
-        "command": "-cmd",
-        "agent": "-agent",
-    }
-
-    # 标记需要加后缀的项
-    for item in items:
-        if len(name_type_map.get(item["name"], set())) > 1:
-            suffix = suffix_map.get(item["type"], "")
-            if suffix:
-                item["display_name"] = f"{item['name']}{suffix}"
-            else:
-                item["display_name"] = item["name"]
-        else:
-            item["display_name"] = item["name"]
-
-    # 4. 排序（与命令卡片完全一致）
-    def _sort_key(item):
-        t = item["type"]
-        if t == "command" and item.get("subtype") == "ui_plugin":
-            return (1, item["display_name"])
-        if t == "command":
-            return (0, item["display_name"])
-        if t == "skill":
-            return (2, item["display_name"])
-        # agent / prompt
-        return (3, item["display_name"])
-
-    items.sort(key=_sort_key)
-    return items
-
-
-def _make_minimal_cmd_file(name: str, description: str, type_str: str, shortcut: str) -> str:
-    """生成最小命令文件内容（仅 frontmatter，用于覆盖快捷键）"""
+def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
     lines = ["---"]
     lines.append(f"description: {description}")
-    lines.append(f"type: {type_str}")
+    lines.append("type: function")
     if shortcut:
         lines.append(f"shortcut: {shortcut}")
     lines.append("---")
@@ -214,53 +131,94 @@ def _make_minimal_cmd_file(name: str, description: str, type_str: str, shortcut:
     return "\n".join(lines)
 
 
+def _load_all_items() -> list:
+    """获取系统内建命令 + UI 插件命令列表。
+
+    Returns:
+        [{name, description, type, shortcut?, subtype?}, ...]
+    """
+    from app.core.command_manager import CommandManager
+    from app.core.ui_plugin_registry import UIPluginRegistry
+
+    items = []
+
+    cmd_mgr = CommandManager.get_instance()
+    commands = cmd_mgr.get_all_commands()
+
+    # 只保留 type="command"（系统内建 + UI 插件命令），过滤掉 agent/prompt
+    ui_cmd_names = UIPluginRegistry.get_instance().get_ui_command_names()
+    for cmd in commands:
+        if cmd.get("type") != "command":
+            continue
+        if cmd["name"] in ui_cmd_names:
+            cmd["subtype"] = "ui_plugin"
+        items.append(cmd)
+
+    # 排序：系统内建 → UI 插件，同组按名称字母序
+    def _sort_key(item):
+        is_plugin = 1 if item.get("subtype") == "ui_plugin" else 0
+        return (is_plugin, item["name"])
+
+    items.sort(key=_sort_key)
+    return items
+
+
 # ── 按键捕获弹出窗 ─────────────────────────────────────
 
 
 class _KeyCapturePopup(QWidget):
-    """弹出按键捕获窗口
+    """弹出按键捕获窗口"""
 
-    点击编辑后弹出，等待用户按下快捷键组合。
-    捕获后自动关闭并发射 key_captured 信号。
-    """
-
-    key_captured = pyqtSignal(str)  # 发射 "Ctrl+Shift+C" 或空字符串（取消/ESC）
+    key_captured = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
+        self.setWindowFlags(
+            Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
+        )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedSize(220, 60)
+        self.setFixedSize(240, 68)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
         frame = QFrame(self)
         frame.setObjectName("captureFrame")
-        frame.setStyleSheet("""
-            #captureFrame {
-                background: rgba(40, 40, 50, 0.95);
-                border: 2px solid rgba(100, 140, 255, 0.6);
-                border-radius: 8px;
-            }
+        t = _theme()
+        bg = t["card_bg"]
+        border = t["search_focus_border"]
+        frame.setStyleSheet(f"""
+            #captureFrame {{
+                background: {bg};
+                border: 2px solid {border};
+                border-radius: 12px;
+            }}
         """)
         fl = QVBoxLayout(frame)
-        fl.setContentsMargins(16, 8, 16, 8)
+        fl.setContentsMargins(20, 12, 20, 12)
 
-        self._hint = QLabel("按下快捷键… 按 Esc 取消", frame)
+        self._hint = QLabel("按下快捷键组合…", frame)
         self._hint.setAlignment(Qt.AlignCenter)
-        self._hint.setStyleSheet("color: white; font-size: 13px; background: transparent;")
+        self._hint.setStyleSheet(
+            f"color: {t['text_primary']}; font-size: 14px; font-weight: 500; background: transparent;"
+        )
         fl.addWidget(self._hint)
+
+        esc_hint = QLabel("Esc 取消", frame)
+        esc_hint.setAlignment(Qt.AlignCenter)
+        esc_hint.setStyleSheet(
+            f"color: {t['text_muted']}; font-size: 12px; background: transparent;"
+        )
+        fl.addWidget(esc_hint)
 
         layout.addWidget(frame)
 
     def showEvent(self, event):
         super().showEvent(event)
-        # 捕获全局键盘
         self.grabKeyboard()
 
     def hideEvent(self, event):
@@ -271,20 +229,15 @@ class _KeyCapturePopup(QWidget):
         key = event.key()
         mods = event.modifiers()
 
-        # 单独按修饰键时忽略（等待组合键）
         if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
             return
-
-        # Esc 取消
         if key == Qt.Key_Escape:
             self.key_captured.emit("")
             self.close()
             return
 
-        # 构建 QKeySequence
         seq = QKeySequence(int(mods) | key)
-        key_str = seq.toString(QKeySequence.NativeText)
-        self.key_captured.emit(key_str)
+        self.key_captured.emit(seq.toString(QKeySequence.NativeText))
         self.close()
 
 
@@ -294,8 +247,8 @@ class _KeyCapturePopup(QWidget):
 class _CommandRow(QWidget):
     """单个命令的显示行"""
 
-    edit_clicked = pyqtSignal(str)  # 参数: 命令名
-    restore_clicked = pyqtSignal(str)  # 参数: 命令名
+    edit_clicked = pyqtSignal(str)
+    restore_clicked = pyqtSignal(str)
 
     def __init__(
         self,
@@ -304,7 +257,8 @@ class _CommandRow(QWidget):
         description: str,
         cmd_type_str: str,
         is_customized: bool,
-        display_name: str = "",
+        is_plugin: bool = False,
+        font_size: int = 14,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -313,62 +267,79 @@ class _CommandRow(QWidget):
         self._description = description
         self._cmd_type_str = cmd_type_str
         self._is_customized = is_customized
-        self._display_name = display_name or cmd_name
-        self.is_skill = cmd_type_str == "skill"
+        self._is_plugin = is_plugin
+        self._font_size = font_size
+        self._hovered = False
+
+        self.setMouseTracking(True)
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setStyleSheet("background: transparent;")
+        t = _theme()
+        fs = self._font_size
+
+        self.setFixedHeight(40)
+        self.setStyleSheet("""
+            _CommandRow {
+                background: transparent;
+                border-radius: 6px;
+            }
+        """)
+
         hly = QHBoxLayout(self)
-        hly.setContentsMargins(8, 4, 8, 4)
+        hly.setContentsMargins(12, 0, 8, 0)
         hly.setSpacing(8)
 
-        # 命令名：/name
-        name_text = f"/{self._display_name}"
+        # ── 左侧：自定义标记 + 命令名 ──
+        if self._is_customized:
+            star = QLabel("✦", self)
+            star.setStyleSheet(
+                f"color: #f5a623; font-size: {fs - 1}px; background: transparent; padding-right: 2px;"
+            )
+            star.setToolTip("已自定义（原系统命令被覆盖）")
+            hly.addWidget(star)
+
+        name_text = f"/{self._cmd_name}"
         name_lb = QLabel(name_text, self)
-        name_lb.setStyleSheet(f"color: {_text_color()}; font-size: 13px; background: transparent;")
-        if self.is_skill:
-            name_lb.setToolTip("技能命令（暂不支持在此设置快捷键）")
-        elif self._is_customized:
-            name_lb.setText(f"✦ /{self._display_name}")
-            name_lb.setToolTip("已自定义（原系统命令被覆盖）")
-        name_lb.setMinimumWidth(140)
+        font_style = "font-weight: 600;" if self._is_customized else ""
+        name_lb.setStyleSheet(
+            f"color: {t['text_primary']}; font-size: {fs - 1}px; {font_style} background: transparent;"
+        )
+        name_lb.setMinimumWidth(120)
         hly.addWidget(name_lb)
 
-        # 类型标签
-        type_lb = QLabel(self._cmd_type_str, self)
+        # ── 类型徽章 ──
+        badge_label = "插件" if self._is_plugin else "系统"
+        badge_bg = t["badge_plugin_bg"] if self._is_plugin else t["badge_bg"]
+        badge_text_c = t["badge_plugin_text"] if self._is_plugin else t["badge_text"]
+        badge_fs = max(fs - 4, 9)
+
+        type_lb = QLabel(badge_label, self)
+        type_lb.setFixedHeight(18)
         type_lb.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 11px; "
-            f"background: rgba(128,128,128,0.1); border-radius: 3px; "
-            f"padding: 1px 6px;"
+            f"color: {badge_text_c}; font-size: {badge_fs}px; font-weight: 500; "
+            f"background: {badge_bg}; border-radius: 4px; "
+            f"padding: 0 7px;"
         )
-        type_lb.setFixedHeight(20)
+        type_lb.setAlignment(Qt.AlignCenter)
         hly.addWidget(type_lb)
 
         hly.addStretch(1)
 
-        # 快捷键显示
-        self._shortcut_lb = QLabel(self._shortcut if self._shortcut else "—", self)
-        ss = f"color: {_text_color()}; font-size: 13px; background: transparent;"
-        if not self._shortcut:
-            ss = f"color: {_text_color(secondary=True)}; font-size: 13px; background: transparent; font-style: italic;"
-        self._shortcut_lb.setStyleSheet(ss)
-        self._shortcut_lb.setMinimumWidth(160)
+        # ── 快捷键 pill ──
+        self._shortcut_lb = QLabel(self)
+        self._shortcut_lb.setFixedHeight(26)
         self._shortcut_lb.setAlignment(Qt.AlignCenter)
+        self._update_shortcut_style()
         hly.addWidget(self._shortcut_lb)
 
-        # 技能：仅展示，无操作按钮
-        if self.is_skill:
-            return
-
-        # 编辑按钮（公开属性，供定位弹窗用）
+        # ── 操作按钮 ──
         self.edit_btn = ToolButton(FluentIcon.EDIT, self)
         self.edit_btn.setToolTip("设置自定义快捷键")
         self.edit_btn.setFixedSize(28, 28)
         self.edit_btn.clicked.connect(lambda: self.edit_clicked.emit(self._cmd_name))
         hly.addWidget(self.edit_btn)
 
-        # 恢复按钮（仅自定义的命令显示）
         if self._is_customized:
             self.restore_btn = ToolButton(FluentIcon.RETURN, self)
             self.restore_btn.setToolTip("恢复系统配置")
@@ -376,15 +347,53 @@ class _CommandRow(QWidget):
             self.restore_btn.clicked.connect(lambda: self.restore_clicked.emit(self._cmd_name))
             hly.addWidget(self.restore_btn)
 
+    def _update_shortcut_style(self):
+        t = _theme()
+        fs = self._font_size
+        if self._shortcut:
+            keys = self._shortcut.replace("+", "  +  ")
+            self._shortcut_lb.setText(keys)
+            self._shortcut_lb.setStyleSheet(
+                f"color: {t['text_primary']}; font-size: {fs - 2}px; font-weight: 500; "
+                f"background: {t['shortcut_bg']}; border: 1px solid {t['shortcut_border']}; "
+                f"border-radius: 6px; padding: 0 10px;"
+            )
+            self._shortcut_lb.setMinimumWidth(60)
+        else:
+            self._shortcut_lb.setText("—")
+            self._shortcut_lb.setStyleSheet(
+                f"color: {t['text_muted']}; font-size: {fs - 2}px; font-style: italic; "
+                f"background: transparent; border: none; padding: 0 8px;"
+            )
+            self._shortcut_lb.setMinimumWidth(30)
+
     def update_shortcut(self, shortcut: str, is_customized: bool):
-        """更新快捷鍵顯示"""
         self._shortcut = shortcut
         self._is_customized = is_customized
-        self._shortcut_lb.setText(shortcut if shortcut else "—")
-        ss = f"color: {_text_color()}; font-size: 13px; background: transparent;"
-        if not shortcut:
-            ss = f"color: {_text_color(secondary=True)}; font-size: 13px; background: transparent; font-style: italic;"
-        self._shortcut_lb.setStyleSheet(ss)
+        self._update_shortcut_style()
+
+    # ── 悬停效果 ──
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_hover()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_hover()
+        super().leaveEvent(event)
+
+    def _apply_hover(self):
+        t = _theme()
+        if self._hovered:
+            self.setStyleSheet(
+                f"_CommandRow {{ background: {t['row_hover']}; border-radius: 6px; }}"
+            )
+        else:
+            self.setStyleSheet(
+                "_CommandRow { background: transparent; border-radius: 6px; }"
+            )
 
 
 # ── 主卡片 ──────────────────────────────────────────────
@@ -398,10 +407,10 @@ class ShortcutManagerCard(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
-        self._all_commands: list = []  # 当前显示的命令列表
-        self._rows: list = []  # _CommandRow 列表
+        self._all_commands: list = []
+        self._rows: list = []
         self._capture_popup: Optional[_KeyCapturePopup] = None
-        self._pending_cmd: str = ""  # 正在编辑的命令名
+        self._pending_cmd: str = ""
         self._header_icon: Optional[IconWidget] = None
 
         self._setup_ui()
@@ -412,30 +421,26 @@ class ShortcutManagerCard(QWidget):
         self._context_provider = provider
 
     def show_card(self):
-        """卡片显示时刷新主题 + 加载数据"""
         self._apply_latest_theme()
         self._apply_plugin_icon()
         self._refresh()
         self.setVisible(True)
 
     def _apply_plugin_icon(self):
-        """从上下文获取插件图标并更新头部图标"""
         if self._context_provider is None or self._header_icon is None:
             return
         try:
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})
-            theme = "dark" if isDarkTheme() else "light"
-            icon_path = icon_info.get(theme, "")
+            theme_key = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme_key, "")
             if icon_path:
                 from PyQt5.QtGui import QIcon
-
                 self._header_icon.setIcon(QIcon(icon_path))
         except Exception:
             pass
 
     def _apply_latest_theme(self):
-        """从上下文拉取最新主题色并刷新"""
         if self._context_provider is None:
             return
         try:
@@ -458,26 +463,9 @@ class ShortcutManagerCard(QWidget):
 
         self._retheme()
 
-        # 分隔线
-        try:
-            for sep in self.findChildren(QFrame):
-                if sep.frameShape() == QFrame.HLine:
-                    sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
-        except RuntimeError:
-            pass
-
-        # 搜索框
-        if hasattr(self, "_search") and self._search is not None:
-            try:
-                self._search.setStyleSheet(
-                    f"background: rgba(128,128,128,0.1); border-radius: 6px; "
-                    f"padding: 4px 10px; border: 1px solid {border_c}; " + _make_style(tc, font_family, font_size)
-                )
-            except RuntimeError:
-                pass
-
     def _retheme(self):
-        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
+        """主题切换时刷新子控件样式（字体/颜色动态适配）"""
+        tc = getattr(self, "_cached_tc", _theme()["text_primary"])
         ff = getattr(self, "_cached_font_family", "")
         fs = getattr(self, "_cached_font_size", 14)
 
@@ -502,9 +490,37 @@ class ShortcutManagerCard(QWidget):
             except RuntimeError:
                 pass
 
+        # 刷新搜索框样式
+        if hasattr(self, "_search") and self._search is not None:
+            try:
+                t = _theme()
+                sf = getattr(self, "_cached_font_size", 14)
+                self._search.setStyleSheet(
+                    f"QLineEdit {{"
+                    f"  background: {t['search_bg']}; border: 1px solid {t['search_border']}; "
+                    f"  border-radius: 8px; padding: 6px 12px; "
+                    f"  color: {t['text_primary']}; font-size: {sf - 1}px; "
+                    f"}}"
+                    f"QLineEdit:focus {{"
+                    f"  border: 1px solid {t['search_focus_border']}; "
+                    f"}}"
+                )
+            except RuntimeError:
+                pass
+
+        # 刷新行样式
+        for row in self._rows:
+            try:
+                row._update_shortcut_style()
+                row._apply_hover()
+            except RuntimeError:
+                pass
+
     # ── 界面 ──
 
     def _setup_ui(self):
+        t = _theme()
+
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -521,12 +537,8 @@ class ShortcutManagerCard(QWidget):
         # ── 分隔线 ──
         sep = QFrame(self)
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
+        sep.setStyleSheet(f"background: {t['sep_color']}; max-height: 1px;")
         root.addWidget(sep)
-
-        # ── 搜索框 ──
-        search_bar = self._build_search_bar()
-        root.addWidget(search_bar)
 
         # ── 滚动内容区 ──
         self._scroll = ScrollArea(self)
@@ -534,63 +546,79 @@ class ShortcutManagerCard(QWidget):
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"
-            "QScrollBar:vertical {"
-            "    width: 6px; background: transparent;"
-            "}"
+            "QScrollBar:vertical { width: 6px; background: transparent; }"
             "QScrollBar::handle:vertical {"
-            "    background: rgba(255,255,255,0.12);"
-            "    border-radius: 3px; min-height: 30px;"
+            "    background: rgba(128,128,128,0.15); border-radius: 3px; min-height: 30px;"
             "}"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-            "    height: 0;"
-            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         self._content = QWidget(self._scroll)
         self._content.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(0)
+        self._content_layout.setContentsMargins(4, 4, 4, 4)
+        self._content_layout.setSpacing(2)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
         root.addWidget(self._scroll, 1)
 
         # ── 底部提示 ──
-        tip = QLabel("💡 点击 ✏ 为命令设置自定义快捷键，点击 ✕ 恢复系统配置。自定义配置保存到 user-custom 插件。", self)
+        fs = getattr(self, "_cached_font_size", 14)
+        tip = QLabel("点击 ✏ 为命令设置自定义快捷键  ·  点击 ↩ 恢复系统配置", self)
         tip.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent; padding: 6px 16px;"
+            f"color: {t['tip_text']}; font-size: {fs - 3}px; background: transparent; "
+            f"padding: 8px 16px;"
         )
         tip.setWordWrap(True)
         root.addWidget(tip)
 
     def _build_header(self) -> QWidget:
+        t = _theme()
+        fs = getattr(self, "_cached_font_size", 14)
+
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         hly = QHBoxLayout(header)
-        hly.setContentsMargins(16, 12, 16, 4)
-        hly.setSpacing(8)
+        hly.setContentsMargins(16, 14, 16, 14)
+        hly.setSpacing(10)
 
         self._header_icon = IconWidget(FluentIcon.COMMAND_PROMPT, header)
         self._header_icon.setFixedSize(22, 22)
         hly.addWidget(self._header_icon)
 
         tl = StrongBodyLabel("快捷键管理器", header)
-        tl.setStyleSheet(f"color: {_text_color()}; background: transparent;")
+        tl.setStyleSheet(f"color: {t['text_primary']}; background: transparent; font-size: {fs}px;")
         hly.addWidget(tl)
 
         self._status_lb = QLabel("", header)
         self._status_lb.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            f"color: {t['text_secondary']}; font-size: {fs - 2}px; background: transparent;"
         )
         hly.addWidget(self._status_lb)
         hly.addStretch(1)
 
-        # 刷新按钮
+        # 搜索框放在 title 行
+        self._search = QLineEdit(header)
+        self._search.setPlaceholderText("搜索命令…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedSize(160, 30)
+        self._search.setStyleSheet(
+            f"QLineEdit {{"
+            f"  background: {t['search_bg']}; border: 1px solid {t['search_border']}; "
+            f"  border-radius: 8px; padding: 4px 10px; "
+            f"  color: {t['text_primary']}; font-size: {fs - 1}px; "
+            f"}}"
+            f"QLineEdit:focus {{"
+            f"  border: 1px solid {t['search_focus_border']}; "
+            f"}}"
+        )
+        self._search.textChanged.connect(self._on_search)
+        hly.addWidget(self._search)
+
         self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新命令列表")
         self._refresh_btn.clicked.connect(self._refresh)
         hly.addWidget(self._refresh_btn)
 
-        # 关闭按钮
         close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
         close_btn.setFixedSize(24, 24)
         close_btn.setToolTip("关闭")
@@ -599,42 +627,16 @@ class ShortcutManagerCard(QWidget):
 
         return header
 
-    def _build_search_bar(self) -> QWidget:
-        bar = QWidget(self)
-        bar.setStyleSheet("background: transparent;")
-        hly = QHBoxLayout(bar)
-        hly.setContentsMargins(16, 6, 16, 6)
-        hly.setSpacing(0)
-
-        self._search = QLineEdit(bar)
-        self._search.setPlaceholderText("搜索命令…")
-        self._search.setClearButtonEnabled(True)
-        self._search.setFixedHeight(28)
-        self._search.setStyleSheet(
-            "background: rgba(128,128,128,0.1); border-radius: 6px; "
-            "padding: 4px 10px; border: 1px solid rgba(128,128,128,0.15);"
-        )
-        self._search.textChanged.connect(self._on_search)
-        hly.addWidget(self._search)
-
-        return bar
-
-    # ── 比例高度（與其他系統卡片一致） ──
+    # ── 比例高度 ──
 
     def sizeHint(self):
-        """高度随内容自适应：命令少则收缩成合适高度，命令多则撑到窗口 85% 上限后内部滚动。
-
-        之前写死为窗口 85%（与 plugin-manager 等一致的"比例高度"），导致卡片永远不收缩、
-        也永远填不满底部区域，看起来像"固定高度"。改为以内容自然高度为准、85% 为上限，
-        与底部其它按内容自适应的浮动卡片（sub_agent_compact / history_questions 等）行为一致。
-        """
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
             h = min(base.height(), int(win.height() * 0.85))
-            h = max(h, 220)  # 保底高度，避免命令极少时卡片塌成一条缝
+            h = max(h, 220)
             return QSize(max(base.width(), 200), h)
         return base
 
@@ -655,19 +657,13 @@ class ShortcutManagerCard(QWidget):
     # ── 加载数据 ──
 
     def _refresh(self):
-        """刷新命令/技能列表"""
         self._set_loading(True)
 
         try:
             self._all_commands = _load_all_items()
             self._render_list()
             count = len(self._all_commands)
-            cmd_count = sum(1 for c in self._all_commands if c["type"] != "skill")
-            skill_count = count - cmd_count
-            parts = [f"{count} 项"]
-            if skill_count:
-                parts.append(f"{skill_count} 技能")
-            self._status_lb.setText(" | ".join(parts))
+            self._status_lb.setText(f"{count} 个命令")
         except Exception as e:
             logger.error(f"[ShortcutManager] 加载命令失败: {e}")
             self._status_lb.setText("加载失败")
@@ -682,67 +678,62 @@ class ShortcutManagerCard(QWidget):
     # ── 搜索过滤 ──
 
     def _on_search(self, text: str):
-        """搜索过滤"""
         self._render_list(text)
 
     # ── 渲染列表 ──
 
     def _render_list(self, filter_text: str = ""):
-        """渲染命令列表"""
-        # 清空
         while self._content_layout.count():
             item = self._content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._rows.clear()
 
-        # 获取 user-custom 覆盖的文件名列表
         customized = self._get_customized_names()
 
-        # 过滤
         filtered = self._all_commands
         if filter_text:
             ft = filter_text.strip().lower()
             filtered = [
                 c
                 for c in self._all_commands
-                if ft in c["name"].lower()
-                or ft in c.get("display_name", c["name"]).lower()
-                or ft in c.get("description", "").lower()
+                if ft in c["name"].lower() or ft in c.get("description", "").lower()
             ]
 
         for cmd in filtered:
             name = cmd["name"]
-            display_name = cmd.get("display_name", name)
             shortcut = cmd.get("shortcut", "")
             description = cmd.get("description", "")
-            cmd_type_str = cmd.get("type", "command")
             is_customized = name in customized
+            is_plugin = cmd.get("subtype") == "ui_plugin"
 
             row = _CommandRow(
                 cmd_name=name,
                 shortcut=shortcut,
                 description=description,
-                cmd_type_str=cmd_type_str,
+                cmd_type_str="command",
                 is_customized=is_customized,
-                display_name=display_name,
+                is_plugin=is_plugin,
+                font_size=getattr(self, "_cached_font_size", 14),
                 parent=self._content,
             )
-            if not row.is_skill:
-                row.edit_clicked.connect(self._on_edit)
-                row.restore_clicked.connect(self._on_restore)
+            row.edit_clicked.connect(self._on_edit)
+            row.restore_clicked.connect(self._on_restore)
             self._content_layout.addWidget(row)
             self._rows.append(row)
 
         # 空状态
         if not filtered:
+            t = _theme()
+            fs = getattr(self, "_cached_font_size", 14)
             empty = QLabel("没有匹配的命令" if filter_text else "暂无命令数据", self._content)
             empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent; padding: 40px;")
+            empty.setStyleSheet(
+                f"color: {t['empty_text']}; font-size: {fs - 1}px; background: transparent; padding: 40px;"
+            )
             self._content_layout.addWidget(empty)
 
     def _get_customized_names(self) -> set:
-        """获取被 user-custom 覆盖的命令名集合"""
         cmd_dir = _get_user_custom_cmd_dir()
         if not cmd_dir.exists():
             return set()
@@ -751,8 +742,6 @@ class ShortcutManagerCard(QWidget):
     # ── 编辑：捕获快捷键 ──
 
     def _on_edit(self, cmd_name: str):
-        """点击编辑按钮：弹出按键捕获窗口"""
-        # 找到对应的命令信息
         cmd_info = None
         for c in self._all_commands:
             if c["name"] == cmd_name:
@@ -762,20 +751,16 @@ class ShortcutManagerCard(QWidget):
             return
 
         self._pending_cmd = cmd_name
-
-        # 找到该命令对应的行控件，获取其编辑按钮的位置
         edit_btn = self._find_edit_button(cmd_name)
 
         popup = _KeyCapturePopup(self.window())
         popup.key_captured.connect(self._on_key_captured)
 
-        # 将 popup 定位在编辑按钮附近（或卡片中央兜底）
         if edit_btn is not None:
             popup.setVisible(True)
             btn_global = edit_btn.mapToGlobal(edit_btn.rect().center())
-            popup.move(btn_global.x() - popup.width() // 2, btn_global.y() - popup.height() - 10)
+            popup.move(btn_global.x() - popup.width() // 2, btn_global.y() - popup.height() - 8)
         else:
-            # 兜底：居中显示
             parent_win = self.window()
             if parent_win:
                 center = parent_win.mapToGlobal(parent_win.rect().center())
@@ -785,7 +770,6 @@ class ShortcutManagerCard(QWidget):
         self._capture_popup = popup
 
     def _find_edit_button(self, cmd_name: str) -> Optional[QWidget]:
-        """根据命令名找到对应行中的编辑按钮"""
         for row in self._rows:
             if row._cmd_name == cmd_name:
                 if hasattr(row, "edit_btn"):
@@ -793,17 +777,14 @@ class ShortcutManagerCard(QWidget):
         return None
 
     def _on_key_captured(self, key_str: str):
-        """按键捕获完成"""
         self._capture_popup = None
 
         if not key_str:
-            # 用户取消（按 Esc）
             return
 
         cmd_name = self._pending_cmd
         self._pending_cmd = ""
 
-        # 查找命令信息
         cmd_info = None
         for c in self._all_commands:
             if c["name"] == cmd_name:
@@ -812,35 +793,22 @@ class ShortcutManagerCard(QWidget):
         if cmd_info is None:
             return
 
-        # 保存到 user-custom
-        display_type = cmd_info.get("type", "command")
         success = self._save_custom_shortcut(
             cmd_name=cmd_name,
             description=cmd_info.get("description", ""),
-            display_type=display_type,
             shortcut=key_str,
         )
 
         if success:
-            # 刷新列表
-            QTimer.singleShot(500, self._refresh)
-            self._status_lb.setText(f"✅ 已设置 /{cmd_name} → {key_str}")
+            QTimer.singleShot(300, self._refresh)
+            self._status_lb.setText(f"✅ /{cmd_name} → {key_str}")
 
-    def _save_custom_shortcut(self, cmd_name: str, description: str, display_type: str, shortcut: str) -> bool:
-        """保存自定义快捷键到 user-custom 插件
-
-        Args:
-            cmd_name: 命令名
-            description: 命令描述
-            display_type: 显示类型 "command"/"prompt"/"agent"
-            shortcut: 快捷键字符串，如 "Ctrl+Shift+C"
-        """
+    def _save_custom_shortcut(self, cmd_name: str, description: str, shortcut: str) -> bool:
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_dir.mkdir(parents=True, exist_ok=True)
 
-            type_str = _display_type_to_yaml(display_type)
-            content = _make_minimal_cmd_file(cmd_name, description, type_str, shortcut)
+            content = _make_minimal_cmd_file(cmd_name, description, shortcut)
 
             cmd_file = cmd_dir / f"{cmd_name}.md"
             cmd_file.write_text(content, encoding="utf-8")
@@ -854,7 +822,6 @@ class ShortcutManagerCard(QWidget):
     # ── 恢复系统配置 ──
 
     def _on_restore(self, cmd_name: str):
-        """恢复系统配置：删除 user-custom 下对应文件"""
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_file = cmd_dir / f"{cmd_name}.md"
@@ -863,8 +830,7 @@ class ShortcutManagerCard(QWidget):
                 logger.info(f"[ShortcutManager] 已恢复系统配置: /{cmd_name}")
                 self._status_lb.setText(f"↺ 已恢复 /{cmd_name} 的系统配置")
 
-            # 刷新列表
-            QTimer.singleShot(500, self._refresh)
+            QTimer.singleShot(300, self._refresh)
         except Exception as e:
             logger.error(f"[ShortcutManager] 恢复配置失败: {e}")
             self._status_lb.setText(f"❌ 恢复失败: {e}")
