@@ -2780,7 +2780,7 @@ class CodeWebViewer(QWebEngineView):
                     transition: border-color 220ms ease, background 220ms ease;
                 }}
                 .think-streaming[data-streaming="true"] {{
-                    background: rgba(255, 200, 50, 0.05);
+                    background: transparent;
                 }}
                 .think-content {{
                     padding: 8px 10px;
@@ -3682,6 +3682,55 @@ class CodeWebViewer(QWebEngineView):
                     requestAnimationFrame(_animateThinkSnake);
                 }}
                 _animateThinkSnake();
+
+                // ===== 深度思考轮播提示（减少等待焦虑，类似 CodeBuddy 设计理念）=====
+                // 当 .think-streaming[data-streaming="true"] 存在时，定时轮换显示
+                // 说明信息，让用户在等待期间能获取有用提示，而不是只盯着转圈。
+                const _thinkTips = [
+                    "正在深度思考中...",
+                    "分析上下文关联...",
+                    "检索相关知识库...",
+                    "正在综合推理...",
+                    "组织回答结构...",
+                    "即将输出结果..."
+                ];
+                let _tipIndex = 0;
+                let _tipTimer = null;
+
+                function _startTipRotation() {{
+                    _stopTipRotation();
+                    _tipTimer = setInterval(() => {{
+                        const el = document.querySelector('.think-streaming[data-streaming="true"]');
+                        if (!el) {{ _stopTipRotation(); return; }}
+                        const tipSpan = el.querySelector('span:last-child');
+                        if (tipSpan) {{
+                            _tipIndex = (_tipIndex + 1) % _thinkTips.length;
+                            tipSpan.textContent = _thinkTips[_tipIndex];
+                        }}
+                    }}, 3500);
+                }}
+
+                function _stopTipRotation() {{
+                    if (_tipTimer) {{
+                        clearInterval(_tipTimer);
+                        _tipTimer = null;
+                    }}
+                }}
+
+                // 通过 MutationObserver 监听 content-placeholder 变化，
+                // 自动启停轮播（兼容 updateContent 全量重建 DOM 的场景）。
+                const _tipObserver = new MutationObserver(() => {{
+                    const hasStreaming = !!document.querySelector('.think-streaming[data-streaming="true"]');
+                    if (hasStreaming && !_tipTimer) {{
+                        _startTipRotation();
+                    }} else if (!hasStreaming && _tipTimer) {{
+                        _stopTipRotation();
+                    }}
+                }});
+                const _tipTarget = document.getElementById('content-placeholder');
+                if (_tipTarget) {{
+                    _tipObserver.observe(_tipTarget, {{ childList: true, subtree: true }});
+                }}
             </script>
         </body>
         </html>
@@ -3974,19 +4023,22 @@ class CodeWebViewer(QWebEngineView):
                 js_code = (
                     "(function(){"
                     "var _finished=" + _safe_finished + ";"
+                    "var _c=document.getElementById('content-placeholder');"
                     "var _sbs=[];"
-                    "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                    "});"
+                    "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                    "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
+                    "}});}"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                    "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
                     "var _bk=_t.firstElementChild;if(_bk){"
                     "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                     "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                    "_c.appendChild(_bk);}}});}"
+                    "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                    "}}});}}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -4032,19 +4084,22 @@ class CodeWebViewer(QWebEngineView):
             js_code = (
                 "(function(){"
                 "var _finished=" + _safe_finished + ";"
+                "var _c=document.getElementById('content-placeholder');"
                 "var _sbs=[];"
-                "document.querySelectorAll('[data-tool-call-id]').forEach(function(el){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML});"
-                "});"
+                "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
+                "}});}"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                "if(_sbs.length>0){var _c=document.getElementById('content-placeholder');"
+                "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
                 "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                 "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                "_c.appendChild(_bk);}}});}"
+                "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                "}}});}}"
                 # 🐛 修复：工具块 restore 后 scrollHeight 可能增加（流式工具块推送新内容），
                 # 但 scrollTop 仍停留在 restore 前的位置，导致"滚不到底部"。
                 # 追加 auto-scroll：用户未滚动 -> 强制滚底；已滚动但接近底部 -> 粘性滚底
