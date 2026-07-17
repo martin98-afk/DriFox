@@ -421,6 +421,7 @@ class UIPluginEdgeLauncher(QWidget):
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         menu.setStyleSheet(self._menu_stylesheet())
         menu.setMinimumWidth(MENU_MIN_WIDTH)
+        menu.setIconSize(QSize(20, 20))
 
         for card_id, title, plugin_name in self._card_infos:
             label = title
@@ -545,14 +546,14 @@ class UIPluginEdgeLauncher(QWidget):
                 background-color: {bg};
                 border: 1px solid {border};
                 border-radius: 8px;
-                padding: 6px;
+                padding: 4px;
                 {font_family_css}
                 {font_size_css(12)}
                 color: {text_color};
             }}
             QMenu::item {{
-                padding: 8px 28px 8px 16px;
-                margin: 1px 0;
+                padding: 6px 20px 6px 20px;
+                margin: 2px 2px;
                 color: {text_color};
                 border-radius: 5px;
                 {font_family_css}
@@ -567,6 +568,9 @@ class UIPluginEdgeLauncher(QWidget):
             QMenu::separator {{
                 height: 1px;
                 background-color: {border};
-                margin: 4px 8px;
+                margin: 3px 8px;
+            }}
+            QMenu::icon {{
+                margin-right: 6px;
             }}
         """
