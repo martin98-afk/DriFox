@@ -79,17 +79,30 @@ class RefreshableThemeComboBox(ComboBox):
         self._themes_changed = True
 
     def _refresh_items(self):
-        """从当前 theme_manager 重建下拉列表项（不重复 reload）"""
+        """从当前 theme_manager 重建下拉列表项（不重复 reload）
+
+        按当前深浅模式过滤，只显示符合当前模式的主题。
+        """
         from app.utils.theme_manager import theme_manager
 
-        themes = theme_manager.list_themes()
-        new_options = {tid: {"label": name} for tid, name in themes.items()}
+        # 先找到父 card 以获取配置信息
         card = self.parent()
         if not card or not hasattr(card, "config_item"):
             p = self.parent()
             while p and not hasattr(p, "config_item"):
                 p = p.parent()
             card = p
+
+        # 获取所有主题，并按当前深浅模式过滤
+        themes = theme_manager.list_themes()
+        if card and hasattr(card, "cfg") and hasattr(card.cfg, "ui_light_mode"):
+            is_light = card.cfg.ui_light_mode.value
+            themes = {
+                tid: name for tid, name in themes.items()
+                if theme_manager.is_light_theme(tid) == is_light
+            }
+
+        new_options = {tid: {"label": name} for tid, name in themes.items()}
         if card and hasattr(card, "config_item"):
             current_key = card.config_item.value
             card.options = new_options

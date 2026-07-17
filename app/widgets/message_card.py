@@ -5078,6 +5078,8 @@ class MessageCard(SimpleCardWidget):
         self._base_bg = self._theme["bg"]
         self._base_border = self._theme["border"]
         self._apply_card_style()
+        # 触发背景动画更新，使模板方法 _normalBackgroundColor 使用新主题颜色
+        self._updateBackgroundColor()
         # 更新头像
         if hasattr(self, "_av_label"):
             self._av_label.setStyleSheet(self._build_avatar_style())
@@ -5113,6 +5115,48 @@ class MessageCard(SimpleCardWidget):
         # 刷新用户卡片纯文本视图颜色（PlainTextViewer 没有 _refresh_viewer_font）
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
+
+    # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色背景）──
+
+    def _normalBackgroundColor(self):
+        """使用主题颜色作为卡片正常态背景，替代 CardWidget 的固定白色覆盖层"""
+        from PyQt5.QtGui import QColor
+        import re
+
+        try:
+            bg = self._theme.get("bg", "")
+            if bg:
+                # 尝试 QColor 直接解析（#hex / named color）
+                color = QColor(bg)
+                if color.isValid():
+                    return color
+                # 兜底解析 rgba(r, g, b, a) / rgb(r, g, b)
+                m = re.match(
+                    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)",
+                    bg,
+                )
+                if m:
+                    return QColor(
+                        int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                        int(m.group(4)) if m.group(4) else 255,
+                    )
+        except Exception:
+            pass
+        # 兜底：qfluentwidgets 默认
+        from qfluentwidgets import isDarkTheme
+        return QColor(255, 255, 255, 13 if isDarkTheme() else 170)
+
+    def _hoverBackgroundColor(self):
+        """悬停态：比正常态略亮"""
+        color = self._normalBackgroundColor()
+        color.setAlpha(min(255, color.alpha() + 25))
+        return color
+
+    def _pressedBackgroundColor(self):
+        """按下态：比正常态略暗"""
+        color = self._normalBackgroundColor()
+        color.setAlpha(max(0, color.alpha() - 15))
+        return color
 
     def _get_footer_model_text(self) -> str:
         """根据 model_name 生成页脚显示文本（服务商名已隐藏，仅显示模型名）"""

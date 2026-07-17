@@ -378,14 +378,28 @@ class ThemeManager:
         self._refresh_targets = alive
 
     def reload(self):
-        """重新加载所有主题（修改文件后调用）"""
+        """重新加载所有主题（修改文件后调用）
+
+        比对当前活动主题在重载前后是否变化，只有当前主题确实被修改/删除
+        时才触发 UI 全量刷新（dispatch_refresh），避免热重载无关主题时
+        不必要地重绘整个界面。
+        """
+        # 重载前：保存当前主题的快照，用于后续比对
+        old_id = self.get_current_theme_id()
+        old_data = self.get_theme(old_id)
+
         self._themes.clear()
         self._load_themes()
         # 清除浅色检测缓存
         self._cached_light_check = (None, None)
-        # 分发刷新给所有注册 widget
-        self.dispatch_refresh()
-        # 兼容旧回调
+
+        # 重载后：获取新数据，判断当前主题是否真实变化
+        new_data = self.get_theme(old_id)
+        if new_data != old_data:
+            # 当前主题被修改/删除 → 全量刷新 UI
+            self.dispatch_refresh()
+
+        # 兼容旧回调（用于设置面板更新主题下拉列表等，无论当前主题是否变化都需要）
         for cb in self._reload_callbacks:
             try:
                 cb()

@@ -15,7 +15,7 @@ background:
     enabled: true
 colors:
   card_bg: rgba(240, 247, 254, 238)
-  card_bg_solid: rgba(240, 247, 254, 252)
+  card_bg_solid: rgba(240, 247, 254, 251)
   content_bg: '#d6e2f2'
   border: '#b0c4da'
   border_accent: '#1d4ed8'
@@ -56,11 +56,11 @@ colors:
   tag_purple_text: '#6d28d9'
   tag_orange: '#d97706'
   tag_orange_text: '#b45309'
-  user_card_bg: rgba(205, 225, 248, 195)
+  user_card_bg: rgba(205, 225, 248, 180)
   user_card_accent: '#1d4ed8'
   user_card_text: '#0a1830'
   user_card_muted: '#5b6e8e'
-  assistant_card_bg: rgba(222, 236, 250, 225)
+  assistant_card_bg: rgba(222, 236, 250, 180)
   assistant_card_accent: '#1e40af'
   assistant_card_text: '#060e20'
   assistant_card_muted: '#5b6e8e'
@@ -68,8 +68,8 @@ colors:
   agent_btn_text_active: '#1d4ed8'
   agent_btn_bg_active: rgba(29, 78, 216, 0.12)
   agent_btn_separator: rgba(165, 185, 212, 150)
-  input_bg_start: rgba(234, 243, 252, 210)
-  input_bg_end: rgba(225, 237, 250, 210)
+  input_bg_start: rgba(234, 243, 252, 180)
+  input_bg_end: rgba(225, 237, 250, 180)
   input_focus_bg_start: rgba(234, 243, 252, 245)
   input_focus_bg_end: rgba(225, 237, 250, 245)
   input_text: '#0a1830'
