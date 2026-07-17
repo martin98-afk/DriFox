@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QWidget,
 )
-from qfluentwidgets import FluentIcon
+from qfluentwidgets import FluentIcon, isDarkTheme
 
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import _is_current_theme_light, get_font_family_css
@@ -429,6 +429,20 @@ class UIPluginEdgeLauncher(QWidget):
                 label = f"{title}  ·  {plugin_name}"
             action = QAction(label, menu)
             action.setData(card_id)
+
+            # 设置插件图标（如有）
+            try:
+                from app.core.plugin_manager import PluginManager
+                pm = PluginManager.get_instance()
+                pi = pm.get_plugin(plugin_name)
+                if pi and pi.icon_config:
+                    theme = "dark" if isDarkTheme() else "light"
+                    icon_p = pi.icon_config.get(theme)
+                    if icon_p:
+                        action.setIcon(QIcon(str(icon_p)))
+            except Exception:
+                pass  # non-critical, skip icon
+
             action.triggered.connect(lambda checked=False, cid=card_id: self._on_menu_action(cid))
             menu.addAction(action)
 
