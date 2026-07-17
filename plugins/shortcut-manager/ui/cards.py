@@ -42,7 +42,29 @@ def _get_user_custom_cmd_dir() -> Path:
     return get_app_data_dir() / _USER_CUSTOM_CMD_REL
 
 
+def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
+    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）"""
+    from app.core.plugin_manager import PluginManager
+
+    pm = PluginManager.get_instance()
+    if not pm.is_initialized():
+        return None
+
+    user_custom_dir = _get_user_custom_cmd_dir()
+    for cmd_file in pm.get_command_files():
+        if cmd_file.stem == cmd_name:
+            # 优先返回非 user-custom 中的原始文件
+            if not str(cmd_file.resolve()).startswith(str(user_custom_dir.resolve())):
+                return cmd_file
+    # 没找到原始文件，返回 user-custom 中的覆盖文件（如有）
+    for cmd_file in pm.get_command_files():
+        if cmd_file.stem == cmd_name:
+            return cmd_file
+    return None
+
+
 def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
+    """生成最小化命令文件（仅用作兜底，当找不到原始文件时）"""
     lines = ["---"]
     lines.append(f"description: {description}")
     lines.append("type: function")
@@ -51,6 +73,61 @@ def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
     lines.append("---")
     lines.append("")
     return "\n".join(lines)
+
+
+def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
+    """在 .md 文件的 YAML frontmatter 中添加或更新 shortcut 字段
+
+    Args:
+        content: 原始 .md 文件全部内容
+        shortcut: 新的快捷键值（空字符串表示删除 shortcut 行）
+
+    Returns:
+        修改后的文件内容
+    """
+    if not content.startswith("---"):
+        return content
+
+    lines = content.splitlines()
+    # 找到 frontmatter 范围：第一个 --- 到下一个 ---
+    close_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            close_idx = i
+            break
+    if close_idx is None:
+        return content
+
+    fm_lines = lines[1:close_idx]
+    body_lines = lines[close_idx + 1:]
+
+    # 检查是否已有 shortcut 行
+    has_shortcut = False
+    new_fm = []
+    for line in fm_lines:
+        if re.match(r'^shortcut\s*:', line):
+            has_shortcut = True
+            if shortcut:
+                new_fm.append(f"shortcut: {shortcut}")
+            # shortcut 为空 → 删除该行（不添加）
+        else:
+            new_fm.append(line)
+
+    if not has_shortcut and shortcut:
+        # 没有 shortcut → 在 description 之后插入
+        inserted = False
+        result = []
+        for line in new_fm:
+            result.append(line)
+            if not inserted and re.match(r'^description\s*:', line):
+                result.append(f"shortcut: {shortcut}")
+                inserted = True
+        if not inserted:
+            # 没找到 description 行，直接追加到末尾
+            result.append(f"shortcut: {shortcut}")
+        new_fm = result
+
+    return "---\n" + "\n".join(new_fm) + "\n---\n" + "\n".join(body_lines)
 
 
 # ── 数据加载 ──────────────────────────────────────────────
@@ -657,11 +734,28 @@ class ShortcutManagerCard(QWidget):
             self._count_lb.setText(f"✅ /{cmd_name} → {key_str}")
 
     def _save_custom_shortcut(self, cmd_name: str, description: str, shortcut: str) -> bool:
+        """保存自定义快捷键：基于原始命令文件完整复制，仅修改 shortcut 字段
+
+        不再使用 _make_minimal_cmd_file（会丢失 argument-hint / parameters / mutex_groups），
+        而是找到原始 .md 文件 → 复制全部内容 → 在 frontmatter 中添加/覆盖 shortcut → 保存到 user-custom。
+        """
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_dir.mkdir(parents=True, exist_ok=True)
-            content = _make_minimal_cmd_file(cmd_name, description, shortcut)
-            (cmd_dir / f"{cmd_name}.md").write_text(content, encoding="utf-8")
+            dest_path = cmd_dir / f"{cmd_name}.md"
+
+            # 1. 找到原始命令文件
+            original = _find_original_cmd_file(cmd_name)
+            if original:
+                content = original.read_text(encoding="utf-8")
+                # 2. 修改 frontmatter 中的 shortcut
+                content = _upsert_frontmatter_shortcut(content, shortcut)
+            else:
+                # 兜底：找不到原始文件时生成最小化文件
+                logger.warning(f"[ShortcutManager] 未找到 /{cmd_name} 的原始文件，使用最小化模板")
+                content = _make_minimal_cmd_file(cmd_name, description, shortcut)
+
+            dest_path.write_text(content, encoding="utf-8")
             logger.info(f"[ShortcutManager] 已保存: /{cmd_name} → {shortcut}")
             self._reload_commands()
             return True

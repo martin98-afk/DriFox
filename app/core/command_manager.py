@@ -155,7 +155,21 @@ class CommandManager:
             parameters: 可交互参数列表（用于 detail 模式参数补全）
             shortcut: 快捷键，如 "Ctrl+Shift+B"
             prompt_sections: 参数→提示词分段映射（用于按需加载，如 {"--create=": "提示词模板", "common": "通用提示词"}）
+
+        同名命令覆盖时：若新旧类型相同且新注册缺少参数/提示词，则保留旧定义中的对应字段。
+        这确保用户通过 ShortcutManager 分配自定义快捷键时不会丢失原始的 parameters/argument_hint。
         """
+        if name in self._commands and command_type in self._commands[name]:
+            existing = self._commands[name][command_type]
+            if not parameters:
+                parameters = existing.parameters
+            if not argument_hint:
+                argument_hint = existing.argument_hint
+            if not prompt_text:
+                prompt_text = existing.prompt_text
+            if not prompt_sections:
+                prompt_sections = existing.prompt_sections
+
         if name not in self._commands:
             self._commands[name] = {}
         self._commands[name][command_type] = CommandDefinition(
