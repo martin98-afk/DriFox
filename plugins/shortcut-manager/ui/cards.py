@@ -120,9 +120,7 @@ class _KeyCapturePopup(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowFlags(
-            Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
-        )
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFixedSize(240, 68)
@@ -222,7 +220,7 @@ class _CommandRow(QFrame):
             name_text = f"✦ /{self._cmd_name}"
         name_lb = QLabel(name_text, self)
         name_lb.setObjectName("cmdRowName")
-        name_lb.setStyleSheet(f"color: {_text_color()}; background: transparent;")
+        name_lb.setStyleSheet(f"color: {_text_color()}; font-size: 14px; background: transparent;")
         name_lb.setMinimumWidth(140)
         if self._is_customized:
             name_lb.setToolTip("已自定义（原系统命令被覆盖）")
@@ -256,7 +254,9 @@ class _CommandRow(QFrame):
         else:
             shortcut_lb = QLabel("—", self)
             shortcut_lb.setObjectName("cmdRowShortcut")
-            shortcut_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;")
+            shortcut_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;"
+            )
         shortcut_lb.setAlignment(Qt.AlignCenter)
         shortcut_lb.setMinimumWidth(60)
         layout.addWidget(shortcut_lb)
@@ -289,7 +289,9 @@ class _CommandRow(QFrame):
             )
         else:
             self._shortcut_lb.setText("—")
-            self._shortcut_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;")
+            self._shortcut_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;"
+            )
 
 
 # ── 主卡片 ──────────────────────────────────────────────
@@ -376,9 +378,9 @@ class ShortcutManagerCard(QWidget):
             pass
 
     _CMD_ROW_SIZE_OFFSETS = {
-        "cmdRowName": 0,
-        "cmdRowBadge": -3,
-        "cmdRowShortcut": -2,
+        "cmdRowName": 1,  # 命令名比基准稍大
+        "cmdRowBadge": -3,  # 标签较小
+        "cmdRowShortcut": -1,  # 快捷键适中
     }
 
     def _retheme(self):
@@ -400,7 +402,11 @@ class ShortcutManagerCard(QWidget):
 
                 new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
                 if target_fs:
-                    new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
+                    if "font-size:" in new_ss:
+                        new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
+                    else:
+                        # 样式表中缺失 font-size 时主动追加，确保所有标签受主题控制
+                        new_ss = new_ss.rstrip() + f"\n    font-size: {target_fs}px;"
                 if ff and f"font-family: '{ff}'" not in new_ss:
                     new_ss += f" font-family: '{ff}';"
                 child.setStyleSheet(new_ss)
@@ -553,8 +559,7 @@ class ShortcutManagerCard(QWidget):
         if filter_text:
             ft = filter_text.strip().lower()
             filtered = [
-                c for c in self._all_commands
-                if ft in c["name"].lower() or ft in c.get("description", "").lower()
+                c for c in self._all_commands if ft in c["name"].lower() or ft in c.get("description", "").lower()
             ]
 
         for cmd in filtered:
@@ -685,6 +690,7 @@ class ShortcutManagerCard(QWidget):
         """强制重新加载命令（刷新 user-custom 覆盖）"""
         try:
             from app.core.builtin_commands import reload_all_commands
+
             reload_all_commands()
         except Exception as e:
             logger.error(f"[ShortcutManager] 重新加载命令失败: {e}")
