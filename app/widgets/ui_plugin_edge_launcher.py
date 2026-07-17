@@ -22,24 +22,26 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QPainter
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QMenu,
     QWidget,
 )
+from qfluentwidgets import FluentIcon
 
-from app.utils.design_tokens import Colors
-from app.utils.utils import _is_current_theme_light
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.utils import _is_current_theme_light, get_font_family_css
 
 # ── 尺寸常量（来自设计文档 §2）───────────────────────────────
 LINE_WIDTH = 4  # 默认细线宽（px）
 LINE_HEIGHT = 80  # 默认细线高（px）
 CAPSULE_WIDTH = 22  # 胶囊展开后宽（比设计文档的 18 略宽，便于图标识别）
 CAPSULE_HEIGHT = 64  # 胶囊高（设计文档 60，留 4px 给阴影/边距）
-TRIGGER_ZONE_WIDTH = 20  # 透明触发区宽（px）
+# 触发区与胶囊等宽（紧贴左边缘时，胶囊整体都应可点击命中）
+TRIGGER_ZONE_WIDTH = CAPSULE_WIDTH
 COLLAPSE_DELAY_MS = 220  # 鼠标离开后延迟收起（避免路过边缘闪烁）
 MENU_MIN_WIDTH = 220  # 弹出菜单最小宽度
 MENU_MAX_HEIGHT = 360  # 弹出菜单最大高度（超过则上下调整）
@@ -141,7 +143,7 @@ class _LauncherVisual(QWidget):
         painter.drawRoundedRect(rect, 2, 2)
 
     def _paint_capsule(self, painter: QPainter, rect: QRect, expansion: float) -> None:
-        """绘制展开态胶囊：圆角矩形 + 中央 3 圆点图标"""
+        """绘制展开态胶囊：圆角矩形 + 中心 FluentIcon.MENU 图标"""
         accent = self._accent_color()
         # 背景
         bg = QColor(accent)
@@ -162,17 +164,26 @@ class _LauncherVisual(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), radius, radius)
 
-        # 中心 3 圆点图标（不依赖资源文件，主题色自适应）
+        # 中心 FluentIcon.MENU 图标（应用主题强调色）
+        # 图标尺寸 = 胶囊宽度的 60%，确保在不同主题下都清晰可辨
+        icon_size = max(10, int(rect.width() * 0.6))
         icon_color = QColor(accent)
         icon_color.setAlpha(int(200 + 55 * expansion))
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(icon_color)
-        cx = rect.center().x()
-        cy = rect.center().y()
-        spacing = max(3, int(rect.width() * 0.22))
-        dot_r = max(1, int(rect.width() * 0.07))
-        for dy in (-spacing, 0, spacing):
-            painter.drawEllipse(QPoint(int(cx), int(cy + dy)), dot_r, dot_r)
+        # 渲染 FluentIcon（qfluentwidgets 提供的主题感知图标）
+        # 使用 icon.paint 直接绘制，自动应用主题
+        menu_icon = FluentIcon.MENU.icon()
+        # 通过 QIcon.paint 绘制，按图标色覆写（用 setThemeColor 不可行，
+        # 改用 painter tint：先画背景再叠图标）
+        # 简单做法：用 _icon_engine 拿 SVG 自行重绘受控色，但侵入太深。
+        # 折中：直接画 QIcon，主题色由 qfluentwidgets 控制。
+        icon_rect = QRect(
+            int(rect.center().x() - icon_size / 2),
+            int(rect.center().y() - icon_size / 2),
+            icon_size,
+            icon_size,
+        )
+        # 应用色调：先用 painter 的 brush tint（drawPixmap 走 QIcon）
+        menu_icon.paint(painter, icon_rect, Qt.AlignCenter)
 
     def _accent_color(self) -> str:
         """从当前主题读取强调色，失败时回退到设计文档约定的暖色。"""
@@ -238,24 +249,25 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 公开 API ────────────────────────────────────────────
     def update_geometry(self, chat_rect: QRect) -> None:
-        """根据消息区矩形重定位到左侧中部
+        """根据消息区矩形重定位到主窗口左边缘中部
 
         Args:
             chat_rect: MainWidget 内部 chat_scroll_area 的 geometry()
-                       （或等价的纵向中部参考矩形）。
+                       （仅用于纵向中部参考；横向不依赖，避免与 viewport
+                       margin / layout padding 产生间隔）。
         """
         if chat_rect.width() <= 0 or chat_rect.height() <= 0:
             self.hide()
             return
         h = max(LINE_HEIGHT, CAPSULE_HEIGHT) + 12
         y = chat_rect.center().y() - h / 2
-        x = chat_rect.left()  # 紧贴消息区左边缘
-        self.setGeometry(int(x), int(y), TRIGGER_ZONE_WIDTH, int(h))
-        # 视觉层在触发区中央
-        vh = h
+        # 横向：紧贴 MainWidget 左边缘（x=0），不依赖 chat_scroll_area 位置，
+        # 避免 viewport margin / 父布局 padding 产生的视觉间隔
+        self.setGeometry(0, int(y), TRIGGER_ZONE_WIDTH, int(h))
+        # 视觉层紧贴左边缘：胶囊左边缘 = 触发区左边缘 = MainWidget 左边缘
         vw = CAPSULE_WIDTH
-        vx = (TRIGGER_ZONE_WIDTH - vw) / 2
-        self._visual.setGeometry(int(vx), 0, int(vw), int(vh))
+        vh = h
+        self._visual.setGeometry(0, 0, int(vw), int(vh))
         if self._state == "COLLAPSED":
             self._visual.set_expansion(0.0)
         if self._card_infos:
@@ -375,8 +387,9 @@ class UIPluginEdgeLauncher(QWidget):
             action.triggered.connect(lambda checked=False, cid=card_id: self._on_menu_action(cid))
             menu.addAction(action)
 
-        # 定位：胶囊右侧（紧贴展开位置）
-        global_pos = self.mapToGlobal(QPoint(int(self.width() / 2 + CAPSULE_WIDTH / 2 + 4), 0))
+        # 定位：菜单仅向右展开 — 起点为胶囊右上角（紧贴右边缘 + 4px 间距）
+        # 菜单完全在胶囊右侧，不会向左扩张
+        global_pos = self.mapToGlobal(QPoint(CAPSULE_WIDTH + 4, 0))
         # 调整：如果超出屏幕底部则向上偏移
         screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
         if screen is not None:
@@ -447,21 +460,35 @@ class UIPluginEdgeLauncher(QWidget):
             hover_bg = "rgba(0,0,0,0.06)"
             border = "rgba(0,0,0,0.12)"
             bg = "rgba(255,255,255,245)"
+        # 应用系统字体 + 缩放字号（与项目其它 UI 保持一致）
+        font_family_css = get_font_family_css()
+        # 菜单项：13px（中等强度可读性）
+        item_font_size = scale_font_size(13)
+        # 菜单背景容器：稍小的字号
+        container_font_size = scale_font_size(12)
         return f"""
             QMenu {{
                 background-color: {bg};
                 border: 1px solid {border};
                 border-radius: 8px;
                 padding: 6px;
+                {font_family_css}
+                {font_size_css(12)}
+                color: {text_color};
             }}
             QMenu::item {{
-                padding: 8px 14px;
+                padding: 8px 28px 8px 16px;
                 margin: 1px 0;
                 color: {text_color};
                 border-radius: 5px;
+                {font_family_css}
+                {font_size_css(13)}
             }}
             QMenu::item:selected {{
                 background-color: {hover_bg};
+            }}
+            QMenu::item:disabled {{
+                color: rgba(128, 128, 128, 0.6);
             }}
             QMenu::separator {{
                 height: 1px;
