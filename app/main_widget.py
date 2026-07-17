@@ -27,6 +27,7 @@ from PyQt5.QtCore import (
     QTimer,
     QUrl,
     pyqtSignal,
+    pyqtSlot,
 )
 from PyQt5.QtGui import QColor, QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
@@ -326,6 +327,8 @@ class OpenAIChatToolWindow(ToolWindow):
     ai_state_changed = pyqtSignal(str)
     # 套餐用量查询结果桥接信号（后台线程 → 主线程）
     _coding_plan_result_ready = pyqtSignal(object)
+    # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
+    _opencode_models_ready = pyqtSignal(object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -435,6 +438,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._interrupt_complete.connect(self._on_finalize_complete)
         # 线程安全桥接：套餐用量查询结果回主线程
         self._coding_plan_result_ready.connect(self._on_coding_plan_result)
+        # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
+        self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：后台 git 分支检测结果回主线程
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
@@ -1279,6 +1284,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
         self._start_subagent_log_cleanup()
+
+        # 延迟启动 OpenCode Zen 免费模型异步刷新（避免与启动期其他网络请求争抢）
+        QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
 
     def _start_subagent_log_cleanup(self):
         """定期清理子智能体日志，避免无限堆积"""
@@ -4432,8 +4440,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         saved_models = ast.literal_eval(saved_models)
                     except Exception:
                         saved_models = []
-                if isinstance(saved_models, list):
+                if isinstance(saved_models, list) and saved_models:
                     model_list = list(saved_models)
+                # 模型列表存在但为空（[]）→ 回退到 merged_provider_models，
+                # 避免刚注入默认配置时模型选择器一片空白
+                if not model_list and pname in merged_provider_models:
+                    model_list = list(merged_provider_models[pname])
             elif pname in merged_provider_models:
                 model_list = list(merged_provider_models[pname])
             cur_model = config.get("模型名称", "")
@@ -4471,6 +4483,97 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 更新卡片头部：有服务商时显示服务商图标 + 模型名称，否则显示默认"模型选择"
         self._update_model_selector_header()
+
+    # ──────────────────────────────────────────────
+    # OpenCode Zen 免费模型异步刷新
+    # ──────────────────────────────────────────────
+    def _async_refresh_opencode_models(self):
+        """后台线程异步刷新所有 OpenCode Zen 服务的免费模型列表（-free 后缀）。
+
+        启动后立即返回，不阻塞 UI。获取完成后通过 _opencode_models_ready 信号
+        回到主线程，更新配置并刷新模型选择器。
+        """
+        import threading
+
+        # 收集所有 OpenCode Zen 服务商（可能有多个实例 #2/#3 等）
+        targets: list[tuple[str, str, str]] = []
+        for config_id, config in self._valid_configs.items():
+            pname = config.get("provider_name", "")
+            if "opencode" not in pname.lower():
+                continue
+            api_url = config.get("API_URL", "")
+            api_key = config.get("API_KEY", "")
+            if api_url and api_key:
+                targets.append((config_id, api_url, api_key))
+
+        if not targets:
+            return
+
+        def _do_fetch():
+            """后台线程执行：调 OpenCode API 获取模型列表，筛选 -free 模型"""
+            import requests as _requests
+
+            for cid, base_url, key in targets:
+                try:
+                    url = f"{base_url.rstrip('/')}/models"
+                    headers = {"Authorization": f"Bearer {key}"}
+                    resp = _requests.get(url, headers=headers, timeout=15)
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    # 解析 OpenAI-compatible 响应
+                    raw_ids: list[str] = []
+                    if isinstance(data, dict):
+                        if "data" in data:
+                            raw_ids = [
+                                m.get("id", "") or m.get("name", "")
+                                for m in data["data"]
+                                if isinstance(m, dict)
+                            ]
+                        elif "models" in data:
+                            raw_ids = [
+                                m.get("id", "") or m.get("name", "")
+                                for m in data["models"]
+                                if isinstance(m, dict)
+                            ]
+                    elif isinstance(data, list):
+                        raw_ids = [m if isinstance(m, str) else "" for m in data]
+
+                    free_models = [m.strip() for m in raw_ids if m.strip().endswith("-free")]
+                    if free_models:
+                        self._opencode_models_ready.emit((cid, free_models))
+                        logger.info(f"[OpenCode] 异步获取免费模型成功 ({cid[:12]}...): {free_models}")
+                except Exception as e:
+                    logger.debug(f"[OpenCode] 异步获取免费模型失败 ({cid[:12]}...): {e}")
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    @pyqtSlot(object)
+    def _on_opencode_models_ready(self, result: tuple):
+        """主线程处理 OpenCode Zen 免费模型异步刷新结果。"""
+        config_id, free_models = result
+
+        if config_id not in self._valid_configs:
+            return
+
+        # 更新持久化配置
+        saved = self.cfg.llm_saved_providers.value
+        if isinstance(saved, dict) and config_id in saved:
+            saved[config_id]["模型列表"] = free_models
+            self.cfg.llm_saved_providers.value = saved
+            self.cfg.save()
+
+        # 更新本地缓存
+        self._valid_configs[config_id]["模型列表"] = free_models
+
+        # 如果当前模型选择器已打开，刷新显示
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible(
+            "model_selector", self._window_id
+        ):
+            self._load_model_selector_to_card()
+
+        # 更新模型选择按钮标签
+        self._update_model_selector_btn()
 
     def _update_model_selector_header(self):
         """根据当前服务商/模型状态，更新模型选择卡片的头部（图标 + 初始标题）
