@@ -7,6 +7,7 @@
 - 完全从文件读取，不硬编码主题数据
 - 参考技能加载模式设计（多层搜索 + 合并）
 """
+
 import logging
 import re
 import weakref
@@ -43,28 +44,72 @@ class ThemeManager:
     # ── 扫描加载 ──────────────────────────────────────────
 
     def _load_themes(self):
-        """加载所有主题：插件 + 内置 + 用户"""
+        """加载所有主题：系统 → 插件 → 用户（后加载覆盖前加载）
 
-        # 1. 插件主题（PluginManager 提供的插件主题路径，优先级最高）
+        插件主题通过两条路径加载：
+        a) 直接扫描插件目录（不依赖 PluginManager，确保 setup_ui 前即可用）
+        b) PluginManager 初始化后重新加载（仅已启用插件，覆盖 a)
+
+        加载顺序即优先级（后加载覆盖同名的前加载）：
+        系统主题 < 插件主题(直接扫描) < 插件主题(PluginManager) < 用户主题
+        """
+
+        # 1. 内置主题（打包在 exe 的 plugins/system/themes/，优先级最低）
+        self._load_from_dir(_BUILTIN_THEMES_DIR, is_builtin=True)
+
+        # 2. 插件主题 — 直接扫描插件目录（不依赖 PluginManager）
+        #    在 setup_ui() 之前即可加载插件主题，避免被重置
+        self._load_plugin_themes_directly()
+
+        # 3. 插件主题（PluginManager 提供，仅已启用插件，可覆盖 #2）
         try:
             from app.core.plugin_manager import PluginManager
+
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for theme_path in pm.get_theme_paths():
                     self._load_from_dir(theme_path, is_builtin=True)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
-        # 2. 内置主题（打包在 exe 的 app/themes/，只读）
-        self._load_from_dir(_BUILTIN_THEMES_DIR, is_builtin=True)
-
-        # 3. 用户主题（~/.drifox/themes/，可写，优先级最高）
+        # 4. 用户主题（~/.drifox/themes/，可写，优先级最高，不可被内置覆盖）
         from app.utils.utils import get_app_data_dir
+
         user_dir = get_app_data_dir() / "themes"
         self._load_from_dir(user_dir, is_builtin=False)
 
         if not self._themes:
             logger.warning("[ThemeManager] 未加载到任何主题")
+
+    def _load_plugin_themes_directly(self):
+        """直接扫描所有插件目录下的 themes/ 文件夹
+
+        不依赖 PluginManager，确保在 setup_ui() 之前插件主题就已可用。
+        PluginManager 初始化后，_reload_themes_from_plugins() 会通过
+        get_theme_paths() 再次加载（仅已启用插件），同名主题会覆盖此处结果。
+        """
+        # 系统插件目录: plugins/
+        system_plugin_dir = Path(__file__).parent.parent.parent / "plugins"
+        if system_plugin_dir.is_dir():
+            for entry in sorted(system_plugin_dir.iterdir()):
+                if entry.is_dir():
+                    theme_dir = entry / "themes"
+                    if theme_dir.exists():
+                        self._load_from_dir(theme_dir, is_builtin=True)
+
+        # 用户插件目录: ~/.drifox/plugins/
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            user_plugin_dir = get_app_data_dir() / "plugins"
+            if user_plugin_dir.is_dir():
+                for entry in sorted(user_plugin_dir.iterdir()):
+                    if entry.is_dir():
+                        theme_dir = entry / "themes"
+                        if theme_dir.exists():
+                            self._load_from_dir(theme_dir, is_builtin=True)
+        except Exception:
+            pass
 
     def _load_from_dir(self, base_dir: Path, is_builtin: bool):
         """从指定目录扫描加载主题"""
@@ -178,10 +223,7 @@ class ThemeManager:
         if image_path.exists():
             return {"image": image_path, "source": "theme"}
 
-        logger.warning(
-            f"[ThemeManager] 主题 {theme_id} 声明的 pet 不存在: {image_path}，"
-            f"fallback 到内嵌默认"
-        )
+        logger.warning(f"[ThemeManager] 主题 {theme_id} 声明的 pet 不存在: {image_path}，fallback 到内嵌默认")
         return {}
 
     # ── 浅色/深色模式检测 ──────────────────────────────
@@ -252,6 +294,7 @@ class ThemeManager:
         """获取当前选中的主题 ID"""
         try:
             from app.utils.config import Settings
+
             return Settings.get_instance().ui_theme_style.value
         except Exception:
             return "midnight"
@@ -299,9 +342,7 @@ class ThemeManager:
 
     def unregister_refresh_target(self, widget) -> None:
         """取消注册 widget"""
-        self._refresh_targets = [
-            ref for ref in self._refresh_targets if ref() is not widget
-        ]
+        self._refresh_targets = [ref for ref in self._refresh_targets if ref() is not widget]
 
     def on_theme_changed(self):
         """主题切换后调用：清除浅色检测缓存。
@@ -318,6 +359,7 @@ class ThemeManager:
         已失效的弱引用会被自动清理。
         """
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
 
         self.on_theme_changed()
@@ -353,6 +395,7 @@ class ThemeManager:
     def get_user_themes_dir(self) -> Path:
         """获取用户主题目录"""
         from app.utils.utils import get_app_data_dir
+
         return get_app_data_dir() / "themes"
 
 
