@@ -4094,10 +4094,59 @@ class CodeWebViewer(QWebEngineView):
         clear_global_render_cache()
 
     def get_plain_text(self) -> str:
-        return self._markdown_text
+        """获取消息纯文本内容
+
+        优先返回缓存的 _markdown_text（性能最优），
+        若已被 _cleanup_render_cache 清空，则尝试从 _lazy_markdown_cb 重新生成，
+        最后兜底从父级 MessageCard 获取 content_to_text 纯文本。
+        """
+        if self._markdown_text:
+            return self._markdown_text
+        # _markdown_text 被 _cleanup_render_cache 清空后的兜底
+        if self._lazy_markdown_cb:
+            try:
+                fresh = self._lazy_markdown_cb()
+                if fresh:
+                    self._markdown_text = fresh
+                    return fresh
+            except Exception:
+                pass
+        # 从父 MessageCard 兜底
+        p = self.parent()
+        while p:
+            if hasattr(p, "get_plain_text") and not isinstance(p, CodeWebViewer):
+                try:
+                    return p.get_plain_text()
+                except Exception:
+                    pass
+                break
+            p = p.parent()
+        return ""
 
     def get_html(self) -> str:
-        return self._markdown_text
+        """获取消息的完整 HTML 页面（非流式/导出用）
+
+        优先返回已缓存的 _last_rendered_html（含工具块等全量 DOM 等效 HTML），
+        否则从 _markdown_text 或 _lazy_markdown_cb 重新生成。
+
+        注意：_last_rendered_html 在流式渲染注入 JS 后会被清空以节省内存，
+        因此导出时多数走 markdown→HTML 路径。
+        """
+        # 优先：已缓存的完整 HTML 直接返回（含工具展开块等，最完整）
+        if self._last_rendered_html:
+            return self._last_rendered_html
+        # 次优：从 _markdown_text 转换
+        md = self._markdown_text
+        if not md and self._lazy_markdown_cb:
+            try:
+                md = self._lazy_markdown_cb()
+                if md:
+                    self._markdown_text = md
+            except Exception:
+                pass
+        if md:
+            return self._convert_md_to_html(md)
+        return ""
 
     def _show_context_menu(self, pos):
         """显示大模型卡片右键菜单：查看差异、复制"""
@@ -4156,20 +4205,28 @@ class CodeWebViewer(QWebEngineView):
             parent = parent.parent()
 
     def _copy_to_clipboard(self):
-        """复制内容到剪贴板（使用系统原生 API）"""
+        """复制内容到剪贴板（使用系统原生 API）
+
+        🐛 修复：使用 get_plain_text() 替代直接读 _markdown_text，
+        因为 _cleanup_render_cache 会将 _markdown_text 清空。
+        get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
+        """
+        text = self.get_plain_text()
+        if not text:
+            return
         try:
             import win32clipboard
 
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText(self._markdown_text or "", win32clipboard.CF_UNICODETEXT)
+            win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
             win32clipboard.CloseClipboard()
         except Exception:
             # 兜底：使用 PyQt5 剪贴板
             from PyQt5.QtWidgets import QApplication
 
             clipboard = QApplication.clipboard()
-            clipboard.setText(self._markdown_text or "")
+            clipboard.setText(text)
 
     def _get_default_filename(self) -> str:
         """生成默认导出文件名：会话名_时间戳"""
@@ -4198,7 +4255,12 @@ class CodeWebViewer(QWebEngineView):
         return f"{session_name}_{ts}"
 
     def _export_message(self):
-        """导出消息为 Markdown、HTML 或 PNG 图片文件"""
+        """导出消息为 Markdown、HTML 或 PNG 图片文件
+
+        🐛 修复：使用 get_plain_text()/get_html() 替代直接读 _markdown_text，
+        因为 _cleanup_render_cache 会将 _markdown_text 清空。
+        get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
+        """
         from PyQt5.QtWidgets import QFileDialog
 
         default_name = self._get_default_filename()
@@ -4208,8 +4270,6 @@ class CodeWebViewer(QWebEngineView):
 
         if not file_path:
             return
-
-        content = self._markdown_text or ""
 
         try:
             is_png = "PNG" in selected_filter or file_path.lower().endswith(".png")
@@ -4221,7 +4281,11 @@ class CodeWebViewer(QWebEngineView):
             elif is_html:
                 if not file_path.lower().endswith(".html"):
                     file_path += ".html"
-                html_content = self._convert_md_to_html(content)
+                html_content = self.get_html()
+                if not html_content:
+                    logger.warning("导出 HTML 失败：无法获取消息内容")
+                    self._show_save_error("无法获取消息内容")
+                    return
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 logger.info(f"消息已导出到: {file_path}")
@@ -4229,8 +4293,13 @@ class CodeWebViewer(QWebEngineView):
             else:
                 if not file_path.lower().endswith(".md"):
                     file_path += ".md"
+                md_content = self.get_plain_text()
+                if not md_content:
+                    logger.warning("导出 Markdown 失败：无法获取消息内容")
+                    self._show_save_error("无法获取消息内容")
+                    return
                 with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                    f.write(md_content)
                 logger.info(f"消息已导出到: {file_path}")
                 self._show_save_success(file_path)
         except Exception as e:
