@@ -2103,11 +2103,11 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         # ===== UI 插件左侧边缘入口 =====
-        # 浮层子控件（不参与主布局 sizeHint），通过 update_geometry 在 resizeEvent 中重定位
+        # 独立窗口模式左侧入口（浮层，不参与主布局，自动跟踪位置）
         try:
             from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
 
-            self._ui_plugin_edge_launcher = UIPluginEdgeLauncher(self, main_widget=self)
+            self._ui_plugin_edge_launcher = UIPluginEdgeLauncher(main_widget=self)
             self._ui_plugin_edge_launcher.hide()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin edge launcher init failed: {e}")

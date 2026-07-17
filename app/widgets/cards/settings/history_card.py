@@ -1093,7 +1093,9 @@ class HistoryCard(QWidget):
                 text = item[1]
                 empty_label = QLabel(text)
                 empty_label.setAlignment(Qt.AlignCenter)
-                empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 16px;")
+                empty_label.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}"
+                )
                 layout.insertWidget(layout.count() - 1, empty_label)
 
         if suspend_repaint:

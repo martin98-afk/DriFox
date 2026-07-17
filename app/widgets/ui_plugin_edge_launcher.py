@@ -22,8 +22,8 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter
+from PyQt5.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -105,53 +105,55 @@ class _LauncherVisual(QWidget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
         rect = QRect(0, 0, self.width(), self.height())
-        cx = self.width() / 2.0
         if self._expansion <= 0.001:
-            # 纯细线
-            line_rect = QRect(
-                int(cx - LINE_WIDTH / 2),
-                0,
-                LINE_WIDTH,
-                rect.height(),
-            )
+            # 纯细线紧贴左边缘
+            line_rect = QRect(0, 0, LINE_WIDTH, rect.height())
             self._paint_line(painter, line_rect)
         else:
+            # 从左边缘向右展开的半胶囊
             current_w = LINE_WIDTH + (CAPSULE_WIDTH - LINE_WIDTH) * self._expansion
-            cap_rect = QRect(
-                int(cx - current_w / 2),
-                0,
-                int(current_w),
-                rect.height(),
-            )
-            self._paint_capsule(painter, cap_rect, self._expansion)
+            cap_rect = QRect(0, 0, int(current_w), rect.height())
+            self._paint_half_capsule(painter, cap_rect, self._expansion)
 
         painter.end()
 
     def _paint_line(self, painter: QPainter, rect: QRect) -> None:
-        """绘制默认细线（带轻微发光）"""
+        """绘制默认细线（紧贴左边缘，发光向右）"""
         accent = self._accent_color()
-        # 发光底层（外扩 1px，alpha 较低）
+        # 发光底层（向右扩散，alpha 较低）
         glow_color = QColor(accent)
         glow_color.setAlpha(60)
         painter.setPen(Qt.NoPen)
         painter.setBrush(glow_color)
-        painter.drawRoundedRect(rect.adjusted(-1, 6, 1, -6), 2, 2)
+        painter.drawRoundedRect(rect.adjusted(0, 6, 2, -6), 2, 2)
         # 主线条
         solid = QColor(accent)
         solid.setAlpha(220)
         painter.setBrush(solid)
         painter.drawRoundedRect(rect, 2, 2)
 
-    def _paint_capsule(self, painter: QPainter, rect: QRect, expansion: float) -> None:
-        """绘制展开态胶囊：圆角矩形 + 中心 FluentIcon.MENU 图标"""
+    def _paint_half_capsule(self, painter: QPainter, rect: QRect, expansion: float) -> None:
+        """绘制半胶囊：左边缘平直 + 右上右下圆角（向右展开）"""
         accent = self._accent_color()
-        # 背景
+        x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+        r = w / 2.0  # 圆角半径 = 宽度的一半（胶囊感）
+
+        # ── 半胶囊路径：左平右圆 ──
+        path = QPainterPath()
+        path.moveTo(x, y)
+        path.lineTo(x + w - r, y)
+        path.quadTo(x + w, y, x + w, y + r)
+        path.lineTo(x + w, y + h - r)
+        path.quadTo(x + w, y + h, x + w - r, y + h)
+        path.lineTo(x, y + h)
+        path.closeSubpath()
+
+        # 背景填充
         bg = QColor(accent)
         bg.setAlpha(int(50 + 150 * expansion))
         painter.setPen(Qt.NoPen)
         painter.setBrush(bg)
-        radius = rect.width() / 2.0
-        painter.drawRoundedRect(rect, radius, radius)
+        painter.drawPath(path)
 
         # 边框
         border = QColor(accent)
@@ -162,27 +164,17 @@ class _LauncherVisual(QWidget):
         pen.setWidthF(1.0)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), radius, radius)
+        painter.drawPath(path)
 
-        # 中心 FluentIcon.MENU 图标（应用主题强调色）
-        # 图标尺寸 = 胶囊宽度的 60%，确保在不同主题下都清晰可辨
-        icon_size = max(10, int(rect.width() * 0.6))
-        icon_color = QColor(accent)
-        icon_color.setAlpha(int(200 + 55 * expansion))
-        # 渲染 FluentIcon（qfluentwidgets 提供的主题感知图标）
-        # 使用 icon.paint 直接绘制，自动应用主题
+        # 中心 FluentIcon.MENU 图标
+        icon_size = max(10, int(w * 0.6))
         menu_icon = FluentIcon.MENU.icon()
-        # 通过 QIcon.paint 绘制，按图标色覆写（用 setThemeColor 不可行，
-        # 改用 painter tint：先画背景再叠图标）
-        # 简单做法：用 _icon_engine 拿 SVG 自行重绘受控色，但侵入太深。
-        # 折中：直接画 QIcon，主题色由 qfluentwidgets 控制。
         icon_rect = QRect(
-            int(rect.center().x() - icon_size / 2),
-            int(rect.center().y() - icon_size / 2),
+            int(x + w / 2 - icon_size / 2),
+            int(y + h / 2 - icon_size / 2),
             icon_size,
             icon_size,
         )
-        # 应用色调：先用 painter 的 brush tint（drawPixmap 走 QIcon）
         menu_icon.paint(painter, icon_rect, Qt.AlignCenter)
 
     def _accent_color(self) -> str:
@@ -198,12 +190,15 @@ class _LauncherVisual(QWidget):
 
 
 class UIPluginEdgeLauncher(QWidget):
-    """UI 插件左侧边缘入口
+    """UI 插件左侧边缘入口 — 独立窗口模式
+
+    与 LockButtonWidget 类似，本组件以独立顶层窗口形式存在（不参与主窗口布局），
+    通过事件过滤器跟踪 MainWidget 的移动/缩放，始终固定在主窗口左边缘中部。
 
     生命周期：
-      1. MainWidget.setup_ui 中创建并 raise_()；
-      2. MainWidget.resizeEvent 中调用 ``update_geometry(chat_rect)`` 重新定位；
-      3. 插件热重载或首次加载完成时调用 ``refresh_plugins()`` 读取最新列表；
+      1. MainWidget.setup_ui 中创建并 show()；
+      2. 插件热重载或首次加载完成时 ``refresh_plugins()`` 刷新列表；
+      3. 自动跟踪 MainWidget 的 Move/Resize → ``_sync_position()`` 重定位；
       4. 窗口销毁时随父对象一起释放，无需手动 disconnect。
 
     状态机：
@@ -218,10 +213,15 @@ class UIPluginEdgeLauncher(QWidget):
 
     menu_visibility_changed = pyqtSignal(bool)
 
-    def __init__(self, parent: QWidget, *, main_widget=None):
-        super().__init__(parent)
+    def __init__(self, parent: QWidget = None, *, main_widget=None):
+        # 与 LockButtonWidget 一致：不设 Qt 父对象 → 完全独立顶层工具窗口
+        # 避免 setGeometry/move 受父子坐标偏移影响
+        super().__init__(None)
         # 保留 main_widget 强引用（与 MainWidget 生命周期一致）
         self._main_widget = main_widget
+        # 顶层窗口引用（懒初始化：首次 _sync_position 时自动检测）
+        # 不能在 init 时用 mw.window() — 此时 main_widget 尚未加入对话框
+        self._top_window = None
         # 缓存的插件列表 [(card_id, title, plugin_name), ...]
         self._card_infos: List[Tuple[str, str, str]] = []
         # 状态机
@@ -232,6 +232,11 @@ class UIPluginEdgeLauncher(QWidget):
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.setInterval(COLLAPSE_DELAY_MS)
         self._collapse_timer.timeout.connect(self._on_collapse_timeout)
+
+        # ── 独立窗口标志（类似 LockButtonWidget）──
+        # 独立顶层窗口：不参与父布局、不被父裁剪、可独立置顶
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
         # 触发区自身就是 Launcher（this），负责命中检测
         self.setFixedWidth(TRIGGER_ZONE_WIDTH)
@@ -247,34 +252,108 @@ class UIPluginEdgeLauncher(QWidget):
         # 鼠标跟踪：enterEvent / leaveEvent
         self.setMouseTracking(True)
 
+        # ── 父窗口位置跟踪（懒安装：首次 _sync_position 时自动 setup）──
+        # 生命周期：主窗口销毁时自动清理（无 Qt parent 时需手动）
+        if self._main_widget is not None:
+            self._main_widget.destroyed.connect(self.deleteLater)
+        # 定时保险：200ms 同步 + 置顶（与 LockButtonWidget 一致）
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._sync_position)
+        self._sync_timer.start(200)
+
     # ── 公开 API ────────────────────────────────────────────
-    def update_geometry(self, chat_rect: QRect) -> None:
-        """根据消息区矩形重定位到主窗口左边缘中部
+    def update_geometry(self, chat_rect: QRect = QRect()) -> None:
+        """兼容接口 —— 被 MainWidget.resizeEvent 调用，重定向到位置同步。
 
         Args:
-            chat_rect: MainWidget 内部 chat_scroll_area 的 geometry()
-                       （仅用于纵向中部参考；横向不依赖，避免与 viewport
-                       margin / layout padding 产生间隔）。
+            chat_rect: 不再使用（独立窗口模式下从主窗口实时读取），
+                       保留参数签名避免破坏调用方。
         """
-        if chat_rect.width() <= 0 or chat_rect.height() <= 0:
-            self.hide()
+        self._sync_position()
+
+    # ── 顶层窗口懒解析 ────────────────────────────────────
+    def _resolve_top_window(self):
+        """动态解析顶层窗口，自动安装事件过滤器
+
+        首次调用时（或窗口变化后）安装事件过滤，避免 init 阶段
+        main_widget 尚未加入对话框导致 _top_window 指向自身。
+        """
+        mw = self._main_widget
+        if mw is None:
+            return None
+        top = mw.window()
+        # main_widget 尚未加入对话框 → window() 返回自身，跳过
+        if top is mw or top is None:
+            return None
+        if top is not self._top_window:
+            # 窗口实例变化 → 切换事件过滤器
+            if self._top_window is not None:
+                try:
+                    self._top_window.removeEventFilter(self)
+                except RuntimeError:
+                    pass
+            self._top_window = top
+            self._top_window.installEventFilter(self)
+        return top
+
+    # ── 事件过滤器（父窗口跟踪）──────────────────────────
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        """跟踪顶层窗口 Move/Resize/WindowState → 自动同步"""
+        if obj is self._top_window:
+            if event.type() == QEvent.WindowStateChange:
+                self._on_parent_window_state_changed()
+            elif event.type() in (QEvent.Move, QEvent.Resize):
+                self._sync_position()
+        return super().eventFilter(obj, event)
+
+    def _on_parent_window_state_changed(self) -> None:
+        """主窗口最小化/恢复时同步显示状态"""
+        top_win = self._resolve_top_window()
+        if top_win is None:
             return
-        h = max(LINE_HEIGHT, CAPSULE_HEIGHT) + 12
-        y = chat_rect.center().y() - h / 2
-        # 横向：紧贴 MainWidget 左边缘（x=0），不依赖 chat_scroll_area 位置，
-        # 避免 viewport margin / 父布局 padding 产生的视觉间隔
-        self.setGeometry(0, int(y), TRIGGER_ZONE_WIDTH, int(h))
-        # 视觉层紧贴左边缘：胶囊左边缘 = 触发区左边缘 = MainWidget 左边缘
-        vw = CAPSULE_WIDTH
-        vh = h
-        self._visual.setGeometry(0, 0, int(vw), int(vh))
-        if self._state == "COLLAPSED":
-            self._visual.set_expansion(0.0)
-        if self._card_infos:
+        if top_win.isMinimized() or not top_win.isVisible():
+            self.hide()
+        elif self._card_infos:
+            self._sync_position()
             self.show()
             self.raise_()
-        else:
-            self.hide()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """显示时同步一次位置"""
+        super().showEvent(event)
+        self._sync_position()
+
+    # ── 位置同步（独立窗口全局坐标定位）──────────────────
+    def _sync_position(self) -> None:
+        """同步自身到主窗口左边缘中部（全局屏幕坐标）
+
+        与 LockButtonWidget 一致：独立顶层窗口，用 move()+resize() 全局定位。
+        """
+        mw = self._main_widget
+        if not mw or not mw.isVisible():
+            return
+
+        top_win = self._resolve_top_window()
+        if top_win is None or not top_win.isVisible():
+            return
+
+        h = max(LINE_HEIGHT, CAPSULE_HEIGHT) + 12
+        # 左边缘 = 顶层窗口的屏幕左边缘（确保紧贴，无偏移）
+        x = top_win.x()
+        # 垂直居中于主窗口内容区
+        global_center = mw.mapToGlobal(mw.rect().center())
+        y = global_center.y() - h // 2
+
+        # 用 move+resize 定位（与 LockButtonWidget 一致）
+        self.move(int(x), int(y))
+        self.resize(TRIGGER_ZONE_WIDTH, int(h))
+        # 视觉层尺寸
+        self._visual.setGeometry(0, 0, CAPSULE_WIDTH, int(h))
+        # 置顶
+        if self.isVisible():
+            self.raise_()
+        if self.isVisible():
+            self.raise_()
 
     def refresh_plugins(self) -> None:
         """从 UIPluginRegistry 重新读取插件列表，决定是否显示入口
@@ -303,6 +382,7 @@ class UIPluginEdgeLauncher(QWidget):
         self._card_infos = infos
 
         if self._card_infos:
+            self._sync_position()
             self.show()
             self.raise_()
         else:

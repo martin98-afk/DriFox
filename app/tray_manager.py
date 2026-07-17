@@ -3,6 +3,7 @@
 全局唯一托盘图标管理器（单例）
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
+
 import math
 import platform
 import time
@@ -18,6 +19,7 @@ from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
 class _HotkeyBridge(QObject):
     """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
+
     toggle_all_windows = pyqtSignal()
 
 
@@ -54,7 +56,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except (RuntimeError, Exception):
+        except RuntimeError, Exception:
             return False
 
     def __init__(self, parent=None):
@@ -103,7 +105,7 @@ class TrayManager(QObject):
         # 定时重建全局热键（应对 sleep/resume 等导致的钩子丢失）
         self._hotkey_health_timer = QTimer(self)
         self._hotkey_health_timer.timeout.connect(self._health_check_hotkey)
-        self._hotkey_health_timer.start(300000)  # 5分钟
+        self._hotkey_health_timer.start(60000)  # 1分钟
 
         # ========== 多窗口选中管理 ==========
         self._selected_windows: list = []  # 当前选中的 ToolPopupDialog 列表
@@ -154,7 +156,7 @@ class TrayManager(QObject):
         for w in self._windows:
             try:
                 selected = w in self._selected_windows
-                if hasattr(w, 'set_selection_indicator'):
+                if hasattr(w, "set_selection_indicator"):
                     w.set_selection_indicator(selected)
             except RuntimeError:
                 pass
@@ -199,6 +201,7 @@ class TrayManager(QObject):
         # 获取当前屏幕号（跳过不同屏幕的窗口）
         try:
             from PyQt5.QtWidgets import QDesktopWidget
+
             desktop = QDesktopWidget()
             current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
         except Exception:
@@ -229,7 +232,7 @@ class TrayManager(QObject):
                 candidates_x = []
 
                 # 水平候选：左边缘、右边缘对齐
-                candidates_x.append((r.x(), abs(x0 - r.x())))          # 移动左 → 目标左
+                candidates_x.append((r.x(), abs(x0 - r.x())))  # 移动左 → 目标左
                 candidates_x.append((r.x() - w, abs(x0 + w - r.x())))  # 移动右 → 目标左
                 candidates_x.append((r.x() + r.width(), abs(x0 - r.x() - r.width())))  # 移动左 → 目标右
                 candidates_x.append((r.x() + r.width() - w, abs(x0 + w - r.x() - r.width())))  # 移动右 → 目标右
@@ -321,8 +324,8 @@ class TrayManager(QObject):
 
         for i, w in enumerate(self._selected_windows):
             try:
-                col = i % cols          # 0 = 最右列
-                row = i // cols         # 0 = 最底行
+                col = i % cols  # 0 = 最右列
+                row = i // cols  # 0 = 最底行
                 # 从右下角开始填充(右下为视觉重心)
                 new_x = available.right() - margin - win_w - col * (win_w + margin)
                 new_y = available.bottom() - margin - win_h - row * (win_h + margin)
@@ -495,7 +498,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except (RuntimeError, Exception):
+            except RuntimeError, Exception:
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -525,7 +528,7 @@ class TrayManager(QObject):
 
     def notify(self, title: str, message: str, window: QObject = None) -> None:
         """发送 Windows 通知
-        
+
         Args:
             title: 通知标题
             message: 通知内容
@@ -587,7 +590,7 @@ class TrayManager(QObject):
             return
 
         # 如果传入的是嵌入式Widget（如OpenAIChatToolWindow），取其顶层窗口
-        top_window = window.window() if hasattr(window, 'window') and callable(window.window) else window
+        top_window = window.window() if hasattr(window, "window") and callable(window.window) else window
         if top_window is None:
             top_window = window
 
@@ -606,7 +609,7 @@ class TrayManager(QObject):
         """处理托盘通知被点击的事件"""
         logger.debug("[_on_message_clicked] 通知被点击")
         # 显示最近一次通知关联的窗口
-        window = getattr(self, '_last_notification_window', None)
+        window = getattr(self, "_last_notification_window", None)
         if window:
             self._show_window(window)
         else:
@@ -687,6 +690,7 @@ class TrayManager(QObject):
                 return ""
             frontmatter = "\n".join(lines[1:close_idx])
             import yaml
+
             meta = yaml.safe_load(frontmatter)
             if not meta:
                 return ""
@@ -762,7 +766,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except (RuntimeError, Exception):
+                except RuntimeError, Exception:
                     continue
 
             if not valid_windows:
@@ -792,15 +796,85 @@ class TrayManager(QObject):
         except Exception as e:
             logger.error(f"[TrayManager] _toggle_all_windows 异常: {e}")
 
+    def _ensure_listener_alive(self):
+        """检测 keyboard 库监听线程是否存活，若死亡则尝试重启
+
+        keyboard 库的 _KeyboardListener 使用 daemon 线程运行 Windows 消息泵。
+        该线程若因异常退出（GetMessage 返回 -1、未捕获异常等），
+        低层键盘钩子（SetWindowsHookEx）也随之失效，全局热键将永久停止响应。
+
+        keyboard 库自身无线程健康检测机制，此处通过轮询 is_alive() 主动发现。
+        """
+        try:
+            # 通过模块级 _listener 访问内部线程状态
+            listener = keyboard._listener
+            thread = getattr(listener, "listening_thread", None)
+            if thread is not None and not thread.is_alive():
+                logger.warning("[TrayManager] keyboard 监听线程已死亡，尝试重启...")
+                listener.listening = False
+                listener.init()
+                listener.start_if_necessary()
+                logger.info("[TrayManager] keyboard 监听线程重启完成")
+        except Exception as exc:
+            logger.debug(f"[TrayManager] 监听线程检查失败（非致命）: {exc}")
+
     def _health_check_hotkey(self):
         """定期检查并重建全局热键
 
-        底层 keyboard 库的低级钩子可能因 sleep/resume、UAC 弹窗等场景丢失。
-        定时重建确保热键始终可用。
+        底层 keyboard 库的低级钩子可能因 sleep/resume、UAC 弹窗、线程崩溃等场景丢失。
+
+        修复要点：
+        1. 【线程存活检查】先确认 keyboard 监听线程活着，否则重启
+        2. 【无竞态重建】先注册新热键，成功后再释放旧热键
+           （原逻辑先释放旧热键，若注册失败则热键永久丢失直到下次健康检查）
+        3. 【快速重试】首次失败后 1s 重试，最多 3 次
         """
-        if self._hotkey_handle is not None:
-            self._release_global_hotkey()
-        self._setup_global_hotkey()
+        # 第一步：检查监听线程存活
+        self._ensure_listener_alive()
+
+        # 第二步：先注册新热键，成功后再切换（保护旧热键不被提前释放）
+        old_handle = self._hotkey_handle
+        old_hotkey = self._registered_hotkey
+
+        hotkey_str = self._read_hotkey_from_command()
+        if not hotkey_str:
+            hotkey_str = "alt+z"
+        hotkey_str = hotkey_str.lower()
+
+        new_handle = None
+        for attempt in range(3):
+            try:
+                new_handle = keyboard.add_hotkey(
+                    hotkey_str,
+                    self._hotkey_bridge.toggle_all_windows.emit,
+                    suppress=True,
+                )
+                break  # 成功
+            except Exception as exc:
+                if attempt < 2:
+                    logger.warning(f"[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}")
+                    import time as _time
+
+                    _time.sleep(1)
+                else:
+                    logger.warning(f"[TrayManager] 热键注册失败（已重试3次）: {exc}")
+
+        if new_handle is not None:
+            # 新热键注册成功 → 释放旧热键，切换到新热键
+            if old_handle is not None:
+                try:
+                    keyboard.remove_hotkey(old_handle)
+                except Exception:
+                    pass
+            self._hotkey_handle = new_handle
+            self._registered_hotkey = hotkey_str
+            logger.debug(f"[TrayManager] 热键健康检查完成: {hotkey_str}")
+        else:
+            # 注册失败，旧热键仍保留在工作状态
+            if self._hotkey_handle is None and old_handle is not None:
+                self._hotkey_handle = old_handle
+                self._registered_hotkey = old_hotkey
+                logger.debug("[TrayManager] 热键健康检查失败，保留旧热键")
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""
