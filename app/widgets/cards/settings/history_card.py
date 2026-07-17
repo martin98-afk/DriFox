@@ -35,11 +35,10 @@ from app.utils.design_tokens import (
     Colors,
     apply_font_size_to_widget,
     font_size_css,
-    get_font_family_css,
     get_ui_font_size,
     scale_font_size,
 )
-from app.utils.utils import get_icon
+from app.utils.utils import get_font_family_css, get_icon
 
 
 class _UrlImportThread(QThread):

@@ -39,7 +39,8 @@ class ThemeManager:
             return
         self._initialized = True
         self._themes: Dict[str, dict] = {}
-        self._load_themes()
+        # 延迟加载：首次访问主题数据时再扫描，避免 import 时触发文件 I/O
+        self._themes_loaded = False
 
     # ── 扫描加载 ──────────────────────────────────────────
 
@@ -80,6 +81,13 @@ class ThemeManager:
 
         if not self._themes:
             logger.warning("[ThemeManager] 未加载到任何主题")
+
+    def _ensure_loaded(self):
+        """确保主题数据已加载（惰性加载守卫）"""
+        if self._themes_loaded:
+            return
+        self._themes_loaded = True
+        self._load_themes()
 
     def _load_plugin_themes_directly(self):
         """直接扫描所有插件目录下的 themes/ 文件夹
@@ -158,14 +166,17 @@ class ThemeManager:
 
     def list_themes(self) -> Dict[str, str]:
         """列出所有可用主题 {id: name}"""
+        self._ensure_loaded()
         return {tid: data.get("name", tid) for tid, data in self._themes.items()}
 
     def get_theme(self, theme_id: str) -> Optional[dict]:
         """获取指定主题数据"""
+        self._ensure_loaded()
         return self._themes.get(theme_id)
 
     def get_theme_value(self, theme_id: str, key: str, default: str = None) -> str:
         """从主题的 colors 中获取颜色值"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id)
         if not theme:
             return default
@@ -174,16 +185,19 @@ class ThemeManager:
 
     def get_theme_window(self, theme_id: str) -> dict:
         """获取窗口背景配置"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id) or {}
         return theme.get("window", {})
 
     def get_theme_background(self, theme_id: str) -> dict:
         """获取背景图片配置"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id) or {}
         return theme.get("background", {})
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
         """获取主题资源目录（主题文件夹路径）"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id)
         if not theme:
             return None
@@ -192,6 +206,7 @@ class ThemeManager:
 
     def get_theme_resource(self, theme_id: str, filename: str) -> Optional[Path]:
         """获取主题资源文件路径（如背景图片）"""
+        self._ensure_loaded()
         theme_dir = self.get_theme_dir(theme_id)
         if not theme_dir:
             return None
@@ -199,16 +214,8 @@ class ThemeManager:
         return resource_path if resource_path.exists() else None
 
     def get_theme_pet(self, theme_id: str) -> dict:
-        """获取主题的 pet 配置。
-
-        主题 YAML 可选声明 `pet:` 段：
-            pet:
-              image: ./pet.png    # 相对主题目录的路径
-
-        Returns:
-            dict: {"image": Path, "source": "theme"} 表示该主题声明了有效 pet
-                  {} 表示该主题未声明 / 声明无效，调用方应 fallback 到内嵌默认
-        """
+        """获取主题的 pet 配置。"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id) or {}
         pet_cfg = theme.get("pet") or {}
         image_rel = pet_cfg.get("image")
@@ -285,6 +292,7 @@ class ThemeManager:
 
     def is_user_theme(self, theme_id: str) -> bool:
         """判断是否为用户自定义主题（非内置）"""
+        self._ensure_loaded()
         theme = self._themes.get(theme_id)
         return bool(theme and not theme.get("_is_builtin", True))
 

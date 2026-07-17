@@ -417,8 +417,8 @@ PROVIDER_ICONS = {
 # ============================================================
 # models.dev 动态同步：白名单与合并
 # ============================================================
-# 从 app.core.models_dev_sync 导入白名单，避免两处维护
-from app.core.models_dev_sync import MODELS_DEV_PROVIDER_MAP
+# 注：MODELS_DEV_PROVIDER_MAP 已在 models_dev_sync 模块级定义，
+# 实际合并逻辑通过 get_dynamic_models() 函数调用，无需在此导入。
 
 
 def get_merged_provider_models() -> Dict[str, List[str]]:

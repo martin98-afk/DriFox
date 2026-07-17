@@ -29,12 +29,10 @@ from PyQt5.QtGui import QFont, QIcon, QIconEngine
 
 from app.utils.config import Settings
 
-try:
-    from pypinyin import Style, pinyin
-except ImportError:
-    pinyin = None
+# ICON_NAME_TO_FILE 延迟到 _ThemeIconEngine._find_icon_file() 中导入，
+# 避免模块启动时加载 icon 映射表
 
-from app.utils.icon_name_map import ICON_NAME_TO_FILE
+# 浅色图标映射（按需导入，避免循环）
 
 # 浅色图标映射（按需导入，避免循环）
 _ICON_NAME_TO_FILE_LIGHT = None
@@ -184,12 +182,16 @@ def migrate_app_data_if_needed():
 
 def get_pinyin_search_keys(text):
     """生成拼音全拼和首字母缩写"""
-    if not pinyin or not text:
+    if not text:
         return ""
+    try:
+        from pypinyin import Style, pinyin as _pinyin
+    except ImportError:
+        return text.lower()
     # 提取首字母 (Style.FIRST_LETTER)
-    first_letters = "".join([i[0][0] for i in pinyin(text, style=Style.FIRST_LETTER)])
+    first_letters = "".join([i[0][0] for i in _pinyin(text, style=Style.FIRST_LETTER)])
     # 提取全拼 (Style.NORMAL)
-    full_pinyin = "".join([i[0] for i in pinyin(text, style=Style.NORMAL)])
+    full_pinyin = "".join([i[0] for i in _pinyin(text, style=Style.NORMAL)])
     return f"{first_letters} {full_pinyin} {text}".lower()
 
 
@@ -301,6 +303,8 @@ class _ThemeIconEngine(QIconEngine):
 
     def _load(self) -> QIcon:
         """根据当前主题加载正确颜色的图标（无缓存，每次调用都检查）"""
+        from app.utils.icon_name_map import ICON_NAME_TO_FILE
+
         is_light = _is_current_theme_light()
         prefix = ":/icons_light" if is_light else ":/icons"
 
