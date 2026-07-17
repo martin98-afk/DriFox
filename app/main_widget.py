@@ -2950,37 +2950,38 @@ class OpenAIChatToolWindow(ToolWindow):
         return None
 
     def _register_command_shortcuts(self):
-        """为所有有 shortcut 配置的 function 命令注册 QShortcut"""
+        """为所有有 shortcut 配置的命令注册 QShortcut
+
+        FUNCTION 命令：有处理器时直接执行，无处理器时回退到插入 /command 文本
+        PROMPT/AGENT 命令：回退到插入 /command 文本（无处理器），用户按 Enter 后走正常发送流程
+        """
         self._clear_command_shortcuts()
 
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
-        from app.core.command_manager import CommandManager, CommandType
+        from app.core.command_manager import CommandManager
 
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
-                if cmd_type == CommandType.FUNCTION and cmd_def.shortcut:
-                    qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                if not cmd_def.shortcut:
+                    continue
+                qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
 
-                    name = cmd_def.name
+                name = cmd_def.name
 
-                    def _on_shortcut(n=name):
-                        try:
-                            # ⚠️ 用户插件 FUNCTION 命令无 Python 处理器注册，
-                            # 直接调用 _execute_command 会静默失败。
-                            # 检测到无处理器时，回退到在输入框插入 /command 文本，
-                            # 与命令卡片点击行为一致。
-                            if self._has_command_handler(n):
-                                self._execute_command(n)
-                            else:
-                                self._insert_command_text_fallback(n)
-                        except RuntimeError:
-                            pass
+                def _on_shortcut(n=name):
+                    try:
+                        if self._has_command_handler(n):
+                            self._execute_command(n)
+                        else:
+                            self._insert_command_text_fallback(n)
+                    except RuntimeError:
+                        pass
 
-                    qs.activated.connect(_on_shortcut)
-                    self._command_shortcuts.append(qs)
+                qs.activated.connect(_on_shortcut)
+                self._command_shortcuts.append(qs)
 
     def _has_command_handler(self, name: str) -> bool:
         """检查命令名是否有对应的 Python 处理器
@@ -7181,6 +7182,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _create_new_session(self):
         import time as _time
+
         _t0 = _time.perf_counter()
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
@@ -7274,11 +7276,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info(
             f"[Perf-CreateSession] "
-            f"auto_save={(_t1-_t0)*1000:.0f}ms "
-            f"cache_cards={(_t2-_t1)*1000:.0f}ms "
-            f"backend_create={(_t3-_t2)*1000:.0f}ms "
-            f"ui_cleanup={(_t4-_t3)*1000:.0f}ms "
-            f"total={(_t4-_t0)*1000:.0f}ms"
+            f"auto_save={(_t1 - _t0) * 1000:.0f}ms "
+            f"cache_cards={(_t2 - _t1) * 1000:.0f}ms "
+            f"backend_create={(_t3 - _t2) * 1000:.0f}ms "
+            f"ui_cleanup={(_t4 - _t3) * 1000:.0f}ms "
+            f"total={(_t4 - _t0) * 1000:.0f}ms"
         )
 
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))

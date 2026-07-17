@@ -9,7 +9,7 @@
 
 设计约束（闭包）：
 - 不导入 app.widgets 内部的任何模块
-- 直接文件操作（创建/删除 user-custom 命令文件） 
+- 直接文件操作（创建/删除 user-custom 命令文件）
 """
 
 from pathlib import Path
@@ -108,29 +108,97 @@ def _display_type_to_yaml(display_type: str) -> str:
     - "command" → "function"
     - "prompt" → "prompt"
     - "agent" → "agent"
+    - "skill"  → "function"（技能保存为 function 类型，快捷鍵插入 /命令）
     """
     mapping = {
         "command": "function",
         "prompt": "prompt",
         "agent": "agent",
+        "skill": "function",
     }
     return mapping.get(display_type, "function")
 
 
-def _load_all_commands() -> list:
-    """从 CommandManager 获取所有命令的展示信息
+def _load_all_items() -> list:
+    """获取所有命令+技能，排序与命令卡片一致
+
+    排序规则（与 CommandCard._sort_key 保持一致）：
+    0 = 系统内建命令 (command)
+    1 = UI 插件命令 (command + subtype=ui_plugin)
+    2 = 技能 (skill)
+    3 = 智能体/提示词 (agent/prompt)
 
     Returns:
-        [{name, description, type, shortcut}, ...]
-        type: "command" | "prompt" | "agent"
+        [{name, description, type, shortcut, subtype?, display_name?}, ...]
     """
     from app.core.command_manager import CommandManager
+    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.utils.utils import get_local_skills
 
+    items = []
+
+    # 1. 加载命令
     cmd_mgr = CommandManager.get_instance()
-    results = cmd_mgr.get_all_commands()
-    # 按名称排序
-    results.sort(key=lambda x: x["name"])
-    return results
+    commands = cmd_mgr.get_all_commands()
+
+    # 标记 UI 插件命令（用于排序）
+    ui_cmd_names = UIPluginRegistry.get_instance().get_ui_command_names()
+    for cmd in commands:
+        if cmd["name"] in ui_cmd_names:
+            cmd["subtype"] = "ui_plugin"
+    items.extend(commands)
+
+    # 2. 加载技能
+    try:
+        skills = get_local_skills()
+        for s in skills:
+            items.append(
+                {
+                    "name": s.get("qualified_name", s["name"]),
+                    "description": s.get("description", ""),
+                    "type": "skill",
+                }
+            )
+    except Exception:
+        pass
+
+    # 3. 重名检测加后缀（与命令卡片一致）
+    name_type_map = {}
+    for item in items:
+        name_type_map.setdefault(item["name"], set()).add(item["type"])
+
+    suffix_map = {
+        "skill": "-skill",
+        "prompt": "-prompt",
+        "command": "-cmd",
+        "agent": "-agent",
+    }
+
+    # 标记需要加后缀的项
+    for item in items:
+        if len(name_type_map.get(item["name"], set())) > 1:
+            suffix = suffix_map.get(item["type"], "")
+            if suffix:
+                item["display_name"] = f"{item['name']}{suffix}"
+            else:
+                item["display_name"] = item["name"]
+        else:
+            item["display_name"] = item["name"]
+
+    # 4. 排序（与命令卡片完全一致）
+    def _sort_key(item):
+        t = item["type"]
+        if t == "command" and item.get("subtype") == "ui_plugin":
+            return (1, item["display_name"])
+        if t == "command":
+            return (0, item["display_name"])
+        if t == "skill":
+            return (2, item["display_name"])
+        # agent / prompt
+        return (3, item["display_name"])
+
+    items.sort(key=_sort_key)
+    return items
 
 
 def _make_minimal_cmd_file(name: str, description: str, type_str: str, shortcut: str) -> str:
@@ -235,6 +303,7 @@ class _CommandRow(QWidget):
         description: str,
         cmd_type_str: str,
         is_customized: bool,
+        display_name: str = "",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -243,6 +312,8 @@ class _CommandRow(QWidget):
         self._description = description
         self._cmd_type_str = cmd_type_str
         self._is_customized = is_customized
+        self._display_name = display_name or cmd_name
+        self.is_skill = cmd_type_str == "skill"
         self._setup_ui()
 
     def _setup_ui(self):
@@ -252,12 +323,13 @@ class _CommandRow(QWidget):
         hly.setSpacing(8)
 
         # 命令名：/name
-        name_text = f"/{self._cmd_name}"
+        name_text = f"/{self._display_name}"
         name_lb = QLabel(name_text, self)
         name_lb.setStyleSheet(f"color: {_text_color()}; font-size: 13px; background: transparent;")
-        # 添加自定义标记
-        if self._is_customized:
-            name_lb.setText(f"✦ /{self._cmd_name}")
+        if self.is_skill:
+            name_lb.setToolTip("技能命令（暂不支持在此设置快捷键）")
+        elif self._is_customized:
+            name_lb.setText(f"✦ /{self._display_name}")
             name_lb.setToolTip("已自定义（原系统命令被覆盖）")
         name_lb.setMinimumWidth(140)
         hly.addWidget(name_lb)
@@ -283,6 +355,10 @@ class _CommandRow(QWidget):
         self._shortcut_lb.setMinimumWidth(160)
         self._shortcut_lb.setAlignment(Qt.AlignCenter)
         hly.addWidget(self._shortcut_lb)
+
+        # 技能：仅展示，无操作按钮
+        if self.is_skill:
+            return
 
         # 编辑按钮（公开属性，供定位弹窗用）
         self.edit_btn = ToolButton(FluentIcon.EDIT, self)
@@ -551,13 +627,19 @@ class ShortcutManagerCard(QWidget):
     # ── 加载数据 ──
 
     def _refresh(self):
-        """刷新命令列表"""
+        """刷新命令/技能列表"""
         self._set_loading(True)
 
         try:
-            self._all_commands = _load_all_commands()
+            self._all_commands = _load_all_items()
             self._render_list()
-            self._status_lb.setText(f"共 {len(self._all_commands)} 个命令")
+            count = len(self._all_commands)
+            cmd_count = sum(1 for c in self._all_commands if c["type"] != "skill")
+            skill_count = count - cmd_count
+            parts = [f"{count} 项"]
+            if skill_count:
+                parts.append(f"{skill_count} 技能")
+            self._status_lb.setText(" | ".join(parts))
         except Exception as e:
             logger.error(f"[ShortcutManager] 加载命令失败: {e}")
             self._status_lb.setText("加载失败")
@@ -594,11 +676,16 @@ class ShortcutManagerCard(QWidget):
         if filter_text:
             ft = filter_text.strip().lower()
             filtered = [
-                c for c in self._all_commands if ft in c["name"].lower() or ft in c.get("description", "").lower()
+                c
+                for c in self._all_commands
+                if ft in c["name"].lower()
+                or ft in c.get("display_name", c["name"]).lower()
+                or ft in c.get("description", "").lower()
             ]
 
         for cmd in filtered:
             name = cmd["name"]
+            display_name = cmd.get("display_name", name)
             shortcut = cmd.get("shortcut", "")
             description = cmd.get("description", "")
             cmd_type_str = cmd.get("type", "command")
@@ -610,10 +697,12 @@ class ShortcutManagerCard(QWidget):
                 description=description,
                 cmd_type_str=cmd_type_str,
                 is_customized=is_customized,
+                display_name=display_name,
                 parent=self._content,
             )
-            row.edit_clicked.connect(self._on_edit)
-            row.restore_clicked.connect(self._on_restore)
+            if not row.is_skill:
+                row.edit_clicked.connect(self._on_edit)
+                row.restore_clicked.connect(self._on_restore)
             self._content_layout.addWidget(row)
             self._rows.append(row)
 
