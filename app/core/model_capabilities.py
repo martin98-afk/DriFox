@@ -184,42 +184,9 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "source": "models.dev",
         "note": "DeepSeek-V4-Flash，2026-04-24 发布",
     },
-    "deepseek-v4-flash-free": {
-        "context_limit": 1048576,
-        "supports_thinking": True,
-        "thinking_param": "reasoning_effort",
-        "source": "inferred",
-        "note": "OpenCode Zen 免费档转发 DeepSeek-V4-Flash；thinking_param 沿用 deepseek-v4-flash",
-    },
-    # ========== OpenCode Zen 真实免费模型（来自 opencode/xxx 系列） ==========
-    # 注意：big-pickle / gpt-5-nano 的精确 context length 没在 models.dev 公开，
-    # 用户确认它们是 OpenCode Zen 的免费档，所以这里不填具体值，让它们走
-    # L3 服务商默认（200k）。如未来核实到精确值再加。
-    "kimi-k2.5-free": {
-        "context_limit": 262144,
-        "supports_thinking": True,
-        "thinking_param": "thinking",
-        "supports_vision": True,
-        "source": "user_provided",
-        "note": "OpenCode Zen 免费档，转发到 Kimi K2.5",
-    },
-    "minimax-m2.5-free": {
-        "context_limit": 204800,
-        "supports_thinking": True,
-        "thinking_param": "thinking",
-        "thinking_enable_value": "adaptive",
-        "source": "user_provided",
-        "note": "OpenCode Zen 免费档，转发到 MiniMax M2.5",
-    },
-    # "glm-5-free" - 是 GLM-5 的 OpenCode Zen 代理，context 推测与 glm-5 一致
-    "glm-5-free": {
-        "context_limit": 202752,
-        "supports_thinking": True,
-        "thinking_param": "thinking",
-        "supports_vision": True,
-        "source": "inferred",
-        "note": "OpenCode Zen 免费档转发 GLM-5；context 沿用 glm-5",
-    },
+    # OpenCode Zen 免费模型（-free 后缀）的能力数据完全来自 models.dev 动态同步，
+    # 不在此处硬编码。models.dev 查不到的免费模型由
+    # PROVIDER_CAPABILITIES["opencode"] family 默认值兜底。
     # ========== OpenAI（Anthropic/Gemini/DeepSeek 同下） ==========
     "gpt-4o": {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},
     "gpt-4o-mini": {"context_limit": 128000, "supports_vision": True, "source": "openai_official"},

@@ -2952,8 +2952,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的命令注册 QShortcut
 
-        FUNCTION 命令：有处理器时直接执行，无处理器时回退到插入 /command 文本
-        PROMPT/AGENT 命令：回退到插入 /command 文本（无处理器），用户按 Enter 后走正常发送流程
+        有参数的命令：无论类型，插入 /command 文本到输入框，自动弹出参数卡片。
+        无参数的 FUNCTION 命令：有处理器时直接执行，无处理器时回退到插入文本。
+        无参数的 PROMPT/AGENT 命令：回退到插入 /command 文本，用户按 Enter 后走正常发送流程。
         """
         self._clear_command_shortcuts()
 
@@ -2973,15 +2974,32 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 def _on_shortcut(n=name):
                     try:
-                        if self._has_command_handler(n):
+                        # 命令有参数 → 插入 /cmd 到输入框，自动触发参数卡片
+                        if self._command_has_params(n):
+                            logger.debug(f"[Shortcut] '{n}' → 插入文本（有参数）")
+                            self._insert_command_text_fallback(n)
+                        elif self._has_command_handler(n):
+                            logger.debug(f"[Shortcut] '{n}' → 直接执行（无参数+有handler）")
                             self._execute_command(n)
                         else:
+                            logger.debug(f"[Shortcut] '{n}' → 插入文本（无handler）")
                             self._insert_command_text_fallback(n)
-                    except RuntimeError:
-                        pass
+                    except Exception:
+                        logger.warning(f"[Shortcut] '{n}' 处理异常", exc_info=True)
 
                 qs.activated.connect(_on_shortcut)
                 self._command_shortcuts.append(qs)
+
+    def _command_has_params(self, name: str) -> bool:
+        """检查命令是否定义了参数（用于快捷键触发的参数卡片决策）
+
+        命令定义了 parameters（如 --flag、--key=value）时返回 True，
+        快捷键触发时走插入文本路径，让参数卡片自动弹出。
+        """
+        from app.core.command_manager import CommandManager
+
+        cmd_def = CommandManager.get_instance().get_command(name)
+        return bool(cmd_def and cmd_def.parameters)
 
     def _has_command_handler(self, name: str) -> bool:
         """检查命令名是否有对应的 Python 处理器
@@ -3002,18 +3020,24 @@ class OpenAIChatToolWindow(ToolWindow):
         return False
 
     def _insert_command_text_fallback(self, command_name: str):
-        """当 function 命令快捷键无处理器时，在输入框插入 /command 文本
+        """在输入框插入 /command 文本并聚焦，自动弹出参数卡片
 
-        用户插件命令（type: function + shortcut）没有 Python 处理器注册，
-        快捷键按下后无法直接执行。回退行为：将当前输入替换为 /{command_name}
-        并聚焦，用户按 Enter 后走正常发送流程（与命令卡片选中效果类似）。
+        适用场景：
+        1. 用户插件命令（type: function + shortcut）无处理器时
+        2. 命令有参数（parameters 非空）时，插入后自动弹出参数卡片
+
+        关键：setPlainText 后光标在0位，需 blockSignals 阻止过早的 textChanged，
+        移动光标到末尾后再手动触发 _on_slash_trigger_check 进入 detail 参数模式。
         """
         insert = f"/{command_name} "
+        self.input_area.blockSignals(True)
         self.input_area.setPlainText(insert)
         cursor = self.input_area.textCursor()
         cursor.movePosition(cursor.End)
         self.input_area.setTextCursor(cursor)
+        self.input_area.blockSignals(False)
         self.input_area.setFocus()
+        self.input_area._on_slash_trigger_check()
 
     def _execute_command(self, command_name: str, args: str = ""):
         """执行内置函数型命令

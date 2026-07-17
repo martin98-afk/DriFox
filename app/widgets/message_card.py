@@ -1066,7 +1066,7 @@ def _render_think_block(content: str, completed: bool = True) -> str:
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -1105,7 +1105,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 13px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -2822,7 +2822,7 @@ class CodeWebViewer(QWebEngineView):
                     background: transparent;
                     color: var(--text-secondary) !important;
                     font-style: italic;
-                    font-size: {code_font_size}px;
+                    font-size: {code_font_size + 2}px;
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
                     max-height: 500px;

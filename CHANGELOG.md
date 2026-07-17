@@ -3,34 +3,44 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.2] - 2026-07-18
 
-自上一版本以来的变更 | 提交数：45 · 文件变更：71 · +4848/-643 | 贡献者：dingma, DriFox Dev, mading
+自上一版本以来的变更 | 提交数：49 · 文件变更：82 · +6362/-1046 | 贡献者：dingma (30), mading (20), DriFox Dev (2)
+
+> 重点：包含 **19 个问题修复**、**23 个新功能**、**4 次重构**、**2 篇设计文档**、**1 项清理**。
 
 ### ✨ 新功能 (New Features)
 
-- **插件图标系统**: 为所有系统插件添加 SVG 图标，引入 PluginIconWidget 组件，在插件市场和插件管理器卡片中统一显示图标
-- **Shortcut Manager 插件**: 实现快捷键管理插件，支持命令与技能管理的完整 UI 组件
-- **UI 插件边缘启动器**: 新增左侧边缘启动器，支持独立窗口模式，优化位置追踪与可见性管理
-- **工具流预览动画增强**: 添加渐变背景动画与旋转提示文字，提升流式工具执行视觉体验
-- **Buddy 多模态生成客户端**: 支持视频、图片和 3D 模型生成
-- **OpenCode 免费模型异步获取**: 实现多厂商免费模型同步与自动刷新
-- **通用对话框重构**: 用 ConfirmDialog 和 InfoDialog 替换原生 QMessageBox，统一交互风格
-- **README 添加技术支持联系方式与图片**
+- **插件图标体系**: 为系统插件添加 SVG 图标，新增 `PluginIconWidget`，统一插件市场 / 插件管理器 / 边缘启动器菜单展示
+- **Shortcut Manager 插件**: 系统级快捷键管理 UI，支持命令与技能管理，含图标与卡片 UI
+- **UI 插件 — 左侧边缘启动器**: 独立窗口模式、位置追踪与可见性管理优化
+- **工具流预览动画增强**: 渐变背景动画 + 旋转提示文字 + 左→右渐变扫描
+- **Buddy 多模态生成客户端**: 支持视频 / 图片 / 3D 模型
+- **OpenCode Zen 免费模型**: 跨多家 provider 异步拉取与自动刷新
+- **通用对话框统一**: 用 `ConfirmDialog` / `InfoDialog` 替换原生 QMessageBox
+- **Plugin Creator 文档集**: components / manifest / publishing / testing / troubleshooting / workflow 全套文档
+- **Shortcut Manager 命令参数保留**: 在快捷键执行时保留原命令参数
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **流式思考/工具执行 UI 修复**: 修复选择器清除 spinner SVG 问题，移除黄色背景，保持 DOM 位置，添加旋转提示
-- **性能优化**: 历史会话延迟加载，优化卡片渲染性能
-- **托盘热键修复**: toggle-window 改用 RegisterHotKey 并自动回退 keyboard 兜底
-- **主题管理修复**: 插件主题提前加载、重启后主题保持、防止初始化前主题重置
-- **边缘启动器修复**: 优化位置追踪与可见性管理，禁用左边缘调整避免与启动器冲突
-- **技能检索增强**: 支持文件夹名匹配，提升插件发现准确率
-- **插件管理器图标重设计**: 采用 2x2 模块网格风格，提升辨识度
-- **InfoBar 位置调整**: 改为 TOP_RIGHT，错误提示改为警告级别
+- **流式思考 / 工具执行 UI**: 修复 spinner SVG 误清除、移除黄色背景、保留工具块 DOM 位置、精确化 think tip 选择器、新增旋转提示
+- **历史会话延迟加载**: 优化卡片渲染性能
+- **托盘热键**: `toggle-window` 改用 `RegisterHotKey` 并自动回退 keyboard
+- **主题管理**: 插件主题提前加载、重启后主题保持、防止未初始化前主题重载、刷新逻辑优化
+- **边缘启动器**: 位置追踪与可见性管理、菜单间距 / 边距 / 图标尺寸调整、移除无效 `QMenu.setIconSize`、禁用左边缘 resize
+- **技能检索**: 支持文件夹名匹配，提升插件发现准确率
+- **插件管理器图标**: 重设计为 2x2 模块网格风格
+- **InfoBar**: 位置改为 `TOP_RIGHT`，错误降级为 `Warning`
+- **CodeWebViewer 缓存清理**: 修复缓存清理后消息内容获取失败
+- **README 图片格式**: 修正支持图片格式，更新版本一致性文档
 
 ### ♻️ 代码重构 (Refactoring)
 
-- **ShortcutManagerCard 代码清理**: 优化可读性和性能
-- **导入与延迟加载优化**: 减少模块加载开销
+- **model_capabilities / models_dev_sync**: 移除写死的免费模型 capability，改为基于 models.dev 动态继承
+- **ShortcutManagerCard**: UI 代码清理与一致性优化（双 commit 合并）
+- **导入与延迟加载**: 减少模块加载开销
+
+### 🎨 样式改进 (Style)
+
+- **message_card**: 调整 think block 字体大小，提升可读性
 
 ### 📚 文档 (Documentation)
 
@@ -39,7 +49,8 @@ All notable changes to this project will be documented in this file.
 
 ### 🔧 其他 (Chores & Build)
 
-- 删除已废弃的 buddy-cloud.py 脚本
+- 删除已废弃的 `buddy-cloud.py` 脚本
+- 删除过时的 UI 插件边缘启动器设计文档
 
 ## [v0.4.1] - 2026-07-16
 

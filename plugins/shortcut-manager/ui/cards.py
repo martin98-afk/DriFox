@@ -42,7 +42,29 @@ def _get_user_custom_cmd_dir() -> Path:
     return get_app_data_dir() / _USER_CUSTOM_CMD_REL
 
 
+def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
+    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）"""
+    from app.core.plugin_manager import PluginManager
+
+    pm = PluginManager.get_instance()
+    if not pm.is_initialized():
+        return None
+
+    user_custom_dir = _get_user_custom_cmd_dir()
+    for cmd_file in pm.get_command_files():
+        if cmd_file.stem == cmd_name:
+            # 优先返回非 user-custom 中的原始文件
+            if not str(cmd_file.resolve()).startswith(str(user_custom_dir.resolve())):
+                return cmd_file
+    # 没找到原始文件，返回 user-custom 中的覆盖文件（如有）
+    for cmd_file in pm.get_command_files():
+        if cmd_file.stem == cmd_name:
+            return cmd_file
+    return None
+
+
 def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
+    """生成最小化命令文件（仅用作兜底，当找不到原始文件时）"""
     lines = ["---"]
     lines.append(f"description: {description}")
     lines.append("type: function")
@@ -51,6 +73,61 @@ def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
     lines.append("---")
     lines.append("")
     return "\n".join(lines)
+
+
+def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
+    """在 .md 文件的 YAML frontmatter 中添加或更新 shortcut 字段
+
+    Args:
+        content: 原始 .md 文件全部内容
+        shortcut: 新的快捷键值（空字符串表示删除 shortcut 行）
+
+    Returns:
+        修改后的文件内容
+    """
+    if not content.startswith("---"):
+        return content
+
+    lines = content.splitlines()
+    # 找到 frontmatter 范围：第一个 --- 到下一个 ---
+    close_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            close_idx = i
+            break
+    if close_idx is None:
+        return content
+
+    fm_lines = lines[1:close_idx]
+    body_lines = lines[close_idx + 1:]
+
+    # 检查是否已有 shortcut 行
+    has_shortcut = False
+    new_fm = []
+    for line in fm_lines:
+        if re.match(r'^shortcut\s*:', line):
+            has_shortcut = True
+            if shortcut:
+                new_fm.append(f"shortcut: {shortcut}")
+            # shortcut 为空 → 删除该行（不添加）
+        else:
+            new_fm.append(line)
+
+    if not has_shortcut and shortcut:
+        # 没有 shortcut → 在 description 之后插入
+        inserted = False
+        result = []
+        for line in new_fm:
+            result.append(line)
+            if not inserted and re.match(r'^description\s*:', line):
+                result.append(f"shortcut: {shortcut}")
+                inserted = True
+        if not inserted:
+            # 没找到 description 行，直接追加到末尾
+            result.append(f"shortcut: {shortcut}")
+        new_fm = result
+
+    return "---\n" + "\n".join(new_fm) + "\n---\n" + "\n".join(body_lines)
 
 
 # ── 数据加载 ──────────────────────────────────────────────
@@ -120,9 +197,7 @@ class _KeyCapturePopup(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowFlags(
-            Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
-        )
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFixedSize(240, 68)
@@ -222,7 +297,7 @@ class _CommandRow(QFrame):
             name_text = f"✦ /{self._cmd_name}"
         name_lb = QLabel(name_text, self)
         name_lb.setObjectName("cmdRowName")
-        name_lb.setStyleSheet(f"color: {_text_color()}; background: transparent;")
+        name_lb.setStyleSheet(f"color: {_text_color()}; font-size: 14px; background: transparent;")
         name_lb.setMinimumWidth(140)
         if self._is_customized:
             name_lb.setToolTip("已自定义（原系统命令被覆盖）")
@@ -256,7 +331,9 @@ class _CommandRow(QFrame):
         else:
             shortcut_lb = QLabel("—", self)
             shortcut_lb.setObjectName("cmdRowShortcut")
-            shortcut_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;")
+            shortcut_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;"
+            )
         shortcut_lb.setAlignment(Qt.AlignCenter)
         shortcut_lb.setMinimumWidth(60)
         layout.addWidget(shortcut_lb)
@@ -289,7 +366,9 @@ class _CommandRow(QFrame):
             )
         else:
             self._shortcut_lb.setText("—")
-            self._shortcut_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;")
+            self._shortcut_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; font-style: italic; background: transparent;"
+            )
 
 
 # ── 主卡片 ──────────────────────────────────────────────
@@ -376,9 +455,9 @@ class ShortcutManagerCard(QWidget):
             pass
 
     _CMD_ROW_SIZE_OFFSETS = {
-        "cmdRowName": 0,
-        "cmdRowBadge": -3,
-        "cmdRowShortcut": -2,
+        "cmdRowName": 1,  # 命令名比基准稍大
+        "cmdRowBadge": -3,  # 标签较小
+        "cmdRowShortcut": -1,  # 快捷键适中
     }
 
     def _retheme(self):
@@ -400,7 +479,11 @@ class ShortcutManagerCard(QWidget):
 
                 new_ss = re.sub(r"color:\s*[^;]+;", f"color: {tc};", ss)
                 if target_fs:
-                    new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
+                    if "font-size:" in new_ss:
+                        new_ss = re.sub(r"font-size:\s*[^;]+;", f"font-size: {target_fs}px;", new_ss)
+                    else:
+                        # 样式表中缺失 font-size 时主动追加，确保所有标签受主题控制
+                        new_ss = new_ss.rstrip() + f"\n    font-size: {target_fs}px;"
                 if ff and f"font-family: '{ff}'" not in new_ss:
                     new_ss += f" font-family: '{ff}';"
                 child.setStyleSheet(new_ss)
@@ -553,8 +636,7 @@ class ShortcutManagerCard(QWidget):
         if filter_text:
             ft = filter_text.strip().lower()
             filtered = [
-                c for c in self._all_commands
-                if ft in c["name"].lower() or ft in c.get("description", "").lower()
+                c for c in self._all_commands if ft in c["name"].lower() or ft in c.get("description", "").lower()
             ]
 
         for cmd in filtered:
@@ -652,11 +734,28 @@ class ShortcutManagerCard(QWidget):
             self._count_lb.setText(f"✅ /{cmd_name} → {key_str}")
 
     def _save_custom_shortcut(self, cmd_name: str, description: str, shortcut: str) -> bool:
+        """保存自定义快捷键：基于原始命令文件完整复制，仅修改 shortcut 字段
+
+        不再使用 _make_minimal_cmd_file（会丢失 argument-hint / parameters / mutex_groups），
+        而是找到原始 .md 文件 → 复制全部内容 → 在 frontmatter 中添加/覆盖 shortcut → 保存到 user-custom。
+        """
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_dir.mkdir(parents=True, exist_ok=True)
-            content = _make_minimal_cmd_file(cmd_name, description, shortcut)
-            (cmd_dir / f"{cmd_name}.md").write_text(content, encoding="utf-8")
+            dest_path = cmd_dir / f"{cmd_name}.md"
+
+            # 1. 找到原始命令文件
+            original = _find_original_cmd_file(cmd_name)
+            if original:
+                content = original.read_text(encoding="utf-8")
+                # 2. 修改 frontmatter 中的 shortcut
+                content = _upsert_frontmatter_shortcut(content, shortcut)
+            else:
+                # 兜底：找不到原始文件时生成最小化文件
+                logger.warning(f"[ShortcutManager] 未找到 /{cmd_name} 的原始文件，使用最小化模板")
+                content = _make_minimal_cmd_file(cmd_name, description, shortcut)
+
+            dest_path.write_text(content, encoding="utf-8")
             logger.info(f"[ShortcutManager] 已保存: /{cmd_name} → {shortcut}")
             self._reload_commands()
             return True
@@ -685,6 +784,7 @@ class ShortcutManagerCard(QWidget):
         """强制重新加载命令（刷新 user-custom 覆盖）"""
         try:
             from app.core.builtin_commands import reload_all_commands
+
             reload_all_commands()
         except Exception as e:
             logger.error(f"[ShortcutManager] 重新加载命令失败: {e}")

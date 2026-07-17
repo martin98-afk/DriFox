@@ -219,8 +219,15 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 # OpenCode Zen 的 /v1/models 端点会返回用户账号下可用的模型列表，
 # 其中包括带 -free 后缀的免费模型。这里单独拉取并合并到 models.dev 数据中，
 # 比仅靠 models.dev 更实时。
-def _fetch_opencode_zen_free_models(api_key: str = "") -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+def _fetch_opencode_zen_free_models(
+    api_key: str = "",
+    models_dev_caps: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
     """从 OpenCode Zen /v1/models 获取带 -free 后缀的免费模型列表。
+
+    对每个 -free 模型，优先从 models_dev_caps 中查找 base 模型（去掉 -free 后缀）
+    的能力数据，让 thinking_param / supports_vision / description 与 models.dev
+    保持一致；查不到才回退到硬编码默认值。
 
     返回 (free_model_names, model_capabilities)。
     网络失败或 API 异常时返回空，不影响主流程。
@@ -273,17 +280,33 @@ def _fetch_opencode_zen_free_models(api_key: str = "") -> Tuple[List[str], Dict[
             continue
 
         free_models.append(model_id)
-        # 简单模式：只写基础能力，具体值由 family 兜底（PROVIDER_CAPABILITIES["opencode"]）
-        caps[model_id] = {
-            "context_limit": 200000,
-            "supports_thinking": True,
-            "thinking_param": "reasoning_effort",
-            "source": "opencode_api",
-            "note": f"OpenCode Zen 免费模型（via {url}）",
-        }
+
+        # 去掉 -free 后缀查 base 模型在 models.dev 中的能力数据
+        base_name = model_id[:-5]  # 去掉末尾 "-free"
+        base_caps: Optional[Dict[str, Any]] = None
+        if models_dev_caps and base_name:
+            base_caps = models_dev_caps.get(base_name)
+
+        # 从 models.dev 的 base 模型继承能力；找不到就不写，让 family 默认值兜底
+        if base_caps:
+            caps[model_id] = {
+                "context_limit": base_caps.get("context_limit", 200000),
+                "supports_thinking": base_caps.get("supports_thinking", True),
+                "thinking_param": base_caps.get("thinking_param", "reasoning_effort"),
+                "supports_vision": base_caps.get("supports_vision", False),
+                "source": "models.dev",
+                "note": base_caps.get("note", ""),
+            }
+            if "thinking_enable_value" in base_caps:
+                caps[model_id]["thinking_enable_value"] = base_caps["thinking_enable_value"]
 
     if free_models:
         logger.info(f"[models.dev] OpenCode Zen 免费模型: {free_models}")
+        logger.debug(
+            f"[models.dev] OpenCode Zen 免费模型能力来源: "
+            f"{sum(1 for v in caps.values() if v.get('source') == 'models.dev')} 个来自 models.dev, "
+            f"{sum(1 for v in caps.values() if v.get('source') == 'opencode_api')} 个回退硬编码"
+        )
 
     return free_models, caps
 
@@ -338,17 +361,9 @@ def fetch_opencode_free_models_for_providers(
             raw_ids: List[str] = []
             if isinstance(data, dict):
                 if "data" in data:
-                    raw_ids = [
-                        m.get("id", "") or m.get("name", "")
-                        for m in data["data"]
-                        if isinstance(m, dict)
-                    ]
+                    raw_ids = [m.get("id", "") or m.get("name", "") for m in data["data"] if isinstance(m, dict)]
                 elif "models" in data:
-                    raw_ids = [
-                        m.get("id", "") or m.get("name", "")
-                        for m in data["models"]
-                        if isinstance(m, dict)
-                    ]
+                    raw_ids = [m.get("id", "") or m.get("name", "") for m in data["models"] if isinstance(m, dict)]
             elif isinstance(data, list):
                 raw_ids = [m if isinstance(m, str) else "" for m in data]
 
@@ -424,7 +439,9 @@ def load_dynamic_models(
             provider_models, model_capabilities = _parse_models_dev_data(remote_data)
 
             # ── 叠加 OpenCode Zen 免费模型 ──
-            opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models()
+            opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models(
+                models_dev_caps=model_capabilities,
+            )
             if opencode_free_models:
                 if "OpenCode Zen" not in provider_models:
                     provider_models["OpenCode Zen"] = []
