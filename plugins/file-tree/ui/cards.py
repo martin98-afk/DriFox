@@ -942,8 +942,25 @@ class FileTreeCard(QWidget):
     def show_card(self):
         """卡片显示时：用最新上下文刷新主题色 + 加载文件树"""
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._async_load_tree()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标"""
+        if self._context_provider is None or self._icon_widget is None:
+            return
+        try:
+            from PyQt5.QtGui import QIcon
+
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                self._icon_widget.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     # ── 主题色 ────────────────────────────────────────────
 
@@ -1035,6 +1052,7 @@ class FileTreeCard(QWidget):
             is_dark = self._colors.get("is_dark", True)
         else:
             from qfluentwidgets import isDarkTheme as _isdark
+
             is_dark = _isdark()
         color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
         ph_font_size = self._colors.get("font_size", 14) if hasattr(self, "_colors") and self._colors else 14

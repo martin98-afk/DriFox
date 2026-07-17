@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -505,6 +506,7 @@ class ShortcutManagerCard(QWidget):
 
     def _setup_ui(self):
         self.setMinimumHeight(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ShortcutManagerCard { background: transparent; }")
 
@@ -546,7 +548,7 @@ class ShortcutManagerCard(QWidget):
         self._content = QWidget(self._scroll)
         self._content.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 4, 0, 4)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
         self._content_layout.setSpacing(0)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
@@ -617,17 +619,23 @@ class ShortcutManagerCard(QWidget):
 
         return bar
 
-    # ── 全屏高度 ──
+    # ── 比例高度（與其他系統卡片一致） ──
 
     def sizeHint(self):
-        """返回極大值，讓容器分配所有可用空間"""
+        """高度随内容自适应：命令少则收缩成合适高度，命令多则撑到窗口 85% 上限后内部滚动。
+
+        之前写死为窗口 85%（与 plugin-manager 等一致的"比例高度"），导致卡片永远不收缩、
+        也永远填不满底部区域，看起来像"固定高度"。改为以内容自然高度为准、85% 为上限，
+        与底部其它按内容自适应的浮动卡片（sub_agent_compact / history_questions 等）行为一致。
+        """
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
-            # 返回 10000，容器 layout 會把剩餘空間全部分配給卡片
-            return QSize(max(base.width(), 200), 10000)
+            h = min(base.height(), int(win.height() * 0.85))
+            h = max(h, 220)  # 保底高度，避免命令极少时卡片塌成一条缝
+            return QSize(max(base.width(), 200), h)
         return base
 
     def showEvent(self, event):
@@ -732,9 +740,6 @@ class ShortcutManagerCard(QWidget):
             empty.setAlignment(Qt.AlignCenter)
             empty.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent; padding: 40px;")
             self._content_layout.addWidget(empty)
-
-        # 末尾弹性空间
-        self._content_layout.addStretch(1)
 
     def _get_customized_names(self) -> set:
         """获取被 user-custom 覆盖的命令名集合"""

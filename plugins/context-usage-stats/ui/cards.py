@@ -62,7 +62,7 @@ def _find_db() -> Optional[Path]:
 
 def _text_color(secondary: bool = False) -> str:
     """（已废弃，保留向后兼容）请改用卡片注入的 context 主题色
-    
+
     根据当前深浅模式返回适配的文字颜色。
     """
     if isDarkTheme():
@@ -309,7 +309,7 @@ def _fetch_session_stats() -> dict:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_sessions_map[label] = row["cnt"]
                 daily_messages_map[label] = row["msgs"]
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
         # 5. ═══ Token 用量 ═══
@@ -329,7 +329,7 @@ def _fetch_session_stats() -> dict:
             try:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_tokens_map[label] = row["total_tokens"]
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
         # 回退：对 context_usage=0 的旧会话，从 messages 估算 token（兼容旧数据）
@@ -429,7 +429,7 @@ def _parse_mmdd(date_str: str) -> datetime:
         if dt > now + timedelta(days=30):
             dt = datetime(now.year - 1, month, day)
         return dt
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return datetime.now()
 
 
@@ -515,7 +515,7 @@ class _BarChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 date_str = label
             QToolTip.showText(event.globalPos(), f"📊 {date_str}\n会话数: {value}", self)
 
@@ -635,7 +635,7 @@ class _BarChartWidget(QWidget):
                         display_label = f"{parts[0]}-{parts[1]}"
                 else:
                     display_label = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 display_label = label
 
             painter.drawText(
@@ -731,7 +731,7 @@ class _LineChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 date_str = label
             QToolTip.showText(event.globalPos(), f"📈 {date_str}\n{_format_number(value)}", self)
 
@@ -906,7 +906,7 @@ class _LineChartWidget(QWidget):
                         display = label
                 else:
                     display = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 display = label
 
             x_spacing = chart_w / n if n > 0 else chart_w
@@ -1220,6 +1220,7 @@ class ContextUsageStatsCard(QWidget):
         self._worker: Optional[_DataWorker] = None
         self._stats_data: Optional[dict] = None
         self._chart_style: Optional[dict] = None
+        self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
 
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -1237,8 +1238,25 @@ class ContextUsageStatsCard(QWidget):
     def show_card(self):
         """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._async_load_data()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标"""
+        if self._context_provider is None or self._header_icon is None:
+            return
+        try:
+            from PyQt5.QtGui import QIcon
+
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                self._header_icon.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     def _apply_latest_theme(self):
         """从上下文提供函数拉取最新主题色并应用到所有子组件"""
@@ -1305,6 +1323,7 @@ class ContextUsageStatsCard(QWidget):
         icon = IconWidget(FluentIcon.HISTORY, header)
         icon.setFixedSize(22, 22)
         hly.addWidget(icon)
+        self._header_icon = icon
 
         title = QLabel("上下文用量统计", header)
         title.setStyleSheet(
@@ -1367,6 +1386,7 @@ class ContextUsageStatsCard(QWidget):
     def sizeHint(self):
         """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
         from PyQt5.QtCore import QSize
+
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
@@ -1384,6 +1404,7 @@ class ContextUsageStatsCard(QWidget):
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
         from PyQt5.QtCore import QEvent
+
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
         return super().eventFilter(obj, event)
@@ -1463,9 +1484,11 @@ class ContextUsageStatsCard(QWidget):
         stat_cards = [
             # 总 token 数放在第一位（最重要），日均 token 作为额外小字显示在副标题之下
             (
-                FluentIcon.FONT, "总 token 数",
+                FluentIcon.FONT,
+                "总 token 数",
                 _format_number(total_tokens),
-                f"日均 {_format_number(avg_daily_tokens)}（近 14 天）", ""
+                f"日均 {_format_number(avg_daily_tokens)}（近 14 天）",
+                "",
             ),
             (FluentIcon.CHAT, "总会话数", str(total_sessions), f"平均 {avg_daily} 次/天", ""),
             (FluentIcon.MESSAGE, "总消息数", _format_number(total_messages), f"平均 {avg_msgs} 条/会话", ""),

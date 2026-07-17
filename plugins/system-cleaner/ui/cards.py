@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     FluentIcon,
+    IconWidget,
     StrongBodyLabel,
     ToolButton,
     TransparentToolButton,
@@ -144,9 +145,9 @@ def _calc_dir_size(path: Path, dir_mode: bool) -> int:
                 if entry.is_file():
                     try:
                         total += entry.stat().st_size
-                    except (OSError, PermissionError):
+                    except OSError, PermissionError:
                         pass
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         pass
     return total
 
@@ -159,9 +160,9 @@ def _walk_dir_size(path: Path) -> int:
             for f in files:
                 try:
                     total += os.path.getsize(os.path.join(root, f))
-                except (OSError, PermissionError):
+                except OSError, PermissionError:
                     pass
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         pass
     return total
 
@@ -244,9 +245,9 @@ def _delete_cache(path: Path, dir_mode: bool):
                 if entry.is_file():
                     try:
                         entry.unlink()
-                    except (OSError, PermissionError):
+                    except OSError, PermissionError:
                         pass
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         pass
 
 
@@ -430,6 +431,7 @@ class SystemCleanerCard(QWidget):
         self._cache_rows: Dict[str, _CacheItemRow] = {}
         self._is_cleaning = False
         self._is_releasing_mem = False
+        self._header_icon: Optional[IconWidget] = None
 
         # 当前上下文值缓存
         self._ctx_font_family = ""
@@ -455,9 +457,26 @@ class SystemCleanerCard(QWidget):
 
     def show_card(self):
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._async_scan()
         self._refresh_memory()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标"""
+        if self._context_provider is None or self._header_icon is None:
+            return
+        try:
+            from PyQt5.QtGui import QIcon
+
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                self._header_icon.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     def _get_context(self) -> Optional[dict]:
         if self._context_provider is None:
@@ -706,10 +725,9 @@ class SystemCleanerCard(QWidget):
         hly.setContentsMargins(16, 12, 16, 4)
         hly.setSpacing(8)
 
-        ic = QLabel("🧹", header)
-        ic.setFixedSize(22, 22)
-        ic.setStyleSheet("background: transparent; font-size: 18px;")
-        hly.addWidget(ic)
+        self._header_icon = IconWidget(FluentIcon.BROOM, header)
+        self._header_icon.setFixedSize(22, 22)
+        hly.addWidget(self._header_icon)
 
         self._header_title = StrongBodyLabel("系统清理", header)
         self._header_title.setStyleSheet(f"color: {_tc}; background: transparent;")
