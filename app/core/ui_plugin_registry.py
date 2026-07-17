@@ -593,6 +593,24 @@ class UIPluginRegistry:
         # 卡片元信息始终注入
         ctx.setdefault("plugin_name", card_info.plugin_name)
         ctx.setdefault("card_id", card_info.card_id)
+
+        # 注入插件图标路径（供卡片在头部/标题等位置展示）
+        try:
+            from app.core.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            pi = pm.get_plugin(card_info.plugin_name)
+            if pi and pi.icon_config:
+                icon_info = {}
+                for theme in ("light", "dark"):
+                    p = pi.icon_config.get(theme)
+                    if p:
+                        icon_info[theme] = str(p)
+                if icon_info:
+                    ctx["plugin_icon"] = icon_info
+        except Exception:
+            pass
+
         return ctx
 
     def _make_context_provider(

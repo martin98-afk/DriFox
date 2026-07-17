@@ -3702,7 +3702,9 @@ class CodeWebViewer(QWebEngineView):
                     _tipTimer = setInterval(() => {{
                         const el = document.querySelector('.think-streaming[data-streaming="true"]');
                         if (!el) {{ _stopTipRotation(); return; }}
-                        const tipSpan = el.querySelector('span:last-child');
+                        // 🐛 修复：不能用 span:last-child — 外层 span（唯一子元素）也会命中，
+                        // 导致 textContent 替换时清掉 spinner SVG。改为精确选择内层文字 span。
+                        const tipSpan = el.querySelector('span > span:last-child');
                         if (tipSpan) {{
                             _tipIndex = (_tipIndex + 1) % _thinkTips.length;
                             tipSpan.textContent = _thinkTips[_tipIndex];

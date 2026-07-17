@@ -401,6 +401,7 @@ class ShortcutManagerCard(QWidget):
         self._rows: list = []  # _CommandRow 列表
         self._capture_popup: Optional[_KeyCapturePopup] = None
         self._pending_cmd: str = ""  # 正在编辑的命令名
+        self._header_icon: Optional[IconWidget] = None
 
         self._setup_ui()
 
@@ -412,8 +413,25 @@ class ShortcutManagerCard(QWidget):
     def show_card(self):
         """卡片显示时刷新主题 + 加载数据"""
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._refresh()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标"""
+        if self._context_provider is None or self._header_icon is None:
+            return
+        try:
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                from PyQt5.QtGui import QIcon
+
+                self._header_icon.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     def _apply_latest_theme(self):
         """从上下文拉取最新主题色并刷新"""
@@ -549,9 +567,9 @@ class ShortcutManagerCard(QWidget):
         hly.setContentsMargins(16, 12, 16, 4)
         hly.setSpacing(8)
 
-        ic = IconWidget(FluentIcon.COMMAND_PROMPT, header)
-        ic.setFixedSize(22, 22)
-        hly.addWidget(ic)
+        self._header_icon = IconWidget(FluentIcon.COMMAND_PROMPT, header)
+        self._header_icon.setFixedSize(22, 22)
+        hly.addWidget(self._header_icon)
 
         tl = StrongBodyLabel("快捷键管理器", header)
         tl.setStyleSheet(f"color: {_text_color()}; background: transparent;")
@@ -599,15 +617,16 @@ class ShortcutManagerCard(QWidget):
 
         return bar
 
-    # ── 比例高度 ──
+    # ── 全屏高度 ──
 
     def sizeHint(self):
+        """填充整個容器高度（與其他全屏 UI 插件一致）"""
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
-            return QSize(max(base.width(), 200), int(win.height() * 0.85))
+            return QSize(max(base.width(), 200), win.height())
         return base
 
     def showEvent(self, event):
