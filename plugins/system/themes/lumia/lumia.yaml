@@ -100,7 +100,7 @@ colors:
   send_btn_end: "#1d4ed8"
   send_btn_hover_start: "#3b82f6"
   send_btn_hover_end: "#2563eb"
-  send_btn_radius: 17
+  send_btn_radius: 8
   timeline_node: '#94a3b8'
   timeline_node_hover: '#2563eb'
   timeline_node_visible: '#10b981'
