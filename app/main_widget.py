@@ -7430,7 +7430,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "提示",
                     "当前没有活动会话",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7440,7 +7440,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "提示",
                     "工具执行器未初始化",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7452,11 +7452,11 @@ class OpenAIChatToolWindow(ToolWindow):
             operations = file_recorder.get_all_operations_for_session(session_id)
 
             if not operations:
-                InfoBar.info(
+                InfoBar.warning(
                     "提示",
                     "当前会话没有文件修改记录",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7464,11 +7464,11 @@ class OpenAIChatToolWindow(ToolWindow):
             file_paths = list({op.get("file_path") for op in operations if op.get("file_path")})
 
             if not file_paths:
-                InfoBar.info(
+                InfoBar.warning(
                     "提示",
                     "未找到修改的文件",
                     parent=self,
-                    position=InfoBarPosition.BOTTOM,
+                    position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
 
@@ -7495,19 +7495,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         except ImportError as e:
             logger.error(f"[DiffViewer] 导入模块失败: {e}")
-            InfoBar.error(
+            InfoBar.warning(
                 "错误",
                 f"功能加载失败: {str(e)}",
                 parent=self,
-                position=InfoBarPosition.BOTTOM,
+                position=InfoBarPosition.TOP_RIGHT,
             )
         except Exception as e:
             logger.exception(f"[DiffViewer] 打开差异查看器失败: {e}")
-            InfoBar.error(
+            InfoBar.warning(
                 "错误",
                 f"打开差异查看器失败: {str(e)}",
                 parent=self,
-                position=InfoBarPosition.BOTTOM,
+                position=InfoBarPosition.TOP_RIGHT,
             )
 
     def _clear_chat_area(self, delete_widgets: bool = True):
