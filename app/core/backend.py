@@ -3,6 +3,7 @@
 ChatBackend - 统一后端接口
 后端自己创建和管理所有组件，前端只负责 UI 调用
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -97,9 +98,7 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     # 误认为用户已确认。该标记在 <system-reminder> 内部，LLM 可见但明确
     # 告知其系统身份，不污染用户消息流。
     if event_name == "Stop":
-        parts.append(
-            "以上是系统自动注入的辅助信息，不是用户的输入。"
-        )
+        parts.append("以上是系统自动注入的辅助信息，不是用户的输入。")
     parts.append("</system-reminder>")
     return "\n".join(parts)
 
@@ -358,11 +357,13 @@ class ChatBackend(QObject):
 
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
         from app.core.memory_manager import MemoryManagerCore
+
         self._memory_manager = MemoryManagerCore.get_instance()
         logger.info("[ChatBackend] MemoryManager 创建完成")
 
         # 3. 创建 HookManager（必须在 create_session 之前）
         from app.core.hook_manager import HookManager
+
         self._hook_manager = HookManager(self._thread_pool)
         # UI 有效性标志：当 UI 窗口关闭时应设为 False，防止 hook 回调访问已销毁的 UI
         self._ui_valid = True
@@ -458,6 +459,7 @@ class ChatBackend(QObject):
         # 5. 使用全局共享的 AgentManager（只读数据，跨窗口复用）
         # agents_dir 传 None，智能体从已启用插件动态加载
         from app.core.agent import AgentManager
+
         self._agent_manager = AgentManager.get_instance(None, self._hook_manager)
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
 
@@ -482,6 +484,7 @@ class ChatBackend(QObject):
 
         # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
         from app.core.tool_executor import ToolExecutor
+
         self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
         self._tool_executor.set_memory_manager(self._memory_manager)
         self._tool_executor.set_llm_config_getter(get_model_config)
@@ -503,6 +506,7 @@ class ChatBackend(QObject):
 
         # 7. 创建 ChatEngine（暂时不传 get_memory_context，后面通过 setter 设置）
         from app.core.engines.ui import ChatEngine
+
         self._chat_engine = ChatEngine(
             session_manager=self._session_manager,
             get_model_config=get_model_config,
@@ -543,6 +547,7 @@ class ChatBackend(QObject):
             return get_model_config()
 
         from app.core.workers.subagent_worker import SubAgentManager
+
         self._sub_agent_manager = SubAgentManager(
             agent_manager=self._agent_manager,
             tool_executor=self._tool_executor,
@@ -561,6 +566,7 @@ class ChatBackend(QObject):
         self._get_memory_context_getter = None
 
         from app.utils.history_manager import HistoryManager
+
         self._history_manager = HistoryManager.get_instance()
 
         # 8. 初始化 PluginManager（系统 + 用户插件发现）
@@ -705,9 +711,7 @@ class ChatBackend(QObject):
                 lsp_configs = pm.get_lsp_configs()
                 workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 lsp_mgr.initialize(workdir, lsp_configs)
-                logger.info(
-                    f"[ChatBackend] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器"
-                )
+                logger.info(f"[ChatBackend] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
                 lsp_mgr.start_all_background()
             except Exception as e:
                 logger.error(f"[ChatBackend] LSP 延迟初始化失败: {e}")
@@ -725,7 +729,45 @@ class ChatBackend(QObject):
             from app.utils.config import update_theme_options
 
             update_theme_options()
-            logger.info(f"[ChatBackend] 插件主题刷新完成，共 {len(theme_manager.list_themes())} 个主题")
+
+            # 安全网：插件主题全部加载后，确保配置中保存的主题被正确恢复。
+            # 读取配置文件中的保存值，与当前值比对。若被重置（启动过程中因列表不含
+            # 插件主题而被回退到系统主题），在此修正。即使当前值恰好是列表中的某个
+            # 系统主题，只要与保存值不同就恢复，保证用户选择不受中间状态影响。
+            from app.utils.config import Settings
+
+            settings = Settings.get_instance()
+            themes = theme_manager.list_themes()
+            current = settings.ui_theme_style.value
+            from app.utils.utils import get_app_data_dir
+            import orjson as json
+
+            config_file = get_app_data_dir() / "app.config"
+            saved_theme = None
+            if config_file.exists():
+                try:
+                    raw = config_file.read_text(encoding="utf-8")
+                    data = json.loads(raw)
+                    saved_theme = data.get("UI", {}).get("ThemeStyle")
+                except Exception:
+                    pass
+
+            if saved_theme and saved_theme in themes:
+                if current != saved_theme:
+                    settings.ui_theme_style.value = saved_theme
+                    logger.info(f"[ChatBackend] 从配置文件恢复保存的主题: {saved_theme} (当前: {current})")
+            elif saved_theme and saved_theme not in themes:
+                # 保存的主题不可用（如插件已卸载），当前值如果也不在列表中才回退
+                if current not in themes and themes:
+                    fallback = next(iter(themes))
+                    settings.ui_theme_style.value = fallback
+                    logger.info(
+                        f"[ChatBackend] 保存的主题 {saved_theme} 不可用，当前值 {current} 也不可用，回退至: {fallback}"
+                    )
+
+            logger.info(
+                f"[ChatBackend] 插件主题刷新完成，共 {len(themes)} 个主题, 当前主题: {settings.ui_theme_style.value}"
+            )
         except Exception as e:
             logger.error(f"[ChatBackend] 刷新插件主题失败: {e}")
 
@@ -1869,7 +1911,9 @@ class ChatBackend(QObject):
         self._last_cache_stats = stats
 
     def get_context_usage_snapshot(
-        self, session, llm_config,
+        self,
+        session,
+        llm_config,
         api_prompt_tokens: int = 0,
         api_message_count: int = 0,
         from_api: bool = False,
@@ -1877,7 +1921,8 @@ class ChatBackend(QObject):
         """获取上下文使用快照"""
         if self._chat_engine:
             return self._chat_engine.get_context_usage_snapshot(
-                session, llm_config,
+                session,
+                llm_config,
                 api_prompt_tokens=api_prompt_tokens,
                 api_message_count=api_message_count,
                 from_api=from_api,
@@ -2363,6 +2408,7 @@ class ChatBackend(QObject):
 
             if not chat_session:
                 from app.core.chat_session import ChatSession
+
                 user_name = gw_session.user_name or user_id[:8]
                 chat_session = ChatSession(
                     name=f"{platform}对话"  # UI 显示用（后续会被 topic_summary 覆盖）
