@@ -9,11 +9,11 @@ system/
 ├── .drifox-plugin/
 │   └── plugin.json            # 插件元数据
 ├── .mcp.json                  # MCP 服务器配置
-├── agents/                    # 系统智能体（8 个）
-├── commands/                  # 系统命令（8 个）
-├── skills/                    # 系统技能（25+）
+├── agents/                    # 系统智能体（11 个）
+├── commands/                  # 系统命令（25 个）
+├── skills/                    # 系统技能（25 个）
 │   └── SKILLS.md              # 技能索引
-├── themes/                    # 主题（11 个）
+├── themes/                    # 主题（21 个）
 └── hooks/
     └── hooks.json             # Hook 配置
 ```
@@ -22,7 +22,7 @@ system/
 
 ### Agents (`agents/`)
 
-系统智能体是 DriFox 内置的预配置 AI 工作角色，每个智能体限定特定任务域和权限范��。通过 Markdown 文件定义，包含角色描述、执行步骤、工具权限和环境变量。
+系统智能体是 DriFox 内置的预配置 AI 工作角色，每个智能体限定特定任务域和权限范围。通过 Markdown 文件定义，包含角色描述、执行步骤、工具权限和环境变量。
 
 | 智能体 | 描述 |
 |--------|------|
@@ -31,24 +31,44 @@ system/
 | `code-reviewer` | 完成里程碑后审查代码与规范的代码审查智能体 |
 | `compaction` | 对话上下文压缩，消除冗余并保留关键信息 |
 | `explore` | 快速代码探索分析智能体（只读），用于深入分析代码库、探索项目结构 |
+| `leader` | 智能体团队统筹管理 Leader，负责组队、任务拆解、分发、监控进度和汇总结果 |
 | `plan` | 制定实施计划、拆解任务的规划智能体 |
+| `review` | 审查更改代码的智能体版本 |
 | `summary` | 对话摘要管理智能体 |
+| `task-executor` | 统一任务执行引擎，严格按照收到的提示词规范执行各类命令任务 |
 | `title` | 对话标题生成智能体 |
 
 ### Commands (`commands/`)
 
-系统命令是可通过斜杠调用的快捷指令（如 `/init`），用于触发常见工作流。
+系统命令是可通过斜杠调用的快捷指令，用于触发常见工作流。
 
 | 命令 | 描述 |
 |------|------|
-| `init` | 项目笔记初始化：分析代码库，编写包含构建命令、代码风格规范等内容的项目笔记 |
-| `new` | 创建新项目或文件 |
-| `new-window` | 在新窗口中打开 |
-| `branch` | 分支管理操作 |
-| `review` | 代码审查流程 |
-| `theme` | 主题切换命令 |
-| `compact` | 对话压缩 |
-| `remember` | 记忆管理命令 |
+| `branch` | 新建分支窗口 |
+| `clear` | 清空当前会话的所有消息，重新显示欢迎页 |
+| `compact` | 手动触发上下文压缩，调用子智能体压缩当前对话摘要 |
+| `debug` | 系统化调试流程 |
+| `finish-branch` | 完成开发工作分支 |
+| `lsp-install` | 一站式安装 LSP 服务依赖并自动创建对应插件 |
+| `new` | 新建会话 |
+| `new-window` | 新建窗口 |
+| `plugin` | 管理插件（安装、列出、卸载、启用/禁用、更新、搜索、查看详情、管理市场） |
+| `project-note` | 项目笔记初始化、完善 |
+| `quota-setting` | 通过 Playwright 辅助抓取 OpenCode Zen/Go 和火山方舟的套餐用量查询配置 |
+| `receive-review` | 处理代码审查反馈 |
+| `release` | 自动发布新版本：生成更新日志、打 tag、推送触发 CI |
+| `remember` | 将输入内容存入长期记忆 |
+| `subagent_dag` | 将复杂任务拆解为 DAG 工作流并自动执行 |
+| `subagents` | 管理子智能体任务和默认模型 |
+| `team` | 多窗口团队协作管理 |
+| `theme` | 生成/切换主题颜色 |
+| `title-gen` | 切换标题生成使用的默认模型 |
+| `todos` | 手动显示/刷新待办事项卡片 |
+| `toggle-window` | 一键隐藏/显示所有 DriFox 窗口 |
+| `verify` | 完成前验证工作 |
+| `webresearch` | 深度网络研究，支持快速查询与多跳调研 |
+| `wordcloud` | 将当前会话内容快速总结为 ECharts 词云 |
+| `worktree` | 设置隔离工作区 |
 
 ### Skills (`skills/`)
 
@@ -84,19 +104,29 @@ system/
 
 ### Themes (`themes/`)
 
-系统主题提供配色方案定制能力，共 11 个内置主题：
+系统主题提供配色方案定制能力，共 21 个内置主题：
 
 | 主题 | 风格 |
 |------|------|
 | `amber` | 琥珀色暖调 |
+| `azure` | 天蓝清新 |
 | `bordeaux` | 波尔多酒红 |
+| `cloud` | 云白浅色 |
+| `crema` | 奶油浅色 |
+| `daylight` | 日光浅色 |
 | `fallout` | 废土风格 |
 | `forest` | 森林绿调 |
 | `graphite` | 石墨灰调 |
 | `jade` | 翡翠绿调 |
+| `laven` | 薰衣草紫 |
+| `lumia` | 流光溢彩 |
+| `meadow` | 草地绿调 |
 | `midnight` | 深蓝午夜 |
+| `minta` | 薄荷清新 |
 | `obsidian` | 黑曜石暗色 |
 | `ocean` | 海洋蓝调 |
+| `pearl` | 珍珠浅色 |
+| `rosee` | 玫瑰粉调 |
 | `sakura` | 樱花粉调 |
 | `slate` | 板岩灰调 |
 
