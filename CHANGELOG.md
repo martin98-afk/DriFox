@@ -1,6 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **测试体系：conftest.py 静默失败**: 原版使用 ``Qt.QT_VERSION`` 触发 PyQt5 初始化，但 PyQt5 5.15 中该属性不存在（原属 PyQt6 风格），导致整段 try 块被静默吞掉。后续 ``setAttribute(Qt.AA_ShareOpenGLContexts, True)`` 与 ``QWebEngineWidgets`` 预导入从未真正生效。现改用 ``QT_VERSION_STR`` 并在初始化错误时通过 ``warnings.warn`` 显式上报。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **测试隔离：UIPluginRegistry.reset() 兼容性**: ``reset()`` 会把单例本身置 ``None``，导致 ``reset()`` 之后 ``register_*`` 落到旧实例，而被测函数内部重新 ``get_instance()`` 时拿全新实例。在 ``test_message_content_custom.py`` 与 ``test_plugin_manager_ui.py`` 中改用「reset 后重新 get_instance」模式。
+
+### 🔧 其他 (Chores & Build)
+
+- **测试孤儿归档**: ``tests/core/test_cron_engine.py`` 与 ``test_cron_smoke.py`` 引用的 ``app.core.engines.cron.*`` 模塊已在某次重构中被删除，整套测试以 ``pytest.skip`` (allow_module_level=True) 形式归档保留，留备未来重新启用 Cron 子系统时复用。
+- **陈旧断言修复**: ``tests/utils/test_default_opencode_provider.py::test_inject_when_empty`` 原断言 ``info["模型列表"] == [...]``，但 ``Settings._ensure_default_opencode_provider()`` 当前实现故意不写此字段（避免空列表让模型选择器显示为空），改为断言字段 *不存在*，并补上文档说明。
+
 ## [v0.4.2] - 2026-07-18
 
 自上一版本以来的变更 | 提交数：49 · 文件变更：82 · +6362/-1046 | 贡献者：dingma (30), mading (20), DriFox Dev (2)

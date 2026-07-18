@@ -499,17 +499,17 @@ class TestDescriptionActiveCount:
 
 
 # ══════════════════════════════════════════════════════════
-# 11. 回归：--load 强制走 QMessageBox 确认（修复 review 问题 2）
+# 11. 回归：--load 强制走 ConfirmDialog 确认（修复 review 问题 2）
 # ══════════════════════════════════════════════════════════
 
 
 class TestLoadConfirmationDialog:
-    """修复说明：_handle_team_load 开头加了 QMessageBox.question 确认。
+    """修复说明：_handle_team_load 开头加了 ConfirmDialog 确认。
 
-    源码静态检查：函数体前 30 行必须出现 QMessageBox.question 调用，且用户选 No 时 return。
+    源码静态检查：使用 ConfirmDialog + _confirmed 回调模式，用户取消时 return。
     """
 
-    def test_handle_team_load_starts_with_qmessagebox(self):
+    def test_handle_team_load_uses_confirm_dialog(self):
         import ast
         import textwrap
 
@@ -524,12 +524,18 @@ class TestLoadConfirmationDialog:
         assert target_func is not None, "未找到 _handle_team_load 方法"
 
         func_src = textwrap.dedent(ast.unparse(target_func))
-        # 必须包含 QMessageBox.question 调用
-        assert "QMessageBox.question" in func_src, "_handle_team_load 缺少 QMessageBox.question 确认弹窗"
-        # 必须在用户选 No 时 return
-        assert "!= QMessageBox.Yes" in func_src, "_handle_team_load 应在用户选 No 时直接 return"
-        # 默认按钮应是 No（防止误触）
-        assert "QMessageBox.No" in func_src, "QMessageBox.question 的 default button 应为 No"
+        # 必须从 common_dialogs 导入 ConfirmDialog
+        assert "from app.widgets.common_dialogs import ConfirmDialog" in func_src, (
+            "_handle_team_load 应从 common_dialogs 导入 ConfirmDialog"
+        )
+        # 必须使用 _confirmed list 回调模式
+        assert "_confirmed" in func_src, "_handle_team_load 应使用 _confirmed 回调变量"
+        # 必须连接 confirmed 信号
+        assert ".confirmed.connect(" in func_src, "_handle_team_load 应连接 confirmed 信号"
+        # 用户取消时必须 return
+        assert "if not _confirmed[0]:" in func_src or "if not _confirmed :" in func_src, (
+            "_handle_team_load 应在用户取消时直接 return"
+        )
 
 
 # ══════════════════════════════════════════════════════════

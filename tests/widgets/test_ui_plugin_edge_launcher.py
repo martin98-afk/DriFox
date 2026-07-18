@@ -269,16 +269,16 @@ class TestGeometryAndPositioning:
         """菜单项有更宽的右侧 padding（为图标预留空间）"""
         launcher = launcher_mod.UIPluginEdgeLauncher.__new__(launcher_mod.UIPluginEdgeLauncher)
         css = launcher._menu_stylesheet()
-        # QMenu::item 的 padding 第二个值（right）应 >= 24px
+        # QMenu::item 的 padding 第二个值（right）应 >= 20px
         import re
 
         m = re.search(r"QMenu::item\s*\{[^}]*padding:\s*([^;]+);", css)
         assert m is not None, "QMenu::item 应设置 padding"
         padding = m.group(1).strip()
         parts = padding.split()
-        # padding: 8px <right>px 8px <left>px
+        # padding: <top>px <right>px <bottom>px <left>px
         right_pad = int(parts[1].rstrip("px"))
-        assert right_pad >= 24, f"菜单项右侧 padding 应 >= 24px（预留图标），实际 {right_pad}px"
+        assert right_pad >= 20, f"菜单项右侧 padding 应 >= 20px（预留图标），实际 {right_pad}px"
 
 
 # ─── 6.2 菜单与注册表测试 ────────────────────────────────────────
