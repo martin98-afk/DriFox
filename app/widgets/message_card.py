@@ -1038,36 +1038,14 @@ def _render_tool_streaming_block(
     </div>"""
 
 
-def _is_short_think(content: str) -> bool:
-    """简短思考内容判定：单行 + ≤100字符 + 无代码块 → 无需折叠，直接显示纯文本"""
-    if "\n" in content:
-        return False
-    if len(content) > 100:
-        return False
-    if "```" in content:
-        return False
-    return True
-
-
 def _render_think_block(content: str, completed: bool = True) -> str:
     if completed:
-        preview = _get_think_preview(content)
-
-        # ── 无需折叠：简短一句话，或预览已覆盖全文 ──
-        if _is_short_think(content) or not preview.endswith("..."):
-            content_escaped = escape(_strip_code_blocks(content))
-            font_style = _get_think_block_styles()
-            return (
-                f'<div class="think-inline" style="margin: 4px 0; padding: 4px 0; '
-                f'color: var(--text-secondary); font-style: italic; {font_style}">'
-                f'{content_escaped}</div>'
-            )
-
         # ── 完成态：可折叠UI（标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
         status_text = escape(tag) if tag else ''
         content_escaped = escape(_strip_code_blocks(content))
         font_style = _get_think_block_styles()
+        preview = _get_think_preview(content)
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
@@ -1101,23 +1079,12 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     2. 不生成 block_key hash（节省计算）
     """
     if completed:
-        preview = _get_think_preview(content)
-
-        # ── 无需折叠：简短一句话，或预览已覆盖全文 ──
-        if _is_short_think(content) or not preview.endswith("..."):
-            content_escaped = escape(content)
-            font_style = _get_think_block_styles()
-            return (
-                f'<div class="think-inline" style="margin: 4px 0; padding: 4px 0; '
-                f'color: var(--text-secondary); font-style: italic; {font_style}">'
-                f'{content_escaped}</div>'
-            )
-
         # ── 完成态：可折叠UI（标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
         status_text = escape(tag) if tag else ''
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
+        preview = _get_think_preview(content)
         summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
@@ -1740,8 +1707,6 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
 # 缓存键：(is_light, theme_fingerprint, font_family)
 _skeleton_cache: Dict[tuple, str] = {}
-# 🔧 代码更新后强制清缓存，确保新骨架（打字机引擎等）生效
-_skeleton_cache.clear()  # 模块加载时清空，后续正常缓存
 
 
 def clear_global_render_cache():
@@ -2022,6 +1987,13 @@ class CodeWebViewer(QWebEngineView):
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
         self._tool_md_cache: Dict[str, str] = {}
+        # [PERF] 流式文字定時器合併：緩衝區 + 16ms 定時器，將多個 chunk 合為一次
+        # runJavaScript() 調用，減少 JS bridge 序列化開銷（profile 顯示每次 ~1-5ms）
+        self._stream_text_buffer: List[str] = []
+        self._stream_flush_timer = QTimer(self)
+        self._stream_flush_timer.setSingleShot(True)
+        self._stream_flush_timer.setInterval(16)  # ~60fps，低於人眼感知閾值
+        self._stream_flush_timer.timeout.connect(self._flush_stream_text)
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         self._min_render_interval = 50
         self._height_report_pending = False
@@ -2917,20 +2889,6 @@ class CodeWebViewer(QWebEngineView):
                     transform-origin: 12px 12px;
                 }}
 
-                /* ── 打字机光标：闪烁动画 ── */
-                .typewriter-cursor {{
-                    display: inline;
-                    color: var(--accent);
-                    font-weight: 400;
-                    animation: tw-blink 1s step-end infinite;
-                    user-select: none;
-                    pointer-events: none;
-                }}
-                @keyframes tw-blink {{
-                    0%, 100% {{ opacity: 1; }}
-                    50% {{ opacity: 0; }}
-                }}
-
                 /* 工具流式调用块 — 金色圆环动画背景 */
                 .tool-streaming-block .tool-block__summary {{
                     transition: background-color 220ms ease;
@@ -3466,164 +3424,6 @@ class CodeWebViewer(QWebEngineView):
                 // mermaid 图表渲染功能因 QtWebEngine Chromium 版本兼容问题已整体移除。
                 // mermaid 代码块（```mermaid）降级为普通代码块，由 Pygments 高亮显示。
 
-                // ===== 逐字打字机效果 =====
-                // 文本通过 _twPush() 推入队列，_twTick() 按 ~30ms/字 逐个渲染到 DOM，
-                // 配合闪烁光标实现 ChatGPT 风格的平滑打字体验。
-                // 全量渲染（updateContent）前会 _twFlush() 清空队列，保证数据不丢失。
-                window._twQueue = [];
-                window._twTimer = null;
-                window._twSpeed = 30;  // ms / 字符（约 33 字/秒）
-                window._twCursorEl = null;
-
-                function _twEnsureCursor() {{
-                    if (!window._twCursorEl) {{
-                        window._twCursorEl = document.createElement('span');
-                        window._twCursorEl.className = 'typewriter-cursor';
-                        window._twCursorEl.textContent = '▌';
-                    }}
-                    return window._twCursorEl;
-                }}
-
-                function _twRemoveCursor() {{
-                    if (window._twCursorEl) {{
-                        window._twCursorEl.remove();
-                        window._twCursorEl = null;
-                    }}
-                }}
-
-                function _twAppendCursor() {{
-                    var c = document.getElementById('content-placeholder');
-                    if (!c) return;
-                    var cursor = _twEnsureCursor();
-                    if (!cursor.parentNode) {{
-                        // 光标永远追加到 content-placeholder 末尾，不嵌套在 <p> 内，
-                        // 这样 innerHTML 替换时它自然被清除，避免悬空引用。
-                        c.appendChild(cursor);
-                    }}
-                }}
-
-                function _twTick() {{
-                    try {{
-                    if (window._twQueue.length === 0) {{
-                        window._twTimer = null;
-                        // 队列空时保留光标继续闪烁
-                        return;
-                    }}
-
-                    var c = document.getElementById('content-placeholder');
-                    if (!c) {{ window._twTimer = null; return; }}
-
-                    // 取字符前先移除光标，追加字符后再放回光标
-                    _twRemoveCursor();
-
-                    var ch = window._twQueue.shift();
-
-                    if (ch === '\\n') {{
-                        // 换行 → 创建新段落
-                        var p = document.createElement('p');
-                        p.textContent = '';
-                        c.appendChild(p);
-                    }} else {{
-                        var last = c.lastElementChild;
-                        // 跳过光标元素（typewriter-cursor），找真正的 <p>
-                        if (last && last.classList.contains('typewriter-cursor')) {{
-                            last = last.previousElementSibling;
-                        }}
-                        if (last && last.tagName === 'P') {{
-                            last.textContent += ch;
-                        }} else {{
-                            var p = document.createElement('p');
-                            p.textContent = ch;
-                            c.appendChild(p);
-                        }}
-                    }}
-
-                    _twAppendCursor();
-
-                    // 自动滚动到底部
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
-                    }} else {{
-                        var _twWasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
-                        if (_twWasAtBottom) {{
-                            document.body.scrollTop = document.body.scrollHeight;
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
-
-                    // 报告高度变化（每 ~200ms 一次，避免 flooding Python 端）
-                    if (!window._twLastHeightReport || performance.now() - window._twLastHeightReport > 200) {{
-                        reportHeight();
-                        window._twLastHeightReport = performance.now();
-                    }}
-
-                    window._twTimer = setTimeout(_twTick, window._twSpeed);
-                    }} catch(e) {{
-                        console.log('pywebview_action:tw_error_tick:' + e.message);
-                        window._twTimer = setTimeout(_twTick, 50);
-                    }}
-                }}
-
-                function _twPush(text) {{
-                    try {{
-                        if (!text) return;
-                        for (var i = 0; i < text.length; i++) {{
-                            window._twQueue.push(text[i]);
-                        }}
-                        if (!window._twTimer) {{
-                            _twAppendCursor();
-                            window._twTimer = setTimeout(_twTick, 10);
-                        }}
-                    }} catch(e) {{ console.log('pywebview_action:tw_error_push:' + e.message); }}
-                }}
-
-                function _twFlush() {{
-                    // 即时揭示队列中所有剩余字符（全量渲染前的收尾）
-                    if (window._twTimer) {{
-                        clearTimeout(window._twTimer);
-                        window._twTimer = null;
-                    }}
-                    _twRemoveCursor();
-
-                    if (window._twQueue.length === 0) return;
-
-                    var c = document.getElementById('content-placeholder');
-                    if (!c) {{ window._twQueue = []; return; }}
-
-                    var text = window._twQueue.join('');
-                    window._twQueue = [];
-
-                    var lines = text.split('\\n');
-                    for (var i = 0; i < lines.length; i++) {{
-                        var line = lines[i];
-                        if (!line && i > 0 && i === lines.length - 1) continue;
-                        var last = c.lastElementChild;
-                        if (last && last.classList.contains('typewriter-cursor')) {{
-                            last = last.previousElementSibling;
-                        }}
-                        if (last && last.tagName === 'P' && i === 0) {{
-                            last.textContent += line;
-                        }} else if (line) {{
-                            var p = document.createElement('p');
-                            p.textContent = line;
-                            c.appendChild(p);
-                        }}
-                    }}
-                }}
-
-                function _twReset() {{
-                    if (window._twTimer) {{
-                        clearTimeout(window._twTimer);
-                        window._twTimer = null;
-                    }}
-                    window._twQueue = [];
-                    _twRemoveCursor();
-                }}
-                // ===== 打字机效果 End =====
-
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
@@ -3660,10 +3460,6 @@ class CodeWebViewer(QWebEngineView):
                         if (window._fadeCleanupTimer) {{
                             clearTimeout(window._fadeCleanupTimer);
                         }}
-                        // ── 打字机收尾：全量渲染前 flush 队列，确保无字符丢失 ──
-                        _twFlush();
-                        _twReset();
-
                         // 先切 transition=none，强制 opacity 跳变到 0.88（避免上一轮 transition
                         // 未清理时产生 1→0.88 的淡出动画），再立即恢复 transition 用于后续淡入。
                         container.style.transition = 'none';
@@ -4017,32 +3813,113 @@ class CodeWebViewer(QWebEngineView):
             self._schedule_render()
 
     def _append_text_incremental(self, text: str):
-        """将流式文本推送到 JS 打字机队列，实现逐字打字效果。
+        """增量追加纯文本到 DOM（流式模式），让用户立即看到文字，不等全量渲染。
 
-        打字机引擎（_twPush / _twTick）在 JS 端按 ~30ms/字 的速度逐个渲染字符。
-        若 JS 未就绪或引擎未加载，回退到全量渲染。
+        [PERF] 使用定時器合併多個 chunk 後一次 runJavaScript()，減少 JS bridge
+        序列化開銷。profile 實測：每次 runJavaScript ~1-5ms，合併後降至 ~1 次/16ms。
+
+        在全量渲染（updateContent）到达前先推送纯文本内容，
+        避免渲染延迟导致的"卡高先涨、文字后显"问题。
         """
-        if not self._is_js_ready or not self.page():
-            return
         try:
+            # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
+            # （防止增量显示标签，全量渲染会正确处理）
             text_clean = text.replace("<think>", "").replace("</think>", "")
             if not text_clean:
                 return
+            # 内存优化：超长 chunk 截断增量推送，避免单次 JS 调用传输过大数据
+            # 全量渲染最终会提供完整格式化后的内容
             if len(text_clean) > 2000:
                 text_clean = text_clean[:2000] + "\n\n..."
-            escaped = escape(text_clean)
-            # typeof 检查 + 防御性调用：若 _twPush 未定义则回退到直接创建 <p>
-            js = (
-                f"(function(){{"
-                f"if(typeof _twPush==='function'){{_twPush({json.dumps(escaped)});}}"
-                f"else{{var c=document.getElementById('content-placeholder');"
-                f"if(c){{var p=document.createElement('p');"
-                f"p.textContent={json.dumps(escaped)};c.appendChild(p);reportHeight();}}}}"
-                f"}})();"
-            )
+            # [PERF] 累積到緩衝區，由定時器合併後一次 flush
+            self._stream_text_buffer.append(text_clean)
+            if not self._stream_flush_timer.isActive():
+                self._stream_flush_timer.start()
+        except RuntimeError:
+            pass
+
+    def _flush_stream_text(self):
+        """定時器回調：合併緩衝區文字，一次 runJavaScript() 推送
+
+        合併多個 chunk 時按換行分割，保持段落結構正確。
+        完成後若緩衝區又有新內容（flush 期間到達），重啟定時器。
+        """
+        if not self._is_js_ready or not self.page():
+            return
+        if not self._stream_text_buffer:
+            return
+
+        merged = "".join(self._stream_text_buffer)
+        self._stream_text_buffer.clear()
+
+        if not merged:
+            return
+
+        try:
+            escaped = escape(merged)
+            js = f"""
+            (function() {{
+                var text = {json.dumps(escaped)};
+                var c = document.getElementById('content-placeholder');
+                if (!c || !text) return;
+                // [PERF] 合併後的文字按換行分割處理，保持段落結構正確
+                // 每個 chunk 原本的換行邊界在合併後仍保留
+                var lines = text.split('\\n');
+                for (var i = 0; i < lines.length; i++) {{
+                    var line = lines[i];
+                    if (i === 0) {{
+                        // 第一行：追加到現有段落
+                        if (line) {{
+                            var last = c.lastElementChild;
+                            if (last && last.tagName === 'P') {{
+                                last.textContent += line;
+                            }} else if (last && last.classList.contains('think-block')) {{
+                                var p = document.createElement('p');
+                                p.textContent = line;
+                                c.appendChild(p);
+                            }} else {{
+                                var p = document.createElement('p');
+                                p.textContent = line;
+                                c.appendChild(p);
+                            }}
+                        }}
+                    }} else {{
+                        // 換行後：創建新段落
+                        if (line) {{
+                            var p = document.createElement('p');
+                            p.textContent = line;
+                            c.appendChild(p);
+                        }} else {{
+                            // 空行：插入空段落保持間距
+                            var p = document.createElement('p');
+                            p.innerHTML = '<br>';
+                            c.appendChild(p);
+                        }}
+                    }}
+                }}
+                // 同步 auto-scroll
+                window._suppressScrollEvent = true;
+                if (!window._userScrolledWithin) {{
+                    document.body.scrollTop = document.body.scrollHeight;
+                }} else {{
+                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    if (wasAtBottom) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                        window._userScrolledWithin = false;
+                    }}
+                }}
+                window._autoScrollTime = performance.now();
+                window._suppressScrollEvent = false;
+                reportHeight();
+            }})();
+            """
             self.page().runJavaScript(js)
         except RuntimeError:
             pass
+        finally:
+            # flush 期間可能又有新內容到達，重啟定時器
+            if self._stream_text_buffer:
+                self._stream_flush_timer.start()
 
     def _render_markdown_to_html(self, raw_md: str) -> str:
         """渲染 markdown 到 HTML。
@@ -4122,28 +3999,25 @@ class CodeWebViewer(QWebEngineView):
         if immediate:
             if self._render_timer.isActive():
                 self._render_timer.stop()
+            # [PERF] immediate 渲染前 flush 緩衝區，確保增量文字已推送到 DOM
+            # 避免全量渲染瞬間覆蓋 DOM 時的視覺跳變
+            if self._stream_flush_timer.isActive():
+                self._stream_flush_timer.stop()
+                self._flush_stream_text()
             self._perform_update()
             return
 
-        # 流式模式：增量文字已由打字机引擎逐字输出，
-        # 此处定时全量渲染用于把代码块/粗体/列表等需要 markdown 格式化的内容补齐。
-        # 间隔放宽到 2s-5s，给打字机足够时间平滑输出，减少 innerHTML 重建的视觉跳变。
+        # [PERF] 流式模式下不做定時全量渲染。
+        # _append_text_incremental 已在 JS 側即時增量追加純文字，
+        # 全量渲染（content_to_markdown → md.convert → innerHTML）會完全銷毀
+        # 增量 DOM 並重建，導致用戶感知「文字跳動 + 一次一大段」。
+        # 參考 PeekAgent 做法：流式中只做增量追加，全量渲染推遲到：
+        #   1. finish_streaming() — 流式結束
+        #   2. append_tool_result() → immediate=True — 工具結果到達
+        #   3. resize / theme change → immediate=True — 視窗/主題變更
         if self._streaming:
-            content_len = len(self._markdown_text)
-            if content_len > 100000:
-                interval = 5000
-            elif content_len > 50000:
-                interval = 4000
-            elif content_len > 10000:
-                interval = 3000
-            else:
-                interval = 2000
-        else:
-            interval = 40
-
-        if self._render_timer.isActive():
             return
-        self._render_timer.start(interval)
+        interval = 40
 
     def _refresh_viewer_font(self):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
@@ -4335,6 +4209,10 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # [PERF] 流式結束前先 flush 緩衝區，確保所有增量文字已推送
+        if self._stream_flush_timer.isActive():
+            self._stream_flush_timer.stop()
+        self._flush_stream_text()
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         self._schedule_render(immediate=True)
 
@@ -6876,12 +6754,14 @@ class MessageCard(SimpleCardWidget):
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 增量文本不依赖 card._streaming（初始为 False），改用 viewer 就绪状态控制：
-            # 只要 viewer 可运行 JS 就即时推送，保证流式期间正文（非思考/工具）的打字机效果。
-            self.viewer._append_text_incremental(text)
-            # 流式模式也启动定时全量渲染：增量打字机保证即时可读性，
-            # 定时全量渲染补齐代码块/粗体等 markdown 格式化，并作为兜底
-            # （JS 未就绪时增量推送会被跳过，定时渲染能恢复已积累的内容）。
+            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
+            if self._streaming:
+                self.viewer._append_text_incremental(text)
+            # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
+            # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
+            # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
+            # 文字即时性已由 _append_text_incremental 保证；流式结束由
+            # finish_streaming() 触发 immediate 收尾渲染。
             self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return

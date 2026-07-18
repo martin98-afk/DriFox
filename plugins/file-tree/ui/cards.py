@@ -149,6 +149,29 @@ def _should_show(name: str, is_dir: bool) -> bool:
     return True
 
 
+def _parse_theme_color(color_str: str) -> QColor:
+    """解析主题色字符串为 QColor
+
+    支持格式：'#RRGGBB'、'#RGB'、'rgb(r,g,b)'、'rgba(r,g,b,a)'。
+    PyQt5 的 QColor(str) 构造器无法解析 CSS rgba() 格式，
+    所以需要手动解析。
+    """
+    import re
+
+    if not color_str:
+        return QColor(33, 33, 38)
+    # rgba(r,g,b,a) — a 为 0~255 整数
+    m = re.match(r"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
+    if m:
+        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    # rgb(r,g,b)
+    m = re.match(r"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", color_str)
+    if m:
+        return QColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # #hex 或其他标准格式 — QColor 原生可解析
+    return QColor(color_str)
+
+
 def _make_colors_from_context(ctx: dict) -> dict:
     """将 context 主题色映射为可用的颜色字典
 
@@ -164,19 +187,19 @@ def _make_colors_from_context(ctx: dict) -> dict:
     def _qcolor(key: str, fallback_light: str, fallback_dark: str) -> QColor:
         val = raw.get(key, "")
         if val:
-            return QColor(val)
+            return _parse_theme_color(val)
         return QColor(fallback_dark if is_dark else fallback_light)
 
     accent = _qcolor("accent", "#2878dc", "#62a0ea")
     border = _qcolor("border", "#cccccc80", "#ffffff1e")
-    bg = ctx.get("card_bg", None)
+    bg = ctx.get("card_bg", None) or ctx.get("colors", {}).get("card_bg", None)
 
     return {
         "accent": accent,
         "border": border,
         "text": _qcolor("text_primary", "#000000", "#ffffff"),
         "text_secondary": _qcolor("text_secondary", "#666666", "#aaaaaa"),
-        "card_bg": QColor(bg) if bg else QColor(0, 0, 0, 0),
+        "card_bg": _parse_theme_color(bg) if bg else QColor(33, 33, 38),
         "is_dark": is_dark,
         "font_family": ctx.get("font_family", "Microsoft YaHei"),
         "font_size": ctx.get("font_size", 14),
@@ -508,16 +531,10 @@ class FileTreeWidget(QTreeWidget):
     ) -> int:
         """创建适配主题色的消息框
 
-        直接通过 findChildren 设置按钮样式，避免 QSS 选择器优先级被全局样式覆盖。
+        设计：不在 QDialog 本身上设背景（Windows 原生窗口边框不可控），
+        而是用内层 QWidget 承接所有内容和背景色——这是 qfluentwidgets 的通用模式。
         颜色取自 FileTreeCard 上下文主题色。
         """
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(icon)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(text)
-        msg_box.setStandardButtons(buttons)
-        msg_box.setDefaultButton(default_button)
-
         # ── 从 card 上下文获取主题色 ──
         if self._tree_card is not None:
             colors = self._tree_card._colors
@@ -540,84 +557,71 @@ class FileTreeWidget(QTreeWidget):
             border = QColor(61, 61, 61)
             font_size = 14
 
-        # QMessageBox 在 Windows 上使用原生渲染，QSS 背景色无效
-        # → 改用自定义 QDialog 完全控制样式
+        # ── 窗口：仅有标题栏 + 关闭按钮 ──
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.setFixedSize(420, 200)
         dlg.setObjectName("file-tree-dialog")
+        dlg.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
 
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        # ── 客户端容器（撑满标题栏以下区域，承载背景色） ──
+        client = QWidget(dlg)
+        client.setObjectName("file-tree-dialog-client")
+        client.setStyleSheet(f"#file-tree-dialog-client {{  background-color: {bg.name()};}}")
 
-        # 消息文字
-        msg_label = QLabel(text, dlg)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(client)
+
+        inner = QVBoxLayout(client)
+        inner.setContentsMargins(24, 20, 24, 20)
+        inner.setSpacing(16)
+
+        # ── 消息文字 ──
+        msg_label = QLabel(text, client)
         msg_label.setWordWrap(True)
+        msg_label.setStyleSheet(f"color: {tc.name()};background: transparent;font-size: {font_size - 1}px;")
+        inner.addWidget(msg_label)
 
-        # 按钮区域
+        # ── 按钮行 ──
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
         btn_layout.addStretch()
 
-        # 确定按钮
-        yes_btn = QPushButton("确定", dlg)
-        no_btn = QPushButton("取消", dlg)
-
-        # 根据 buttons 参数决定显示哪些按钮
         btn_map = {
             QMessageBox.Ok: ("确定", QMessageBox.Ok),
             QMessageBox.Yes: ("是", QMessageBox.Yes),
             QMessageBox.No: ("否", QMessageBox.No),
             QMessageBox.Cancel: ("取消", QMessageBox.Cancel),
         }
-        shown_btns: List[QPushButton] = []
-        result_code = [QMessageBox.No]  # 闭包捕获
+        result_code = [QMessageBox.No]
+
+        btn_style = (
+            f"background-color: #3a3a3a;"
+            f"color: {tc.name()};"
+            f"border: 1px solid {border.name()};"
+            f"border-radius: 5px;"
+            f"padding: 6px 24px;"
+            f"min-width: 80px;"
+            f"min-height: 30px;"
+            f"font-size: {font_size - 2}px;"
+        )
+        btn_hover = f"background-color: {accent.name()};color: #ffffff;border: 1px solid {accent.name()};"
 
         for std_btn, (label_text, code) in btn_map.items():
             if buttons & std_btn:
-                btn = QPushButton(label_text, dlg)
+                btn = QPushButton(label_text, client)
+                btn.setStyleSheet(f"QPushButton {{ {btn_style} }}QPushButton:hover {{ {btn_hover} }}")
                 btn.clicked.connect(lambda checked, c=code: [result_code.__setitem__(0, c), dlg.accept()])
                 if std_btn == default_button:
                     btn.setDefault(True)
                     btn.setFocus()
-                shown_btns.append(btn)
                 btn_layout.addWidget(btn)
 
-        layout.addWidget(msg_label)
-        layout.addLayout(btn_layout)
-
-        # ── 应用主题色 ──
-        dlg.setStyleSheet(
-            f"#file-tree-dialog {{"
-            f"  background-color: {bg.name()};"
-            f"  color: {tc.name()};"
-            f"}}"
-            f"#file-tree-dialog QLabel {{"
-            f"  color: {tc.name()};"
-            f"  font-size: {font_size - 1}px;"
-            f"}}"
-            f"#file-tree-dialog QPushButton {{"
-            f"  background-color: #3a3a3a;"
-            f"  color: {tc.name()};"
-            f"  border: 1px solid {border.name()};"
-            f"  border-radius: 5px;"
-            f"  padding: 6px 24px;"
-            f"  min-width: 80px;"
-            f"  min-height: 30px;"
-            f"  font-size: {font_size - 2}px;"
-            f"}}"
-            f"#file-tree-dialog QPushButton:hover {{"
-            f"  background-color: {accent.name()};"
-            f"  color: #ffffff;"
-            f"  border: 1px solid {accent.name()};"
-            f"}}"
-        )
+        inner.addLayout(btn_layout)
 
         dlg.exec_()
         return result_code[0]
-
-        return msg_box.exec_()
 
     def dropEvent(self, event):
         """处理拖放事件：内部拖放执行文件移动，外部拖放忽略"""
