@@ -1292,9 +1292,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 判断是否为复制/分支窗口（__init__ 中通过 source_window 参数设置）
         is_duplicate = getattr(self, "_is_duplicate_window", False)
 
-        # 使用 _safe_timer_call 包装所有异步回调，在 widget 销毁后自动跳过
-        QTimer.singleShot(0, lambda: self._safe_timer_call(self._load_agent_list))
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
+        # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
         if getattr(self, "_branch_session_data", None):
             QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
         else:
@@ -1549,6 +1548,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 记录分支所属项目(走 metadata 而非新增字段,保持核心数据模型不变)
         session.metadata["project"] = self._current_project
         self._current_session_id = session.session_id
+        self._load_agent_list()
 
         # 清空聊天区域
         self._clear_chat_area()
