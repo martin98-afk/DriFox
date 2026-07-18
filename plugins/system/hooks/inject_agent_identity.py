@@ -21,4 +21,4 @@ def hook(event: str, context: dict) -> str:
     Returns:
         预取好的智能体身份内容字符串，或空字符串
     """
-    return context.get("agent_identity_content", "")
+    return "当前智能体身份：" + context.get("agent_identity_content", "")
