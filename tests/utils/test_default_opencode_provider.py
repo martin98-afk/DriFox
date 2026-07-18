@@ -42,7 +42,15 @@ def _find_opencode_config(saved_providers):
 
 
 def test_inject_when_empty():
-    """空配置时应自动注入 OpenCode 默认配置。"""
+    """空配置时应自动注入 OpenCode 默认配置。
+
+    注意（2026-07-18 測試體系整改）：
+        ``Settings._ensure_default_opencode_provider()`` 当前实现**故意不写**
+        ``"模型列表"`` 字段——空列表会让模型选择器显示为空。
+        不写此键时回退到 ``merged_provider_models``（硬编码 + models.dev +
+        异步刷新），异步刷新完成后再写入实际列表。
+        因此本测试断言 ``info["模型列表"]`` *不* 出现，而非枚举具体值。
+    """
     instance = _FakeInstance(saved_providers={}, injected=False)
     Settings._ensure_default_opencode_provider(instance)
 
@@ -55,12 +63,8 @@ def test_inject_when_empty():
     assert info["API_URL"] == "https://opencode.ai/zen/v1"
     assert info["模型名称"] == "deepseek-v4-flash-free"
     assert info["API_KEY"] == OPENCODE_SHARED_API_KEY
-    assert info["模型列表"] == [
-        "deepseek-v4-flash-free",
-        "mimo-v2.5-free",
-        "nemotron-3-ultra-free",
-        "north-mini-code-free",
-    ]
+    # 模型列表字段被故意省略（由异步刷新回填，见上方说明）
+    assert "模型列表" not in info, f"info 应不含「模型列表」键，实际为 {list(info.get('模型列表', []))!r}"
     assert "config_id" in info
 
 
