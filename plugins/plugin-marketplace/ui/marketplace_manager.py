@@ -168,7 +168,10 @@ class MarketplaceSourceManager:
                     "_error": f"Unsupported source: {src_type}",
                 }
         except Exception as e:
-            logger.error(f"[Marketplace] 拉取市场 {name} 失败: {e}")
+            if name == "__tmp__":
+                logger.debug(f"[Marketplace] 验证拉取市场失败 (预期内): {e}")
+            else:
+                logger.error(f"[Marketplace] 拉取市场 {name} 失败: {e}")
             if cache_file.exists():
                 try:
                     return json.loads(cache_file.read_text(encoding="utf-8"))

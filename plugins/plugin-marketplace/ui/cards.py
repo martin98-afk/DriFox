@@ -942,6 +942,10 @@ class MarketplaceCard(QWidget):
         mgr.add_source(market_name, source, auto_update=False)
         self._market_url_edit.clear()
         self._build_markets_page()
+        self._status_label.setText(f"已添加 {market_name}")
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
 
     def _on_remove_marketplace(self, name: str):
         """移除市场源"""
