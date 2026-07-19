@@ -639,7 +639,7 @@ class MarketplaceCard(QWidget):
         """在后台线程拉取市场数据"""
         self._set_loading(True)
         self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
+        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
