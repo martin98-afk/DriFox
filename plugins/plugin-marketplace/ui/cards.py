@@ -26,6 +26,8 @@ from qfluentwidgets import (
     FluentIcon,
     FluentLabelBase,
     IconWidget,
+    InfoBar,
+    InfoBarPosition,
     LineEdit,
     PushButton,
     ScrollArea,
@@ -809,14 +811,25 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("")
         if success:
             self._update_row_state(name, installed=True)
+            InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=self)
         else:
             self._update_row_state(name, installed=False, error=True)
+            InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=self)
 
     def _on_install_error(self, name: str, err: str):
         """安装出错"""
         self._status_label.setText("安装失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=False, error=True)
+        # 提取简洁错误信息
+        import re as _re
+        msg = err
+        m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
+        if m:
+            msg = m.group(0)[:120]
+        elif len(err) > 120:
+            msg = err[:120] + "..."
+        InfoBar.error(f"{name} 安装失败", msg, duration=5000, parent=self)
 
     # ── 异步更新 ────────────────────────────────────────
 
@@ -841,19 +854,28 @@ class MarketplaceCard(QWidget):
         self._worker_thread.start()
 
     def _on_update_done(self, name: str, success: bool):
-        """更新完成 — 刷新列表确保版本信息正确"""
+        """更新完成"""
         self._status_label.setText("")
         if success:
-            # 重新渲染整个列表以刷新版本显示（v旧版→v新版 → 变为已安装）
             self._render_plugins(self._plugin_data)
+            InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=self)
         else:
             self._update_row_state(name, installed=True, error=True)
+            InfoBar.error(f"{name} 更新失败", "请检查网络或插件源", duration=3000, parent=self)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=True, error=True)
+        import re as _re
+        msg = err
+        m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
+        if m:
+            msg = m.group(0)[:120]
+        elif len(err) > 120:
+            msg = err[:120] + "..."
+        InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=self)
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态
