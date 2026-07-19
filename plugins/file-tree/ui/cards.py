@@ -39,7 +39,6 @@ from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QDialog,
     QFileIconProvider,
     QFrame,
     QHBoxLayout,
@@ -56,8 +55,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
     FluentIcon,
     IconWidget,
+    MaskDialogBase,
     ScrollArea,
     StrongBodyLabel,
     ToolButton,
@@ -529,11 +530,9 @@ class FileTreeWidget(QTreeWidget):
         buttons: QMessageBox.StandardButtons = QMessageBox.Yes | QMessageBox.No,
         default_button: QMessageBox.StandardButton = QMessageBox.No,
     ) -> int:
-        """创建适配主题色的消息框
+        """创建适配主题色的消息框 — 统一 MaskDialogBase 风格
 
-        设计：不在 QDialog 本身上设背景（Windows 原生窗口边框不可控），
-        而是用内层 QWidget 承接所有内容和背景色——这是 qfluentwidgets 的通用模式。
-        颜色取自 FileTreeCard 上下文主题色。
+        参考 app/widgets/common_dialogs.py 的 ConfirmDialog 实现。
         """
         # ── 从 card 上下文获取主题色 ──
         if self._tree_card is not None:
@@ -544,84 +543,175 @@ class FileTreeWidget(QTreeWidget):
                 accent = colors.get("accent", QColor(102, 198, 255))
                 border = colors.get("border", QColor(61, 61, 61))
                 font_size = colors.get("font_size", 14)
+                ff = colors.get("font_family", "Microsoft YaHei")
+                is_dark = colors.get("is_dark", True)
             else:
                 bg = QColor(33, 33, 38)
                 tc = QColor(255, 255, 255)
                 accent = QColor(102, 198, 255)
                 border = QColor(61, 61, 61)
                 font_size = 14
+                ff = "Microsoft YaHei"
+                is_dark = True
         else:
             bg = QColor(33, 33, 38)
             tc = QColor(255, 255, 255)
             accent = QColor(102, 198, 255)
             border = QColor(61, 61, 61)
             font_size = 14
+            ff = "Microsoft YaHei"
+            is_dark = True
 
-        # ── 窗口：仅有标题栏 + 关闭按钮 ──
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        dlg.setFixedSize(420, 200)
-        dlg.setObjectName("file-tree-dialog")
-        dlg.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        # hover_bg: card_bg 基础上微调亮度
+        hover_bg = bg.lighter(115) if is_dark else bg.darker(110)
 
-        # ── 客户端容器（撑满标题栏以下区域，承载背景色） ──
-        client = QWidget(dlg)
-        client.setObjectName("file-tree-dialog-client")
-        client.setStyleSheet(f"#file-tree-dialog-client {{  background-color: {bg.name()};}}")
+        # ── 确定按钮集 ──
+        has_yes = bool(buttons & QMessageBox.Yes)
+        has_no = bool(buttons & QMessageBox.No)
+        has_ok = bool(buttons & QMessageBox.Ok)
+        has_cancel = bool(buttons & QMessageBox.Cancel)
 
-        outer = QVBoxLayout(dlg)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(client)
+        # ── 构建 MaskDialogBase 弹窗 ──
+        class _Dialog(MaskDialogBase):
+            def __init__(self, parent_widget):
+                super().__init__(parent_widget)
+                self._result = QMessageBox.No
+                self._setup()
 
-        inner = QVBoxLayout(client)
-        inner.setContentsMargins(24, 20, 24, 20)
-        inner.setSpacing(16)
+            def _setup(self):
+                self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+                self.setClosableOnMaskClicked(True)
+                self.setDraggable(True)
+                self.setMaskColor(QColor(0, 0, 0, 76))
 
-        # ── 消息文字 ──
-        msg_label = QLabel(text, client)
-        msg_label.setWordWrap(True)
-        msg_label.setStyleSheet(f"color: {tc.name()};background: transparent;font-size: {font_size - 1}px;")
-        inner.addWidget(msg_label)
+                self.widget.setObjectName("fileTreeStyledDialog")
+                self.widget.setStyleSheet(f"""
+                    #fileTreeStyledDialog {{
+                        background-color: {bg.name()};
+                        border: 1px solid {border.name()};
+                        border-radius: 8px;
+                    }}
+                """)
 
-        # ── 按钮行 ──
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
-        btn_layout.addStretch()
+                layout = QVBoxLayout(self.widget)
+                layout.setContentsMargins(28, 28, 28, 20)
+                layout.setSpacing(0)
 
-        btn_map = {
-            QMessageBox.Ok: ("确定", QMessageBox.Ok),
-            QMessageBox.Yes: ("是", QMessageBox.Yes),
-            QMessageBox.No: ("否", QMessageBox.No),
-            QMessageBox.Cancel: ("取消", QMessageBox.Cancel),
-        }
-        result_code = [QMessageBox.No]
+                # ── 标题 ──
+                title_lb = BodyLabel(title, self.widget)
+                title_lb.setWordWrap(True)
+                title_lb.setStyleSheet(
+                    f"color: {tc.name()}; background: transparent; "
+                    f"font-family: '{ff}';"
+                    f"font-size: {font_size + 2}px; font-weight: bold;"
+                )
+                layout.addWidget(title_lb)
 
-        btn_style = (
-            f"background-color: #3a3a3a;"
-            f"color: {tc.name()};"
-            f"border: 1px solid {border.name()};"
-            f"border-radius: 5px;"
-            f"padding: 6px 24px;"
-            f"min-width: 80px;"
-            f"min-height: 30px;"
-            f"font-size: {font_size - 2}px;"
-        )
-        btn_hover = f"background-color: {accent.name()};color: #ffffff;border: 1px solid {accent.name()};"
+                layout.addSpacing(12)
 
-        for std_btn, (label_text, code) in btn_map.items():
-            if buttons & std_btn:
-                btn = QPushButton(label_text, client)
-                btn.setStyleSheet(f"QPushButton {{ {btn_style} }}QPushButton:hover {{ {btn_hover} }}")
-                btn.clicked.connect(lambda checked, c=code: [result_code.__setitem__(0, c), dlg.accept()])
-                if std_btn == default_button:
-                    btn.setDefault(True)
-                    btn.setFocus()
-                btn_layout.addWidget(btn)
+                # ── 内容 ──
+                content_lb = BodyLabel(text, self.widget)
+                content_lb.setWordWrap(True)
+                content_lb.setStyleSheet(
+                    f"color: {tc.name()}; background: transparent; "
+                    f"font-family: '{ff}';"
+                    f"font-size: {font_size - 1}px; line-height: 1.6;"
+                )
+                layout.addWidget(content_lb)
 
-        inner.addLayout(btn_layout)
+                layout.addStretch()
 
-        dlg.exec_()
-        return result_code[0]
+                # ── 按钮行 ──
+                btn_layout = QHBoxLayout()
+                btn_layout.setSpacing(10)
+
+                def _make_btn(label_text: str, result_code, is_default: bool, is_primary: bool):
+                    btn = QPushButton(label_text, self.widget)
+                    btn.setCursor(Qt.PointingHandCursor)
+                    btn.setFixedHeight(36)
+                    if is_primary:
+                        # 主要按钮（accent 填充）
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: {accent.name()};
+                                color: #ffffff;
+                                border: none;
+                                border-radius: 8px;
+                                padding: 4px 28px;
+                                font-family: '{ff}';
+                                font-size: {font_size - 1}px;
+                                font-weight: bold;
+                            }}
+                            QPushButton:hover {{
+                                background-color: {accent.name()};
+                            }}
+                        """)
+                    else:
+                        # 次要按钮（有边框）
+                        btn.setStyleSheet(f"""
+                            QPushButton {{
+                                background-color: {bg.name()};
+                                color: {tc.name()};
+                                border: 1px solid {border.name()};
+                                border-radius: 8px;
+                                padding: 4px 28px;
+                                font-family: '{ff}';
+                                font-size: {font_size - 1}px;
+                            }}
+                            QPushButton:hover {{
+                                background-color: {hover_bg.name()};
+                                border-color: {accent.name()};
+                            }}
+                        """)
+                    if is_default:
+                        btn.setDefault(True)
+                        btn.setFocus()
+                    btn.clicked.connect(lambda: [setattr(self, "_result", result_code), self.close()])
+                    return btn
+
+                btn_layout.addStretch()
+
+                # Windows 惯例：否定在左，肯定在右
+                if has_ok:
+                    # 单按钮「确定」→ 主要按钮
+                    btn_layout.addWidget(_make_btn("确定", QMessageBox.Ok, True, True))
+                else:
+                    if has_no:
+                        btn_layout.addWidget(
+                            _make_btn(
+                                "否",
+                                QMessageBox.No,
+                                default_button == QMessageBox.No,
+                                False,
+                            )
+                        )
+                    if has_yes:
+                        btn_layout.addWidget(
+                            _make_btn(
+                                "是",
+                                QMessageBox.Yes,
+                                default_button == QMessageBox.Yes,
+                                True,
+                            )
+                        )
+                    if has_cancel:
+                        btn_layout.addWidget(
+                            _make_btn(
+                                "取消",
+                                QMessageBox.Cancel,
+                                default_button == QMessageBox.Cancel,
+                                False,
+                            )
+                        )
+
+                layout.addLayout(btn_layout)
+
+                # 高度自适应内容
+                self.widget.setFixedSize(400, 200)
+
+        dialog = _Dialog(self.window())
+        dialog.exec_()
+        return dialog._result
 
     def dropEvent(self, event):
         """处理拖放事件：内部拖放执行文件移动，外部拖放忽略"""
