@@ -7,7 +7,6 @@
 - 内存读取通过 psutil 完成
 """
 
-import gc
 import time
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
@@ -42,6 +41,7 @@ from .scanner import (
     _drifox_dir,
     _format_size,
     _get_process_memory,
+    _release_memory,
 )
 
 
@@ -558,32 +558,17 @@ class SystemCleanerCard(QWidget):
     # ── ⚡ 内存释放 ──
 
     def _on_memory_release(self):
+        """深度释放进程内存并归还给操作系统。"""
         if self._is_releasing_mem:
             return
 
         self._is_releasing_mem = True
         self._mem_release_btn.setEnabled(False)
         self._mem_release_btn.setText("⚡ 释放中…")
-        self._set_status("释放内存中…")
+        self._set_status("深度清理内存中…")
 
-        mem_before = _get_process_memory()
-        self._release_internal_caches()
+        mem_before, mem_after, collected = _release_memory()
 
-        collected = 0
-        for _ in range(3):
-            collected += gc.collect()
-
-        try:
-            from PyQt5.QtWidgets import QApplication
-
-            app = QApplication.instance()
-            if app:
-                app.sendPostedEvents()
-        except Exception:
-            pass
-
-        collected += gc.collect()
-        mem_after = _get_process_memory()
         freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -606,21 +591,6 @@ class SystemCleanerCard(QWidget):
     def _reset_mem_release_btn(self):
         if not self._is_releasing_mem:
             self._mem_release_btn.setText("⚡ 释放内存")
-
-    def _release_internal_caches(self):
-        try:
-            from PyQt5.QtGui import QPixmapCache
-
-            QPixmapCache.clear()
-        except Exception:
-            pass
-
-        try:
-            import importlib
-
-            importlib.invalidate_caches()
-        except Exception:
-            pass
 
     # ── 内存 ──
 

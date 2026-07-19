@@ -298,9 +298,16 @@ class _CommandRow(QFrame):
             " border-radius: 8px; padding: 0px; }"
             "#cmdRow:hover { background: rgba(128,128,128,0.05); }"
         )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(8)
+
+        # 垂直主布局：上行=名称+快捷键+按钮，下行=描述
+        vly = QVBoxLayout(self)
+        vly.setContentsMargins(12, 6, 12, 6)
+        vly.setSpacing(2)
+
+        # ── 上行 ──
+        hly = QHBoxLayout()
+        hly.setContentsMargins(0, 0, 0, 0)
+        hly.setSpacing(8)
 
         # 命令名
         name_text = f"/{self._cmd_name}"
@@ -312,22 +319,9 @@ class _CommandRow(QFrame):
         name_lb.setMinimumWidth(140)
         if self._is_customized:
             name_lb.setToolTip("已自定义（原系统命令被覆盖）")
-        layout.addWidget(name_lb)
+        hly.addWidget(name_lb)
 
-        # 类型标签
-        badge_label = "插件" if self._is_plugin else "系统"
-        badge_color = "rgba(66,133,244,0.8)" if self._is_plugin else _text_color(True)
-        badge = QLabel(badge_label, self)
-        badge.setObjectName("cmdRowBadge")
-        badge.setFixedHeight(18)
-        badge.setStyleSheet(
-            f"color: {badge_color}; font-size: 10px; background: rgba(128,128,128,0.1);"
-            f" border-radius: 4px; padding: 0 6px;"
-        )
-        badge.setAlignment(Qt.AlignCenter)
-        layout.addWidget(badge)
-
-        layout.addStretch(1)
+        hly.addStretch(1)
 
         # 快捷键
         if self._shortcut:
@@ -347,7 +341,7 @@ class _CommandRow(QFrame):
             )
         shortcut_lb.setAlignment(Qt.AlignCenter)
         shortcut_lb.setMinimumWidth(60)
-        layout.addWidget(shortcut_lb)
+        hly.addWidget(shortcut_lb)
         self._shortcut_lb = shortcut_lb
 
         # 编辑按钮
@@ -355,7 +349,7 @@ class _CommandRow(QFrame):
         self.edit_btn.setToolTip("设置自定义快捷键")
         self.edit_btn.setFixedSize(28, 28)
         self.edit_btn.clicked.connect(lambda: self.edit_clicked.emit(self._cmd_name))
-        layout.addWidget(self.edit_btn)
+        hly.addWidget(self.edit_btn)
 
         # 恢复按钮
         if self._is_customized:
@@ -363,7 +357,19 @@ class _CommandRow(QFrame):
             self.restore_btn.setToolTip("恢复系统配置")
             self.restore_btn.setFixedSize(28, 28)
             self.restore_btn.clicked.connect(lambda: self.restore_clicked.emit(self._cmd_name))
-            layout.addWidget(self.restore_btn)
+            hly.addWidget(self.restore_btn)
+
+        vly.addLayout(hly)
+
+        # ── 下行：描述文字 ──
+        if self._description:
+            desc_lb = QLabel(self._description, self)
+            desc_lb.setObjectName("cmdRowDesc")
+            desc_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; background: transparent;"
+            )
+            desc_lb.setWordWrap(True)
+            vly.addWidget(desc_lb)
 
     def update_shortcut(self, shortcut: str, is_customized: bool):
         self._shortcut = shortcut
@@ -466,8 +472,8 @@ class ShortcutManagerCard(QWidget):
             pass
 
     _CMD_ROW_SIZE_OFFSETS = {
-        "cmdRowName": 1,  # 命令名比基准稍大
-        "cmdRowBadge": -3,  # 标签较小
+        "cmdRowName": 1,       # 命令名比基准稍大
+        "cmdRowDesc": -3,      # 描述文字较小
         "cmdRowShortcut": -1,  # 快捷键适中
     }
 

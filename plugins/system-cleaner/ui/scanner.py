@@ -126,6 +126,95 @@ def _delete_cache(path: Path, dir_mode: bool):
         pass
 
 
+# ── 内存释放 ──────────────────────────────────────────
+
+
+def _release_memory():
+    """
+    深度释放进程内存，归还给操作系统。
+
+    链路：
+    1. 清理 DriFox 全局 LRU 缓存（HTML 渲染/token 估算/grep 编译等）
+    2. 清理 Qt QPixmapCache
+    3. 清理 importlib 缓存
+    4. 清理 re 正则编译缓存 + linecache 行缓存
+    5. gc.collect(2) 全代回收
+    6. 堆压缩 + 激进工作集归还 OS（Windows: SetProcessWorkingSetSize / Linux: malloc_trim）
+
+    Returns:
+        (before_rss, after_rss, collected_objects)
+    """
+    import ctypes
+    import gc
+    import sys as _sys
+
+    before = _get_process_memory()
+
+    # ── 1. DriFox 内部 LRU 缓存 ──
+    try:
+        from app.main_widget import _cleanup_global_lru_caches
+
+        _cleanup_global_lru_caches()
+    except Exception:
+        pass
+
+    # ── 2. Qt 像素图缓存 ──
+    try:
+        from PyQt5.QtGui import QPixmapCache
+
+        QPixmapCache.clear()
+    except Exception:
+        pass
+
+    # ── 3. importlib 缓存（模块查找缓存） ──
+    try:
+        import importlib
+
+        importlib.invalidate_caches()
+    except Exception:
+        pass
+
+    # ── 4. re 正则 + linecache 行缓存 ──
+    try:
+        import re
+
+        re.purge()
+    except Exception:
+        pass
+    try:
+        import linecache
+
+        linecache.clearcache()
+    except Exception:
+        pass
+
+    # ── 5. Python GC 全代回收 ──
+    # gc.collect() 默认只收第 0 代；gc.collect(2) 收全部三代
+    collected = gc.collect(2)
+
+    # ── 6. 堆压缩 + 归还 OS ──
+    try:
+        if _sys.platform == "win32":
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            # 6a. 压缩堆（消除碎片，合并空闲块）
+            heap = kernel32.GetProcessHeap()
+            if heap:
+                kernel32.HeapCompact(heap, 0)
+            # 6b. 激进工作集修剪：SetProcessWorkingSetSize(-1, -1)
+            #     移除进程最小工作集限制，让 Windows 积极换出未使用页面
+            #     比 EmptyWorkingSet 更彻底——不再保留任何"锁住"的页面
+            h = kernel32.GetCurrentProcess()
+            kernel32.SetProcessWorkingSetSize(h, ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
+        elif _sys.platform == "linux":
+            libc = ctypes.CDLL("libc.so.6", use_last_error=True)
+            libc.malloc_trim(0)
+    except Exception:
+        pass
+
+    after = _get_process_memory()
+    return before, after, collected
+
+
 # ── 扫描工作器 ──────────────────────────────────────────
 
 
