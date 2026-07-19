@@ -1134,6 +1134,22 @@ class ToolPopupDialog(QDialog):
                 QColor(55, 55, 55, int(255 * opacity)),
             )
 
+        # ═══════════════════════════════════════════════════
+        # 🛡️ 分层窗口黑影防护（Layered Window Black-Shield）
+        # ═══════════════════════════════════════════════════
+        # Windows 分层窗口 (WS_EX_LAYERED) 在缓冲区重新分配
+        # （缩放/恢复等操作）后，新区域初始化为全零（透明黑）。
+        # 若 paintEvent 因 clip rect 限制未覆盖右/下阴影区域，
+        # 或 UpdateLayeredWindow 在绘制完成前展示了缓冲区，
+        # 未初始化区域会显示为全黑。
+        #
+        # 修复：先清除整个窗口为全透明，再用 SourceOver 正常绘制。
+        # clear 使用 CompositionMode_Source 强制写入 alpha=0，
+        # 确保任何未初始化像素不会残留黑色。
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
         painter.setBrush(shadow_color)
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(4, 4, self.width() - 4, self.height() - 4, 10, 10)
@@ -1356,6 +1372,8 @@ class ToolPopupDialog(QDialog):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if not self._is_closing:
+            # 🛡️ 分层窗口缩放后强制全窗口重绘，防止阴影区域未被 paintEvent 覆盖
+            self.update()
             self._geometry_save_timer.start()
             # 同步 lock button 和 opacity slider 位置
             if self._lock_mode:

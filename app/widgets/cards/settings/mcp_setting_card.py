@@ -990,11 +990,24 @@ class MCPListSettingCard(ExpandSettingCard):
         self.serversChanged.emit()
 
     def _on_remove_server(self, name: str):
-        from qfluentwidgets import Dialog
+        from app.widgets.common_dialogs import ConfirmDialog
 
-        w = Dialog("确定要删除这个 MCP 服务器吗?", f'删除 "{name}" 后将不再出现在列表中。', self.window())
-        w.yesSignal.connect(lambda: self._do_remove(name))
-        w.exec_()
+        _confirmed: list[bool] = [False]
+
+        def _on_confirm():
+            _confirmed[0] = True
+
+        dialog = ConfirmDialog(
+            title="删除 MCP 服务器",
+            content=f"确定要删除 MCP 服务器「{name}」吗？\n删除后将不再出现在列表中。",
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(_on_confirm)
+        dialog.exec_()
+        if _confirmed[0]:
+            self._do_remove(name)
 
     def _do_remove(self, name: str):
         # 热断开
