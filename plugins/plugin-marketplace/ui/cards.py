@@ -920,6 +920,8 @@ class MarketplaceCard(QWidget):
 
     def _on_add_marketplace(self):
         """添加市场源"""
+        import re
+
         text = self._market_url_edit.text().strip()
         if not text:
             return
@@ -928,10 +930,18 @@ class MarketplaceCard(QWidget):
 
         # 判断类型
         if text.startswith(("http://", "https://")):
-            if text.endswith(".git"):
+            # GitHub repo URL → github 类型
+            m = re.match(r"https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$", text)
+            if m:
+                source = {"source": "github", "repo": m.group(1)}
+            elif "raw.githubusercontent.com" in text:
+                # raw URL 直接当 url 类型
+                source = {"source": "url", "url": text}
+            elif text.endswith(".json"):
                 source = {"source": "url", "url": text}
             else:
-                source = {"source": "url", "url": text}
+                # 其他 URL，尝试追加 marketplace.json
+                source = {"source": "url", "url": text.rstrip("/") + "/.claude-plugin/marketplace.json"}
         elif "/" in text and " " not in text:
             parts = text.split("/")
             if len(parts) == 2:
