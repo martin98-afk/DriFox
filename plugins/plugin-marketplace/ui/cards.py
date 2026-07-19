@@ -509,6 +509,13 @@ class MarketplaceCard(QWidget):
         self._close_btn.clicked.connect(self._on_close)
         header_layout.addWidget(self._close_btn)
 
+        # 刷新按钮（关闭按钮左边）
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn.setFixedSize(24, 24)
+        self._refresh_btn.setToolTip("刷新")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+        header_layout.addWidget(self._refresh_btn)
+
         root.addWidget(header)
 
         # ── 分隔线 ──
@@ -1089,6 +1096,18 @@ class MarketplaceCard(QWidget):
         """关闭卡片"""
         self.setVisible(False)
         self.closed.emit()
+
+    def _on_refresh(self):
+        """强制刷新所有市场"""
+        self._status_label.setText("刷新中…")
+        # 删除所有市场缓存，后台重新拉取
+        mgr = get_marketplace_manager()
+        cache_dir = mgr._cache_dir
+        if cache_dir.exists():
+            for f in cache_dir.glob("*.json"):
+                if f.name != "sources.json":
+                    f.unlink()
+        self._async_refresh()
 
     def _cleanup_worker(self):
         """安全清理旧的 worker/thread"""
