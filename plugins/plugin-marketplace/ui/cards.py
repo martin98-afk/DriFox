@@ -466,11 +466,11 @@ class MarketplaceCard(QWidget):
         root.setSpacing(0)
 
         # ── 标签栏 ──
-        from qfluentwidgets import SegmentedToggleToolWidget
+        from qfluentwidgets import Pivot
 
-        self._tab_bar = SegmentedToggleToolWidget(self)
-        self._tab_bar.addItem("浏览", "browse")
-        self._tab_bar.addItem("市场", "markets")
+        self._tab_bar = Pivot(self)
+        self._tab_bar.addItem("browse", "浏览", None, None)
+        self._tab_bar.addItem("markets", "市场", None, None)
         self._tab_bar.setCurrentItem("browse")
         self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
         root.addWidget(self._tab_bar)
