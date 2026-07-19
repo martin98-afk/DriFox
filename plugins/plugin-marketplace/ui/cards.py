@@ -457,7 +457,6 @@ class MarketplaceCard(QWidget):
 
     def _setup_ui(self):
         self.setMinimumHeight(0)
-        # 半透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("MarketplaceCard { background: transparent; }")
 
@@ -465,30 +464,8 @@ class MarketplaceCard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── 标签栏 ──
-        from qfluentwidgets import Pivot
-
-        self._tab_bar = Pivot(self)
-        self._tab_bar.addItem("browse", "浏览", None, None)
-        self._tab_bar.addItem("markets", "市场", None, None)
-        self._tab_bar.setCurrentItem("browse")
-        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
-        root.addWidget(self._tab_bar)
-
-        # ── 页面堆叠 ──
-        from PyQt5.QtWidgets import QStackedWidget
-
-        self._page_stack = QStackedWidget(self)
-        self._page_stack.setStyleSheet("background: transparent;")
-
-        # ===== 浏览页 =====
-        self._browse_page = QWidget(self._page_stack)
-        browse_root = QVBoxLayout(self._browse_page)
-        browse_root.setContentsMargins(0, 0, 0, 0)
-        browse_root.setSpacing(0)
-
-        # ── 头部 ──
-        header = QWidget(self._browse_page)
+        # ── 头部（全局固定，切换标签不变）──
+        header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(16, 12, 16, 4)
@@ -505,14 +482,12 @@ class MarketplaceCard(QWidget):
 
         header_layout.addStretch(1)
 
-        # 状态标签（加载中/安装中标记）
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
         )
         header_layout.addWidget(self._status_label)
 
-        # 搜索框
         self._search_edit = LineEdit(header)
         self._search_edit.setPlaceholderText("搜索插件…")
         self._search_edit.setClearButtonEnabled(True)
@@ -523,22 +498,42 @@ class MarketplaceCard(QWidget):
         self._search_edit.textChanged.connect(self._filter_plugins)
         header_layout.addWidget(self._search_edit)
 
-        # 关闭按钮
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
         self._close_btn.setFixedSize(24, 24)
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self._on_close)
         header_layout.addWidget(self._close_btn)
 
-        browse_root.addWidget(header)
+        root.addWidget(header)
 
         # ── 分隔线 ──
-        sep = QFrame(self._browse_page)
+        sep = QFrame(self)
         sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
-        browse_root.addWidget(sep)
+        root.addWidget(sep)
 
-        # ── 内容区（滚动列表 + 居中空状态）──
+        # ── 标签栏（标题下方）──
+        from qfluentwidgets import Pivot
+
+        self._tab_bar = Pivot(self)
+        self._tab_bar.addItem("browse", "浏览", None, None)
+        self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.setCurrentItem("browse")
+        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
+        root.addWidget(self._tab_bar)
+
+        # ── 页面堆叠 ──
+        from PyQt5.QtWidgets import QStackedWidget
+
+        self._page_stack = QStackedWidget(self)
+        self._page_stack.setStyleSheet("background: transparent;")
+
+        # ===== 浏览页（只有内容区，无标题）=====
+        self._browse_page = QWidget(self._page_stack)
+        browse_root = QVBoxLayout(self._browse_page)
+        browse_root.setContentsMargins(0, 0, 0, 0)
+        browse_root.setSpacing(0)
+
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
 
@@ -573,7 +568,6 @@ class MarketplaceCard(QWidget):
         markets_root.setContentsMargins(0, 0, 0, 0)
         markets_root.setSpacing(0)
 
-        # 添加市场行
         add_row = QWidget(self._markets_page)
         add_layout = QHBoxLayout(add_row)
         add_layout.setContentsMargins(16, 12, 16, 4)
@@ -591,7 +585,6 @@ class MarketplaceCard(QWidget):
 
         markets_root.addWidget(add_row)
 
-        # 市场列表
         self._markets_scroll = ScrollArea(self._markets_page)
         self._markets_scroll.setWidgetResizable(True)
         self._markets_scroll.setStyleSheet(
@@ -609,7 +602,6 @@ class MarketplaceCard(QWidget):
 
         self._page_stack.addWidget(self._markets_page)
 
-        # 默认显示浏览页
         self._page_stack.setCurrentIndex(0)
         root.addWidget(self._page_stack, 1)
 
