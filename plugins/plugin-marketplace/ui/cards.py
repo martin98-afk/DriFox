@@ -503,18 +503,18 @@ class MarketplaceCard(QWidget):
         )
         header_layout.addWidget(self._status_label)
 
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
-        self._close_btn.setFixedSize(24, 24)
-        self._close_btn.setToolTip("关闭")
-        self._close_btn.clicked.connect(self._on_close)
-        header_layout.addWidget(self._close_btn)
-
-        # 刷新按钮（关闭按钮左边）
+        # 刷新 + 关闭（刷新在左，关闭在右）
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setFixedSize(24, 24)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         header_layout.addWidget(self._refresh_btn)
+
+        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
+        self._close_btn.setFixedSize(24, 24)
+        self._close_btn.setToolTip("关闭")
+        self._close_btn.clicked.connect(self._on_close)
+        header_layout.addWidget(self._close_btn)
 
         root.addWidget(header)
 
