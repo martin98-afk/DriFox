@@ -210,17 +210,17 @@ class _PluginRow(QFrame):
             self._btn.setStyleSheet(
                 "PushButton { background: rgba(255, 167, 38, 0.2); "
                 "color: #FFA726; border: 1px solid rgba(255, 167, 38, 0.3); "
-                "border-radius: 4px; font-size: 13px; }"
+                "border-radius: 4px; font-size: 14px; }"
                 "PushButton:hover { background: rgba(255, 167, 38, 0.35); }"
             )
         elif self._installed:
             self._btn.setText("已安装")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet("font-size: 13px;" + self._original_btn_style)
+            self._btn.setStyleSheet(self._original_btn_style)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet("font-size: 13px;" + self._original_btn_style)
+            self._btn.setStyleSheet(self._original_btn_style)
 
     def _on_click(self):
         if self._busy:
