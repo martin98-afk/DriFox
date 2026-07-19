@@ -36,6 +36,11 @@ from loguru import logger
 _USER_CUSTOM_CMD_REL = "plugins/user-custom/commands"
 
 
+def _safe_filename(cmd_name: str) -> str:
+    """将命令名转换为安全文件名（: → __，解决 Windows 文件名非法字符问题）"""
+    return cmd_name.replace(":", "__")
+
+
 def _get_user_custom_cmd_dir() -> Path:
     from app.utils.utils import get_app_data_dir
 
@@ -43,7 +48,10 @@ def _get_user_custom_cmd_dir() -> Path:
 
 
 def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
-    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）"""
+    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）
+
+    Windows 兼容：同时尝试原始命令名和安全文件名（: → __）进行匹配。
+    """
     from app.core.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
@@ -51,14 +59,17 @@ def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
         return None
 
     user_custom_dir = _get_user_custom_cmd_dir()
+    safe_name = _safe_filename(cmd_name)
+    match_names = (cmd_name, safe_name) if safe_name != cmd_name else (cmd_name,)
+
     for cmd_file in pm.get_command_files():
-        if cmd_file.stem == cmd_name:
+        if cmd_file.stem in match_names:
             # 优先返回非 user-custom 中的原始文件
             if not str(cmd_file.resolve()).startswith(str(user_custom_dir.resolve())):
                 return cmd_file
     # 没找到原始文件，返回 user-custom 中的覆盖文件（如有）
     for cmd_file in pm.get_command_files():
-        if cmd_file.stem == cmd_name:
+        if cmd_file.stem in match_names:
             return cmd_file
     return None
 
@@ -666,10 +677,12 @@ class ShortcutManagerCard(QWidget):
         self._retheme()
 
     def _get_customized_names(self) -> set:
+        """获取已自定义的命令名集合（将安全文件名反向映射为命令名）"""
         cmd_dir = _get_user_custom_cmd_dir()
         if not cmd_dir.exists():
             return set()
-        return {p.stem for p in cmd_dir.glob("*.md")}
+        # 安全文件名中的 __ 映射回命令名中的 :
+        return {p.stem.replace("__", ":") for p in cmd_dir.glob("*.md")}
 
     # ── 编辑快捷键 ──
 
@@ -742,7 +755,8 @@ class ShortcutManagerCard(QWidget):
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = cmd_dir / f"{cmd_name}.md"
+            safe_name = _safe_filename(cmd_name)
+            dest_path = cmd_dir / f"{safe_name}.md"
 
             # 1. 找到原始命令文件
             original = _find_original_cmd_file(cmd_name)
@@ -769,11 +783,16 @@ class ShortcutManagerCard(QWidget):
     def _on_restore(self, cmd_name: str):
         try:
             cmd_dir = _get_user_custom_cmd_dir()
-            cmd_file = cmd_dir / f"{cmd_name}.md"
-            if cmd_file.exists():
-                cmd_file.unlink()
-                logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
-                self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+            safe_name = _safe_filename(cmd_name)
+            # 尝试安全文件名和原始名（不同时才分别尝试，兼容旧文件）
+            candidates = {safe_name, cmd_name}
+            for name in candidates:
+                cmd_file = cmd_dir / f"{name}.md"
+                if cmd_file.exists():
+                    cmd_file.unlink()
+                    logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
+                    self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+                    break
             self._reload_commands()
             QTimer.singleShot(300, self._refresh)
         except Exception as e:
@@ -781,11 +800,25 @@ class ShortcutManagerCard(QWidget):
             self._count_lb.setText(f"❌ 恢复失败: {e}")
 
     def _reload_commands(self):
-        """强制重新加载命令（刷新 user-custom 覆盖）"""
+        """强制重新加载命令（刷新 user-custom 覆盖）并同步所有窗口的快捷键注册"""
         try:
             from app.core.builtin_commands import reload_all_commands
 
             reload_all_commands()
+
+            # 同步刷新所有窗口的快捷键绑定（QShortcut 注册）
+            try:
+                from app.main_widget import OpenAIChatToolWindow
+
+                for win in OpenAIChatToolWindow._instances:
+                    if getattr(win, "_is_destroyed", False):
+                        continue
+                    try:
+                        win._register_command_shortcuts()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[ShortcutManager] 重新加载命令失败: {e}")
 
