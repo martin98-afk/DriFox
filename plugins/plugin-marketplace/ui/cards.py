@@ -128,6 +128,7 @@ class _PluginRow(QFrame):
         self._local_version = local_version
         self._busy = False
         self._font_size = font_size  # 上下文字体大小（用于头像自适应）
+        self._btn_font_size = max(13, font_size) if font_size > 0 else 14
         self._avatar = None
         self._setup_ui()
 
@@ -192,34 +193,40 @@ class _PluginRow(QFrame):
         # 操作按钮
         self._btn = PushButton(self)
         self._btn.setFixedWidth(100)
-        self._btn_font_size = max(13, self._font_size) if self._font_size > 0 else 14
+        # 保存 FluentUI 默认样式，仅追加 font-size 不改其他
+        self._original_btn_style = self._btn.styleSheet()
         self._update_btn_text()
         self._btn.clicked.connect(self._on_click)
         layout.addWidget(self._btn)
 
     def _update_btn_text(self):
+        from PyQt5.QtGui import QFont
         fs = self._btn_font_size
+        btn_font = self._btn.font()
+        btn_font.setPixelSize(fs)
+        self._btn.setFont(btn_font)
+
         if self._busy:
             self._btn.setText("处理中…")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(f"font-size: {fs}px;")
+            self._btn.setStyleSheet(self._original_btn_style)
         elif self._has_update:
             self._btn.setText("更新")
             self._btn.setEnabled(True)
             self._btn.setStyleSheet(
-                f"PushButton {{ background: rgba(255, 167, 38, 0.2); "
-                f"color: #FFA726; border: 1px solid rgba(255, 167, 38, 0.3); "
-                f"border-radius: 4px; font-size: {fs}px; }}"
+                "PushButton { background: rgba(255, 167, 38, 0.2); "
+                "color: #FFA726; border: 1px solid rgba(255, 167, 38, 0.3); "
+                "border-radius: 4px; }"
                 "PushButton:hover { background: rgba(255, 167, 38, 0.35); }"
             )
         elif self._installed:
             self._btn.setText("已安装")
             self._btn.setEnabled(False)
-            self._btn.setStyleSheet(f"font-size: {fs}px;")
+            self._btn.setStyleSheet(self._original_btn_style)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet(f"font-size: {fs}px;")
+            self._btn.setStyleSheet(self._original_btn_style)
 
     def _on_click(self):
         if self._busy:
