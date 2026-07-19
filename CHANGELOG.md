@@ -1,20 +1,53 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.4.3] - 2026-07-19
+
+自上一版本以来的变更 | 提交数：42 · 文件变更：48 · +5339/-2953 | 贡献者：dingma
+
+> 重点：包含 **17 个新功能**、**13 个问题修复**、**4 次性能优化**、**4 项样式改进**、**3 项测试增强**、**1 项重构**。
+
+### ✨ 新功能 (New Features)
+
+- **插件市场全量重构**: 集成 Claude Code 插件市场协议，支持多源聚合；新增筛选标签（全部/已安装/未安装/待更新）、刷新按钮（跳过缓存）、加载更多（每次 30 个）、全局搜索；安装/更新/失败时推送 InfoBar 通知；自动识别 GitHub URL 并转换为 github 源；支持相对路径源通过仓库克隆；市场名自动取路径末段，附带链接跳转按钮；防止重复条目
+- **文件树组件 (FileTree)**: 异步目录扫描、拖拽式文件树小部件、目录变更监听器，侧边栏文件管理全链路
+- **通用对话框统一 (MaskDialogBase)**: 为 PluginManagerCard、Dialogs 等组件提供主题感知的统一弹出对话框，支持确认/信息/自定义场景
+- **消息卡片增强 (MessageCard)**: 思考块 UI 增加图标与状态指示，提升可视性
+- **Shortcut Manager 增强**: 命令文件处理支持 Windows 兼容路径，系统级快捷键注册与内存释放功能
+- **分享卡片 (ShareCardContent)**: 保存文件后支持打开所在文件夹并选中文件
+- **插件管理器卡片 (PluginManagerCard)**: 实现主题感知的确认对话框
+- **FileTreeWidget**: 新增主题色解析，统一对话框样式集成
+- **Agent 身份注入增强**: 钩子中优化身份信息输出格式
+- **缓存管理组件**: 新增 UI 组件支持缓存管理与对话样式设置
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **测试体系：conftest.py 静默失败**: 原版使用 ``Qt.QT_VERSION`` 触发 PyQt5 初始化，但 PyQt5 5.15 中该属性不存在（原属 PyQt6 风格），导致整段 try 块被静默吞掉。后续 ``setAttribute(Qt.AA_ShareOpenGLContexts, True)`` 与 ``QWebEngineWidgets`` 预导入从未真正生效。现改用 ``QT_VERSION_STR`` 并在初始化错误时通过 ``warnings.warn`` 显式上报。
+- **Backend 插件发现修复**: `_try_identify_new_plugins` 现在返回所有新插件而非仅第一个
+- **Marketplace 多处修复**: 刷新按钮跳过全部缓存；恢复按钮样式、用 QFont 替代 QSS；字号调整至 13px；交换刷新/关闭按钮顺序；移除 ThreadPoolExecutor，改用延迟刷新 + processEvents 防止 UI 阻塞；将 tab 栏移至标题下方、改用 Pivot 替代 SegmentedToggleToolWidget；修复重复市场条目问题；静默验证错误并在 UI 显示添加反馈
+- **MainWidget**: MCP 编辑卡片高度模式改为 content
+- **主窗口（main）**: 属性装饰器格式调整；`ui_plugin_edge_launcher` 启用半透明背景并记录卡片信息
+- **测试体系重构**: conftest.py 修复 Qt 静默初始化失败（`QT_VERSION` → `QT_VERSION_STR`）；UIPluginRegistry 重置兼容性；QMessageBox → ConfirmDialog AST 适配；main_widget 冒烟测试
+
+### ⚡ 性能优化 (Performance)
+
+- **Marketplace 批量渲染**: 每次渲染 30 个插件、移除 hover QSS，并行拉取所有源 + 缓存复用
+- **CodeWebViewer**: 增量文本渲染优化，减少 JS bridge 开销
+- **消息卡片**: 工具结果缓存增量 Markdown 构建，减少全量重绘
+
+### 🎨 样式改进 (Style)
+
+- **Marketplace 按钮**: 统一 install/update 按钮上下文字号，13px 基准
+- **Marketplace 行字号**: 市场行标题升至 18px、副标题 14px
 
 ### ♻️ 代码重构 (Refactoring)
 
-- **测试隔离：UIPluginRegistry.reset() 兼容性**: ``reset()`` 会把单例本身置 ``None``，导致 ``reset()`` 之后 ``register_*`` 落到旧实例，而被测函数内部重新 ``get_instance()`` 时拿全新实例。在 ``test_message_content_custom.py`` 与 ``test_plugin_manager_ui.py`` 中改用「reset 后重新 get_instance」模式。
+- **UIPluginRegistry.reset() 隔离**: 重置后重新 `get_instance()` 保证测试隔离性
 
 ### 🔧 其他 (Chores & Build)
 
-- **测试孤儿归档**: ``tests/core/test_cron_engine.py`` 与 ``test_cron_smoke.py`` 引用的 ``app.core.engines.cron.*`` 模塊已在某次重构中被删除，整套测试以 ``pytest.skip`` (allow_module_level=True) 形式归档保留，留备未来重新启用 Cron 子系统时复用。
-- **陈旧断言修复**: ``tests/utils/test_default_opencode_provider.py::test_inject_when_empty`` 原断言 ``info["模型列表"] == [...]``，但 ``Settings._ensure_default_opencode_provider()`` 当前实现故意不写此字段（避免空列表让模型选择器显示为空），改为断言字段 *不存在*，并补上文档说明。
+- **测试归档**: 已删除的 Cron 子系统测试模块以 `pytest.skip` 归档保留，备未来复用
+- **陈旧断言修复**: `test_default_opencode_provider` 中模型列表字段断言改为存在性检测
+- **Agent 冒烟测试**: 为 Agent 数据类、PermissionResolver、AgentManager 单例添加 93 个冒烟用例
 
 ## [v0.4.2] - 2026-07-18
 
