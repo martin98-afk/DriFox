@@ -877,6 +877,7 @@ class MarketplaceCard(QWidget):
         info.addWidget(name_label)
 
         src = src_def.get("source", {})
+        src_type = src.get("source", "url")
         src_text = src.get("repo", src.get("url", "unknown"))
         if len(src_text) > 60:
             src_text = src_text[:57] + "..."
@@ -885,6 +886,27 @@ class MarketplaceCard(QWidget):
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
+
+        # 打开网页按钮
+        link_url = ""
+        if src_type == "github":
+            link_url = f"https://github.com/{src.get('repo', '')}"
+        elif src_type == "url":
+            u = src.get("url", "")
+            # raw URL 转成网页 URL
+            if "raw.githubusercontent.com" in u:
+                parts = u.replace("https://raw.githubusercontent.com/", "").split("/")
+                if len(parts) >= 3:
+                    link_url = f"https://github.com/{parts[0]}/{parts[1]}"
+            else:
+                link_url = u.replace(".git", "")
+
+        if link_url:
+            link_btn = TransparentToolButton(FluentIcon.LINK, row)
+            link_btn.setFixedSize(28, 28)
+            link_btn.setToolTip(f"打开 {link_url}")
+            link_btn.clicked.connect(lambda checked, u=link_url: self._open_url(u))
+            h.addWidget(link_btn)
 
         # 删除按钮（内置市场不可删）
         if not src_def.get("builtin"):
@@ -919,17 +941,10 @@ class MarketplaceCard(QWidget):
         else:
             source = {"source": "url", "url": text}
 
-        # 先用拉取验证获取市场名
-        market_name = ""
-        try:
-            temp_def = {"name": "__tmp__", "source": source}
-            data = mgr.fetch_marketplace(temp_def, force=True)
-            market_name = data.get("name", text.split("/")[-1].replace(".git", "").replace(".json", ""))
-        except Exception:
-            market_name = text.split("/")[-1].replace(".git", "").replace(".json", "")
-
+        # 名称取最后 / 后的部分
+        market_name = text.rstrip("/").split("/")[-1].replace(".git", "").replace(".json", "")
         if not market_name:
-            market_name = text.split("/")[-1].replace(".git", "").replace(".json", "")
+            market_name = text
 
         # 已存在则提示，不重复添加
         existing = {s["name"] for s in mgr.get_sources()}
@@ -950,6 +965,11 @@ class MarketplaceCard(QWidget):
         mgr = get_marketplace_manager()
         mgr.remove_source(name)
         self._build_markets_page()
+
+    def _open_url(self, url: str):
+        """在浏览器中打开 URL"""
+        import webbrowser
+        webbrowser.open(url)
 
     # ── 清理 ──
 
