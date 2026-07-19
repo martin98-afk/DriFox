@@ -83,7 +83,7 @@ class PluginInstaller:
             logger.info(f"[Installer] Plugin {name} already exists, skipping install")
             return True
 
-        return self._install_by_source(name, source, target)
+        return self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
 
     def update(self, plugin_meta: dict) -> bool:
         """更新插件 — 删除旧版后重新下载
@@ -112,19 +112,19 @@ class PluginInstaller:
                 return False
 
         # 重新下载安装
-        success = self._install_by_source(name, source, target)
+        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
         return success
 
     # ── Source 类型分发 ──────────────────────────────────
 
-    def _install_by_source(self, name: str, source, target: Path) -> bool:
+    def _install_by_source(self, name: str, source, target: Path, marketplace_source: dict = None) -> bool:
         """根据 source 类型分发安装逻辑"""
-        # 字符串 source → 相对路径（暂不支持自动安装）
+        # 字符串 source → 相对路径
         if isinstance(source, str):
             if source.startswith("./"):
-                logger.warning(f"[Installer] 相对路径源暂不支持自动安装: {source}")
+                return self._install_relative(name, source, target, marketplace_source)
             else:
                 logger.error(f"[Installer] 不支持的 source 格式: {source}")
             return False
@@ -173,6 +173,47 @@ class PluginInstaller:
         ref = source.get("ref", "main")
         if not url or not subpath:
             return False
+        return self._download_and_move(name, url, subpath, ref, target)
+
+    def _install_relative(self, name: str, relative_path: str, target: Path,
+                          marketplace_source: dict = None) -> bool:
+        """从相对路径安装插件（从市场仓库中提取子目录）
+
+        将相对路径转换为 git-subdir 安装：
+        - 相对路径如 "./plugin-builder" 或 "./plugins/xxx"
+        - 从 marketplace_source 推断仓库 URL
+        - 使用 sparse clone 只下载该子目录
+        """
+        if not marketplace_source:
+            logger.warning(f"[Installer] 无法安装相对路径插件 {name}：缺少市场源信息")
+            return False
+
+        # 去掉 "./" 前缀得到子目录路径
+        subpath = relative_path.lstrip("./")
+        if not subpath:
+            logger.error(f"[Installer] 无效的相对路径: {relative_path}")
+            return False
+
+        src_type = marketplace_source.get("source", "")
+        ref = marketplace_source.get("ref", "main")
+
+        if src_type == "github":
+            repo = marketplace_source.get("repo", "")
+            url = _resolve_github_url(repo)
+        elif src_type == "url":
+            url = marketplace_source.get("url", "")
+            # 如果是 raw URL (marketplace.json 直链)，无法 clone
+            if "/raw.githubusercontent.com/" in url or url.endswith(".json"):
+                logger.warning(f"[Installer] 无法从 URL 类型市场安装相对路径插件: {url}")
+                return False
+        else:
+            logger.warning(f"[Installer] 不支持的市场源类型用于相对路径: {src_type}")
+            return False
+
+        if not url:
+            return False
+
+        logger.info(f"[Installer] 相对路径安装: {name} ← {url} / {subpath}")
         return self._download_and_move(name, url, subpath, ref, target)
 
     # ── 核心下载逻辑 ─────────────────────────────────────
