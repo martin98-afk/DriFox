@@ -854,15 +854,19 @@ class ChatBackend(QObject):
             """重建插件路径索引（在 watch 线程中调用）"""
             _prefixes_ref[0] = self._build_plugin_path_index()
 
-        def _try_identify_new_plugin(changes) -> Optional[str]:
-            """直接扫描变更路径的父目录链，检测是否为新增插件的首次变更
+        def _try_identify_new_plugins(changes) -> set:
+            """直接扫描变更路径的父目录链，检测所有新增插件的首次变更
 
             当 _identify_plugin_from_changes 返回 None 时调用此方法，
             作为 fallback 直接从文件系统查找插件清单。
+
+            修复：原 _try_identify_new_plugin 找到第一个插件就 return，
+            导致一次性复制多个新插件时只检测到 1 个。现改为返回所有新插件名集合。
             """
             import json as _json
             from pathlib import Path as _Path
 
+            found: set = set()
             for _, change_path in changes:
                 p = _Path(change_path)
                 # 遍历变更路径及其所有父目录
@@ -874,18 +878,20 @@ class ChatBackend(QObject):
                     if manifest.exists():
                         try:
                             data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            return data.get("name", parent.name)
+                            found.add(data.get("name", parent.name))
                         except Exception:
-                            return parent.name
+                            found.add(parent.name)
+                        break  # 跳出父目录链，处理下一个变更路径
                     # 检查 .claude-plugin 格式
                     manifest = parent / ".claude-plugin" / "plugin.json"
                     if manifest.exists():
                         try:
                             data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            return data.get("name", parent.name)
+                            found.add(data.get("name", parent.name))
                         except Exception:
-                            return parent.name
-            return None
+                            found.add(parent.name)
+                        break  # 跳出父目录链，处理下一个变更路径
+            return found
 
         def _watch_loop():
             """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
@@ -998,15 +1004,19 @@ class ChatBackend(QObject):
                             self._hot_reload_requested.emit(plugin_name, "")
                     else:
                         # 无法通过路径索引识别：尝试直接从文件系统检测新插件
-                        new_name = _try_identify_new_plugin(relevant_changes)
-                        if new_name:
-                            logger.info(f"[ChatBackend] 检测到新插件「{new_name}」文件变更，请求增量重载...")
-                            # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
-                            # 的剩余部分以已知插件路径再次触发（ghost trigger）
-                            _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
-                            # 发射新插件标记，走 _reload_new_plugin 增量路径
-                            # 只扫描这一个插件目录，不触发全量 rescan
-                            self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
+                        new_names = _try_identify_new_plugins(relevant_changes)
+                        if new_names:
+                            logger.info(
+                                f"[ChatBackend] 检测到 {len(new_names)} 个新插件文件变更"
+                                f"「{', '.join(sorted(new_names))}」，逐一请求增量重载..."
+                            )
+                            for new_name in sorted(new_names):
+                                # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
+                                # 的剩余部分以已知插件路径再次触发（ghost trigger）
+                                _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
+                                # 发射新插件标记，走 _reload_new_plugin 增量路径
+                                # 只扫描这一个插件目录，不触发全量 rescan
+                                self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
                         else:
                             # 无法识别的新增文件变更（如编辑器临时文件、git 残留等）
                             # 跳过不处理，等下次事件重试。不触发全量重扫

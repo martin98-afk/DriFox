@@ -412,6 +412,8 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 菜单 ────────────────────────────────────────────────
     def _open_menu(self) -> None:
+        # 打开菜单前刷新插件列表（确保卸载/安装后数据是最新的）
+        self.refresh_plugins()
         if not self._card_infos:
             return
         self._collapse_timer.stop()
