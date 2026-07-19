@@ -11423,9 +11423,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     from app.utils.utils import load_skill as load_skill_func
 
                     success, content, workspace = load_skill_func(skill_name)
+                    if not success:
+                        logger.warning(f"[Skill] load_skill failed for '{skill_name}': content={len(content)}")
                     if success:
                         session = self.session_manager.get_current_session()
                         if session:
+                            # 🛡️ 清除可能残留的旧 pending_command（防止劫持技能注入）
+                            session.metadata.pop("_pending_command", None)
                             session.metadata["_pending_skill"] = {
                                 "name": skill_name,
                                 "content": content,

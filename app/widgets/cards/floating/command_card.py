@@ -1367,15 +1367,25 @@ class CommandCard(QWidget):
         # 按类型查找对应 CommandDefinition（同名多类型时只显示选中类型的 hint）
         entries = cmd_mgr._commands.get(cmd_name, {})
         cmd = None
-        if use_type:
+        skill = None
+
+        if use_type == "skill":
+            # 技能类型：直接查技能，不查命令
+            # 修复：同名命令存在时，若不优先查技能，技能参数（--enable/--disable）
+            # 会被命令参数覆盖，因为下方兜底逻辑 `if not cmd and entries` 会抢走 cmd
+            skill = get_skill_by_name(cmd_name)
+        elif use_type:
             type_map = {"command": CommandType.FUNCTION, "prompt": CommandType.PROMPT, "agent": CommandType.AGENT}
             preferred = type_map.get(use_type)
             if preferred and preferred in entries:
                 cmd = entries[preferred]
-        if not cmd and entries:
-            cmd = next(iter(entries.values()))
 
-        skill = get_skill_by_name(cmd_name) if not cmd else None
+        # 兜底：未通过类型匹配到，退而尝试任意命令或技能
+        if not cmd and not skill:
+            if entries:
+                cmd = next(iter(entries.values()))
+            else:
+                skill = get_skill_by_name(cmd_name)
 
         if not cmd and not skill:
             return
