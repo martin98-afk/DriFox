@@ -237,7 +237,7 @@ def main():
         def workflow_name(self):
             return "standalone_llm_chatter"
 
-        @property
+        @property   
         def global_variables_changed(self):
             class FakeSignal:
                 def connect(self, *args, **kwargs):

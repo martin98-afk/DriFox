@@ -26,6 +26,8 @@ from qfluentwidgets import (
     FluentIcon,
     FluentLabelBase,
     IconWidget,
+    InfoBar,
+    InfoBarPosition,
     LineEdit,
     PushButton,
     ScrollArea,
@@ -36,6 +38,7 @@ from qfluentwidgets import (
 
 from .data import get_marketplace
 from .installer import get_installer
+from .marketplace_manager import get_marketplace_manager
 from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
 
 # ── 主题色辅助 ──────────────────────────────────────────────
@@ -124,17 +127,15 @@ class _PluginRow(QFrame):
         self._has_update = has_update
         self._local_version = local_version
         self._busy = False
-        self._original_btn_style: str = ""  # 在 _setup_ui 中保存 FluentUI 默认样式
         self._font_size = font_size  # 上下文字体大小（用于头像自适应）
+        self._btn_font_size = max(13, font_size) if font_size > 0 else 14
         self._avatar = None
         self._setup_ui()
 
     def _setup_ui(self):
         self.setObjectName("pluginRow")
-        # 透明背景 + 悬停微亮
         self.setStyleSheet(
-            "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.15); border-radius: 8px; padding: 0px; }"
-            "#pluginRow:hover { background: rgba(128,128,128,0.05); }"
+            "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.12); border-radius: 8px; }"
         )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -178,18 +179,33 @@ class _PluginRow(QFrame):
             desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             info_layout.addWidget(desc_label)
 
+        # 市场来源标签
+        marketplace = self._meta.get("_marketplace", "")
+        if marketplace:
+            mp_label = QLabel(f"📦 {marketplace}", self)
+            mp_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 10px; background: transparent;"
+            )
+            info_layout.addWidget(mp_label)
+
         layout.addLayout(info_layout, 1)
 
         # 操作按钮
         self._btn = PushButton(self)
         self._btn.setFixedWidth(100)
-        # 保存 FluentUI 默认样式，切换状态时恢复（仅「更新」状态使用自定义橙色样式）
+        # 保存 FluentUI 默认样式，仅追加 font-size 不改其他
         self._original_btn_style = self._btn.styleSheet()
         self._update_btn_text()
         self._btn.clicked.connect(self._on_click)
         layout.addWidget(self._btn)
 
     def _update_btn_text(self):
+        from PyQt5.QtGui import QFont
+        fs = self._btn_font_size
+        btn_font = self._btn.font()
+        btn_font.setPixelSize(fs)
+        self._btn.setFont(btn_font)
+
         if self._busy:
             self._btn.setText("处理中…")
             self._btn.setEnabled(False)
@@ -197,7 +213,6 @@ class _PluginRow(QFrame):
         elif self._has_update:
             self._btn.setText("更新")
             self._btn.setEnabled(True)
-            # 橙色按钮风格 — 提示有新版本可更新
             self._btn.setStyleSheet(
                 "PushButton { background: rgba(255, 167, 38, 0.2); "
                 "color: #FFA726; border: 1px solid rgba(255, 167, 38, 0.3); "
@@ -308,6 +323,9 @@ class MarketplaceCard(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
         self._plugin_data: list = []
+        self._matched_plugins: list = []
+        self._rendered_count: int = 0
+        self._current_filter: str = "all"
         self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -319,11 +337,13 @@ class MarketplaceCard(QWidget):
         self._context_provider = provider
 
     def show_card(self):
-        """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
+        """卡片显示时：用最新上下文刷新主题色 + 延迟加载数据"""
+        self.setVisible(True)
         self._apply_latest_theme()
         self._apply_plugin_icon()
-        self._async_refresh()
-        self.setVisible(True)
+        # 延迟 50ms 启动后台刷新，避免阻塞 show 过程
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(50, self._async_refresh)
 
     def _apply_plugin_icon(self):
         """从上下文获取插件图标并更新头部图标"""
@@ -447,7 +467,6 @@ class MarketplaceCard(QWidget):
 
     def _setup_ui(self):
         self.setMinimumHeight(0)
-        # 半透明背景
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("MarketplaceCard { background: transparent; }")
 
@@ -455,7 +474,7 @@ class MarketplaceCard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── 头部 ──
+        # ── 头部（全局固定，切换标签不变）──
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         header_layout = QHBoxLayout(header)
@@ -471,29 +490,31 @@ class MarketplaceCard(QWidget):
         title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         header_layout.addWidget(title)
 
+        # ── 浏览/市场切换（标题行内）──
+        from qfluentwidgets import Pivot
+
+        self._tab_bar = Pivot(header)
+        self._tab_bar.addItem("browse", "浏览", None, None)
+        self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.setCurrentItem("browse")
+        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
+        header_layout.addWidget(self._tab_bar)
+
         header_layout.addStretch(1)
 
-        # 状态标签（加载中/安装中标记）
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
         )
         header_layout.addWidget(self._status_label)
 
-        # 搜索框
-        self._search_edit = LineEdit(header)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setFixedWidth(160)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
-        self._search_edit.textChanged.connect(self._filter_plugins)
-        header_layout.addWidget(self._search_edit)
+        # 刷新 + 关闭（刷新在左，关闭在右）
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn.setFixedSize(24, 24)
+        self._refresh_btn.setToolTip("刷新")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+        header_layout.addWidget(self._refresh_btn)
 
-        # 注意：没有刷新按钮，每次 show_card 自动强制拉取最新数据
-
-        # 关闭按钮
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
         self._close_btn.setFixedSize(24, 24)
         self._close_btn.setToolTip("关闭")
@@ -508,14 +529,47 @@ class MarketplaceCard(QWidget):
         sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
         root.addWidget(sep)
 
-        # ── 内容区（滚动列表 + 居中空状态用 QStackedWidget）──
+        # ── 页面堆叠 ──
         from PyQt5.QtWidgets import QStackedWidget
 
-        self._content_stack = QStackedWidget(self)
+        self._page_stack = QStackedWidget(self)
+        self._page_stack.setStyleSheet("background: transparent;")
+
+        # ===== 浏览页 =====
+        self._browse_page = QWidget(self._page_stack)
+        browse_root = QVBoxLayout(self._browse_page)
+        browse_root.setContentsMargins(0, 0, 0, 0)
+        browse_root.setSpacing(0)
+
+        # ── 筛选标签（全部/已安装/未安装/待更新）──
+        self._filter_bar = Pivot(self._browse_page)
+        self._filter_bar.addItem("all", "全部", None, None)
+        self._filter_bar.addItem("installed", "已安装", None, None)
+        self._filter_bar.addItem("uninstalled", "未安装", None, None)
+        self._filter_bar.addItem("updates", "待更新", None, None)
+        self._filter_bar.setCurrentItem("all")
+        self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
+        browse_root.addWidget(self._filter_bar)
+
+        # ── 搜索框 ──
+        search_row = QWidget(self._browse_page)
+        search_layout = QHBoxLayout(search_row)
+        search_layout.setContentsMargins(16, 4, 16, 4)
+
+        self._search_edit = LineEdit(search_row)
+        self._search_edit.setPlaceholderText("搜索插件…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
+        self._search_edit.textChanged.connect(self._filter_plugins)
+        search_layout.addWidget(self._search_edit)
+        browse_root.addWidget(search_row)
+
+        self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
 
-        # 页面 0：滚动列表
-        self._scroll = ScrollArea(self)
+        self._scroll = ScrollArea(self._browse_page)
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
@@ -530,14 +584,58 @@ class MarketplaceCard(QWidget):
         self._scroll.setWidget(self._content)
         self._content_stack.addWidget(self._scroll)
 
-        # 页面 1：居中空状态
-        self._empty_label = StrongBodyLabel("暂无可用插件", self._content_stack)
+        self._empty_label = StrongBodyLabel("暂无可用插件", self._browse_page)
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._content_stack.addWidget(self._empty_label)
 
-        self._content_stack.setCurrentIndex(0)  # 默认显示滚动列表
-        root.addWidget(self._content_stack, 1)
+        self._content_stack.setCurrentIndex(0)
+        browse_root.addWidget(self._content_stack, 1)
+
+        self._page_stack.addWidget(self._browse_page)
+
+        # ===== 市场管理页 =====
+        self._markets_page = QWidget(self._page_stack)
+        markets_root = QVBoxLayout(self._markets_page)
+        markets_root.setContentsMargins(0, 0, 0, 0)
+        markets_root.setSpacing(0)
+
+        add_row = QWidget(self._markets_page)
+        add_layout = QHBoxLayout(add_row)
+        add_layout.setContentsMargins(16, 12, 16, 4)
+        add_layout.setSpacing(8)
+
+        self._market_url_edit = LineEdit(add_row)
+        self._market_url_edit.setPlaceholderText("owner/repo 或 URL，如 claude-market/marketplace")
+        self._market_url_edit.setClearButtonEnabled(True)
+        add_layout.addWidget(self._market_url_edit)
+
+        add_btn = PushButton("添加", add_row)
+        add_btn.setFixedWidth(80)
+        add_btn.clicked.connect(self._on_add_marketplace)
+        add_layout.addWidget(add_btn)
+
+        markets_root.addWidget(add_row)
+
+        self._markets_scroll = ScrollArea(self._markets_page)
+        self._markets_scroll.setWidgetResizable(True)
+        self._markets_scroll.setStyleSheet(
+            "ScrollArea { background: transparent; border: none; }"
+            "ScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._markets_content = QWidget(self._markets_scroll)
+        self._markets_content.setStyleSheet("background: transparent;")
+        self._markets_content_layout = QVBoxLayout(self._markets_content)
+        self._markets_content_layout.setContentsMargins(16, 4, 16, 8)
+        self._markets_content_layout.setSpacing(6)
+        self._markets_content_layout.setAlignment(Qt.AlignTop)
+        self._markets_scroll.setWidget(self._markets_content)
+        markets_root.addWidget(self._markets_scroll, 1)
+
+        self._page_stack.addWidget(self._markets_page)
+
+        self._page_stack.setCurrentIndex(0)
+        root.addWidget(self._page_stack, 1)
 
     # ── 高度模式 ──
 
@@ -569,11 +667,18 @@ class MarketplaceCard(QWidget):
 
     # ── 异步刷新 ──
 
-    def _async_refresh(self):
-        """在后台线程拉取市场数据"""
+    def _async_refresh(self, force: bool = False):
+        """在后台线程拉取市场数据
+
+        Args:
+            force: 是否强制拉取远程（跳过缓存）
+        """
         self._set_loading(True)
         self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
+        if force:
+            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
+        else:
+            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -613,42 +718,100 @@ class MarketplaceCard(QWidget):
 
     # ── 渲染 ──
 
+    _RENDER_BATCH = 30
+
     def _render_plugins(self, plugins: list):
-        """渲染插件列表（含版本检测）"""
+        """渲染插件列表（首屏 30 个 + 分批加载）"""
         self._clear_plugin_list()
         query = self._search_edit.text().strip().lower()
         installer = get_installer()
-        count = 0
+        filter_mode = self._current_filter
+
+        matched = []
         for p in plugins:
             name = p.get("name", "")
+            # 搜索过滤
             if query and query not in name.lower() and query not in (p.get("description", "")).lower():
                 continue
             installed = installer.is_installed(name)
-            # 检查是否有版本更新
             has_update = False
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
+            # 标签过滤
+            if filter_mode == "installed" and not installed:
+                continue
+            if filter_mode == "uninstalled" and installed:
+                continue
+            if filter_mode == "updates" and not has_update:
+                continue
+            matched.append((p, installed, has_update, local_ver))
+
+        self._matched_plugins = matched
+        self._rendered_count = 0
+
+        if not matched:
+            self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
+            self._content_stack.setCurrentIndex(1)
+            return
+
+        self._content_stack.setCurrentIndex(0)
+        self._render_next_batch()
+
+        self._retheme()
+
+    def _render_next_batch(self):
+        """渲染下一批 30 个插件"""
+        start = self._rendered_count
+        end = min(start + self._RENDER_BATCH, len(self._matched_plugins))
+        self._render_batch(start, end)
+        self._rendered_count = end
+
+        # 还有更多 → 更新/添加「加载更多」按钮
+        remaining = len(self._matched_plugins) - self._rendered_count
+        if remaining > 0:
+            self._add_load_more_button(remaining)
+        else:
+            self._remove_load_more_button()
+
+    def _render_batch(self, start: int, end: int):
+        """渲染 [start, end) 范围的插件行"""
+        fs = self._cached_font_size
+        for i in range(start, end):
+            p, installed, has_update, local_ver = self._matched_plugins[i]
             row = _PluginRow(
-                p,
-                installed,
-                has_update=has_update,
-                local_version=local_ver,
-                parent=self._content,
-                font_size=self._cached_font_size,
+                p, installed, has_update=has_update, local_version=local_ver,
+                parent=self._content, font_size=fs,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
-            count += 1
 
-        if count == 0:
-            self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
-            self._content_stack.setCurrentIndex(1)
-        else:
-            self._content_stack.setCurrentIndex(0)
+    def _add_load_more_button(self, remaining: int):
+        """在列表底部添加「加载更多」按钮"""
+        self._remove_load_more_button()
+        btn = PushButton(f"加载更多 ({remaining} 个)", self._content)
+        btn.setStyleSheet(
+            "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
+            "PushButton:hover { background: rgba(128,128,128,0.2); }"
+        )
+        btn.clicked.connect(self._on_load_more)
+        self._content_layout.addWidget(btn)
 
-        # 对动态创建的子控件应用主题
+    def _remove_load_more_button(self):
+        """移除现有的「加载更多」按钮"""
+        count = self._content_layout.count()
+        if count > 0:
+            item = self._content_layout.itemAt(count - 1)
+            w = item.widget() if item else None
+            if isinstance(w, PushButton) and "更多" in (w.text() or ""):
+                self._content_layout.takeAt(count - 1)
+                w.deleteLater()
+
+    def _on_load_more(self):
+        """加载下一批"""
+        self._remove_load_more_button()
+        self._render_next_batch()
         self._retheme()
 
     def _clear_plugin_list(self):
@@ -691,14 +854,25 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("")
         if success:
             self._update_row_state(name, installed=True)
+            InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=self)
         else:
             self._update_row_state(name, installed=False, error=True)
+            InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=self)
 
     def _on_install_error(self, name: str, err: str):
         """安装出错"""
         self._status_label.setText("安装失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=False, error=True)
+        # 提取简洁错误信息
+        import re as _re
+        msg = err
+        m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
+        if m:
+            msg = m.group(0)[:120]
+        elif len(err) > 120:
+            msg = err[:120] + "..."
+        InfoBar.error(f"{name} 安装失败", msg, duration=5000, parent=self)
 
     # ── 异步更新 ────────────────────────────────────────
 
@@ -723,19 +897,28 @@ class MarketplaceCard(QWidget):
         self._worker_thread.start()
 
     def _on_update_done(self, name: str, success: bool):
-        """更新完成 — 刷新列表确保版本信息正确"""
+        """更新完成"""
         self._status_label.setText("")
         if success:
-            # 重新渲染整个列表以刷新版本显示（v旧版→v新版 → 变为已安装）
             self._render_plugins(self._plugin_data)
+            InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=self)
         else:
             self._update_row_state(name, installed=True, error=True)
+            InfoBar.error(f"{name} 更新失败", "请检查网络或插件源", duration=3000, parent=self)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=True, error=True)
+        import re as _re
+        msg = err
+        m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
+        if m:
+            msg = m.group(0)[:120]
+        elif len(err) > 120:
+            msg = err[:120] + "..."
+        InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=self)
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态
@@ -764,12 +947,172 @@ class MarketplaceCard(QWidget):
                         row.set_installed(installed)
                     break
 
+    # ── 标签切换 ──
+
+    def _on_tab_changed(self, key: str):
+        """标签切换"""
+        if key == "browse":
+            self._page_stack.setCurrentIndex(0)
+        elif key == "markets":
+            self._build_markets_page()
+            self._page_stack.setCurrentIndex(1)
+
+    def _on_filter_changed(self, key: str):
+        """筛选标签切换"""
+        self._current_filter = key
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
+
+    # ── 市场管理 ──
+
+    def _build_markets_page(self):
+        """构建市场管理页面"""
+        # 清空旧内容
+        while self._markets_content_layout.count():
+            item = self._markets_content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        mgr = get_marketplace_manager()
+        for src in mgr.get_sources():
+            row = self._create_market_row(src)
+            self._markets_content_layout.addWidget(row)
+
+        self._markets_content_layout.addStretch()
+
+    def _create_market_row(self, src_def: dict) -> QWidget:
+        """创建单个市场源的行组件"""
+        row = QWidget(self._markets_content)
+        row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(8)
+
+        # 名称 + 来源
+        info = QVBoxLayout()
+        info.setSpacing(2)
+
+        name_text = src_def["name"]
+        if src_def.get("builtin"):
+            name_text += " (内置)"
+        name_label = QLabel(name_text, row)
+        name_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;")
+        info.addWidget(name_label)
+
+        src = src_def.get("source", {})
+        src_type = src.get("source", "url")
+        src_text = src.get("repo", src.get("url", "unknown"))
+        if len(src_text) > 60:
+            src_text = src_text[:57] + "..."
+        url_label = QLabel(src_text, row)
+        url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 14px; background: transparent;")
+        info.addWidget(url_label)
+
+        h.addLayout(info, 1)
+
+        # 打开网页按钮
+        link_url = ""
+        if src_type == "github":
+            link_url = f"https://github.com/{src.get('repo', '')}"
+        elif src_type == "url":
+            u = src.get("url", "")
+            # raw URL 转成网页 URL
+            if "raw.githubusercontent.com" in u:
+                parts = u.replace("https://raw.githubusercontent.com/", "").split("/")
+                if len(parts) >= 3:
+                    link_url = f"https://github.com/{parts[0]}/{parts[1]}"
+            else:
+                link_url = u.replace(".git", "")
+
+        if link_url:
+            link_btn = TransparentToolButton(FluentIcon.LINK, row)
+            link_btn.setFixedSize(28, 28)
+            link_btn.setToolTip(f"打开 {link_url}")
+            link_btn.clicked.connect(lambda checked, u=link_url: self._open_url(u))
+            h.addWidget(link_btn)
+
+        # 删除按钮（内置市场不可删）
+        if not src_def.get("builtin"):
+            del_btn = TransparentToolButton(FluentIcon.DELETE, row)
+            del_btn.setFixedSize(28, 28)
+            del_btn.setToolTip("移除市场")
+            del_btn.clicked.connect(lambda checked, n=src_def["name"]: self._on_remove_marketplace(n))
+            h.addWidget(del_btn)
+
+        return row
+
+    def _on_add_marketplace(self):
+        """添加市场源"""
+        text = self._market_url_edit.text().strip()
+        if not text:
+            return
+
+        mgr = get_marketplace_manager()
+
+        # 判断类型
+        if text.startswith(("http://", "https://")):
+            # GitHub repo URL → github 类型
+            m = re.match(r"https?://github\.com/([^/]+/[^/]+?)(?:\.git)?/?$", text)
+            if m:
+                source = {"source": "github", "repo": m.group(1)}
+            elif "raw.githubusercontent.com" in text:
+                # raw URL 直接当 url 类型
+                source = {"source": "url", "url": text}
+            elif text.endswith(".json"):
+                source = {"source": "url", "url": text}
+            else:
+                # 其他 URL，尝试追加 marketplace.json
+                source = {"source": "url", "url": text.rstrip("/") + "/.claude-plugin/marketplace.json"}
+        elif "/" in text and " " not in text:
+            parts = text.split("/")
+            if len(parts) == 2:
+                source = {"source": "github", "repo": text}
+            else:
+                source = {"source": "url", "url": text}
+        else:
+            source = {"source": "url", "url": text}
+
+        # 名称取最后 / 后的部分
+        market_name = text.rstrip("/").split("/")[-1].replace(".git", "").replace(".json", "")
+        if not market_name:
+            market_name = text
+
+        # 已存在则提示，不重复添加
+        existing = {s["name"] for s in mgr.get_sources()}
+        if market_name in existing:
+            self._status_label.setText(f"{market_name} 已存在")
+            return
+
+        mgr.add_source(market_name, source, auto_update=False)
+        self._market_url_edit.clear()
+        self._build_markets_page()
+        self._status_label.setText(f"已添加 {market_name}")
+        self._status_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+        )
+
+    def _on_remove_marketplace(self, name: str):
+        """移除市场源"""
+        mgr = get_marketplace_manager()
+        mgr.remove_source(name)
+        self._build_markets_page()
+
+    def _open_url(self, url: str):
+        """在浏览器中打开 URL"""
+        import webbrowser
+        webbrowser.open(url)
+
     # ── 清理 ──
 
     def _on_close(self):
         """关闭卡片"""
         self.setVisible(False)
         self.closed.emit()
+
+    def _on_refresh(self):
+        """强制刷新所有市场"""
+        self._status_label.setText("刷新中…")
+        self._async_refresh(force=True)
 
     def _cleanup_worker(self):
         """安全清理旧的 worker/thread"""

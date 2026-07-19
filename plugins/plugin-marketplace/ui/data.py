@@ -1,85 +1,49 @@
 # -*- coding: utf-8 -*-
-"""市场数据源 — 远程拉取 + 本地缓存"""
-import json
-from pathlib import Path
-import time
+"""市场数据源 — 多市场拉取 + 本地缓存"""
 from typing import Any, Dict, List, Optional
 
-import httpx
-from loguru import logger
-
-
-MARKETPLACE_URL = (
-    "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/"
-    "main/marketplace.json"
-)
-CACHE_TTL = 3600  # 1 小时
-
-
-# ── 环境检测 ──────────────────────────────────────────────
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DEV_DRIFOX = _PROJECT_ROOT / ".drifox"
-_USER_DRIFOX = Path.home() / ".drifox"
-
-
-def _drifox_dir() -> Path:
-    """查找 .drifox 目录（开发环境优先，兜底用户目录）"""
-    if _DEV_DRIFOX.exists():
-        return _DEV_DRIFOX
-    return _USER_DRIFOX
+from .marketplace_manager import get_marketplace_manager
 
 
 class MarketplaceData:
-    """市场数据获取 + 缓存"""
+    """市场数据获取（适配多市场）"""
 
     def __init__(self):
-        self._cache_file = _drifox_dir() / "cache" / "marketplace.json"
-        self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self._data: Optional[Dict[str, Any]] = None
-        self._fetched_at: float = 0
+        self._mgr = get_marketplace_manager()
 
     def fetch(self, force: bool = False) -> Dict[str, Any]:
-        """获取市场数据（带缓存）
+        """获取合并后的市场数据
 
         Args:
-            force: 强制刷新（忽略缓存）
+            force: 强制刷新所有市场
 
         Returns:
-            {"name": ..., "description": ..., "plugins": [...]}
+            {
+                "name": "combined",
+                "description": "All marketplaces",
+                "plugins": [...],
+                "marketplaces": [...]   # 每个市场的完整数据
+            }
         """
-        if not force and self._data is not None and (time.time() - self._fetched_at) < CACHE_TTL:
-            return self._data
-        if not force and self._cache_file.exists():
-            try:
-                data = json.loads(self._cache_file.read_text(encoding="utf-8"))
-                self._data = data
-                self._fetched_at = self._cache_file.stat().st_mtime
-                return data
-            except Exception as e:
-                logger.warning(f"[Marketplace] Cache read failed: {e}")
-        # 拉取远程
-        try:
-            response = httpx.get(MARKETPLACE_URL, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            self._cache_file.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            self._data = data
-            self._fetched_at = time.time()
-            return data
-        except Exception as e:
-            logger.error(f"[Marketplace] Fetch failed: {e}")
-            # 降级：返回空数据
-            return {"name": "drifox-official", "description": "", "plugins": []}
+        all_plugins, marketplaces, errors = self._mgr.fetch_all(force=force)
+
+        return {
+            "name": "combined",
+            "description": "All marketplaces",
+            "plugins": all_plugins,
+            "marketplaces": [
+                {"name": m.get("name"), "description": m.get("description", "")}
+                for m in marketplaces
+            ],
+            "_errors": errors,
+        }
 
     def list_plugins(self, category: Optional[str] = None, force: bool = False) -> List[Dict[str, Any]]:
-        """列出插件（可选按 category 过滤）
+        """列出插件（可选按 category 过滤，保持向后兼容）
 
         Args:
             category: 分类过滤
-            force: 是否强制拉取远程（跳过缓存）
+            force: 是否强制拉取远程
         """
         data = self.fetch(force=force)
         plugins = data.get("plugins", [])
@@ -118,7 +82,6 @@ def compare_versions(v1: str, v2: str) -> int:
     parts1 = parse(v1)
     parts2 = parse(v2)
 
-    # 补齐到相同长度
     max_len = max(len(parts1), len(parts2))
     parts1.extend([0] * (max_len - len(parts1)))
     parts2.extend([0] * (max_len - len(parts2)))

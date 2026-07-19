@@ -5,6 +5,7 @@
 - 临时下载到 cache 目录，避免触发 watchfiles 插件热更新
 - 下载完成后再原子式 move 到 plugins 目录
 - 支持版本检测与更新
+- 支持多种 source 类型（兼容 Claude Code marketplace 格式）
 """
 
 import json
@@ -34,11 +35,26 @@ def _drifox_dir() -> Path:
     return _USER_DRIFOX
 
 
+def _resolve_github_url(repo: str) -> str:
+    """将 owner/repo 格式解析为 GitHub HTTPS URL"""
+    return f"https://github.com/{repo}.git"
+
+
+def _resolve_git_subdir_url(url_or_repo: str) -> str:
+    """解析 git-subdir 的 url 字段（支持 owner/repo 简写）"""
+    if "/" in url_or_repo and not url_or_repo.startswith(("http://", "https://", "git@")):
+        return f"https://github.com/{url_or_repo}.git"
+    return url_or_repo
+
+
 class PluginInstaller:
     """插件安装器
 
-    支持 git-subdir 类型的 source（仅克隆子目录到本地）
-    支持版本检测与增量更新
+    支持多种 source 类型：
+    - git-subdir（DriFox）：{"type": "git-subdir", "url": "...", "path": "...", "ref": "..."}
+    - github（Claude Code）：{"source": "github", "repo": "owner/repo", "ref": "..."}
+    - url（Claude Code）：{"source": "url", "url": "https://...", "ref": "..."}
+    - 相对路径："./plugins/xxx"（暂不支持自动安装，仅本地市场有效）
     """
 
     def __init__(self):
@@ -49,7 +65,7 @@ class PluginInstaller:
     # ── 安装 ─────────────────────────────────────────────
 
     def install(self, plugin_meta: dict) -> bool:
-        """安装插件
+        """安装插件（自动识别 source 类型）
 
         Args:
             plugin_meta: marketplace.json 中的插件元数据
@@ -58,10 +74,6 @@ class PluginInstaller:
             True 安装成功
         """
         source = plugin_meta.get("source", {})
-        if source.get("type") != "git-subdir":
-            logger.error(f"[Installer] 不支持的 source 类型: {source.get('type')}")
-            return False
-
         name = plugin_meta.get("name", "")
         if not name:
             return False
@@ -71,7 +83,7 @@ class PluginInstaller:
             logger.info(f"[Installer] Plugin {name} already exists, skipping install")
             return True
 
-        return self._download_and_move(name, source, target)
+        return self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
 
     def update(self, plugin_meta: dict) -> bool:
         """更新插件 — 删除旧版后重新下载
@@ -87,10 +99,6 @@ class PluginInstaller:
             return False
 
         source = plugin_meta.get("source", {})
-        if source.get("type") != "git-subdir":
-            logger.error(f"[Installer] 不支持的 source 类型: {source.get('type')}")
-            return False
-
         target = self._plugins_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
@@ -104,19 +112,122 @@ class PluginInstaller:
                 return False
 
         # 重新下载安装
-        success = self._download_and_move(name, source, target)
+        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
         return success
 
-    def _download_and_move(self, name: str, source: dict, target: Path) -> bool:
-        """从 git 源下载插件并移动到目标目录（核心逻辑）"""
+    # ── Source 类型分发 ──────────────────────────────────
+
+    def _install_by_source(self, name: str, source, target: Path, marketplace_source: dict = None) -> bool:
+        """根据 source 类型分发安装逻辑"""
+        # 字符串 source → 相对路径
+        if isinstance(source, str):
+            if source.startswith("./"):
+                return self._install_relative(name, source, target, marketplace_source)
+            else:
+                logger.error(f"[Installer] 不支持的 source 格式: {source}")
+            return False
+
+        if not isinstance(source, dict):
+            logger.error(f"[Installer] 不支持的 source 类型: {type(source)}")
+            return False
+
+        # 识别 source 类型：优先 Claude Code 的 "source" 字段，其次 DriFox 的 "type" 字段
+        src_type = source.get("source") or source.get("type", "")
+
+        if src_type == "github":
+            return self._install_github(name, source, target)
+        elif src_type == "url":
+            return self._install_git_url(name, source, target)
+        elif src_type == "git-subdir":
+            return self._install_git_subdir(name, source, target)
+        else:
+            logger.error(f"[Installer] 不支持的 source 类型: {src_type}")
+            return False
+
+    def _install_github(self, name: str, source: dict, target: Path) -> bool:
+        """从 GitHub 仓库安装插件（Claude Code 格式）"""
+        repo = source.get("repo", "")
+        if not repo:
+            return False
+        ref = source.get("ref", "main")
+        url = _resolve_github_url(repo)
+        # 整个仓库就是插件
+        return self._download_and_move(name, url, ".", ref, target)
+
+    def _install_git_url(self, name: str, source: dict, target: Path) -> bool:
+        """从 Git URL 安装插件（Claude Code 格式）"""
         url = source.get("url", "")
+        if not url:
+            return False
+        ref = source.get("ref", "main")
+        # url 类型通常整个仓库就是插件
+        return self._download_and_move(name, url, ".", ref, target)
+
+    def _install_git_subdir(self, name: str, source: dict, target: Path) -> bool:
+        """从 git-subdir 类型安装插件（兼容 DriFox 旧格式）"""
+        raw_url = source.get("url", "")
+        url = _resolve_git_subdir_url(raw_url)
         subpath = source.get("path", "")
         ref = source.get("ref", "main")
         if not url or not subpath:
             return False
+        return self._download_and_move(name, url, subpath, ref, target)
 
+    def _install_relative(self, name: str, relative_path: str, target: Path,
+                          marketplace_source: dict = None) -> bool:
+        """从相对路径安装插件（从市场仓库中提取子目录）
+
+        将相对路径转换为 git-subdir 安装：
+        - 相对路径如 "./plugin-builder" 或 "./plugins/xxx"
+        - 从 marketplace_source 推断仓库 URL
+        - 使用 sparse clone 只下载该子目录
+        """
+        if not marketplace_source:
+            logger.warning(f"[Installer] 无法安装相对路径插件 {name}：缺少市场源信息")
+            return False
+
+        # 去掉 "./" 前缀得到子目录路径
+        subpath = relative_path.lstrip("./")
+        if not subpath:
+            logger.error(f"[Installer] 无效的相对路径: {relative_path}")
+            return False
+
+        src_type = marketplace_source.get("source", "")
+        ref = marketplace_source.get("ref", "main")
+
+        if src_type == "github":
+            repo = marketplace_source.get("repo", "")
+            url = _resolve_github_url(repo)
+        elif src_type == "url":
+            url = marketplace_source.get("url", "")
+            # 如果是 raw URL (marketplace.json 直链)，无法 clone
+            if "/raw.githubusercontent.com/" in url or url.endswith(".json"):
+                logger.warning(f"[Installer] 无法从 URL 类型市场安装相对路径插件: {url}")
+                return False
+        else:
+            logger.warning(f"[Installer] 不支持的市场源类型用于相对路径: {src_type}")
+            return False
+
+        if not url:
+            return False
+
+        logger.info(f"[Installer] 相对路径安装: {name} ← {url} / {subpath}")
+        return self._download_and_move(name, url, subpath, ref, target)
+
+    # ── 核心下载逻辑 ─────────────────────────────────────
+
+    def _download_and_move(self, name: str, url: str, subpath: str, ref: str, target: Path) -> bool:
+        """从 git 源下载插件并移动到目标目录
+
+        Args:
+            name: 插件名
+            url: git 仓库 URL
+            subpath: 仓库内子目录路径（"." 表示整个仓库）
+            ref: 分支/标签
+            target: 目标安装目录
+        """
         try:
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
             self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -130,11 +241,14 @@ class PluginInstaller:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
 
-            # === 2. 从 cache 移到 plugins 目录（只移动子目录内容）===
-            sub_src = cache_tmp / subpath
+            # === 2. 确定源目录 ===
+            if subpath in (".", ""):
+                sub_src = cache_tmp
+            else:
+                sub_src = cache_tmp / subpath
             if not sub_src.exists():
                 shutil.rmtree(cache_tmp, ignore_errors=True)
-                raise RuntimeError(f"Subpath {subpath} not found in cache")
+                raise RuntimeError(f"Subpath {subpath} not found in clone")
 
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(sub_src), str(target))
@@ -150,20 +264,30 @@ class PluginInstaller:
             return False
 
     def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path):
-        """克隆仓库指定子目录到 cache_dir"""
-        # Windows 上避免 git 弹出控制台黑框
+        """克隆仓库指定子目录到 cache_dir
+
+        对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
+        """
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
-        subprocess.run(
-            ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
-            check=True, capture_output=True, text=True, **kwargs,
-        )
-        subprocess.run(
-            ["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath],
-            check=True, capture_output=True, text=True, **kwargs,
-        )
+        if subpath in (".", ""):
+            # 整个仓库：直接浅克隆
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
+                check=True, capture_output=True, text=True, **kwargs,
+            )
+        else:
+            # 子目录：稀疏克隆
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
+                check=True, capture_output=True, text=True, **kwargs,
+            )
+            subprocess.run(
+                ["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath],
+                check=True, capture_output=True, text=True, **kwargs,
+            )
 
     # ── 卸载 ─────────────────────────────────────────────
 
@@ -227,11 +351,11 @@ class PluginInstaller:
 
         local_ver = self.get_installed_version(name)
         if local_ver is None:
-            return (False, None, None)  # 未安装，不触发更新
+            return (False, None, None)
 
         remote_ver = plugin_meta.get("version")
         if not remote_ver:
-            return (False, local_ver, None)  # 远端无版本信息
+            return (False, local_ver, None)
 
         has_update = compare_versions(local_ver, remote_ver) < 0
         return (has_update, local_ver, remote_ver)

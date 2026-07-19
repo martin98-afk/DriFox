@@ -1187,3 +1187,261 @@ plugins/<your-plugin>/
 | 路径层级数错（找不到 DB） | 打印 `_PROJECT_ROOT` 验证 | `widgets-sqlite.md §一.3` |
 
 完整陷阱速查表见 `widgets.md §6`。
+
+---
+
+## 七、通用弹窗模板
+
+> 设计模式见 `patterns.md §7`。本模板提供确认弹窗的完整可复制代码。
+
+### 7.1 确认弹窗类
+
+```python
+# ── 统一 MaskDialogBase 风格弹窗 ──
+# 放置位置：cards.py 中，_xxxCard 类之前
+
+
+class _StyledConfirmDialog(MaskDialogBase):
+    """统一 MaskDialogBase 风格的确认弹窗 — 参考 ConfirmDialog 设计
+
+    配合 _plugin_styled_dialog() 函数使用，颜色从卡片缓存自动获取。
+    """
+
+    def __init__(
+        self,
+        parent,
+        title: str,
+        text: str,
+        *,
+        tc: str,
+        ff: str,
+        fs: int,
+        accent_bg: str,
+        card_bg: str,
+        border_c: str,
+        hover_bg: str,
+        yes_text: str = "是",
+        no_text: str = "否",
+        default_yes: bool = False,
+    ):
+        super().__init__(parent)
+        self._result = False
+        self._init_ui(title, text, tc, ff, fs, accent_bg, card_bg, border_c, hover_bg,
+                      yes_text, no_text, default_yes)
+
+    def _init_ui(self, title, text, tc, ff, fs, accent_bg, card_bg, border_c, hover_bg,
+                 yes_text, no_text, default_yes):
+        # ── MaskDialogBase 基础设置 ──
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        # ── 圆角卡片 ──
+        self.widget.setObjectName("styledConfirmDialog")
+        self.widget.setStyleSheet(f"""
+            #styledConfirmDialog {{
+                background-color: {card_bg};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(28, 28, 28, 20)
+        layout.setSpacing(0)
+
+        # ── 标题（粗体，稍大） ──
+        title_lb = BodyLabel(title, self.widget)
+        title_lb.setWordWrap(True)
+        title_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; "
+            f"{f'font-family: \"{ff}\";' if ff else ''}"
+            f"font-size: {max(8, fs + 2)}px; font-weight: bold;"
+        )
+        layout.addWidget(title_lb)
+
+        layout.addSpacing(12)
+
+        # ── 内容 ──
+        content_lb = BodyLabel(text, self.widget)
+        content_lb.setWordWrap(True)
+        content_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; "
+            f"{f'font-family: \"{ff}\";' if ff else ''}"
+            f"font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+        )
+        layout.addWidget(content_lb)
+
+        layout.addStretch()
+
+        # ── 按钮行 ──
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        # 取消按钮（有边框，hover 显示 accent 边框）
+        cancel_btn = QPushButton(no_text, self.widget)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {card_bg};
+                color: {tc};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+                padding: 4px 28px;
+                {f'font-family: \"{ff}\";' if ff else ''}
+                font-size: {max(8, fs - 1)}px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+                border-color: {accent_bg};
+            }}
+        """)
+        cancel_btn.clicked.connect(self._on_cancel)
+
+        # 确认按钮（accent 填充，白色粗体）
+        confirm_btn = QPushButton(yes_text, self.widget)
+        confirm_btn.setCursor(Qt.PointingHandCursor)
+        confirm_btn.setFixedHeight(36)
+        confirm_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {accent_bg};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 28px;
+                {f'font-family: \"{ff}\";' if ff else ''}
+                font-size: {max(8, fs - 1)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {accent_bg};
+            }}
+        """)
+        confirm_btn.clicked.connect(self._on_confirm)
+
+        if default_yes:
+            confirm_btn.setDefault(True)
+            confirm_btn.setFocus()
+        else:
+            cancel_btn.setDefault(True)
+            cancel_btn.setFocus()
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(400, 200)
+
+    def _on_confirm(self):
+        self._result = True
+        self.close()
+
+    def _on_cancel(self):
+        self._result = False
+        self.close()
+```
+
+### 7.2 快捷函数
+
+```python
+def _styled_confirm(
+    parent: QWidget,
+    title: str,
+    text: str,
+    *,
+    color_source: Optional[QWidget] = None,
+    yes_text: str = "是",
+    no_text: str = "否",
+    default_yes: bool = False,
+) -> bool:
+    """快捷确认弹窗 — 从卡片缓存获取主题色
+
+    Args:
+        parent: MaskDialogBase 的视觉父窗口（传 self.window()）
+        color_source: 颜色查找起点（传 self，即调用的 widget）
+    """
+    # ── 从 color_source/parent 的父链获取主题色 ──
+    tc = "rgba(255,255,255,0.9)"
+    ff = ""
+    fs = 14
+    theme_colors: dict = {}
+
+    p = color_source or parent
+    while p is not None:
+        cached = getattr(p, "_cached_tc", None)
+        if cached is not None:
+            tc = cached
+            ff = getattr(p, "_cached_font_family", "")
+            fs = getattr(p, "_cached_font_size", 14)
+            theme_colors = getattr(p, "_cached_theme_colors", {})
+            break
+        p = p.parent()
+
+    accent_bg = theme_colors.get("accent", "") or ("#62a0ea" if isDarkTheme() else "#2878dc")
+    card_bg = theme_colors.get("content_bg", "#2a2a2e" if isDarkTheme() else "#ffffff")
+    border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
+    hover_bg = theme_colors.get("hover_bg", "rgba(255,255,255,0.08)" if isDarkTheme() else "rgba(0,0,0,0.06)")
+
+    dialog = _StyledConfirmDialog(
+        parent, title, text,
+        tc=tc, ff=ff, fs=fs,
+        accent_bg=accent_bg, card_bg=card_bg,
+        border_c=border_c, hover_bg=hover_bg,
+        yes_text=yes_text, no_text=no_text,
+        default_yes=default_yes,
+    )
+    dialog.exec_()
+    return dialog._result
+```
+
+### 7.3 在卡片中使用
+
+```python
+# cards.py 中 _PluginRow._on_uninstall 模式：
+def _on_uninstall(self):
+    reply = _styled_confirm(
+        self.window(),
+        "确认卸载",
+        f"确定要卸载「{self._plugin.name}」吗？\n此操作不可恢复。",
+        color_source=self,
+    )
+    if reply:
+        self._do_uninstall()
+```
+
+> **关键**：`parent=self.window()` 保证 `MaskDialogBase` 遮罩覆盖全屏；
+> `color_source=self` 保证颜色从调用 widget 的父链向上找到卡片缓存。
+
+### 7.4 补充：卡片 _apply_latest_theme 需缓存 theme_colors
+
+```python
+# 在卡片的 _apply_latest_theme 中新增一行：
+def _apply_latest_theme(self):
+    if self._context_provider is None:
+        return
+    try:
+        ctx = self._context_provider()
+    except Exception:
+        return
+
+    # ── 缓存上下文值（供弹窗使用） ──
+    font_family, font_size = _ctx_font(ctx)
+    self._cached_tc = _ctx_text_color(ctx)
+    self._cached_tcs = _ctx_text_color(ctx, secondary=True)
+    self._cached_font_family = font_family
+    self._cached_font_size = font_size
+    self._cached_theme_colors = ctx.get("colors", {})  # ← 新增：弹窗颜色源
+    ...
+```
+
+### 7.5 所需额外 import
+
+```python
+from PyQt5.QtGui import QColor
+from qfluentwidgets import BodyLabel, MaskDialogBase
+```
+
+> `QPushButton`, `QVBoxLayout`, `QHBoxLayout` 在卡片模板中已默认导入。

@@ -36,6 +36,11 @@ from loguru import logger
 _USER_CUSTOM_CMD_REL = "plugins/user-custom/commands"
 
 
+def _safe_filename(cmd_name: str) -> str:
+    """将命令名转换为安全文件名（: → __，解决 Windows 文件名非法字符问题）"""
+    return cmd_name.replace(":", "__")
+
+
 def _get_user_custom_cmd_dir() -> Path:
     from app.utils.utils import get_app_data_dir
 
@@ -43,7 +48,10 @@ def _get_user_custom_cmd_dir() -> Path:
 
 
 def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
-    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）"""
+    """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）
+
+    Windows 兼容：同时尝试原始命令名和安全文件名（: → __）进行匹配。
+    """
     from app.core.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
@@ -51,14 +59,17 @@ def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
         return None
 
     user_custom_dir = _get_user_custom_cmd_dir()
+    safe_name = _safe_filename(cmd_name)
+    match_names = (cmd_name, safe_name) if safe_name != cmd_name else (cmd_name,)
+
     for cmd_file in pm.get_command_files():
-        if cmd_file.stem == cmd_name:
+        if cmd_file.stem in match_names:
             # 优先返回非 user-custom 中的原始文件
             if not str(cmd_file.resolve()).startswith(str(user_custom_dir.resolve())):
                 return cmd_file
     # 没找到原始文件，返回 user-custom 中的覆盖文件（如有）
     for cmd_file in pm.get_command_files():
-        if cmd_file.stem == cmd_name:
+        if cmd_file.stem in match_names:
             return cmd_file
     return None
 
@@ -287,9 +298,16 @@ class _CommandRow(QFrame):
             " border-radius: 8px; padding: 0px; }"
             "#cmdRow:hover { background: rgba(128,128,128,0.05); }"
         )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(8)
+
+        # 垂直主布局：上行=名称+快捷键+按钮，下行=描述
+        vly = QVBoxLayout(self)
+        vly.setContentsMargins(12, 6, 12, 6)
+        vly.setSpacing(2)
+
+        # ── 上行 ──
+        hly = QHBoxLayout()
+        hly.setContentsMargins(0, 0, 0, 0)
+        hly.setSpacing(8)
 
         # 命令名
         name_text = f"/{self._cmd_name}"
@@ -301,22 +319,9 @@ class _CommandRow(QFrame):
         name_lb.setMinimumWidth(140)
         if self._is_customized:
             name_lb.setToolTip("已自定义（原系统命令被覆盖）")
-        layout.addWidget(name_lb)
+        hly.addWidget(name_lb)
 
-        # 类型标签
-        badge_label = "插件" if self._is_plugin else "系统"
-        badge_color = "rgba(66,133,244,0.8)" if self._is_plugin else _text_color(True)
-        badge = QLabel(badge_label, self)
-        badge.setObjectName("cmdRowBadge")
-        badge.setFixedHeight(18)
-        badge.setStyleSheet(
-            f"color: {badge_color}; font-size: 10px; background: rgba(128,128,128,0.1);"
-            f" border-radius: 4px; padding: 0 6px;"
-        )
-        badge.setAlignment(Qt.AlignCenter)
-        layout.addWidget(badge)
-
-        layout.addStretch(1)
+        hly.addStretch(1)
 
         # 快捷键
         if self._shortcut:
@@ -336,7 +341,7 @@ class _CommandRow(QFrame):
             )
         shortcut_lb.setAlignment(Qt.AlignCenter)
         shortcut_lb.setMinimumWidth(60)
-        layout.addWidget(shortcut_lb)
+        hly.addWidget(shortcut_lb)
         self._shortcut_lb = shortcut_lb
 
         # 编辑按钮
@@ -344,7 +349,7 @@ class _CommandRow(QFrame):
         self.edit_btn.setToolTip("设置自定义快捷键")
         self.edit_btn.setFixedSize(28, 28)
         self.edit_btn.clicked.connect(lambda: self.edit_clicked.emit(self._cmd_name))
-        layout.addWidget(self.edit_btn)
+        hly.addWidget(self.edit_btn)
 
         # 恢复按钮
         if self._is_customized:
@@ -352,7 +357,19 @@ class _CommandRow(QFrame):
             self.restore_btn.setToolTip("恢复系统配置")
             self.restore_btn.setFixedSize(28, 28)
             self.restore_btn.clicked.connect(lambda: self.restore_clicked.emit(self._cmd_name))
-            layout.addWidget(self.restore_btn)
+            hly.addWidget(self.restore_btn)
+
+        vly.addLayout(hly)
+
+        # ── 下行：描述文字 ──
+        if self._description:
+            desc_lb = QLabel(self._description, self)
+            desc_lb.setObjectName("cmdRowDesc")
+            desc_lb.setStyleSheet(
+                f"color: {_text_color(True)}; font-size: 12px; background: transparent;"
+            )
+            desc_lb.setWordWrap(True)
+            vly.addWidget(desc_lb)
 
     def update_shortcut(self, shortcut: str, is_customized: bool):
         self._shortcut = shortcut
@@ -455,8 +472,8 @@ class ShortcutManagerCard(QWidget):
             pass
 
     _CMD_ROW_SIZE_OFFSETS = {
-        "cmdRowName": 1,  # 命令名比基准稍大
-        "cmdRowBadge": -3,  # 标签较小
+        "cmdRowName": 1,       # 命令名比基准稍大
+        "cmdRowDesc": -3,      # 描述文字较小
         "cmdRowShortcut": -1,  # 快捷键适中
     }
 
@@ -666,10 +683,12 @@ class ShortcutManagerCard(QWidget):
         self._retheme()
 
     def _get_customized_names(self) -> set:
+        """获取已自定义的命令名集合（将安全文件名反向映射为命令名）"""
         cmd_dir = _get_user_custom_cmd_dir()
         if not cmd_dir.exists():
             return set()
-        return {p.stem for p in cmd_dir.glob("*.md")}
+        # 安全文件名中的 __ 映射回命令名中的 :
+        return {p.stem.replace("__", ":") for p in cmd_dir.glob("*.md")}
 
     # ── 编辑快捷键 ──
 
@@ -742,7 +761,8 @@ class ShortcutManagerCard(QWidget):
         try:
             cmd_dir = _get_user_custom_cmd_dir()
             cmd_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = cmd_dir / f"{cmd_name}.md"
+            safe_name = _safe_filename(cmd_name)
+            dest_path = cmd_dir / f"{safe_name}.md"
 
             # 1. 找到原始命令文件
             original = _find_original_cmd_file(cmd_name)
@@ -769,11 +789,16 @@ class ShortcutManagerCard(QWidget):
     def _on_restore(self, cmd_name: str):
         try:
             cmd_dir = _get_user_custom_cmd_dir()
-            cmd_file = cmd_dir / f"{cmd_name}.md"
-            if cmd_file.exists():
-                cmd_file.unlink()
-                logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
-                self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+            safe_name = _safe_filename(cmd_name)
+            # 尝试安全文件名和原始名（不同时才分别尝试，兼容旧文件）
+            candidates = {safe_name, cmd_name}
+            for name in candidates:
+                cmd_file = cmd_dir / f"{name}.md"
+                if cmd_file.exists():
+                    cmd_file.unlink()
+                    logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
+                    self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+                    break
             self._reload_commands()
             QTimer.singleShot(300, self._refresh)
         except Exception as e:
@@ -781,11 +806,25 @@ class ShortcutManagerCard(QWidget):
             self._count_lb.setText(f"❌ 恢复失败: {e}")
 
     def _reload_commands(self):
-        """强制重新加载命令（刷新 user-custom 覆盖）"""
+        """强制重新加载命令（刷新 user-custom 覆盖）并同步所有窗口的快捷键注册"""
         try:
             from app.core.builtin_commands import reload_all_commands
 
             reload_all_commands()
+
+            # 同步刷新所有窗口的快捷键绑定（QShortcut 注册）
+            try:
+                from app.main_widget import OpenAIChatToolWindow
+
+                for win in OpenAIChatToolWindow._instances:
+                    if getattr(win, "_is_destroyed", False):
+                        continue
+                    try:
+                        win._register_command_shortcuts()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[ShortcutManager] 重新加载命令失败: {e}")
 

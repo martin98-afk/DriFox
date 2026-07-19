@@ -8,6 +8,8 @@
 
 import json
 import markdown
+import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,7 +42,7 @@ def _format_timestamp(msg: Dict[str, Any]) -> str:
         try:
             dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return dt.strftime("%m-%d %H:%M")
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return ts
     return ""
 
@@ -786,6 +788,18 @@ class ShareCardContent(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             self._show_info(f"已保存到 {path}", "success")
+            # ── 自动打开文件夹并选中文件 ──
+            try:
+                if os.name == "nt":
+                    subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                else:
+                    folder = os.path.dirname(path)
+                    if folder:
+                        subprocess.Popen(["xdg-open", folder])
+            except Exception as open_err:
+                from loguru import logger
+
+                logger.debug(f"[ShareCard] 打开文件夹失败: {open_err}")
         except Exception as e:
             self._show_info(f"保存失败: {e}", "error")
 

@@ -383,11 +383,74 @@ class MyCard(QWidget):
 
 ---
 
-## 7. 外部依赖管理（_vendor/ 模式）
+## 7. 弹窗/确认对话框 — 统一 MaskDialogBase 风格
+
+> 完整代码模板见 `templates.md §七`。
+
+### 7.1 为什么不用 QMessageBox
+
+- 原生 `QMessageBox.question()` 样式与 app 主题不统一（白底/系统默认）
+- qfluentwidgets 的 `MessageBox` 在插件闭包约束下不易获取主题色
+- **推荐方案**：使用 qfluentwidgets 的 `MaskDialogBase`（主程序 `ConfirmDialog` 也是用它）
+
+### 7.2 颜色从哪里来
+
+与浮动卡片一样，弹窗颜色从 **卡片缓存的上下文主题色** 获取：
+
+```python
+# 卡片 _apply_latest_theme 中缓存
+self._cached_tc = _ctx_text_color(ctx)          # 文字主色
+self._cached_font_family, self._cached_font_size = _ctx_font(ctx)
+self._cached_theme_colors = ctx.get("colors", {})  # 完整主题色 dict
+```
+
+弹窗通过父链向上查找 `PluginManagerCard` / `YourCard` 上的缓存属性：
+
+```python
+p = color_source  # 从调用弹窗的 widget 出发
+while p is not None:
+    cached = getattr(p, "_cached_tc", None)
+    if cached is not None:
+        tc = cached
+        theme_colors = getattr(p, "_cached_theme_colors", {})
+        break
+    p = p.parent()
+```
+
+### 7.3 关键设计
+
+| 设计点 | 说明 |
+|--------|------|
+| **parent vs color_source 分离** | `parent=self.window()` 给 `MaskDialogBase`（全屏遮罩），`color_source=self` 从调用 widget 向上找卡片缓存 |
+| **缓存 `_cached_theme_colors`** | 在 `_apply_latest_theme` 中保存 `ctx.get("colors", {})`，给弹窗提供 `accent` / `content_bg` / `hover_bg` 等键 |
+| **按钮风格** | 取消按钮（有边框，hover accent 边框）；确认按钮（accent 填充白字，粗体） |
+| **圆角 8px** | 卡片和按钮统一 8px border-radius |
+| **按钮高度 36px** | 与 `ConfirmDialog` 一致，注意用 `padding: 4px 28px` 而非垂直 padding（见 §5.2 陷阱） |
+
+### 7.4 调用模式
+
+```python
+# 在 _PluginRow._on_uninstall 等地方：
+def _on_uninstall(self):
+    reply = _plugin_styled_dialog(
+        self.window(),           # MaskDialogBase 父窗口（遮罩用）
+        "确认卸载",
+        f"确定要卸载「{self._name}」吗？",
+        color_source=self,       # 颜色查找起点（_PluginRow → … → YourCard）
+    )
+    if reply:
+        self._do_uninstall()
+```
+
+完整实现见 `templates.md §七`。
+
+---
+
+## 8. 外部依赖管理（_vendor/ 模式）
 
 > 详细内容见 `references/templates.md §五`，这里只列核心要点。
 
-### 7.1 适用场景
+### 8.1 适用场景
 
 UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**不能再次打包**主程序。
 
@@ -395,11 +458,11 @@ UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**
 - 用户从市场下载的插件无法重新打包
 - 含 C 扩展的包（`.pyd`/`.so`）不能跨版本/架构复制
 
-### 7.2 解决方案
+### 8.2 解决方案
 
 把**纯 Python**依赖放在 `plugins/<plugin>/ui/_vendor/`，在 `register_ui` 开头加入 `sys.path`。
 
-### 7.3 何时用 _vendor/
+### 8.3 何时用 _vendor/
 
 | 场景 | 推荐做法 |
 |------|---------|
@@ -412,7 +475,7 @@ UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**
 
 ---
 
-## 8. 其他约定
+## 9. 其他约定
 
 ### 8.1 日志
 

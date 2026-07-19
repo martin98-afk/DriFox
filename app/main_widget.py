@@ -2769,7 +2769,44 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.builtin_commands import register_all_commands
 
         register_all_commands()
+        self._register_system_card_commands()
         self._register_command_shortcuts()
+
+    def _register_system_card_commands(self):
+        """为顶层系统设置卡片注册 FUNCTION 命令，使其出现在快捷键管理中
+
+        这些卡片原本只能通过按钮打开，注册为命令后：
+        - 用户可以在快捷键管理器中为它们分配全局快捷键
+        - 也可以通过 /settings、/history 等斜杠命令打开
+        """
+        from app.core.command_manager import CommandManager, CommandType
+
+        cmd_mgr = CommandManager.get_instance()
+
+        # card_id → 中文描述
+        _SYSTEM_CARD_COMMANDS = {
+            "settings": "打开设置面板",
+            "history": "打开对话历史",
+            "memory": "打开记忆管理",
+            "model_selector": "选择模型",
+            "tool_control": "打开工具控制面板",
+            "project_selector": "选择项目",
+            "share": "分享对话",
+        }
+
+        for card_id, description in _SYSTEM_CARD_COMMANDS.items():
+            # 先注册 handler（即使命令已存在也要注册，否则快捷键无法触发 toggle_card）
+            self._function_command_handlers[card_id] = lambda args, cid=card_id: self._card_manager.toggle_card(
+                cid, self._window_id
+            )
+            if cmd_mgr.has_command(card_id):
+                continue
+            cmd_mgr.register(
+                name=card_id,
+                command_type=CommandType.FUNCTION,
+                description=description,
+                argument_hint="",
+            )
 
     def _clear_command_shortcuts(self):
         """清除已注册的命令快捷键"""
@@ -2839,9 +2876,10 @@ class OpenAIChatToolWindow(ToolWindow):
         for plugin in pm.get_enabled_plugins():
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
+        logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
         count = registry.load_all_enabled_plugins(plugin_dirs)
         if count > 0:
-            logger.info(f"[MainWidget] Loaded {count} UI plugins")
+            logger.info(f"[MainWidget] Loaded {count}/{len(plugin_dirs)} UI plugins")
 
     def _build_ui_context(self) -> Dict[str, str]:
         """构建 UI 插件的上下文 dict
@@ -5474,7 +5512,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
         self._mcp_edit_card.setMinimumHeight(200)
-        self._mcp_edit_card.set_height_mode("proportional")
+        self._mcp_edit_card.set_height_mode("content")
         self._mcp_edit_popup = None
         self._mcp_edit_card.setVisible(False)
         self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
