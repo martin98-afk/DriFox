@@ -667,11 +667,18 @@ class MarketplaceCard(QWidget):
 
     # ── 异步刷新 ──
 
-    def _async_refresh(self):
-        """在后台线程拉取市场数据"""
+    def _async_refresh(self, force: bool = False):
+        """在后台线程拉取市场数据
+
+        Args:
+            force: 是否强制拉取远程（跳过缓存）
+        """
         self._set_loading(True)
         self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
+        if force:
+            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
+        else:
+            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -1105,14 +1112,7 @@ class MarketplaceCard(QWidget):
     def _on_refresh(self):
         """强制刷新所有市场"""
         self._status_label.setText("刷新中…")
-        # 删除所有市场缓存，后台重新拉取
-        mgr = get_marketplace_manager()
-        cache_dir = mgr._cache_dir
-        if cache_dir.exists():
-            for f in cache_dir.glob("*.json"):
-                if f.name != "sources.json":
-                    f.unlink()
-        self._async_refresh()
+        self._async_refresh(force=True)
 
     def _cleanup_worker(self):
         """安全清理旧的 worker/thread"""
