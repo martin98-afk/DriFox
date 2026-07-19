@@ -36,6 +36,7 @@ from qfluentwidgets import (
 
 from .data import get_marketplace
 from .installer import get_installer
+from .marketplace_manager import get_marketplace_manager
 from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
 
 # ── 主题色辅助 ──────────────────────────────────────────────
@@ -177,6 +178,15 @@ class _PluginRow(QFrame):
             desc_label.setObjectName("pluginRowDesc")
             desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             info_layout.addWidget(desc_label)
+
+        # 市场来源标签
+        marketplace = self._meta.get("_marketplace", "")
+        if marketplace:
+            mp_label = QLabel(f"📦 {marketplace}", self)
+            mp_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 10px; background: transparent;"
+            )
+            info_layout.addWidget(mp_label)
 
         layout.addLayout(info_layout, 1)
 
@@ -455,8 +465,30 @@ class MarketplaceCard(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # ── 标签栏 ──
+        from qfluentwidgets import SegmentedToggleToolWidget
+
+        self._tab_bar = SegmentedToggleToolWidget(self)
+        self._tab_bar.addItem("浏览", "browse")
+        self._tab_bar.addItem("市场", "markets")
+        self._tab_bar.setCurrentItem("browse")
+        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
+        root.addWidget(self._tab_bar)
+
+        # ── 页面堆叠 ──
+        from PyQt5.QtWidgets import QStackedWidget
+
+        self._page_stack = QStackedWidget(self)
+        self._page_stack.setStyleSheet("background: transparent;")
+
+        # ===== 浏览页 =====
+        self._browse_page = QWidget(self._page_stack)
+        browse_root = QVBoxLayout(self._browse_page)
+        browse_root.setContentsMargins(0, 0, 0, 0)
+        browse_root.setSpacing(0)
+
         # ── 头部 ──
-        header = QWidget(self)
+        header = QWidget(self._browse_page)
         header.setStyleSheet("background: transparent;")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(16, 12, 16, 4)
@@ -491,8 +523,6 @@ class MarketplaceCard(QWidget):
         self._search_edit.textChanged.connect(self._filter_plugins)
         header_layout.addWidget(self._search_edit)
 
-        # 注意：没有刷新按钮，每次 show_card 自动强制拉取最新数据
-
         # 关闭按钮
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
         self._close_btn.setFixedSize(24, 24)
@@ -500,22 +530,19 @@ class MarketplaceCard(QWidget):
         self._close_btn.clicked.connect(self._on_close)
         header_layout.addWidget(self._close_btn)
 
-        root.addWidget(header)
+        browse_root.addWidget(header)
 
         # ── 分隔线 ──
-        sep = QFrame(self)
+        sep = QFrame(self._browse_page)
         sep.setFrameShape(QFrame.HLine)
         sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
-        root.addWidget(sep)
+        browse_root.addWidget(sep)
 
-        # ── 内容区（滚动列表 + 居中空状态用 QStackedWidget）──
-        from PyQt5.QtWidgets import QStackedWidget
-
-        self._content_stack = QStackedWidget(self)
+        # ── 内容区（滚动列表 + 居中空状态）──
+        self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
 
-        # 页面 0：滚动列表
-        self._scroll = ScrollArea(self)
+        self._scroll = ScrollArea(self._browse_page)
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
@@ -530,14 +557,61 @@ class MarketplaceCard(QWidget):
         self._scroll.setWidget(self._content)
         self._content_stack.addWidget(self._scroll)
 
-        # 页面 1：居中空状态
-        self._empty_label = StrongBodyLabel("暂无可用插件", self._content_stack)
+        self._empty_label = StrongBodyLabel("暂无可用插件", self._browse_page)
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._content_stack.addWidget(self._empty_label)
 
-        self._content_stack.setCurrentIndex(0)  # 默认显示滚动列表
-        root.addWidget(self._content_stack, 1)
+        self._content_stack.setCurrentIndex(0)
+        browse_root.addWidget(self._content_stack, 1)
+
+        self._page_stack.addWidget(self._browse_page)
+
+        # ===== 市场管理页 =====
+        self._markets_page = QWidget(self._page_stack)
+        markets_root = QVBoxLayout(self._markets_page)
+        markets_root.setContentsMargins(0, 0, 0, 0)
+        markets_root.setSpacing(0)
+
+        # 添加市场行
+        add_row = QWidget(self._markets_page)
+        add_layout = QHBoxLayout(add_row)
+        add_layout.setContentsMargins(16, 12, 16, 4)
+        add_layout.setSpacing(8)
+
+        self._market_url_edit = LineEdit(add_row)
+        self._market_url_edit.setPlaceholderText("owner/repo 或 URL，如 claude-market/marketplace")
+        self._market_url_edit.setClearButtonEnabled(True)
+        add_layout.addWidget(self._market_url_edit)
+
+        add_btn = PushButton("添加", add_row)
+        add_btn.setFixedWidth(80)
+        add_btn.clicked.connect(self._on_add_marketplace)
+        add_layout.addWidget(add_btn)
+
+        markets_root.addWidget(add_row)
+
+        # 市场列表
+        self._markets_scroll = ScrollArea(self._markets_page)
+        self._markets_scroll.setWidgetResizable(True)
+        self._markets_scroll.setStyleSheet(
+            "ScrollArea { background: transparent; border: none; }"
+            "ScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._markets_content = QWidget(self._markets_scroll)
+        self._markets_content.setStyleSheet("background: transparent;")
+        self._markets_content_layout = QVBoxLayout(self._markets_content)
+        self._markets_content_layout.setContentsMargins(16, 4, 16, 8)
+        self._markets_content_layout.setSpacing(6)
+        self._markets_content_layout.setAlignment(Qt.AlignTop)
+        self._markets_scroll.setWidget(self._markets_content)
+        markets_root.addWidget(self._markets_scroll, 1)
+
+        self._page_stack.addWidget(self._markets_page)
+
+        # 默认显示浏览页
+        self._page_stack.setCurrentIndex(0)
+        root.addWidget(self._page_stack, 1)
 
     # ── 高度模式 ──
 
@@ -763,6 +837,125 @@ class MarketplaceCard(QWidget):
                     else:
                         row.set_installed(installed)
                     break
+
+    # ── 标签切换 ──
+
+    def _on_tab_changed(self, key: str):
+        """标签切换"""
+        if key == "browse":
+            self._page_stack.setCurrentIndex(0)
+        elif key == "markets":
+            self._build_markets_page()
+            self._page_stack.setCurrentIndex(1)
+
+    # ── 市场管理 ──
+
+    def _build_markets_page(self):
+        """构建市场管理页面"""
+        # 清空旧内容
+        while self._markets_content_layout.count():
+            item = self._markets_content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        mgr = get_marketplace_manager()
+        for src in mgr.get_sources():
+            row = self._create_market_row(src)
+            self._markets_content_layout.addWidget(row)
+
+        self._markets_content_layout.addStretch()
+
+    def _create_market_row(self, src_def: dict) -> QWidget:
+        """创建单个市场源的行组件"""
+        row = QWidget(self._markets_content)
+        row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(8)
+
+        # 名称 + 来源
+        info = QVBoxLayout()
+        info.setSpacing(2)
+
+        name_text = src_def["name"]
+        if src_def.get("builtin"):
+            name_text += " (内置)"
+        name_label = QLabel(name_text, row)
+        name_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; background: transparent;")
+        info.addWidget(name_label)
+
+        src = src_def.get("source", {})
+        src_text = src.get("repo", src.get("url", "unknown"))
+        if len(src_text) > 60:
+            src_text = src_text[:57] + "..."
+        url_label = QLabel(src_text, row)
+        url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
+        info.addWidget(url_label)
+
+        h.addLayout(info, 1)
+
+        # 删除按钮（内置市场不可删）
+        if not src_def.get("builtin"):
+            del_btn = TransparentToolButton(FluentIcon.DELETE, row)
+            del_btn.setFixedSize(28, 28)
+            del_btn.setToolTip("移除市场")
+            del_btn.clicked.connect(lambda checked, n=src_def["name"]: self._on_remove_marketplace(n))
+            h.addWidget(del_btn)
+
+        return row
+
+    def _on_add_marketplace(self):
+        """添加市场源"""
+        text = self._market_url_edit.text().strip()
+        if not text:
+            return
+
+        mgr = get_marketplace_manager()
+
+        # 判断类型
+        if text.startswith(("http://", "https://")):
+            if text.endswith(".git"):
+                source = {"source": "url", "url": text}
+            else:
+                source = {"source": "url", "url": text}
+        elif "/" in text and " " not in text:
+            parts = text.split("/")
+            if len(parts) == 2:
+                source = {"source": "github", "repo": text}
+            else:
+                source = {"source": "url", "url": text}
+        else:
+            source = {"source": "url", "url": text}
+
+        # 先用拉取验证获取市场名
+        market_name = ""
+        try:
+            temp_def = {"name": "__tmp__", "source": source}
+            data = mgr.fetch_marketplace(temp_def, force=True)
+            market_name = data.get("name", text.split("/")[-1].replace(".git", "").replace(".json", ""))
+        except Exception:
+            market_name = text.split("/")[-1].replace(".git", "").replace(".json", "")
+
+        if not market_name:
+            market_name = text.split("/")[-1].replace(".git", "").replace(".json", "")
+
+        # 确保名称唯一
+        existing = {s["name"] for s in mgr.get_sources()}
+        base_name = market_name
+        counter = 1
+        while market_name in existing:
+            market_name = f"{base_name}-{counter}"
+            counter += 1
+
+        mgr.add_source(market_name, source, auto_update=False)
+        self._market_url_edit.clear()
+        self._build_markets_page()
+
+    def _on_remove_marketplace(self, name: str):
+        """移除市场源"""
+        mgr = get_marketplace_manager()
+        mgr.remove_source(name)
+        self._build_markets_page()
 
     # ── 清理 ──
 
