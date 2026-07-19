@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.3] - 2026-07-19
 
-自上一版本以来的变更 | 提交数：42 · 文件变更：48 · +5339/-2953 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：43 · 文件变更：52 · +5498/-2973 | 贡献者：dingma
 
-> 重点：包含 **17 个新功能**、**13 个问题修复**、**4 次性能优化**、**4 项样式改进**、**3 项测试增强**、**1 项重构**。
+> 重点：包含 **17 个新功能**、**14 个问题修复**、**4 次性能优化**、**4 项样式改进**、**3 项测试增强**、**1 项重构**。
 
 ### ✨ 新功能 (New Features)
 
@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 
 - **Backend 插件发现修复**: `_try_identify_new_plugins` 现在返回所有新插件而非仅第一个
+- **UI 插件边缘启动器**: 打开菜单前刷新插件列表，确保数据显示最新
 - **Marketplace 多处修复**: 刷新按钮跳过全部缓存；恢复按钮样式、用 QFont 替代 QSS；字号调整至 13px；交换刷新/关闭按钮顺序；移除 ThreadPoolExecutor，改用延迟刷新 + processEvents 防止 UI 阻塞；将 tab 栏移至标题下方、改用 Pivot 替代 SegmentedToggleToolWidget；修复重复市场条目问题；静默验证错误并在 UI 显示添加反馈
 - **MainWidget**: MCP 编辑卡片高度模式改为 content
 - **主窗口（main）**: 属性装饰器格式调整；`ui_plugin_edge_launcher` 启用半透明背景并记录卡片信息
