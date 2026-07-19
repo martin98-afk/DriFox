@@ -382,6 +382,9 @@ class Settings(QConfig):
     )
     ui_light_mode = ConfigItem("UI", "LightMode", False, BoolValidator())
 
+    # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
+    ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
+
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
     pet_size = OptionsConfigItem("UI", "PetSize", "medium", OptionsValidator(["small", "medium", "large"]))

@@ -97,10 +97,7 @@ class RefreshableThemeComboBox(ComboBox):
         themes = theme_manager.list_themes()
         if card and hasattr(card, "cfg") and hasattr(card.cfg, "ui_light_mode"):
             is_light = card.cfg.ui_light_mode.value
-            themes = {
-                tid: name for tid, name in themes.items()
-                if theme_manager.is_light_theme(tid) == is_light
-            }
+            themes = {tid: name for tid, name in themes.items() if theme_manager.is_light_theme(tid) == is_light}
 
         new_options = {tid: {"label": name} for tid, name in themes.items()}
         if card and hasattr(card, "config_item"):
@@ -334,6 +331,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         self.autoStartCard.checkedChanged.connect(self._on_toggled)
         content_layout.addWidget(self.autoStartCard)
+
+        # 简洁模式：工具调用/思考块折叠显示
+        self.compactToolCard = SwitchSettingCard(
+            FluentIcon.MENU,
+            "简洁模式",
+            "工具与思考归拢到卡片顶部可滚动区域",
+            configItem=self.cfg.ui_compact_tool_area,
+            parent=self,
+        )
+        content_layout.addWidget(self.compactToolCard)
 
         # 智能体完成通知
         self.llmNotifyCard = SwitchSettingCard(
@@ -772,6 +779,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # 浅/深色切换 → 清除浅色检测缓存（图标由 QIconEngine 自动适配）
         from app.utils.theme_manager import theme_manager
+
         theme_manager.on_theme_changed()
 
         if hasattr(self, "refresh_style"):
