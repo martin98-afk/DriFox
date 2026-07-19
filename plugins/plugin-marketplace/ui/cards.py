@@ -320,6 +320,7 @@ class MarketplaceCard(QWidget):
         self._plugin_data: list = []
         self._matched_plugins: list = []
         self._rendered_count: int = 0
+        self._current_filter: str = "all"
         self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -484,6 +485,16 @@ class MarketplaceCard(QWidget):
         title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         header_layout.addWidget(title)
 
+        # ── 浏览/市场切换（标题行内）──
+        from qfluentwidgets import Pivot
+
+        self._tab_bar = Pivot(header)
+        self._tab_bar.addItem("browse", "浏览", None, None)
+        self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.setCurrentItem("browse")
+        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
+        header_layout.addWidget(self._tab_bar)
+
         header_layout.addStretch(1)
 
         self._status_label = QLabel("", header)
@@ -491,16 +502,6 @@ class MarketplaceCard(QWidget):
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
         )
         header_layout.addWidget(self._status_label)
-
-        self._search_edit = LineEdit(header)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setFixedWidth(160)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
-        self._search_edit.textChanged.connect(self._filter_plugins)
-        header_layout.addWidget(self._search_edit)
 
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, header)
         self._close_btn.setFixedSize(24, 24)
@@ -516,27 +517,42 @@ class MarketplaceCard(QWidget):
         sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
         root.addWidget(sep)
 
-        # ── 标签栏（标题下方）──
-        from qfluentwidgets import Pivot
-
-        self._tab_bar = Pivot(self)
-        self._tab_bar.addItem("browse", "浏览", None, None)
-        self._tab_bar.addItem("markets", "市场", None, None)
-        self._tab_bar.setCurrentItem("browse")
-        self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
-        root.addWidget(self._tab_bar)
-
         # ── 页面堆叠 ──
         from PyQt5.QtWidgets import QStackedWidget
 
         self._page_stack = QStackedWidget(self)
         self._page_stack.setStyleSheet("background: transparent;")
 
-        # ===== 浏览页（只有内容区，无标题）=====
+        # ===== 浏览页 =====
         self._browse_page = QWidget(self._page_stack)
         browse_root = QVBoxLayout(self._browse_page)
         browse_root.setContentsMargins(0, 0, 0, 0)
         browse_root.setSpacing(0)
+
+        # ── 筛选标签（全部/已安装/未安装/待更新）──
+        self._filter_bar = Pivot(self._browse_page)
+        self._filter_bar.addItem("all", "全部", None, None)
+        self._filter_bar.addItem("installed", "已安装", None, None)
+        self._filter_bar.addItem("uninstalled", "未安装", None, None)
+        self._filter_bar.addItem("updates", "待更新", None, None)
+        self._filter_bar.setCurrentItem("all")
+        self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
+        browse_root.addWidget(self._filter_bar)
+
+        # ── 搜索框 ──
+        search_row = QWidget(self._browse_page)
+        search_layout = QHBoxLayout(search_row)
+        search_layout.setContentsMargins(16, 4, 16, 4)
+
+        self._search_edit = LineEdit(search_row)
+        self._search_edit.setPlaceholderText("搜索插件…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
+        self._search_edit.textChanged.connect(self._filter_plugins)
+        search_layout.addWidget(self._search_edit)
+        browse_root.addWidget(search_row)
 
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
@@ -690,11 +706,12 @@ class MarketplaceCard(QWidget):
         self._clear_plugin_list()
         query = self._search_edit.text().strip().lower()
         installer = get_installer()
+        filter_mode = self._current_filter
 
-        # 过滤全部匹配插件
         matched = []
         for p in plugins:
             name = p.get("name", "")
+            # 搜索过滤
             if query and query not in name.lower() and query not in (p.get("description", "")).lower():
                 continue
             installed = installer.is_installed(name)
@@ -702,6 +719,13 @@ class MarketplaceCard(QWidget):
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
+            # 标签过滤
+            if filter_mode == "installed" and not installed:
+                continue
+            if filter_mode == "uninstalled" and installed:
+                continue
+            if filter_mode == "updates" and not has_update:
+                continue
             matched.append((p, installed, has_update, local_ver))
 
         self._matched_plugins = matched
@@ -913,6 +937,12 @@ class MarketplaceCard(QWidget):
         elif key == "markets":
             self._build_markets_page()
             self._page_stack.setCurrentIndex(1)
+
+    def _on_filter_changed(self, key: str):
+        """筛选标签切换"""
+        self._current_filter = key
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
 
     # ── 市场管理 ──
 
