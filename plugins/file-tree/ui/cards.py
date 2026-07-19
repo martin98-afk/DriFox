@@ -607,7 +607,7 @@ class FileTreeWidget(QTreeWidget):
                 )
                 layout.addWidget(title_lb)
 
-                layout.addSpacing(12)
+                layout.addSpacing(6)
 
                 # ── 内容 ──
                 content_lb = BodyLabel(text, self.widget)

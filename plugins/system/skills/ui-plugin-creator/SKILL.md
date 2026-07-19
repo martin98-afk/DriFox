@@ -50,7 +50,8 @@ Step 3  读 references/ 对应文件（按需加载）
         │   ├─ 图表 → widgets-charts.md
         │   ├─ 工具函数 → widgets-utils.md
         │   ├─ SQLite 模式 → widgets-sqlite.md
-        │   └─ 主题色 → widgets-theme.md
+        │   ├─ 主题色 → widgets-theme.md
+        │   └─ 弹窗对话框 → templates.md §七（统一 MaskDialogBase 风格）
         ├─ 修改现有插件 → references/modifying.md
         ├─ 验证清单 → references/checklist.md
         └─ _vendor/ 外部依赖 → references/templates.md §五

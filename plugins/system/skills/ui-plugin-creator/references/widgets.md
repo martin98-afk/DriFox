@@ -21,6 +21,7 @@
 | 新字段缺失时回退到旧字段估算 | `widgets-sqlite.md §三` |
 | 把 ctx["colors"] 转成图表用的 QColor 字典 | `widgets-theme.md §二` |
 | 浮动卡片主题色适配（白字固定） | `widgets-theme.md §一/§三` |
+| **弹窗/确认对话框（统一 MaskDialogBase 风格）** | **`templates.md §七`** |
 
 ---
 
