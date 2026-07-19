@@ -329,11 +329,13 @@ class MarketplaceCard(QWidget):
         self._context_provider = provider
 
     def show_card(self):
-        """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
+        """卡片显示时：用最新上下文刷新主题色 + 延迟加载数据"""
+        self.setVisible(True)
         self._apply_latest_theme()
         self._apply_plugin_icon()
-        self._async_refresh()
-        self.setVisible(True)
+        # 延迟 50ms 启动后台刷新，避免阻塞 show 过程
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(50, self._async_refresh)
 
     def _apply_plugin_icon(self):
         """从上下文获取插件图标并更新头部图标"""
@@ -690,23 +692,22 @@ class MarketplaceCard(QWidget):
             if query and query not in name.lower() and query not in (p.get("description", "")).lower():
                 continue
             installed = installer.is_installed(name)
-            # 检查是否有版本更新
             has_update = False
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
             row = _PluginRow(
-                p,
-                installed,
-                has_update=has_update,
-                local_version=local_ver,
-                parent=self._content,
-                font_size=self._cached_font_size,
+                p, installed, has_update=has_update, local_version=local_ver,
+                parent=self._content, font_size=self._cached_font_size,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
             count += 1
+            # 每 20 个让 UI 喘口气
+            if count % 20 == 0:
+                from PyQt5.QtWidgets import QApplication
+                QApplication.processEvents()
 
         if count == 0:
             self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
@@ -920,8 +921,6 @@ class MarketplaceCard(QWidget):
 
     def _on_add_marketplace(self):
         """添加市场源"""
-        import re
-
         text = self._market_url_edit.text().strip()
         if not text:
             return

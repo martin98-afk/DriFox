@@ -197,46 +197,24 @@ class MarketplaceSourceManager:
         return market_data
 
     def fetch_all(self, force: bool = False) -> tuple:
-        """并行拉取所有市场的插件列表（合并）
+        """拉取所有市场的插件列表（合并）
 
         Returns:
             (all_plugins: list, marketplaces: list, errors: list)
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         all_plugins: Dict[str, Dict[str, Any]] = {}
         marketplaces: List[Dict[str, Any]] = []
         errors: List[str] = []
 
-        sources = self.get_sources()
-        if not sources:
-            return [], [], []
-
-        # 并行拉取所有市场（最多 6 并发）
-        results: Dict[str, Dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=min(len(sources), 6)) as executor:
-            futures = {
-                executor.submit(self.fetch_marketplace, src, force): src["name"]
-                for src in sources
-            }
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    results[name] = future.result()
-                except Exception as e:
-                    logger.error(f"[Marketplace] 拉取 {name} 异常: {e}")
-                    results[name] = {"name": name, "plugins": [], "_error": str(e)}
-
-        # 按原始顺序合并结果
-        for src_def in sources:
-            data = results.get(src_def["name"], {"name": src_def["name"], "plugins": [], "_error": "timeout"})
+        for src_def in self.get_sources():
+            data = self.fetch_marketplace(src_def, force=force)
             if data.get("_error"):
                 errors.append(f"{src_def['name']}: {data['_error']}")
             marketplaces.append(data)
             for plugin in data.get("plugins", []):
-                pname = plugin.get("name", "")
-                if pname and pname not in all_plugins:
-                    all_plugins[pname] = plugin
+                name = plugin.get("name", "")
+                if name and name not in all_plugins:
+                    all_plugins[name] = plugin
 
         return list(all_plugins.values()), marketplaces, errors
 
