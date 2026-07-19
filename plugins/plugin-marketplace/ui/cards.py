@@ -931,13 +931,11 @@ class MarketplaceCard(QWidget):
         if not market_name:
             market_name = text.split("/")[-1].replace(".git", "").replace(".json", "")
 
-        # 确保名称唯一
+        # 已存在则提示，不重复添加
         existing = {s["name"] for s in mgr.get_sources()}
-        base_name = market_name
-        counter = 1
-        while market_name in existing:
-            market_name = f"{base_name}-{counter}"
-            counter += 1
+        if market_name in existing:
+            self._status_label.setText(f"{market_name} 已存在")
+            return
 
         mgr.add_source(market_name, source, auto_update=False)
         self._market_url_edit.clear()
