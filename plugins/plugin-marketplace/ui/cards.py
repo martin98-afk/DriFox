@@ -873,7 +873,7 @@ class MarketplaceCard(QWidget):
         if src_def.get("builtin"):
             name_text += " (内置)"
         name_label = QLabel(name_text, row)
-        name_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; font-size: 14px; background: transparent;")
+        name_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;")
         info.addWidget(name_label)
 
         src = src_def.get("source", {})
@@ -881,7 +881,7 @@ class MarketplaceCard(QWidget):
         if len(src_text) > 60:
             src_text = src_text[:57] + "..."
         url_label = QLabel(src_text, row)
-        url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
+        url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 14px; background: transparent;")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
