@@ -132,10 +132,8 @@ class _PluginRow(QFrame):
 
     def _setup_ui(self):
         self.setObjectName("pluginRow")
-        # 透明背景 + 悬停微亮
         self.setStyleSheet(
-            "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.15); border-radius: 8px; padding: 0px; }"
-            "#pluginRow:hover { background: rgba(128,128,128,0.05); }"
+            "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.12); border-radius: 8px; }"
         )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
@@ -318,6 +316,7 @@ class MarketplaceCard(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
         self._plugin_data: list = []
+        self._matched_plugins: list = []
         self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -681,12 +680,16 @@ class MarketplaceCard(QWidget):
 
     # ── 渲染 ──
 
+    _RENDER_BATCH = 30  # 首屏只渲染 30 个
+
     def _render_plugins(self, plugins: list):
-        """渲染插件列表（含版本检测）"""
+        """渲染插件列表（首屏 30 个 + 「显示更多」按钮）"""
         self._clear_plugin_list()
         query = self._search_edit.text().strip().lower()
         installer = get_installer()
-        count = 0
+
+        # 过滤并缓存全部匹配插件
+        matched = []
         for p in plugins:
             name = p.get("name", "")
             if query and query not in name.lower() and query not in (p.get("description", "")).lower():
@@ -696,26 +699,56 @@ class MarketplaceCard(QWidget):
             local_ver = None
             if installed:
                 has_update, local_ver, _ = installer.check_update(p)
+            matched.append((p, installed, has_update, local_ver))
+
+        self._matched_plugins = matched
+
+        if not matched:
+            self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
+            self._content_stack.setCurrentIndex(1)
+            return
+
+        self._content_stack.setCurrentIndex(0)
+        end = min(self._RENDER_BATCH, len(matched))
+        self._render_batch(0, end)
+
+        # 还有更多 → 显示「显示全部」按钮
+        if len(matched) > self._RENDER_BATCH:
+            self._add_load_more_button(len(matched))
+
+        self._retheme()
+
+    def _render_batch(self, start: int, end: int):
+        """渲染 [start, end) 范围的插件行"""
+        fs = self._cached_font_size
+        for i in range(start, end):
+            p, installed, has_update, local_ver = self._matched_plugins[i]
             row = _PluginRow(
                 p, installed, has_update=has_update, local_version=local_ver,
-                parent=self._content, font_size=self._cached_font_size,
+                parent=self._content, font_size=fs,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             self._content_layout.addWidget(row)
-            count += 1
-            # 每 20 个让 UI 喘口气
-            if count % 20 == 0:
-                from PyQt5.QtWidgets import QApplication
-                QApplication.processEvents()
 
-        if count == 0:
-            self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
-            self._content_stack.setCurrentIndex(1)
-        else:
-            self._content_stack.setCurrentIndex(0)
+    def _add_load_more_button(self, total: int):
+        """在列表底部添加「显示全部」按钮"""
+        btn = PushButton(f"显示全部 {total} 个插件", self._content)
+        btn.setStyleSheet(
+            "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
+            "PushButton:hover { background: rgba(128,128,128,0.2); }"
+        )
+        btn.clicked.connect(self._on_load_more)
+        self._content_layout.addWidget(btn)
 
-        # 对动态创建的子控件应用主题
+    def _on_load_more(self):
+        """点击「显示全部」→ 移除按钮，渲染剩余插件"""
+        # 移除加载更多按钮（它是最末一个）
+        item = self._content_layout.takeAt(self._content_layout.count() - 1)
+        if item and item.widget():
+            item.widget().deleteLater()
+        # 渲染剩余的
+        self._render_batch(self._RENDER_BATCH, len(self._matched_plugins))
         self._retheme()
 
     def _clear_plugin_list(self):
