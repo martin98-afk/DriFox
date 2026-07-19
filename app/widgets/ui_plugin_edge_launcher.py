@@ -67,6 +67,7 @@ class _LauncherVisual(QWidget):
         self._anim_duration: int = ANIM_DURATION_MS
 
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
 
@@ -345,6 +346,8 @@ class UIPluginEdgeLauncher(QWidget):
         infos.sort(key=lambda x: x[1].lower())
         self._card_infos = infos
 
+        logger.info(f"[EdgeLauncher] refresh_plugins loaded {len(infos)} cards: {[cid for cid, _, _ in infos]}")
+
         if self._card_infos:
             self._sync_position()
             self.show()
@@ -433,6 +436,7 @@ class UIPluginEdgeLauncher(QWidget):
             # 设置插件图标（如有）
             try:
                 from app.core.plugin_manager import PluginManager
+
                 pm = PluginManager.get_instance()
                 pi = pm.get_plugin(plugin_name)
                 if pi and pi.icon_config:
@@ -447,31 +451,39 @@ class UIPluginEdgeLauncher(QWidget):
             menu.addAction(action)
 
         # 定位：菜单在胶囊右侧，垂直居中于 Launcher
-        # 计算菜单预估高度
+        # 计算菜单理想高度（无硬上限，让屏幕修正来决定最终高度）
         item_count = len(self._card_infos)
-        est_menu_h = min(MENU_MAX_HEIGHT, max(80, item_count * 32 + 24))
+        est_menu_h = max(80, item_count * 32 + 24)
         # 水平：胶囊右边缘 + 4px 间距
         x = self.mapToGlobal(QPoint(CAPSULE_WIDTH + 4, 0)).x()
         # 垂直：Launcher 中心对齐（向上下均等展开）
         launcher_center_y = self.mapToGlobal(QPoint(0, self.height() // 2)).y()
         y = launcher_center_y - est_menu_h // 2
 
-        # 屏幕边界修正：不超出可用区域
+        # 屏幕边界修正 + 动态最大高度
         screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
-            # 超出右边缘 → 左移
+            # 水平：不超出右边缘
             if x + MENU_MIN_WIDTH > avail.right():
                 x = avail.right() - MENU_MIN_WIDTH - 8
-            # 超出顶部 → 对齐顶部
+            # 垂直：先确保不超出顶部
             if y < avail.top() + 4:
                 y = avail.top() + 4
-            # 超出底部 → 对齐底部
+            # 再确保不超出底部（若空间不够，回缩 y 让菜单底部对齐）
             if y + est_menu_h > avail.bottom() - 4:
                 y = avail.bottom() - est_menu_h - 4
+            # 若顶部又超出，说明屏幕实在不够高，限制最大高度 + 滚轮
+            if y < avail.top() + 4:
+                y = avail.top() + 4
+                max_h = avail.height() - 80
+            else:
+                max_h = max(MENU_MAX_HEIGHT, est_menu_h)
+        else:
+            max_h = MENU_MAX_HEIGHT
 
-        # 设置最大高度（超出自动滚轮）
-        menu.setMaximumHeight(MENU_MAX_HEIGHT)
+        # 设置最大高度（超出时 QMenu 自动出现滚轮）
+        menu.setMaximumHeight(max_h)
 
         global_pos = QPoint(int(x), int(y))
 

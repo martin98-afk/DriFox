@@ -2796,8 +2796,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         for card_id, description in _SYSTEM_CARD_COMMANDS.items():
             # 先注册 handler（即使命令已存在也要注册，否则快捷键无法触发 toggle_card）
-            self._function_command_handlers[card_id] = (
-                lambda args, cid=card_id: self._card_manager.toggle_card(cid, self._window_id)
+            self._function_command_handlers[card_id] = lambda args, cid=card_id: self._card_manager.toggle_card(
+                cid, self._window_id
             )
             if cmd_mgr.has_command(card_id):
                 continue
@@ -2876,9 +2876,10 @@ class OpenAIChatToolWindow(ToolWindow):
         for plugin in pm.get_enabled_plugins():
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
+        logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
         count = registry.load_all_enabled_plugins(plugin_dirs)
         if count > 0:
-            logger.info(f"[MainWidget] Loaded {count} UI plugins")
+            logger.info(f"[MainWidget] Loaded {count}/{len(plugin_dirs)} UI plugins")
 
     def _build_ui_context(self) -> Dict[str, str]:
         """构建 UI 插件的上下文 dict
