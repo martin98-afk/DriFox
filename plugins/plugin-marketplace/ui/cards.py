@@ -12,6 +12,7 @@
 import re
 import sys
 import traceback
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
@@ -107,22 +108,23 @@ def _drifox_dir() -> Path:
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-    if sys.platform == 'darwin':
+    if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
+        return Path(".drifox")
+    if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
             paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
                 NSApplicationSupportDirectory, NSUserDomainMask
             )
             if paths:
-                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-                app_support = Path(app_support_path) / 'Drifox'
+                app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
+                app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / '.drifox'
+                return app_support / ".drifox"
         except Exception:
             pass
-    return Path.home() / '.drifox'
+    return Path.home() / ".drifox"
 
 
 # ── 单行插件卡片 ────────────────────────────────────────────
@@ -159,6 +161,9 @@ class _PluginRow(QFrame):
         self._font_size = font_size  # 上下文字体大小（用于头像自适应）
         self._btn_font_size = max(13, font_size) if font_size > 0 else 14
         self._avatar = None
+        self._tags = self._compute_tags(plugin_meta)
+        self._tag_widgets: list = []
+        self._overflow_tag: Optional[QLabel] = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -208,13 +213,31 @@ class _PluginRow(QFrame):
             desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
             info_layout.addWidget(desc_label)
 
+        # Tag 标签行（categories + keywords 合并，宽度自适应）
+        if self._tags:
+            self._tags_row = QWidget(self)
+            self._tags_layout = QHBoxLayout(self._tags_row)
+            self._tags_layout.setContentsMargins(0, 2, 0, 0)
+            self._tags_layout.setSpacing(4)
+            for tag in self._tags:
+                lbl = QLabel(tag, self._tags_row)
+                lbl.setObjectName("pluginRowTag")
+                lbl.setStyleSheet(self._tag_stylesheet())
+                self._tags_layout.addWidget(lbl)
+                self._tag_widgets.append(lbl)
+            self._overflow_tag = QLabel("", self._tags_row)
+            self._overflow_tag.setObjectName("pluginRowTag")
+            self._overflow_tag.setStyleSheet(self._tag_stylesheet(is_overflow=True))
+            self._overflow_tag.hide()
+            self._tags_layout.addWidget(self._overflow_tag)
+            self._tags_layout.addStretch()
+            info_layout.addWidget(self._tags_row)
+
         # 市场来源标签
         marketplace = self._meta.get("_marketplace", "")
         if marketplace:
             mp_label = QLabel(f"📦 {marketplace}", self)
-            mp_label.setStyleSheet(
-                f"color: {_text_color(secondary=True)}; font-size: 10px; background: transparent;"
-            )
+            mp_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 10px; background: transparent;")
             info_layout.addWidget(mp_label)
 
         layout.addLayout(info_layout, 1)
@@ -230,6 +253,7 @@ class _PluginRow(QFrame):
 
     def _update_btn_text(self):
         from PyQt5.QtGui import QFont
+
         fs = self._btn_font_size
         btn_font = self._btn.font()
         btn_font.setPixelSize(fs)
@@ -336,6 +360,91 @@ class _PluginRow(QFrame):
         if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
             self._avatar.set_font_size(font_size)
 
+    # ── Tag 相关 ─────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_tags(meta: dict) -> list:
+        """合并 categories 和 keywords 为展示标签（categories 在前，去重）"""
+        cats = meta.get("categories", []) or []
+        keys = meta.get("keywords", []) or []
+        seen: set = set()
+        tags: list = []
+        for c in cats:
+            if c and c not in seen:
+                tags.append(c)
+                seen.add(c)
+        for k in keys:
+            if k and k not in seen:
+                tags.append(k)
+                seen.add(k)
+        return tags
+
+    def _tag_stylesheet(self, is_overflow: bool = False) -> str:
+        """tag 标签 QSS 样式"""
+        tc = _text_color(secondary=True)
+        bg = "rgba(128,128,128,0.08)" if is_overflow else "rgba(128,128,128,0.12)"
+        return f"background: {bg}; color: {tc}; border-radius: 4px; padding: 1px 6px; font-size: 10px;"
+
+    def resizeEvent(self, event):
+        """卡片宽度变化时自适应 tag 显示数量"""
+        super().resizeEvent(event)
+        if hasattr(self, "_tags_row") and self._tags_row is not None:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, self._adapt_tags)
+
+    def showEvent(self, event):
+        """首次显示时执行一次 tag 宽度适配"""
+        super().showEvent(event)
+        if hasattr(self, "_tags_row") and self._tags_row is not None:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, self._adapt_tags)
+
+    def _adapt_tags(self):
+        """按当前可用宽度显示尽可能多的 tag，溢出显示 +N"""
+        if not self._tag_widgets or not hasattr(self, "_tags_row") or self._tags_row is None:
+            return
+        try:
+            tag_area_w = self._tags_row.width()
+        except RuntimeError:
+            return
+        if tag_area_w <= 0:
+            return
+
+        spacing = self._tags_layout.spacing()
+        cum_w = 0
+        visible_count = 0
+
+        for i, w in enumerate(self._tag_widgets):
+            try:
+                tag_w = w.sizeHint().width()
+            except RuntimeError:
+                break
+            extra = spacing if i > 0 else 0
+            if cum_w + tag_w + extra <= tag_area_w:
+                cum_w += tag_w + extra
+                visible_count += 1
+            else:
+                break
+
+        hidden = len(self._tag_widgets) - visible_count
+
+        for i, w in enumerate(self._tag_widgets):
+            try:
+                w.setVisible(i < visible_count)
+            except RuntimeError:
+                pass
+
+        try:
+            if hidden > 0:
+                self._overflow_tag.setText(f"+{hidden}")
+                self._overflow_tag.setVisible(True)
+            else:
+                self._overflow_tag.setVisible(False)
+        except RuntimeError:
+            pass
+
 
 # ── 市场主卡片 ──────────────────────────────────────────────
 
@@ -371,6 +480,7 @@ class MarketplaceCard(QWidget):
         self._apply_plugin_icon()
         # 延迟 50ms 启动后台刷新，避免阻塞 show 过程
         from PyQt5.QtCore import QTimer
+
         QTimer.singleShot(50, self._async_refresh)
 
     def _apply_plugin_icon(self):
@@ -441,12 +551,14 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass
 
-    # objectName → font-size 偏移（用于插件行的标题/描述）
+    # objectName → font-size 偏移（用于插件行的标题/描述/tag）
     # pluginRowTitle: 标题用 font_size - 2（让标题比上下文默认小 2 号）
     # pluginRowDesc:  描述用 font_size - 4（再小 2 号，作为辅助文字）
+    # pluginRowTag:   tag 标签用 font_size - 5（最小号辅助信息）
     _PLUGIN_ROW_SIZE_OFFSETS = {
         "pluginRowTitle": -2,
         "pluginRowDesc": -4,
+        "pluginRowTag": -5,
     }
 
     def _retheme(self):
@@ -808,8 +920,12 @@ class MarketplaceCard(QWidget):
         for i in range(start, end):
             p, installed, has_update, local_ver = self._matched_plugins[i]
             row = _PluginRow(
-                p, installed, has_update=has_update, local_version=local_ver,
-                parent=self._content, font_size=fs,
+                p,
+                installed,
+                has_update=has_update,
+                local_version=local_ver,
+                parent=self._content,
+                font_size=fs,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
@@ -894,6 +1010,7 @@ class MarketplaceCard(QWidget):
         self._update_row_state(name, installed=False, error=True)
         # 提取简洁错误信息
         import re as _re
+
         msg = err
         m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
         if m:
@@ -940,6 +1057,7 @@ class MarketplaceCard(QWidget):
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=True, error=True)
         import re as _re
+
         msg = err
         m = _re.search(r"Command\s*'\[.*?\]'\s*returned.*", err)
         if m:
@@ -1024,7 +1142,9 @@ class MarketplaceCard(QWidget):
         if src_def.get("builtin"):
             name_text += " (内置)"
         name_label = QLabel(name_text, row)
-        name_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;")
+        name_label.setStyleSheet(
+            f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;"
+        )
         info.addWidget(name_label)
 
         src = src_def.get("source", {})
@@ -1128,6 +1248,7 @@ class MarketplaceCard(QWidget):
     def _open_url(self, url: str):
         """在浏览器中打开 URL"""
         import webbrowser
+
         webbrowser.open(url)
 
     # ── 清理 ──

@@ -3353,6 +3353,7 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content {{
                     max-height: 350px;
                     overflow-y: auto;
+                    overscroll-behavior: contain;
                     background: var(--panel-soft);
                     border: 1px solid var(--border);
                     border-radius: 8px;
@@ -3368,12 +3369,19 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content > .think-streaming:last-child {{
                     margin-bottom: 0;
                 }}
+                #tool-separator-bottom {{
+                    height: 1px;
+                    background: var(--border);
+                    opacity: 0.6;
+                    margin: 6px 0 2px 0;
+                }}
             </style>
         </head>
         <body>
             <div id="tool-section" style="display: none;">
               <div id="tool-separator"><span>⚙ 工具与思考</span></div>
               <div id="tool-content"></div>
+              <div id="tool-separator-bottom"></div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -3603,10 +3611,16 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
+                        // 将工具/思考块分流到独立滚动容器（仅简洁模式）
+                        // 必须在 _suppressScrollEvent=false 之前执行，
+                        // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
+                        if (window._toolCompactMode) reorganizeContent();
+
                         // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
-                        // think-block 展开、ECharts 初始化）之后执行，确保 scrollHeight 值反映
-                        // 最终渲染结果，避免因 collapsible 展开 / tool-block restore 等操作
-                        // 在 auto-scroll 后增加高度而导致的"滚不到底部"问题。
+                        // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
+                        // 确保 scrollHeight 值反映最终渲染结果，避免因 collapsible 展开 /
+                        // tool-block restore 等操作在 auto-scroll 后增加高度而导致的
+                        // "滚不到底部"问题。
                         // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
                         // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
                         // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
@@ -3643,8 +3657,6 @@ class CodeWebViewer(QWebEngineView):
 
                         // 使用延迟报告，确保浏览器布局完成
                         setTimeout(() => reportHeight(), 50);
-                        // 将工具/思考块分流到独立滚动容器（仅简洁模式）
-                        if (window._toolCompactMode) reorganizeContent();
                     }}
                 }}
                 function reportHeight() {{
