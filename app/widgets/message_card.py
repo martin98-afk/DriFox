@@ -1728,6 +1728,65 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool =
 _skeleton_cache: Dict[tuple, str] = {}
 
 
+# ── 流式活动坞（Streaming Dock）骨架资产 ──
+# 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
+# 让用户实时看到正在执行的工具/思考；流式结束后归位顶部恢复现状。
+# 由 Python 在流式开始/结束时注入 _setStreamingDock(true/false) 切换。
+_STREAMING_DOCK_CSS = """
+                /* ── 流式活动坞：简洁模式流式期间工具区沉底 + 限高 ──
+                   纯 CSS order 调换，不搬移 DOM，避免闪烁。 */
+                body.streaming-dock {
+                    display: flex;
+                    flex-direction: column;
+                }
+                body.streaming-dock #content-placeholder {
+                    order: 1;
+                }
+                body.streaming-dock #tool-section {
+                    order: 2;
+                    margin: 8px 0 0 0;
+                }
+                /* 坞态限高：≈3-4 行条目（行高约 26px + 上下 padding） */
+                body.streaming-dock #tool-content {
+                    max-height: 110px;
+                }
+"""
+
+_STREAMING_DOCK_JS = """
+                // ===== 流式活动坞（Streaming Dock）=====
+                window._streamingActive = false;
+                function _setStreamingDock(active) {
+                    // 仅简洁模式启用坞态
+                    var on = !!active && !!window._toolCompactMode;
+                    var wasOn = document.body.classList.contains('streaming-dock');
+                    window._streamingActive = !!active;
+                    if (on === wasOn) return;
+                    var ts = document.getElementById('tool-section');
+                    // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
+                    var _dockH = ts ? ts.offsetHeight : 0;
+                    var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
+                    document.body.classList.toggle('streaming-dock', on);
+                    if (!on && wasOn) {
+                        // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
+                        // 用户上滚阅读时补偿 scrollTop，避免阅读位置跳动
+                        if (!_atBottom && _dockH > 0) {
+                            document.body.scrollTop = document.body.scrollTop + _dockH;
+                        }
+                        // 恢复完整高度后滚到底部，展示最新条目
+                        var tc = document.getElementById('tool-content');
+                        if (tc) { tc._userScrolledUp = false; tc.scrollTop = tc.scrollHeight; }
+                    } else if (on && !wasOn) {
+                        // 顶部 → 坞态：正文上移，做对称补偿
+                        if (!_atBottom && _dockH > 0) {
+                            document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
+                        }
+                    }
+                    // 高度变化（110px ↔ 600px max-height）后重新报告文档高度
+                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                }
+"""
+
+
 def clear_global_render_cache():
     """清理全局 Markdown 渲染 LRU 缓存 + 骨架 HTML 缓存
 
@@ -2313,7 +2372,7 @@ class CodeWebViewer(QWebEngineView):
 
             compact = "true" if Settings.get_instance().ui_compact_tool_area.value else "false"
             self.page().runJavaScript(f"window._toolCompactMode = {compact};")
-            # 历史会话：直接在 Python 侧设置折叠（避免 DOMContentLoaded 时序竞态）
+            # 历史会话：先折叠工具区（设置 data-collapsed="true"，dock sync 需要读取此值）
             if getattr(self, "_is_history", False):
                 self.page().runJavaScript(
                     "var _ts=document.getElementById('tool-section');"
@@ -2321,6 +2380,15 @@ class CodeWebViewer(QWebEngineView):
                     "if(_ts)_ts.setAttribute('data-collapsed','true');"
                     "if(_sep)_sep.setAttribute('aria-expanded','false');"
                 )
+            # 坞态同步：由 JS 读取 tool-section 的 data-collapsed 属性判断
+            # collapsed="true"（历史会话/已完成）→ dock off
+            # collapsed="false"（流式会话默认）→ dock on（受 _toolCompactMode 守卫）
+            # 此 JS 在上方 collapse 之后执行，保证 data-collapsed 已更新到正确值
+            self.page().runJavaScript(
+                "var _ts2=document.getElementById('tool-section');"
+                "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
+                "if(typeof _setStreamingDock==='function')_setStreamingDock(!_co);"
+            )
         except RuntimeError:
             pass
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
@@ -3482,6 +3550,7 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 0.6;
                     margin: 6px 0 2px 0;
                 }}
+                {_STREAMING_DOCK_CSS}
             </style>
         </head>
         <body>
@@ -3882,6 +3951,8 @@ class CodeWebViewer(QWebEngineView):
                         // （markdown 被缩短、块被删除），仍需刷新 header
                         toolSection.style.display = '';
                         _updateToolSectionHeader();
+                        // 坞态（流式中）：自动滚底显示最新活动
+                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                         return;
                     }}
                     // ── 增量搬移：用稳定标识（data-block-key / data-tool-call-id）
@@ -3983,6 +4054,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
+                    // 坞态（流式中）：新条目进入后自动滚底
+                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -4178,6 +4251,7 @@ class CodeWebViewer(QWebEngineView):
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
                 }});
+                {_STREAMING_DOCK_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
                 // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
@@ -4688,12 +4762,28 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
+        self._sync_streaming_dock(False)
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
+
+    def _sync_streaming_dock(self, active: bool):
+        """同步流式活动坞状态到 JS 端。
+
+        仅简洁模式下 JS 侧 _setStreamingDock 会真正切换 body.streaming-dock，
+        非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
+        _streaming / _is_history 状态兜底同步。
+        """
+        try:
+            if self._is_js_ready and self.page():
+                flag = "true" if active else "false"
+                self.page().runJavaScript(f"if(typeof _setStreamingDock==='function')_setStreamingDock({flag});")
+        except RuntimeError:
+            pass
 
     def _cleanup_render_cache(self):
         """清理渲染缓存，降低内存占用（流式完成后调用）
@@ -6441,6 +6531,13 @@ class MessageCard(SimpleCardWidget):
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
         if self.viewer and hasattr(self.viewer, "_streaming") and not self.viewer._streaming:
             self.viewer._streaming = True
+        # 修正 viewer 初始化时的 _is_history 标记（可能因 viewer 创建早于
+        # start_streaming_anim 而为 True，导致 _on_js_ready 误折叠工具区）
+        if self.viewer and hasattr(self.viewer, "_is_history") and self.viewer._is_history:
+            self.viewer._is_history = False
+        # 新轮流式开始：恢复简洁模式坞态（工具区沉底跟随最新活动）
+        if self.viewer and hasattr(self.viewer, "_sync_streaming_dock"):
+            self.viewer._sync_streaming_dock(True)
         self._pulse_phase = 0.0
         try:
             self._anim_timer.start(50)  # 80→50ms，帧率从12.5fps提升到20fps
