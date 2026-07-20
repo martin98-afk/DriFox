@@ -296,6 +296,36 @@ class _ProjectUrlImportThread(QThread):
             self.finished.emit("", f"下载失败: {e}")
 
 
+class _ProjectUploadThread(QThread):
+    """后台线程：上传 .drifox_project 文件到 Gitee，避免 UI 冻结。
+
+    finished 信号携带 (url, error)，二者有且仅有一个非空。
+    """
+
+    finished = pyqtSignal(str, str)
+
+    def __init__(self, zip_path: str):
+        super().__init__()
+        self._zip_path = zip_path
+
+    def run(self):
+        try:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            uploader = GiteeUploader.get_instance()
+            if not uploader.is_configured():
+                self.finished.emit("", "Gitee 未配置（缺少 token/owner/repo）")
+                return
+
+            url, err = uploader.upload_file(self._zip_path)
+            if err:
+                self.finished.emit("", err)
+            else:
+                self.finished.emit(url, "")
+        except Exception as e:
+            self.finished.emit("", str(e))
+
+
 class _ProjectExportChoiceDialog(MaskDialogBase):
     """项目导出方式选择弹框 — 导出前选择方式，而非导出后展示选项
 
@@ -14520,45 +14550,47 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(title="", content=f"导出本地失败: {e}", duration=3000, parent=self)
 
     def _on_export_upload(self, zip_path: str, project_name: str):
-        """导出并上传到 Gitee，复制分享链接"""
-        try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
-
-            uploader = GiteeUploader.get_instance()
-            if not uploader.is_configured():
-                InfoBar.warning(
-                    title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
-                    duration=3000, parent=self,
-                )
-                self._on_export_local(zip_path, project_name)
-                return
-
-            InfoBar.info(title="", content="正在上传项目压缩包...", duration=5000, parent=self)
-
-            url, err = uploader.upload_file(zip_path)
-            if err:
-                InfoBar.warning(
-                    title="", content=f"上传失败: {err}（文件已保存到本地）",
-                    duration=3000, parent=self,
-                )
-                self._on_export_local(zip_path, project_name)
-                return
-
-            # 复制链接到剪贴板
-            from PyQt5.QtWidgets import QApplication
-            QApplication.clipboard().setText(url)
-            InfoBar.success(
-                title="",
-                content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
-                duration=5000,
-                parent=self,
-            )
-        except Exception as e:
-            logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
+        """导出并上传到 Gitee，复制分享链接（异步，不卡 UI）"""
+        # 先检查 Gitee 是否配置（快速检查，不涉及网络请求）
+        from app.gateway.utils.gitee_uploader import GiteeUploader
+        uploader = GiteeUploader.get_instance()
+        if not uploader.is_configured():
             InfoBar.warning(
-                title="", content=f"上传异常，文件已保存到本地: {zip_path}",
+                title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
                 duration=3000, parent=self,
             )
+            self._on_export_local(zip_path, project_name)
+            return
+
+        # 启动后台上传线程
+        self._upload_thread = _ProjectUploadThread(zip_path)
+        self._upload_thread.finished.connect(
+            lambda url, err: self._on_upload_finished(url, err, zip_path, project_name)
+        )
+        self._upload_thread.finished.connect(self._upload_thread.deleteLater)
+        self._upload_thread.start()
+
+        InfoBar.info(title="", content="正在上传项目压缩包...（异步上传，不阻塞界面）", duration=8000, parent=self)
+
+    def _on_upload_finished(self, url: str, err: str, zip_path: str, project_name: str):
+        """上传线程完成后的回调（主线程执行）"""
+        if err:
+            InfoBar.warning(
+                title="", content=f"上传失败: {err}（文件已保存到本地）",
+                duration=3000, parent=self,
+            )
+            self._on_export_local(zip_path, project_name)
+            return
+
+        # 复制链接到剪贴板
+        from PyQt5.QtWidgets import QApplication
+        QApplication.clipboard().setText(url)
+        InfoBar.success(
+            title="",
+            content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
+            duration=5000,
+            parent=self,
+        )
 
         # 使用现有的 GiteeUploader
         try:
@@ -14763,22 +14795,27 @@ class OpenAIChatToolWindow(ToolWindow):
         """确定项目文件的恢复路径（仅返回路径，不创建目录）
 
         优先级：
-        1. 原路径存在且在用户目录树下 → 恢复回原路径
+        1. 原路径存在且合法（不含 .. 遍历） → 恢复回原路径，尊重用户已有配置
         2. 否则 → 默认恢复到 ~/Documents/DriFox/projects/<project_name>/
         """
-        home = os.path.abspath(str(Path.home()))
         if original_root:
             resolved = os.path.abspath(original_root)
-            if resolved.startswith(home) and os.path.isdir(resolved):
+            # 防止路径遍历攻击：拒绝包含 .. 的非法路径
+            # 但不限制必须在 home 下，用户的项目可能在任何位置
+            if ".." in resolved.split(os.sep) or ".." in resolved.split("/"):
+                logger.warning(f"[MainWidget] 原始路径包含 .. ，已跳过: {resolved}")
+            elif os.path.isdir(resolved):
                 logger.info(f"[MainWidget] 使用原始项目路径恢复: {resolved}")
                 return resolved
+            else:
+                logger.info(f"[MainWidget] 原始路径不存在，将使用默认路径: {original_root}")
 
         # 默认恢复路径（替换不可用于文件夹名的字符）
         safe_name = re.sub(r'[<>:"/\\|?*]', '_', (project_name or "imported_project")[:40]).strip()
         if not safe_name:
             safe_name = "imported_project"
         default_dir = Path.home() / "Documents" / "DriFox" / "projects" / safe_name
-        logger.info(f"[MainWidget] 原始路径不可用，使用默认路径恢复: {default_dir}")
+        logger.info(f"[MainWidget] 使用默认路径恢复: {default_dir}")
         return str(default_dir)
 
     def _update_project_root_dir(self, project_name: str, restore_path: str):
