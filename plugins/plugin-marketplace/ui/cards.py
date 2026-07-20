@@ -15,12 +15,13 @@ import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -29,7 +30,6 @@ from qfluentwidgets import (
     FluentLabelBase,
     IconWidget,
     InfoBar,
-    InfoBarPosition,
     LineEdit,
     PushButton,
     ScrollArea,
@@ -127,6 +127,87 @@ def _drifox_dir() -> Path:
     return Path.home() / ".drifox"
 
 
+def _highlight_html(text: str, query: str) -> str:
+    """HTML 转义并对搜索词加高亮背景"""
+    if not query or not text:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(
+        re.escape(query),
+        lambda m: f'<span style="background:rgba(255,167,38,0.25);border-radius:2px;padding:0 1px;">{m.group()}</span>',
+        escaped,
+        flags=re.IGNORECASE,
+    )
+
+
+class _FlowLayout(QLayout):
+    """简易流式布局：子控件按宽度自动换行排列"""
+
+    def __init__(self, parent=None, spacing=4):
+        super().__init__(parent)
+        self._spacing = spacing
+        self._items: list = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Vertical
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size + QSize(2 * self._spacing, 2 * self._spacing)
+
+    def _do_layout(self, rect, test_only):
+        x = rect.x()
+        y = rect.y()
+        line_height = 0
+        for item in self._items:
+            w = item.widget()
+            if w is None:
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width()
+            if next_x > rect.right() and x > rect.x():
+                x = rect.x()
+                y += line_height + self._spacing
+                line_height = 0
+                next_x = x + hint.width()
+            if not test_only:
+                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+            x = next_x + self._spacing
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
+
+
 # ── 单行插件卡片 ────────────────────────────────────────────
 
 
@@ -151,6 +232,7 @@ class _PluginRow(QFrame):
         local_version: Optional[str] = None,
         parent=None,
         font_size: int = 0,
+        search_query: str = "",
     ):
         super().__init__(parent)
         self._meta = plugin_meta
@@ -161,9 +243,8 @@ class _PluginRow(QFrame):
         self._font_size = font_size  # 上下文字体大小（用于头像自适应）
         self._btn_font_size = max(13, font_size) if font_size > 0 else 14
         self._avatar = None
+        self._search_query = search_query
         self._tags = self._compute_tags(plugin_meta)
-        self._tag_widgets: list = []
-        self._overflow_tag: Optional[QLabel] = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -186,17 +267,21 @@ class _PluginRow(QFrame):
         name = self._meta.get("name", "未知")
         remote_ver = self._meta.get("version", "")
 
-        # 标题行：显示名称 + 版本信息（字号 = font_size - 2，由 _retheme 通过 objectName 识别）
+        # 标题行：名称 + 版本，搜索词高亮（HTML 内嵌字号，因 QLabel 富文本忽略 QSS font-size）
+        ver_suffix = ""
         if self._has_update and self._local_version and remote_ver:
-            # 有新版：显示 v旧版 → v新版
-            title = StrongBodyLabel(f"{name}  v{self._local_version} → v{remote_ver}", self)
+            ver_suffix = f"  v{self._local_version} → v{remote_ver}"
         elif remote_ver:
-            title = StrongBodyLabel(f"{name}  v{remote_ver}", self)
-        else:
-            title = StrongBodyLabel(name, self)
-        title.setObjectName("pluginRowTitle")
-        title.setStyleSheet(f"color: {_text_color()}; background: transparent;")
-        info_layout.addWidget(title)
+            ver_suffix = f"  v{remote_ver}"
+        self._name_raw = name
+        self._version_suffix = ver_suffix
+        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
+        name_html = _highlight_html(name, self._search_query)
+        name_text = f'<span style="font-size:{title_fs}pt;">{name_html}{ver_suffix}</span>'
+        self._title_label = QLabel(name_text, self)
+        self._title_label.setObjectName("pluginRowTitle")
+        self._title_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; background: transparent;")
+        info_layout.addWidget(self._title_label)
 
         # 版本更新提示小标签（仅在有更新时显示）
         if self._has_update:
@@ -205,33 +290,37 @@ class _PluginRow(QFrame):
             info_layout.addWidget(update_tag)
 
         desc = self._meta.get("description", "")
+        self._desc_label = None
+        self._desc_raw = ""
         if desc:
-            desc_label = QLabel(desc[:120], self)
-            desc_label.setWordWrap(True)
-            # objectName "pluginRowDesc" → _retheme 强制使用 font_size - 4
-            desc_label.setObjectName("pluginRowDesc")
-            desc_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;")
-            info_layout.addWidget(desc_label)
+            self._desc_raw = desc[:120]
+            desc_text = _highlight_html(self._desc_raw, self._search_query)
+            self._desc_label = QLabel(desc_text, self)
+            self._desc_label.setWordWrap(True)
+            self._desc_label.setObjectName("pluginRowDesc")
+            self._desc_label.setStyleSheet(
+                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+            )
+            info_layout.addWidget(self._desc_label)
 
-        # Tag 标签行（categories + keywords 合并，宽度自适应）
+        # Tag 标签行（FlowLayout 自动换行，不撑大卡片宽度）
+        self._tag_labels: list = []
         if self._tags:
-            self._tags_row = QWidget(self)
-            self._tags_layout = QHBoxLayout(self._tags_row)
-            self._tags_layout.setContentsMargins(0, 2, 0, 0)
-            self._tags_layout.setSpacing(4)
+            tags_widget = QWidget(self)
+            tags_layout = _FlowLayout(tags_widget, spacing=4)
+            tags_layout.setContentsMargins(0, 2, 0, 0)
             for tag in self._tags:
-                lbl = QLabel(tag, self._tags_row)
+                tag_text = (
+                    _highlight_html(tag, self._search_query)
+                    if (self._search_query and self._search_query.lower() in tag.lower())
+                    else tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                )
+                lbl = QLabel(tag_text, tags_widget)
                 lbl.setObjectName("pluginRowTag")
                 lbl.setStyleSheet(self._tag_stylesheet())
-                self._tags_layout.addWidget(lbl)
-                self._tag_widgets.append(lbl)
-            self._overflow_tag = QLabel("", self._tags_row)
-            self._overflow_tag.setObjectName("pluginRowTag")
-            self._overflow_tag.setStyleSheet(self._tag_stylesheet(is_overflow=True))
-            self._overflow_tag.hide()
-            self._tags_layout.addWidget(self._overflow_tag)
-            self._tags_layout.addStretch()
-            info_layout.addWidget(self._tags_row)
+                tags_layout.addWidget(lbl)
+                self._tag_labels.append(lbl)
+            info_layout.addWidget(tags_widget)
 
         # 市场来源标签
         marketplace = self._meta.get("_marketplace", "")
@@ -252,7 +341,6 @@ class _PluginRow(QFrame):
         layout.addWidget(self._btn)
 
     def _update_btn_text(self):
-        from PyQt5.QtGui import QFont
 
         fs = self._btn_font_size
         btn_font = self._btn.font()
@@ -379,71 +467,37 @@ class _PluginRow(QFrame):
                 seen.add(k)
         return tags
 
-    def _tag_stylesheet(self, is_overflow: bool = False) -> str:
+    def _tag_stylesheet(self) -> str:
         """tag 标签 QSS 样式"""
         tc = _text_color(secondary=True)
-        bg = "rgba(128,128,128,0.08)" if is_overflow else "rgba(128,128,128,0.12)"
-        return f"background: {bg}; color: {tc}; border-radius: 4px; padding: 1px 6px; font-size: 10px;"
+        return (
+            f"background: rgba(128,128,128,0.12); color: {tc}; border-radius: 4px; padding: 1px 6px; font-size: 10px;"
+        )
 
-    def resizeEvent(self, event):
-        """卡片宽度变化时自适应 tag 显示数量"""
-        super().resizeEvent(event)
-        if hasattr(self, "_tags_row") and self._tags_row is not None:
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(0, self._adapt_tags)
-
-    def showEvent(self, event):
-        """首次显示时执行一次 tag 宽度适配"""
-        super().showEvent(event)
-        if hasattr(self, "_tags_row") and self._tags_row is not None:
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(0, self._adapt_tags)
-
-    def _adapt_tags(self):
-        """按当前可用宽度显示尽可能多的 tag，溢出显示 +N"""
-        if not self._tag_widgets or not hasattr(self, "_tags_row") or self._tags_row is None:
+    def update_search_highlight(self, query: str):
+        """搜索词变化时更新标题/描述/tag 的高亮 HTML，无需重建 widget"""
+        if query == self._search_query:
             return
-        try:
-            tag_area_w = self._tags_row.width()
-        except RuntimeError:
-            return
-        if tag_area_w <= 0:
-            return
+        self._search_query = query
 
-        spacing = self._tags_layout.spacing()
-        cum_w = 0
-        visible_count = 0
+        # 标题
+        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
+        name_html = _highlight_html(self._name_raw, query)
+        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{self._version_suffix}</span>')
 
-        for i, w in enumerate(self._tag_widgets):
-            try:
-                tag_w = w.sizeHint().width()
-            except RuntimeError:
-                break
-            extra = spacing if i > 0 else 0
-            if cum_w + tag_w + extra <= tag_area_w:
-                cum_w += tag_w + extra
-                visible_count += 1
-            else:
-                break
+        # 描述
+        if self._desc_label is not None:
+            self._desc_label.setText(_highlight_html(self._desc_raw, query))
 
-        hidden = len(self._tag_widgets) - visible_count
-
-        for i, w in enumerate(self._tag_widgets):
-            try:
-                w.setVisible(i < visible_count)
-            except RuntimeError:
-                pass
-
-        try:
-            if hidden > 0:
-                self._overflow_tag.setText(f"+{hidden}")
-                self._overflow_tag.setVisible(True)
-            else:
-                self._overflow_tag.setVisible(False)
-        except RuntimeError:
-            pass
+        # Tag
+        for i, tag in enumerate(self._tags):
+            if i < len(self._tag_labels):
+                tag_text = (
+                    _highlight_html(tag, query)
+                    if query and query.lower() in tag.lower()
+                    else tag.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                )
+                self._tag_labels[i].setText(tag_text)
 
 
 # ── 市场主卡片 ──────────────────────────────────────────────
@@ -462,6 +516,9 @@ class MarketplaceCard(QWidget):
         self._plugin_data: list = []
         self._matched_plugins: list = []
         self._rendered_count: int = 0
+        self._row_map: dict = {}  # plugin_name → _PluginRow
+        self._all_plugins: list = []
+        self._all_loaded: bool = False  # 是否已全部渲染完
         self._current_filter: str = "all"
         self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
@@ -861,64 +918,126 @@ class MarketplaceCard(QWidget):
     _RENDER_BATCH = 30
 
     def _render_plugins(self, plugins: list):
-        """渲染插件列表（首屏 30 个 + 分批加载）"""
-        self._clear_plugin_list()
+        """渲染插件列表：首屏分批防卡死，全部加载后搜索用 show/hide"""
+        self._render_gen = getattr(self, "_render_gen", 0) + 1
         query = self._search_edit.text().strip().lower()
         installer = get_installer()
         filter_mode = self._current_filter
 
-        matched = []
+        # 缓存 tags 到插件 dict（避免重复计算）
         for p in plugins:
-            name = p.get("name", "")
-            # 搜索过滤
-            if query and query not in name.lower() and query not in (p.get("description", "")).lower():
-                continue
-            installed = installer.is_installed(name)
-            has_update = False
-            local_ver = None
-            if installed:
-                has_update, local_ver, _ = installer.check_update(p)
-            # 标签过滤
-            if filter_mode == "installed" and not installed:
-                continue
-            if filter_mode == "uninstalled" and installed:
-                continue
-            if filter_mode == "updates" and not has_update:
-                continue
-            matched.append((p, installed, has_update, local_ver))
+            if "_cached_tags" not in p:
+                p["_cached_tags"] = _PluginRow._compute_tags(p)
 
-        self._matched_plugins = matched
-        self._rendered_count = 0
+        # 数据变了 → 全量重建
+        data_changed = not self._all_plugins or self._all_plugins is not plugins
+        if data_changed:
+            self._all_plugins = plugins
+            self._matched_plugins = []
+            for p in plugins:
+                self._matched_plugins.append(self._plugin_matches(p, query, installer, filter_mode))
+            self._clear_plugin_list()
+            self._rendered_count = 0
+            self._all_loaded = False
+            self._render_next_batch(query)
+            self._retheme()
+            # 后台逐批加载剩余插件（不阻塞 UI）
+            from PyQt5.QtCore import QTimer
 
-        if not matched:
-            self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
-            self._content_stack.setCurrentIndex(1)
+            QTimer.singleShot(100, self._auto_load_remaining)
             return
 
-        self._content_stack.setCurrentIndex(0)
-        self._render_next_batch()
+        # 全部加载完 → show/hide（零重建，极快）+ 更新高亮
+        if self._all_loaded:
+            any_visible = False
+            for p in plugins:
+                name = p.get("name", "")
+                if name in self._row_map:
+                    row = self._row_map[name]
+                    matches, _, _, _ = self._plugin_matches(p, query, installer, filter_mode)
+                    row.setVisible(matches)
+                    row.update_search_highlight(query)
+                    if matches:
+                        any_visible = True
+            if not any_visible:
+                self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
+                self._content_stack.setCurrentIndex(1)
+            else:
+                self._content_stack.setCurrentIndex(0)
+            return
 
+        # 还未全部加载但需要刷（筛选标签切换等）→ 重建当前批次
+        self._matched_plugins = []
+        for p in plugins:
+            self._matched_plugins.append(self._plugin_matches(p, query, installer, filter_mode))
+        self._clear_plugin_list()
+        self._rendered_count = 0
+        self._render_next_batch(query)
         self._retheme()
 
-    def _render_next_batch(self):
+    @staticmethod
+    def _plugin_matches(p: dict, query: str, installer, filter_mode: str) -> tuple:
+        """检查插件是否匹配当前搜索/筛选。
+        Returns: (matches: bool, installed: bool, has_update: bool, local_ver: str|None)
+        """
+        name = p.get("name", "")
+
+        if query:
+            if query not in name.lower() and query not in (p.get("description", "")).lower():
+                tags = p.get("_cached_tags", [])
+                if not any(query in t.lower() for t in tags):
+                    return (False, False, False, None)
+
+        installed = installer.is_installed(name)
+        has_update = False
+        local_ver = None
+        if installed:
+            has_update, local_ver, _ = installer.check_update(p)
+
+        if filter_mode == "installed" and not installed:
+            return (False, installed, has_update, local_ver)
+        if filter_mode == "uninstalled" and installed:
+            return (False, installed, has_update, local_ver)
+        if filter_mode == "updates" and not has_update:
+            return (False, installed, has_update, local_ver)
+
+        return (True, installed, has_update, local_ver)
+
+    def _auto_load_remaining(self):
+        """后台逐批加载剩余插件行（每批 50ms 间隔，不卡 UI）"""
+        if not self.isVisible():
+            return
+        gen = getattr(self, "_render_gen", 0)
+        if gen != self._render_gen:
+            return  # 已触发新渲染，放弃本轮
+        if self._rendered_count >= len(self._matched_plugins):
+            self._all_loaded = True
+            self._remove_load_more_button()
+            return
+        self._render_next_batch(self._search_edit.text().strip().lower())
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(50, self._auto_load_remaining)
+
+    def _render_next_batch(self, query: str):
         """渲染下一批 30 个插件"""
         start = self._rendered_count
         end = min(start + self._RENDER_BATCH, len(self._matched_plugins))
-        self._render_batch(start, end)
+        self._render_batch(start, end, query)
         self._rendered_count = end
 
-        # 还有更多 → 更新/添加「加载更多」按钮
         remaining = len(self._matched_plugins) - self._rendered_count
         if remaining > 0:
             self._add_load_more_button(remaining)
         else:
             self._remove_load_more_button()
 
-    def _render_batch(self, start: int, end: int):
+    def _render_batch(self, start: int, end: int, query: str):
         """渲染 [start, end) 范围的插件行"""
         fs = self._cached_font_size
         for i in range(start, end):
-            p, installed, has_update, local_ver = self._matched_plugins[i]
+            matches, installed, has_update, local_ver = self._matched_plugins[i]
+            p = self._all_plugins[i]
             row = _PluginRow(
                 p,
                 installed,
@@ -926,13 +1045,19 @@ class MarketplaceCard(QWidget):
                 local_version=local_ver,
                 parent=self._content,
                 font_size=fs,
+                search_query=query,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
+            row.setVisible(matches)
             self._content_layout.addWidget(row)
+            self._row_map[p.get("name", "")] = row
+        # 首屏批次补 stretch
+        if start == 0:
+            self._content_layout.addStretch(1)
 
     def _add_load_more_button(self, remaining: int):
-        """在列表底部添加「加载更多」按钮"""
+        """在列表底部添加「加载更多」按钮（stretch 之前）"""
         self._remove_load_more_button()
         btn = PushButton(f"加载更多 ({remaining} 个)", self._content)
         btn.setStyleSheet(
@@ -940,26 +1065,33 @@ class MarketplaceCard(QWidget):
             "PushButton:hover { background: rgba(128,128,128,0.2); }"
         )
         btn.clicked.connect(self._on_load_more)
-        self._content_layout.addWidget(btn)
+        count = self._content_layout.count()
+        last_item = self._content_layout.itemAt(count - 1) if count > 0 else None
+        if last_item and last_item.widget() is None:
+            self._content_layout.insertWidget(count - 1, btn)
+        else:
+            self._content_layout.addWidget(btn)
 
     def _remove_load_more_button(self):
         """移除现有的「加载更多」按钮"""
-        count = self._content_layout.count()
-        if count > 0:
-            item = self._content_layout.itemAt(count - 1)
+        for i in range(self._content_layout.count() - 1, -1, -1):
+            item = self._content_layout.itemAt(i)
             w = item.widget() if item else None
             if isinstance(w, PushButton) and "更多" in (w.text() or ""):
-                self._content_layout.takeAt(count - 1)
+                self._content_layout.takeAt(i)
                 w.deleteLater()
+                return
 
     def _on_load_more(self):
-        """加载下一批"""
+        """手动加载下一批"""
         self._remove_load_more_button()
-        self._render_next_batch()
+        self._render_next_batch(self._search_edit.text().strip().lower())
         self._retheme()
 
     def _clear_plugin_list(self):
         """清空插件列表"""
+        self._row_map.clear()
+        self._all_loaded = False
         while self._content_layout.count():
             item = self._content_layout.takeAt(0)
             if item.widget():

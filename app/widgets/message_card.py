@@ -186,6 +186,9 @@ def _get_formatter_cached():
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+
+# 编辑类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
+_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit"})
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -3678,6 +3681,21 @@ class CodeWebViewer(QWebEngineView):
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
+
+                // 更新"工具与思考"头部计数
+                function _updateToolSectionHeader() {{
+                    var toolContent = document.getElementById('tool-content');
+                    var separator = document.getElementById('tool-separator');
+                    if (!toolContent || !separator) return;
+                    var count = toolContent.children.length;
+                    var span = separator.querySelector('span');
+                    if (count > 0) {{
+                        span.textContent = '⚙ 工具与思考 · ' + count + ' 项';
+                    }} else {{
+                        span.textContent = '⚙ 工具与思考';
+                    }}
+                }}
+
                 function reorganizeContent() {{
                     var container = document.getElementById('content-placeholder');
                     var toolSection = document.getElementById('tool-section');
@@ -3697,6 +3715,7 @@ class CodeWebViewer(QWebEngineView):
                         hasBlocks = true;
                     }});
                     toolSection.style.display = hasBlocks ? '' : 'none';
+                    if (hasBlocks) _updateToolSectionHeader();
                 }}
                 document.addEventListener('click', e => {{
                     const btn = e.target.closest('button[data-action]');
@@ -4207,7 +4226,7 @@ class CodeWebViewer(QWebEngineView):
                     "}}});}}"
                     "if(window._toolCompactMode){"
                     "var _ts2=document.getElementById('tool-section');"
-                    "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';}"
+                    "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
                     "}"
                     "})();"
                 )
@@ -4273,7 +4292,7 @@ class CodeWebViewer(QWebEngineView):
                 # 🐛 修复：工具块 restore 后 scrollHeight 可能增加
                 "if(window._toolCompactMode){"
                 "var _ts2=document.getElementById('tool-section');"
-                "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';}"
+                "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
                 "}"
                 "if(!window._userScrolledWithin){"
                 "document.body.scrollTop=document.body.scrollHeight;"
@@ -6960,9 +6979,12 @@ class MessageCard(SimpleCardWidget):
                 safe_btn_inner = safe_body_inner = safe_body_style = '""'
                 _use_incremental = "false"
 
+            # 编辑类工具始终注入到正文区域，不进入"工具与思考"
+            tool_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+
             js_code = f"""
             (function() {{
-                var tc = document.getElementById('{self.viewer._tool_target_id}');
+                var tc = document.getElementById('{tool_target}');
                 if (!tc) {{
                     tc = document.getElementById('content-placeholder');
                 }}
@@ -6998,7 +7020,7 @@ class MessageCard(SimpleCardWidget):
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{
                         var ts = document.getElementById('tool-section');
-                        if (ts) ts.style.display = '';
+                        if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     reportHeight();
                     return;
@@ -7155,13 +7177,16 @@ class MessageCard(SimpleCardWidget):
                 char_count=char_count,
                 completed=completed,
             )
+            # 编辑类工具流式块始终注入到正文区域
+            _stream_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+
             safe_html = json.dumps(block_html).decode("utf-8")
             safe_preview = json.dumps(preview_content).decode("utf-8")
             streaming_flag = "true" if not completed else "false"
             _text_only_js = "true" if _text_only else "false"
             js_code = f"""
             (function() {{
-                var tc = document.getElementById('{self.viewer._tool_target_id}');
+                var tc = document.getElementById('{_stream_target}');
                 if (!tc) {{
                     tc = document.getElementById('content-placeholder');
                 }}
@@ -7203,7 +7228,7 @@ class MessageCard(SimpleCardWidget):
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{
                         var ts = document.getElementById('tool-section');
-                        if (ts) ts.style.display = '';
+                        if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     hr();
                 }}
