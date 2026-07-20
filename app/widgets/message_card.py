@@ -3469,35 +3469,7 @@ class CodeWebViewer(QWebEngineView):
                     font-size: 9px;
                     opacity: 0.7;
                 }}
-                #tool-separator .counts {{
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 6px;
-                    margin-left: 4px;
-                }}
-                #tool-separator .count-badge {{
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 3px;
-                    padding: 1px 6px;
-                    border-radius: 8px;
-                    background: var(--panel-soft);
-                    border: 1px solid var(--border);
-                    font-size: 10px;
-                    line-height: 1.4;
-                }}
-                #tool-separator .count-badge.success {{ color: #5fd18c; }}
-                #tool-separator .count-badge.fail {{ color: #f44336; }}
-                #tool-separator .count-badge.running {{ color: #ffb65c; }}
-                #tool-separator .streaming-dot {{
-                    display: inline-block;
-                    width: 6px;
-                    height: 6px;
-                    border-radius: 50%;
-                    background: #ffb65c;
-                    margin-left: 2px;
-                    animation: _streamingPulse 1.2s ease-in-out infinite;
-                }}
+
                 @keyframes _streamingPulse {{
                     0%, 100% {{ opacity: 0.3; transform: scale(0.85); }}
                     50% {{ opacity: 1; transform: scale(1.1); }}
@@ -3558,7 +3530,6 @@ class CodeWebViewer(QWebEngineView):
               <div id="tool-separator" role="button" tabindex="0" aria-expanded="true" title="点击折叠/展开工具与思考区">
                 <span class="chevron">▾</span>
                 <span>⚙ 工具与思考</span>
-                <span class="counts"></span>
               </div>
               <div id="tool-content"></div>
               <div id="tool-separator-bottom"></div>
@@ -3889,43 +3860,13 @@ class CodeWebViewer(QWebEngineView):
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
 
-                // 更新"工具与思考"头部计数（分组：完成 / 失败 / 进行中 + 流式指示点）
+                // 更新"工具与思考"标题（始终显示固定文本）
                 function _updateToolSectionHeader() {{
-                    var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
-                    if (!toolContent || !separator) return;
-                    var total = toolContent.children.length;
-                    var running = 0, success = 0, fail = 0;
-                    Array.prototype.forEach.call(toolContent.children, function(el) {{
-                        if (el.classList && el.classList.contains('cm-collapsible')) {{
-                            var streaming = el.getAttribute('data-streaming');
-                            if (streaming === 'true') {{
-                                running++;
-                            }} else {{
-                                // 通过 args-row.result-success/fail 判断结果状态
-                                if (el.querySelector('.args-row.result-fail')) fail++;
-                                else if (el.querySelector('.args-row.result-success')) success++;
-                                else success++; // 工具块默认算成功
-                            }}
-                        }}
-                    }});
-                    // 查找标题 span（⚙ 工具与思考）+ counts span
-                    var labels = separator.querySelectorAll(':scope > span');
-                    var titleSpan = null, countsSpan = null;
-                    labels.forEach(function(s) {{
-                        if (s.classList.contains('counts')) countsSpan = s;
-                        else if (!s.classList.contains('chevron') && !titleSpan) titleSpan = s;
-                    }});
+                    if (!separator) return;
+                    var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
                     if (titleSpan) {{
-                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
-                    }}
-                    if (countsSpan) {{
-                        var html = '';
-                        if (success > 0) html += '<span class="count-badge success">✓ ' + success + '</span>';
-                        if (fail > 0) html += '<span class="count-badge fail">✗ ' + fail + '</span>';
-                        if (running > 0) html += '<span class="count-badge running">⏳ ' + running + '</span>';
-                        if (running > 0) html += '<span class="streaming-dot" title="正在流式输出"></span>';
-                        countsSpan.innerHTML = html;
+                        titleSpan.textContent = '⚙ 工具与思考';
                     }}
                 }}
 
@@ -5425,7 +5366,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -8190,7 +8131,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):
