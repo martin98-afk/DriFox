@@ -240,6 +240,13 @@ class UIPluginEdgeLauncher(QWidget):
         self._collapse_timer.setInterval(COLLAPSE_DELAY_MS)
         self._collapse_timer.timeout.connect(self._on_collapse_timeout)
 
+        # 点击防重开：菜单刚因点击胶囊而关闭时置 True，阻止 mousePressEvent 重开
+        self._click_just_closed_menu: bool = False
+        self._clear_flag_timer = QTimer(self)
+        self._clear_flag_timer.setSingleShot(True)
+        self._clear_flag_timer.setInterval(0)
+        self._clear_flag_timer.timeout.connect(self._clear_click_just_closed)
+
         # 触发区自身就是 Launcher（this），负责命中检测
         self.setFixedWidth(TRIGGER_ZONE_WIDTH)
         # 视觉层紧贴触发区
@@ -413,8 +420,15 @@ class UIPluginEdgeLauncher(QWidget):
         if not self._card_infos:
             super().mousePressEvent(event)
             return
-        if event.button() == Qt.LeftButton and self._state in ("EXPANDED", "COLLAPSED"):
-            self._open_menu()
+        if event.button() == Qt.LeftButton:
+            # ── 防重开：若菜单刚因点击胶囊而关闭，此点击即为「关」动作 ──
+            if self._click_just_closed_menu:
+                self._click_just_closed_menu = False
+                self._clear_flag_timer.stop()
+                event.accept()
+                return
+            if self._state in ("EXPANDED", "COLLAPSED"):
+                self._open_menu()
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -533,11 +547,24 @@ class UIPluginEdgeLauncher(QWidget):
                 pass
         self._menu = None
         self.menu_visibility_changed.emit(False)
+
+        # 标记「菜单刚被关闭」，用于 mousePressEvent 防重开。
+        # zero-timer 延迟清除：菜单关闭 → mousePressEvent（同一事件周期内）
+        # → 清除标记 → 下次点击能正常打开。
+        # 用 self._clear_flag_timer（持引用，防 GC）而非 QTimer.singleShot。
+        self._click_just_closed_menu = True
+        self._clear_flag_timer.start()
+
         if self.underMouse():
             self._set_state("EXPANDED")
         else:
             self._set_state("COLLAPSED")
             self._collapse_timer.start()
+
+    def _clear_click_just_closed(self) -> None:
+        """清除防重开标记（zero-timer 回调，在 mousePressEvent 之后执行）。"""
+        if self._click_just_closed_menu:
+            self._click_just_closed_menu = False
 
     def _on_menu_action(self, card_id: str) -> None:
         """菜单项点击：调用当前窗口的 UIPluginRegistry.toggle_floating_card"""

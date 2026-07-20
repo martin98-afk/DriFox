@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from PyQt5.QtCore import (
     QObject,
     QRunnable,
     Qt,
+    QThread,
     QThreadPool,
     QTimer,
     QUrl,
@@ -2026,6 +2028,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card_content.projectSelected.connect(self._on_project_selected)
         self._project_selector_card_content.newProjectCreated.connect(self._on_new_project_created)
         self._project_selector_card_content.archiveProject.connect(self._on_archive_project)
+        self._project_selector_card_content.exportProject.connect(self._on_export_project)
+        self._project_selector_card_content.importProjectRequested.connect(self._on_import_project)
         self._project_selector_card_content.openFolderRequested.connect(self._on_open_project_folder)
         self._project_selector_card_content.folderDropped.connect(self._on_project_folder_dropped)
 
@@ -2070,10 +2074,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_open_folder_btn.setToolTip("选择文件夹作为项目根目录")
         self._project_open_folder_btn.clicked.connect(self._on_project_open_folder_btn)
 
+        # 导入项目按钮（从 .drifox_project 压缩包导入）
+        self._project_import_btn = TransparentToolButton(get_icon("导入"), self._project_selector_card)
+        self._project_import_btn.setFixedSize(24, 24)
+        self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
+        self._project_import_btn.clicked.connect(self._on_import_project)
+
         # 插入到标题栏的额外按钮区（关闭按钮之前）
         self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
         self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
         self._project_selector_card._extra_buttons_container.insertWidget(2, self._project_open_folder_btn)
+        self._project_selector_card._extra_buttons_container.insertWidget(3, self._project_import_btn)
 
         self._project_selector_card.setVisible(False)
         self._project_selector_card.closed.connect(
@@ -14133,6 +14144,425 @@ class OpenAIChatToolWindow(ToolWindow):
         # 操作完成，恢复正常状态
         if self.pixel_pet:
             self.pixel_pet.set_state("idle")
+
+    def _on_export_project(self, project_name: str):
+        """导出项目为 .drifox_project 压缩包"""
+        if not self.history_manager:
+            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            return
+
+        # 获取项目根目录
+        root_dir = ""
+        if self.backend and self.backend.session_store:
+            root_dir_map = self._build_project_root_dir_map([project_name])
+            root_dir = root_dir_map.get(project_name, "")
+
+        # 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
+
+        zip_path = self.history_manager.export_project_archive(project_name, root_dir)
+
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
+
+        if not zip_path:
+            InfoBar.error(
+                title="导出失败",
+                content=f"项目「{project_name}」无会话或导出异常",
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        # 展示导出选项对话框
+        self._show_project_export_options(zip_path, project_name)
+
+    def _show_project_export_options(self, zip_path: str, project_name: str):
+        """显示项目导出后的操作选项（保存/上传/打开路径）"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
+        from PyQt5.QtCore import Qt
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"📦 项目「{project_name}」已导出")
+        dialog.setFixedSize(420, 200)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 10px;
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        # 提示文字
+        label = QLabel(f"✅ 项目「{project_name}」已导出为压缩包\n路径: {zip_path}", dialog)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: 13px;")
+        layout.addWidget(label)
+
+        # 按钮行
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        def make_btn(text, color_bg):
+            btn = QPushButton(text, dialog)
+            btn.setFixedHeight(34)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {color_bg};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                    color: {Colors.TEXT_PRIMARY};
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{
+                    background: {Colors.HOVER_BG_STRONG};
+                }}
+            """)
+            return btn
+
+        save_btn = make_btn("💾 保存到本地", Colors.CONTENT_BG)
+        open_btn = make_btn("📂 打开路径", Colors.CONTENT_BG)
+        upload_btn = make_btn("🔗 上传获取链接", Colors.CONTENT_BG)
+        close_btn = make_btn("关闭", Colors.CONTENT_BG)
+
+        save_btn.clicked.connect(lambda: self._on_save_project_export(zip_path, dialog))
+        open_btn.clicked.connect(lambda: self._on_open_export_path(zip_path, dialog))
+        upload_btn.clicked.connect(lambda: self._on_upload_project_export(zip_path, dialog))
+        close_btn.clicked.connect(dialog.accept)
+
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(open_btn)
+        btn_layout.addWidget(upload_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        dialog.exec_()
+
+    def _on_save_project_export(self, zip_path: str, dialog=None):
+        """保存导出的项目压缩包到指定位置"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        src = Path(zip_path)
+        default_name = src.name
+        target, _ = QFileDialog.getSaveFileName(
+            self, "保存项目压缩包", str(Path.home() / "Downloads" / default_name),
+            "DriFox 项目包 (*.drifox_project);;ZIP 文件 (*.zip);;所有文件 (*)",
+        )
+        if not target:
+            if dialog:
+                dialog.accept()
+            return
+
+        try:
+            import shutil
+            shutil.copy2(zip_path, target)
+            if dialog:
+                dialog.accept()
+            InfoBar.success(
+                title="",
+                content=f"已保存到 {target}",
+                duration=3000,
+                parent=self,
+            )
+            # 自动打开文件夹并选中
+            try:
+                if os.name == "nt":
+                    subprocess.Popen(["explorer", "/select,", os.path.normpath(target)])
+                else:
+                    folder = os.path.dirname(target)
+                    if folder:
+                        subprocess.Popen(["xdg-open", folder])
+            except Exception:
+                pass
+        except Exception as e:
+            InfoBar.error(title="", content=f"保存失败: {e}", duration=3000, parent=self)
+
+    def _on_open_export_path(self, zip_path: str, dialog=None):
+        """在文件管理器中打开导出路径"""
+        path = Path(zip_path)
+        folder = path.parent
+        if dialog:
+            dialog.accept()
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as e:
+            logger.warning(f"[MainWidget] 打开导出路径失败: {e}")
+
+    def _on_upload_project_export(self, zip_path: str, dialog=None):
+        """上传项目压缩包到 Gitee 并获取分享链接"""
+        if dialog:
+            dialog.accept()
+
+        # 使用现有的 GiteeUploader
+        try:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            uploader = GiteeUploader.get_instance()
+            if not uploader.is_configured():
+                InfoBar.warning(
+                    title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
+                    duration=3000, parent=self,
+                )
+                self._on_open_export_path(zip_path)
+                return
+
+            # 显示上传中
+            InfoBar.info(title="", content="正在上传项目压缩包...", duration=5000, parent=self)
+
+            url, err = uploader.upload_file(zip_path)
+            if err:
+                InfoBar.warning(
+                    title="", content=f"上传失败: {err}（文件已在本地）",
+                    duration=3000, parent=self,
+                )
+                self._on_open_export_path(zip_path)
+                return
+
+            # 复制链接到剪贴板
+            from PyQt5.QtWidgets import QApplication
+            QApplication.clipboard().setText(url)
+            InfoBar.success(
+                title="",
+                content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
+                duration=5000,
+                parent=self,
+            )
+        except Exception as e:
+            logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
+            InfoBar.error(title="", content=f"上传异常: {e}", duration=3000, parent=self)
+
+    def _on_import_project(self):
+        """从 .drifox_project 压缩包导入项目"""
+        if not self.history_manager:
+            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            return
+
+        # 弹出导入选项：从文件 / 从URL（与 session 导入类似）
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QLabel
+        from PyQt5.QtCore import Qt
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📦 导入项目")
+        dialog.setFixedSize(360, 200)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 10px;
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        label = QLabel("选择导入方式", dialog)
+        label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: 14px; font-weight: bold;")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+
+        def make_btn(text, desc=""):
+            btn = QPushButton(text, dialog)
+            btn.setFixedHeight(40)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {Colors.CONTENT_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 6px;
+                    padding: 4px 16px;
+                    color: {Colors.TEXT_PRIMARY};
+                    font-size: 13px;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background: {Colors.HOVER_BG_STRONG};
+                    border: 1px solid {Colors.TEXT_ACCENT};
+                }}
+            """)
+            if desc:
+                btn.setToolTip(desc)
+            return btn
+
+        file_btn = make_btn("📄 从文件导入", "选择本地的 .drifox_project 压缩包")
+        url_btn = make_btn("🔗 从URL导入", "输入项目压缩包的分享链接")
+        cancel_btn = make_btn("取消")
+
+        file_btn.clicked.connect(lambda: (dialog.accept(), self._on_import_project_from_file()))
+        url_btn.clicked.connect(lambda: (dialog.accept(), self._on_import_project_from_url()))
+        cancel_btn.clicked.connect(dialog.accept)
+
+        layout.addWidget(file_btn)
+        layout.addWidget(url_btn)
+        layout.addStretch()
+        layout.addWidget(cancel_btn)
+
+        dialog.exec_()
+
+    def _on_import_project_from_file(self):
+        """从文件导入项目压缩包"""
+        from PyQt5.QtWidgets import QFileDialog
+
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "导入项目", "",
+            "DriFox 项目包 (*.drifox_project);;ZIP 文件 (*.zip);;所有文件 (*)",
+        )
+        if not files:
+            return
+
+        success_count = 0
+        for file_path in files:
+            if self._do_import_project_archive(file_path):
+                success_count += 1
+
+        if success_count > 0:
+            # 刷新项目列表和历史面板
+            self._refresh_project_selector()
+            self._refresh_history_toggle_panel()
+            InfoBar.success(
+                title="",
+                content=f"成功导入 {success_count} 个项目",
+                duration=3000,
+                parent=self,
+            )
+
+    def _on_import_project_from_url(self):
+        """从URL导入项目压缩包"""
+        from app.widgets.cards.settings.memory_card import SingleInputDialog
+
+        dialog = SingleInputDialog(
+            title="🔗 从URL导入项目",
+            hint="请输入 .drifox_project 项目压缩包的分享链接",
+            placeholder="https://gitee.com/.../xxx.drifox_project",
+            default_text="https://",
+            confirm_text="导入",
+            cancel_text="取消",
+            parent=self,
+        )
+        dialog.confirmed.connect(self._on_url_project_import_confirmed)
+        dialog.exec_()
+
+    def _on_url_project_import_confirmed(self, url: str):
+        """URL确认后的项目导入处理（后台线程下载）"""
+        url = url.strip()
+        if not url:
+            return
+
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "https://" + url
+
+        # 后台线程下载
+        import threading
+        import tempfile
+        import requests
+
+        def _download_and_import():
+            try:
+                resp = requests.get(url, timeout=60)
+                if resp.status_code != 200:
+                    raise Exception(f"下载失败 (HTTP {resp.status_code})")
+
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".drifox_project", prefix="drifox_import_", delete=False,
+                )
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+                tmp.close()
+
+                # 在主线程执行导入
+                from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    self, "_do_import_project_archive_qt",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, tmp_path),
+                )
+            except Exception as e:
+                from PyQt5.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(
+                    self, "_on_import_project_error",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, str(e)),
+                )
+
+        thread = threading.Thread(target=_download_and_import, daemon=True)
+        thread.start()
+
+        InfoBar.info(title="", content="正在下载项目压缩包...", duration=5000, parent=self)
+
+    def _do_import_project_archive(self, zip_path: str) -> bool:
+        """执行项目压缩包导入"""
+        try:
+            result = self.history_manager.import_project_archive(zip_path)
+            if result and result.get("session_count", 0) > 0:
+                project_name = result.get("project_name", "导入项目")
+                InfoBar.success(
+                    title="",
+                    content=f"项目「{project_name}」导入成功（{result['session_count']} 个会话）",
+                    duration=3000,
+                    parent=self,
+                )
+
+                # 如果导出了 git_files，提示用户
+                if result.get("extract_dir"):
+                    InfoBar.info(
+                        title="",
+                        content=f"Git 文件已提取到: {result['extract_dir']}",
+                        duration=5000,
+                        parent=self,
+                    )
+
+                # 清理临时文件
+                try:
+                    if zip_path.startswith(tempfile.gettempdir()):
+                        os.unlink(zip_path)
+                except Exception:
+                    pass
+
+                return True
+            else:
+                InfoBar.warning(
+                    title="", content="导入失败：压缩包中无有效会话数据",
+                    duration=3000, parent=self,
+                )
+                return False
+        except Exception as e:
+            logger.error(f"[MainWidget] 导入项目异常: {e}", exc_info=True)
+            InfoBar.error(title="", content=f"导入失败: {e}", duration=3000, parent=self)
+            return False
+
+    # 通过 QMetaObject.invokeMethod 调用的辅助方法
+    def _do_import_project_archive_qt(self, zip_path: str):
+        """Qt 线程安全的导入包装"""
+        if self._do_import_project_archive(zip_path):
+            self._refresh_project_selector()
+            self._refresh_history_toggle_panel()
+
+    def _on_import_project_error(self, error: str):
+        """导入失败时的错误提示"""
+        InfoBar.error(title="", content=f"下载失败: {error}", duration=3000, parent=self)
+
+    def _refresh_project_selector(self):
+        """刷新项目选择器列表"""
+        if not hasattr(self, "_project_selector_card_content"):
+            return
+        projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
+        if self._current_project not in projects:
+            projects.insert(0, self._current_project)
+        meta_map = self._build_project_meta_map(projects)
+        root_dir_map = self._build_project_root_dir_map(projects)
+        self._project_selector_card_content.set_projects_data(
+            projects, self._current_project, meta_map, root_dir_map
+        )
 
     def _on_open_project_folder(self, project_name: str, root_dir: str):
         """打开项目根目录（在文件管理器中打开）"""
