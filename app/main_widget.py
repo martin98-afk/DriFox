@@ -296,20 +296,20 @@ class _ProjectUrlImportThread(QThread):
             self.finished.emit("", f"下载失败: {e}")
 
 
-class _ProjectExportOptionDialog(MaskDialogBase):
-    """项目导出选项弹框 — 与 ImportOptionDialog 一致的 MaskDialogBase 风格
+class _ProjectExportChoiceDialog(MaskDialogBase):
+    """项目导出方式选择弹框 — 导出前选择方式，而非导出后展示选项
 
-    提供：💾 保存到本地 / 📂 打开路径 / 🔗 上传获取链接
+    提供：💾 导出到本地 / 🔗 导出为URL链接
     """
 
-    saveRequested = pyqtSignal()
-    openFolderRequested = pyqtSignal()
-    uploadRequested = pyqtSignal()
+    EXPORT_LOCAL = 1
+    EXPORT_UPLOAD = 2
 
-    def __init__(self, project_name: str, zip_path: str, parent=None):
+    exportChosen = pyqtSignal(int)  # 携带 EXPORT_LOCAL 或 EXPORT_UPLOAD
+
+    def __init__(self, project_name: str, parent=None):
         super().__init__(parent)
         self._project_name = project_name
-        self._zip_path = zip_path
         self._init_ui()
 
     def _init_ui(self):
@@ -319,9 +319,9 @@ class _ProjectExportOptionDialog(MaskDialogBase):
         self.setDraggable(True)
         self.setMaskColor(QColor(0, 0, 0, 76))
 
-        self.widget.setObjectName("projectExportDialogWidget")
+        self.widget.setObjectName("projectExportChoiceDialog")
         self.widget.setStyleSheet(f"""
-            #projectExportDialogWidget {{
+            #projectExportChoiceDialog {{
                 background-color: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
@@ -333,25 +333,23 @@ class _ProjectExportOptionDialog(MaskDialogBase):
         layout.setSpacing(12)
 
         # 标题
-        title_label = BodyLabel(f"📦 项目「{self._project_name}」已导出", self.widget)
+        title_label = BodyLabel(f"📦 导出项目「{self._project_name}」", self.widget)
         title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(16)}"
         )
         layout.addWidget(title_label)
 
-        # 路径提示
-        hint_label = CaptionLabel(f"路径: {self._zip_path}", self.widget)
+        hint_label = CaptionLabel("选择导出方式：", self.widget)
         hint_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 2px;"
+            f"{get_font_family_css()} {font_size_css(11)}; padding-left: 2px;"
         )
-        hint_label.setWordWrap(True)
         layout.addWidget(hint_label)
 
         layout.addSpacing(4)
 
-        # 按钮
+        # 统一按钮样式
         btn_style = f"""
             QPushButton {{
                 background-color: {Colors.CARD_BG.format(alpha=180)};
@@ -368,31 +366,40 @@ class _ProjectExportOptionDialog(MaskDialogBase):
             }}
         """
 
-        save_btn = QPushButton("💾  保存到本地", self.widget)
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setFixedHeight(48)
-        save_btn.setStyleSheet(btn_style)
-        save_btn.clicked.connect(lambda: (self.close(), self.saveRequested.emit()))
-        layout.addWidget(save_btn)
+        # 导出到本地
+        local_btn = QPushButton("💾  导出到本地", self.widget)
+        local_btn.setCursor(Qt.PointingHandCursor)
+        local_btn.setFixedHeight(56)
+        local_btn.setStyleSheet(btn_style)
+        local_btn.clicked.connect(lambda: (self.close(), self.exportChosen.emit(self.EXPORT_LOCAL)))
+        layout.addWidget(local_btn)
 
-        open_btn = QPushButton("📂  打开文件所在路径", self.widget)
-        open_btn.setCursor(Qt.PointingHandCursor)
-        open_btn.setFixedHeight(48)
-        open_btn.setStyleSheet(btn_style)
-        open_btn.clicked.connect(lambda: (self.close(), self.openFolderRequested.emit()))
-        layout.addWidget(open_btn)
+        local_hint = CaptionLabel("直接导出到默认路径，自动打开文件夹", self.widget)
+        local_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(local_hint)
 
-        upload_btn = QPushButton("🔗  上传获取分享链接", self.widget)
-        upload_btn.setCursor(Qt.PointingHandCursor)
-        upload_btn.setFixedHeight(48)
-        upload_btn.setStyleSheet(btn_style)
-        upload_btn.clicked.connect(lambda: (self.close(), self.uploadRequested.emit()))
-        layout.addWidget(upload_btn)
+        # 导出为URL链接
+        url_btn = QPushButton("🔗  导出为URL链接", self.widget)
+        url_btn.setCursor(Qt.PointingHandCursor)
+        url_btn.setFixedHeight(56)
+        url_btn.setStyleSheet(btn_style)
+        url_btn.clicked.connect(lambda: (self.close(), self.exportChosen.emit(self.EXPORT_UPLOAD)))
+        layout.addWidget(url_btn)
+
+        url_hint = CaptionLabel("导出后自动上传到 Gitee 并复制分享链接", self.widget)
+        url_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(url_hint)
 
         layout.addStretch()
 
         # 取消按钮
-        cancel_btn = PushButton("关闭", self.widget)
+        cancel_btn = PushButton("取消", self.widget)
         cancel_btn.setStyleSheet(f"""
             PushButton {{
                 background-color: {Colors.CARD_BG.format(alpha=180)};
@@ -413,7 +420,7 @@ class _ProjectExportOptionDialog(MaskDialogBase):
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(400, 360)
+        self.widget.setFixedSize(400, 320)
         self._center_widget()
 
     def _center_widget(self):
@@ -2333,6 +2340,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card_content.archiveProject.connect(self._on_archive_project)
         self._project_selector_card_content.exportProject.connect(self._on_export_project)
         self._project_selector_card_content.importProjectRequested.connect(self._on_import_project)
+        self._project_selector_card_content.projectFileDropped.connect(self._on_project_file_dropped)
         self._project_selector_card_content.openFolderRequested.connect(self._on_open_project_folder)
         self._project_selector_card_content.folderDropped.connect(self._on_project_folder_dropped)
 
@@ -14449,94 +14457,108 @@ class OpenAIChatToolWindow(ToolWindow):
             self.pixel_pet.set_state("idle")
 
     def _on_export_project(self, project_name: str):
-        """导出项目为 .drifox_project 压缩包"""
+        """导出项目为 .drifox_project 压缩包 — 先选方式再导出"""
         if not self.history_manager:
             InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
             return
 
-        # 获取项目根目录
-        root_dir = ""
-        if self.backend and self.backend.session_store:
-            root_dir_map = self._build_project_root_dir_map([project_name])
-            root_dir = root_dir_map.get(project_name, "")
+        # 先弹出选择对话框，再根据选择执行导出
+        dialog = _ProjectExportChoiceDialog(project_name, parent=self.window())
 
-        # 触发警示动画
-        if self.pixel_pet:
-            self.pixel_pet.set_state("warning")
+        def _on_choice(mode: int):
+            # 获取项目根目录
+            root_dir = ""
+            if self.backend and self.backend.session_store:
+                root_dir_map = self._build_project_root_dir_map([project_name])
+                root_dir = root_dir_map.get(project_name, "")
 
-        zip_path = self.history_manager.export_project_archive(project_name, root_dir)
+            if self.pixel_pet:
+                self.pixel_pet.set_state("warning")
 
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")
+            zip_path = self.history_manager.export_project_archive(project_name, root_dir)
 
-        if not zip_path:
-            InfoBar.error(
-                title="导出失败",
-                content=f"项目「{project_name}」无会话或导出异常",
-                duration=3000,
-                parent=self,
-            )
-            return
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
 
-        # 展示导出选项对话框
-        self._show_project_export_options(zip_path, project_name)
+            if not zip_path:
+                InfoBar.error(
+                    title="导出失败",
+                    content=f"项目「{project_name}」无会话或导出异常",
+                    duration=3000,
+                    parent=self,
+                )
+                return
 
-    def _show_project_export_options(self, zip_path: str, project_name: str):
-        """显示项目导出后的操作选项（保存/上传/打开路径）— 与 ImportOptionDialog 一致风格"""
-        dialog = _ProjectExportOptionDialog(project_name, zip_path, parent=self.window())
-        dialog.saveRequested.connect(lambda: self._on_save_project_export(zip_path))
-        dialog.openFolderRequested.connect(lambda: self._on_open_export_path(zip_path))
-        dialog.uploadRequested.connect(lambda: self._on_upload_project_export(zip_path))
+            if mode == _ProjectExportChoiceDialog.EXPORT_LOCAL:
+                self._on_export_local(zip_path, project_name)
+            elif mode == _ProjectExportChoiceDialog.EXPORT_UPLOAD:
+                self._on_export_upload(zip_path, project_name)
+
+        dialog.exportChosen.connect(_on_choice)
         dialog.exec_()
 
-    def _on_save_project_export(self, zip_path: str):
-        """保存导出的项目压缩包到指定位置"""
-        from PyQt5.QtWidgets import QFileDialog
-
-        src = Path(zip_path)
-        default_name = src.name
-        target, _ = QFileDialog.getSaveFileName(
-            self, "保存项目压缩包", str(Path.home() / "Downloads" / default_name),
-            "DriFox 项目包 (*.drifox_project);;ZIP 文件 (*.zip);;所有文件 (*)",
-        )
-        if not target:
-            return
-
+    def _on_export_local(self, zip_path: str, project_name: str):
+        """导出到本地：保存到默认路径，自动打开文件夹"""
         try:
-            shutil.copy2(zip_path, target)
+            path = Path(zip_path)
             InfoBar.success(
                 title="",
-                content=f"已保存到 {target}",
+                content=f"项目「{project_name}」已导出到: {path}",
                 duration=3000,
                 parent=self,
             )
-            # 自动打开文件夹并选中
+            # 自动打开文件夹并选中文件
             try:
                 if os.name == "nt":
-                    subprocess.Popen(["explorer", "/select,", os.path.normpath(target)])
+                    subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
                 else:
-                    folder = os.path.dirname(target)
-                    if folder:
-                        subprocess.Popen(["xdg-open", folder])
-            except Exception:
-                pass
+                    folder = str(path.parent)
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception as e:
+                logger.warning(f"[MainWidget] 打开导出路径失败: {e}")
         except Exception as e:
-            InfoBar.error(title="", content=f"保存失败: {e}", duration=3000, parent=self)
+            InfoBar.error(title="", content=f"导出本地失败: {e}", duration=3000, parent=self)
 
-    def _on_open_export_path(self, zip_path: str):
-        """在文件管理器中打开导出路径"""
-        path = Path(zip_path)
-        folder = path.parent
+    def _on_export_upload(self, zip_path: str, project_name: str):
+        """导出并上传到 Gitee，复制分享链接"""
         try:
-            if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
-            else:
-                subprocess.Popen(["xdg-open", str(folder)])
-        except Exception as e:
-            logger.warning(f"[MainWidget] 打开导出路径失败: {e}")
+            from app.gateway.utils.gitee_uploader import GiteeUploader
 
-    def _on_upload_project_export(self, zip_path: str):
-        """上传项目压缩包到 Gitee 并获取分享链接"""
+            uploader = GiteeUploader.get_instance()
+            if not uploader.is_configured():
+                InfoBar.warning(
+                    title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
+                    duration=3000, parent=self,
+                )
+                self._on_export_local(zip_path, project_name)
+                return
+
+            InfoBar.info(title="", content="正在上传项目压缩包...", duration=5000, parent=self)
+
+            url, err = uploader.upload_file(zip_path)
+            if err:
+                InfoBar.warning(
+                    title="", content=f"上传失败: {err}（文件已保存到本地）",
+                    duration=3000, parent=self,
+                )
+                self._on_export_local(zip_path, project_name)
+                return
+
+            # 复制链接到剪贴板
+            from PyQt5.QtWidgets import QApplication
+            QApplication.clipboard().setText(url)
+            InfoBar.success(
+                title="",
+                content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
+                duration=5000,
+                parent=self,
+            )
+        except Exception as e:
+            logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
+            InfoBar.warning(
+                title="", content=f"上传异常，文件已保存到本地: {zip_path}",
+                duration=3000, parent=self,
+            )
 
         # 使用现有的 GiteeUploader
         try:
@@ -14771,6 +14793,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.info(f"[MainWidget] 已更新项目「{project_name}」根目录为: {restore_path}")
         except Exception as e:
             logger.warning(f"[MainWidget] 更新项目根目录失败: {e}")
+
+    def _on_project_file_dropped(self, file_path: str):
+        """拖拽 .drifox_project 文件到项目选择卡片的处理"""
+        if not self.history_manager:
+            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            return
+        if self._do_import_project_archive(file_path):
+            self._refresh_project_selector()
+            self._refresh_history_toggle_panel()
 
     def _refresh_project_selector(self):
         """刷新项目选择器列表"""

@@ -414,7 +414,8 @@ class ProjectSelectorCardContent(QWidget):
     newProjectCreated = pyqtSignal(str)
     archiveProject = pyqtSignal(str)
     exportProject = pyqtSignal(str)  # 导出项目压缩包
-    importProjectRequested = pyqtSignal()  # 导入项目压缩包
+    importProjectRequested = pyqtSignal()  # 导入项目压缩包（按钮触发）
+    projectFileDropped = pyqtSignal(str)  # 拖拽 .drifox_project 文件路径
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
 
@@ -468,15 +469,18 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setAcceptDrops(True)
         layout.addWidget(self._scroll_area, 1)
 
-    # ── 拖拽支持 ──────────────────────────────────────
+    # ── 拖拽支持（文件夹 / .drifox_project 文件） ──
+
+    def _is_drifox_project(self, path: str) -> bool:
+        return path.endswith(".drifox_project") or path.endswith(".zip")
 
     def dragEnterEvent(self, event):
-        """判断拖入内容是否为文件夹（URL 指向本地路径）"""
+        """判断拖入内容是否为文件夹或 .drifox_project 文件"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
-                    if os.path.isdir(path):
+                    if os.path.isdir(path) or self._is_drifox_project(path):
                         event.acceptProposedAction()
                         return
         event.ignore()
@@ -485,17 +489,23 @@ class ProjectSelectorCardContent(QWidget):
         """拖拽移动时保持接受状态"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and os.path.isdir(url.toLocalFile()):
-                    event.acceptProposedAction()
-                    return
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path) or self._is_drifox_project(path):
+                        event.acceptProposedAction()
+                        return
         event.ignore()
 
     def dropEvent(self, event):
-        """放下文件夹时发射信号"""
+        """放下文件夹或 .drifox_project 文件时发射信号"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
+                    if self._is_drifox_project(path):
+                        self.projectFileDropped.emit(path)
+                        event.acceptProposedAction()
+                        return
                     if os.path.isdir(path):
                         self.folderDropped.emit(path)
                         event.acceptProposedAction()
