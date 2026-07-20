@@ -8308,6 +8308,11 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             self._loading_session = False
             self._lazy_batch_timer_active = False
+            # 🐛 修复：所有懒渲染批次完成后，卡片仍在异步报告高度，
+            # layout 持续扩展但不再触发滚底。用 sticky 模式在接下来
+            # 900ms 内持续滚动到底部，覆盖卡片异步高度上报期。
+            if self._initial_scroll_to_bottom:
+                self._scroll_to_bottom(sticky_ms=900)
 
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
