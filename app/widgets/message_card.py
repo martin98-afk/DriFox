@@ -186,6 +186,9 @@ def _get_formatter_cached():
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+
+# 编辑类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
+_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit"})
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -1026,7 +1029,7 @@ def _render_tool_streaming_block(
 
     streaming_state = "false" if completed else "true"
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">
             <span style="flex: 0 0 auto;">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
@@ -2057,6 +2060,19 @@ class CodeWebViewer(QWebEngineView):
 
         self._load_skeleton()
 
+    @property
+    def _tool_compact_mode(self) -> bool:
+        try:
+            from app.utils.config import Settings
+
+            return Settings.get_instance().ui_compact_tool_area.value
+        except Exception:
+            return True
+
+    @property
+    def _tool_target_id(self) -> str:
+        return "tool-content" if self._tool_compact_mode else "content-placeholder"
+
     def _handle_context_lost(self):
         """JavaScript 报告上下文丢失"""
         if not self._context_lost:
@@ -2278,6 +2294,14 @@ class CodeWebViewer(QWebEngineView):
 
     def _on_js_ready(self):
         self._is_js_ready = True
+        # 同步简洁模式标志到 JS
+        try:
+            from app.utils.config import Settings
+
+            compact = "true" if Settings.get_instance().ui_compact_tool_area.value else "false"
+            self.page().runJavaScript(f"window._toolCompactMode = {compact};")
+        except RuntimeError:
+            pass
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
         # 仅检查 _markdown_text 会遗漏这些内容，导致卡片永久空白。
         # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
@@ -3307,12 +3331,66 @@ class CodeWebViewer(QWebEngineView):
                 #content-placeholder img {{
                     cursor: pointer;
                 }}
+
+                /* 工具/思考区域 - 固定高度滚动容器（正文上方，背景+边框区分） */
+                #tool-section {{
+                    margin: 0 0 8px 0;
+                }}
+                #tool-separator {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-size: 11px;
+                    color: var(--text-muted);
+                    user-select: none;
+                    padding: 2px 2px 6px 2px;
+                }}
+                #tool-separator::before,
+                #tool-separator::after {{
+                    content: '';
+                    flex: 1;
+                    height: 1px;
+                    background: var(--border);
+                    opacity: 0.6;
+                }}
+                #tool-content {{
+                    max-height: 350px;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    background: var(--panel-soft);
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    padding: 4px 8px;
+                }}
+                #tool-content > .tool-block:first-child,
+                #tool-content > .think-block:first-child,
+                #tool-content > .think-streaming:first-child {{
+                    margin-top: 0;
+                }}
+                #tool-content > .tool-block:last-child,
+                #tool-content > .think-block:last-child,
+                #tool-content > .think-streaming:last-child {{
+                    margin-bottom: 0;
+                }}
+                #tool-separator-bottom {{
+                    height: 1px;
+                    background: var(--border);
+                    opacity: 0.6;
+                    margin: 6px 0 2px 0;
+                }}
             </style>
         </head>
         <body>
+            <div id="tool-section" style="display: none;">
+              <div id="tool-separator"><span>⚙ 工具与思考</span></div>
+              <div id="tool-content"></div>
+              <div id="tool-separator-bottom"></div>
+            </div>
             <div id="content-placeholder"></div>
             <script>
                 const collapsibleState = new Map();
+                // 简洁模式标志：由 Python 在 _load_skeleton 后通过 JS 同步更新
+                window._toolCompactMode = true;
 
                 function syncExpandedAttrs(block, expanded) {{
                     block.dataset.expanded = expanded ? 'true' : 'false';
@@ -3536,10 +3614,16 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
+                        // 将工具/思考块分流到独立滚动容器（仅简洁模式）
+                        // 必须在 _suppressScrollEvent=false 之前执行，
+                        // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
+                        if (window._toolCompactMode) reorganizeContent();
+
                         // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
-                        // think-block 展开、ECharts 初始化）之后执行，确保 scrollHeight 值反映
-                        // 最终渲染结果，避免因 collapsible 展开 / tool-block restore 等操作
-                        // 在 auto-scroll 后增加高度而导致的"滚不到底部"问题。
+                        // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
+                        // 确保 scrollHeight 值反映最终渲染结果，避免因 collapsible 展开 /
+                        // tool-block restore 等操作在 auto-scroll 后增加高度而导致的
+                        // "滚不到底部"问题。
                         // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
                         // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
                         // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
@@ -3592,6 +3676,46 @@ class CodeWebViewer(QWebEngineView):
                         reportHeight();
                         _heightReportPending = false;
                     }});
+                }}
+
+                // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
+                // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
+                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
+
+                // 更新"工具与思考"头部计数
+                function _updateToolSectionHeader() {{
+                    var toolContent = document.getElementById('tool-content');
+                    var separator = document.getElementById('tool-separator');
+                    if (!toolContent || !separator) return;
+                    var count = toolContent.children.length;
+                    var span = separator.querySelector('span');
+                    if (count > 0) {{
+                        span.textContent = '⚙ 工具与思考 · ' + count + ' 项';
+                    }} else {{
+                        span.textContent = '⚙ 工具与思考';
+                    }}
+                }}
+
+                function reorganizeContent() {{
+                    var container = document.getElementById('content-placeholder');
+                    var toolSection = document.getElementById('tool-section');
+                    var toolContent = document.getElementById('tool-content');
+                    if (!container || !toolContent || !toolSection) return;
+                    // 清空旧内容，防止残留/重复
+                    toolContent.innerHTML = '';
+                    // 移动工具/思考块到 tool-content（编辑类工具保留在正文）
+                    var blocks = container.querySelectorAll(
+                        '.tool-block' + _EDIT_TOOLS_SELECTOR + ', ' +
+                        '.think-block, .think-streaming, ' +
+                        '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
+                    );
+                    var hasBlocks = false;
+                    blocks.forEach(function(el) {{
+                        toolContent.appendChild(el);
+                        hasBlocks = true;
+                    }});
+                    toolSection.style.display = hasBlocks ? '' : 'none';
+                    if (hasBlocks) _updateToolSectionHeader();
                 }}
                 document.addEventListener('click', e => {{
                     const btn = e.target.closest('button[data-action]');
@@ -3786,6 +3910,11 @@ class CodeWebViewer(QWebEngineView):
                 const _tipTarget = document.getElementById('content-placeholder');
                 if (_tipTarget) {{
                     _tipObserver.observe(_tipTarget, {{ childList: true, subtree: true }});
+                }}
+                // 也监听 tool-content（思考块被移动到此处）
+                const _tipToolContent = document.getElementById('tool-content');
+                if (_tipToolContent) {{
+                    _tipObserver.observe(_tipToolContent, {{ childList: true, subtree: true }});
                 }}
             </script>
         </body>
@@ -4079,22 +4208,26 @@ class CodeWebViewer(QWebEngineView):
                 js_code = (
                     "(function(){"
                     "var _finished=" + _safe_finished + ";"
-                    "var _c=document.getElementById('content-placeholder');"
+                    f"var _tc=document.getElementById('{self._tool_target_id}');"
                     "var _sbs=[];"
-                    "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                    "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
                     "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
                     "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
                     "}});}"
                     "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                     f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
+                    f"if(_sbs.length>0){{_tc=document.getElementById('{self._tool_target_id}');if(_tc){{"
                     "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                     "var _t=document.createElement('div');_t.innerHTML=b.html;"
                     "var _bk=_t.firstElementChild;if(_bk){"
                     "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                     "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                    "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                    "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
                     "}}});}}"
+                    "if(window._toolCompactMode){"
+                    "var _ts2=document.getElementById('tool-section');"
+                    "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+                    "}"
                     "})();"
                 )
                 self._last_rendered_html = None
@@ -4140,26 +4273,27 @@ class CodeWebViewer(QWebEngineView):
             js_code = (
                 "(function(){"
                 "var _finished=" + _safe_finished + ";"
-                "var _c=document.getElementById('content-placeholder');"
+                f"var _tc=document.getElementById('{self._tool_target_id}');"
                 "var _sbs=[];"
-                "if(_c){Array.prototype.forEach.call(_c.children,function(el,i){"
+                "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
                 "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
                 "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
                 "}});}"
                 "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
                 f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                "if(_sbs.length>0){_c=document.getElementById('content-placeholder');if(_c){"
+                f"if(_sbs.length>0){{_tc=document.getElementById('{self._tool_target_id}');if(_tc){{"
                 "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
                 "var _t=document.createElement('div');_t.innerHTML=b.html;"
                 "var _bk=_t.firstElementChild;if(_bk){"
                 "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
                 "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                "_c.insertBefore(_bk,_c.children[b.idx]||null);"
+                "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
                 "}}});}}"
-                # 🐛 修复：工具块 restore 后 scrollHeight 可能增加（流式工具块推送新内容），
-                # 但 scrollTop 仍停留在 restore 前的位置，导致"滚不到底部"。
-                # 追加 auto-scroll：用户未滚动 -> 强制滚底；已滚动但接近底部 -> 粘性滚底
-                "window._suppressScrollEvent=true;"
+                # 🐛 修复：工具块 restore 后 scrollHeight 可能增加
+                "if(window._toolCompactMode){"
+                "var _ts2=document.getElementById('tool-section');"
+                "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+                "}"
                 "if(!window._userScrolledWithin){"
                 "document.body.scrollTop=document.body.scrollHeight;"
                 "}else{"
@@ -6624,7 +6758,7 @@ class MessageCard(SimpleCardWidget):
             self._content_data = ensure_content_blocks(content)
             rendered = content_to_markdown(self._content_data)
             # [PERF] 內容已整體替換，失效舊工具塊 markdown 緩存
-            if self.viewer and hasattr(self.viewer, '_tool_md_cache'):
+            if self.viewer and hasattr(self.viewer, "_tool_md_cache"):
                 self.viewer._tool_md_cache.clear()
         else:
             # 用户消息支持 multimodal 内容（含图片块的列表）
@@ -6663,7 +6797,7 @@ class MessageCard(SimpleCardWidget):
         if isinstance(content, str) or not isinstance(content, list):
             return content_to_markdown(content)
 
-        cache = getattr(self.viewer, '_tool_md_cache', {}) if self.viewer else {}
+        cache = getattr(self.viewer, "_tool_md_cache", {}) if self.viewer else {}
         parts: List[str] = []
 
         for block in content:
@@ -6781,7 +6915,7 @@ class MessageCard(SimpleCardWidget):
         if tool_call_id and self.viewer:
             block = self._content_data[-1]
             single_md = content_to_markdown([block])
-            cache = getattr(self.viewer, '_tool_md_cache', None)
+            cache = getattr(self.viewer, "_tool_md_cache", None)
             if cache is not None:
                 cache[tool_call_id] = single_md
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
@@ -6845,10 +6979,15 @@ class MessageCard(SimpleCardWidget):
                 safe_btn_inner = safe_body_inner = safe_body_style = '""'
                 _use_incremental = "false"
 
+            # 编辑类工具始终注入到正文区域，不进入"工具与思考"
+            tool_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+
             js_code = f"""
             (function() {{
-                var c = document.getElementById('content-placeholder');
-                if (!c) return;
+                var tc = document.getElementById('{tool_target}');
+                if (!tc) {{
+                    tc = document.getElementById('content-placeholder');
+                }}
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
@@ -6878,6 +7017,11 @@ class MessageCard(SimpleCardWidget):
                         // 兜底：整体替换（fallback，不应触发）
                         existing.innerHTML = {safe_inner};
                     }}
+                    // 确保 tool-section 可见
+                    if (window._toolCompactMode) {{
+                        var ts = document.getElementById('tool-section');
+                        if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
+                    }}
                     reportHeight();
                     return;
                 }}
@@ -6885,7 +7029,14 @@ class MessageCard(SimpleCardWidget):
                 var d = document.createElement('div');
                 d.setAttribute('data-tool-injected', 'true');
                 d.innerHTML = {safe_html};
-                c.appendChild(d);
+                tc.appendChild(d);
+                // 自动滚底
+                tc.scrollTop = tc.scrollHeight;
+                // 确保 tool-section 可见
+                if (window._toolCompactMode) {{
+                    var ts2 = document.getElementById('tool-section');
+                    if (ts2) ts2.style.display = '';
+                }}
                 reportHeight();
             }})();
             """
@@ -6990,7 +7141,8 @@ class MessageCard(SimpleCardWidget):
         # ⚠️ 不在此处调用 _schedule_render：全量渲染会执行 updateContent()
         # 销毁所有 JS 注入的 [data-tool-injected] 元素，导致流式块闪灭→再现。
         # 流式文本已由 _append_text_incremental 增量推送，不需要全量渲染。
-        self._content_just_loaded = True
+        # 🔧 不设置 _content_just_loaded：工具流式更新不应触发外部消息列表滚动，
+        # 仅 tool-content 内部自动滚底（见 JS 注入代码）。
 
         # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
         _text_only = preview is None
@@ -7025,14 +7177,19 @@ class MessageCard(SimpleCardWidget):
                 char_count=char_count,
                 completed=completed,
             )
+            # 编辑类工具流式块始终注入到正文区域
+            _stream_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+
             safe_html = json.dumps(block_html).decode("utf-8")
             safe_preview = json.dumps(preview_content).decode("utf-8")
             streaming_flag = "true" if not completed else "false"
             _text_only_js = "true" if _text_only else "false"
             js_code = f"""
             (function() {{
-                var c = document.getElementById('content-placeholder');
-                if (!c) return;
+                var tc = document.getElementById('{_stream_target}');
+                if (!tc) {{
+                    tc = document.getElementById('content-placeholder');
+                }}
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
                 if (el) {{
@@ -7065,7 +7222,14 @@ class MessageCard(SimpleCardWidget):
                     var tmp = document.createElement('div');
                     tmp.innerHTML = {safe_html};
                     var block = tmp.firstElementChild;
-                    if (block) c.appendChild(block);
+                    if (block) tc.appendChild(block);
+                    // 自动滚底
+                    tc.scrollTop = tc.scrollHeight;
+                    // 确保 tool-section 可见
+                    if (window._toolCompactMode) {{
+                        var ts = document.getElementById('tool-section');
+                        if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
+                    }}
                     hr();
                 }}
             }})();

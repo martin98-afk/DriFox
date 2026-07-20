@@ -757,6 +757,7 @@ class CommandCard(QWidget):
         self._last_tip_width = -1
         self._has_tooltip_text = False  # 当前选中项是否有可展示的描述文本
         self._window_resize_hooked = False  # 是否已给顶层窗口安装 resize 事件过滤器
+        self._parent_move_hooked = False  # 是否已给父控件安装 move 事件过滤器
         self._resize_recompute_timer: Optional[QTimer] = None  # 窗口 resize 防抖重算
 
         # 滚动区域
@@ -1006,6 +1007,8 @@ class CommandCard(QWidget):
         # 气泡已通过 paintEvent 自绘圆角实底 + 边框，视觉上足够清晰。
         self._desc_tooltip_label = lbl
         self._apply_desc_tooltip_style()
+        # 安装父控件 move 钩子，确保气泡跟随父控件移动
+        self._ensure_parent_move_hook()
         # 气泡位置在每次显示/窗口变化时由 _position_desc_tooltip 计算
 
     def _position_desc_tooltip(self):
@@ -1038,7 +1041,13 @@ class CommandCard(QWidget):
         # 安全兜底：气泡高度不超过卡片上方可用空间，避免溢出屏幕顶部
         if available_above > 0:
             tip_h = min(tip_h, available_above)
+        else:
+            # 卡片上方无可用空间（卡片紧贴窗口顶边），隐藏气泡避免遮挡卡片
+            tip_h = 0
         lbl.setFixedHeight(tip_h)
+        if tip_h <= 0:
+            lbl.setVisible(False)
+            return
         gx = card_global.x() + 1
         gy = card_global.y() - tip_h - gap
         if gy < win_global.y():
@@ -1231,6 +1240,22 @@ class CommandCard(QWidget):
         budget = top.height() - reserve
         return max(CARD_MIN_HEIGHT, budget)
 
+    def _ensure_parent_move_hook(self):
+        """给父控件安装一次性 move 事件过滤器
+
+        父控件（BottomCardContainer）移动时，CommandCard 作为子控件
+        其 screen 位置也会改变，但 card 自身的 moveEvent 不会触发
+        （因为 card 在父控件内的相对位置未变），导致悬浮气泡留在错误位置。
+        此处监听父控件的 move 事件，同步重定位气泡。
+        """
+        if self._parent_move_hooked:
+            return
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        parent.installEventFilter(self)
+        self._parent_move_hooked = True
+
     def _ensure_window_resize_hook(self):
         """给顶层窗口安装一次性的 resize 事件过滤器，窗口高度变化时按预算重算卡片高度"""
         if self._window_resize_hooked:
@@ -1240,14 +1265,22 @@ class CommandCard(QWidget):
             return
         top.installEventFilter(self)
         self._window_resize_hooked = True
+        # 同时安装父控件 move 钩子（两者独立，互不干扰）
+        self._ensure_parent_move_hook()
 
     def eventFilter(self, obj, event):
-        """监听顶层窗口 resize / move：
+        """监听顶层窗口 resize / move 以及父控件 move：
 
-        - resize：高度/宽度变化（卡片自身收不到的窗口级 resize）时按最新预算
+        - window resize：高度/宽度变化（卡片自身收不到的窗口级 resize）时按最新预算
           重算卡片高度，并重定位悬浮气泡，保证矮窗口压缩/放宽实时生效。
-        - move：窗口被拖动时，悬浮气泡（独立顶层窗口）需同步跟随重定位。
+        - window move：窗口被拖动时，悬浮气泡（独立顶层窗口）需同步跟随重定位。
+        - parent move：父控件移动导致卡片 screen 位置变化时，重定位气泡。
         """
+        # 父控件移动 → 只需重定位悬浮气泡（卡片高度/预算不受影响）
+        parent = self.parentWidget()
+        if obj is parent and event.type() == QEvent.Move:
+            self._sync_desc_tooltip_position()
+            return False
         if obj is self.window() and event.type() in (QEvent.Resize, QEvent.Move):
             if self._resize_recompute_timer is None:
                 self._resize_recompute_timer = QTimer(self)
@@ -1367,15 +1400,25 @@ class CommandCard(QWidget):
         # 按类型查找对应 CommandDefinition（同名多类型时只显示选中类型的 hint）
         entries = cmd_mgr._commands.get(cmd_name, {})
         cmd = None
-        if use_type:
+        skill = None
+
+        if use_type == "skill":
+            # 技能类型：直接查技能，不查命令
+            # 修复：同名命令存在时，若不优先查技能，技能参数（--enable/--disable）
+            # 会被命令参数覆盖，因为下方兜底逻辑 `if not cmd and entries` 会抢走 cmd
+            skill = get_skill_by_name(cmd_name)
+        elif use_type:
             type_map = {"command": CommandType.FUNCTION, "prompt": CommandType.PROMPT, "agent": CommandType.AGENT}
             preferred = type_map.get(use_type)
             if preferred and preferred in entries:
                 cmd = entries[preferred]
-        if not cmd and entries:
-            cmd = next(iter(entries.values()))
 
-        skill = get_skill_by_name(cmd_name) if not cmd else None
+        # 兜底：未通过类型匹配到，退而尝试任意命令或技能
+        if not cmd and not skill:
+            if entries:
+                cmd = next(iter(entries.values()))
+            else:
+                skill = get_skill_by_name(cmd_name)
 
         if not cmd and not skill:
             return

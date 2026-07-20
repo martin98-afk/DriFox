@@ -310,7 +310,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.4.2"
+    current_version = "v0.4.3"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -381,6 +381,9 @@ class Settings(QConfig):
         OptionsValidator(["fallout"]),  # 运行时动态补充
     )
     ui_light_mode = ConfigItem("UI", "LightMode", False, BoolValidator())
+
+    # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
+    ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())

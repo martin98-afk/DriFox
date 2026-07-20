@@ -2783,22 +2783,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         cmd_mgr = CommandManager.get_instance()
 
-        # card_id → 中文描述
+        # card_id → (中文描述, 实际 toggle 方法引用)
+        # 直接用 toggle 方法而非裸 toggle_card，确保命令路径与按钮路径行为一致
+        # （按钮路径的 toggle 方法会同时刷新卡片数据——如 history 刷新列表、
+        #   model_selector 加载模型数据、project_selector 加载项目列表等）
         _SYSTEM_CARD_COMMANDS = {
-            "settings": "打开设置面板",
-            "history": "打开对话历史",
-            "memory": "打开记忆管理",
-            "model_selector": "选择模型",
-            "tool_control": "打开工具控制面板",
-            "project_selector": "选择项目",
-            "share": "分享对话",
+            "settings": ("打开设置面板", self._toggle_settings_card),
+            "history": ("打开对话历史", self._toggle_history_card),
+            "memory": ("打开记忆管理", self._toggle_memory_card),
+            "model_selector": ("选择模型", self._toggle_model_selector_card),
+            "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
+            "project_selector": ("选择项目", self._toggle_project_selector_card),
+            "share": ("分享对话", self._on_share_clicked),
         }
 
-        for card_id, description in _SYSTEM_CARD_COMMANDS.items():
-            # 先注册 handler（即使命令已存在也要注册，否则快捷键无法触发 toggle_card）
-            self._function_command_handlers[card_id] = lambda args, cid=card_id: self._card_manager.toggle_card(
-                cid, self._window_id
-            )
+        for card_id, (description, toggle_method) in _SYSTEM_CARD_COMMANDS.items():
+            # 注册 handler：忽略 args 参数，直接调用 toggle 方法
+            self._function_command_handlers[card_id] = lambda _args, m=toggle_method: m()
             if cmd_mgr.has_command(card_id):
                 continue
             cmd_mgr.register(
@@ -11423,9 +11424,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     from app.utils.utils import load_skill as load_skill_func
 
                     success, content, workspace = load_skill_func(skill_name)
+                    if not success:
+                        logger.warning(f"[Skill] load_skill failed for '{skill_name}': content={len(content)}")
                     if success:
                         session = self.session_manager.get_current_session()
                         if session:
+                            # 🛡️ 清除可能残留的旧 pending_command（防止劫持技能注入）
+                            session.metadata.pop("_pending_command", None)
                             session.metadata["_pending_skill"] = {
                                 "name": skill_name,
                                 "content": content,

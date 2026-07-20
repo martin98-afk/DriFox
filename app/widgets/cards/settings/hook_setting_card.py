@@ -34,7 +34,15 @@ from qfluentwidgets import (
 from typing import Dict
 
 from app.tools.tool_name_mapper import ToolNameMapper
-from app.utils.design_tokens import ButtonStyles, CardStyles, Colors, ComboBoxStyles, Sizes, SwitchStyles, scale_font_size
+from app.utils.design_tokens import (
+    ButtonStyles,
+    CardStyles,
+    Colors,
+    ComboBoxStyles,
+    Sizes,
+    SwitchStyles,
+    scale_font_size,
+)
 from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
 from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
@@ -1220,16 +1228,71 @@ class HookListSettingCard(ExpandSettingCard):
                         return
 
     def _delete_hook_by_id(self, hook_id: str):
-        """删除 hook"""
-        if self._hook_manager:
-            success = self._hook_manager.delete_hook_by_id(hook_id)
-            if not success:
-                from PyQt5.QtWidgets import QToolTip
+        """删除 hook（先弹出确认对话框）"""
+        if not self._hook_manager:
+            return
 
-                QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
-                return
-            self._refresh(reload=True)
-            self.hooksChanged.emit()
+        # 查找 hook 信息用于确认文案
+        hook_event = ""
+        hook_command = ""
+        is_system = False
+        for source in ("plugin", "skill", "user"):
+            for event, hooks in list(self.grouped_hooks.get(source, {}).items()):
+                for h in hooks:
+                    if h.get("id") == hook_id:
+                        hook_event = event
+                        hook_command = (
+                            h.get("command", "")
+                            or h.get("url", "")
+                            or h.get("prompt", "")
+                            or h.get("function", "")
+                            or ""
+                        )
+                        is_system = h.get("_is_system_plugin", False)
+                        break
+
+        if is_system:
+            from PyQt5.QtWidgets import QToolTip
+
+            QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
+            return
+
+        # 构建确认文案
+        event_cn = HOOK_EVENT_DISPLAY_NAMES.get(hook_event, hook_event)
+        cmd_display = hook_command[:60] + ("…" if len(hook_command) > 60 else "")
+        content = "确定要删除此 Hook 吗？"
+        if event_cn:
+            content += f"\n触发事件: {event_cn}"
+        if cmd_display:
+            content += f"\n命令: {cmd_display}"
+
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_confirm():
+            _confirmed[0] = True
+
+        dialog = ConfirmDialog(
+            title="删除 Hook",
+            content=content,
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(_on_confirm)
+        dialog.exec_()
+        if not _confirmed[0]:
+            return
+
+        success = self._hook_manager.delete_hook_by_id(hook_id)
+        if not success:
+            from PyQt5.QtWidgets import QToolTip
+
+            QToolTip.showText(QPoint(0, 0), "删除失败")
+            return
+        self._refresh(reload=True)
+        self.hooksChanged.emit()
 
     def _toggle_hook_by_id(self, hook_id: str, enabled: bool):
         """切换 hook 启用状态（仅更新内存+持久化，不触发全量刷新）

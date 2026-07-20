@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     ConfigItem,
-    Dialog,
     ExpandSettingCard,
     FluentIcon,
     IconWidget,
@@ -472,11 +471,24 @@ class ProviderListSettingCard(ExpandSettingCard):
         self.showEditProviderCard.emit(config_id, info)
 
     def _show_confirm_dialog(self, item: ProviderItem):
-        title = self.tr("确定要删除这个服务商吗?")
-        content = self.tr('删除 "') + item.provider_name + self.tr('" 后将不再出现在列表中。')
-        w = Dialog(title, content, self.window())
-        w.yesSignal.connect(lambda: self._remove_provider(item))
-        w.exec_()
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        _confirmed: list[bool] = [False]
+
+        def _on_confirm():
+            _confirmed[0] = True
+
+        dialog = ConfirmDialog(
+            title="删除服务商",
+            content=f"确定要删除服务商「{item.provider_name}」吗？\n删除后将不再出现在列表中。",
+            confirm_text="删除",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(_on_confirm)
+        dialog.exec_()
+        if _confirmed[0]:
+            self._remove_provider(item)
 
     def _remove_provider(self, item: ProviderItem):
         if self._is_deleting:

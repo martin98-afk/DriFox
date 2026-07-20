@@ -419,7 +419,7 @@ class SendableTextEdit(TextEdit):
                 from app.utils.utils import get_skill_by_name
 
                 # 解析后缀：如 "tdd-skill" → base="tdd", type="skill"
-                raw_cmd, _ = CommandManager.parse_suffixed_name(cmd_name)
+                raw_cmd, suffix_type = CommandManager.parse_suffixed_name(cmd_name)
                 check_name = raw_cmd or cmd_name
                 if (
                     CommandManager.get_instance().is_known_command_name(cmd_name)
@@ -431,6 +431,10 @@ class SendableTextEdit(TextEdit):
                     self._slash_trigger_pos = 0
                     # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
                     selected_type = card._current_selected_type if card else ""
+                    # 从后缀推断类型：当卡片未提供选中类型时（如用户手动输入 /tdd-skill），
+                    # 确保 detail 模式能正确显示技能参数而非同名命令参数
+                    if suffix_type and not selected_type:
+                        selected_type = suffix_type
                     self.slashShowHint.emit(check_name, selected_type)
                 else:
                     # 未知命令/技能 + 参数 → 关闭
