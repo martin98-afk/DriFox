@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.3] - 2026-07-20
 
-自上一版本以来的变更 | 提交数：52 · 文件变更：71 · +6646/-3322 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：54 · 文件变更：73 · +6764/-3362 | 贡献者：dingma, mading
 
-> 重点：包含 **19 个新功能**、**15 个问题修复**、**4 次性能优化**、**4 项样式改进**、**3 项测试增强**、**2 项重构**。
+> 重点：包含 **21 个新功能**、**15 个问题修复**、**4 次性能优化**、**4 项样式改进**、**3 项测试增强**、**2 项重构**。
 
 ### ✨ 新功能 (New Features)
 
@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
 - **FileTreeWidget**: 新增主题色解析，统一对话框样式集成
 - **Agent 身份注入增强**: 钩子中优化身份信息输出格式
 - **缓存管理组件**: 新增 UI 组件支持缓存管理与对话样式设置
+- **插件市场搜索增强 (Marketplace Search)**: 搜索框接入 300ms 防抖与缓存机制，避免每敲一个字就全量重建；打开卡片时自动清理旧搜索状态与防抖定时器；`_compute_tags` 升级为支持 `categories` / `category` / `keywords` 三字段去重合并，补齐单数 `category` 字段
+- **插件行尺寸与滚动布局改进 (Plugin Row Layout)**: `_PluginRow` 设置最小宽度为 0 + `QSizePolicy.Ignored` 横向策略，让插件行在搜索与刷新时能更合理地参与流式布局与滚动区收缩
 
 ### 🐛 问题修复 (Bug Fixes)
 
