@@ -18,6 +18,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
 from app.constants import IMAGE_EXTENSIONS
+from app.utils.utils import invalidate_skills_cache
 
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
@@ -1305,6 +1306,8 @@ class ChatBackend(QObject):
                     logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
             # 5. 技能 / MCP：懒加载，只需标记
+            if comps.get("skills"):
+                invalidate_skills_cache()
             result["skills"] = bool(comps.get("skills"))
             result["mcp"] = bool(comps.get("mcp"))
 
@@ -1433,6 +1436,8 @@ class ChatBackend(QObject):
 
                 # 技能 / MCP：PluginManager 已移除该插件的目录，
                 # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
+                if removed_components.get("skills", False):
+                    invalidate_skills_cache()
                 result["skills"] = removed_components.get("skills", False)
                 result["mcp"] = removed_components.get("mcp", False)
 
@@ -1517,6 +1522,9 @@ class ChatBackend(QObject):
             #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
             if component == "skills":
                 result["skills"] = True
+                # 🛡️ 强制失效技能缓存，确保下次 get_local_skills() 返回最新数据
+                # 虽然 mtime 缓存 key 能检测文件变更，但文件系统时间精度不足时可能漏检
+                invalidate_skills_cache()
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
 
             # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
@@ -1657,6 +1665,8 @@ class ChatBackend(QObject):
                         logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
                 # 技能：PluginManager 已更新，UI 懒加载
+                if comps.get("skills"):
+                    invalidate_skills_cache()
                 result["skills"] = bool(comps.get("skills"))
 
                 # MCP：PluginManager 已更新，UI 懒加载

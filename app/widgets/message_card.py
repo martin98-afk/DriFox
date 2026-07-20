@@ -7766,7 +7766,8 @@ class MessageCard(SimpleCardWidget):
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
-        completed_html = _render_think_block(content, completed=True, compact=self._tool_compact_mode)
+        compact = self.viewer._tool_compact_mode if self.viewer else False
+        completed_html = _render_think_block(content, completed=True, compact=compact)
         safe_completed_html = json.dumps(completed_html).decode("utf-8")
 
         # 直接 JS 处理 DOM 上残留的"思考中"状态

@@ -11412,10 +11412,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
             parts = user_text[1:].split(maxsplit=1)
             if parts:
-                # 解析后缀：如 "tdd-skill" → "tdd"
+                # 确定实际技能名：优先用完整名 parts[0] 查找，失败才回退到 raw_name
+                # 修复：parse_suffixed_name 会把技能真名"my-skill"错误截断为"my"，
+                # 导致 get_skill_by_name("my") 查不到（技能实际叫"my-skill"）
                 raw_name, _ = CommandManager.parse_suffixed_name(parts[0])
-                skill_name = raw_name or parts[0]
-                skill = get_skill_by_name(skill_name)
+                skill = get_skill_by_name(parts[0])
+                if skill:
+                    skill_name = parts[0]
+                elif raw_name:
+                    skill = get_skill_by_name(raw_name)
+                    skill_name = raw_name if skill else parts[0]
+                else:
+                    skill_name = parts[0]
                 if skill:
                     remainder = parts[1] if len(parts) > 1 else ""
                     # ── --enable / --disable 作为 FUNCTION 命令执行 ──

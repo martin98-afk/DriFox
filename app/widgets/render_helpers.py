@@ -1628,7 +1628,7 @@ def render_tool_block(
         raw_output_html = _render_text_output(result, tool_name, tool_args)
 
     # 有 echarts / 截图 / 文本输出 / diff 时：跳过参数表格，直接显示内容
-    DIFF_AUTO_COLLAPSE_LINES = 20
+    DIFF_AUTO_COLLAPSE_LINES = 10
     if echarts:
         collapsed = False  # 有图表时默认展开
         expanded_content = f"""
