@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLayout,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -641,6 +642,8 @@ class _PluginRow(QFrame):
             " border-radius: 8px; padding: 0px; }"
             "#pluginRow:hover { background: rgba(128,128,128,0.05); }"
         )
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
@@ -1084,6 +1087,7 @@ class PluginManagerCard(QWidget):
         # 滚动内容
         self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"
