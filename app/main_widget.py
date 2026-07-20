@@ -6502,7 +6502,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6567,7 +6567,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6578,7 +6578,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -6603,7 +6603,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -6637,7 +6637,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -6678,7 +6678,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -6705,7 +6705,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -6718,7 +6718,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     launcher = getattr(win, "_ui_plugin_edge_launcher", None)
                     if launcher is not None:
                         launcher.refresh_plugins()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 插件边缘入口已刷新")
 
@@ -11655,7 +11655,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
-        card = self._find_latest_assistant_card()
+        # 🐛 修复：统一使用 _current_assistant_card，避免与 _on_tool_result_received
+        # 中的 fallback 路径分歧（_find_latest_assistant_card 在子智能体/多轮场景下
+        # 可能解析到不同卡片，导致运行框与结果落在不同卡片，运行框永不转换）。
+        card = self._current_assistant_card or self._find_latest_assistant_card()
         if card and getattr(card, "update_tool_streaming", None):
             # 记录 tool_call_id 归属的卡片，确保工具结果落在与运行折叠框同一张卡片上
             self._tool_card_map[tool_call_id] = card
@@ -11672,6 +11675,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型开始调用工具时激活彩虹边框（即使返回内容不含文本）
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
+
+        # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
+        # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。
+        # 原实现仅依赖 update_tool_streaming 触发，导致思考块永不 finalize。
+        if self._current_assistant_card and getattr(self._current_assistant_card, "_maybe_finish_thinking_for_tool", None):
+            self._current_assistant_card._maybe_finish_thinking_for_tool(tool_call_id)
 
         # AutoLoop 运行期间不显示工具调用 UI
         if self._is_auto_loop_running:
@@ -11694,7 +11703,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具参数接收完成，更新预览文本，保持"执行中"状态（金色转圈继续显示）
         # 转圈在 append_tool_result（工具结果返回）时由 DOM 原地替换自然消失，
         # 不可提前设为完成态 —— 此时工具尚未执行。
-        card = self._find_latest_assistant_card()
+        # 🐛 修复：统一使用 _current_assistant_card，与 _on_tool_result_received
+        # 的 fallback 保持一致，避免卡片定位分歧导致运行框卡死。
+        card = self._current_assistant_card or self._find_latest_assistant_card()
         if card and getattr(card, "update_tool_streaming", None):
             # 记录 tool_call_id 归属的卡片，确保工具结果落在与运行折叠框同一张卡片上
             self._tool_card_map[tool_call_id] = card
@@ -14735,7 +14746,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -14762,7 +14773,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

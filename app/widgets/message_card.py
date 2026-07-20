@@ -4605,20 +4605,24 @@ class CodeWebViewer(QWebEngineView):
             "(function(){"
             f"var _tc=document.getElementById('{_target_id}');"
             "var _saved=[];"
-            # 🐛 FIX: 只保存流式进行中的工具块（data-streaming="true"）。
-            # 思考块由 markdown 渲染 + reorganizeContent 管理，不参与 save/restore。
-            # 已完成的工具块同样来自 markdown，不保存。
+            # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），避免
+            # updateContent 全量重渲染把 finish_tool_streaming 注入的已完成块抹掉。
+            # 原 _finished_ids 去重依赖 markdown 重新生成 + reorganizeContent 去重，
+            # 但在"流式结束但工具仍在并行执行"的非流式分支中，已完成块不被 markdown
+            # 重新生成，导致 append_tool_result 查找失败走兜底 append，产生重复块。
+            # 思考块仍由 reorganizeContent 管理，不在此保存。
             "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
-            "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')"
-            "&&el.getAttribute('data-streaming')==='true'){"
-            "_saved.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,kind:'tool'});}"
+            "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+            "_saved.push({id:el.getAttribute('data-tool-call-id'),"
+            "html:el.outerHTML,kind:'tool',"
+            "streaming:el.getAttribute('data-streaming')||''});}"
             "});}"
             "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
             f"updateContent({json.dumps(html_content).decode('utf-8')});"
-            # 🐛 FIX: 恢复流式块后，对已完成（_finished_ids）的流式块不做转换，
-            # 因为已完成块已由 append_tool_result 原地替换为完整折叠框，
-            # 且 markdown 渲染也会生成重复的完成态块由 reorganizeContent 去重。
-            # 流式块只需原样恢复，等待后续 append_tool_result 或 markdown 渲染处理。
+            # 🐛 修复：恢复所有 data-tool-call-id 块。已完成（streaming !== 'true'）
+            # 的块若 markdown 重新生成了同 ID 块（由 reorganizeContent 迁移），
+            # 查找命中则跳过；未重新生成则恢复原块，确保 append_tool_result 的
+            # 原地转换能找到目标 DOM 节点。
             f"if(_saved.length>0){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
             "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
@@ -4641,6 +4645,10 @@ class CodeWebViewer(QWebEngineView):
     def finish_streaming(self):
         self._streaming = False
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
+        # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
+        # think-streaming（展开）应保持，只有历史会话加载走非流式分支
+        # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
+        # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
 
     def _cleanup_render_cache(self):
@@ -5283,7 +5291,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -7637,23 +7645,42 @@ class MessageCard(SimpleCardWidget):
 
         修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 上还显示"思考中"。
 
-        触发条件：update_tool_streaming 第一次被某个 tool_call_id 调用。
+        触发条件：update_tool_streaming / _on_tool_call_started 第一次被某个 tool_call_id 调用。
 
         实现：
         - 对 .think-block（已有折叠框结构）→ JS 更新 summary 文字为完成态
         - 对 .think-streaming（流式纯文本）→ Python 生成完整折叠框 HTML 替换
+
+        🐛 修复：原实现只检查 _content_data[-1]，若 reasoning 后跟了空 text block
+        则末尾为 text 类型，转换被跳过。改为向前遍历查找最后一个非空 reasoning block，
+        与 append_reasoning 的查找逻辑保持一致。
         """
         if tool_call_id in self._tool_args_first_seen_ids:
             return
         self._tool_args_first_seen_ids.add(tool_call_id)
 
-        # 检查 _content_data 末尾是否是未完成的 reasoning block
+        # 检查 _content_data 中最后一个 reasoning block（允许其后存在空 text block）
         if not self._content_data or not isinstance(self._content_data, list):
             return
-        last_block = self._content_data[-1]
-        if not isinstance(last_block, dict):
+        last_reasoning_idx = -1
+        for i in reversed(range(len(self._content_data))):
+            blk = self._content_data[i]
+            if isinstance(blk, dict) and blk.get("type") == "reasoning":
+                last_reasoning_idx = i
+                break
+            # 遇到非空非 reasoning block 停止向前查找（避免误绑定早期思考）
+            if isinstance(blk, dict):
+                bt = blk.get("type")
+                if bt == "text" and (blk.get("text") or "").strip():
+                    break
+                if bt in ("tool_result", "tool_streaming"):
+                    break
+            if isinstance(blk, str) and blk.strip():
+                break
+        if last_reasoning_idx < 0:
             return
-        if last_block.get("type") != "reasoning":
+        last_block = self._content_data[last_reasoning_idx]
+        if not isinstance(last_block, dict):
             return
         content = (last_block.get("content") or "").strip()
         if not content:
@@ -7999,7 +8026,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):
