@@ -3870,6 +3870,13 @@ class CodeWebViewer(QWebEngineView):
                     if (titleSpan) {{
                         titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
                     }}
+                    // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
+                    var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
+                    var _tsEl = document.getElementById('tool-section');
+                    if (_hasStreaming && _tsEl && _tsEl.getAttribute('data-collapsed') === 'true') {{
+                        _tsEl.setAttribute('data-collapsed', 'false');
+                        separator.setAttribute('aria-expanded', 'true');
+                    }}
                 }}
 
                 function reorganizeContent() {{
