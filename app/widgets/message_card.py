@@ -4159,32 +4159,9 @@ class CodeWebViewer(QWebEngineView):
                     if (atBottom) tc._userScrolledUp = false;
                 }});
 
-                // ===== 流式工具块超时恢复 =====
-                // 🐛 修复"工具卡在进行中"：如果流式块超过 30 秒仍处于 data-streaming="true"
-                // 且无结果到达，自动标记为"失败/超时"，避免 spinner 永远旋转。
-                function _cleanupStuckTools() {{
-                    var now = Date.now();
-                    document.querySelectorAll('#tool-content [data-streaming="true"].tool-streaming-block').forEach(function(el) {{
-                        var ts = el.getAttribute('data-streaming-start');
-                        if (!ts) {{
-                            el.setAttribute('data-streaming-start', now);
-                            return;
-                        }}
-                        if (now - parseInt(ts, 10) > 30000) {{
-                            // 超时 → 标记为"失败"，移除 spinner，更新预览文字
-                            el.setAttribute('data-streaming', 'false');
-                            el.classList.remove('tool-streaming-block');
-                            var spinner = el.querySelector('.tool-streaming-spinner');
-                            if (spinner) spinner.remove();
-                            var preview = el.querySelector('.tool-streaming-preview');
-                            if (preview) preview.textContent = '⏱ 超时未返回结果';
-                            console.warn('工具超时:', el.getAttribute('data-tool-name'));
-                            if (typeof reportHeight === 'function') reportHeight();
-                        }}
-                    }});
-                }}
-                // 每 15 秒检查一次
-                setInterval(_cleanupStuckTools, 15000);
+                // ===== 流式工具块：移除超时自动标记 ====
+                // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
+                // 但工具可能仍在执行中，不应急于标记失败。硬等即可。
 
                 // ===== 深度思考轮播提示（减少等待焦虑，类似 CodeBuddy 设计理念）=====
                 // 当 .think-streaming[data-streaming="true"] 存在时，定时轮换显示
