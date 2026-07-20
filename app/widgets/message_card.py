@@ -1675,14 +1675,14 @@ _LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
 
 
 @lru_cache(maxsize=64)  # 256→64：实际唯一渲染内容通常 < 32 条，64 覆盖 2 个会话绰绰有余
-def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: bool = False) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
-    processed_md = _inject_think_cards(safe_md, True)
+    processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True)
     processed_md = _inject_hook_blocks(processed_md, True)
 
@@ -1696,7 +1696,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str) -> str:
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
+def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool = False) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
@@ -1714,12 +1714,12 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str) -> str:
         original_cache_info = _render_markdown_to_html_cached_impl.cache_info()
         _render_markdown_to_html_cached_impl.cache_clear()
         try:
-            return _render_markdown_to_html_cached_impl(raw_md, reasoning)
+            return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
         finally:
             # 恢复缓存状态
             pass
 
-    return _render_markdown_to_html_cached_impl(raw_md, reasoning)
+    return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
 
 
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
@@ -4378,6 +4378,7 @@ class CodeWebViewer(QWebEngineView):
             html_content = _render_markdown_to_html_cached(
                 raw_md,
                 "",
+                compact=self._tool_compact_mode,
             )
             # 将图片相对路径转为绝对 file:/// 路径
             html_content = _resolve_image_src(html_content)
@@ -4393,8 +4394,7 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
-        processed_md = _inject_think_cards(safe_md, self._streaming is False,
-                                          compact=getattr(self.parent(), "_tool_compact_mode", False))
+        processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
@@ -7736,7 +7736,7 @@ class MessageCard(SimpleCardWidget):
         last_block = self._content_data[last_reasoning_idx]
         if not isinstance(last_block, dict):
             return
-        raw_content = (last_block.get("content") or "")
+        raw_content = last_block.get("content") or ""
         if not raw_content.strip():
             # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
             return
