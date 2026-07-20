@@ -4390,14 +4390,8 @@ class CodeWebViewer(QWebEngineView):
         # 判断标准：markdown 以 </think> 结尾（说明最后一个块恰好是 reasoning）
         streaming_md = raw_md.rstrip()
         if self._streaming and streaming_md.endswith("</think>") and not self._thinking_finalized:
-            # 🐛 修复：仅当存在未闭合的 <think> 时才剥离 </think>。
-            # 若 _thinking_finalized 因 start_new_thinking_block 被过早重置为 False，
-            # 而新一轮 block 尚未收到内容，则所有已完成 block 的标签计数相等，
-            # 不应剥离已完成 block 的 </think>，否则会将已完成折叠框错误渲染为 think-streaming。
-            open_count = streaming_md.count("<think>")
-            close_count = streaming_md.count("</think>")
-            if close_count < open_count:
-                streaming_md = streaming_md[: -len("</think>")].rstrip()
+            # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
+            streaming_md = streaming_md[: -len("</think>")].rstrip()
 
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
@@ -7518,9 +7512,11 @@ class MessageCard(SimpleCardWidget):
         使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
-        # 新一轮思考开始，重置 viewer 的 finalized 和 streaming 标志
+        # 新一轮思考开始，仅重置 streaming 标志。
+        # _thinking_finalized 留在 True（上一轮已完成），直到新 reasoning chunk 到达
+        # （append_reasoning 首 chunk）才置为 False，防止在两轮之间的窗口期，
+        # 已完成 think-block 的 </think> 被 _render_markdown_to_html 错误剥离。
         if self.viewer:
-            self.viewer._thinking_finalized = False
             self.viewer._reasoning_streaming_started = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
@@ -7981,6 +7977,10 @@ class MessageCard(SimpleCardWidget):
         # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
         if not self.viewer._reasoning_streaming_started:
             self.viewer._reasoning_streaming_started = True
+            # 🐛 修复：仅在新 reasoning 真正开始接收内容时才重置 _thinking_finalized。
+            # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
+            # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
+            self.viewer._thinking_finalized = False
             # 首 chunk：增量高度 + 立即全量渲染显示 spinner
             self._update_thinking_incremental(text)
             self.viewer._lazy_markdown_cb = self._build_incremental_md
