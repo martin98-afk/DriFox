@@ -10,6 +10,7 @@
 """
 
 import re
+import sys
 import traceback
 from typing import Callable, Optional
 
@@ -94,6 +95,34 @@ class _MarketplaceWorker(QObject):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
+
+
+# ── 路径解析 ──────────────────────────────────────────────
+
+
+def _drifox_dir() -> Path:
+    """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
+
+    开发环境: 当前目录/.drifox
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    """
+    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
+        return Path('.drifox')
+    if sys.platform == 'darwin':
+        try:
+            from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+            paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
+                NSApplicationSupportDirectory, NSUserDomainMask
+            )
+            if paths:
+                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
+                app_support = Path(app_support_path) / 'Drifox'
+                app_support.mkdir(parents=True, exist_ok=True)
+                return app_support / '.drifox'
+        except Exception:
+            pass
+    return Path.home() / '.drifox'
 
 
 # ── 单行插件卡片 ────────────────────────────────────────────
@@ -291,12 +320,11 @@ class _PluginRow(QFrame):
     @staticmethod
     def _find_local_plugin_path(name: str) -> Optional[Path]:
         """在本地插件目录查找指定名称的插件"""
-        from pathlib import Path
-
         dev = Path(__file__).resolve().parent.parent.parent.parent / "plugins" / name
         if dev.is_dir():
             return dev
-        for base in (Path.home() / ".drifox" / "plugins", Path.home() / ".drifox" / "plugins-disabled"):
+        drifox = _drifox_dir()
+        for base in (drifox / "plugins", drifox / "plugins-disabled"):
             p = base / name
             if p.is_dir():
                 return p

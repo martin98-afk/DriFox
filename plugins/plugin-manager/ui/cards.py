@@ -18,6 +18,7 @@
 import json
 import re
 import shutil
+import sys
 import traceback
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,23 +47,37 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
-from loguru import logger
-
 from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
 
 
 # ── 路径常量 ──────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DEV_DRIFOX = _PROJECT_ROOT / ".drifox"
-_USER_DRIFOX = Path.home() / ".drifox"
 
 
 def _drifox_dir() -> Path:
-    """查找 .drifox 目录（开发环境优先，兜底用户目录）"""
-    if _DEV_DRIFOX.exists():
-        return _DEV_DRIFOX
-    return _USER_DRIFOX
+    """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
+
+    开发环境: 当前目录/.drifox
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    """
+    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
+        return Path('.drifox')
+    if sys.platform == 'darwin':
+        try:
+            from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+            paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
+                NSApplicationSupportDirectory, NSUserDomainMask
+            )
+            if paths:
+                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
+                app_support = Path(app_support_path) / 'Drifox'
+                app_support.mkdir(parents=True, exist_ok=True)
+                return app_support / '.drifox'
+        except Exception:
+            pass
+    return Path.home() / '.drifox'
 
 
 def _plugins_root() -> Path:

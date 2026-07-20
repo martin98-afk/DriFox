@@ -1026,7 +1026,7 @@ def _render_tool_streaming_block(
 
     streaming_state = "false" if completed else "true"
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">
             <span style="flex: 0 0 auto;">{icon}</span>
             <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
@@ -3664,6 +3664,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
 
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
+                // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
+                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
                 function reorganizeContent() {{
                     var container = document.getElementById('content-placeholder');
                     var toolSection = document.getElementById('tool-section');
@@ -3671,9 +3673,11 @@ class CodeWebViewer(QWebEngineView):
                     if (!container || !toolContent || !toolSection) return;
                     // 清空旧内容，防止残留/重复
                     toolContent.innerHTML = '';
-                    // 移动所有工具/思考块到 tool-content
+                    // 移动工具/思考块到 tool-content（编辑类工具保留在正文）
                     var blocks = container.querySelectorAll(
-                        '.tool-block, .think-block, .think-streaming, [data-tool-call-id]'
+                        '.tool-block' + _EDIT_TOOLS_SELECTOR + ', ' +
+                        '.think-block, .think-streaming, ' +
+                        '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
                     var hasBlocks = false;
                     blocks.forEach(function(el) {{
