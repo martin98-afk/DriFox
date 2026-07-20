@@ -7,6 +7,7 @@ import gc
 import heapq
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,11 +47,14 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
     FluentIcon,
     InfoBadge,
     InfoBadgePosition,
     InfoBar,
     InfoBarPosition,
+    MaskDialogBase,
     PushButton,
     SingleDirectionScrollArea,
     TransparentToolButton,
@@ -252,6 +256,305 @@ class _BranchDetectTask(QRunnable):
         except Exception:
             # signals 可能在窗口销毁时被 GC，直接丢弃
             pass
+
+
+class _ProjectUrlImportThread(QThread):
+    """后台线程：从 URL 下载 .drifox_project 项目压缩包，避免 UI 冻结。
+
+    finished 信号携带 (file_path, error)，二者有且仅有一个非空。
+    """
+
+    finished = pyqtSignal(str, str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self._url = url
+
+    def run(self):
+        import tempfile
+        try:
+            import requests
+
+            resp = requests.get(self._url, timeout=60)
+            if resp.status_code != 200:
+                self.finished.emit("", f"下载失败 (HTTP {resp.status_code})")
+                return
+
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".drifox_project", prefix="drifox_import_", delete=False,
+            )
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+            tmp.close()
+
+            self.finished.emit(tmp_path, "")
+        except requests.exceptions.Timeout:
+            self.finished.emit("", "下载超时 (60s)")
+        except requests.exceptions.ConnectionError:
+            self.finished.emit("", "网络连接失败")
+        except Exception as e:
+            self.finished.emit("", f"下载失败: {e}")
+
+
+class _ProjectExportOptionDialog(MaskDialogBase):
+    """项目导出选项弹框 — 与 ImportOptionDialog 一致的 MaskDialogBase 风格
+
+    提供：💾 保存到本地 / 📂 打开路径 / 🔗 上传获取链接
+    """
+
+    saveRequested = pyqtSignal()
+    openFolderRequested = pyqtSignal()
+    uploadRequested = pyqtSignal()
+
+    def __init__(self, project_name: str, zip_path: str, parent=None):
+        super().__init__(parent)
+        self._project_name = project_name
+        self._zip_path = zip_path
+        self._init_ui()
+
+    def _init_ui(self):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("projectExportDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #projectExportDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(12)
+
+        # 标题
+        title_label = BodyLabel(f"📦 项目「{self._project_name}」已导出", self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(16)}"
+        )
+        layout.addWidget(title_label)
+
+        # 路径提示
+        hint_label = CaptionLabel(f"路径: {self._zip_path}", self.widget)
+        hint_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 2px;"
+        )
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
+        layout.addSpacing(4)
+
+        # 按钮
+        btn_style = f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 8px 16px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(14)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """
+
+        save_btn = QPushButton("💾  保存到本地", self.widget)
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setFixedHeight(48)
+        save_btn.setStyleSheet(btn_style)
+        save_btn.clicked.connect(lambda: (self.close(), self.saveRequested.emit()))
+        layout.addWidget(save_btn)
+
+        open_btn = QPushButton("📂  打开文件所在路径", self.widget)
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.setFixedHeight(48)
+        open_btn.setStyleSheet(btn_style)
+        open_btn.clicked.connect(lambda: (self.close(), self.openFolderRequested.emit()))
+        layout.addWidget(open_btn)
+
+        upload_btn = QPushButton("🔗  上传获取分享链接", self.widget)
+        upload_btn.setCursor(Qt.PointingHandCursor)
+        upload_btn.setFixedHeight(48)
+        upload_btn.setStyleSheet(btn_style)
+        upload_btn.clicked.connect(lambda: (self.close(), self.uploadRequested.emit()))
+        layout.addWidget(upload_btn)
+
+        layout.addStretch()
+
+        # 取消按钮
+        cancel_btn = PushButton("关闭", self.widget)
+        cancel_btn.setStyleSheet(f"""
+            PushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.close)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(400, 360)
+        self._center_widget()
+
+    def _center_widget(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()
+
+
+class _ProjectImportOptionDialog(MaskDialogBase):
+    """项目导入选项弹框 — 与 ImportOptionDialog 一致的 MaskDialogBase 风格
+
+    提供：📁 从文件导入 / 🔗 从URL导入
+    """
+
+    fileImportRequested = pyqtSignal()
+    urlImportRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("projectImportDialogWidget")
+        self.widget.setStyleSheet(f"""
+            #projectImportDialogWidget {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(12)
+
+        # 标题
+        title_label = BodyLabel("📦 导入项目", self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(16)}"
+        )
+        layout.addWidget(title_label)
+
+        # 从文件导入
+        btn_style = f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 8px 16px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(14)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """
+
+        file_btn = QPushButton("📁  从文件导入", self.widget)
+        file_btn.setCursor(Qt.PointingHandCursor)
+        file_btn.setFixedHeight(56)
+        file_btn.setStyleSheet(btn_style)
+        file_btn.clicked.connect(lambda: self._on_choose("file"))
+        layout.addWidget(file_btn)
+
+        file_hint = CaptionLabel("选择本地的 .drifox_project 项目压缩包", self.widget)
+        file_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(file_hint)
+
+        # 从URL导入
+        url_btn = QPushButton("🔗  从URL导入", self.widget)
+        url_btn.setCursor(Qt.PointingHandCursor)
+        url_btn.setFixedHeight(56)
+        url_btn.setStyleSheet(btn_style)
+        url_btn.clicked.connect(lambda: self._on_choose("url"))
+        layout.addWidget(url_btn)
+
+        url_hint = CaptionLabel("输入项目压缩包的分享链接", self.widget)
+        url_hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+        layout.addWidget(url_hint)
+
+        layout.addStretch()
+
+        # 取消按钮
+        cancel_btn = PushButton("取消", self.widget)
+        cancel_btn.setStyleSheet(f"""
+            PushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 20px;
+                {font_size_css(12)}
+            }}
+            PushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.close)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(400, 340)
+        self._center_widget()
+
+    def _center_widget(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()
+
+    def _on_choose(self, choice: str):
+        self.close()
+        if choice == "file":
+            self.fileImportRequested.emit()
+        else:
+            self.urlImportRequested.emit()
 
 
 class OpenAIChatToolWindow(ToolWindow):
@@ -14179,73 +14482,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._show_project_export_options(zip_path, project_name)
 
     def _show_project_export_options(self, zip_path: str, project_name: str):
-        """显示项目导出后的操作选项（保存/上传/打开路径）"""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
-        from PyQt5.QtCore import Qt
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"📦 项目「{project_name}」已导出")
-        dialog.setFixedSize(420, 200)
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background: {Colors.CARD_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 10px;
-            }}
-        """)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
-
-        # 提示文字
-        label = QLabel(f"✅ 项目「{project_name}」已导出为压缩包\n路径: {zip_path}", dialog)
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: 13px;")
-        layout.addWidget(label)
-
-        # 按钮行
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
-
-        def make_btn(text, color_bg):
-            btn = QPushButton(text, dialog)
-            btn.setFixedHeight(34)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {color_bg};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 6px;
-                    padding: 4px 16px;
-                    color: {Colors.TEXT_PRIMARY};
-                    font-size: 12px;
-                }}
-                QPushButton:hover {{
-                    background: {Colors.HOVER_BG_STRONG};
-                }}
-            """)
-            return btn
-
-        save_btn = make_btn("💾 保存到本地", Colors.CONTENT_BG)
-        open_btn = make_btn("📂 打开路径", Colors.CONTENT_BG)
-        upload_btn = make_btn("🔗 上传获取链接", Colors.CONTENT_BG)
-        close_btn = make_btn("关闭", Colors.CONTENT_BG)
-
-        save_btn.clicked.connect(lambda: self._on_save_project_export(zip_path, dialog))
-        open_btn.clicked.connect(lambda: self._on_open_export_path(zip_path, dialog))
-        upload_btn.clicked.connect(lambda: self._on_upload_project_export(zip_path, dialog))
-        close_btn.clicked.connect(dialog.accept)
-
-        btn_layout.addWidget(save_btn)
-        btn_layout.addWidget(open_btn)
-        btn_layout.addWidget(upload_btn)
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
-
+        """显示项目导出后的操作选项（保存/上传/打开路径）— 与 ImportOptionDialog 一致风格"""
+        dialog = _ProjectExportOptionDialog(project_name, zip_path, parent=self.window())
+        dialog.saveRequested.connect(lambda: self._on_save_project_export(zip_path))
+        dialog.openFolderRequested.connect(lambda: self._on_open_export_path(zip_path))
+        dialog.uploadRequested.connect(lambda: self._on_upload_project_export(zip_path))
         dialog.exec_()
 
-    def _on_save_project_export(self, zip_path: str, dialog=None):
+    def _on_save_project_export(self, zip_path: str):
         """保存导出的项目压缩包到指定位置"""
         from PyQt5.QtWidgets import QFileDialog
 
@@ -14256,15 +14500,10 @@ class OpenAIChatToolWindow(ToolWindow):
             "DriFox 项目包 (*.drifox_project);;ZIP 文件 (*.zip);;所有文件 (*)",
         )
         if not target:
-            if dialog:
-                dialog.accept()
             return
 
         try:
-            import shutil
             shutil.copy2(zip_path, target)
-            if dialog:
-                dialog.accept()
             InfoBar.success(
                 title="",
                 content=f"已保存到 {target}",
@@ -14284,12 +14523,10 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             InfoBar.error(title="", content=f"保存失败: {e}", duration=3000, parent=self)
 
-    def _on_open_export_path(self, zip_path: str, dialog=None):
+    def _on_open_export_path(self, zip_path: str):
         """在文件管理器中打开导出路径"""
         path = Path(zip_path)
         folder = path.parent
-        if dialog:
-            dialog.accept()
         try:
             if os.name == "nt":
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(str(path))])
@@ -14298,10 +14535,8 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 打开导出路径失败: {e}")
 
-    def _on_upload_project_export(self, zip_path: str, dialog=None):
+    def _on_upload_project_export(self, zip_path: str):
         """上传项目压缩包到 Gitee 并获取分享链接"""
-        if dialog:
-            dialog.accept()
 
         # 使用现有的 GiteeUploader
         try:
@@ -14342,71 +14577,14 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(title="", content=f"上传异常: {e}", duration=3000, parent=self)
 
     def _on_import_project(self):
-        """从 .drifox_project 压缩包导入项目"""
+        """从 .drifox_project 压缩包导入项目 — 与 ImportOptionDialog 一致风格"""
         if not self.history_manager:
             InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
             return
 
-        # 弹出导入选项：从文件 / 从URL（与 session 导入类似）
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QLabel
-        from PyQt5.QtCore import Qt
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("📦 导入项目")
-        dialog.setFixedSize(360, 200)
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background: {Colors.CARD_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 10px;
-            }}
-        """)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
-
-        label = QLabel("选择导入方式", dialog)
-        label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: 14px; font-weight: bold;")
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
-
-        def make_btn(text, desc=""):
-            btn = QPushButton(text, dialog)
-            btn.setFixedHeight(40)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {Colors.CONTENT_BG};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 6px;
-                    padding: 4px 16px;
-                    color: {Colors.TEXT_PRIMARY};
-                    font-size: 13px;
-                    text-align: left;
-                }}
-                QPushButton:hover {{
-                    background: {Colors.HOVER_BG_STRONG};
-                    border: 1px solid {Colors.TEXT_ACCENT};
-                }}
-            """)
-            if desc:
-                btn.setToolTip(desc)
-            return btn
-
-        file_btn = make_btn("📄 从文件导入", "选择本地的 .drifox_project 压缩包")
-        url_btn = make_btn("🔗 从URL导入", "输入项目压缩包的分享链接")
-        cancel_btn = make_btn("取消")
-
-        file_btn.clicked.connect(lambda: (dialog.accept(), self._on_import_project_from_file()))
-        url_btn.clicked.connect(lambda: (dialog.accept(), self._on_import_project_from_url()))
-        cancel_btn.clicked.connect(dialog.accept)
-
-        layout.addWidget(file_btn)
-        layout.addWidget(url_btn)
-        layout.addStretch()
-        layout.addWidget(cancel_btn)
-
+        dialog = _ProjectImportOptionDialog(parent=self.window())
+        dialog.fileImportRequested.connect(self._on_import_project_from_file)
+        dialog.urlImportRequested.connect(self._on_import_project_from_url)
         dialog.exec_()
 
     def _on_import_project_from_file(self):
@@ -14461,50 +14639,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if not (url.startswith("http://") or url.startswith("https://")):
             url = "https://" + url
 
-        # 后台线程下载
-        import threading
-        import tempfile
-        import requests
-
-        def _download_and_import():
-            try:
-                resp = requests.get(url, timeout=60)
-                if resp.status_code != 200:
-                    raise Exception(f"下载失败 (HTTP {resp.status_code})")
-
-                tmp = tempfile.NamedTemporaryFile(
-                    suffix=".drifox_project", prefix="drifox_import_", delete=False,
-                )
-                tmp.write(resp.content)
-                tmp_path = tmp.name
-                tmp.close()
-
-                # 在主线程执行导入
-                from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
-                QMetaObject.invokeMethod(
-                    self, "_do_import_project_archive_qt",
-                    Qt.QueuedConnection,
-                    Q_ARG(str, tmp_path),
-                )
-            except Exception as e:
-                from PyQt5.QtCore import QMetaObject, Qt
-                QMetaObject.invokeMethod(
-                    self, "_on_import_project_error",
-                    Qt.QueuedConnection,
-                    Q_ARG(str, str(e)),
-                )
-
-        thread = threading.Thread(target=_download_and_import, daemon=True)
-        thread.start()
+        # 启动后台下载线程
+        self._url_import_thread = _ProjectUrlImportThread(url)
+        self._url_import_thread.finished.connect(self._on_project_url_import_result)
+        self._url_import_thread.finished.connect(self._url_import_thread.deleteLater)
+        self._url_import_thread.start()
 
         InfoBar.info(title="", content="正在下载项目压缩包...", duration=5000, parent=self)
 
+    @pyqtSlot(str, str)
+    def _on_project_url_import_result(self, file_path: str, error: str):
+        """后台下载完成后的回调（主线程执行）"""
+        if error:
+            InfoBar.error(title="", content=f"下载失败: {error}", duration=3000, parent=self)
+            return
+
+        if self._do_import_project_archive(file_path):
+            self._refresh_project_selector()
+            self._refresh_history_toggle_panel()
+
     def _do_import_project_archive(self, zip_path: str) -> bool:
-        """执行项目压缩包导入"""
+        """执行项目压缩包导入，含项目文件的自动恢复"""
         try:
             result = self.history_manager.import_project_archive(zip_path)
             if result and result.get("session_count", 0) > 0:
-                project_name = result.get("project_name", "导入项目")
+                project_name = (result.get("project_name") or "导入项目")[:40]
                 InfoBar.success(
                     title="",
                     content=f"项目「{project_name}」导入成功（{result['session_count']} 个会话）",
@@ -14512,14 +14671,52 @@ class OpenAIChatToolWindow(ToolWindow):
                     parent=self,
                 )
 
-                # 如果导出了 git_files，提示用户
-                if result.get("extract_dir"):
-                    InfoBar.info(
-                        title="",
-                        content=f"Git 文件已提取到: {result['extract_dir']}",
-                        duration=5000,
-                        parent=self,
-                    )
+                # ── 项目文件恢复 ──
+                extract_dir = result.get("extract_dir")
+                original_root = result.get("original_root")
+
+                if extract_dir:
+                    try:
+                        extract_path = Path(extract_dir)
+                        if not extract_path.is_dir():
+                            logger.warning(f"[MainWidget] extract_dir 不存在或不是目录: {extract_dir}")
+                        else:
+                            # 确定恢复目标路径
+                            restore_path = self._resolve_restore_path(project_name, original_root)
+                            if restore_path:
+                                os.makedirs(restore_path, exist_ok=True)
+                                # 提取到的文件列表
+                                items = list(extract_path.iterdir())
+                                if items:
+                                    logger.info(f"[MainWidget] 开始恢复 {len(items)} 个项目文件到 {restore_path}")
+                                    for item in items:
+                                        dst = Path(restore_path) / item.name
+                                        if item.is_dir():
+                                            if dst.exists():
+                                                logger.warning(f"[MainWidget] 目标目录已存在将被覆盖: {dst}")
+                                                shutil.rmtree(str(dst))
+                                            shutil.copytree(str(item), str(dst))
+                                        elif item.is_file():
+                                            shutil.copy2(str(item), str(dst))
+                                    InfoBar.success(
+                                        title="",
+                                        content=f"项目文件已恢复到: {restore_path}",
+                                        duration=5000,
+                                        parent=self,
+                                    )
+
+                                    # ── 更新项目的根目录为恢复路径 ──
+                                    self._update_project_root_dir(project_name, restore_path)
+                                else:
+                                    logger.info(f"[MainWidget] extract_dir 为空，无文件可恢复: {extract_dir}")
+                    except Exception as e:
+                        logger.error(f"[MainWidget] 恢复项目文件失败: {e}", exc_info=True)
+                        InfoBar.warning(
+                            title="",
+                            content=f"文件已暂存到: {extract_dir}，可手动复制到项目目录",
+                            duration=5000,
+                            parent=self,
+                        )
 
                 # 清理临时文件
                 try:
@@ -14540,16 +14737,40 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(title="", content=f"导入失败: {e}", duration=3000, parent=self)
             return False
 
-    # 通过 QMetaObject.invokeMethod 调用的辅助方法
-    def _do_import_project_archive_qt(self, zip_path: str):
-        """Qt 线程安全的导入包装"""
-        if self._do_import_project_archive(zip_path):
-            self._refresh_project_selector()
-            self._refresh_history_toggle_panel()
+    def _resolve_restore_path(self, project_name: str, original_root: Optional[str]) -> Optional[str]:
+        """确定项目文件的恢复路径（仅返回路径，不创建目录）
 
-    def _on_import_project_error(self, error: str):
-        """导入失败时的错误提示"""
-        InfoBar.error(title="", content=f"下载失败: {error}", duration=3000, parent=self)
+        优先级：
+        1. 原路径存在且在用户目录树下 → 恢复回原路径
+        2. 否则 → 默认恢复到 ~/Documents/DriFox/projects/<project_name>/
+        """
+        home = os.path.abspath(str(Path.home()))
+        if original_root:
+            resolved = os.path.abspath(original_root)
+            if resolved.startswith(home) and os.path.isdir(resolved):
+                logger.info(f"[MainWidget] 使用原始项目路径恢复: {resolved}")
+                return resolved
+
+        # 默认恢复路径（替换不可用于文件夹名的字符）
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', (project_name or "imported_project")[:40]).strip()
+        if not safe_name:
+            safe_name = "imported_project"
+        default_dir = Path.home() / "Documents" / "DriFox" / "projects" / safe_name
+        logger.info(f"[MainWidget] 原始路径不可用，使用默认路径恢复: {default_dir}")
+        return str(default_dir)
+
+    def _update_project_root_dir(self, project_name: str, restore_path: str):
+        """导入后更新项目的根目录指向恢复路径"""
+        try:
+            if self.backend and self.backend.memory_manager:
+                self.backend.memory_manager.set_working_directory(project_name, restore_path)
+                # 同时更新实例缓存
+                if not hasattr(self, "_current_workdir"):
+                    self._current_workdir = {}
+                self._current_workdir[project_name] = restore_path
+                logger.info(f"[MainWidget] 已更新项目「{project_name}」根目录为: {restore_path}")
+        except Exception as e:
+            logger.warning(f"[MainWidget] 更新项目根目录失败: {e}")
 
     def _refresh_project_selector(self):
         """刷新项目选择器列表"""

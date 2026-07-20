@@ -3860,13 +3860,15 @@ class CodeWebViewer(QWebEngineView):
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
 
-                // 更新"工具与思考"标题（始终显示固定文本）
+                // 更新"工具与思考"标题（总项数，无勾叉 badge）
                 function _updateToolSectionHeader() {{
+                    var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
+                    var total = toolContent ? toolContent.children.length : 0;
                     var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
                     if (titleSpan) {{
-                        titleSpan.textContent = '⚙ 工具与思考';
+                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
                     }}
                 }}
 
