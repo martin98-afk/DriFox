@@ -344,6 +344,7 @@ class ChatBackend(QObject):
             workdir: 工作目录
         """
         import time as _time
+
         _t0 = _time.perf_counter()
         logger.info("[ChatBackend] 初始化中...")
 
@@ -355,7 +356,7 @@ class ChatBackend(QObject):
 
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
-        logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter()-_t0)*1000:.0f}ms)")
+        logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter() - _t0) * 1000:.0f}ms)")
 
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
         from app.core.memory_manager import MemoryManagerCore
@@ -1895,8 +1896,12 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.warning(f"[ChatBackend] cleanup hook_manager: {e}")
 
-        # 4. 清除 SubAgentManager 回调引用
+        # 4. 清除 SubAgentManager：先取消所有运行中的子智能体任务 + 停止 Stall 检测器
         if self._sub_agent_manager:
+            try:
+                self._sub_agent_manager.cancel_all()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup sub_agent_manager.cancel_all: {e}")
             self._sub_agent_manager = None
 
         # 5. 清除 SessionManager（窗口独有的会话）

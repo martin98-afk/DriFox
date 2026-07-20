@@ -2192,6 +2192,59 @@ class SubAgentManager(QObject):
 
         return cleaned
 
+    def cancel_all(self):
+        """取消所有运行中的子智能体任务 + 停止 Stall 检测器
+
+        用于窗口关闭时清理当前窗口的所有子智能体任务，防止线程泄漏。
+        """
+        # 先停止 stall 检测器，避免在取消过程中触发额外的回调
+        self.stop_stall_detector()
+
+        # 取消所有运行中的任务
+        for task_id in list(self._running_tasks.keys()):
+            try:
+                executor = self._running_tasks[task_id]
+                agent_name = executor.agent_name
+                task_description = executor.task_description
+                logs = executor.get_logs()
+                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
+
+                # 标记取消（设置 _is_cancelled 标志，线程在下一次检查点退出）
+                executor.cancel()
+
+                # 写入 finished_tasks（与 _check_stalled_tasks / cancel_task 一致）
+                error_msg = "Task cancelled: window closed"
+                self._finished_tasks[task_id] = {
+                    "result": "",
+                    "error": error_msg,
+                    "agent_name": agent_name,
+                    "task_description": task_description,
+                    "session_id": task_session_id,
+                    "logs": logs,
+                }
+                # 保存到数据库
+                self._save_task_to_store(
+                    task_id,
+                    agent_name,
+                    task_description,
+                    "cancelled",
+                    "",
+                    error_msg,
+                    logs,
+                    session_id=task_session_id,
+                )
+                # 通知 DAG（如果有）
+                self._notify_dag_task_failed(task_id, error_msg)
+                # 发送完成信号让 UI 知道
+                try:
+                    self.task_finished.emit(task_id, "")
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"[SubAgentManager] cancel_all: 取消任务 {task_id} 时出错: {e}")
+
+        self._running_tasks.clear()
+
     def get_task_result(self, task_id: str) -> Dict:
         """获取指定任务的执行结果"""
         return self._finished_tasks.get(task_id, {"result": "", "error": ""})
