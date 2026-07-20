@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -252,6 +253,8 @@ class _PluginRow(QFrame):
         self.setStyleSheet(
             "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.12); border-radius: 8px; }"
         )
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
@@ -452,16 +455,21 @@ class _PluginRow(QFrame):
 
     @staticmethod
     def _compute_tags(meta: dict) -> list:
-        """合并 categories 和 keywords 为展示标签（categories 在前，去重）"""
-        cats = meta.get("categories", []) or []
-        keys = meta.get("keywords", []) or []
+        """合并 categories / category / keywords 为展示标签（去重）"""
         seen: set = set()
         tags: list = []
-        for c in cats:
+        # categories（数组）
+        for c in (meta.get("categories", []) or []):
             if c and c not in seen:
                 tags.append(c)
                 seen.add(c)
-        for k in keys:
+        # category（单数字段，如 "productivity"）
+        cat = meta.get("category")
+        if isinstance(cat, str) and cat and cat not in seen:
+            tags.append(cat)
+            seen.add(cat)
+        # keywords（数组）
+        for k in (meta.get("keywords", []) or []):
             if k and k not in seen:
                 tags.append(k)
                 seen.add(k)
@@ -535,6 +543,9 @@ class MarketplaceCard(QWidget):
         self.setVisible(True)
         self._apply_latest_theme()
         self._apply_plugin_icon()
+        # 清除旧搜索状态、防抖定时器
+        self._search_edit.clear()
+        self._search_debounce.stop()
         # 延迟 50ms 启动后台刷新，避免阻塞 show 过程
         from PyQt5.QtCore import QTimer
 
@@ -759,7 +770,12 @@ class MarketplaceCard(QWidget):
         self._search_edit.setStyleSheet(
             f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
         )
-        self._search_edit.textChanged.connect(self._filter_plugins)
+        # 防抖 300ms，避免每敲一个字就全量重建
+        from PyQt5.QtCore import QTimer
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.timeout.connect(self._filter_plugins)
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
         search_layout.addWidget(self._search_edit)
         browse_root.addWidget(search_row)
 
@@ -768,6 +784,7 @@ class MarketplaceCard(QWidget):
 
         self._scroll = ScrollArea(self._browse_page)
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"
@@ -929,22 +946,31 @@ class MarketplaceCard(QWidget):
             if "_cached_tags" not in p:
                 p["_cached_tags"] = _PluginRow._compute_tags(p)
 
+        # ── 批量缓存已安装状态和版本号（避免每次逐个磁盘 IO） ──
+        self._installed_set: set = set()
+        self._version_map: dict = {}
+        for p in plugins:
+            name = p.get("name", "")
+            if not name:
+                continue
+            if installer.is_installed(name):
+                self._installed_set.add(name)
+                ver = installer.get_installed_version(name)
+                if ver:
+                    self._version_map[name] = ver
+
         # 数据变了 → 全量重建
         data_changed = not self._all_plugins or self._all_plugins is not plugins
         if data_changed:
             self._all_plugins = plugins
             self._matched_plugins = []
             for p in plugins:
-                self._matched_plugins.append(self._plugin_matches(p, query, installer, filter_mode))
+                self._matched_plugins.append(self._plugin_matches(p, query, filter_mode))
             self._clear_plugin_list()
             self._rendered_count = 0
             self._all_loaded = False
             self._render_next_batch(query)
             self._retheme()
-            # 后台逐批加载剩余插件（不阻塞 UI）
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(100, self._auto_load_remaining)
             return
 
         # 全部加载完 → show/hide（零重建，极快）+ 更新高亮
@@ -954,7 +980,7 @@ class MarketplaceCard(QWidget):
                 name = p.get("name", "")
                 if name in self._row_map:
                     row = self._row_map[name]
-                    matches, _, _, _ = self._plugin_matches(p, query, installer, filter_mode)
+                    matches, _, _, _ = self._plugin_matches(p, query, filter_mode)
                     row.setVisible(matches)
                     row.update_search_highlight(query)
                     if matches:
@@ -966,18 +992,42 @@ class MarketplaceCard(QWidget):
                 self._content_stack.setCurrentIndex(0)
             return
 
-        # 还未全部加载但需要刷（筛选标签切换等）→ 重建当前批次
+        # 还未全部加载但需要刷（筛选标签切换等）
         self._matched_plugins = []
         for p in plugins:
-            self._matched_plugins.append(self._plugin_matches(p, query, installer, filter_mode))
+            self._matched_plugins.append(self._plugin_matches(p, query, filter_mode))
         self._clear_plugin_list()
         self._rendered_count = 0
-        self._render_next_batch(query)
+
+        if query:
+            # 搜索模式：只渲染匹配的插件，分批显示 + 加载更多按钮
+            self._matching_indices = [i for i, (m, _, _, _) in enumerate(self._matched_plugins) if m]
+            self._rendered_count = 0
+            self._render_search_batch(query)
+            visible_count = len(self._matching_indices)
+            if visible_count == 0:
+                self._empty_label.setText("没有匹配的插件")
+                self._content_stack.setCurrentIndex(1)
+            else:
+                self._status_label.setText(f"找到 {visible_count} 个匹配结果")
+                self._status_label.setStyleSheet(
+                    f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+                )
+        else:
+            # 非搜索（清空搜索/切换筛选）：全量加载，后续 show/hide 快速路径
+            while self._rendered_count < len(self._matched_plugins):
+                self._render_next_batch(query)
+            self._all_loaded = True
+            self._remove_load_more_button()
+            visible_count = sum(1 for m in self._matched_plugins if m[0])
+            if visible_count == 0:
+                self._empty_label.setText("暂无可用插件")
+                self._content_stack.setCurrentIndex(1)
+
         self._retheme()
 
-    @staticmethod
-    def _plugin_matches(p: dict, query: str, installer, filter_mode: str) -> tuple:
-        """检查插件是否匹配当前搜索/筛选。
+    def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> tuple:
+        """检查插件是否匹配当前搜索/筛选（使用批量缓存的安装状态）。
         Returns: (matches: bool, installed: bool, has_update: bool, local_ver: str|None)
         """
         name = p.get("name", "")
@@ -988,11 +1038,14 @@ class MarketplaceCard(QWidget):
                 if not any(query in t.lower() for t in tags):
                     return (False, False, False, None)
 
-        installed = installer.is_installed(name)
+        installed = name in self._installed_set
         has_update = False
-        local_ver = None
-        if installed:
-            has_update, local_ver, _ = installer.check_update(p)
+        local_ver = self._version_map.get(name)
+        if installed and local_ver:
+            remote_ver = p.get("version", "")
+            if remote_ver:
+                from .data import compare_versions
+                has_update = compare_versions(local_ver, remote_ver) < 0
 
         if filter_mode == "installed" and not installed:
             return (False, installed, has_update, local_ver)
@@ -1002,22 +1055,6 @@ class MarketplaceCard(QWidget):
             return (False, installed, has_update, local_ver)
 
         return (True, installed, has_update, local_ver)
-
-    def _auto_load_remaining(self):
-        """后台逐批加载剩余插件行（每批 50ms 间隔，不卡 UI）"""
-        if not self.isVisible():
-            return
-        gen = getattr(self, "_render_gen", 0)
-        if gen != self._render_gen:
-            return  # 已触发新渲染，放弃本轮
-        if self._rendered_count >= len(self._matched_plugins):
-            self._all_loaded = True
-            self._remove_load_more_button()
-            return
-        self._render_next_batch(self._search_edit.text().strip().lower())
-        from PyQt5.QtCore import QTimer
-
-        QTimer.singleShot(50, self._auto_load_remaining)
 
     def _render_next_batch(self, query: str):
         """渲染下一批 30 个插件"""
@@ -1031,6 +1068,7 @@ class MarketplaceCard(QWidget):
             self._add_load_more_button(remaining)
         else:
             self._remove_load_more_button()
+            self._all_loaded = True
 
     def _render_batch(self, start: int, end: int, query: str):
         """渲染 [start, end) 范围的插件行"""
@@ -1055,6 +1093,34 @@ class MarketplaceCard(QWidget):
         # 首屏批次补 stretch
         if start == 0:
             self._content_layout.addStretch(1)
+
+    def _render_search_batch(self, query: str):
+        """搜索模式：从匹配索引列表中渲染下一批"""
+        start = self._rendered_count
+        end = min(start + self._RENDER_BATCH, len(self._matching_indices))
+        fs = self._cached_font_size
+        for idx in range(start, end):
+            i = self._matching_indices[idx]
+            _, installed, has_update, local_ver = self._matched_plugins[i]
+            p = self._all_plugins[i]
+            row = _PluginRow(
+                p, installed, has_update=has_update, local_version=local_ver,
+                parent=self._content, font_size=fs, search_query=query,
+            )
+            row.installRequested.connect(self._async_install)
+            row.updateRequested.connect(self._async_update)
+            row.setVisible(True)
+            self._content_layout.addWidget(row)
+            self._row_map[p.get("name", "")] = row
+        self._rendered_count = end
+        remaining = len(self._matching_indices) - self._rendered_count
+        if remaining > 0:
+            self._add_load_more_button(remaining)
+        else:
+            self._remove_load_more_button()
+            # 搜索全部加载完 → 标记全量，后续 show/hide
+            if not self._all_loaded:
+                self._all_loaded = True
 
     def _add_load_more_button(self, remaining: int):
         """在列表底部添加「加载更多」按钮（stretch 之前）"""
@@ -1083,9 +1149,13 @@ class MarketplaceCard(QWidget):
                 return
 
     def _on_load_more(self):
-        """手动加载下一批"""
+        """手动加载下一批（搜索模式用 _matching_indices，普通模式用全索引）"""
         self._remove_load_more_button()
-        self._render_next_batch(self._search_edit.text().strip().lower())
+        query = self._search_edit.text().strip().lower()
+        if query and hasattr(self, "_matching_indices") and self._rendered_count < len(self._matching_indices):
+            self._render_search_batch(query)
+        else:
+            self._render_next_batch(query)
         self._retheme()
 
     def _clear_plugin_list(self):
@@ -1096,6 +1166,10 @@ class MarketplaceCard(QWidget):
             item = self._content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def _on_search_text_changed(self):
+        """搜索文本变化 → 防抖后触发过滤"""
+        self._search_debounce.start(300)
 
     def _filter_plugins(self):
         """搜索过滤（复用已有数据）"""
