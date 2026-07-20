@@ -4390,8 +4390,14 @@ class CodeWebViewer(QWebEngineView):
         # 判断标准：markdown 以 </think> 结尾（说明最后一个块恰好是 reasoning）
         streaming_md = raw_md.rstrip()
         if self._streaming and streaming_md.endswith("</think>") and not self._thinking_finalized:
-            # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
-            streaming_md = streaming_md[: -len("</think>")].rstrip()
+            # 🐛 修复：仅当存在未闭合的 <think> 时才剥离 </think>。
+            # 若 _thinking_finalized 因 start_new_thinking_block 被过早重置为 False，
+            # 而新一轮 block 尚未收到内容，则所有已完成 block 的标签计数相等，
+            # 不应剥离已完成 block 的 </think>，否则会将已完成折叠框错误渲染为 think-streaming。
+            open_count = streaming_md.count("<think>")
+            close_count = streaming_md.count("</think>")
+            if close_count < open_count:
+                streaming_md = streaming_md[: -len("</think>")].rstrip()
 
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
@@ -7736,10 +7742,15 @@ class MessageCard(SimpleCardWidget):
         last_block = self._content_data[last_reasoning_idx]
         if not isinstance(last_block, dict):
             return
-        content = (last_block.get("content") or "").strip()
-        if not content:
+        raw_content = (last_block.get("content") or "")
+        if not raw_content.strip():
             # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
             return
+        # 保持原始 content 用于 block-key 计算，确保与 _inject_think_cards
+        # （通过 _build_incremental_md）产生的 key 一致。
+        # 否则每次 _perform_update → reorganizeContent 会因 key 不匹配
+        # 删除已有的 think-block 再重新创建，触发 CSS 入场动画（消失→重现）。
+        content = raw_content
 
         # 懒渲染未就绪 / viewer 未创建
         if not self._lazy_rendered or not self.viewer:
@@ -7778,6 +7789,9 @@ class MessageCard(SimpleCardWidget):
                     tmp.innerHTML = {safe_completed_html};
                     var newBlock = tmp.firstElementChild;
                     if (newBlock) {{
+                        // 标记为恢复块，跳过 CSS 入场动画（_toolBlockEnter opacity:0→1），
+                        // 避免工具调用切换时思考折叠框"消失→重现"的视觉闪烁
+                        newBlock.setAttribute('data-restored', 'true');
                         block.parentNode.replaceChild(newBlock, block);
                     }}
                 }});
