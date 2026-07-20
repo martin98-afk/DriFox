@@ -2497,6 +2497,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 body {{
                     padding: 6px 14px 0 14px; 
+                    max-height: {self.MAX_HEIGHT}px;
                     overflow-x: hidden;
                 }}
                 {scrollbar_css}
@@ -3625,14 +3626,24 @@ class CodeWebViewer(QWebEngineView):
                         if (window._fadeCleanupTimer) {{
                             clearTimeout(window._fadeCleanupTimer);
                         }}
-                        // 🐛 修复闪烁：有流式块（data-streaming="true"）时跳过淡入淡出过渡，
-                        // 因为 save-restore 在 updateContent 后立即恢复流式块，opacity
-                        // 跳变 0.88→1 与流式块动画叠加产生肉眼可见的"闪来闪去"效果。
+                        // 🐛 修复闪烁：有流式块或折叠框时跳过淡入淡出过渡。
+                        // 原因：updateContent 全量重建 DOM 后，think-block / tool-block
+                        // 短暂出现在 #content-placeholder（reorganizeContent 迁移前），
+                        // opacity 0.88→1 的淡入会放大这个视觉跳变，产生闪烁。
+                        // 任何"已有折叠框/工具块"的场景都应跳过淡入，保持视觉稳定。
                         var _hasStreaming = document.querySelector(
                             '#tool-content [data-streaming="true"], ' +
                             '#content-placeholder [data-streaming="true"]'
                         ) !== null;
-                        if (_hasStreaming) {{
+                        var _hasCollapsible = document.querySelector(
+                            '#tool-content .think-block, ' +
+                            '#tool-content .tool-block, ' +
+                            '#tool-content .think-streaming, ' +
+                            '#content-placeholder .think-block, ' +
+                            '#content-placeholder .tool-block, ' +
+                            '#content-placeholder .think-streaming'
+                        ) !== null;
+                        if (_hasStreaming || _hasCollapsible) {{
                             container.style.opacity = '1';
                             container.style.transition = '';
                         }} else {{
@@ -3857,12 +3868,19 @@ class CodeWebViewer(QWebEngineView):
                     // 做精确去重 —— 比"count 比对"可靠，因为 updateContent 重写
                     // content-placeholder 后，里面的块全是新 DOM 节点，单纯比数量会
                     // 误判"已搬移过"而漏搬新块，导致工具/思考在正文里也出现。
-                    // 清理工具区中残留的旧流式思考块：.think-streaming 无稳定标识，
-                    // updateContent 反复运行时旧块无法被 dedup 检测，导致累积重复。
-                    // 当前 content-placeholder 中的新版将由下方搬移逻辑重新注入。
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-streaming'), function(el) {{
-                        el.remove();
+                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
+                    // 原实现 remove+append 导致闪烁；保留旧的导致内容过期被吞。
+                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
+                    var _oldThinkStreaming = toolContent.querySelector('.think-streaming');
+                    var _hasNewThinkStreaming = false;
+                    Array.prototype.forEach.call(blocks, function(el) {{
+                        if (el.classList.contains('think-streaming')) _hasNewThinkStreaming = true;
                     }});
+                    if (!_hasNewThinkStreaming && _oldThinkStreaming) {{
+                        // reasoning 已完成，#content-placeholder 没有 think-streaming
+                        // 安全移除 #tool-content 中残留的旧 think-streaming
+                        _oldThinkStreaming.remove();
+                    }}
                     // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block
                     // 多轮思考场景：旧完成的折叠框持续堆积在 tool-content 底部不清理。
                     // 收集 content-placeholder 中当前 think-block 的 block-key 集合，
@@ -3892,6 +3910,9 @@ class CodeWebViewer(QWebEngineView):
                         if (!bk && !tid) el._posIdx = idx;
                     }});
                     // 从正文移除已有稳定标识的重叠块，其余搬移到工具区
+                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
+                    // 原实现 remove+append 闪烁；保留旧的导致 reasoning 累积内容被吞。
+                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
                     var moved = false;
                     Array.prototype.forEach.call(blocks, function(el) {{
                         var bk = el.getAttribute('data-block-key');
@@ -3900,14 +3921,26 @@ class CodeWebViewer(QWebEngineView):
                                || (tid && toolContent.querySelector('[data-tool-call-id="' + tid + '"]'));
                         if (dup) {{
                             if (el.parentNode === container) el.remove();
+                        }} else if (el.classList.contains('think-streaming') && _oldThinkStreaming) {{
+                            // think-streaming 原地替换：保持 DOM 位置，更新内容
+                            if (el.parentNode === container) {{
+                                if (_oldThinkStreaming.parentNode) {{
+                                    _oldThinkStreaming.parentNode.replaceChild(el, _oldThinkStreaming);
+                                }}
+                                _oldThinkStreaming = el;  // 更新引用，供后续排序使用
+                            }}
                         }} else if (el.parentNode === container) {{
                             toolContent.appendChild(el);
                             moved = true;
                         }}
                     }});
                     // 整体排序：使工具区所有子元素顺序与 content-placeholder 匹配
+                    // 🐛 修复闪烁：只在顺序确实变化时才 appendChild 重排。
+                    // 原实现无脑 allChildren.forEach(appendChild) 即使顺序未变
+                    // 也会移动 DOM 节点，触发浏览器重绘导致已稳定显示的块闪烁。
                     var allChildren = Array.prototype.slice.call(toolContent.children);
-                    allChildren.sort(function(a, b) {{
+                    var _needsReorder = false;
+                    var _sortedChildren = allChildren.slice().sort(function(a, b) {{
                         function getPos(el) {{
                             var bk = el.getAttribute('data-block-key');
                             var tid = el.getAttribute('data-tool-call-id');
@@ -3918,7 +3951,16 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         return getPos(a) - getPos(b);
                     }});
-                    allChildren.forEach(function(el) {{ toolContent.appendChild(el); }});
+                    // 检查排序后是否有元素位置变化
+                    for (var _i = 0; _i < _sortedChildren.length; _i++) {{
+                        if (_sortedChildren[_i] !== allChildren[_i]) {{
+                            _needsReorder = true;
+                            break;
+                        }}
+                    }}
+                    if (_needsReorder) {{
+                        _sortedChildren.forEach(function(el) {{ toolContent.appendChild(el); }});
+                    }}
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                 }}
