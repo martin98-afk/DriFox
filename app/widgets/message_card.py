@@ -3828,42 +3828,51 @@ class CodeWebViewer(QWebEngineView):
                     // 做精确去重 —— 比"count 比对"可靠，因为 updateContent 重写
                     // content-placeholder 后，里面的块全是新 DOM 节点，单纯比数量会
                     // 误判"已搬移过"而漏搬新块，导致工具/思考在正文里也出现。
-                    // 用 insertBefore + insertIdx 游标保持 content-placeholder 的文档顺序，
-                    // 确保思考块排在工具块之前（chronological order）。 ──
-                    var existingKeys = Object.create(null);
-                    Array.prototype.forEach.call(toolContent.children, function(el) {{
-                        var bk = el.getAttribute('data-block-key');
-                        if (bk) existingKeys['bk:' + bk] = 1;
-                        var tid = el.getAttribute('data-tool-call-id');
-                        if (tid) existingKeys['tcid:' + tid] = 1;
+                    // 清理工具区中残留的旧流式思考块：.think-streaming 无稳定标识，
+                    // updateContent 反复运行时旧块无法被 dedup 检测，导致累积重复。
+                    // 当前 content-placeholder 中的新版将由下方搬移逻辑重新注入。
+                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-streaming'), function(el) {{
+                        el.remove();
                     }});
+                    // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
+                    // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
+                    var posMap = Object.create(null);
+                    Array.prototype.forEach.call(blocks, function(el, idx) {{
+                        var bk = el.getAttribute('data-block-key');
+                        var tid = el.getAttribute('data-tool-call-id');
+                        if (bk) posMap['bk:' + bk] = idx;
+                        if (tid) posMap['tcid:' + tid] = idx;
+                        // 无稳定标识的块（.think-streaming）用其在 blocks 中的序号
+                        if (!bk && !tid) el._posIdx = idx;
+                    }});
+                    // 从正文移除已有稳定标识的重叠块，其余搬移到工具区
                     var moved = false;
-                    var insertIdx = 0; // 保持 content-placeholder 文档顺序的插入位置游标
-                    blocks.forEach(function(el) {{
+                    Array.prototype.forEach.call(blocks, function(el) {{
                         var bk = el.getAttribute('data-block-key');
                         var tid = el.getAttribute('data-tool-call-id');
-                        // 已有相同标识 → 已搬移过，从正文移除（同时工具区已有旧版块残留），游标前进
-                        if (bk && existingKeys['bk:' + bk]) {{
+                        var dup = (bk && toolContent.querySelector('[data-block-key="' + bk + '"]'))
+                               || (tid && toolContent.querySelector('[data-tool-call-id="' + tid + '"]'));
+                        if (dup) {{
                             if (el.parentNode === container) el.remove();
-                            insertIdx++;
-                            moved = true;
-                            return;
-                        }}
-                        if (tid && existingKeys['tcid:' + tid]) {{
-                            if (el.parentNode === container) el.remove();
-                            insertIdx++;
-                            moved = true;
-                            return;
-                        }}
-                        // 搬移到工具区，用 insertBefore + 游标保持与正文原始顺序一致
-                        // 包括无稳定标识的流式思考块（.think-streaming），避免思考框残留在正文
-                        if (el.parentNode === container) {{
-                            var refNode = toolContent.children[insertIdx] || null;
-                            toolContent.insertBefore(el, refNode);
-                            insertIdx++;
+                        }} else if (el.parentNode === container) {{
+                            toolContent.appendChild(el);
                             moved = true;
                         }}
                     }});
+                    // 整体排序：使工具区所有子元素顺序与 content-placeholder 匹配
+                    var allChildren = Array.prototype.slice.call(toolContent.children);
+                    allChildren.sort(function(a, b) {{
+                        function getPos(el) {{
+                            var bk = el.getAttribute('data-block-key');
+                            var tid = el.getAttribute('data-tool-call-id');
+                            if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
+                            if (tid && posMap['tcid:' + tid] !== undefined) return posMap['tcid:' + tid];
+                            if (el._posIdx !== undefined) return el._posIdx;
+                            return 1e9;
+                        }}
+                        return getPos(a) - getPos(b);
+                    }});
+                    allChildren.forEach(function(el) {{ toolContent.appendChild(el); }});
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                 }}
