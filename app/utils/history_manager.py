@@ -308,7 +308,8 @@ class HistoryManager:
         self.archive_dir = get_app_data_dir() / "archived"
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
-        self._history_limit = 100
+        # 与 SQLite 轻量懒加载上限保持一致，避免首次加载 500 条后保存任意会话又截断成 100 条。
+        self._history_limit = 500
         self._save_timer: Optional[QTimer] = None
         self._save_delay_ms = 1000
 
@@ -435,6 +436,10 @@ class HistoryManager:
         """保存会话"""
         if not messages:
             return
+
+        # 保存前先完成 SQLite 懒加载，避免新会话进入待保存队列后，
+        # 首次打开历史面板又用数据库快照覆盖内存记录，导致延迟保存找不到目标。
+        self._ensure_history_loaded()
 
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
@@ -595,7 +600,7 @@ class HistoryManager:
             return
         self._history_loaded = True
         try:
-            self._history_sessions = self._session_store.get_sessions_lightweight(limit=500)
+            self._history_sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
             self._deduplicate_history_sessions()
             self._migrate_if_needed()
         except Exception as e:
@@ -770,6 +775,9 @@ class HistoryManager:
             导入的会话数据，失败返回 None
         """
         try:
+            # 导入后会立即刷新历史面板，因此必须先完成懒加载，防止刷新时覆盖尚未落盘的导入记录。
+            self._ensure_history_loaded()
+
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
                 data = deserialize_from_json(json.loads(content))
