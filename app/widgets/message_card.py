@@ -4605,27 +4605,31 @@ class CodeWebViewer(QWebEngineView):
             "(function(){"
             f"var _tc=document.getElementById('{_target_id}');"
             "var _saved=[];"
-            # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），避免
-            # updateContent 全量重渲染把 finish_tool_streaming 注入的已完成块抹掉。
-            # 原 _finished_ids 去重依赖 markdown 重新生成 + reorganizeContent 去重，
-            # 但在"流式结束但工具仍在并行执行"的非流式分支中，已完成块不被 markdown
-            # 重新生成，导致 append_tool_result 查找失败走兜底 append，产生重复块。
-            # 思考块仍由 reorganizeContent 管理，不在此保存。
-            "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
+            # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），并从 DOM 移除。
+            # 【根因】原实现只读取 outerHTML 不移除旧块，导致 reorganizeContent
+            # 在 updateContent 内部迁移 markdown 新块时，发现 #tool-content 已有
+            # 同 data-tool-call-id 的旧块，误判为重复并移除新块。最终 #tool-content
+            # 保留旧块（流式态 tool-streaming-block），append_tool_result 的增量
+            # 更新找不到 .cm-collapsible__summary / __body，原地转换失败，
+            # 运行框卡在"运行中"。
+            # 【修复】保存后立即 el.remove()，让 reorganizeContent 干净迁移新块。
+            # restore 时只恢复 data-streaming="true" 的流式块（不在 markdown 中），
+            # 已完成块由 markdown 重新生成 + reorganizeContent 迁移。
+            "if(_tc){Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
-            "streaming:el.getAttribute('data-streaming')||''});}"
+            "streaming:el.getAttribute('data-streaming')||''});"
+            "el.remove();}"
             "});}"
             "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
             f"updateContent({json.dumps(html_content).decode('utf-8')});"
-            # 🐛 修复：恢复所有 data-tool-call-id 块。已完成（streaming !== 'true'）
-            # 的块若 markdown 重新生成了同 ID 块（由 reorganizeContent 迁移），
-            # 查找命中则跳过；未重新生成则恢复原块，确保 append_tool_result 的
-            # 原地转换能找到目标 DOM 节点。
+            # 🐛 修复：只恢复流式进行中的块（data-streaming="true"）。
+            # 已完成块已由 markdown 重新生成 + reorganizeContent 迁移到 #tool-content。
+            # 恢复流式块时检查同 ID 是否已存在（避免与 reorganizeContent 迁移的块重复）。
             f"if(_saved.length>0){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
-            "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+            "if(b.streaming==='true'&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
@@ -7326,39 +7330,48 @@ class MessageCard(SimpleCardWidget):
                 // 优先查找已有流式块（同一 tool_call_id），原地转换为完成态块
                 var existing = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 if (existing) {{
-                    // 原地更新：保持同一 DOM 节点，只替换 className / 属性
-                    // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
-                    existing.className = 'cm-collapsible tool-block';
-                    existing.setAttribute('data-block-key', '{block_key}');
-                    existing.setAttribute('data-expanded', 'false');
-                    existing.removeAttribute('data-streaming');
-                    existing.removeAttribute('data-tool-injected');
-                    // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
-                    // 的预览文字 text-align:right 正确工作。
-                    existing.setAttribute('style', {safe_outer_style});
-
-                    if ({_use_incremental}) {{
-                        // 【增量更新】分别更新 button 和 body，避免 innerHTML 整体替换
-                        // 导致外层 div 子节点临时清空，margin 暴露为可见间距
-                        var btn = existing.querySelector('.cm-collapsible__summary');
-                        if (btn) btn.innerHTML = {safe_btn_inner};
-                        var body = existing.querySelector('.cm-collapsible__body');
-                        if (body) {{
-                            body.innerHTML = {safe_body_inner};
-                            if ({safe_body_style}) {{
-                                body.setAttribute('style', {safe_body_style});
-                            }}
+                    // 🐛 修复：检测 existing 是否为流式态块（tool-streaming-block）。
+                    // 流式态块内部是 spinner + preview text，没有 .cm-collapsible__summary
+                    // 和 .cm-collapsible__body 子元素，增量更新查找返回 null，
+                    // 仅改 className 不改内部结构，导致运行框卡在"运行中"。
+                    // 对流式态块走 outerHTML 整体替换为完成态折叠框。
+                    var _isStreamingBlock = existing.classList.contains('tool-streaming-block');
+                    if (_isStreamingBlock) {{
+                        var _wrap = document.createElement('div');
+                        _wrap.innerHTML = {safe_html};
+                        var _newBlock = _wrap.firstElementChild;
+                        if (_newBlock && existing.parentNode) {{
+                            existing.parentNode.replaceChild(_newBlock, existing);
                         }}
                     }} else {{
-                        // 兜底：整体替换（fallback，不应触发）
-                        existing.innerHTML = {safe_inner};
+                        // 原地更新：保持同一 DOM 节点，只替换 className / 属性
+                        // 避免 outerHTML 销毁+重建导致的"消失再出现"闪烁
+                        existing.className = 'cm-collapsible tool-block';
+                        existing.setAttribute('data-block-key', '{block_key}');
+                        existing.setAttribute('data-expanded', 'false');
+                        existing.removeAttribute('data-streaming');
+                        existing.removeAttribute('data-tool-injected');
+                        existing.setAttribute('style', {safe_outer_style});
+
+                        if ({_use_incremental}) {{
+                            var btn = existing.querySelector('.cm-collapsible__summary');
+                            if (btn) btn.innerHTML = {safe_btn_inner};
+                            var body = existing.querySelector('.cm-collapsible__body');
+                            if (body) {{
+                                body.innerHTML = {safe_body_inner};
+                                if ({safe_body_style}) {{
+                                    body.setAttribute('style', {safe_body_style});
+                                }}
+                            }}
+                        }} else {{
+                            existing.innerHTML = {safe_inner};
+                        }}
                     }}
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{
                         var ts = document.getElementById('tool-section');
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
-                    // 🐛 修复：增量更新后同步滚动 document.body，确保用户看到新内容
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
                         document.body.scrollTop = document.body.scrollHeight;
@@ -7371,7 +7384,6 @@ class MessageCard(SimpleCardWidget):
                     }}
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
-                    // 🐛 修复：工具区内部自动滚底
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
                     reportHeight();
                     return;
