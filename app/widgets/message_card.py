@@ -1041,16 +1041,28 @@ def _render_tool_streaming_block(
     </div>"""
 
 
-def _render_think_block(content: str, completed: bool = True) -> str:
+def _render_think_block(content: str, completed: bool = True, compact: bool = False) -> str:
     if completed:
-        # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
+        # ── 完成态 ──
         tag = _classify_think_tag(content)
         status_text = (
             f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
         )
-        content_escaped = escape(_strip_code_blocks(content))
-        font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
+        font_style = _get_think_block_styles()
+
+        # ── 简洁模式：纯文本行，不走折叠框（避免 save/restore 导致的消失→重现闪烁）──
+        if compact:
+            block_seed = f"{content}|1"
+            block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
+            preview_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+            return f"""<div class="think-compact" data-block-key="{block_key}" style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
+    <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
+    {preview_right}
+</div>"""
+
+        # ── 非简洁模式：完整折叠框UI（💡标签 + 预览 + 可展开全文）──
+        content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
@@ -1115,7 +1127,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
 
-def _inject_think_cards(md_text: str, completed: bool = True) -> str:
+def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
     关键逻辑：<think> 匹配到下一个 <think> 之前的最后一个 </think>，
@@ -1142,7 +1154,7 @@ def _inject_think_cards(md_text: str, completed: bool = True) -> str:
         if end_idx != -1:
             content = md_text[think_start:end_idx]
             if content.strip():
-                parts.append(_render_think_block(content, completed=True))
+                parts.append(_render_think_block(content, completed=True, compact=compact))
             # 空思考块跳过渲染，避免页面末尾遗留空折叠框
             i = end_idx + len("</think>")
         else:
@@ -2800,6 +2812,10 @@ class CodeWebViewer(QWebEngineView):
                     border: none;
                     border-radius: 6px;
                 }}
+                .think-compact {{
+                    background: transparent;
+                    border: none;
+                }}
                 .think-block[data-expanded="true"] {{
                     border: none;
                 }}
@@ -3610,7 +3626,7 @@ class CodeWebViewer(QWebEngineView):
                             document.head.appendChild(_el);
                             return _el;
                         }})();
-                        _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *{{transition:none!important}}';
+                        _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *,.think-compact,.think-compact *{{transition:none!important}}';
 
                         // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
                         // 导致"置顶闪烁"和用户滚动后永久卡顶的问题。
@@ -3639,9 +3655,11 @@ class CodeWebViewer(QWebEngineView):
                             '#tool-content .think-block, ' +
                             '#tool-content .tool-block, ' +
                             '#tool-content .think-streaming, ' +
+                            '#tool-content .think-compact, ' +
                             '#content-placeholder .think-block, ' +
                             '#content-placeholder .tool-block, ' +
-                            '#content-placeholder .think-streaming'
+                            '#content-placeholder .think-streaming, ' +
+                            '#content-placeholder .think-compact'
                         ) !== null;
                         if (_hasStreaming || _hasCollapsible) {{
                             container.style.opacity = '1';
@@ -3847,9 +3865,10 @@ class CodeWebViewer(QWebEngineView):
                     var toolContent = document.getElementById('tool-content');
                     if (!container || !toolContent || !toolSection) return;
                     // 找出容器内所有需要迁移到工具区的块（编辑类工具保留在正文）
+                    // 🆕 .think-compact：简洁模式下的思考纯文本行，非折叠框
                     var blocks = container.querySelectorAll(
                         '.tool-block' + _EDIT_TOOLS_SELECTOR + ', ' +
-                        '.think-block, .think-streaming, ' +
+                        '.think-block, .think-streaming, .think-compact, ' +
                         '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
                     if (blocks.length === 0) {{
@@ -3881,18 +3900,18 @@ class CodeWebViewer(QWebEngineView):
                         // 安全移除 #tool-content 中残留的旧 think-streaming
                         _oldThinkStreaming.remove();
                     }}
-                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block
+                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block / think-compact
                     // 多轮思考场景：旧完成的折叠框持续堆积在 tool-content 底部不清理。
-                    // 收集 content-placeholder 中当前 think-block 的 block-key 集合，
-                    // 移除 tool-content 中不在集合内的旧 think-block。
+                    // 收集 content-placeholder 中当前 think 块的 block-key 集合，
+                    // 移除 tool-content 中不在集合内的旧 think 块。
                     var _currentThinkKeys = new Set();
                     Array.prototype.forEach.call(blocks, function(el) {{
                         var _bk = el.getAttribute('data-block-key');
-                        if (_bk && (el.classList.contains('think-block') || el.classList.contains('think-streaming'))) {{
+                        if (_bk && (el.classList.contains('think-block') || el.classList.contains('think-streaming') || el.classList.contains('think-compact'))) {{
                             _currentThinkKeys.add(_bk);
                         }}
                     }});
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-block'), function(el) {{
+                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-block, .think-compact'), function(el) {{
                         var _bk = el.getAttribute('data-block-key');
                         if (_bk && !_currentThinkKeys.has(_bk) && !el.getAttribute('data-tool-call-id')) {{
                             el.remove();
@@ -4373,7 +4392,8 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _sanitize_incomplete_markdown(streaming_md)
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
-        processed_md = _inject_think_cards(safe_md, self._streaming is False)
+        processed_md = _inject_think_cards(safe_md, self._streaming is False,
+                                          compact=getattr(self.parent(), "_tool_compact_mode", False))
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
@@ -7745,7 +7765,7 @@ class MessageCard(SimpleCardWidget):
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
-        completed_html = _render_think_block(content, completed=True)
+        completed_html = _render_think_block(content, completed=True, compact=self._tool_compact_mode)
         safe_completed_html = json.dumps(completed_html).decode("utf-8")
 
         # 直接 JS 处理 DOM 上残留的"思考中"状态
