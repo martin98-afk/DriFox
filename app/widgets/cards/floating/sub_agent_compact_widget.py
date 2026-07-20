@@ -997,8 +997,19 @@ class SubAgentCompactFloatingWidget(QWidget):
         if len(self._task_rows) > 1:
             content_height += self._body_layout.spacing() * (len(self._task_rows) - 1)
 
-        # 卡片总高度 ≈ top margin(6) + header(~24) + spacing(2) + content + bottom margin(6)
-        overhead = 6 + 24 + 2 + 6  # = 38
+        # 从实际 layout 动态计算 overhead（替代硬编码 38px）
+        # header 的实际高度取决于字体渲染、DPI、status_label 内容等，写死 24px 会
+        # 在 header 实际 > 24px 时让 scroll area 可用高度 < content_height，
+        # 导致底部行被裁切隐藏（又因未达 _MAX_CARD_HEIGHT 而不出现滚动条）。
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        header_item = self.layout().itemAt(0)  # QVBoxLayout 索引 0 是 header QHBoxLayout
+        header_h = 24  # fallback（隐藏状态时 sizeHint 可能为 0）
+        if header_item and header_item.layout():
+            hint = header_item.layout().sizeHint()
+            if hint.isValid() and hint.height() > 0:
+                header_h = hint.height()
+        overhead = margins.top() + header_h + spacing + margins.bottom()
         total_height = overhead + content_height
 
         if total_height > _MAX_CARD_HEIGHT:
@@ -1006,10 +1017,19 @@ class SubAgentCompactFloatingWidget(QWidget):
         else:
             self.setFixedHeight(max(36, total_height))
 
+        # 显式激活布局，确保 scroll area 及其内容 widget 立即响应新高度
+        self.layout().activate()
+        self._scroll_area.updateGeometry()
+
         # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
         # 上述 sizeHint 可能不可靠。调度一次延迟重算，确保在 widget 显示后、
         # 布局就绪时纠正高度。
         if not self.isVisible() and not self._reflow_deferred_guard:
+            self._reflow_deferred_guard = True
+            QTimer.singleShot(0, self._reflow_after_layout)
+        elif self.isVisible() and not self._reflow_deferred_guard:
+            # 即使 widget 可见，Qt 布局传播可能未完全同步（尤其首次显示时），
+            # 调度一次延迟重算以确保 scroll area 内部 content widget 尺寸正确。
             self._reflow_deferred_guard = True
             QTimer.singleShot(0, self._reflow_after_layout)
 

@@ -3332,9 +3332,12 @@ class CodeWebViewer(QWebEngineView):
                     cursor: pointer;
                 }}
 
-                /* 工具/思考区域 - 固定高度滚动容器（正文上方，背景+边框区分） */
+                /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，背景+边框区分） */
+                /* ── 性能优化：contain: layout paint 让浏览器把此容器视为独立渲染作用域，
+                   父布局变化不会让其子树重排 ── */
                 #tool-section {{
                     margin: 0 0 8px 0;
+                    contain: layout paint;
                 }}
                 #tool-separator {{
                     display: flex;
@@ -3344,6 +3347,16 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-muted);
                     user-select: none;
                     padding: 2px 2px 6px 2px;
+                    cursor: pointer;
+                    border-radius: 4px;
+                    transition: background-color 120ms ease;
+                }}
+                #tool-separator:hover {{
+                    background: var(--panel-soft);
+                }}
+                /* 折叠时让 chevron 旋转 */
+                #tool-section[data-collapsed="true"] #tool-separator .chevron {{
+                    transform: rotate(-90deg);
                 }}
                 #tool-separator::before,
                 #tool-separator::after {{
@@ -3353,14 +3366,76 @@ class CodeWebViewer(QWebEngineView):
                     background: var(--border);
                     opacity: 0.6;
                 }}
+                #tool-separator .chevron {{
+                    display: inline-block;
+                    transition: transform 160ms ease;
+                    font-size: 9px;
+                    opacity: 0.7;
+                }}
+                #tool-separator .counts {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-left: 4px;
+                }}
+                #tool-separator .count-badge {{
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 3px;
+                    padding: 1px 6px;
+                    border-radius: 8px;
+                    background: var(--panel-soft);
+                    border: 1px solid var(--border);
+                    font-size: 10px;
+                    line-height: 1.4;
+                }}
+                #tool-separator .count-badge.success {{ color: #5fd18c; }}
+                #tool-separator .count-badge.fail {{ color: #f44336; }}
+                #tool-separator .count-badge.running {{ color: #ffb65c; }}
+                #tool-separator .streaming-dot {{
+                    display: inline-block;
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 50%;
+                    background: #ffb65c;
+                    margin-left: 2px;
+                    animation: _streamingPulse 1.2s ease-in-out infinite;
+                }}
+                @keyframes _streamingPulse {{
+                    0%, 100% {{ opacity: 0.3; transform: scale(0.85); }}
+                    50% {{ opacity: 1; transform: scale(1.1); }}
+                }}
                 #tool-content {{
-                    max-height: 350px;
+                    /* 高度由 JS 通过 --tool-max-height CSS 变量控制。
+                       用变量而非 inline style 避免与折叠 [data-collapsed="true"]
+                       选择器的 max-height:0 冲突（inline 优先级高于选择器）。 */
+                    max-height: var(--tool-max-height, 350px);
                     overflow-y: auto;
                     overscroll-behavior: contain;
                     background: var(--panel-soft);
                     border: 1px solid var(--border);
                     border-radius: 8px;
                     padding: 4px 8px;
+                    /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
+                    transition: max-height 200ms ease, opacity 160ms ease;
+                }}
+                #tool-section[data-collapsed="true"] #tool-content {{
+                    max-height: 0;
+                    opacity: 0;
+                    padding-top: 0;
+                    padding-bottom: 0;
+                    border-color: transparent;
+                    overflow: hidden;
+                }}
+                /* 新工具块入场动效 */
+                @keyframes _toolBlockEnter {{
+                    from {{ opacity: 0; transform: translateY(4px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+                #tool-content > .tool-block,
+                #tool-content > .think-block,
+                #tool-content > .think-streaming {{
+                    animation: _toolBlockEnter 160ms ease-out;
                 }}
                 #tool-content > .tool-block:first-child,
                 #tool-content > .think-block:first-child,
@@ -3381,8 +3456,12 @@ class CodeWebViewer(QWebEngineView):
             </style>
         </head>
         <body>
-            <div id="tool-section" style="display: none;">
-              <div id="tool-separator"><span>⚙ 工具与思考</span></div>
+            <div id="tool-section" style="display: none;" data-collapsed="false">
+              <div id="tool-separator" role="button" tabindex="0" aria-expanded="true" title="点击折叠/展开工具与思考区">
+                <span class="chevron">▾</span>
+                <span>⚙ 工具与思考</span>
+                <span class="counts"></span>
+              </div>
               <div id="tool-content"></div>
               <div id="tool-separator-bottom"></div>
             </div>
@@ -3682,17 +3761,43 @@ class CodeWebViewer(QWebEngineView):
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
 
-                // 更新"工具与思考"头部计数
+                // 更新"工具与思考"头部计数（分组：完成 / 失败 / 进行中 + 流式指示点）
                 function _updateToolSectionHeader() {{
                     var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
                     if (!toolContent || !separator) return;
-                    var count = toolContent.children.length;
-                    var span = separator.querySelector('span');
-                    if (count > 0) {{
-                        span.textContent = '⚙ 工具与思考 · ' + count + ' 项';
-                    }} else {{
-                        span.textContent = '⚙ 工具与思考';
+                    var total = toolContent.children.length;
+                    var running = 0, success = 0, fail = 0;
+                    Array.prototype.forEach.call(toolContent.children, function(el) {{
+                        if (el.classList && el.classList.contains('cm-collapsible')) {{
+                            var streaming = el.getAttribute('data-streaming');
+                            if (streaming === 'true') {{
+                                running++;
+                            }} else {{
+                                // 通过 args-row.result-success/fail 判断结果状态
+                                if (el.querySelector('.args-row.result-fail')) fail++;
+                                else if (el.querySelector('.args-row.result-success')) success++;
+                                else success++; // 工具块默认算成功
+                            }}
+                        }}
+                    }});
+                    // 查找标题 span（⚙ 工具与思考）+ counts span
+                    var labels = separator.querySelectorAll(':scope > span');
+                    var titleSpan = null, countsSpan = null;
+                    labels.forEach(function(s) {{
+                        if (s.classList.contains('counts')) countsSpan = s;
+                        else if (!s.classList.contains('chevron') && !titleSpan) titleSpan = s;
+                    }});
+                    if (titleSpan) {{
+                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
+                    }}
+                    if (countsSpan) {{
+                        var html = '';
+                        if (success > 0) html += '<span class="count-badge success">✓ ' + success + '</span>';
+                        if (fail > 0) html += '<span class="count-badge fail">✗ ' + fail + '</span>';
+                        if (running > 0) html += '<span class="count-badge running">⏳ ' + running + '</span>';
+                        if (running > 0) html += '<span class="streaming-dot" title="正在流式输出"></span>';
+                        countsSpan.innerHTML = html;
                     }}
                 }}
 
@@ -3701,23 +3806,94 @@ class CodeWebViewer(QWebEngineView):
                     var toolSection = document.getElementById('tool-section');
                     var toolContent = document.getElementById('tool-content');
                     if (!container || !toolContent || !toolSection) return;
-                    // 清空旧内容，防止残留/重复
-                    toolContent.innerHTML = '';
-                    // 移动工具/思考块到 tool-content（编辑类工具保留在正文）
+                    // 找出容器内所有需要迁移到工具区的块（编辑类工具保留在正文）
                     var blocks = container.querySelectorAll(
                         '.tool-block' + _EDIT_TOOLS_SELECTOR + ', ' +
                         '.think-block, .think-streaming, ' +
                         '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
-                    var hasBlocks = false;
-                    blocks.forEach(function(el) {{
-                        toolContent.appendChild(el);
-                        hasBlocks = true;
+                    if (blocks.length === 0) {{
+                        // 容器没有需要迁移的块 —— 若 tool-content 也空就隐藏整个区
+                        if (toolContent.children.length === 0) {{
+                            toolSection.style.display = 'none';
+                            return;
+                        }}
+                        // tool-content 仍有 data-tool-injected 流式块 / 旧搬移块
+                        // （markdown 被缩短、块被删除），仍需刷新 header
+                        toolSection.style.display = '';
+                        _updateToolSectionHeader();
+                        return;
+                    }}
+                    // ── 增量搬移：用稳定标识（data-block-key / data-tool-call-id）
+                    // 做精确去重 —— 比"count 比对"可靠，因为 updateContent 重写
+                    // content-placeholder 后，里面的块全是新 DOM 节点，单纯比数量会
+                    // 误判"已搬移过"而漏搬新块，导致工具/思考在正文里也出现。
+                    // 用 insertBefore + insertIdx 游标保持 content-placeholder 的文档顺序，
+                    // 确保思考块排在工具块之前（chronological order）。 ──
+                    var existingKeys = Object.create(null);
+                    Array.prototype.forEach.call(toolContent.children, function(el) {{
+                        var bk = el.getAttribute('data-block-key');
+                        if (bk) existingKeys['bk:' + bk] = 1;
+                        var tid = el.getAttribute('data-tool-call-id');
+                        if (tid) existingKeys['tcid:' + tid] = 1;
                     }});
-                    toolSection.style.display = hasBlocks ? '' : 'none';
-                    if (hasBlocks) _updateToolSectionHeader();
+                    var moved = false;
+                    var insertIdx = 0; // 保持 content-placeholder 文档顺序的插入位置游标
+                    blocks.forEach(function(el) {{
+                        var bk = el.getAttribute('data-block-key');
+                        var tid = el.getAttribute('data-tool-call-id');
+                        // 已有相同标识 → 已搬移过，从正文移除（同时工具区已有旧版块残留），游标前进
+                        if (bk && existingKeys['bk:' + bk]) {{
+                            if (el.parentNode === container) el.remove();
+                            insertIdx++;
+                            moved = true;
+                            return;
+                        }}
+                        if (tid && existingKeys['tcid:' + tid]) {{
+                            if (el.parentNode === container) el.remove();
+                            insertIdx++;
+                            moved = true;
+                            return;
+                        }}
+                        // 搬移到工具区，用 insertBefore + 游标保持与正文原始顺序一致
+                        // 包括无稳定标识的流式思考块（.think-streaming），避免思考框残留在正文
+                        if (el.parentNode === container) {{
+                            var refNode = toolContent.children[insertIdx] || null;
+                            toolContent.insertBefore(el, refNode);
+                            insertIdx++;
+                            moved = true;
+                        }}
+                    }});
+                    toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
+                    if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
+                }}
+                // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
+                // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
+                function _toggleToolSection(sep, evt) {{
+                    var toolSection = document.getElementById('tool-section');
+                    if (!sep || !toolSection) return;
+                    if (evt) {{ evt.stopPropagation(); evt.preventDefault(); }}
+                    var collapsed = toolSection.getAttribute('data-collapsed') === 'true';
+                    toolSection.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
+                    sep.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
+                    try {{ sessionStorage.setItem('_toolSectionCollapsed', collapsed ? '0' : '1'); }} catch(_err) {{}}
+                    var tc = document.getElementById('tool-content');
+                    if (tc) {{
+                        var onEnd = function() {{
+                            tc.removeEventListener('transitionend', onEnd);
+                            reportHeight();
+                        }};
+                        tc.addEventListener('transitionend', onEnd);
+                        // 兜底：transitionend 在 display:none 时可能不触发
+                        setTimeout(function() {{ tc.removeEventListener('transitionend', onEnd); reportHeight(); }}, 260);
+                    }}
                 }}
                 document.addEventListener('click', e => {{
+                    const sep = e.target.closest('#tool-separator');
+                    if (sep) {{
+                        _toggleToolSection(sep, e);
+                        return;
+                    }}
                     const btn = e.target.closest('button[data-action]');
                     if (btn) {{
                         const act = btn.getAttribute('data-action');
@@ -3766,6 +3942,25 @@ class CodeWebViewer(QWebEngineView):
                 }});
                 document.addEventListener('DOMContentLoaded', () => {{
                     console.log('pywebview_ready');
+                    // 恢复简洁模式折叠状态（sessionStorage，仅本次会话有效）
+                    try {{
+                        var _stored = sessionStorage.getItem('_toolSectionCollapsed');
+                        if (_stored === '1') {{
+                            var _ts = document.getElementById('tool-section');
+                            var _sep = document.getElementById('tool-separator');
+                            if (_ts) _ts.setAttribute('data-collapsed', 'true');
+                            if (_sep) _sep.setAttribute('aria-expanded', 'false');
+                        }}
+                    }} catch(_e) {{}}
+                    // 无障碍：键盘 Enter / Space 触发折叠切换（WCAG button 模式）
+                    var _sepEl = document.getElementById('tool-separator');
+                    if (_sepEl) {{
+                        _sepEl.addEventListener('keydown', function(kEvt) {{
+                            if (kEvt.key === 'Enter' || kEvt.key === ' ') {{
+                                _toggleToolSection(_sepEl, kEvt);
+                            }}
+                        }});
+                    }}
                     reportHeight();
                     // 使用防抖的 ResizeObserver，避免频繁触发高度更新
                     let resizeTimeout = null;
@@ -3775,6 +3970,28 @@ class CodeWebViewer(QWebEngineView):
                         if (resizeTimeout) clearTimeout(resizeTimeout);
                         resizeTimeout = setTimeout(() => requestAnimationFrame(reportHeight), 50);
                     }}).observe(document.body);
+
+                    // ── 工具区高度自适应：按卡片总高度的 60% 设定 --tool-max-height CSS 变量，
+                    // 但不小于 350px（足够显示 2-3 个工具块），不超过 800px。
+                    // 用 CSS 变量而非 inline style.maxHeight —— 否则 inline 优先级
+                    // 高于 [data-collapsed="true"] 选择器的 max-height:0，导致折叠
+                    // 规则被覆盖、空间不收缩。
+                    // ResizeObserver 监听 #content-placeholder 高度变化时同步调整。 ──
+                    const _toolContent = document.getElementById('tool-content');
+                    if (_toolContent) {{
+                        const _adjustToolHeight = () => {{
+                            var section = document.getElementById('tool-section');
+                            if (section && section.getAttribute('data-collapsed') === 'true') return;
+                            var bodyH = document.body.getBoundingClientRect().height;
+                            // 自适应：body 高度的 60%，夹在 350~800 之间
+                            var newMax = Math.max(350, Math.min(800, Math.round(bodyH * 0.6)));
+                            _toolContent.style.setProperty('--tool-max-height', newMax + 'px');
+                        }};
+                        _adjustToolHeight();
+                        // 监听 #content-placeholder 高度变化（正文增减会改变 body 高度）
+                        var _cp = document.getElementById('content-placeholder');
+                        if (_cp) new ResizeObserver(_adjustToolHeight).observe(_cp);
+                    }}
                 }});
                 window.addEventListener('load', () => {{
                     reportHeight();
@@ -4205,33 +4422,9 @@ class CodeWebViewer(QWebEngineView):
                 # ♻️ 修复：保存所有 [data-tool-call-id] 块，不仅 data-streaming="true"。
                 # 因为 finish_tool_streaming 注入的已完成块 (data-streaming="false")
                 # 不在 _content_data 中，不会被 markdown 重新生成，若不保存也会被抹掉。
-                js_code = (
-                    "(function(){"
-                    "var _finished=" + _safe_finished + ";"
-                    f"var _tc=document.getElementById('{self._tool_target_id}');"
-                    "var _sbs=[];"
-                    "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
-                    "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
-                    "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
-                    "}});}"
-                    "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
-                    f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                    f"if(_sbs.length>0){{_tc=document.getElementById('{self._tool_target_id}');if(_tc){{"
-                    "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
-                    "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                    "var _bk=_t.firstElementChild;if(_bk){"
-                    "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
-                    "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                    "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
-                    "}}});}}"
-                    "if(window._toolCompactMode){"
-                    "var _ts2=document.getElementById('tool-section');"
-                    "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
-                    "}"
-                    "})();"
-                )
+                # 非流式分支：使用共享的 _build_save_and_restore_js 模板
+                self.page().runJavaScript(self._build_save_and_restore_js(html_content))
                 self._last_rendered_html = None
-                self.page().runJavaScript(js_code)
                 return
 
             # ── 以下为流式模式（增量渲染） ──
@@ -4264,36 +4457,17 @@ class CodeWebViewer(QWebEngineView):
             self._last_rendered_markdown = self._markdown_text
             self._last_rendered_html = html_content
             self._height_report_pending = True
-            # ♻️ 修复：保存所有 [data-tool-call-id] 块（含已完成块 data-streaming="false"），
-            # 不仅 data-streaming="true"。因为 finish_tool_streaming 注入的已完成块不在
-            # _content_data 中、不会被 markdown 重新生成，若只保存活跃流式块，会被
-            # updateContent 抹掉导致预览文本一闪而没。
-            # 已在 markdown 中的块（来自 _content_data 的 tool result）不会被重复恢复，
-            # 因为 restore 前检查了 if(!document.querySelector(...))。
-            js_code = (
-                "(function(){"
-                "var _finished=" + _safe_finished + ";"
-                f"var _tc=document.getElementById('{self._tool_target_id}');"
-                "var _sbs=[];"
-                "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
-                "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
-                "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
-                "}});}"
-                "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
-                f"updateContent({json.dumps(html_content).decode('utf-8')});"
-                f"if(_sbs.length>0){{_tc=document.getElementById('{self._tool_target_id}');if(_tc){{"
-                "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
-                "var _t=document.createElement('div');_t.innerHTML=b.html;"
-                "var _bk=_t.firstElementChild;if(_bk){"
-                "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
-                "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-                "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
-                "}}});}}"
-                # 🐛 修复：工具块 restore 后 scrollHeight 可能增加
-                "if(window._toolCompactMode){"
-                "var _ts2=document.getElementById('tool-section');"
-                "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
-                "}"
+            # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
+            # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后
+            # updateContent 的 height report 到达时 _content_just_loaded 已为 False，
+            # _on_message_card_height_changed 跳过外部滚底。
+            # 这里在推 JS 前还原标记，确保全量渲染后的 height report 能触发外部滚底。
+            _card = self.parent()
+            if _card is not None and _card.__class__.__name__ == "MessageCard":
+                _card._content_just_loaded = True
+            # 流式分支：复用共享的 save+restore 模板，末尾追加 auto-scroll 逻辑
+            # （工具块 restore 后 scrollHeight 可能增加，需要重新判断滚到底）
+            auto_scroll_js = (
                 "if(!window._userScrolledWithin){"
                 "document.body.scrollTop=document.body.scrollHeight;"
                 "}else{"
@@ -4304,14 +4478,58 @@ class CodeWebViewer(QWebEngineView):
                 "}}"
                 "window._autoScrollTime=performance.now();"
                 "window._suppressScrollEvent=false;"
-                "})();"
             )
+            js_code = self._build_save_and_restore_js(html_content).replace("})();", auto_scroll_js + "})();")
             self.page().runJavaScript(js_code)
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
 
         except RuntimeError:
             pass
+
+    def _build_save_and_restore_js(self, html_content: str) -> str:
+        """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
+
+        为什么需要这个三步流程？
+        - 流式期间 `_inject_tool_streaming_html` 会把运行中的工具块直接 append 到
+          #tool-content（带 data-tool-call-id 标记），不在 _content_data 中。
+        - updateContent() 重写 #content-placeholder 的 innerHTML **不会**影响 #tool-content
+          里的块，但**已完成且由 JS 注入**的工具结果块（data-tool-call-id）也不会被 markdown
+          重新生成（它们是 JS 端瞬时数据）。若不保存就 updateContent，这些块会被 JS 视为
+          "应被保留"，从而产生一闪而没或重复出现的"闪灭"现象。
+        - 解决：保存 #tool-content 内所有 data-tool-call-id 块 → updateContent → 按原 idx
+          位置还原。已完成块会被"复活"为静态折叠框（移除 data-streaming、标记 data-expanded=false）。
+
+        调用方：流式分支需要在末尾额外追加 auto-scroll 逻辑；非流式分支直接 runJavaScript。
+        """
+        _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
+        _safe_finished = json.dumps(_finished_ids).decode("utf-8")
+        _target_id = self._tool_target_id
+        return (
+            "(function(){"
+            "var _finished=" + _safe_finished + ";"
+            f"var _tc=document.getElementById('{_target_id}');"
+            "var _sbs=[];"
+            "if(_tc){Array.prototype.forEach.call(_tc.children,function(el,i){"
+            "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+            "_sbs.push({id:el.getAttribute('data-tool-call-id'),html:el.outerHTML,idx:i});"
+            "}});}"
+            "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
+            f"updateContent({json.dumps(html_content).decode('utf-8')});"
+            f"if(_sbs.length>0){{_tc=document.getElementById('{_target_id}');if(_tc){{"
+            "_sbs.forEach(function(b){if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+            "var _t=document.createElement('div');_t.innerHTML=b.html;"
+            "var _bk=_t.firstElementChild;if(_bk){"
+            "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
+            "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
+            "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
+            "}}});}}"
+            "if(window._toolCompactMode){"
+            "var _ts2=document.getElementById('tool-section');"
+            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+            "}"
+            "})();"
+        )
 
     def finish_streaming(self):
         self._streaming = False
