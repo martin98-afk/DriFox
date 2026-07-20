@@ -2509,6 +2509,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 body {{
                     padding: 6px 14px 0 14px; 
+                    max-height: {self.MAX_HEIGHT}px;
+                    overflow-y: auto;
                     overflow-x: hidden;
                 }}
                 {scrollbar_css}
