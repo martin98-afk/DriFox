@@ -14752,15 +14752,23 @@ class OpenAIChatToolWindow(ToolWindow):
                                             shutil.copytree(str(item), str(dst))
                                         elif item.is_file():
                                             shutil.copy2(str(item), str(dst))
+                                    # ── 更新项目的根目录 ──
+                                    # 仅当恢复路径就是原始 git 仓库路径时才更新：
+                                    # 这样下次导出时 git 检测仍能正常工作。
+                                    # 如果恢复到了默认路径（非 git 仓库），不更新，
+                                    # 保持项目原有根目录不变，避免下次导出丢失 git 信息。
+                                    if original_root and os.path.abspath(restore_path) == os.path.abspath(original_root):
+                                        self._update_project_root_dir(project_name, restore_path)
+                                        logger.info("[MainWidget] 恢复路径为原始 git 仓库，已更新项目根目录")
+                                    else:
+                                        logger.info("[MainWidget] 恢复路径为默认路径（非 git 仓库），跳过更新项目根目录")
+
                                     InfoBar.success(
                                         title="",
                                         content=f"项目文件已恢复到: {restore_path}",
                                         duration=5000,
                                         parent=self,
                                     )
-
-                                    # ── 更新项目的根目录为恢复路径 ──
-                                    self._update_project_root_dir(project_name, restore_path)
                                 else:
                                     logger.info(f"[MainWidget] extract_dir 为空，无文件可恢复: {extract_dir}")
                     except Exception as e:
@@ -14796,7 +14804,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         优先级：
         1. 原路径存在且合法（不含 .. 遍历） → 恢复回原路径，尊重用户已有配置
-        2. 否则 → 默认恢复到 ~/Documents/DriFox/projects/<project_name>/
+        2. 否则 → 默认恢复到 ~/.drifox/workspaces/<project_name>/
         """
         if original_root:
             resolved = os.path.abspath(original_root)
@@ -14810,11 +14818,11 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 logger.info(f"[MainWidget] 原始路径不存在，将使用默认路径: {original_root}")
 
-        # 默认恢复路径（替换不可用于文件夹名的字符）
+        # 默认恢复路径：与 _ensure_temp_workdir 一致，使用 ~/.drifox/workspaces/<project_name>/
         safe_name = re.sub(r'[<>:"/\\|?*]', '_', (project_name or "imported_project")[:40]).strip()
         if not safe_name:
             safe_name = "imported_project"
-        default_dir = Path.home() / "Documents" / "DriFox" / "projects" / safe_name
+        default_dir = Path.home() / ".drifox" / "workspaces" / safe_name
         logger.info(f"[MainWidget] 使用默认路径恢复: {default_dir}")
         return str(default_dir)
 
