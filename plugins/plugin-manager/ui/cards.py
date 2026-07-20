@@ -1241,6 +1241,7 @@ class PluginManagerCard(QWidget):
             return
         if self._rendered_count >= len(self._plugins):
             self._all_loaded = True
+            self._content_layout.addStretch(1)
             return
         self._render_next_batch(self._search.text().strip().lower())
         from PyQt5.QtCore import QTimer
@@ -1259,8 +1260,6 @@ class PluginManagerCard(QWidget):
             self._content_layout.addWidget(row)
             self._row_map[p.name] = row
         self._rendered_count = end
-        if start == 0:
-            self._content_layout.addStretch(1)
         self._update_empty_state(query)
 
     def _update_empty_state(self, query: str):

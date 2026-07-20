@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
@@ -227,6 +227,10 @@ class UIPluginEdgeLauncher(QWidget):
         self._reparented_to_top: bool = False
         # 缓存的插件列表 [(card_id, title, plugin_name), ...]
         self._card_infos: List[Tuple[str, str, str]] = []
+        # 性能优化缓存
+        self._cached_stylesheet: Optional[str] = None
+        self._cached_stylesheet_is_light: Optional[bool] = None
+        self._icon_cache: Dict[str, QIcon] = {}
         # 状态机
         self._state: str = "COLLAPSED"  # COLLAPSED / EXPANDED / MENU_OPEN
         self._menu: Optional[QMenu] = None
@@ -348,6 +352,9 @@ class UIPluginEdgeLauncher(QWidget):
 
         logger.info(f"[EdgeLauncher] refresh_plugins loaded {len(infos)} cards: {[cid for cid, _, _ in infos]}")
 
+        # 预加载插件图标缓存（避免菜单首次打开时同步文件 I/O 阻塞 UI 线程）
+        self._preload_icons()
+
         if self._card_infos:
             self._sync_position()
             self.show()
@@ -357,8 +364,30 @@ class UIPluginEdgeLauncher(QWidget):
             # 没有插件时也收起菜单
             self._close_menu()
 
+    def _preload_icons(self) -> None:
+        """预加载所有插件的图标到缓存，避免菜单打开时同步文件 I/O 阻塞 UI 线程。"""
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        theme = "dark" if isDarkTheme() else "light"
+        cache: Dict[str, QIcon] = {}
+        for _, _, plugin_name in self._card_infos:
+            try:
+                pi = pm.get_plugin(plugin_name)
+                if pi and pi.icon_config:
+                    icon_p = pi.icon_config.get(theme)
+                    if icon_p:
+                        cache[plugin_name] = QIcon(str(icon_p))
+            except Exception:
+                pass  # non-critical, skip icon
+        self._icon_cache = cache
+
     def apply_theme(self) -> None:
         """主题切换后调用：刷新视觉颜色与菜单样式。"""
+        # 使样式表缓存和图标缓存失效（主题色/深色/浅色图标路径可能不同）
+        self._cached_stylesheet = None
+        self._cached_stylesheet_is_light = None
+        self._icon_cache.clear()
         self._visual.update()
 
     # ── 鼠标事件（命中检测）────────────────────────────────
@@ -412,8 +441,8 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 菜单 ────────────────────────────────────────────────
     def _open_menu(self) -> None:
-        # 打开菜单前刷新插件列表（确保卸载/安装后数据是最新的）
-        self.refresh_plugins()
+        # 插件列表在初始化/热重载时已通过 refresh_plugins() 刷新，此处不再重复加载。
+        # 注意：若将来需支持"运行中动态增减插件且无热重载"，请在此处加版本号检查。
         if not self._card_infos:
             return
         self._collapse_timer.stop()
@@ -435,19 +464,10 @@ class UIPluginEdgeLauncher(QWidget):
             action = QAction(label, menu)
             action.setData(card_id)
 
-            # 设置插件图标（如有）
-            try:
-                from app.core.plugin_manager import PluginManager
-
-                pm = PluginManager.get_instance()
-                pi = pm.get_plugin(plugin_name)
-                if pi and pi.icon_config:
-                    theme = "dark" if isDarkTheme() else "light"
-                    icon_p = pi.icon_config.get(theme)
-                    if icon_p:
-                        action.setIcon(QIcon(str(icon_p)))
-            except Exception:
-                pass  # non-critical, skip icon
+            # 使用预加载的图标缓存（refresh_plugins 时已加载），避免同步文件 I/O
+            icon = self._icon_cache.get(plugin_name)
+            if icon is not None:
+                action.setIcon(icon)
 
             action.triggered.connect(lambda checked=False, cid=card_id: self._on_menu_action(cid))
             menu.addAction(action)
@@ -531,6 +551,11 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 样式 ────────────────────────────────────────────────
     def _menu_stylesheet(self) -> str:
+        is_light = _is_current_theme_light()
+        # 主题未变 → 返回缓存（避免重复计算字体/颜色 CSS 字符串）
+        if self._cached_stylesheet is not None and self._cached_stylesheet_is_light == is_light:
+            return self._cached_stylesheet
+
         try:
             text_color = Colors.TEXT_PRIMARY
             hover_bg = Colors.HOVER_BG_STRONG
@@ -541,7 +566,6 @@ class UIPluginEdgeLauncher(QWidget):
             hover_bg = "rgba(255,255,255,0.08)"
             border = "#3d3d3d"
             bg = "rgba(33,33,38,250)"
-        is_light = _is_current_theme_light()
         if is_light:
             # 浅色主题下做轻量反转
             text_color = "#1f1f1f"
@@ -554,7 +578,7 @@ class UIPluginEdgeLauncher(QWidget):
         item_font_size = scale_font_size(13)
         # 菜单背景容器：稍小的字号
         container_font_size = scale_font_size(12)
-        return f"""
+        stylesheet = f"""
             QMenu {{
                 background-color: {bg};
                 border: 1px solid {border};
@@ -587,3 +611,6 @@ class UIPluginEdgeLauncher(QWidget):
                 margin-right: 6px;
             }}
         """
+        self._cached_stylesheet = stylesheet
+        self._cached_stylesheet_is_light = is_light
+        return stylesheet

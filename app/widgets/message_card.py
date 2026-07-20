@@ -3834,6 +3834,23 @@ class CodeWebViewer(QWebEngineView):
                     Array.prototype.forEach.call(toolContent.querySelectorAll('.think-streaming'), function(el) {{
                         el.remove();
                     }});
+                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block
+                    // 多轮思考场景：旧完成的折叠框持续堆积在 tool-content 底部不清理。
+                    // 收集 content-placeholder 中当前 think-block 的 block-key 集合，
+                    // 移除 tool-content 中不在集合内的旧 think-block。
+                    var _currentThinkKeys = new Set();
+                    Array.prototype.forEach.call(blocks, function(el) {{
+                        var _bk = el.getAttribute('data-block-key');
+                        if (_bk && (el.classList.contains('think-block') || el.classList.contains('think-streaming'))) {{
+                            _currentThinkKeys.add(_bk);
+                        }}
+                    }});
+                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-block'), function(el) {{
+                        var _bk = el.getAttribute('data-block-key');
+                        if (_bk && !_currentThinkKeys.has(_bk) && !el.getAttribute('data-tool-call-id')) {{
+                            el.remove();
+                        }}
+                    }});
                     // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
                     // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
                     var posMap = Object.create(null);
@@ -4531,8 +4548,12 @@ class CodeWebViewer(QWebEngineView):
             "var _bk=_t.firstElementChild;if(_bk){"
             "if(_finished.indexOf(b.id)>=0 && _bk.getAttribute('data-streaming')==='true'){"
             "_bk.className='cm-collapsible tool-block';_bk.removeAttribute('data-streaming');_bk.setAttribute('data-expanded','false');}"
-            "_tc.insertBefore(_bk,_tc.children[b.idx]||null);"
-            "}}});}}"
+            "_bk.removeAttribute('data-tool-injected');"
+            # 🐛 FIX: append 而非 insertBefore 旧 idx，避免插入到错误位置破坏。
+            # reorganizeContent 已经完成的排序不应被旧索引覆盖。
+            "_tc.appendChild(_bk);"
+            "}}});"
+            "}}"
             "if(window._toolCompactMode){"
             "var _ts2=document.getElementById('tool-section');"
             "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
@@ -7224,6 +7245,7 @@ class MessageCard(SimpleCardWidget):
                     existing.setAttribute('data-block-key', '{block_key}');
                     existing.setAttribute('data-expanded', 'false');
                     existing.removeAttribute('data-streaming');
+                    existing.removeAttribute('data-tool-injected');
                     // 恢复外层 div 的 style（如 display:flex），确保 INLINE_TOOLS
                     // 的预览文字 text-align:right 正确工作。
                     existing.setAttribute('style', {safe_outer_style});
@@ -7249,16 +7271,39 @@ class MessageCard(SimpleCardWidget):
                         var ts = document.getElementById('tool-section');
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
+                    // 🐛 修复：增量更新后同步滚动 document.body，确保用户看到新内容
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
                     reportHeight();
                     return;
                 }}
                 // 无已有流式块时，追加新块（兜底逻辑）
                 var d = document.createElement('div');
-                d.setAttribute('data-tool-injected', 'true');
                 d.innerHTML = {safe_html};
                 tc.appendChild(d);
-                // 自动滚底
-                tc.scrollTop = tc.scrollHeight;
+                // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
+                window._suppressScrollEvent = true;
+                if (!window._userScrolledWithin) {{
+                    document.body.scrollTop = document.body.scrollHeight;
+                }} else {{
+                    var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                    if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                        window._userScrolledWithin = false;
+                    }}
+                }}
+                window._autoScrollTime = performance.now();
+                window._suppressScrollEvent = false;
                 // 确保 tool-section 可见
                 if (window._toolCompactMode) {{
                     var ts2 = document.getElementById('tool-section');
@@ -7420,10 +7465,19 @@ class MessageCard(SimpleCardWidget):
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
                 if (el) {{
+                    // 🐛 FIX: 清除旧 data-tool-injected，消除 save-remove-restore 闪烁循环
+                    el.removeAttribute('data-tool-injected');
                     var curStreaming = el.getAttribute('data-streaming');
                     // text-only 模式：仅更新 data-streaming 状态，不碰文字
                     if ({_text_only_js}) {{
                         el.setAttribute('data-streaming', '{streaming_flag}');
+                        // 🐛 修复：状态更新后 body 自动滚底
+                        window._suppressScrollEvent = true;
+                        if (!window._userScrolledWithin) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                        }}
+                        window._autoScrollTime = performance.now();
+                        window._suppressScrollEvent = false;
                         hr();
                         return;
                     }}
@@ -7441,6 +7495,19 @@ class MessageCard(SimpleCardWidget):
                             previewEl.innerHTML = {safe_preview};
                         }}
                     }}
+                    // 🐛 修复：预览内容更新后 body 自动滚底
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
                     hr();
                 }} else {{
                     // text-only 模式下不存在块：不创建
@@ -7450,8 +7517,19 @@ class MessageCard(SimpleCardWidget):
                     tmp.innerHTML = {safe_html};
                     var block = tmp.firstElementChild;
                     if (block) tc.appendChild(block);
-                    // 自动滚底
-                    tc.scrollTop = tc.scrollHeight;
+                    // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{
                         var ts = document.getElementById('tool-section');
