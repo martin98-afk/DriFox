@@ -3493,9 +3493,9 @@ class CodeWebViewer(QWebEngineView):
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
                     overflow-y: auto;
-                    background: var(--panel-soft);
-                    border: 1px solid var(--border);
-                    border-radius: 8px;
+                    background: transparent;
+                    border: none;
+                    border-radius: 6px;
                     padding: 4px 8px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
@@ -3505,7 +3505,6 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 0;
                     padding-top: 0;
                     padding-bottom: 0;
-                    border-color: transparent;
                     overflow: hidden;
                 }}
                 /* 新工具块入场动效 — 仅对"真正新"的块生效
