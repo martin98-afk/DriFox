@@ -98,6 +98,9 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render_helpers import (
     _format_natural_preview,
     _get_tool_icon,
+    _get_tool_icon_name,
+    _get_tool_icon_html,
+    _get_tool_cn_name,
     render_tool_block,
 )
 
@@ -1010,14 +1013,17 @@ def _render_tool_streaming_block(
 
     # 图标与颜色：与 render_tool_block 保持一致
     if is_mcp:
-        icon = "🌐"
+        icon_name = "websearch"
         title_color = "#00BCD4"
     elif is_sub_agent_task:
-        icon = "🤖"
+        icon_name = "设置-subagent"
         title_color = "#9C27B0"
     else:
-        icon = _get_tool_icon(tool_name)
+        icon_name = _get_tool_icon(tool_name)
         title_color = "#FFA500"
+
+    icon_html = _get_tool_icon_html(icon_name)
+    cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
 
     # spinner
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
@@ -1030,9 +1036,11 @@ def _render_tool_streaming_block(
     streaming_state = "false" if completed else "true"
 
     return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">
-            <span style="flex: 0 0 auto;">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
         <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
@@ -1069,9 +1077,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
-        <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
     <div class="cm-collapsible__body">
         {body_html}
@@ -1108,9 +1116,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
-        <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
     <div class="cm-collapsible__body">
         {body_html}
@@ -6059,23 +6067,24 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
-        # Review 按钮（紧贴差异统计右侧，emoji 🔍），点击触发 code-reviewer 子智能体
-        # 字号与文字保持一致（10px），避免 emoji 与 9px 文字基线错位
-        review_btn = QLabel("🔍", self)
+        # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
+        icon_size = scale_font_size(12)
+        review_btn = QLabel(self)
         review_btn.setObjectName("footer_review_btn")
+        review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
+        review_btn.setFixedSize(icon_size + 4, icon_size + 4)
+        review_btn.setScaledContents(True)
         review_btn.setStyleSheet(
-            f"QLabel {{"
-            f" background: transparent; padding: 0px 2px; margin: 0px;"
-            f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
-            f" color: {accent};"
-            f" }}"
-            f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
+            "QLabel {"
+            " background: transparent; padding: 2px; margin: 0px;"
+            " border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); }"
         )
-        review_btn.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        review_btn.setAlignment(Qt.AlignCenter)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
         review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
-        review_btn.adjustSize()
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
@@ -6188,16 +6197,8 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
 
-        # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
+        # 同步显示 Review 按钮（紧贴差异统计右侧）
         if self._footer_review_btn:
-            self._footer_review_btn.setStyleSheet(
-                f"QLabel {{"
-                f" background: transparent; padding: 0px 2px; margin: 0px;"
-                f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
-                f" color: {accent};"
-                f" }}"
-                f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
-            )
             self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
@@ -7451,11 +7452,13 @@ class MessageCard(SimpleCardWidget):
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
-            # 🐛 修复"工具结果冒出又消失"：去掉旧的条件判断，始终更新 callback，
-            # 确保 _perform_update 能拿到含最新工具结果的 markdown，不被旧 DOM 覆盖。
-            # [PERF] 使用增量 markdown 構建，已緩存的工具塊不再重複轉換
+            # 🐛 修复"工具结果冒出又消失"：设置增量回调但不立即渲染，
+            # 先通过 JS 注入工具块到 DOM，再触发渲染确保 markdown 与 DOM 一致。
+            # 编辑类工具注入到 content-placeholder，立即渲染会先清空再重建导致闪烁。
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            self.viewer._schedule_render(immediate=True)
+            _is_edit_tool = tool_name in _EDIT_TOOLS
+            if not _is_edit_tool:
+                self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(
                 tool_name=tool_name,
@@ -7612,6 +7615,9 @@ class MessageCard(SimpleCardWidget):
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
+            # 编辑类工具已注入到 content-placeholder，延迟渲染确保 JS 先落地避免闪烁
+            if _is_edit_tool:
+                self.viewer._schedule_render(immediate=False)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
 
