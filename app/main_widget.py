@@ -32,7 +32,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import QColor, QDesktopServices, QPixmap
+from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -622,6 +622,26 @@ class _ProjectImportOptionDialog(MaskDialogBase):
             self.fileImportRequested.emit()
         else:
             self.urlImportRequested.emit()
+
+
+class _ThemedIconLabel(QWidget):
+    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
+
+    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
+    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
+    """
+
+    def __init__(self, icon_name: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        self._icon = get_icon(icon_name)
+        self._icon_size = size
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._icon.paint(painter, self.rect())
 
 
 class OpenAIChatToolWindow(ToolWindow):
@@ -2762,9 +2782,9 @@ class OpenAIChatToolWindow(ToolWindow):
         tt_layout.setContentsMargins(6, 0, 6, 0)
         tt_layout.setSpacing(0)
 
-        # 图标
-        tt_icon = QLabel("🔧")
-        tt_icon.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+        # 图标（主题感知 SVG — 自动适配浅色/深色模式）
+        tt_icon = _ThemedIconLabel("工具", 18, self._tool_toggle_btn)
+        tt_icon.setStyleSheet("background: transparent; border: none;")
         tt_layout.addWidget(tt_icon)
         tt_layout.addSpacing(4)
 
