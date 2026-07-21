@@ -79,4 +79,5 @@ ICON_NAME_TO_FILE = {
     "folder": "folder.svg",
     "裁剪": "裁剪.svg",
     "233键盘-线性": "233键盘-线性.svg",
+    "思考过程": "思考过程.svg",
 }

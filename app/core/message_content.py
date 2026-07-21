@@ -181,6 +181,93 @@ def _clean_multimodal_blocks(blocks: List[Dict]) -> List[Dict]:
     return cleaned
 
 
+def _safe_truncate_json_array_or_object(serialized: str, max_len: int = 50000) -> str:
+    """安全截断 JSON 数组/对象，保持 JSON 合法性。
+
+    当序列化后的 JSON 超过 max_len 时，截断到最后一个完整元素后补闭合括号。
+    例如：[1,2,3,4,5] 截断到 3 个元素 → [1,2,3]。
+    """
+    if len(serialized) <= max_len:
+        return serialized
+
+    # 判断是数组还是对象
+    is_array = serialized.startswith("[")
+    closer = "]" if is_array else "}"
+
+    # 从 max_len 往前找，找到完整的元素边界
+    # 遍历到 max_len 位置，用状态机找到深度为 1 的第一个逗号
+    depth = 0
+    in_string = False
+    escape_next = False
+    last_comma_at_depth1 = -1
+
+    for pos in range(len(serialized)):
+        if pos > max_len - len(closer) - 1:
+            break
+        c = serialized[pos]
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in ("{", "["):
+            depth += 1
+        elif c in ("}", "]"):
+            depth -= 1
+            if depth == 0:
+                # 到达顶层闭合，说明整个 JSON 恰好在这个范围内完整
+                return serialized[: pos + 1]
+        elif c == "," and depth == 1:
+            last_comma_at_depth1 = pos
+
+    if last_comma_at_depth1 > 0:
+        truncated = serialized[:last_comma_at_depth1] + closer
+        return truncated
+
+    # 兜底：在目标位置截断并补闭合括号，必须验证合法性
+    fallback = serialized[: max_len - len(closer)] + closer
+    if not _is_json_balanced(fallback):
+        # 再兜底：从末尾反向找最近的开括号，补闭合括号后重建
+        for pos in range(len(serialized) - 1, 0, -1):
+            if serialized[pos] in ("{", "["):
+                fallback = serialized[:pos] + closer
+                if _is_json_balanced(fallback):
+                    return fallback
+    return fallback
+
+
+def _is_json_balanced(text: str) -> bool:
+    """检查 JSON 文本的括号是否平衡"""
+    depth = 0
+    in_string = False
+    escape_next = False
+    for c in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if c == "\\":
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in ("{", "["):
+            depth += 1
+        elif c in ("}", "]"):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _sanitize_tool_args(args: Any) -> Any:
     """
     递归清理工具参数中的渲染敏感标记。
@@ -453,20 +540,18 @@ def content_to_markdown(content: Any) -> str:
                             safe_v = _sanitize_result(safe_v)
                             args_parts.append(f'"{k}": "{safe_v}"')
                     else:
-                        # 非字符串类型（list/dict）：序列化后智能截断
+                        # 非字符串类型（list/dict）：完整序列化，不截断
+                        # 原因：截断会产生非法 JSON，导致 _render_tool_block_content
+                        # 解析失败，参数预览信息（如"更新待办（3项）"的计数）丢失。
+                        # 仅在极端异常大时（>50KB）做安全截断。
                         try:
                             serialized = json.dumps(v).decode('utf-8')
                         except (AttributeError, TypeError):
                             serialized = str(v)
-                        # question 工具的 questions 字段是核心展示数据，不截断
-                        is_question_args = block.get("name") == "question" and k == "questions"
-                        if len(serialized) > 300 and not is_question_args:
-                            # 过长的 list/dict 只保留前100字符作为预览 + 省略标记
-                            preview = serialized[:100].replace('\\', '\\\\\\').replace('"', '\\"').replace('\n', '\\n')
-                            preview = _sanitize_result(preview)
-                            args_parts.append(f'"{k}": "{preview}..."')
-                        else:
-                            args_parts.append(f'"{k}": {_sanitize_result(serialized)}')
+                        if len(serialized) > 50000:
+                            # 极端情况：截断但保持 JSON 合法（截断到最后一个完整元素）
+                            serialized = _safe_truncate_json_array_or_object(serialized)
+                        args_parts.append(f'"{k}": {_sanitize_result(serialized)}')
                 args_json = "{" + ", ".join(args_parts) + "}"
             else:
                 args_json = "{}"
@@ -484,6 +569,7 @@ def content_to_markdown(content: Any) -> str:
 
             # 读取 diff 字段（用于 inline diff 展示）
             diff_raw = block.get("diff", "") or ""
+            diff_escaped = ""  # 显式初始化，避免 LSP 误报未绑定
             if diff_raw:
                 # diff 多行内容，直接嵌入
                 diff_escaped = _sanitize_result(str(diff_raw))
