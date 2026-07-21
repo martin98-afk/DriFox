@@ -1127,6 +1127,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
 
+def _has_unclosed_think(text: str) -> bool:
+    """检测文本中是否存在未闭合的 <think> 标签（最后一个 <think> 之后无 </think>）。"""
+    if not text:
+        return False
+    last_open = text.rfind("<think>")
+    if last_open == -1:
+        return False
+    last_close = text.rfind("</think>", last_open)
+    return last_close == -1
+
+
 def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
@@ -2086,6 +2097,9 @@ class CodeWebViewer(QWebEngineView):
         self._thinking_finalized = False
         # 流式思考首 chunk 标志：首 chunk 渲染"深度思考中..." spinner，后续静默累积不更新 DOM
         self._reasoning_streaming_started = False
+        # <think> 标签文本流式思考标志：与 _reasoning_streaming_started 对应，
+        # 用于 text 块中包含 <think> 标签时的静默累积策略
+        self._think_text_streaming_started = False
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -4737,6 +4751,9 @@ class CodeWebViewer(QWebEngineView):
         # 在 reorganizeContent 中因不匹配而被清除或生成重复。
         if hasattr(self, "_tool_md_cache"):
             self._tool_md_cache.clear()
+        # 重置思考文本流式标志，防止下一轮对话误判
+        self._think_text_streaming_started = False
+        self._reasoning_streaming_started = False
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
@@ -7308,6 +7325,25 @@ class MessageCard(SimpleCardWidget):
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
             if self._streaming:
                 self.viewer._append_text_incremental(text)
+            # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
+            # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
+            # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
+            last_block = self._content_data[-1] if self._content_data else None
+            last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
+            if _has_unclosed_think(last_text):
+                if not self.viewer._think_text_streaming_started:
+                    # 首 chunk：立即渲染一次显示"深度思考中..." spinner
+                    self.viewer._think_text_streaming_started = True
+                    self.viewer._thinking_finalized = False
+                    self.viewer._schedule_render(immediate=True)
+                # 后续 chunk：静默累积，不触发渲染/高度更新
+                self._content_just_loaded = True
+                return
+            # <think> 已闭合或无 think 标签：恢复正常渲染
+            self.viewer._think_text_streaming_started = False
+            # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
+            # 末尾闭合的 </think>（仅 reasoning_content 路径需要此行为）
+            self.viewer._thinking_finalized = True
             # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
             # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
             # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
@@ -7591,6 +7627,7 @@ class MessageCard(SimpleCardWidget):
         # 已完成 think-block 的 </think> 被 _render_markdown_to_html 错误剥离。
         if self.viewer:
             self.viewer._reasoning_streaming_started = False
+            self.viewer._think_text_streaming_started = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
         if self.viewer and getattr(self.viewer, "page", None):
