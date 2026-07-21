@@ -3939,6 +3939,24 @@ class CodeWebViewer(QWebEngineView):
                             el.remove();
                         }}
                     }});
+                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 tool-block
+                    // 多轮工具调用场景：旧已完成 tool-block 堆积在 tool-content 底部不清理。
+                    // 收集 content-placeholder 中当前 tool 块的 tool-call-id 集合，
+                    // 移除 tool-content 中不在集合内的已完成 tool 块（保留流式进行中的块）。
+                    var _currentToolIds = new Set();
+                    Array.prototype.forEach.call(blocks, function(el) {{
+                        var _tid = el.getAttribute('data-tool-call-id');
+                        if (_tid) {{
+                            _currentToolIds.add(_tid);
+                        }}
+                    }});
+                    Array.prototype.forEach.call(toolContent.querySelectorAll('.tool-block'), function(el) {{
+                        var _tid = el.getAttribute('data-tool-call-id');
+                        var _streaming = el.getAttribute('data-streaming');
+                        if (_tid && !_currentToolIds.has(_tid) && _streaming !== 'true') {{
+                            el.remove();
+                        }}
+                    }});
                     // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
                     // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
                     var posMap = Object.create(null);
@@ -4714,6 +4732,11 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         self._sync_streaming_dock(False)
+        # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
+        # 后续非流式渲染拿到缺内容的旧 <tool> markdown，造成 tool-block
+        # 在 reorganizeContent 中因不匹配而被清除或生成重复。
+        if hasattr(self, "_tool_md_cache"):
+            self._tool_md_cache.clear()
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
