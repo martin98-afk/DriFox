@@ -131,3 +131,33 @@ def get_records(limit: int = 500) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"[ShareHistory] 查询记录失败: {e}")
         return []
+
+
+def delete_record(record_id: int) -> bool:
+    """删除单条分享记录"""
+    try:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        conn.execute("DELETE FROM share_records WHERE id = ?", (record_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"[ShareHistory] 删除记录失败: {e}")
+        return False
+
+
+def clear_all_records() -> bool:
+    """清空全部分享记录"""
+    try:
+        conn = _get_conn()
+        if conn is None:
+            return False
+        conn.execute("DELETE FROM share_records")
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"[ShareHistory] 清空记录失败: {e}")
+        return False

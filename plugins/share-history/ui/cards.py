@@ -4,8 +4,8 @@
 功能：
 - 浏览历史分享记录（会话分享 + 项目导出）
 - 按时间倒序排列
-- 打开本地文件
-- 复制上传链接
+- 打开本地文件 / 复制上传链接
+- 搜索筛选 / 单条删除 / 清空全部
 
 设计约束（闭包）：
 - 不导入 app.core 或 app.widgets 内部的任何模块
@@ -27,8 +27,9 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -38,7 +39,6 @@ from qfluentwidgets import (
     FluentLabelBase,
     IconWidget,
     InfoBar,
-    InfoBarPosition,
     ScrollArea,
     StrongBodyLabel,
     ToolButton,
@@ -46,7 +46,7 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from .db import get_records
+from .db import clear_all_records, delete_record, get_records
 
 
 # ════════════════════════════════════════════════════════════
@@ -78,6 +78,24 @@ def _ctx_border_color(ctx: dict) -> str:
 def _ctx_color(ctx: dict, key: str, fallback: str) -> str:
     return ctx.get("colors", {}).get(key, fallback)
 
+
+# ════════════════════════════════════════════════════════════
+# 默认主题配置
+# ════════════════════════════════════════════════════════════
+
+_DEFAULT_THEME: Dict[str, Any] = {
+    "tc": "rgba(255,255,255,0.9)",
+    "tcs": "rgba(255,255,255,0.55)",
+    "border_c": "rgba(128,128,128,0.15)",
+    "card_bg_dim": "rgba(128,128,128,0.06)",
+    "hover_bg": "rgba(128,128,128,0.10)",
+    "badge_bg": "rgba(128,128,128,0.10)",
+    "btn_bg": "rgba(128,128,128,0.08)",
+    "btn_border": "rgba(128,128,128,0.15)",
+    "btn_disabled": "rgba(128,128,128,0.4)",
+    "ff": "Microsoft YaHei",
+    "fs": 14,
+}
 
 # ════════════════════════════════════════════════════════════
 # 类型常量
@@ -114,37 +132,21 @@ class _LoadWorker(QObject):
 class _RecordItem(QFrame):
     """单条分享记录展示行"""
 
+    deleted = pyqtSignal(int)  # 删除请求，携带 record id
+
     def __init__(
         self,
         record: Dict[str, Any],
         parent=None,
-        tc="rgba(255,255,255,0.9)",
-        tcs="rgba(255,255,255,0.55)",
-        border_c="rgba(128,128,128,0.15)",
-        card_bg_dim="rgba(128,128,128,0.06)",
-        hover_bg="rgba(128,128,128,0.10)",
-        badge_bg="rgba(128,128,128,0.10)",
-        btn_bg="rgba(128,128,128,0.08)",
-        btn_border="rgba(128,128,128,0.15)",
-        btn_disabled="rgba(128,128,128,0.4)",
-        ff="Microsoft YaHei",
-        fs=14,
+        theme: Optional[dict] = None,
     ):
         super().__init__(parent)
         self._record = record
 
-        # 主题色缓存
-        self._tc = tc
-        self._tcs = tcs
-        self._border_c = border_c
-        self._card_bg_dim = card_bg_dim
-        self._hover_bg = hover_bg
-        self._badge_bg = badge_bg
-        self._btn_bg = btn_bg
-        self._btn_border = btn_border
-        self._btn_disabled = btn_disabled
-        self._ff = ff
-        self._fs = fs
+        # 主题配置（合并默认值）
+        self._theme = dict(_DEFAULT_THEME)
+        if theme:
+            self._theme.update(theme)
 
         # widget 引用（供 refresh_theme 用）
         self._title_lb: Optional[QLabel] = None
@@ -154,6 +156,7 @@ class _RecordItem(QFrame):
         self._open_btn: Optional[QPushButton] = None
         self._copy_btn: Optional[QPushButton] = None
         self._missing_btn: Optional[QPushButton] = None
+        self._delete_btn: Optional[QPushButton] = None
 
         self._setup_ui()
 
@@ -258,59 +261,83 @@ class _RecordItem(QFrame):
             self._copy_btn.clicked.connect(lambda: self._copy_link(upload_url))
             row3.addWidget(self._copy_btn)
 
+        # 删除按钮
+        self._delete_btn = QPushButton("🗑️")
+        self._delete_btn.setFixedHeight(26)
+        self._delete_btn.setFixedWidth(32)
+        self._delete_btn.setCursor(Qt.PointingHandCursor)
+        self._delete_btn.setToolTip("删除此记录")
+        self._delete_btn.clicked.connect(self._on_delete_clicked)
+        row3.addWidget(self._delete_btn)
+
         layout.addLayout(row3)
 
         # 最后用主题色装饰全部
         self._apply_theme()
 
+    def _on_delete_clicked(self):
+        """弹出确认对话框，确认后发射 deleted 信号"""
+        parent = self.window()
+        reply = QMessageBox.question(
+            parent or self,
+            "确认删除",
+            f"确定要删除「{self._record.get('title', '未命名')}」这条分享记录吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            rid = self._record.get("id")
+            if rid is not None:
+                self.deleted.emit(rid)
+
     def _apply_theme(self):
         """用当前缓存的颜色值刷新全部样式表"""
-        fs = self._fs
-        ff = self._ff
+        t = self._theme
+        fs = t["fs"]
+        ff = t["ff"]
 
         # QFrame 自身背景 + 边框
         self.setStyleSheet(f"""
             #recordRow {{
-                background: {self._card_bg_dim};
-                border: 1px solid {self._border_c};
+                background: {t["card_bg_dim"]};
+                border: 1px solid {t["border_c"]};
                 border-radius: 8px;
             }}
             #recordRow:hover {{
-                background: {self._hover_bg};
-                border: 1px solid {self._border_c};
+                background: {t["hover_bg"]};
+                border: 1px solid {t["border_c"]};
             }}
         """)
 
-        # 标题 — 显式 color 确保主题色应用
+        # 标题
         if self._title_lb:
             self._title_lb.setStyleSheet(
-                f"font-weight: 600; background: transparent; font-size: {fs}px; color: {self._tc};"
+                f"font-weight: 600; background: transparent; font-size: {fs}px; color: {t['tc']}; font-family: '{ff}';"
             )
 
         # 时间
         if self._time_lb:
             self._time_lb.setStyleSheet(
-                f"background: transparent; font-size: {max(fs - 1, 12)}px;"
-                f" color: {self._tcs}; font-family: '{self._ff}';"
+                f"background: transparent; font-size: {max(fs - 1, 12)}px; color: {t['tcs']}; font-family: '{ff}';"
             )
 
         # 辅助信息
         if self._info_lb:
             self._info_lb.setStyleSheet(
-                f"background: transparent; font-size: {max(fs - 1, 12)}px;"
-                f" color: {self._tcs}; font-family: '{self._ff}';"
+                f"background: transparent; font-size: {max(fs - 1, 12)}px; color: {t['tcs']}; font-family: '{ff}';"
             )
 
         # 格式徽章
         if self._badge:
             self._badge.setStyleSheet(f"""
                 QLabel {{
-                    background: {self._badge_bg};
+                    background: {t["badge_bg"]};
                     border-radius: 4px;
                     padding: 0 8px;
                     font-size: 11px;
                     font-weight: 500;
-                    color: {self._tcs};
+                    color: {t["tcs"]};
+                    font-family: '{ff}';
                 }}
             """)
 
@@ -320,16 +347,16 @@ class _RecordItem(QFrame):
         if self._open_btn:
             self._open_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {self._btn_bg};
-                    border: 1px solid {self._btn_border};
+                    background: {t["btn_bg"]};
+                    border: 1px solid {t["btn_border"]};
                     border-radius: 4px;
                     padding: 0 10px;
-                    color: {self._tc};
+                    color: {t["tc"]};
                     font-size: {btn_fs}px;
-                    font-family: '{self._ff}';
+                    font-family: '{ff}';
                 }}
                 QPushButton:hover {{
-                    background: {self._hover_bg};
+                    background: {t["hover_bg"]};
                 }}
             """)
 
@@ -337,16 +364,16 @@ class _RecordItem(QFrame):
         if self._copy_btn:
             self._copy_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {self._btn_bg};
-                    border: 1px solid {self._btn_border};
+                    background: {t["btn_bg"]};
+                    border: 1px solid {t["btn_border"]};
                     border-radius: 4px;
                     padding: 0 10px;
-                    color: {self._tc};
+                    color: {t["tc"]};
                     font-size: {btn_fs}px;
-                    font-family: '{self._ff}';
+                    font-family: '{ff}';
                 }}
                 QPushButton:hover {{
-                    background: {self._hover_bg};
+                    background: {t["hover_bg"]};
                 }}
             """)
 
@@ -354,53 +381,35 @@ class _RecordItem(QFrame):
         if self._missing_btn:
             self._missing_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: {self._card_bg_dim};
+                    background: {t["card_bg_dim"]};
                     border: 1px solid transparent;
                     border-radius: 4px;
                     padding: 0 10px;
-                    color: {self._btn_disabled};
+                    color: {t["btn_disabled"]};
                     font-size: {btn_fs}px;
-                    font-family: '{self._ff}';
+                    font-family: '{ff}';
                 }}
             """)
 
-    def refresh_theme(
-        self,
-        tc=None,
-        tcs=None,
-        border_c=None,
-        card_bg_dim=None,
-        hover_bg=None,
-        badge_bg=None,
-        btn_bg=None,
-        btn_border=None,
-        btn_disabled=None,
-        ff=None,
-        fs=None,
-    ):
+        # 删除按钮
+        if self._delete_btn:
+            self._delete_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: 1px solid transparent;
+                    border-radius: 4px;
+                    padding: 0 4px;
+                    font-size: {btn_fs}px;
+                }}
+                QPushButton:hover {{
+                    background: rgba(255,60,60,0.15);
+                    border: 1px solid rgba(255,60,60,0.3);
+                }}
+            """)
+
+    def refresh_theme(self, theme: dict):
         """主题切换时由父卡片调用，更新全部颜色"""
-        if tc is not None:
-            self._tc = tc
-        if tcs is not None:
-            self._tcs = tcs
-        if border_c is not None:
-            self._border_c = border_c
-        if card_bg_dim is not None:
-            self._card_bg_dim = card_bg_dim
-        if hover_bg is not None:
-            self._hover_bg = hover_bg
-        if badge_bg is not None:
-            self._badge_bg = badge_bg
-        if btn_bg is not None:
-            self._btn_bg = btn_bg
-        if btn_border is not None:
-            self._btn_border = btn_border
-        if btn_disabled is not None:
-            self._btn_disabled = btn_disabled
-        if ff is not None:
-            self._ff = ff
-        if fs is not None:
-            self._fs = fs
+        self._theme.update(theme)
         self._apply_theme()
 
     def _open_file(self, path: str):
@@ -445,18 +454,13 @@ class ShareHistoryCard(QWidget):
         self._worker: Optional[_LoadWorker] = None
         self._header_icon: Optional[IconWidget] = None
 
-        # 缓存上下文值
-        self._cached_tc = "rgba(255,255,255,0.9)"
-        self._cached_tcs = "rgba(255,255,255,0.55)"
-        self._cached_border_c = "rgba(128,128,128,0.15)"
-        self._cached_card_bg_dim = "rgba(128,128,128,0.06)"
-        self._cached_hover_bg = "rgba(128,128,128,0.10)"
-        self._cached_badge_bg = "rgba(128,128,128,0.10)"
-        self._cached_btn_bg = "rgba(128,128,128,0.08)"
-        self._cached_btn_border = "rgba(128,128,128,0.15)"
-        self._cached_btn_disabled = "rgba(128,128,128,0.4)"
-        self._cached_font_family = "Microsoft YaHei"
-        self._cached_font_size = 14
+        # 全量记录 + 主题配置
+        self._all_records: List[Dict[str, Any]] = []
+        self._theme = dict(_DEFAULT_THEME)
+
+        # widget 引用
+        self._search_input: Optional[QLineEdit] = None
+        self._clear_btn: Optional[ToolButton] = None
 
         self._setup_ui()
 
@@ -501,26 +505,22 @@ class ShareHistoryCard(QWidget):
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
 
-        # 从主题颜色表中提取更多语义色
         colors = ctx.get("colors", {})
-        card_bg_dim = colors.get("card_bg_dim", "rgba(128,128,128,0.06)")
-        hover_bg = colors.get("hover_bg", "rgba(128,128,128,0.10)")
-        badge_bg = colors.get("card_bg_dim", "rgba(128,128,128,0.10)")
-        btn_bg = colors.get("toolbar_bg", "rgba(128,128,128,0.08)")
-        btn_border = border_c
-        btn_disabled = colors.get("text_muted", "rgba(128,128,128,0.4)")
-
-        self._cached_tc = tc
-        self._cached_tcs = tcs
-        self._cached_border_c = border_c
-        self._cached_card_bg_dim = card_bg_dim
-        self._cached_hover_bg = hover_bg
-        self._cached_badge_bg = badge_bg
-        self._cached_btn_bg = btn_bg
-        self._cached_btn_border = btn_border
-        self._cached_btn_disabled = btn_disabled
-        self._cached_font_family = font_family
-        self._cached_font_size = font_size
+        self._theme.update(
+            {
+                "tc": tc,
+                "tcs": tcs,
+                "border_c": border_c,
+                "card_bg_dim": colors.get("card_bg_dim", "rgba(128,128,128,0.06)"),
+                "hover_bg": colors.get("hover_bg", "rgba(128,128,128,0.10)"),
+                "badge_bg": colors.get("card_bg_dim", "rgba(128,128,128,0.10)"),
+                "btn_bg": colors.get("toolbar_bg", "rgba(128,128,128,0.08)"),
+                "btn_border": border_c,
+                "btn_disabled": colors.get("text_muted", "rgba(128,128,128,0.4)"),
+                "ff": font_family,
+                "fs": font_size,
+            }
+        )
 
         # 第 1 层：QFont 级联
         if font_family:
@@ -536,19 +536,39 @@ class ShareHistoryCard(QWidget):
             pass
 
     def _retheme(self):
-        """第 2+3 层字体 + 背景色刷新策略"""
-        tc = self._cached_tc
-        tcs = self._cached_tcs
-        ff = self._cached_font_family
-        fs = self._cached_font_size
+        """刷新全部子控件颜色+字体"""
+        t = self._theme
+        tc = t["tc"]
+        tcs = t["tcs"]
+        ff = t["ff"]
+        fs = t["fs"]
 
-        # 刷新 header 标题/状态（可能在 _build_header 中用 _text_color 初始化的）
+        # 刷新 header 标题/状态
         try:
             self._header_title.setStyleSheet(f"color: {tc}; background: transparent;")
             self._status_lb.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
         except RuntimeError:
             pass
 
+        # 搜索框样式
+        try:
+            if self._search_input:
+                self._search_input.setStyleSheet(f"""
+                    QLineEdit {{
+                        background: {t["card_bg_dim"]};
+                        border: 1px solid {t["border_c"]};
+                        border-radius: 4px;
+                        padding: 4px 8px;
+                        color: {tc};
+                        font-size: 12px;
+                        font-family: '{ff}';
+                        selection-background-color: {tc};
+                    }}
+                """)
+        except RuntimeError:
+            pass
+
+        # QLabel 级联刷新
         for child in self.findChildren(QLabel):
             try:
                 if isinstance(child, FluentLabelBase) and ff:
@@ -566,7 +586,7 @@ class ShareHistoryCard(QWidget):
             except RuntimeError:
                 pass
 
-        # QPushButton 也需要 font
+        # QPushButton 字体
         for child in self.findChildren(QPushButton):
             try:
                 cur = child.styleSheet()
@@ -574,22 +594,10 @@ class ShareHistoryCard(QWidget):
             except RuntimeError:
                 pass
 
-        # 刷新 _RecordItem 子项的完整主题色（背景+边框+文字）
+        # 刷新 _RecordItem 子项
         for child in self.findChildren(_RecordItem):
             try:
-                child.refresh_theme(
-                    tc=tc,
-                    tcs=tcs,
-                    border_c=self._cached_border_c,
-                    card_bg_dim=self._cached_card_bg_dim,
-                    hover_bg=self._cached_hover_bg,
-                    badge_bg=self._cached_badge_bg,
-                    btn_bg=self._cached_btn_bg,
-                    btn_border=self._cached_btn_border,
-                    btn_disabled=self._cached_btn_disabled,
-                    ff=ff,
-                    fs=fs,
-                )
+                child.refresh_theme(self._theme)
             except RuntimeError:
                 pass
 
@@ -612,6 +620,9 @@ class ShareHistoryCard(QWidget):
         self._sep.setFrameShape(QFrame.HLine)
         self._sep.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px;")
         root.addWidget(self._sep)
+
+        # ── 搜索条 ──
+        self._build_search_bar(root)
 
         # ── 滚动内容区 ──
         self._scroll = ScrollArea(self)
@@ -639,7 +650,7 @@ class ShareHistoryCard(QWidget):
         root.addWidget(self._scroll, 1)
 
     def _build_header(self, root: QVBoxLayout):
-        """标题栏：图标 + 标题 + 状态 + 刷新 + 关闭"""
+        """标题栏：图标 + 标题 + 状态 + 清空 + 刷新 + 关闭"""
         header = QWidget(self)
         header.setStyleSheet("background: transparent;")
         hly = QHBoxLayout(header)
@@ -665,6 +676,12 @@ class ShareHistoryCard(QWidget):
 
         hly.addStretch(1)
 
+        # 清空按钮
+        self._clear_btn = ToolButton(FluentIcon.DELETE, header)
+        self._clear_btn.setToolTip("清空全部记录")
+        self._clear_btn.clicked.connect(self._on_clear_all)
+        hly.addWidget(self._clear_btn)
+
         # 刷新按钮
         self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
@@ -679,6 +696,43 @@ class ShareHistoryCard(QWidget):
         hly.addWidget(close_btn)
 
         root.addWidget(header)
+
+    def _build_search_bar(self, root: QVBoxLayout):
+        """搜索输入条"""
+        container = QWidget(self)
+        container.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(16, 6, 16, 2)
+        layout.setSpacing(0)
+
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet("background: transparent; font-size: 12px;")
+        layout.addWidget(search_icon)
+
+        self._search_input = QLineEdit(container)
+        self._search_input.setPlaceholderText("搜索标题…")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setFixedHeight(28)
+        self._search_input.textChanged.connect(self._on_search_changed)
+        layout.addWidget(self._search_input, 1)
+
+        root.addWidget(container)
+
+    # ── 搜索 ────────────────────────────────────────────
+
+    def _on_search_changed(self, text: str):
+        """搜索文本变化 → 重新过滤渲染"""
+        self._apply_filter(text.strip())
+
+    def _apply_filter(self, keyword: str):
+        """根据关键字过滤并重新渲染"""
+        if not keyword:
+            self._render_records(self._all_records, update_search=False)
+            return
+
+        keyword_lower = keyword.lower()
+        filtered = [r for r in self._all_records if keyword_lower in r.get("title", "").lower()]
+        self._render_records(filtered, update_search=False)
 
     # ── 比例高度 ────────────────────────────────────────
 
@@ -710,6 +764,12 @@ class ShareHistoryCard(QWidget):
         self._status_lb.setText("读取中…")
         self._show_empty_state()
 
+        # 清空搜索框
+        if self._search_input:
+            self._search_input.blockSignals(True)
+            self._search_input.clear()
+            self._search_input.blockSignals(False)
+
         self._worker = _LoadWorker()
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
@@ -727,7 +787,9 @@ class ShareHistoryCard(QWidget):
         self._refresh_btn.setEnabled(True)
         self._status_lb.setText("")
         self._cleanup_worker()
-        self._render_records(records)
+
+        self._all_records = records
+        self._render_records(records, update_search=False)
 
     def _on_load_error(self, err: str):
         logger.warning(f"[ShareHistory] 加载记录失败: {err}")
@@ -735,48 +797,38 @@ class ShareHistoryCard(QWidget):
         self._status_lb.setText("")
         self._cleanup_worker()
 
-    def _render_records(self, records: List[Dict[str, Any]]):
+    # ── 渲染 ────────────────────────────────────────────
+
+    def _render_records(self, records: List[Dict[str, Any]], update_search: bool = True):
         """渲染记录列表"""
         # 清空内容
         self._clear_content()
 
         if not records:
             self._show_empty_state()
+            self._status_lb.setText(f"共 {len(self._all_records)} 条" if self._all_records else "")
             return
 
         self._status_lb.setText(f"共 {len(records)} 条")
         for rec in records:
-            item = _RecordItem(
-                rec,
-                tc=self._cached_tc,
-                tcs=self._cached_tcs,
-                border_c=self._cached_border_c,
-                card_bg_dim=self._cached_card_bg_dim,
-                hover_bg=self._cached_hover_bg,
-                badge_bg=self._cached_badge_bg,
-                btn_bg=self._cached_btn_bg,
-                btn_border=self._cached_btn_border,
-                btn_disabled=self._cached_btn_disabled,
-                ff=self._cached_font_family,
-                fs=self._cached_font_size,
-            )
+            item = _RecordItem(rec, theme=self._theme)
+            item.deleted.connect(self._on_item_deleted)
             self._content_layout.addWidget(item)
 
         self._content_layout.addStretch()
 
-        # 刷新主题色 + 字体
-        self._retheme()
+        # 不需要再调 _retheme() — _RecordItem 构造时已用最新 theme
 
     def _show_empty_state(self):
-        """显示空状态（使用缓存的上下文颜色+字体）"""
+        """显示空状态"""
         self._clear_content()
+        t = self._theme
         empty_lb = QLabel("暂无分享记录\n分享会话或导出项目后，记录将出现在这里")
         empty_lb.setAlignment(Qt.AlignCenter)
         empty_lb.setWordWrap(True)
         empty_lb.setStyleSheet(
-            f"color: {self._cached_tcs}; background: transparent; padding: 40px;"
-            f" font-family: '{self._cached_font_family}';"
-            f" font-size: {self._cached_font_size}px;"
+            f"color: {t['tcs']}; background: transparent; padding: 40px;"
+            f" font-family: '{t['ff']}'; font-size: {t['fs']}px;"
         )
         self._content_layout.addWidget(empty_lb, 1, Qt.AlignCenter)
 
@@ -786,6 +838,69 @@ class ShareHistoryCard(QWidget):
             item = self._content_layout.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
+
+    # ── 删除 ────────────────────────────────────────────
+
+    def _on_item_deleted(self, record_id: int):
+        """处理单条记录删除"""
+        if delete_record(record_id):
+            # 从内存缓存中移除
+            self._all_records = [r for r in self._all_records if r.get("id") != record_id]
+            # 重新应用搜索过滤
+            keyword = self._search_input.text().strip() if self._search_input else ""
+            self._apply_filter(keyword)
+
+            parent = self.window()
+            if parent:
+                InfoBar.success(
+                    title="",
+                    content="记录已删除",
+                    duration=2000,
+                    parent=parent,
+                )
+        else:
+            parent = self.window()
+            if parent:
+                InfoBar.error(
+                    title="",
+                    content="删除失败",
+                    duration=2000,
+                    parent=parent,
+                )
+
+    def _on_clear_all(self):
+        """清空全部记录"""
+        if not self._all_records:
+            return
+
+        parent = self.window()
+        reply = QMessageBox.question(
+            parent or self,
+            "确认清空",
+            f"确定要清空全部 {len(self._all_records)} 条分享记录吗？\n此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            if clear_all_records():
+                self._all_records.clear()
+                self._render_records([], update_search=False)
+
+                if parent:
+                    InfoBar.success(
+                        title="",
+                        content="已清空全部记录",
+                        duration=2000,
+                        parent=parent,
+                    )
+            else:
+                if parent:
+                    InfoBar.error(
+                        title="",
+                        content="清空失败",
+                        duration=2000,
+                        parent=parent,
+                    )
 
     # ── 生命周期 ────────────────────────────────────────
 
