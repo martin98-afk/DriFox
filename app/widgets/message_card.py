@@ -7499,9 +7499,14 @@ class MessageCard(SimpleCardWidget):
                     return;
                 }}
                 // 无已有流式块时，追加新块（兜底逻辑）
-                var d = document.createElement('div');
-                d.innerHTML = {safe_html};
-                tc.appendChild(d);
+                // 🐛 修复：不使用包装器 div（createElement+innerHTML+appendChild），
+                // 改为直接追加 .tool-block 元素到 #tool-content。
+                // 原包装器 div 不是 .tool-block，无 data-tool-call-id，
+                // reorganizeContent 排序时 getPos=1e9 → 永远沉底，也无法被清理。
+                var _wrap = document.createElement('div');
+                _wrap.innerHTML = {safe_html};
+                var _newBlock = _wrap.firstElementChild;
+                if (_newBlock) tc.appendChild(_newBlock);
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
