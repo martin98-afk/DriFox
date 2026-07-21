@@ -4757,6 +4757,33 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
+        # 🆕 流式结束：自动折叠工具与思考区。在最终渲染完成后执行，
+        # 减少"弹到抬头"时的视觉跳跃，让已完成内容的展示更紧凑。
+        # 若有流式进行中的工具块（data-streaming="true"）则暂不折叠，
+        # 等待后续 tool_result_received 处理完成后自然收敛。
+        self._auto_collapse_tool_section()
+
+    def _auto_collapse_tool_section(self):
+        """流式结束时自动折叠工具与思考区
+
+        在 dock 归位 + 最终渲染完成后折叠工具区，减少"弹到抬头"的视觉跳跃。
+        检测到仍有流式进行中的块时跳过折叠，等后续工具结果到达再自然收敛。
+        """
+        try:
+            if self._is_js_ready and self.page():
+                self.page().runJavaScript(
+                    "(function(){"
+                    "var _ts=document.getElementById('tool-section');"
+                    "var _sep=document.getElementById('tool-separator');"
+                    "if(_ts&&!_ts.querySelector('[data-streaming=\"true\"]')){"
+                    "  _ts.setAttribute('data-collapsed','true');"
+                    "  if(_sep)_sep.setAttribute('aria-expanded','false');"
+                    "  if(typeof reportHeightDebounced==='function')reportHeightDebounced();"
+                    "}"
+                    "})();"
+                )
+        except RuntimeError:
+            pass
 
     def _sync_streaming_dock(self, active: bool):
         """同步流式活动坞状态到 JS 端。
