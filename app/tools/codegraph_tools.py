@@ -375,43 +375,57 @@ class CodeGraphTools:
         return "\n".join(lines)
 
     def _mode_files(self, cg: CodeGraph, directory: Optional[str], by_directory: bool) -> str:
-        all_files = cg._queries.get_all_file_paths()
+        # 单条 SQL 批量加载文件信息 + 符号分布 (v1.3.5+ 公共 API)
+        files_info = cg.get_files_summary()
         if directory:
-            all_files = [f for f in all_files if f.startswith(directory)]
-        if not all_files:
+            files_info = [f for f in files_info if f['path'].startswith(directory)]
+        if not files_info:
             return "没有已索引的文件"
+
+        # Collapse noise directories from listing
+        SKIP_DIRS = {
+            '__pycache__', '.git', '.hg', '.svn', '.idea', '.vscode',
+            '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox',
+            'node_modules', 'venv', '.venv', '.codegraph',
+            'dist', 'build', 'target', '.next', 'Pods', '.build', 'out',
+        }
 
         if by_directory:
             from collections import defaultdict
 
-            dirs: Dict[str, List[str]] = defaultdict(list)
-            for f in sorted(all_files):
-                d = os.path.dirname(f) or "."
+            dirs: Dict[str, List[Dict]] = defaultdict(list)
+            for f in files_info:
+                d = os.path.dirname(f['path']) or "."
+                # Skip noise directories
+                if d.startswith('.') or d.split(os.sep)[0] in SKIP_DIRS:
+                    continue
                 dirs[d].append(f)
 
-            lines = [f"📁 已索引文件 ({len(all_files)} 个, {len(dirs)} 个目录)\n"]
+            total_files = len(files_info)
+            lines = [f"📁 已索引文件 ({total_files} 个, {len(dirs)} 个目录)\n"]
             for d in sorted(dirs):
-                lines.append(f"**{d}/**")
-                for f in dirs[d]:
-                    nodes = cg.get_nodes_by_file(f)
-                    kinds = {}
-                    for n in nodes:
-                        k = n.kind
-                        kinds[k] = kinds.get(k, 0) + 1
-                    kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
-                    lines.append(
-                        f"  - {os.path.basename(f)}  ({kind_str})" if kind_str else f"  - {os.path.basename(f)}"
-                    )
+                count = len(dirs[d])
+                # Collapse large directories — show count only
+                if count > 10:
+                    langs = {f['language'] for f in dirs[d] if f['language'] != 'unknown'}
+                    lang_str = ', '.join(sorted(langs))
+                    lines.append(f"**{d}/**  ({count} 文件, {lang_str})")
+                else:
+                    lines.append(f"**{d}/**")
+                    for f in dirs[d]:
+                        kinds = {k: v for k, v in f['kinds'].items() if k != 'file'}
+                        kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
+                        lines.append(
+                            f"  - {os.path.basename(f['path'])}  ({kind_str})"
+                            if kind_str else f"  - {os.path.basename(f['path'])}"
+                        )
         else:
-            lines = [f"📁 已索引文件 ({len(all_files)} 个)\n"]
-            for f in sorted(all_files):
-                nodes = cg.get_nodes_by_file(f)
-                kinds = {}
-                for n in nodes:
-                    k = n.kind
-                    kinds[k] = kinds.get(k, 0) + 1
-                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
-                lines.append(f"- {f}  ({kind_str})" if kind_str else f"- {f}")
+            total_files = len(files_info)
+            lines = [f"📁 已索引文件 ({total_files} 个)\n"]
+            for f in files_info:
+                kinds = {k: v for k, v in f['kinds'].items() if k != 'file'}
+                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
+                lines.append(f"- {f['path']}  ({kind_str})" if kind_str else f"- {f['path']}")
 
         return "\n".join(lines)
 
