@@ -1127,6 +1127,17 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
 
+def _has_unclosed_think(text: str) -> bool:
+    """检测文本中是否存在未闭合的 <think> 标签（最后一个 <think> 之后无 </think>）。"""
+    if not text:
+        return False
+    last_open = text.rfind("<think>")
+    if last_open == -1:
+        return False
+    last_close = text.rfind("</think>", last_open)
+    return last_close == -1
+
+
 def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
@@ -2086,6 +2097,9 @@ class CodeWebViewer(QWebEngineView):
         self._thinking_finalized = False
         # 流式思考首 chunk 标志：首 chunk 渲染"深度思考中..." spinner，后续静默累积不更新 DOM
         self._reasoning_streaming_started = False
+        # <think> 标签文本流式思考标志：与 _reasoning_streaming_started 对应，
+        # 用于 text 块中包含 <think> 标签时的静默累积策略
+        self._think_text_streaming_started = False
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -3939,6 +3953,24 @@ class CodeWebViewer(QWebEngineView):
                             el.remove();
                         }}
                     }});
+                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 tool-block
+                    // 多轮工具调用场景：旧已完成 tool-block 堆积在 tool-content 底部不清理。
+                    // 收集 content-placeholder 中当前 tool 块的 tool-call-id 集合，
+                    // 移除 tool-content 中不在集合内的已完成 tool 块（保留流式进行中的块）。
+                    var _currentToolIds = new Set();
+                    Array.prototype.forEach.call(blocks, function(el) {{
+                        var _tid = el.getAttribute('data-tool-call-id');
+                        if (_tid) {{
+                            _currentToolIds.add(_tid);
+                        }}
+                    }});
+                    Array.prototype.forEach.call(toolContent.querySelectorAll('.tool-block'), function(el) {{
+                        var _tid = el.getAttribute('data-tool-call-id');
+                        var _streaming = el.getAttribute('data-streaming');
+                        if (_tid && !_currentToolIds.has(_tid) && _streaming !== 'true') {{
+                            el.remove();
+                        }}
+                    }});
                     // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
                     // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
                     var posMap = Object.create(null);
@@ -4369,9 +4401,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
-                // 🐛 修复：文本追加后同步报告高度，缩短 _document_height 更新延迟，
-                // 让 wheelEvent 能及时获取最新 scrollHeight 做边界判定。
-                reportHeight();
+                reportHeightDebounced();
             }})();
             """
             self.page().runJavaScript(js)
@@ -4714,6 +4744,14 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         self._sync_streaming_dock(False)
+        # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
+        # 后续非流式渲染拿到缺内容的旧 <tool> markdown，造成 tool-block
+        # 在 reorganizeContent 中因不匹配而被清除或生成重复。
+        if hasattr(self, "_tool_md_cache"):
+            self._tool_md_cache.clear()
+        # 重置思考文本流式标志，防止下一轮对话误判
+        self._think_text_streaming_started = False
+        self._reasoning_streaming_started = False
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
@@ -7285,6 +7323,25 @@ class MessageCard(SimpleCardWidget):
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
             if self._streaming:
                 self.viewer._append_text_incremental(text)
+            # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
+            # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
+            # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
+            last_block = self._content_data[-1] if self._content_data else None
+            last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
+            if _has_unclosed_think(last_text):
+                if not self.viewer._think_text_streaming_started:
+                    # 首 chunk：立即渲染一次显示"深度思考中..." spinner
+                    self.viewer._think_text_streaming_started = True
+                    self.viewer._thinking_finalized = False
+                    self.viewer._schedule_render(immediate=True)
+                # 后续 chunk：静默累积，不触发渲染/高度更新
+                self._content_just_loaded = True
+                return
+            # <think> 已闭合或无 think 标签：恢复正常渲染
+            self.viewer._think_text_streaming_started = False
+            # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
+            # 末尾闭合的 </think>（仅 reasoning_content 路径需要此行为）
+            self.viewer._thinking_finalized = True
             # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
             # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
             # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
@@ -7476,9 +7533,14 @@ class MessageCard(SimpleCardWidget):
                     return;
                 }}
                 // 无已有流式块时，追加新块（兜底逻辑）
-                var d = document.createElement('div');
-                d.innerHTML = {safe_html};
-                tc.appendChild(d);
+                // 🐛 修复：不使用包装器 div（createElement+innerHTML+appendChild），
+                // 改为直接追加 .tool-block 元素到 #tool-content。
+                // 原包装器 div 不是 .tool-block，无 data-tool-call-id，
+                // reorganizeContent 排序时 getPos=1e9 → 永远沉底，也无法被清理。
+                var _wrap = document.createElement('div');
+                _wrap.innerHTML = {safe_html};
+                var _newBlock = _wrap.firstElementChild;
+                if (_newBlock) tc.appendChild(_newBlock);
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
@@ -7563,6 +7625,7 @@ class MessageCard(SimpleCardWidget):
         # 已完成 think-block 的 </think> 被 _render_markdown_to_html 错误剥离。
         if self.viewer:
             self.viewer._reasoning_streaming_started = False
+            self.viewer._think_text_streaming_started = False
         # DOM 端：将所有 data-streaming="true" 的旧块标记为完成
         # 兼容两种渲染形式：think-block（折叠框完成态）和 think-streaming（流式纯文本）
         if self.viewer and getattr(self.viewer, "page", None):

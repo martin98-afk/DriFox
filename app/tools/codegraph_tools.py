@@ -45,7 +45,7 @@ class CodeGraphTools:
         self._last_init_attempt = 0.0
         self._init_cooldown = 1.0
         self._last_sync_time = 0.0
-        self._sync_cooldown = 5.0  # 两次自动 sync 的最小间隔（秒）
+        self._sync_cooldown = 30.0  # 两次自动 sync 的最小间隔（秒）
         self._watch_enabled = watch  # 是否启用文件监听自动索引
 
     @property
@@ -219,10 +219,15 @@ class CodeGraphTools:
             details.append(f"删除 {result.files_removed}")
         return f"同步完成: {', '.join(details)}，更新 {result.nodes_updated} 个符号"
 
-    def _mode_search(self, cg: CodeGraph, query: str, kind: Optional[str], limit: int, exact: bool) -> str:
+    def _mode_search(self, cg: CodeGraph, query: str, kind: Optional[str],
+                     limit: int, exact: bool, substring: bool,
+                     visibility: Optional[str], case_sensitive: bool) -> str:
         if not query:
             return "请提供搜索关键词"
-        opts = SearchOptions(limit=limit, exact_match=exact)
+        opts = SearchOptions(limit=limit, exact_match=exact,
+                             substring=substring,
+                             visibility=visibility,
+                             case_sensitive=case_sensitive)
         if kind:
             opts.kinds = [kind]
         results = cg.search_nodes(query, opts)
@@ -294,7 +299,9 @@ class CodeGraphTools:
         return "\n".join(lines)
 
     def _mode_explore(self, cg: CodeGraph, query: str, max_files: int) -> str:
-        results = cg.search_nodes(query, SearchOptions(limit=max_files))
+        # 使用 explore_nodes — 批量查询 + 崩溃降级（单入口 v1.3.7+）
+        er = cg.explore_nodes(query, SearchOptions(limit=max_files), call_depth=1)
+        results = er.search_results
         if not results:
             return f"未找到匹配「{query}」的符号"
 
@@ -314,28 +321,13 @@ class CodeGraphTools:
             for n in nodes:
                 sig = self._sig(n)
                 lines.append(f"  [{n.kind}] **{n.name}**{sig}  L{n.start_line}-{n.end_line}")
-                # 调用者摘要
-                try:
-                    callers = cg.get_callers(n.id)
-                    if callers:
-                        summary = ", ".join(cn.name for cn, _ in callers[:5])
-                        extra = f"    ← 被 {summary}"
-                        if len(callers) > 5:
-                            extra += f" 等{len(callers)}处"
-                        lines.append(extra)
-                except Exception:
-                    pass
-                # 被调用者摘要
-                try:
-                    callees = cg.get_callees(n.id)
-                    if callees:
-                        summary = ", ".join(cn.name for cn, _ in callees[:5])
-                        extra = f"    → 调用 {summary}"
-                        if len(callees) > 5:
-                            extra += f" 等{len(callees)}处"
-                        lines.append(extra)
-                except Exception:
-                    pass
+                # 调用者摘要（来自 explore_nodes 的批量查询）
+                cs = er.caller_summary(n.id)
+                if cs['total_callers'] > 0:
+                    lines.append(f"    ← 被 {cs['total_callers']} 处调用（{cs['unique_files']} 个文件）")
+                ces = er.callee_summary(n.id)
+                if ces['total_callers'] > 0:
+                    lines.append(f"    → 调用 {ces['total_callers']} 处（{ces['unique_files']} 个文件）")
                 lines.append("")
 
         lines.append(f"📊 总计: {len(results)} 个匹配，{len(by_file)} 个文件")
@@ -351,23 +343,33 @@ class CodeGraphTools:
             if n.file_path:
                 files.add(n.file_path)
 
+        # ── 风险排序 ──
+        edge_counts: Dict[str, int] = {}
+        for e in subgraph.edges:
+            edge_counts[e.source] = edge_counts.get(e.source, 0) + 1
+            edge_counts[e.target] = edge_counts.get(e.target, 0) + 1
+
+        def _risk_label(ec: int) -> str:
+            return "⬆ 高" if ec >= 10 else ("⬡ 中" if ec >= 3 else "⬇ 低")
+
+        # 排序受影响符号（排除目标自身）
+        affected = []
+        for n in subgraph.nodes.values():
+            if n.id == node.id:
+                continue
+            ec = edge_counts.get(n.id, 0)
+            affected.append((n, ec))
+        affected.sort(key=lambda x: -x[1])
+
         lines = [
             f"💥 变更影响分析: 「{symbol}」",
             f"📊 影响范围: {len(subgraph.nodes)} 符号, {len(subgraph.edges)} 关系, {len(files)} 文件 (深度={depth})",
             "",
         ]
-        if len(subgraph.nodes) > 1:
-            # 按文件分组受影响符号
-            by_file: Dict[str, List] = {}
-            for n in subgraph.nodes.values():
-                if n.id == node.id:
-                    continue
-                by_file.setdefault(n.file_path, []).append(n)
-            lines.append(f"受影响的符号 ({len(subgraph.nodes) - 1}):")
-            for fp in sorted(by_file):
-                lines.append(f"  📄 {fp}")
-                for n in by_file[fp]:
-                    lines.append(f"    [{n.kind}] **{n.name}**  L{n.start_line}")
+        if affected:
+            lines.append(f"受影响的符号 ({len(affected)} 个，按风险排序):")
+            for n, ec in affected:
+                lines.append(f"  {_risk_label(ec)}  [{n.kind}] **{n.name}**  L{n.start_line}  ({n.file_path})")
             lines.append("")
         lines.append(f"涉及文件 ({len(files)}):")
         for f in sorted(files):
@@ -375,43 +377,57 @@ class CodeGraphTools:
         return "\n".join(lines)
 
     def _mode_files(self, cg: CodeGraph, directory: Optional[str], by_directory: bool) -> str:
-        all_files = cg._queries.get_all_file_paths()
+        # 单条 SQL 批量加载文件信息 + 符号分布 (v1.3.5+ 公共 API)
+        files_info = cg.get_files_summary()
         if directory:
-            all_files = [f for f in all_files if f.startswith(directory)]
-        if not all_files:
+            files_info = [f for f in files_info if f['path'].startswith(directory)]
+        if not files_info:
             return "没有已索引的文件"
+
+        # Collapse noise directories from listing
+        SKIP_DIRS = {
+            '__pycache__', '.git', '.hg', '.svn', '.idea', '.vscode',
+            '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox',
+            'node_modules', 'venv', '.venv', '.codegraph',
+            'dist', 'build', 'target', '.next', 'Pods', '.build', 'out',
+        }
 
         if by_directory:
             from collections import defaultdict
 
-            dirs: Dict[str, List[str]] = defaultdict(list)
-            for f in sorted(all_files):
-                d = os.path.dirname(f) or "."
+            dirs: Dict[str, List[Dict]] = defaultdict(list)
+            for f in files_info:
+                d = os.path.dirname(f['path']) or "."
+                # Skip noise directories
+                if d.startswith('.') or d.split(os.sep)[0] in SKIP_DIRS:
+                    continue
                 dirs[d].append(f)
 
-            lines = [f"📁 已索引文件 ({len(all_files)} 个, {len(dirs)} 个目录)\n"]
+            total_files = len(files_info)
+            lines = [f"📁 已索引文件 ({total_files} 个, {len(dirs)} 个目录)\n"]
             for d in sorted(dirs):
-                lines.append(f"**{d}/**")
-                for f in dirs[d]:
-                    nodes = cg.get_nodes_by_file(f)
-                    kinds = {}
-                    for n in nodes:
-                        k = n.kind
-                        kinds[k] = kinds.get(k, 0) + 1
-                    kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
-                    lines.append(
-                        f"  - {os.path.basename(f)}  ({kind_str})" if kind_str else f"  - {os.path.basename(f)}"
-                    )
+                count = len(dirs[d])
+                # Collapse large directories — show count only
+                if count > 10:
+                    langs = {f['language'] for f in dirs[d] if f['language'] != 'unknown'}
+                    lang_str = ', '.join(sorted(langs))
+                    lines.append(f"**{d}/**  ({count} 文件, {lang_str})")
+                else:
+                    lines.append(f"**{d}/**")
+                    for f in dirs[d]:
+                        kinds = {k: v for k, v in f['kinds'].items() if k != 'file'}
+                        kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
+                        lines.append(
+                            f"  - {os.path.basename(f['path'])}  ({kind_str})"
+                            if kind_str else f"  - {os.path.basename(f['path'])}"
+                        )
         else:
-            lines = [f"📁 已索引文件 ({len(all_files)} 个)\n"]
-            for f in sorted(all_files):
-                nodes = cg.get_nodes_by_file(f)
-                kinds = {}
-                for n in nodes:
-                    k = n.kind
-                    kinds[k] = kinds.get(k, 0) + 1
-                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
-                lines.append(f"- {f}  ({kind_str})" if kind_str else f"- {f}")
+            total_files = len(files_info)
+            lines = [f"📁 已索引文件 ({total_files} 个)\n"]
+            for f in files_info:
+                kinds = {k: v for k, v in f['kinds'].items() if k != 'file'}
+                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()))
+                lines.append(f"- {f['path']}  ({kind_str})" if kind_str else f"- {f['path']}")
 
         return "\n".join(lines)
 
@@ -427,6 +443,9 @@ class CodeGraphTools:
         directory: Optional[str] = None,
         limit: int = 20,
         exact: bool = False,
+        substring: bool = False,
+        visibility: Optional[str] = None,
+        case_sensitive: bool = False,
     ) -> ToolResult:
         """统一代码探索入口 — 通过 mode 参数切换不同能力
 
@@ -444,11 +463,14 @@ class CodeGraphTools:
             query: 搜索的符号名或关键词（status/sync/files 模式不需要）
             mode: 操作模式（见上方列表）
             depth: 调用链/影响分析深度（默认 2）
-            max_files: explore 模式最大涉及文件数（默认 12）
+            max_files: explore 模式最大涉及文件数（默认 50）
             kind: search 模式按类型过滤（function/class/method/variable/...）
             directory: files 模式按目录筛选（可选）
             limit: search 模式最大返回数（默认 20）
             exact: search 模式是否精确匹配（默认模糊）
+            substring: search 模式使用子串匹配（搜 "Manager" 也能找到 SessionManager）
+            visibility: 可见性过滤，"public" 或 "private"（基于 _ 前缀约定）
+            case_sensitive: 是否大小写敏感（默认不敏感）
         """
         cg = self._ensure_cg()
         if cg is None:
@@ -463,7 +485,8 @@ class CodeGraphTools:
             if now - self._last_sync_time > self._sync_cooldown:
                 self._last_sync_time = now
                 try:
-                    sync_result = cg.sync()
+                    # quick=True: CodeGraph 端有 5s 内部 debounce，避免频繁全目录扫描
+                    sync_result = cg.sync(quick=True)
                     changed = sync_result.files_added + sync_result.files_modified + sync_result.files_removed
                     if changed:
                         logger.info(f"[CodeGraph] 自动同步: {changed} 个文件变更")
@@ -476,7 +499,8 @@ class CodeGraphTools:
             elif mode == "sync":
                 content = self._mode_sync(cg)
             elif mode == "search":
-                content = self._mode_search(cg, query, kind, limit, exact)
+                content = self._mode_search(cg, query, kind, limit, exact,
+                                            substring, visibility, case_sensitive)
             elif mode == "callers":
                 content = self._mode_callers(cg, query, depth)
             elif mode == "callees":
