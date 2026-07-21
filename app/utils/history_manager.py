@@ -11,8 +11,11 @@
 
 import os
 import re
+import shutil
+import subprocess
 import threading
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -308,7 +311,8 @@ class HistoryManager:
         self.archive_dir = get_app_data_dir() / "archived"
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
-        self._history_limit = 100
+        # 与 SQLite 轻量懒加载上限保持一致，避免首次加载 500 条后保存任意会话又截断成 100 条。
+        self._history_limit = 500
         self._save_timer: Optional[QTimer] = None
         self._save_delay_ms = 1000
 
@@ -435,6 +439,10 @@ class HistoryManager:
         """保存会话"""
         if not messages:
             return
+
+        # 保存前先完成 SQLite 懒加载，避免新会话进入待保存队列后，
+        # 首次打开历史面板又用数据库快照覆盖内存记录，导致延迟保存找不到目标。
+        self._ensure_history_loaded()
 
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
@@ -595,7 +603,7 @@ class HistoryManager:
             return
         self._history_loaded = True
         try:
-            self._history_sessions = self._session_store.get_sessions_lightweight(limit=500)
+            self._history_sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
             self._deduplicate_history_sessions()
             self._migrate_if_needed()
         except Exception as e:
@@ -770,6 +778,9 @@ class HistoryManager:
             导入的会话数据，失败返回 None
         """
         try:
+            # 导入后会立即刷新历史面板，因此必须先完成懒加载，防止刷新时覆盖尚未落盘的导入记录。
+            self._ensure_history_loaded()
+
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
                 data = deserialize_from_json(json.loads(content))
@@ -1183,3 +1194,342 @@ class HistoryManager:
             "storage_size": self.get_total_storage_size(),
             "storage_mode": "sqlite" if self._use_sqlite else "json",
         }
+
+    # ============================================================
+    # 项目归档导出/导入（ZIP 压缩包）
+    # ============================================================
+
+    def export_project_archive(self, project_name: str, root_dir: str = "") -> Optional[str]:
+        """将项目完整导出为 ZIP 压缩包
+
+        包含：
+        - 项目所有会话的 JSON 文件（`sessions/` 目录）
+        - Git 仓库信息（`git_info.json`）
+        - Git 跟踪的文件快照（`git_files/` 目录，仅当 root_dir 为 git 仓库时）
+
+        Args:
+            project_name: 项目名
+            root_dir: 项目根目录（用于获取 git 仓库信息）
+
+        Returns:
+            ZIP 文件路径，失败返回 None
+        """
+        # 确保会话已加载
+        self._ensure_history_loaded()
+
+        # 获取项目下所有会话（轻量列表）
+        sessions_light = self.get_history_list(project_name, with_messages=False)
+        if not sessions_light:
+            logger.warning(f"[HistoryManager] 项目「{project_name}」无会话，无法导出")
+            return None
+
+        # 🐛 修复：轻量加载的消息为空，必须逐条从 SQLite 补全完整消息数据
+        sessions = []
+        for s in sessions_light:
+            sid = s.get("session_id", "")
+            if sid:
+                full = self.get_session_by_session_id(sid)
+                if full and full.get("messages"):
+                    sessions.append(full)
+                    continue
+            # 兜底：没有完整数据也用轻量数据
+            sessions.append(s)
+
+        if not sessions:
+            logger.warning(f"[HistoryManager] 项目「{project_name}」无有效会话，无法导出")
+            return None
+
+        # 构建 ZIP 文件名
+        safe_name = sanitize_filename(project_name[:50])
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_filename = f"{safe_name}_{timestamp}.drifox_project"
+        zip_dir = Path.home() / ".drifox" / "project_archives"
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = zip_dir / zip_filename
+
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                # ── 写入项目元信息 ──
+                meta = {
+                    "project_name": project_name,
+                    "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "session_count": len(sessions),
+                    "version": 1,
+                }
+                zf.writestr("project.json", json.dumps(serialize_for_json(meta), option=json.OPT_INDENT_2))
+
+                # ── 写入所有会话 JSON ──
+                for session in sessions:
+                    session_id = session.get("session_id", uuid.uuid4().hex[:8])
+                    title = session.get("title", "未命名")
+                    safe_title = sanitize_filename(title[:50])
+                    last_time = session.get("last_time", datetime.now().strftime("%Y-%m-%d"))
+                    date_str = last_time[:10]
+                    session_filename = f"sessions/{date_str}_{safe_title}_{session_id}.json"
+                    zf.writestr(
+                        session_filename,
+                        json.dumps(serialize_for_json(session), option=json.OPT_INDENT_2),
+                    )
+
+                # ── 写入 Git 仓库信息（如果支持） ──
+                git_info = self._collect_git_info(root_dir)
+                if git_info:
+                    zf.writestr("git_info.json", json.dumps(serialize_for_json(git_info), option=json.OPT_INDENT_2))
+
+                    # ── 写入 Git 跟踪文件快照 ──
+                    if git_info.get("root"):
+                        self._add_git_files_to_zip(zf, git_info["root"])
+
+            logger.info(f"[HistoryManager] 项目导出成功: {zip_path}")
+            return str(zip_path)
+
+        except Exception as e:
+            logger.error(f"[HistoryManager] 项目导出失败: {e}", exc_info=True)
+            # 清理不完整的 ZIP
+            if zip_path.exists():
+                try:
+                    zip_path.unlink()
+                except Exception:
+                    pass
+            return None
+
+    def _collect_git_info(self, root_dir: str) -> Optional[Dict]:
+        """收集 Git 仓库信息"""
+        if not root_dir or not os.path.isdir(root_dir):
+            return None
+
+        try:
+            # 检查是否在 git 仓库中
+            git_dir = self._find_git_root(root_dir)
+            if not git_dir:
+                return None
+
+            result = {
+                "root": git_dir,
+                "remote": "",
+                "branch": "",
+                "last_commit_hash": "",
+                "last_commit_message": "",
+                "last_commit_author": "",
+                "last_commit_date": "",
+            }
+
+            # 获取 remote
+            try:
+                r = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=git_dir,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=10,
+                )
+                if r.returncode == 0:
+                    result["remote"] = r.stdout.strip()
+            except Exception:
+                pass
+
+            # 获取当前分支
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=git_dir,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=10,
+                )
+                if r.returncode == 0:
+                    result["branch"] = r.stdout.strip()
+            except Exception:
+                pass
+
+            # 获取最新提交信息
+            try:
+                r = subprocess.run(
+                    ["git", "log", "-1", "--format=%H%n%s%n%an%n%ci"],
+                    cwd=git_dir,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=10,
+                )
+                if r.returncode == 0:
+                    lines = r.stdout.strip().split("\n")
+                    if len(lines) >= 4:
+                        result["last_commit_hash"] = lines[0]
+                        result["last_commit_message"] = lines[1]
+                        result["last_commit_author"] = lines[2]
+                        result["last_commit_date"] = lines[3]
+            except Exception:
+                pass
+
+            return result
+
+        except Exception as e:
+            logger.debug(f"[HistoryManager] 收集 git 信息失败: {e}")
+            return None
+
+    def _find_git_root(self, path: str) -> Optional[str]:
+        """从指定路径向上查找 git 根目录"""
+        current = os.path.abspath(path)
+        while current and os.path.isdir(current):
+            if os.path.isdir(os.path.join(current, ".git")):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        return None
+
+    def _add_git_files_to_zip(self, zf, git_root: str):
+        """将 Git 跟踪的文件添加到 ZIP（git_files/ 目录）"""
+        try:
+            # git_root 统一用 Posix 路径分隔符，避免 Windows 反斜杠问题
+            git_root = git_root.replace("\\", "/")
+            # 获取 git 跟踪的文件列表
+            r = subprocess.run(
+                ["git", "ls-files"],
+                cwd=git_root,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30,
+            )
+            if r.returncode != 0:
+                logger.debug(f"[HistoryManager] git ls-files 返回非零: {r.stderr}")
+                return
+
+            tracked_files = [line.strip() for line in r.stdout.strip().split("\n") if line.strip()]
+            if not tracked_files:
+                logger.debug("[HistoryManager] git ls-files 无输出，跳过 git 文件")
+                return
+
+            max_files = 500  # 限制最大文件数，避免 ZIP 过大
+            added_count = 0
+
+            for i, rel_path in enumerate(tracked_files):
+                if i >= max_files:
+                    break
+                # 统一用正斜杠作为 ZIP 内路径
+                arc_path = f"git_files/{rel_path.replace('\\', '/')}"
+                abs_path = os.path.join(git_root, rel_path)
+                if os.path.isfile(abs_path) and os.path.getsize(abs_path) < 5 * 1024 * 1024:
+                    try:
+                        # 用 arcname 显式指定归档内路径，避免 zipfile 自动处理带来的问题
+                        zf.write(abs_path, arcname=arc_path)
+                        added_count += 1
+                    except Exception as e:
+                        logger.debug(f"[HistoryManager] 跳过文件 {rel_path}: {e}")
+
+            logger.info(f"[HistoryManager] 已添加 {added_count}/{min(len(tracked_files), max_files)} 个 git 文件到 ZIP")
+
+        except Exception as e:
+            logger.debug(f"[HistoryManager] 添加 git 文件到 ZIP 失败: {e}")
+
+    def import_project_archive(self, zip_path: str) -> Optional[Dict]:
+        """从 ZIP 压缩包导入完整项目
+
+        导入内容：
+        - 项目会话（还原到该项目下）
+        - 项目元信息（项目名、git 信息）
+
+        Args:
+            zip_path: .drifox_project ZIP 文件路径
+
+        Returns:
+            导入结果字典 {project_name, session_count, git_info}，失败返回 None
+        """
+        if not os.path.isfile(zip_path):
+            logger.error(f"[HistoryManager] 导入文件不存在: {zip_path}")
+            return None
+
+        # 确保会话已加载
+        self._ensure_history_loaded()
+
+        result = {
+            "project_name": "导入项目",
+            "session_count": 0,
+            "git_info": None,
+        }
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                # ── 读取项目元信息 ──
+                if "project.json" in zf.namelist():
+                    meta_raw = zf.read("project.json")
+                    meta = deserialize_from_json(json.loads(meta_raw))
+                    result["project_name"] = meta.get("project_name", "导入项目")
+
+                # ── 读取并导入所有会话 ──
+                session_files = sorted([n for n in zf.namelist() if n.startswith("sessions/") and n.endswith(".json")])
+                imported_count = 0
+                for session_file in session_files:
+                    try:
+                        raw = zf.read(session_file)
+                        data = deserialize_from_json(json.loads(raw))
+                        session = self._normalize_single_session(data)
+                        # 设置项目名
+                        session["project"] = result["project_name"]
+
+                        # 检查是否已存在
+                        existing_id = session.get("session_id", "")
+                        if existing_id:
+                            existing_index = self.find_index_by_session_id(existing_id)
+                            if existing_index is not None:
+                                # 更新已存在会话
+                                self._history_sessions[existing_index] = session
+                                self._schedule_save(existing_id)
+                                imported_count += 1
+                                continue
+
+                        # 新会话
+                        if not existing_id:
+                            session["session_id"] = uuid.uuid4().hex[:8]
+                        self._history_sessions.insert(0, session)
+                        self._schedule_save(session["session_id"])
+                        imported_count += 1
+                    except Exception as e:
+                        logger.warning(f"[HistoryManager] 导入会话文件失败 {session_file}: {e}")
+
+                result["session_count"] = imported_count
+
+                # ── 读取 Git 信息（含原始根路径，用于文件恢复） ──
+                if "git_info.json" in zf.namelist():
+                    try:
+                        git_raw = zf.read("git_info.json")
+                        git_info = deserialize_from_json(json.loads(git_raw))
+                        result["git_info"] = git_info
+                        # 保存原始 git 根路径，用于后续文件恢复
+                        if git_info.get("root"):
+                            result["original_root"] = git_info["root"]
+                    except Exception as e:
+                        logger.warning(f"[HistoryManager] 读取 git_info.json 失败: {e}")
+
+                # ── 提取 git_files 到临时目录 ──
+                git_file_entries = [n for n in zf.namelist() if n.startswith("git_files/")]
+                if git_file_entries:
+                    safe_proj = sanitize_filename(result["project_name"][:30])
+                    extract_dir = Path.home() / ".drifox" / "project_imports" / safe_proj
+                    # 清空旧目录防止残留
+                    if extract_dir.exists():
+                        shutil.rmtree(str(extract_dir))
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    for gf_name in git_file_entries:
+                        try:
+                            zf.extract(gf_name, str(extract_dir))
+                        except Exception as e:
+                            logger.warning(f"[HistoryManager] 提取 git_files 失败 {gf_name}: {e}")
+                    # 将 git_files/ 子目录的内容提到 extract_dir 根目录
+                    git_files_subdir = extract_dir / "git_files"
+                    if git_files_subdir.exists():
+                        for item in git_files_subdir.iterdir():
+                            target = extract_dir / item.name
+                            if item.is_dir():
+                                shutil.copytree(str(item), str(target), dirs_exist_ok=True)
+                            else:
+                                shutil.copy2(str(item), str(target))
+                        shutil.rmtree(str(git_files_subdir))
+                    result["extract_dir"] = str(extract_dir)
+
+            logger.info(f"[HistoryManager] 项目导入成功: {result['project_name']}, {imported_count} 会话")
+            return result
+
+        except zipfile.BadZipFile as e:
+            logger.error(f"[HistoryManager] ZIP 文件损坏: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[HistoryManager] 项目导入异常: {e}", exc_info=True)
+            return None

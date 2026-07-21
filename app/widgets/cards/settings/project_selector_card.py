@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentToolButton
+from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -202,6 +202,7 @@ class ProjectItem(QWidget):
 
     clicked = pyqtSignal(str)
     archiveClicked = pyqtSignal(str)
+    exportClicked = pyqtSignal(str)  # 导出项目压缩包
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
 
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
@@ -284,6 +285,25 @@ class ProjectItem(QWidget):
         self._open_folder_btn.hide()
         layout.addWidget(self._open_folder_btn)
 
+        # 导出按钮（默认隐藏）
+        self._export_btn = TransparentToolButton(FluentIcon.SHARE, self)
+        self._export_btn.setFixedSize(24, 24)
+        self._export_btn.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                font-size: {scale_font_size(12)}px;
+            }}
+            QToolButton:hover {{
+                background: rgba(255, 255, 255, 50);
+                border-radius: 4px;
+            }}
+        """)
+        self._export_btn.clicked.connect(self._emit_export)
+        self._export_btn.setToolTip("导出项目压缩包（含会话+Git文件）")
+        self._export_btn.hide()
+        layout.addWidget(self._export_btn)
+
         # 归档按钮（默认隐藏）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
         self._archive_btn.setFixedSize(24, 24)
@@ -312,6 +332,9 @@ class ProjectItem(QWidget):
             # 非当前项目用半透明版本
             semi_color = get_project_color(self._name, alpha=160)
             self._name_label.setStyleSheet(f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};")
+
+    def _emit_export(self):
+        self.exportClicked.emit(self._name)
 
     def _emit_archive(self):
         self.archiveClicked.emit(self._name)
@@ -367,6 +390,7 @@ class ProjectItem(QWidget):
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
         self._meta_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
+        self._export_btn.show()
         self._archive_btn.show()
         if self._root_dir:
             self._open_folder_btn.show()
@@ -377,6 +401,7 @@ class ProjectItem(QWidget):
         self._apply_name_style()
         Colors.refresh()
         self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._export_btn.hide()
         self._archive_btn.hide()
         self._open_folder_btn.hide()
         super().leaveEvent(event)
@@ -388,6 +413,9 @@ class ProjectSelectorCardContent(QWidget):
     projectSelected = pyqtSignal(str)
     newProjectCreated = pyqtSignal(str)
     archiveProject = pyqtSignal(str)
+    exportProject = pyqtSignal(str)  # 导出项目压缩包
+    importProjectRequested = pyqtSignal()  # 导入项目压缩包（按钮触发）
+    projectFileDropped = pyqtSignal(str)  # 拖拽 .drifox_project 文件路径
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
 
@@ -441,15 +469,18 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setAcceptDrops(True)
         layout.addWidget(self._scroll_area, 1)
 
-    # ── 拖拽支持 ──────────────────────────────────────
+    # ── 拖拽支持（文件夹 / .drifox_project 文件） ──
+
+    def _is_drifox_project(self, path: str) -> bool:
+        return path.endswith(".drifox_project") or path.endswith(".zip")
 
     def dragEnterEvent(self, event):
-        """判断拖入内容是否为文件夹（URL 指向本地路径）"""
+        """判断拖入内容是否为文件夹或 .drifox_project 文件"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
-                    if os.path.isdir(path):
+                    if os.path.isdir(path) or self._is_drifox_project(path):
                         event.acceptProposedAction()
                         return
         event.ignore()
@@ -458,17 +489,23 @@ class ProjectSelectorCardContent(QWidget):
         """拖拽移动时保持接受状态"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and os.path.isdir(url.toLocalFile()):
-                    event.acceptProposedAction()
-                    return
+                if url.isLocalFile():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path) or self._is_drifox_project(path):
+                        event.acceptProposedAction()
+                        return
         event.ignore()
 
     def dropEvent(self, event):
-        """放下文件夹时发射信号"""
+        """放下文件夹或 .drifox_project 文件时发射信号"""
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     path = url.toLocalFile()
+                    if self._is_drifox_project(path):
+                        self.projectFileDropped.emit(path)
+                        event.acceptProposedAction()
+                        return
                     if os.path.isdir(path):
                         self.folderDropped.emit(path)
                         event.acceptProposedAction()
@@ -552,6 +589,7 @@ class ProjectSelectorCardContent(QWidget):
             item.set_root_dir(self._root_dir_map.get(proj_name, ""))
             item.clicked.connect(self._on_project_item_clicked)
             item.archiveClicked.connect(self._on_archive_clicked)
+            item.exportClicked.connect(self._on_export_clicked)
             item.openFolderClicked.connect(self._on_open_folder_clicked)
             self._content_layout.addWidget(item)
             self._project_items.append(item)
@@ -565,6 +603,10 @@ class ProjectSelectorCardContent(QWidget):
     def _on_open_folder_clicked(self, project_name: str, root_dir: str):
         """打开项目根目录按钮被点击"""
         self.openFolderRequested.emit(project_name, root_dir)
+
+    def _on_export_clicked(self, project_name: str):
+        """导出按钮被点击"""
+        self.exportProject.emit(project_name)
 
     def _on_archive_clicked(self, project_name: str):
         """归档按钮被点击"""

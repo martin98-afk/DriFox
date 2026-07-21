@@ -398,7 +398,7 @@ class CodeGraphTools:
                     for n in nodes:
                         k = n.kind
                         kinds[k] = kinds.get(k, 0) + 1
-                    kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k != "file")
+                    kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
                     lines.append(
                         f"  - {os.path.basename(f)}  ({kind_str})" if kind_str else f"  - {os.path.basename(f)}"
                     )
@@ -410,7 +410,7 @@ class CodeGraphTools:
                 for n in nodes:
                     k = n.kind
                     kinds[k] = kinds.get(k, 0) + 1
-                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k != "file")
+                kind_str = ", ".join(f"{v} {k}" for k, v in sorted(kinds.items()) if k is not None and k != "file")
                 lines.append(f"- {f}  ({kind_str})" if kind_str else f"- {f}")
 
         return "\n".join(lines)

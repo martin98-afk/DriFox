@@ -336,7 +336,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.compactToolCard = SwitchSettingCard(
             FluentIcon.MENU,
             "简洁模式",
-            "工具与思考归拢到卡片顶部可滚动区域",
+            "工具与思考归拢到可滚动区域",
             configItem=self.cfg.ui_compact_tool_area,
             parent=self,
         )

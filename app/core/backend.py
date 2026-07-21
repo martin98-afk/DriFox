@@ -18,6 +18,7 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
 
 from app.constants import IMAGE_EXTENSIONS
+from app.utils.utils import invalidate_skills_cache
 
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
@@ -344,6 +345,7 @@ class ChatBackend(QObject):
             workdir: 工作目录
         """
         import time as _time
+
         _t0 = _time.perf_counter()
         logger.info("[ChatBackend] 初始化中...")
 
@@ -355,7 +357,7 @@ class ChatBackend(QObject):
 
         self._session_store = SessionStore.get_instance()
         self._session_manager = SessionManager()
-        logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter()-_t0)*1000:.0f}ms)")
+        logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter() - _t0) * 1000:.0f}ms)")
 
         # 2. 创建 MemoryManager（全局单例，跨窗口共享）
         from app.core.memory_manager import MemoryManagerCore
@@ -1304,6 +1306,8 @@ class ChatBackend(QObject):
                     logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
             # 5. 技能 / MCP：懒加载，只需标记
+            if comps.get("skills"):
+                invalidate_skills_cache()
             result["skills"] = bool(comps.get("skills"))
             result["mcp"] = bool(comps.get("mcp"))
 
@@ -1432,6 +1436,8 @@ class ChatBackend(QObject):
 
                 # 技能 / MCP：PluginManager 已移除该插件的目录，
                 # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
+                if removed_components.get("skills", False):
+                    invalidate_skills_cache()
                 result["skills"] = removed_components.get("skills", False)
                 result["mcp"] = removed_components.get("mcp", False)
 
@@ -1516,6 +1522,9 @@ class ChatBackend(QObject):
             #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
             if component == "skills":
                 result["skills"] = True
+                # 🛡️ 强制失效技能缓存，确保下次 get_local_skills() 返回最新数据
+                # 虽然 mtime 缓存 key 能检测文件变更，但文件系统时间精度不足时可能漏检
+                invalidate_skills_cache()
                 logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
 
             # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
@@ -1656,6 +1665,8 @@ class ChatBackend(QObject):
                         logger.error(f"[ChatBackend] Failed to reload themes: {e}")
 
                 # 技能：PluginManager 已更新，UI 懒加载
+                if comps.get("skills"):
+                    invalidate_skills_cache()
                 result["skills"] = bool(comps.get("skills"))
 
                 # MCP：PluginManager 已更新，UI 懒加载
@@ -1895,8 +1906,12 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.warning(f"[ChatBackend] cleanup hook_manager: {e}")
 
-        # 4. 清除 SubAgentManager 回调引用
+        # 4. 清除 SubAgentManager：先取消所有运行中的子智能体任务 + 停止 Stall 检测器
         if self._sub_agent_manager:
+            try:
+                self._sub_agent_manager.cancel_all()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup sub_agent_manager.cancel_all: {e}")
             self._sub_agent_manager = None
 
         # 5. 清除 SessionManager（窗口独有的会话）
