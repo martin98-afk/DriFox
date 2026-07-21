@@ -1042,9 +1042,15 @@ TOOL_SCHEMAS = [
                 "  - sync: 同步索引与文件系统变更\n"
                 "  - files: 列出已索引文件\n"
                 "\n"
+                "新参数（v1.4.0）:\n"
+                "  substring=true  — 子串匹配，搜 Manager 也能找到 SessionManager\n"
+                "  visibility=private — 只搜 _ 开头的私有符号\n"
+                "  case_sensitive=true — 大小写敏感\n"
+                "\n"
                 "使用示例：\n"
                 "  codegraph_explore(mode='status') — 看索引状态\n"
                 "  codegraph_explore('ChatBackend') — 探索 ChatBackend\n"
+                "  codegraph_explore('Manager', mode='search', substring=true, kind='class') — 搜所有 Manager 类\n"
                 "  codegraph_explore('send_message', mode='callers') — 找调用者\n"
                 "  codegraph_explore('on_click', mode='impact') — 影响分析"
             ),
@@ -1097,6 +1103,21 @@ TOOL_SCHEMAS = [
                     "exact": {
                         "type": "boolean",
                         "description": "search 模式是否精确匹配（默认模糊）",
+                        "default": False,
+                    },
+                    "substring": {
+                        "type": "boolean",
+                        "description": "search 模式使用子串匹配（搜 Manager 也可命中 SessionManager）",
+                        "default": False,
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["public", "private"],
+                        "description": "search 模式按可见性过滤：public（无 _ 前缀）/private（有 _ 前缀）",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "search 模式是否大小写敏感（默认不敏感）",
                         "default": False,
                     },
                 },
