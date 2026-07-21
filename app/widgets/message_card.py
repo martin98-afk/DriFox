@@ -380,6 +380,18 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
     return md_text
 
 
+def _get_think_icon_html(size: int = 18) -> str:
+    """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except Exception:
+        prefix = "qrc:/icons"
+    style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
+    return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
+
+
 def _get_think_block_styles() -> str:
     """获取思考块的全局字体样式"""
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
@@ -1053,9 +1065,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     if completed:
         # ── 完成态 ──
         tag = _classify_think_tag(content)
-        status_text = (
-            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-        )
+        think_icon = _get_think_icon_html()
+        bulb = f'<span class="think-bulb">{think_icon}</span>'
+        status_text = f"{bulb} {escape(tag)}" if tag else bulb
         preview = _get_think_preview(content)
         font_style = _get_think_block_styles()
 
@@ -1069,7 +1081,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     {preview_right}
 </div>"""
 
-        # ── 非简洁模式：完整折叠框UI（💡标签 + 预览 + 可展开全文）──
+        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
@@ -1104,11 +1116,11 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     2. 不生成 block_key hash（节省计算）
     """
     if completed:
-        # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
+        # ── 完成态：可折叠UI（图标标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
-        status_text = (
-            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-        )
+        think_icon = _get_think_icon_html()
+        bulb = f'<span class="think-bulb">{think_icon}</span>'
+        status_text = f"{bulb} {escape(tag)}" if tag else bulb
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
@@ -7939,12 +7951,13 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
             self.viewer._render_timer.stop()
 
-        # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
+        # Python 端预计算分类（与 _render_think_block 一致），保留图标 + 分类标签
         tag = _classify_think_tag(content)
+        think_icon = _get_think_icon_html()
         if tag:
-            status_html = f'<span class="think-bulb">💡</span> {escape(tag)}'
+            status_html = f'<span class="think-bulb">{think_icon}</span> {escape(tag)}'
         else:
-            status_html = '<span class="think-bulb">💡</span>'
+            status_html = f'<span class="think-bulb">{think_icon}</span>'
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）
