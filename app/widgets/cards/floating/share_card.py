@@ -32,6 +32,20 @@ from app.utils.design_tokens import Colors, current_theme, get_unified_scrollbar
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_unified_font
 
+# 延迟导入：share-history 插件（模块加载时 plugins/ 可能未入 path）
+
+
+def _insert_share_record(**kwargs):
+    """延迟导入并插入分享记录，插件不存在则静默跳过"""
+    try:
+        from plugins.share_history.ui.db import insert_record
+        insert_record(**kwargs)
+    except ImportError:
+        pass
+    except Exception as e:
+        from loguru import logger
+        logger.debug(f"[ShareCard] share-history 记录写入失败: {e}")
+
 
 # ── 导出工具函数 ──────────────────────────────────────────────────
 
@@ -788,6 +802,19 @@ class ShareCardContent(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             self._show_info(f"已保存到 {path}", "success")
+            # ── 写入分享记录 ──
+            fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+            _insert_share_record(
+                type_="session",
+                title=self._record.get("title") or _get_session_title(self._messages) or "对话分享",
+                format_=fmt_name,
+                file_path=path,
+                ref_id=self._record.get("session_id", ""),
+                extra_info={
+                    "msg_count": len(self._messages),
+                    "project": self._record.get("project", ""),
+                },
+            )
             # ── 自动打开文件夹并选中文件 ──
             try:
                 if os.name == "nt":
@@ -840,7 +867,19 @@ class ShareCardContent(QWidget):
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
                 self._show_info("Gitee 未配置（缺少 token/owner/repo）", "warning")
-                # 已保存到本地，不删除
+                # 已保存到本地，写入记录
+                fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+                _insert_share_record(
+                    type_="session",
+                    title=title,
+                    format_=fmt_name,
+                    file_path=str(save_path),
+                    ref_id=self._record.get("session_id", ""),
+                    extra_info={
+                        "msg_count": len(self._messages),
+                        "project": self._record.get("project", ""),
+                    },
+                )
                 return
             self._upload_btn.setEnabled(False)
             self._upload_btn.setText("⏳ 上传中…")
@@ -849,9 +888,35 @@ class ShareCardContent(QWidget):
             self._upload_btn.setText("🔗 生成链接")
             if err:
                 self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
+                fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+                _insert_share_record(
+                    type_="session",
+                    title=title,
+                    format_=fmt_name,
+                    file_path=str(save_path),
+                    ref_id=self._record.get("session_id", ""),
+                    extra_info={
+                        "msg_count": len(self._messages),
+                        "project": self._record.get("project", ""),
+                    },
+                )
                 return
             QApplication.clipboard().setText(url)
             self._show_info(f"链接已复制到剪贴板\n本地备份: {save_path.name}", "success")
+            # ── 写入分享记录（含上传链接） ──
+            fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+            _insert_share_record(
+                type_="session",
+                title=title,
+                format_=fmt_name,
+                file_path=str(save_path),
+                upload_url=url,
+                ref_id=self._record.get("session_id", ""),
+                extra_info={
+                    "msg_count": len(self._messages),
+                    "project": self._record.get("project", ""),
+                },
+            )
         except Exception as e:
             self._upload_btn.setEnabled(True)
             self._upload_btn.setText("🔗 生成链接")

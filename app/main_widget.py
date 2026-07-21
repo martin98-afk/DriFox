@@ -84,6 +84,19 @@ from app.core.model_capabilities import apply_model_defaults, get_model_capabili
 from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
 
+# 延迟导入：share-history 插件（模块加载时 plugins/ 可能未入 path）
+
+
+def _insert_project_record(**kwargs):
+    """延迟导入并插入项目导出记录，插件不存在则静默跳过"""
+    try:
+        from plugins.share_history.ui.db import insert_record
+        insert_record(**kwargs)
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"[MainWidget] share-history 记录写入失败: {e}")
+
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -14527,6 +14540,25 @@ class OpenAIChatToolWindow(ToolWindow):
         dialog.exportChosen.connect(_on_choice)
         dialog.exec_()
 
+    def _insert_project_share_record(self, project_name: str, zip_path: str, upload_url: str = ""):
+        """插入项目导出分享记录"""
+        session_count = 0
+        if self.history_manager:
+            try:
+                sessions = self.history_manager.get_history_list(project_name, with_messages=False)
+                session_count = len(sessions) if sessions else 0
+            except Exception:
+                pass
+        _insert_project_record(
+            type_="project",
+            title=project_name,
+            format_="drifox_project",
+            file_path=str(Path(zip_path)) if zip_path else "",
+            upload_url=upload_url,
+            ref_id=project_name,
+            extra_info={"session_count": session_count},
+        )
+
     def _on_export_local(self, zip_path: str, project_name: str):
         """导出到本地：保存到默认路径，自动打开文件夹"""
         try:
@@ -14537,6 +14569,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 parent=self,
             )
+            # ── 写入分享记录 ──
+            self._insert_project_share_record(project_name, zip_path)
             # 自动打开文件夹并选中文件
             try:
                 if os.name == "nt":
@@ -14591,6 +14625,8 @@ class OpenAIChatToolWindow(ToolWindow):
             duration=5000,
             parent=self,
         )
+        # ── 写入分享记录（含上传链接） ──
+        self._insert_project_share_record(project_name, zip_path, url)
 
         # 使用现有的 GiteeUploader
         try:
@@ -14626,6 +14662,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=5000,
                 parent=self,
             )
+            # ── 写入分享记录（含上传链接） ──
+            self._insert_project_share_record(project_name, zip_path, url)
         except Exception as e:
             logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
             InfoBar.error(title="", content=f"上传异常: {e}", duration=3000, parent=self)

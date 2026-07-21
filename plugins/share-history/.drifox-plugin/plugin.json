@@ -1,0 +1,16 @@
+{
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "name": "share-history",
+    "description": "分享记录管理器 - 追踪会话分享和项目导出的历史记录",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFox Team"
+    },
+    "type": "user",
+    "components": {
+        "ui": true
+    }
+}
