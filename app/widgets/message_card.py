@@ -4401,9 +4401,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
-                // 🐛 修复：文本追加后同步报告高度，缩短 _document_height 更新延迟，
-                // 让 wheelEvent 能及时获取最新 scrollHeight 做边界判定。
-                reportHeight();
+                reportHeightDebounced();
             }})();
             """
             self.page().runJavaScript(js)
