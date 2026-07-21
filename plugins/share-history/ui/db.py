@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""share-history — 基于 sessions.db 的分享记录存储层
-
-使用 ~/.drifox/sessions.db 中的 share_records 表存储分享历史。
-采用独立 sqlite3 连接（不耦合 SessionStore/DatabaseManager），
-通过 WAL 模式避免与主程序写入冲突。
-"""
+"""share-history — 基于 sessions.db 的分享记录存储层"""
 
 import json
 import sqlite3
@@ -13,15 +8,46 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-_DB_PATH = Path.home() / ".drifox" / "sessions.db"
+
+# ── 路径解析（与 plugin-marketplace 一致） ──
+
+
+def _drifox_dir() -> Path:
+    """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
+
+    开发环境: 当前目录/.drifox
+    PyInstaller打包: ~/.drifox
+    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    """
+    import sys as _sys
+
+    if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):
+        return Path(".drifox")
+    if _sys.platform == "darwin":
+        try:
+            from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
+            paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
+                NSApplicationSupportDirectory, NSUserDomainMask
+            )
+            if paths:
+                app_support = Path(paths[0].fileSystemRepresentation().decode("utf-8")) / "Drifox"
+                app_support.mkdir(parents=True, exist_ok=True)
+                return app_support / ".drifox"
+        except Exception:
+            pass
+    return Path.home() / ".drifox"
+
+
+# ── 数据库连接 ──
 
 
 def _get_conn() -> Optional[sqlite3.Connection]:
-    """获取数据库连接（自动建表 + 启用 WAL）"""
+    """获取 sessions.db 连接（自动建表 + WAL）"""
     try:
-        conn = sqlite3.connect(str(_DB_PATH), timeout=5)
+        db_path = _drifox_dir() / "sessions.db"
+        conn = sqlite3.connect(str(db_path), timeout=5)
         conn.row_factory = sqlite3.Row
-        # WAL 模式：读写不互斥，避免与 SessionStore 并发冲突
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS share_records (
@@ -44,6 +70,9 @@ def _get_conn() -> Optional[sqlite3.Connection]:
         return None
 
 
+# ── CRUD ──
+
+
 def insert_record(
     type_: str,
     title: str,
@@ -53,17 +82,7 @@ def insert_record(
     ref_id: str = "",
     extra_info: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """插入一条分享记录
-
-    Args:
-        type_: 'session' 或 'project'
-        title: 会话标题或项目名
-        format_: md/json/html（session）或 drifox_project（project）
-        file_path: 本地保存路径
-        upload_url: Gitee 上传链接
-        ref_id: session_id（session）或 project_name（project）
-        extra_info: 额外信息，如 {"msg_count": 12} 或 {"session_count": 5}
-    """
+    """插入一条分享记录"""
     try:
         conn = _get_conn()
         if conn is None:

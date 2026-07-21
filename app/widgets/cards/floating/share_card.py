@@ -35,16 +35,36 @@ from app.utils.utils import get_unified_font
 # 延迟导入：share-history 插件（模块加载时 plugins/ 可能未入 path）
 
 
-def _insert_share_record(**kwargs):
-    """延迟导入并插入分享记录，插件不存在则静默跳过"""
+
+def _write_share_record(type_, title, format_, file_path="", upload_url="", ref_id="", extra_info=None):
+    """直接写入分享记录到 sessions.db（不依赖插件，插件只负责读取展示）"""
+    import json as _json
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+    from app.utils.utils import get_app_data_dir as _get_data_dir
     try:
-        from plugins.share_history.ui.db import insert_record
-        insert_record(**kwargs)
-    except ImportError:
-        pass
-    except Exception as e:
+        db_path = _Path(_get_data_dir()) / "sessions.db"
+        conn = _sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS share_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL CHECK(type IN ('session','project')),
+                title TEXT NOT NULL, format TEXT NOT NULL,
+                file_path TEXT DEFAULT '', upload_url TEXT DEFAULT '',
+                ref_id TEXT DEFAULT '', extra_info TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute(
+            "INSERT INTO share_records (type,title,format,file_path,upload_url,ref_id,extra_info) VALUES (?,?,?,?,?,?,?)",
+            (type_, title, format_, file_path or "", upload_url or "", ref_id or "", _json.dumps(extra_info or {}, ensure_ascii=False)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
         from loguru import logger
-        logger.debug(f"[ShareCard] share-history 记录写入失败: {e}")
+        logger.debug("[ShareCard] 写入分享记录失败", exc_info=True)
 
 
 # ── 导出工具函数 ──────────────────────────────────────────────────
@@ -804,7 +824,7 @@ class ShareCardContent(QWidget):
             self._show_info(f"已保存到 {path}", "success")
             # ── 写入分享记录 ──
             fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
-            _insert_share_record(
+            _write_share_record(
                 type_="session",
                 title=self._record.get("title") or _get_session_title(self._messages) or "对话分享",
                 format_=fmt_name,
@@ -869,7 +889,7 @@ class ShareCardContent(QWidget):
                 self._show_info("Gitee 未配置（缺少 token/owner/repo）", "warning")
                 # 已保存到本地，写入记录
                 fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
-                _insert_share_record(
+                _write_share_record(
                     type_="session",
                     title=title,
                     format_=fmt_name,
@@ -889,7 +909,7 @@ class ShareCardContent(QWidget):
             if err:
                 self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
                 fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
-                _insert_share_record(
+                _write_share_record(
                     type_="session",
                     title=title,
                     format_=fmt_name,
@@ -905,7 +925,7 @@ class ShareCardContent(QWidget):
             self._show_info(f"链接已复制到剪贴板\n本地备份: {save_path.name}", "success")
             # ── 写入分享记录（含上传链接） ──
             fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
-            _insert_share_record(
+            _write_share_record(
                 type_="session",
                 title=title,
                 format_=fmt_name,

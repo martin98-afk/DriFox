@@ -564,12 +564,16 @@ class ShareHistoryCard(QWidget):
         self._retheme()
 
     def _show_empty_state(self):
-        """显示空状态（在 content 中居中显示）"""
+        """显示空状态（使用缓存的上下文颜色+字体）"""
         self._clear_content()
         empty_lb = QLabel("暂无分享记录\n分享会话或导出项目后，记录将出现在这里")
         empty_lb.setAlignment(Qt.AlignCenter)
         empty_lb.setWordWrap(True)
-        empty_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent; padding: 40px;")
+        empty_lb.setStyleSheet(
+            f"color: {self._cached_tcs}; background: transparent; padding: 40px;"
+            f" font-family: '{self._cached_font_family}';"
+            f" font-size: {self._cached_font_size}px;"
+        )
         self._content_layout.addWidget(empty_lb, 1, Qt.AlignCenter)
 
     def _clear_content(self):
