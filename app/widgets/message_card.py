@@ -6068,7 +6068,7 @@ class MessageCard(SimpleCardWidget):
         layout.addWidget(diff_l)
 
         # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
-        icon_size = scale_font_size(12)
+        icon_size = scale_font_size(10)
         review_btn = QLabel(self)
         review_btn.setObjectName("footer_review_btn")
         review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
@@ -7452,12 +7452,11 @@ class MessageCard(SimpleCardWidget):
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
-            # 🐛 修复"工具结果冒出又消失"：设置增量回调但不立即渲染，
-            # 先通过 JS 注入工具块到 DOM，再触发渲染确保 markdown 与 DOM 一致。
-            # 编辑类工具注入到 content-placeholder，立即渲染会先清空再重建导致闪烁。
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
+            # 编辑类工具注入到 content-placeholder，跳过回调与渲染避免闪烁。
+            # DOM 已通过 JS 注入到位，markdown 缓存已就绪供后续全量渲染使用。
             _is_edit_tool = tool_name in _EDIT_TOOLS
             if not _is_edit_tool:
+                self.viewer._lazy_markdown_cb = self._build_incremental_md
                 self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(
@@ -7615,9 +7614,6 @@ class MessageCard(SimpleCardWidget):
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
-            # 编辑类工具已注入到 content-placeholder，延迟渲染确保 JS 先落地避免闪烁
-            if _is_edit_tool:
-                self.viewer._schedule_render(immediate=False)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
 
