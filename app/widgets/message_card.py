@@ -1757,6 +1757,7 @@ _STREAMING_DOCK_CSS = """
                 body.streaming-dock {
                     display: flex;
                     flex-direction: column;
+                    overflow-anchor: auto;
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
@@ -2602,6 +2603,7 @@ class CodeWebViewer(QWebEngineView):
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-y: auto;
                     overflow-x: hidden;
+                    overflow-anchor: auto;
                 }}
                 {scrollbar_css}
 

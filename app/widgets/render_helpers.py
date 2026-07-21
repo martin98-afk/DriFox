@@ -966,7 +966,7 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc += f" ({path})"
     elif tool_name == "list":
         path = _to_rel_path(tool_args.get("path", "."))
-        desc = f"列出 {path}"
+        desc = f"{path}"
     elif tool_name == "scan_repo":
         path = _to_rel_path(tool_args.get("path", "."))
         desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
