@@ -32,7 +32,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import QColor, QDesktopServices, QPixmap
+from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -83,6 +83,36 @@ from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
+
+
+def _write_project_record(type_, title, format_, file_path="", upload_url="", ref_id="", extra_info=None):
+    """直接写入项目导出记录到 sessions.db（不依赖插件）"""
+    import json as _json
+    import sqlite3 as _sqlite3
+    from pathlib import Path as _Path
+    from app.utils.utils import get_app_data_dir as _get_data_dir
+    try:
+        db_path = _Path(_get_data_dir()) / "sessions.db"
+        conn = _sqlite3.connect(str(db_path), timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS share_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL CHECK(type IN ('session','project')),
+                title TEXT NOT NULL, format TEXT NOT NULL,
+                file_path TEXT DEFAULT '', upload_url TEXT DEFAULT '',
+                ref_id TEXT DEFAULT '', extra_info TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
+        conn.execute(
+            "INSERT INTO share_records (type,title,format,file_path,upload_url,ref_id,extra_info) VALUES (?,?,?,?,?,?,?)",
+            (type_, title, format_, file_path or "", upload_url or "", ref_id or "", _json.dumps(extra_info or {}, ensure_ascii=False)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.debug("[MainWidget] 写入项目导出记录失败", exc_info=True)
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
@@ -592,6 +622,26 @@ class _ProjectImportOptionDialog(MaskDialogBase):
             self.fileImportRequested.emit()
         else:
             self.urlImportRequested.emit()
+
+
+class _ThemedIconLabel(QWidget):
+    """主题感知图标标签 — 使用 QIcon 引擎自动适配浅色/深色
+
+    替代静态 emoji/文字图标，支持主题切换时自动更新图标颜色。
+    通过 QIconEngine（_ThemeIconEngine）实现每次 paint 时按当前主题加载正确颜色。
+    """
+
+    def __init__(self, icon_name: str, size: int = 18, parent=None):
+        super().__init__(parent)
+        self._icon = get_icon(icon_name)
+        self._icon_size = size
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._icon.paint(painter, self.rect())
 
 
 class OpenAIChatToolWindow(ToolWindow):
@@ -2732,9 +2782,9 @@ class OpenAIChatToolWindow(ToolWindow):
         tt_layout.setContentsMargins(6, 0, 6, 0)
         tt_layout.setSpacing(0)
 
-        # 图标
-        tt_icon = QLabel("🔧")
-        tt_icon.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+        # 图标（主题感知 SVG — 自动适配浅色/深色模式）
+        tt_icon = _ThemedIconLabel("工具", 18, self._tool_toggle_btn)
+        tt_icon.setStyleSheet("background: transparent; border: none;")
         tt_layout.addWidget(tt_icon)
         tt_layout.addSpacing(4)
 
@@ -14527,6 +14577,25 @@ class OpenAIChatToolWindow(ToolWindow):
         dialog.exportChosen.connect(_on_choice)
         dialog.exec_()
 
+    def _insert_project_share_record(self, project_name: str, zip_path: str, upload_url: str = ""):
+        """插入项目导出分享记录"""
+        session_count = 0
+        if self.history_manager:
+            try:
+                sessions = self.history_manager.get_history_list(project_name, with_messages=False)
+                session_count = len(sessions) if sessions else 0
+            except Exception:
+                pass
+        _write_project_record(
+            type_="project",
+            title=project_name,
+            format_="drifox_project",
+            file_path=str(Path(zip_path)) if zip_path else "",
+            upload_url=upload_url,
+            ref_id=project_name,
+            extra_info={"session_count": session_count},
+        )
+
     def _on_export_local(self, zip_path: str, project_name: str):
         """导出到本地：保存到默认路径，自动打开文件夹"""
         try:
@@ -14537,6 +14606,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 parent=self,
             )
+            # ── 写入分享记录 ──
+            self._insert_project_share_record(project_name, zip_path)
             # 自动打开文件夹并选中文件
             try:
                 if os.name == "nt":
@@ -14591,6 +14662,8 @@ class OpenAIChatToolWindow(ToolWindow):
             duration=5000,
             parent=self,
         )
+        # ── 写入分享记录（含上传链接） ──
+        self._insert_project_share_record(project_name, zip_path, url)
 
         # 使用现有的 GiteeUploader
         try:
@@ -14626,6 +14699,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=5000,
                 parent=self,
             )
+            # ── 写入分享记录（含上传链接） ──
+            self._insert_project_share_record(project_name, zip_path, url)
         except Exception as e:
             logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
             InfoBar.error(title="", content=f"上传异常: {e}", duration=3000, parent=self)

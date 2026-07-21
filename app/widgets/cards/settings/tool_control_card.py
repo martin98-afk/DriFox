@@ -25,7 +25,7 @@ from app.tools.tool_classifier import (
     get_default_toggles,
 )
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel
 
@@ -412,8 +412,11 @@ class ToolControlCardFrame(SystemCardFrame):
         self.set_height_mode("proportional")
         self.setMinimumHeight(250)
 
-        self.title_label.setText("🔧 工具控制")
-        self.icon_label.hide()
+        self.title_label.setText("工具控制")
+        # 使用主题感知 SVG 图标代替 emoji
+        self.icon_label.show()
+        self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
+        self.icon_label.setFixedSize(18, 18)
 
         # ========== 右上角下拉框:关闭时行为 ==========
         self._behavior_combo = ComboBox(self)
@@ -494,6 +497,8 @@ class ToolControlCardFrame(SystemCardFrame):
     def refresh_style(self):
         """主题/字体变更时刷新卡片样式"""
         super().refresh_style()
+        # 刷新主题感知图标（浅色/深色切换后更新图标颜色）
+        self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
         # 刷新内容区 widget（全量重建以应用新样式）
         if hasattr(self, "_card") and self._card is not None:
             self._card.refresh_style()

@@ -28,18 +28,32 @@ from PyQt5.QtWidgets import (
 )
 
 from app.utils.design_tokens import Colors, scale_font_size
-from app.utils.utils import get_font_family_css, get_unified_font
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
-# 日志类型到图标/样式的映射
-LOG_ICONS = {
-    "progress": "📌",
-    "thinking": "💭",
-    "ai_response": "🤖",
-    "tool_call": "🔧",
-    "tool_result": "✅",
-    "tool_error": "❌",
-    "finish": "🏁",
+# 日志类型到图标名的映射（统一使用 设置-subagent.svg）
+LOG_ICON_NAMES = {
+    "progress": "设置-subagent",
+    "thinking": "设置-subagent",
+    "ai_response": "设置-subagent",
+    "tool_call": "设置-subagent",
+    "tool_result": "设置-subagent",
+    "tool_error": "设置-subagent",
+    "finish": "设置-subagent",
 }
+
+
+def _get_subagent_icon_html(icon_name: str = "设置-subagent", size: int = 18) -> str:
+    """生成子智能体图标的 HTML <img> 标签（主题感知）
+
+    根据当前主题自动选择 qrc:/icons 或 qrc:/icons_light 前缀。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except (ImportError, AttributeError):
+        prefix = "qrc:/icons"
+    return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;vertical-align:middle;" />'
 
 LOG_COLORS = {
     "progress": "#9C27B0",
@@ -120,7 +134,7 @@ class SubAgentSessionDialog(QDialog):
         self._last_log_count = len(logs)
         self._result_appended = bool(self._summary.get("result") or self._summary.get("error"))
 
-        self.setWindowTitle(f"🤖 {agent_name} - 会话日志")
+        self.setWindowTitle(f"{agent_name} - 会话日志")
         self.setMinimumSize(800, 520)
         # 无边框：去掉系统原生标题栏，使用内部绘制的标题栏
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
@@ -367,7 +381,16 @@ class SubAgentSessionDialog(QDialog):
         layout = QHBoxLayout(header)
         layout.setContentsMargins(16, 0, 12, 0)
 
-        title = QLabel(f"🤖  {self._agent_name}  —  会话日志", header)
+        # 主题感知图标
+        self._header_icon_label = QLabel(header)
+        self._header_icon_label.setFixedSize(20, 20)
+        self._header_icon_label.setStyleSheet("background: transparent; border: none;")
+        self._header_icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        pixmap = get_icon("设置-subagent").pixmap(20, 20)
+        self._header_icon_label.setPixmap(pixmap)
+        layout.addWidget(self._header_icon_label)
+
+        title = QLabel(f"  {self._agent_name}  —  会话日志", header)
         title.setFont(get_unified_font(12, True))
         title.setStyleSheet("color: #ffffff; background: transparent;")
         title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -1005,7 +1028,8 @@ class SubAgentSessionDialog(QDialog):
 
     def _build_nav_item(self, log_type: str, content: str, log: Dict, index: int) -> str:
         """构建左侧导览项"""
-        icon = LOG_ICONS.get(log_type, "•")
+        icon_name = LOG_ICON_NAMES.get(log_type, "设置-subagent")
+        icon_html = _get_subagent_icon_html(icon_name, size=16)
         label = LOG_TYPE_LABELS.get(log_type, log_type)
         color = LOG_COLORS.get(log_type, "#888")
 
@@ -1014,7 +1038,7 @@ class SubAgentSessionDialog(QDialog):
 
         target_id = f"section-{index}"
         return f"""<a class="nav-item" data-target="{target_id}" data-type="{log_type}" style="border-left-color: {color};">
-    <span class="nav-icon">{icon}</span>
+    <span class="nav-icon">{icon_html}</span>
     <span class="nav-text">
         <span class="nav-role" style="color: {color};">{label}</span>
         <span class="nav-snip">{self._escape_html(snippet)}</span>
@@ -1024,9 +1048,10 @@ class SubAgentSessionDialog(QDialog):
     def _build_result_nav_item(self, title: str, index: int) -> str:
         """构建最终结果的导览项"""
         color = "#888"
+        icon_html = _get_subagent_icon_html("设置-subagent", size=16)
         target_id = "section-result"
         return f"""<a class="nav-item nav-result" data-target="{target_id}" data-type="result" style="border-left-color: {color};">
-    <span class="nav-icon">📋</span>
+    <span class="nav-icon">{icon_html}</span>
     <span class="nav-text">
         <span class="nav-role">{title}</span>
         <span class="nav-snip">执行结果</span>
@@ -1035,7 +1060,8 @@ class SubAgentSessionDialog(QDialog):
 
     def _build_content_section(self, log_type: str, content: str, log: Dict, index: int) -> str:
         """构建右侧内容区（一条日志条目）"""
-        icon = LOG_ICONS.get(log_type, "•")
+        icon_name = LOG_ICON_NAMES.get(log_type, "设置-subagent")
+        icon_html = _get_subagent_icon_html(icon_name, size=18)
         color = LOG_COLORS.get(log_type, "#888")
         label = LOG_TYPE_LABELS.get(log_type, log_type)
 
@@ -1053,7 +1079,7 @@ class SubAgentSessionDialog(QDialog):
         return f"""<div class="content-section" id="{target_id}">
     <div class="log-entry" style="border-left-color: {color};">
         <div class="log-header" style="color: {color};">
-            <span>{icon}</span>
+            <span>{icon_html}</span>
             <span>{label}</span>
             <span class="log-time">{time_str}</span>
         </div>

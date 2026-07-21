@@ -207,7 +207,7 @@ class SendableTextEdit(TextEdit):
         self.setLineWrapMode(TextEdit.WidgetWidth)
         self.setAcceptDrops(True)
         self.setMinimumHeight(42)
-        self.setMaximumHeight(180)
+        self.setMaximumHeight(300)
         self.setFixedHeight(42)
 
         self._agent_combo = ComboBox(self)
@@ -1093,8 +1093,8 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        content_height = int(doc.size().height()) + 24
-        new_height = max(44, min(160, content_height))
+        content_height = int(doc.size().height()) + 8
+        new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:
             self._adjusting_height = True
@@ -1170,7 +1170,7 @@ class SendableTextEdit(TextEdit):
         if self.send_btn:
             btn_size = self.send_btn.size()
             send_btn_x = self.width() - btn_size.width() - 10
-            send_btn_y = self.height() - btn_size.height() - 8
+            send_btn_y = self.height() - btn_size.height() - 4
             self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -1367,7 +1367,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 12px 52px 12px 20px;
+                padding: 8px 52px 0px 20px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}

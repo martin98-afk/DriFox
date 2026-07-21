@@ -172,8 +172,25 @@ class MyCardWidget(QWidget):
     def show_card(self):
         """卡片显示时：用最新上下文刷新主题色 + 加载数据"""
         self._apply_latest_theme()
+        self._apply_plugin_icon()
         self._async_refresh()
         self.setVisible(True)
+
+    def _apply_plugin_icon(self):
+        """从上下文获取插件图标并更新头部图标（所有实际卡片均实现此模式）"""
+        if self._context_provider is None or self._header_icon is None:
+            return
+        try:
+            from PyQt5.QtGui import QIcon
+
+            ctx = self._context_provider()
+            icon_info = ctx.get("plugin_icon", {})
+            theme = "dark" if isDarkTheme() else "light"
+            icon_path = icon_info.get(theme, "")
+            if icon_path:
+                self._header_icon.setIcon(QIcon(icon_path))
+        except Exception:
+            pass
 
     def _apply_latest_theme(self):
         """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
@@ -198,6 +215,13 @@ class MyCardWidget(QWidget):
 
         # ── 缓存上下文值（供动态创建的子控件使用） ──
         font_family, font_size = _ctx_font(ctx)
+        tc = _ctx_text_color(ctx)
+        tcs = _ctx_text_color(ctx, secondary=True)
+        border_c = _ctx_border_color(ctx)
+        self._cached_tc = tc
+        self._cached_tcs = tcs
+        self._cached_font_family = font_family
+        self._cached_font_size = font_size
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)

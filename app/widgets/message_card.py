@@ -98,6 +98,9 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render_helpers import (
     _format_natural_preview,
     _get_tool_icon,
+    _get_tool_icon_name,
+    _get_tool_icon_html,
+    _get_tool_cn_name,
     render_tool_block,
 )
 
@@ -375,6 +378,18 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
     if md_text.count("```") % 2 == 1:
         md_text += "\n```"
     return md_text
+
+
+def _get_think_icon_html(size: int = 18) -> str:
+    """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except Exception:
+        prefix = "qrc:/icons"
+    style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
+    return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
 
 
 def _get_think_block_styles() -> str:
@@ -1010,14 +1025,17 @@ def _render_tool_streaming_block(
 
     # 图标与颜色：与 render_tool_block 保持一致
     if is_mcp:
-        icon = "🌐"
+        icon_name = "websearch"
         title_color = "#00BCD4"
     elif is_sub_agent_task:
-        icon = "🤖"
+        icon_name = "设置-subagent"
         title_color = "#9C27B0"
     else:
-        icon = _get_tool_icon(tool_name)
+        icon_name = _get_tool_icon(tool_name)
         title_color = "#FFA500"
+
+    icon_html = _get_tool_icon_html(icon_name)
+    cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
 
     # spinner
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
@@ -1030,9 +1048,11 @@ def _render_tool_streaming_block(
     streaming_state = "false" if completed else "true"
 
     return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">
-            <span style="flex: 0 0 auto;">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(display_name)}</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
         <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
@@ -1045,9 +1065,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     if completed:
         # ── 完成态 ──
         tag = _classify_think_tag(content)
-        status_text = (
-            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-        )
+        think_icon = _get_think_icon_html()
+        bulb = f'<span class="think-bulb">{think_icon}</span>'
+        status_text = f"{bulb} {escape(tag)}" if tag else bulb
         preview = _get_think_preview(content)
         font_style = _get_think_block_styles()
 
@@ -1061,7 +1081,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     {preview_right}
 </div>"""
 
-        # ── 非简洁模式：完整折叠框UI（💡标签 + 预览 + 可展开全文）──
+        # ── 非简洁模式：完整折叠框UI（图标标签 + 预览 + 可展开全文）──
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
@@ -1069,9 +1089,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
-        <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
     <div class="cm-collapsible__body">
         {body_html}
@@ -1096,11 +1116,11 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     2. 不生成 block_key hash（节省计算）
     """
     if completed:
-        # ── 完成态：可折叠UI（💡标签 + 预览 + 可展开全文） ──
+        # ── 完成态：可折叠UI（图标标签 + 预览 + 可展开全文） ──
         tag = _classify_think_tag(content)
-        status_text = (
-            f'<span class="think-bulb">💡</span> {escape(tag)}' if tag else '<span class="think-bulb">💡</span>'
-        )
+        think_icon = _get_think_icon_html()
+        bulb = f'<span class="think-bulb">{think_icon}</span>'
+        status_text = f"{bulb} {escape(tag)}" if tag else bulb
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
@@ -1108,9 +1128,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
-        <span class="cm-collapsible__chevron" aria-hidden="true"></span>
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
     <div class="cm-collapsible__body">
         {body_html}
@@ -1749,6 +1769,7 @@ _STREAMING_DOCK_CSS = """
                 body.streaming-dock {
                     display: flex;
                     flex-direction: column;
+                    overflow-anchor: auto;
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
@@ -2594,6 +2615,7 @@ class CodeWebViewer(QWebEngineView):
                     max-height: {self.MAX_HEIGHT}px;
                     overflow-y: auto;
                     overflow-x: hidden;
+                    overflow-anchor: auto;
                 }}
                 {scrollbar_css}
 
@@ -2612,6 +2634,16 @@ class CodeWebViewer(QWebEngineView):
                     display: block;
                     margin: 8px 0;
                     object-fit: contain;
+                }}
+                /* 工具/思考块内的图标小图不应用圆角裁剪，保持原样显示 */
+                #content-placeholder .tool-block img,
+                #content-placeholder .think-block img,
+                #content-placeholder .think-compact img,
+                #content-placeholder .think-streaming img {{
+                    border-radius: 0;
+                    display: inline;
+                    margin: 0;
+                    max-width: none;
                 }}
                 h1, h2, h3, h4, h5, h6 {{ color: var(--text) !important; font-weight: 700; letter-spacing: 0.01em; }}
                 h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
@@ -3442,6 +3474,17 @@ class CodeWebViewer(QWebEngineView):
                 #content-placeholder img {{
                     cursor: pointer;
                 }}
+                /* 工具/思考块内的图标小图不应用圆角裁剪和指针样式 */
+                #content-placeholder .tool-block img,
+                #content-placeholder .think-block img,
+                #content-placeholder .think-compact img,
+                #content-placeholder .think-streaming img {{
+                    border-radius: 0;
+                    display: inline;
+                    margin: 0;
+                    max-width: none;
+                    cursor: default;
+                }}
 
                 /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，背景+边框区分） */
                 /* ── 性能优化：contain: layout paint 让浏览器把此容器视为独立渲染作用域，
@@ -3493,9 +3536,9 @@ class CodeWebViewer(QWebEngineView):
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
                     overflow-y: auto;
-                    background: var(--panel-soft);
-                    border: 1px solid var(--border);
-                    border-radius: 8px;
+                    background: transparent;
+                    border: none;
+                    border-radius: 6px;
                     padding: 4px 8px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
@@ -3505,7 +3548,6 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 0;
                     padding-top: 0;
                     padding-bottom: 0;
-                    border-color: transparent;
                     overflow: hidden;
                 }}
                 /* 新工具块入场动效 — 仅对"真正新"的块生效
@@ -3530,12 +3572,6 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content > .think-streaming:last-child {{
                     margin-bottom: 0;
                 }}
-                #tool-separator-bottom {{
-                    height: 1px;
-                    background: var(--border);
-                    opacity: 0.6;
-                    margin: 6px 0 2px 0;
-                }}
                 {_STREAMING_DOCK_CSS}
             </style>
         </head>
@@ -3546,7 +3582,6 @@ class CodeWebViewer(QWebEngineView):
                 <span>⚙ 工具与思考</span>
               </div>
               <div id="tool-content"></div>
-              <div id="tool-separator-bottom"></div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -4758,6 +4793,33 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
+        # 🆕 流式结束：自动折叠工具与思考区。在最终渲染完成后执行，
+        # 减少"弹到抬头"时的视觉跳跃，让已完成内容的展示更紧凑。
+        # 若有流式进行中的工具块（data-streaming="true"）则暂不折叠，
+        # 等待后续 tool_result_received 处理完成后自然收敛。
+        self._auto_collapse_tool_section()
+
+    def _auto_collapse_tool_section(self):
+        """流式结束时自动折叠工具与思考区
+
+        在 dock 归位 + 最终渲染完成后折叠工具区，减少"弹到抬头"的视觉跳跃。
+        检测到仍有流式进行中的块时跳过折叠，等后续工具结果到达再自然收敛。
+        """
+        try:
+            if self._is_js_ready and self.page():
+                self.page().runJavaScript(
+                    "(function(){"
+                    "var _ts=document.getElementById('tool-section');"
+                    "var _sep=document.getElementById('tool-separator');"
+                    "if(_ts&&!_ts.querySelector('[data-streaming=\"true\"]')){"
+                    "  _ts.setAttribute('data-collapsed','true');"
+                    "  if(_sep)_sep.setAttribute('aria-expanded','false');"
+                    "  if(typeof reportHeightDebounced==='function')reportHeightDebounced();"
+                    "}"
+                    "})();"
+                )
+        except RuntimeError:
+            pass
 
     def _sync_streaming_dock(self, active: bool):
         """同步流式活动坞状态到 JS 端。
@@ -5812,6 +5874,12 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
+        self._stream_height_timer = QTimer(self)
+        self._stream_height_timer.setSingleShot(True)
+        self._stream_height_timer.setInterval(80)
+        self._stream_height_timer.timeout.connect(self._apply_debounced_height)
+        self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
         self._base_bg = self._theme["bg"]
         self._base_border = self._theme["border"]
@@ -6034,23 +6102,24 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
-        # Review 按钮（紧贴差异统计右侧，emoji 🔍），点击触发 code-reviewer 子智能体
-        # 字号与文字保持一致（10px），避免 emoji 与 9px 文字基线错位
-        review_btn = QLabel("🔍", self)
+        # Review 按钮（使用 Search 图标），点击触发 code-reviewer 子智能体
+        icon_size = scale_font_size(10)
+        review_btn = QLabel(self)
         review_btn.setObjectName("footer_review_btn")
+        review_btn.setPixmap(get_icon("Search").pixmap(icon_size, icon_size))
+        review_btn.setFixedSize(icon_size + 4, icon_size + 4)
+        review_btn.setScaledContents(True)
         review_btn.setStyleSheet(
-            f"QLabel {{"
-            f" background: transparent; padding: 0px 2px; margin: 0px;"
-            f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
-            f" color: {accent};"
-            f" }}"
-            f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
+            "QLabel {"
+            " background: transparent; padding: 2px; margin: 0px;"
+            " border-radius: 3px;"
+            " }"
+            "QLabel:hover { background: rgba(128,128,128,0.18); }"
         )
-        review_btn.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        review_btn.setAlignment(Qt.AlignCenter)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
         review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
-        review_btn.adjustSize()
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
@@ -6163,16 +6232,8 @@ class MessageCard(SimpleCardWidget):
         self._footer_diff_stats_label.setTextFormat(Qt.RichText)
         self._footer_diff_stats_label.setVisible(True)
 
-        # 同步显示 Review 按钮（紧贴差异统计右侧），保持 accent 一致
+        # 同步显示 Review 按钮（紧贴差异统计右侧）
         if self._footer_review_btn:
-            self._footer_review_btn.setStyleSheet(
-                f"QLabel {{"
-                f" background: transparent; padding: 0px 2px; margin: 0px;"
-                f" border-radius: 3px; font-size: {scale_font_size(10)}px;"
-                f" color: {accent};"
-                f" }}"
-                f"QLabel:hover {{ background: rgba(128,128,128,0.18); }}"
-            )
             self._footer_review_btn.setVisible(True)
 
     def add_diff_stats(self, files_count: int = 0, additions: int = 0, deletions: int = 0, seen_files: set = None):
@@ -6989,8 +7050,20 @@ class MessageCard(SimpleCardWidget):
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         self._target_viewer_height = target_height
 
-        # 关键优化：流式或小变化 → 立即跳转
-        if self._streaming or abs(target_height - current_height) < 10:
+        # 🆕 流式中防抖：累积高度变化，定时器到期才应用 viewer 高度。
+        # 流式期间每个 text chunk 都会触发 height report（~60fps），
+        # 若每次立即 resize viewer 会导致卡片高度持续跳动、主滚动区不稳定。
+        # 防抖后只有最后一次高度在 80ms 窗口到期后被应用，大幅减少 resize 频率。
+        if self._streaming:
+            if self._height_anim.state() == QVariantAnimation.Running:
+                self._height_anim.stop()
+            self._debounced_target_height = target_height
+            if not self._stream_height_timer.isActive():
+                self._stream_height_timer.start()
+            return
+
+        # 非流式小变化（<10px）→ 立即跳转避免闪烁
+        if abs(target_height - current_height) < 10:
             if self._height_anim.state() == QVariantAnimation.Running:
                 self._height_anim.stop()
             self._apply_viewer_height(target_height)
@@ -7013,6 +7086,16 @@ class MessageCard(SimpleCardWidget):
             layout = self.layout()
             if layout:
                 layout.invalidate()
+
+    def _apply_debounced_height(self):
+        """应用防抖后的流式高度（_stream_height_timer 到期回调）"""
+        h = self._debounced_target_height
+        # 流式已结束则跳过（由 finish_streaming 后的非流式 _update_height 接管）
+        if not self._streaming:
+            return
+        current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        if abs(h - current_height) > 2:
+            self._apply_viewer_height(h)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
@@ -7404,11 +7487,12 @@ class MessageCard(SimpleCardWidget):
         # 增量注入：直接通过 JS 追加工具块 HTML，跳过全量 markdown 重建
         # 避免 content_to_markdown() 遍历全部 content_data 持有 GIL 导致拖动卡顿
         try:
-            # 🐛 修复"工具结果冒出又消失"：去掉旧的条件判断，始终更新 callback，
-            # 确保 _perform_update 能拿到含最新工具结果的 markdown，不被旧 DOM 覆盖。
-            # [PERF] 使用增量 markdown 構建，已緩存的工具塊不再重複轉換
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
-            self.viewer._schedule_render(immediate=True)
+            # 编辑类工具注入到 content-placeholder，跳过回调与渲染避免闪烁。
+            # DOM 已通过 JS 注入到位，markdown 缓存已就绪供后续全量渲染使用。
+            _is_edit_tool = tool_name in _EDIT_TOOLS
+            if not _is_edit_tool:
+                self.viewer._lazy_markdown_cb = self._build_incremental_md
+                self.viewer._schedule_render(immediate=True)
 
             block_html = render_tool_block(
                 tool_name=tool_name,
@@ -7867,12 +7951,13 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "_render_timer") and self.viewer._render_timer.isActive():
             self.viewer._render_timer.stop()
 
-        # Python 端预计算分类（与 _render_think_block 一致），保留 💡 + 分类标签
+        # Python 端预计算分类（与 _render_think_block 一致），保留图标 + 分类标签
         tag = _classify_think_tag(content)
+        think_icon = _get_think_icon_html()
         if tag:
-            status_html = f'<span class="think-bulb">💡</span> {escape(tag)}'
+            status_html = f'<span class="think-bulb">{think_icon}</span> {escape(tag)}'
         else:
-            status_html = '<span class="think-bulb">💡</span>'
+            status_html = f'<span class="think-bulb">{think_icon}</span>'
         safe_status = json.dumps(status_html).decode("utf-8")
 
         # 预生成完成态折叠框 HTML（用于替换 .think-streaming 纯文本 div）

@@ -693,77 +693,144 @@ def _render_diff_preview(diff_text: str) -> str:
     return "".join(rows)
 
 
-# 内建工具图标映射（按模块×操作类型分类）
+# 内建工具图标映射（按模块×操作类型分类 → SVG 图标文件名）
 _TOOL_ICON_MAP = {
     # 文件工具 - 读取
-    "read": "📖",
-    "todoread": "📖",
+    "read": "read",
+    "todoread": "todo",
     # 文件工具 - 写入/编辑
-    "write": "✏️",
-    "edit": "✏️",
-    "multi_edit": "✏️",
-    "todowrite": "✏️",
+    "write": "编辑",
+    "edit": "编辑",
+    "multi_edit": "编辑",
+    "todowrite": "todo",
     # 文件工具 - 搜索/扫描
-    "grep": "🔍",
-    "glob": "🔍",
-    "list": "🔍",
-    "scan_repo": "🔍",
-    "stage_files": "🔍",
+    "grep": "Search",
+    "glob": "Search",
+    "list": "folder",
+    "scan_repo": "Search",
+    "stage_files": "Search",
     # 终端/后台命令
-    "bash": "💻",
-    "bg_start": "💻",
-    "bg_stop": "💻",
-    "bg_logs": "💻",
-    "bg_list": "💻",
+    "bash": "shell",
+    "bg_start": "shell",
+    "bg_stop": "shell",
+    "bg_logs": "shell",
+    "bg_list": "shell",
     # 网络工具
-    "websearch": "🌐",
-    "webfetch": "🌐",
+    "websearch": "websearch",
+    "webfetch": "websearch",
     # 子智能体任务
-    "subagent_para": "🤖",
-    "subagent_status": "🤖",
-    "subagent_dag": "🔗",
+    "subagent_para": "设置-subagent",
+    "subagent_status": "设置-subagent",
+    "subagent_dag": "设置-subagent",
     # 技能工具
-    "skill": "⚡",
-    "list_skills": "⚡",
+    "skill": "技能",
+    "list_skills": "技能",
     # 提问工具
-    "question": "❓",
+    "question": "question",
     # 诊断工具
-    "get_diagnostics": "🩺",
+    "get_diagnostics": "工具",
     # 截图工具
-    "screenshot": "📸",
-    "mouse": "🖱️",
-    "keyboard": "⌨️",
-    # LSP 工具（默认 = listServers 列表图标；具体 operation 由 _get_tool_icon 解析）
-    "lsp": "📋",
+    "screenshot": "裁剪",
+    "mouse": "鼠标",
+    "keyboard": "233键盘-线性",
+    # LSP 工具（默认 = 工具图标；具体 operation 由 _get_tool_icon 解析）
+    "lsp": "工具",
     # CodeGraph 代码智能
-    "codegraph_explore": "🔍",
+    "codegraph_explore": "Search",
+    # 上传文件
+    "upload_file": "upload-file",
+}
+
+# 工具名 → 中文显示名
+_TOOL_CN_NAME_MAP = {
+    "read": "读取",
+    "todoread": "查看待办",
+    "write": "写入",
+    "edit": "编辑",
+    "multi_edit": "批量编辑",
+    "todowrite": "更新待办",
+    "grep": "搜索",
+    "glob": "匹配",
+    "list": "列出文件",
+    "scan_repo": "扫描仓库",
+    "stage_files": "标记文件",
+    "bash": "执行命令",
+    "bg_start": "后台启动",
+    "bg_stop": "后台停止",
+    "bg_logs": "后台日志",
+    "bg_list": "后台列表",
+    "websearch": "网页搜索",
+    "webfetch": "抓取网页",
+    "subagent_para": "分发任务",
+    "subagent_status": "查询任务状态",
+    "subagent_dag": "分发工作流",
+    "skill": "加载技能",
+    "list_skills": "列出技能",
+    "question": "提问",
+    "get_diagnostics": "诊断",
+    "screenshot": "截图",
+    "mouse": "鼠标",
+    "keyboard": "键盘",
+    "lsp": "LSP",
+    "codegraph_explore": "代码探索",
+    "upload_file": "上传文件",
 }
 
 
-# LSP 工具 operation → 图标
-# 让 lsp 工具折叠框在调用 diagnostics / goToDefinition / hover 等操作时显示对应的语义图标，
-# 与 get_diagnostics / read 等独立工具的渲染风格一致。
+# LSP 工具 operation → 图标（SVG 图标名）
 _LSP_OPERATION_ICON_MAP = {
-    "diagnostics": "🩺",  # 诊断（与 get_diagnostics 一致）
-    "documentSymbols": "🔣",  # 符号列表
-    "goToDefinition": "➡️",  # 跳转定义
-    "findReferences": "🔗",  # 引用
-    "hover": "💬",  # 悬浮文档
-    "listServers": "📋",  # 服务器列表
+    "diagnostics": "工具",
+    "documentSymbols": "Search",
+    "goToDefinition": "Search",
+    "findReferences": "Search",
+    "hover": "question",
+    "listServers": "folder",
 }
 
 
-def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
-    """根据工具名（必要时结合 tool_args）查找图标
+def _get_tool_icon_name(tool_name: str, tool_args: dict = None) -> str:
+    """根据工具名（必要时结合 tool_args）查找图标文件名（不含扩展名）
 
     普通工具直接查 _TOOL_ICON_MAP；
-    LSP 工具按 operation 参数切换图标（diagnostics→🩺, hover→💬 等）。
+    LSP 工具按 operation 参数切换图标。
     """
     if tool_name == "lsp" and tool_args:
         operation = tool_args.get("operation", "")
         if operation in _LSP_OPERATION_ICON_MAP:
             return _LSP_OPERATION_ICON_MAP[operation]
-    return _TOOL_ICON_MAP.get(tool_name, "🔧")
+    return _TOOL_ICON_MAP.get(tool_name, "工具")
+
+
+def _get_tool_cn_name(tool_name: str) -> str:
+    """获取工具的中文显示名"""
+    # MCP 工具：返回服务名
+    if tool_name.startswith("mcp__"):
+        return "__".join(tool_name.split("__")[2:]) if len(tool_name.split("__")) > 2 else "MCP"
+    if tool_name == "mcp_list_servers":
+        return "MCP列表"
+    return _TOOL_CN_NAME_MAP.get(tool_name, tool_name)
+
+
+def _get_tool_icon_html(icon_name: str, size: int = 18) -> str:
+    """生成工具图标的 HTML <img> 标签（主题感知）
+
+    根据当前主题选择 qrc:/icons 或 qrc:/icons_light 前缀。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except Exception:
+        prefix = "qrc:/icons"
+    return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;pointer-events:none;" />'
+
+
+def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
+    """[已弃用] 根据工具名查找图标（保留兼容，返回图标文件名）
+
+    新代码请使用 _get_tool_icon_name + _get_tool_icon_html 组合。
+    """
+    return _get_tool_icon_name(tool_name, tool_args)
 
 
 def _extract_screenshot_image_path(result: str) -> str:
@@ -803,6 +870,21 @@ def _extract_screenshot_image_path(result: str) -> str:
             return path
 
     return ""
+
+
+def _to_rel_path(path: str) -> str:
+    """将绝对路径转为相对项目根目录的路径（便于预览展示）"""
+    if not path or not os.path.isabs(path):
+        return path
+    try:
+        cwd = os.getcwd()
+        # normpath 统一分隔符后再比较
+        if os.path.normpath(path).startswith(os.path.normpath(cwd)):
+            rel = os.path.relpath(path, cwd)
+            return rel.replace("\\", "/")
+    except (ValueError, OSError):
+        pass
+    return path
 
 
 # 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
@@ -850,9 +932,10 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         return ""
     desc = ""
     if tool_name == "read":
-        path = tool_args.get("path") or tool_args.get("file_path") or ""
+        raw = tool_args.get("path") or tool_args.get("file_path") or ""
+        path = _to_rel_path(raw.rstrip("/").rstrip("\\")) if raw else ""
         if path:
-            desc = f'读取 "{os.path.basename(path.rstrip("/").rstrip("\\\\"))}"'
+            desc = f'读取 "{path}"'
         else:
             desc = "读取文件"
         startline = tool_args.get("startline")
@@ -865,7 +948,7 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc += f" (前 {endline} 行)"
     elif tool_name == "grep":
         pattern = tool_args.get("pattern", "")
-        path = tool_args.get("path", "")
+        path = _to_rel_path(tool_args.get("path", ""))
         include = tool_args.get("include", "")
         desc = f'搜索 "{pattern}"'
         parts = []
@@ -877,15 +960,15 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             desc += " (" + ", ".join(parts) + ")"
     elif tool_name == "glob":
         pattern = tool_args.get("pattern", "")
-        path = tool_args.get("path", "")
+        path = _to_rel_path(tool_args.get("path", ""))
         desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
         if path:
             desc += f" ({path})"
     elif tool_name == "list":
-        path = tool_args.get("path", ".")
-        desc = f"列出 {path}"
+        path = _to_rel_path(tool_args.get("path", "."))
+        desc = f"{path}"
     elif tool_name == "scan_repo":
-        path = tool_args.get("path", ".")
+        path = _to_rel_path(tool_args.get("path", "."))
         desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
         max_depth = tool_args.get("max_depth")
         if max_depth is not None:
@@ -893,7 +976,9 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
     elif tool_name == "stage_files":
         files = tool_args.get("files", [])
         if files and isinstance(files, (list, tuple)):
-            names = [os.path.basename(f)[:30] for f in files[:3]]
+            names = [_to_rel_path(f) if os.path.isabs(f) else f for f in files[:3]]
+            names = [os.path.basename(n) if "/" in n or "\\" in n else n for n in names]
+            names = [n[:30] for n in names]
             if len(files) > 3:
                 desc = "标记 " + ", ".join(names) + f" 等 {len(files)} 个"
             else:
@@ -901,15 +986,16 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         else:
             desc = "标记文件"
     elif tool_name == "get_diagnostics":
-        path = tool_args.get("path", "")
+        path = _to_rel_path(tool_args.get("path", ""))
         language = tool_args.get("language", "")
         desc = f"诊断 {path}" if path else "代码诊断"
         if language:
             desc += f" ({language})"
     # ── 折叠工具的自然预览 ──
     elif tool_name in ("write", "edit", "multi_edit"):
-        path = tool_args.get("path") or tool_args.get("file_path") or ""
-        fname = os.path.basename(path) if path else "文件"
+        raw = tool_args.get("path") or tool_args.get("file_path") or ""
+        path = _to_rel_path(raw) if raw else ""
+        fname = path or "文件"
         if tool_name == "write":
             desc = f'写入 "{fname}"'
         elif tool_name == "edit":
@@ -927,7 +1013,8 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
         desc = f'加载技能 "{name}"' if name else "加载技能"
     elif tool_name == "lsp":
         operation = tool_args.get("operation", "")
-        path = tool_args.get("path", "")
+        raw = tool_args.get("path", "")
+        path = _to_rel_path(raw) if raw else ""
         op_labels = {
             "diagnostics": "诊断",
             "documentSymbols": "符号列表",
@@ -937,10 +1024,9 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
             "listServers": "服务器列表",
         }
         op_label = op_labels.get(operation, operation or "LSP")
-        fname = os.path.basename(path) if path else ""
         desc = f"LSP {op_label}"
-        if fname:
-            desc += f' "{fname}"'
+        if path:
+            desc += f' "{path}"'
     elif tool_name == "subagent_para":
         tasks = tool_args.get("tasks", [])
         count = len(tasks) if isinstance(tasks, list) else 0
@@ -1047,26 +1133,40 @@ def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
     return desc
 
 
+def _render_tool_status_badge(success: bool) -> str:
+    """生成工具执行状态的 HTML 徽章（显示在图标右上角）"""
+    if success is None:
+        return ""
+    bg = "#4CAF50" if success else "#F44336"
+    return f'<span class="tool-status-badge" style="position:absolute;top:-2px;right:-2px;width:7px;height:7px;border-radius:50%;background:{bg};z-index:2;box-shadow:0 1px 2px rgba(0,0,0,0.35);"></span>'
+
+
 def _render_inline_tool(
     tool_name: str,
     tool_args: dict,
     success: bool = None,
     tool_call_id: str = None,
 ) -> str:
-    """渲染紧凑单行卡片（无折叠、无 body、无工具结果内容）"""
-    status_html = ""
-    if success is not None:
-        status_color = "#4CAF50" if success else "#F44336"
-        status_text = "✓" if success else "✗"
-        status_html = f'<span style="color: {status_color}; font-weight: bold; margin-left: 6px;">{status_text}</span>'
-    icon = _get_tool_icon(tool_name, tool_args)
+    """渲染紧凑单行卡片（无折叠、无 body、无工具结果内容）
+
+    新设计：SVG 图标 + 状态徽章 + 中文名 + 自然语言参数描述
+    """
+    icon_name = _get_tool_icon_name(tool_name, tool_args)
+    icon_html = _get_tool_icon_html(icon_name)
+    badge_html = _render_tool_status_badge(success)
+    cn_name = _get_tool_cn_name(tool_name)
     natural_preview = _format_natural_preview(tool_name, tool_args)
+    # 去重：自然语言预览开头如与工具名重复则省略
+    if natural_preview.startswith(cn_name):
+        natural_preview = natural_preview[len(cn_name) :].lstrip()
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
     return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">
-            <span style="flex: 0 0 auto;">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto;">{escape(tool_name)}</span>
-            {status_html}
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
         </span>
         <span style="flex: 1 1 auto; min-width: 0; text-align: left; color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {escape(natural_preview)}
@@ -1446,26 +1546,21 @@ def render_tool_block(
     # 检测是否为子智能体任务（特殊渲染逻辑）
     is_sub_agent_task = tool_name in ("subagent_para", "subagent_dag")
 
-    # 状态图标
-    status_html = ""
-    if success is not None:
-        status_color = "#4CAF50" if success else "#F44336"
-        status_text = "✓" if success else "✗"
-        status_html = f'<span style="color: {status_color}; font-weight: bold; margin-left: 6px;">{status_text}</span>'
-
     # 图标与颜色按类型区分
     if is_mcp_tool:
-        icon = "🌐"
+        icon_name = "websearch"
         title_color = "#00BCD4"
-        if tool_name.startswith("mcp__"):
-            tool_name = "__".join(tool_name.split("__")[2:])
     elif is_sub_agent_task:
-        icon = "🤖"
+        icon_name = "设置-subagent"
         title_color = "#9C27B0"
     else:
-        # 从图标映射表查找，未找到则用默认扳手图标
-        icon = _get_tool_icon(tool_name, tool_args)
+        icon_name = _get_tool_icon_name(tool_name, tool_args)
         title_color = "#FFA500"
+
+    # 状态徽章（图标右上角）
+    badge_html = _render_tool_status_badge(success)
+    icon_html = _get_tool_icon_html(icon_name)
+    cn_name = _get_tool_cn_name(tool_name)
 
     # 子智能体任务特殊处理
     if is_sub_agent_task:
@@ -1528,6 +1623,10 @@ def render_tool_block(
         # 优先使用自然语言预览，无匹配时 fallback 到 key=value 格式
         natural = _format_natural_preview(tool_name, tool_args)
         args_preview = natural if natural else _format_args_preview(tool_args)
+
+    # 去重：自然语言预览开头如与工具名重复则省略
+    if args_preview.startswith(cn_name):
+        args_preview = args_preview[len(cn_name) :].lstrip()
 
     # ── grep/glob 结果计数 ──
     match_count_html = ""
@@ -1687,11 +1786,12 @@ def render_tool_block(
 
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
-        <span style="display: inline-flex; align-items: center; gap: 4px; min-width: 80px; flex: 0 0 auto;">
-            <span class="cm-collapsible__chevron" aria-hidden="true"></span>
-            <span style="flex: 0 0 auto; {get_font_family_css()}">{icon}</span>
-            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(tool_name)}</span>
-            {status_html}
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
         </span>
         <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
             <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
@@ -1701,6 +1801,7 @@ def render_tool_block(
             {diff_stats_html}
             {subagent_log_btn_html}
         </span>
+        <span class="cm-collapsible__chevron" aria-hidden="true" style="flex: 0 0 auto; margin-left: auto;"></span>
     </button>
     <div class="cm-collapsible__body"{body_style}>
         {expanded_content}

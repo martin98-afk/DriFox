@@ -394,7 +394,8 @@ class UIPluginEdgeLauncher(QWidget):
         # 使样式表缓存和图标缓存失效（主题色/深色/浅色图标路径可能不同）
         self._cached_stylesheet = None
         self._cached_stylesheet_is_light = None
-        self._icon_cache.clear()
+        # 重新加载图标缓存：深浅主题切换后图标路径可能不同（如 icon_dark.svg / icon_light.svg）
+        self._preload_icons()
         self._visual.update()
 
     # ── 鼠标事件（命中检测）────────────────────────────────

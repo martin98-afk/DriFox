@@ -31,6 +31,9 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
+# ── 分页常量 ──
+_PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
+
 from app.utils.design_tokens import (
     Colors,
     apply_font_size_to_widget,
@@ -730,6 +733,13 @@ class HistoryCard(QWidget):
         self._current_project: Optional[str] = None  # 当前过滤的项目
         self._search_filter: str = ""  # 搜索过滤文本
 
+        # === 分页控制 ===
+        self._page_size = _PAGE_SIZE
+        self._show_limit = _PAGE_SIZE  # 当前最多显示的会话数
+        self._remaining_count = 0  # 未显示的会话数
+        self._total_session_count = 0  # 当前列表总会话数
+        self._load_more_btn = None  # 加载更多按钮引用
+
         # === 增量更新缓存 ===
         # session_id → _HistoryItemCard 缓存（避免重复创建 widget）
         self._cached_cards: Dict[str, _HistoryItemCard] = {}
@@ -826,6 +836,9 @@ class HistoryCard(QWidget):
         # 注意：不再清空 _pinyin_cache。会话标题/预览的拼音与 session_id 绑定，
         # 只要 session 存在，拼音结果就不变。删除会话时其缓存条目自然失效。
         # 这样每次搜索避免 O(n) 次 lazy_pinyin 重复计算。
+        # 搜索框清空时恢复分页首屏（避免用户看到展开后的全部列表）
+        if not self._search_filter:
+            self._show_limit = self._page_size
         self._update_display()
 
     def get_content_layout(self) -> QVBoxLayout:
@@ -893,6 +906,9 @@ class HistoryCard(QWidget):
         cached_set.update(id(w) for w in self._cached_archived.values())
         cached_set.update(id(w) for w in self._cached_headers.values())
         cached_set.update(id(w) for w in self._cached_spacers)
+
+        # 清理「加载更多」按钮引用（它不在缓存中，会被 deleteLater 清理）
+        self._load_more_btn = None
 
         while layout.count():
             item = layout.takeAt(0)
@@ -1003,12 +1019,14 @@ class HistoryCard(QWidget):
         """切换标签页"""
         if self._current_tab != tab:
             self._current_tab = tab
+            self._show_limit = self._page_size
             self._update_display()
 
     def _update_display(self):
         """逐步渲染：先准备数据队列，再分批创建 widget（避免一次创建全部导致 UI 冻结）"""
         self._render_timer.stop()
         self._render_queue.clear()
+        self._remaining_count = 0
 
         layout = self.get_content_layout()
         content_widget = layout.parentWidget() if layout else None
@@ -1108,6 +1126,7 @@ class HistoryCard(QWidget):
         else:
             # 全部渲染完成
             self._prune_cached_spacers()
+            self._add_load_more_if_needed(layout)
             self._refresh_font_size()
 
     def _get_or_create_history_card(
@@ -1287,16 +1306,32 @@ class HistoryCard(QWidget):
         for year in sorted(year_groups.keys(), reverse=True):
             final_order.append((year, year_groups[year]))
 
+        # ── 计算分页 ──
+        total_other = sum(len(sessions) for _, sessions in final_order)
+        self._total_session_count = len(self._all_history)
+        limit = self._show_limit if not self._search_filter else total_other
+        session_count = 0
+        self._remaining_count = max(0, total_other - limit)
+
         has_items = current_session_widget
         for section, sessions in final_order:
             if not sessions:
                 continue
+            # 分页截断：已达到限制则跳过剩余分组
+            if session_count >= limit:
+                continue
+            total_in_section = len(sessions)
+            to_add = sessions[:limit - session_count] if session_count + total_in_section > limit else sessions
+            if not to_add:
+                continue
             has_items = True
-            queue.append(("header", section, len(sessions)))
-            for original_index, session in sessions:
+            # header 显示该分组总会话数（而非仅可见数），让用户了解完整规模
+            queue.append(("header", section, total_in_section))
+            for original_index, session in to_add:
                 sid = session.get("session_id", "")
                 visible_ids.add(sid)
                 queue.append(("session", session, original_index, False))
+            session_count += len(to_add)
             queue.append(("spacer",))
 
         if not has_items:
@@ -1356,17 +1391,33 @@ class HistoryCard(QWidget):
             if category not in order:
                 final_order.append((category, sessions))
 
+        # ── 计算分页 ──
+        total_archived = sum(len(sessions) for _, sessions in final_order)
+        self._total_session_count = total_archived
+        limit = self._show_limit if not self._search_filter else total_archived
+        session_count = 0
+        self._remaining_count = max(0, total_archived - limit)
+
         has_items = False
         active_paths = set()
         for section, sessions in final_order:
             if not sessions:
                 continue
+            # 分页截断
+            if session_count >= limit:
+                continue
+            total_in_section = len(sessions)
+            to_add = sessions[:limit - session_count] if session_count + total_in_section > limit else sessions
+            if not to_add:
+                continue
             has_items = True
-            queue.append(("header", section, len(sessions)))
-            for session in sessions:
+            # header 显示该分组总会话数（而非仅可见数），让用户了解完整规模
+            queue.append(("header", section, total_in_section))
+            for session in to_add:
                 file_path = session.get("path", "")
                 active_paths.add(file_path)
                 queue.append(("archived", session))
+            session_count += len(to_add)
             queue.append(("spacer",))
 
         if not has_items:
@@ -1380,6 +1431,64 @@ class HistoryCard(QWidget):
         while len(self._cached_spacers) > max_spacers:
             spacer = self._cached_spacers.pop()
             spacer.deleteLater()
+
+    # ── 加载更多 ──────────────────────────────────────────────
+
+    def _add_load_more_if_needed(self, layout):
+        """在列表底部添加「加载更多」按钮（stretch 之前）"""
+        if self._remaining_count <= 0:
+            self._remove_load_more_button()
+            return
+        if self._search_filter:
+            return  # 搜索模式不显示加载更多（已显示全部结果）
+
+        self._remove_load_more_button()
+
+        total = self._total_session_count
+        shown = total - self._remaining_count
+        btn = PushButton(f"共 {total} 个会话，点击加载更多（已显示 {shown} 个）", self)
+        btn.setStyleSheet(
+            "PushButton { background: rgba(128,128,128,0.06); border: 1px solid rgba(128,128,128,0.15);"
+            " border-radius: 8px; padding: 10px; color: rgba(128,128,128,0.6); }"
+            "PushButton:hover { background: rgba(128,128,128,0.15); border-color: rgba(128,128,128,0.3);"
+            " color: rgba(255,255,255,0.85); }"
+        )
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(self._on_load_more)
+        self._load_more_btn = btn
+        # 插入到 stretch 之前
+        count = layout.count()
+        last_item = layout.itemAt(count - 1) if count > 0 else None
+        if last_item and last_item.widget() is None:
+            layout.insertWidget(count - 1, btn)
+        else:
+            layout.addWidget(btn)
+
+    def _remove_load_more_button(self):
+        """移除现有的「加载更多」按钮"""
+        btn = self._load_more_btn
+        if btn is None:
+            return
+        self._load_more_btn = None
+        try:
+            btn.clicked.disconnect()
+        except TypeError:
+            pass
+        layout = self.get_content_layout()
+        if layout is None:
+            btn.deleteLater()
+            return
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item and item.widget() is btn:
+                layout.takeAt(i)
+                break
+        btn.deleteLater()
+
+    def _on_load_more(self):
+        """加载下一批会话"""
+        self._show_limit += self._page_size
+        self._update_display()
 
     def _cleanup_orphan_archived_cards(self, active_paths: set):
         """清理不再显示的归档缓存卡片（搜索过滤时不清理）"""

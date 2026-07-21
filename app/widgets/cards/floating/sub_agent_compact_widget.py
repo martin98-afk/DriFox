@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.utils.design_tokens import Colors
-from app.utils.utils import _is_current_theme_light, get_font_family_css, get_unified_font
+from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
@@ -546,9 +546,10 @@ class SubAgentCompactFloatingWidget(QWidget):
         header = QHBoxLayout()
         header.setSpacing(6)
 
-        self.header_icon = QLabel("🤖", self)
-        self.header_icon.setFont(get_unified_font(11))
+        self.header_icon = QLabel(self)
+        self.header_icon.setFixedSize(18, 18)
         self.header_icon.setStyleSheet("background: transparent; border: none;")
+        self._update_header_icon()
         header.addWidget(self.header_icon)
 
         self.title_label = QLabel("子智能体", self)
@@ -657,9 +658,15 @@ class SubAgentCompactFloatingWidget(QWidget):
             }}
         """)
 
+    def _update_header_icon(self):
+        """更新头部图标为设置-subagent（主题感知，由 refresh_style 在主题切换时调用）"""
+        pixmap = get_icon("设置-subagent").pixmap(18, 18)
+        self.header_icon.setPixmap(pixmap)
+
     def refresh_style(self):
         """响应主题切换"""
         Colors.refresh()
+        self._update_header_icon()
         self.title_label.setStyleSheet(f"color: {Colors.REALTIME_ACCENT}; background: transparent;")
         self.status_label.setStyleSheet(f"color: {Colors.REALTIME_TEXT_SECONDARY}; background: transparent;")
 

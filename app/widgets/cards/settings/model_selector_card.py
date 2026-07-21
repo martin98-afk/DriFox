@@ -357,6 +357,24 @@ class ModelSelectorCardContent(QWidget):
         """刷新主题样式"""
         Colors.refresh()
         self.content_widget.setStyleSheet("background: transparent;")
+        # 刷新滚动区域样式（含滚动条颜色）
+        self.scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background: transparent;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(8)}
+        """)
+        # 强制滚动条重新应用样式表（水平+垂直，确保主题切换后颜色即时生效）
+        for sb in (self.scroll_area.verticalScrollBar(), self.scroll_area.horizontalScrollBar()):
+            if sb is not None:
+                sb_style = sb.style()
+                if sb_style is not None:
+                    sb_style.unpolish(sb)
+                    sb_style.polish(sb)
         # 重新触发射信号，让标题栏标签更新颜色
         scroll_pos = self.scroll_area.verticalScrollBar().value()
         self._on_scroll(scroll_pos)
