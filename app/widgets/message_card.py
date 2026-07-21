@@ -2623,6 +2623,16 @@ class CodeWebViewer(QWebEngineView):
                     margin: 8px 0;
                     object-fit: contain;
                 }}
+                /* 工具/思考块内的图标小图不应用圆角裁剪，保持原样显示 */
+                #content-placeholder .tool-block img,
+                #content-placeholder .think-block img,
+                #content-placeholder .think-compact img,
+                #content-placeholder .think-streaming img {{
+                    border-radius: 0;
+                    display: inline;
+                    margin: 0;
+                    max-width: none;
+                }}
                 h1, h2, h3, h4, h5, h6 {{ color: var(--text) !important; font-weight: 700; letter-spacing: 0.01em; }}
                 h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
                 h2 {{ font-size: 1.25em; margin: 10px 0 6px; }}
@@ -3451,6 +3461,17 @@ class CodeWebViewer(QWebEngineView):
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
                     cursor: pointer;
+                }}
+                /* 工具/思考块内的图标小图不应用圆角裁剪和指针样式 */
+                #content-placeholder .tool-block img,
+                #content-placeholder .think-block img,
+                #content-placeholder .think-compact img,
+                #content-placeholder .think-streaming img {{
+                    border-radius: 0;
+                    display: inline;
+                    margin: 0;
+                    max-width: none;
+                    cursor: default;
                 }}
 
                 /* 工具/思考区域 - 高度自适应 + 可折叠（正文上方，背景+边框区分） */
