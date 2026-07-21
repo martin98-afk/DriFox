@@ -37,6 +37,8 @@ from qfluentwidgets import (
     FluentIcon,
     FluentLabelBase,
     IconWidget,
+    InfoBar,
+    InfoBarPosition,
     ScrollArea,
     StrongBodyLabel,
     ToolButton,
@@ -152,13 +154,13 @@ class _RecordItem(QFrame):
         icon_lb = QLabel(_TYPE_ICONS.get(rtype, "📄"))
         icon_lb.setFixedWidth(24)
         icon_lb.setAlignment(Qt.AlignCenter)
-        icon_lb.setStyleSheet("background: transparent;")
+        icon_lb.setStyleSheet("background: transparent; font-size: 14px;")
         row1.addWidget(icon_lb)
 
         title_lb = QLabel(title)
         title_lb.setObjectName("recordRowTitle")
         title_lb.setWordWrap(False)
-        title_lb.setStyleSheet("font-weight: 600; background: transparent;")
+        title_lb.setStyleSheet("font-weight: 600; background: transparent; font-size: 14px;")
         row1.addWidget(title_lb, 1)
 
         badge_text = fmt.upper() if fmt else _TYPE_LABELS.get(rtype, "")
@@ -185,7 +187,7 @@ class _RecordItem(QFrame):
 
         time_lb = QLabel(created_at)
         time_lb.setObjectName("recordRowTime")
-        time_lb.setStyleSheet("background: transparent;")
+        time_lb.setStyleSheet("background: transparent; font-size: 13px;")
         row2.addWidget(time_lb)
 
         info_parts = []
@@ -204,7 +206,7 @@ class _RecordItem(QFrame):
         if info_parts:
             info_lb = QLabel(" · ".join(info_parts))
             info_lb.setObjectName("recordRowInfo")
-            info_lb.setStyleSheet("background: transparent;")
+            info_lb.setStyleSheet("background: transparent; font-size: 13px;")
             row2.addWidget(info_lb)
 
         row2.addStretch()
@@ -285,6 +287,14 @@ class _RecordItem(QFrame):
     def _copy_link(self, url: str):
         if url:
             QApplication.clipboard().setText(url)
+            parent = self.window()
+            if parent:
+                InfoBar.success(
+                    title="",
+                    content="链接已复制到剪贴板",
+                    duration=2000,
+                    parent=parent,
+                )
 
 
 # ════════════════════════════════════════════════════════════
