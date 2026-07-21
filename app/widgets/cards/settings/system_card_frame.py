@@ -169,6 +169,20 @@ class SystemCardFrame(QFrame):
         self._count_label.setFont(get_unified_font(10))
         self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
         self.scroll_area.setStyleSheet(self._scroll_style())
+        # 强制滚动条重新应用样式表：unpolish/polish 让 Qt 重新评估 QSS
+        # 深色/浅色切换后旧样式可能被缓存，unpolish+polish 迫使 Qt 重新解析颜色
+        sb_vertical = self.scroll_area.verticalScrollBar()
+        if sb_vertical is not None:
+            sb_style = sb_vertical.style()
+            if sb_style is not None:
+                sb_style.unpolish(sb_vertical)
+                sb_style.polish(sb_vertical)
+        sb_horizontal = self.scroll_area.horizontalScrollBar()
+        if sb_horizontal is not None:
+            sb_style = sb_horizontal.style()
+            if sb_style is not None:
+                sb_style.unpolish(sb_horizontal)
+                sb_style.polish(sb_horizontal)
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
         # 刷新搜索框样式（如果存在）

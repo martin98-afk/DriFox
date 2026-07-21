@@ -526,8 +526,26 @@ class ProjectSelectorCardContent(QWidget):
             self.refresh_style()
 
     def refresh_style(self):
-        """刷新主题样式"""
+        """刷新主题样式（含滚动条颜色）"""
         Colors.refresh()
+        # 刷新滚动区域样式表（滚动条颜色随主题变化）
+        self._scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: none;
+                background: transparent;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(8)}
+        """)
+        # 强制滚动条重新应用样式（水平+垂直，确保主题切换后颜色即时生效）
+        for sb in (self._scroll_area.verticalScrollBar(), self._scroll_area.horizontalScrollBar()):
+            if sb is not None:
+                sb_style = sb.style()
+                if sb_style is not None:
+                    sb_style.unpolish(sb)
+                    sb_style.polish(sb)
 
     # ── 公有方法 ──────────────────────────────────────
 
