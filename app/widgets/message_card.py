@@ -3529,12 +3529,6 @@ class CodeWebViewer(QWebEngineView):
                 #tool-content > .think-streaming:last-child {{
                     margin-bottom: 0;
                 }}
-                #tool-separator-bottom {{
-                    height: 1px;
-                    background: var(--border);
-                    opacity: 0.6;
-                    margin: 6px 0 2px 0;
-                }}
                 {_STREAMING_DOCK_CSS}
             </style>
         </head>
@@ -3545,7 +3539,6 @@ class CodeWebViewer(QWebEngineView):
                 <span>⚙ 工具与思考</span>
               </div>
               <div id="tool-content"></div>
-              <div id="tool-separator-bottom"></div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -5838,6 +5831,12 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
+        self._stream_height_timer = QTimer(self)
+        self._stream_height_timer.setSingleShot(True)
+        self._stream_height_timer.setInterval(80)
+        self._stream_height_timer.timeout.connect(self._apply_debounced_height)
+        self._debounced_target_height = 40
         self._theme = self._build_theme(role, error)
         self._base_bg = self._theme["bg"]
         self._base_border = self._theme["border"]
@@ -7015,8 +7014,20 @@ class MessageCard(SimpleCardWidget):
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         self._target_viewer_height = target_height
 
-        # 关键优化：流式或小变化 → 立即跳转
-        if self._streaming or abs(target_height - current_height) < 10:
+        # 🆕 流式中防抖：累积高度变化，定时器到期才应用 viewer 高度。
+        # 流式期间每个 text chunk 都会触发 height report（~60fps），
+        # 若每次立即 resize viewer 会导致卡片高度持续跳动、主滚动区不稳定。
+        # 防抖后只有最后一次高度在 80ms 窗口到期后被应用，大幅减少 resize 频率。
+        if self._streaming:
+            if self._height_anim.state() == QVariantAnimation.Running:
+                self._height_anim.stop()
+            self._debounced_target_height = target_height
+            if not self._stream_height_timer.isActive():
+                self._stream_height_timer.start()
+            return
+
+        # 非流式小变化（<10px）→ 立即跳转避免闪烁
+        if abs(target_height - current_height) < 10:
             if self._height_anim.state() == QVariantAnimation.Running:
                 self._height_anim.stop()
             self._apply_viewer_height(target_height)
@@ -7039,6 +7050,16 @@ class MessageCard(SimpleCardWidget):
             layout = self.layout()
             if layout:
                 layout.invalidate()
+
+    def _apply_debounced_height(self):
+        """应用防抖后的流式高度（_stream_height_timer 到期回调）"""
+        h = self._debounced_target_height
+        # 流式已结束则跳过（由 finish_streaming 后的非流式 _update_height 接管）
+        if not self._streaming:
+            return
+        current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
+        if abs(h - current_height) > 2:
+            self._apply_viewer_height(h)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
