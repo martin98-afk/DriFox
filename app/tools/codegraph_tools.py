@@ -45,7 +45,7 @@ class CodeGraphTools:
         self._last_init_attempt = 0.0
         self._init_cooldown = 1.0
         self._last_sync_time = 0.0
-        self._sync_cooldown = 5.0  # 两次自动 sync 的最小间隔（秒）
+        self._sync_cooldown = 30.0  # 两次自动 sync 的最小间隔（秒）
         self._watch_enabled = watch  # 是否启用文件监听自动索引
 
     @property
@@ -463,7 +463,8 @@ class CodeGraphTools:
             if now - self._last_sync_time > self._sync_cooldown:
                 self._last_sync_time = now
                 try:
-                    sync_result = cg.sync()
+                    # quick=True: CodeGraph 端有 5s 内部 debounce，避免频繁全目录扫描
+                    sync_result = cg.sync(quick=True)
                     changed = sync_result.files_added + sync_result.files_modified + sync_result.files_removed
                     if changed:
                         logger.info(f"[CodeGraph] 自动同步: {changed} 个文件变更")
