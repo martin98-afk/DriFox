@@ -29,6 +29,28 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
 
+# ── 全局禁用原生 QToolTip.showText ──────────────────────
+# 必须在模块加载时执行，确保所有 QToolTip.showText() 调用都被拦截。
+# 否则 qfluentwidgets SwitchButton 等未装 _HoverTooltipFilter 的控件
+# 会触发原生 tooltip，在 Windows 深色模式下渲染为全黑方块。
+
+def _disable_native_tooltip():
+    """Monkey-patch QToolTip.showText 为空操作，彻底消灭原生 tooltip 黑块。"""
+    try:
+        from PyQt5.QtWidgets import QToolTip
+
+        if QToolTip.showText.__name__ != "_noop":
+            _original = QToolTip.showText
+            def _noop(*args, **kwargs):
+                pass
+            _noop._original = _original
+            QToolTip.showText = _noop
+    except Exception:
+        pass
+
+_disable_native_tooltip()
+
+
 # ── 自动拦截所有 QWidget.setToolTip，统一接入自绘 tooltip ──
 # 只要某处调用了 setToolTip("xxx")，自动为该 widget 安装 _HoverTooltipFilter。
 # 使自定义 tooltip 覆盖所有系统内部 widget，无需逐个改调用处。

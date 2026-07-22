@@ -34,7 +34,7 @@ class SendStopButton(QWidget):
 
     # 呼吸周期参数
     CYCLE_MS = 2500
-    SCALE_AMPLITUDE = 0.10   # 缩放幅度 ±10%
+    SCALE_AMPLITUDE = 0.10  # 缩放幅度 ±10%
     FRAME_INTERVAL_MS = 33
 
     # 停止方块颜色（深浅主题统一用白色）
@@ -48,11 +48,12 @@ class SendStopButton(QWidget):
 
         # 状态
         self._mode = self.MODE_SEND
-        self._send_enabled = True   # 发送模式下是否可用（有文本）
+        self._send_enabled = True  # 发送模式下是否可用（有文本）
         self._hovered = False
 
-        # 动画状态
-        self._anim_progress = 0.0
+        # 动画状态 — 两个独立连续累计的相位（弧度），保证 sin() 回绕点连续
+        self._phase_scale = 0.0  # 缩放相位，每个 CYCLE_MS 走 2π
+        self._phase_shape = 0.0  # 形状相位，比缩放稍慢
         self._timer = QTimer(self)
         self._timer.setInterval(self.FRAME_INTERVAL_MS)
         self._timer.timeout.connect(self._advance)
@@ -68,6 +69,7 @@ class SendStopButton(QWidget):
     def _register_theme(self):
         try:
             from app.utils.theme_manager import theme_manager
+
             theme_manager.register_refresh_target(self)
             self.refresh_theme()
         except Exception:
@@ -85,13 +87,15 @@ class SendStopButton(QWidget):
         """切换到发送模式"""
         self._mode = self.MODE_SEND
         self._timer.stop()
-        self._anim_progress = 0.0
+        self._phase_scale = 0.0
+        self._phase_shape = 0.0
         self.update()
 
     def set_stop_mode(self):
         """切换到停止模式并启动呼吸动画"""
         self._mode = self.MODE_STOP
-        self._anim_progress = 0.0
+        self._phase_scale = 0.0
+        self._phase_shape = 0.0
         self._timer.start()
         self.update()
 
@@ -106,10 +110,14 @@ class SendStopButton(QWidget):
     # ── 动画 ──────────────────────────────────────────
 
     def _advance(self):
-        increment = self.FRAME_INTERVAL_MS / self.CYCLE_MS
-        self._anim_progress += increment
-        if self._anim_progress > 1.0:
-            self._anim_progress -= 1.0
+        """每帧推进两个相位；回绕到 [0, 2π) 时 sin 值天然连续"""
+        delta = self.FRAME_INTERVAL_MS / self.CYCLE_MS * 2 * math.pi
+        self._phase_scale += delta
+        self._phase_shape += delta * 0.7  # 形状相位比缩放稍慢
+        if self._phase_scale >= 2 * math.pi:
+            self._phase_scale -= 2 * math.pi
+        if self._phase_shape >= 2 * math.pi:
+            self._phase_shape -= 2 * math.pi
         self.update()
 
     # ── 事件 ──────────────────────────────────────────
@@ -134,6 +142,7 @@ class SendStopButton(QWidget):
     def _get_bg_colors(self):
         """根据当前状态获取背景色（单色或渐变起止色）"""
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
 
         # 禁用态不改变背景色，仅靠图标半透明区分
@@ -156,6 +165,7 @@ class SendStopButton(QWidget):
         # 1. 绘制按钮背景（圆角矩形，半径取自主题）
         # _get_bg_colors 中已 Colors.refresh()，这里直接读缓存值
         from app.utils.design_tokens import Colors as _C
+
         btn_r = _C.SEND_BTN_RADIUS
 
         bg_path = QPainterPath()
@@ -186,13 +196,23 @@ class SendStopButton(QWidget):
         icon.paint(painter, x, y, icon_size, icon_size, Qt.AlignCenter, QIcon.Normal)
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
-        """绘制缩放呼吸方块"""
-        angle = self._anim_progress * 2.0 * math.pi
-        scale = 1.0 + self.SCALE_AMPLITUDE * math.sin(angle)
+        """绘制缩放+形状呼吸方块
 
-        base_size = 17          # 方块基准边长
+        两种连续变化叠加（两个独立连续相位，无回绕割裂）：
+        - 缩放：size 在 base_size ±10% 之间正弦变化
+        - 形状：圆角半径 rx 在 min_rx ↔ size/2（纯圆）之间正弦变化
+        - 形状相位比缩放稍慢（0.7x），效果更有机
+        """
+        scale = 1.0 + self.SCALE_AMPLITUDE * math.sin(self._phase_scale)
+
+        base_size = 17  # 方块基准边长
         size = base_size * scale
-        rx = 3.0 * scale        # 圆角跟随缩放
+        half = size / 2.0
+
+        # 形状呼吸：圆角在「柔和圆角方块」↔「正圆(rx=size/2)」之间循环
+        min_rx = 5.0  # 始终保持可见弧度，避免尖角
+        max_rx = half  # 正圆所需的圆角
+        rx = min_rx + (max_rx - min_rx) * (0.5 + 0.5 * math.sin(self._phase_shape))
 
         square_path = QPainterPath()
         square_path.addRoundedRect(cx - size / 2, cy - size / 2, size, size, rx, rx)
@@ -201,6 +221,7 @@ class SendStopButton(QWidget):
     def __del__(self):
         try:
             from app.utils.theme_manager import theme_manager
+
             theme_manager.unregister_refresh_target(self)
         except Exception:
             pass
