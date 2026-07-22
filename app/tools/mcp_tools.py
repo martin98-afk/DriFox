@@ -100,6 +100,9 @@ class MCPClientManager:
         self._busy_names: set = set()
         self._busy_lock = threading.Lock()
 
+        # 保护 _connections / _connected 多线程访问（UI 线程 + 事件循环线程）
+        self._lock = threading.Lock()
+
         # 专用后台线程 + 持久事件循环
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -389,7 +392,9 @@ class MCPClientManager:
             except Exception as e:
                 logger.error(f"[MCP] 连接服务器 '{name}' 失败: {e}")
 
-        self._connected = True
+        # 修复：从实际已连接的服务器计算状态，避免全失败也显示已连接
+        with self._lock:
+            self._connected = bool(self._connections)
 
     def connect_server_sync(self, name: str, config: dict) -> bool:
         """同步连接单个 MCP 服务器（热添加）"""
@@ -475,8 +480,9 @@ class MCPClientManager:
             logger.error(f"[MCP] {msg}")
             return False, msg
 
-        self._connections[name] = conn
-        self._connected = True
+        with self._lock:
+            self._connections[name] = conn
+            self._connected = True
         logger.info(f"[MCP] 已连接服务器 '{name}'，发现 {len(conn.tools)} 个工具")
         return True, ""
 
@@ -524,24 +530,25 @@ class MCPClientManager:
 
     async def _disconnect_single(self, name: str) -> bool:
         """断开单个服务器：信号通知 + 取消 Task，不等待清理完成"""
-        conn = self._connections.pop(name, None)
-        if not conn:
-            return False
+        with self._lock:
+            conn = self._connections.pop(name, None)
+            if not conn:
+                return False
 
-        # 通知生命周期 Task 退出（走 async with 正常清理路径）
-        if conn._disconnect_event:
-            conn._disconnect_event.set()
+            # 通知生命周期 Task 退出（走 async with 正常清理路径）
+            if conn._disconnect_event:
+                conn._disconnect_event.set()
 
-        # 取消 Task 作为备份（CancelledError 在 async with 内触发 __aexit__）
-        if conn._task and not conn._task.done():
-            conn._task.cancel()
+            # 取消 Task 作为备份（CancelledError 在 async with 内触发 __aexit__）
+            if conn._task and not conn._task.done():
+                conn._task.cancel()
 
-        # 立即清除引用，不等待 Task 完成
-        conn.session = None
-        conn.tools = []
+            # 立即清除引用，不等待 Task 完成
+            conn.session = None
+            conn.tools = []
 
-        if not self._connections:
-            self._connected = False
+            if not self._connections:
+                self._connected = False
         return True
 
     def disconnect_all_sync(self) -> None:
@@ -568,22 +575,28 @@ class MCPClientManager:
         threading.Thread(target=_worker, name="mcp-disconnect-all", daemon=True).start()
 
     async def _disconnect_all(self) -> None:
-        names = list(self._connections.keys())
+        with self._lock:
+            names = list(self._connections.keys())
         for name in names:
             try:
                 await self._disconnect_single(name)
             except Exception as e:
                 logger.error(f"[MCP] 断开服务器 '{name}' 失败: {e}")
 
-        self._connections.clear()
-        self._connected = False
+        # _disconnect_single 已持锁清理了各自的条目，但可能仍有残留（如并发添加）
+        with self._lock:
+            if self._connections:
+                self._connections.clear()
+            self._connected = False
 
     # ── 工具 Schema ──────────────────────────────────
 
     def get_tool_schemas(self) -> List[Dict]:
         """获取所有 MCP 工具的 OpenAI function calling schema"""
         schemas = []
-        for server_name, conn in self._connections.items():
+        with self._lock:
+            items = list(self._connections.items())
+        for server_name, conn in items:
             if not conn.session or not conn.enabled:
                 continue
             for tool in conn.tools:
@@ -627,7 +640,8 @@ class MCPClientManager:
             return ToolResult(False, error=f"无效的 MCP 工具名: {prefixed_name}")
 
         server_name, tool_name = parsed
-        conn = self._connections.get(server_name)
+        with self._lock:
+            conn = self._connections.get(server_name)
         if not conn or not conn.session:
             return ToolResult(False, error=f"MCP 服务器 '{server_name}' 未连接")
 
@@ -673,7 +687,9 @@ class MCPClientManager:
         status = []
         with self._busy_lock:
             busy_names = set(self._busy_names)
-        for name, conn in self._connections.items():
+        with self._lock:
+            items = list(self._connections.items())
+        for name, conn in items:
             status.append({
                 "name": name,
                 "type": conn.server_type,

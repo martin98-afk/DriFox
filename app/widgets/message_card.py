@@ -4391,6 +4391,34 @@ class CodeWebViewer(QWebEngineView):
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
+    # ========== 差量渲染常量 ==========
+    # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
+    _SAFETY_RENDER_INTERVAL = 2000
+
+    @staticmethod
+    def _has_reached_clean_boundary(md_text: str) -> bool:
+        """检测 markdown 文本是否在自然边界结束
+
+        自然边界 = 段落结束 / think 块闭合 / 代码块闭合。
+        在此边界做全量 HTML 渲染可得稳定结果，无需后续重算。
+
+        Returns:
+            True: 文本在自然边界结束，适合触发全量渲染
+        """
+        if not md_text:
+            return False
+        # 段落结束（双换行）
+        if md_text.endswith("\n\n"):
+            return True
+        stripped = md_text.rstrip()
+        # think 块闭合
+        if stripped.endswith("</think>"):
+            return True
+        # 代码块闭合（``` 后跟非反引号字符）
+        if re.search(r"```[\s]*$", stripped):
+            return True
+        return False
+
     def append_chunk(self, text: str):
         if not text:
             return
@@ -4400,7 +4428,11 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            self._schedule_render(immediate=True)
+            # 差量渲染：仅在自然边界触发全量渲染，否则靠增量文本 + 安全兜底
+            if self._has_reached_clean_boundary(self._markdown_text):
+                self._schedule_render(immediate=True)
+            else:
+                self._schedule_render(immediate=False)
         else:
             self._schedule_render()
 
@@ -4566,28 +4598,23 @@ class CodeWebViewer(QWebEngineView):
             self._perform_update()
             return
 
-        # 动态渲染间隔：内容越大渲染越稀疏，减轻 UI 压力
-        # 流式模式下 _append_text_incremental 已在 JS 侧即时显示文本，
-        # 全量渲染仅用于保证 markdown 格式正确（代码块、思考块等），
-        # 因此间隔可以大幅放宽以避免不必要的全量重渲染。
-        # 注意：间隔已加大，因为增量文本提供了即时可读性，
-        # 降低全量渲染频率可减少 DOM 重建带来的视觉跳跃。
+        # ── 差量渲染策略 ──
+        # 增量纯文本已由 _append_text_incremental 即时显示到 DOM，
+        # 全量 HTML 渲染仅在以下时机触发，避免 O(n) 逐帧重排：
+        # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
+        # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            content_len = len(self._markdown_text)
-            if content_len > 100000:
-                interval = 800
-            elif content_len > 50000:
-                interval = 500
-            elif content_len > 10000:
-                interval = 350
-            else:
-                interval = 250
+            # 流式模式下检查自然边界
+            if self._has_reached_clean_boundary(self._markdown_text):
+                self._perform_update()
+                return
+            # 无边界：启安全定时器（仅当未激活时）
+            if not self._render_timer.isActive():
+                self._render_timer.start(self._SAFETY_RENDER_INTERVAL)
         else:
-            interval = 40
-
-        if self._render_timer.isActive():
-            return
-        self._render_timer.start(interval)
+            # 非流式模式（历史加载）：40ms 防抖后渲染
+            if not self._render_timer.isActive():
+                self._render_timer.start(40)
 
     def _refresh_viewer_font(self):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
@@ -7471,12 +7498,14 @@ class MessageCard(SimpleCardWidget):
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
             # 末尾闭合的 </think>（仅 reasoning_content 路径需要此行为）
             self.viewer._thinking_finalized = True
-            # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
-            # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
-            # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
-            # 文字即时性已由 _append_text_incremental 保证；流式结束由
-            # finish_streaming() 触发 immediate 收尾渲染。
-            self.viewer._schedule_render(immediate=False)
+            # ── 差量渲染（2026-07-22）──
+            # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
+            # 仅在自然边界触发（段落结束 / 块闭合），非边界时只启安全定时器。
+            # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
+            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+                self.viewer._schedule_render(immediate=True)
+            else:
+                self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return
 
