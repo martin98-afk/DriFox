@@ -1037,9 +1037,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._scroll_area.updateGeometry()
 
         # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
-        # 上述 sizeHint 可能不可靠。调度一次延迟重算，确保在 widget 显示后、
-        # 布局就绪时纠正高度。
-        # 注意：由 _reflow_after_layout 触发的重算不再重复调度，防止无限链式调用。
+        # 上述 sizeHint 可能不可靠。调度延迟重算，通过 _reflow_after_layout 不断调用
+        # _reflow 形成持续修正链，确保布局稳定后高度正确。
         if not self._reflow_deferred_guard:
             self._reflow_deferred_guard = True
             QTimer.singleShot(0, self._reflow_after_layout)
@@ -1058,14 +1057,10 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _reflow_after_layout(self):
         """延迟重算：由 _reflow 或 showEvent 调度，在 Qt 事件循环处理完布局后执行。
 
-        注意：直接调用 _calculate_total_height（不调用 _reflow），
-        避免再次调度形成无限链式循环。
+        通过调用 _reflow() 进入重算循环，确保布局稳定后高度正确。
         """
         self._reflow_deferred_guard = False
-        total_height = self._calculate_total_height()
-        self.setFixedHeight(max(36, total_height))
-        self.layout().activate()
-        self._scroll_area.updateGeometry()
+        self._reflow()
 
     def _on_close(self):
         """手动关闭"""
