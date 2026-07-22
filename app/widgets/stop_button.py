@@ -35,7 +35,7 @@ class SendStopButton(QWidget):
 
     # 呼吸周期参数
     CYCLE_MS = 2500
-    SCALE_AMPLITUDE = 0.12
+    SCALE_AMPLITUDE = 0.10   # 缩放幅度 ±10%
     FRAME_INTERVAL_MS = 33
 
     # 颜色（纯黑/纯白，适配任何主题）
@@ -200,9 +200,9 @@ class SendStopButton(QWidget):
         angle = self._anim_progress * 2.0 * math.pi
         scale = 1.0 + self.SCALE_AMPLITUDE * math.sin(angle)
 
-        base_size = 20
+        base_size = 17          # 方块基准边长
         size = base_size * scale
-        rx = 4.0 * scale
+        rx = 3.5 * scale        # 圆角跟随缩放
 
         square_path = QPainterPath()
         square_path.addRoundedRect(cx - size / 2, cy - size / 2, size, size, rx, rx)
