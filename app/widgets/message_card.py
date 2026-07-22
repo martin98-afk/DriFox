@@ -70,9 +70,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    ToolTipFilter,
     TransparentToolButton,
 )
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
@@ -3539,7 +3539,7 @@ class CodeWebViewer(QWebEngineView):
                     background: transparent;
                     border: none;
                     border-radius: 6px;
-                    padding: 4px 8px;
+                    padding: 2px 4px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -6098,6 +6098,7 @@ class MessageCard(SimpleCardWidget):
         diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
+        diff_l.setToolTip("点击查看文件差异详情")
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
@@ -6165,6 +6166,7 @@ class MessageCard(SimpleCardWidget):
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
+        model_l.setToolTip("点击查看或切换模型配置")
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
         self._footer_model_label = model_l
         layout.addWidget(model_l)
@@ -6427,7 +6429,7 @@ class MessageCard(SimpleCardWidget):
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(32, 32)
-            b.installEventFilter(ToolTipFilter(b))
+            install_hover_tooltip(b, delay_ms=200)
             bl.addWidget(b)
         if specs:
             top.addWidget(btns)

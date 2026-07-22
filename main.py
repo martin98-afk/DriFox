@@ -201,23 +201,9 @@ def main():
         except Exception:
             font_family = "Segoe UI"
 
-    try:
-        from app.utils.design_tokens import scale_font_size
-        tooltip_font_size = scale_font_size(12)
-    except Exception:
-        tooltip_font_size = 12
-
-    app.setStyleSheet(f"""
-            QToolTip {{
-                color: #ffffff;
-                background-color: rgba(30, 30, 32, 240);
-                border: 1px solid #3d3d3d;
-                border-radius: 4px;
-                padding: 2px 2px;
-                font-size: {tooltip_font_size}px;
-                font-family: '{font_family}';
-            }}
-        """)
+    # 注意：不在这里设置 QToolTip/ToolTip 样式，
+    # 由 Colors.refresh() 在主题加载后用主题色统一设置。
+    # 见 design_tokens.py: Colors.refresh() step 5。
     # 创建并显示窗口
     logger.info("LLM Chatter 启动中...")
 
