@@ -12044,7 +12044,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ 只在尚未开始计时时启动，避免重复调用重置计数器。
             if self._current_assistant_card._elapsed_start_time is None:
                 self._current_assistant_card.start_elapsed_tracking()
-        self._accumulated_content = ""
+        # 所有内容已由 MessageCard._markdown_text 累加，无需主窗口冗余存储
         # 每个新的流式轮次清空工具结果去重集合
         self._processed_tool_result_ids: set = set()
         # tool_call_id -> 拥有其运行折叠框的卡片。
@@ -12069,10 +12069,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
-
-        if not hasattr(self, "_accumulated_content"):
-            self._accumulated_content = ""
-        self._accumulated_content += content_piece
+        # 内容已由 MessageCard.append_chunk 内部累加，无需主窗口冗余存储
 
     def _on_reasoning_content_received(self, reasoning_piece: str):
         """处理 DeepSeek 思考内容（流式接收）"""
