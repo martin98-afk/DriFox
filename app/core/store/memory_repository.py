@@ -163,7 +163,9 @@ class MemoryRepository:
 
     def save_all(self, memories: List[Dict]) -> bool:
         """
-        批量保存记忆（全量替换，先清空再插入）
+        批量保存记忆（增量更新，仅 upsert 新增/变更项 + 清理已删除项）
+
+        替代原来的 DELETE + 全量 INSERT 模式，在记忆量大时显著减少 I/O。
 
         Args:
             memories: 记忆列表
@@ -177,12 +179,14 @@ class MemoryRepository:
         try:
             conn = self._db._conn
             cursor = conn.cursor()
-
-            # 清空现有记忆
-            cursor.execute(f"DELETE FROM {self.TABLE_NAME}")
-
-            # 批量插入
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # 获取现有记忆 ID 集合（用于后续清理已删除项）
+            cursor.execute(f"SELECT id FROM {self.TABLE_NAME}")
+            existing_ids = {row[0] for row in cursor.fetchall()}
+
+            # 逐条 upsert（INSERT OR REPLACE），仅新增/变更项写入
+            new_ids = set()
             for memory in memories:
                 existing_id = memory.get("id") or memory.get("memory_id")
                 if existing_id:
@@ -190,9 +194,10 @@ class MemoryRepository:
                 else:
                     content_hash = hashlib.md5(str(memory.get("content", "")).encode()).hexdigest()[:8]
                     memory_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{content_hash}"
+                new_ids.add(memory_id)
 
                 cursor.execute(f'''
-                    INSERT INTO {self.TABLE_NAME}
+                    INSERT OR REPLACE INTO {self.TABLE_NAME}
                     (id, content, enabled, confidence, source, created_at, updated_at, last_accessed)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
@@ -206,8 +211,21 @@ class MemoryRepository:
                     now,
                 ))
 
+            # 清理不再存在的记忆（避免全量 DELETE 再 INSERT 导致碎片+WAL 膨胀）
+            removed_ids = existing_ids - new_ids
+            if removed_ids:
+                placeholders = ",".join("?" for _ in removed_ids)
+                cursor.execute(
+                    f"DELETE FROM {self.TABLE_NAME} WHERE id IN ({placeholders})",
+                    list(removed_ids),
+                )
+
             conn.commit()
-            logger.info(f"[MemoryRepository] 已保存 {len(memories)} 条记忆")
+            logger.debug(
+                f"[MemoryRepository] 已保存 {len(memories)} 条记忆 "
+                f"(upserted={len(new_ids - existing_ids)}, kept={len(new_ids & existing_ids)}, "
+                f"removed={len(removed_ids)})"
+            )
             return True
 
         except Exception as e:

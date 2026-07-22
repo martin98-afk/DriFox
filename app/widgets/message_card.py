@@ -4394,6 +4394,8 @@ class CodeWebViewer(QWebEngineView):
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
     _SAFETY_RENDER_INTERVAL = 2000
+    # 预编译代码块闭合检测
+    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -4407,17 +4409,15 @@ class CodeWebViewer(QWebEngineView):
         """
         if not md_text:
             return False
-        # 段落结束（双换行）
+        # 段落结束（双换行）：用原文本检测，因 rstrip 会移除尾部换行
         if md_text.endswith("\n\n"):
             return True
+        # think 块 / 代码块闭合：用 rstrip 处理尾部空白
         stripped = md_text.rstrip()
-        # think 块闭合
-        if stripped.endswith("</think>"):
-            return True
-        # 代码块闭合（``` 后跟非反引号字符）
-        if re.search(r"```[\s]*$", stripped):
-            return True
-        return False
+        return (
+            stripped.endswith("</think>")
+            or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
+        )
 
     def append_chunk(self, text: str):
         if not text:
