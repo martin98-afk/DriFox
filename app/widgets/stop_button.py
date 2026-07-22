@@ -143,15 +143,14 @@ class SendStopButton(QWidget):
 
     # ── 绘制 ──────────────────────────────────────────
 
-    def _get_gradient_colors(self):
-        """根据当前状态获取渐变起始/结束色"""
+    def _get_bg_colors(self):
+        """根据当前状态获取背景色（单色或渐变起止色）"""
         from app.utils.design_tokens import Colors
         Colors.refresh()
 
         if self._mode == self.MODE_SEND and not self._send_enabled:
-            # 发送模式 + 禁用 → 灰色
-            from app.utils.design_tokens import Colors as C
-            return C.TOOLBAR_BG, C.TOOLBAR_BG
+            # 发送模式 + 禁用 → 纯色背景
+            return Colors.TOOLBAR_BG, None  # flat color
 
         if self._hovered:
             return Colors.SEND_BTN_HOVER_START, Colors.SEND_BTN_HOVER_END
@@ -163,17 +162,24 @@ class SendStopButton(QWidget):
 
         w, h = self.width(), self.height()
         center_x, center_y = w / 2, h / 2
-        radius = min(w, h) / 2
 
-        # 1. 绘制圆形背景
+        # 1. 绘制按钮背景（圆角矩形，半径取自主题）
+        # _get_bg_colors 中已 Colors.refresh()，这里直接读缓存值
+        from app.utils.design_tokens import Colors as _C
+        btn_r = _C.SEND_BTN_RADIUS
+
         bg_path = QPainterPath()
-        bg_path.addEllipse(center_x - radius, center_y - radius, radius * 2, radius * 2)
+        bg_path.addRoundedRect(0, 0, w, h, btn_r, btn_r)
 
-        start_color, end_color = self._get_gradient_colors()
-        grad = QLinearGradient(QPointF(0, 0), QPointF(w, h))
-        grad.setColorAt(0.0, QColor(start_color))
-        grad.setColorAt(1.0, QColor(end_color))
-        painter.fillPath(bg_path, grad)
+        start_color, end_color = self._get_bg_colors()
+        if end_color is None:
+            # 纯色背景（禁用态）
+            painter.fillPath(bg_path, QColor(start_color))
+        else:
+            grad = QLinearGradient(QPointF(0, 0), QPointF(w, h))
+            grad.setColorAt(0.0, QColor(start_color))
+            grad.setColorAt(1.0, QColor(end_color))
+            painter.fillPath(bg_path, grad)
 
         # 2. 根据模式绘制内容
         if self._mode == self.MODE_SEND:
@@ -188,13 +194,9 @@ class SendStopButton(QWidget):
         icon = FluentIcon.SEND.icon()
         icon_size = 18
         x, y = int(cx - icon_size / 2), int(cy - icon_size / 2)
-        # 禁用态 → 半透明
-        opacity = 0.35 if not self._send_enabled else 1.0
-        painter.save()
-        painter.setOpacity(opacity)
+        # 禁用态：QIcon.Disabled 已自带灰色，不额外加透明度
         icon.paint(painter, x, y, icon_size, icon_size,
-                   Qt.AlignCenter, QIcon.Normal if self._send_enabled else QIcon.Disabled)
-        painter.restore()
+                   Qt.AlignCenter, QIcon.Disabled if not self._send_enabled else QIcon.Normal)
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
         """绘制缩放呼吸方块"""
