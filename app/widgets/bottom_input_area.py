@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
 
-from app.widgets.stop_button import AnimatedStopButton
+from app.widgets.stop_button import SendStopButton
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -218,18 +218,11 @@ class SendableTextEdit(TextEdit):
         self._agent_combo.setStyleSheet(self._build_combo_style())
         self._agent_combo.currentTextChanged.connect(self._on_agent_changed)
 
-        self.send_btn = TransparentToolButton(FluentIcon.SEND, self)
-        self.send_btn.setFixedSize(34, 34)
+        self.send_btn = SendStopButton(self)
         self.send_btn.setToolTip("发送（Enter）")
         install_hover_tooltip(self.send_btn)
         self.send_btn.clicked.connect(self._on_send_click)
-        self.send_btn.setDisabled(True)
-        self._apply_send_btn_style()
-
-        # 动画停止按钮（默认隐藏）
-        self.stop_btn = AnimatedStopButton(self)
-        self.stop_btn.setVisible(False)
-        self.stop_btn.clicked.connect(self._on_stop_click)
+        self.send_btn.set_send_enabled(False)
 
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
@@ -1067,7 +1060,7 @@ class SendableTextEdit(TextEdit):
         # 在停止模式下，按钮应该始终可用（用于停止正在进行的请求）
         # 只在发送模式下才根据文本内容决定是否启用
         if not getattr(self, "_is_stop_mode", False):
-            self.send_btn.setDisabled(not has_text)
+            self.send_btn.set_send_enabled(has_text)
         # 文本变化时总是需要调整高度，不管是否在停止模式
         if not getattr(self, "_initializing", False):
             self._adjust_height_to_content()
@@ -1116,30 +1109,17 @@ class SendableTextEdit(TextEdit):
             finally:
                 self._adjusting_height = False
 
-    def _rebind_send_btn(self, handler):
-        try:
-            self.send_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        self.send_btn.clicked.connect(handler)
-
     def toggle_send_button(self, enable: bool):
-        """启用/禁用发送按钮（enable=True=发送模式, enable=False=停止模式）"""
+        """切换发送/停止模式（enable=True=发送模式, enable=False=停止模式）"""
         if enable:
             self._is_stop_mode = False
-            self.send_btn.setVisible(True)
-            self.stop_btn.setVisible(False)
-            self.stop_btn.stop_animation()
-            self.send_btn.setIcon(FluentIcon.SEND)
+            self.send_btn.set_send_mode()
             self.send_btn.setToolTip("发送（Enter）")
-            self._rebind_send_btn(self._on_send_click)
             self._on_text_changed()
         else:
             self._is_stop_mode = True
-            self.send_btn.setVisible(False)
-            self.stop_btn.setVisible(True)
-            self.stop_btn.start_animation()
-            self.stop_btn.setToolTip("停止")
+            self.send_btn.set_stop_mode()
+            self.send_btn.setToolTip("停止")
 
         self._sync_external_send_btn()
 
@@ -1148,16 +1128,17 @@ class SendableTextEdit(TextEdit):
         pass
 
     def _on_send_click(self):
-        """发送按钮点击事件"""
-        if not self.toPlainText().strip():
-            return
-        self.toggle_send_button(False)
-        self.sendMessageRequested.emit()
-
-    def _on_stop_click(self):
-        """停止按钮点击事件"""
-        self.toggle_send_button(True)
-        self.stopMessageRequested.emit()
+        """发送/停止按钮点击事件"""
+        if self.send_btn.is_stop_mode():
+            # 停止模式 → 停止当前请求
+            self.toggle_send_button(True)
+            self.stopMessageRequested.emit()
+        else:
+            # 发送模式 → 发送消息
+            if not self.toPlainText().strip():
+                return
+            self.toggle_send_button(False)
+            self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1176,14 +1157,12 @@ class SendableTextEdit(TextEdit):
         self._position_send_button()
 
     def _position_send_button(self):
-        """定位发送按钮和停止按钮到输入框右下角"""
-        btn_size = self.send_btn.size()
-        btn_x = self.width() - btn_size.width() - 10
-        btn_y = self.height() - btn_size.height() - 4
-        if self.send_btn.isVisible():
-            self.send_btn.move(max(0, btn_x), max(0, btn_y))
-        if self.stop_btn.isVisible():
-            self.stop_btn.move(max(0, btn_x), max(0, btn_y))
+        """定位发送按钮到输入框右下角"""
+        if self.send_btn:
+            btn_size = self.send_btn.size()
+            send_btn_x = self.width() - btn_size.width() - 10
+            send_btn_y = self.height() - btn_size.height() - 4
+            self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
         # 强制 / 键直接输入 /，不受中文输入法影响（防止变成、）
