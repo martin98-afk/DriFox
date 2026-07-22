@@ -3517,6 +3517,33 @@ class CodeWebViewer(QWebEngineView):
                 #tool-separator:hover {{
                     background: var(--panel-soft);
                 }}
+                /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
+                #tool-separator {{
+                    position: relative;
+                }}
+                .tool-separator-tooltip {{
+                    position: absolute;
+                    left: 50%;
+                    top: 100%;
+                    transform: translateX(-50%);
+                    margin-top: 6px;
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                #tool-separator:hover .tool-separator-tooltip {{
+                    opacity: 1;
+                }}
                 /* 折叠时让 chevron 旋转 */
                 #tool-section[data-collapsed="true"] #tool-separator .chevron {{
                     transform: rotate(-90deg);
@@ -3586,9 +3613,10 @@ class CodeWebViewer(QWebEngineView):
         </head>
         <body>
             <div id="tool-section" style="display: none;" data-collapsed="false">
-              <div id="tool-separator" role="button" tabindex="0" aria-expanded="true" title="点击折叠/展开工具与思考区">
+              <div id="tool-separator" role="button" tabindex="0" aria-expanded="true">
                 <span class="chevron">▾</span>
                 <span>⚙ 工具与思考</span>
+                <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
             </div>
