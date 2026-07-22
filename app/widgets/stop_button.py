@@ -12,7 +12,6 @@ from PyQt5.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
-    QPixmap,
 )
 from PyQt5.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon
@@ -57,9 +56,6 @@ class SendStopButton(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(self.FRAME_INTERVAL_MS)
         self._timer.timeout.connect(self._advance)
-
-        # 缓存的图标 pixmap（减少重复绘制开销）
-        self._send_icon_cache: Optional[QPixmap] = None
 
         # 颜色
         self._square_color = QColor(self.SQUARE_COLOR)
@@ -149,6 +145,11 @@ class SendStopButton(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        # 禁用态：整体降透明度，金色渐变自然变淡（主题色淡色系）
+        disabled = self._mode == self.MODE_SEND and not self._send_enabled
+        if disabled:
+            painter.setOpacity(0.4)
+
         w, h = self.width(), self.height()
         center_x, center_y = w / 2, h / 2
 
@@ -162,7 +163,6 @@ class SendStopButton(QWidget):
 
         start_color, end_color = self._get_bg_colors()
         if end_color is None:
-            # 纯色背景（禁用态）
             painter.fillPath(bg_path, QColor(start_color))
         else:
             grad = QLinearGradient(QPointF(0, 0), QPointF(w, h))
@@ -179,16 +179,11 @@ class SendStopButton(QWidget):
         painter.end()
 
     def _draw_send_icon(self, painter: QPainter, cx: float, cy: float):
-        """绘制 FluentIcon.SEND 发送图标"""
+        """绘制 FluentIcon.SEND 发送图标（透明度由 paintEvent 统一控制）"""
         icon = FluentIcon.SEND.icon()
         icon_size = 18
         x, y = int(cx - icon_size / 2), int(cy - icon_size / 2)
-        # 禁用态：50% 透明度模拟 TEXT_SECONDARY 效果，不用 QIcon.Disabled（渲染成纯黑）
-        painter.save()
-        if not self._send_enabled:
-            painter.setOpacity(0.5)
         icon.paint(painter, x, y, icon_size, icon_size, Qt.AlignCenter, QIcon.Normal)
-        painter.restore()
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
         """绘制缩放呼吸方块"""
