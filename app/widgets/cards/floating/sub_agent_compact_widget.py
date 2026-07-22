@@ -535,6 +535,11 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMaximumHeight(_MAX_CARD_HEIGHT)
+        # 声明不参与容器展开/折叠动画：SubAgentCompactFloatingWidget 通过
+        # setFixedHeight 自行管理高度，容器动画（200ms OutCubic）会抑制
+        # 动画期间的 Resize 事件，导致批量 task 到达时卡片高度被锁死。
+        # snap 模式确保容器直接跟随 fixedHeight，无动画，无抑制。
+        self.setProperty("noContainerAnimation", True)
         Colors.refresh()
         self._apply_style(None)
 
@@ -1038,9 +1043,23 @@ class SubAgentCompactFloatingWidget(QWidget):
         else:
             self.setFixedHeight(max(36, total_height))
 
+        # 关键：强制内容 widget 的最小高度 = 内容自然高度。
+        # widgetResizable=True 时 scroll area 将内容 widget 缩放到 viewport，
+        # 若 viewport < 内容自然高度但 widget 的 sizeHint 未被 Qt 及时识别，
+        # 滚动条不会出现，底部行被静默裁切。minimumHeight 是显式下限，
+        # 确保溢出时 scroll area 必定出现滚动条。
+        self._scroll_content.setMinimumHeight(max(content_height, 0))
+
         # 显式激活布局链，确保卡片 → scroll area → 内容 widget 各级都刷新
         self.layout().activate()
         self._scroll_area.updateGeometry()
+
+        # 直接通知父容器（BottomCardContainer）重新展开。
+        # noContainerAnimation 属性确保容器 snap 到目标高度（无动画），
+        # 绕过 eventFilter→Resize→动画→抑制 的脆弱链条。
+        parent = self.parent()
+        if parent and hasattr(parent, "_schedule_expand"):
+            parent._schedule_expand()
 
     def _reflow(self):
         """根据内容重新计算卡片高度，并调度一次延迟重算。
@@ -1078,19 +1097,12 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _reflow_after_layout(self):
         """延迟重算：由 _reflow 或 showEvent 调度，在 Qt 事件循环处理完布局后执行。
 
-        直接应用高度而不调用 _reflow()（避免重新调度形成无限循环）。
         guard 在此重置，允许后续高度变化（如 finish_task）再次调度延迟重算。
-
-        关键：setVisible(True) 可能触发即时布局，使容器在仅有部分 task 时
-        就启动 200ms 展开动画。动画期间 resize 事件被 eventFilter 抑制，
-        导致后续 task 的高度变化丢失。因此在动画结束后（250ms）再做一次
-        延迟修正，确保容器 maxHeight 与卡片 fixedHeight 最终一致。
+        noContainerAnimation 属性确保容器 snap 到正确高度（无动画），
+        因此无需额外的延迟修正。
         """
         self._reflow_deferred_guard = False
         self._apply_height()
-        # 容器展开动画为 200ms OutCubic，250ms 后可确保动画已结束。
-        # 若动画期间有 resize 被抑制，此回调将在动画完成后修正容器高度。
-        QTimer.singleShot(250, self._apply_height)
 
     def _on_close(self):
         """手动关闭"""
