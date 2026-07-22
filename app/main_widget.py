@@ -91,6 +91,7 @@ def _write_project_record(type_, title, format_, file_path="", upload_url="", re
     import sqlite3 as _sqlite3
     from pathlib import Path as _Path
     from app.utils.utils import get_app_data_dir as _get_data_dir
+
     try:
         db_path = _Path(_get_data_dir()) / "sessions.db"
         conn = _sqlite3.connect(str(db_path), timeout=5)
@@ -107,12 +108,21 @@ def _write_project_record(type_, title, format_, file_path="", upload_url="", re
         """)
         conn.execute(
             "INSERT INTO share_records (type,title,format,file_path,upload_url,ref_id,extra_info) VALUES (?,?,?,?,?,?,?)",
-            (type_, title, format_, file_path or "", upload_url or "", ref_id or "", _json.dumps(extra_info or {}, ensure_ascii=False)),
+            (
+                type_,
+                title,
+                format_,
+                file_path or "",
+                upload_url or "",
+                ref_id or "",
+                _json.dumps(extra_info or {}, ensure_ascii=False),
+            ),
         )
         conn.commit()
         conn.close()
     except Exception:
         logger.debug("[MainWidget] 写入项目导出记录失败", exc_info=True)
+
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
@@ -303,6 +313,7 @@ class _ProjectUrlImportThread(QThread):
 
     def run(self):
         import tempfile
+
         try:
             import requests
 
@@ -312,7 +323,9 @@ class _ProjectUrlImportThread(QThread):
                 return
 
             tmp = tempfile.NamedTemporaryFile(
-                suffix=".drifox_project", prefix="drifox_import_", delete=False,
+                suffix=".drifox_project",
+                prefix="drifox_import_",
+                delete=False,
             )
             tmp.write(resp.content)
             tmp_path = tmp.name
@@ -396,8 +409,7 @@ class _ProjectExportChoiceDialog(MaskDialogBase):
         # 标题
         title_label = BodyLabel(f"📦 导出项目「{self._project_name}」", self.widget)
         title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(16)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
         )
         layout.addWidget(title_label)
 
@@ -530,8 +542,7 @@ class _ProjectImportOptionDialog(MaskDialogBase):
         # 标题
         title_label = BodyLabel("📦 导入项目", self.widget)
         title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
-            f"{get_font_family_css()} {font_size_css(16)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(16)}"
         )
         layout.addWidget(title_label)
 
@@ -6912,7 +6923,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -6977,7 +6988,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -6988,7 +6999,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7013,7 +7024,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7047,7 +7058,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7088,7 +7099,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7115,7 +7126,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7128,7 +7139,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     launcher = getattr(win, "_ui_plugin_edge_launcher", None)
                     if launcher is not None:
                         launcher.refresh_plugins()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 插件边缘入口已刷新")
 
@@ -9027,6 +9038,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
         # 长时间主动聊天会导致大量卡片堆积在布局中，WebEngine 内存持续增长
         self._virtual_scroll_timer.start()
+
+        # [PERF] 非懒渲染卡片加入懒渲染队列（如欢迎卡片 P0 优化后走此路径）
+        if isinstance(widget, MessageCard) and not getattr(widget, "_lazy_rendered", True):
+            existing_ids = {id(c) for c in self._pending_lazy_cards}
+            if id(widget) not in existing_ids:
+                self._pending_lazy_cards.append(widget)
+            if not self._lazy_batch_timer_active:
+                self._lazy_batch_timer_active = True
+                QTimer.singleShot(200, self._process_next_lazy_batch)
 
     def _archive_history_session(self, index: int):
         ## 触发警示动画
@@ -12107,7 +12127,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
         # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。
         # 原实现仅依赖 update_tool_streaming 触发，导致思考块永不 finalize。
-        if self._current_assistant_card and getattr(self._current_assistant_card, "_maybe_finish_thinking_for_tool", None):
+        if self._current_assistant_card and getattr(
+            self._current_assistant_card, "_maybe_finish_thinking_for_tool", None
+        ):
             self._current_assistant_card._maybe_finish_thinking_for_tool(tool_call_id)
 
         # AutoLoop 运行期间不显示工具调用 UI
@@ -14642,11 +14664,14 @@ class OpenAIChatToolWindow(ToolWindow):
         """导出并上传到 Gitee，复制分享链接（异步，不卡 UI）"""
         # 先检查 Gitee 是否配置（快速检查，不涉及网络请求）
         from app.gateway.utils.gitee_uploader import GiteeUploader
+
         uploader = GiteeUploader.get_instance()
         if not uploader.is_configured():
             InfoBar.warning(
-                title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
-                duration=3000, parent=self,
+                title="",
+                content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
+                duration=3000,
+                parent=self,
             )
             self._on_export_local(zip_path, project_name)
             return
@@ -14665,14 +14690,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """上传线程完成后的回调（主线程执行）"""
         if err:
             InfoBar.warning(
-                title="", content=f"上传失败: {err}（文件已保存到本地）",
-                duration=3000, parent=self,
+                title="",
+                content=f"上传失败: {err}（文件已保存到本地）",
+                duration=3000,
+                parent=self,
             )
             self._on_export_local(zip_path, project_name)
             return
 
         # 复制链接到剪贴板
         from PyQt5.QtWidgets import QApplication
+
         QApplication.clipboard().setText(url)
         InfoBar.success(
             title="",
@@ -14690,8 +14718,10 @@ class OpenAIChatToolWindow(ToolWindow):
             uploader = GiteeUploader.get_instance()
             if not uploader.is_configured():
                 InfoBar.warning(
-                    title="", content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
-                    duration=3000, parent=self,
+                    title="",
+                    content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
+                    duration=3000,
+                    parent=self,
                 )
                 self._on_open_export_path(zip_path)
                 return
@@ -14702,14 +14732,17 @@ class OpenAIChatToolWindow(ToolWindow):
             url, err = uploader.upload_file(zip_path)
             if err:
                 InfoBar.warning(
-                    title="", content=f"上传失败: {err}（文件已在本地）",
-                    duration=3000, parent=self,
+                    title="",
+                    content=f"上传失败: {err}（文件已在本地）",
+                    duration=3000,
+                    parent=self,
                 )
                 self._on_open_export_path(zip_path)
                 return
 
             # 复制链接到剪贴板
             from PyQt5.QtWidgets import QApplication
+
             QApplication.clipboard().setText(url)
             InfoBar.success(
                 title="",
@@ -14739,7 +14772,9 @@ class OpenAIChatToolWindow(ToolWindow):
         from PyQt5.QtWidgets import QFileDialog
 
         files, _ = QFileDialog.getOpenFileNames(
-            self, "导入项目", "",
+            self,
+            "导入项目",
+            "",
             "DriFox 项目包 (*.drifox_project);;ZIP 文件 (*.zip);;所有文件 (*)",
         )
         if not files:
@@ -14850,11 +14885,15 @@ class OpenAIChatToolWindow(ToolWindow):
                                     # 这样下次导出时 git 检测仍能正常工作。
                                     # 如果恢复到了默认路径（非 git 仓库），不更新，
                                     # 保持项目原有根目录不变，避免下次导出丢失 git 信息。
-                                    if original_root and os.path.abspath(restore_path) == os.path.abspath(original_root):
+                                    if original_root and os.path.abspath(restore_path) == os.path.abspath(
+                                        original_root
+                                    ):
                                         self._update_project_root_dir(project_name, restore_path)
                                         logger.info("[MainWidget] 恢复路径为原始 git 仓库，已更新项目根目录")
                                     else:
-                                        logger.info("[MainWidget] 恢复路径为默认路径（非 git 仓库），跳过更新项目根目录")
+                                        logger.info(
+                                            "[MainWidget] 恢复路径为默认路径（非 git 仓库），跳过更新项目根目录"
+                                        )
 
                                     InfoBar.success(
                                         title="",
@@ -14883,8 +14922,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 return True
             else:
                 InfoBar.warning(
-                    title="", content="导入失败：压缩包中无有效会话数据",
-                    duration=3000, parent=self,
+                    title="",
+                    content="导入失败：压缩包中无有效会话数据",
+                    duration=3000,
+                    parent=self,
                 )
                 return False
         except Exception as e:
@@ -14912,7 +14953,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.info(f"[MainWidget] 原始路径不存在，将使用默认路径: {original_root}")
 
         # 默认恢复路径：与 _ensure_temp_workdir 一致，使用 ~/.drifox/workspaces/<project_name>/
-        safe_name = re.sub(r'[<>:"/\\|?*]', '_', (project_name or "imported_project")[:40]).strip()
+        safe_name = re.sub(r'[<>:"/\\|?*]', "_", (project_name or "imported_project")[:40]).strip()
         if not safe_name:
             safe_name = "imported_project"
         default_dir = Path.home() / ".drifox" / "workspaces" / safe_name
@@ -14950,9 +14991,7 @@ class OpenAIChatToolWindow(ToolWindow):
             projects.insert(0, self._current_project)
         meta_map = self._build_project_meta_map(projects)
         root_dir_map = self._build_project_root_dir_map(projects)
-        self._project_selector_card_content.set_projects_data(
-            projects, self._current_project, meta_map, root_dir_map
-        )
+        self._project_selector_card_content.set_projects_data(projects, self._current_project, meta_map, root_dir_map)
 
     def _on_open_project_folder(self, project_name: str, root_dir: str):
         """打开项目根目录（在文件管理器中打开）"""
@@ -15574,7 +15613,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -15601,7 +15640,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

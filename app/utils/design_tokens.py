@@ -48,6 +48,7 @@ def _get_global_font() -> str:
 def _get_font_family_css() -> str:
     """懒导入 get_font_family_css，避免 app.utils.utils 模块级加载（含 pypinyin 等重型包）"""
     from app.utils.utils import get_font_family_css
+
     return get_font_family_css()
 
 
@@ -170,12 +171,14 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 def current_theme() -> dict:
     """获取当前主题的扁平 colors 字典"""
     from app.utils.theme_manager import theme_manager
+
     return theme_manager.get_current_colors()
 
 
 def get_window_style() -> str:
     """获取窗口渐变背景样式"""
     from app.utils.theme_manager import theme_manager
+
     window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
     return f"""
     #OpenAIChatToolWindow {{
@@ -1232,16 +1235,18 @@ def _apply_tooltip_style() -> None:
             "fs": fs,
         }
 
-        # ── 2) 原生 QToolTip —— 全局禁用（自绘 SimpleHoverTooltip 已接管）──
-        # 设空 palette + 最小尺寸，确保原生 tooltip 不可见
+        # ── 2) 原生 QToolTip —— 用主题色样式化（备选兜底）──
+        # SimpleHoverTooltip 已在模块级 patch QToolTip.showText 为空操作，
+        # 此处仍用主题色正确配置 QToolTip palette 和 font，
+        # 确保任何未安装自绘 tooltip 的 widget 不会显示黑方块。
         from PyQt5.QtWidgets import QToolTip as _QToolTip
-        from PyQt5.QtGui import QPalette as _QPalette, QFont as _QFont, QColor as _QColor
+        from PyQt5.QtGui import QPalette as _QPalette, QFont as _QFont
 
-        _empty = _QPalette()
-        _empty.setColor(_QPalette.ToolTipBase, _QColor(0, 0, 0, 0))
-        _empty.setColor(_QPalette.ToolTipText, _QColor(0, 0, 0, 0))
-        _QToolTip.setPalette(_empty)
-        _QToolTip.setFont(_QFont("", 1))
+        _pal = _QPalette()
+        _pal.setColor(_QPalette.ToolTipBase, _rgba_to_qcolor(bg))
+        _pal.setColor(_QPalette.ToolTipText, _rgba_to_qcolor(tc))
+        _QToolTip.setPalette(_pal)
+        _QToolTip.setFont(_QFont(ff, fs))
 
         # ── 3) qfluentwidgets ToolTip：monkey-patch showEvent ──
         _ensure_qfluentwidgets_tooltip_patch()
@@ -1278,18 +1283,18 @@ def _ensure_qfluentwidgets_tooltip_patch() -> None:
                 self.setStyleSheet(f"""
                     ToolTip {{ border-radius: 6px; }}
                     ToolTip>#container {{
-                        background-color: {tt['bg']};
-                        border: 1px solid {tt['border_c']};
+                        background-color: {tt["bg"]};
+                        border: 1px solid {tt["border_c"]};
                         border-radius: 6px;
                     }}
                     ToolTip>#container[transparent=true] {{
                         background-color: transparent;
                     }}
                     QLabel {{
-                        color: {tt['tc']};
+                        color: {tt["tc"]};
                         background-color: transparent;
-                        font-size: {tt['fs']}px;
-                        font-family: '{tt['ff']}';
+                        font-size: {tt["fs"]}px;
+                        font-family: '{tt["ff"]}';
                         border: none;
                     }}
                 """)
