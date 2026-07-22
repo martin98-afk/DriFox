@@ -6098,8 +6098,8 @@ class MessageCard(SimpleCardWidget):
         diff_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
-        diff_l.setToolTip("点击查看文件差异详情")
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        install_hover_tooltip(diff_l, "点击查看文件差异详情")
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
@@ -6120,8 +6120,8 @@ class MessageCard(SimpleCardWidget):
         review_btn.setAlignment(Qt.AlignCenter)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
-        review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
+        install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
 
@@ -6166,8 +6166,8 @@ class MessageCard(SimpleCardWidget):
         model_l.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
-        model_l.setToolTip("点击查看或切换模型配置")
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
+        install_hover_tooltip(model_l, "点击查看或切换模型配置")
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
