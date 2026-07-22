@@ -149,8 +149,8 @@ class SendStopButton(QWidget):
         Colors.refresh()
 
         if self._mode == self.MODE_SEND and not self._send_enabled:
-            # 发送模式 + 禁用 → 纯色背景
-            return Colors.TOOLBAR_BG, None  # flat color
+            # 发送模式 + 禁用 → 使用工具栏胶囊背景色
+            return Colors.CAPSULE_BG, None  # flat color
 
         if self._hovered:
             return Colors.SEND_BTN_HOVER_START, Colors.SEND_BTN_HOVER_END
@@ -208,7 +208,7 @@ class SendStopButton(QWidget):
 
         base_size = 17          # 方块基准边长
         size = base_size * scale
-        rx = 3.5 * scale        # 圆角跟随缩放
+        rx = 3.0 * scale        # 圆角跟随缩放
 
         square_path = QPainterPath()
         square_path.addRoundedRect(cx - size / 2, cy - size / 2, size, size, rx, rx)
