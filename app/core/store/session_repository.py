@@ -25,9 +25,9 @@ class SessionRepository:
             db_manager: DatabaseManager 实例
         """
         self._db = db_manager
-        # 内容地址缓存：session_id -> hash(messages_serialized)
+        # 内容地址缓存：session_id -> (message_count, last_msg_hash)
         # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
-        self._content_hash_cache: Dict[str, int] = {}
+        self._content_hash_cache: Dict[str, tuple] = {}
 
     @property
     def is_initialized(self) -> bool:
@@ -130,9 +130,15 @@ class SessionRepository:
             logger.warning("[SessionRepository] session_id 不能为空")
             return False
 
-        # 内容去重：只 hash 快速字段（hash 消息列表比全量序列化+zstd 快 100x+）
+        # 增量内容指纹：消息流式过程中只追加/修改最后一条消息，
+        # 用 (len, last_msg_hash) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
+        # 对于"修改历史消息"的非常规场景（如 compaction），后续 serialize 会覆盖写入。
         messages = session.get("messages", [])
-        content_key = hash(str(messages))
+        if messages:
+            last_msg = messages[-1]
+            content_key = (len(messages), hash(str(last_msg)))
+        else:
+            content_key = (0, 0)
         cached = self._content_hash_cache.get(session_id)
         if cached is not None and cached == content_key:
             return True  # 消息未变，跳过昂贵的序列化+压缩+写盘

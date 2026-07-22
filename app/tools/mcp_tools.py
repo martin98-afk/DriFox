@@ -300,9 +300,7 @@ class MCPClientManager:
                 process.kill()
             except Exception:
                 pass
-            raise RuntimeError(
-                f"启动服务器 '{conn.name}' 后未能从输出中解析到 URL"
-            )
+            raise RuntimeError(f"启动服务器 '{conn.name}' 后未能从输出中解析到 URL")
 
         # 清理 URL 中的尾部分隔符
         found_url = found_url.rstrip("/,.;")
@@ -341,6 +339,7 @@ class MCPClientManager:
 
     def connect_all_background(self, servers_config: List[dict], on_done=None) -> None:
         """后台连接所有 MCP 服务器（不阻塞 UI 线程）"""
+
         def _worker():
             try:
                 self._run_async(self._connect_all(servers_config))
@@ -348,10 +347,13 @@ class MCPClientManager:
                 logger.error(f"[MCP] 后台连接失败: {e}")
             finally:
                 if on_done:
-                    connected = sum(1 for c in self._connections.values() if c.session)
+                    with self._lock:
+                        connected = sum(1 for c in self._connections.values() if c.session)
+                        connected_names = set(self._connections.keys())
                     failed = [
-                        s.get("name", "?") for s in servers_config
-                        if s.get("enabled", True) and s.get("name") not in self._connections
+                        s.get("name", "?")
+                        for s in servers_config
+                        if s.get("enabled", True) and s.get("name") not in connected_names
                     ]
                     try:
                         on_done(connected, len(servers_config), failed)
@@ -560,6 +562,7 @@ class MCPClientManager:
 
     def disconnect_all_background(self, on_done=None) -> None:
         """后台断开所有连接（不阻塞 UI）"""
+
         def _worker():
             try:
                 self._run_async(self._disconnect_all())
@@ -606,7 +609,8 @@ class MCPClientManager:
                     "function": {
                         "name": prefixed_name,
                         "description": tool.description or f"MCP tool: {tool.name}",
-                        "parameters": tool.inputSchema or {
+                        "parameters": tool.inputSchema
+                        or {
                             "type": "object",
                             "properties": {},
                         },
@@ -649,7 +653,7 @@ class MCPClientManager:
             result = await conn.session.call_tool(tool_name, arguments)
 
             text_parts = []
-            for content in (result.content or []):
+            for content in result.content or []:
                 if isinstance(content, mcp_types.TextContent):
                     text_parts.append(content.text)
                 elif hasattr(content, "text"):
@@ -671,7 +675,7 @@ class MCPClientManager:
     def _parse_tool_name(self, prefixed_name: str) -> Optional[tuple]:
         if not prefixed_name.startswith(self.TOOL_PREFIX):
             return None
-        remainder = prefixed_name[len(self.TOOL_PREFIX):]
+        remainder = prefixed_name[len(self.TOOL_PREFIX) :]
         if "__" not in remainder:
             return None
         server_name, tool_name = remainder.split("__", 1)
@@ -679,7 +683,8 @@ class MCPClientManager:
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        with self._lock:
+            return self._connected
 
     def get_status(self) -> List[Dict]:
         # 注意：返回的 tools 必须带 mcp__{server}__ 前缀，与 get_tool_schemas() 保持一致，
@@ -690,17 +695,17 @@ class MCPClientManager:
         with self._lock:
             items = list(self._connections.items())
         for name, conn in items:
-            status.append({
-                "name": name,
-                "type": conn.server_type,
-                "enabled": conn.enabled,
-                "connected": conn.session is not None,
-                "busy": name in busy_names,
-                "tool_count": len(conn.tools),
-                "tools": [
-                    f"{self.TOOL_PREFIX}{name}__{t.name}" for t in conn.tools
-                ],
-            })
+            status.append(
+                {
+                    "name": name,
+                    "type": conn.server_type,
+                    "enabled": conn.enabled,
+                    "connected": conn.session is not None,
+                    "busy": name in busy_names,
+                    "tool_count": len(conn.tools),
+                    "tools": [f"{self.TOOL_PREFIX}{name}__{t.name}" for t in conn.tools],
+                }
+            )
         return status
 
     # ── 引用计数（多窗口生命周期）──────────────────────
@@ -788,16 +793,18 @@ def _discover_claude_desktop_servers() -> List[dict]:
             if not command:
                 continue
 
-            servers.append({
-                "name": name,
-                "type": "stdio",
-                "command": command,
-                "args": args,
-                "env": server_cfg.get("env"),
-                "enabled": False,
-                "_source": "claude_desktop",
-                "_source_path": config_path,
-            })
+            servers.append(
+                {
+                    "name": name,
+                    "type": "stdio",
+                    "command": command,
+                    "args": args,
+                    "env": server_cfg.get("env"),
+                    "enabled": False,
+                    "_source": "claude_desktop",
+                    "_source_path": config_path,
+                }
+            )
             logger.info(f"[MCP] 发现 Claude Desktop 服务器: {name}")
 
     return servers
@@ -833,7 +840,9 @@ def _discover_cursor_servers() -> List[dict]:
         if appdata:
             config_paths.append(os.path.join(appdata, "Cursor", "User", "globalStorage", "mcp-settings.json"))
     elif os.uname().sysname == "Darwin":
-        config_paths.append(os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/mcp-settings.json"))
+        config_paths.append(
+            os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/mcp-settings.json")
+        )
     else:
         config_paths.append(os.path.expanduser("~/.config/Cursor/User/globalStorage/mcp-settings.json"))
 
@@ -859,16 +868,18 @@ def _discover_cursor_servers() -> List[dict]:
             if not command:
                 continue
 
-            servers.append({
-                "name": name,
-                "type": "stdio",
-                "command": command,
-                "args": args,
-                "env": server_cfg.get("env"),
-                "enabled": False,
-                "_source": "cursor",
-                "_source_path": config_path,
-            })
+            servers.append(
+                {
+                    "name": name,
+                    "type": "stdio",
+                    "command": command,
+                    "args": args,
+                    "env": server_cfg.get("env"),
+                    "enabled": False,
+                    "_source": "cursor",
+                    "_source_path": config_path,
+                }
+            )
             logger.info(f"[MCP] 发现 Cursor MCP 服务器: {name}")
 
     return servers
