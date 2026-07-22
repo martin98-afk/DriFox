@@ -5,7 +5,7 @@ import math
 from typing import Optional
 
 from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPainterPath
+from PyQt5.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath
 from PyQt5.QtWidgets import QWidget
 
 
@@ -95,7 +95,7 @@ class AnimatedStopButton(QWidget):
         bg_path = QPainterPath()
         bg_path.addEllipse(center_x - radius, center_y - radius, radius * 2, radius * 2)
 
-        grad = painter.linearGradient(QPointF(0, 0), QPointF(w, h))
+        grad = QLinearGradient(QPointF(0, 0), QPointF(w, h))
         grad.setColorAt(0.0, QColor(Colors.SEND_BTN_START))
         grad.setColorAt(1.0, QColor(Colors.SEND_BTN_END))
         painter.fillPath(bg_path, grad)
