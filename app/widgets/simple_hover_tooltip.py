@@ -40,7 +40,7 @@ _disable_native_tooltip()
 
 from typing import Optional
 
-from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
+from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
@@ -171,7 +171,7 @@ class SimpleHoverTooltip(QWidget):
         fm = QFontMetrics(self._font)
         lines = self._text.split("\n") if self._text else [""]
         max_w = max((fm.width(line) for line in lines), default=0)
-        line_h = fm.height()
+        line_h = fm.lineSpacing()  # 含行间距，多行不挤
         w = max_w + self._padding_h * 2
         h = line_h * len(lines) + self._padding_v * 2
         self.setFixedSize(max(w, 20), max(h, 20))
@@ -211,6 +211,7 @@ class SimpleHoverTooltip(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
 
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         r = self._border_radius
@@ -218,7 +219,6 @@ class SimpleHoverTooltip(QWidget):
         # 背景
         path = QPainterPath()
         path.addRoundedRect(rect, r, r)
-        painter.setPen(Qt.NoPen)
         painter.setBrush(self._bg)
         painter.drawPath(path)
 
@@ -227,35 +227,37 @@ class SimpleHoverTooltip(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, r, r)
 
-        # 文字
-        painter.setPen(self._tc)
-        painter.setFont(self._font)
-        painter.drawText(
-            QRectF(self._padding_h, self._padding_v, self.width() - self._padding_h * 2, self.height() - self._padding_v * 2),
-            Qt.AlignCenter,
-            self._text,
-        )
+        # 文字（逐行绘制，行间距与 _recalc_size 一致）
+        if self._text:
+            painter.setPen(self._tc)
+            painter.setFont(self._font)
+            lines = self._text.split("\n")
+            fm = QFontMetrics(self._font)
+            line_h = fm.lineSpacing()
+            y = self._padding_v + fm.ascent()
+            for line in lines:
+                painter.drawText(self._padding_h, y, line)
+                y += line_h
 
 
 # ── Hover 事件过滤器 ────────────────────────────────────
 
 
-class _HoverTooltipFilter(QTimer):
-    """安装在目标 widget 上的事件过滤器：hover 延迟后显示 tooltip。
-
-    使用 QTimer 单发实现延迟触发（避免鼠标快速划过时闪烁）。
-    """
+class _HoverTooltipFilter(QObject):
+    """安装在目标 widget 上的事件过滤器：hover 延迟后显示 tooltip。"""
 
     def __init__(self, parent: QWidget, text: str, delay_ms: int = 400):
         super().__init__(parent)
         self._parent = parent
         self._text = text
-        self._delay = delay_ms
         self._tooltip: Optional[SimpleHoverTooltip] = None
-        self.setSingleShot(True)
-        self.timeout.connect(self._on_timeout)
-        # 监听父控件的 toolTip 变化：如果外部改了 toolTip 文本，同步更新
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(delay_ms)
+        self._timer.timeout.connect(self._on_timeout)
         parent.installEventFilter(self)
+        # 目标销毁时自动清理 tooltip
+        parent.destroyed.connect(self._cleanup)
 
     def _get_tooltip(self) -> SimpleHoverTooltip:
         if self._tooltip is None:
@@ -263,21 +265,19 @@ class _HoverTooltipFilter(QTimer):
         return self._tooltip
 
     def eventFilter(self, obj, event):
-        if obj is self._parent:
-            t = event.type()
-            if t == event.ToolTip:
-                # 拦截原生 QToolTip 事件，用自绘 tooltip 替代
-                return True
-            elif t == event.Enter:
-                self._text = self._parent.toolTip() or ""
-                if self._text:
-                    self.start(self._delay)
-            elif t == event.Leave:
-                self.stop()
-                self._hide()
-            elif t == event.Hide:
-                self.stop()
-                self._hide()
+        if obj is not self._parent:
+            return False
+        t = event.type()
+        if t == event.ToolTip:
+            return True  # 拦截原生
+        elif t == event.Enter:
+            tip = self._parent.toolTip() or ""
+            if tip:
+                self._text = tip
+                self._timer.start()
+        elif t in (event.Leave, event.Hide):
+            self._timer.stop()
+            self._hide()
         return False
 
     def _on_timeout(self):
@@ -289,15 +289,13 @@ class _HoverTooltipFilter(QTimer):
         if self._tooltip:
             self._tooltip.hide_tip()
 
-    def set_delay(self, ms: int):
-        self._delay = ms
+    def _cleanup(self):
+        self._timer.stop()
+        self._hide()
 
     def refresh_theme(self):
         if self._tooltip:
             self._tooltip._refresh_theme()
-
-    def __del__(self):
-        self._hide()
 
 
 # 缓存：同一 widget 不要重复安装
