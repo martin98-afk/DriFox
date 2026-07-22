@@ -3544,6 +3544,30 @@ class CodeWebViewer(QWebEngineView):
                 #tool-separator:hover .tool-separator-tooltip {{
                     opacity: 1;
                 }}
+                /* 子智能体日志按钮自绘 tooltip（代替 HTML title，避免 Chromium 原生 tooltip 在深色模式下显示为黑块） */
+                .tool-subagent-log-btn::after {{
+                    content: attr(data-tooltip);
+                    position: absolute;
+                    bottom: calc(100% + 6px);
+                    left: 50%;
+                    transform: translateX(-50%);
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                .tool-subagent-log-btn:hover::after {{
+                    opacity: 1;
+                }}
                 /* 折叠时让 chevron 旋转 */
                 #tool-section[data-collapsed="true"] #tool-separator .chevron {{
                     transform: rotate(-90deg);
