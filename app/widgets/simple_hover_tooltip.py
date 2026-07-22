@@ -315,12 +315,12 @@ class _HoverTooltipFilter(QObject):
         t = event.type()
         if t == event.ToolTip:
             return True  # 拦截原生
-        elif t == event.Enter:
+        elif t in (event.Enter, event.HoverEnter):
             tip = self._parent.toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()
-        elif t in (event.Leave, event.Hide):
+        elif t in (event.Leave, event.HoverLeave, event.Hide):
             self._timer.stop()
             self._hide()
         return False
