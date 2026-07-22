@@ -1,11 +1,11 @@
 from PyQt5.QtCore import QPoint, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
-from PyQt5.QtWidgets import QToolTip, QWidget
+from PyQt5.QtWidgets import QWidget
+from app.widgets.simple_hover_tooltip import SimpleHoverTooltip
 
 
 class ConversationNodePreview(QWidget):
     nodeClicked = pyqtSignal(int)
-
 
     # 主题颜色缓存
     _colors_initialized = False
@@ -19,6 +19,7 @@ class ConversationNodePreview(QWidget):
     @classmethod
     def _refresh_colors(cls):
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         cls._COLOR_NODE_DEFAULT = QColor(Colors.TIMELINE_NODE)
         cls._COLOR_NODE_HOVER = QColor(Colors.TIMELINE_NODE_HOVER)
@@ -65,9 +66,7 @@ class ConversationNodePreview(QWidget):
             painter.drawLine(start_x, center_y, end_x, center_y)
 
             if self._progress_position >= 0:
-                clamped_progress = min(
-                    max(float(self._progress_position), 0.0), len(self._nodes) - 1
-                )
+                clamped_progress = min(max(float(self._progress_position), 0.0), len(self._nodes) - 1)
                 progress_x = start_x + clamped_progress * self._spacing
 
                 active_pen = QPen(self._COLOR_LINE_PROGRESS)
@@ -96,9 +95,7 @@ class ConversationNodePreview(QWidget):
 
             painter.setPen(QPen(color))
             painter.setBrush(QBrush(color))
-            painter.drawEllipse(
-                QPoint(x, center_y), self._node_radius, self._node_radius
-            )
+            painter.drawEllipse(QPoint(x, center_y), self._node_radius, self._node_radius)
 
     def mouseMoveEvent(self, event):
         if not self._nodes:
@@ -121,16 +118,37 @@ class ConversationNodePreview(QWidget):
                 preview = self._nodes[new_hovered] or ""
                 if len(preview) > 50:
                     preview = preview[:50] + "..."
-                QToolTip.showText(event.globalPos(), preview, self)
+                # 自绘 tooltip 跟随鼠标
+                if not hasattr(self, "_preview_tip") or self._preview_tip is None:
+                    self._preview_tip = SimpleHoverTooltip(transient=True)
+                self._preview_tip.set_text(preview)
+                self._preview_tip.winId()
+                tx = event.globalPos().x() + 12
+                ty = event.globalPos().y() - self._preview_tip.height() - 8
+                screen = self.screen()
+                if screen:
+                    sg = screen.geometry()
+                    tx = max(sg.left() + 2, min(tx, sg.right() - self._preview_tip.width() - 2))
+                    if ty < sg.top():
+                        ty = event.globalPos().y() + 20
+                self._preview_tip.move(tx, ty)
+                self._preview_tip.show()
             else:
-                QToolTip.hideText()
+                self._hide_preview_tip()
             self.update()
 
         super().mouseMoveEvent(event)
 
+    def _hide_preview_tip(self):
+        tip = getattr(self, "_preview_tip", None)
+        if tip is not None:
+            tip.hide()
+            tip.deleteLater()
+            self._preview_tip = None
+
     def leaveEvent(self, event):
         self._hovered_index = -1
-        QToolTip.hideText()
+        self._hide_preview_tip()
         self.update()
         super().leaveEvent(event)
 
@@ -174,7 +192,5 @@ class ConversationNodePreview(QWidget):
         if not self._nodes:
             self._progress_position = -1.0
         else:
-            self._progress_position = min(
-                max(float(position), 0.0), len(self._nodes) - 1
-            )
+            self._progress_position = min(max(float(position), 0.0), len(self._nodes) - 1)
         self.update()

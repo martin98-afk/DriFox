@@ -1236,9 +1236,9 @@ def _apply_tooltip_style() -> None:
         }
 
         # ── 2) 原生 QToolTip —— 用主题色样式化（备选兜底）──
-        # SimpleHoverTooltip 已在模块级 patch QToolTip.showText 为空操作，
-        # 此处仍用主题色正确配置 QToolTip palette 和 font，
-        # 确保任何未安装自绘 tooltip 的 widget 不会显示黑方块。
+        # 此处用主题色配置 QToolTip palette 和 font，
+        # 确保直接调用 QToolTip.showText() 的组件（如图表）显示正确主题色，
+        # 也作为任何未安装自绘 tooltip 的 widget 的兜底样式。
         from PyQt5.QtWidgets import QToolTip as _QToolTip
         from PyQt5.QtGui import QPalette as _QPalette, QFont as _QFont
 
