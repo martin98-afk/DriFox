@@ -621,13 +621,13 @@ class MCPClientManager:
 
     # ── 工具调用 ──────────────────────────────────────
 
-    def call_tool_sync(self, prefixed_name: str, arguments: dict, timeout: float = 120) -> ToolResult:
+    def call_tool_sync(self, prefixed_name: str, arguments: dict, timeout: float = 60) -> ToolResult:
         """同步调用 MCP 工具（供 ToolExecutor 调用）
 
         Args:
             prefixed_name: 带前缀的工具名（如 mcp__server__tool）
             arguments: 工具参数
-            timeout: 超时时间（秒），默认 120 秒
+            timeout: 超时时间（秒），默认 60 秒（原 120s，见 2026-07-22 perf）
         """
         try:
             return self._run_async(self._call_tool(prefixed_name, arguments), timeout=timeout)
