@@ -70,9 +70,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    ToolTipFilter,
     TransparentToolButton,
 )
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
@@ -3539,7 +3539,7 @@ class CodeWebViewer(QWebEngineView):
                     background: transparent;
                     border: none;
                     border-radius: 6px;
-                    padding: 4px 8px;
+                    padding: 2px 4px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -6099,6 +6099,7 @@ class MessageCard(SimpleCardWidget):
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
+        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
@@ -6119,8 +6120,8 @@ class MessageCard(SimpleCardWidget):
         review_btn.setAlignment(Qt.AlignCenter)
         review_btn.setCursor(Qt.PointingHandCursor)
         review_btn.setVisible(False)
-        review_btn.setToolTip("用 code-reviewer 子智能体快速审查本次修改")
         review_btn.mousePressEvent = lambda e: self._emit_review_requested()
+        install_hover_tooltip(review_btn, "用 code-reviewer 子智能体快速审查本次修改")
         self._footer_review_btn = review_btn
         layout.addWidget(review_btn)
 
@@ -6166,6 +6167,7 @@ class MessageCard(SimpleCardWidget):
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
+        install_hover_tooltip(model_l, "点击切换到目标模型配置")
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
@@ -6427,7 +6429,7 @@ class MessageCard(SimpleCardWidget):
             b.setToolTip(tp)
             b.clicked.connect(cb)
             b.setFixedSize(32, 32)
-            b.installEventFilter(ToolTipFilter(b))
+            install_hover_tooltip(b, delay_ms=200)
             bl.addWidget(b)
         if specs:
             top.addWidget(btns)

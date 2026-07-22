@@ -1244,6 +1244,7 @@ class PluginManagerCard(QWidget):
             self._content_layout.addStretch(1)
             return
         self._render_next_batch(self._search.text().strip().lower())
+        self._retheme()
         from PyQt5.QtCore import QTimer
 
         QTimer.singleShot(50, self._auto_load_remaining)

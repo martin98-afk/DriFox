@@ -35,6 +35,7 @@ from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, Transpare
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [
@@ -218,6 +219,7 @@ class SendableTextEdit(TextEdit):
         self.send_btn = TransparentToolButton(FluentIcon.SEND, self)
         self.send_btn.setFixedSize(34, 34)
         self.send_btn.setToolTip("发送（Enter）")
+        install_hover_tooltip(self.send_btn)
         self.send_btn.clicked.connect(self._on_send_click)
         self.send_btn.setDisabled(True)
         self._apply_send_btn_style()

@@ -502,6 +502,9 @@ class Colors:
                     f"(valid: {sorted(GLOW_PRESETS.keys())}); falling back to class defaults."
                 )
 
+        # 5. 刷新全局 tooltip 样式（跟随主题）
+        _apply_tooltip_style()
+
     @classmethod
     def apply_glow_preset(cls, preset_name: str) -> bool:
         """应用发光预设：**只覆盖发光强度 token，不覆盖 INPUT_FOCUS_BORDER**
@@ -1133,6 +1136,168 @@ def apply_card_shadow(widget, shadow_type: str = "card"):
         # CARD / FLOATING：颜色直接来自 token 的 color 字段
         effect.setColor(QColor(config["color"]))
     widget.setGraphicsEffect(effect)
+
+
+# ── 全局 tooltip 样式（跟随主题） ──────────────────────
+
+
+def _rgba_to_qcolor(value: str) -> "QColor":
+    """将 rgba(r,g,b,a) / rgb(r,g,b) / #rrggbb 字符串转为 QColor。
+
+    QColor 构造函数不认 CSS rgba()/rgb() 写法，主题 YAML 中大量使用
+    rgba(r,g,b,a)，直接丢给 QColor 会退化为黑色。此处手动解析。
+    """
+    from PyQt5.QtGui import QColor
+
+    s = str(value or "").strip()
+    try:
+        if s.startswith("#"):
+            return QColor(s)
+        elif s.lower().startswith(("rgba(", "rgb(")):
+            inner = s[s.index("(") + 1 : s.rindex(")")]
+            parts = [p.strip() for p in inner.split(",")]
+            if len(parts) >= 3:
+                r, g, b = (int(round(float(parts[i]))) for i in range(3))
+                a = 255
+                if len(parts) >= 4:
+                    av = float(parts[3])
+                    a = int(round(av * 255)) if av <= 1 else int(round(av))
+                return QColor(
+                    max(0, min(255, r)),
+                    max(0, min(255, g)),
+                    max(0, min(255, b)),
+                    max(0, min(255, a)),
+                )
+        return QColor(s)
+    except Exception:
+        return QColor(33, 33, 38, 246)
+
+
+# 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色
+_tooltip_theme: dict = {}
+_tooltip_qf_patched: bool = False
+
+
+def _apply_tooltip_style() -> None:
+    """用当前主题色设置全局 tooltip 样式
+
+    统一规范：
+    - 背景：主题 card_bg_solid（实底卡片色，亮/暗自适应）
+    - 文字：主题 text_primary，字体 12px，字体家族跟随全局设置
+    - 边框：主题 divider_color 细线 + 6px 圆角，悬浮感克制
+    - 内边距：4px 8px，文字不贴边
+
+    覆盖两种 tooltip 系统：
+    1) 原生 QToolTip（widget.setToolTip() → 无 ToolTipFilter）
+       → QToolTip.setPalette() 设色 + QToolTip.setFont() 设字体。
+         故意不设 qapp.setStyleSheet()：stylesheet 会将 Qt 拖入 "stylesheet mode"，
+         导致 palette 被 QStyleSheetStyle 忽略，亮/暗主题下颜色错乱。
+    2) qfluentwidgets 自定义 ToolTip（经 ToolTipFilter → ToolTip widget）
+       → monkey-patch ToolTip.showEvent，每次显示前用 self.setStyleSheet()
+         完全替换 FluentStyleSheet.TOOL_TIP
+
+    以下特殊 tooltip 不受此全局样式影响（各自独立绘制）：
+    - ContextBreakdownTooltip（上下文占比条）
+    - CodingPlanTooltip（套餐用量）
+    - 命令卡片悬浮描述气泡（_DescTooltipBubble）
+    """
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        qapp = QApplication.instance()
+        if qapp is None:
+            return
+    except Exception:
+        return
+
+    try:
+        from loguru import logger as _log
+
+        theme = current_theme()
+        bg = theme.get("card_bg_solid", "rgba(30, 30, 32, 240)")
+        tc = theme.get("text_primary", "#ffffff")
+        border_c = theme.get("divider_color", "rgba(128,128,128,0.15)")
+        ff = _get_global_font()
+        fs = scale_font_size(11)
+
+        _log.debug(f"[tooltip] apply: bg={bg[:40]} tc={tc} fs={fs} ff={ff}")
+
+        # ── 1) 更新模块级主题字典（供 monkey-patch 读取） ──
+        global _tooltip_theme
+        _tooltip_theme = {
+            "bg": bg,
+            "tc": tc,
+            "border_c": border_c,
+            "ff": ff,
+            "fs": fs,
+        }
+
+        # ── 2) 原生 QToolTip —— 全局禁用（自绘 SimpleHoverTooltip 已接管）──
+        # 设空 palette + 最小尺寸，确保原生 tooltip 不可见
+        from PyQt5.QtWidgets import QToolTip as _QToolTip
+        from PyQt5.QtGui import QPalette as _QPalette, QFont as _QFont, QColor as _QColor
+
+        _empty = _QPalette()
+        _empty.setColor(_QPalette.ToolTipBase, _QColor(0, 0, 0, 0))
+        _empty.setColor(_QPalette.ToolTipText, _QColor(0, 0, 0, 0))
+        _QToolTip.setPalette(_empty)
+        _QToolTip.setFont(_QFont("", 1))
+
+        # ── 3) qfluentwidgets ToolTip：monkey-patch showEvent ──
+        _ensure_qfluentwidgets_tooltip_patch()
+    except Exception:
+        pass
+
+
+def _ensure_qfluentwidgets_tooltip_patch() -> None:
+    """对 qfluentwidgets ToolTip.showEvent 做一次性 monkey-patch。
+
+    qfluentwidgets 的 ToolTip 在 __init__ 中通过 FluentStyleSheet.TOOL_TIP.apply()
+    给自己设置了 widget 级样式表（ToolTip / ToolTip>#container / QLabel），
+    导致 qapp.setStyleSheet() 对它无效。
+
+    此处 monkey-patch showEvent，每次显示前直接替换 ToolTip 自身的整个样式表
+    （self.setStyleSheet），用 DriFox 主题色覆盖 FluentStyleSheet 的默认值。
+    样式结构保持与 FluentStyleSheet 一致（ToolTip / ToolTip>#container / QLabel），
+    仅颜色/字号/圆角替换为主题感知值。
+    """
+    global _tooltip_qf_patched
+    if _tooltip_qf_patched:
+        return
+    _tooltip_qf_patched = True
+
+    try:
+        from qfluentwidgets.components.widgets.tool_tip import ToolTip
+
+        _original_show = ToolTip.showEvent
+
+        def _patched_show_event(self, event):
+            tt = _tooltip_theme  # 模块级 dict，主题切换时由 _apply_tooltip_style 更新
+            if tt:
+                # 完全替换 ToolTip 的样式表（覆盖 FluentStyleSheet.TOOL_TIP）
+                self.setStyleSheet(f"""
+                    ToolTip {{ border-radius: 6px; }}
+                    ToolTip>#container {{
+                        background-color: {tt['bg']};
+                        border: 1px solid {tt['border_c']};
+                        border-radius: 6px;
+                    }}
+                    ToolTip>#container[transparent=true] {{
+                        background-color: transparent;
+                    }}
+                    QLabel {{
+                        color: {tt['tc']};
+                        background-color: transparent;
+                        font-size: {tt['fs']}px;
+                        font-family: '{tt['ff']}';
+                        border: none;
+                    }}
+                """)
+            _original_show(self, event)
+
+        ToolTip.showEvent = _patched_show_event
+    except Exception:
+        pass
 
 
 # 从 utils 导入字体家族 CSS 函数供复用

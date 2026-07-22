@@ -203,6 +203,7 @@ from app.widgets.message_card import (
     clear_global_render_cache,
     create_welcome_card,
 )
+from app.widgets.simple_hover_tooltip import install_hover_tooltip, batch_install_hover_tooltips
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
@@ -2201,7 +2202,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 差异对比按钮（从右下移到右上）
         self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
         self.diff_btn.setFixedSize(28, 28)
-        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.setToolTip("会话级差异对比")
         self.diff_btn.clicked.connect(self._open_diff_viewer)
         right_layout.addWidget(self.diff_btn)
 
@@ -2887,6 +2888,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.new_session_btn.clicked.connect(self._create_new_session)
         capsule_layout.addWidget(self.new_session_btn)
 
+        # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）
+        for _tb in [self.auto_loop_btn, self.memory_btn, self.history_btn, self.new_session_btn]:
+            install_hover_tooltip(_tb)
+
         toolbar_layout.addWidget(self._toolbar_capsule)
 
         # 工具栏挂到独立 strip（不在 _input_card 里了）
@@ -2942,6 +2947,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 初始刷新工具开关按钮
         self._refresh_tool_toggle_btn()
+
+        # 统一安装自绘 hover tooltip，替换所有原生 QToolTip
+        batch_install_hover_tooltips(self)
 
     def _build_settings_popup(self):
         """性能优化：懒构建设置弹窗（重型，隐藏构件）。
@@ -7222,6 +7230,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 if hasattr(card, "refresh_theme"):
                     card.refresh_theme()
 
+            # 自绘 hover tooltip 主题刷新
+            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
+
+            refresh_all_tooltips()
+
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
             # 输入区字体
@@ -7244,6 +7257,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 ring = getattr(self, ring_attr, None)
                 if ring and hasattr(ring, "refresh_font_size"):
                     ring.refresh_font_size()
+
+            # 自绘 hover tooltip 字号刷新
+            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
+
+            refresh_all_tooltips()
 
             # 分支标签（包含字号 + 颜色的样式，字体变化时需同步刷新）
             if hasattr(self, "_project_label"):
