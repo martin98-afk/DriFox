@@ -140,10 +140,7 @@ class SendStopButton(QWidget):
         from app.utils.design_tokens import Colors
         Colors.refresh()
 
-        if self._mode == self.MODE_SEND and not self._send_enabled:
-            # 发送模式 + 禁用 → 使用工具栏胶囊背景色
-            return Colors.CAPSULE_BG, None  # flat color
-
+        # 禁用态不改变背景色，仅靠图标半透明区分
         if self._hovered:
             return Colors.SEND_BTN_HOVER_START, Colors.SEND_BTN_HOVER_END
         return Colors.SEND_BTN_START, Colors.SEND_BTN_END
