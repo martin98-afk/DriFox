@@ -1728,8 +1728,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启动子智能体日志自动清理（每6小时清理一次，保留14天）
         self._start_subagent_log_cleanup()
 
-        # 延迟启动 OpenCode Zen 免费模型异步刷新（避免与启动期其他网络请求争抢）
-        QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
+        # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
+        # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
+        if not getattr(self, "_is_duplicate_window", False):
+            QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
 
     def _start_subagent_log_cleanup(self):
         """定期清理子智能体日志，避免无限堆积"""
