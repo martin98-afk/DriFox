@@ -2202,7 +2202,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 差异对比按钮（从右下移到右上）
         self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
         self.diff_btn.setFixedSize(28, 28)
-        self.diff_btn.setToolTip("差异对比")
+        self.diff_btn.setToolTip("会话级差异对比")
         self.diff_btn.clicked.connect(self._open_diff_viewer)
         right_layout.addWidget(self.diff_btn)
 

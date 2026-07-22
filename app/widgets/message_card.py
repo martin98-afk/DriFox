@@ -6099,7 +6099,7 @@ class MessageCard(SimpleCardWidget):
         diff_l.setVisible(False)
         diff_l.setCursor(Qt.PointingHandCursor)
         diff_l.mousePressEvent = lambda e: self._emit_card_diff_requested()
-        install_hover_tooltip(diff_l, "点击查看文件差异详情")
+        install_hover_tooltip(diff_l, "点击查看当条消息的文件差异详情")
         self._footer_diff_stats_label = diff_l
         layout.addWidget(diff_l)
 
@@ -6167,7 +6167,7 @@ class MessageCard(SimpleCardWidget):
         model_l.setVisible(bool(footer_text))
         model_l.setCursor(Qt.PointingHandCursor)
         model_l.mousePressEvent = lambda e: self._on_footer_model_clicked(e)
-        install_hover_tooltip(model_l, "点击查看或切换模型配置")
+        install_hover_tooltip(model_l, "点击切换到目标模型配置")
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
