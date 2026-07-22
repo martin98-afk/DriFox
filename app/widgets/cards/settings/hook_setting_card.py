@@ -1252,9 +1252,10 @@ class HookListSettingCard(ExpandSettingCard):
                         break
 
         if is_system:
-            from PyQt5.QtWidgets import QToolTip
+            from app.widgets.simple_hover_tooltip import show_immediate_tooltip
+            from PyQt5.QtGui import QCursor
 
-            QToolTip.showText(QPoint(0, 0), "系统级 Hook 不可删除")
+            show_immediate_tooltip(self, "系统级 Hook 不可删除", QCursor.pos(), duration_ms=1800)
             return
 
         # 构建确认文案
@@ -1287,9 +1288,10 @@ class HookListSettingCard(ExpandSettingCard):
 
         success = self._hook_manager.delete_hook_by_id(hook_id)
         if not success:
-            from PyQt5.QtWidgets import QToolTip
+            from app.widgets.simple_hover_tooltip import show_immediate_tooltip
+            from PyQt5.QtGui import QCursor
 
-            QToolTip.showText(QPoint(0, 0), "删除失败")
+            show_immediate_tooltip(self, "删除失败", QCursor.pos(), duration_ms=1800)
             return
         self._refresh(reload=True)
         self.hooksChanged.emit()

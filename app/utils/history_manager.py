@@ -1142,8 +1142,32 @@ class HistoryManager:
         return "未知"
 
     def _ensure_message_timestamps(self, messages: List[Dict], fallback_ts: str) -> List[Dict]:
-        normalized: List[Dict] = []
+        """确保所有消息都有时间戳，缺失时用 fallback_ts 填充。
+
+        优化：所有消息已有有效时间戳时直接返回原列表（避免 O(n) dict 拷贝）。
+        """
+        if not messages:
+            return messages
+
+        # 快速路径：所有消息已有有效时间戳
+        all_have_ts = True
         last_seen_ts = fallback_ts
+        for msg in messages:
+            if not isinstance(msg, dict):
+                all_have_ts = False
+                break
+            ts = msg.get("timestamp")
+            if ts:
+                last_seen_ts = ts
+            else:
+                all_have_ts = False
+                break
+
+        if all_have_ts:
+            return messages
+
+        # 慢路径：需要填充缺失的时间戳
+        normalized: List[Dict] = []
         for msg in messages or []:
             if not isinstance(msg, dict):
                 continue

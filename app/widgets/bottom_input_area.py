@@ -33,6 +33,8 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
 
+from app.widgets.stop_button import SendStopButton
+
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
@@ -216,13 +218,12 @@ class SendableTextEdit(TextEdit):
         self._agent_combo.setStyleSheet(self._build_combo_style())
         self._agent_combo.currentTextChanged.connect(self._on_agent_changed)
 
-        self.send_btn = TransparentToolButton(FluentIcon.SEND, self)
-        self.send_btn.setFixedSize(34, 34)
+        self.send_btn = SendStopButton(self)
         self.send_btn.setToolTip("发送（Enter）")
         install_hover_tooltip(self.send_btn)
         self.send_btn.clicked.connect(self._on_send_click)
-        self.send_btn.setDisabled(True)
-        self._apply_send_btn_style()
+        self.send_btn.set_send_enabled(False)
+
         self.textChanged.connect(self._on_text_changed)
         self.textChanged.connect(self._on_slash_trigger_check)
         self.textChanged.connect(self._on_at_trigger_check)
@@ -230,14 +231,6 @@ class SendableTextEdit(TextEdit):
         # 关闭 qfluentwidgets TextEdit 焦点时的底部高亮
         if hasattr(self, "layer"):
             self.layer.hide()
-
-        # 防抖定时器：合并连续 resize 事件中的发送按钮定位，
-        # 避免 setMinimumHeight/setMaximumHeight 与父布局级联 resize
-        # 触发的多次 resizeEvent 把按钮跳到中间位置。
-        self._send_btn_debounce_timer = QTimer(self)
-        self._send_btn_debounce_timer.setSingleShot(True)
-        self._send_btn_debounce_timer.setInterval(0)
-        self._send_btn_debounce_timer.timeout.connect(self._position_send_button)
 
         self._setup_keyboard_shortcuts()
 
@@ -1059,7 +1052,7 @@ class SendableTextEdit(TextEdit):
         # 在停止模式下，按钮应该始终可用（用于停止正在进行的请求）
         # 只在发送模式下才根据文本内容决定是否启用
         if not getattr(self, "_is_stop_mode", False):
-            self.send_btn.setDisabled(not has_text)
+            self.send_btn.set_send_enabled(has_text)
         # 文本变化时总是需要调整高度，不管是否在停止模式
         if not getattr(self, "_initializing", False):
             self._adjust_height_to_content()
@@ -1108,31 +1101,18 @@ class SendableTextEdit(TextEdit):
             finally:
                 self._adjusting_height = False
 
-    def _rebind_send_btn(self, handler):
-        try:
-            self.send_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        self.send_btn.clicked.connect(handler)
-
     def toggle_send_button(self, enable: bool):
-        """启用/禁用发送按钮"""
+        """切换发送/停止模式（enable=True=发送模式, enable=False=停止模式）"""
         if enable:
             self._is_stop_mode = False
-            self.send_btn.setIcon(FluentIcon.SEND)
+            self.send_btn.set_send_mode()
             self.send_btn.setToolTip("发送（Enter）")
-            self._rebind_send_btn(self._on_send_click)
             self._on_text_changed()
-            # 发送完成后，确保输入框高度重置（即使在停止模式下也可能需要调整高度）
-            # _on_text_changed 内部已调用 _adjust_height_to_content，无需重复
         else:
             self._is_stop_mode = True
-            self.send_btn.setIcon(FluentIcon.PAUSE)
+            self.send_btn.set_stop_mode()
             self.send_btn.setToolTip("停止")
-            self.send_btn.setDisabled(False)  # 停止模式下按钮应该始终可用
-            self._rebind_send_btn(self._on_stop_click)
 
-        # 同步到外部工具栏按钮（如果有的话）
         self._sync_external_send_btn()
 
     def _sync_external_send_btn(self):
@@ -1140,22 +1120,21 @@ class SendableTextEdit(TextEdit):
         pass
 
     def _on_send_click(self):
-        """发送按钮点击事件"""
-        if not self.toPlainText().strip():
-            return
-        self.toggle_send_button(False)
-        self.sendMessageRequested.emit()
-
-    def _on_stop_click(self):
-        """停止按钮点击事件"""
-        self.toggle_send_button(True)
-        self.stopMessageRequested.emit()
+        """发送/停止按钮点击事件"""
+        if self.send_btn.is_stop_mode():
+            # 停止模式 → 停止当前请求
+            self.toggle_send_button(True)
+            self.stopMessageRequested.emit()
+        else:
+            # 发送模式 → 发送消息
+            if not self.toPlainText().strip():
+                return
+            self.toggle_send_button(False)
+            self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 每次 resize 重启定时器；连续多次 resize 只会触发最后一次定位，
-        # 保证发送按钮一次到位（不抖）。
-        self._send_btn_debounce_timer.start()
+        self._position_send_button()
 
     def showEvent(self, event):
         super().showEvent(event)

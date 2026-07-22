@@ -3,6 +3,7 @@
 LLM Chatter 主入口
 以独立弹窗模式启动，无需 FluentWindow 框架
 """
+
 import os
 import sys
 import warnings
@@ -37,6 +38,7 @@ else:
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
+
 def main():
     """启动 LLM Chatter"""
     from loguru import logger
@@ -60,6 +62,7 @@ def main():
     # 注册 Qt 资源文件中的图标 — 在 QApp 就绪后尽快导入
     from app.utils import icons_rc  # noqa: F401
     from app.utils import icons_light_rc  # noqa: F401
+
     app.setStyle("Fusion")
     app.setApplicationName("Drifox")
     app.setApplicationDisplayName("Drifox")
@@ -72,6 +75,7 @@ def main():
         # 迁移旧版本数据
         try:
             from app.utils.utils import migrate_app_data_if_needed
+
             migrate_app_data_if_needed()
         except Exception:
             logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
@@ -79,6 +83,7 @@ def main():
         # 设置日志
         try:
             from app.utils.utils import get_app_data_dir
+
             log_dir = get_app_data_dir() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             logger.add(
@@ -94,6 +99,7 @@ def main():
         if MEM_DIAG_ENABLED:
             try:
                 from app.utils.utils import get_app_data_dir
+
                 log_dir = get_app_data_dir() / "logs"
                 logger.add(
                     log_dir / "mem_diag.log",
@@ -108,6 +114,7 @@ def main():
         # 同步开机自启注册表状态
         try:
             from app.utils.startup_manager import sync_auto_start_from_config
+
             sync_auto_start_from_config()
         except Exception:
             logger.exception("[DeferredStartup] sync_auto_start_from_config 失败")
@@ -116,14 +123,31 @@ def main():
         # [PERF] 从主线程关键路径移到这里，首帧不再阻塞
         try:
             from app.core.webengine_profile import init_shared_web_profile
+
             init_shared_web_profile(parent=app)
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
+
+        # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
+        # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
+        # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
+        try:
+            from PyQt5.QtWebEngineWidgets import QWebEngineView
+
+            _preheat_view = QWebEngineView()
+            _preheat_view.setHtml("<html><body></body></html>")
+            _preheat_view.hide()
+            # 保持引用，防止 GC 回收导致进程退出
+            app._preheat_webengine = _preheat_view
+            logger.debug("[DeferredStartup] WebEngine 预热视图已创建")
+        except Exception:
+            logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
             try:
                 from app.core.models_dev_sync import load_dynamic_models
+
                 result = load_dynamic_models()
                 dynamic_count = sum(len(v) for v in result.provider_models.values())
                 logger.info(
@@ -135,6 +159,7 @@ def main():
 
         try:
             import threading
+
             threading.Thread(target=_sync_models_dev, daemon=True).start()
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
@@ -153,19 +178,22 @@ def main():
 
     # 全局 Python 异常钩子（兜底）
     import traceback as _traceback
+
     def _pyqt_exception_hook(exc_type, exc_val, exc_tb):
         _logger.error(f"[UnhandledException] {exc_type.__name__}: {exc_val}")
         _logger.error("".join(_traceback.format_exception(exc_type, exc_val, exc_tb)))
+
     sys.excepthook = _pyqt_exception_hook
 
     # sys.unraisablehook
     def _unraisable_hook(unraisable):
-        msg = getattr(unraisable.exc_value, 'args', (str(unraisable.exc_value),))
+        msg = getattr(unraisable.exc_value, "args", (str(unraisable.exc_value),))
         err_msg = msg[0] if msg else str(unraisable.exc_value)
         _logger.error(f"[UnraisableException] {unraisable.exc_type.__name__}: {err_msg}")
         if unraisable.object:
             _logger.error(f"  Object: {unraisable.object!r}")
         _logger.error(f"  Err: {unraisable.err_msg}")
+
     sys.unraisablehook = _unraisable_hook
 
     # 禁用默认退出行为
@@ -173,6 +201,7 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
+
     _guard = SingleInstanceGuard("Drifox")
     if not _guard.try_lock():
         _guard.request_show_window()
@@ -181,8 +210,10 @@ def main():
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
+
     try:
         from app.utils.theme_manager import theme_manager
+
         if theme_manager.is_light_theme():
             setTheme(Theme.LIGHT)
         else:
@@ -192,6 +223,7 @@ def main():
 
     # 获取全局字体配置
     from app.utils.config import Settings
+
     try:
         settings = Settings.get_instance()
         font_family = settings.llm_font_family.value
@@ -223,11 +255,12 @@ def main():
         def workflow_name(self):
             return "standalone_llm_chatter"
 
-        @property   
+        @property
         def global_variables_changed(self):
             class FakeSignal:
                 def connect(self, *args, **kwargs):
                     pass
+
             return FakeSignal()
 
         def setUpdatesEnabled(self, enabled):
@@ -255,6 +288,7 @@ def main():
 
     def _show_popup():
         from app.tool_popup import ToolPopupDialog
+
         popup = ToolPopupDialog(chat_window, None)
         popup.setWindowTitle("Drifox")
         chat_window._skip_restore_history = True
@@ -265,6 +299,7 @@ def main():
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)
     from app.core.store.session_store import SessionStore
+
     app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
 
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动

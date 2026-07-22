@@ -5,6 +5,12 @@
 完全绕过 Qt 原生 QToolTip / qfluentwidgets ToolTip 的样式表/调色板体系，
 颜色由 DriFox 主题 YAML 直接控制，亮/暗主题下表现一致。
 
+系统集成：
+  - 模块加载时自动 monkey-patch QWidget.setToolTip，任意 widget.setToolTip("xxx")
+    调用都会自动安装自绘 hover tooltip，无需额外步骤。
+  - 直接调用 QToolTip.showText() 的代码不受影响（如图表插件），仍显示原生 tooltip。
+  - 如需要为尚无 toolTip 的 widget 安装，可显式调用 install_hover_tooltip()。
+
 用法：
     from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -16,8 +22,17 @@
     refresh_all_tooltips()
 """
 
+from typing import Optional
+
+from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
+from PyQt5.QtWidgets import QApplication, QWidget
+
+
 # ── 全局禁用原生 QToolTip.showText ──────────────────────
-# 必须在模块加载时执行，确保所有 QToolTip.showText() 调用都被拦截
+# 必须在模块加载时执行，确保所有 QToolTip.showText() 调用都被拦截。
+# 否则 qfluentwidgets SwitchButton 等未装 _HoverTooltipFilter 的控件
+# 会触发原生 tooltip，在 Windows 深色模式下渲染为全黑方块。
 
 def _disable_native_tooltip():
     """Monkey-patch QToolTip.showText 为空操作，彻底消灭原生 tooltip 黑块。"""
@@ -26,23 +41,52 @@ def _disable_native_tooltip():
 
         if QToolTip.showText.__name__ != "_noop":
             _original = QToolTip.showText
-
             def _noop(*args, **kwargs):
                 pass
-
             _noop._original = _original
             QToolTip.showText = _noop
     except Exception:
         pass
 
-
 _disable_native_tooltip()
 
-from typing import Optional
 
-from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
-from PyQt5.QtWidgets import QApplication, QWidget
+# ── 自动拦截所有 QWidget.setToolTip，统一接入自绘 tooltip ──
+# 只要某处调用了 setToolTip("xxx")，自动为该 widget 安装 _HoverTooltipFilter。
+# 使自定义 tooltip 覆盖所有系统内部 widget，无需逐个改调用处。
+
+_original_setToolTip = QWidget.setToolTip
+_patching_setToolTip: bool = False
+_SKIP_TOOLTIP_TYPES = None
+
+
+def _get_skip_tooltip_types():
+    """懒加载跳过类型，避免模块加载时 QWidget 子类还未准备就绪。"""
+    global _SKIP_TOOLTIP_TYPES
+    if _SKIP_TOOLTIP_TYPES is None:
+        from PyQt5.QtWidgets import QAbstractScrollArea, QLineEdit, QTextEdit
+
+        _SKIP_TOOLTIP_TYPES = (QAbstractScrollArea, QLineEdit, QTextEdit)
+    return _SKIP_TOOLTIP_TYPES
+
+
+def _patched_setToolTip(self, text):
+    """Monkey-patch: setToolTip 时自动安装自定义 hover tooltip。"""
+    global _patching_setToolTip
+    _original_setToolTip(self, text)
+    if _patching_setToolTip:
+        return
+    if text and id(self) not in _filters:
+        if isinstance(self, _get_skip_tooltip_types()):
+            return
+        _patching_setToolTip = True
+        try:
+            install_hover_tooltip(self)
+        finally:
+            _patching_setToolTip = False
+
+
+QWidget.setToolTip = _patched_setToolTip
 
 
 # ── helpers ─────────────────────────────────────────────
@@ -133,7 +177,7 @@ class SimpleHoverTooltip(QWidget):
 
     _gap: int = 4  # 与目标控件的间距
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, transient=False):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -148,7 +192,8 @@ class SimpleHoverTooltip(QWidget):
         self._border_radius: int = 6
 
         self._refresh_theme()
-        _tooltip_instances.append(self)
+        if not transient:
+            _tooltip_instances.append(self)
 
     def _refresh_theme(self):
         """从当前主题刷新颜色。"""
@@ -270,12 +315,12 @@ class _HoverTooltipFilter(QObject):
         t = event.type()
         if t == event.ToolTip:
             return True  # 拦截原生
-        elif t == event.Enter:
+        elif t in (event.Enter, event.HoverEnter):
             tip = self._parent.toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()
-        elif t in (event.Leave, event.Hide):
+        elif t in (event.Leave, event.HoverLeave, event.Hide):
             self._timer.stop()
             self._hide()
         return False
@@ -315,6 +360,9 @@ def install_hover_tooltip(widget: QWidget, text: str = "", delay_ms: int = 400):
         return
     if text:
         widget.setToolTip(text)
+        # setToolTip 可能触发 _patched_setToolTip 已安装 filter，此时直接返回
+        if id(widget) in _filters:
+            return
     f = _HoverTooltipFilter(widget, widget.toolTip() or "", delay_ms)
     _filters[id(widget)] = f
     return f
@@ -339,3 +387,51 @@ def batch_install_hover_tooltips(container: QWidget, delay_ms: int = 400):
         if isinstance(child, skipped_types):
             continue
         install_hover_tooltip(child, delay_ms=delay_ms)
+
+
+def show_immediate_tooltip(
+    widget: QWidget,
+    text: str,
+    pos: Optional[QPoint] = None,
+    duration_ms: int = 2500,
+) -> SimpleHoverTooltip:
+    """在 widget 附近立即显示自绘 tooltip（无悬停延迟），自动消失后清理。
+
+    Args:
+        widget: 关联的目标控件
+        text: 显示文本
+        pos: 屏幕坐标位置（None 则自动定位到 widget 正上方）
+        duration_ms: 显示时长 ms，到期自动隐藏并清理（0=不自动隐藏）
+
+    Returns:
+        创建的 SimpleHoverTooltip 实例（外部可提前 hide/destroy）
+    """
+    tip = SimpleHoverTooltip(transient=True)
+    tip.set_text(text)
+    tip.winId()
+
+    if pos is not None:
+        # 定位到鼠标附近：水平居中于 pos，显示在其上方
+        tx = pos.x() - tip.width() // 2
+        ty = pos.y() - tip.height() - 8
+        screen = QApplication.primaryScreen()
+        if screen:
+            sg = screen.geometry()
+            tx = max(sg.left() + 2, min(tx, sg.right() - tip.width() - 2))
+            if ty < sg.top():
+                ty = pos.y() + 20
+        tip.move(tx, ty)
+    else:
+        tip.show_above(widget)
+
+    tip.show()
+
+    if duration_ms > 0:
+
+        def _cleanup():
+            tip.hide()
+            tip.deleteLater()
+
+        QTimer.singleShot(duration_ms, _cleanup)
+
+    return tip

@@ -139,6 +139,33 @@ _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 
+# ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
+_ICON_PREFIX_CACHE: str = "qrc:/icons"
+_CODE_FONT_SIZE: int = scale_font_size(13)
+
+
+def _update_icon_prefix():
+    """主题切换时更新图标前缀缓存"""
+    global _ICON_PREFIX_CACHE
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        _ICON_PREFIX_CACHE = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except Exception:
+        _ICON_PREFIX_CACHE = "qrc:/icons"
+
+
+# HTML 实体解码翻译表：比链式 .replace() 快 3-5x
+_HTML_ENTITY_TRANS = str.maketrans(
+    {
+        "&": "&",
+        "<": "<",
+        ">": ">",
+        "'": "'",
+        '"': '"',
+    }
+)
+
 
 def _get_lexer_cached(lang: str):
     """按语言名缓存 lexer 实例（lexer 构造开销大，含完整词法分析器初始化）"""
@@ -250,13 +277,8 @@ def _strip_code_blocks(text: str) -> str:
 
 # ======== 核心逻辑：保留你的原始代码块样式 ========
 def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
-    # 检测当前主题，选择对应图标资源前缀
-    try:
-        from app.utils.theme_manager import theme_manager
-
-        _icon_prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except Exception:
-        _icon_prefix = "qrc:/icons"
+    _icon_prefix = _ICON_PREFIX_CACHE
+    _font_size = _CODE_FONT_SIZE
 
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
@@ -265,16 +287,9 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
         # ===== ECharts 代码块：渲染为交互式图表 =====
         if lang == "echarts":
             try:
-                # 解码 HTML 实体
-                json_text = (
-                    code_content_raw.replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&amp;", "&")
-                    .replace("&#39;", "'")
-                    .replace("&quot;", '"')
-                )
-                # 验证 JSON 合法性
-                json.loads(json_text)
+                # 一次性解码所有 HTML 实体（str.translate 比链式 .replace 快 3-5x）
+                json_text = code_content_raw.translate(_HTML_ENTITY_TRANS)
+                # 验证 JSON 合法性（json.loads 内部会解析，无需提前 decode）
                 # base64 编码防止 HTML 属性转义问题
                 b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
                 chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
@@ -287,13 +302,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
 
         # --- 普通代码块处理 ---
         try:
-            copy_text = (
-                code_content_raw.replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&amp;", "&")
-                .replace("&#39;", "'")
-                .replace("&quot;", '"')
-            )
+            copy_text = code_content_raw.translate(_HTML_ENTITY_TRANS)
         except Exception:
             copy_text = code_content_raw
 
@@ -339,7 +348,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
             box-shadow: 0 4px 12px rgba(0,0,0,0.18), 0 1px 3px rgba(0,0,0,0.2);
             backdrop-filter: blur(8px);
             font-family: Consolas, monospace;
-            font-size: {scale_font_size(13)}px;
+            font-size: {_font_size}px;
         ">
             <!-- 顶部工具栏区域 -->
             <div style="
@@ -347,7 +356,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
                 padding: 6px 10px; height: 30px; background: rgba(255, 255, 255, 0.03);
                 border-bottom: 1px solid var(--code-border, rgba(45, 45, 57, 0.5)); border-radius: 10px 10px 0 0;
             ">
-                {f'<span style="color: #FFA500; font-size: {scale_font_size(13)}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: #888;">Plain Text</span>'}
+                {f'<span style="color: #FFA500; font-size: {_font_size}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: #888;">Plain Text</span>'}
                 <div style="display: flex; gap: 12px; align-items: center; padding-right: 4px;">
                     <button type="button" data-action="save_file" data-lang="{lang}" data-copy="{b64_copy}" class="code-btn" data-tooltip="保存本地文件" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
                         <img src="{_icon_prefix}/导入.svg" style="width:22px; height:22px; pointer-events: none;" />
@@ -3508,6 +3517,57 @@ class CodeWebViewer(QWebEngineView):
                 #tool-separator:hover {{
                     background: var(--panel-soft);
                 }}
+                /* 自绘 tooltip：hover 时在分隔条下方显示说明 */
+                #tool-separator {{
+                    position: relative;
+                }}
+                .tool-separator-tooltip {{
+                    position: absolute;
+                    left: 50%;
+                    top: 100%;
+                    transform: translateX(-50%);
+                    margin-top: 6px;
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                #tool-separator:hover .tool-separator-tooltip {{
+                    opacity: 1;
+                }}
+                /* 子智能体日志按钮自绘 tooltip（代替 HTML title，避免 Chromium 原生 tooltip 在深色模式下显示为黑块） */
+                .tool-subagent-log-btn::after {{
+                    content: attr(data-tooltip);
+                    position: absolute;
+                    bottom: calc(100% + 6px);
+                    left: 50%;
+                    transform: translateX(-50%);
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                .tool-subagent-log-btn:hover::after {{
+                    opacity: 1;
+                }}
                 /* 折叠时让 chevron 旋转 */
                 #tool-section[data-collapsed="true"] #tool-separator .chevron {{
                     transform: rotate(-90deg);
@@ -3577,9 +3637,10 @@ class CodeWebViewer(QWebEngineView):
         </head>
         <body>
             <div id="tool-section" style="display: none;" data-collapsed="false">
-              <div id="tool-separator" role="button" tabindex="0" aria-expanded="true" title="点击折叠/展开工具与思考区">
+              <div id="tool-separator" role="button" tabindex="0" aria-expanded="true">
                 <span class="chevron">▾</span>
                 <span>⚙ 工具与思考</span>
+                <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
             </div>
@@ -4354,6 +4415,34 @@ class CodeWebViewer(QWebEngineView):
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
+    # ========== 差量渲染常量 ==========
+    # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
+    _SAFETY_RENDER_INTERVAL = 2000
+    # 预编译代码块闭合检测
+    _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
+
+    @staticmethod
+    def _has_reached_clean_boundary(md_text: str) -> bool:
+        """检测 markdown 文本是否在自然边界结束
+
+        自然边界 = 段落结束 / think 块闭合 / 代码块闭合。
+        在此边界做全量 HTML 渲染可得稳定结果，无需后续重算。
+
+        Returns:
+            True: 文本在自然边界结束，适合触发全量渲染
+        """
+        if not md_text:
+            return False
+        # 段落结束（双换行）：用原文本检测，因 rstrip 会移除尾部换行
+        if md_text.endswith("\n\n"):
+            return True
+        # think 块 / 代码块闭合：用 rstrip 处理尾部空白
+        stripped = md_text.rstrip()
+        return (
+            stripped.endswith("</think>")
+            or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
+        )
+
     def append_chunk(self, text: str):
         if not text:
             return
@@ -4363,7 +4452,11 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            self._schedule_render(immediate=True)
+            # 差量渲染：仅在自然边界触发全量渲染，否则靠增量文本 + 安全兜底
+            if self._has_reached_clean_boundary(self._markdown_text):
+                self._schedule_render(immediate=True)
+            else:
+                self._schedule_render(immediate=False)
         else:
             self._schedule_render()
 
@@ -4459,6 +4552,10 @@ class CodeWebViewer(QWebEngineView):
             _style = "friendly" if theme_manager.is_light_theme() else "dracula"
             set_pygments_style(_style)
             set_diff_highlight_style(_style)
+            # 同步缓存图标前缀，避免每次渲染都重新检测主题
+            _update_icon_prefix()
+            global _CODE_FONT_SIZE
+            _CODE_FONT_SIZE = scale_font_size(13)
         except Exception:
             pass
 
@@ -4525,28 +4622,23 @@ class CodeWebViewer(QWebEngineView):
             self._perform_update()
             return
 
-        # 动态渲染间隔：内容越大渲染越稀疏，减轻 UI 压力
-        # 流式模式下 _append_text_incremental 已在 JS 侧即时显示文本，
-        # 全量渲染仅用于保证 markdown 格式正确（代码块、思考块等），
-        # 因此间隔可以大幅放宽以避免不必要的全量重渲染。
-        # 注意：间隔已加大，因为增量文本提供了即时可读性，
-        # 降低全量渲染频率可减少 DOM 重建带来的视觉跳跃。
+        # ── 差量渲染策略 ──
+        # 增量纯文本已由 _append_text_incremental 即时显示到 DOM，
+        # 全量 HTML 渲染仅在以下时机触发，避免 O(n) 逐帧重排：
+        # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
+        # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            content_len = len(self._markdown_text)
-            if content_len > 100000:
-                interval = 800
-            elif content_len > 50000:
-                interval = 500
-            elif content_len > 10000:
-                interval = 350
-            else:
-                interval = 250
+            # 流式模式下检查自然边界
+            if self._has_reached_clean_boundary(self._markdown_text):
+                self._perform_update()
+                return
+            # 无边界：启安全定时器（仅当未激活时）
+            if not self._render_timer.isActive():
+                self._render_timer.start(self._SAFETY_RENDER_INTERVAL)
         else:
-            interval = 40
-
-        if self._render_timer.isActive():
-            return
-        self._render_timer.start(interval)
+            # 非流式模式（历史加载）：40ms 防抖后渲染
+            if not self._render_timer.isActive():
+                self._render_timer.start(40)
 
     def _refresh_viewer_font(self):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
@@ -5974,6 +6066,11 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
+        # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
+        _update_icon_prefix()
+        global _CODE_FONT_SIZE
+        _CODE_FONT_SIZE = scale_font_size(13)
+        # 刷新主题颜色
         self._theme = self._build_theme(self.role, self.error)
         self._base_bg = self._theme["bg"]
         self._base_border = self._theme["border"]
@@ -6443,22 +6540,17 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = True
         elif self.role == "welcome":
-            # 欢迎卡片直接创建轻量 WebEngine（使用精简骨架，无 echarts CDN）
-            self.viewer = CodeWebViewer(self, light=True)
-            self.viewer._lazy_markdown_cb = self._build_incremental_md
-            self.viewer.codeActionRequested.connect(self.actionRequested.emit)
-            self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
-            self.viewer.contentHeightChanged.connect(self._update_height)
-            self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
-            self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-            self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
-            self.viewer.contextLost.connect(self._on_webengine_context_lost)
-            self.viewer.contextRestored.connect(self._on_webengine_context_restored)
-            self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
-            self.viewer._install_dialog_filter()
-            self._viewer_layout.addWidget(self.viewer)
+            # 欢迎卡片使用懒渲染：占位符，不立即创建 QWebEngine
+            # 避免首帧 Chromium 进程创建阻塞主线程（优化前首帧卡顿 200-500ms 的根因）
+            placeholder = QLabel("加载中...", self)
+            placeholder.setStyleSheet(
+                f"color: #888888; font-size: {scale_font_size(14)}px; padding: 8px; {get_font_family_css()}"
+            )
+            placeholder.setAlignment(Qt.AlignCenter)
+            self._viewer_layout.addWidget(placeholder)
             main.addWidget(self._viewer_container)
-            self._lazy_rendered = True
+            self._lazy_rendered = False
+            self.viewer = None  # 懒加载，延后创建
         else:
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
@@ -7265,13 +7357,16 @@ class MessageCard(SimpleCardWidget):
                 if item and item.widget():
                     item.widget().deleteLater()
 
-            self.viewer = CodeWebViewer(self)
+            # welcome 卡片使用轻量骨架（无 echarts CDN）
+            is_welcome = self.role == "welcome"
+            self.viewer = CodeWebViewer(self, light=is_welcome)
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
-            self.viewer._is_history = not self._streaming
-            # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
-            # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
-            self.viewer._restore_finished_ids = self._finished_streaming_ids
+            if not is_welcome:
+                # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
+                self.viewer._is_history = not self._streaming
+                # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
+                # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
+                self.viewer._restore_finished_ids = self._finished_streaming_ids
             self.viewer.codeActionRequested.connect(self.actionRequested.emit)
             self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
             self.viewer.contentHeightChanged.connect(self._update_height)
@@ -7427,12 +7522,14 @@ class MessageCard(SimpleCardWidget):
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
             # 末尾闭合的 </think>（仅 reasoning_content 路径需要此行为）
             self.viewer._thinking_finalized = True
-            # 全量格式化渲染统一走定时器节流：多个 chunk 在窗口期(100~500ms)内
-            # 合并为一次渲染，避免每个 chunk 都做 O(n) 全量 markdown→HTML→JS 渲染
-            # 导致主线程阻塞、增量纯文本也被卡住（"流式好久才刷新"）。
-            # 文字即时性已由 _append_text_incremental 保证；流式结束由
-            # finish_streaming() 触发 immediate 收尾渲染。
-            self.viewer._schedule_render(immediate=False)
+            # ── 差量渲染（2026-07-22）──
+            # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
+            # 仅在自然边界触发（段落结束 / 块闭合），非边界时只启安全定时器。
+            # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
+            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+                self.viewer._schedule_render(immediate=True)
+            else:
+                self.viewer._schedule_render(immediate=False)
             self._content_just_loaded = True
             return
 

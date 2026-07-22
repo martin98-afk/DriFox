@@ -380,7 +380,7 @@ class Settings(QConfig):
         "fallout",
         OptionsValidator(["fallout"]),  # 运行时动态补充
     )
-    ui_light_mode = ConfigItem("UI", "LightMode", False, BoolValidator())
+    ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 
     # 工具区折叠显示（简洁模式）：工具调用/思考块集中在卡片顶部可滚动容器
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())

@@ -1603,10 +1603,10 @@ def render_tool_block(
             subagent_log_btn_html = f'''
         <span class="tool-subagent-log-btn" data-task-ids="{escape(task_ids_str)}"
             role="button" tabindex="0"
-            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px;"
+            style="display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; background: transparent; cursor: pointer; padding: 4px; margin-left: 8px; border-radius: 4px; position: relative;"
             onclick="event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds)"
             onkeydown="if(event.key === 'Enter' || event.key === ' '){{ event.preventDefault(); event.stopPropagation(); window._requestSubAgentLog(this.dataset.taskIds); }}"
-            title="查看子智能体执行日志">
+            data-tooltip="查看子智能体执行日志">
             <img src="qrc:/icons/日志.svg" style="width: 16px; height: 16px;" />
         </span>'''
 
