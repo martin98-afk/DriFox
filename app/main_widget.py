@@ -13102,6 +13102,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 session = self.session_manager.get_current_session()
                 if session and session.messages:
+                    # 🐛 修复：只更新最近一条 assistant 消息，避免每次新对话把历史消息的
+                    # model_name/provider_name/config_id 都覆盖成当前轮的，导致之前卡片
+                    # 的页脚模型显示全部变成最后那次对话的模型。
                     for msg in reversed(session.messages):
                         if msg.get("role") == "assistant":
                             msg["model_name"] = current_model_name
@@ -13109,6 +13112,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                 msg["provider_name"] = provider_display
                             if not msg.get("config_id") and self._current_provider_name:
                                 msg["config_id"] = self._current_provider_name
+                            break
         # 计算流式耗时并设置到卡片底部栏
         elapsed = None
         if self._response_start_time is not None:

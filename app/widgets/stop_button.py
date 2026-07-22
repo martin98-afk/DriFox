@@ -187,12 +187,13 @@ class SendStopButton(QWidget):
         """绘制 FluentIcon.SEND 发送图标"""
         icon = FluentIcon.SEND.icon()
         icon_size = 18
-        icon_rect = self._icon_rect(cx, cy, icon_size)
+        x, y = int(cx - icon_size / 2), int(cy - icon_size / 2)
         # 禁用态 → 半透明
         opacity = 0.35 if not self._send_enabled else 1.0
         painter.save()
         painter.setOpacity(opacity)
-        icon.paint(painter, icon_rect, Qt.AlignCenter, QIcon.Normal if self._send_enabled else QIcon.Disabled)
+        icon.paint(painter, x, y, icon_size, icon_size,
+                   Qt.AlignCenter, QIcon.Normal if self._send_enabled else QIcon.Disabled)
         painter.restore()
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
@@ -207,11 +208,6 @@ class SendStopButton(QWidget):
         square_path = QPainterPath()
         square_path.addRoundedRect(cx - size / 2, cy - size / 2, size, size, rx, rx)
         painter.fillPath(square_path, self._square_color)
-
-    @staticmethod
-    def _icon_rect(cx: float, cy: float, size: float):
-        from PyQt5.QtCore import QRectF
-        return QRectF(cx - size / 2, cy - size / 2, size, size)
 
     def __del__(self):
         try:
