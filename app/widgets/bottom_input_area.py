@@ -232,14 +232,6 @@ class SendableTextEdit(TextEdit):
         if hasattr(self, "layer"):
             self.layer.hide()
 
-        # 防抖定时器：合并连续 resize 事件中的发送按钮定位，
-        # 避免 setMinimumHeight/setMaximumHeight 与父布局级联 resize
-        # 触发的多次 resizeEvent 把按钮跳到中间位置。
-        self._send_btn_debounce_timer = QTimer(self)
-        self._send_btn_debounce_timer.setSingleShot(True)
-        self._send_btn_debounce_timer.setInterval(0)
-        self._send_btn_debounce_timer.timeout.connect(self._position_send_button)
-
         self._setup_keyboard_shortcuts()
 
         # [[filename]] 占位符高亮
@@ -1142,9 +1134,7 @@ class SendableTextEdit(TextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 每次 resize 重启定时器；连续多次 resize 只会触发最后一次定位，
-        # 保证发送按钮一次到位（不抖）。
-        self._send_btn_debounce_timer.start()
+        self._position_send_button()
 
     def showEvent(self, event):
         super().showEvent(event)
