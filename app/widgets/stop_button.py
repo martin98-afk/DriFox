@@ -38,9 +38,8 @@ class SendStopButton(QWidget):
     SCALE_AMPLITUDE = 0.10   # 缩放幅度 ±10%
     FRAME_INTERVAL_MS = 33
 
-    # 颜色（纯黑/纯白，适配任何主题）
-    COLOR_SQUARE_DARK = "#FFFFFF"  # 深色主题 → 白色方块
-    COLOR_SQUARE_LIGHT = "#000000"  # 浅色主题 → 黑色方块
+    # 停止方块颜色（深浅主题统一用白色）
+    SQUARE_COLOR = "#FFFFFF"
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -63,7 +62,7 @@ class SendStopButton(QWidget):
         self._send_icon_cache: Optional[QPixmap] = None
 
         # 颜色
-        self._square_color = QColor(self.COLOR_SQUARE_DARK)
+        self._square_color = QColor(self.SQUARE_COLOR)
 
         # 注册主题刷新
         self._register_theme()
@@ -79,15 +78,8 @@ class SendStopButton(QWidget):
             pass
 
     def refresh_theme(self):
-        """主题切换时更新方块颜色、清除图标缓存"""
-        try:
-            from app.utils.theme_manager import theme_manager
-            is_light = theme_manager.is_light_theme()
-            self._square_color = QColor(
-                self.COLOR_SQUARE_LIGHT if is_light else self.COLOR_SQUARE_DARK
-            )
-        except Exception:
-            self._square_color = QColor(self.COLOR_SQUARE_DARK)
+        """主题切换时清除图标缓存"""
+        self._square_color = QColor(self.SQUARE_COLOR)
         self._send_icon_cache = None
         self.update()
 
