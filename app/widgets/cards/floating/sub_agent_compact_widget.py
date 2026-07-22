@@ -29,10 +29,6 @@ from app.utils.utils import _is_current_theme_light, get_font_family_css, get_ic
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
-# 隐藏状态下 sizeHint 不可靠时的兜底高度
-_MIN_ROW_HEIGHT = 28
-# sizeHint 与实际布局分配的微差缓冲
-_HEIGHT_SAFETY_BUFFER = 4
 
 
 class _RotatingIcon(QWidget):
@@ -360,10 +356,6 @@ class _AgentTaskRow(QFrame):
         if self._is_expanded:
             h += self._detail_panel.sizeHint().height()
         return QSize(self._main_layout.sizeHint().width(), h)
-
-    def minimumSizeHint(self):
-        """返回与 sizeHint 相同的最小尺寸，防止 widgetResizable 将行压缩到自然高度以下。"""
-        return self.sizeHint()
 
     def set_rotation_angle(self, angle: float):
         if self.is_running:
@@ -842,6 +834,25 @@ class SubAgentCompactFloatingWidget(QWidget):
             return "128K 上下文"
         return ""
 
+    def sizeHint(self):
+        """返回固定高度（若已设置），确保父容器读取的 sizeHint 与实际 fixedHeight 一致。
+
+        背景：SubAgentCompactFloatingWidget 通过 setFixedHeight 控制自身高度，
+        但其默认 sizeHint() 依赖内部 layout 计算结果。在布局尚未完成时（如批量
+        添加任务后），layout 的 sizeHint 可能远小于 fixedHeight，导致父容器
+        （BottomCardContainer）在 _do_expand 中将 maxHeight 设错，卡片被裁剪。
+        resize 窗口时 layout 已稳定，sizeHint 返回正确值，所以"恢复正常"。
+
+        覆写后：当 minHeight==maxHeight（即已调用 setFixedHeight），直接返回
+        该高度作为 sizeHint，与固定高度保持一致。
+        """
+        min_h = self.minimumHeight()
+        max_h = self.maximumHeight()
+        if min_h > 0 and min_h == max_h:
+            sh = super().sizeHint()
+            return QSize(sh.width(), min_h)
+        return super().sizeHint()
+
     def _on_row_toggled(self, task_id: str = ""):
         """行展开/收起时重新计算卡片高度"""
         self._reflow()
@@ -984,20 +995,25 @@ class SubAgentCompactFloatingWidget(QWidget):
         else:
             self.status_label.setText("")
 
-    def _calculate_total_height(self) -> int:
-        """计算卡片应占用的总高度（含安全缓冲区，已 clamp 到 _MAX_CARD_HEIGHT）。
+    def _apply_height(self):
+        """计算内容自然高度 + overhead 并设置 fixedHeight（不触发延迟重算）。
 
-        供 _reflow 和 _reflow_after_layout 共用，消除重复计算逻辑。
+        供 _reflow 和 _reflow_after_layout 共用，_reflow_after_layout 通过此方法
+        直接修正高度而不重新调度，打破旧版"无限延迟循环"。
         """
         # 计算内容自然高度（所有任务行的 sizeHint 之和 + 间距）
         # 注意：当 widget 未显示（隐藏状态）时，Qt 尚未处理子 widget 的布局，
         # sizeHint() 可能返回极小值（如 15-20px）。为确保卡片不会在首次显示时
-        # 因 height 过小而被锁死在矮小尺寸，对每个未展开行强制最低 _MIN_ROW_HEIGHT。
+        # 因 height 过小而被锁死在矮小尺寸，对每个未展开行强制最低 28px。
+        _MIN_ROW_HEIGHT = 28
         content_height = 0
         for _, row in self._task_rows.items():
             sh = row.sizeHint()
-            row_h = sh.height() if sh.isValid() else 0
-            row_h = max(_MIN_ROW_HEIGHT, row_h)
+            row_h = 0
+            if sh.isValid():
+                row_h = sh.height()
+            if row_h < _MIN_ROW_HEIGHT:
+                row_h = _MIN_ROW_HEIGHT
             content_height += row_h
         if len(self._task_rows) > 1:
             content_height += self._body_layout.spacing() * (len(self._task_rows) - 1)
@@ -1015,12 +1031,19 @@ class SubAgentCompactFloatingWidget(QWidget):
             if hint.isValid() and hint.height() > 0:
                 header_h = hint.height()
         overhead = margins.top() + header_h + spacing + margins.bottom()
+        total_height = overhead + content_height
 
-        total_height = overhead + content_height + _HEIGHT_SAFETY_BUFFER
-        return min(total_height, _MAX_CARD_HEIGHT)
+        if total_height > _MAX_CARD_HEIGHT:
+            self.setFixedHeight(_MAX_CARD_HEIGHT)
+        else:
+            self.setFixedHeight(max(36, total_height))
+
+        # 显式激活布局链，确保卡片 → scroll area → 内容 widget 各级都刷新
+        self.layout().activate()
+        self._scroll_area.updateGeometry()
 
     def _reflow(self):
-        """根据内容重新计算卡片高度。
+        """根据内容重新计算卡片高度，并调度一次延迟重算。
 
         策略：
         - 内容总高度 <= _MAX_CARD_HEIGHT → 卡片固定为内容高度（无滚动）
@@ -1028,22 +1051,15 @@ class SubAgentCompactFloatingWidget(QWidget):
 
         widgetResizable=True 时内容 widget 由 scroll area 自动缩放，
         任务行自然高度小于视口则无滚动条，大于视口则出现滚动条。
+
+        延迟重算：_reflow 首次调用时可能 sizeHint 不可靠（widget 未显示或
+        Qt 布局未完成），通过 _reflow_after_layout 在下一轮事件循环中修正。
+        _apply_height (由 _reflow_after_layout 调用) 不再重新调度，打破循环。
         """
-        total_height = self._calculate_total_height()
-        self.setFixedHeight(max(36, total_height))
+        self._apply_height()
 
-        # 显式激活布局链，确保卡片 → scroll area → 内容 widget 各级都刷新
-        self.layout().activate()
-        self._scroll_area.updateGeometry()
-        if self._scroll_content.layout():
-            self._scroll_content.layout().invalidate()
-            self._scroll_content.layout().activate()
-        # 通知父容器（BottomCardContainer）它的尺寸约束已变化
-        self.updateGeometry()
-
-        # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
-        # 上述 sizeHint 可能不可靠。调度延迟重算，通过 _reflow_after_layout 不断调用
-        # _reflow 形成持续修正链，确保布局稳定后高度正确。
+        # ⚡ 调度一次延迟重算：_reflow_after_layout 通过 _apply_height 修正高度，
+        # 不重新调度，因此整体只执行一次"立即 + 一次延迟"。
         if not self._reflow_deferred_guard:
             self._reflow_deferred_guard = True
             QTimer.singleShot(0, self._reflow_after_layout)
@@ -1062,10 +1078,19 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _reflow_after_layout(self):
         """延迟重算：由 _reflow 或 showEvent 调度，在 Qt 事件循环处理完布局后执行。
 
-        通过调用 _reflow() 进入重算循环，确保布局稳定后高度正确。
+        直接应用高度而不调用 _reflow()（避免重新调度形成无限循环）。
+        guard 在此重置，允许后续高度变化（如 finish_task）再次调度延迟重算。
+
+        关键：setVisible(True) 可能触发即时布局，使容器在仅有部分 task 时
+        就启动 200ms 展开动画。动画期间 resize 事件被 eventFilter 抑制，
+        导致后续 task 的高度变化丢失。因此在动画结束后（250ms）再做一次
+        延迟修正，确保容器 maxHeight 与卡片 fixedHeight 最终一致。
         """
         self._reflow_deferred_guard = False
-        self._reflow()
+        self._apply_height()
+        # 容器展开动画为 200ms OutCubic，250ms 后可确保动画已结束。
+        # 若动画期间有 resize 被抑制，此回调将在动画完成后修正容器高度。
+        QTimer.singleShot(250, self._apply_height)
 
     def _on_close(self):
         """手动关闭"""

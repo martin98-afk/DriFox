@@ -172,7 +172,7 @@ PLACEHOLDER_TIPS = [
     "/ 搜索支持 | 和 & 组合关键字",
     # ════ 文件提及 ════
     "@ 搜索支持 | 和 & 组合筛选",
-    "@ 模糊匹配：rqrmnts 也能找到 requirements.txt"
+    "@ 模糊匹配：rqrmnts 也能找到 requirements.txt",
 ]
 
 # 轮播间隔（毫秒）
@@ -421,7 +421,9 @@ class SendableTextEdit(TextEdit):
                 # 结尾时，raw_cmd 会把真名"my-skill"截断为"my"，导致后续 show_command_detail
                 # 用错误的名字查不到技能，参数卡片不弹出。
                 cmd_match = CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name)
-                raw_match = bool(raw_cmd) and (CommandManager.get_instance().is_known_command_name(raw_cmd) or get_skill_by_name(raw_cmd))
+                raw_match = bool(raw_cmd) and (
+                    CommandManager.get_instance().is_known_command_name(raw_cmd) or get_skill_by_name(raw_cmd)
+                )
 
                 if cmd_match or raw_match:
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
@@ -1120,7 +1122,7 @@ class SendableTextEdit(TextEdit):
         pass
 
     def _on_send_click(self):
-        """发送/停止按钮点击事件"""
+        """发送/停止按钮点击事件（点击按钮触发）"""
         if self.send_btn.is_stop_mode():
             # 停止模式 → 停止当前请求
             self.toggle_send_button(True)
@@ -1131,6 +1133,22 @@ class SendableTextEdit(TextEdit):
                 return
             self.toggle_send_button(False)
             self.sendMessageRequested.emit()
+
+    def _on_enter_send(self):
+        """Enter 键发送：始终触发发送流程
+
+        与按钮点击不同，Enter 键不检查停止模式，直接发射 sendMessageRequested。
+        main_widget 的 _on_send_clicked 内部会处理：
+        - 命令（/xxx）→ 不打断流式直接执行
+        - 非命令 + 流式中 → 先停止再发送新消息
+        """
+        if not self.toPlainText().strip():
+            return
+        # 如果当前在发送模式（非流式），切换到停止模式表示正在请求
+        if not self.send_btn.is_stop_mode():
+            self.toggle_send_button(False)
+        # 直接发送请求，由 main_widget 内部逻辑处理命令/停止
+        self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1237,7 +1255,7 @@ class SendableTextEdit(TextEdit):
             if event.modifiers() & Qt.ShiftModifier:
                 super().keyPressEvent(event)  # 换行
             else:
-                self._on_send_click()
+                self._on_enter_send()
                 event.accept()
         elif event.key() == Qt.Key_Up:
             if self._history_index >= 0 or not self.toPlainText():
