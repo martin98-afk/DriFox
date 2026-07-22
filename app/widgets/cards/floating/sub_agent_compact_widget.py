@@ -1032,9 +1032,14 @@ class SubAgentCompactFloatingWidget(QWidget):
         total_height = self._calculate_total_height()
         self.setFixedHeight(max(36, total_height))
 
-        # 显式激活布局，确保 scroll area 及其内容 widget 立即响应新高度
+        # 显式激活布局链，确保卡片 → scroll area → 内容 widget 各级都刷新
         self.layout().activate()
         self._scroll_area.updateGeometry()
+        if self._scroll_content.layout():
+            self._scroll_content.layout().invalidate()
+            self._scroll_content.layout().activate()
+        # 通知父容器（BottomCardContainer）它的尺寸约束已变化
+        self.updateGeometry()
 
         # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
         # 上述 sizeHint 可能不可靠。调度延迟重算，通过 _reflow_after_layout 不断调用
