@@ -194,9 +194,12 @@ class SendStopButton(QWidget):
         icon = FluentIcon.SEND.icon()
         icon_size = 18
         x, y = int(cx - icon_size / 2), int(cy - icon_size / 2)
-        # 禁用态：QIcon.Disabled 已自带灰色，不额外加透明度
-        icon.paint(painter, x, y, icon_size, icon_size,
-                   Qt.AlignCenter, QIcon.Disabled if not self._send_enabled else QIcon.Normal)
+        # 禁用态：50% 透明度模拟 TEXT_SECONDARY 效果，不用 QIcon.Disabled（渲染成纯黑）
+        painter.save()
+        if not self._send_enabled:
+            painter.setOpacity(0.5)
+        icon.paint(painter, x, y, icon_size, icon_size, Qt.AlignCenter, QIcon.Normal)
+        painter.restore()
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
         """绘制缩放呼吸方块"""
