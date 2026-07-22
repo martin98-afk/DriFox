@@ -29,6 +29,10 @@ from app.utils.utils import _is_current_theme_light, get_font_family_css, get_ic
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
+# 隐藏状态下 sizeHint 不可靠时的兜底高度
+_MIN_ROW_HEIGHT = 28
+# sizeHint 与实际布局分配的微差缓冲
+_HEIGHT_SAFETY_BUFFER = 4
 
 
 class _RotatingIcon(QWidget):
@@ -980,30 +984,20 @@ class SubAgentCompactFloatingWidget(QWidget):
         else:
             self.status_label.setText("")
 
-    def _reflow(self):
-        """根据内容重新计算卡片高度。
+    def _calculate_total_height(self) -> int:
+        """计算卡片应占用的总高度（含安全缓冲区，已 clamp 到 _MAX_CARD_HEIGHT）。
 
-        策略：
-        - 内容总高度 = 所有任务行高度之和 + 间距
-        - 内容总高度 <= _MAX_CARD_HEIGHT → 卡片固定为内容高度（无滚动）
-        - 内容总高度 > _MAX_CARD_HEIGHT → 卡片固定为最大高度（出现滚动条）
-
-        widgetResizable=True 时内容 widget 由 scroll area 自动缩放，
-        任务行自然高度小于视口则无滚动条，大于视口则出现滚动条。
+        供 _reflow 和 _reflow_after_layout 共用，消除重复计算逻辑。
         """
         # 计算内容自然高度（所有任务行的 sizeHint 之和 + 间距）
         # 注意：当 widget 未显示（隐藏状态）时，Qt 尚未处理子 widget 的布局，
         # sizeHint() 可能返回极小值（如 15-20px）。为确保卡片不会在首次显示时
-        # 因 height 过小而被锁死在矮小尺寸，对每个未展开行强制最低 28px。
-        _MIN_ROW_HEIGHT = 28
+        # 因 height 过小而被锁死在矮小尺寸，对每个未展开行强制最低 _MIN_ROW_HEIGHT。
         content_height = 0
         for _, row in self._task_rows.items():
             sh = row.sizeHint()
-            row_h = 0
-            if sh.isValid():
-                row_h = sh.height()
-            if row_h < _MIN_ROW_HEIGHT:
-                row_h = _MIN_ROW_HEIGHT
+            row_h = sh.height() if sh.isValid() else 0
+            row_h = max(_MIN_ROW_HEIGHT, row_h)
             content_height += row_h
         if len(self._task_rows) > 1:
             content_height += self._body_layout.spacing() * (len(self._task_rows) - 1)
@@ -1021,16 +1015,22 @@ class SubAgentCompactFloatingWidget(QWidget):
             if hint.isValid() and hint.height() > 0:
                 header_h = hint.height()
         overhead = margins.top() + header_h + spacing + margins.bottom()
-        total_height = overhead + content_height
 
-        # 添加安全缓冲区（4px），防止 sizeHint 与实际布局分配间的微小差异导致行被裁切
-        _HEIGHT_SAFETY_BUFFER = 4
-        total_height_with_buffer = total_height + _HEIGHT_SAFETY_BUFFER
+        total_height = overhead + content_height + _HEIGHT_SAFETY_BUFFER
+        return min(total_height, _MAX_CARD_HEIGHT)
 
-        if total_height_with_buffer > _MAX_CARD_HEIGHT:
-            self.setFixedHeight(_MAX_CARD_HEIGHT)
-        else:
-            self.setFixedHeight(max(36, total_height_with_buffer))
+    def _reflow(self):
+        """根据内容重新计算卡片高度。
+
+        策略：
+        - 内容总高度 <= _MAX_CARD_HEIGHT → 卡片固定为内容高度（无滚动）
+        - 内容总高度 > _MAX_CARD_HEIGHT → 卡片固定为最大高度（出现滚动条）
+
+        widgetResizable=True 时内容 widget 由 scroll area 自动缩放，
+        任务行自然高度小于视口则无滚动条，大于视口则出现滚动条。
+        """
+        total_height = self._calculate_total_height()
+        self.setFixedHeight(max(36, total_height))
 
         # 显式激活布局，确保 scroll area 及其内容 widget 立即响应新高度
         self.layout().activate()
@@ -1039,7 +1039,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         # ⚡ 若当前 widget 不可见（未显示），Qt 布局系统尚未给子 widget 分配有效高度，
         # 上述 sizeHint 可能不可靠。调度一次延迟重算，确保在 widget 显示后、
         # 布局就绪时纠正高度。
-        # 注意：由 _reflow_after_layout 触发的 _reflow 不再重复调度，防止无限链式调用。
+        # 注意：由 _reflow_after_layout 触发的重算不再重复调度，防止无限链式调用。
         if not self._reflow_deferred_guard:
             self._reflow_deferred_guard = True
             QTimer.singleShot(0, self._reflow_after_layout)
@@ -1058,42 +1058,12 @@ class SubAgentCompactFloatingWidget(QWidget):
     def _reflow_after_layout(self):
         """延迟重算：由 _reflow 或 showEvent 调度，在 Qt 事件循环处理完布局后执行。
 
-        注意：直接执行计算逻辑（不调用 _reflow），避免再次调度形成无限链式循环。
+        注意：直接调用 _calculate_total_height（不调用 _reflow），
+        避免再次调度形成无限链式循环。
         """
         self._reflow_deferred_guard = False
-        # 重新计算高度（直接从 sizeHint 取最新值，不触发链式调度）
-        _MIN_ROW_HEIGHT = 28
-        content_height = 0
-        for _, row in self._task_rows.items():
-            sh = row.sizeHint()
-            row_h = 0
-            if sh.isValid():
-                row_h = sh.height()
-            if row_h < _MIN_ROW_HEIGHT:
-                row_h = _MIN_ROW_HEIGHT
-            content_height += row_h
-        if len(self._task_rows) > 1:
-            content_height += self._body_layout.spacing() * (len(self._task_rows) - 1)
-
-        margins = self.layout().contentsMargins()
-        spacing = self.layout().spacing()
-        header_item = self.layout().itemAt(0)
-        header_h = 24
-        if header_item and header_item.layout():
-            hint = header_item.layout().sizeHint()
-            if hint.isValid() and hint.height() > 0:
-                header_h = hint.height()
-        overhead = margins.top() + header_h + spacing + margins.bottom()
-        total_height = overhead + content_height
-
-        _HEIGHT_SAFETY_BUFFER = 4
-        total_height_with_buffer = total_height + _HEIGHT_SAFETY_BUFFER
-
-        if total_height_with_buffer > _MAX_CARD_HEIGHT:
-            self.setFixedHeight(_MAX_CARD_HEIGHT)
-        else:
-            self.setFixedHeight(max(36, total_height_with_buffer))
-
+        total_height = self._calculate_total_height()
+        self.setFixedHeight(max(36, total_height))
         self.layout().activate()
         self._scroll_area.updateGeometry()
 
