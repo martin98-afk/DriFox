@@ -46,7 +46,20 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from .db import clear_all_records, delete_record, get_records
+from .db import clear_all_records, delete_record, get_records, update_record_file_path
+
+
+def _share_dir() -> Path:
+    """获取分享根目录（不依赖外部模块）"""
+    import sys as _sys
+
+    if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):
+        base = Path(".drifox")
+    elif _sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "Drifox" / ".drifox"
+    else:
+        base = Path.home() / ".drifox"
+    return base / "share"
 
 
 # ════════════════════════════════════════════════════════════
@@ -133,6 +146,7 @@ class _RecordItem(QFrame):
     """单条分享记录展示行"""
 
     deleted = pyqtSignal(int)  # 删除请求，携带 record id
+    downloaded = pyqtSignal(int)  # 下载完成，携带 record id（通知父卡片刷新）
 
     def __init__(
         self,
@@ -156,6 +170,7 @@ class _RecordItem(QFrame):
         self._open_btn: Optional[QPushButton] = None
         self._copy_btn: Optional[QPushButton] = None
         self._missing_btn: Optional[QPushButton] = None
+        self._download_btn: Optional[QPushButton] = None
         self._delete_btn: Optional[QPushButton] = None
 
         self._setup_ui()
@@ -248,6 +263,12 @@ class _RecordItem(QFrame):
             self._open_btn.setCursor(Qt.PointingHandCursor)
             self._open_btn.clicked.connect(lambda: self._open_file(file_path))
             row3.addWidget(self._open_btn)
+        elif has_url:
+            self._download_btn = QPushButton("📥 下载")
+            self._download_btn.setFixedHeight(26)
+            self._download_btn.setCursor(Qt.PointingHandCursor)
+            self._download_btn.clicked.connect(lambda: self._download_file(upload_url))
+            row3.addWidget(self._download_btn)
         else:
             self._missing_btn = QPushButton("📂 文件缺失")
             self._missing_btn.setFixedHeight(26)
@@ -391,6 +412,23 @@ class _RecordItem(QFrame):
                 }}
             """)
 
+        # 下载按钮
+        if self._download_btn:
+            self._download_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {t["btn_bg"]};
+                    border: 1px solid {t["btn_border"]};
+                    border-radius: 4px;
+                    padding: 0 10px;
+                    color: {t["tc"]};
+                    font-size: {btn_fs}px;
+                    font-family: '{ff}';
+                }}
+                QPushButton:hover {{
+                    background: {t["hover_bg"]};
+                }}
+            """)
+
         # 删除按钮
         if self._delete_btn:
             self._delete_btn.setStyleSheet(f"""
@@ -435,6 +473,107 @@ class _RecordItem(QFrame):
                     duration=2000,
                     parent=parent,
                 )
+
+    def _download_file(self, url: str):
+        """后台下载分享文件到本地（QThread + signals，不卡 UI）"""
+        rec = self._record
+        record_id = rec.get("id")
+        rtype = rec.get("type", "session")
+        title = rec.get("title", "未命名")
+        safe_title = "".join(c for c in title if c not in r'<>:"/\|?*').rstrip(". ") or "download"
+
+        # 确定保存目录
+        share_dir = _share_dir()
+        if rtype == "session":
+            save_dir = share_dir / "sessions"
+        else:
+            save_dir = share_dir / "projects"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 从 URL 推断扩展名
+        ext = ".html"
+        url_lower = url.lower()
+        if ".md" in url_lower or "markdown" in url_lower:
+            ext = ".md"
+        elif ".json" in url_lower:
+            ext = ".json"
+        elif ".drifox_project" in url_lower or ".zip" in url_lower:
+            ext = ".drifox_project"
+
+        filename = f"{safe_title}{ext}"
+        save_path = save_dir / filename
+
+        # 禁用按钮，显示进度
+        if self._download_btn:
+            self._download_btn.setText("⏳ 下载中…")
+            self._download_btn.setEnabled(False)
+
+        # ── QThread 方式：和 DownloadThread 同模式 ──
+        worker = _DownloadWorker(url, str(save_path))
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda fp: self._on_download_done(fp, record_id))
+        worker.error.connect(self._on_download_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_download_done(self, file_path: str, record_id: int):
+        """下载成功回调（主线程）"""
+        update_record_file_path(record_id, file_path)
+        self.downloaded.emit(record_id)
+
+        parent = self.window()
+        if parent:
+            InfoBar.success(
+                title="",
+                content=f"已下载到 {Path(file_path).name}",
+                duration=3000,
+                parent=parent,
+            )
+
+    def _on_download_error(self, err: str):
+        """下载失败回调（主线程）"""
+        logger.warning(f"[ShareHistory] 下载失败: {err}")
+        if self._download_btn:
+            self._download_btn.setText("📥 重试")
+            self._download_btn.setEnabled(True)
+
+        parent = self.window()
+        if parent:
+            InfoBar.error(
+                title="",
+                content=f"下载失败: {err}",
+                duration=3000,
+                parent=parent,
+            )
+
+
+class _DownloadWorker(QObject):
+    """文件下载 Worker — 与 app.utils.utils.DownloadThread 同模式，QThread + signals"""
+
+    finished = pyqtSignal(str)  # 文件路径
+    error = pyqtSignal(str)      # 错误信息
+
+    def __init__(self, url: str, file_path: str):
+        super().__init__()
+        self._url = url
+        self._file_path = file_path
+
+    def run(self):
+        from urllib.request import Request, urlopen
+
+        try:
+            req = Request(self._url, headers={"User-Agent": "DriFox/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            Path(self._file_path).write_bytes(data)
+            self.finished.emit(self._file_path)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # ════════════════════════════════════════════════════════════
@@ -813,6 +952,7 @@ class ShareHistoryCard(QWidget):
         for rec in records:
             item = _RecordItem(rec, theme=self._theme)
             item.deleted.connect(self._on_item_deleted)
+            item.downloaded.connect(self._on_item_downloaded)
             self._content_layout.addWidget(item)
 
         self._content_layout.addStretch()
@@ -867,6 +1007,11 @@ class ShareHistoryCard(QWidget):
                     duration=2000,
                     parent=parent,
                 )
+
+    def _on_item_downloaded(self, record_id: int):
+        """处理下载完成后刷新记录列表"""
+        # 重新加载全量记录并刷新渲染
+        self._load_records()
 
     def _on_clear_all(self):
         """清空全部记录"""

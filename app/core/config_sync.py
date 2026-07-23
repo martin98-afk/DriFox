@@ -27,6 +27,7 @@ from app.utils.utils import get_app_data_dir
 SETTINGS_REPO_NAME = "DriFox_settings"
 REMOTE_PATH = "drifox/app.config"
 USER_CUSTOM_REMOTE_PATH = "drifox/user-custom.zip"
+REMOTE_RECORDS_PATH = "drifox/share_records.json"
 SHA_CACHE_FILE = ".sync_shas.json"
 DEBOUNCE_MS = 10000
 
@@ -52,6 +53,11 @@ def _get_user_custom_path() -> Path:
 def _get_user_custom_backup_path() -> Path:
     """获取 user-custom 绑定前备份路径"""
     return get_app_data_dir() / "plugins" / "user-custom.pre_bind"
+
+
+def _get_records_path() -> Path:
+    """获取分享记录文件路径"""
+    return get_app_data_dir() / "share" / "records.json"
 
 
 # ── ConfigSyncService ─────────────────────────────────────
@@ -85,6 +91,7 @@ class ConfigSyncService(QObject):
         self._backup_path: Path = _get_backup_path().resolve()
         self._user_custom_path: Path = _get_user_custom_path().resolve()
         self._user_custom_backup_path: Path = _get_user_custom_backup_path().resolve()
+        self._records_path: Path = _get_records_path().resolve()
         self._debounce_timer: Optional[QTimer] = None
         self._upload_lock = threading.Lock()
         self._watch_stop: Optional[threading.Event] = None
@@ -93,8 +100,10 @@ class ConfigSyncService(QObject):
         self._upload_thread: Optional[threading.Thread] = None  # 后台上传线程引用
         self._config_dirty: bool = False     # app.config 有待上传的变更
         self._custom_dirty: bool = False     # user-custom 有待上传的变更
+        self._records_dirty: bool = False    # share_records.json 有待上传的变更
         self._config_remote_sha: Optional[str] = None  # 远端 app.config SHA 缓存
         self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
+        self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
 
         # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
@@ -223,6 +232,7 @@ class ConfigSyncService(QObject):
         # 清除 SHA 缓存（磁盘 + 内存），防止解绑后重新绑定时误判跳过下载
         self._config_remote_sha = None
         self._custom_remote_sha = None
+        self._records_remote_sha = None
         try:
             if self._sha_cache_path.exists():
                 self._sha_cache_path.unlink()
@@ -231,9 +241,10 @@ class ConfigSyncService(QObject):
         self._set_state("disabled")
 
     def upload(self) -> bool:
-        """强制立即上传当前配置和 user-custom 到远端（公开方法，供手动重试）"""
+        """强制立即上传当前配置、user-custom 和分享记录到远端（公开方法，供手动重试）"""
         self._config_dirty = True
         self._custom_dirty = True
+        self._records_dirty = True
         return self._do_upload()
 
     def download(self) -> bool:
@@ -266,12 +277,18 @@ class ConfigSyncService(QObject):
 
         cfg_dir = str(self._config_path.parent)
         cfg_name = self._config_path.name
+        records_name = self._records_path.name
 
         # 构建监听路径列表（app.config 目录 + user-custom 目录）
         watch_dirs = [cfg_dir]
         uc_path_str = str(self._user_custom_path)
         if self._user_custom_path.exists():
             watch_dirs.append(uc_path_str)
+
+        # 如果 share 目录存在，监听 records.json 所在的 share 目录
+        records_dir = str(self._records_path.parent)
+        if self._records_path.parent.exists():
+            watch_dirs.append(records_dir)
 
         logger.info(f"[ConfigSync] watch 线程已启动，监控目录={watch_dirs}")
         try:
@@ -284,6 +301,12 @@ class ConfigSyncService(QObject):
                     if changed_p.name == cfg_name:
                         logger.info(f"[ConfigSync] 检测到配置变更: {changed_path}")
                         self._config_dirty = True
+                        self._on_config_changed()
+                        break
+                    # share_records.json 变更
+                    if changed_p.name == records_name:
+                        logger.info(f"[ConfigSync] 检测到分享记录变更: {changed_path}")
+                        self._records_dirty = True
                         self._on_config_changed()
                         break
                     # user-custom 目录下文件变更（排除目录本身 mtime 变化）
@@ -343,6 +366,7 @@ class ConfigSyncService(QObject):
             logger.info("[ConfigSync] 远端无配置，开始上传…")
             self._config_dirty = True
             self._custom_dirty = True
+            self._records_dirty = True
             ok = self._do_upload()
             if ok:
                 self._set_state("idle")
@@ -385,15 +409,17 @@ class ConfigSyncService(QObject):
             logger.debug("[ConfigSync] 下载后抑制窗口内，跳过上传")
             return True
 
-        if not self._config_dirty and not self._custom_dirty:
+        if not self._config_dirty and not self._custom_dirty and not self._records_dirty:
             logger.debug("[ConfigSync] 无可上传的变更，跳过")
             return True
 
         # 读取脏标记后立刻清空，避免重复触发
         upload_config = self._config_dirty
         upload_custom = self._custom_dirty
+        upload_records = self._records_dirty
         self._config_dirty = False
         self._custom_dirty = False
+        self._records_dirty = False
 
         acquired = self._upload_lock.acquire(blocking=False)
         if not acquired:
@@ -403,6 +429,7 @@ class ConfigSyncService(QObject):
         try:
             config_ok = True
             custom_ok = True
+            records_ok = True
 
             # ── 1. 上传 app.config（仅脏时） ──
             if upload_config:
@@ -420,7 +447,19 @@ class ConfigSyncService(QObject):
             if upload_custom and self._user_custom_path.exists():
                 custom_ok = self._upload_user_custom_zip()
 
-            if config_ok and custom_ok:
+            # ── 3. 上传分享记录（仅脏时） ──
+            if upload_records:
+                if self._records_path.exists():
+                    records_ok = self._upload_file(
+                        local_path=self._records_path,
+                        remote_path=REMOTE_RECORDS_PATH,
+                        label="share_records",
+                    )
+                else:
+                    # 本地无分享记录，跳过（不清除远端）
+                    records_ok = True
+
+            if config_ok and custom_ok and records_ok:
                 self._set_state("idle")
                 return True
 
@@ -485,6 +524,8 @@ class ConfigSyncService(QObject):
                                     self._config_remote_sha = sha
                                 elif label == "user-custom":
                                     self._custom_remote_sha = sha
+                                elif label == "share_records":
+                                    self._records_remote_sha = sha
                                 self._save_sha_cache()
                     except Exception:
                         pass
@@ -514,6 +555,8 @@ class ConfigSyncService(QObject):
                                             self._config_remote_sha = sha2
                                         elif label == "user-custom":
                                             self._custom_remote_sha = sha2
+                                        elif label == "share_records":
+                                            self._records_remote_sha = sha2
                                         self._save_sha_cache()
                             except Exception:
                                 pass
@@ -580,8 +623,10 @@ class ConfigSyncService(QObject):
 
         config_ok = True
         custom_ok = True
+        records_ok = True
         config_downloaded = False
         custom_downloaded = False
+        records_downloaded = False
         try:
             # ── 1. app.config：SHA 未变则跳过 ──
             remote_config_sha = self._get_remote_file_sha(REMOTE_PATH)
@@ -602,7 +647,18 @@ class ConfigSyncService(QObject):
                     custom_ok = self._download_user_custom_zip()
                     custom_downloaded = custom_ok
 
-            # ── 3. 全部下载完成后：重载配置 + 抑制上传风暴 ──
+            # ── 3. share_records.json：SHA 未变则跳过 ──
+            if self._check_remote_file(REMOTE_RECORDS_PATH):
+                remote_records_sha = self._get_remote_file_sha(REMOTE_RECORDS_PATH)
+                if remote_records_sha and remote_records_sha == self._records_remote_sha:
+                    logger.debug("[ConfigSync] 远端 share_records 未变化，跳过下载")
+                else:
+                    records_ok = self._download_file(
+                        REMOTE_RECORDS_PATH, self._records_path, label="share_records",
+                    )
+                    records_downloaded = records_ok
+
+            # ── 4. 全部下载完成后：重载配置 + 抑制上传风暴 + 清除脏标记 ──
             if config_downloaded:
                 self._suppress_until = time.time() + 10.0
                 logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
@@ -616,7 +672,19 @@ class ConfigSyncService(QObject):
                 # 确保抑制窗口覆盖 user-custom 解压的文件事件风暴
                 self._suppress_until = time.time() + 10.0
 
-            return config_ok and custom_ok
+            if records_downloaded:
+                # 确保抑制窗口覆盖 share_records 下载触发的文件变更事件
+                self._suppress_until = time.time() + 10.0
+
+            # 清除下载本身触发的文件变更脏标记，避免抑制窗口结束后重复上传。
+            # 抑制窗口由上方各分支设置，覆盖 watchfiles 事件风暴。
+            if config_downloaded or custom_downloaded or records_downloaded:
+                self._config_dirty = False
+                self._custom_dirty = False
+                self._records_dirty = False
+                logger.debug("[ConfigSync] 已清除下载触发的脏标记")
+
+            return config_ok and custom_ok and records_ok
         except Exception as e:
             logger.error(f"[ConfigSync] 下载异常: {e}")
             return False
@@ -654,6 +722,8 @@ class ConfigSyncService(QObject):
                     self._config_remote_sha = remote_sha
                 elif label == "user-custom":
                     self._custom_remote_sha = remote_sha
+                elif label == "share_records":
+                    self._records_remote_sha = remote_sha
                 self._save_sha_cache()
 
             return True
@@ -717,6 +787,7 @@ class ConfigSyncService(QObject):
                 data = json.loads(self._sha_cache_path.read_text(encoding="utf-8"))
                 self._config_remote_sha = data.get("config_sha") or None
                 self._custom_remote_sha = data.get("custom_sha") or None
+                self._records_remote_sha = data.get("records_sha") or None
                 logger.debug(f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}...")
         except Exception as e:
             logger.warning(f"[ConfigSync] SHA 缓存加载失败: {e}")
@@ -730,6 +801,8 @@ class ConfigSyncService(QObject):
                 data["config_sha"] = self._config_remote_sha
             if self._custom_remote_sha:
                 data["custom_sha"] = self._custom_remote_sha
+            if self._records_remote_sha:
+                data["records_sha"] = self._records_remote_sha
             self._sha_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._sha_cache_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),

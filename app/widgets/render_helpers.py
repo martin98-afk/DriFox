@@ -882,7 +882,7 @@ def _to_rel_path(path: str) -> str:
         if os.path.normpath(path).startswith(os.path.normpath(cwd)):
             rel = os.path.relpath(path, cwd)
             return rel.replace("\\", "/")
-    except (ValueError, OSError):
+    except ValueError, OSError:
         pass
     return path
 
@@ -1727,28 +1727,34 @@ def render_tool_block(
         raw_output_html = _render_text_output(result, tool_name, tool_args)
 
     # 有 echarts / 截图 / 文本输出 / diff 时：跳过参数表格，直接显示内容
+    # 注意：调用方传入的 collapsed 代表模式偏好（简洁模式=True，非简洁=False）。
+    # 内容类型逻辑仅在非简洁模式下生效；简洁模式下保持 collapsed=True 全部折叠。
     DIFF_AUTO_COLLAPSE_LINES = 10
     if echarts:
-        collapsed = False  # 有图表时默认展开
+        if not collapsed:  # 非简洁模式下图表默认展开
+            collapsed = False
         expanded_content = f"""
         <div class="tool-expanded-content">
             {echarts_html}
             {diff_html}
         </div>"""
     elif screenshot_image_html:
-        collapsed = False  # 截图默认展开
+        if not collapsed:  # 非简洁模式下截图默认展开
+            collapsed = False
         expanded_content = f"""
         <div class="tool-expanded-content">
             {screenshot_image_html}
         </div>"""
     elif raw_output_html:
-        collapsed = True  # 文本输出默认折叠，用户手动展开
+        # 文本输出始终折叠（内容通常很长），简洁/非简洁均保持
+        collapsed = True
         expanded_content = f"""
         <div class="tool-expanded-content">
             {raw_output_html}
         </div>"""
     elif diff and diff_line_count > 0:
-        collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
+        if not collapsed:  # 非简洁模式下按行数自动判断
+            collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""
         <div class="tool-expanded-content">
             {echarts_html}
@@ -1763,6 +1769,7 @@ def render_tool_block(
         </div>"""
     else:
         # 无特殊渲染时：显示参数表格
+        # collapsed 保持调用方传入值（简洁模式=True折叠，非简洁=False展开）
         unified_table_html = _format_unified_table(tool_args, result, is_sub_agent_task, success)
         expanded_content = f"""
         <div class="tool-expanded-content">

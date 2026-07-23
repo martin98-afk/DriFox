@@ -134,15 +134,20 @@ class GiteeUploader:
             return None, "Gitee 未配置 (缺少 token/owner/repo)"
 
         try:
-            # 确定文件名
+            # 确定文件名：优先用原始文件名，仅无文件名时才用 UUID
             if not ext and filename:
                 ext = Path(filename).suffix
             if not ext:
                 ext = ".png"
 
-            unique_name = f"{uuid.uuid4().hex}{ext}"
+            if filename:
+                # 使用原始文件名（分享文件已带时间戳，不存在冲突）
+                upload_name = filename
+            else:
+                upload_name = f"{uuid.uuid4().hex}{ext}"
+
             storage_path = self._path.strip("/")
-            full_path = f"{storage_path}/{unique_name}" if storage_path else unique_name
+            full_path = f"{storage_path}/{upload_name}" if storage_path else upload_name
 
             # Base64 编码
             content_b64 = base64.b64encode(data).decode("utf-8")
@@ -152,7 +157,7 @@ class GiteeUploader:
             payload = {
                 "access_token": self._token,
                 "content": content_b64,
-                "message": f"DriFox Upload: {unique_name}",
+                "message": f"DriFox Upload: {upload_name}",
                 "branch": self._branch,
             }
 
@@ -160,7 +165,7 @@ class GiteeUploader:
             if resp.status_code == 201:
                 download_url = resp.json().get("content", {}).get("download_url")
                 if download_url:
-                    logger.info(f"[GiteeUploader] 上传成功: {unique_name} → {download_url}")
+                    logger.info(f"[GiteeUploader] 上传成功: {upload_name} → {download_url}")
                     return download_url, None
                 return None, "API 返回了 201 但缺少 download_url"
 

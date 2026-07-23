@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
-"""share-history — 基于 sessions.db 的分享记录存储层"""
+"""share-history — 基于 records.json 的分享记录存储层
+
+目录结构:
+    ~/.drifox/share/
+    ├── sessions/        # 会话分享文件
+    ├── projects/        # 项目导出文件
+    └── records.json     # 所有分享记录 (JSON 数组)
+"""
 
 import json
-import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 
-# ── 路径解析（与 plugin-marketplace 一致） ──
+# ── 路径解析 ──────────────────────────────────────────────
 
 
 def _drifox_dir() -> Path:
@@ -39,38 +46,41 @@ def _drifox_dir() -> Path:
     return Path.home() / ".drifox"
 
 
-# ── 数据库连接 ──
+def _records_path() -> Path:
+    """获取分享记录文件路径"""
+    return _drifox_dir() / "share" / "records.json"
 
 
-def _get_conn() -> Optional[sqlite3.Connection]:
-    """获取 sessions.db 连接（自动建表 + WAL）"""
+# ── 内部读写 ──────────────────────────────────────────────
+
+
+def _load_records() -> List[Dict[str, Any]]:
+    """从 records.json 加载全部分享记录"""
+    path = _records_path()
+    if not path.exists():
+        return []
     try:
-        db_path = _drifox_dir() / "sessions.db"
-        conn = sqlite3.connect(str(db_path), timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS share_records (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                type        TEXT NOT NULL CHECK(type IN ('session','project')),
-                title       TEXT NOT NULL,
-                format      TEXT NOT NULL,
-                file_path   TEXT DEFAULT '',
-                upload_url  TEXT DEFAULT '',
-                ref_id      TEXT DEFAULT '',
-                extra_info  TEXT DEFAULT '{}',
-                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_share_records_time ON share_records(created_at DESC)")
-        conn.commit()
-        return conn
-    except Exception as e:
-        logger.error(f"[ShareHistory] 连接 sessions.db 失败: {e}")
-        return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"[ShareHistory] 读取 records.json 失败: {e}")
+    return []
 
 
-# ── CRUD ──
+def _save_records(records: List[Dict[str, Any]]) -> bool:
+    """保存分享记录到 records.json"""
+    path = _records_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except OSError as e:
+        logger.error(f"[ShareHistory] 写入 records.json 失败: {e}")
+        return False
+
+
+# ── CRUD ──────────────────────────────────────────────────
 
 
 def insert_record(
@@ -83,81 +93,70 @@ def insert_record(
     extra_info: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """插入一条分享记录"""
-    try:
-        conn = _get_conn()
-        if conn is None:
-            return False
-        conn.execute(
-            "INSERT INTO share_records "
-            "(type, title, format, file_path, upload_url, ref_id, extra_info) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                type_,
-                title,
-                format_,
-                file_path or "",
-                upload_url or "",
-                ref_id or "",
-                json.dumps(extra_info or {}, ensure_ascii=False),
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"[ShareHistory] 插入记录失败: {e}")
-        return False
+    records = _load_records()
+    next_id = max((r.get("id", 0) for r in records), default=0) + 1
+    record = {
+        "id": next_id,
+        "type": type_,
+        "title": title,
+        "format": format_,
+        "file_path": file_path or "",
+        "upload_url": upload_url or "",
+        "ref_id": ref_id or "",
+        "extra_info": extra_info or {},
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    records.insert(0, record)
+    ok = _save_records(records)
+    if ok:
+        logger.debug(f"[ShareHistory] 插入记录 id={record['id']}")
+    return ok
 
 
 def get_records(limit: int = 500) -> List[Dict[str, Any]]:
     """获取分享记录列表，按时间倒序"""
-    try:
-        conn = _get_conn()
-        if conn is None:
-            return []
-        cursor = conn.execute(
-            "SELECT * FROM share_records ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        )
-        rows = [dict(r) for r in cursor.fetchall()]
-        for row in rows:
-            if isinstance(row.get("extra_info"), str):
-                try:
-                    row["extra_info"] = json.loads(row["extra_info"])
-                except json.JSONDecodeError, TypeError:
-                    row["extra_info"] = {}
-        conn.close()
-        return rows
-    except Exception as e:
-        logger.error(f"[ShareHistory] 查询记录失败: {e}")
-        return []
+    records = _load_records()
+    for row in records:
+        if isinstance(row.get("extra_info"), str):
+            try:
+                row["extra_info"] = json.loads(row["extra_info"])
+            except (json.JSONDecodeError, TypeError):
+                row["extra_info"] = {}
+    return records[:limit]
 
 
 def delete_record(record_id: int) -> bool:
     """删除单条分享记录"""
-    try:
-        conn = _get_conn()
-        if conn is None:
-            return False
-        conn.execute("DELETE FROM share_records WHERE id = ?", (record_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"[ShareHistory] 删除记录失败: {e}")
+    records = _load_records()
+    new_records = [r for r in records if r.get("id") != record_id]
+    if len(new_records) == len(records):
         return False
+    ok = _save_records(new_records)
+    if ok:
+        logger.debug(f"[ShareHistory] 删除记录 id={record_id}")
+    return ok
 
 
 def clear_all_records() -> bool:
     """清空全部分享记录"""
-    try:
-        conn = _get_conn()
-        if conn is None:
-            return False
-        conn.execute("DELETE FROM share_records")
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"[ShareHistory] 清空记录失败: {e}")
+    ok = _save_records([])
+    if ok:
+        logger.debug("[ShareHistory] 已清空所有记录")
+    return ok
+
+
+def update_record_file_path(record_id: int, file_path: str) -> bool:
+    """更新指定记录的 file_path 字段"""
+    records = _load_records()
+    found = False
+    for r in records:
+        if r.get("id") == record_id:
+            r["file_path"] = file_path
+            found = True
+            break
+    if not found:
         return False
+    ok = _save_records(records)
+    if ok:
+        logger.debug(f"[ShareHistory] 更新记录 id={record_id} file_path={file_path}")
+    return ok

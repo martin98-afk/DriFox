@@ -1208,9 +1208,13 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
 
 
 @lru_cache(maxsize=128)
-def _render_tool_block_content(content: str) -> str:
+def _render_tool_block_content(content: str, compact: bool = False) -> str:
     """
     渲染工具块内容为HTML。
+
+    Args:
+        content: 原始 tool 块标记文本
+        compact: 简洁模式标志，True 则工具块默认折叠，False 默认展开
 
     解析格式：
     <tool>
@@ -1401,7 +1405,7 @@ def _render_tool_block_content(content: str) -> str:
         args_dict,
         tool_result,
         tool_success,
-        collapsed=True,
+        collapsed=compact,
         tool_call_id=tool_call_id,
         diff=diff_content,
         echarts=echarts_content,
@@ -1633,7 +1637,7 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
+def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入工具块HTML，类似think块"""
     if not md_text:
         return md_text
@@ -1649,7 +1653,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True) -> str:
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
-            parts.append(_render_tool_block_content(content))
+            parts.append(_render_tool_block_content(content, compact=compact))
             i = end_idx + len("</tool>")
         else:
             parts.append(md_text[start_idx:])
@@ -1723,7 +1727,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: b
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
 
     try:
@@ -4458,10 +4462,7 @@ class CodeWebViewer(QWebEngineView):
             return True
         # think 块 / 代码块闭合：用 rstrip 处理尾部空白
         stripped = md_text.rstrip()
-        return (
-            stripped.endswith("</think>")
-            or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
-        )
+        return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
 
     def append_chunk(self, text: str):
         if not text:
@@ -4603,7 +4604,7 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
-        processed_md = _inject_tool_blocks(processed_md, self._streaming is False)
+        processed_md = _inject_tool_blocks(processed_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
 
         # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
@@ -6091,7 +6092,7 @@ class MessageCard(SimpleCardWidget):
         """刷新主题颜色，响应全局主题切换"""
         # 🐛 清空 LRU 渲染缓存 + 骨架 HTML 缓存，强制下次渲染使用新主题颜色。
         # 否则 _render_markdown_to_html_cached 的 @lru_cache 会返回旧主题的 HTML
-        #（旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
+        # （旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
         clear_global_render_cache()
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
         _update_icon_prefix()
@@ -7621,12 +7622,14 @@ class MessageCard(SimpleCardWidget):
                 self.viewer._lazy_markdown_cb = self._build_incremental_md
                 self.viewer._schedule_render(immediate=True)
 
+            # 简洁模式：工具块默认折叠；非简洁模式：默认展开便于查看结果
+            _collapsed = self.viewer._tool_compact_mode if self.viewer else True
             block_html = render_tool_block(
                 tool_name=tool_name,
                 tool_args=arguments or {},
                 result=str(result) if result is not None else None,
                 success=success,
-                collapsed=True,
+                collapsed=_collapsed,
                 tool_call_id=tool_call_id,
                 diff=diff,
                 echarts=echarts,

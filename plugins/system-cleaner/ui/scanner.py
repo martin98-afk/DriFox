@@ -53,6 +53,7 @@ CACHE_DEFS: List[Tuple[str, str, str, str, bool]] = [
     ("cache", "🗃️", "应用缓存", "cache", True),
     ("screenshots", "📸", "截图文件", "screenshots", False),
     ("archived", "📦", "归档会话", "archived", False),
+    ("share_sessions", "📤", "分享会话文件", "share/sessions", False),
 ]
 
 
