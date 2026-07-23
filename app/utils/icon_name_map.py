@@ -9,6 +9,7 @@ ICON_NAME_TO_FILE = {
     "folder": "folder.svg",
     "fox_bg": "fox_bg.png",
     "gemini-ai": "gemini-ai.svg",
+    "gitee": "gitee.svg",
     "groq": "groq.svg",
     "hooks": "hooks.svg",
     "lsp": "lsp.svg",

@@ -463,6 +463,20 @@ class Settings(QConfig):
     gitee_path = ConfigItem("Gitee", "Path", uuid.uuid4().hex)
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
 
+    # --- 用户 OAuth 绑定 ---
+    gitee_bound = ConfigItem("Gitee", "Bound", False, BoolValidator())
+    gitee_user_token = ConfigItem("Gitee", "UserToken", "")
+    gitee_user_owner = ConfigItem("Gitee", "UserOwner", "")
+    gitee_user_repo = ConfigItem("Gitee", "UserRepo", "DriFox_uploads")
+
+    # OAuth 应用凭证（内置）
+    gitee_oauth_client_id = ConfigItem(
+        "Gitee", "OAuthClientID", "3efedde73e3c9e698b84a5f9ef781ad771059a01dd8fc839752cf0aed70037c2"
+    )
+    gitee_oauth_client_secret = ConfigItem(
+        "Gitee", "OAuthClientSecret", "73236836a816f2d2de6826b86e36bf9cddf8ff551290be2c4977b620a98c74c6"
+    )
+
     # ========== LSP 配置 ==========
     lsp_auto_diagnose = ConfigItem("LSP", "AutoDiagnose", False, BoolValidator())
 

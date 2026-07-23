@@ -36,6 +36,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
+from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
@@ -309,6 +310,10 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
         )
         content_layout.addWidget(self.gatewayCard)
+
+        # Gitee 账号绑定
+        self.giteeCard = GiteeCard(self)
+        content_layout.addWidget(self.giteeCard)
 
         # 锁屏远程
         self.lockRemoteCard = SwitchSettingCard(
