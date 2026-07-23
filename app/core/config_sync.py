@@ -626,6 +626,7 @@ class ConfigSyncService(QObject):
         records_ok = True
         config_downloaded = False
         custom_downloaded = False
+        records_downloaded = False
         try:
             # ── 1. app.config：SHA 未变则跳过 ──
             remote_config_sha = self._get_remote_file_sha(REMOTE_PATH)
@@ -655,8 +656,9 @@ class ConfigSyncService(QObject):
                     records_ok = self._download_file(
                         REMOTE_RECORDS_PATH, self._records_path, label="share_records",
                     )
+                    records_downloaded = records_ok
 
-            # ── 4. 全部下载完成后：重载配置 + 抑制上传风暴 ──
+            # ── 4. 全部下载完成后：重载配置 + 抑制上传风暴 + 清除脏标记 ──
             if config_downloaded:
                 self._suppress_until = time.time() + 10.0
                 logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
@@ -669,6 +671,18 @@ class ConfigSyncService(QObject):
             if custom_downloaded:
                 # 确保抑制窗口覆盖 user-custom 解压的文件事件风暴
                 self._suppress_until = time.time() + 10.0
+
+            if records_downloaded:
+                # 确保抑制窗口覆盖 share_records 下载触发的文件变更事件
+                self._suppress_until = time.time() + 10.0
+
+            # 清除下载本身触发的文件变更脏标记，避免抑制窗口结束后重复上传。
+            # 抑制窗口由上方各分支设置，覆盖 watchfiles 事件风暴。
+            if config_downloaded or custom_downloaded or records_downloaded:
+                self._config_dirty = False
+                self._custom_dirty = False
+                self._records_dirty = False
+                logger.debug("[ConfigSync] 已清除下载触发的脏标记")
 
             return config_ok and custom_ok and records_ok
         except Exception as e:

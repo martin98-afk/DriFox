@@ -308,31 +308,45 @@ class GiteeCard(SettingCard):
     def _on_initial_sync_done(self, success: bool, message: str):
         """首次同步完成回调（仅绑定后首次检查远端时触发）"""
         if success:
-            # [PERF] 延迟 UI 刷新 2 秒：让窗口完全就绪后再应用远端配置，
-            # 避免在窗口刚出现时 dispatch_refresh() 造成的可见闪烁。
-            # _refresh_app_ui 内部调用 theme_manager.dispatch_refresh()
-            # 会重算所有颜色 token 并重新应用样式，~80ms 主线程工作。
-            QTimer.singleShot(2000, self._refresh_app_ui)
+            # 远端配置已下载并覆盖本地，立即通过标准配置变更链路刷新全窗口 UI。
+            # 使用 _apply_runtime_ui_settings 替代 dispatch_refresh()：
+            #   - 走与用户手动改设置相同的刷新路径，确保配置值被正确传播
+            #   - 30ms debounce 批处理避免重复刷新
+            #   - 不再需要 2s 延迟（旧方案用 dispatch_refresh 会导致窗口创建期闪烁）
+            QTimer.singleShot(100, self._refresh_app_ui)
             # 静默同步成功，不弹 InfoBar（避免启动时打扰）
         # 失败时由状态机显示红点，不弹 InfoBar
 
     def _refresh_app_ui(self):
-        """配置恢复后刷新整个 UI：主题、颜色，关闭设置弹窗让用户重开"""
+        """配置恢复后刷新整个 UI：通过标准配置变更链路逐窗口刷新"""
         try:
-            from app.utils.theme_manager import theme_manager
-
-            # 1. 视觉刷新：主题/颜色/字体/卡片样式
-            theme_manager.dispatch_refresh()
-
-            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建
+            # QTimer 回调可能在窗口已销毁后触发（极端情况：100ms 内关闭窗口）
             main_win = self.window()
+            if main_win and getattr(main_win, "_is_destroyed", False):
+                return
+
+            from app.main_widget import OpenAIChatToolWindow
+
+            # 1. 通过标准配置变更路径逐窗口刷新（与用户手动更改设置走同一路径）
+            #    _apply_runtime_ui_settings 内部：
+            #      - Colors.refresh() → 重算颜色 token
+            #      - 按 scope 精准刷新 widget 树（message card / settings card / 圆环等）
+            #      - 不触发 dispatch_refresh() 的全量 refresh_theme() 调用
+            for win in getattr(OpenAIChatToolWindow, "_instances", []):
+                if getattr(win, "_is_destroyed", False):
+                    continue
+                try:
+                    win._apply_runtime_ui_settings(scope=None)
+                except Exception as e:
+                    logger.warning(f"[GiteeCard] 窗口 {win._window_id} 刷新失败: {e}")
+
+            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建，
+            #    所有子卡片（provider/MCP/gateway/font 等）从 Settings 读取最新值
             if main_win and hasattr(main_win, "_settings_popup"):
                 popup = main_win._settings_popup
                 if popup is not None and popup.isVisible():
-                    # 通过 card_manager 正确关闭（清理容器引用）
                     if hasattr(main_win, "_card_manager") and hasattr(main_win, "_window_id"):
                         main_win._card_manager.hide_card("settings", main_win._window_id)
-                # 置空引用：强制 _build_settings_popup 下次重新创建
                 main_win._settings_popup = None
 
             logger.info("[GiteeCard] UI 已根据恢复的配置全面刷新")
