@@ -1430,7 +1430,7 @@ class HistoryManager:
                 # 统一用正斜杠作为 ZIP 内路径
                 arc_path = f"git_files/{rel_path.replace('\\', '/')}"
                 abs_path = os.path.join(git_root, rel_path)
-                if os.path.isfile(abs_path) and os.path.getsize(abs_path) < 5 * 1024 * 1024:
+                if os.path.isfile(abs_path) and os.path.getsize(abs_path) < 50 * 1024 * 1024:
                     try:
                         # 用 arcname 显式指定归档内路径，避免 zipfile 自动处理带来的问题
                         zf.write(abs_path, arcname=arc_path)

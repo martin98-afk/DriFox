@@ -14680,10 +14680,15 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
             return
 
-        # 防止重复导出
-        if hasattr(self, "_export_thread") and self._export_thread is not None and self._export_thread.isRunning():
-            InfoBar.warning(title="", content="导出进行中，请稍候…", duration=2000, parent=self)
-            return
+        # 防止重复导出 — 注意 C++ 对象可能已被 deleteLater 销毁
+        if hasattr(self, "_export_thread"):
+            try:
+                if self._export_thread is not None and self._export_thread.isRunning():
+                    InfoBar.warning(title="", content="导出进行中，请稍候…", duration=2000, parent=self)
+                    return
+            except RuntimeError:
+                # C++ 对象已被 deleteLater 销毁，清理 Python 引用后继续
+                self._export_thread = None
 
         # 先弹出选择对话框，再根据选择执行导出
         dialog = _ProjectExportChoiceDialog(project_name, parent=self.window())
@@ -14704,6 +14709,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 lambda zp, err, m=mode, pn=project_name: self._on_project_export_done(zp, err, pn, m)
             )
             self._export_thread.finished.connect(self._export_thread.deleteLater)
+            self._export_thread.finished.connect(lambda: setattr(self, '_export_thread', None))
             self._export_thread.start()
 
         dialog.exportChosen.connect(_on_choice)
