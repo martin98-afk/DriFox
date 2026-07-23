@@ -1267,7 +1267,10 @@ class HistoryManager:
         safe_name = sanitize_filename(project_name[:50])
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_filename = f"{safe_name}_{timestamp}.drifox_project"
-        zip_dir = Path.home() / ".drifox" / "project_archives"
+        from app.utils.share_records import ensure_dirs, get_projects_dir
+
+        ensure_dirs()
+        zip_dir = get_projects_dir()
         zip_dir.mkdir(parents=True, exist_ok=True)
         zip_path = zip_dir / zip_filename
 
