@@ -11,12 +11,13 @@ import webbrowser
 from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
-from PyQt5.QtWidgets import QLabel
-from qfluentwidgets import Dialog, InfoBar, InfoBarPosition, PrimaryPushButton, SettingCard
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, PrimaryPushButton, SettingCard
 
 from app.utils.config import Settings
-from app.utils.design_tokens import ButtonStyles, scale_font_size
-from app.utils.utils import get_icon, get_unified_font
+from app.utils.design_tokens import ButtonStyles, Colors, font_size_css, scale_font_size
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.widgets.common_dialogs import ConfirmDialog
 
 _AVATAR_COLORS = [
     "#c71d23", "#e74c3c", "#e67e22", "#f39c12",
@@ -53,6 +54,121 @@ class _ClickableAvatar(QLabel):
         self.clicked.emit()
 
 
+# ── 仓库可见性选择弹窗（参考 _ProjectExportChoiceDialog） ──
+
+
+class _RepoVisibilityDialog(MaskDialogBase):
+    """选择公开/私有仓库 — 与项目导出弹窗统一风格"""
+
+    PUBLIC = False
+    PRIVATE = True
+
+    chosen = pyqtSignal(bool)  # True=私有, False=公开
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_ui()
+
+    def _init_ui(self):
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("repoVisibilityDialog")
+        self.widget.setStyleSheet(f"""
+            #{self.widget.objectName()} {{
+                background-color: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(12)
+
+        title_label = QLabel("🔒 仓库可见性", self.widget)
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(16)}; font-weight: bold;"
+        )
+        layout.addWidget(title_label)
+
+        hint_label = QLabel("选择要创建的仓库类型：", self.widget)
+        hint_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(11)}; padding-left: 2px;"
+        )
+        layout.addWidget(hint_label)
+
+        layout.addSpacing(4)
+
+        btn_style = f"""
+            QPushButton {{
+                background-color: {Colors.CARD_BG.format(alpha=180)};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 8px 16px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(14)}
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """
+        hint_style = (
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)}; padding-left: 4px;"
+        )
+
+        # ── 公开按钮 ──
+        public_btn = QPushButton("🌐  公开仓库", self.widget)
+        public_btn.setCursor(Qt.PointingHandCursor)
+        public_btn.setFixedHeight(56)
+        public_btn.setStyleSheet(btn_style)
+        public_btn.clicked.connect(lambda: self._choose(False))
+        layout.addWidget(public_btn)
+
+        public_hint = QLabel("任何人可见，适合分享用途", self.widget)
+        public_hint.setStyleSheet(hint_style)
+        layout.addWidget(public_hint)
+
+        # ── 私有按钮 ──
+        private_btn = QPushButton("🔒  私有仓库", self.widget)
+        private_btn.setCursor(Qt.PointingHandCursor)
+        private_btn.setFixedHeight(56)
+        private_btn.setStyleSheet(btn_style)
+        private_btn.clicked.connect(lambda: self._choose(True))
+        layout.addWidget(private_btn)
+
+        private_hint = QLabel("仅自己可访问，链接需登录后查看", self.widget)
+        private_hint.setStyleSheet(hint_style)
+        layout.addWidget(private_hint)
+
+        self.widget.setFixedSize(400, 320)
+        self._center()
+
+    def _choose(self, is_private: bool):
+        self.close()
+        self.chosen.emit(is_private)
+
+    def _center(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center()
+
+
+# ── 卡片 ──────────────────────────────────────────────────
+
+
 class GiteeCard(SettingCard):
     """Gitee 账号绑定 — SettingCard 子类，布局与其他设置卡片一致"""
 
@@ -83,12 +199,16 @@ class GiteeCard(SettingCard):
         self._avatar.clicked.connect(self._on_avatar_clicked)
         self.hBoxLayout.addWidget(self._avatar)
 
+        self.hBoxLayout.addSpacing(6)
+
         self._bind_btn = PrimaryPushButton("绑定")
-        self._bind_btn.setFixedWidth(72)
+        self._bind_btn.setFixedWidth(76)
         self._bind_btn.setMinimumHeight(30)
         self._bind_btn.setStyleSheet(ButtonStyles.primary_action())
         self._bind_btn.clicked.connect(self._on_bind_clicked)
-        self.hBoxLayout.addWidget(self._bind_btn, 0, Qt.AlignRight)
+        self.hBoxLayout.addWidget(self._bind_btn)
+
+        self.hBoxLayout.addSpacing(4)
 
     # ── UI 刷新 ──────────────────────────────────────────
 
@@ -133,17 +253,11 @@ class GiteeCard(SettingCard):
         if self._binding:
             return
 
-        dialog = Dialog("仓库可见性", "选择要创建的仓库类型：", self.window())
-        dialog.yesButton.setText("公开")
-        dialog.cancelButton.setText("私有")
-        dialog.yesButton.setStyleSheet(ButtonStyles.primary_action())
-        dialog.cancelButton.setStyleSheet(ButtonStyles.primary_action())
+        dialog = _RepoVisibilityDialog(self.window())
+        dialog.chosen.connect(self._start_oauth)
+        dialog.exec_()
 
-        if dialog.exec():
-            repo_private = False
-        else:
-            repo_private = True
-
+    def _start_oauth(self, repo_private: bool):
         self._binding = True
         self._bind_btn.setText("授权中…")
         self._bind_btn.setEnabled(False)
@@ -171,15 +285,19 @@ class GiteeCard(SettingCard):
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
             InfoBar.success(
-                title="绑定成功", content=msg,
-                position=InfoBarPosition.TOP_RIGHT, duration=3000,
+                title="绑定成功",
+                content=msg,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
                 parent=self.window(),
             )
         else:
             self._bind_btn.setText("绑定")
             InfoBar.error(
-                title="绑定失败", content=msg,
-                position=InfoBarPosition.TOP_RIGHT, duration=5000,
+                title="绑定失败",
+                content=msg,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=5000,
                 parent=self.window(),
             )
 
@@ -187,17 +305,17 @@ class GiteeCard(SettingCard):
 
     def _on_unbind(self):
         owner = self.cfg.gitee_user_owner.value
-        dialog = Dialog("确认解绑", f"解绑后上传将恢复使用共享图床仓库。\n当前绑定：{owner}", self.window())
-        dialog.yesButton.setText("确定解绑")
-        dialog.cancelButton.setText("取消")
-        dialog.yesButton.setStyleSheet(
-            f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
-            f"padding: 6px 16px; font-size: {scale_font_size(13)}px;"
+        dialog = ConfirmDialog(
+            title="确认解绑",
+            content=f"解绑后上传将恢复使用共享图床仓库。\n当前绑定：{owner}",
+            confirm_text="确定解绑",
+            cancel_text="取消",
+            parent=self.window(),
         )
+        dialog.confirmed.connect(self._do_unbind)
+        dialog.exec_()
 
-        if not dialog.exec():
-            return
-
+    def _do_unbind(self):
         try:
             from app.gateway.utils.gitee_oauth import unbind_account
             from app.gateway.utils.gitee_uploader import GiteeUploader
@@ -206,14 +324,18 @@ class GiteeCard(SettingCard):
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
             InfoBar.success(
-                title="已解绑", content="Gitee 账号已解绑",
-                position=InfoBarPosition.TOP_RIGHT, duration=3000,
+                title="已解绑",
+                content="Gitee 账号已解绑",
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
                 parent=self.window(),
             )
         except Exception as e:
             logger.error(f"[GiteeCard] 解绑异常: {e}")
             InfoBar.error(
-                title="解绑失败", content=str(e),
-                position=InfoBarPosition.TOP_RIGHT, duration=3000,
+                title="解绑失败",
+                content=str(e),
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
                 parent=self.window(),
             )
