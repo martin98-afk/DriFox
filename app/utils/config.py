@@ -13,6 +13,7 @@
 import atexit
 from copy import deepcopy
 from enum import Enum
+import uuid
 
 import orjson as json
 from loguru import logger
@@ -458,8 +459,8 @@ class Settings(QConfig):
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
     gitee_token = ConfigItem("Gitee", "Token", "a5dcb6e2e7776143b7a7e7685a1f33a3")
     gitee_owner = ConfigItem("Gitee", "Owner", "dingmama123141")
-    gitee_repo = ConfigItem("Gitee", "Repo", "canvas-mind-components")
-    gitee_path = ConfigItem("Gitee", "Path", "drifox")
+    gitee_repo = ConfigItem("Gitee", "Repo", "DriFox_share")
+    gitee_path = ConfigItem("Gitee", "Path", uuid.uuid4().hex)
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
 
     # ========== LSP 配置 ==========
