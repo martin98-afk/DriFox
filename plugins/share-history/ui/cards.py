@@ -475,9 +475,7 @@ class _RecordItem(QFrame):
                 )
 
     def _download_file(self, url: str):
-        """后台下载分享文件到本地，完成后更新记录并通知刷新"""
-        from urllib.request import Request, urlopen
-
+        """后台下载分享文件到本地（QThread + signals，不卡 UI）"""
         rec = self._record
         record_id = rec.get("id")
         rtype = rec.get("type", "session")
@@ -510,46 +508,72 @@ class _RecordItem(QFrame):
             self._download_btn.setText("⏳ 下载中…")
             self._download_btn.setEnabled(False)
 
-        def _do_download():
-            try:
-                req = Request(url, headers={"User-Agent": "DriFox/1.0"})
-                with urlopen(req, timeout=30) as resp:
-                    data = resp.read()
-                save_path.write_bytes(data)
+        # ── QThread 方式：和 DownloadThread 同模式 ──
+        worker = _DownloadWorker(url, str(save_path))
+        thread = QThread(self)
+        worker.moveToThread(thread)
 
-                # 更新记录
-                update_record_file_path(record_id, str(save_path))
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda fp: self._on_download_done(fp, record_id))
+        worker.error.connect(self._on_download_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
-                # 通知父卡片刷新（刷新后旧 widget 销毁，按钮自然会更新）
-                self.downloaded.emit(record_id)
+    def _on_download_done(self, file_path: str, record_id: int):
+        """下载成功回调（主线程）"""
+        update_record_file_path(record_id, file_path)
+        self.downloaded.emit(record_id)
 
-                parent = self.window()
-                if parent:
-                    InfoBar.success(
-                        title="",
-                        content=f"已下载到 {save_path.name}",
-                        duration=3000,
-                        parent=parent,
-                    )
-            except Exception as e:
-                logger.warning(f"[ShareHistory] 下载失败: {e}")
-                if self._download_btn:
-                    self._download_btn.setText("📥 重试")
-                    self._download_btn.setEnabled(True)
+        parent = self.window()
+        if parent:
+            InfoBar.success(
+                title="",
+                content=f"已下载到 {Path(file_path).name}",
+                duration=3000,
+                parent=parent,
+            )
 
-                parent = self.window()
-                if parent:
-                    InfoBar.error(
-                        title="",
-                        content=f"下载失败: {e}",
-                        duration=3000,
-                        parent=parent,
-                    )
+    def _on_download_error(self, err: str):
+        """下载失败回调（主线程）"""
+        logger.warning(f"[ShareHistory] 下载失败: {err}")
+        if self._download_btn:
+            self._download_btn.setText("📥 重试")
+            self._download_btn.setEnabled(True)
 
-        # 后台线程执行下载
-        import threading
-        t = threading.Thread(target=_do_download, daemon=True)
-        t.start()
+        parent = self.window()
+        if parent:
+            InfoBar.error(
+                title="",
+                content=f"下载失败: {err}",
+                duration=3000,
+                parent=parent,
+            )
+
+
+class _DownloadWorker(QObject):
+    """文件下载 Worker — 与 app.utils.utils.DownloadThread 同模式，QThread + signals"""
+
+    finished = pyqtSignal(str)  # 文件路径
+    error = pyqtSignal(str)      # 错误信息
+
+    def __init__(self, url: str, file_path: str):
+        super().__init__()
+        self._url = url
+        self._file_path = file_path
+
+    def run(self):
+        from urllib.request import Request, urlopen
+
+        try:
+            req = Request(self._url, headers={"User-Agent": "DriFox/1.0"})
+            with urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            Path(self._file_path).write_bytes(data)
+            self.finished.emit(self._file_path)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # ════════════════════════════════════════════════════════════
