@@ -233,6 +233,10 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.setContentsMargins(0, 4, 0, 4)
         content_layout.setSpacing(6)
 
+        # ---- Gitee 账号绑定（最顶部） ----
+        self.giteeCard = GiteeCard(self)
+        content_layout.addWidget(self.giteeCard)
+
         # ---- 大模型分隔标签 ----
         self._sep_llm_label = self._make_sep_label("大模型")
         self._section_anchors["llm"] = self._sep_llm_label
@@ -310,10 +314,6 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
         )
         content_layout.addWidget(self.gatewayCard)
-
-        # Gitee 账号绑定
-        self.giteeCard = GiteeCard(self)
-        content_layout.addWidget(self.giteeCard)
 
         # 锁屏远程
         self.lockRemoteCard = SwitchSettingCard(

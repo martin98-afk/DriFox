@@ -270,7 +270,15 @@ def _start_callback_server(port: int) -> Optional[HTTPServer]:
     try:
         server = HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
         server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        t = threading.Thread(target=server.serve_forever, daemon=True)
+        server.timeout = 0.5
+
+        def _serve():
+            try:
+                server.serve_forever()
+            except OSError:
+                pass  # socket 被关闭时触发，忽略
+
+        t = threading.Thread(target=_serve, daemon=True)
         t.start()
         logger.info(f"[GiteeOAuth] 回调服务器已启动: http://localhost:{port}/callback")
         return server
@@ -280,13 +288,12 @@ def _start_callback_server(port: int) -> Optional[HTTPServer]:
 
 
 def _stop_callback_server(server: Optional[HTTPServer]):
-    """关闭回调服务器"""
+    """关闭回调服务器（仅关闭 socket，不等待 shutdown）"""
     if server:
         try:
-            server.shutdown()
-            logger.info("[GiteeOAuth] 回调服务器已关闭")
-        except Exception as e:
-            logger.warning(f"[GiteeOAuth] 关闭服务器异常: {e}")
+            server.socket.close()
+        except Exception:
+            pass
 
 
 def _parse_error(resp) -> str:
