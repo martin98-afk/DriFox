@@ -314,7 +314,10 @@ class ConfigSyncService(QObject):
             self._debounce_timer.start(DEBOUNCE_MS)
 
     def _on_debounce_timeout(self):
-        """防抖到期 → 启动后台上传线程，只上传有变更的项，不阻塞 UI"""
+        """防抖到期 → 检查抑制窗口 → 启动后台上传线程"""
+        if time.time() < self._suppress_until:
+            logger.debug("[ConfigSync] 下载后抑制窗口内，取消本次上传")
+            return
         logger.info("[ConfigSync] 防抖到期，启动后台上传线程")
         t = threading.Thread(target=self._do_upload, daemon=True)
         t.start()
@@ -376,6 +379,11 @@ class ConfigSyncService(QObject):
         if not self._token or not self._owner:
             logger.warning("[ConfigSync] 无法上传：缺少 token/owner")
             return False
+
+        # 双重校验：抑制窗口内完全跳过上传
+        if time.time() < self._suppress_until:
+            logger.debug("[ConfigSync] 下载后抑制窗口内，跳过上传")
+            return True
 
         if not self._config_dirty and not self._custom_dirty:
             logger.debug("[ConfigSync] 无可上传的变更，跳过")
@@ -495,6 +503,20 @@ class ConfigSyncService(QObject):
                         resp2 = client.put(url, data=payload)
                         if resp2.status_code in (200, 201):
                             logger.info(f"[ConfigSync] {tag} 上传成功 (PUT retry)")
+                            # 缓存重试后的 SHA
+                            try:
+                                resp2_data = resp2.json()
+                                content2 = resp2_data.get("content")
+                                if isinstance(content2, dict):
+                                    sha2 = content2.get("sha", "")
+                                    if sha2:
+                                        if label == "app.config":
+                                            self._config_remote_sha = sha2
+                                        elif label == "user-custom":
+                                            self._custom_remote_sha = sha2
+                                        self._save_sha_cache()
+                            except Exception:
+                                pass
                             return True
 
                 logger.error(f"[ConfigSync] {tag} 上传最终失败 [{resp.status_code}]: {err_msg}")
