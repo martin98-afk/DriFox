@@ -35,6 +35,7 @@ REDIRECT_PORT = 18923
 REDIRECT_URI = "http://localhost:18923/callback"
 
 FIXED_REPO_NAME = "DriFox_uploads"
+SETTINGS_REPO_NAME = "DriFox_settings"  # 配置备份仓库（强制私有）
 
 
 # ── 回调 HTTP 服务器 ──────────────────────────────────────
@@ -186,10 +187,15 @@ def start_oauth_flow(repo_private: bool) -> Tuple[bool, str]:
 
         logger.info(f"[GiteeOAuth] 用户: {owner}")
 
-        # 6. 检查/创建仓库
+        # 6. 检查/创建上传仓库
         repo_ok, repo_msg = _ensure_repo(access_token, owner, FIXED_REPO_NAME, repo_private)
         if not repo_ok:
             return False, repo_msg
+
+        # 6b. 创建配置备份仓库（强制私有，失败不阻断绑定流程）
+        settings_ok, settings_msg = _ensure_repo(access_token, owner, SETTINGS_REPO_NAME, private=True)
+        if not settings_ok:
+            logger.warning(f"[GiteeOAuth] {SETTINGS_REPO_NAME} 创建失败: {settings_msg}（不影响绑定）")
 
         # 7. 存储到配置
         cfg.gitee_user_token.value = access_token
