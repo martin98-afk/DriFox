@@ -2260,8 +2260,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
-        # 大幅延迟到窗口可交互之后再构建（1500ms），让窗口外壳先出现 + 用户能先打字
-        QTimer.singleShot(1500, self._build_settings_popup)
+        # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
+        # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
+        # 下载+UI 刷新（~300ms 主线程工作），避免在窗口刚出现时发生可见的 UI 闪烁。
+        QTimer.singleShot(3500, self._build_settings_popup)
 
         # ── 隐藏编辑卡片懒创建标记 ──
         # hook/provider/mcp 三张编辑卡片从直接创建改为首次显示时懒创建，
@@ -2566,7 +2568,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
         # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
-        self._init_builtin_commands()
+        # [PERF] 延迟注册到首帧之后，节省 ~200ms 关键路径时间。
+        # 命令仅在用户输入 / 或打开快捷键管理时必需，不阻塞窗口首次出现。
+        QTimer.singleShot(0, self._init_builtin_commands)
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，

@@ -5,11 +5,12 @@ Gitee 账号绑定设置卡片
 继承 SettingCard：图标 + 标题 + 说明文字自动布局，
 右侧追加头像 + 绑定/解绑按钮。
 """
+
 import hashlib
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, PrimaryPushButton, SettingCard
@@ -20,9 +21,18 @@ from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.common_dialogs import ConfirmDialog
 
 _AVATAR_COLORS = [
-    "#c71d23", "#e74c3c", "#e67e22", "#f39c12",
-    "#27ae60", "#2ecc71", "#1abc9c", "#3498db",
-    "#2980b9", "#9b59b6", "#8e44ad", "#34495e",
+    "#c71d23",
+    "#e74c3c",
+    "#e67e22",
+    "#f39c12",
+    "#27ae60",
+    "#2ecc71",
+    "#1abc9c",
+    "#3498db",
+    "#2980b9",
+    "#9b59b6",
+    "#8e44ad",
+    "#34495e",
 ]
 
 
@@ -221,6 +231,7 @@ class GiteeCard(SettingCard):
         self.hBoxLayout.addSpacing(2)
 
         from app.core.config_sync import ConfigSyncService
+
         self._sync_svc = ConfigSyncService.get_instance()
         self._sync_svc.stateChanged.connect(self._on_sync_state_changed)
         self._sync_svc.syncDone.connect(self._on_initial_sync_done)
@@ -273,21 +284,15 @@ class GiteeCard(SettingCard):
         if state == "disabled":
             self._sync_dot.hide()
         elif state == "idle":
-            self._sync_dot.setStyleSheet(
-                f"background: #3fb950; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #3fb950; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("同步正常")
             self._sync_dot.show()
         elif state == "syncing":
-            self._sync_dot.setStyleSheet(
-                f"background: #58a6ff; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #58a6ff; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("正在同步…")
             self._sync_dot.show()
         elif state == "error":
-            self._sync_dot.setStyleSheet(
-                f"background: #f85149; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #f85149; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("同步失败，点击重试")
             self._sync_dot.setCursor(Qt.PointingHandCursor)
             self._sync_dot.mousePressEvent = self._on_sync_retry
@@ -296,14 +301,18 @@ class GiteeCard(SettingCard):
     def _on_sync_retry(self, event):
         """点击红点重试"""
         import threading
+
         t = threading.Thread(target=self._sync_svc.upload, daemon=True)
         t.start()
 
     def _on_initial_sync_done(self, success: bool, message: str):
         """首次同步完成回调（仅绑定后首次检查远端时触发）"""
         if success:
-            # 远端配置恢复 → 触发完整 UI 刷新
-            self._refresh_app_ui()
+            # [PERF] 延迟 UI 刷新 2 秒：让窗口完全就绪后再应用远端配置，
+            # 避免在窗口刚出现时 dispatch_refresh() 造成的可见闪烁。
+            # _refresh_app_ui 内部调用 theme_manager.dispatch_refresh()
+            # 会重算所有颜色 token 并重新应用样式，~80ms 主线程工作。
+            QTimer.singleShot(2000, self._refresh_app_ui)
             InfoBar.success(
                 title="云端同步",
                 content=message,
@@ -359,6 +368,7 @@ class GiteeCard(SettingCard):
     def _start_oauth_with_backup(self, repo_private: bool):
         """绑定前先备份本地配置"""
         from app.core.config_sync import ConfigSyncService
+
         ConfigSyncService.get_instance().backup_local()
         self._start_oauth(repo_private)
 
