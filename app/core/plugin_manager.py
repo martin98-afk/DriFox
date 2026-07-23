@@ -490,12 +490,12 @@ class PluginManager:
                 # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
                 if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
                     components["ui"] = True
-                if "components" not in manifest or not manifest["components"]:
+                if isinstance(manifest.get("components"), dict):
+                    # 以实际目录为准覆盖 manifest 的组件声明
+                    # 目的：取消 plugin.json 对组件加载的门控，物理存在的组件全部生效
+                    manifest["components"].update(components)
+                else:
                     manifest["components"] = components
-                elif isinstance(manifest["components"], dict):
-                    # 补充清单未声明的但实际存在的组件
-                    for k, v in components.items():
-                        manifest["components"].setdefault(k, v)
 
                 discovered.append(PluginInfo(
                     name=plugin_name,
@@ -557,12 +557,12 @@ class PluginManager:
             if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
                 detected_components["ui"] = True
 
-            if "components" not in manifest or not manifest["components"]:
+            if isinstance(manifest.get("components"), dict):
+                # 以实际目录为准覆盖 manifest 的组件声明
+                # 目的：取消 plugin.json 对组件加载的门控，物理存在的组件全部生效
+                manifest["components"].update(detected_components)
+            else:
                 manifest["components"] = detected_components
-            elif isinstance(manifest["components"], dict):
-                # 补充清单未声明的但实际存在的组件（setdefault 不覆盖已有值）
-                for k, v in detected_components.items():
-                    manifest["components"].setdefault(k, v)
 
             info = PluginInfo(
                 name=plugin_name,
@@ -663,7 +663,12 @@ class PluginManager:
         return dirs
 
     def get_command_files(self) -> List[Path]:
-        """获取所有已启用插件的命令文件，同名去重（系统→用户，用户覆盖系统）"""
+        """获取所有已启用插件的命令文件，同名去重（系统→用户，用户覆盖系统）
+
+        始终包含 user-custom 插件命令目录（即使插件清单不存在），
+        解决 ShortcutManager 写入自定义快捷键后 user-custom 插件未注册
+        导致自定义文件不被加载的问题。
+        """
         result = []
         name_order: Dict[str, int] = {}
 
@@ -672,6 +677,19 @@ class PluginManager:
             if not cmd_dir.exists():
                 continue
             for md_file in sorted(cmd_dir.glob("*.md")):
+                if md_file.stem in name_order:
+                    idx = name_order[md_file.stem]
+                    result[idx] = md_file
+                else:
+                    name_order[md_file.stem] = len(result)
+                    result.append(md_file)
+
+        # 始终包含 user-custom 命令目录（最高优先级，覆盖所有其他插件）
+        from app.utils.utils import get_app_data_dir
+
+        user_custom_cmd = get_app_data_dir() / "plugins" / "user-custom" / "commands"
+        if user_custom_cmd.exists():
+            for md_file in sorted(user_custom_cmd.glob("*.md")):
                 if md_file.stem in name_order:
                     idx = name_order[md_file.stem]
                     result[idx] = md_file
@@ -811,7 +829,10 @@ class PluginManager:
             return None
 
     def _get_md_files(self, subdir: str) -> List[Path]:
-        """从所有已启用插件获取某子目录下的 .md 文件"""
+        """从所有已启用插件获取某子目录下的 .md 文件
+
+        始终包含 user-custom 插件对应子目录（即使插件清单不存在）。
+        """
         files: List[Path] = []
         seen: Set[str] = set()
 
@@ -820,6 +841,19 @@ class PluginManager:
             if not d.exists():
                 continue
             for md_file in sorted(d.glob("*.md")):
+                if md_file.stem not in seen:
+                    seen.add(md_file.stem)
+                    files.append(md_file)
+                else:
+                    idx = next(i for i, f in enumerate(files) if f.stem == md_file.stem)
+                    files[idx] = md_file
+
+        # 始终包含 user-custom 对应子目录（最高优先级，覆盖所有其他插件）
+        from app.utils.utils import get_app_data_dir
+
+        user_custom_sub = get_app_data_dir() / "plugins" / "user-custom" / subdir
+        if user_custom_sub.exists():
+            for md_file in sorted(user_custom_sub.glob("*.md")):
                 if md_file.stem not in seen:
                     seen.add(md_file.stem)
                     files.append(md_file)
@@ -1022,6 +1056,10 @@ class PluginManager:
         components["mcp"] = True
         components["hooks"] = True
         components["team_templates"] = True
+        # 如果用户已在 user-custom 中创建了 commands 目录（如 ShortcutManager），
+        # 则同步标记 commands 组件，确保重扫插件时能被识别
+        if (custom_dir / "commands").exists():
+            components["commands"] = True
         manifest["components"] = components
         if "name" not in manifest:
             manifest["name"] = "user-custom"

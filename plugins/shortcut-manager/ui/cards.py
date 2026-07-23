@@ -47,6 +47,52 @@ def _get_user_custom_cmd_dir() -> Path:
     return get_app_data_dir() / _USER_CUSTOM_CMD_REL
 
 
+def _ensure_user_custom_plugin():
+    """确保 user-custom 插件有有效的 plugin.json 清单并被 PluginManager 发现
+
+    ShortcutManager 写入自定义快捷键文件到 user-custom/commands/，
+    但如果 user-custom 插件没有 .drifox-plugin/plugin.json 清单，
+    PluginManager._scan_plugins 不会发现该插件，导致自定义文件不被加载。
+
+    本函数在首次保存时自动创建最小清单并触发插件发现，
+    配合 watchfiles 热重载机制使自定义快捷键立即生效。
+    """
+    import json
+
+    from app.core.plugin_manager import PluginManager
+    from app.utils.utils import get_app_data_dir
+
+    custom_dir = get_app_data_dir() / "plugins" / "user-custom"
+    manifest_dir = custom_dir / ".drifox-plugin"
+    manifest_path = manifest_dir / "plugin.json"
+
+    if manifest_path.exists():
+        return
+
+    try:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "name": "user-custom",
+            "description": "用户自定义配置（命令、MCP、Hooks 等）",
+            "version": "1.0.0",
+            "type": "user",
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized() and not pm.has_plugin("user-custom"):
+            pm._discover_user_plugins(get_app_data_dir())
+            try:
+                pm.enable_plugin("user-custom")
+            except Exception:
+                pass
+            logger.info("[ShortcutManager] user-custom 插件清单已自动创建并注册")
+    except Exception as e:
+        logger.warning(f"[ShortcutManager] 创建 user-custom 插件清单失败: {e}")
+
+
 def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
     """查找命令的原始 .md 文件（排除 user-custom 目录中的覆盖文件）
 
@@ -763,6 +809,9 @@ class ShortcutManagerCard(QWidget):
             cmd_dir.mkdir(parents=True, exist_ok=True)
             safe_name = _safe_filename(cmd_name)
             dest_path = cmd_dir / f"{safe_name}.md"
+
+            # 确保 user-custom 插件被 PluginManager 发现（创建清单如不存在）
+            _ensure_user_custom_plugin()
 
             # 1. 找到原始命令文件
             original = _find_original_cmd_file(cmd_name)
