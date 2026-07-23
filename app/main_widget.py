@@ -1757,6 +1757,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
             QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
+            # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
+            QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
 
     def _start_subagent_log_cleanup(self):
         """定期清理子智能体日志，避免无限堆积"""
@@ -5540,6 +5542,67 @@ class OpenAIChatToolWindow(ToolWindow):
                 top_window.raise_()
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
+
+    def _check_gitee_sync_reminder(self):
+        """启动后检查：未绑定 Gitee 且提醒开启时，弹 InfoBar 引导绑定"""
+        if self.cfg.gitee_bound.value:
+            return
+        if not self.cfg.gitee_sync_remind.value:
+            return
+        if not hasattr(self, "_settings_popup") or self._settings_popup is None:
+            return
+
+        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
+        from PyQt5.QtWidgets import QWidget, QHBoxLayout
+        from PyQt5.QtCore import Qt
+
+        infobar = InfoBar(
+            icon=InfoBarIcon.INFORMATION,
+            title="绑定 Gitee 账号",
+            content=(
+                "• 配置与插件自动备份到 Gitee 私有仓库，仅自己可见\n"
+                "• 会话记录与项目文件分享可选择公开或私有仓库\n"
+                "• 多设备间恢复配置，换机无缝衔接"
+            ),
+            orient=Qt.Vertical,
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=self,
+        )
+
+        # 按钮容器（水平布局，右对齐）
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+
+        btn_bind = PrimaryPushButton("立即绑定")
+        btn_bind.setFixedWidth(90)
+        btn_bind.clicked.connect(lambda: self._open_gitee_bind_from_reminder(infobar))
+        btn_layout.addWidget(btn_bind)
+
+        btn_dismiss = PushButton("不再提醒")
+        btn_dismiss.setFixedWidth(90)
+        btn_dismiss.clicked.connect(lambda: self._dismiss_gitee_reminder(infobar))
+        btn_layout.addWidget(btn_dismiss)
+
+        infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
+        infobar.show()
+
+    def _open_gitee_bind_from_reminder(self, infobar):
+        """提醒中点击「立即绑定」：关闭提醒，打开设置定位到 Gitee 卡片"""
+        infobar.close()
+        self._open_settings_popup()
+        # GiteeCard 在设置页最顶部，滚动到顶部即可
+        if hasattr(self, "_settings_popup") and self._settings_popup:
+            scroll_bar = self._settings_popup.scroll_area.verticalScrollBar()
+            scroll_bar.setValue(0)
+
+    def _dismiss_gitee_reminder(self, infobar):
+        """提醒中点击「不再提醒」：持久化设置并关闭"""
+        self.cfg.set(self.cfg.gitee_sync_remind, False, save=True)
+        infobar.close()
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):
         """服务商编辑保存后的回调

@@ -468,6 +468,7 @@ class Settings(QConfig):
     gitee_user_token = ConfigItem("Gitee", "UserToken", "")
     gitee_user_owner = ConfigItem("Gitee", "UserOwner", "")
     gitee_user_repo = ConfigItem("Gitee", "UserRepo", "DriFox_uploads")
+    gitee_sync_remind = ConfigItem("Gitee", "SyncRemind", True, BoolValidator())
 
     # OAuth 应用凭证（内置）
     gitee_oauth_client_id = ConfigItem(
