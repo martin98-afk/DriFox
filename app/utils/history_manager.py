@@ -1407,7 +1407,7 @@ class HistoryManager:
             git_root = git_root.replace("\\", "/")
             # 获取 git 跟踪的文件列表
             r = subprocess.run(
-                ["git", "ls-files"],
+                ["git", "-c", "core.quotepath=false", "ls-files"],
                 cwd=git_root,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=30,
