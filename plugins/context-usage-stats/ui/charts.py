@@ -167,8 +167,16 @@ class _ChartTooltip(QWidget):
         self._bg = QColor(33, 33, 38, 245)
         self._tc = QColor(255, 255, 255, 230)
         self._border = QColor(60, 60, 65, 200)
-        self._font = QFont("Microsoft YaHei", 11)
+        self._font_family = "Microsoft YaHei"
+        self._font = QFont(self._font_family, 11)
         self._font.setWeight(QFont.Normal)
+
+    def set_font_family(self, family: str):
+        """设置 tooltip 字体族，跟随系统/上下文主题"""
+        if family and family != self._font_family:
+            self._font_family = family
+            self._font = QFont(family, 11)
+            self._font.setWeight(QFont.Normal)
 
     def set_text(self, text: str):
         """设置文本并重算尺寸"""
@@ -312,6 +320,7 @@ class _BarChartWidget(QWidget):
             except ValueError, IndexError:
                 date_str = label
             tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
             tt.set_text(f"📊 {date_str}\n会话数: {value}")
             tt.show_at_global(event.globalPos())
 
@@ -542,6 +551,7 @@ class _LineChartWidget(QWidget):
             except ValueError, IndexError:
                 date_str = label
             tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
             tt.set_text(f"📈 {date_str}\n{_format_number(value)}")
             tt.show_at_global(event.globalPos())
 
@@ -914,6 +924,7 @@ class _ProjectBarWidget(QWidget):
         if self._hovered_index >= 0:
             label, value = self._data[self._hovered_index]
             tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
             tt.set_text(f"📁 {label}\n会话数: {value}")
             tt.show_at_global(event.globalPos())
 

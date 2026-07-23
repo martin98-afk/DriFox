@@ -12,6 +12,7 @@ from PyQt5.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QRadialGradient,
 )
 from PyQt5.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon
@@ -34,8 +35,10 @@ class SendStopButton(QWidget):
 
     # 呼吸周期参数
     CYCLE_MS = 2500
-    SCALE_AMPLITUDE = 0.10  # 缩放幅度 ±10%
+    SCALE_AMPLITUDE = 0.14  # 缩放幅度 ±14%
     FRAME_INTERVAL_MS = 33
+    MORPH_VERTICES = 32  # 多边形顶点数（越多越平滑）
+    GLOW_STRENGTH = 0.55  # 辉光最大强度因子
 
     # 停止方块颜色（深浅主题统一用白色）
     SQUARE_COLOR = "#FFFFFF"
@@ -196,27 +199,76 @@ class SendStopButton(QWidget):
         icon.paint(painter, x, y, icon_size, icon_size, Qt.AlignCenter, QIcon.Normal)
 
     def _draw_stop_square(self, painter: QPainter, cx: float, cy: float):
-        """绘制缩放+形状呼吸方块
+        """多边形呼吸停止动画
 
-        两种连续变化叠加（两个独立连续相位，无回绕割裂）：
-        - 缩放：size 在 base_size ±10% 之间正弦变化
-        - 形状：圆角半径 rx 在 min_rx ↔ size/2（纯圆）之间正弦变化
-        - 形状相位比缩放稍慢（0.7x），效果更有机
+        两层效果：
+        1. 径向辉光脉冲 — 背后扩散/收缩的白色光晕
+        2. 多边形变形 — 32 顶点在「方形 ↔ 八角 ↔ 正圆」之间平滑过渡
         """
         scale = 1.0 + self.SCALE_AMPLITUDE * math.sin(self._phase_scale)
+        base_size = 17
+        half = base_size * scale / 2.0
 
-        base_size = 17  # 方块基准边长
-        size = base_size * scale
-        half = size / 2.0
+        # 1. 径向辉光脉冲（先画，在形状下层）
+        self._draw_glow_pulse(painter, cx, cy, half)
 
-        # 形状呼吸：圆角在「柔和圆角方块」↔「正圆(rx=size/2)」之间循环
-        min_rx = 5.0  # 始终保持可见弧度，避免尖角
-        max_rx = half  # 正圆所需的圆角
-        rx = min_rx + (max_rx - min_rx) * (0.5 + 0.5 * math.sin(self._phase_shape))
+        # 2. 多边形变形：t=0 方形 → t=0.5 八角 → t=1 正圆
+        t = (math.sin(self._phase_shape) + 1.0) / 2.0
+        morph_path = self._build_morph_path(half, t)
 
-        square_path = QPainterPath()
-        square_path.addRoundedRect(cx - size / 2, cy - size / 2, size, size, rx, rx)
-        painter.fillPath(square_path, self._square_color)
+        painter.save()
+        painter.translate(cx, cy)
+        painter.fillPath(morph_path, self._square_color)
+        painter.restore()
+
+    def _build_morph_path(self, half: float, t: float) -> QPainterPath:
+        """构建方形→正圆平滑变形路径（坐标相对于中心）。
+
+        原理：对每个顶点，计算方形半径和圆形半径，在二者间插值。
+        方形半径公式：half / max(|cos θ|, |sin θ|)
+        圆形半径公式：half
+        """
+        n = self.MORPH_VERTICES
+        path = QPainterPath()
+
+        for i in range(n):
+            angle = 2.0 * math.pi * i / n - math.pi / 2.0  # 从 12 点钟开始
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+
+            # 该角度上方形边界的距离
+            denom = max(abs(cos_a), abs(sin_a))
+            square_r = half / denom if denom > 0.001 else half * 1.42
+            circle_r = half
+
+            r = circle_r + (square_r - circle_r) * (1.0 - t)
+
+            x = r * cos_a
+            y = r * sin_a
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+
+        path.closeSubpath()
+        return path
+
+    def _draw_glow_pulse(self, painter: QPainter, cx: float, cy: float, half: float):
+        """径向辉光脉冲 — 中心最亮、边缘透明，呼吸节奏与方块同步。"""
+        pulse = (math.sin(self._phase_scale + math.pi / 2.0) + 1.0) / 2.0  # 0..1，与缩放相位差90°
+        glow_radius = half * (1.2 + pulse * 0.8)  # 辉光半径 1.2x~2.0x
+        center_alpha = int(255 * self.GLOW_STRENGTH * pulse)
+        edge_alpha = 0
+
+        gradient = QRadialGradient(QPointF(cx, cy), glow_radius)
+        gradient.setColorAt(0.0, QColor(255, 255, 255, center_alpha))
+        gradient.setColorAt(0.3, QColor(255, 255, 255, int(center_alpha * 0.45)))
+        gradient.setColorAt(0.6, QColor(255, 255, 255, int(center_alpha * 0.12)))
+        gradient.setColorAt(1.0, QColor(255, 255, 255, edge_alpha))
+
+        painter.setBrush(gradient)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(cx, cy), glow_radius, glow_radius)
 
     def __del__(self):
         try:
