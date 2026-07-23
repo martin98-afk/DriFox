@@ -378,8 +378,8 @@ class Settings(QConfig):
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "fallout",
-        OptionsValidator(["fallout"]),  # 运行时动态补充
+        "lumia",
+        OptionsValidator(["lumia"]),  # 运行时动态补充
     )
     ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 

@@ -27,6 +27,7 @@ from app.utils.utils import get_app_data_dir
 SETTINGS_REPO_NAME = "DriFox_settings"
 REMOTE_PATH = "drifox/app.config"
 USER_CUSTOM_REMOTE_PATH = "drifox/user-custom.zip"
+SHA_CACHE_FILE = ".sync_shas.json"
 DEBOUNCE_MS = 10000
 
 GITEE_FILE_API = "https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}"
@@ -94,6 +95,10 @@ class ConfigSyncService(QObject):
         self._custom_dirty: bool = False     # user-custom 有待上传的变更
         self._config_remote_sha: Optional[str] = None  # 远端 app.config SHA 缓存
         self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
+        self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
+
+        # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
+        self._load_sha_cache()
 
         # 跨线程桥：watchfiles 线程 → 主线程
         self._configChanged.connect(self._on_config_changed_main)
@@ -208,13 +213,21 @@ class ConfigSyncService(QObject):
         t.start()
 
     def disable(self):
-        """解绑前调用：停止文件监听和防抖计时器"""
+        """解绑前调用：停止文件监听和防抖计时器，清除 SHA 缓存"""
         self._stop_watching()
         if self._debounce_timer:
             self._debounce_timer.stop()
             self._debounce_timer = None
         self._token = ""
         self._owner = ""
+        # 清除 SHA 缓存（磁盘 + 内存），防止解绑后重新绑定时误判跳过下载
+        self._config_remote_sha = None
+        self._custom_remote_sha = None
+        try:
+            if self._sha_cache_path.exists():
+                self._sha_cache_path.unlink()
+        except Exception:
+            pass
         self._set_state("disabled")
 
     def upload(self) -> bool:
@@ -464,6 +477,7 @@ class ConfigSyncService(QObject):
                                     self._config_remote_sha = sha
                                 elif label == "user-custom":
                                     self._custom_remote_sha = sha
+                                self._save_sha_cache()
                     except Exception:
                         pass
                     return True
@@ -618,6 +632,7 @@ class ConfigSyncService(QObject):
                     self._config_remote_sha = remote_sha
                 elif label == "user-custom":
                     self._custom_remote_sha = remote_sha
+                self._save_sha_cache()
 
             return True
         except Exception as e:
@@ -669,6 +684,37 @@ class ConfigSyncService(QObject):
             except Exception:
                 pass
             return False
+
+    # ── SHA 缓存持久化 ───────────────────────────────────
+
+    def _load_sha_cache(self):
+        """从磁盘加载持久化的远端 SHA 缓存"""
+        try:
+            if self._sha_cache_path.exists():
+                import json
+                data = json.loads(self._sha_cache_path.read_text(encoding="utf-8"))
+                self._config_remote_sha = data.get("config_sha") or None
+                self._custom_remote_sha = data.get("custom_sha") or None
+                logger.debug(f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}...")
+        except Exception as e:
+            logger.warning(f"[ConfigSync] SHA 缓存加载失败: {e}")
+
+    def _save_sha_cache(self):
+        """持久化当前远端 SHA 到磁盘"""
+        try:
+            import json
+            data = {}
+            if self._config_remote_sha:
+                data["config_sha"] = self._config_remote_sha
+            if self._custom_remote_sha:
+                data["custom_sha"] = self._custom_remote_sha
+            self._sha_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sha_cache_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"[ConfigSync] SHA 缓存持久化失败: {e}")
 
     # ── 辅助 ──────────────────────────────────────────────
 
