@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import requests
+import httpx
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
@@ -75,7 +75,8 @@ class ConfigSyncService(QObject):
         self._upload_lock = threading.Lock()
         self._watch_stop: Optional[threading.Event] = None
         self._watch_thread: Optional[threading.Thread] = None
-        self._suppress_upload: bool = False  # 下载恢复时抑制上传反馈
+        self._suppress_until: float = 0.0  # 下载后抑制上传的时间窗口（时间戳）
+        self._upload_thread: Optional[threading.Thread] = None  # 后台上传线程引用
 
         # 跨线程桥：watchfiles 线程 → 主线程
         self._configChanged.connect(self._on_config_changed_main)
@@ -143,7 +144,7 @@ class ConfigSyncService(QObject):
         self._owner = owner
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
-        self._debounce_timer.timeout.connect(self._do_upload)
+        self._debounce_timer.timeout.connect(self._on_debounce_timeout)
 
         self._set_state("idle")
         self._start_watching()
@@ -215,15 +216,23 @@ class ConfigSyncService(QObject):
         self._configChanged.emit()
 
     def _on_config_changed_main(self):
-        """主线程：重置防抖计时器"""
+        """主线程：重置防抖计时器。timeout 后由后台线程执行上传，不阻塞 UI。"""
         if self._state == "disabled":
             return
-        # 下载恢复中，抑制上传（避免下载 → 触发变更 → 重新上传的循环）
-        if self._suppress_upload:
+        # 下载后 5 秒内抑制上传，覆盖 下载→Settings重载→UI刷新→再写盘 的级联
+        if time.time() < self._suppress_until:
+            logger.debug("[ConfigSync] 处于下载后抑制窗口，跳过上传")
             return
         if self._debounce_timer:
             logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
             self._debounce_timer.start(DEBOUNCE_MS)
+
+    def _on_debounce_timeout(self):
+        """防抖到期 → 启动后台线程执行上传，不阻塞 UI 主线程"""
+        logger.info("[ConfigSync] 防抖到期，启动后台上传线程")
+        t = threading.Thread(target=self._do_upload, daemon=True)
+        t.start()
+        self._upload_thread = t
 
     # ── 远端同步 ──────────────────────────────────────────
 
@@ -257,7 +266,8 @@ class ConfigSyncService(QObject):
             return False
         try:
             url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=REMOTE_PATH)
-            resp = requests.get(url, params={"access_token": self._token}, timeout=10)
+            with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+                resp = client.get(url, params={"access_token": self._token})
             if resp.status_code != 200:
                 return False
             body = resp.json()
@@ -290,49 +300,50 @@ class ConfigSyncService(QObject):
                 "branch": "master",
             }
 
-            # 先查询远端是否存在（获取 sha）
-            existing_sha = self._get_remote_sha()
+            with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
+                # 先查询远端是否存在（获取 sha）
+                existing_sha = self._get_remote_sha(client)
 
-            if existing_sha:
-                # 文件已存在 → PUT + sha 更新
-                payload = {**base_payload, "sha": existing_sha}
-                resp = requests.put(url, data=payload, timeout=30)
-                method = "PUT"
-            else:
-                # 文件不存在 → POST 新建
-                resp = requests.post(url, data=base_payload, timeout=30)
-                method = "POST"
+                if existing_sha:
+                    # 文件已存在 → PUT + sha 更新
+                    payload = {**base_payload, "sha": existing_sha}
+                    resp = client.put(url, data=payload)
+                    method = "PUT"
+                else:
+                    # 文件不存在 → POST 新建
+                    resp = client.post(url, data=base_payload)
+                    method = "POST"
 
-            if resp.status_code in (200, 201):
-                logger.info(f"[ConfigSync] 配置上传成功 ({method})")
-                self._set_state("idle")
-                return True
+                if resp.status_code in (200, 201):
+                    logger.info(f"[ConfigSync] 配置上传成功 ({method})")
+                    self._set_state("idle")
+                    return True
 
-            err_msg = self._parse_error(resp)
-            if resp.status_code in (401, 403):
-                logger.error(f"[ConfigSync] 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
+                err_msg = self._parse_error(resp)
+                if resp.status_code in (401, 403):
+                    logger.error(f"[ConfigSync] 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
+                    self._set_state("error")
+                    return False
+
+                # 如果是 PUT 失败但原因是 sha 不匹配（并发冲突），重新 GET sha 后重试一次
+                if method == "PUT" and "sha" in err_msg.lower():
+                    retry_sha = self._get_remote_sha(client)
+                    if retry_sha:
+                        payload["sha"] = retry_sha
+                        resp2 = client.put(url, data=payload)
+                        if resp2.status_code in (200, 201):
+                            logger.info("[ConfigSync] 配置上传成功 (PUT retry)")
+                            self._set_state("idle")
+                            return True
+
+                logger.error(f"[ConfigSync] 上传最终失败 [{resp.status_code}]: {err_msg}")
                 self._set_state("error")
                 return False
-
-            # 如果是 PUT 失败但原因是 sha 不匹配（并发冲突），重新 GET sha 后重试一次
-            if method == "PUT" and "sha" in err_msg.lower():
-                retry_sha = self._get_remote_sha()
-                if retry_sha:
-                    payload["sha"] = retry_sha
-                    resp2 = requests.put(url, data=payload, timeout=30)
-                    if resp2.status_code in (200, 201):
-                        logger.info("[ConfigSync] 配置上传成功 (PUT retry)")
-                        self._set_state("idle")
-                        return True
-
-            logger.error(f"[ConfigSync] 上传最终失败 [{resp.status_code}]: {err_msg}")
-            self._set_state("error")
-            return False
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             logger.error("[ConfigSync] 上传超时")
             self._set_state("error")
             return False
-        except requests.exceptions.ConnectionError:
+        except httpx.ConnectError:
             logger.error("[ConfigSync] 网络连接失败")
             self._set_state("error")
             return False
@@ -343,11 +354,15 @@ class ConfigSyncService(QObject):
         finally:
             self._upload_lock.release()
 
-    def _get_remote_sha(self) -> Optional[str]:
-        """查询远端文件的 sha，不存在返回 None"""
+    def _get_remote_sha(self, client: Optional[httpx.Client] = None) -> Optional[str]:
+        """查询远端文件的 sha，不存在返回 None。可传入已打开的 httpx.Client 复用连接。"""
         try:
             url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=REMOTE_PATH)
-            resp = requests.get(url, params={"access_token": self._token}, timeout=10)
+            if client:
+                resp = client.get(url, params={"access_token": self._token})
+            else:
+                with httpx.Client(timeout=httpx.Timeout(10.0)) as c:
+                    resp = c.get(url, params={"access_token": self._token})
             if resp.status_code == 200:
                 body = resp.json()
                 if isinstance(body, dict) and "sha" in body:
@@ -362,7 +377,8 @@ class ConfigSyncService(QObject):
             return False
         try:
             url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=REMOTE_PATH)
-            resp = requests.get(url, params={"access_token": self._token}, timeout=15)
+            with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+                resp = client.get(url, params={"access_token": self._token})
             if resp.status_code != 200:
                 err = self._parse_error(resp)
                 logger.error(f"[ConfigSync] 下载失败 [{resp.status_code}]: {err}")
@@ -379,10 +395,9 @@ class ConfigSyncService(QObject):
 
             decoded = base64.b64decode(content_b64)
 
-            # 下载写文件前抑制上传反馈，避免下载→触发变更→上传的循环
-            self._suppress_upload = True
+            # 写文件后抑制上传 5 秒，覆盖下载→Settings重载→UI刷新→再写盘的级联
             self._config_path.write_bytes(decoded)
-            self._suppress_upload = False
+            self._suppress_until = time.time() + 5.0
             logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
 
             # 重新加载 Settings
@@ -401,6 +416,7 @@ class ConfigSyncService(QObject):
 
     @staticmethod
     def _parse_error(resp) -> str:
+        """解析 API 错误响应（兼容 httpx.Response）"""
         try:
             body = resp.json()
             return body.get("message", resp.text[:200])

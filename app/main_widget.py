@@ -340,6 +340,31 @@ class _ProjectUrlImportThread(QThread):
             self.finished.emit("", f"下载失败: {e}")
 
 
+class _ProjectExportThread(QThread):
+    """后台线程：导出项目为 .drifox_project 压缩包，避免大项目 UI 冻结。
+
+    exportDone 信号携带 (zip_path, error)，二者有且仅有一个非空。
+    """
+
+    exportDone = pyqtSignal(str, str)
+
+    def __init__(self, history_manager, project_name: str, root_dir: str):
+        super().__init__()
+        self._hm = history_manager
+        self._project_name = project_name
+        self._root_dir = root_dir
+
+    def run(self):
+        try:
+            zip_path = self._hm.export_project_archive(self._project_name, self._root_dir)
+            if zip_path:
+                self.exportDone.emit(zip_path, "")
+            else:
+                self.exportDone.emit("", f"项目「{self._project_name}」无会话或导出异常")
+        except Exception as e:
+            self.exportDone.emit("", str(e))
+
+
 class _ProjectUploadThread(QThread):
     """后台线程：上传 .drifox_project 文件到 Gitee，避免 UI 冻结。
 
@@ -14580,9 +14605,14 @@ class OpenAIChatToolWindow(ToolWindow):
             self.pixel_pet.set_state("idle")
 
     def _on_export_project(self, project_name: str):
-        """导出项目为 .drifox_project 压缩包 — 先选方式再导出"""
+        """导出项目为 .drifox_project 压缩包 — 先选方式再导出（后台线程避免 UI 冻结）"""
         if not self.history_manager:
             InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            return
+
+        # 防止重复导出
+        if hasattr(self, "_export_thread") and self._export_thread is not None and self._export_thread.isRunning():
+            InfoBar.warning(title="", content="导出进行中，请稍候…", duration=2000, parent=self)
             return
 
         # 先弹出选择对话框，再根据选择执行导出
@@ -14598,27 +14628,35 @@ class OpenAIChatToolWindow(ToolWindow):
             if self.pixel_pet:
                 self.pixel_pet.set_state("warning")
 
-            zip_path = self.history_manager.export_project_archive(project_name, root_dir)
-
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
-
-            if not zip_path:
-                InfoBar.error(
-                    title="导出失败",
-                    content=f"项目「{project_name}」无会话或导出异常",
-                    duration=3000,
-                    parent=self,
-                )
-                return
-
-            if mode == _ProjectExportChoiceDialog.EXPORT_LOCAL:
-                self._on_export_local(zip_path, project_name)
-            elif mode == _ProjectExportChoiceDialog.EXPORT_UPLOAD:
-                self._on_export_upload(zip_path, project_name)
+            # 后台线程导出 ZIP，避免大项目阻塞 UI
+            self._export_thread = _ProjectExportThread(self.history_manager, project_name, root_dir)
+            self._export_thread.exportDone.connect(
+                lambda zp, err, m=mode, pn=project_name: self._on_project_export_done(zp, err, pn, m)
+            )
+            self._export_thread.finished.connect(self._export_thread.deleteLater)
+            self._export_thread.start()
 
         dialog.exportChosen.connect(_on_choice)
         dialog.exec_()
+
+    def _on_project_export_done(self, zip_path: str, error: str, project_name: str, mode: int):
+        """后台导出完成回调（主线程）"""
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
+
+        if error:
+            InfoBar.error(
+                title="导出失败",
+                content=error,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        if mode == _ProjectExportChoiceDialog.EXPORT_LOCAL:
+            self._on_export_local(zip_path, project_name)
+        elif mode == _ProjectExportChoiceDialog.EXPORT_UPLOAD:
+            self._on_export_upload(zip_path, project_name)
 
     def _insert_project_share_record(self, project_name: str, zip_path: str, upload_url: str = ""):
         """插入项目导出分享记录"""
