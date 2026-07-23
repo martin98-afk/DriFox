@@ -143,3 +143,20 @@ def clear_all_records() -> bool:
     if ok:
         logger.debug("[ShareHistory] 已清空所有记录")
     return ok
+
+
+def update_record_file_path(record_id: int, file_path: str) -> bool:
+    """更新指定记录的 file_path 字段"""
+    records = _load_records()
+    found = False
+    for r in records:
+        if r.get("id") == record_id:
+            r["file_path"] = file_path
+            found = True
+            break
+    if not found:
+        return False
+    ok = _save_records(records)
+    if ok:
+        logger.debug(f"[ShareHistory] 更新记录 id={record_id} file_path={file_path}")
+    return ok
