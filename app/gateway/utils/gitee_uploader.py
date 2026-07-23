@@ -8,6 +8,7 @@ AI 也可通过 gitee_upload 工具手动上传。
 
 参考实现: WorkFlowGUI/app/components/消息推送 中的 Gitee 上传逻辑
 """
+
 import base64
 import uuid
 from pathlib import Path
@@ -47,24 +48,44 @@ class GiteeUploader:
         return cls._instance
 
     def _ensure_config(self) -> bool:
-        """从 Settings 加载配置，仅加载一次"""
+        """加载配置。
+        优先使用用户 OAuth 绑定的 token/repo，
+        未绑定时回退到共享仓库配置。
+        """
         if self._config_loaded:
             return bool(self._token and self._owner and self._repo)
 
         try:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
 
-            self._token = cfg.gitee_token.value or ""
-            self._owner = cfg.gitee_owner.value or ""
-            self._repo = cfg.gitee_repo.value or ""
-            self._path = cfg.gitee_path.value or "drifox"
-            self._branch = cfg.gitee_branch.value or "master"
+            # 优先使用用户绑定的 Gitee 账号
+            if cfg.gitee_bound.value and cfg.gitee_user_token.value:
+                self._token = cfg.gitee_user_token.value
+                self._owner = cfg.gitee_user_owner.value
+                self._repo = cfg.gitee_user_repo.value or "DriFox_uploads"
+                self._path = "drifox"
+                self._branch = "master"
+                logger.info("[GiteeUploader] 使用用户绑定账号上传")
+            else:
+                # 回退共享仓库
+                self._token = cfg.gitee_token.value or ""
+                self._owner = cfg.gitee_owner.value or ""
+                self._repo = cfg.gitee_repo.value or ""
+                self._path = cfg.gitee_path.value or "drifox"
+                self._branch = cfg.gitee_branch.value or "master"
+                logger.info("[GiteeUploader] 使用共享仓库上传")
+
             self._config_loaded = True
         except Exception as e:
             logger.warning(f"[GiteeUploader] 加载配置失败: {e}")
 
         return bool(self._token and self._owner and self._repo)
+
+    def reset_config(self):
+        """重置配置缓存，使下次访问时重新加载（用于绑定/解绑后刷新）"""
+        self._config_loaded = False
 
     def is_configured(self) -> bool:
         """检查 Gitee 是否已配置"""
@@ -95,9 +116,7 @@ class GiteeUploader:
         except Exception as e:
             return None, f"读取文件失败: {e}"
 
-    def upload_bytes(
-        self, data: bytes, filename: str = "", ext: str = ""
-    ) -> Tuple[Optional[str], Optional[str]]:
+    def upload_bytes(self, data: bytes, filename: str = "", ext: str = "") -> Tuple[Optional[str], Optional[str]]:
         """
         上传字节数据到 Gitee 仓库
 
@@ -128,9 +147,7 @@ class GiteeUploader:
             # Base64 编码
             content_b64 = base64.b64encode(data).decode("utf-8")
 
-            url = self.API_URL.format(
-                owner=self._owner, repo=self._repo, path=full_path
-            )
+            url = self.API_URL.format(owner=self._owner, repo=self._repo, path=full_path)
 
             payload = {
                 "access_token": self._token,
@@ -141,9 +158,7 @@ class GiteeUploader:
 
             resp = requests.post(url, data=payload, timeout=30)
             if resp.status_code == 201:
-                download_url = (
-                    resp.json().get("content", {}).get("download_url")
-                )
+                download_url = resp.json().get("content", {}).get("download_url")
                 if download_url:
                     logger.info(f"[GiteeUploader] 上传成功: {unique_name} → {download_url}")
                     return download_url, None

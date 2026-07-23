@@ -14714,51 +14714,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 写入分享记录（含上传链接） ──
         self._insert_project_share_record(project_name, zip_path, url)
 
-        # 使用现有的 GiteeUploader
-        try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
-
-            uploader = GiteeUploader.get_instance()
-            if not uploader.is_configured():
-                InfoBar.warning(
-                    title="",
-                    content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
-                    duration=3000,
-                    parent=self,
-                )
-                self._on_open_export_path(zip_path)
-                return
-
-            # 显示上传中
-            InfoBar.info(title="", content="正在上传项目压缩包...", duration=5000, parent=self)
-
-            url, err = uploader.upload_file(zip_path)
-            if err:
-                InfoBar.warning(
-                    title="",
-                    content=f"上传失败: {err}（文件已在本地）",
-                    duration=3000,
-                    parent=self,
-                )
-                self._on_open_export_path(zip_path)
-                return
-
-            # 复制链接到剪贴板
-            from PyQt5.QtWidgets import QApplication
-
-            QApplication.clipboard().setText(url)
-            InfoBar.success(
-                title="",
-                content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
-                duration=5000,
-                parent=self,
-            )
-            # ── 写入分享记录（含上传链接） ──
-            self._insert_project_share_record(project_name, zip_path, url)
-        except Exception as e:
-            logger.error(f"[MainWidget] 上传项目压缩包失败: {e}")
-            InfoBar.error(title="", content=f"上传异常: {e}", duration=3000, parent=self)
-
     def _on_import_project(self):
         """从 .drifox_project 压缩包导入项目 — 与 ImportOptionDialog 一致风格"""
         if not self.history_manager:

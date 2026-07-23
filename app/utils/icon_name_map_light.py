@@ -2,6 +2,7 @@
 ICON_NAME_TO_FILE_LIGHT = {
     "233键盘-线性": "233键盘-线性.svg",
     "folder": "folder.svg",
+    "gitee": "gitee.svg",
     "groq": "groq.svg",
     "hooks": "hooks.svg",
     "lsp": "lsp.svg",

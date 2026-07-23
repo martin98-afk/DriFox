@@ -1,6 +1,63 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.5] - 2026-07-22
+
+自上一版本以来的变更 | 提交数：55 · 文件变更：79 · +7210/-1211 | 贡献者：dingma, mading
+
+> 重点：包含 **AnimatedStopButton 呼吸按钮组件**、**ShareHistory 分享历史功能**、自定义 Tooltip 系统、SubAgentCompact 高度重构、以及大量性能优化与修复。
+
+### ✨ 新功能 (New Features)
+
+- **AnimatedStopButton 呼吸按钮**: 集成到 BottomInputArea，支持呼吸缩放动画效果
+- **ShareHistory 分享历史系统**: 新增分享历史插件、UI 组件与数据库集成，支持直接写入 sessions.db
+- **ShareHistoryCard 增强**: 主题色管理、图标样式更新、InfoBar 复制确认提示，支持字体族
+- **自定义 Tooltip 系统**: 全面替换原生 QToolTip 为自定义悬停 Tooltip，修复深色模式 Chromium 黑色提示框问题
+- **流式渲染稳定性优化**: 流式内容防抖高度调整，减少 viewer 尺寸抖动
+- **工具与思维块区域自动折叠**: 流式结束后自动折叠工具/思维区域，优化 UI 体验
+- **思维块动态图标渲染**: 根据主题动态渲染思维块图标，改善视觉一致性
+- **历史记录分页**: 历史卡片添加分页功能，提升性能
+- **主题化图标标签**: 新增 ThemedIconLabel 支持自适应颜色，更新工具控制卡片图标
+- **Overflow-anchor 属性支持**: 流式 dock 与代码 viewer 添加 overflow-anchor，提升布局稳定性
+- **滚动条样式统一**: 模型选择器与项目选择器卡片刷新滚动条样式，适配主题
+- **SendableTextEdit 高度优化**: 增加最大高度并调整内边距
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **SubAgentCompact 高度重构**: 修复高度计算错误导致行被裁剪的问题，提取 `_calculate_total_height()`、优化布局失效链，增强动画处理
+- **深色模式 Tooltip 修复**: 使用 CSS 自绘 Tooltip 替代 HTML title，避免 Chromium 黑色提示框
+- **SendStopButton 颜色修复**: 禁用状态使用 50% 透明度而非 QIcon.Disabled；统一使用纯黑/白图标；修复 QPainter 兼容性
+- **禁用状态视觉修复**: 保持金色渐变背景仅调暗图标、使用 CAPSULE_BG 替代 TOOLBAR_BG、统一 40% 整体透明度
+- **呼吸方块尺寸调整**: 基础尺寸 20→17，振幅 0.12→0.10
+- **工具分隔符提示**: 默认启用浅色模式并添加 Tooltip
+- **QPushButton 兼容性**: Tooltip 过滤器添加 HoverEnter/HoverLeave 事件处理
+
+### ♻️ 代码重构 (Refactoring)
+
+- 提取 SubAgentCompact 高度计算方法，提升常量定义
+- 消除发送按钮 resize 事件防抖定时器
+- 统一 SendStopButton 替代双按钮方案
+- 重构子智能体组件与图标结构
+- 分离分享历史记录处理逻辑，直接写入 sessions.db
+
+### ⚡ 性能优化 (Performance)
+
+- **增量内存优化**: 增量式会话保存，指纹去重，减少冗余消息拷贝
+- **差异渲染**: 仅在自然边界执行完整 HTML 渲染
+- **MCP 超时缩短**: 工具调用超时从 120s 降至 60s
+- **清理死代码**: 移除 `_accumulated_content` 属性（内容已由 MessageCard 追踪）
+- **图标与字号缓存**: 缓存图标前缀与字号，减少重复计算
+
+### 📚 文档 (Documentation)
+
+- 停止按钮呼吸效果设计说明 Spec
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号更新至 v0.4.5
+- 集成完整性验证
+- 新增并更新 SVG 图标资源
+
 ## [v0.4.4] - 2026-07-21
 
 自上一版本以来的变更 | 提交数：36 · 文件变更：20 · +2278/-307 | 贡献者：dingma (8), mading (28)

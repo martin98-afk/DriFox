@@ -10,13 +10,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QPointF, QRectF, Qt
-from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -142,6 +142,100 @@ def _short_weekday(date_str: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════
+# 轻量自绘 tooltip（替代 QToolTip.showText——因全局 monkey-patch 已禁用它）
+# ══════════════════════════════════════════════════════════
+
+
+class _ChartTooltip(QWidget):
+    """自绘 tooltip 气泡，替代 QToolTip.showText。
+
+    设计原因：
+      app/widgets/simple_hover_tooltip.py 在模块加载时全局 monkey-patch 了
+      QToolTip.showText → no-op，导致图表中所有 QToolTip.showText() 调用静默失效。
+      本类提供一个零依赖的自包含替代方案，不违反「不导入 app 内部模块」的设计约束。
+    """
+
+    _padding_h = 10
+    _padding_v = 6
+    _border_radius = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self._text = ""
+        self._bg = QColor(33, 33, 38, 245)
+        self._tc = QColor(255, 255, 255, 230)
+        self._border = QColor(60, 60, 65, 200)
+        self._font_family = "Microsoft YaHei"
+        self._font = QFont(self._font_family, 11)
+        self._font.setWeight(QFont.Normal)
+
+    def set_font_family(self, family: str):
+        """设置 tooltip 字体族，跟随系统/上下文主题"""
+        if family and family != self._font_family:
+            self._font_family = family
+            self._font = QFont(family, 11)
+            self._font.setWeight(QFont.Normal)
+
+    def set_text(self, text: str):
+        """设置文本并重算尺寸"""
+        self._text = text
+        fm = QFontMetrics(self._font)
+        lines = text.split("\n")
+        max_w = max((fm.width(l) for l in lines), default=0)
+        line_h = fm.lineSpacing()
+        w = max_w + self._padding_h * 2
+        h = line_h * len(lines) + self._padding_v * 2
+        self.setFixedSize(max(w, 30), max(h, 26))
+        self.update()
+
+    def show_at_global(self, pos):
+        """在屏幕坐标 pos 附近显示（水平居中于 pos，显示在其上方）"""
+        if not self._text:
+            return
+        self.winId()
+        tx = pos.x() - self.width() // 2
+        ty = pos.y() - self.height() - 8
+
+        # 屏幕边界约束
+        screen = QApplication.primaryScreen()
+        if screen:
+            sg = screen.geometry()
+            tx = max(sg.left() + 2, min(tx, sg.right() - self.width() - 2))
+            if ty < sg.top():
+                ty = pos.y() + 16  # 放鼠标下方
+
+        self.move(tx, ty)
+        self.show()
+
+    def hide_tip(self):
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._border_radius, self._border_radius)
+        painter.setPen(QPen(self._border, 1))
+        painter.setBrush(self._bg)
+        painter.drawPath(path)
+
+        if not self._text:
+            return
+        painter.setPen(self._tc)
+        painter.setFont(self._font)
+        fm = QFontMetrics(self._font)
+        line_h = fm.lineSpacing()
+        y = self._padding_v + fm.ascent()
+        for line in self._text.split("\n"):
+            painter.drawText(self._padding_h, y, line)
+            y += line_h
+
+
+# ══════════════════════════════════════════════════════════
 # 柱状图组件
 # ══════════════════════════════════════════════════════════
 
@@ -159,6 +253,19 @@ class _BarChartWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
         self._hovered_index = -1
+        self._tooltip: Optional[_ChartTooltip] = None
+        self.destroyed.connect(self._cleanup_tooltip)
+
+    def _get_tooltip(self) -> _ChartTooltip:
+        if self._tooltip is None:
+            self._tooltip = _ChartTooltip()
+        return self._tooltip
+
+    def _cleanup_tooltip(self):
+        if self._tooltip is not None:
+            self._tooltip.hide_tip()
+            self._tooltip.deleteLater()
+            self._tooltip = None
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -212,13 +319,18 @@ class _BarChartWidget(QWidget):
                     date_str = label
             except ValueError, IndexError:
                 date_str = label
-            QToolTip.showText(event.globalPos(), f"📊 {date_str}\n会话数: {value}", self)
+            tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_text(f"📊 {date_str}\n会话数: {value}")
+            tt.show_at_global(event.globalPos())
 
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self._hovered_index = -1
         self.update()
+        if self._tooltip:
+            self._tooltip.hide_tip()
         super().leaveEvent(event)
 
     def paintEvent(self, event):
@@ -370,6 +482,19 @@ class _LineChartWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
         self._hovered_index = -1
+        self._tooltip: Optional[_ChartTooltip] = None
+        self.destroyed.connect(self._cleanup_tooltip)
+
+    def _get_tooltip(self) -> _ChartTooltip:
+        if self._tooltip is None:
+            self._tooltip = _ChartTooltip()
+        return self._tooltip
+
+    def _cleanup_tooltip(self):
+        if self._tooltip is not None:
+            self._tooltip.hide_tip()
+            self._tooltip.deleteLater()
+            self._tooltip = None
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -425,13 +550,18 @@ class _LineChartWidget(QWidget):
                     date_str = label
             except ValueError, IndexError:
                 date_str = label
-            QToolTip.showText(event.globalPos(), f"📈 {date_str}\n{_format_number(value)}", self)
+            tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_text(f"📈 {date_str}\n{_format_number(value)}")
+            tt.show_at_global(event.globalPos())
 
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self._hovered_index = -1
         self.update()
+        if self._tooltip:
+            self._tooltip.hide_tip()
         super().leaveEvent(event)
 
     def paintEvent(self, event):
@@ -736,6 +866,19 @@ class _ProjectBarWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
         self._hovered_index = -1
+        self._tooltip: Optional[_ChartTooltip] = None
+        self.destroyed.connect(self._cleanup_tooltip)
+
+    def _get_tooltip(self) -> _ChartTooltip:
+        if self._tooltip is None:
+            self._tooltip = _ChartTooltip()
+        return self._tooltip
+
+    def _cleanup_tooltip(self):
+        if self._tooltip is not None:
+            self._tooltip.hide_tip()
+            self._tooltip.deleteLater()
+            self._tooltip = None
 
     def set_data(self, data: List[Tuple[str, int]]):
         self._data = data
@@ -780,13 +923,18 @@ class _ProjectBarWidget(QWidget):
 
         if self._hovered_index >= 0:
             label, value = self._data[self._hovered_index]
-            QToolTip.showText(event.globalPos(), f"📁 {label}\n会话数: {value}", self)
+            tt = self._get_tooltip()
+            tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_text(f"📁 {label}\n会话数: {value}")
+            tt.show_at_global(event.globalPos())
 
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self._hovered_index = -1
         self.update()
+        if self._tooltip:
+            self._tooltip.hide_tip()
         super().leaveEvent(event)
 
     def paintEvent(self, event):

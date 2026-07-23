@@ -2257,7 +2257,17 @@ class CodeWebViewer(QWebEngineView):
 
             # 检查内部 WebView 是否有可滚动内容（文档高度 > 视口高度）
             viewport_h = self.height()
-            doc_h = self._document_height
+            # 🐛 修复：用 page().contentsSize() 获取更实时的文档高度，
+            # 替代仅靠 JS 异步上报的 _document_height（流式期间滞后 ~100-200ms）。
+            # contentsSize 由 Chromium 在每帧渲染后更新，滞后 < 1 帧（~16ms）。
+            doc_h = 0
+            page = self.page()
+            if page:
+                contents_size = page.contentsSize()
+                if contents_size and contents_size.height() > 0:
+                    doc_h = contents_size.height()
+            if doc_h <= 0:
+                doc_h = self._document_height
 
             # 🐛 修复竞态：_document_height 通过 JS 异步上报，初始值为 0，
             # 此时保守处理——让内部先处理（super().wheelEvent），
@@ -3919,6 +3929,8 @@ class CodeWebViewer(QWebEngineView):
                                 window._userScrolledWithin = false;
                             }}
                         }}
+                        // 同步 _prevScrollTop，让 delta 检测有正确基线
+                        window._prevScrollTop = document.body.scrollTop;
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
 
@@ -4273,22 +4285,30 @@ class CodeWebViewer(QWebEngineView):
                 // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
-                // 🐛 修复 race condition：scroll 事件是异步派发的（Chromium 在下一帧
-                // dispatch），即使同步代码末尾已经 _suppressScrollEvent=false，
-                // pending 的 scroll 事件仍可能在 suppress=false 之后才被 dispatch，
-                // 错误地把程序 auto-scroll 触发的滚动标记为"用户主动滚动"，导致
-                // 后续 updateContent 跳过 auto-scroll → 用户视觉上"卡在顶部"。
-                // 修复：用时间戳识别 auto-scroll 触发的 scroll 事件（< 50ms 内视为程序驱动）。
-                window._autoScrollTime = 0;
+                // 🐛 修复 race condition：用 scrollTop 差值区分用户滚动 vs 程序自动滚动。
+                // 原实现用 200ms 时间窗抑制 auto-scroll 事件，但快速流式时 auto-scroll
+                // 频繁触发导致时间窗永不过期，用户所有滚轮事件被永久忽略（卡在底部）。
+                // 新方案：用户滚轮单次增量 < 300px，auto-scroll（scrollTop=scrollHeight）
+                // 跳变 > 300px。通过 delta 判断替代时间窗，不受流式频率影响。
+                window._prevScrollTop = 0;
                 document.body.addEventListener('scroll', function() {{
-                    if (window._suppressScrollEvent) return;
-                    // 🐛 修复：增加时间窗到 200ms。在 QtWebEngine 中，innerHTML 替换
-                    // 触发的 scroll 事件（scrollTop=0）可能因事件循环繁忙而延迟 dispatch，
-                    // 原 50ms 窗口不足时会被误判为用户主动滚动，导致后续 auto-scroll 跳过。
-                    // 用户真实滚动会连续产生多帧 scroll 事件（~60fps），第一帧可能在 200ms
-                    // 窗口内被忽略，但后续帧会正常通过并正确标记 _userScrolledWithin=true。
-                    if (performance.now() - window._autoScrollTime < 200) return;
-                    window._userScrolledWithin = true;
+                    var _st = document.body.scrollTop;
+                    // 即使被抑制也保持 _prevScrollTop 同步，避免 auto-scroll 后首次
+                    // 用户滚动因 _prevScrollTop 陈旧而导致 delta 误判（大跳变）。
+                    if (window._suppressScrollEvent) {{
+                        window._prevScrollTop = _st;
+                        return;
+                    }}
+                    var delta = Math.abs(_st - window._prevScrollTop);
+                    window._prevScrollTop = _st;
+                    // 用户滚轮单步增量 ~35-120px（取决于滚轮设置和滚动速度）。
+                    // auto-scroll 跳变 > 500px（内容显著增长）。
+                    // Page Down / 键盘滚动 增量可能更大（~视口高度），
+                    // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
+                    // 仅过滤 auto-scroll 直接跳到底部的大跳变。
+                    if (delta < 2000) {{
+                        window._userScrolledWithin = true;
+                    }}
                 }});
                 // ======================================================
 
@@ -4515,8 +4535,8 @@ class CodeWebViewer(QWebEngineView):
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
                 // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
                 // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
-                // 附加修复（race condition）：打 auto-scroll 时间戳，防止异步派发的
-                // scroll 事件在 _suppressScrollEvent=false 后被误判为用户主动滚动。
+                // 用 scrollTop 差值识别用户滚动（替代原 200ms 时间窗，避免
+                // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
                     document.body.scrollTop = document.body.scrollHeight;
@@ -4527,6 +4547,8 @@ class CodeWebViewer(QWebEngineView):
                         window._userScrolledWithin = false;
                     }}
                 }}
+                // 同步 _prevScrollTop，使 delta 检测有正确的基线
+                window._prevScrollTop = document.body.scrollTop;
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
                 reportHeightDebounced();
@@ -4779,6 +4801,7 @@ class CodeWebViewer(QWebEngineView):
                 "document.body.scrollTop=document.body.scrollHeight;"
                 "window._userScrolledWithin=false;"
                 "}}"
+                "window._prevScrollTop=document.body.scrollTop;"
                 "window._autoScrollTime=performance.now();"
                 "window._suppressScrollEvent=false;"
             )
@@ -6066,6 +6089,10 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
+        # 🐛 清空 LRU 渲染缓存 + 骨架 HTML 缓存，强制下次渲染使用新主题颜色。
+        # 否则 _render_markdown_to_html_cached 的 @lru_cache 会返回旧主题的 HTML
+        #（旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
+        clear_global_render_cache()
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
         _update_icon_prefix()
         global _CODE_FONT_SIZE
@@ -7224,6 +7251,7 @@ class MessageCard(SimpleCardWidget):
                     "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
+                    "  window._prevScrollTop = document.body.scrollTop;"
                     "  window._autoScrollTime = performance.now();"
                     "  window._suppressScrollEvent = false;"
                     "})();"
@@ -7709,6 +7737,7 @@ class MessageCard(SimpleCardWidget):
                             window._userScrolledWithin = false;
                         }}
                     }}
+                    window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
@@ -7735,6 +7764,7 @@ class MessageCard(SimpleCardWidget):
                         window._userScrolledWithin = false;
                     }}
                 }}
+                window._prevScrollTop = document.body.scrollTop;
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
                 // 🐛 修复：工具区内部自动滚底
@@ -7916,6 +7946,7 @@ class MessageCard(SimpleCardWidget):
                         }}
                         // 🐛 修复：工具区内部自动滚底
                         if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
+                        window._prevScrollTop = document.body.scrollTop;
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
                         hr();
@@ -7948,6 +7979,7 @@ class MessageCard(SimpleCardWidget):
                     }}
                     // 🐛 修复：工具区（#tool-content）内部自动滚底
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
+                    window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     hr();
@@ -7970,6 +8002,7 @@ class MessageCard(SimpleCardWidget):
                             window._userScrolledWithin = false;
                         }}
                     }}
+                    window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     // 工具区内部自动滚底（新块追加后）

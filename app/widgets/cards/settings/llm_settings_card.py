@@ -36,6 +36,7 @@ from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
+from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
@@ -232,6 +233,10 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.setContentsMargins(0, 4, 0, 4)
         content_layout.setSpacing(6)
 
+        # ---- Gitee 账号绑定（最顶部） ----
+        self.giteeCard = GiteeCard(self)
+        content_layout.addWidget(self.giteeCard)
+
         # ---- 大模型分隔标签 ----
         self._sep_llm_label = self._make_sep_label("大模型")
         self._section_anchors["llm"] = self._sep_llm_label
@@ -314,7 +319,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard = SwitchSettingCard(
             FluentIcon.SYNC,
             "锁屏远程",
-            "保持系统唤醒、屏幕常亮，适合远程操控。",
+            "保持系统唤醒、屏幕常亮。",
             configItem=self.cfg.lock_screen_remote_enabled,
             parent=self,
         )

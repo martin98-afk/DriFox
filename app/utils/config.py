@@ -13,6 +13,7 @@
 import atexit
 from copy import deepcopy
 from enum import Enum
+import uuid
 
 import orjson as json
 from loguru import logger
@@ -310,7 +311,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.4.4"
+    current_version = "v0.4.5"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -458,9 +459,23 @@ class Settings(QConfig):
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
     gitee_token = ConfigItem("Gitee", "Token", "a5dcb6e2e7776143b7a7e7685a1f33a3")
     gitee_owner = ConfigItem("Gitee", "Owner", "dingmama123141")
-    gitee_repo = ConfigItem("Gitee", "Repo", "canvas-mind-components")
-    gitee_path = ConfigItem("Gitee", "Path", "drifox")
+    gitee_repo = ConfigItem("Gitee", "Repo", "DriFox_share")
+    gitee_path = ConfigItem("Gitee", "Path", uuid.uuid4().hex)
     gitee_branch = ConfigItem("Gitee", "Branch", "master")
+
+    # --- 用户 OAuth 绑定 ---
+    gitee_bound = ConfigItem("Gitee", "Bound", False, BoolValidator())
+    gitee_user_token = ConfigItem("Gitee", "UserToken", "")
+    gitee_user_owner = ConfigItem("Gitee", "UserOwner", "")
+    gitee_user_repo = ConfigItem("Gitee", "UserRepo", "DriFox_uploads")
+
+    # OAuth 应用凭证（内置）
+    gitee_oauth_client_id = ConfigItem(
+        "Gitee", "OAuthClientID", "3efedde73e3c9e698b84a5f9ef781ad771059a01dd8fc839752cf0aed70037c2"
+    )
+    gitee_oauth_client_secret = ConfigItem(
+        "Gitee", "OAuthClientSecret", "73236836a816f2d2de6826b86e36bf9cddf8ff551290be2c4977b620a98c74c6"
+    )
 
     # ========== LSP 配置 ==========
     lsp_auto_diagnose = ConfigItem("LSP", "AutoDiagnose", False, BoolValidator())
