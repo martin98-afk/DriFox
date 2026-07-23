@@ -743,6 +743,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _auto_loop_worker: Optional[AutoLoopWorker] = None
     _history_preview_messages: Optional[List[dict]] = None
     _history_preview_title: str = ""
+
+    # 自动压缩
+    _auto_compact_in_progress: bool = False  # 防重入守卫
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -4649,6 +4652,15 @@ class OpenAIChatToolWindow(ToolWindow):
         base_task = "请压缩当前对话上下文，生成详细的工作摘要"
         task_description = f"{base_task}。用户补充说明：{user_hint}" if user_hint else base_task
 
+        # 自动压缩时要求子智能体在摘要末尾输出用户最新提问，便于继续执行
+        if clear_after and not user_hint:
+            task_description += (
+                f"\n\n## 重要：压缩完成后需继续执行\n"
+                f"在标准的 5 段输出末尾，追加一节 ## Continue：\n"
+                f"从对话上下文中找到用户最新的提问，原样输出（不要修改任何文字、不要翻译、不要总结）。\n"
+                f"这是为了压缩完成后 AI 能紧接用户的提问继续执行，不要停下。"
+            )
+
         # 仅在需要清空时才挂接完成回调，避免污染正常 compact 流程
         on_finished_cb = None
         if clear_after:
@@ -4690,9 +4702,39 @@ class OpenAIChatToolWindow(ToolWindow):
         当 PreAssistantMessage hook 检测到上下文使用比例超过阈值时，
         由 backend.auto_compact_requested 信号触发。
 
-        直接复用 /compact --clear 命令路径，保证行为完全一致。
+        流程：
+        1. 停止当前流式输出（与手动 /compact --clear 行为一致）
+        2. 保存中断消息到 session（partial 消息不丢失）
+        3. 触发上下文压缩子智能体
+
+        防重入：若上一次自动压缩尚未完成，跳过本次触发。
         """
+        # 防重入：上一次自动压缩未完成时跳过
+        if self._auto_compact_in_progress:
+            logger.info(f"[MainWidget] 自动压缩已在执行中，跳过本次触发 (ratio={ratio:.1%})")
+            return
+
         logger.info(f"[MainWidget] 自动上下文压缩触发 (ratio={ratio:.1%})")
+
+        # 先停止当前流式输出，确保会话状态稳定
+        # 与手动 /compact --clear 一致：停止后再压缩，避免竞态条件：
+        #  - Worker 的 _on_messages_updated 不会在清空后覆盖 session
+        #  - UI 不会被 _display_current_session 重建后丢失流式卡片引用
+        if self._is_streaming and self.backend.chat_engine:
+            self._is_streaming = False
+            self._set_ai_state("idle")
+            self._toggle_send_stop(False)
+            if self._current_assistant_card:
+                self._current_assistant_card.stop_streaming_anim()
+                self._current_assistant_card.finish_streaming()
+            try:
+                interrupted = self.backend.stop_streaming()
+                if interrupted:
+                    self._apply_interrupted_messages_to_session(interrupted)
+            except Exception as e:
+                logger.warning(f"[MainWidget] 自动压缩停止流式失败: {e}")
+
+        self._auto_compact_in_progress = True
         QTimer.singleShot(0, lambda: self._trigger_context_compaction(clear_after=True))
 
     def _on_compact_clear_finished(self, task_id: str, result: str, session_id: str):
@@ -4713,6 +4755,9 @@ class OpenAIChatToolWindow(ToolWindow):
             result: 子智能体返回的摘要内容
             session_id: 触发压缩时锁定的会话 ID（用于按 ID 找到原 session，不依赖 "current"）
         """
+        # 重置自动压缩进度标志（即使 early return 也要重置，防止标志位卡死）
+        self._auto_compact_in_progress = False
+
         if getattr(self, "_is_destroyed", False):
             return
         # 校验执行结果：仅在无错误时清空
@@ -4765,6 +4810,19 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id == session_id:
             self._display_current_session()
 
+        # 自动压缩：将压缩摘要存入 compaction_cache，供后续对话提供上下文
+        if target_session and result:
+            src_msg_count = len(target_session.messages) if target_session.messages else 0
+            target_session.set_compaction_cache(
+                {
+                    "active": True,
+                    "kind": "auto_compact",
+                    "summary_message": {"role": "system", "content": str(result)},
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "source_message_count": src_msg_count,
+                }
+            )
+
     def _on_compact_finished(self, task_id: str, result: str, session_id: str):
         """普通 compact 完成后触发 SessionStart state='compact'
 
@@ -4773,6 +4831,9 @@ class OpenAIChatToolWindow(ToolWindow):
             result: 子智能体返回的摘要内容
             session_id: 触发压缩时锁定的会话 ID
         """
+        # 重置自动压缩进度标志（与 _on_compact_clear_finished 一致）
+        self._auto_compact_in_progress = False
+
         if getattr(self, "_is_destroyed", False):
             return
         # 校验执行结果：仅在无错误时触发
@@ -5560,9 +5621,8 @@ class OpenAIChatToolWindow(ToolWindow):
             icon=InfoBarIcon.INFORMATION,
             title="绑定 Gitee 账号",
             content=(
-                "• 配置与插件自动备份到 Gitee 私有仓库，仅自己可见\n"
+                "• 配置与自定义插件自动备份，仅自己可见\n"
                 "• 会话记录与项目文件分享可选择公开或私有仓库\n"
-                "• 多设备间恢复配置，换机无缝衔接"
             ),
             orient=Qt.Vertical,
             isClosable=True,
