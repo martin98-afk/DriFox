@@ -777,7 +777,7 @@ class ShortcutManagerCard(QWidget):
 
             dest_path.write_text(content, encoding="utf-8")
             logger.info(f"[ShortcutManager] 已保存: /{cmd_name} → {shortcut}")
-            self._reload_commands()
+            # 文件写入触发 watchfiles 文件监控，自动重载命令并刷新快捷键绑定
             return True
         except Exception as e:
             logger.error(f"[ShortcutManager] 保存失败: {e}")
@@ -799,34 +799,11 @@ class ShortcutManagerCard(QWidget):
                     logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
                     self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
                     break
-            self._reload_commands()
+            # 文件删除触发 watchfiles 文件监控，自动重载命令并刷新快捷键绑定
             QTimer.singleShot(300, self._refresh)
         except Exception as e:
             logger.error(f"[ShortcutManager] 恢复失败: {e}")
             self._count_lb.setText(f"❌ 恢复失败: {e}")
-
-    def _reload_commands(self):
-        """强制重新加载命令（刷新 user-custom 覆盖）并同步所有窗口的快捷键注册"""
-        try:
-            from app.core.builtin_commands import reload_all_commands
-
-            reload_all_commands()
-
-            # 同步刷新所有窗口的快捷键绑定（QShortcut 注册）
-            try:
-                from app.main_widget import OpenAIChatToolWindow
-
-                for win in OpenAIChatToolWindow._instances:
-                    if getattr(win, "_is_destroyed", False):
-                        continue
-                    try:
-                        win._register_command_shortcuts()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"[ShortcutManager] 重新加载命令失败: {e}")
 
     # ── 关闭 ──
 
