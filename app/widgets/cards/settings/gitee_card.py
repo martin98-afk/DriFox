@@ -13,10 +13,10 @@ from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
-from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, PrimaryPushButton, SettingCard
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard
 
 from app.utils.config import Settings
-from app.utils.design_tokens import ButtonStyles, Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.common_dialogs import ConfirmDialog
 
@@ -212,10 +212,20 @@ class GiteeCard(SettingCard):
 
         self.hBoxLayout.addSpacing(6)
 
-        self._bind_btn = PrimaryPushButton("绑定")
+        self._bind_btn = QPushButton("绑定")
         self._bind_btn.setFixedWidth(76)
         self._bind_btn.setMinimumHeight(30)
-        self._bind_btn.setStyleSheet(ButtonStyles.primary_action())
+        self._bind_btn.setCursor(Qt.PointingHandCursor)
+        self._bind_btn.setStyleSheet(
+            f"QPushButton {{"
+            f"background-color: #0078d4; color: #ffffff; border: none;"
+            f"border-radius: 5px; padding: 5px 16px; {font_size_css(13)}"
+            f"font-weight: bold;"
+            f"}}"
+            f"QPushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
+            f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
+            f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
+        )
         self._bind_btn.clicked.connect(self._on_bind_clicked)
         self.hBoxLayout.addWidget(self._bind_btn)
 
@@ -250,10 +260,14 @@ class GiteeCard(SettingCard):
             self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._bind_btn.setText("解绑")
+            self._bind_btn.setCursor(Qt.PointingHandCursor)
             self._bind_btn.setStyleSheet(
+                f"QPushButton {{"
                 f"color: #fa5151; border: 1px solid #fa5151; border-radius: 6px;"
                 f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
                 f"background: transparent;"
+                f"}}"
+                f"QPushButton:hover {{ background-color: rgba(250, 81, 81, 0.1); }}"
             )
             # 已绑定 → 自动启动同步（如尚未启动）
             self._auto_enable_sync()
@@ -263,7 +277,17 @@ class GiteeCard(SettingCard):
             self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
             self._avatar.setToolTip("未绑定")
             self._bind_btn.setText("绑定")
-            self._bind_btn.setStyleSheet(ButtonStyles.primary_action())
+            self._bind_btn.setCursor(Qt.PointingHandCursor)
+            self._bind_btn.setStyleSheet(
+                f"QPushButton {{"
+                f"background-color: #0078d4; color: #ffffff; border: none;"
+                f"border-radius: 5px; padding: 5px 16px; {font_size_css(13)}"
+                f"font-weight: bold;"
+                f"}}"
+                f"QPushButton:hover {{ background-color: {Colors.BORDER_ACCENT}; }}"
+                f"QPushButton:pressed {{ background-color: {Colors.SELECTED_BG}; }}"
+                f"QPushButton:disabled {{ background-color: #444; color: #888; }}"
+            )
             self._sync_dot.hide()
 
     def _auto_enable_sync(self):
