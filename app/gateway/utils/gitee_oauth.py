@@ -264,14 +264,13 @@ def _ensure_repo(token: str, owner: str, repo: str, private: bool) -> Tuple[bool
         logger.info(f"[GiteeOAuth] 仓库已存在: {owner}/{repo}，复用")
         return True, f"复用已有仓库：{owner}/{repo}"
 
-    # 创建仓库（先创建，再通过 PATCH 设置可见性）
+    # 创建仓库
     logger.info(f"[GiteeOAuth] 创建仓库: {owner}/{repo}")
     create_resp = requests.post(
         "https://gitee.com/api/v5/user/repos",
         data={
             "access_token": token,
             "name": repo,
-            "private": "false",  # 先以默认创建
             "description": "DriFox 自动创建的上传仓库",
             "auto_init": "true",
         },
@@ -281,17 +280,18 @@ def _ensure_repo(token: str, owner: str, repo: str, private: bool) -> Tuple[bool
         err = _parse_error(create_resp)
         return False, f"创建仓库失败：{err}"
 
-    # 通过 PATCH 设置最终可见性
-    if private:
-        patch_resp = requests.patch(
-            GITEE_REPO_URL.format(owner=owner, repo=repo),
-            data={"access_token": token, "name": repo, "private": "true"},
-            timeout=10,
-        )
-        if patch_resp.status_code != 200:
-            err = _parse_error(patch_resp)
-            logger.warning(f"[GiteeOAuth] 设置私有失败: {err}")
-            return False, f"设置仓库可见性失败：{err}"
+    # 创建后显式设置可见性（创建 API 的 private 参数不可靠）
+    logger.info(f"[GiteeOAuth] 设置可见性: {owner}/{repo} private={private}")
+    visibility = "true" if private else "false"
+    patch_resp = requests.patch(
+        GITEE_REPO_URL.format(owner=owner, repo=repo),
+        data={"access_token": token, "name": repo, "private": visibility},
+        timeout=10,
+    )
+    if patch_resp.status_code != 200:
+        err = _parse_error(patch_resp)
+        logger.warning(f"[GiteeOAuth] 设置可见性失败: {err}")
+        return False, f"设置仓库可见性失败：{err}"
 
     logger.info(f"[GiteeOAuth] 仓库创建成功: {owner}/{repo} (private={private})")
     return True, f"仓库已创建：{owner}/{repo}"
