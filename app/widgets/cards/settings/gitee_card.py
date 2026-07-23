@@ -5,11 +5,12 @@ Gitee 账号绑定设置卡片
 继承 SettingCard：图标 + 标题 + 说明文字自动布局，
 右侧追加头像 + 绑定/解绑按钮。
 """
+
 import hashlib
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, PrimaryPushButton, SettingCard
@@ -20,9 +21,18 @@ from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.common_dialogs import ConfirmDialog
 
 _AVATAR_COLORS = [
-    "#c71d23", "#e74c3c", "#e67e22", "#f39c12",
-    "#27ae60", "#2ecc71", "#1abc9c", "#3498db",
-    "#2980b9", "#9b59b6", "#8e44ad", "#34495e",
+    "#c71d23",
+    "#e74c3c",
+    "#e67e22",
+    "#f39c12",
+    "#27ae60",
+    "#2ecc71",
+    "#1abc9c",
+    "#3498db",
+    "#2980b9",
+    "#9b59b6",
+    "#8e44ad",
+    "#34495e",
 ]
 
 
@@ -178,7 +188,7 @@ class GiteeCard(SettingCard):
         super().__init__(
             get_icon("gitee"),
             "Gitee 账号绑定",
-            "绑定后可云端备份配置、分享会话",
+            "云端备份配置、分享会话",
             parent,
         )
         self.cfg = Settings.get_instance()
@@ -221,6 +231,7 @@ class GiteeCard(SettingCard):
         self.hBoxLayout.addSpacing(2)
 
         from app.core.config_sync import ConfigSyncService
+
         self._sync_svc = ConfigSyncService.get_instance()
         self._sync_svc.stateChanged.connect(self._on_sync_state_changed)
         self._sync_svc.syncDone.connect(self._on_initial_sync_done)
@@ -244,6 +255,8 @@ class GiteeCard(SettingCard):
                 f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
                 f"background: transparent;"
             )
+            # 已绑定 → 自动启动同步（如尚未启动）
+            self._auto_enable_sync()
         else:
             self._bound_owner = ""
             self._bound_repo = ""
@@ -253,6 +266,16 @@ class GiteeCard(SettingCard):
             self._bind_btn.setStyleSheet(ButtonStyles.primary_action())
             self._sync_dot.hide()
 
+    def _auto_enable_sync(self):
+        """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""
+        if self._sync_svc._state != "disabled":
+            return
+        token = self.cfg.gitee_user_token.value
+        owner = self.cfg.gitee_user_owner.value
+        if token and owner:
+            logger.info("[GiteeCard] 检测到已绑定，自动启动配置同步")
+            self._sync_svc.enable(token, owner)
+
     # ── 同步状态指示 ─────────────────────────────────────
 
     def _on_sync_state_changed(self, state: str):
@@ -261,21 +284,15 @@ class GiteeCard(SettingCard):
         if state == "disabled":
             self._sync_dot.hide()
         elif state == "idle":
-            self._sync_dot.setStyleSheet(
-                f"background: #3fb950; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #3fb950; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("同步正常")
             self._sync_dot.show()
         elif state == "syncing":
-            self._sync_dot.setStyleSheet(
-                f"background: #58a6ff; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #58a6ff; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("正在同步…")
             self._sync_dot.show()
         elif state == "error":
-            self._sync_dot.setStyleSheet(
-                f"background: #f85149; border-radius: {dot_size // 2}px;"
-            )
+            self._sync_dot.setStyleSheet(f"background: #f85149; border-radius: {dot_size // 2}px;")
             self._sync_dot.setToolTip("同步失败，点击重试")
             self._sync_dot.setCursor(Qt.PointingHandCursor)
             self._sync_dot.mousePressEvent = self._on_sync_retry
@@ -284,33 +301,39 @@ class GiteeCard(SettingCard):
     def _on_sync_retry(self, event):
         """点击红点重试"""
         import threading
+
         t = threading.Thread(target=self._sync_svc.upload, daemon=True)
         t.start()
 
     def _on_initial_sync_done(self, success: bool, message: str):
         """首次同步完成回调（仅绑定后首次检查远端时触发）"""
         if success:
-            # 远端配置恢复 → 触发完整 UI 刷新
-            self._refresh_app_ui()
-            InfoBar.success(
-                title="云端同步",
-                content=message,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=3000,
-                parent=self.window(),
-            )
+            # [PERF] 延迟 UI 刷新 2 秒：让窗口完全就绪后再应用远端配置，
+            # 避免在窗口刚出现时 dispatch_refresh() 造成的可见闪烁。
+            # _refresh_app_ui 内部调用 theme_manager.dispatch_refresh()
+            # 会重算所有颜色 token 并重新应用样式，~80ms 主线程工作。
+            QTimer.singleShot(2000, self._refresh_app_ui)
+            # 静默同步成功，不弹 InfoBar（避免启动时打扰）
         # 失败时由状态机显示红点，不弹 InfoBar
 
     def _refresh_app_ui(self):
-        """配置恢复后刷新整个 UI：主题、颜色、所有设置卡片"""
+        """配置恢复后刷新整个 UI：主题、颜色，关闭设置弹窗让用户重开"""
         try:
             from app.utils.theme_manager import theme_manager
 
-            # dispatch_refresh 自动执行：
-            #   Colors.refresh() → on_theme_changed() → 所有 widget.refresh_theme()
-            # main_widget.refresh_theme() → _apply_runtime_ui_settings(scope="theme")
-            #   → setTheme() + 颜色/字体/卡片/窗口背景/设置弹窗 全面刷新
+            # 1. 视觉刷新：主题/颜色/字体/卡片样式
             theme_manager.dispatch_refresh()
+
+            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建
+            main_win = self.window()
+            if main_win and hasattr(main_win, "_settings_popup"):
+                popup = main_win._settings_popup
+                if popup is not None and popup.isVisible():
+                    # 通过 card_manager 正确关闭（清理容器引用）
+                    if hasattr(main_win, "_card_manager") and hasattr(main_win, "_window_id"):
+                        main_win._card_manager.hide_card("settings", main_win._window_id)
+                # 置空引用：强制 _build_settings_popup 下次重新创建
+                main_win._settings_popup = None
 
             logger.info("[GiteeCard] UI 已根据恢复的配置全面刷新")
         except Exception as e:
@@ -339,6 +362,7 @@ class GiteeCard(SettingCard):
     def _start_oauth_with_backup(self, repo_private: bool):
         """绑定前先备份本地配置"""
         from app.core.config_sync import ConfigSyncService
+
         ConfigSyncService.get_instance().backup_local()
         self._start_oauth(repo_private)
 

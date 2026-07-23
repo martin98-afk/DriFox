@@ -340,6 +340,31 @@ class _ProjectUrlImportThread(QThread):
             self.finished.emit("", f"下载失败: {e}")
 
 
+class _ProjectExportThread(QThread):
+    """后台线程：导出项目为 .drifox_project 压缩包，避免大项目 UI 冻结。
+
+    exportDone 信号携带 (zip_path, error)，二者有且仅有一个非空。
+    """
+
+    exportDone = pyqtSignal(str, str)
+
+    def __init__(self, history_manager, project_name: str, root_dir: str):
+        super().__init__()
+        self._hm = history_manager
+        self._project_name = project_name
+        self._root_dir = root_dir
+
+    def run(self):
+        try:
+            zip_path = self._hm.export_project_archive(self._project_name, self._root_dir)
+            if zip_path:
+                self.exportDone.emit(zip_path, "")
+            else:
+                self.exportDone.emit("", f"项目「{self._project_name}」无会话或导出异常")
+        except Exception as e:
+            self.exportDone.emit("", str(e))
+
+
 class _ProjectUploadThread(QThread):
     """后台线程：上传 .drifox_project 文件到 Gitee，避免 UI 冻结。
 
@@ -1732,6 +1757,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
             QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
+            # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
+            QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
 
     def _start_subagent_log_cleanup(self):
         """定期清理子智能体日志，避免无限堆积"""
@@ -2235,8 +2262,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
-        # 大幅延迟到窗口可交互之后再构建（1500ms），让窗口外壳先出现 + 用户能先打字
-        QTimer.singleShot(1500, self._build_settings_popup)
+        # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
+        # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
+        # 下载+UI 刷新（~300ms 主线程工作），避免在窗口刚出现时发生可见的 UI 闪烁。
+        QTimer.singleShot(3500, self._build_settings_popup)
 
         # ── 隐藏编辑卡片懒创建标记 ──
         # hook/provider/mcp 三张编辑卡片从直接创建改为首次显示时懒创建，
@@ -2541,7 +2570,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
         # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
-        self._init_builtin_commands()
+        # [PERF] 延迟 100ms 到首帧之后注册，节省 ~200ms 关键路径时间。
+        # 为什么是 100ms 而非 singleShot(0)：Qt QTimer 按到期时间排序，
+        # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
+        # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
+        # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
+        QTimer.singleShot(100, self._init_builtin_commands)
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
@@ -5508,6 +5542,67 @@ class OpenAIChatToolWindow(ToolWindow):
                 top_window.raise_()
             self._settings_popup.raise_()
             self._settings_popup.activateWindow()
+
+    def _check_gitee_sync_reminder(self):
+        """启动后检查：未绑定 Gitee 且提醒开启时，弹 InfoBar 引导绑定"""
+        if self.cfg.gitee_bound.value:
+            return
+        if not self.cfg.gitee_sync_remind.value:
+            return
+        if not hasattr(self, "_settings_popup") or self._settings_popup is None:
+            return
+
+        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
+        from PyQt5.QtWidgets import QWidget, QHBoxLayout
+        from PyQt5.QtCore import Qt
+
+        infobar = InfoBar(
+            icon=InfoBarIcon.INFORMATION,
+            title="绑定 Gitee 账号",
+            content=(
+                "• 配置与插件自动备份到 Gitee 私有仓库，仅自己可见\n"
+                "• 会话记录与项目文件分享可选择公开或私有仓库\n"
+                "• 多设备间恢复配置，换机无缝衔接"
+            ),
+            orient=Qt.Vertical,
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=self,
+        )
+
+        # 按钮容器（水平布局，右对齐）
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+
+        btn_bind = PrimaryPushButton("立即绑定")
+        btn_bind.setFixedWidth(90)
+        btn_bind.clicked.connect(lambda: self._open_gitee_bind_from_reminder(infobar))
+        btn_layout.addWidget(btn_bind)
+
+        btn_dismiss = PushButton("不再提醒")
+        btn_dismiss.setFixedWidth(90)
+        btn_dismiss.clicked.connect(lambda: self._dismiss_gitee_reminder(infobar))
+        btn_layout.addWidget(btn_dismiss)
+
+        infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
+        infobar.show()
+
+    def _open_gitee_bind_from_reminder(self, infobar):
+        """提醒中点击「立即绑定」：关闭提醒，打开设置定位到 Gitee 卡片"""
+        infobar.close()
+        self._open_settings_popup()
+        # GiteeCard 在设置页最顶部，滚动到顶部即可
+        if hasattr(self, "_settings_popup") and self._settings_popup:
+            scroll_bar = self._settings_popup.scroll_area.verticalScrollBar()
+            scroll_bar.setValue(0)
+
+    def _dismiss_gitee_reminder(self, infobar):
+        """提醒中点击「不再提醒」：持久化设置并关闭"""
+        self.cfg.set(self.cfg.gitee_sync_remind, False, save=True)
+        infobar.close()
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):
         """服务商编辑保存后的回调
@@ -14580,10 +14675,20 @@ class OpenAIChatToolWindow(ToolWindow):
             self.pixel_pet.set_state("idle")
 
     def _on_export_project(self, project_name: str):
-        """导出项目为 .drifox_project 压缩包 — 先选方式再导出"""
+        """导出项目为 .drifox_project 压缩包 — 先选方式再导出（后台线程避免 UI 冻结）"""
         if not self.history_manager:
             InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
             return
+
+        # 防止重复导出 — 注意 C++ 对象可能已被 deleteLater 销毁
+        if hasattr(self, "_export_thread"):
+            try:
+                if self._export_thread is not None and self._export_thread.isRunning():
+                    InfoBar.warning(title="", content="导出进行中，请稍候…", duration=2000, parent=self)
+                    return
+            except RuntimeError:
+                # C++ 对象已被 deleteLater 销毁，清理 Python 引用后继续
+                self._export_thread = None
 
         # 先弹出选择对话框，再根据选择执行导出
         dialog = _ProjectExportChoiceDialog(project_name, parent=self.window())
@@ -14598,27 +14703,36 @@ class OpenAIChatToolWindow(ToolWindow):
             if self.pixel_pet:
                 self.pixel_pet.set_state("warning")
 
-            zip_path = self.history_manager.export_project_archive(project_name, root_dir)
-
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
-
-            if not zip_path:
-                InfoBar.error(
-                    title="导出失败",
-                    content=f"项目「{project_name}」无会话或导出异常",
-                    duration=3000,
-                    parent=self,
-                )
-                return
-
-            if mode == _ProjectExportChoiceDialog.EXPORT_LOCAL:
-                self._on_export_local(zip_path, project_name)
-            elif mode == _ProjectExportChoiceDialog.EXPORT_UPLOAD:
-                self._on_export_upload(zip_path, project_name)
+            # 后台线程导出 ZIP，避免大项目阻塞 UI
+            self._export_thread = _ProjectExportThread(self.history_manager, project_name, root_dir)
+            self._export_thread.exportDone.connect(
+                lambda zp, err, m=mode, pn=project_name: self._on_project_export_done(zp, err, pn, m)
+            )
+            self._export_thread.finished.connect(self._export_thread.deleteLater)
+            self._export_thread.finished.connect(lambda: setattr(self, '_export_thread', None))
+            self._export_thread.start()
 
         dialog.exportChosen.connect(_on_choice)
         dialog.exec_()
+
+    def _on_project_export_done(self, zip_path: str, error: str, project_name: str, mode: int):
+        """后台导出完成回调（主线程）"""
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
+
+        if error:
+            InfoBar.error(
+                title="导出失败",
+                content=error,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        if mode == _ProjectExportChoiceDialog.EXPORT_LOCAL:
+            self._on_export_local(zip_path, project_name)
+        elif mode == _ProjectExportChoiceDialog.EXPORT_UPLOAD:
+            self._on_export_upload(zip_path, project_name)
 
     def _insert_project_share_record(self, project_name: str, zip_path: str, upload_url: str = ""):
         """插入项目导出分享记录"""

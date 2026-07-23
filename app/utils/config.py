@@ -372,14 +372,14 @@ class Settings(QConfig):
     ui_font_size = OptionsConfigItem(
         "UI",
         "FontSize",
-        "medium",
+        "large",
         OptionsValidator(["small", "medium", "large", "superlarge"]),
     )
     ui_theme_style = OptionsConfigItem(
         "UI",
         "ThemeStyle",
-        "fallout",
-        OptionsValidator(["fallout"]),  # 运行时动态补充
+        "lumia",
+        OptionsValidator(["lumia"]),  # 运行时动态补充
     )
     ui_light_mode = ConfigItem("UI", "LightMode", True, BoolValidator())
 
@@ -468,6 +468,7 @@ class Settings(QConfig):
     gitee_user_token = ConfigItem("Gitee", "UserToken", "")
     gitee_user_owner = ConfigItem("Gitee", "UserOwner", "")
     gitee_user_repo = ConfigItem("Gitee", "UserRepo", "DriFox_uploads")
+    gitee_sync_remind = ConfigItem("Gitee", "SyncRemind", True, BoolValidator())
 
     # OAuth 应用凭证（内置）
     gitee_oauth_client_id = ConfigItem(
