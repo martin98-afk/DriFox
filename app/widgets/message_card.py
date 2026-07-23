@@ -6066,6 +6066,10 @@ class MessageCard(SimpleCardWidget):
 
     def refresh_theme(self):
         """刷新主题颜色，响应全局主题切换"""
+        # 🐛 清空 LRU 渲染缓存 + 骨架 HTML 缓存，强制下次渲染使用新主题颜色。
+        # 否则 _render_markdown_to_html_cached 的 @lru_cache 会返回旧主题的 HTML
+        #（旧 pygments 代码高亮 + 旧图标路径），导致代码块颜色与背景混淆而"消失"。
+        clear_global_render_cache()
         # 同步全局性能缓存（图标前缀和字号），确保下次渲染使用新主题
         _update_icon_prefix()
         global _CODE_FONT_SIZE

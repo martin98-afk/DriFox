@@ -84,6 +84,15 @@ class UIEngine(BaseEngine):
             executor=self._conversation_executor,
         )
 
+        # ===== 工具 schema token 缓存：避免 get_context_usage_snapshot 频繁触发 get_builtin_tools_schema =====
+        # tools/init.py 虽有 5 秒 TTL，但工具执行间隔常超 5 秒（6~11s），缓存频繁失效。
+        # 此处加一层 30 秒独立缓存，get_context_usage_snapshot 直接复用 tools 列表和已算好的 tools_tokens。
+        self._tools_schema_cache: Dict[str, Any] = {
+            "timestamp": 0.0,
+            "tools": None,
+            "tokens": 0,
+        }
+
         # ===== Adapter 信号 → UIEngine 回调 =====
         self._adapter.content_received.connect(lambda p: self._emit("content_received", p))
         self._adapter.reasoning_content_received.connect(lambda p: self._emit("reasoning_content_received", p))
@@ -523,15 +532,37 @@ class UIEngine(BaseEngine):
         # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
         # 是本地估算与 API 返回的 prompt_tokens 差异巨大的主因之一。
-        if self._current_agent:
-            available_tools = self._get_agent_manager().get_agent_tools_schema(
-                self._current_agent
-            )
+        #
+        # 🚀 性能优化：30 秒缓存 tools 列表和 tools_tokens，避免每次工具执行后
+        # 的上下文刷新都触发 get_agent_tools_schema → get_builtin_tools_schema
+        # （后者做 deepcopy + MCP/LSP/subagent 动态注入，即使 5 秒 TTL 也常因
+        # 工具执行间隔 >5 秒而失效浪费）。
+        import time as _time
+        _cache = self._tools_schema_cache
+        _now = _time.monotonic()
+        _CACHE_TTL = 30.0
+        if _now - _cache["timestamp"] < _CACHE_TTL and _cache["tools"] is not None:
+            available_tools = _cache["tools"]
+            tools_tokens = _cache["tokens"]
         else:
-            available_tools = get_builtin_tools_schema(
-                self._get_agent_manager(),
-                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            if self._current_agent:
+                available_tools = self._get_agent_manager().get_agent_tools_schema(
+                    self._current_agent
+                )
+            else:
+                available_tools = get_builtin_tools_schema(
+                    self._get_agent_manager(),
+                    builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                )
+            # 更新缓存
+            tools_tokens = (
+                int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model))
+                if available_tools
+                else 0
             )
+            _cache["timestamp"] = _now
+            _cache["tools"] = available_tools
+            _cache["tokens"] = tools_tokens
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
@@ -543,7 +574,6 @@ class UIEngine(BaseEngine):
             if system_prompt
             else 0
         )
-        tools_tokens = int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model)) if available_tools else 0
 
         # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
