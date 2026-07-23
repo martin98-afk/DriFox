@@ -2568,9 +2568,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
 
         # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
-        # [PERF] 延迟注册到首帧之后，节省 ~200ms 关键路径时间。
-        # 命令仅在用户输入 / 或打开快捷键管理时必需，不阻塞窗口首次出现。
-        QTimer.singleShot(0, self._init_builtin_commands)
+        # [PERF] 延迟 100ms 到首帧之后注册，节省 ~200ms 关键路径时间。
+        # 为什么是 100ms 而非 singleShot(0)：Qt QTimer 按到期时间排序，
+        # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
+        # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
+        # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
+        QTimer.singleShot(100, self._init_builtin_commands)
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，

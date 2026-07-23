@@ -188,7 +188,7 @@ class GiteeCard(SettingCard):
         super().__init__(
             get_icon("gitee"),
             "Gitee 账号绑定",
-            "绑定后可云端备份配置、分享会话",
+            "云端备份配置、分享会话",
             parent,
         )
         self.cfg = Settings.get_instance()
@@ -313,13 +313,7 @@ class GiteeCard(SettingCard):
             # _refresh_app_ui 内部调用 theme_manager.dispatch_refresh()
             # 会重算所有颜色 token 并重新应用样式，~80ms 主线程工作。
             QTimer.singleShot(2000, self._refresh_app_ui)
-            InfoBar.success(
-                title="云端同步",
-                content=message,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=3000,
-                parent=self.window(),
-            )
+            # 静默同步成功，不弹 InfoBar（避免启动时打扰）
         # 失败时由状态机显示红点，不弹 InfoBar
 
     def _refresh_app_ui(self):
