@@ -244,6 +244,8 @@ class GiteeCard(SettingCard):
                 f"padding: 5px 12px; font-size: {scale_font_size(12)}px;"
                 f"background: transparent;"
             )
+            # 已绑定 → 自动启动同步（如尚未启动）
+            self._auto_enable_sync()
         else:
             self._bound_owner = ""
             self._bound_repo = ""
@@ -252,6 +254,16 @@ class GiteeCard(SettingCard):
             self._bind_btn.setText("绑定")
             self._bind_btn.setStyleSheet(ButtonStyles.primary_action())
             self._sync_dot.hide()
+
+    def _auto_enable_sync(self):
+        """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""
+        if self._sync_svc._state != "disabled":
+            return
+        token = self.cfg.gitee_user_token.value
+        owner = self.cfg.gitee_user_owner.value
+        if token and owner:
+            logger.info("[GiteeCard] 检测到已绑定，自动启动配置同步")
+            self._sync_svc.enable(token, owner)
 
     # ── 同步状态指示 ─────────────────────────────────────
 
@@ -302,15 +314,23 @@ class GiteeCard(SettingCard):
         # 失败时由状态机显示红点，不弹 InfoBar
 
     def _refresh_app_ui(self):
-        """配置恢复后刷新整个 UI：主题、颜色、所有设置卡片"""
+        """配置恢复后刷新整个 UI：主题、颜色，关闭设置弹窗让用户重开"""
         try:
             from app.utils.theme_manager import theme_manager
 
-            # dispatch_refresh 自动执行：
-            #   Colors.refresh() → on_theme_changed() → 所有 widget.refresh_theme()
-            # main_widget.refresh_theme() → _apply_runtime_ui_settings(scope="theme")
-            #   → setTheme() + 颜色/字体/卡片/窗口背景/设置弹窗 全面刷新
+            # 1. 视觉刷新：主题/颜色/字体/卡片样式
             theme_manager.dispatch_refresh()
+
+            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建
+            main_win = self.window()
+            if main_win and hasattr(main_win, "_settings_popup"):
+                popup = main_win._settings_popup
+                if popup is not None and popup.isVisible():
+                    # 通过 card_manager 正确关闭（清理容器引用）
+                    if hasattr(main_win, "_card_manager") and hasattr(main_win, "_window_id"):
+                        main_win._card_manager.hide_card("settings", main_win._window_id)
+                # 置空引用：强制 _build_settings_popup 下次重新创建
+                main_win._settings_popup = None
 
             logger.info("[GiteeCard] UI 已根据恢复的配置全面刷新")
         except Exception as e:

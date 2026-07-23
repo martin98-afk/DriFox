@@ -60,6 +60,7 @@ class ConfigSyncService(QObject):
     # 信号
     stateChanged = pyqtSignal(str)       # idle / syncing / error / disabled
     syncDone = pyqtSignal(bool, str)     # success, message
+    _configChanged = pyqtSignal()        # 文件变更通知（watch 线程 → 主线程）
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -74,6 +75,10 @@ class ConfigSyncService(QObject):
         self._upload_lock = threading.Lock()
         self._watch_stop: Optional[threading.Event] = None
         self._watch_thread: Optional[threading.Thread] = None
+        self._suppress_upload: bool = False  # 下载恢复时抑制上传反馈
+
+        # 跨线程桥：watchfiles 线程 → 主线程
+        self._configChanged.connect(self._on_config_changed_main)
 
     # ── 单例 ──────────────────────────────────────────────
 
@@ -122,9 +127,17 @@ class ConfigSyncService(QObject):
 
     def enable(self, token: str, owner: str):
         """绑定成功后启动同步：启动文件监听 → 检查远端 → 自动恢复或上传"""
+        logger.info(f"[ConfigSync] enable token={token[:8]}... owner={owner}")
+        logger.info(f"[ConfigSync] config_path={self._config_path}")
+        logger.info(f"[ConfigSync] cfg_dir={self._config_path.parent}")
+        logger.info(f"[ConfigSync] cfg_name={self._config_path.name}")
+
         if self._state != "disabled":
             logger.warning("[ConfigSync] 已在运行中，忽略重复 enable")
             return
+
+        # 确保任何残留的旧监听线程已停止
+        self._stop_watching()
 
         self._token = token
         self._owner = owner
@@ -183,6 +196,7 @@ class ConfigSyncService(QObject):
 
         cfg_dir = str(self._config_path.parent)
         cfg_name = self._config_path.name
+        logger.info(f"[ConfigSync] watch 线程已启动，监控目录={cfg_dir}，文件名={cfg_name}")
         try:
             for changes in watch(cfg_dir):
                 if self._watch_stop and self._watch_stop.is_set():
@@ -190,17 +204,25 @@ class ConfigSyncService(QObject):
                 # 只关心 app.config 的变更
                 for change_type, changed_path in changes:
                     if Path(changed_path).name == cfg_name:
+                        logger.info(f"[ConfigSync] 检测到文件变更: {changed_path}")
                         self._on_config_changed()
                         break
         except Exception as e:
             logger.error(f"[ConfigSync] 文件监听异常: {e}")
 
     def _on_config_changed(self):
-        """文件变更回调（watchfiles 线程）→ 重置防抖计时器"""
+        """文件变更回调（watchfiles 线程）→ 通过信号桥接到主线程"""
+        self._configChanged.emit()
+
+    def _on_config_changed_main(self):
+        """主线程：重置防抖计时器"""
         if self._state == "disabled":
             return
-        # cross-thread timer reset
+        # 下载恢复中，抑制上传（避免下载 → 触发变更 → 重新上传的循环）
+        if self._suppress_upload:
+            return
         if self._debounce_timer:
+            logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
             self._debounce_timer.start(DEBOUNCE_MS)
 
     # ── 远端同步 ──────────────────────────────────────────
@@ -356,7 +378,11 @@ class ConfigSyncService(QObject):
                 return False
 
             decoded = base64.b64decode(content_b64)
+
+            # 下载写文件前抑制上传反馈，避免下载→触发变更→上传的循环
+            self._suppress_upload = True
             self._config_path.write_bytes(decoded)
+            self._suppress_upload = False
             logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
 
             # 重新加载 Settings
