@@ -241,28 +241,60 @@ def _ensure_repo(token: str, owner: str, repo: str, private: bool) -> Tuple[bool
         timeout=10,
     )
     if check_resp.status_code == 200:
+        # 仓库存在 → 检查可见性是否匹配，不匹配则更新
+        existing = check_resp.json()
+        current_private = existing.get("private", False)
+        if current_private != private:
+            logger.info(f"[GiteeOAuth] 仓库已存在，更新可见性: {owner}/{repo} private={private}")
+            patch_resp = requests.patch(
+                GITEE_REPO_URL.format(owner=owner, repo=repo),
+                data={
+                    "access_token": token,
+                    "name": repo,
+                    "private": "true" if private else "false",
+                },
+                timeout=10,
+            )
+            if patch_resp.status_code == 200:
+                return True, f"仓库已存在，可见性已更新：{owner}/{repo}"
+            else:
+                err = _parse_error(patch_resp)
+                logger.warning(f"[GiteeOAuth] 更新可见性失败: {err}")
+                return False, f"更新仓库可见性失败：{err}"
         logger.info(f"[GiteeOAuth] 仓库已存在: {owner}/{repo}，复用")
         return True, f"复用已有仓库：{owner}/{repo}"
 
-    # 创建仓库
-    logger.info(f"[GiteeOAuth] 创建仓库: {owner}/{repo} (private={private})")
+    # 创建仓库（先创建，再通过 PATCH 设置可见性）
+    logger.info(f"[GiteeOAuth] 创建仓库: {owner}/{repo}")
     create_resp = requests.post(
         "https://gitee.com/api/v5/user/repos",
         data={
             "access_token": token,
             "name": repo,
-            "private": "true" if private else "false",
+            "private": "false",  # 先以默认创建
             "description": "DriFox 自动创建的上传仓库",
             "auto_init": "true",
         },
         timeout=15,
     )
-    if create_resp.status_code in (201, 200):
-        logger.info(f"[GiteeOAuth] 仓库创建成功: {owner}/{repo}")
-        return True, f"仓库已创建：{owner}/{repo}"
+    if create_resp.status_code not in (201, 200):
+        err = _parse_error(create_resp)
+        return False, f"创建仓库失败：{err}"
 
-    err = _parse_error(create_resp)
-    return False, f"创建仓库失败：{err}"
+    # 通过 PATCH 设置最终可见性
+    if private:
+        patch_resp = requests.patch(
+            GITEE_REPO_URL.format(owner=owner, repo=repo),
+            data={"access_token": token, "name": repo, "private": "true"},
+            timeout=10,
+        )
+        if patch_resp.status_code != 200:
+            err = _parse_error(patch_resp)
+            logger.warning(f"[GiteeOAuth] 设置私有失败: {err}")
+            return False, f"设置仓库可见性失败：{err}"
+
+    logger.info(f"[GiteeOAuth] 仓库创建成功: {owner}/{repo} (private={private})")
+    return True, f"仓库已创建：{owner}/{repo}"
 
 
 def _start_callback_server(port: int) -> Optional[HTTPServer]:
