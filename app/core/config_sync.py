@@ -92,6 +92,8 @@ class ConfigSyncService(QObject):
         self._upload_thread: Optional[threading.Thread] = None  # 后台上传线程引用
         self._config_dirty: bool = False     # app.config 有待上传的变更
         self._custom_dirty: bool = False     # user-custom 有待上传的变更
+        self._config_remote_sha: Optional[str] = None  # 远端 app.config SHA 缓存
+        self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
 
         # 跨线程桥：watchfiles 线程 → 主线程
         self._configChanged.connect(self._on_config_changed_main)
@@ -451,6 +453,19 @@ class ConfigSyncService(QObject):
 
                 if resp.status_code in (200, 201):
                     logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
+                    # 缓存远端 SHA，避免下次下载时重复拉取
+                    try:
+                        resp_data = resp.json()
+                        content_data = resp_data.get("content")
+                        if isinstance(content_data, dict):
+                            sha = content_data.get("sha", "")
+                            if sha:
+                                if label == "app.config":
+                                    self._config_remote_sha = sha
+                                elif label == "user-custom":
+                                    self._custom_remote_sha = sha
+                    except Exception:
+                        pass
                     return True
 
                 err_msg = self._parse_error(resp)
@@ -523,30 +538,47 @@ class ConfigSyncService(QObject):
         return self._get_remote_file_sha(REMOTE_PATH, client)
 
     def _do_download(self) -> bool:
-        """从远端下载配置和 user-custom 插件，覆盖本地"""
+        """从远端下载配置和 user-custom 插件，覆盖本地（SHA 未变则跳过）"""
         if not self._token or not self._owner:
             return False
 
-        config_ok = False
+        config_ok = True
+        custom_ok = True
+        config_downloaded = False
+        custom_downloaded = False
         try:
-            # ── 1. 下载 app.config ──
-            config_ok = self._download_file(REMOTE_PATH, self._config_path, label="app.config")
+            # ── 1. app.config：SHA 未变则跳过 ──
+            remote_config_sha = self._get_remote_file_sha(REMOTE_PATH)
+            if remote_config_sha and remote_config_sha == self._config_remote_sha:
+                logger.debug("[ConfigSync] 远端 app.config 未变化，跳过下载")
+            else:
+                config_ok = self._download_file(
+                    REMOTE_PATH, self._config_path, label="app.config",
+                )
+                config_downloaded = config_ok
 
-            if config_ok:
-                # 写文件后抑制上传 5 秒
-                self._suppress_until = time.time() + 5.0
+            # ── 2. user-custom：SHA 未变则跳过 ──
+            if self._check_remote_file(USER_CUSTOM_REMOTE_PATH):
+                remote_custom_sha = self._get_remote_file_sha(USER_CUSTOM_REMOTE_PATH)
+                if remote_custom_sha and remote_custom_sha == self._custom_remote_sha:
+                    logger.debug("[ConfigSync] 远端 user-custom 未变化，跳过下载")
+                else:
+                    custom_ok = self._download_user_custom_zip()
+                    custom_downloaded = custom_ok
+
+            # ── 3. 全部下载完成后：重载配置 + 抑制上传风暴 ──
+            if config_downloaded:
+                self._suppress_until = time.time() + 10.0
                 logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
-                # 重新加载 Settings
                 try:
                     Settings.get_instance().load()
                     logger.info("[ConfigSync] Settings 已重新加载")
                 except Exception as e:
                     logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
-            # ── 2. 下载 user-custom 插件 ──
-            custom_ok = True
-            if self._check_remote_file(USER_CUSTOM_REMOTE_PATH):
-                custom_ok = self._download_user_custom_zip()
+            if custom_downloaded:
+                # 确保抑制窗口覆盖 user-custom 解压的文件事件风暴
+                self._suppress_until = time.time() + 10.0
 
             return config_ok and custom_ok
         except Exception as e:
@@ -578,6 +610,15 @@ class ConfigSyncService(QObject):
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_bytes(decoded)
             logger.info(f"[ConfigSync] {tag} 已下载到本地")
+
+            # 缓存远端 SHA，避免下次重复下载
+            remote_sha = body.get("sha", "")
+            if remote_sha:
+                if label == "app.config":
+                    self._config_remote_sha = remote_sha
+                elif label == "user-custom":
+                    self._custom_remote_sha = remote_sha
+
             return True
         except Exception as e:
             logger.error(f"[ConfigSync] {tag} 下载异常: {e}")
