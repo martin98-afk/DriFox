@@ -18,6 +18,45 @@ import requests
 from loguru import logger
 
 
+class GiteeContentBackend:
+    """
+    Gitee contents API 存储后端
+
+    只负责「把一段 base64 内容写入仓库指定路径」这一原子动作，
+    上传器通过 _backend 属性持有，便于替换为其他平台的存储实现（GitHub 等）。
+    """
+
+    API_URL = "https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}"
+
+    def __init__(self):
+        self.last_error: str = ""
+
+    def upload(self, token: str, owner: str, repo: str, branch: str, path: str, content_b64: str, message: str) -> bool:
+        """上传内容到仓库。成功返回 True；失败返回 False 并记录 last_error"""
+        url = self.API_URL.format(owner=owner, repo=repo, path=path)
+        payload = {
+            "access_token": token,
+            "content": content_b64,
+            "message": message,
+            "branch": branch,
+        }
+        resp = requests.post(url, data=payload, timeout=30)
+        if resp.status_code == 201:
+            self.last_error = ""
+            return True
+
+        self.last_error = f"[{resp.status_code}] {self._parse_error(resp)}"
+        return False
+
+    @staticmethod
+    def _parse_error(resp) -> str:
+        try:
+            body = resp.json()
+            return body.get("message", resp.text[:200])
+        except Exception:
+            return resp.text[:200]
+
+
 class GiteeUploader:
     """
     Gitee 图床上传器（单例）
@@ -30,7 +69,8 @@ class GiteeUploader:
 
     _instance: Optional["GiteeUploader"] = None
 
-    API_URL = "https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}"
+    # 公开下载链接模板（与 Gitee contents API 返回的 download_url 一致）
+    DOWNLOAD_URL = "https://gitee.com/{owner}/{repo}/raw/{branch}/{path}"
 
     def __init__(self):
         self._token: str = ""
@@ -39,6 +79,8 @@ class GiteeUploader:
         self._path: str = "drifox"
         self._branch: str = "master"
         self._config_loaded: bool = False
+        # 存储后端（可替换为其他平台实现）
+        self._backend = GiteeContentBackend()
 
     @classmethod
     def get_instance(cls) -> "GiteeUploader":
@@ -152,27 +194,26 @@ class GiteeUploader:
             # Base64 编码
             content_b64 = base64.b64encode(data).decode("utf-8")
 
-            url = self.API_URL.format(owner=self._owner, repo=self._repo, path=full_path)
-
-            payload = {
-                "access_token": self._token,
-                "content": content_b64,
-                "message": f"DriFox Upload: {upload_name}",
-                "branch": self._branch,
-            }
-
-            resp = requests.post(url, data=payload, timeout=30)
-            if resp.status_code == 201:
-                download_url = resp.json().get("content", {}).get("download_url")
-                if download_url:
-                    logger.info(f"[GiteeUploader] 上传成功: {upload_name} → {download_url}")
-                    return download_url, None
-                return None, "API 返回了 201 但缺少 download_url"
+            ok = self._backend.upload(
+                token=self._token,
+                owner=self._owner,
+                repo=self._repo,
+                branch=self._branch,
+                path=full_path,
+                content_b64=content_b64,
+                message=f"DriFox Upload: {upload_name}",
+            )
+            if ok:
+                download_url = self.DOWNLOAD_URL.format(
+                    owner=self._owner, repo=self._repo, branch=self._branch, path=full_path
+                )
+                logger.info(f"[GiteeUploader] 上传成功: {upload_name} → {download_url}")
+                return download_url, None
 
             # 常见错误码处理
-            err_msg = self._parse_error(resp)
-            logger.warning(f"[GiteeUploader] 上传失败 [{resp.status_code}]: {err_msg}")
-            return None, f"[{resp.status_code}] {err_msg}"
+            err_msg = getattr(self._backend, "last_error", "") or "上传失败"
+            logger.warning(f"[GiteeUploader] 上传失败: {err_msg}")
+            return None, err_msg
 
         except requests.exceptions.Timeout:
             return None, "上传超时 (30s)"

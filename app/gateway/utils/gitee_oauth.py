@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Gitee OAuth 账号绑定
+Gitee OAuth 账号绑定（流程编排层）
 
 通过 OAuth 网页授权绑定 Gitee 账号：
 1. 启动本地 HTTP 回调服务器
@@ -9,6 +9,11 @@ Gitee OAuth 账号绑定
 4. 用授权码换取 access_token
 5. 获取用户信息，检查/创建仓库
 6. 存储 token 到本地配置
+
+分层说明：
+  - 本模块只负责流程编排（回调服务器、浏览器、等待循环）与配置读写；
+  - 所有 Gitee 网络/API 调用位于 app.gateway.auth.gitee（抽象层的平台实现）；
+  - 对外统一入口请使用 app.gateway.auth.get_oauth_backend("gitee")。
 """
 
 import html
@@ -19,23 +24,23 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import requests
 from loguru import logger
 
+from app.gateway.auth import gitee as gitee_api
+from app.gateway.auth.base import parse_error as _parse_error  # noqa: F401  向后兼容导出
+from app.gateway.auth.gitee import (  # noqa: F401  向后兼容导出
+    FIXED_REPO_NAME,
+    GITEE_AUTHORIZE_URL,
+    GITEE_REPO_URL,
+    GITEE_TOKEN_URL,
+    GITEE_USER_URL,
+    SETTINGS_REPO_NAME,
+)
 from app.utils.config import Settings
-
-# ── OAuth 常量 ────────────────────────────────────────────
-GITEE_AUTHORIZE_URL = "https://gitee.com/oauth/authorize"
-GITEE_TOKEN_URL = "https://gitee.com/oauth/token"
-GITEE_USER_URL = "https://gitee.com/api/v5/user"
-GITEE_REPO_URL = "https://gitee.com/api/v5/repos/{owner}/{repo}"
 
 # OAuth 回调地址（必须与 Gitee 注册的 OAuth 应用回调地址完全一致）
 REDIRECT_PORT = 18923
 REDIRECT_URI = "http://localhost:18923/callback"
-
-FIXED_REPO_NAME = "DriFox_uploads"
-SETTINGS_REPO_NAME = "DriFox_settings"  # 配置备份仓库（强制私有）
 
 
 # ── 回调 HTTP 服务器 ──────────────────────────────────────
@@ -95,7 +100,7 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
 def start_oauth_flow(repo_private: bool) -> Tuple[bool, str]:
     """
-    启动 OAuth 授权流程（阻塞，约 30s 超时）
+    启动 OAuth 授权流程（阻塞，约 120s 超时）
 
     Args:
         repo_private: 仓库是否私有
@@ -147,45 +152,15 @@ def start_oauth_flow(repo_private: bool) -> Tuple[bool, str]:
 
         code = _OAuthCallbackHandler.server_code
 
-        # 4. 用授权码换取 access_token
-        resp = requests.post(
-            GITEE_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": REDIRECT_URI,
-            },
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            err = _parse_error(resp)
-            return False, f"换取 Token 失败：{err}"
-
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
+        # 4. 用授权码换取 access_token（API 层）
+        access_token, err = gitee_api.exchange_token(code, client_id, client_secret, REDIRECT_URI)
         if not access_token:
-            return False, "换取 Token 失败：响应中缺少 access_token"
+            return False, err
 
-        logger.info("[GiteeOAuth] 获取 access_token 成功")
-
-        # 5. 获取用户信息
-        user_resp = requests.get(
-            GITEE_USER_URL,
-            params={"access_token": access_token},
-            timeout=10,
-        )
-        if user_resp.status_code != 200:
-            err = _parse_error(user_resp)
-            return False, f"获取用户信息失败：{err}"
-
-        user = user_resp.json()
-        owner = user.get("login")
-        if not isinstance(owner, str) or not owner:
-            return False, "获取用户信息失败：login 字段无效"
-
-        logger.info(f"[GiteeOAuth] 用户: {owner}")
+        # 5. 获取用户信息（API 层）
+        owner, err = gitee_api.fetch_user_login(access_token)
+        if not owner:
+            return False, err
 
         # 6. 检查/创建上传仓库
         repo_ok, repo_msg = _ensure_repo(access_token, owner, FIXED_REPO_NAME, repo_private)
@@ -239,68 +214,8 @@ def get_bound_info() -> Optional[dict]:
 
 
 def _ensure_repo(token: str, owner: str, repo: str, private: bool) -> Tuple[bool, str]:
-    """确保仓库存在，不存在则创建"""
-    # 先检查仓库是否存在
-    check_resp = requests.get(
-        GITEE_REPO_URL.format(owner=owner, repo=repo),
-        params={"access_token": token},
-        timeout=10,
-    )
-    if check_resp.status_code == 200:
-        # 仓库存在 → 检查可见性是否匹配，不匹配则更新
-        existing = check_resp.json()
-        current_private = existing.get("private", False)
-        if current_private != private:
-            logger.info(f"[GiteeOAuth] 仓库已存在，更新可见性: {owner}/{repo} private={private}")
-            patch_resp = requests.patch(
-                GITEE_REPO_URL.format(owner=owner, repo=repo),
-                data={
-                    "access_token": token,
-                    "name": repo,
-                    "private": "true" if private else "false",
-                },
-                timeout=10,
-            )
-            if patch_resp.status_code == 200:
-                return True, f"仓库已存在，可见性已更新：{owner}/{repo}"
-            else:
-                err = _parse_error(patch_resp)
-                logger.warning(f"[GiteeOAuth] 更新可见性失败: {err}")
-                return False, f"更新仓库可见性失败：{err}"
-        logger.info(f"[GiteeOAuth] 仓库已存在: {owner}/{repo}，复用")
-        return True, f"复用已有仓库：{owner}/{repo}"
-
-    # 创建仓库
-    logger.info(f"[GiteeOAuth] 创建仓库: {owner}/{repo}")
-    create_resp = requests.post(
-        "https://gitee.com/api/v5/user/repos",
-        data={
-            "access_token": token,
-            "name": repo,
-            "description": "DriFox 自动创建的上传仓库",
-            "auto_init": "true",
-        },
-        timeout=15,
-    )
-    if create_resp.status_code not in (201, 200):
-        err = _parse_error(create_resp)
-        return False, f"创建仓库失败：{err}"
-
-    # 创建后显式设置可见性（创建 API 的 private 参数不可靠）
-    logger.info(f"[GiteeOAuth] 设置可见性: {owner}/{repo} private={private}")
-    visibility = "true" if private else "false"
-    patch_resp = requests.patch(
-        GITEE_REPO_URL.format(owner=owner, repo=repo),
-        data={"access_token": token, "name": repo, "private": visibility},
-        timeout=10,
-    )
-    if patch_resp.status_code != 200:
-        err = _parse_error(patch_resp)
-        logger.warning(f"[GiteeOAuth] 设置可见性失败: {err}")
-        return False, f"设置仓库可见性失败：{err}"
-
-    logger.info(f"[GiteeOAuth] 仓库创建成功: {owner}/{repo} (private={private})")
-    return True, f"仓库已创建：{owner}/{repo}"
+    """确保仓库存在（委托 API 层实现，保留旧函数名以兼容既有调用与测试）"""
+    return gitee_api.ensure_repo(token, owner, repo, private)
 
 
 def _start_callback_server(port: int) -> Optional[HTTPServer]:
@@ -332,12 +247,3 @@ def _stop_callback_server(server: Optional[HTTPServer]):
             server.socket.close()
         except Exception:
             pass
-
-
-def _parse_error(resp) -> str:
-    """解析 Gitee API 错误响应"""
-    try:
-        body = resp.json()
-        return body.get("message", body.get("error_description", resp.text[:200]))
-    except Exception:
-        return resp.text[:200]
