@@ -16,6 +16,7 @@ import json as json_mod
 import os
 import re
 import subprocess
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -460,6 +461,9 @@ class _RecordItem(QFrame):
         try:
             if os.name == "nt":
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            elif sys.platform == "darwin":
+                folder = str(Path(path).parent)
+                subprocess.Popen(["open", folder])
             else:
                 folder = str(Path(path).parent)
                 subprocess.Popen(["xdg-open", folder])

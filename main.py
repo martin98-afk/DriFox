@@ -41,9 +41,22 @@ sys.path.insert(0, project_root)
 
 def main():
     """启动 LLM Chatter"""
+
+    # ========== 环境清理：避免与已安装 Drifox.app 的 Qt 冲突 ==========
+    # macOS 上如果通过 Login Items 启动了已打包的 Drifox.app，其启动脚本可能
+    # 将 QT_PLUGIN_PATH 设置为 App bundle 内 PyQt5 的 plugin 路径。该路径
+    # 指向的 QtCore 与开发环境 .venv 中的 PyQt5 QtCore 不是同一份二进制，
+    # 导致在 QApplication 创建时加载两套 Qt 框架 → 类重复注册 → 最终触发
+    # CoreFoundation __CFDataValidateRange 断言失败（SIGABRT）。
+    # 开发环境下 PyQt5 会自动感知自身 plugin 路径，无需外部 QT_PLUGIN_PATH。
+    _qt_pp = os.environ.pop("QT_PLUGIN_PATH", "")
+
     from loguru import logger
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
+
+    if _qt_pp:
+        logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
@@ -54,7 +67,10 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
-    from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
+    # 否则后续模块（如 message_card.py）中延迟导入会导致：
+    #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
+    from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings  # noqa: F401
 
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
