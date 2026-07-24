@@ -209,8 +209,10 @@ def _get_formatter_cached():
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 
-# 编辑类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
-_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit"})
+# 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
+# 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
+# 留在正文中比收到工具区更符合直觉，体验更连贯。
+_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit", "subagent_para", "subagent_dag", "question"})
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -3976,7 +3978,9 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
-                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
+                // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
+                // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
+                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"]):not([data-tool-name="subagent_para"]):not([data-tool-name="subagent_dag"]):not([data-tool-name="question"])';
 
                 // 更新"工具与思考"标题（总项数，无勾叉 badge）
                 function _updateToolSectionHeader() {{
