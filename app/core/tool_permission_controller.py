@@ -12,6 +12,7 @@
 - 复制/分支窗口:复制 user + active + active_agent_name
 - 启动时:user 从全局 Settings 读取"用户最后修改的偏好"
 """
+
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -25,9 +26,9 @@ class ToolPermissionController(QObject):
     """工具权限控制器(per-window)"""
 
     # 当前生效状态变化
-    togglesChanged = pyqtSignal(dict)        # 引擎读取这个来获取最新 toggles
-    behaviorChanged = pyqtSignal(str)        # 关闭行为变化
-    activeAgentChanged = pyqtSignal(str)     # 当前激活的智能体(空字符串=用户模式)
+    togglesChanged = pyqtSignal(dict)  # 引擎读取这个来获取最新 toggles
+    behaviorChanged = pyqtSignal(str)  # 关闭行为变化
+    activeAgentChanged = pyqtSignal(str)  # 当前激活的智能体(空字符串=用户模式)
 
     # 用户偏好状态变化(用于 UI 反映"用户原始设置")
     userTogglesChanged = pyqtSignal(dict)
@@ -56,9 +57,7 @@ class ToolPermissionController(QObject):
                 settings.save()
                 stale = set(saved_toggles.keys()) - set(cleaned_toggles.keys())
                 if stale:
-                    logger.info(
-                        f"[ToolPermission] 清理已删除工具的残留开关: {sorted(stale)}"
-                    )
+                    logger.info(f"[ToolPermission] 清理已删除工具的残留开关: {sorted(stale)}")
             except Exception as e:
                 logger.warning(f"[ToolPermission] 持久化清理残留开关失败: {e}")
 
@@ -72,6 +71,17 @@ class ToolPermissionController(QObject):
 
         # 当前激活的智能体(None = 用户模式)
         self._active_agent_name: Optional[str] = None
+
+        # ── 监听 Settings 外部变更（配置同步/下载新配置后自动刷新） ──
+        # 当 ConfigSyncService 下载新配置并重载 Settings 后，tool_toggles 和
+        # tool_off_behavior 的 valueChanged 信号触发刷新，使控制器状态与云端一致。
+        # 【注意】控制器自身通过 _persist_user_toggles() 写入 Settings 也会触发
+        # valueChanged，但 handler 内有相等性检查，不会重复发射信号。
+        try:
+            settings.tool_toggles.valueChanged.connect(self._on_settings_toggles_changed)
+            settings.tool_off_behavior.valueChanged.connect(self._on_settings_behavior_changed)
+        except Exception:
+            pass
 
     # ===================================================================
     #  Getters
@@ -177,8 +187,12 @@ class ToolPermissionController(QObject):
     #  智能体激活 / 恢复
     # ===================================================================
 
-    def apply_agent(self, agent_name: str, agent_tools: Optional[Dict[str, bool]] = None,
-                    agent_permission: Optional[Dict[str, Any]] = None):
+    def apply_agent(
+        self,
+        agent_name: str,
+        agent_tools: Optional[Dict[str, bool]] = None,
+        agent_permission: Optional[Dict[str, Any]] = None,
+    ):
         """激活智能体命令:把 active_* 替换为 agent 的工具权限
 
         Args:
@@ -253,6 +267,51 @@ class ToolPermissionController(QObject):
         self.togglesChanged.emit(self.get_toggles())
         self.behaviorChanged.emit(self.get_behavior())
         self.activeAgentChanged.emit("")  # 空字符串 = 用户模式
+
+    # ===================================================================
+    #  Settings 外部变更响应（配置同步后自动刷新）
+    # ===================================================================
+
+    def _on_settings_toggles_changed(self, new_toggles: dict):
+        """Settings.tool_toggles 被外部变更后自动刷新用户偏好
+
+        触发场景：
+        - ConfigSyncService 下载新配置后重载 Settings
+        - 其他窗口的 ToolPermissionController 持久化偏好（跨窗口同步）
+
+        行为：
+        - 始终更新 _user_*（用户偏好）
+        - 非 agent 模式下同步更新 _active_*（当前生效）
+        - agent 模式下只更新 _user_*，不覆盖智能体权限
+        """
+        if not isinstance(new_toggles, dict):
+            return
+        cleaned = self._complete_toggles(new_toggles)
+        # 相等性检查：防止 _persist_user_toggles() 写入后回环重复发射
+        if cleaned == self._user_tool_toggles:
+            return
+
+        self._user_tool_toggles = cleaned
+        if not self.is_agent_active():
+            self._active_tool_toggles = dict(cleaned)
+            self.togglesChanged.emit(self.get_toggles())
+        self.userTogglesChanged.emit(self.get_user_toggles())
+        logger.info("[ToolPermission] 用户偏好已从更新的 Settings 刷新")
+
+    def _on_settings_behavior_changed(self, new_behavior: str):
+        """Settings.tool_off_behavior 被外部变更后自动刷新用户偏好"""
+        if new_behavior not in ("deny", "ask"):
+            return
+        # 相等性检查：防止 set_user_behavior() 写入后回环重复发射
+        if new_behavior == self._user_tool_off_behavior:
+            return
+
+        self._user_tool_off_behavior = new_behavior
+        if not self.is_agent_active():
+            self._active_tool_off_behavior = new_behavior
+            self.behaviorChanged.emit(new_behavior)
+        self.userBehaviorChanged.emit(new_behavior)
+        logger.info("[ToolPermission] 关闭行为偏好已从更新的 Settings 刷新")
 
     # ===================================================================
     #  状态复制(用于窗口复制/分支)
