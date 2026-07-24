@@ -77,9 +77,7 @@ def _ensure_user_custom_plugin():
             "version": "1.0.0",
             "type": "user",
         }
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
         pm = PluginManager.get_instance()
         if pm.is_initialized() and not pm.has_plugin("user-custom"):
@@ -156,13 +154,13 @@ def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
         return content
 
     fm_lines = lines[1:close_idx]
-    body_lines = lines[close_idx + 1:]
+    body_lines = lines[close_idx + 1 :]
 
     # 检查是否已有 shortcut 行
     has_shortcut = False
     new_fm = []
     for line in fm_lines:
-        if re.match(r'^shortcut\s*:', line):
+        if re.match(r"^shortcut\s*:", line):
             has_shortcut = True
             if shortcut:
                 new_fm.append(f"shortcut: {shortcut}")
@@ -176,7 +174,7 @@ def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
         result = []
         for line in new_fm:
             result.append(line)
-            if not inserted and re.match(r'^description\s*:', line):
+            if not inserted and re.match(r"^description\s*:", line):
                 result.append(f"shortcut: {shortcut}")
                 inserted = True
         if not inserted:
@@ -185,6 +183,29 @@ def _upsert_frontmatter_shortcut(content: str, shortcut: str) -> str:
         new_fm = result
 
     return "---\n" + "\n".join(new_fm) + "\n---\n" + "\n".join(body_lines)
+
+
+# ── 快捷键冲突检测 ──
+
+
+def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") -> list:
+    """查找已分配相同快捷键的命令列表
+
+    Args:
+        shortcut: 要检测的快捷键
+        all_commands: 所有命令列表（dict，含 name / shortcut 字段）
+        exclude_cmd: 排除的命令名（当前正在编辑的命令，不与自己冲突）
+
+    Returns:
+        冲突的命令 dict 列表
+    """
+    conflicts = []
+    for cmd in all_commands:
+        if cmd["name"] == exclude_cmd:
+            continue
+        if cmd.get("shortcut", "") and cmd["shortcut"] == shortcut:
+            conflicts.append(cmd)
+    return conflicts
 
 
 # ── 数据加载 ──────────────────────────────────────────────
@@ -411,9 +432,7 @@ class _CommandRow(QFrame):
         if self._description:
             desc_lb = QLabel(self._description, self)
             desc_lb.setObjectName("cmdRowDesc")
-            desc_lb.setStyleSheet(
-                f"color: {_text_color(True)}; font-size: 12px; background: transparent;"
-            )
+            desc_lb.setStyleSheet(f"color: {_text_color(True)}; font-size: 12px; background: transparent;")
             desc_lb.setWordWrap(True)
             vly.addWidget(desc_lb)
 
@@ -518,8 +537,8 @@ class ShortcutManagerCard(QWidget):
             pass
 
     _CMD_ROW_SIZE_OFFSETS = {
-        "cmdRowName": 1,       # 命令名比基准稍大
-        "cmdRowDesc": -3,      # 描述文字较小
+        "cmdRowName": 1,  # 命令名比基准稍大
+        "cmdRowDesc": -3,  # 描述文字较小
         "cmdRowShortcut": -1,  # 快捷键适中
     }
 
@@ -788,6 +807,45 @@ class ShortcutManagerCard(QWidget):
         if cmd_info is None:
             return
 
+        # ── 快捷键冲突检测 ──
+        conflicts = _find_conflicts(key_str, self._all_commands, exclude_cmd=cmd_name)
+        if conflicts:
+            conflict_names = "\n".join(f"  • /{c['name']}" for c in conflicts)
+            from app.widgets.common_dialogs import ConfirmDialog
+
+            dialog = ConfirmDialog(
+                title="快捷键冲突",
+                content=(f"快捷键「{key_str}」已被以下命令占用：\n{conflict_names}\n\n仍要分配给 /{cmd_name} 吗？"),
+                confirm_text="覆盖",
+                cancel_text="取消",
+                parent=self.window(),
+            )
+            confirmed = False
+
+            def _on_confirm():
+                nonlocal confirmed
+                confirmed = True
+
+            dialog.confirmed.connect(_on_confirm)
+            dialog.exec_()
+            if not confirmed:
+                self._count_lb.setText(f"⛔ 已取消：/{cmd_name}")
+                return
+
+            # ── 覆盖冲突：清空被覆盖命令的快捷键 ──
+            for conflict in conflicts:
+                conflict_info = None
+                for c in self._all_commands:
+                    if c["name"] == conflict["name"]:
+                        conflict_info = c
+                        break
+                if conflict_info:
+                    self._save_custom_shortcut(
+                        cmd_name=conflict["name"],
+                        description=conflict_info.get("description", ""),
+                        shortcut="",
+                    )
+
         success = self._save_custom_shortcut(
             cmd_name=cmd_name,
             description=cmd_info.get("description", ""),
@@ -826,7 +884,10 @@ class ShortcutManagerCard(QWidget):
 
             dest_path.write_text(content, encoding="utf-8")
             logger.info(f"[ShortcutManager] 已保存: /{cmd_name} → {shortcut}")
-            # 文件写入触发 watchfiles 文件监控，自动重载命令并刷新快捷键绑定
+            # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新（watchfiles 有 2 秒防抖）
+            from app.core.builtin_commands import reload_all_commands
+
+            reload_all_commands()
             return True
         except Exception as e:
             logger.error(f"[ShortcutManager] 保存失败: {e}")
@@ -847,8 +908,11 @@ class ShortcutManagerCard(QWidget):
                     cmd_file.unlink()
                     logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
                     self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+                    # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新
+                    from app.core.builtin_commands import reload_all_commands
+
+                    reload_all_commands()
                     break
-            # 文件删除触发 watchfiles 文件监控，自动重载命令并刷新快捷键绑定
             QTimer.singleShot(300, self._refresh)
         except Exception as e:
             logger.error(f"[ShortcutManager] 恢复失败: {e}")

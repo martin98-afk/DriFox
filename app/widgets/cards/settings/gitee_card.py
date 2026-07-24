@@ -424,9 +424,9 @@ class GiteeCard(SettingCard):
 
     def _do_oauth(self, repo_private: bool):
         try:
-            from app.gateway.utils.gitee_oauth import start_oauth_flow
+            from app.gateway.auth import get_oauth_backend
 
-            success, msg = start_oauth_flow(repo_private)
+            success, msg = get_oauth_backend("gitee").bind(repo_private=repo_private)
             self.oauthResult.emit(success, msg)
         except Exception as e:
             logger.error(f"[GiteeCard] OAuth 异常: {e}")
@@ -476,12 +476,12 @@ class GiteeCard(SettingCard):
 
     def _do_unbind(self):
         try:
-            from app.gateway.utils.gitee_oauth import unbind_account
+            from app.gateway.auth import get_oauth_backend
             from app.gateway.utils.gitee_uploader import GiteeUploader
 
             # 先停止同步，再解绑
             self._sync_svc.disable()
-            unbind_account()
+            get_oauth_backend("gitee").unbind()
             GiteeUploader.get_instance().reset_config()
 
             # 恢复绑定前的本地配置
