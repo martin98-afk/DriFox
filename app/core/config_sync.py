@@ -205,9 +205,7 @@ class ConfigSyncService(QObject):
             logger.warning("[ConfigSync] 已在运行中，忽略重复 enable")
             return
 
-        # 确保任何残留的旧监听线程已停止
-        self._stop_watching()
-
+        # 残留清理由 _start_watching 内部的 _stop_watching 处理
         self._token = token
         self._owner = owner
         self._debounce_timer = QTimer(self)
@@ -262,6 +260,8 @@ class ConfigSyncService(QObject):
     # ── 文件监听 ──────────────────────────────────────────
 
     def _start_watching(self):
+        # 确保旧线程已完全退出后再启动新线程，避免新旧线程同时监听导致重复触发
+        self._stop_watching()
         self._watch_stop = threading.Event()
         self._watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
         self._watch_thread.start()
@@ -270,7 +270,11 @@ class ConfigSyncService(QObject):
     def _stop_watching(self):
         if self._watch_stop:
             self._watch_stop.set()
-            self._watch_stop = None
+        # 等待旧线程真正退出（watchfiles 的 stop_event 机制使其快速响应）
+        old_thread = self._watch_thread
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=3.0)
+        self._watch_stop = None
         self._watch_thread = None
         logger.info("[ConfigSync] 文件监听已停止")
 
@@ -294,7 +298,7 @@ class ConfigSyncService(QObject):
 
         logger.info(f"[ConfigSync] watch 线程已启动，监控目录={watch_dirs}")
         try:
-            for changes in watch(*watch_dirs):
+            for changes in watch(*watch_dirs, stop_event=self._watch_stop):
                 if self._watch_stop and self._watch_stop.is_set():
                     break
                 for change_type, changed_path in changes:
