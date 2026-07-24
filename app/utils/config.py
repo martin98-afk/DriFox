@@ -459,11 +459,6 @@ class Settings(QConfig):
     gateway_slack_bot_token = ConfigItem("Gateway", "Slack/BotToken", "")
     gateway_slack_app_token = ConfigItem("Gateway", "Slack/AppToken", "")
 
-    # ========== 云平台绑定 ==========
-    # 当前已绑定的 OAuth 云平台标识（如 "gitee"），空串表示未绑定。
-    # 由 app/gateway/auth 抽象层维护，用于多平台扩展。
-    cloud_platform = ConfigItem("Cloud", "Platform", "")
-
     # ========== Gitee 图床配置 ==========
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
     gitee_token = ConfigItem("Gitee", "Token", "a5dcb6e2e7776143b7a7e7685a1f33a3")

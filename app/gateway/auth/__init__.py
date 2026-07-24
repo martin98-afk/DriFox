@@ -6,7 +6,7 @@ OAuth 平台抽象层 — 注册表与工厂
     from app.gateway.auth import get_oauth_backend
 
     backend = get_oauth_backend("gitee")   # 显式指定平台
-    backend = get_oauth_backend()          # 自动使用当前已绑定的平台
+    backend = get_oauth_backend()          # 自动探测已绑定的平台
 
 新增平台：
     1. 在本包下新建 <platform>.py，继承 OAuthBackend（见 base.py 文档字符串）
@@ -55,28 +55,23 @@ def get_oauth_backend(name: str = "") -> OAuthBackend:
     获取 OAuth 平台后端实例。
 
     Args:
-        name: 平台标识（如 "gitee"）。为空时从配置 cloud_platform 读取
-              当前已绑定的平台；若配置为空但存在旧版 gitee 绑定标记，
-              则回退到 gitee（向后兼容）。
+        name: 平台标识（如 "gitee"）。为空时自动探测：
+              遍历已注册平台，返回第一个已绑定的；
+              若无可绑定的平台则抛 ValueError。
 
     Raises:
         ValueError: 平台名未注册，或未绑定任何平台
     """
     if not name:
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        item = getattr(cfg, "cloud_platform", None)
-        name = str(item.value).strip() if item is not None and item.value else ""
-
-        # 向后兼容：旧版本配置只有 gitee_bound 标记
-        if not name:
-            gitee_bound = getattr(cfg, "gitee_bound", None)
-            if gitee_bound is not None and gitee_bound.value:
-                name = GiteeOAuthBackend.name
-
-        if not name:
-            raise ValueError("未绑定任何云平台账号")
+        # 自动探测已绑定的平台
+        for platform_name, backend_cls in _BACKENDS.items():
+            try:
+                backend = backend_cls()
+                if backend.is_bound():
+                    return backend
+            except Exception:
+                continue
+        raise ValueError("未绑定任何云平台账号")
 
     backend_cls = _BACKENDS.get(name)
     if backend_cls is None:

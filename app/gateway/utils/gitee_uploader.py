@@ -91,34 +91,42 @@ class GiteeUploader:
 
     def _ensure_config(self) -> bool:
         """加载配置。
-        优先使用用户 OAuth 绑定的 token/repo，
-        未绑定时回退到共享仓库配置。
+        优先使用用户 OAuth 绑定的 token/repo（通过抽象层查询），
+        未绑定时回退到共享仓库配置（向后兼容）。
         """
         if self._config_loaded:
             return bool(self._token and self._owner and self._repo)
 
         try:
+            from app.gateway.auth import get_oauth_backend
+
+            # 优先使用 OAuth 抽象层获取绑定信息
+            backend = get_oauth_backend("gitee")
+            bound_info = backend.get_bound_info()
+            if bound_info:
+                self._token = bound_info["token"]
+                self._owner = bound_info["owner"]
+                self._repo = bound_info.get("repo", "DriFox_uploads")
+                self._path = "drifox"
+                self._branch = "master"
+                logger.info("[GiteeUploader] 使用 OAuth 绑定账号上传")
+                self._config_loaded = True
+                return True
+        except Exception as e:
+            # OAuth 后端查询失败（未绑定/异常等），回退到共享仓库
+            logger.debug(f"[GiteeUploader] OAuth 后端查询异常: {e}")
+
+        # 回退共享仓库（OAuth 未绑定或查询异常时）
+        try:
             from app.utils.config import Settings
 
             cfg = Settings.get_instance()
-
-            # 优先使用用户绑定的 Gitee 账号
-            if cfg.gitee_bound.value and cfg.gitee_user_token.value:
-                self._token = cfg.gitee_user_token.value
-                self._owner = cfg.gitee_user_owner.value
-                self._repo = cfg.gitee_user_repo.value or "DriFox_uploads"
-                self._path = "drifox"
-                self._branch = "master"
-                logger.info("[GiteeUploader] 使用用户绑定账号上传")
-            else:
-                # 回退共享仓库
-                self._token = cfg.gitee_token.value or ""
-                self._owner = cfg.gitee_owner.value or ""
-                self._repo = cfg.gitee_repo.value or ""
-                self._path = cfg.gitee_path.value or "drifox"
-                self._branch = cfg.gitee_branch.value or "master"
-                logger.info("[GiteeUploader] 使用共享仓库上传")
-
+            self._token = cfg.gitee_token.value or ""
+            self._owner = cfg.gitee_owner.value or ""
+            self._repo = cfg.gitee_repo.value or ""
+            self._path = cfg.gitee_path.value or "drifox"
+            self._branch = cfg.gitee_branch.value or "master"
+            logger.info("[GiteeUploader] 使用共享仓库上传")
             self._config_loaded = True
         except Exception as e:
             logger.warning(f"[GiteeUploader] 加载配置失败: {e}")
@@ -222,16 +230,6 @@ class GiteeUploader:
         except Exception as e:
             logger.error(f"[GiteeUploader] 上传异常: {e}", exc_info=True)
             return None, str(e)
-
-    @staticmethod
-    def _parse_error(resp) -> str:
-        """解析 Gitee API 错误响应"""
-        try:
-            body = resp.json()
-            return body.get("message", resp.text[:200])
-        except Exception:
-            return resp.text[:200]
-
 
 # 便捷函数
 def get_gitee_uploader() -> GiteeUploader:

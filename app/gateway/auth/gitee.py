@@ -5,9 +5,8 @@ Gitee OAuth 平台后端
 分层说明：
   - 本模块承载 Gitee 平台的 **网络/API 层**（token 换取、用户信息、仓库管理），
     所有 requests 调用集中于此，便于测试 mock 与平台横向扩展；
-  - 授权码流程编排（回调服务器、浏览器、等待循环）暂由
-    app.gateway.utils.gitee_oauth.start_oauth_flow 承载（向后兼容），
-    新平台请直接使用 base.run_authorization_code_flow。
+  - 授权码流程编排复用 base.run_authorization_code_flow（通用实现），
+    本模块只负责 Gitee 特有的初始化动作（拉用户信息、建仓库、存配置）。
 """
 
 from typing import Optional, Tuple
@@ -15,7 +14,7 @@ from typing import Optional, Tuple
 import requests
 from loguru import logger
 
-from app.gateway.auth.base import OAuthBackend, parse_error
+from app.gateway.auth.base import OAuthAppConfig, OAuthBackend, parse_error, run_authorization_code_flow
 
 # ── Gitee 端点常量 ────────────────────────────────────────
 GITEE_AUTHORIZE_URL = "https://gitee.com/oauth/authorize"
@@ -147,28 +146,86 @@ class GiteeOAuthBackend(OAuthBackend):
         """
         绑定 Gitee 账号（阻塞，约 120s 超时）。
 
+        使用 base.run_authorization_code_flow 完成通用授权码流程，
+        再执行 Gitee 特有的初始化：拉用户信息、确保仓库存在、写配置。
+
         Args:
             repo_private (bool): 上传仓库是否私有，默认 True
         """
-        from app.gateway.utils.gitee_oauth import start_oauth_flow
+        from app.utils.config import Settings
 
+        cfg = Settings.get_instance()
+        client_id = cfg.gitee_oauth_client_id.value
+        client_secret = cfg.gitee_oauth_client_secret.value
+
+        if not client_id or not client_secret:
+            return False, "OAuth 凭证未配置"
+
+        # 1. 构建 OAuth 应用配置
+        app_cfg = OAuthAppConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            authorize_url=GITEE_AUTHORIZE_URL,
+            token_url=GITEE_TOKEN_URL,
+            scope="user_info projects",
+        )
+
+        # 2. 执行通用授权码流程（阻塞，起回调服务器 → 开浏览器 → 等授权 → 换 token）
+        token_data, err = run_authorization_code_flow(app_cfg)
+        if token_data is None:
+            return False, err
+
+        access_token = token_data["access_token"]
+
+        # 3. 获取用户信息（Gitee 特有）
+        owner, err = fetch_user_login(access_token)
+        if not owner:
+            return False, err
+
+        # 4. 检查/创建上传仓库
         repo_private = bool(options.get("repo_private", True))
-        success, msg = start_oauth_flow(repo_private)
+        repo_ok, repo_msg = ensure_repo(access_token, owner, FIXED_REPO_NAME, repo_private)
+        if not repo_ok:
+            return False, repo_msg
 
-        if success:
-            self._set_cloud_platform(self.name)
-            logger.info(f"[OAuth] 平台绑定成功: {self.name}")
-        return success, msg
+        # 4b. 创建配置备份仓库（强制私有，失败不阻断绑定流程）
+        settings_ok, settings_msg = ensure_repo(access_token, owner, SETTINGS_REPO_NAME, private=True)
+        if settings_ok:
+            logger.info(f"[GiteeOAuth] {SETTINGS_REPO_NAME} 已就绪")
+        else:
+            logger.warning(f"[GiteeOAuth] {SETTINGS_REPO_NAME} 创建失败: {settings_msg}（不影响绑定）")
+
+        # 5. 存储到配置
+        cfg.gitee_user_token.value = access_token
+        cfg.gitee_user_owner.value = owner
+        cfg.gitee_user_repo.value = FIXED_REPO_NAME
+        cfg.gitee_bound.value = True
+        try:
+            cfg.save()
+        except Exception as e:
+            logger.error(f"[OAuth] 绑定后保存配置失败: {e}")
+            return False, f"绑定失败（配置保存错误）：{e}"
+
+        logger.info(f"[OAuth] 平台绑定成功: {self.name} — {owner}/{FIXED_REPO_NAME}")
+        return True, f"绑定成功！仓库：{owner}/{FIXED_REPO_NAME}"
 
     def unbind(self) -> Tuple[bool, str]:
-        """解绑 Gitee 账号，同时清除 cloud_platform 标记"""
-        from app.gateway.utils.gitee_oauth import unbind_account
+        """解绑 Gitee 账号，清除本地 token"""
+        from app.utils.config import Settings
 
-        success, msg = unbind_account()
-        if success:
-            self._set_cloud_platform("")
-            logger.info(f"[OAuth] 平台已解绑: {self.name}")
-        return success, msg
+        cfg = Settings.get_instance()
+        cfg.gitee_bound.value = False
+        cfg.gitee_user_token.value = ""
+        cfg.gitee_user_owner.value = ""
+        cfg.gitee_user_repo.value = ""
+        try:
+            cfg.save()
+        except Exception as e:
+            logger.error(f"[OAuth] 解绑时保存配置失败: {e}")
+            return False, f"解绑失败（配置保存错误）：{e}"
+
+        logger.info(f"[OAuth] 平台已解绑: {self.name}")
+        return True, "已解绑 Gitee 账号"
 
     def is_bound(self) -> bool:
         from app.utils.config import Settings
@@ -177,23 +234,13 @@ class GiteeOAuthBackend(OAuthBackend):
         return bool(cfg.gitee_bound.value)
 
     def get_bound_info(self) -> Optional[dict]:
-        from app.gateway.utils.gitee_oauth import get_bound_info
-
-        return get_bound_info()
-
-    # ── 内部辅助 ──────────────────────────────────────
-
-    @staticmethod
-    def _set_cloud_platform(value: str):
-        """更新 cloud_platform 配置（旧版本配置类可能没有该字段，容错处理）"""
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
-        item = getattr(cfg, "cloud_platform", None)
-        if item is None:
-            return
-        try:
-            item.value = value
-            cfg.save()
-        except Exception as e:
-            logger.warning(f"[OAuth] 更新 cloud_platform 失败: {e}")
+        if not cfg.gitee_bound.value:
+            return None
+        return {
+            "owner": cfg.gitee_user_owner.value,
+            "repo": cfg.gitee_user_repo.value,
+            "token": cfg.gitee_user_token.value,
+        }
