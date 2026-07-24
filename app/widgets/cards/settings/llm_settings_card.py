@@ -193,10 +193,6 @@ class LLMSettingsCard(SystemCardFrame):
         self.setMinimumHeight(250)  # 自适应窗口高度，showEvent 会自动设置 maximumHeight
 
         self.cfg = Settings.get_instance()
-        self._save_timer = QTimer(self)
-        self._save_timer.setSingleShot(True)
-        self._save_timer.setInterval(500)
-        self._save_timer.timeout.connect(self._perform_save)
 
         # 存储各区域分隔标签的位置
         self._section_anchors = {}
@@ -430,19 +426,13 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.addStretch(1)
 
         # 连接信号
-        # 注意：只有真正影响外观或模型列表的变更才走 _on_config_changed（触发全量刷新）
-        # 技能、通知、提示音等不涉及外观的变更走轻量级保存路径
-        self.llmProviderCard.providerChanged.connect(self._on_provider_changed)
-        self.llmSkillsCard.skillsChanged.connect(self._on_skills_changed)
-        self.cfg.llm_notify_enabled.valueChanged.connect(self._on_settings_changed)
-        self.llmSoundCard.optionChanged.connect(self._on_settings_changed)
+        # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
         self.cfg.llm_font_family.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_font_size.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_theme_style.valueChanged.connect(self._on_config_changed)
         self.cfg.ui_light_mode.valueChanged.connect(self._on_light_mode_changed)
         self.cfg.llm_api_enabled.valueChanged.connect(self._on_llm_api_enabled_changed)
         self.cfg.llm_api_port.valueChanged.connect(self._on_llm_api_port_changed)
-        self.cfg.pet_size.valueChanged.connect(self._on_settings_changed)
 
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
         self._list_cards = [
@@ -653,7 +643,6 @@ class LLMSettingsCard(SystemCardFrame):
 
             def _on_font_changed(self, font):
                 self.cfg.set(self.cfg.llm_font_family, font.family(), save=True)
-                self.cfg.save()
                 if self._parent and hasattr(self._parent, "_on_config_changed"):
                     self._parent._on_config_changed()
 
@@ -700,25 +689,6 @@ class LLMSettingsCard(SystemCardFrame):
     def _on_close(self):
         self.setVisible(False)
         self.closed.emit()
-
-    def _on_skills_changed(self, enabled_skills):
-        """技能变更 — 仅保存，不需要刷新外观或模型列表"""
-        self._save_timer.start()
-
-    def _on_settings_changed(self, _value=None):
-        """非外观类设置变更（通知、提示音等）— 仅保存，不需要刷新外观"""
-        self._save_timer.start()
-
-    def _on_provider_changed(self):
-        """服务商变更（添加/删除/修改）— 只需重载模型配置，不需要刷新外观
-
-        qconfig.set(save=True) 已经会触发 cfg.llm_saved_providers.valueChanged
-        → _on_providers_config_changed（轻量级，仅 _load_model_configs +
-        必要时刷新服务商/模型选择卡片），无需再 emit configChanged。
-        后者会走 _on_settings_config_changed → _apply_runtime_ui_settings，
-        全窗口刷一遍 setStyleSheet，导致删除操作明显卡顿。
-        """
-        self._save_timer.start()
 
     def _on_light_mode_changed(self, is_light: bool):
         """浅色模式开关切换 — 自动选择对应模式的主题"""
@@ -769,9 +739,7 @@ class LLMSettingsCard(SystemCardFrame):
             LLMSettingsCard._last_change_type = None  # 未知类型，全量刷新
 
         self.configChanged.emit()
-        self._save_timer.start()
-        # 注意：不再通过 QTimer 调用 _refresh_appearance_from_config
-        # 所有刷新由主窗口 _on_settings_config_changed 统一处理
+        # 所有配置控件在变更时已即时保存，这里只负责刷新运行时外观
 
     def _refresh_appearance_from_config(self):
         """根据当前配置刷新外观样式"""
@@ -841,12 +809,6 @@ class LLMSettingsCard(SystemCardFrame):
             except Exception as e:
                 logger.warning(f"[ThemeComboBox] 主动刷新失败: {e}")
 
-    def _perform_save(self):
-        try:
-            self.cfg.save_config()
-        except Exception as e:
-            logger.error(f"保存配置失败: {e}")
-
     def _on_toggled(self, enabled: bool):
         """开机自启开关切换时：检查平台支持 + 更新注册表"""
         # 防重入：防止信号递归/连锁导致多次写入
@@ -889,12 +851,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ).show()
                 return
 
-            # 2. 再单独保存配置（SwitchSettingCard 已通过 qconfig.set 保存过，
-            #    此处 save 用于兜底写入，失败不滚回注册表）
-            try:
-                self.cfg.save()
-            except Exception as e:
-                logger.warning(f"[AutoStart] 配置保存失败，但注册表已更新: {e}")
+            # SwitchSettingCard 已通过 qconfig.set(save=True) 持久化配置
         finally:
             LLMSettingsCard._autostart_toggling = False
 
@@ -913,7 +870,6 @@ class LLMSettingsCard(SystemCardFrame):
         else:
             if is_service_running():
                 stop_llm_api_service()
-        self._on_settings_changed()
 
     def _on_llm_api_port_changed(self, port):
         from app.gateway import (
@@ -955,7 +911,6 @@ class LLMSettingsCard(SystemCardFrame):
                 duration=2500,
                 parent=self,
             ).show()
-        self._on_settings_changed()
 
     def showEvent(self, event):
         if hasattr(self, "llmProviderCard"):
