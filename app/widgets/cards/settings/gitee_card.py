@@ -431,11 +431,7 @@ class GiteeCard(SettingCard):
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
-
-            token = self.cfg.gitee_user_token.value
-            owner = self.cfg.gitee_user_owner.value
-            if token and owner:
-                self._sync_svc.enable(token, owner)
+            # _refresh_ui() → _auto_enable_sync() 已调 enable()，无需重复调用
 
             InfoBar.success(
                 title="绑定成功",

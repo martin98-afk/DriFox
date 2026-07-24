@@ -76,9 +76,9 @@ class ConfigSyncService(QObject):
     _instance: Optional["ConfigSyncService"] = None
 
     # 信号
-    stateChanged = pyqtSignal(str)       # idle / syncing / error / disabled
-    syncDone = pyqtSignal(bool, str)     # success, message
-    _configChanged = pyqtSignal()        # 文件变更通知（watch 线程 → 主线程）
+    stateChanged = pyqtSignal(str)  # idle / syncing / error / disabled
+    syncDone = pyqtSignal(bool, str)  # success, message
+    _configChanged = pyqtSignal()  # 文件变更通知（watch 线程 → 主线程）
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -98,9 +98,9 @@ class ConfigSyncService(QObject):
         self._watch_thread: Optional[threading.Thread] = None
         self._suppress_until: float = 0.0  # 下载后抑制上传的时间窗口（时间戳）
         self._upload_thread: Optional[threading.Thread] = None  # 后台上传线程引用
-        self._config_dirty: bool = False     # app.config 有待上传的变更
-        self._custom_dirty: bool = False     # user-custom 有待上传的变更
-        self._records_dirty: bool = False    # share_records.json 有待上传的变更
+        self._config_dirty: bool = False  # app.config 有待上传的变更
+        self._custom_dirty: bool = False  # user-custom 有待上传的变更
+        self._records_dirty: bool = False  # share_records.json 有待上传的变更
         self._config_remote_sha: Optional[str] = None  # 远端 app.config SHA 缓存
         self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
@@ -215,6 +215,8 @@ class ConfigSyncService(QObject):
         self._debounce_timer.timeout.connect(self._on_debounce_timeout)
 
         self._set_state("idle")
+        # 先设抑制窗口再启动 watch，防止 initial_sync 过程中的文件事件触发防抖上传
+        self._suppress_until = time.time() + 30.0
         self._start_watching()
 
         # 异步检查远端并恢复/上传
@@ -310,9 +312,11 @@ class ConfigSyncService(QObject):
                         self._on_config_changed()
                         break
                     # user-custom 目录下文件变更（排除目录本身 mtime 变化）
-                    if (self._user_custom_path.exists()
-                            and changed_p != self._user_custom_path
-                            and changed_p.is_relative_to(self._user_custom_path)):
+                    if (
+                        self._user_custom_path.exists()
+                        and changed_p != self._user_custom_path
+                        and changed_p.is_relative_to(self._user_custom_path)
+                    ):
                         logger.info(f"[ConfigSync] 检测到用户插件变更: {changed_path}")
                         self._custom_dirty = True
                         self._on_config_changed()
@@ -351,29 +355,34 @@ class ConfigSyncService(QObject):
     def _initial_sync(self):
         """绑定后首次同步：检查远端 → 下载/上传（含 app.config + user-custom 插件）"""
         self._set_state("syncing")
-        if self._check_remote():
-            # 远端有配置 → 下载恢复
-            logger.info("[ConfigSync] 远端有配置，开始恢复…")
-            ok = self._do_download()
-            if ok:
-                self._set_state("idle")
-                self.syncDone.emit(True, "配置与用户插件已从云端恢复")
+        try:
+            if self._check_remote():
+                # 远端有配置 → 下载恢复
+                logger.info("[ConfigSync] 远端有配置，开始恢复…")
+                ok = self._do_download()
+                if ok:
+                    self._set_state("idle")
+                    self.syncDone.emit(True, "配置与用户插件已从云端恢复")
+                else:
+                    self._set_state("error")
+                    self.syncDone.emit(False, "配置与用户插件恢复失败")
             else:
-                self._set_state("error")
-                self.syncDone.emit(False, "配置与用户插件恢复失败")
-        else:
-            # 远端无配置 → 上传当前（全量）
-            logger.info("[ConfigSync] 远端无配置，开始上传…")
-            self._config_dirty = True
-            self._custom_dirty = True
-            self._records_dirty = True
-            ok = self._do_upload()
-            if ok:
-                self._set_state("idle")
-                self.syncDone.emit(True, "配置与用户插件已备份到云端")
-            else:
-                self._set_state("error")
-                self.syncDone.emit(False, "配置与用户插件备份失败")
+                # 远端无配置 → 上传当前（全量）
+                logger.info("[ConfigSync] 远端无配置，开始上传…")
+                self._config_dirty = True
+                self._custom_dirty = True
+                self._records_dirty = True
+                ok = self._do_upload()
+                if ok:
+                    self._set_state("idle")
+                    self.syncDone.emit(True, "配置与用户插件已备份到云端")
+                else:
+                    self._set_state("error")
+                    self.syncDone.emit(False, "配置与用户插件备份失败")
+        finally:
+            # 同步完成（无论成败），释放 enable() 设的长抑制窗口
+            # 保留 5s 冷静期，让下载/解压的级联事件自然平息
+            self._suppress_until = time.time() + 5.0
 
     def _check_remote(self) -> bool:
         """检查远端是否存在配置文件（200 + 返回 dict=文件存在，list=仅目录存在）"""
@@ -628,13 +637,21 @@ class ConfigSyncService(QObject):
         custom_downloaded = False
         records_downloaded = False
         try:
+            # ★ 进入下载立即取消防抖计时，防止之前 watch 事件的残留防抖与下载流程并发
+            if self._debounce_timer:
+                self._debounce_timer.stop()
+            # ★ 设 30s 抑制窗口，覆盖下载写盘 + Settings.load 级联效应的全过程
+            self._suppress_until = time.time() + 30.0
+
             # ── 1. app.config：SHA 未变则跳过 ──
             remote_config_sha = self._get_remote_file_sha(REMOTE_PATH)
             if remote_config_sha and remote_config_sha == self._config_remote_sha:
                 logger.debug("[ConfigSync] 远端 app.config 未变化，跳过下载")
             else:
                 config_ok = self._download_file(
-                    REMOTE_PATH, self._config_path, label="app.config",
+                    REMOTE_PATH,
+                    self._config_path,
+                    label="app.config",
                 )
                 config_downloaded = config_ok
 
@@ -654,13 +671,15 @@ class ConfigSyncService(QObject):
                     logger.debug("[ConfigSync] 远端 share_records 未变化，跳过下载")
                 else:
                     records_ok = self._download_file(
-                        REMOTE_RECORDS_PATH, self._records_path, label="share_records",
+                        REMOTE_RECORDS_PATH,
+                        self._records_path,
+                        label="share_records",
                     )
                     records_downloaded = records_ok
 
-            # ── 4. 全部下载完成后：重载配置 + 抑制上传风暴 + 清除脏标记 ──
+            # ── 4. 全部下载完成后：重载配置 + 清除脏标记 ──
+            # 抑制窗口已在入口设 30s，覆盖所有下载/解压的级联事件，无需逐个设
             if config_downloaded:
-                self._suppress_until = time.time() + 10.0
                 logger.info("[ConfigSync] 配置已从云端下载并覆盖本地")
                 try:
                     Settings.get_instance().load()
@@ -669,12 +688,10 @@ class ConfigSyncService(QObject):
                     logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
             if custom_downloaded:
-                # 确保抑制窗口覆盖 user-custom 解压的文件事件风暴
-                self._suppress_until = time.time() + 10.0
+                logger.debug("[ConfigSync] user-custom 已解压恢复，抑制窗口持续生效中")
 
             if records_downloaded:
-                # 确保抑制窗口覆盖 share_records 下载触发的文件变更事件
-                self._suppress_until = time.time() + 10.0
+                logger.debug("[ConfigSync] share_records 已下载恢复，抑制窗口持续生效中")
 
             # 清除下载本身触发的文件变更脏标记，避免抑制窗口结束后重复上传。
             # 抑制窗口由上方各分支设置，覆盖 watchfiles 事件风暴。
@@ -749,24 +766,39 @@ class ConfigSyncService(QObject):
                 shutil.move(str(self._user_custom_path), str(rollback_path))
 
             try:
-                with zipfile.ZipFile(str(zip_path), "r") as zf:
-                    zf.extractall(str(self._user_custom_path))
-                logger.info("[ConfigSync] user-custom 插件已从云端恢复")
-                # 清理临时 zip 和回滚备份
-                try:
-                    zip_path.unlink()
-                except Exception:
-                    pass
-                if rollback_path.exists():
-                    shutil.rmtree(str(rollback_path))
-                return True
-            except Exception:
+                # 解压（带重试，解决文件被占用如 night_city_bg.jpg 的问题）
+                _extract_ok = False
+                for _attempt in range(3):
+                    try:
+                        with zipfile.ZipFile(str(zip_path), "r") as zf:
+                            zf.extractall(str(self._user_custom_path))
+                        _extract_ok = True
+                        break
+                    except (PermissionError, OSError) as _e:
+                        logger.warning(f"[ConfigSync] user-custom 解压文件被占用，重试中 ({_attempt + 1}/3)... {_e}")
+                        time.sleep(1.0)
+                if not _extract_ok:
+                    raise RuntimeError("user-custom 解压失败：文件持续被占用")
+            except RuntimeError, zipfile.BadZipFile:
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
                 if rollback_path.exists():
                     shutil.move(str(rollback_path), str(self._user_custom_path))
                 raise
+
+            # 解压成功后清理临时文件（失败不阻塞，不触发回滚）
+            logger.info("[ConfigSync] user-custom 插件已从云端恢复")
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+            try:
+                if rollback_path.exists():
+                    shutil.rmtree(str(rollback_path))
+            except Exception:
+                pass
+            return True
         except Exception as e:
             logger.error(f"[ConfigSync] user-custom 下载解压失败: {e}")
             # 清理残留
@@ -784,11 +816,14 @@ class ConfigSyncService(QObject):
         try:
             if self._sha_cache_path.exists():
                 import json
+
                 data = json.loads(self._sha_cache_path.read_text(encoding="utf-8"))
                 self._config_remote_sha = data.get("config_sha") or None
                 self._custom_remote_sha = data.get("custom_sha") or None
                 self._records_remote_sha = data.get("records_sha") or None
-                logger.debug(f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}...")
+                logger.debug(
+                    f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}..."
+                )
         except Exception as e:
             logger.warning(f"[ConfigSync] SHA 缓存加载失败: {e}")
 
@@ -796,6 +831,7 @@ class ConfigSyncService(QObject):
         """持久化当前远端 SHA 到磁盘"""
         try:
             import json
+
             data = {}
             if self._config_remote_sha:
                 data["config_sha"] = self._config_remote_sha
