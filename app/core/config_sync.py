@@ -51,8 +51,8 @@ def _get_user_custom_path() -> Path:
 
 
 def _get_user_custom_backup_path() -> Path:
-    """获取 user-custom 绑定前备份路径"""
-    return get_app_data_dir() / "plugins" / "user-custom.pre_bind"
+    """获取 user-custom 绑定前备份路径（放 .drifox/ 根目录，避免触发插件 watch）"""
+    return get_app_data_dir() / "user-custom.pre_bind"
 
 
 def _get_records_path() -> Path:
@@ -758,20 +758,26 @@ class ConfigSyncService(QObject):
             if not ok:
                 return False
 
-            # 解压前备份当前 user-custom（异常时回滚）
-            rollback_path = get_app_data_dir() / "plugins" / "user-custom.tmp"
+            # 解压前备份当前 user-custom（异常时回滚，备份放 .drifox/ 根目录避免触发插件 watch）
+            rollback_path = get_app_data_dir() / "user-custom.backup"
             if self._user_custom_path.exists():
                 if rollback_path.exists():
                     shutil.rmtree(str(rollback_path))
                 shutil.move(str(self._user_custom_path), str(rollback_path))
 
             try:
-                # 解压（带重试，解决文件被占用如 night_city_bg.jpg 的问题）
+                # 先解压到临时目录（不在插件 watch 路径内），再原子重命名到目标路径。
+                # 避免 watchfiles 逐文件检测到 184+ 个写入事件 → PluginManager 反复
+                # 在 manifest 未就绪时 rescan → 插件被移除/重载多次。
                 _extract_ok = False
+                _tmp_extract = get_app_data_dir() / "user-custom.extract"
                 for _attempt in range(3):
                     try:
+                        if _tmp_extract.exists():
+                            shutil.rmtree(str(_tmp_extract))
+                        _tmp_extract.mkdir(parents=True, exist_ok=True)
                         with zipfile.ZipFile(str(zip_path), "r") as zf:
-                            zf.extractall(str(self._user_custom_path))
+                            zf.extractall(str(_tmp_extract))
                         _extract_ok = True
                         break
                     except (PermissionError, OSError) as _e:
@@ -779,6 +785,11 @@ class ConfigSyncService(QObject):
                         time.sleep(1.0)
                 if not _extract_ok:
                     raise RuntimeError("user-custom 解压失败：文件持续被占用")
+
+                # 原子重命名到目标路径（单次目录操作，watch 只看到一个事件）
+                if self._user_custom_path.exists():
+                    shutil.rmtree(str(self._user_custom_path))
+                shutil.move(str(_tmp_extract), str(self._user_custom_path))
             except RuntimeError, zipfile.BadZipFile:
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
@@ -786,6 +797,14 @@ class ConfigSyncService(QObject):
                 if rollback_path.exists():
                     shutil.move(str(rollback_path), str(self._user_custom_path))
                 raise
+            finally:
+                # 确保临时目录被清理
+                try:
+                    _tmp_extract = get_app_data_dir() / "user-custom.extract"
+                    if _tmp_extract.exists():
+                        shutil.rmtree(str(_tmp_extract))
+                except Exception:
+                    pass
 
             # 解压成功后清理临时文件（失败不阻塞，不触发回滚）
             logger.info("[ConfigSync] user-custom 插件已从云端恢复")
