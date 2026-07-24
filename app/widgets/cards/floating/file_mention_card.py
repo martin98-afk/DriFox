@@ -7,6 +7,7 @@
 交互方式：↑/↓ 导航，Enter 选中，Esc 关闭
 选中后：文件以 attachment chip 形式添加到输入框上方
 """
+
 import fnmatch
 import os
 from pathlib import Path
@@ -45,43 +46,88 @@ class FileMentionItemWidget(QWidget):
     # 扩展名 → emoji 映射（复用 memory_card 的风格，比 IconWidget 轻量无数倍）
     _EMOJI_MAP = {
         # 代码
-        '.py': '🐍', '.pyw': '🐍', '.pyx': '🐍',
-        '.js': '🟨', '.jsx': '⚛️', '.mjs': '🟨', '.cjs': '🟨',
-        '.ts': '🔷', '.tsx': '⚛️',
-        '.html': '🌐', '.htm': '🌐',
-        '.css': '🎨', '.scss': '🎨', '.less': '🎨',
-        '.java': '☕',
-        '.go': '🐹',
-        '.rs': '🦀',
-        '.rb': '💎',
-        '.php': '🐘',
-        '.swift': '🍎',
-        '.kt': '🤖',
-        '.c': '🔶', '.cpp': '🔶', '.h': '🔶', '.hpp': '🔶',
-        '.cs': '🔷',
-        '.sql': '🗃️',
-        '.sh': '💻', '.bash': '💻', '.zsh': '💻', '.ps1': '💻', '.cmd': '💻',
+        ".py": "🐍",
+        ".pyw": "🐍",
+        ".pyx": "🐍",
+        ".js": "🟨",
+        ".jsx": "⚛️",
+        ".mjs": "🟨",
+        ".cjs": "🟨",
+        ".ts": "🔷",
+        ".tsx": "⚛️",
+        ".html": "🌐",
+        ".htm": "🌐",
+        ".css": "🎨",
+        ".scss": "🎨",
+        ".less": "🎨",
+        ".java": "☕",
+        ".go": "🐹",
+        ".rs": "🦀",
+        ".rb": "💎",
+        ".php": "🐘",
+        ".swift": "🍎",
+        ".kt": "🤖",
+        ".c": "🔶",
+        ".cpp": "🔶",
+        ".h": "🔶",
+        ".hpp": "🔶",
+        ".cs": "🔷",
+        ".sql": "🗃️",
+        ".sh": "💻",
+        ".bash": "💻",
+        ".zsh": "💻",
+        ".ps1": "💻",
+        ".cmd": "💻",
         # 文档
-        '.md': '📝', '.rst': '📝',
-        '.txt': '📄', '.log': '📄',
-        '.json': '🔧', '.xml': '🔧',
-        '.yaml': '🔧', '.yml': '🔧',
-        '.toml': '🔧', '.ini': '🔧', '.cfg': '🔧', '.conf': '🔧',
-        '.csv': '📊', '.tsv': '📊',
-        '.pdf': '📕',
+        ".md": "📝",
+        ".rst": "📝",
+        ".txt": "📄",
+        ".log": "📄",
+        ".json": "🔧",
+        ".xml": "🔧",
+        ".yaml": "🔧",
+        ".yml": "🔧",
+        ".toml": "🔧",
+        ".ini": "🔧",
+        ".cfg": "🔧",
+        ".conf": "🔧",
+        ".csv": "📊",
+        ".tsv": "📊",
+        ".pdf": "📕",
         # 图片
-        '.png': '🖼️', '.jpg': '🖼️', '.jpeg': '🖼️',
-        '.gif': '🖼️', '.bmp': '🖼️', '.svg': '🖼️',
-        '.webp': '🖼️', '.ico': '🖼️',
+        ".png": "🖼️",
+        ".jpg": "🖼️",
+        ".jpeg": "🖼️",
+        ".gif": "🖼️",
+        ".bmp": "🖼️",
+        ".svg": "🖼️",
+        ".webp": "🖼️",
+        ".ico": "🖼️",
         # 视频
-        '.mp4': '🎬', '.avi': '🎬', '.mov': '🎬', '.mkv': '🎬',
-        '.webm': '🎬', '.flv': '🎬', '.m4v': '🎬',
+        ".mp4": "🎬",
+        ".avi": "🎬",
+        ".mov": "🎬",
+        ".mkv": "🎬",
+        ".webm": "🎬",
+        ".flv": "🎬",
+        ".m4v": "🎬",
         # 音频
-        '.mp3': '🎵', '.wav': '🎵', '.flac': '🎵', '.aac': '🎵',
-        '.ogg': '🎵', '.wma': '🎵', '.m4a': '🎵',
+        ".mp3": "🎵",
+        ".wav": "🎵",
+        ".flac": "🎵",
+        ".aac": "🎵",
+        ".ogg": "🎵",
+        ".wma": "🎵",
+        ".m4a": "🎵",
         # 压缩包
-        '.zip': '📦', '.rar': '📦', '.7z': '📦',
-        '.tar': '📦', '.gz': '📦', '.bz2': '📦', '.xz': '📦', '.zst': '📦',
+        ".zip": "📦",
+        ".rar": "📦",
+        ".7z": "📦",
+        ".tar": "📦",
+        ".gz": "📦",
+        ".bz2": "📦",
+        ".xz": "📦",
+        ".zst": "📦",
     }
 
     def __init__(self, file_data: Dict[str, str], query: str, parent=None):
@@ -182,11 +228,11 @@ class FileMentionItemWidget(QWidget):
             found.append(query)
             return found
         # 按 | & 拆解
-        for or_term in query.split('|'):
+        for or_term in query.split("|"):
             or_term = or_term.strip()
             if not or_term:
                 continue
-            for and_part in or_term.split('&'):
+            for and_part in or_term.split("&"):
                 and_part = and_part.strip()
                 if and_part and and_part.lower() in text_lower and and_part not in found:
                     found.append(and_part)
@@ -362,13 +408,12 @@ class FileMentionCard(QWidget):
         self._scroll_layout.setSpacing(0)
 
         self._scroll_area.setWidget(self._scroll_content)
-        self._scroll_area.viewport().setStyleSheet(
-            "background: transparent; border: none; padding: 0; margin: 0;"
-        )
+        self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
 
     def set_root_dir(self, root_dir: str):
-        """设置根目录"""
+        """设置根目录（自动归一化路径，避免 Windows 上混合斜杠）"""
+        root_dir = os.path.normpath(root_dir) if root_dir else root_dir
         if root_dir != self._root_dir:
             self._root_dir = root_dir
             self._cache_dirty = True
@@ -394,7 +439,7 @@ class FileMentionCard(QWidget):
         """
         if self._scanning:
             return
-        self._changed_dirs.add(path)
+        self._changed_dirs.add(os.path.normpath(path))
         self._incr_timer.start()
 
     def _do_incremental_update(self):
@@ -430,15 +475,14 @@ class FileMentionCard(QWidget):
 
     def _sort_file_cache(self):
         """重新排序文件缓存（目录优先，同名不区分大小写）"""
-        self._file_cache.sort(
-            key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower())
-        )
+        self._file_cache.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
 
     def _incremental_update_one(self, changed_dir: str) -> bool:
         """增量处理单个变化目录：diff 快照后增删缓存条目
 
         返回 True 表示有实际变化（新增或删除），False 表示无变化。
         """
+        changed_dir = os.path.normpath(changed_dir)
         old_names = self._dir_snapshots.get(changed_dir, set())
         rel_prefix = self._get_rel_prefix(changed_dir)
         new_names: Set[str] = set()
@@ -460,7 +504,7 @@ class FileMentionCard(QWidget):
                         # ---- 新增条目 ----
                         item = {
                             "name": name,
-                            "path": entry.path,
+                            "path": os.path.normpath(entry.path),
                             "relative_path": rel,
                             "type": "dir" if is_dir else "file",
                         }
@@ -469,8 +513,8 @@ class FileMentionCard(QWidget):
 
                         if is_dir:
                             # 新目录：递归扫描子文件 + 注册监视
-                            self._incremental_scan_new_dir(entry.path, rel)
-        except (PermissionError, FileNotFoundError, OSError):
+                            self._incremental_scan_new_dir(os.path.normpath(entry.path), rel)
+        except PermissionError, FileNotFoundError, OSError:
             # 目录可能已被删除
             new_names = set()
 
@@ -482,9 +526,9 @@ class FileMentionCard(QWidget):
             prefix = rel if rel.endswith("/") else rel + "/"
             before = len(self._file_cache)
             self._file_cache = [
-                item for item in self._file_cache
-                if item["relative_path"] != rel
-                and not item["relative_path"].startswith(prefix)
+                item
+                for item in self._file_cache
+                if item["relative_path"] != rel and not item["relative_path"].startswith(prefix)
             ]
             if len(self._file_cache) < before:
                 changed = True
@@ -501,6 +545,7 @@ class FileMentionCard(QWidget):
 
         与 _scan_dir 一致地用 max_items=500 防止大目录导致缓存膨胀失控。
         """
+        dirpath = os.path.normpath(dirpath)
         # 注册监视器
         if dirpath not in self._watched_dirs:
             self._watched_dirs.add(dirpath)
@@ -525,15 +570,15 @@ class FileMentionCard(QWidget):
                     names.add(name)
                     item = {
                         "name": name,
-                        "path": entry.path,
+                        "path": os.path.normpath(entry.path),
                         "relative_path": rel,
                         "type": "dir" if is_dir else "file",
                     }
                     self._file_cache.append(item)
 
                     if is_dir:
-                        self._incremental_scan_new_dir(entry.path, rel)
-        except (PermissionError, FileNotFoundError, OSError):
+                        self._incremental_scan_new_dir(os.path.normpath(entry.path), rel)
+        except PermissionError, FileNotFoundError, OSError:
             pass
 
         self._dir_snapshots[dirpath] = names
@@ -584,43 +629,70 @@ class FileMentionCard(QWidget):
 
     # 总是忽略的目录名（不区分大小写精确匹配）
     _IGNORED_DIRS: Set[str] = {
-        '.git', '.idea', '.vscode', '.venv', 'venv', 'env',
-        '__pycache__', 'build', 'dist', 'node_modules',
-        '.svn', '.hg', '.bzr',
-        '.mypy_cache', '.pytest_cache', '.ruff_cache',
-        '.drifox',  # 项目数据目录
+        ".git",
+        ".idea",
+        ".vscode",
+        ".venv",
+        "venv",
+        "env",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        ".svn",
+        ".hg",
+        ".bzr",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".drifox",  # 项目数据目录
         # 构建输出目录
-        'target',  # Rust cargo build
-        'bin', 'obj',  # C#/.NET 构建
+        "target",  # Rust cargo build
+        "bin",
+        "obj",  # C#/.NET 构建
         # 前端框架构建缓存
-        '.next', '.nuxt',
+        ".next",
+        ".nuxt",
         # 基础设施构建缓存
-        '.serverless', '.terraform',
+        ".serverless",
+        ".terraform",
         # 测试覆盖率报告
-        'coverage', 'htmlcov', '.coverage',
+        "coverage",
+        "htmlcov",
+        ".coverage",
         # 日志/临时文件
-        'logs', 'log', 'tmp', 'temp',
+        "logs",
+        "log",
+        "tmp",
+        "temp",
         # 第三方依赖目录
-        'vendor',  # Go/PHP
-        'Pods',    # CocoaPods
-        'Carthage',  # Carthage
-        '.gradle',  # Gradle 缓存
+        "vendor",  # Go/PHP
+        "Pods",  # CocoaPods
+        "Carthage",  # Carthage
+        ".gradle",  # Gradle 缓存
         # Python 测试
-        '.tox',
+        ".tox",
         # Python 包目录
-        'site-packages', 'lib', 'lib64',
+        "site-packages",
+        "lib",
+        "lib64",
     }
 
     # 模糊匹配忽略的目录模式（fnmatch 通配符，不区分大小写）
     _IGNORED_DIR_PATTERNS: Set[str] = {
-        '*venv*',        # 匹配 venv, .venv, myvenv, venv38, .venv38 等虚拟环境目录
-        '*.egg-info*',   # Python egg-info 元数据目录
+        "*venv*",  # 匹配 venv, .venv, myvenv, venv38, .venv38 等虚拟环境目录
+        "*.egg-info*",  # Python egg-info 元数据目录
     }
 
     # 总是忽略的扩展名
     _IGNORED_EXT: Set[str] = {
-        '.pyc', '.pyo', '.so', '.dll', '.dylib',
-        '.egg-info', '.whl',
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dll",
+        ".dylib",
+        ".egg-info",
+        ".whl",
     }
 
     @staticmethod
@@ -684,17 +756,17 @@ class FileMentionCard(QWidget):
         - / 结尾表示目录
         - 标准 glob (*, ?, [abc])
         """
-        gitignore_path = root / '.gitignore'
+        gitignore_path = root / ".gitignore"
         if not gitignore_path.exists():
             return []
 
         patterns = []
         try:
-            text = gitignore_path.read_text(encoding='utf-8', errors='replace')
-            for line in text.split('\n'):
+            text = gitignore_path.read_text(encoding="utf-8", errors="replace")
+            for line in text.split("\n"):
                 line = line.strip()
                 # 跳过空行和注释
-                if not line or line.startswith('#'):
+                if not line or line.startswith("#"):
                     continue
                 patterns.append(line)
         except Exception:
@@ -711,7 +783,7 @@ class FileMentionCard(QWidget):
         3. 检查是否命中 always-ignored 扩展名
         4. 检查 .gitignore 模式
         """
-        path_parts = rel_path.replace('\\', '/').split('/')
+        path_parts = rel_path.replace("\\", "/").split("/")
         name = path_parts[-1]
         name_lower = name.lower()
 
@@ -743,15 +815,15 @@ class FileMentionCard(QWidget):
             # 处理取反
             negate = False
             p = pattern
-            if pattern.startswith('!'):
+            if pattern.startswith("!"):
                 negate = True
                 p = pattern[1:]
 
             # 去掉尾部 /
-            p_trail = p.rstrip('/')
+            p_trail = p.rstrip("/")
 
             # 构建匹配路径（用 / 分隔）
-            match_path = rel_path.replace('\\', '/')
+            match_path = rel_path.replace("\\", "/")
 
             # 尝试直接匹配
             if fnmatch.fnmatch(match_path, p_trail):
@@ -759,14 +831,14 @@ class FileMentionCard(QWidget):
                 continue
 
             # 尝试匹配文件名（模式中没有 / 时匹配任何层级的文件名）
-            if '/' not in p:
+            if "/" not in p:
                 if fnmatch.fnmatch(name, p_trail):
                     ignored = not negate
                     continue
 
             # 尝试前缀匹配（e.g. "build/" 匹配 "build/xxx"）
-            if p.endswith('/'):
-                if match_path.startswith(p) or match_path == p.rstrip('/'):
+            if p.endswith("/"):
+                if match_path.startswith(p) or match_path == p.rstrip("/"):
                     ignored = not negate
                     continue
 
@@ -801,12 +873,12 @@ class FileMentionCard(QWidget):
         finally:
             self._scanning = False
 
-    def _scan_dir(self, dirpath: str, rel_prefix: str,
-                  gitignore_patterns: List[str], max_items: int):
+    def _scan_dir(self, dirpath: str, rel_prefix: str, gitignore_patterns: List[str], max_items: int):
         """递归扫描单层目录（os.scandir 实现）
 
         同时将扫描到的目录注册到文件系统监视器，以便实时检测新增/删除文件。
         """
+        dirpath = os.path.normpath(dirpath)
         # 将当前目录加入文件系统监视器（去重）
         if dirpath not in self._watched_dirs:
             self._watched_dirs.add(dirpath)
@@ -830,7 +902,7 @@ class FileMentionCard(QWidget):
                     names.add(name)
                     item = {
                         "name": name,
-                        "path": entry.path,
+                        "path": os.path.normpath(entry.path),
                         "relative_path": rel,
                         "type": "dir" if is_dir else "file",
                     }
@@ -838,8 +910,7 @@ class FileMentionCard(QWidget):
 
                     # 递归子目录
                     if is_dir:
-                        self._scan_dir(entry.path, rel,
-                                       gitignore_patterns, max_items)
+                        self._scan_dir(os.path.normpath(entry.path), rel, gitignore_patterns, max_items)
 
             self._dir_snapshots[dirpath] = names
         except PermissionError:
@@ -859,10 +930,7 @@ class FileMentionCard(QWidget):
 
         # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
         if len(self._item_widgets) == len(new_items):
-            same = all(
-                self._item_widgets[i].item_data["path"] == new_items[i]["path"]
-                for i in range(len(new_items))
-            )
+            same = all(self._item_widgets[i].item_data["path"] == new_items[i]["path"] for i in range(len(new_items)))
             if same:
                 for w, item in zip(self._item_widgets, new_items):
                     w.update_data(item, self._current_query)
@@ -936,12 +1004,12 @@ class FileMentionCard(QWidget):
             return True
         text = (item["name"] + " " + item["relative_path"]).lower()
 
-        for or_term in query.split('|'):
+        for or_term in query.split("|"):
             or_term = or_term.strip()
             if not or_term:
                 continue
             # 过滤空 AND 部分：让 "config&" 等价于 "config"
-            and_parts = [p.strip() for p in or_term.split('&') if p.strip()]
+            and_parts = [p.strip() for p in or_term.split("&") if p.strip()]
             if not and_parts:
                 continue
             if all(part in text for part in and_parts):
@@ -965,7 +1033,7 @@ class FileMentionCard(QWidget):
             self._filtered_items = sorted(
                 self._file_cache,
                 key=lambda x: (
-                    x["relative_path"].count('/'),  # 深度，浅在前
+                    x["relative_path"].count("/"),  # 深度，浅在前
                     0 if x["type"] == "dir" else 1,  # 目录优先
                     x["name"].lower(),  # 不区分大小写
                 ),
@@ -973,18 +1041,12 @@ class FileMentionCard(QWidget):
         else:
             q_lower = query.lower()
 
-            if '|' in query or '&' in query:
+            if "|" in query or "&" in query:
                 # 多关键字模式：布尔匹配
-                self._filtered_items = [
-                    item for item in self._file_cache
-                    if self._matches_multi(item, query)
-                ]
+                self._filtered_items = [item for item in self._file_cache if self._matches_multi(item, query)]
             else:
                 # 单关键字模式：全量评分 + 全排序
-                scored = [
-                    (self._score_item(item, q_lower), item)
-                    for item in self._file_cache
-                ]
+                scored = [(self._score_item(item, q_lower), item) for item in self._file_cache]
                 scored = [(s, item) for s, item in scored if s > 0]
                 scored.sort(key=lambda x: -x[0])
                 self._filtered_items = [item for _, item in scored]
@@ -1021,7 +1083,7 @@ class FileMentionCard(QWidget):
         """延迟一帧触父容器 _schedule_expand（等 LayoutRequest 传播完）"""
         try:
             parent = self.parentWidget()
-            if parent and hasattr(parent, '_schedule_expand'):
+            if parent and hasattr(parent, "_schedule_expand"):
                 parent._schedule_expand()
         except RuntimeError:
             pass
@@ -1065,9 +1127,7 @@ class FileMentionCard(QWidget):
 
         # 滚动到可见
         if 0 <= self._selected_index < len(self._item_widgets):
-            self._scroll_area.ensureWidgetVisible(
-                self._item_widgets[self._selected_index], 0, 0
-            )
+            self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
 
     def select_next(self) -> bool:
         """选择下一项"""
@@ -1186,7 +1246,7 @@ class FileMentionCard(QWidget):
         # ⚠️ 必须延迟到下一帧：setFixedHeight 发出的 LayoutRequest 需要
         # 通过事件循环传播到父容器布局后才能被 _do_expand→sizeHint() 读到新值。
         parent = self.parentWidget()
-        if parent and hasattr(parent, '_schedule_expand'):
+        if parent and hasattr(parent, "_schedule_expand"):
             QTimer.singleShot(0, self._deferred_container_expand)
 
         has_items = len(self._filtered_items) > 0

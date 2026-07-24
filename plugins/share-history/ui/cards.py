@@ -173,6 +173,10 @@ class _RecordItem(QFrame):
         self._download_btn: Optional[QPushButton] = None
         self._delete_btn: Optional[QPushButton] = None
 
+        # 下载线程/worker 引用（防止局部变量被 GC 导致线程信号丢失）
+        self._download_thread: Optional[QThread] = None
+        self._download_worker: Optional[_DownloadWorker] = None
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -509,20 +513,29 @@ class _RecordItem(QFrame):
             self._download_btn.setEnabled(False)
 
         # ── QThread 方式：和 DownloadThread 同模式 ──
-        worker = _DownloadWorker(url, str(save_path))
-        thread = QThread(self)
-        worker.moveToThread(thread)
+        # ⚠️ 必须保存为实例变量，防止 Python GC 在线程启动前回收 worker/thread
+        self._cleanup_download()
+        self._download_worker = _DownloadWorker(url, str(save_path))
+        self._download_thread = QThread(self)
+        self._download_worker.moveToThread(self._download_thread)
 
-        thread.started.connect(worker.run)
-        worker.finished.connect(lambda fp: self._on_download_done(fp, record_id))
-        worker.error.connect(self._on_download_error)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
+        self._download_thread.started.connect(self._download_worker.run)
+        self._download_worker.finished.connect(lambda fp: self._on_download_done(fp, record_id))
+        self._download_worker.error.connect(self._on_download_error)
+        self._download_worker.finished.connect(self._download_thread.quit)
+        self._download_worker.error.connect(self._download_thread.quit)
+        self._download_thread.finished.connect(self._download_thread.deleteLater)
+        self._download_thread.finished.connect(self._cleanup_download)
+        self._download_thread.start()
+
+    def _cleanup_download(self):
+        """清理下载线程引用，防止内存泄漏"""
+        self._download_worker = None
+        self._download_thread = None
 
     def _on_download_done(self, file_path: str, record_id: int):
         """下载成功回调（主线程）"""
+        self._cleanup_download()
         update_record_file_path(record_id, file_path)
         self.downloaded.emit(record_id)
 
@@ -538,6 +551,7 @@ class _RecordItem(QFrame):
     def _on_download_error(self, err: str):
         """下载失败回调（主线程）"""
         logger.warning(f"[ShareHistory] 下载失败: {err}")
+        self._cleanup_download()
         if self._download_btn:
             self._download_btn.setText("📥 重试")
             self._download_btn.setEnabled(True)
@@ -556,7 +570,7 @@ class _DownloadWorker(QObject):
     """文件下载 Worker — 与 app.utils.utils.DownloadThread 同模式，QThread + signals"""
 
     finished = pyqtSignal(str)  # 文件路径
-    error = pyqtSignal(str)      # 错误信息
+    error = pyqtSignal(str)  # 错误信息
 
     def __init__(self, url: str, file_path: str):
         super().__init__()
@@ -564,10 +578,16 @@ class _DownloadWorker(QObject):
         self._file_path = file_path
 
     def run(self):
+        from urllib.parse import urlsplit, urlunsplit, quote
         from urllib.request import Request, urlopen
 
         try:
-            req = Request(self._url, headers={"User-Agent": "DriFox/1.0"})
+            # 关键修复：对 URL 路径进行 percent-encoding，防止中文字符导致 UnicodeEncodeError
+            parts = urlsplit(self._url)
+            safe_path = quote(parts.path, safe="/:@!$&'()*+,;=-._~%")
+            safe_url = urlunsplit(parts._replace(path=safe_path)) if safe_path != parts.path else self._url
+
+            req = Request(safe_url, headers={"User-Agent": "DriFox/1.0"})
             with urlopen(req, timeout=30) as resp:
                 data = resp.read()
             Path(self._file_path).write_bytes(data)
