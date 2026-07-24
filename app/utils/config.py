@@ -268,6 +268,10 @@ class Settings(QConfig):
         copy: bool
             whether to deep copy the new value
         """
+        # 与 qfluentwidgets 的 QConfig.set() 保持一致：值未变化时不触发信号或写盘
+        if item.value == value:
+            return
+
         # deepcopy new value
         try:
             item.value = deepcopy(value) if copy else value

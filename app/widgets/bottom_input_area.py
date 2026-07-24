@@ -1153,6 +1153,9 @@ class SendableTextEdit(TextEdit):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_send_button()
+        # 窗口 resize → 宽度变化 → 文本换行量变化 → 文档高度变化
+        # 必须触发高度重算，否则滚动条会在远未达到 maxHeight 时出现
+        self._adjust_height_to_content()
 
     def showEvent(self, event):
         super().showEvent(event)
