@@ -27,7 +27,7 @@ import time
 import urllib.parse
 from datetime import datetime
 from functools import lru_cache
-from html import escape
+from html import escape, unescape
 from typing import Any, Dict, List, Optional
 
 import orjson as json
@@ -155,16 +155,8 @@ def _update_icon_prefix():
         _ICON_PREFIX_CACHE = "qrc:/icons"
 
 
-# HTML 实体解码翻译表：比链式 .replace() 快 3-5x
-_HTML_ENTITY_TRANS = str.maketrans(
-    {
-        "&": "&",
-        "<": "<",
-        ">": ">",
-        "'": "'",
-        '"': '"',
-    }
-)
+# HTML 实体解码函数（str.maketrans 只能做单字符→单字符，无法解码 &quot; 等多字符实体）
+_unescape_html = unescape  # 别名，保持语义清晰
 
 
 def _get_lexer_cached(lang: str):
@@ -287,8 +279,8 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
         # ===== ECharts 代码块：渲染为交互式图表 =====
         if lang == "echarts":
             try:
-                # 一次性解码所有 HTML 实体（str.translate 比链式 .replace 快 3-5x）
-                json_text = code_content_raw.translate(_HTML_ENTITY_TRANS)
+                # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
+                json_text = _unescape_html(code_content_raw)
                 # 验证 JSON 合法性（json.loads 内部会解析，无需提前 decode）
                 # base64 编码防止 HTML 属性转义问题
                 b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
@@ -302,7 +294,7 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
 
         # --- 普通代码块处理 ---
         try:
-            copy_text = code_content_raw.translate(_HTML_ENTITY_TRANS)
+            copy_text = _unescape_html(code_content_raw)
         except Exception:
             copy_text = code_content_raw
 
@@ -4499,10 +4491,9 @@ class CodeWebViewer(QWebEngineView):
             # 全量渲染最终会提供完整格式化后的内容
             if len(text_clean) > 2000:
                 text_clean = text_clean[:2000] + "\n\n..."
-            escaped = escape(text_clean)
             js = f"""
             (function() {{
-                var text = {json.dumps(escaped)};
+                var text = {json.dumps(text_clean)};
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 智能段落处理 ──

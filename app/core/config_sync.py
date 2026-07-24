@@ -79,6 +79,7 @@ class ConfigSyncService(QObject):
     stateChanged = pyqtSignal(str)  # idle / syncing / error / disabled
     syncDone = pyqtSignal(bool, str)  # success, message
     _configChanged = pyqtSignal()  # 文件变更通知（watch 线程 → 主线程）
+    _reloadSettings = pyqtSignal()  # 请求在主线程重新加载 Settings（后台线程 → 主线程）
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -105,12 +106,15 @@ class ConfigSyncService(QObject):
         self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
+        self._pending_sync_message: Optional[str] = None  # 延迟 syncDone 消息（Settings 在主线程重载完成后发射）
 
         # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
         self._load_sha_cache()
 
         # 跨线程桥：watchfiles 线程 → 主线程
         self._configChanged.connect(self._on_config_changed_main)
+        # 跨线程桥：后台线程请求重新加载 Settings → 主线程执行
+        self._reloadSettings.connect(self._reload_settings_on_main_thread)
 
     # ── 单例 ──────────────────────────────────────────────
 
@@ -180,9 +184,16 @@ class ConfigSyncService(QObject):
         uc = self._user_custom_path
         if uc_bak.exists():
             try:
+                # [PERF] 原子恢复：先复制到临时目录（不在插件 watch 路径内），
+                # 再 rename 到目标路径（单次目录操作），避免 shutil.copytree
+                # 逐个文件触发 ChatBackend 插件重载（如 49+ 次文件事件）。
+                _tmp_restore = get_app_data_dir() / "user-custom.restore"
+                if _tmp_restore.exists():
+                    shutil.rmtree(str(_tmp_restore))
+                shutil.copytree(str(uc_bak), str(_tmp_restore))
                 if uc.exists():
                     shutil.rmtree(str(uc))
-                shutil.copytree(str(uc_bak), str(uc))
+                shutil.move(str(_tmp_restore), str(uc))
                 logger.info(f"[ConfigSync] 已恢复 user-custom 插件 ← {uc_bak.name}")
                 shutil.rmtree(str(uc_bak))
             except Exception as e:
@@ -301,19 +312,28 @@ class ConfigSyncService(QObject):
             for changes in watch(*watch_dirs, stop_event=self._watch_stop):
                 if self._watch_stop and self._watch_stop.is_set():
                     break
+
+                # [PERF] 批处理：watchfiles 每次迭代可能包含多个文件变更（如解压 user-custom 插件时
+                # 37+ 个文件同时出现）。只在整批处理完成后发射一次 _configChanged 信号，避免
+                # 大量跨线程信号拥塞主线程事件队列导致 UI 卡顿。
+                needs_notify = False
+                custom_logged = False
+
                 for change_type, changed_path in changes:
                     changed_p = Path(changed_path)
                     # app.config 变更
                     if changed_p.name == cfg_name:
-                        logger.info(f"[ConfigSync] 检测到配置变更: {changed_path}")
+                        if not self._config_dirty:
+                            logger.info(f"[ConfigSync] 检测到配置变更: {changed_path}")
                         self._config_dirty = True
-                        self._on_config_changed()
+                        needs_notify = True
                         continue
                     # share_records.json 变更
                     if changed_p.name == records_name:
-                        logger.info(f"[ConfigSync] 检测到分享记录变更: {changed_path}")
+                        if not self._records_dirty:
+                            logger.info(f"[ConfigSync] 检测到分享记录变更: {changed_path}")
                         self._records_dirty = True
-                        self._on_config_changed()
+                        needs_notify = True
                         continue
                     # user-custom 目录下文件变更（排除目录本身 mtime 变化）
                     if (
@@ -321,10 +341,15 @@ class ConfigSyncService(QObject):
                         and changed_p != self._user_custom_path
                         and changed_p.is_relative_to(self._user_custom_path)
                     ):
-                        logger.info(f"[ConfigSync] 检测到用户插件变更: {changed_path}")
                         self._custom_dirty = True
-                        self._on_config_changed()
+                        needs_notify = True
+                        if not custom_logged:
+                            logger.info("[ConfigSync] 检测到用户插件变更（批量）")
+                            custom_logged = True
                         continue
+
+                if needs_notify:
+                    self._on_config_changed()
         except Exception as e:
             logger.error(f"[ConfigSync] 文件监听异常: {e}")
 
@@ -354,11 +379,33 @@ class ConfigSyncService(QObject):
         t.start()
         self._upload_thread = t
 
+    # ── 主线程 Settings 重载 ──────────────────────────────
+
+    def _reload_settings_on_main_thread(self):
+        """在主线程重新加载 Settings（响应 _reloadSettings 信号）
+
+        由 _reloadSettings（后台线程发射）桥接到主线程执行，
+        避免大量 valueChanged 信号从非主线程发射导致 UI 卡顿。
+        """
+        try:
+            Settings.get_instance().load()
+            logger.info("[ConfigSync] Settings 已重新加载（主线程）")
+        except Exception as e:
+            logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
+
+        # 发射被延迟的 syncDone（_do_download 中设置的 _pending_sync_message）
+        if self._pending_sync_message:
+            msg = self._pending_sync_message
+            self._pending_sync_message = None
+            self._set_state("idle")
+            self.syncDone.emit(True, msg)
+
     # ── 远端同步 ──────────────────────────────────────────
 
     def _initial_sync(self):
         """绑定后首次同步：检查远端 → 下载/上传（含 app.config + user-custom 插件）"""
         self._set_state("syncing")
+        self._pending_sync_message = None  # 确保无残留
         try:
             remote_status = self._check_remote()
             if remote_status is True:
@@ -366,8 +413,13 @@ class ConfigSyncService(QObject):
                 logger.info("[ConfigSync] 远端有配置，开始恢复…")
                 ok = self._do_download()
                 if ok:
-                    self._set_state("idle")
-                    self.syncDone.emit(True, "配置与用户插件已从云端恢复")
+                    if self._pending_sync_message:
+                        # Settings 重载已延迟到主线程执行，syncDone 会在
+                        # _reload_settings_on_main_thread 中自动发射
+                        logger.debug("[ConfigSync] 等待 Settings 在主线程重载后发射 syncDone")
+                    else:
+                        self._set_state("idle")
+                        self.syncDone.emit(True, "配置与用户插件已从云端恢复")
                 else:
                     self._set_state("error")
                     self.syncDone.emit(False, "配置与用户插件恢复失败")
@@ -665,12 +717,12 @@ class ConfigSyncService(QObject):
                     results.append(True)
                 else:
                     if self._download_file(REMOTE_PATH, self._config_path, label="app.config"):
-                        logger.info("[ConfigSync] app.config 已下载并立即应用")
-                        try:
-                            Settings.get_instance().load()
-                            logger.info("[ConfigSync] Settings 已重新加载")
-                        except Exception as e:
-                            logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
+                        logger.info("[ConfigSync] app.config 已下载，安排在主线重载 Settings")
+                        # [PERF] 不在后台线程直接调用 Settings.load()，避免大量
+                        # valueChanged 信号从非主线程发射到主线程队列引发 UI 卡顿。
+                        # 改用信号桥接到主线程执行，load 完成后自动发射 syncDone。
+                        self._pending_sync_message = "配置与用户插件已从云端恢复"
+                        self._reloadSettings.emit()
                         results.append(True)
                     else:
                         results.append(False)

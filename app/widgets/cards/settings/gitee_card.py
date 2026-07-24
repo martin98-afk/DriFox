@@ -344,12 +344,11 @@ class GiteeCard(SettingCard):
             # 失败时由状态机显示红点，不弹 InfoBar
             return
 
-        # 远端配置已下载并覆盖本地，通过标准配置变更链路刷新全窗口 UI。
-        # 使用 _apply_runtime_ui_settings 替代 dispatch_refresh()：
-        #   - 走与用户手动改设置相同的刷新路径，确保配置值被正确传播
-        #   - 30ms debounce 批处理避免重复刷新
-        #   - 不再需要 2s 延迟（旧方案用 dispatch_refresh 会导致窗口创建期闪烁）
-        QTimer.singleShot(100, self._refresh_app_ui)
+        # 远端配置已下载并覆盖本地。
+        # 不再调用 _refresh_app_ui() — Settings.load() 已在主线程由
+        # _reload_settings_on_main_thread 执行，所有 ConfigItem 的
+        # valueChanged 信号已同步分发给 UI 槽，UI 已自然更新。
+        # 移除额外的全量刷新避免了 findChildren 遍历全窗口树的 6s+ 卡顿。
         # 静默同步成功，不弹 InfoBar（避免启动时打扰）
 
     def _refresh_app_ui(self):
