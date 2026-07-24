@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.6] - 2026-07-24
 
-自上一版本以来的变更 | 提交数：39 · 文件变更：37 · +3484/-714 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：40 · 文件变更：38 · +3551/-722 | 贡献者：dingma, mading, martin98-afk
 
 > 重点：包含 **Gitee 账号绑定与 OAuth 集成**、**云配置同步服务**、**Gitee 配置修复与同步增强**、**文件下载 QThread 重构**、**分享记录管理系统**，以及多项重大 bug 修复与 UI 优化。
 
@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 
 - **GiteeCard 连接与同步修复**: 修复不必要的信号发射，优化 GiteeCard 连接处理；增强远程配置检查与错误处理；简化同步逻辑，移除冗余 enable() 调用
 - **ConfigSyncService 增强**: 改进设置重载逻辑与批量变更处理，提升配置同步的健壮性；精简 message_card 相关冗余代码
+- **ToolPermissionController 同步刷新**: 监听 Settings 变更，使配置同步后自动刷新工具权限列表，无需手动重启
 - **配置变更检测修复**: 改进配置变更检测逻辑，更优雅地处理异常；确保旧监视线程正确清理，防止重复触发
 - **用户自定义备份路径修复**: 修复用户自定义备份路径触发插件监视的问题，优化提取流程
 - **下载处理优化**: 增强下载处理，防止内存泄漏并修复 URL 编码问题
