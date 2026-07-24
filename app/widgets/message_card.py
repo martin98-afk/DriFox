@@ -5610,6 +5610,10 @@ class CodeWebViewer(QWebEngineView):
 class PlainTextViewer(QWidget):
     contentHeightChanged = pyqtSignal(int)
 
+    # 用户消息卡片最大高度（px）：超过此高度启用 QTextEdit 内部滚动条
+    # 约可容纳 13 行 14px 文本，平衡阅读完整性与卡片视觉占位
+    MAX_HEIGHT = 300
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
@@ -5631,11 +5635,15 @@ class PlainTextViewer(QWidget):
         self.text_edit.setFrameShape(QTextEdit.NoFrame)
         self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
         self.text_edit.customContextMenuRequested.connect(self._show_context_menu)
+        # 显式声明：超出可视区域时自动显示垂直滚动条
+        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._apply_text_style()
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(40)
+        # 用户消息卡片最大高度：超出后由 QTextEdit 内部滚动条处理滚动
+        self.setMaximumHeight(self.MAX_HEIGHT)
 
     def _apply_text_style(self):
         """应用文本样式（从 Colors token 读取颜色）"""
@@ -5711,7 +5719,8 @@ class PlainTextViewer(QWidget):
         doc = self.text_edit.document()
         h = int(math.ceil(doc.size().height())) + 16  # padding
 
-        h = max(40, h)
+        # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
+        h = max(40, min(h, self.MAX_HEIGHT))
 
         if abs(self.height() - h) > 2:
             self.setFixedHeight(h)
