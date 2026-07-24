@@ -1,11 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.4.6] - 2026-07-23
+## [v0.4.6] - 2026-07-24
 
-自上一版本以来的变更 | 提交数：27 · 文件变更：33 · +3011/-528 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：40 · 文件变更：38 · +3551/-722 | 贡献者：dingma, mading, martin98-afk
 
-> 重点：包含 **Gitee 账号绑定与 OAuth 集成**、**云配置同步服务**、**文件下载 QThread 重构**、**分享记录管理系统**，以及多项 UI 优化与修复。
+> 重点：包含 **Gitee 账号绑定与 OAuth 集成**、**云配置同步服务**、**Gitee 配置修复与同步增强**、**文件下载 QThread 重构**、**分享记录管理系统**，以及多项重大 bug 修复与 UI 优化。
 
 ### ✨ 新功能 (New Features)
 
@@ -18,11 +18,23 @@ All notable changes to this project will be documented in this file.
 - **上下文压缩与工具块渲染**: 实现自动上下文压缩功能，增强工具块紧凑模式渲染
 - **UI 性能优化**: 优化命令注册时机、延迟设置弹窗加载、默认主题从 fallout 改为 lumia
 - **GiteeCard 按钮样式增强**: 使用 QPushButton 替换 PrimaryPushButton，增强按钮交互样式
+- **插件发现增强**: 确保用户自定义插件具有有效 manifest，能被 PluginManager 发现
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **GiteeCard 连接与同步修复**: 修复不必要的信号发射，优化 GiteeCard 连接处理；增强远程配置检查与错误处理；简化同步逻辑，移除冗余 enable() 调用
+- **ConfigSyncService 增强**: 改进设置重载逻辑与批量变更处理，提升配置同步的健壮性；精简 message_card 相关冗余代码
+- **ToolPermissionController 同步刷新**: 监听 Settings 变更，使配置同步后自动刷新工具权限列表，无需手动重启
+- **配置变更检测修复**: 改进配置变更检测逻辑，更优雅地处理异常；确保旧监视线程正确清理，防止重复触发
+- **用户自定义备份路径修复**: 修复用户自定义备份路径触发插件监视的问题，优化提取流程
+- **下载处理优化**: 增强下载处理，防止内存泄漏并修复 URL 编码问题
+- **QT_PLUGIN_PATH 冲突修复**: 修复 macOS 上与 Drifox.app 的 QT_PLUGIN_PATH 冲突
 - **Gitee 配置修复**: 修复 Gitee 配置设置与 UUID 路径生成，优化 LLM 设置卡片提示文本
 - **文档显示修复**: 修复 CodeWebViewer 文档高度计算与滚动行为，增强图表工具提示字体族支持
+
+### ♻️ 代码重构 (Refactoring)
+
+- **GiteeCard 同步逻辑精简**: 简化 GiteeCard 同步逻辑，移除冗余 enable() 调用
 
 ### 🔧 其他 (Chores & Build)
 

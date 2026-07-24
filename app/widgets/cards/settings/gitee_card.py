@@ -243,6 +243,15 @@ class GiteeCard(SettingCard):
         from app.core.config_sync import ConfigSyncService
 
         self._sync_svc = ConfigSyncService.get_instance()
+        # 先断开旧连接，防止 GiteeCard 重建（如设置面板关闭再打开）导致重复连接
+        try:
+            self._sync_svc.stateChanged.disconnect(self._on_sync_state_changed)
+        except TypeError:
+            pass
+        try:
+            self._sync_svc.syncDone.disconnect(self._on_initial_sync_done)
+        except TypeError:
+            pass
         self._sync_svc.stateChanged.connect(self._on_sync_state_changed)
         self._sync_svc.syncDone.connect(self._on_initial_sync_done)
 
@@ -331,15 +340,16 @@ class GiteeCard(SettingCard):
 
     def _on_initial_sync_done(self, success: bool, message: str):
         """首次同步完成回调（仅绑定后首次检查远端时触发）"""
-        if success:
-            # 远端配置已下载并覆盖本地，立即通过标准配置变更链路刷新全窗口 UI。
-            # 使用 _apply_runtime_ui_settings 替代 dispatch_refresh()：
-            #   - 走与用户手动改设置相同的刷新路径，确保配置值被正确传播
-            #   - 30ms debounce 批处理避免重复刷新
-            #   - 不再需要 2s 延迟（旧方案用 dispatch_refresh 会导致窗口创建期闪烁）
-            QTimer.singleShot(100, self._refresh_app_ui)
-            # 静默同步成功，不弹 InfoBar（避免启动时打扰）
-        # 失败时由状态机显示红点，不弹 InfoBar
+        if not success:
+            # 失败时由状态机显示红点，不弹 InfoBar
+            return
+
+        # 远端配置已下载并覆盖本地。
+        # 不再调用 _refresh_app_ui() — Settings.load() 已在主线程由
+        # _reload_settings_on_main_thread 执行，所有 ConfigItem 的
+        # valueChanged 信号已同步分发给 UI 槽，UI 已自然更新。
+        # 移除额外的全量刷新避免了 findChildren 遍历全窗口树的 6s+ 卡顿。
+        # 静默同步成功，不弹 InfoBar（避免启动时打扰）
 
     def _refresh_app_ui(self):
         """配置恢复后刷新整个 UI：通过标准配置变更链路逐窗口刷新"""
@@ -431,11 +441,7 @@ class GiteeCard(SettingCard):
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
-
-            token = self.cfg.gitee_user_token.value
-            owner = self.cfg.gitee_user_owner.value
-            if token and owner:
-                self._sync_svc.enable(token, owner)
+            # _refresh_ui() → _auto_enable_sync() 已调 enable()，无需重复调用
 
             InfoBar.success(
                 title="绑定成功",
