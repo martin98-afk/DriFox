@@ -308,13 +308,13 @@ class ConfigSyncService(QObject):
                         logger.info(f"[ConfigSync] 检测到配置变更: {changed_path}")
                         self._config_dirty = True
                         self._on_config_changed()
-                        break
+                        continue
                     # share_records.json 变更
                     if changed_p.name == records_name:
                         logger.info(f"[ConfigSync] 检测到分享记录变更: {changed_path}")
                         self._records_dirty = True
                         self._on_config_changed()
-                        break
+                        continue
                     # user-custom 目录下文件变更（排除目录本身 mtime 变化）
                     if (
                         self._user_custom_path.exists()
@@ -324,7 +324,7 @@ class ConfigSyncService(QObject):
                         logger.info(f"[ConfigSync] 检测到用户插件变更: {changed_path}")
                         self._custom_dirty = True
                         self._on_config_changed()
-                        break
+                        continue
         except Exception as e:
             logger.error(f"[ConfigSync] 文件监听异常: {e}")
 
@@ -423,7 +423,7 @@ class ConfigSyncService(QObject):
             body = resp.json()
             return isinstance(body, dict) and "content" in body
         except Exception:
-            return False
+            return None
 
     def _do_upload(self) -> bool:
         """上传有变更的项到远端（基于 _config_dirty / _custom_dirty 脏标记）。
@@ -435,11 +435,8 @@ class ConfigSyncService(QObject):
             logger.warning("[ConfigSync] 无法上传：缺少 token/owner")
             return False
 
-        # 双重校验：抑制窗口内完全跳过上传
-        if time.time() < self._suppress_until:
-            logger.debug("[ConfigSync] 下载后抑制窗口内，跳过上传")
-            return True
-
+        # 抑制窗口检查已在 _on_config_changed_main / _on_debounce_timeout 中执行，
+        # 不在 _do_upload 中重复检查——否则会误拦截 _initial_sync 的显式上传。
         if not self._config_dirty and not self._custom_dirty and not self._records_dirty:
             logger.debug("[ConfigSync] 无可上传的变更，跳过")
             return True
