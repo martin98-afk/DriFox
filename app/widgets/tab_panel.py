@@ -124,9 +124,31 @@ class TabItem(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
 
         if self._selected:
-            painter.fillRect(self.rect(), QColor(Colors.SELECTED_BG))
+            # 解析 rgba() 字符串为 QColor
+            bg_str = Colors.SELECTED_BG
+            try:
+                if bg_str.startswith("rgba("):
+                    parts = bg_str.strip("rgba() ").split(",")
+                    r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                    a = int(float(parts[3]) * 255) if float(parts[3]) <= 1 else int(parts[3])
+                    painter.fillRect(self.rect(), QColor(r, g, b, a))
+                else:
+                    painter.fillRect(self.rect(), QColor(bg_str))
+            except Exception:
+                painter.fillRect(self.rect(), QColor(102, 198, 255, 90))
+
             # 左侧选中指示条
-            painter.fillRect(0, 4, 3, self.height() - 8, QColor(Colors.INFO))
+            inf_str = Colors.INFO
+            try:
+                if inf_str.startswith("rgba("):
+                    parts = inf_str.strip("rgba() ").split(",")
+                    r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                    a = int(float(parts[3]) * 255) if len(parts) > 3 else 255
+                    painter.fillRect(0, 4, 3, self.height() - 8, QColor(r, g, b, a))
+                else:
+                    painter.fillRect(0, 4, 3, self.height() - 8, QColor(inf_str))
+            except Exception:
+                painter.fillRect(0, 4, 3, self.height() - 8, QColor(255, 255, 255, 200))
 
         super().paintEvent(event)
 

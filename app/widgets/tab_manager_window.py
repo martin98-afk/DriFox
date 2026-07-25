@@ -69,6 +69,26 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(new_btn)
 
 
+def _hide_edge_launcher(window):
+    """隐藏窗口的 UIPluginEdgeLauncher"""
+    try:
+        for child in window.findChildren(QWidget):
+            if child.metaObject().className() == "UIPluginEdgeLauncher":
+                child.hide()
+    except Exception:
+        pass
+
+
+def _show_edge_launcher(window):
+    """显示窗口的 UIPluginEdgeLauncher"""
+    try:
+        for child in window.findChildren(QWidget):
+            if child.metaObject().className() == "UIPluginEdgeLauncher":
+                child.show()
+    except Exception:
+        pass
+
+
 class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -100,8 +120,11 @@ class TabManagerWindow(QWidget):
         self.setWindowTitle("DriFox — Tab 管理器")
         self.setMinimumSize(800, 500)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        # 永久置顶（与 ToolPopupDialog 行为一致）
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        # 窗口标志：独立任务栏按钮 + 置顶（与 ToolPopupDialog 行为一致）
+        self.setWindowFlags(
+            Qt.Window | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint
+        )
 
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
@@ -185,7 +208,12 @@ class TabManagerWindow(QWidget):
         from PyQt5.QtGui import QIcon
         raw_icon = getattr(window, "icon", None)
         tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
-        self._tab_panel.add_tab(title, tab_icon)
+        tab_idx = self._tab_panel.add_tab(title, tab_icon)
+
+        # 监听窗口标题变更，同步更新 Tab
+        window.windowTitleChanged.connect(
+            lambda new_title, i=tab_idx: self._tab_panel.update_tab_title(i, new_title)
+        )
 
         # 隐藏空状态页，切换到新窗口
         self._content_area.widget(0).hide()
@@ -243,12 +271,18 @@ class TabManagerWindow(QWidget):
             self.remove_window(window)
 
     def _on_new_tab_requested(self):
-        """新建窗口"""
-        from app.main_widget import OpenAIChatToolWindow
+        """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
+        current = self.get_current_window()
+        if current is not None and hasattr(current, "_duplicate_window"):
+            # 从当前窗口复制（保留后端上下文）
+            current._duplicate_window(branch=False)
+        else:
+            # 没有当前窗口时，走基础创建逻辑
+            from app.main_widget import OpenAIChatToolWindow
 
-        fake_page = self._create_fake_page()
-        new_window = OpenAIChatToolWindow(fake_page)
-        self.add_window(new_window)
+            fake_page = self._create_fake_page()
+            new_window = OpenAIChatToolWindow(fake_page)
+            self.add_window(new_window)
 
     @staticmethod
     def _create_fake_page():
@@ -318,8 +352,16 @@ class TabManagerWindow(QWidget):
             # 遍历 TrayManager 中的所有独立窗口
             for dialog in list(tray_manager._windows):
                 try:
+                    # 跳过已销毁或无效的窗口
+                    from PyQt5 import sip
+
+                    if sip.isdeleted(dialog):
+                        tray_manager.unregister_window(dialog)
+                        continue
+
                     tool_instance = getattr(dialog, "tool_instance", None)
-                    if tool_instance is None:
+                    if tool_instance is None or sip.isdeleted(tool_instance):
+                        tray_manager.unregister_window(dialog)
                         continue
 
                     # 从 dialog 中取出
@@ -357,6 +399,10 @@ class TabManagerWindow(QWidget):
 
             # 更新 Tray 菜单
             tray_manager._rebuild_context_menu()
+
+            # 隐藏所有窗口的 EdgeLauncher（Tab 模式下只显示一个）
+            for w in tab_mgr._windows:
+                _hide_edge_launcher(w)
 
             # 显示 TabManagerWindow
             tab_mgr.show()
@@ -422,6 +468,10 @@ class TabManagerWindow(QWidget):
             # 更新 Tray 菜单
             tray_manager._tab_manager_window = None
             tray_manager._rebuild_context_menu()
+
+            # 恢复窗口的 EdgeLauncher
+            for w in tab_mgr._windows:
+                _show_edge_launcher(w)
 
             logger.info("[TabMode] 已禁用，所有窗口恢复为独立模式")
 
