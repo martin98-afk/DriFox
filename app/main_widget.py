@@ -3200,6 +3200,11 @@ class OpenAIChatToolWindow(ToolWindow):
         register_all_commands()
         self._register_system_card_commands()
         self._register_command_shortcuts()
+        # ⚠️ register_all_commands() 清空并重建了所有命令定义，
+        # 导致之前 _update_subagents_param_description() 更新的
+        # param.description 被重置为默认值。此处重新应用当前配置。
+        self._update_subagents_param_description()
+        self._update_title_gen_param_description()
 
     def _register_system_card_commands(self):
         """为顶层系统设置卡片注册 FUNCTION 命令，使其出现在快捷键管理中
