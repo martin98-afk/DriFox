@@ -658,11 +658,14 @@ class TabManagerWindow(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self._save_geometry()
+        # 非过渡期间才保存几何（避免隐藏/恢复过程中的错误位置被保存）
+        if not self._is_transitioning and self.isVisible():
+            self._save_geometry()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._save_geometry()
+        if not self._is_transitioning and self.isVisible():
+            self._save_geometry()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏"""
