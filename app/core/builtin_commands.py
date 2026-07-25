@@ -650,6 +650,31 @@ def reload_all_commands():
 
     _registered = True
 
+    # ── 快捷键绑定同步 ──────────────────────────────────
+    # reload 会重新注册命令定义（含 shortcut），但 Qt 的 QShortcut 绑定未自动更新。
+    # 旧 QShortcut 仍绑定旧按键序列，新按键序列无对应 QShortcut 创建。
+    # 此处遍历所有窗口实例，重新注册快捷键绑定，与 _on_plugin_hot_reload 一致。
+    try:
+        from app.main_widget import OpenAIChatToolWindow
+
+        for win in OpenAIChatToolWindow._instances:
+            if win._is_destroyed:
+                continue
+            try:
+                win._register_command_shortcuts()
+            except (RuntimeError, AttributeError):
+                pass
+    except Exception:
+        pass
+    # toggle-window 等全局热键可能被用户插件覆盖，也要同步更新
+    try:
+        from app.tray_manager import TrayManager
+
+        tray = TrayManager.get_instance()
+        tray._setup_global_hotkey()
+    except Exception:
+        pass
+
 
 # ============================================================
 # PluginManager 集成
