@@ -1539,6 +1539,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # 注意：不要设置 _session_initialized，让 showEvent 正常执行初始化
             new_instance._skip_restore_history = True  # 跳过历史会话恢复
 
+            # ── Tab 模式分支 ──
+            if self.cfg.enable_tab_manager.value:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.add_window(new_instance)
+                    logger.debug("[TabMode] 已添加新窗口到 Tab 管理器")
+                    return
+                # TabManagerWindow 实例不存在，降级到原有逻辑
+
             # 以弹窗方式显示
             from app.tool_popup import ToolPopupDialog
 
