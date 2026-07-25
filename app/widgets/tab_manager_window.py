@@ -570,12 +570,19 @@ class TabManagerWindow(QWidget):
                     # 从 content_area 移除
                     tab_mgr._content_area.removeWidget(tool_instance)
 
+                    # 确保标题栏尚存（_enable_mode 时可能被销毁），否则重新创建
+                    title_bar = tool_instance.get_title_bar()
+                    if title_bar is None or _sip.isdeleted(title_bar):
+                        # 强制重建：先置 None 再调用 _init_title_bar
+                        tool_instance._title_bar = None
+                        tool_instance._init_title_bar()
+                        title_bar = tool_instance.get_title_bar()
+
                     # 始终创建全新的 ToolPopupDialog（避免复用已关闭 dialog 的布局问题）
                     dialog = ToolPopupDialog(tool_instance, None)
 
                     # 确保标题栏可见
-                    title_bar = tool_instance.get_title_bar()
-                    if title_bar:
+                    if title_bar and not _sip.isdeleted(title_bar):
                         title_bar.show()
 
                     # 恢复窗口位置：在屏幕中央显示
