@@ -94,13 +94,10 @@ class GiteeUploader:
         优先使用用户 OAuth 绑定的 token/repo（通过抽象层查询），
         未绑定时回退到共享仓库配置（向后兼容）。
         """
-        if self._config_loaded:
-            return bool(self._token and self._owner and self._repo)
-
+        # OAuth 模式：每次都从后端获取最新 token（支持自动过期刷新）
         try:
             from app.gateway.auth import get_oauth_backend
 
-            # 优先使用 OAuth 抽象层获取绑定信息
             backend = get_oauth_backend("gitee")
             bound_info = backend.get_bound_info()
             if bound_info:
@@ -109,14 +106,16 @@ class GiteeUploader:
                 self._repo = bound_info.get("repo", "DriFox_uploads")
                 self._path = "drifox"
                 self._branch = "master"
-                logger.info("[GiteeUploader] 使用 OAuth 绑定账号上传")
                 self._config_loaded = True
                 return True
         except Exception as e:
             # OAuth 后端查询失败（未绑定/异常等），回退到共享仓库
             logger.debug(f"[GiteeUploader] OAuth 后端查询异常: {e}")
 
-        # 回退共享仓库（OAuth 未绑定或查询异常时）
+        # 共享仓库模式：token 固定不变，可用缓存
+        if self._config_loaded:
+            return bool(self._token and self._owner and self._repo)
+
         try:
             from app.utils.config import Settings
 
@@ -218,8 +217,29 @@ class GiteeUploader:
                 logger.info(f"[GiteeUploader] 上传成功: {upload_name} → {download_url}")
                 return download_url, None
 
-            # 常见错误码处理
+            # token 过期 → 强制刷新后重试一次
             err_msg = getattr(self._backend, "last_error", "") or "上传失败"
+            if "401" in err_msg or "Access token is expired" in err_msg:
+                logger.info("[GiteeUploader] token 过期，尝试刷新后重试")
+                self.reset_config()
+                if self._ensure_config():
+                    ok = self._backend.upload(
+                        token=self._token,
+                        owner=self._owner,
+                        repo=self._repo,
+                        branch=self._branch,
+                        path=full_path,
+                        content_b64=content_b64,
+                        message=f"DriFox Upload: {upload_name} (retry)",
+                    )
+                    if ok:
+                        download_url = self.DOWNLOAD_URL.format(
+                            owner=self._owner, repo=self._repo, branch=self._branch, path=full_path
+                        )
+                        logger.info(f"[GiteeUploader] 刷新后上传成功: {upload_name} → {download_url}")
+                        return download_url, None
+                    err_msg = getattr(self._backend, "last_error", "") or "重试上传失败"
+
             logger.warning(f"[GiteeUploader] 上传失败: {err_msg}")
             return None, err_msg
 
@@ -230,6 +250,7 @@ class GiteeUploader:
         except Exception as e:
             logger.error(f"[GiteeUploader] 上传异常: {e}", exc_info=True)
             return None, str(e)
+
 
 # 便捷函数
 def get_gitee_uploader() -> GiteeUploader:

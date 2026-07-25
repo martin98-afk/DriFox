@@ -470,6 +470,8 @@ class Settings(QConfig):
     # --- 用户 OAuth 绑定 ---
     gitee_bound = ConfigItem("Gitee", "Bound", False, BoolValidator())
     gitee_user_token = ConfigItem("Gitee", "UserToken", "")
+    gitee_user_refresh_token = ConfigItem("Gitee", "UserRefreshToken", "")
+    gitee_token_expires_at = ConfigItem("Gitee", "TokenExpiresAt", 0.0)
     gitee_user_owner = ConfigItem("Gitee", "UserOwner", "")
     gitee_user_repo = ConfigItem("Gitee", "UserRepo", "DriFox_uploads")
     gitee_sync_remind = ConfigItem("Gitee", "SyncRemind", True, BoolValidator())

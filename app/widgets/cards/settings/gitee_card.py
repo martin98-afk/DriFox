@@ -303,11 +303,13 @@ class GiteeCard(SettingCard):
         """如果已绑定且同步未启动，自动 enable（重启恢复场景）"""
         if self._sync_svc._state != "disabled":
             return
-        token = self.cfg.gitee_user_token.value
-        owner = self.cfg.gitee_user_owner.value
-        if token and owner:
+        # 通过 OAuth 后端获取有效 token（支持自动刷新）
+        from app.gateway.auth import get_oauth_backend
+
+        bound_info = get_oauth_backend("gitee").get_bound_info()
+        if bound_info and bound_info.get("token") and bound_info.get("owner"):
             logger.info("[GiteeCard] 检测到已绑定，自动启动配置同步")
-            self._sync_svc.enable(token, owner)
+            self._sync_svc.enable(bound_info["token"], bound_info["owner"])
 
     # ── 同步状态指示 ─────────────────────────────────────
 

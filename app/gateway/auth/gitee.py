@@ -9,6 +9,7 @@ Gitee OAuth 平台后端
     本模块只负责 Gitee 特有的初始化动作（拉用户信息、建仓库、存配置）。
 """
 
+import time
 from typing import Optional, Tuple
 
 import requests
@@ -52,6 +53,34 @@ def exchange_token(code: str, client_id: str, client_secret: str, redirect_uri: 
 
     logger.info("[GiteeOAuth] 获取 access_token 成功")
     return access_token, ""
+
+
+def refresh_access_token(refresh_token: str, client_id: str, client_secret: str) -> Tuple[Optional[dict], str]:
+    """
+    用 refresh_token 刷新 access_token。
+    Returns: (token_data|None, err_msg)
+    token_data 包含 access_token、refresh_token、expires_in 等字段。
+    """
+    resp = requests.post(
+        GITEE_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        headers={"Accept": "application/json"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return None, f"刷新 Token 失败：{parse_error(resp)}"
+
+    token_data = resp.json()
+    if not token_data.get("access_token"):
+        return None, "刷新 Token 失败：响应中缺少 access_token"
+
+    logger.info("[GiteeOAuth] access_token 已刷新")
+    return token_data, ""
 
 
 def fetch_user_login(access_token: str) -> Tuple[Optional[str], str]:
@@ -176,6 +205,8 @@ class GiteeOAuthBackend(OAuthBackend):
             return False, err
 
         access_token = token_data["access_token"]
+        refresh_token = token_data.get("refresh_token", "")
+        expires_in = token_data.get("expires_in", 0)
 
         # 3. 获取用户信息（Gitee 特有）
         owner, err = fetch_user_login(access_token)
@@ -195,8 +226,10 @@ class GiteeOAuthBackend(OAuthBackend):
         else:
             logger.warning(f"[GiteeOAuth] {SETTINGS_REPO_NAME} 创建失败: {settings_msg}（不影响绑定）")
 
-        # 5. 存储到配置
+        # 5. 存储到配置（含 refresh_token 和过期时间）
         cfg.gitee_user_token.value = access_token
+        cfg.gitee_user_refresh_token.value = refresh_token
+        cfg.gitee_token_expires_at.value = time.time() + expires_in if expires_in > 0 else 0.0
         cfg.gitee_user_owner.value = owner
         cfg.gitee_user_repo.value = FIXED_REPO_NAME
         cfg.gitee_bound.value = True
@@ -216,6 +249,8 @@ class GiteeOAuthBackend(OAuthBackend):
         cfg = Settings.get_instance()
         cfg.gitee_bound.value = False
         cfg.gitee_user_token.value = ""
+        cfg.gitee_user_refresh_token.value = ""
+        cfg.gitee_token_expires_at.value = 0.0
         cfg.gitee_user_owner.value = ""
         cfg.gitee_user_repo.value = ""
         try:
@@ -233,14 +268,71 @@ class GiteeOAuthBackend(OAuthBackend):
         cfg = Settings.get_instance()
         return bool(cfg.gitee_bound.value)
 
+    def _ensure_valid_token(self) -> Tuple[Optional[str], str]:
+        """
+        获取当前有效的 access_token，过期则自动刷新。
+
+        返回 (access_token|None, err_msg)：
+          - access_token 为 None 时表示刷新失败，需要用户重新绑定。
+        """
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        access_token = cfg.gitee_user_token.value
+        refresh_token = cfg.gitee_user_refresh_token.value
+        expires_at = cfg.gitee_token_expires_at.value
+
+        # ── 判断是否需要刷新 ────────────────────────────
+        needs_refresh = False
+        if refresh_token:
+            # 有 refresh_token：过期了就刷新；无过期时间也刷新（旧绑定迁移场景）
+            if not expires_at or time.time() >= expires_at - 60:
+                needs_refresh = True
+        elif not access_token:
+            return None, "access_token 为空，请重新绑定"
+        # 无 refresh_token 但有 access_token → 当作不过期 token 直接返回
+
+        if not needs_refresh:
+            return access_token, ""
+
+        # ── 执行刷新 ─────────────────────────────────────
+        client_id = cfg.gitee_oauth_client_id.value
+        client_secret = cfg.gitee_oauth_client_secret.value
+
+        new_tokens, err = refresh_access_token(refresh_token, client_id, client_secret)
+        if new_tokens is None:
+            logger.warning(f"[GiteeOAuth] token 刷新失败，请重新绑定: {err}")
+            return None, f"token 已过期且刷新失败：{err}"
+
+        # 更新配置
+        cfg.gitee_user_token.value = new_tokens["access_token"]
+        if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
+            cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
+        if "expires_in" in new_tokens:
+            cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
+        try:
+            cfg.save()
+        except Exception as e:
+            logger.error(f"[GiteeOAuth] token 刷新后保存配置失败: {e}")
+
+        logger.info("[GiteeOAuth] access_token 已续期")
+        return new_tokens["access_token"], ""
+
     def get_bound_info(self) -> Optional[dict]:
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
         if not cfg.gitee_bound.value:
             return None
+
+        # 获取有效 token（自动检测过期并刷新）
+        token, err = self._ensure_valid_token()
+        if not token:
+            logger.warning(f"[GiteeOAuth] 获取有效 token 失败: {err}")
+            return None
+
         return {
             "owner": cfg.gitee_user_owner.value,
             "repo": cfg.gitee_user_repo.value,
-            "token": cfg.gitee_user_token.value,
+            "token": token,
         }
