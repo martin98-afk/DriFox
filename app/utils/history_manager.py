@@ -311,7 +311,7 @@ class HistoryManager:
         self.archive_dir = get_app_data_dir() / "archived"
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
-        # 与 SQLite 轻量懒加载上限保持一致，避免首次加载 500 条后保存任意会话又截断成 100 条。
+        # 与 SQLite 轻量懒加载上限保持一致，避免首次加载后保存任意会话又截断。
         self._history_limit = 500
         self._save_timer: Optional[QTimer] = None
         self._save_delay_ms = 1000
@@ -326,6 +326,13 @@ class HistoryManager:
         # 内存缓存
         self._history_sessions: List[Dict] = []
         self._history_loaded = False  # 懒加载标记：首次访问 _history_sessions 时从 SQLite 加载
+
+        # === 轻量列表缓存 ===
+        # get_history_list() 的结果缓存，避免每次调用都排序+过滤+重建 dict。
+        # key: project (None=全部), value: (project, [list_of_lightweight_dicts])
+        # 当 _history_sessions 发生变化时置 _cache_dirty = True。
+        self._cache_dirty: bool = True
+        self._cached_lightweight: Dict[Optional[str], List[Dict]] = {}
 
         # === 异步归档扫描（性能优化）===
         # _archive_meta_cache：file_path → (mtime, info_dict)
@@ -342,6 +349,10 @@ class HistoryManager:
 
         # 初始化存储
         self._init_storage()
+
+    def _mark_cache_dirty(self):
+        """标记轻量列表缓存为脏，下次 get_history_list 时重新构建"""
+        self._cache_dirty = True
 
     def _deduplicate_history_sessions(self):
         """去重历史会话列表，保持最新的一个
@@ -361,7 +372,10 @@ class HistoryManager:
         removed = len(self._history_sessions) - len(unique_sessions)
         if removed > 0:
             logger.warning(f"[HistoryManager] 移除了 {removed} 个重复会话")
-        self._history_sessions = unique_sessions
+            self._history_sessions = unique_sessions
+            self._mark_cache_dirty()
+        else:
+            self._history_sessions = unique_sessions
 
     def _init_storage(self):
         """初始化存储层"""
@@ -474,6 +488,7 @@ class HistoryManager:
             self._history_sessions.insert(0, session_record)
 
         self._history_sessions = self._history_sessions[: self._history_limit]
+        self._mark_cache_dirty()
 
         # 持久化到 SQLite
         self._persist_session(session_record)
@@ -620,6 +635,12 @@ class HistoryManager:
         # 先去重
         self._deduplicate_history_sessions()
 
+        # 🚀 轻量列表缓存：避免每次调用都排序+过滤+重建 dict
+        if not with_messages:
+            cache_key = project  # None 表示全部项目
+            if not self._cache_dirty and cache_key in self._cached_lightweight:
+                return list(self._cached_lightweight[cache_key])
+
         sessions = self._history_sessions
         if project:
             sessions = [s for s in sessions if s.get("project", "默认项目") == project]
@@ -647,6 +668,10 @@ class HistoryManager:
                         "worktree_path": s.get("worktree_path", "") or "",
                     }
                 )
+
+            # 缓存构建结果，下次直接返回
+            self._cached_lightweight[cache_key] = list(result)
+            self._cache_dirty = False
             return result
 
         return sessions
@@ -672,6 +697,7 @@ class HistoryManager:
             if self._use_sqlite and self._session_store:
                 self._session_store.update_session_project(session.get("session_id"), project)
             self._persist_session(session)
+            self._mark_cache_dirty()
             return True
         return False
 
@@ -681,6 +707,7 @@ class HistoryManager:
             count = self._session_store.archive_sessions_by_project(project)
             # 同步内存缓存
             self._history_sessions = [s for s in self._history_sessions if s.get("project", "默认项目") != project]
+            self._mark_cache_dirty()
             return count
         return 0
 
@@ -725,6 +752,9 @@ class HistoryManager:
 
             count += 1
 
+        if count > 0:
+            self._mark_cache_dirty()
+
         return count
 
     def archive_history(self, index: int) -> bool:
@@ -759,6 +789,7 @@ class HistoryManager:
 
             # 从内存缓存移除
             self._history_sessions.pop(index)
+            self._mark_cache_dirty()
 
             # 从 SQLite 删除
             if self._use_sqlite and self._session_store:
@@ -800,6 +831,7 @@ class HistoryManager:
                     # 更新已存在的会话，移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
                     self._history_sessions.pop(existing_index)
                     self._history_sessions.insert(0, session)
+                    self._mark_cache_dirty()
                     self._schedule_save(existing_session_id)
                     logger.info(f"[HistoryManager] 更新已存在的会话: {existing_session_id}")
                 else:
@@ -819,6 +851,7 @@ class HistoryManager:
                     # 添加到内存缓存顶部
                     self._history_sessions.insert(0, session)
                     self._history_sessions = self._history_sessions[: self._history_limit]
+                    self._mark_cache_dirty()
                     self._schedule_save(session["session_id"])
                     logger.info(f"[HistoryManager] 导入新会话: {session['session_id']}")
             else:
@@ -826,6 +859,7 @@ class HistoryManager:
                 session["session_id"] = uuid.uuid4().hex[:8]
                 self._history_sessions.insert(0, session)
                 self._history_sessions = self._history_sessions[: self._history_limit]
+                self._mark_cache_dirty()
                 self._schedule_save(session["session_id"])
 
             return session
@@ -1079,6 +1113,7 @@ class HistoryManager:
             # 移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
             self._history_sessions.pop(index)
             self._history_sessions.insert(0, updated)
+            self._mark_cache_dirty()
             self._schedule_save(existing.get("session_id"))
 
     def _schedule_save(self, session_id: str = None):
@@ -1346,7 +1381,10 @@ class HistoryManager:
                 r = subprocess.run(
                     ["git", "remote", "get-url", "origin"],
                     cwd=git_dir,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=10,
                 )
                 if r.returncode == 0:
@@ -1359,7 +1397,10 @@ class HistoryManager:
                 r = subprocess.run(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                     cwd=git_dir,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=10,
                 )
                 if r.returncode == 0:
@@ -1372,7 +1413,10 @@ class HistoryManager:
                 r = subprocess.run(
                     ["git", "log", "-1", "--format=%H%n%s%n%an%n%ci"],
                     cwd=git_dir,
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=10,
                 )
                 if r.returncode == 0:
@@ -1412,7 +1456,10 @@ class HistoryManager:
             r = subprocess.run(
                 ["git", "-c", "core.quotepath=false", "ls-files"],
                 cwd=git_root,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if r.returncode != 0:

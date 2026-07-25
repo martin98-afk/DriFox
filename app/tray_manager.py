@@ -3,6 +3,7 @@
 全局唯一托盘图标管理器（单例）
 所有 ToolPopupDialog 共享同一个 QSystemTrayIcon，避免多个托盘图标。
 """
+
 import ctypes
 import math
 import platform
@@ -19,6 +20,7 @@ from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
 class _HotkeyBridge(QObject):
     """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
+
     toggle_all_windows = pyqtSignal()
 
 
@@ -116,7 +118,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except (RuntimeError, Exception):
+        except RuntimeError, Exception:
             return False
 
     def __init__(self, parent=None):
@@ -133,17 +135,11 @@ class TrayManager(QObject):
         self._tray_icon.setIcon(QIcon(":/icons/drifox.ico"))
         self._tray_icon.setToolTip("Drifox")
 
-        # 创建右键菜单
-        tray_menu = QMenu()
-        show_action = QAction("显示窗口", tray_menu)
-        show_action.triggered.connect(self._show_all_windows)
-        tray_menu.addAction(show_action)
-        tray_menu.addSeparator()
-        quit_action = QAction("退出", tray_menu)
-        quit_action.triggered.connect(self._quit_application)
-        tray_menu.addAction(quit_action)
-
-        self._tray_icon.setContextMenu(tray_menu)
+        # 创建右键菜单（动态重建，连接 aboutToShow 信号）
+        self._tray_menu = QMenu()
+        self._tray_menu.aboutToShow.connect(self._rebuild_context_menu)
+        self._tray_menu.addAction("加载中…")  # 占位，显示前会重建
+        self._tray_icon.setContextMenu(self._tray_menu)
 
         # 监听托盘图标点击（Windows: 单击恢复窗口）
         if platform.system() == "Windows":
@@ -186,6 +182,45 @@ class TrayManager(QObject):
 
         logger.info("TrayManager 初始化完成")
 
+    # ========== 托盘右键菜单动态重建 ==========
+
+    def _rebuild_context_menu(self):
+        """动态重建托盘右键菜单，为每个窗口创建独立的菜单项"""
+        self._tray_menu.clear()
+
+        # 过滤有效的窗口
+        valid_windows = [w for w in self._windows if self._is_window_valid(w)]
+
+        if valid_windows:
+            for i, w in enumerate(valid_windows, 1):
+                title = self._get_window_menu_title(w, i)
+                action = QAction(title, self._tray_menu)
+                action.setData(id(w))  # 用对象 id 标识窗口
+                action.triggered.connect(lambda checked, win=w: self._show_window(win))
+                self._tray_menu.addAction(action)
+            self._tray_menu.addSeparator()
+
+        # 底部固定项
+        show_all = QAction("显示所有窗口", self._tray_menu)
+        show_all.triggered.connect(self._show_all_windows)
+        self._tray_menu.addAction(show_all)
+
+        quit_action = QAction("退出", self._tray_menu)
+        quit_action.triggered.connect(self._quit_application)
+        self._tray_menu.addAction(quit_action)
+
+    def _get_window_menu_title(self, window, index: int) -> str:
+        """获取窗口在托盘菜单中显示的标题"""
+        try:
+            # 优先用 windowTitle（已由 _sync_dialog_title 同步为会话标题）
+            title = window.windowTitle()
+            if title and title != "飘狐":
+                return f"  {title}"
+        except RuntimeError:
+            pass
+        # 兜底：用窗口注册序号
+        return f"  窗口 {index}"
+
     # ========== 多窗口选中管理 ==========
 
     def _select_window(self, window) -> None:
@@ -224,7 +259,7 @@ class TrayManager(QObject):
         for w in self._windows:
             try:
                 selected = w in self._selected_windows
-                if hasattr(w, 'set_selection_indicator'):
+                if hasattr(w, "set_selection_indicator"):
                     w.set_selection_indicator(selected)
             except RuntimeError:
                 pass
@@ -269,6 +304,7 @@ class TrayManager(QObject):
         # 获取当前屏幕号（跳过不同屏幕的窗口）
         try:
             from PyQt5.QtWidgets import QDesktopWidget
+
             desktop = QDesktopWidget()
             current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
         except Exception:
@@ -299,7 +335,7 @@ class TrayManager(QObject):
                 candidates_x = []
 
                 # 水平候选：左边缘、右边缘对齐
-                candidates_x.append((r.x(), abs(x0 - r.x())))          # 移动左 → 目标左
+                candidates_x.append((r.x(), abs(x0 - r.x())))  # 移动左 → 目标左
                 candidates_x.append((r.x() - w, abs(x0 + w - r.x())))  # 移动右 → 目标左
                 candidates_x.append((r.x() + r.width(), abs(x0 - r.x() - r.width())))  # 移动左 → 目标右
                 candidates_x.append((r.x() + r.width() - w, abs(x0 + w - r.x() - r.width())))  # 移动右 → 目标右
@@ -337,8 +373,6 @@ class TrayManager(QObject):
             snapped_y = False
 
         return best_x, best_y, snapped_x, snapped_y
-
-        return x, y, snapped_x, snapped_y
 
     def arrange_selected_windows_grid(self) -> None:
         """智能网格模式：右下锚定，自适应列数
@@ -391,8 +425,8 @@ class TrayManager(QObject):
 
         for i, w in enumerate(self._selected_windows):
             try:
-                col = i % cols          # 0 = 最右列
-                row = i // cols         # 0 = 最底行
+                col = i % cols  # 0 = 最右列
+                row = i // cols  # 0 = 最底行
                 # 从右下角开始填充(右下为视觉重心)
                 new_x = available.right() - margin - win_w - col * (win_w + margin)
                 new_y = available.bottom() - margin - win_h - row * (win_h + margin)
@@ -565,7 +599,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except (RuntimeError, Exception):
+            except RuntimeError, Exception:
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -595,7 +629,7 @@ class TrayManager(QObject):
 
     def notify(self, title: str, message: str, window: QObject = None) -> None:
         """发送 Windows 通知
-        
+
         Args:
             title: 通知标题
             message: 通知内容
@@ -657,7 +691,7 @@ class TrayManager(QObject):
             return
 
         # 如果传入的是嵌入式Widget（如OpenAIChatToolWindow），取其顶层窗口
-        top_window = window.window() if hasattr(window, 'window') and callable(window.window) else window
+        top_window = window.window() if hasattr(window, "window") and callable(window.window) else window
         if top_window is None:
             top_window = window
 
@@ -676,7 +710,7 @@ class TrayManager(QObject):
         """处理托盘通知被点击的事件"""
         logger.debug("[_on_message_clicked] 通知被点击")
         # 显示最近一次通知关联的窗口
-        window = getattr(self, '_last_notification_window', None)
+        window = getattr(self, "_last_notification_window", None)
         if window:
             self._show_window(window)
         else:
@@ -757,6 +791,7 @@ class TrayManager(QObject):
                 return ""
             frontmatter = "\n".join(lines[1:close_idx])
             import yaml
+
             meta = yaml.safe_load(frontmatter)
             if not meta:
                 return ""
@@ -778,18 +813,18 @@ class TrayManager(QObject):
         if hotkey_str is None:
             hotkey_str = self._read_hotkey_from_command()
         if not hotkey_str:
-            hotkey_str = 'alt+z'
+            hotkey_str = "alt+z"
 
         hotkey_str = hotkey_str.lower()
 
-        if platform.system() == 'Windows':
+        if platform.system() == "Windows":
             self._win_register_hotkey(hotkey_str)
         else:
             self._kbd_register_hotkey(hotkey_str)
 
     def _release_global_hotkey(self):
         """释放已注册的全局热键（兼容 win / kbd 两种模式）"""
-        if platform.system() == 'Windows':
+        if platform.system() == "Windows":
             self._win_unregister_hotkey()
         self._kbd_release()
         self._hotkey_mode = None
@@ -808,7 +843,7 @@ class TrayManager(QObject):
         try:
             modifiers, vk = self._parse_hotkey(hotkey_str)
         except ValueError as exc:
-            logger.warning(f'[TrayManager] 热键字符串解析失败({hotkey_str}): {exc}')
+            logger.warning(f"[TrayManager] 热键字符串解析失败({hotkey_str}): {exc}")
             return
 
         self._win_unregister_hotkey()
@@ -816,28 +851,28 @@ class TrayManager(QObject):
         if ok:
             self._hotkey_id = _HOTKEY_ID
             self._registered_hotkey = hotkey_str
-            self._hotkey_mode = 'win'
+            self._hotkey_mode = "win"
             # 升级到原生热键成功 → 释放可能残留的 keyboard 兜底钩子
             self._kbd_release()
             self._hotkey_failed_once = False
-            logger.info(f'[TrayManager] 原生全局热键已注册: {hotkey_str}')
+            logger.info(f"[TrayManager] 原生全局热键已注册: {hotkey_str}")
             return
 
         # —— 注册失败：组合键被占用，回退到 keyboard LL 钩子 ——
         err = ctypes.GetLastError()
         logger.warning(
-            f'[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}'
-            f'（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）'
+            f"[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}"
+            f"（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）"
         )
         # 仅首次失败 / 更换组合时弹一次托盘提示，引导用户换键
-        if not getattr(self, '_hotkey_failed_once', False) or self._hotkey_failed_hotkey != hotkey_str:
+        if not getattr(self, "_hotkey_failed_once", False) or self._hotkey_failed_hotkey != hotkey_str:
             self._hotkey_failed_once = True
             self._hotkey_failed_hotkey = hotkey_str
             try:
                 self.notify(
-                    '全局快捷键被占用',
-                    f'「{hotkey_str}」已被其它程序占用（常见于 NVIDIA GeForce Experience 的 Alt+Z）。'
-                    f'已自动回退到兼容模式，功能正常；如需彻底规避，可在 toggle-window 的 shortcut 换为 ctrl+alt+z。',
+                    "全局快捷键被占用",
+                    f"「{hotkey_str}」已被其它程序占用（常见于 NVIDIA GeForce Experience 的 Alt+Z）。"
+                    f"已自动回退到兼容模式，功能正常；如需彻底规避，可在 toggle-window 的 shortcut 换为 ctrl+alt+z。",
                 )
             except Exception:
                 pass
@@ -845,7 +880,7 @@ class TrayManager(QObject):
 
     def _win_unregister_hotkey(self):
         """注销已注册的原生热键（幂等安全）"""
-        if getattr(self, '_hotkey_id', None) is not None:
+        if getattr(self, "_hotkey_id", None) is not None:
             try:
                 _UnregisterHotKey(None, self._hotkey_id)
             except Exception:
@@ -863,9 +898,9 @@ class TrayManager(QObject):
         """
         # 幂等：同模式 + 同组合 + 句柄有效 → 跳过
         if (
-            getattr(self, '_hotkey_mode', None) == 'kbd'
-            and getattr(self, '_registered_hotkey', None) == hotkey_str
-            and getattr(self, '_hotkey_handle', None) is not None
+            getattr(self, "_hotkey_mode", None) == "kbd"
+            and getattr(self, "_registered_hotkey", None) == hotkey_str
+            and getattr(self, "_hotkey_handle", None) is not None
         ):
             return
         self._kbd_release()
@@ -877,20 +912,20 @@ class TrayManager(QObject):
             )
             self._hotkey_handle = handle
             self._registered_hotkey = hotkey_str
-            self._hotkey_mode = 'kbd'
-            logger.info(f'[TrayManager] 兜底（keyboard 钩子）热键已注册: {hotkey_str}')
+            self._hotkey_mode = "kbd"
+            logger.info(f"[TrayManager] 兜底（keyboard 钩子）热键已注册: {hotkey_str}")
         except Exception as exc:
-            logger.warning(f'[TrayManager] keyboard 兜底热键注册失败({hotkey_str}): {exc}')
+            logger.warning(f"[TrayManager] keyboard 兜底热键注册失败({hotkey_str}): {exc}")
 
     def _kbd_release(self):
         """释放 keyboard 库兜底热键（幂等安全）"""
-        if getattr(self, '_hotkey_handle', None) is not None:
+        if getattr(self, "_hotkey_handle", None) is not None:
             try:
                 keyboard.remove_hotkey(self._hotkey_handle)
             except Exception:
                 pass
             self._hotkey_handle = None
-        if getattr(self, '_hotkey_mode', None) == 'kbd':
+        if getattr(self, "_hotkey_mode", None) == "kbd":
             self._hotkey_mode = None
 
     # ---------- 热键字符串解析 ----------
@@ -901,61 +936,133 @@ class TrayManager(QObject):
         modifiers: MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN 的组合（含 MOD_NOREPEAT）
         vk: 主键的虚拟键码
         """
-        parts = [p.strip() for p in hotkey_str.lower().split('+') if p.strip()]
+        parts = [p.strip() for p in hotkey_str.lower().split("+") if p.strip()]
         modifiers = 0
         vk = None
         for p in parts:
-            if p in ('alt', 'menu'):
+            if p in ("alt", "menu"):
                 modifiers |= MOD_ALT
-            elif p in ('ctrl', 'control'):
+            elif p in ("ctrl", "control"):
                 modifiers |= MOD_CONTROL
-            elif p == 'shift':
+            elif p == "shift":
                 modifiers |= MOD_SHIFT
-            elif p in ('win', 'super', 'meta'):
+            elif p in ("win", "super", "meta"):
                 modifiers |= MOD_WIN
             else:
                 vk = self._key_to_vk(p)
         if vk is None:
-            raise ValueError(f'缺少主键: {hotkey_str}')
+            raise ValueError(f"缺少主键: {hotkey_str}")
         modifiers |= MOD_NOREPEAT
         return modifiers, vk
 
     def _key_to_vk(self, key: str):
         """将单个按键名转为虚拟键码（vk）"""
         named = {
-            'backspace': 0x08, 'tab': 0x09, 'enter': 0x0D, 'return': 0x0D,
-            'shift': 0x10, 'ctrl': 0x11, 'control': 0x11, 'alt': 0x12, 'menu': 0x12,
-            'pause': 0x13, 'capslock': 0x14, 'esc': 0x1B, 'escape': 0x1B,
-            'space': 0x20, 'pgup': 0x21, 'pgdn': 0x22, 'end': 0x23, 'home': 0x24,
-            'left': 0x25, 'up': 0x26, 'right': 0x27, 'down': 0x28,
-            'insert': 0x2D, 'delete': 0x2E, 'del': 0x2E,
-            '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
-            '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
-            'a': 0x41, 'b': 0x42, 'c': 0x43, 'd': 0x44, 'e': 0x45, 'f': 0x46,
-            'g': 0x47, 'h': 0x48, 'i': 0x49, 'j': 0x4A, 'k': 0x4B, 'l': 0x4C,
-            'm': 0x4D, 'n': 0x4E, 'o': 0x4F, 'p': 0x50, 'q': 0x51, 'r': 0x52,
-            's': 0x53, 't': 0x54, 'u': 0x55, 'v': 0x56, 'w': 0x57, 'x': 0x58,
-            'y': 0x59, 'z': 0x5A,
-            'numpad0': 0x60, 'numpad1': 0x61, 'numpad2': 0x62, 'numpad3': 0x63,
-            'numpad4': 0x64, 'numpad5': 0x65, 'numpad6': 0x66, 'numpad7': 0x67,
-            'numpad8': 0x68, 'numpad9': 0x69,
-            'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74,
-            'f6': 0x75, 'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79,
-            'f11': 0x7A, 'f12': 0x7B,
-            'numlock': 0x90, 'scrolllock': 0x91,
-            'semicolon': 0xBA, 'equal': 0xBB, 'comma': 0xBC, 'minus': 0xBD,
-            'period': 0xBE, 'slash': 0xBF, 'backquote': 0xC0,
-            'lbracket': 0xDB, 'backslash': 0xDC, 'rbracket': 0xDD,
-            'quote': 0xDE,
+            "backspace": 0x08,
+            "tab": 0x09,
+            "enter": 0x0D,
+            "return": 0x0D,
+            "shift": 0x10,
+            "ctrl": 0x11,
+            "control": 0x11,
+            "alt": 0x12,
+            "menu": 0x12,
+            "pause": 0x13,
+            "capslock": 0x14,
+            "esc": 0x1B,
+            "escape": 0x1B,
+            "space": 0x20,
+            "pgup": 0x21,
+            "pgdn": 0x22,
+            "end": 0x23,
+            "home": 0x24,
+            "left": 0x25,
+            "up": 0x26,
+            "right": 0x27,
+            "down": 0x28,
+            "insert": 0x2D,
+            "delete": 0x2E,
+            "del": 0x2E,
+            "0": 0x30,
+            "1": 0x31,
+            "2": 0x32,
+            "3": 0x33,
+            "4": 0x34,
+            "5": 0x35,
+            "6": 0x36,
+            "7": 0x37,
+            "8": 0x38,
+            "9": 0x39,
+            "a": 0x41,
+            "b": 0x42,
+            "c": 0x43,
+            "d": 0x44,
+            "e": 0x45,
+            "f": 0x46,
+            "g": 0x47,
+            "h": 0x48,
+            "i": 0x49,
+            "j": 0x4A,
+            "k": 0x4B,
+            "l": 0x4C,
+            "m": 0x4D,
+            "n": 0x4E,
+            "o": 0x4F,
+            "p": 0x50,
+            "q": 0x51,
+            "r": 0x52,
+            "s": 0x53,
+            "t": 0x54,
+            "u": 0x55,
+            "v": 0x56,
+            "w": 0x57,
+            "x": 0x58,
+            "y": 0x59,
+            "z": 0x5A,
+            "numpad0": 0x60,
+            "numpad1": 0x61,
+            "numpad2": 0x62,
+            "numpad3": 0x63,
+            "numpad4": 0x64,
+            "numpad5": 0x65,
+            "numpad6": 0x66,
+            "numpad7": 0x67,
+            "numpad8": 0x68,
+            "numpad9": 0x69,
+            "f1": 0x70,
+            "f2": 0x71,
+            "f3": 0x72,
+            "f4": 0x73,
+            "f5": 0x74,
+            "f6": 0x75,
+            "f7": 0x76,
+            "f8": 0x77,
+            "f9": 0x78,
+            "f10": 0x79,
+            "f11": 0x7A,
+            "f12": 0x7B,
+            "numlock": 0x90,
+            "scrolllock": 0x91,
+            "semicolon": 0xBA,
+            "equal": 0xBB,
+            "comma": 0xBC,
+            "minus": 0xBD,
+            "period": 0xBE,
+            "slash": 0xBF,
+            "backquote": 0xC0,
+            "lbracket": 0xDB,
+            "backslash": 0xDC,
+            "rbracket": 0xDD,
+            "quote": 0xDE,
         }
         key = key.lower()
         if key in named:
             return named[key]
         if len(key) == 1:
             return _VkKeyScanW(key) & 0xFF
-        if key.startswith('f') and key[1:].isdigit() and 1 <= int(key[1:]) <= 12:
+        if key.startswith("f") and key[1:].isdigit() and 1 <= int(key[1:]) <= 12:
             return 0x70 + int(key[1:]) - 1
-        raise ValueError(f'未知按键: {key}')
+        raise ValueError(f"未知按键: {key}")
 
     # ---------- 原生事件过滤器安装 ----------
 
@@ -975,9 +1082,9 @@ class TrayManager(QObject):
                 return
             self._hotkey_filter = _HotkeyNativeFilter(self._hotkey_bridge.toggle_all_windows.emit)
             app.installNativeEventFilter(self._hotkey_filter)
-            logger.info('[TrayManager] WM_HOTKEY 原生过滤器已安装')
+            logger.info("[TrayManager] WM_HOTKEY 原生过滤器已安装")
         except Exception as exc:
-            logger.warning(f'[TrayManager] 安装 WM_HOTKEY 过滤器失败: {exc}')
+            logger.warning(f"[TrayManager] 安装 WM_HOTKEY 过滤器失败: {exc}")
 
     def _toggle_all_windows(self):
         """切换所有窗口的隐藏/显示状态
@@ -1001,7 +1108,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except (RuntimeError, Exception):
+                except RuntimeError, Exception:
                     continue
 
             if not valid_windows:
@@ -1037,19 +1144,19 @@ class TrayManager(QObject):
         仅在「keyboard 兜底模式」(_hotkey_mode == 'kbd')下需要：
         RegisterHotKey 原生模式没有监听线程，无需此检查。
         """
-        if getattr(self, '_hotkey_mode', None) != 'kbd':
+        if getattr(self, "_hotkey_mode", None) != "kbd":
             return
         try:
             listener = keyboard._listener
-            thread = getattr(listener, 'listening_thread', None)
+            thread = getattr(listener, "listening_thread", None)
             if thread is not None and not thread.is_alive():
-                logger.warning('[TrayManager] keyboard 监听线程已死亡，尝试重启...')
+                logger.warning("[TrayManager] keyboard 监听线程已死亡，尝试重启...")
                 listener.listening = False
                 listener.init()
                 listener.start_if_necessary()
-                logger.info('[TrayManager] keyboard 监听线程重启完成')
+                logger.info("[TrayManager] keyboard 监听线程重启完成")
         except Exception as exc:
-            logger.debug(f'[TrayManager] 监听线程检查失败（非致命）: {exc}')
+            logger.debug(f"[TrayManager] 监听线程检查失败（非致命）: {exc}")
 
     def _health_check_hotkey(self):
         """定期检查并重建全局热键
@@ -1062,10 +1169,10 @@ class TrayManager(QObject):
         try:
             hotkey_str = self._read_hotkey_from_command()
             if not hotkey_str:
-                hotkey_str = 'alt+z'
+                hotkey_str = "alt+z"
             hotkey_str = hotkey_str.lower()
 
-            if platform.system() == 'Windows':
+            if platform.system() == "Windows":
                 # 幂等重注册：RegisterHotKey 失败会自动回退到 keyboard 兜底；
                 # 组合键空闲后此处会重新升级为原生 RegisterHotKey。
                 self._win_register_hotkey(hotkey_str)
@@ -1090,12 +1197,12 @@ class TrayManager(QObject):
                     break  # 成功
                 except Exception as exc:
                     if attempt < 2:
-                        logger.warning(f'[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}')
+                        logger.warning(f"[TrayManager] 热键注册失败（第{attempt + 1}次），1s后重试: {exc}")
                         import time as _time
 
                         _time.sleep(1)
                     else:
-                        logger.warning(f'[TrayManager] 热键注册失败（已重试3次）: {exc}')
+                        logger.warning(f"[TrayManager] 热键注册失败（已重试3次）: {exc}")
 
             if new_handle is not None:
                 if old_handle is not None:
@@ -1105,14 +1212,14 @@ class TrayManager(QObject):
                         pass
                 self._hotkey_handle = new_handle
                 self._registered_hotkey = hotkey_str
-                logger.debug(f'[TrayManager] 热键健康检查完成: {hotkey_str}')
+                logger.debug(f"[TrayManager] 热键健康检查完成: {hotkey_str}")
             else:
                 if self._hotkey_handle is None and old_handle is not None:
                     self._hotkey_handle = old_handle
                     self._registered_hotkey = old_hotkey
-                    logger.debug('[TrayManager] 热键健康检查失败，保留旧热键')
+                    logger.debug("[TrayManager] 热键健康检查失败，保留旧热键")
         except Exception as exc:
-            logger.debug(f'[TrayManager] 健康检查异常（非致命）: {exc}')
+            logger.debug(f"[TrayManager] 健康检查异常（非致命）: {exc}")
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""

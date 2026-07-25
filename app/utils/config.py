@@ -332,11 +332,6 @@ class Settings(QConfig):
     github_token = ConfigItem("Patch", "GitHub/Token", "")
 
     # ========== 大模型对话默认配置 ==========
-    llm_model = ConfigItem("LLM", "Model", "qwen/qwen3-30b-a3b-2507")
-    llm_api_key = ConfigItem("LLM", "APIKey", "")
-    llm_api_base = ConfigItem("LLM", "APIBase", "http://127.0.0.1:1234/v1")
-    llm_max_tokens = ConfigItem("LLM", "MaxTokens", 2048, RangeValidator(1024, 400960))
-    llm_temperature = ConfigItem("LLM", "Temperature", 0.7, RangeValidator(0, 1))
     # 保存的免费/自定义服务商配置
     llm_saved_providers = ConfigItem("LLM", "SavedProviders", {})
     # 默认 OpenCode 免费配置是否已注入（防止用户删除后反复自动创建）

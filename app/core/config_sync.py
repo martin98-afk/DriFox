@@ -404,6 +404,31 @@ class ConfigSyncService(QObject):
 
             cfg.load()
 
+            # ⚠️ QConfig.load() 被 @exceptionHandler() 装饰，任何 ConfigItem
+            # 反序列化异常都会被静默吞掉，导致整个加载失败，所有值保持原样。
+            # 此处从文件直接读取并设置关键 section 的所有配置项，确保远端值同步到内存。
+            try:
+                import json as _json
+                from qfluentwidgets.common.config import ConfigItem as _CI
+
+                with open(cfg.file, encoding="utf-8") as _f:
+                    _file_data = _json.load(_f)
+                # 保护 LLM section（子智能体模型、标题生成模型等）+ Gateway section（各平台配置）
+                for _section in ("LLM", "Gateway"):
+                    _data = _file_data.get(_section, {})
+                    for _key, _value in _data.items():
+                        # 在 cfg 类上找到匹配的 ConfigItem 属性名
+                        _matched = None
+                        for _name in dir(cfg.__class__):
+                            _item = getattr(cfg.__class__, _name)
+                            if isinstance(_item, _CI) and _item.group == _section and _item.name == _key:
+                                _matched = _name
+                                break
+                        if _matched:
+                            getattr(cfg, _matched).value = _value
+            except Exception as _e:
+                logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
+
             # 恢复 token 相关值：远端 app.config 中的 token 可能是过期的，
             # 本地刚刷新好的 token 不应被覆盖
             if _saved["bound"]:

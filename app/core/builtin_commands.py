@@ -145,7 +145,7 @@ def _try_load_cache(key: str) -> Optional[dict]:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("cache_key") == key:
             return data
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         pass
     return None
 
@@ -577,9 +577,25 @@ def register_all_commands():
     _registered = True
 
 
+# 重载防抖：500ms 内重复调用跳过（避免前端手动触发 + 后端 watcher 重复加载）
+_last_reload_time: float = 0.0
+_RELOAD_DEBOUNCE_MS: float = 500.0
+
+
 def reload_all_commands():
-    """强制重新加载所有内置命令（重置 _registered 标志，用于运行时重载）"""
-    global _registered
+    """强制重新加载所有内置命令（重置 _registered 标志，用于运行时重载）
+
+    内置 500ms 防抖：短时间内重复调用跳过，避免 shortcut-manager 手动触发
+    与 backend watcher 异步热更新叠加导致重复加载。
+    """
+    global _registered, _last_reload_time
+
+    now = time.time() * 1000
+    if now - _last_reload_time < _RELOAD_DEBOUNCE_MS:
+        logger.debug(f"[BuiltinCommands] 防抖跳过 reload_all_commands（距上次 {(now - _last_reload_time):.0f}ms）")
+        return
+    _last_reload_time = now
+
     _registered = False
 
     cmd_mgr = CommandManager.get_instance()
@@ -629,7 +645,7 @@ def reload_all_commands():
         from app.core.ui_plugin_registry import UIPluginRegistry
 
         UIPluginRegistry.get_instance().re_register_all_commands()
-    except (ImportError, Exception):
+    except ImportError, Exception:
         pass
 
     _registered = True

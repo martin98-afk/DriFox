@@ -421,10 +421,11 @@ class LockButtonWidget(QWidget):
         self._setup_ui()
         self._update_icon()
         self._force_always_on_top()
-        # 定时器持续置顶，防止焦点切换时被其他窗口遮挡
+        # [PERF] 定时器持续置顶，防止焦点切换时被其他窗口遮挡
+        # 500ms 间隔已足够维持置顶状态，比 200ms 减少 60% 的定时器触发和 Win32 API 调用
         self._topmost_timer = QTimer(self)
         self._topmost_timer.timeout.connect(self._force_always_on_top)
-        self._topmost_timer.start(200)  # 每 200ms 重新置顶一次
+        self._topmost_timer.start(500)  # 每 500ms 重新置顶一次（原 200ms）
 
     def _force_always_on_top(self):
         """智能置顶：本应用前台时允许对话框位于锁定按钮之上，其他应用前台时强制 TOPMOST 防止被遮挡"""
