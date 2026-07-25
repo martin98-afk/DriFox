@@ -2706,11 +2706,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_subagents_param_description()
         self._update_title_gen_param_description()
 
-        # 监听配置变更，配置同步时自动刷新命令卡参数描述
+        # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
         from app.utils.config import Settings as _Cfg
         _cfg = _Cfg.get_instance()
-        _cfg.llm_subagent_default_model.valueChanged.connect(self._update_subagents_param_description)
-        _cfg.llm_title_gen_default_model.valueChanged.connect(self._update_title_gen_param_description)
+        _cfg.llm_subagent_default_model.valueChanged.connect(self._on_subagent_model_config_changed)
+        _cfg.llm_title_gen_default_model.valueChanged.connect(self._on_title_gen_model_config_changed)
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
@@ -12690,6 +12690,24 @@ class OpenAIChatToolWindow(ToolWindow):
                     else:
                         param.description = "设置标题生成默认模型"
                     break
+
+    def _on_subagent_model_config_changed(self):
+        """子智能体默认模型配置变更时：更新命令描述 + 刷新命令卡 UI"""
+        self._update_subagents_param_description()
+        self._refresh_command_card_detail("subagents")
+
+    def _on_title_gen_model_config_changed(self):
+        """标题生成默认模型配置变更时：更新命令描述 + 刷新命令卡 UI"""
+        self._update_title_gen_param_description()
+        self._refresh_command_card_detail("title-gen")
+
+    def _refresh_command_card_detail(self, cmd_name: str):
+        """强制刷新命令卡的 detail 模式参数视图"""
+        if not hasattr(self, "_command_card"):
+            return
+        card = self._command_card
+        if card.is_detail_mode and card.detail_cmd_name == cmd_name:
+            card._refresh_detail_view()
 
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
         """子智能体任务启动（通过 SubAgentManager 信号触发）
