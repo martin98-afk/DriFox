@@ -480,6 +480,15 @@ class TabManagerWindow(QWidget):
             return
         tab_mgr._is_transitioning = True
 
+        # 清理旧的 Tab 面板和内容区（防止上次 Tab 模式残留）
+        for i in range(tab_mgr._tab_panel.count - 1, -1, -1):
+            tab_mgr._tab_panel.remove_tab(i)
+        while tab_mgr._content_area.count() > 1:
+            w = tab_mgr._content_area.widget(1)
+            tab_mgr._content_area.removeWidget(w)
+        tab_mgr._windows.clear()
+        tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
+
         try:
             migrated_windows = []
             for dialog in list(tray_manager._windows):
