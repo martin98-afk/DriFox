@@ -1,0 +1,467 @@
+# -*- coding: utf-8 -*-
+"""
+TabManagerWindow — Tab 管理器宿主窗口
+
+左侧 TabPanel + 右侧 QStackedWidget 嵌入 OpenAIChatToolWindow 实例。
+支持模式切换（独立 ↔ 嵌入），窗口状态通过 setParent 迁移完全保留。
+"""
+
+import json
+from typing import Any, Dict, List, Optional
+
+from loguru import logger
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QCloseEvent
+from PyQt5.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.utils.config import Settings
+from app.utils.design_tokens import Colors, font_size_css
+
+
+class EmptyStateWidget(QWidget):
+    """空状态页 — 最后一个 Tab 关闭时显示"""
+
+    newTabRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(16)
+
+        icon_label = QLabel("📑", self)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("font-size: 48px; background: transparent;")
+        layout.addWidget(icon_label)
+
+        text_label = QLabel("没有打开的窗口", self)
+        text_label.setAlignment(Qt.AlignCenter)
+        text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}"
+        )
+        layout.addWidget(text_label)
+
+        new_btn = QPushButton("＋ 新建标签页", self)
+        new_btn.setCursor(Qt.PointingHandCursor)
+        new_btn.setFixedSize(160, 36)
+        new_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {Colors.CARD_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                {font_size_css(13)}
+            }}
+            QPushButton:hover {{
+                background: {Colors.HOVER_BG};
+                border-color: {Colors.INFO};
+            }}
+        """)
+        new_btn.clicked.connect(self.newTabRequested.emit)
+        layout.addWidget(new_btn)
+
+
+class TabManagerWindow(QWidget):
+    """Tab 管理器宿主窗口（单例）"""
+
+    _instance: Optional["TabManagerWindow"] = None
+
+    tabCountChanged = pyqtSignal(int)
+    activeTabChanged = pyqtSignal(int)
+
+    @classmethod
+    def get_instance(cls) -> Optional["TabManagerWindow"]:
+        return cls._instance
+
+    @classmethod
+    def create_instance(cls, parent=None) -> "TabManagerWindow":
+        if cls._instance is None:
+            cls._instance = cls(parent)
+        return cls._instance
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        if TabManagerWindow._instance is not None:
+            raise RuntimeError("TabManagerWindow 是单例，请使用 get_instance() 获取")
+        TabManagerWindow._instance = self
+
+        self._windows: List = []  # List[OpenAIChatToolWindow]
+        self._cached_dialogs: Dict[int, Any] = {}  # id → ToolPopupDialog
+        self._is_transitioning: bool = False
+
+        self.setWindowTitle("DriFox — Tab 管理器")
+        self.setMinimumSize(800, 500)
+        self.setAttribute(Qt.WA_DeleteOnClose, False)
+
+        self._setup_ui()
+        self._setup_signals()
+        self._restore_geometry()
+
+        # 注册到 TrayManager
+        from app.tray_manager import TrayManager
+
+        TrayManager.get_instance()._tab_manager_window = self
+
+    def _setup_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ── 左侧 Tab 面板 ──
+        from app.widgets.tab_panel import TabPanel
+
+        self._tab_panel = TabPanel(self)
+        self._tab_panel.setObjectName("tabPanel")
+        main_layout.addWidget(self._tab_panel)
+
+        # ── 右侧内容区 ──
+        self._content_area = QStackedWidget(self)
+
+        # 空状态页（索引 0）
+        self._empty_state = EmptyStateWidget(self)
+        self._empty_state.newTabRequested.connect(self._on_new_tab_requested)
+        self._content_area.addWidget(self._empty_state)  # index 0
+
+        main_layout.addWidget(self._content_area, 1)
+
+        # 应用样式
+        self.setStyleSheet(f"""
+            #tabPanel {{
+                background: {Colors.CARD_BG};
+                border-right: 1px solid {Colors.BORDER};
+            }}
+            TabManagerWindow {{
+                background: {Colors.CONTENT_BG};
+            }}
+        """)
+
+    def _setup_signals(self):
+        self._tab_panel.tabSelected.connect(self._on_tab_selected)
+        self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+
+    # ── 窗口管理 ──
+
+    def add_window(self, window) -> int:
+        """添加窗口到 Tab 管理器，返回索引"""
+        if window in self._windows:
+            return self._windows.index(window)
+
+        self._windows.append(window)
+        idx = len(self._windows)
+
+        # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
+        self._content_area.addWidget(window)
+
+        # 在 Tab 面板添加项
+        title = window.windowTitle() or "新建会话"
+        icon = getattr(window, "icon", None)
+        self._tab_panel.add_tab(title, icon)
+
+        # 隐藏空状态页，切换到新窗口
+        self._content_area.widget(0).hide()
+        self._tab_panel.set_active_index(idx - 1)
+
+        self.tabCountChanged.emit(len(self._windows))
+        return idx - 1
+
+    def remove_window(self, window):
+        """从 Tab 管理器移除窗口"""
+        if window not in self._windows:
+            return
+
+        idx = self._windows.index(window)
+        self._windows.remove(window)
+
+        # 从 QStackedWidget 移除
+        self._content_area.removeWidget(window)
+
+        # 从 Tab 面板移除
+        self._tab_panel.remove_tab(idx)
+
+        # 如果所有窗口都被移除，显示空状态页
+        if not self._windows:
+            self._content_area.widget(0).show()
+
+        self.tabCountChanged.emit(len(self._windows))
+
+    def get_current_window(self):
+        """获取当前选中的窗口"""
+        idx = self._tab_panel.active_index
+        if 0 <= idx < len(self._windows):
+            return self._windows[idx]
+        return None
+
+    @property
+    def window_count(self) -> int:
+        return len(self._windows)
+
+    # ── Tab 回调 ──
+
+    def _on_tab_selected(self, index: int):
+        if 0 <= index < len(self._windows):
+            self._content_area.setCurrentWidget(self._windows[index])
+            self.activeTabChanged.emit(index)
+
+    def _on_tab_close_requested(self, index: int):
+        if 0 <= index < len(self._windows):
+            window = self._windows[index]
+            # 调用窗口的关闭逻辑（自动保存会话）
+            try:
+                window.close()
+            except Exception as e:
+                logger.error(f"[TabManager] 关闭窗口失败: {e}")
+            self.remove_window(window)
+
+    def _on_new_tab_requested(self):
+        """新建窗口"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        fake_page = self._create_fake_page()
+        new_window = OpenAIChatToolWindow(fake_page)
+        self.add_window(new_window)
+
+    @staticmethod
+    def _create_fake_page():
+        """创建一个临时的 FakePage 用于窗口初始化（与 main.py 类似）"""
+        from PyQt5.QtWidgets import QWidget
+
+        class FakePage(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.cfg = Settings.get_instance()
+
+            def isActiveWindow(self):
+                return True
+
+            @property
+            def workflow_name(self):
+                return "tab_manager"
+
+            @property
+            def global_variables_changed(self):
+                class FakeSignal:
+                    def connect(self, *args, **kwargs):
+                        pass
+                return FakeSignal()
+
+            def setUpdatesEnabled(self, enabled):
+                pass
+
+            def update(self):
+                pass
+
+            def show_splitter(self):
+                pass
+
+            def hide_splitter(self):
+                pass
+
+        return FakePage()
+
+    # ── 模式切换 ──
+
+    @classmethod
+    def toggle_mode(cls, enable: bool):
+        """切换 Tab 管理器模式的启用/关闭"""
+        from app.tray_manager import TrayManager
+        tm = TrayManager.get_instance()
+
+        if enable:
+            cls._enable_mode(tm)
+        else:
+            cls._disable_mode(tm)
+
+    @classmethod
+    def _enable_mode(cls, tray_manager):
+        """启用 Tab 模式：将所有独立窗口迁入"""
+        from app.tool_popup import ToolPopupDialog
+
+        tab_mgr = cls.get_instance()
+        if tab_mgr is None:
+            tab_mgr = cls.create_instance()
+
+        if tab_mgr._is_transitioning:
+            return
+        tab_mgr._is_transitioning = True
+
+        try:
+            # 遍历 TrayManager 中的所有独立窗口
+            for dialog in list(tray_manager._windows):
+                try:
+                    tool_instance = getattr(dialog, "tool_instance", None)
+                    if tool_instance is None:
+                        continue
+
+                    # 从 dialog 中取出
+                    old_layout = dialog.layout()
+                    if old_layout:
+                        old_layout.removeWidget(tool_instance)
+                    tool_instance.setParent(tab_mgr._content_area)
+
+                    # 缓存 dialog 引用供恢复
+                    tab_mgr._cached_dialogs[id(tool_instance)] = dialog
+
+                    # 从 TrayManager 注销
+                    tray_manager.unregister_window(dialog)
+
+                    # 添加到 Tab 管理器
+                    tab_mgr._windows.append(tool_instance)
+                    tab_mgr._content_area.addWidget(tool_instance)
+
+                    # 添加 Tab 项
+                    title = tool_instance.windowTitle() or "会话"
+                    icon = getattr(tool_instance, "icon", None)
+                    tab_mgr._tab_panel.add_tab(title, icon)
+
+                except Exception as e:
+                    logger.error(f"[TabMode] 迁移窗口失败: {e}")
+
+            # 更新 UI 状态
+            if tab_mgr._windows:
+                tab_mgr._content_area.widget(0).hide()
+                tab_mgr._tab_panel.set_active_index(0)
+            else:
+                tab_mgr._content_area.widget(0).show()
+
+            # 更新 Tray 菜单
+            tray_manager._rebuild_context_menu()
+
+            # 显示 TabManagerWindow
+            tab_mgr.show()
+            tab_mgr.activateWindow()
+            tab_mgr.raise_()
+
+            logger.info(f"[TabMode] 已启用，迁入 {len(tab_mgr._windows)} 个窗口")
+
+        finally:
+            tab_mgr._is_transitioning = False
+
+    @classmethod
+    def _disable_mode(cls, tray_manager):
+        """禁用 Tab 模式：将所有窗口迁出为独立窗口"""
+        from app.tool_popup import ToolPopupDialog
+
+        tab_mgr = cls.get_instance()
+        if tab_mgr is None:
+            return
+
+        if tab_mgr._is_transitioning:
+            return
+        tab_mgr._is_transitioning = True
+
+        try:
+            for tool_instance in list(tab_mgr._windows):
+                try:
+                    cached_id = id(tool_instance)
+                    dialog = tab_mgr._cached_dialogs.pop(cached_id, None)
+
+                    if dialog is None or not hasattr(dialog, "layout") or dialog.layout() is None:
+                        dialog = ToolPopupDialog(tool_instance, None)
+
+                    # 将 tool_instance 移回 dialog
+                    tab_mgr._content_area.removeWidget(tool_instance)
+                    tool_instance.setParent(dialog)
+
+                    # 添加到 dialog 的 layout
+                    from PyQt5.QtWidgets import QVBoxLayout
+
+                    d_layout = dialog.layout() or QVBoxLayout(dialog)
+                    if dialog.layout() is None:
+                        d_layout.setContentsMargins(0, 0, 0, 0)
+                        dialog.setLayout(d_layout)
+                    title_bar = tool_instance.get_title_bar()
+                    if title_bar:
+                        title_bar.show()
+                        d_layout.addWidget(title_bar)
+                    d_layout.addWidget(tool_instance, 1)
+
+                    # 显示 dialog 并注册到 TrayManager
+                    dialog.show()
+                    dialog.activateWindow()
+                    tray_manager.register_window(dialog)
+
+                except Exception as e:
+                    logger.error(f"[TabMode] 恢复窗口失败: {e}")
+
+            # 清空 Tab 管理器状态
+            tab_mgr._windows.clear()
+            tab_mgr.hide()
+
+            # 更新 Tray 菜单
+            tray_manager._tab_manager_window = None
+            tray_manager._rebuild_context_menu()
+
+            logger.info("[TabMode] 已禁用，所有窗口恢复为独立模式")
+
+        finally:
+            tab_mgr._is_transitioning = False
+
+    # ── 几何持久化 ──
+
+    def _save_geometry(self):
+        """保存窗口位置和大小"""
+        geo = {
+            "x": self.x(),
+            "y": self.y(),
+            "w": self.width(),
+            "h": self.height(),
+        }
+        Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
+
+    def _restore_geometry(self):
+        """恢复窗口位置和大小"""
+        try:
+            geo_str = Settings.get_instance().tab_manager_geometry.value
+            if geo_str:
+                geo = json.loads(geo_str)
+                self.setGeometry(geo["x"], geo["y"], geo["w"], geo["h"])
+                return
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+        # 默认居中
+        screen = QApplication.primaryScreen()
+        if screen:
+            rect = screen.availableGeometry()
+            w, h = 960, 640
+            self.setGeometry(
+                (rect.width() - w) // 2,
+                (rect.height() - h) // 2,
+                w, h,
+            )
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._save_geometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._save_geometry()
+
+    def closeEvent(self, event: QCloseEvent):
+        """关闭 TabManagerWindow 时不销毁，仅隐藏"""
+        event.ignore()
+        self.hide()
+
+    # ── 资源清理 ──
+
+    def cleanup(self):
+        """清理所有窗口和资源"""
+        TabManagerWindow._instance = None
+        for w in list(self._windows):
+            try:
+                w.close()
+            except Exception:
+                pass
+        self._windows.clear()
+        self._cached_dialogs.clear()
+        self.close()
