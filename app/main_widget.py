@@ -6758,7 +6758,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重新定位 UI 插件左侧边缘入口（基于 chat_scroll_area 几何）
         launcher = getattr(self, "_ui_plugin_edge_launcher", None)
         if launcher is not None and hasattr(self, "chat_scroll_area"):
-            launcher.update_geometry(self.chat_scroll_area.geometry())
+            try:
+                if not sip.isdeleted(launcher):
+                    launcher.update_geometry(self.chat_scroll_area.geometry())
+            except (RuntimeError, AttributeError):
+                pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
             self.pixel_pet.resize_handle(self.width(), self.height())
@@ -14647,6 +14651,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._create_new_session()
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
+
+        # Tab 模式下同步更新 Tab 图标
+        if self.cfg.enable_tab_manager.value:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+                tm = TabManagerWindow.get_instance()
+                if tm and self in tm._windows:
+                    idx = tm._windows.index(self)
+                    _update_tab_icon(idx, project)
+            except Exception:
+                pass
 
     def _on_project_filter_changed(self, text: str):
         """输入过滤文本变化时同步过滤项目列表"""
