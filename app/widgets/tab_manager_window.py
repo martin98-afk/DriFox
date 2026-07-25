@@ -643,7 +643,7 @@ class TabManagerWindow(QWidget):
                 Settings.get_instance().tab_panel_width.value = sizes[0]
 
     def _restore_geometry(self):
-        """恢复窗口位置和大小"""
+        """恢复窗口位置和大小（无保存记录时使用默认尺寸，位置由 OS 自动 cascade）"""
         try:
             geo_str = Settings.get_instance().tab_manager_geometry.value
             if geo_str:
@@ -653,16 +653,8 @@ class TabManagerWindow(QWidget):
         except (json.JSONDecodeError, KeyError):
             pass
 
-        # 默认居中
-        screen = QApplication.primaryScreen()
-        if screen:
-            rect = screen.availableGeometry()
-            w, h = 960, 640
-            self.setGeometry(
-                (rect.width() - w) // 2,
-                (rect.height() - h) // 2,
-                w, h,
-            )
+        # 首次启动：设置默认大小，不强制居中（让 OS 自动 cascade）
+        self.resize(960, 640)
 
     def moveEvent(self, event):
         super().moveEvent(event)
