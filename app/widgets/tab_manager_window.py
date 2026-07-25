@@ -69,32 +69,42 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(new_btn)
 
 
-def _hide_edge_launcher(window):
-    """隐藏窗口的 UIPluginEdgeLauncher"""
+def _find_edge_launchers(window):
+    """查找窗口的所有 UIPluginEdgeLauncher 实例"""
     from PyQt5 import sip
 
     if window is None or sip.isdeleted(window):
-        return
+        return []
     try:
+        result = []
         for child in window.findChildren(QWidget):
-            if not sip.isdeleted(child) and child.metaObject().className() == "UIPluginEdgeLauncher":
-                child.hide()
+            if sip.isdeleted(child):
+                continue
+            # 检查类名（PyQt5 中 Python 子类的 metaObject className）
+            name = child.metaObject().className()
+            if name and "UIPluginEdgeLauncher" in name:
+                result.append(child)
+        return result
     except Exception:
-        pass
+        return []
+
+
+def _hide_edge_launcher(window):
+    """隐藏窗口的 UIPluginEdgeLauncher"""
+    for child in _find_edge_launchers(window):
+        try:
+            child.hide()
+        except Exception:
+            pass
 
 
 def _show_edge_launcher(window):
     """显示窗口的 UIPluginEdgeLauncher"""
-    from PyQt5 import sip
-
-    if window is None or sip.isdeleted(window):
-        return
-    try:
-        for child in window.findChildren(QWidget):
-            if not sip.isdeleted(child) and child.metaObject().className() == "UIPluginEdgeLauncher":
-                child.show()
-    except Exception:
-        pass
+    for child in _find_edge_launchers(window):
+        try:
+            child.show()
+        except Exception:
+            pass
 
 
 class TabManagerWindow(QWidget):
@@ -232,24 +242,38 @@ class TabManagerWindow(QWidget):
         project = getattr(window, "_current_project", None) or ""
         title = window.windowTitle() or project or "新建会话"
 
-        # 获取初始图标：优先用项目图标
+        # 获取初始图标：使用项目选择器的风格
         from PyQt5.QtGui import QIcon, QPixmap
         tab_icon = None
         if project:
-            # 尝试从项目名称生成图标（首字）
             try:
-                letter = project[0].upper()
-                pixmap = QPixmap(20, 20)
-                pixmap.fill(Qt.transparent)
-                from PyQt5.QtGui import QPainter as QPainter2
-                p = QPainter2(pixmap)
-                p.setPen(Qt.white)
-                from app.utils.design_tokens import Colors as Colors2
-                p.setBrush(Colors2.INFO)
-                p.drawRoundedRect(0, 0, 20, 20, 4, 4)
-                p.drawText(pixmap.rect(), Qt.AlignCenter, letter)
-                p.end()
-                tab_icon = pixmap
+                from app.widgets.cards.settings.project_selector_card import (
+                    extract_project_initials,
+                    get_project_color,
+                )
+                initials = extract_project_initials(project)
+                color_str = get_project_color(project, alpha=255)
+                # 解析颜色
+                import re
+                m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color_str)
+                if m:
+                    r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    from PyQt5.QtGui import QColor as QColor2, QPainter as QPainter2
+                    pixmap = QPixmap(20, 20)
+                    pixmap.fill(Qt.transparent)
+                    p = QPainter2(pixmap)
+                    p.setRenderHint(QPainter2.Antialiasing)
+                    p.setBrush(QColor2(r, g, b))
+                    p.setPen(Qt.NoPen)
+                    p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+                    p.setPen(QColor2(255, 255, 255))
+                    font = p.font()
+                    font.setPixelSize(11)
+                    font.setBold(True)
+                    p.setFont(font)
+                    p.drawText(pixmap.rect(), Qt.AlignCenter, initials)
+                    p.end()
+                    tab_icon = pixmap
             except Exception:
                 pass
         if tab_icon is None:
@@ -264,6 +288,9 @@ class TabManagerWindow(QWidget):
                 self._tab_panel.update_tab_title(i, new_title or project or "对话")
             )
         )
+
+        # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
+        _hide_edge_launcher(window)
 
         # 隐藏空状态页，切换到新窗口
         self._content_area.widget(0).hide()

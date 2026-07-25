@@ -4372,6 +4372,12 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # 同时更新自身标题（供 Tab 管理器监听 windowTitleChanged）
+        try:
+            self.setWindowTitle(title)
+        except Exception:
+            pass
+
     def _sync_dialog_title(self):
         """同步对话框窗口标题为当前会话标题，供 Windows 任务栏区分各窗口
 
@@ -4391,6 +4397,11 @@ class OpenAIChatToolWindow(ToolWindow):
             dialog = self.window() if hasattr(self, "window") else None
             if dialog and hasattr(dialog, "setWindowTitle"):
                 dialog.setWindowTitle(title)
+        except Exception:
+            pass
+        # 同时更新自身标题（供 Tab 管理器监听 windowTitleChanged）
+        try:
+            self.setWindowTitle(title)
         except Exception:
             pass
 
