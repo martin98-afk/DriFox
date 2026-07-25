@@ -2706,6 +2706,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_subagents_param_description()
         self._update_title_gen_param_description()
 
+        # 监听配置变更，配置同步时自动刷新命令卡参数描述
+        from app.utils.config import Settings as _Cfg
+        _cfg = _Cfg.get_instance()
+        _cfg.llm_subagent_default_model.valueChanged.connect(self._update_subagents_param_description)
+        _cfg.llm_title_gen_default_model.valueChanged.connect(self._update_title_gen_param_description)
+
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
         # 放在主 layout 自己的容器里。这样 _input_card 缩小到 0 时，
