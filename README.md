@@ -13,11 +13,11 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.4.6-brightgreen)
+![Version](https://img.shields.io/badge/version-0.4.7-brightgreen)
 
 </div>
 
-<h1 align="center">DriFox 飘狐 v0.4.6 — 轻量化 AI 桌面对话助手</h1>
+<h1 align="center">DriFox 飘狐 v0.4.7 — 轻量化 AI 桌面对话助手</h1>
 
 <p align="center">
   <b>不做大而全的 IDE。</b> 只是一个对话框——随时调出，随意提问，随性分支。
@@ -52,6 +52,7 @@
 | 🧩 **插件系统** | 33+ 即装即用插件，命令/Agent/Skill/主题/Hook/MCP |
 | 🛠️ **40+ 内置工具** | 文件/执行/网络/代码/桌面/团队/MCP |
 | 🔌 **多模型** | OpenAI / Claude / DeepSeek / MiniMax / 通义 / Gemini / Groq / OpenCode Zen / OpenCode Go / SiliconFlow / Ollama / 火山方舟 / 百度千帆 / 智谱AI |
+| ☁️ **Gitee 云同步** | OAuth 绑定，配置自动备份/恢复，图床上传，分享记录云端管理，Token 自动续期 |
 | 🌐 **MCP 系统** | Model Context Protocol，扩展工具能力 |
 | 🔌 **Hook 系统** | 6 种事件钩子，PreToolUse 可 BLOCK |
 | 🧩 **Skill 系统** | 25+ 即用技能，可自行扩展 |
@@ -95,7 +96,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.4.6 架构                       │
+│                    DriFox v0.4.7 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
 │             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │
@@ -202,6 +203,14 @@ plugins/system/          # 系统内置插件（打包在 exe 中）
 
 | 版本 | 亮点 |
 |------|------|
+| **v0.4.7** | **Gitee OAuth Token 自动刷新** — refresh_token 滚动续期，ConfigSync 全链路同步，401 自动重试，不再因 token 过期而中断服务 |
+| **v0.4.6** | Gitee 配置云同步增强（user-custom 插件备份/恢复、分享记录管理），工具权限自动同步，Token 过期防护 |
+| **v0.4.5** | 子智能体紧凑卡片高度修复，Windows 暗色模式 Tooltip 修复 |
+| **v0.4.4** | 性能优化：差分渲染、增量内存保存、MCP 超时优化、死代码清理 |
+| **v0.4.3** | 统一发送/停止按钮，暗色/浅色主题适配，状态动画优化 |
+| **v0.4.2** | 浅色主题全面升级，21 套主题组件级感知，禁用状态视觉优化 |
+| **v0.4.1** | 配置云同步，user-custom 插件云端备份/恢复，项目导出异步化，分享记录管理 |
+| **v0.4.0** | **🎉 Gitee 云端集成** — OAuth 账号绑定，图床上传，配置云备份，快捷键冲突检测，子智能体工具结果增强展示 |
 | **v0.3.11** | models.dev 动态模型同步, OpenCode Go 独立服务商, 模型参数服务商级隔离 |
 | **v0.3.10** | 搜索引引擎修复 (Tavily+TinyFish), toggle-window 修复 |
 | **v0.3.9** | 消息指纹, toggle-window/clear 命令, 浮动tooltip独立窗口, 平滑动画 |

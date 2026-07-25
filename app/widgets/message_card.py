@@ -209,8 +209,10 @@ def _get_formatter_cached():
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 
-# 编辑类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
-_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit"})
+# 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
+# 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
+# 留在正文中比收到工具区更符合直觉，体验更连贯。
+_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit", "subagent_para", "subagent_dag", "question"})
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -3976,7 +3978,9 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
-                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"])';
+                // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
+                // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
+                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"]):not([data-tool-name="subagent_para"]):not([data-tool-name="subagent_dag"]):not([data-tool-name="question"])';
 
                 // 更新"工具与思考"标题（总项数，无勾叉 badge）
                 function _updateToolSectionHeader() {{
@@ -5606,6 +5610,10 @@ class CodeWebViewer(QWebEngineView):
 class PlainTextViewer(QWidget):
     contentHeightChanged = pyqtSignal(int)
 
+    # 用户消息卡片最大高度（px）：超过此高度启用 QTextEdit 内部滚动条
+    # 约可容纳 13 行 14px 文本，平衡阅读完整性与卡片视觉占位
+    MAX_HEIGHT = 300
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
@@ -5627,11 +5635,15 @@ class PlainTextViewer(QWidget):
         self.text_edit.setFrameShape(QTextEdit.NoFrame)
         self.text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
         self.text_edit.customContextMenuRequested.connect(self._show_context_menu)
+        # 显式声明：超出可视区域时自动显示垂直滚动条
+        self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._apply_text_style()
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(40)
+        # 用户消息卡片最大高度：超出后由 QTextEdit 内部滚动条处理滚动
+        self.setMaximumHeight(self.MAX_HEIGHT)
 
     def _apply_text_style(self):
         """应用文本样式（从 Colors token 读取颜色）"""
@@ -5707,7 +5719,8 @@ class PlainTextViewer(QWidget):
         doc = self.text_edit.document()
         h = int(math.ceil(doc.size().height())) + 16  # padding
 
-        h = max(40, h)
+        # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
+        h = max(40, min(h, self.MAX_HEIGHT))
 
         if abs(self.height() - h) > 2:
             self.setFixedHeight(h)

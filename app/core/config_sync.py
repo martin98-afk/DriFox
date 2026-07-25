@@ -386,10 +386,35 @@ class ConfigSyncService(QObject):
 
         由 _reloadSettings（后台线程发射）桥接到主线程执行，
         避免大量 valueChanged 信号从非主线程发射导致 UI 卡顿。
+
+        ⚠️ 重载前保存 token 相关值，防止远端旧配置覆盖本地刷新后的 token。
         """
         try:
-            Settings.get_instance().load()
-            logger.info("[ConfigSync] Settings 已重新加载（主线程）")
+            cfg = Settings.get_instance()
+
+            # 保存当前内存中的 token 值（可能是自动刷新后的新 token）
+            _saved = {
+                "bound": cfg.gitee_bound.value,
+                "token": cfg.gitee_user_token.value,
+                "refresh_token": cfg.gitee_user_refresh_token.value,
+                "expires_at": cfg.gitee_token_expires_at.value,
+                "owner": cfg.gitee_user_owner.value,
+                "repo": cfg.gitee_user_repo.value,
+            }
+
+            cfg.load()
+
+            # 恢复 token 相关值：远端 app.config 中的 token 可能是过期的，
+            # 本地刚刷新好的 token 不应被覆盖
+            if _saved["bound"]:
+                cfg.gitee_bound.value = _saved["bound"]
+                cfg.gitee_user_token.value = _saved["token"]
+                cfg.gitee_user_refresh_token.value = _saved["refresh_token"]
+                cfg.gitee_token_expires_at.value = _saved["expires_at"]
+                cfg.gitee_user_owner.value = _saved["owner"]
+                cfg.gitee_user_repo.value = _saved["repo"]
+
+            logger.info("[ConfigSync] Settings 已重新加载（主线程，token 已保护）")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
@@ -400,10 +425,54 @@ class ConfigSyncService(QObject):
             self._set_state("idle")
             self.syncDone.emit(True, msg)
 
+    # ── Token 同步 ──────────────────────────────────────────
+
+    def _sync_token(self) -> bool:
+        """
+        从中央 token 管理器同步有效 access_token（自动检测过期并刷新）。
+
+        ConfigSyncService 在 enable() 时收到的 token 是一次性快照，
+        token 过期后不会自动更新。本方法每次 API 调用前调用，确保
+        self._token 持有最新有效值。
+
+        Returns:
+            True: token 有效
+            False: token 无效（未绑定/刷新失败）
+        """
+        try:
+            from app.gateway.auth.gitee import GiteeOAuthBackend
+
+            backend = GiteeOAuthBackend()
+            if not backend.is_bound():
+                return False
+
+            token, err = backend._ensure_valid_token()
+            if token:
+                self._token = token
+                return True
+
+            if err:
+                logger.warning(f"[ConfigSync] token 同步失败: {err}")
+            return False
+        except Exception as e:
+            logger.debug(f"[ConfigSync] token 同步异常（回退到旧 token）: {e}")
+            # 回退：尝试直接从 config 读
+            if not self._token:
+                try:
+                    from app.utils.config import Settings as Cfg
+
+                    self._token = Cfg.get_instance().gitee_user_token.value or ""
+                except Exception:
+                    pass
+            return bool(self._token)
+
     # ── 远端同步 ──────────────────────────────────────────
 
     def _initial_sync(self):
         """绑定后首次同步：检查远端 → 下载/上传（含 app.config + user-custom 插件）"""
+        # 先同步有效 token
+        self._sync_token()
+
         self._set_state("syncing")
         self._pending_sync_message = None  # 确保无残留
         try:
@@ -464,6 +533,9 @@ class ConfigSyncService(QObject):
             False: 文件不存在（404）
             None: 无法确定（网络异常），调用方应保守处理
         """
+        # 先同步有效 token（自动刷新）
+        self._sync_token()
+
         if not self._token or not self._owner:
             return None
         try:
@@ -483,6 +555,11 @@ class ConfigSyncService(QObject):
         防抖触发时只上传被标记的项；
         手动 upload() / 首次同步强制全量（两项都标记）。
         """
+        # 先同步有效 token（自动刷新），防止使用过期 token 导致 401
+        if not self._sync_token():
+            logger.warning("[ConfigSync] 无法上传：token 无效")
+            return False
+
         if not self._token or not self._owner:
             logger.warning("[ConfigSync] 无法上传：缺少 token/owner")
             return False
@@ -698,6 +775,11 @@ class ConfigSyncService(QObject):
 
     def _do_download(self) -> bool:
         """从远端下载配置和 user-custom 插件，覆盖本地（SHA 未变则跳过）"""
+        # 先同步有效 token（自动刷新）
+        if not self._sync_token():
+            logger.warning("[ConfigSync] 无法下载：token 无效")
+            return False
+
         if not self._token or not self._owner:
             return False
 

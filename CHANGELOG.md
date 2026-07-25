@@ -1,6 +1,29 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.7] - 2026-07-25
+
+自上一版本以来的变更 | 提交数：8 · 文件变更：24 · +1106/-518 | 贡献者：dingma, mading
+
+> 重点：实现 **Gitee OAuth Token 自动刷新机制**，access_token 过期后自动通过 refresh_token 续期，ConfigSync 全链路同步有效 token，不再因 token 过期导致 401 中断服务。
+
+### ✨ 新功能 (New Features)
+
+- **Gitee OAuth Token 自动刷新**: access_token 过期后自动通过 refresh_token 换取新 token，支持滚动续期（refresh_token 每次刷新同步更新），Token 过期前 60s 自动触发刷新，避免 24h 过期后服务中断
+- **ConfigSync Token 全链路同步**: 新增 `_sync_token()` 方法，在 _do_upload / _do_download / _initial_sync / _check_remote_file 四个入口统一同步有效 token，解决 ConfigSync 持有过期 token 导致 401 的问题
+- **远程下载 Token 保护**: Settings 重载时保存当前刷新后的 token，防止远端旧配置覆盖本地刚刷新的 token
+- **GiteeCard 启动自动同步优化**: 启动时通过 `get_bound_info()` 获取有效 token（含刷新），不再直接读取可能过期的配置值
+- **PlainTextViewer 最大高度约束**: 限制消息卡片中纯文本视图的最大高度，提升消息列表可用性
+- **子智能体工具结果展示增强**: 改进 subagent_para / subagent_dag 工具结果的展示逻辑
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Gitee OAuth 集成精简**: 移除废弃的 `gitee_oauth.py` 遗留代码，清理 336 行死代码，简化 OAuth 后端注册流程
+
+### 🔧 其他 (Chores & Build)
+
+- **快捷键冲突检测**: ShortcutManagerCard 新增快捷键冲突检测与提示功能
+
 ## [v0.4.6] - 2026-07-24
 
 自上一版本以来的变更 | 提交数：40 · 文件变更：38 · +3551/-722 | 贡献者：dingma, mading, martin98-afk
