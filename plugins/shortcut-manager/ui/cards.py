@@ -852,6 +852,11 @@ class ShortcutManagerCard(QWidget):
             shortcut=key_str,
         )
 
+        # 所有文件写入完成，只重载一次（不依赖 watchfiles 异步热更新防抖）
+        from app.core.builtin_commands import reload_all_commands
+
+        reload_all_commands()
+
         if success:
             QTimer.singleShot(300, self._refresh)
             self._count_lb.setText(f"✅ /{cmd_name} → {key_str}")
@@ -884,10 +889,6 @@ class ShortcutManagerCard(QWidget):
 
             dest_path.write_text(content, encoding="utf-8")
             logger.info(f"[ShortcutManager] 已保存: /{cmd_name} → {shortcut}")
-            # 强制立即重载命令缓存，不依赖 watchfiles 异步热更新（watchfiles 有 2 秒防抖）
-            from app.core.builtin_commands import reload_all_commands
-
-            reload_all_commands()
             return True
         except Exception as e:
             logger.error(f"[ShortcutManager] 保存失败: {e}")

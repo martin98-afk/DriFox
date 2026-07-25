@@ -285,11 +285,12 @@ class SessionRepository:
             return []
 
         try:
+            # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
+            # 等重量级 BLOB 列，减少 SQLite I/O 和传输开销。
             success, rows = self._execute(
                 f"SELECT session_id, title, project, system_prompt, "
-                f"compaction_state, compaction_cache, message_count, "
-                f"user_edited_title, worktree_path, preview, "
-                f"context_usage, created_at, updated_at "
+                f"message_count, user_edited_title, worktree_path, "
+                f"preview, context_usage, created_at, updated_at "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -312,27 +313,9 @@ class SessionRepository:
         else:
             return {}
 
-        compaction_state = {}
-        compaction_cache = {}
-
-        try:
-            state_raw = d.get("compaction_state")
-            if isinstance(state_raw, (str, bytes)):
-                compaction_state = deserialize(state_raw) or {}
-            elif isinstance(state_raw, dict):
-                compaction_state = state_raw
-        except Exception:
-            pass
-
-        try:
-            cache_raw = d.get("compaction_cache")
-            if isinstance(cache_raw, (str, bytes)):
-                compaction_cache = deserialize(cache_raw) or {}
-            elif isinstance(cache_raw, dict):
-                compaction_cache = cache_raw
-        except Exception:
-            pass
-
+        # 🚀 性能优化：跳过 compaction_state/cache 的 zstd 解压+反序列化。
+        # 轻量列表展示中不使用这两个字段，全量加载在 get_session() 中才做。
+        # 省掉 500 条记录的 zstd 解压 + orjson.loads，可节省大量 CPU。
         raw_title = d.get("title", "") or ""
         return {
             "session_id": d.get("session_id", ""),
@@ -342,8 +325,8 @@ class SessionRepository:
             "project": d.get("project", "默认项目"),
             "messages": [],  # 懒加载：不在启动时加载
             "system_prompt": d.get("system_prompt", ""),
-            "compaction_state": compaction_state,
-            "compaction_cache": compaction_cache,
+            "compaction_state": {},
+            "compaction_cache": {},
             "message_count": d.get("message_count", 0),
             "preview": d.get("preview", "") or "",  # 从 DB 读取预览文本
             "created_at": d.get("created_at", ""),
