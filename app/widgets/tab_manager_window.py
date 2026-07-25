@@ -9,8 +9,10 @@ TabManagerWindow — Tab 管理器宿主窗口
 import json
 from typing import Any, Dict, List, Optional
 
+from PyQt5 import sip as _sip
+
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCloseEvent
 from PyQt5.QtWidgets import (
     QApplication,
@@ -105,6 +107,41 @@ def _show_edge_launcher(window):
             child.show()
         except Exception:
             pass
+
+
+def _update_tab_icon(tab_idx: int, project: str):
+    """更新指定 Tab 的项目图标"""
+    from PyQt5.QtGui import QPixmap, QColor as QClr, QPainter as QPnt
+
+    tm = TabManagerWindow.get_instance()
+    if tm is None:
+        return
+    try:
+        from app.widgets.cards.settings.project_selector_card import (
+            extract_project_initials,
+            get_project_color,
+        )
+        initials = extract_project_initials(project)
+        color_str = get_project_color(project, alpha=255)
+        parts = color_str.replace("rgba(", "").replace(")", "").split(",")
+        r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+        pix = QPixmap(20, 20)
+        pix.fill(Qt.transparent)
+        p = QPnt(pix)
+        p.setRenderHint(QPnt.Antialiasing)
+        p.setBrush(QClr(r, g, b))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+        p.setPen(QClr(255, 255, 255))
+        f = p.font()
+        f.setPixelSize(11)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(pix.rect(), Qt.AlignCenter, initials)
+        p.end()
+        tm._tab_panel.update_tab_icon(tab_idx, pix)
+    except Exception:
+        pass
 
 
 class TabManagerWindow(QWidget):
@@ -288,6 +325,24 @@ class TabManagerWindow(QWidget):
                 self._tab_panel.update_tab_title(i, new_title or project or "对话")
             )
         )
+
+        # 启动项目变化检测（每 2s 检查一次 _current_project 是否变化）
+        _last_project = [project]
+        def _check_project():
+            if _sip.isdeleted(window):
+                return
+            current_p = getattr(window, "_current_project", None) or ""
+            if current_p != _last_project[0]:
+                _last_project[0] = current_p
+                _update_tab_icon(tab_idx, current_p)
+        _check_timer = QTimer(window)
+        _check_timer.timeout.connect(_check_project)
+        _check_timer.start(2000)
+        # 窗口销毁时自动停止定时器
+        try:
+            window.destroyed.connect(_check_timer.stop)
+        except Exception:
+            pass
 
         # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
         _hide_edge_launcher(window)
