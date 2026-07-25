@@ -319,21 +319,19 @@ class TabManagerWindow(QWidget):
 
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 
-        # 监听窗口标题变更，同步更新 Tab
-        window.windowTitleChanged.connect(
-            lambda new_title, i=tab_idx: (
-                self._tab_panel.update_tab_title(i, new_title or project or "对话")
-            )
-        )
-
-        # 通过标题变更触发项目图标更新（项目切换时 _sync_window_title 会更新标题）
-        def _on_title_changed(new_title):
-            if _sip.isdeleted(window):
+        # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标
+        def _on_win_title_changed(_new_title, _idx=tab_idx, _win=window):
+            if _sip.isdeleted(_win):
                 return
-            p = getattr(window, "_current_project", None) or ""
-            _update_tab_icon(tab_idx, p)
-        window.windowTitleChanged.connect(_on_title_changed)
-        # 同时也立即更新一次图标
+            # 更新标题
+            t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
+            self._tab_panel.update_tab_title(_idx, t)
+            # 更新项目图标
+            p = getattr(_win, "_current_project", None) or ""
+            _update_tab_icon(_idx, p)
+        window.windowTitleChanged.connect(_on_win_title_changed)
+
+        # 立即触发一次初始图标更新
         _update_tab_icon(tab_idx, project)
 
         # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
