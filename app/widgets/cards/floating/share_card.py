@@ -598,7 +598,7 @@ class ShareCardContent(QWidget):
         super().__init__(parent)
         self._messages: List[Dict] = []
         self._record: Dict = {}
-        self._selected_format = "markdown"
+        self._selected_format = "json"
         self._setup_ui()
 
     def _setup_ui(self):
@@ -614,8 +614,8 @@ class ShareCardContent(QWidget):
         fmt_layout.setSpacing(4)
         Colors.refresh()
         for fmt_id, fmt_name in [
-            ("markdown", "📝 Markdown"),
             ("json", "📊 JSON"),
+            ("markdown", "📝 Markdown"),
             ("html", "🌐 HTML"),
         ]:
             btn = QPushButton(fmt_name, self)

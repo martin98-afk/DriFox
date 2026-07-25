@@ -205,6 +205,18 @@ class TrayManager(QObject):
         show_all.triggered.connect(self._show_all_windows)
         self._tray_menu.addAction(show_all)
 
+        hide_all = QAction("隐藏所有窗口", self._tray_menu)
+        hide_all.triggered.connect(self._hide_all_windows)
+        self._tray_menu.addAction(hide_all)
+
+        self._tray_menu.addSeparator()
+
+        new_win = QAction("新建窗口", self._tray_menu)
+        new_win.triggered.connect(self._new_window)
+        self._tray_menu.addAction(new_win)
+
+        self._tray_menu.addSeparator()
+
         quit_action = QAction("退出", self._tray_menu)
         quit_action.triggered.connect(self._quit_application)
         self._tray_menu.addAction(quit_action)
@@ -644,6 +656,35 @@ class TrayManager(QObject):
             self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon(1), 4000)
             # 4秒后清理（与 showMessage 的显示时长一致）
             QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
+
+    def _hide_all_windows(self) -> None:
+        """隐藏所有已注册的窗口"""
+        for w in list(self._windows):
+            try:
+                if w.isVisible():
+                    w.hide()
+            except RuntimeError:
+                # 窗口已被 C++ 销毁，清理引用
+                self._windows = [x for x in self._windows if x is not w]
+
+    def _new_window(self) -> None:
+        """从第一个有效窗口创建新窗口"""
+        dialog = self._get_first_valid_window()
+        if dialog is None:
+            logger.warning("[_new_window] 没有有效窗口，无法创建新窗口")
+            return
+
+        # 获取窗口内部的 tool_instance (OpenAIChatToolWindow)
+        tool_instance = getattr(dialog, "tool_instance", None)
+        if tool_instance is None:
+            logger.warning("[_new_window] 窗口无效，无法创建新窗口")
+            return
+
+        # 调用窗口的复制方法（branch=False 表示全新空窗口）
+        try:
+            tool_instance._safe_duplicate_window(branch=False)
+        except Exception as e:
+            logger.error(f"[_new_window] 创建新窗口失败: {e}")
 
     def _show_all_windows(self) -> None:
         """显示所有已注册的窗口"""
