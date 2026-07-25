@@ -326,23 +326,15 @@ class TabManagerWindow(QWidget):
             )
         )
 
-        # 启动项目变化检测（每 2s 检查一次 _current_project 是否变化）
-        _last_project = [project]
-        def _check_project():
+        # 通过标题变更触发项目图标更新（项目切换时 _sync_window_title 会更新标题）
+        def _on_title_changed(new_title):
             if _sip.isdeleted(window):
                 return
-            current_p = getattr(window, "_current_project", None) or ""
-            if current_p != _last_project[0]:
-                _last_project[0] = current_p
-                _update_tab_icon(tab_idx, current_p)
-        _check_timer = QTimer(window)
-        _check_timer.timeout.connect(_check_project)
-        _check_timer.start(2000)
-        # 窗口销毁时自动停止定时器
-        try:
-            window.destroyed.connect(_check_timer.stop)
-        except Exception:
-            pass
+            p = getattr(window, "_current_project", None) or ""
+            _update_tab_icon(tab_idx, p)
+        window.windowTitleChanged.connect(_on_title_changed)
+        # 同时也立即更新一次图标
+        _update_tab_icon(tab_idx, project)
 
         # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
         _hide_edge_launcher(window)
@@ -480,8 +472,6 @@ class TabManagerWindow(QWidget):
     @classmethod
     def _enable_mode(cls, tray_manager):
         """启用 Tab 模式：将所有独立窗口迁入"""
-        from app.tool_popup import ToolPopupDialog
-
         tab_mgr = cls.get_instance()
         if tab_mgr is None:
             tab_mgr = cls.create_instance()
@@ -491,49 +481,41 @@ class TabManagerWindow(QWidget):
         tab_mgr._is_transitioning = True
 
         try:
-            # 遍历 TrayManager 中的所有独立窗口
+            migrated_windows = []
             for dialog in list(tray_manager._windows):
                 try:
-                    # 跳过已销毁或无效的窗口
-                    from PyQt5 import sip
-
-                    if sip.isdeleted(dialog):
+                    if _sip.isdeleted(dialog):
                         tray_manager.unregister_window(dialog)
                         continue
 
                     tool_instance = getattr(dialog, "tool_instance", None)
-                    if tool_instance is None or sip.isdeleted(tool_instance):
+                    if tool_instance is None or _sip.isdeleted(tool_instance):
                         tray_manager.unregister_window(dialog)
                         continue
 
-                    # 从 dialog 中取出
+                    # 从 dialog 中取出 tool_instance
                     old_layout = dialog.layout()
                     if old_layout:
                         old_layout.removeWidget(tool_instance)
-                    tool_instance.setParent(tab_mgr._content_area)
 
-                    # 缓存 dialog 引用供恢复
-                    tab_mgr._cached_dialogs[id(tool_instance)] = dialog
-
-                    # 从 TrayManager 注销
+                    # 关闭并销毁 dialog（防止空白窗口残留）
+                    dialog.close()
+                    dialog.deleteLater()
                     tray_manager.unregister_window(dialog)
 
-                    # 添加到 Tab 管理器
-                    tab_mgr._windows.append(tool_instance)
-                    tab_mgr._content_area.addWidget(tool_instance)
-
-                    # 添加 Tab 项
-                    title = tool_instance.windowTitle() or "会话"
-                    from PyQt5.QtGui import QIcon
-                    raw_icon = getattr(tool_instance, "icon", None)
-                    tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
-                    tab_mgr._tab_panel.add_tab(title, tab_icon)
+                    # 迁移到 Tab 管理器
+                    tool_instance.setParent(tab_mgr)
+                    # 使用 add_window 统一处理（自动添加项、连接信号）
+                    tab_mgr.add_window(tool_instance)
+                    migrated_windows.append(tool_instance)
 
                 except Exception as e:
                     logger.error(f"[TabMode] 迁移窗口失败: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
             # 更新 UI 状态
-            if tab_mgr._windows:
+            if migrated_windows:
                 tab_mgr._content_area.widget(0).hide()
                 tab_mgr._tab_panel.set_active_index(0)
             else:
@@ -542,8 +524,8 @@ class TabManagerWindow(QWidget):
             # 更新 Tray 菜单
             tray_manager._rebuild_context_menu()
 
-            # 隐藏所有窗口的 EdgeLauncher（Tab 模式下只显示一个）
-            for w in tab_mgr._windows:
+            # 隐藏所有窗口的 EdgeLauncher
+            for w in migrated_windows:
                 _hide_edge_launcher(w)
 
             # 显示 TabManagerWindow
@@ -551,7 +533,7 @@ class TabManagerWindow(QWidget):
             tab_mgr.activateWindow()
             tab_mgr.raise_()
 
-            logger.info(f"[TabMode] 已启用，迁入 {len(tab_mgr._windows)} 个窗口")
+            logger.info(f"[TabMode] 已启用，迁入 {len(migrated_windows)} 个窗口")
 
         finally:
             tab_mgr._is_transitioning = False

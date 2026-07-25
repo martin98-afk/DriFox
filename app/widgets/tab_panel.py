@@ -21,10 +21,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, TransparentToolButton, isDarkTheme
+from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon as FIF, TransparentToolButton, isDarkTheme
 
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_font_family_css
 
 
 class TabItem(QFrame):
@@ -75,9 +75,9 @@ class TabItem(QFrame):
         self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._title_label, 1)
 
-        # 关闭按钮
+        # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE）
         self._close_btn = TransparentToolButton(self)
-        self._close_btn.setIcon(get_icon("close"))
+        self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setFixedSize(20, 20)
         self._close_btn.setVisible(False)
         self._close_btn.clicked.connect(self.closeRequested.emit)
