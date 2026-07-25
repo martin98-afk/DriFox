@@ -180,6 +180,9 @@ class TrayManager(QObject):
         self._arrange_mode: int = 0
         self._ARRANGE_MODES = ("网格", "竖列", "折叠")
 
+        # ========== Tab 管理器支持 ==========
+        self._tab_manager_window = None  # Tab 模式开启时指向 TabManagerWindow
+
         logger.info("TrayManager 初始化完成")
 
     # ========== 托盘右键菜单动态重建 ==========
@@ -188,6 +191,26 @@ class TrayManager(QObject):
         """动态重建托盘右键菜单，为每个窗口创建独立的菜单项"""
         self._tray_menu.clear()
 
+        # ── Tab 模式：简化菜单 ──
+        if self._tab_manager_window is not None:
+            tm_action = QAction("📑 Tab 管理器", self._tray_menu)
+            tm_action.triggered.connect(
+                lambda: (
+                    self._tab_manager_window.show(),
+                    self._tab_manager_window.activateWindow(),
+                    self._tab_manager_window.raise_(),
+                )
+                if self._tab_manager_window
+                else None
+            )
+            self._tray_menu.addAction(tm_action)
+            self._tray_menu.addSeparator()
+            quit_action = QAction("退出", self._tray_menu)
+            quit_action.triggered.connect(self._quit_application)
+            self._tray_menu.addAction(quit_action)
+            return
+
+        # ── 独立窗口模式（原有逻辑）──
         # 过滤有效的窗口
         valid_windows = [w for w in self._windows if self._is_window_valid(w)]
 
@@ -1133,6 +1156,20 @@ class TrayManager(QObject):
         任意窗口可见 → 全部隐藏
         全部已隐藏 → 全部显示并激活
         """
+        # ── Tab 模式分支 ──
+        if self._tab_manager_window is not None:
+            try:
+                if self._tab_manager_window.isVisible():
+                    self._tab_manager_window.hide()
+                else:
+                    self._tab_manager_window.show()
+                    self._tab_manager_window.activateWindow()
+                    self._tab_manager_window.raise_()
+            except RuntimeError:
+                pass
+            return
+
+        # ── 独立窗口模式（原有逻辑）──
         # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
         now = time.perf_counter()
         if now - self._last_toggle_time < 0.5:
