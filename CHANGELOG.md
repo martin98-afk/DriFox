@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.7] - 2026-07-25
 
-自上一版本以来的变更 | 提交数：8 · 文件变更：24 · +1106/-518 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：15 · 文件变更：21 · +1475/-606 | 贡献者：dingma, mading
 
 > 重点：实现 **Gitee OAuth Token 自动刷新机制**，access_token 过期后自动通过 refresh_token 续期，ConfigSync 全链路同步有效 token，不再因 token 过期导致 401 中断服务。
 
@@ -15,10 +15,20 @@ All notable changes to this project will be documented in this file.
 - **GiteeCard 启动自动同步优化**: 启动时通过 `get_bound_info()` 获取有效 token（含刷新），不再直接读取可能过期的配置值
 - **PlainTextViewer 最大高度约束**: 限制消息卡片中纯文本视图的最大高度，提升消息列表可用性
 - **子智能体工具结果展示增强**: 改进 subagent_para / subagent_dag 工具结果的展示逻辑
+- **配置同步增强**: 在加载过程中从文件到内存同步关键配置段，确保配置一致性
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **子智能体/标题生成模型描述修复**: 内置命令重注册后重新应用模型描述，配置变更时自动刷新参数描述，强制刷新命令卡片详情视图，确保显示与实际配置同步
+- **命令重载防抖**: 为命令重载实现防抖机制，避免冗余调用，提升系统响应性
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **Gitee OAuth 集成精简**: 移除废弃的 `gitee_oauth.py` 遗留代码，清理 336 行死代码，简化 OAuth 后端注册流程
+
+### ⚡ 性能优化 (Performance)
+
+- **定时器与渲染优化**: 调整定时器间隔以减少冗余布局重算，合并渲染调用，动态重建托盘菜单，增强窗口标题同步功能
 
 ### 🔧 其他 (Chores & Build)
 
