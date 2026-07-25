@@ -188,7 +188,7 @@ class TabManagerWindow(QWidget):
 
         self._setup_ui()
         self._setup_signals()
-        self._restore_geometry()
+        # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
         # 注册到 TrayManager
         from app.tray_manager import TrayManager
@@ -540,9 +540,8 @@ class TabManagerWindow(QWidget):
             for w in migrated_windows:
                 _hide_edge_launcher(w)
 
-            # 显示 TabManagerWindow（先 show 再设位置，确保正确生效）
+            # 显示 TabManagerWindow（位置由 showEvent 自动恢复）
             tab_mgr.show()
-            tab_mgr._restore_geometry()
             tab_mgr.activateWindow()
             tab_mgr.raise_()
 
@@ -625,24 +624,15 @@ class TabManagerWindow(QWidget):
         finally:
             tab_mgr._is_transitioning = False
 
-    # ── 几何持久化 ──
+    # ── 几何持久化（简化版）──
 
     def _save_geometry(self):
-        """保存窗口位置、大小和面板宽度（含屏幕边界保护）"""
-        screen = QApplication.primaryScreen()
-        screen_rect = screen.availableGeometry() if screen else None
-        x, y = self.x(), self.y()
-        if screen_rect:
-            x = max(screen_rect.x(), min(x, screen_rect.right() - 200))
-            y = max(screen_rect.y(), min(y, screen_rect.bottom() - 100))
+        """保存窗口位置到配置"""
         geo = {
-            "x": x,
-            "y": y,
-            "w": self.width(),
-            "h": self.height(),
+            "x": self.x(), "y": self.y(),
+            "w": self.width(), "h": self.height(),
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
-
         # 保存面板宽度
         if hasattr(self, "_splitter"):
             sizes = self._splitter.sizes()
@@ -650,44 +640,44 @@ class TabManagerWindow(QWidget):
                 Settings.get_instance().tab_panel_width.value = sizes[0]
 
     def _restore_geometry(self):
-        """恢复窗口位置和大小，确保不超出屏幕"""
+        """恢复窗口位置（屏幕居中），确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
+        if not screen_rect:
+            self.resize(960, 640)
+            return
 
+        w, h = 960, 640
         try:
             geo_str = Settings.get_instance().tab_manager_geometry.value
             if geo_str:
-                geo = json.loads(geo_str)
-                # 确保窗口不超出屏幕边界
-                if screen_rect:
-                    geo["x"] = max(screen_rect.x(), min(geo["x"], screen_rect.right() - 200))
-                    geo["y"] = max(screen_rect.y(), min(geo["y"], screen_rect.bottom() - 100))
-                self.setGeometry(geo["x"], geo["y"], geo["w"], geo["h"])
+                g = json.loads(geo_str)
+                x = max(screen_rect.x(), min(g["x"], screen_rect.right() - 100))
+                y = max(screen_rect.y(), min(g["y"], screen_rect.bottom() - 50))
+                self.setGeometry(x, y, g["w"], g["h"])
                 return
-        except (json.JSONDecodeError, KeyError):
+        except Exception:
             pass
 
-        # 首次启动：屏幕居中
-        if screen_rect:
-            w, h = 960, 640
-            self.setGeometry(
-                screen_rect.x() + (screen_rect.width() - w) // 2,
-                screen_rect.y() + (screen_rect.height() - h) // 2,
-                w, h,
-            )
-        else:
-            self.resize(960, 640)
+        # 首次：居中
+        self.setGeometry(
+            screen_rect.x() + (screen_rect.width() - w) // 2,
+            screen_rect.y() + (screen_rect.height() - h) // 2,
+            w, h,
+        )
+
+    def showEvent(self, event):
+        """每次显示时恢复位置"""
+        super().showEvent(event)
+        self._restore_geometry()
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        # 非过渡期间才保存几何（避免隐藏/恢复过程中的错误位置被保存）
-        if not self._is_transitioning and self.isVisible():
-            self._save_geometry()
+        self._save_geometry()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if not self._is_transitioning and self.isVisible():
-            self._save_geometry()
+        self._save_geometry()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏"""
