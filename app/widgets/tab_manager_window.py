@@ -71,9 +71,13 @@ class EmptyStateWidget(QWidget):
 
 def _hide_edge_launcher(window):
     """隐藏窗口的 UIPluginEdgeLauncher"""
+    from PyQt5 import sip
+
+    if window is None or sip.isdeleted(window):
+        return
     try:
         for child in window.findChildren(QWidget):
-            if child.metaObject().className() == "UIPluginEdgeLauncher":
+            if not sip.isdeleted(child) and child.metaObject().className() == "UIPluginEdgeLauncher":
                 child.hide()
     except Exception:
         pass
@@ -81,9 +85,13 @@ def _hide_edge_launcher(window):
 
 def _show_edge_launcher(window):
     """显示窗口的 UIPluginEdgeLauncher"""
+    from PyQt5 import sip
+
+    if window is None or sip.isdeleted(window):
+        return
     try:
         for child in window.findChildren(QWidget):
-            if child.metaObject().className() == "UIPluginEdgeLauncher":
+            if not sip.isdeleted(child) and child.metaObject().className() == "UIPluginEdgeLauncher":
                 child.show()
     except Exception:
         pass
@@ -263,12 +271,22 @@ class TabManagerWindow(QWidget):
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):
             window = self._windows[index]
+            # 先从列表中移除，避免后续操作访问到已销毁的窗口
+            self._windows.pop(index)
+            self._content_area.removeWidget(window)
+            self._tab_panel.remove_tab(index)
+
             # 调用窗口的关闭逻辑（自动保存会话）
             try:
                 window.close()
             except Exception as e:
                 logger.error(f"[TabManager] 关闭窗口失败: {e}")
-            self.remove_window(window)
+
+            # 如果所有窗口都被移除，显示空状态页
+            if not self._windows:
+                self._content_area.widget(0).show()
+
+            self.tabCountChanged.emit(len(self._windows))
 
     def _on_new_tab_requested(self):
         """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
