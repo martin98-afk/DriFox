@@ -242,8 +242,8 @@ class TabManagerWindow(QWidget):
         project = getattr(window, "_current_project", None) or ""
         title = window.windowTitle() or project or "新建会话"
 
-        # 获取初始图标：使用项目选择器的风格
-        from PyQt5.QtGui import QIcon, QPixmap
+        # 获取初始图标：使用项目选择器风格的项目头像
+        from PyQt5.QtGui import QIcon, QPixmap, QColor as QClr, QPainter as QPnt
         tab_icon = None
         if project:
             try:
@@ -253,32 +253,32 @@ class TabManagerWindow(QWidget):
                 )
                 initials = extract_project_initials(project)
                 color_str = get_project_color(project, alpha=255)
-                # 解析颜色
-                import re
-                m = re.match(r'rgba?\((\d+),\s*(\d+),\s*(\d+)', color_str)
-                if m:
-                    r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                    from PyQt5.QtGui import QColor as QColor2, QPainter as QPainter2
-                    pixmap = QPixmap(20, 20)
-                    pixmap.fill(Qt.transparent)
-                    p = QPainter2(pixmap)
-                    p.setRenderHint(QPainter2.Antialiasing)
-                    p.setBrush(QColor2(r, g, b))
-                    p.setPen(Qt.NoPen)
-                    p.drawRoundedRect(0, 0, 20, 20, 4, 4)
-                    p.setPen(QColor2(255, 255, 255))
-                    font = p.font()
-                    font.setPixelSize(11)
-                    font.setBold(True)
-                    p.setFont(font)
-                    p.drawText(pixmap.rect(), Qt.AlignCenter, initials)
-                    p.end()
-                    tab_icon = pixmap
+                # 解析 "rgba(r,g,b,a)"
+                parts = color_str.replace("rgba(", "").replace(")", "").split(",")
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                pix = QPixmap(20, 20)
+                pix.fill(Qt.transparent)
+                p = QPnt(pix)
+                p.setRenderHint(QPnt.Antialiasing)
+                p.setBrush(QClr(r, g, b))
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+                p.setPen(QClr(255, 255, 255))
+                f = p.font()
+                f.setPixelSize(11)
+                f.setBold(True)
+                p.setFont(f)
+                p.drawText(pix.rect(), Qt.AlignCenter, initials)
+                p.end()
+                tab_icon = pix
             except Exception:
                 pass
         if tab_icon is None:
             raw_icon = getattr(window, "icon", None)
-            tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
+            if isinstance(raw_icon, QIcon):
+                tab_icon = raw_icon.pixmap(20, 20)
+            elif raw_icon is not None:
+                tab_icon = raw_icon
 
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 

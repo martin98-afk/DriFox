@@ -67,10 +67,10 @@ class TabItem(QFrame):
                     pass
         layout.addWidget(self._icon_label)
 
-        # 标题
+        # 标题（使用系统 UI 字号，不自设固定大小）
         self._title_label = BodyLabel(self._title, self)
         self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
         )
         self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._title_label, 1)
@@ -175,7 +175,6 @@ class TabPanel(QWidget):
             border-radius: 4px;
             padding: 6px 12px;
             text-align: left;
-            {font_size_css(12)}
         }}
         QPushButton:hover {{
             background: {Colors.HOVER_BG};
