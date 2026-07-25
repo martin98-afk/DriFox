@@ -627,10 +627,16 @@ class TabManagerWindow(QWidget):
     # ── 几何持久化 ──
 
     def _save_geometry(self):
-        """保存窗口位置、大小和面板宽度"""
+        """保存窗口位置、大小和面板宽度（含屏幕边界保护）"""
+        screen = QApplication.primaryScreen()
+        screen_rect = screen.availableGeometry() if screen else None
+        x, y = self.x(), self.y()
+        if screen_rect:
+            x = max(screen_rect.x(), min(x, screen_rect.right() - 200))
+            y = max(screen_rect.y(), min(y, screen_rect.bottom() - 100))
         geo = {
-            "x": self.x(),
-            "y": self.y(),
+            "x": x,
+            "y": y,
             "w": self.width(),
             "h": self.height(),
         }
@@ -643,18 +649,33 @@ class TabManagerWindow(QWidget):
                 Settings.get_instance().tab_panel_width.value = sizes[0]
 
     def _restore_geometry(self):
-        """恢复窗口位置和大小（无保存记录时使用默认尺寸，位置由 OS 自动 cascade）"""
+        """恢复窗口位置和大小，确保不超出屏幕"""
+        screen = QApplication.primaryScreen()
+        screen_rect = screen.availableGeometry() if screen else None
+
         try:
             geo_str = Settings.get_instance().tab_manager_geometry.value
             if geo_str:
                 geo = json.loads(geo_str)
+                # 确保窗口不超出屏幕边界
+                if screen_rect:
+                    geo["x"] = max(screen_rect.x(), min(geo["x"], screen_rect.right() - 200))
+                    geo["y"] = max(screen_rect.y(), min(geo["y"], screen_rect.bottom() - 100))
                 self.setGeometry(geo["x"], geo["y"], geo["w"], geo["h"])
                 return
         except (json.JSONDecodeError, KeyError):
             pass
 
-        # 首次启动：设置默认大小，不强制居中（让 OS 自动 cascade）
-        self.resize(960, 640)
+        # 首次启动：屏幕居中
+        if screen_rect:
+            w, h = 960, 640
+            self.setGeometry(
+                screen_rect.x() + (screen_rect.width() - w) // 2,
+                screen_rect.y() + (screen_rect.height() - h) // 2,
+                w, h,
+            )
+        else:
+            self.resize(960, 640)
 
     def moveEvent(self, event):
         super().moveEvent(event)
