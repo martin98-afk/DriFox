@@ -485,6 +485,7 @@ class TabManagerWindow(QWidget):
             w = tab_mgr._content_area.widget(1)
             tab_mgr._content_area.removeWidget(w)
         tab_mgr._windows.clear()
+        tab_mgr._cached_dialogs.clear()
         tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
 
         try:
@@ -505,9 +506,8 @@ class TabManagerWindow(QWidget):
                     if old_layout:
                         old_layout.removeWidget(tool_instance)
 
-                    # 关闭并销毁 dialog（防止空白窗口残留）
-                    dialog.close()
-                    dialog.deleteLater()
+                    # 隐藏 dialog（不 close/delete，避免触发 tool_instance.closeEvent）
+                    dialog.hide()
                     tray_manager.unregister_window(dialog)
 
                     # 迁移到 Tab 管理器
