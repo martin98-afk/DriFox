@@ -126,12 +126,14 @@ class TabManagerWindow(QWidget):
         self._is_transitioning: bool = False
 
         self.setWindowTitle("DriFox — Tab 管理器")
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(500, 400)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        # 窗口标志：独立任务栏按钮 + 置顶（与 ToolPopupDialog 行为一致）
+        # 窗口标志：支持最大化 + 独立任务栏按钮 + 置顶
         self.setWindowFlags(
-            Qt.Window | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
-            | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint
+            Qt.Window | Qt.WindowStaysOnTopHint
+            | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
+            | Qt.WindowCloseButtonHint
         )
 
         # 确保 Colors 已刷新（主题色初始化）
@@ -165,12 +167,13 @@ class TabManagerWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ── 左侧 Tab 面板 ──
+        # ── 左侧 Tab 面板（可拖拽调整宽度）──
         from app.widgets.tab_panel import TabPanel
 
         self._tab_panel = TabPanel(self)
         self._tab_panel.setObjectName("tabPanel")
-        main_layout.addWidget(self._tab_panel)
+        self._tab_panel.setMinimumWidth(120)
+        self._tab_panel.setMaximumWidth(400)
 
         # ── 右侧内容区 ──
         self._content_area = QStackedWidget(self)
@@ -180,7 +183,21 @@ class TabManagerWindow(QWidget):
         self._empty_state.newTabRequested.connect(self._on_new_tab_requested)
         self._content_area.addWidget(self._empty_state)  # index 0
 
-        main_layout.addWidget(self._content_area, 1)
+        # 使用 QSplitter 让左侧面板可拖拽
+        from PyQt5.QtWidgets import QSplitter
+        self._splitter = QSplitter(Qt.Horizontal, self)
+        self._splitter.addWidget(self._tab_panel)
+        self._splitter.addWidget(self._content_area)
+        self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
+        self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
+        self._splitter.setHandleWidth(4)
+        self._splitter.setChildrenCollapsible(False)
+        main_layout.addWidget(self._splitter)
+
+        # 恢复面板宽度
+        saved_w = Settings.get_instance().tab_panel_width.value
+        if saved_w:
+            self._splitter.setSizes([saved_w, self.width() - saved_w])
 
         # 应用样式
         self.setStyleSheet(f"""
@@ -211,16 +228,41 @@ class TabManagerWindow(QWidget):
         # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
         self._content_area.addWidget(window)
 
-        # 在 Tab 面板添加项
-        title = window.windowTitle() or "新建会话"
-        from PyQt5.QtGui import QIcon
-        raw_icon = getattr(window, "icon", None)
-        tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
+        # 获取初始标题：优先用项目名，其次窗口标题，最后默认
+        project = getattr(window, "_current_project", None) or ""
+        title = window.windowTitle() or project or "新建会话"
+
+        # 获取初始图标：优先用项目图标
+        from PyQt5.QtGui import QIcon, QPixmap
+        tab_icon = None
+        if project:
+            # 尝试从项目名称生成图标（首字）
+            try:
+                letter = project[0].upper()
+                pixmap = QPixmap(20, 20)
+                pixmap.fill(Qt.transparent)
+                from PyQt5.QtGui import QPainter as QPainter2
+                p = QPainter2(pixmap)
+                p.setPen(Qt.white)
+                from app.utils.design_tokens import Colors as Colors2
+                p.setBrush(Colors2.INFO)
+                p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+                p.drawText(pixmap.rect(), Qt.AlignCenter, letter)
+                p.end()
+                tab_icon = pixmap
+            except Exception:
+                pass
+        if tab_icon is None:
+            raw_icon = getattr(window, "icon", None)
+            tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
+
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 
         # 监听窗口标题变更，同步更新 Tab
         window.windowTitleChanged.connect(
-            lambda new_title, i=tab_idx: self._tab_panel.update_tab_title(i, new_title)
+            lambda new_title, i=tab_idx: (
+                self._tab_panel.update_tab_title(i, new_title or project or "对话")
+            )
         )
 
         # 隐藏空状态页，切换到新窗口
@@ -446,52 +488,55 @@ class TabManagerWindow(QWidget):
         tab_mgr._is_transitioning = True
 
         try:
-            for tool_instance in list(tab_mgr._windows):
+            # 先清空引用，边恢复边移除
+            windows = list(tab_mgr._windows)
+            tab_mgr._windows.clear()
+
+            for tool_instance in windows:
                 try:
-                    cached_id = id(tool_instance)
-                    dialog = tab_mgr._cached_dialogs.pop(cached_id, None)
-
-                    if dialog is None or not hasattr(dialog, "layout") or dialog.layout() is None:
-                        dialog = ToolPopupDialog(tool_instance, None)
-
-                    # 将 tool_instance 移回 dialog
+                    # 从 content_area 移除
                     tab_mgr._content_area.removeWidget(tool_instance)
-                    tool_instance.setParent(dialog)
 
-                    # 添加到 dialog 的 layout
-                    from PyQt5.QtWidgets import QVBoxLayout
+                    # 始终创建全新的 ToolPopupDialog（避免复用已关闭 dialog 的布局问题）
+                    dialog = ToolPopupDialog(tool_instance, None)
 
-                    d_layout = dialog.layout() or QVBoxLayout(dialog)
-                    if dialog.layout() is None:
-                        d_layout.setContentsMargins(0, 0, 0, 0)
-                        dialog.setLayout(d_layout)
+                    # 确保标题栏可见
                     title_bar = tool_instance.get_title_bar()
                     if title_bar:
                         title_bar.show()
-                        d_layout.addWidget(title_bar)
-                    d_layout.addWidget(tool_instance, 1)
+
+                    # 恢复窗口位置：在屏幕中央显示
+                    screen = QApplication.primaryScreen()
+                    if screen:
+                        rect = screen.availableGeometry()
+                        dialog.setGeometry(
+                            rect.x() + 50, rect.y() + 50,
+                            min(600, rect.width() - 100),
+                            min(900, rect.height() - 100),
+                        )
 
                     # 显示 dialog 并注册到 TrayManager
                     dialog.show()
                     dialog.activateWindow()
                     tray_manager.register_window(dialog)
 
+                    # 恢复 EdgeLauncher
+                    _show_edge_launcher(tool_instance)
+
                 except Exception as e:
                     logger.error(f"[TabMode] 恢复窗口失败: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
-            # 清空 Tab 管理器状态
-            tab_mgr._windows.clear()
+            # 清空缓存
+            tab_mgr._cached_dialogs.clear()
             tab_mgr.hide()
 
             # 更新 Tray 菜单
             tray_manager._tab_manager_window = None
             tray_manager._rebuild_context_menu()
 
-            # 恢复窗口的 EdgeLauncher
-            for w in tab_mgr._windows:
-                _show_edge_launcher(w)
-
-            logger.info("[TabMode] 已禁用，所有窗口恢复为独立模式")
+            logger.info(f"[TabMode] 已禁用，{len(windows)} 个窗口恢复为独立模式")
 
         finally:
             tab_mgr._is_transitioning = False
@@ -499,7 +544,7 @@ class TabManagerWindow(QWidget):
     # ── 几何持久化 ──
 
     def _save_geometry(self):
-        """保存窗口位置和大小"""
+        """保存窗口位置、大小和面板宽度"""
         geo = {
             "x": self.x(),
             "y": self.y(),
@@ -507,6 +552,12 @@ class TabManagerWindow(QWidget):
             "h": self.height(),
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
+
+        # 保存面板宽度
+        if hasattr(self, "_splitter"):
+            sizes = self._splitter.sizes()
+            if sizes:
+                Settings.get_instance().tab_panel_width.value = sizes[0]
 
     def _restore_geometry(self):
         """恢复窗口位置和大小"""
