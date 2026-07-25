@@ -11,7 +11,7 @@ DriFox 已支持多窗口自由创建/关闭，但缺乏有效的窗口管理手
 - 提供一个类似浏览器 Tab 页的窗口管理体验
 - 与现有独立窗口模式通过配置开关切换，不破坏现有行为
 - 切换过程窗口状态（会话、滚动、输入内容）完全保留
-- 利用 Qt `QWidget::setParent()` 实现零开销窗口迁移
+- 利用 Qt `QWidget::setParent()` 实现内存共享迁移（同一份 `OpenAIChatToolWindow` 实例在两种模式下复用，无需重建）
 - 视觉风格与 DriFox 现有主题体系一致
 
 ## 架构设计
@@ -57,6 +57,26 @@ class TabManagerWindow(QWidget):
     # 信号
     - tab_count_changed = pyqtSignal(int)
     - active_tab_changed = pyqtSignal(int)
+
+**Tab 面板 ↔ 内容区索引同步机制：**
+
+TabPanel 拖拽排序后发射 `tabs_reordered(list)`，TabManagerWindow 的槽函数将 QStackedWidget 的页面顺序与之对齐：
+
+```python
+def _on_tabs_reordered(self, new_order: list):
+    # new_order 包含按新顺序排列的 widget 引用
+    for i, w in enumerate(new_order):
+        # 将要排在第 i 位的 widget 插入到第 i 位
+        self._content_area.insertWidget(i, w)
+```
+
+**空状态页（EmptyStateWidget）：**
+
+TabManagerWindow 内置一个 `QWidget` 作为空状态页，在最后一个 Tab 关闭时显示：
+- 居中的大号 + 图标
+- 「新建标签页」文字按钮
+- 点击按钮 → 调用 `_duplicate_window(branch=False)` 创建新窗口
+- 空状态页本身也是 QStackedWidget 的一页（索引 0），其他窗口从索引 1 开始
 ```
 
 **`app/widgets/tab_panel.py`** — 左侧 Tab 面板
@@ -78,23 +98,47 @@ class TabPanel(QWidget):
 
 ### 改动文件
 
-**`app/widgets/settings/base_settings_card.py`** — 设置卡片
+**`app/widgets/settings/llm_settings_card.py`** — LLM 设置卡片（通用 Tab）
 
-- 新增「多窗口」设置分组
+- 在「通用设置」Tab 下新增「多窗口管理」分组
 - 添加 `启用 Tab 管理器` 开关（QSwitchSettingCard）
 - 关联配置键 `enable_tab_manager`
+- 开关切换时触发 `TabManagerWindow.toggle_mode()`
 
 **`app/tray_manager.py`** — 托盘管理器
 
-- Tab 模式开启时：Tray 菜单不再列出各窗口，改为单一项「Tab 管理器」
+- 新增 `_tab_manager_window` 属性，Tab 模式开启时指向 TabManagerWindow
+- Tab 模式开启时：Tray 菜单不再列出各窗口，改为「Tab 管理器」单一项
 - Tab 模式关闭后：恢复正常窗口列表
-- `_toggle_all_windows` 在 Tab 模式下切换 TabManagerWindow
+- `_toggle_all_windows` 检测 `_tab_manager_window` 引用：有则切换 TabManagerWindow 而非独立窗口
+
+  ```python
+  def _toggle_all_windows(self):
+      if self._tab_manager_window is not None:
+          if self._tab_manager_window.isVisible():
+              self._tab_manager_window.hide()
+          else:
+              self._tab_manager_window.show()
+          return
+      # 原有独立窗口逻辑...
+  ```
 
 **`app/main_widget.py`** — 主窗口逻辑
 
-- `OpenAIChatToolWindow.__init__` 中判断 Tab 模式
-- Tab 模式下创建窗口时不经过 `ToolPopupDialog`
-- `_duplicate_window` 支持在 Tab 模式下直接加入 QStackedWidget
+- 新增 `_tab_mode_active` 实例属性（独立于 `_is_duplicate_window`），从 Settings 读 `enable_tab_manager`
+- `_duplicate_window` 开头增加 Tab 模式分支判断：
+
+  ```python
+  def _duplicate_window(self, branch=False):
+      if Settings.get_instance().enable_tab_manager.value:
+          # Tab 模式：直接创建并加入 TabManagerWindow
+          new_instance = OpenAIChatToolWindow(self.homepage, self)
+          TabManagerWindow.get_instance().add_window(new_instance)
+          return
+      # 原有逻辑：创建 ToolPopupDialog...
+  ```
+
+- Tab 模式下新建窗口不经过 `ToolPopupDialog`，`OpenAIChatToolWindow` 的标题栏在嵌入时自动隐藏
 
 ## 核心交互
 
@@ -157,9 +201,12 @@ class TabPanel(QWidget):
    b. 从 dialog layout 中 removeWidget(tool_instance)
    c. tool_instance.setParent(content_area)
    d. content_area.addWidget(tool_instance)
-   e. dialog.close()（缓存 dialog 引用供恢复）
-4. 更新 Tray 菜单 → 「Tab 管理器」单一项
-5. 显示 TabManagerWindow，选中第一个 Tab
+   e. 从 _popup_refs 中清除已迁移 popup 的引用（防内存泄漏）
+   f. 缓存 dialog 引用供恢复
+   g. 调用 TrayManager.unregister_window(dialog)（清理 Tray 列表）
+4. TrayManager._tab_manager_window = self
+5. 更新 Tray 菜单 → 「Tab 管理器」单一项
+6. 显示 TabManagerWindow，选中第一个 Tab
 ```
 
 ### 关闭 Tab 模式（true → false）
@@ -171,9 +218,11 @@ class TabPanel(QWidget):
    b. window.setParent(dialog)
    c. 添加到 dialog layout
    d. 显示 dialog，恢复位置
-   e. 注册到 TrayManager
-3. 清空 content_area，隐藏 TabManagerWindow
-4. 恢复 Tray 菜单正常窗口列表
+   e. TrayManager.register_window(dialog)（重新注册）
+3. 清空 content_area
+4. TrayManager._tab_manager_window = None
+5. 隐藏 TabManagerWindow（不销毁，下次切换时复用缓存）
+6. 恢复 Tray 菜单正常窗口列表
 ```
 
 ### 启动时自动进入
@@ -200,12 +249,16 @@ class TabPanel(QWidget):
 
 | 场景 | 处理 |
 |---|---|
-| 最后一个 Tab 关闭 | 显示空状态页：大号 + 图标 + "新建标签页" 按钮 |
+| 最后一个 Tab 关闭 | 显示 EmptyStateWidget（QStackedWidget 第 0 页）：大号 + 图标 + 「新建标签页」按钮 |
 | 窗口有未保存内容 | 复用 `OpenAIChatToolWindow` 现有关闭保存逻辑 |
 | 模式切换中用户连续操作 | `_is_transitioning` 保护锁 + 半透明遮罩 |
 | 迁移中某个窗口异常 | try/except 逐个保护，跳过异常窗口，汇总提示 |
-| Tab 模式开启时 Alt+Z | 切换 TabManagerWindow 而非各个窗口 |
-| 多屏幕场景 | TabManagerWindow 跟随当前屏幕创建 |
+| Tab 模式开启时 Alt+Z | TrayManager 检测 `_tab_manager_window` 引用，切换整窗可见性 |
+| 多屏幕场景 | TabManagerWindow 创建在用户主屏幕（与现有 ToolPopupDialog 行为一致），首次启用 Tab 模式时使用当前活动窗口所在屏幕 |
+| macOS Dock 点击恢复 | Tab 模式下 Dock 点击恢复 TabManagerWindow（TrayManager 安装 macOS 事件过滤器指向 TabManagerWindow） |
+| Tab 模式下嵌入窗口的标题栏 | `OpenAIChatToolWindow.get_title_bar().hide()` — 标题栏操作由 Tab 面板提供，原标题栏在嵌入时隐藏 |
+| Tab 最小化行为 | 点击最小化 → 整个 TabManagerWindow 最小化到任务栏；各窗口不保留独立任务栏按钮 |
+| Tab 面板图标 | 动态显示当前会话的 Agent 图标（源自 `OpenAIChatToolWindow.icon` 类属性 + 当前 active agent），无 Agent 时使用默认应用图标 |
 
 ## 测试要点
 
@@ -216,8 +269,10 @@ class TabPanel(QWidget):
 - 关闭 Tab → 窗口正确保存并从列表中移除
 - 最后一个 Tab 关闭 → 显示空状态页
 - 快速反复切换模式 → 保护锁正常工作（无竞态）
-- Tab 拖拽排序 → 页面顺序同步更新
+- Tab 拖拽排序 → QStackedWidget 页面顺序同步更新
 - 深色/浅色主题切换 → Tab 面板配色正确适配
+- TrayManager 在 Tab 模式下 `_windows` 列表为空，`_tab_manager_window` 正确指向 TabManagerWindow
+- `_popup_refs` 在模式切换后无残留引用（无内存泄漏）
 
 ## 未涵盖（后续迭代）
 
