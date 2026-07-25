@@ -3,12 +3,13 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.7] - 2026-07-25
 
-自上一版本以来的变更 | 提交数：15 · 文件变更：21 · +1475/-606 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：16 · 文件变更：24 · +1543/-608 | 贡献者：dingma, mading
 
 > 重点：实现 **Gitee OAuth Token 自动刷新机制**，access_token 过期后自动通过 refresh_token 续期，ConfigSync 全链路同步有效 token，不再因 token 过期导致 401 中断服务。
 
 ### ✨ 新功能 (New Features)
 
+- **快捷键绑定同步与新窗口操作**: 重构快捷键绑定同步机制，确保命令管理器中的快捷键与系统注册保持同步；托盘菜单新增「新建窗口」「切换窗口」「新建对话」等窗口管理操作，提升多窗口场景的使用便捷性
 - **Gitee OAuth Token 自动刷新**: access_token 过期后自动通过 refresh_token 换取新 token，支持滚动续期（refresh_token 每次刷新同步更新），Token 过期前 60s 自动触发刷新，避免 24h 过期后服务中断
 - **ConfigSync Token 全链路同步**: 新增 `_sync_token()` 方法，在 _do_upload / _do_download / _initial_sync / _check_remote_file 四个入口统一同步有效 token，解决 ConfigSync 持有过期 token 导致 401 的问题
 - **远程下载 Token 保护**: Settings 重载时保存当前刷新后的 token，防止远端旧配置覆盖本地刚刷新的 token
@@ -25,6 +26,7 @@ All notable changes to this project will be documented in this file.
 ### ♻️ 代码重构 (Refactoring)
 
 - **Gitee OAuth 集成精简**: 移除废弃的 `gitee_oauth.py` 遗留代码，清理 336 行死代码，简化 OAuth 后端注册流程
+- **分享卡片默认格式改为 JSON**: 将分享卡片默认导出格式从 Markdown 改为 JSON，提升数据结构完整性与后续处理兼容性
 
 ### ⚡ 性能优化 (Performance)
 
