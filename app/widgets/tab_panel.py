@@ -51,9 +51,20 @@ class TabItem(QFrame):
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(20, 20)
         if self._icon_pixmap:
-            self._icon_label.setPixmap(
-                self._icon_pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
+            from PyQt5.QtGui import QPixmap
+
+            if isinstance(self._icon_pixmap, QPixmap):
+                self._icon_label.setPixmap(
+                    self._icon_pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+            else:
+                # QIcon 等类型：转为 QPixmap
+                try:
+                    pixmap = self._icon_pixmap.pixmap(20, 20)
+                    if pixmap:
+                        self._icon_label.setPixmap(pixmap)
+                except Exception:
+                    pass
         layout.addWidget(self._icon_label)
 
         # 标题
@@ -83,9 +94,19 @@ class TabItem(QFrame):
     def set_icon(self, icon):
         self._icon_pixmap = icon
         if icon:
-            self._icon_label.setPixmap(
-                icon.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
+            from PyQt5.QtGui import QPixmap
+
+            if isinstance(icon, QPixmap):
+                self._icon_label.setPixmap(
+                    icon.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+            else:
+                try:
+                    pixmap = icon.pixmap(20, 20)
+                    if pixmap:
+                        self._icon_label.setPixmap(pixmap)
+                except Exception:
+                    pass
 
     def enterEvent(self, event):
         self._close_btn.setVisible(True)
@@ -104,8 +125,6 @@ class TabItem(QFrame):
             painter.fillRect(self.rect(), Colors.SELECTED_BG)
             # 左侧选中指示条
             painter.fillRect(0, 4, 3, self.height() - 8, Colors.INFO)
-        else:
-            painter.fillRect(self.rect(), Colors.TRANSPARENT)
 
         super().paintEvent(event)
 

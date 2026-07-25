@@ -163,8 +163,10 @@ class TabManagerWindow(QWidget):
 
         # 在 Tab 面板添加项
         title = window.windowTitle() or "新建会话"
-        icon = getattr(window, "icon", None)
-        self._tab_panel.add_tab(title, icon)
+        from PyQt5.QtGui import QIcon
+        raw_icon = getattr(window, "icon", None)
+        tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
+        self._tab_panel.add_tab(title, tab_icon)
 
         # 隐藏空状态页，切换到新窗口
         self._content_area.widget(0).hide()
@@ -319,8 +321,10 @@ class TabManagerWindow(QWidget):
 
                     # 添加 Tab 项
                     title = tool_instance.windowTitle() or "会话"
-                    icon = getattr(tool_instance, "icon", None)
-                    tab_mgr._tab_panel.add_tab(title, icon)
+                    from PyQt5.QtGui import QIcon
+                    raw_icon = getattr(tool_instance, "icon", None)
+                    tab_icon = raw_icon.pixmap(20, 20) if isinstance(raw_icon, QIcon) else raw_icon
+                    tab_mgr._tab_panel.add_tab(title, tab_icon)
 
                 except Exception as e:
                     logger.error(f"[TabMode] 迁移窗口失败: {e}")
