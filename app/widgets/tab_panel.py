@@ -118,13 +118,15 @@ class TabItem(QFrame):
         super().leaveEvent(event)
 
     def paintEvent(self, event):
+        from PyQt5.QtGui import QColor
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         if self._selected:
-            painter.fillRect(self.rect(), Colors.SELECTED_BG)
+            painter.fillRect(self.rect(), QColor(Colors.SELECTED_BG))
             # 左侧选中指示条
-            painter.fillRect(0, 4, 3, self.height() - 8, Colors.INFO)
+            painter.fillRect(0, 4, 3, self.height() - 8, QColor(Colors.INFO))
 
         super().paintEvent(event)
 
