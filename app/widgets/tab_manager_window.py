@@ -332,6 +332,7 @@ class TabManagerWindow(QWidget):
         window.windowTitleChanged.connect(_on_win_title_changed)
 
         # 立即触发一次初始图标更新
+        logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
         _update_tab_icon(tab_idx, project)
 
         # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
@@ -487,6 +488,10 @@ class TabManagerWindow(QWidget):
         tab_mgr._windows.clear()
         tab_mgr._cached_dialogs.clear()
         tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
+
+        logger.info(f"[TabMode] _enable_mode: tray_manager._windows 数量={len(tray_manager._windows)}")
+        for d in tray_manager._windows:
+            logger.info(f"[TabMode]   dialog: {d}, tool_instance={getattr(d, 'tool_instance', None)}")
 
         try:
             migrated_windows = []
