@@ -540,8 +540,9 @@ class TabManagerWindow(QWidget):
             for w in migrated_windows:
                 _hide_edge_launcher(w)
 
-            # 显示 TabManagerWindow
+            # 显示 TabManagerWindow（先 show 再设位置，确保正确生效）
             tab_mgr.show()
+            tab_mgr._restore_geometry()
             tab_mgr.activateWindow()
             tab_mgr.raise_()
 
