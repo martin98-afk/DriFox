@@ -145,24 +145,40 @@ class TabPanel(QWidget):
         self._active_index: int = -1
         self._setup_ui()
 
+    _BTN_STYLE = f"""
+        QPushButton {{
+            background: transparent;
+            color: {Colors.TEXT_SECONDARY};
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            text-align: left;
+            {font_size_css(12)}
+        }}
+        QPushButton:hover {{
+            background: {Colors.HOVER_BG};
+            color: {Colors.TEXT_PRIMARY};
+        }}
+    """
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 标题区域
-        header = QWidget(self)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
-        title_label = BodyLabel("窗口列表", header)
-        title_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent; {font_size_css(11)}"
-        )
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-        layout.addWidget(header)
+        # ── 顶部：新建按钮 ──
+        top_bar = QWidget(self)
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(4, 4, 4, 2)
+        self._new_btn = QPushButton("＋ 新建", top_bar)
+        self._new_btn.setCursor(Qt.PointingHandCursor)
+        self._new_btn.setStyleSheet(self._BTN_STYLE)
+        self._new_btn.clicked.connect(self.newTabRequested.emit)
+        top_layout.addWidget(self._new_btn)
+        top_layout.addStretch()
+        layout.addWidget(top_bar)
 
-        # Tab 列表（QScrollArea 包裹）
+        # ── 中间：Tab 列表 ──
         self._scroll_area = QScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -177,31 +193,37 @@ class TabPanel(QWidget):
         self._scroll_area.setWidget(self._list_widget)
         layout.addWidget(self._scroll_area, 1)
 
-        # 底部新建按钮
+        # ── 底部：设置按钮 ──
         bottom_bar = QWidget(self)
         bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(8, 6, 8, 6)
+        bottom_layout.setContentsMargins(4, 2, 4, 4)
 
-        self._new_btn = QPushButton("＋ 新建", bottom_bar)
-        self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px dashed {Colors.BORDER};
-                border-radius: 6px;
-                padding: 6px 12px;
-                {font_size_css(12)}
-            }}
-            QPushButton:hover {{
-                background: {Colors.HOVER_BG};
-                border-color: {Colors.INFO};
-            }}
-        """)
-        self._new_btn.clicked.connect(self.newTabRequested.emit)
-        bottom_layout.addWidget(self._new_btn)
+        self._settings_btn = QPushButton("⚙ 设置", bottom_bar)
+        self._settings_btn.setCursor(Qt.PointingHandCursor)
+        self._settings_btn.setStyleSheet(self._BTN_STYLE)
+        self._settings_btn.clicked.connect(self._on_settings_clicked)
+        bottom_layout.addWidget(self._settings_btn)
+        bottom_layout.addStretch()
 
         layout.addWidget(bottom_bar)
+
+    def _on_settings_clicked(self):
+        """打开设置卡片"""
+        from PyQt5.QtWidgets import QWidget
+        # 沿父链向上找 OpenAIChatToolWindow
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_toggle_settings_card"):
+                parent._toggle_settings_card()
+                return
+            parent = parent.parent()
+        # 兜底：通过 TabManagerWindow 切换回独立模式
+        from app.widgets.tab_manager_window import TabManagerWindow
+        tm = TabManagerWindow.get_instance()
+        if tm:
+            current = tm.get_current_window()
+            if current and hasattr(current, "_toggle_settings_card"):
+                current._toggle_settings_card()
 
     def add_tab(self, title: str, icon=None) -> int:
         """添加 Tab 项，返回其索引"""

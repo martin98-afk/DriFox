@@ -54,7 +54,7 @@ class EmptyStateWidget(QWidget):
         new_btn.setFixedSize(160, 36)
         new_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=200)};
                 color: {Colors.TEXT_PRIMARY};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
@@ -100,6 +100,11 @@ class TabManagerWindow(QWidget):
         self.setWindowTitle("DriFox — Tab 管理器")
         self.setMinimumSize(800, 500)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+        # 永久置顶（与 ToolPopupDialog 行为一致）
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        # 确保 Colors 已刷新（主题色初始化）
+        Colors.refresh()
 
         self._setup_ui()
         self._setup_signals()
@@ -109,6 +114,20 @@ class TabManagerWindow(QWidget):
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._tab_manager_window = self
+
+    def _on_theme_changed(self):
+        """主题切换时刷新配色"""
+        Colors.refresh()
+        # 重建样式表
+        self.setStyleSheet(f"""
+            #tabPanel {{
+                background: {Colors.CARD_BG.format(alpha=240)};
+                border-right: 1px solid {Colors.BORDER};
+            }}
+            TabManagerWindow {{
+                background: {Colors.CONTENT_BG};
+            }}
+        """)
 
     def _setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -135,7 +154,7 @@ class TabManagerWindow(QWidget):
         # 应用样式
         self.setStyleSheet(f"""
             #tabPanel {{
-                background: {Colors.CARD_BG};
+                background: {Colors.CARD_BG.format(alpha=240)};
                 border-right: 1px solid {Colors.BORDER};
             }}
             TabManagerWindow {{
