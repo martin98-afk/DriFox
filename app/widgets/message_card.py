@@ -2106,7 +2106,10 @@ class CodeWebViewer(QWebEngineView):
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
         self._tool_md_cache: Dict[str, str] = {}
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
-        self._min_render_interval = 50
+        # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
+        # 每 80ms 合并一次渲染比 50ms 减少 37.5% 的 Chromium 重排版次数，
+        # 对用户感知的流式流畅度影响极小（人眼无法分辨 50ms 与 80ms 的渲染间隔差异）
+        self._min_render_interval = 80
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
         self._context_lost_count = 0  # 上下文丢失次数统计
@@ -2138,9 +2141,11 @@ class CodeWebViewer(QWebEngineView):
         self._render_timer.timeout.connect(self._perform_update)
 
         # 2. Resize 定时器 (修复 Crash 的关键：作为成员变量，随 self 销毁)
+        # [PERF] 100ms 比 50ms 减少 50% 的 height report 触发，
+        # 降低父容器和 scrollarea 的 layout 重算频率
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(50)
+        self._resize_timer.setInterval(100)
         self._resize_timer.timeout.connect(self._safe_report_height)
 
         # 共享全局 profile：所有消息卡片复用同一 Chromium 进程池，

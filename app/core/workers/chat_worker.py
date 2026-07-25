@@ -92,7 +92,7 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     header_end = data_uri.find(",")
     if header_end == -1:
         return data_uri
-    b64_data = data_uri[header_end + 1:]
+    b64_data = data_uri[header_end + 1 :]
 
     # 检查是否需要压缩
     if len(b64_data) <= max_bytes:
@@ -100,6 +100,7 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
 
     try:
         import base64
+
         img_bytes = base64.b64decode(b64_data)
         img = QImage.fromData(QByteArray(img_bytes))
         if img.isNull():
@@ -107,10 +108,7 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
             return data_uri
 
         orig_w, orig_h = img.width(), img.height()
-        logger.warning(
-            f"[Vision] 图片过大: base64={len(b64_data)} bytes, "
-            f"原始尺寸={orig_w}x{orig_h}，开始压缩..."
-        )
+        logger.warning(f"[Vision] 图片过大: base64={len(b64_data)} bytes, 原始尺寸={orig_w}x{orig_h}，开始压缩...")
 
         # 等比缩小：按面积比例估算缩放因子，留 20% 余量避免反复压缩
         # base64 ≈ 原始字节 × 4/3，原始字节 ≈ b64_data × 3/4
@@ -525,9 +523,7 @@ class OpenAIChatWorker(QThread):
 
         # 只转换新消息并追加
         for msg in new_messages:
-            api_msg = to_api_message(
-                msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
-            )
+            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model())
             if api_msg:
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
@@ -785,7 +781,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     @staticmethod
@@ -820,7 +816,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except json.JSONDecodeError, TypeError, ValueError:
             pass
 
         # 优先级 4: raw output 兜底
@@ -1545,7 +1541,7 @@ class OpenAIChatWorker(QThread):
                         # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
-                    except (ValueError, TypeError, RuntimeError):
+                    except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
@@ -2210,7 +2206,7 @@ class OpenAIChatWorker(QThread):
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except (ValueError, SyntaxError):
+                            except ValueError, SyntaxError:
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2268,9 +2264,7 @@ class OpenAIChatWorker(QThread):
         # 修复方案：新建一条 user 消息用标准 image_url 格式承载图片，采用与 hook
         # 相同的注入模式（仅加入 API 缓存和 session_messages，不加 current_messages），
         # 避免被 UI 渲染为多余卡片，同时让 LLM 以常规方式看到图片。
-        tool_names_str = ", ".join(
-            r.get("name", "") for r in tool_results if isinstance(r, dict) and r.get("success")
-        )
+        tool_names_str = ", ".join(r.get("name", "") for r in tool_results if isinstance(r, dict) and r.get("success"))
         vision_content: List[Dict] = [
             {
                 "type": "text",
@@ -2302,8 +2296,7 @@ class OpenAIChatWorker(QThread):
         current_messages.append(vision_msg)
 
         logger.info(
-            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern "
-            f"for {model_name} (tools: {tool_names_str})"
+            f"[Vision] Injected {len(data_uris)} image(s) via hook pattern for {model_name} (tools: {tool_names_str})"
         )
 
         # 重建 API 缓存：current_messages 已被修改（含 image_url），
@@ -2558,7 +2551,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except (httpx.ReadError, httpcore.ReadError):
+                except httpx.ReadError, httpcore.ReadError:
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:
@@ -3049,10 +3042,13 @@ class OpenAIChatWorker(QThread):
                     self._emit_with_callback("thinking_started", self.thinking_started)
                 # 性能优化：使用 list append 代替字符串拼接
                 self._reasoning_chunks.append(reasoning_delta)
-                # 批量发送：积累到 10 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                # [PERF] 批量发送：积累到 20 字符或 80ms 才 emit，降低信号频率
+                # 原 10 字符/50ms 过高，导致流式时每 50ms 触发一次 Qt 跨线程信号+WebEngine 重渲染
+                # 增大到 20 字符/80ms 后信号频率降低 37.5%（50ms→80ms），
+                # 字符阈值 10→20 在中文场景下约多等 5-10 字，用户无明显感知
                 _reasoning_batch += reasoning_delta
                 now = time.time()
-                if len(_reasoning_batch) >= 10 or (now - _reasoning_batch_time) > 0.05:
+                if len(_reasoning_batch) >= 20 or (now - _reasoning_batch_time) > 0.08:
                     self._emit_with_callback(
                         "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
                     )
@@ -3063,10 +3059,13 @@ class OpenAIChatWorker(QThread):
                 # 性能优化：使用 list append + join 代替字符串拼接
                 self._response_chunks.append(content)
                 self._response_content_blocks = append_text_block(self._response_content_blocks, content)
-                # 批量发送：积累到 15 字符或 50ms 才 emit，避免高频信号堵塞 Qt 事件队列
+                # [PERF] 批量发送：积累到 30 字符或 80ms 才 emit，降低信号频率
+                # 原 15 字符/50ms 过于激进，每 50ms 触发一次完整的
+                # content_received → _on_content_received → append_chunk → _schedule_render → setHtml 链
+                # 增大阈值后大幅减少 WebEngine 渲染次数，用户感知的流式流畅度无显著影响
                 _content_batch += content
                 now = time.time()
-                if len(_content_batch) >= 15 or (now - _content_batch_time) > 0.05:
+                if len(_content_batch) >= 30 or (now - _content_batch_time) > 0.08:
                     self._emit_with_callback("content_received", self.content_received, _content_batch)
                     _content_batch = ""
                     _content_batch_time = now
@@ -3759,6 +3758,7 @@ class OpenAIChatWorker(QThread):
         if tool_name == "screenshot" and success:
             try:
                 from app.core.model_capabilities import get_model_capabilities
+
                 _model_name = str(self.llm_config.get("模型名称", "") or "")
                 _caps = get_model_capabilities(_model_name)
                 if _caps.get("supports_vision"):
@@ -3768,8 +3768,7 @@ class OpenAIChatWorker(QThread):
                     )
                 else:
                     result_content = str(result_content) + (
-                        "\n\n[Notice] 本模型不支持视觉识别，你无法从截图中看到图像内容，"
-                        "只能获得文件路径。"
+                        "\n\n[Notice] 本模型不支持视觉识别，你无法从截图中看到图像内容，只能获得文件路径。"
                     )
             except Exception:
                 pass  # 降级：不加额外提示

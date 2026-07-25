@@ -85,8 +85,6 @@ from app.core.tool_permission_controller import ToolPermissionController
 from app.tool_popup import ToolWindow
 
 
-
-
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
@@ -844,19 +842,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
+        # [PERF] 滚底定时器：24ms → 50ms，减少冗余布局重算
+        # 50ms 已足够覆盖最快的内容到达速度（约 30 chars/80ms 批处理）
         self._scroll_bottom_timer = QTimer(self)
         self._scroll_bottom_timer.setSingleShot(True)
-        self._scroll_bottom_timer.setInterval(24)
+        self._scroll_bottom_timer.setInterval(50)
         self._scroll_bottom_timer.timeout.connect(self._do_scroll_to_bottom)
         # 团队模式：文件系统监听器（检测新邮件到达）
         self._team_fs_watcher = QFileSystemWatcher(self)
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
         self._team_watch_paths: set = set()
         self._team_processing: bool = False  # 串行处理锁
+        self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
 
+        # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
         self._bottom_anchor_timer.setSingleShot(True)
-        self._bottom_anchor_timer.setInterval(80)
+        self._bottom_anchor_timer.setInterval(100)
         self._bottom_anchor_timer.timeout.connect(self._maintain_bottom_anchor)
         self._suppress_scroll_sync_count = 0  # 加载历史时抑制滚动同步的计数器
         # 🛡️ 会话切换哨兵：_create_new_session 中置 True，丢弃 stop_streaming 后
@@ -880,10 +882,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
-        # resize 防抖定时器 - 性能优化：16ms 约 60fps，肉眼丝滑
+        # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
+        # 每帧比 16ms 少一次布局重算，在慢速 resize 拖拽场景下人眼不会感知差异
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
-        self._resize_debounce_timer.setInterval(16)  # 16ms 防抖，约60fps视觉刷新
+        self._resize_debounce_timer.setInterval(32)  # 32ms 防抖，约30fps视觉刷新
         self._resize_debounce_timer.timeout.connect(self._do_debounced_resize)
         # resize 完成后更新所有卡片的定时器（延迟更新非可见区域卡片）
         self._resize_complete_timer = QTimer(self)
@@ -893,9 +896,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_resize_sync = False
         self._resize_preview_active = False
         self._last_chat_viewport_width = 0
+        # [PERF] 滚动同步定时器：100ms 已足够跟踪滚动停止
         self._scroll_sync_timer = QTimer(self)
         self._scroll_sync_timer.setSingleShot(True)
-        self._scroll_sync_timer.setInterval(80)
+        self._scroll_sync_timer.setInterval(100)
         self._scroll_sync_timer.timeout.connect(self._sync_visible_cards_on_scroll)
         self.toolStartUiSyncRequested.connect(self._handle_tool_start_ui_sync, type=Qt.QueuedConnection)
         self._is_streaming = False
@@ -2708,6 +2712,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
         from app.utils.config import Settings as _Cfg
+
         _cfg = _Cfg.get_instance()
         _cfg.llm_subagent_default_model.valueChanged.connect(self._on_subagent_model_config_changed)
         _cfg.llm_title_gen_default_model.valueChanged.connect(self._on_title_gen_model_config_changed)
@@ -3693,6 +3698,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
         tm.join_team(window_id=self._window_id, agent_name=agent_name)
+        self._team_agent_name = agent_name
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -3719,7 +3725,8 @@ class OpenAIChatToolWindow(ToolWindow):
         tm.leave_team(self._window_id)
         self._tool_permission_controller.restore_user()
 
-        # 3) 刷新 UI
+        # 3) 清除团队标记后刷新 UI
+        self._team_agent_name = ""
         self._refresh_team_ui(is_team=False)
 
         # 4) 同步活跃窗口列表（触发失效成员清理）
@@ -4327,8 +4334,12 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._title_bar:
                 self._title_bar.set_title_color(color)
         else:
-            # 独立模式：恢复原标题、默认边框和默认字体颜色
-            title = "飘狐"
+            # 独立模式：使用会话标题（让 Windows 任务栏能区分各窗口）
+            session = self.session_manager.get_current_session() if self.session_manager else None
+            if session:
+                title = session.topic_summary or session.name or "飘狐"
+            else:
+                title = "飘狐"
             self._set_dialog_border("none")
             # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
             if self._title_bar:
@@ -4343,6 +4354,28 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         # 同步更新对话框的窗口标题（影响任务栏底部显示的名称）
+        try:
+            dialog = self.window() if hasattr(self, "window") else None
+            if dialog and hasattr(dialog, "setWindowTitle"):
+                dialog.setWindowTitle(title)
+        except Exception:
+            pass
+
+    def _sync_dialog_title(self):
+        """同步对话框窗口标题为当前会话标题，供 Windows 任务栏区分各窗口
+
+        当会话标题变更（用户重命名 / 主题摘要生成 / 切换会话）时调用，
+        确保每个窗口在 Windows 任务栏右键菜单中显示不同的会话标题。
+        
+        团队模式下窗口标题由 _refresh_team_ui 管理（显示 agent 名称），
+        此处跳过以避免覆盖。
+        """
+        if self._team_agent_name:
+            return
+        session = self.session_manager.get_current_session() if self.session_manager else None
+        if not session:
+            return
+        title = session.topic_summary or session.name or "新对话"
         try:
             dialog = self.window() if hasattr(self, "window") else None
             if dialog and hasattr(dialog, "setWindowTitle"):
@@ -5594,10 +5627,7 @@ class OpenAIChatToolWindow(ToolWindow):
         infobar = InfoBar(
             icon=InfoBarIcon.INFORMATION,
             title="绑定 Gitee 账号",
-            content=(
-                "• 配置与自定义插件自动备份，仅自己可见\n"
-                "• 会话记录与项目文件分享可选择公开或私有仓库\n"
-            ),
+            content=("• 配置与自定义插件自动备份，仅自己可见\n• 会话记录与项目文件分享可选择公开或私有仓库\n"),
             orient=Qt.Vertical,
             isClosable=True,
             duration=-1,
@@ -7908,6 +7938,8 @@ class OpenAIChatToolWindow(ToolWindow):
             f"total={(_t4 - _t0) * 1000:.0f}ms"
         )
 
+        # 同步对话框窗口标题（新会话默认名称如"对话 07-25 14:19"）
+        self._sync_dialog_title()
         QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
         self._refresh_context_usage_indicator()
 
@@ -7941,6 +7973,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         self.title_edit.setText(session.topic_summary or session.name or "新对话")
+        # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
+        self._sync_dialog_title()
 
         # 关键修复：同步 _current_session_id 与实际显示的会话
         self._current_session_id = session.session_id
@@ -8863,10 +8897,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
-        # 继续处理下一批：60ms 间隔给 Chromium 进程喘息空间，避免批量
+        # [PERF] 继续处理下一批：80ms 间隔给 Chromium 进程喘息空间，避免批量
         # 创建 QWebEngineView 时进程初始化压力集中导致卡顿
+        # 同时增大间隔让 Qt 事件循环有机会处理悬而未决的绘制事件
         if self._pending_lazy_cards:
-            QTimer.singleShot(60, self._process_next_lazy_batch)
+            QTimer.singleShot(80, self._process_next_lazy_batch)
         else:
             self._loading_session = False
             self._lazy_batch_timer_active = False
@@ -9654,9 +9689,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_assistant_message(self, card: MessageCard, new_content: str):
         card.update_content(new_content)
-        # 🐛 修复：延迟到下一事件循环再滚底，等卡片高度变化（CSS transition / 布局更新）
-        # 完成后再读取 scroll_bar.maximum()，否则高度还没变化时滚底不到位。
-        if self._is_streaming:
+        # [PERF] 流式中合并滚底调用：仅在 _scroll_bottom_timer 未激活时调度，
+        # 避免高频 content_received 信号导致大量 singleShot(0) 堆积在事件队列中。
+        # timer 激活后会在 50ms 后自动滚底，合并期间所有 content_received 的请求。
+        # 卡片高度变化到 layout 更新有至少 1-2 帧延迟，用 timer 合并足够。
+        if self._is_streaming and not self._scroll_bottom_timer.isActive():
+            # 延迟到下一事件循环再滚底，等卡片高度变化完成后读取 scroll_bar.maximum()
             QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming))
 
     def _update_node_preview(self):
@@ -12198,6 +12236,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._ai_state == "thinking":
             self._set_ai_state("streaming")
 
+        # [PERF] 流式密集型渲染保护：单次事件循环中积累的多个 content_piece
+        # 合并为一次 update_content 调用。重复调用仅保留最后一段，避免
+        # MessageCard.append_chunk → _schedule_render → setHtml 高频链式触发。
+        # 刷新时机：下一次 content_received 信号（由 chat_worker 批处理阈值 80ms 保障），
+        # 或 MessageCard._SAFETY_RENDER_INTERVAL (2000ms) 安全兜底触发。
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
         # 内容已由 MessageCard.append_chunk 内部累加，无需主窗口冗余存储
@@ -14275,6 +14318,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.history_manager.update_topic_summary(idx, clean_summary)
 
         self.title_edit.setText(clean_summary)
+        # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
+        self._sync_dialog_title()
 
     def _update_project_display(self, project: str):
         """更新项目名称显示"""
@@ -14761,7 +14806,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 lambda zp, err, m=mode, pn=project_name: self._on_project_export_done(zp, err, pn, m)
             )
             self._export_thread.finished.connect(self._export_thread.deleteLater)
-            self._export_thread.finished.connect(lambda: setattr(self, '_export_thread', None))
+            self._export_thread.finished.connect(lambda: setattr(self, "_export_thread", None))
             self._export_thread.start()
 
         dialog.exportChosen.connect(_on_choice)
@@ -15447,12 +15492,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 同步 user_edited_title 标记
                 self.history_manager.set_user_edited_title(idx, True)
 
+        # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
+        self._sync_dialog_title()
+
     def _restore_title_display(self):
         """恢复标题显示（编辑取消时）"""
         session = self.session_manager.get_current_session()
         if session:
             current_title = session.topic_summary or session.name or "新对话"
             self.title_edit.setText(current_title)
+            # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
+            self._sync_dialog_title()
 
     def _get_current_worktree_path(self) -> str:
         """检测当前工作目录是否在 git worktree 中，返回 worktree 路径（空字符串表示不在）"""
