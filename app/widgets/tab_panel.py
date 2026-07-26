@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -403,6 +404,124 @@ class TabPanel(QWidget):
         }}
     """
 
+    @staticmethod
+    def _info_rgb() -> tuple:
+        """返回 Colors.INFO 的 (r, g, b) 整数值"""
+        c = _QColor(Colors.INFO)
+        return c.red(), c.green(), c.blue()
+
+    @staticmethod
+    def _card_bg_rgb() -> tuple:
+        """从 Colors.CARD_BG rgba 字符串提取 (r, g, b)"""
+        s = Colors.CARD_BG
+        try:
+            if s.startswith("rgba("):
+                parts = s.strip("rgba() ").split(",")
+                return int(parts[0]), int(parts[1]), int(parts[2])
+        except Exception:
+            pass
+        return 33, 33, 38  # fallback
+
+    def _apply_panel_stylesheet(self):
+        """应用/刷新面板所有动态样式（渐变/颜色/字体随主题变化）"""
+        ir, ig, ib = self._info_rgb()
+        cr, cg, cb = self._card_bg_rgb()
+        cr2, cg2, cb2 = max(0, cr - 5), max(0, cg - 5), max(0, cb - 5)
+
+        # ── 面板背景渐变 ──
+        self.setStyleSheet(f"""
+            #tabPanel {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba({cr},{cg},{cb}, 0.97),
+                    stop:0.5 rgba({cr},{cg},{cb}, 0.98),
+                    stop:1 rgba({cr2},{cg2},{cb2}, 0.99));
+            }}
+        """)
+
+        # ── 顶部渐变发光线 ──
+        if self._glow_line:
+            self._glow_line.setStyleSheet(f"""
+                #glowLine {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(0,0,0,0),
+                        stop:0.2 rgba({ir},{ig},{ib}, 0.35),
+                        stop:0.5 rgba(139, 92, 246, 0.35),
+                        stop:0.8 rgba({ir},{ig},{ib}, 0.35),
+                        stop:1 rgba(0,0,0,0));
+                    margin: 0 12px;
+                }}
+            """)
+
+        # ── 品牌文字 ──
+        for child in self.findChildren(QLabel):
+            name = child.objectName()
+            if name == "brandName":
+                child.setStyleSheet(
+                    f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+                    f"{font_size_css(13)} font-weight: 600;"
+                )
+            elif name == "sessionCountBadge":
+                child.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; background: rgba(255,255,255,0.05); "
+                    f"border-radius: 10px; padding: 2px 8px; {font_size_css(11)};"
+                )
+
+        # ── 新建按钮渐变 ──
+        self._new_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba({ir},{ig},{ib}, 0.12),
+                    stop:1 rgba(139, 92, 246, 0.08));
+                border: 1px solid rgba({ir},{ig},{ib}, 0.18);
+                color: {Colors.INFO};
+                border-radius: 8px;
+                padding: 6px 12px;
+                {font_size_css(12)}
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba({ir},{ig},{ib}, 0.20),
+                    stop:1 rgba(139, 92, 246, 0.15));
+                border: 1px solid rgba({ir},{ig},{ib}, 0.35);
+            }}
+        """)
+
+        # ── 渐变分隔线 ──
+        for child in self.findChildren(QFrame):
+            if child.objectName() == "gradientDivider":
+                child.setStyleSheet(f"""
+                    #gradientDivider {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 rgba(0,0,0,0),
+                            stop:0.5 rgba(255,255,255, 0.08),
+                            stop:1 rgba(0,0,0,0));
+                        margin: 0 16px;
+                        border: none;
+                    }}
+                """)
+
+        # ── 底部扁平按钮 ──
+        self._settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_MUTED};
+                border: none;
+                border-radius: 5px;
+                padding: 4px 8px;
+                {font_size_css(11)}
+            }}
+            QPushButton:hover {{
+                background: rgba(255,255,255,0.06);
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+
+    def _update_session_count(self):
+        """同步品牌区会话计数"""
+        if self._session_count_label:
+            n = len(self._items)
+            self._session_count_label.setText(f"{n} 会话")
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -474,7 +593,7 @@ class TabPanel(QWidget):
         top_bar = QWidget(self)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(6, 6, 6, 4)
-        self._new_btn = TransparentPushButton(FIF.ADD, "新建标签页", top_bar)
+        self._new_btn = QPushButton("＋ 新建标签页", top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.clicked.connect(self.newTabRequested.emit)
@@ -514,8 +633,9 @@ class TabPanel(QWidget):
 
         # ── 分隔线 ──
         separator = QFrame(self)
+        separator.setObjectName("gradientDivider")
         separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet(self._SEPARATOR_STYLE)
+        separator.setFixedHeight(1)
         layout.addWidget(separator)
 
         # ── 底部：设置按钮 ──
@@ -523,7 +643,7 @@ class TabPanel(QWidget):
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(6, 4, 6, 6)
 
-        self._settings_btn = TransparentPushButton(FIF.SETTING, "设置", bottom_bar)
+        self._settings_btn = QPushButton("设置", bottom_bar)
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
@@ -532,12 +652,15 @@ class TabPanel(QWidget):
         layout.addWidget(bottom_bar)
 
         account_separator = QFrame(self)
+        account_separator.setObjectName("gradientDivider")
         account_separator.setFrameShape(QFrame.HLine)
-        account_separator.setStyleSheet(self._SEPARATOR_STYLE)
+        account_separator.setFixedHeight(1)
         layout.addWidget(account_separator)
 
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
+
+        self._apply_panel_stylesheet()
 
     def _on_settings_clicked(self):
         """打开设置卡片"""
@@ -669,6 +792,7 @@ class TabPanel(QWidget):
         if len(self._items) == 1:
             self.set_active_index(0)
 
+        self._update_session_count()
         return idx
 
     def remove_tab(self, index: int):
@@ -690,6 +814,8 @@ class TabPanel(QWidget):
                 self.set_active_index(new_idx)
             elif self._active_index > index:
                 self._active_index -= 1
+
+        self._update_session_count()
 
     def set_active_index(self, index: int):
         """设置选中 Tab"""
@@ -783,6 +909,7 @@ class TabPanel(QWidget):
         from app.utils.design_tokens import Colors as _Colors
 
         _Colors.refresh()
+        self._apply_panel_stylesheet()
         for item in self._items:
             item.refresh_style()
             # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
