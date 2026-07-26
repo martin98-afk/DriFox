@@ -92,6 +92,7 @@ from app.utils.design_tokens import (
     current_theme,
     fade_in_widget,
     font_size_css,
+    get_unified_scrollbar_style,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
@@ -5651,7 +5652,11 @@ class PlainTextViewer(QWidget):
         self.setMaximumHeight(self.MAX_HEIGHT)
 
     def _apply_text_style(self):
-        """应用文本样式（从 Colors token 读取颜色）"""
+        """应用文本样式（从 Colors token 读取颜色）
+
+        滚动条复用项目统一的 get_unified_scrollbar_style，与
+        tab_panel / project_selector / settings 等列表的视觉风格保持一致。
+        """
         font_css = get_font_family_css()
         text_color = Colors.USER_CARD_TEXT
         self.text_edit.setStyleSheet(f"""
@@ -5664,6 +5669,7 @@ class PlainTextViewer(QWidget):
                 line-height: 1.5;
                 selection-background-color: rgba(102, 198, 255, 0.28);
             }}
+            {get_unified_scrollbar_style(6)}
         """)
 
     def refresh_theme(self):

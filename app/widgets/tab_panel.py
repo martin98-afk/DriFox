@@ -8,8 +8,8 @@ TabPanel — Tab 管理器左侧面板
 
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QMouseEvent, QPainter, QPixmap
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QIcon, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from loguru import logger
 from qfluentwidgets import (
     CaptionLabel,
     FluentIcon as FIF,
@@ -29,13 +30,14 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from app.utils.design_tokens import Colors, font_size_css, scale_icon_size
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 import re as _re
+import math as _math
 from PyQt5.QtGui import QColor as _QColor
 
 
@@ -85,6 +87,7 @@ class TabItem(QFrame):
         self._selected = False
         self._streaming = False
         self._stream_error = False
+        self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         self._setup_ui()
 
@@ -196,6 +199,11 @@ class TabItem(QFrame):
         self._stream_error = error
         self.update()
 
+    def set_question(self, question: bool):
+        """设置"提问等待回答"态：仅点亮橙色脉动指示条"""
+        self._question = question
+        self.update()
+
     def set_title(self, title: str):
         self._title = title
         self._title_label.setText(title)
@@ -270,6 +278,14 @@ class TabItem(QFrame):
                 phase = self._panel._anim_phase if self._panel else 0
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
                 painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
+        elif self._question:
+            # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
+            h = self.height()
+            y0, y1 = 4, h - 8
+            phase = self._panel._question_phase if self._panel else 0
+            # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+            alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
+            painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
             # 左侧选中指示条
             painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
@@ -277,7 +293,54 @@ class TabItem(QFrame):
         super().paintEvent(event)
 
 
-class TabPanel(QWidget):
+class UIPluginRow(QFrame):
+    """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None):
+        super().__init__(parent)
+        self._icon_label = QLabel(self)
+        self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
+        self._title_label = QLabel(title, self)
+        self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(6)
+        layout.addWidget(self._icon_label)
+        layout.addWidget(self._title_label, 1)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("uiPluginRow")
+        self.set_icon(icon)
+
+    def set_icon(self, icon: Optional[QIcon]):
+        size = scale_icon_size(16)
+        self._icon_label.setFixedSize(size, size)
+        if icon is not None:
+            self._icon_label.setPixmap(icon.pixmap(size, size))
+        else:
+            self._icon_label.clear()
+
+    def refresh_style(self):
+        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(12)}")
+        self._icon_label.setStyleSheet("background: transparent;")
+        self.setStyleSheet(f"""
+            #uiPluginRow {{
+                background: transparent;
+                border-radius: 5px;
+            }}
+            #uiPluginRow:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
     """左侧 Tab 列表面板"""
 
     tabSelected = pyqtSignal(int)  # 选中 Tab 索引
@@ -289,9 +352,16 @@ class TabPanel(QWidget):
         super().__init__(parent)
         self._items: List[TabItem] = []
         self._active_index: int = -1
+        self._plugin_section: Optional[QWidget] = None
+        self._plugin_layout: Optional[QVBoxLayout] = None
+        self._plugin_title: Optional[CaptionLabel] = None
+        self._plugin_infos: list[tuple[str, str, str]] = []
+        self._plugin_buttons: list[UIPluginRow] = []
         self._anim_phase: float = 0.0  # 彩虹动画相位
-        self._anim_timer: Optional[QTimer] = None  # 有 tab 流式时启动
+        self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
+        self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
         self._streaming_count: int = 0  # 当前流式 tab 计数
+        self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -307,6 +377,20 @@ class TabPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # ── 顶部：UI 插件列表 ──
+        self._plugin_section = QWidget(self)
+        plugin_layout = QVBoxLayout(self._plugin_section)
+        self._plugin_layout = plugin_layout
+        plugin_layout.setContentsMargins(6, 6, 6, 4)
+        plugin_layout.setSpacing(2)
+        plugin_title = CaptionLabel("UI 插件", self._plugin_section)
+        self._plugin_title = plugin_title
+        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(11)}")
+        plugin_layout.addWidget(plugin_title)
+        self._plugin_section.setStyleSheet("background: transparent;")
+        self._plugin_section.setVisible(False)
+        layout.addWidget(self._plugin_section)
 
         # ── 顶部：新建按钮 ──
         top_bar = QWidget(self)
@@ -325,8 +409,20 @@ class TabPanel(QWidget):
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setFrameShape(QFrame.NoFrame)
-        # QScrollArea viewport 在 Windows 上默认可能为白色，需显式透明
-        self._scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        # QScrollArea viewport 在 Windows 上默认可能为白色，需显式透明；
+        # 滚动条样式与项目其他列表保持一致（get_unified_scrollbar_style）
+        self._scroll_area.setStyleSheet(
+            f"""
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(6)}
+            """
+        )
         self._scroll_area.viewport().setStyleSheet("background: transparent;")
 
         self._list_widget = QWidget()
@@ -376,6 +472,85 @@ class TabPanel(QWidget):
             current = tm.get_current_window()
             if current and hasattr(current, "_toggle_settings_card"):
                 current._toggle_settings_card()
+
+    def refresh_ui_plugins(self):
+        """刷新 Tab 模式顶部的 UI 插件按钮列表"""
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            cards = UIPluginRegistry.get_instance().get_floating_cards()
+        except Exception:
+            cards = {}
+
+        infos = []
+        for card_id, info in cards.items():
+            try:
+                title = (info.title or "").strip() or card_id
+                infos.append((card_id, title, info.plugin_name))
+            except Exception:
+                continue
+        infos.sort(key=lambda item: item[1].lower())
+        self._plugin_infos = infos
+
+        if self._plugin_layout is None or self._plugin_section is None:
+            return
+        while self._plugin_layout.count() > 1:  # 保留索引 0 的标题
+            item = self._plugin_layout.takeAt(1)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._plugin_buttons = []
+
+        from app.core.plugin_manager import PluginManager
+
+        plugin_manager = PluginManager.get_instance()
+        for card_id, title, plugin_name in infos:
+            row = UIPluginRow(title, self._get_plugin_icon(plugin_manager, plugin_name), self._plugin_section)
+            row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
+            self._plugin_layout.addWidget(row)
+            self._plugin_buttons.append(row)
+
+        self._plugin_section.setVisible(bool(infos))
+        self._refresh_plugin_style()
+
+    @staticmethod
+    def _get_plugin_icon(plugin_manager, plugin_name):
+        """读取插件当前主题图标，读取失败时不影响列表显示"""
+        try:
+            plugin = plugin_manager.get_plugin(plugin_name)
+            icon_config = getattr(plugin, "icon_config", None) if plugin else None
+            icon_path = icon_config.get("dark" if isDarkTheme() else "light") if icon_config else None
+            return QIcon(str(icon_path)) if icon_path else None
+        except Exception:
+            return None
+
+    def _on_ui_plugin_clicked(self, card_id: str):
+        """在当前活动 Tab 中打开 UI 插件卡片"""
+        parent = self.parent()
+        while parent is not None and not hasattr(parent, "get_current_window"):
+            parent = parent.parent()
+        if parent is None:
+            logger.warning(f"[TabPanel] UI 插件 {card_id} 点击：无法找到 TabManagerWindow")
+            return
+        current_window = parent.get_current_window()
+        if current_window is None:
+            logger.warning(f"[TabPanel] UI 插件 {card_id} 点击：当前窗口为空")
+            return
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().toggle_floating_card(card_id, main_widget=current_window)
+        except Exception as e:
+            logger.error(f"[TabPanel] UI 插件 {card_id} 打开失败：{e}")
+
+    def _refresh_plugin_style(self):
+        """刷新插件区域的主题和字号样式"""
+        if self._plugin_section is None:
+            return
+        if self._plugin_title is not None:
+            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(11)}")
+        for row in self._plugin_buttons:
+            row.refresh_style()
 
     def add_tab(self, title: str, icon=None) -> int:
         """添加 Tab 项，返回其索引"""
@@ -470,8 +645,24 @@ class TabPanel(QWidget):
                 self._ensure_anim_timer()
             elif not streaming and old:
                 self._streaming_count = max(0, self._streaming_count - 1)
-                if self._streaming_count == 0:
+                if self._streaming_count + self._question_count == 0:
                     self._stop_anim_timer()
+
+    def update_tab_question(self, index: int, question: bool):
+        """更新 Tab 的 question 状态（AI 提问等待用户回答）"""
+        if not (0 <= index < len(self._items)):
+            return
+        old = self._items[index]._question
+        if old == question:
+            return
+        self._items[index].set_question(question)
+        if question:
+            self._question_count += 1
+            self._ensure_anim_timer()
+        else:
+            self._question_count = max(0, self._question_count - 1)
+            if self._streaming_count + self._question_count == 0:
+                self._stop_anim_timer()
 
     def _ensure_anim_timer(self):
         """确保彩虹动画定时器已启动"""
@@ -490,10 +681,11 @@ class TabPanel(QWidget):
         self._anim_phase = 0.0
 
     def _on_anim_tick(self):
-        """动画帧：推进相位 + 刷新所有流式 tab"""
+        """动画帧：推进相位 + 刷新所有流式 / question tab"""
         self._anim_phase = (self._anim_phase + 12) % 360
+        self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
         for item in self._items:
-            if item._streaming:
+            if item._streaming or item._question:
                 item.update()
 
     def refresh_style(self):
@@ -505,6 +697,7 @@ class TabPanel(QWidget):
             item.refresh_style()
             # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
             item.repaint()
+        self._refresh_plugin_style()
 
     @property
     def count(self) -> int:

@@ -27,7 +27,6 @@ from PyQt5.QtWidgets import (
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.theme_manager import theme_manager
-from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
 
 
 class EmptyStateWidget(QWidget):
@@ -184,8 +183,6 @@ class TabManagerWindow(QWidget):
         self._windows: List = []  # List[OpenAIChatToolWindow]
         self._cached_dialogs: Dict[int, Any] = {}  # id → ToolPopupDialog
         self._is_transitioning: bool = False
-        # Tab 模式下共享的 UI 插件左侧边缘入口（单例，所有标签页共用）
-        self._shared_edge_launcher: Optional["UIPluginEdgeLauncher"] = None
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
@@ -214,9 +211,8 @@ class TabManagerWindow(QWidget):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
-        # Tab 模式下共享的 UI 插件左侧边缘入口
-        self._init_shared_launcher()
-
+        # 刷新 Tab 面板内嵌的 UI 插件列表
+        self._tab_panel.refresh_ui_plugins()
         # 注册到 TrayManager
         from app.tray_manager import TrayManager
 
@@ -231,12 +227,6 @@ class TabManagerWindow(QWidget):
         Colors.refresh()
         # 重建样式表
         self._apply_theme_stylesheet()
-        # 刷新共享 Launcher 的主题色
-        if self._shared_edge_launcher is not None:
-            try:
-                self._shared_edge_launcher.apply_theme()
-            except Exception:
-                pass
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
         try:
             self._tab_panel.refresh_style()
@@ -264,11 +254,15 @@ class TabManagerWindow(QWidget):
         使用 #objectName 选择器而非类选择器。PyQt5 中 Python QWidget 子类的
         metaObject().className() 统一返回 'QWidget'，类选择器（如
         'TabManagerWindow {...}'）无法匹配，导致样式失效。
+
+        左侧 Tab 面板的右边框线由 splitter handle 区域绘制：
+        QSplitter 自己的子控件绘制顺序会吞掉普通 widget 的 border-right，
+        直接给 #tabPanel 设 border 看不到；用 1px handle + BORDER 颜色
+        是最可靠的方案（拖拽热区收到 1px，但 Qt 对窄 handle 也有命中扩展）。
         """
         self.setStyleSheet(f"""
             #tabPanel {{
                 background: {Colors.CARD_BG.format(alpha=240)};
-                border-right: 1px solid {Colors.BORDER};
             }}
             #tabManagerWindow {{
                 background: {Colors.CONTENT_BG};
@@ -277,6 +271,13 @@ class TabManagerWindow(QWidget):
                 background: {Colors.CONTENT_BG};
             }}
         """)
+        # splitter handle 区域显示为 BORDER 颜色，形成可视右边框线
+        if getattr(self, "_splitter", None) is not None:
+            self._splitter.setStyleSheet(f"""
+                QSplitter::handle:horizontal {{
+                    background: {Colors.BORDER};
+                }}
+            """)
 
     def _setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -308,7 +309,10 @@ class TabManagerWindow(QWidget):
         self._splitter.addWidget(self._content_area)
         self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
         self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
-        self._splitter.setHandleWidth(4)
+        # handle 宽设为 1 并由 _apply_theme_stylesheet 给它上 BORDER 颜色，
+        # 形成清晰的"左边框线"；QSplitter 自身的子控件绘制顺序会吞掉普通
+        # widget 的 border-right，所以用 handle 区域显示更可靠。
+        self._splitter.setHandleWidth(1)
         self._splitter.setChildrenCollapsible(False)
         main_layout.addWidget(self._splitter)
 
@@ -410,7 +414,7 @@ class TabManagerWindow(QWidget):
 
         window.windowTitleChanged.connect(_on_win_title_changed)
 
-        # 监听 AI 状态变化（流式/错误 → Tab 边框指示）
+        # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
         def _on_ai_state_changed(state, _win=window):
             if _sip.isdeleted(_win):
                 return
@@ -419,10 +423,16 @@ class TabManagerWindow(QWidget):
             cur_idx = self._windows.index(_win)
             if state in ("streaming", "thinking"):
                 self._tab_panel.update_tab_streaming(cur_idx, True, False)
+                self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
             elif state == "error":
                 self._tab_panel.update_tab_streaming(cur_idx, False, True)
-            else:  # idle / question
+                self._tab_panel.update_tab_question(cur_idx, False)
+            elif state == "question":
+                self._tab_panel.update_tab_question(cur_idx, True)
                 self._tab_panel.update_tab_streaming(cur_idx, False, False)
+            else:  # idle
+                self._tab_panel.update_tab_streaming(cur_idx, False, False)
+                self._tab_panel.update_tab_question(cur_idx, False)
 
         window.ai_state_changed.connect(_on_ai_state_changed)
 
@@ -529,46 +539,20 @@ class TabManagerWindow(QWidget):
             new_window = OpenAIChatToolWindow(fake_page)
             self.add_window(new_window)
 
-    # ── 共享 EdgeLauncher（Tab 模式下单例） ──
-
-    def _init_shared_launcher(self) -> None:
-        """创建 Tab 模式下共享的 UI 插件边缘入口"""
-        try:
-            self._shared_edge_launcher = UIPluginEdgeLauncher(main_widget=self)
-            self._shared_edge_launcher.hide()
-        except Exception as e:
-            logger.error(f"[TabManager] 共享 EdgeLauncher 创建失败: {e}")
-            self._shared_edge_launcher = None
+    # ── Tab 面板 UI 插件列表 ──
 
     def _update_shared_launcher(self) -> None:
-        """刷新共享 Launcher 的插件列表并定位到当前活跃窗口"""
-        launcher = self._shared_edge_launcher
-        if launcher is None:
-            return
-        # 设置卡片操作目标为当前活跃窗口
-        active_win = self.get_current_window()
-        if active_win is not None:
-            launcher.set_card_target(active_win)
-        # 刷新插件列表（从 UIPluginRegistry 读取，单例共享）
-        launcher.refresh_plugins()
-        launcher._sync_position()
+        """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
+        self._tab_panel.refresh_ui_plugins()
 
     def _show_shared_launcher(self) -> None:
-        """显示共享 Launcher（仅 Tab 模式下调用）"""
-        launcher = self._shared_edge_launcher
-        if launcher is None:
-            return
-        self._update_shared_launcher()
-        launcher.show()
-        launcher.raise_()
+        """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
+        self._tab_panel.refresh_ui_plugins()
 
     def _hide_shared_launcher(self) -> None:
-        """隐藏共享 Launcher"""
-        launcher = self._shared_edge_launcher
-        if launcher is None:
-            return
-        launcher.hide()
-        launcher._close_menu()
+        """兼容模式切换调用：插件列表内嵌在 TabPanel，无独立入口需要隐藏"""
+        logger.debug("[TabMode] 跳过隐藏共享 EdgeLauncher：插件列表已内嵌在 TabPanel")
+
 
     @staticmethod
     def _create_fake_page():
@@ -972,6 +956,7 @@ class TabManagerWindow(QWidget):
 
         # ── [DEBUG] 拖拽性能诊断 ──
         samples = self.__class__._drag_perf_samples
+        in_handler = self.__class__._drag_in_handler
         if len(samples) >= 5:
             intervals = [(samples[i] - samples[i - 1]) * 1000 for i in range(1, len(samples))]
             avg = sum(intervals) / len(intervals)
@@ -980,26 +965,20 @@ class TabManagerWindow(QWidget):
             gt_33 = sum(1 for iv in intervals if iv > 33)
             gt_50 = sum(1 for iv in intervals if iv > 50)
             paints = self.__class__._paint_count_during_drag
+            # moveEvent 自身耗时（应远小于 avg，否则 Qt 内部有问题）
+            handler_avg = sum(in_handler) / len(in_handler) if in_handler else 0
+            handler_max = max(in_handler) if in_handler else 0
             logger.info(
                 f"[TabDrag] frames={len(samples)} "
                 f"avg={avg:.1f}ms max={mx:.1f}ms "
                 f">16:{gt_16} >33:{gt_33} >50:{gt_50} "
-                f"paints={paints}"
+                f"paints={paints} "
+                f"inHandler={handler_avg:.1f}/{handler_max:.1f}ms"
             )
-
-        # ── 拖拽结束：恢复嵌入窗口更新 ──
-        if self.__class__._is_dragging:
-            self.__class__._is_dragging = False
-            self.__class__._last_move_ts = None
-            for w in self._windows:
-                try:
-                    if not _sip.isdeleted(w):
-                        w.setUpdatesEnabled(True)
-                        w.update()  # 强制刷新一次被抑制的 paint
-                except Exception:
-                    pass
-
+        # ── 拖拽结束：清理诊断状态 ──
+        self.__class__._is_dragging = False
         self.__class__._drag_perf_samples.clear()
+        self.__class__._drag_in_handler.clear()
         self.__class__._paint_count_during_drag = 0
 
     def _restore_geometry(self):
@@ -1038,49 +1017,38 @@ class TabManagerWindow(QWidget):
     # ── [DEBUG] 拖拽性能诊断 ──
     # 每次 moveEvent 记录时间戳；拖拽停止后由 _do_save_geometry 输出摘要
     _drag_perf_samples: List[float] = []
-    # 拖拽状态：用于禁用嵌入窗口更新，避免 paint 阻塞事件循环
+    # moveEvent 函数体内耗时（用于判断 Qt 事件循环是否慢）
+    _drag_in_handler: List[float] = []
+    # 是否正在拖拽（moveEvent 在短时间内连续触发即视为拖拽中）
     _is_dragging: bool = False
     _last_move_ts: Optional[float] = None
 
     def moveEvent(self, event):
-        super().moveEvent(event)
-        self._save_geometry()
-        # 记录时间戳供 _do_save_geometry 分析
         import time as _time
 
-        now = _time.monotonic()
-        self.__class__._drag_perf_samples.append(now)
-
-        # ── 拖拽期间抑制嵌入窗口 paint ──
-        # 拖拽过程中如果 chat 流式输出或工具结果触发了嵌入窗口的 paintEvent，
-        # 会阻塞事件循环 → 后续 moveEvent 延迟处理 → 视觉卡顿（实测 max=269ms）。
-        # 检测：连续两次 moveEvent 间隔 < 150ms 即视为拖拽中。
+        t0 = _time.monotonic()
+        super().moveEvent(event)
+        t1 = _time.monotonic()
+        self._save_geometry()
+        self.__class__._drag_perf_samples.append(t1)
+        self.__class__._drag_in_handler.append((t1 - t0) * 1000)  # ms
+        # ── 拖拽状态机 ──
         last = self.__class__._last_move_ts
-        if last is None or now - last > 0.15:
-            # 视为新拖拽开始
-            if not self.__class__._is_dragging:
-                self.__class__._is_dragging = True
-                for w in self._windows:
-                    try:
-                        if not _sip.isdeleted(w):
-                            w.setUpdatesEnabled(False)
-                    except Exception:
-                        pass
-        self.__class__._last_move_ts = now
+        if last is None or (t1 - last) > 0.15:
+            # 第一次或距上次 > 150ms → 视为新拖拽开始
+            self.__class__._is_dragging = True
+            self.__class__._paint_count_during_drag = 0
+
+        self.__class__._last_move_ts = t1
 
     def paintEvent(self, event):
-        # ── [DEBUG] 记录拖拽期间的 paint 事件 ──
-        if self.__class__._drag_perf_samples:
+        if self.__class__._is_dragging:
             self.__class__._paint_count_during_drag += 1
-        # TabManagerWindow 本身没有自定义绘制
         super().paintEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._save_geometry()  # 防抖，缩放结束后才真正写盘
-        # 共享 Launcher 跟随窗口缩放重新定位
-        if self._shared_edge_launcher is not None:
-            self._shared_edge_launcher._sync_position()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏"""
