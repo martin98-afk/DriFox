@@ -952,9 +952,35 @@ class TabManagerWindow(QWidget):
         super().showEvent(event)
         self._restore_geometry()
 
+    # ── [DEBUG] 拖拽性能诊断 ──
+    _drag_perf_timestamps: List[float] = []
+    _drag_perf_last_logged: int = 0
+
     def moveEvent(self, event):
         super().moveEvent(event)
         self._save_geometry()  # 防抖，拖拽结束后才真正写盘
+
+        # ── [DEBUG] 记录 moveEvent 耗时 ──
+        now = event.timestamp()  # ms 精度
+        if now > 0:
+            if len(self.__class__._drag_perf_timestamps) > 100:
+                self.__class__._drag_perf_timestamps.clear()
+            self.__class__._drag_perf_timestamps.append(now)
+
+            # 每 50 帧输出一次诊断摘要
+            ts = self.__class__._drag_perf_timestamps
+            if len(ts) >= 10 and len(ts) - self.__class__._drag_perf_last_logged >= 50:
+                intervals = [(ts[i] - ts[i - 1]) for i in range(1, len(ts))]
+                avg = sum(intervals) / len(intervals)
+                mx = max(intervals)
+                gt_16 = sum(1 for iv in intervals if iv > 16)
+                gt_33 = sum(1 for iv in intervals if iv > 33)
+                logger.debug(
+                    f"[TabDrag] {len(ts)} moveEvents | "
+                    f"avg={avg:.1f}ms max={mx:.1f}ms | "
+                    f">16ms={gt_16} >33ms={gt_33}"
+                )
+                self.__class__._drag_perf_last_logged = len(ts)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
