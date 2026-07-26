@@ -7064,6 +7064,19 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
 
+        # ── Tab 模式：刷新 TabManagerWindow 样式 ──
+        # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
+        # OpenAIChatToolWindow._instances，导致 TabManagerWindow 注册的
+        # refresh_target 回调从未触发。此处直接更新。
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow as _TabManagerWindow
+
+            _tm = _TabManagerWindow.get_instance()
+            if _tm is not None:
+                _tm._on_theme_changed()
+        except Exception as e:
+            logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
+
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
 

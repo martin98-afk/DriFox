@@ -267,8 +267,12 @@ class TabPanel(QWidget):
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setFrameShape(QFrame.NoFrame)
+        # QScrollArea viewport 在 Windows 上默认可能为白色，需显式透明
+        self._scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._scroll_area.viewport().setStyleSheet("background: transparent;")
 
         self._list_widget = QWidget()
+        self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
         self._list_layout.setContentsMargins(6, 0, 6, 0)
         self._list_layout.setSpacing(2)

@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.theme_manager import theme_manager
 from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
 
 
@@ -149,6 +150,8 @@ class TabManagerWindow(QWidget):
 
     _instance: Optional["TabManagerWindow"] = None
     _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
+    # ── [DEBUG] 拖拽期间 paintEvent 计数 ──
+    _paint_count_during_drag: int = 0
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -181,6 +184,7 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
         self.setWindowTitle("飘狐-DriFox")
+        self.setObjectName("tabManagerWindow")
         self.setMinimumSize(500, 400)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         # 窗口标志：支持最大化 + 独立任务栏按钮 + 置顶
@@ -209,25 +213,45 @@ class TabManagerWindow(QWidget):
 
         TrayManager.get_instance()._tab_manager_window = self
 
+        # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
+        # 但保持接口一致性便于将来扩展）
+        theme_manager.register_refresh_target(self)
+
     def _on_theme_changed(self):
         """主题切换时刷新配色"""
         Colors.refresh()
         # 重建样式表
-        self.setStyleSheet(f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=240)};
-                border-right: 1px solid {Colors.BORDER};
-            }}
-            TabManagerWindow {{
-                background: {Colors.CONTENT_BG};
-            }}
-        """)
+        self._apply_theme_stylesheet()
         # 刷新共享 Launcher 的主题色
         if self._shared_edge_launcher is not None:
             try:
                 self._shared_edge_launcher.apply_theme()
             except Exception:
                 pass
+
+    def refresh_theme(self):
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
+        self._on_theme_changed()
+
+    def _apply_theme_stylesheet(self):
+        """应用主题样式表
+
+        使用 #objectName 选择器而非类选择器。PyQt5 中 Python QWidget 子类的
+        metaObject().className() 统一返回 'QWidget'，类选择器（如
+        'TabManagerWindow {...}'）无法匹配，导致样式失效。
+        """
+        self.setStyleSheet(f"""
+            #tabPanel {{
+                background: {Colors.CARD_BG.format(alpha=240)};
+                border-right: 1px solid {Colors.BORDER};
+            }}
+            #tabManagerWindow {{
+                background: {Colors.CONTENT_BG};
+            }}
+            #contentArea {{
+                background: {Colors.CONTENT_BG};
+            }}
+        """)
 
     def _setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -244,6 +268,7 @@ class TabManagerWindow(QWidget):
 
         # ── 右侧内容区 ──
         self._content_area = QStackedWidget(self)
+        self._content_area.setObjectName("contentArea")
 
         # 空状态页（索引 0）
         self._empty_state = EmptyStateWidget(self)
@@ -267,16 +292,8 @@ class TabManagerWindow(QWidget):
         if saved_w:
             self._splitter.setSizes([saved_w, self.width() - saved_w])
 
-        # 应用样式
-        self.setStyleSheet(f"""
-            #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=240)};
-                border-right: 1px solid {Colors.BORDER};
-            }}
-            TabManagerWindow {{
-                background: {Colors.CONTENT_BG};
-            }}
-        """)
+        # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
+        self._apply_theme_stylesheet()
 
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
@@ -905,12 +922,21 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.start()  # 连续调用时不断重置计时器
 
     def _do_save_geometry(self):
-        """实际写入配置（防抖回调，拖拽/缩放结束后执行一次）"""
+        """实际写入配置（防抖回调，拖拽/缩放结束后执行一次）
+
+        ★ 必须使用 geometry() 而不是 x()/y()：
+        对于顶层窗口，x()/y() 返回 FRAME 在屏幕上的位置（含标题栏），
+        而 setGeometry(x, y, w, h) 把 (x, y) 当作 CLIENT 区域位置。
+        若保存 frame 位置再用 setGeometry 还原，每次恢复窗口会向上偏移
+        title bar 高度（约 65px）—— 这就是 tab 模式最小化恢复后窗口
+        「往上跑」的根因。
+        """
+        g = self.geometry()
         geo = {
-            "x": self.x(),
-            "y": self.y(),
-            "w": self.width(),
-            "h": self.height(),
+            "x": g.x(),
+            "y": g.y(),
+            "w": g.width(),
+            "h": g.height(),
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
         # 保存面板宽度
@@ -918,6 +944,38 @@ class TabManagerWindow(QWidget):
             sizes = self._splitter.sizes()
             if sizes:
                 Settings.get_instance().tab_panel_width.value = sizes[0]
+
+        # ── [DEBUG] 拖拽性能诊断 ──
+        samples = self.__class__._drag_perf_samples
+        if len(samples) >= 5:
+            intervals = [(samples[i] - samples[i - 1]) * 1000 for i in range(1, len(samples))]
+            avg = sum(intervals) / len(intervals)
+            mx = max(intervals)
+            gt_16 = sum(1 for iv in intervals if iv > 16)
+            gt_33 = sum(1 for iv in intervals if iv > 33)
+            gt_50 = sum(1 for iv in intervals if iv > 50)
+            paints = self.__class__._paint_count_during_drag
+            logger.info(
+                f"[TabDrag] frames={len(samples)} "
+                f"avg={avg:.1f}ms max={mx:.1f}ms "
+                f">16:{gt_16} >33:{gt_33} >50:{gt_50} "
+                f"paints={paints}"
+            )
+
+        # ── 拖拽结束：恢复嵌入窗口更新 ──
+        if self.__class__._is_dragging:
+            self.__class__._is_dragging = False
+            self.__class__._last_move_ts = None
+            for w in self._windows:
+                try:
+                    if not _sip.isdeleted(w):
+                        w.setUpdatesEnabled(True)
+                        w.update()  # 强制刷新一次被抑制的 paint
+                except Exception:
+                    pass
+
+        self.__class__._drag_perf_samples.clear()
+        self.__class__._paint_count_during_drag = 0
 
     def _restore_geometry(self):
         """恢复窗口位置（屏幕居中），确保不超出屏幕"""
@@ -953,34 +1011,44 @@ class TabManagerWindow(QWidget):
         self._restore_geometry()
 
     # ── [DEBUG] 拖拽性能诊断 ──
-    _drag_perf_timestamps: List[float] = []
-    _drag_perf_last_logged: int = 0
+    # 每次 moveEvent 记录时间戳；拖拽停止后由 _do_save_geometry 输出摘要
+    _drag_perf_samples: List[float] = []
+    # 拖拽状态：用于禁用嵌入窗口更新，避免 paint 阻塞事件循环
+    _is_dragging: bool = False
+    _last_move_ts: Optional[float] = None
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self._save_geometry()  # 防抖，拖拽结束后才真正写盘
+        self._save_geometry()
+        # 记录时间戳供 _do_save_geometry 分析
+        import time as _time
 
-        # ── [DEBUG] 记录 moveEvent 耗时 ──
-        now = event.timestamp()  # ms 精度
-        if now > 0:
-            if len(self.__class__._drag_perf_timestamps) > 100:
-                self.__class__._drag_perf_timestamps.clear()
-            self.__class__._drag_perf_timestamps.append(now)
+        now = _time.monotonic()
+        self.__class__._drag_perf_samples.append(now)
 
-            # 每 50 帧输出一次诊断摘要
-            ts = self.__class__._drag_perf_timestamps
-            if len(ts) >= 10 and len(ts) - self.__class__._drag_perf_last_logged >= 50:
-                intervals = [(ts[i] - ts[i - 1]) for i in range(1, len(ts))]
-                avg = sum(intervals) / len(intervals)
-                mx = max(intervals)
-                gt_16 = sum(1 for iv in intervals if iv > 16)
-                gt_33 = sum(1 for iv in intervals if iv > 33)
-                logger.debug(
-                    f"[TabDrag] {len(ts)} moveEvents | "
-                    f"avg={avg:.1f}ms max={mx:.1f}ms | "
-                    f">16ms={gt_16} >33ms={gt_33}"
-                )
-                self.__class__._drag_perf_last_logged = len(ts)
+        # ── 拖拽期间抑制嵌入窗口 paint ──
+        # 拖拽过程中如果 chat 流式输出或工具结果触发了嵌入窗口的 paintEvent，
+        # 会阻塞事件循环 → 后续 moveEvent 延迟处理 → 视觉卡顿（实测 max=269ms）。
+        # 检测：连续两次 moveEvent 间隔 < 150ms 即视为拖拽中。
+        last = self.__class__._last_move_ts
+        if last is None or now - last > 0.15:
+            # 视为新拖拽开始
+            if not self.__class__._is_dragging:
+                self.__class__._is_dragging = True
+                for w in self._windows:
+                    try:
+                        if not _sip.isdeleted(w):
+                            w.setUpdatesEnabled(False)
+                    except Exception:
+                        pass
+        self.__class__._last_move_ts = now
+
+    def paintEvent(self, event):
+        # ── [DEBUG] 记录拖拽期间的 paint 事件 ──
+        if self.__class__._drag_perf_samples:
+            self.__class__._paint_count_during_drag += 1
+        # TabManagerWindow 本身没有自定义绘制
+        super().paintEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
