@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import TransparentToolButton
 
 from app.utils.config import Settings
+from app.utils.utils import get_icon
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
@@ -127,21 +128,21 @@ class TabManagerTitleBar(QWidget):
         self._memory_label.hide()
         layout.addWidget(self._memory_label)
 
-        # ── 窗口控制按钮（Windows 11 通用风格） ──
+        # ── 窗口控制按钮（主题感知图标，适配浅色/深色） ──
         self._min_btn = TransparentToolButton(self)
-        self._min_btn.setIcon(self._draw_minimize_icon())
+        self._min_btn.setIcon(get_icon("最小化"))
         self._min_btn.setFixedSize(36, 30)
         self._min_btn.setToolTip("最小化")
         self._min_btn.clicked.connect(self.minimizeRequested.emit)
 
         self._max_btn = TransparentToolButton(self)
-        self._max_btn.setIcon(self._draw_maximize_icon())
+        self._max_btn.setIcon(get_icon("最大化"))
         self._max_btn.setFixedSize(36, 30)
         self._max_btn.setToolTip("最大化")
         self._max_btn.clicked.connect(self._on_max_clicked)
 
         self._close_btn = TransparentToolButton(self)
-        self._close_btn.setIcon(self._draw_close_icon())
+        self._close_btn.setIcon(get_icon("关闭"))
         self._close_btn.setFixedSize(36, 30)
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self.closeRequested.emit)
@@ -149,87 +150,6 @@ class TabManagerTitleBar(QWidget):
         layout.addWidget(self._min_btn)
         layout.addWidget(self._max_btn)
         layout.addWidget(self._close_btn)
-
-    def _draw_minimize_icon(self) -> "QIcon":
-        """绘制 Windows 11 风格最小化图标（水平线）"""
-        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
-
-        size = 14
-        pix = QPixmap(size, size)
-        pix.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        # 居中水平线，略偏下使视觉平衡
-        cx, cy = size // 2, size // 2 + 1
-        half = 5
-        p.drawLine(cx - half, cy, cx + half, cy)
-        p.end()
-        return QIcon(pix)
-
-    def _draw_maximize_icon(self) -> "QIcon":
-        """绘制 Windows 11 风格最大化图标（空心方形）"""
-        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
-
-        size = 14
-        pix = QPixmap(size, size)
-        pix.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
-        pen.setJoinStyle(Qt.MiterJoin)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        margin = 2
-        p.drawRect(margin, margin, size - 2 * margin, size - 2 * margin)
-        p.end()
-        return QIcon(pix)
-
-    def _draw_restore_icon(self) -> "QIcon":
-        """绘制 Fluent Design 风格还原图标（重叠双矩形）"""
-        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
-
-        size = 14
-        pix = QPixmap(size, size)
-        pix.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
-        pen.setJoinStyle(Qt.MiterJoin)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-
-        # 前层矩形（在前，偏右下）
-        p.drawRect(1, 5, size - 5, size - 6)
-
-        # 后层矩形（在后，偏左上），只画不被前层遮挡的三条边
-        bx, by, bw, bh = 5, 1, size - 6, size - 6
-        # 右、下、左三条边
-        p.drawLine(bx + bw, by, bx + bw, by + bh)
-        p.drawLine(bx + bw, by + bh, bx, by + bh)
-        p.drawLine(bx, by + bh, bx, by)
-        p.end()
-        return QIcon(pix)
-
-    def _draw_close_icon(self) -> "QIcon":
-        """绘制 Windows 11 风格关闭图标（X 形）"""
-        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
-
-        size = 14
-        pix = QPixmap(size, size)
-        pix.fill(QColor(0, 0, 0, 0))
-        p = QPainter(pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        margin = 3
-        p.drawLine(margin, margin, size - margin, size - margin)
-        p.drawLine(size - margin, margin, margin, size - margin)
-        p.end()
-        return QIcon(pix)
 
     def _apply_style(self):
         Colors.refresh()
@@ -274,8 +194,12 @@ class TabManagerTitleBar(QWidget):
         """)
 
     def refresh_style(self):
-        """主题/字体变更时刷新"""
+        """主题/字体变更时刷新样式和图标"""
         self._apply_style()
+        # 刷新窗口控制图标（主题感知，自动适配浅色/深色）
+        self._min_btn.setIcon(get_icon("最小化"))
+        self._max_btn.setIcon(get_icon("还原" if self._is_maximized else "最大化"))
+        self._close_btn.setIcon(get_icon("关闭"))
 
     def set_title(self, title: str):
         self._title_label.setText(title)
@@ -284,10 +208,10 @@ class TabManagerTitleBar(QWidget):
         self._is_maximized = maximized
         if maximized:
             self._max_btn.setToolTip("还原")
-            self._max_btn.setIcon(self._draw_restore_icon())
+            self._max_btn.setIcon(get_icon("还原"))
         else:
             self._max_btn.setToolTip("最大化")
-            self._max_btn.setIcon(self._draw_maximize_icon())
+            self._max_btn.setIcon(get_icon("最大化"))
 
     def _on_max_clicked(self):
         self.maximizeRestoreRequested.emit()

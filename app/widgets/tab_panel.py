@@ -382,11 +382,13 @@ class TabPanel(QWidget):
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
 
-    _SEPARATOR_STYLE = """
-        QFrame {
-            background: rgba(128, 128, 128, 0.18);
+    _SEPARATOR_STYLE = f"""
+        QFrame {{
+            background: {Colors.DIVIDER_COLOR};
+            border: none;
+            min-height: 1px;
             max-height: 1px;
-        }
+        }}
     """
 
     def _setup_ui(self):
