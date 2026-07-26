@@ -326,7 +326,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.tabManagerCard = SwitchSettingCard(
             FluentIcon.APPLICATION,
             "启用 Tab 管理器",
-            "将所有窗口整合到左侧 Tab 面板 + 右侧内容区的管理器中",
+            "将所有窗口整合到 Tab 面板",
             configItem=self.cfg.enable_tab_manager,
             parent=self,
         )

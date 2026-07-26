@@ -33,6 +33,44 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
+# ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
+import re as _re
+from PyQt5.QtGui import QColor as _QColor
+
+
+def _parse_rgba(rgba_str: str) -> _QColor:
+    """将 'rgba(r,g,b,a)' 字符串解析为 QColor，缓存结果"""
+    try:
+        if rgba_str.startswith("rgba("):
+            parts = rgba_str.strip("rgba() ").split(",")
+            r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+            a_raw = parts[3].strip()
+            a = int(float(a_raw) * 255) if float(a_raw) <= 1 else int(a_raw)
+            return _QColor(r, g, b, a)
+    except Exception:
+        pass
+    return _QColor(rgba_str)
+
+
+# 预解析常用颜色（首次导入时计算一次）
+_CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
+_CACHED_INFO = _parse_rgba(Colors.INFO)
+
+# 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
+_RAINBOW_COLORS = [
+    _QColor("#60D4FF"),
+    _QColor("#40C8FF"),
+    _QColor("#4DA6FF"),
+    _QColor("#8B7BFF"),
+    _QColor("#C084FC"),
+    _QColor("#F472B6"),
+    _QColor("#FB7185"),
+    _QColor("#F59E0B"),
+    _QColor("#34D399"),
+    _QColor("#22D3EE"),
+]
+_RAINBOW_N = len(_RAINBOW_COLORS)
+
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件"""
@@ -159,66 +197,26 @@ class TabItem(QFrame):
         super().leaveEvent(event)
 
     def paintEvent(self, event):
-        from PyQt5.QtGui import QColor
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         if self._selected:
-            # 解析 rgba() 字符串为 QColor
-            bg_str = Colors.SELECTED_BG
-            try:
-                if bg_str.startswith("rgba("):
-                    parts = bg_str.strip("rgba() ").split(",")
-                    r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-                    a = int(float(parts[3]) * 255) if float(parts[3]) <= 1 else int(parts[3])
-                    painter.fillRect(self.rect(), QColor(r, g, b, a))
-                else:
-                    painter.fillRect(self.rect(), QColor(bg_str))
-            except Exception:
-                painter.fillRect(self.rect(), QColor(102, 198, 255, 90))
+            painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
 
         # ── 流式/错误状态指示条 ──
         if self._streaming or self._stream_error:
-            from math import sin, pi
-
             h = self.height()
             y0, y1 = 4, h - 8
             if self._stream_error:
-                c = QColor(220, 50, 50)
-                painter.fillRect(0, y0, 3, y1, c)
+                painter.fillRect(0, y0, 3, y1, _QColor(220, 50, 50))
             else:
                 # 彩虹渐变动画
                 phase = self._panel._anim_phase if self._panel else 0
-                _rainbow = [
-                    QColor("#60D4FF"),
-                    QColor("#40C8FF"),
-                    QColor("#4DA6FF"),
-                    QColor("#8B7BFF"),
-                    QColor("#C084FC"),
-                    QColor("#F472B6"),
-                    QColor("#FB7185"),
-                    QColor("#F59E0B"),
-                    QColor("#34D399"),
-                    QColor("#22D3EE"),
-                ]
-                N = len(_rainbow)
-                idx = int((phase / 360) * N) % N
-                c = _rainbow[idx]
-                painter.fillRect(0, y0, 3, y1, c)
+                idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
+                painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
         elif self._selected:
             # 左侧选中指示条
-            inf_str = Colors.INFO
-            try:
-                if inf_str.startswith("rgba("):
-                    parts = inf_str.strip("rgba() ").split(",")
-                    r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-                    a = int(float(parts[3]) * 255) if len(parts) > 3 else 255
-                    painter.fillRect(0, 4, 3, self.height() - 8, QColor(r, g, b, a))
-                else:
-                    painter.fillRect(0, 4, 3, self.height() - 8, QColor(inf_str))
-            except Exception:
-                painter.fillRect(0, 4, 3, self.height() - 8, QColor(255, 255, 255, 200))
+            painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
 
         super().paintEvent(event)
 
@@ -322,15 +320,19 @@ class TabPanel(QWidget):
         idx = len(self._items)
         item = TabItem(title, icon, self._list_widget, panel=self)
 
-        # 连接信号
-        item.closeRequested.connect(lambda i=idx: self.tabCloseRequested.emit(i))
+        # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
+        # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
+        item.closeRequested.connect(
+            lambda _item=item: self.tabCloseRequested.emit(self._items.index(_item) if _item in self._items else -1)
+        )
 
-        # 连接点击事件
-        def on_click(ev, i=idx):
+        # 连接点击事件 — ★ 同样动态查找当前索引
+        def _on_tab_click(ev, _item=item):
             if ev.button() == Qt.LeftButton:
-                self.set_active_index(i)
+                if _item in self._items:
+                    self.set_active_index(self._items.index(_item))
 
-        item.mousePressEvent = on_click
+        item.mousePressEvent = _on_tab_click
 
         # 在 stretch 之前插入
         self._list_layout.insertWidget(idx, item)

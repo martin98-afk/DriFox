@@ -3301,8 +3301,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # 以便失败时隐藏入口、清理残留菜单）
             launcher = getattr(self, "_ui_plugin_edge_launcher", None)
             if launcher is not None and hasattr(self, "chat_scroll_area"):
+                # 先刷新卡片列表（更新内部状态）
                 launcher.refresh_plugins()
                 launcher.update_geometry(self.chat_scroll_area.geometry())
+                # Tab 模式下：共享 Launcher 由 TabManagerWindow 管理，隐藏 per-window launcher
+                try:
+                    from app.widgets.tab_manager_window import TabManagerWindow
+                    _tm = TabManagerWindow.get_instance()
+                    if _tm is not None and _tm.isVisible():
+                        launcher.hide()
+                except ImportError:
+                    pass
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -7349,6 +7358,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         launcher.refresh_plugins()
                 except RuntimeError, AttributeError:
                     pass
+            # Tab 模式下也刷新共享 Launcher
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None and _tm.isVisible():
+                    _tm._update_shared_launcher()
+            except Exception:
+                pass
             logger.debug("[HotReload] UI 插件边缘入口已刷新")
 
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):

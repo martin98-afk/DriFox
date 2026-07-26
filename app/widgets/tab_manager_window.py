@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
+from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
 
 
 class EmptyStateWidget(QWidget):
@@ -147,6 +148,7 @@ class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
+    _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -170,6 +172,13 @@ class TabManagerWindow(QWidget):
         self._windows: List = []  # List[OpenAIChatToolWindow]
         self._cached_dialogs: Dict[int, Any] = {}  # id → ToolPopupDialog
         self._is_transitioning: bool = False
+        # Tab 模式下共享的 UI 插件左侧边缘入口（单例，所有标签页共用）
+        self._shared_edge_launcher: Optional["UIPluginEdgeLauncher"] = None
+        # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
+        self._geo_save_timer = QTimer(self)
+        self._geo_save_timer.setSingleShot(True)
+        self._geo_save_timer.setInterval(200)
+        self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
         self.setWindowTitle("飘狐-DriFox")
         self.setMinimumSize(500, 400)
@@ -192,6 +201,9 @@ class TabManagerWindow(QWidget):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
+        # Tab 模式下共享的 UI 插件左侧边缘入口
+        self._init_shared_launcher()
+
         # 注册到 TrayManager
         from app.tray_manager import TrayManager
 
@@ -210,6 +222,12 @@ class TabManagerWindow(QWidget):
                 background: {Colors.CONTENT_BG};
             }}
         """)
+        # 刷新共享 Launcher 的主题色
+        if self._shared_edge_launcher is not None:
+            try:
+                self._shared_edge_launcher.apply_theme()
+            except Exception:
+                pass
 
     def _setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -325,35 +343,44 @@ class TabManagerWindow(QWidget):
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 
         # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
-        def _on_win_title_changed(_new_title, _idx=tab_idx, _win=window):
+        # ★ 使用窗口对象引用 + 动态索引查找，防止删除前序 tab 后 _idx 漂移
+        def _on_win_title_changed(_new_title, _win=window):
             if _sip.isdeleted(_win):
                 return
+            if _win not in self._windows:
+                return
+            cur_idx = self._windows.index(_win)
             # 更新 Tab 标题
             t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
-            self._tab_panel.update_tab_title(_idx, t)
+            self._tab_panel.update_tab_title(cur_idx, t)
             # 更新项目图标
             p = getattr(_win, "_current_project", None) or ""
-            _update_tab_icon(_idx, p)
+            _update_tab_icon(cur_idx, p)
             # 团队模式：显示角色胶囊
             team_agent = getattr(_win, "_team_agent_name", "") or ""
             if team_agent:
-                self._tab_panel.update_tab_capsule(_idx, team_agent)
+                self._tab_panel.update_tab_capsule(cur_idx, team_agent)
             else:
-                self._tab_panel.clear_tab_capsule(_idx)
+                self._tab_panel.clear_tab_capsule(cur_idx)
             # 如果该窗口是当前选中 Tab，同步宿主窗口标题
-            if self._tab_panel.active_index == _idx:
+            if self._tab_panel.active_index == cur_idx:
                 self._sync_window_title()
 
         window.windowTitleChanged.connect(_on_win_title_changed)
 
         # 监听 AI 状态变化（流式/错误 → Tab 边框指示）
-        def _on_ai_state_changed(state, _idx=tab_idx):
+        def _on_ai_state_changed(state, _win=window):
+            if _sip.isdeleted(_win):
+                return
+            if _win not in self._windows:
+                return
+            cur_idx = self._windows.index(_win)
             if state in ("streaming", "thinking"):
-                self._tab_panel.update_tab_streaming(_idx, True, False)
+                self._tab_panel.update_tab_streaming(cur_idx, True, False)
             elif state == "error":
-                self._tab_panel.update_tab_streaming(_idx, False, True)
+                self._tab_panel.update_tab_streaming(cur_idx, False, True)
             else:  # idle / question
-                self._tab_panel.update_tab_streaming(_idx, False, False)
+                self._tab_panel.update_tab_streaming(cur_idx, False, False)
 
         window.ai_state_changed.connect(_on_ai_state_changed)
 
@@ -423,6 +450,8 @@ class TabManagerWindow(QWidget):
             self.activeTabChanged.emit(index)
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
+            # 刷新共享 Launcher 的卡片目标窗口为当前 Tab
+            self._update_shared_launcher()
 
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):
@@ -457,6 +486,47 @@ class TabManagerWindow(QWidget):
             fake_page = self._create_fake_page()
             new_window = OpenAIChatToolWindow(fake_page)
             self.add_window(new_window)
+
+    # ── 共享 EdgeLauncher（Tab 模式下单例） ──
+
+    def _init_shared_launcher(self) -> None:
+        """创建 Tab 模式下共享的 UI 插件边缘入口"""
+        try:
+            self._shared_edge_launcher = UIPluginEdgeLauncher(main_widget=self)
+            self._shared_edge_launcher.hide()
+        except Exception as e:
+            logger.error(f"[TabManager] 共享 EdgeLauncher 创建失败: {e}")
+            self._shared_edge_launcher = None
+
+    def _update_shared_launcher(self) -> None:
+        """刷新共享 Launcher 的插件列表并定位到当前活跃窗口"""
+        launcher = self._shared_edge_launcher
+        if launcher is None:
+            return
+        # 设置卡片操作目标为当前活跃窗口
+        active_win = self.get_current_window()
+        if active_win is not None:
+            launcher.set_card_target(active_win)
+        # 刷新插件列表（从 UIPluginRegistry 读取，单例共享）
+        launcher.refresh_plugins()
+        launcher._sync_position()
+
+    def _show_shared_launcher(self) -> None:
+        """显示共享 Launcher（仅 Tab 模式下调用）"""
+        launcher = self._shared_edge_launcher
+        if launcher is None:
+            return
+        self._update_shared_launcher()
+        launcher.show()
+        launcher.raise_()
+
+    def _hide_shared_launcher(self) -> None:
+        """隐藏共享 Launcher"""
+        launcher = self._shared_edge_launcher
+        if launcher is None:
+            return
+        launcher.hide()
+        launcher._close_menu()
 
     @staticmethod
     def _create_fake_page():
@@ -501,7 +571,33 @@ class TabManagerWindow(QWidget):
 
     @classmethod
     def toggle_mode(cls, enable: bool):
-        """切换 Tab 管理器模式的启用/关闭"""
+        """切换 Tab 管理器模式的启用/关闭
+
+        防重入守卫：1 秒内重复调用直接忽略，防止信号循环导致
+        _enable_mode/_disable_mode 被反复触发，造成卡顿和日志洪泛。
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if now - cls._last_toggle_time < 1.0:
+            logger.warning(
+                f"[TabMode] 防重入守卫触发，忽略 toggle_mode({enable})，"
+                f"距上次切换仅 {(now - cls._last_toggle_time) * 1000:.0f}ms"
+            )
+            return
+
+        # 模式状态检查：如果已经在目标模式，跳过（不更新 _last_toggle_time）
+        inst = cls.get_instance()
+        if enable:
+            if inst is not None and inst.isVisible():
+                return
+        else:
+            if inst is None or not inst.isVisible():
+                return
+
+        # 通过所有检查，更新时间戳并执行切换
+        cls._last_toggle_time = now
+
         from app.tray_manager import TrayManager
 
         tm = TrayManager.get_instance()
@@ -510,6 +606,95 @@ class TabManagerWindow(QWidget):
             cls._enable_mode(tm)
         else:
             cls._disable_mode(tm)
+
+    @classmethod
+    def _collect_windows_to_migrate(cls, tray_manager):
+        """收集需要迁入 Tab 管理器的窗口（OpenAIChatToolWindow 实例列表）
+
+        优先从 tray_manager._windows（ToolPopupDialog）中提取 tool_instance，
+        兜底直接从 OpenAIChatToolWindow._instances 收集——防止因注册时序或异常
+        导致 tray_manager._windows 为空时遗漏窗口。
+        """
+        # 方法一：从 TrayManager 已注册的 ToolPopupDialog 提取
+        from app.main_widget import OpenAIChatToolWindow as _OCW
+
+        seen_ids = set()
+        collected = []
+
+        for dialog in list(tray_manager._windows):
+            try:
+                if _sip.isdeleted(dialog):
+                    tray_manager.unregister_window(dialog)
+                    continue
+                tool_instance = getattr(dialog, "tool_instance", None)
+                if tool_instance is None or _sip.isdeleted(tool_instance):
+                    tray_manager.unregister_window(dialog)
+                    continue
+                wid = getattr(tool_instance, "_window_id", id(tool_instance))
+                seen_ids.add(wid)
+                collected.append((dialog, tool_instance))
+            except Exception:
+                continue
+
+        # 方法二（兜底）：直接从 _instances 收集未被上层覆盖的窗口
+        for win in getattr(_OCW, "_instances", []):
+            try:
+                if _sip.isdeleted(win):
+                    continue
+                if getattr(win, "_is_destroyed", False):
+                    continue
+                wid = getattr(win, "_window_id", id(win))
+                if wid in seen_ids:
+                    continue
+                # 这个窗口不在 TrayManager 注册列表中，直接作为 tool_instance 迁入
+                logger.warning(f"[TabMode] 兜底收集未注册窗口: {win}, window_id={wid}")
+                collected.append((None, win))
+                seen_ids.add(wid)
+            except Exception:
+                continue
+
+        return collected
+
+    @classmethod
+    def _force_close_system_cards(cls, tool_instance):
+        """强制关闭指定窗口的所有系统卡片
+
+        模式切换（多窗口→Tab）时，window 内可能开着设置/历史等系统卡片，
+        其 CardManager 状态和 _system_cards_open 标记会残留，导致：
+        - 输入区域持续隐藏（_on_system_card_closed 未触发）
+        - 卡片无法正常交互关闭
+        """
+        try:
+            from app.widgets.cards.card_manager import CardManager as _CM
+
+            window_id = getattr(tool_instance, "_window_id", None)
+            if not window_id:
+                return
+
+            mgr = _CM.get_instance()
+            # 系统卡片 ID 列表（与 OpenAIChatToolWindow._BASE_SYSTEM_CARD_IDS 同步）
+            system_card_ids = (
+                "model_selector",
+                "model_config",
+                "memory",
+                "history",
+                "auto_loop_config",
+                "auto_loop_running",
+                "settings",
+                "provider_edit",
+                "mcp_edit",
+                "hook_edit",
+                "project_selector",
+                "tool_control",
+                "share",
+                "history_questions",
+            )
+            for cid in system_card_ids:
+                if mgr.is_card_visible(cid, window_id):
+                    logger.info(f"[TabMode] 强制关闭系统卡片 [{cid}] window_id={window_id}")
+                    mgr.hide_card(cid, window_id)
+        except Exception as e:
+            logger.warning(f"[TabMode] 强制关闭系统卡片时出错: {e}")
 
     @classmethod
     def _enable_mode(cls, tray_manager):
@@ -532,37 +717,53 @@ class TabManagerWindow(QWidget):
         tab_mgr._cached_dialogs.clear()
         tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
 
-        logger.info(f"[TabMode] _enable_mode: tray_manager._windows 数量={len(tray_manager._windows)}")
-        for d in tray_manager._windows:
-            logger.info(f"[TabMode]   dialog: {d}, tool_instance={getattr(d, 'tool_instance', None)}")
+        # 收集待迁入窗口
+        pending = cls._collect_windows_to_migrate(tray_manager)
+        logger.info(f"[TabMode] _enable_mode: 待迁入窗口数={len(pending)}")
+        for dialog, tool in pending:
+            logger.info(f"[TabMode]    dialog={dialog}, tool_instance={tool}")
 
         try:
             migrated_windows = []
-            for dialog in list(tray_manager._windows):
+            for dialog, tool_instance in pending:
                 try:
-                    if _sip.isdeleted(dialog):
+                    # 如果有 dialog（ToolPopupDialog 模式），正确解绑
+                    if dialog is not None and not _sip.isdeleted(dialog):
+                        # 从 dialog 布局中移除 tool_instance（实际可能无效，因
+                        # tool_instance 在 ToolPopupDialog 的 _fade_container 内层，
+                        # 但 setParent 会处理真正的解绑）
+                        old_layout = dialog.layout()
+                        if old_layout:
+                            old_layout.removeWidget(tool_instance)
+
+                        # 隐藏 dialog（不 close/delete，避免触发 tool_instance.closeEvent）
+                        dialog.hide()
                         tray_manager.unregister_window(dialog)
-                        continue
-
-                    tool_instance = getattr(dialog, "tool_instance", None)
-                    if tool_instance is None or _sip.isdeleted(tool_instance):
-                        tray_manager.unregister_window(dialog)
-                        continue
-
-                    # 从 dialog 中取出 tool_instance
-                    old_layout = dialog.layout()
-                    if old_layout:
-                        old_layout.removeWidget(tool_instance)
-
-                    # 隐藏 dialog（不 close/delete，避免触发 tool_instance.closeEvent）
-                    dialog.hide()
-                    tray_manager.unregister_window(dialog)
+                    else:
+                        # 无 dialog（兜底直采模式）：tool_instance 直接迁入
+                        pass
 
                     # 迁移到 Tab 管理器
                     tool_instance.setParent(tab_mgr)
                     # 使用 add_window 统一处理（自动添加项、连接信号）
                     tab_mgr.add_window(tool_instance)
+
+                    # ★ 关键修复：显式恢复窗口可见性
+                    # dialog.hide() 会将 tool_instance 标记为隐藏(setParent 时 Qt
+                    # 不自动恢复），而 QStackedWidget.setCurrentWidget 的内部 show()
+                    # 在父级 QStackedWidget 未显示时可能无法正确设置可见状态。
+                    # 这里显式 show() 确保标记正确，QStackedWidget 显示后会自动管理。
+                    tool_instance.show()
+
                     migrated_windows.append(tool_instance)
+
+                    # ★ 模式切换后强制关闭该窗口的所有系统卡片
+                    # 多窗口模式下可能打开了设置/历史/记忆等系统卡片，这些卡片
+                    # 的打开标记（CardManager.visible_cards + _system_cards_open）
+                    # 在迁移后仍处于"已打开"状态 → 输入区域被隐藏且无法恢复。
+                    # 这里强制关闭所有系统卡片，让卡片管理器触发 _on_system_card_closed
+                    # 回调，从而恢复输入区域 + 清空系统卡片状态。
+                    cls._force_close_system_cards(tool_instance)
 
                 except Exception as e:
                     logger.error(f"[TabMode] 迁移窗口失败: {e}")
@@ -577,12 +778,28 @@ class TabManagerWindow(QWidget):
             else:
                 tab_mgr._content_area.widget(0).show()
 
+            # ★ 迁移后重新注册命令快捷键：窗口从 ToolPopupDialog 迁移到
+            # TabManagerWindow 后，原有的 QShortcut 实例因其 parent widget
+            # 的 window() 从 ToolPopupDialog 变为 TabManagerWindow，Qt
+            # 内部 shortcut 上下文匹配可能失效（parentWidget()->window()
+            # 变化后需重新注册才能保证 isActiveWindow() 判断正确）。
+            # 对每个已迁入窗口重新调用 _register_command_shortcuts()，
+            # 确保 QShortcut 与正确的窗口上下文绑定。
+            for w in migrated_windows:
+                try:
+                    w._register_command_shortcuts()
+                except Exception as exc:
+                    logger.warning(f"[TabMode] 重新注册快捷键失败: {exc}")
+
             # 更新 Tray 菜单
             tray_manager._rebuild_context_menu()
 
-            # 隐藏所有窗口的 EdgeLauncher
+            # 隐藏所有窗口的独立 EdgeLauncher
             for w in migrated_windows:
                 _hide_edge_launcher(w)
+
+            # Tab 模式下使用共享 Launcher（单例）
+            tab_mgr._show_shared_launcher()
 
             # 显示 TabManagerWindow（位置由 showEvent 自动恢复）
             tab_mgr.show()
@@ -651,11 +868,22 @@ class TabManagerWindow(QWidget):
                     # 恢复 EdgeLauncher
                     _show_edge_launcher(tool_instance)
 
+                    # ★ 迁出后重新注册命令快捷键：窗口从 TabManagerWindow
+                    # 移回独立 ToolPopupDialog，parent widget 的 window()
+                    # 再次变化，需重新注册 QShortcut 以匹配新的窗口上下文。
+                    try:
+                        tool_instance._register_command_shortcuts()
+                    except Exception as exc:
+                        logger.warning(f"[TabMode] 迁出后重新注册快捷键失败: {exc}")
+
                 except Exception as e:
                     logger.error(f"[TabMode] 恢复窗口失败: {e}")
                     import traceback
 
                     logger.error(traceback.format_exc())
+
+            # 隐藏共享 Launcher（切换到独立模式后每个窗口使用自己的）
+            tab_mgr._hide_shared_launcher()
 
             # 清空缓存
             tab_mgr._cached_dialogs.clear()
@@ -673,7 +901,11 @@ class TabManagerWindow(QWidget):
     # ── 几何持久化（简化版）──
 
     def _save_geometry(self):
-        """保存窗口位置到配置"""
+        """防抖：记录位置/尺寸，等拖拽/缩放结束后 200ms 再写盘"""
+        self._geo_save_timer.start()  # 连续调用时不断重置计时器
+
+    def _do_save_geometry(self):
+        """实际写入配置（防抖回调，拖拽/缩放结束后执行一次）"""
         geo = {
             "x": self.x(),
             "y": self.y(),
@@ -722,11 +954,14 @@ class TabManagerWindow(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self._save_geometry()
+        self._save_geometry()  # 防抖，拖拽结束后才真正写盘
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._save_geometry()
+        self._save_geometry()  # 防抖，缩放结束后才真正写盘
+        # 共享 Launcher 跟随窗口缩放重新定位
+        if self._shared_edge_launcher is not None:
+            self._shared_edge_launcher._sync_position()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏"""
