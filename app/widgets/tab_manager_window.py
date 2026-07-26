@@ -46,9 +46,7 @@ class EmptyStateWidget(QWidget):
 
         text_label = QLabel("没有打开的窗口", self)
         text_label.setAlignment(Qt.AlignCenter)
-        text_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}"
-        )
+        text_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}")
         layout.addWidget(text_label)
 
         new_btn = QPushButton("＋ 新建标签页", self)
@@ -121,6 +119,7 @@ def _update_tab_icon(tab_idx: int, project: str):
             extract_project_initials,
             get_project_color,
         )
+
         initials = extract_project_initials(project)
         color_str = get_project_color(project, alpha=255)
         parts = color_str.replace("rgba(", "").replace(")", "").split(",")
@@ -172,14 +171,17 @@ class TabManagerWindow(QWidget):
         self._cached_dialogs: Dict[int, Any] = {}  # id → ToolPopupDialog
         self._is_transitioning: bool = False
 
-        self.setWindowTitle("DriFox — Tab 管理器")
+        self.setWindowTitle("飘狐-DriFox")
         self.setMinimumSize(500, 400)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         # 窗口标志：支持最大化 + 独立任务栏按钮 + 置顶
         self.setWindowFlags(
-            Qt.Window | Qt.WindowStaysOnTopHint
-            | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
-            | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
+            Qt.Window
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowMaximizeButtonHint
             | Qt.WindowCloseButtonHint
         )
 
@@ -232,6 +234,7 @@ class TabManagerWindow(QWidget):
 
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter
+
         self._splitter = QSplitter(Qt.Horizontal, self)
         self._splitter.addWidget(self._tab_panel)
         self._splitter.addWidget(self._content_area)
@@ -281,6 +284,7 @@ class TabManagerWindow(QWidget):
 
         # 获取初始图标：使用项目选择器风格的项目头像
         from PyQt5.QtGui import QIcon, QPixmap, QColor as QClr, QPainter as QPnt
+
         tab_icon = None
         if project:
             try:
@@ -288,6 +292,7 @@ class TabManagerWindow(QWidget):
                     extract_project_initials,
                     get_project_color,
                 )
+
                 initials = extract_project_initials(project)
                 color_str = get_project_color(project, alpha=255)
                 # 解析 "rgba(r,g,b,a)"
@@ -329,6 +334,7 @@ class TabManagerWindow(QWidget):
             # 更新项目图标
             p = getattr(_win, "_current_project", None) or ""
             _update_tab_icon(_idx, p)
+
         window.windowTitleChanged.connect(_on_win_title_changed)
 
         # 立即触发一次初始图标更新
@@ -439,6 +445,7 @@ class TabManagerWindow(QWidget):
                 class FakeSignal:
                     def connect(self, *args, **kwargs):
                         pass
+
                 return FakeSignal()
 
             def setUpdatesEnabled(self, enabled):
@@ -461,6 +468,7 @@ class TabManagerWindow(QWidget):
     def toggle_mode(cls, enable: bool):
         """切换 Tab 管理器模式的启用/关闭"""
         from app.tray_manager import TrayManager
+
         tm = TrayManager.get_instance()
 
         if enable:
@@ -524,6 +532,7 @@ class TabManagerWindow(QWidget):
                 except Exception as e:
                     logger.error(f"[TabMode] 迁移窗口失败: {e}")
                     import traceback
+
                     logger.error(traceback.format_exc())
 
             # 更新 UI 状态
@@ -593,7 +602,8 @@ class TabManagerWindow(QWidget):
                     if screen:
                         rect = screen.availableGeometry()
                         dialog.setGeometry(
-                            rect.x() + 50, rect.y() + 50,
+                            rect.x() + 50,
+                            rect.y() + 50,
                             min(600, rect.width() - 100),
                             min(900, rect.height() - 100),
                         )
@@ -609,6 +619,7 @@ class TabManagerWindow(QWidget):
                 except Exception as e:
                     logger.error(f"[TabMode] 恢复窗口失败: {e}")
                     import traceback
+
                     logger.error(traceback.format_exc())
 
             # 清空缓存
@@ -629,8 +640,10 @@ class TabManagerWindow(QWidget):
     def _save_geometry(self):
         """保存窗口位置到配置"""
         geo = {
-            "x": self.x(), "y": self.y(),
-            "w": self.width(), "h": self.height(),
+            "x": self.x(),
+            "y": self.y(),
+            "w": self.width(),
+            "h": self.height(),
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
         # 保存面板宽度
@@ -663,7 +676,8 @@ class TabManagerWindow(QWidget):
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
             screen_rect.y() + (screen_rect.height() - h) // 2,
-            w, h,
+            w,
+            h,
         )
 
     def showEvent(self, event):

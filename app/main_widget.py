@@ -3826,6 +3826,35 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:  # noqa: BLE001
             InfoBar.error("保存失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
+    def _collect_active_windows_for_template(self) -> List["OpenAIChatToolWindow"]:
+        """收集模板加载时可用的活跃窗口。
+
+        Tab 模式特殊处理：QStackedWidget 隐藏非当前 tab（isVisible=False），
+        导致模板加载器只能看到当前 tab。改为直接读取 TabManagerWindow._windows。
+        """
+        if self.cfg.enable_tab_manager.value:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                windows = []
+                for w in tm._windows:
+                    try:
+                        if not getattr(w, "_is_destroyed", False):
+                            windows.append(w)
+                    except Exception:
+                        continue
+                return windows
+        # 独立模式：用 isVisible() 过滤
+        windows = []
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            try:
+                if not getattr(win, "_is_destroyed", False) and win.isVisible():
+                    windows.append(win)
+            except Exception:
+                continue
+        return windows
+
     def _handle_team_load(self, name: str):
         """应用模板：重新分配所有活跃窗口的 agent 身份并 join team。
 
@@ -3887,13 +3916,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 收集当前活跃窗口（排除已销毁的）
-        active_windows: List["OpenAIChatToolWindow"] = []
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
-            try:
-                if not getattr(win, "_is_destroyed", False) and win.isVisible():
-                    active_windows.append(win)
-            except Exception:
-                continue
+        # Tab 模式特殊处理：QStackedWidget 隐藏了非当前 tab，导致 isVisible 为 False
+        active_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
 
         # 排序：当前窗口排第一，其他窗口按 window_id 稳定排序
         def _sort_key(w: "OpenAIChatToolWindow"):
@@ -3923,13 +3947,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
             # 重新收集活跃窗口
-            after_windows: List["OpenAIChatToolWindow"] = []
-            for win in getattr(OpenAIChatToolWindow, "_instances", []):
-                try:
-                    if not getattr(win, "_is_destroyed", False) and win.isVisible():
-                        after_windows.append(win)
-                except Exception:
-                    continue
+            after_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
             after_windows.sort(key=_sort_key)
             new_windows = [w for w in after_windows if getattr(w, "_window_id", None) not in before_ids]
             active_windows = after_windows
@@ -4383,7 +4401,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         当会话标题变更（用户重命名 / 主题摘要生成 / 切换会话）时调用，
         确保每个窗口在 Windows 任务栏右键菜单中显示不同的会话标题。
-        
+
         团队模式下窗口标题由 _refresh_team_ui 管理（显示 agent 名称），
         此处跳过以避免覆盖。
         """
@@ -6761,7 +6779,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 if not sip.isdeleted(launcher):
                     launcher.update_geometry(self.chat_scroll_area.geometry())
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
@@ -14656,6 +14674,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.cfg.enable_tab_manager.value:
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
                 tm = TabManagerWindow.get_instance()
                 if tm and self in tm._windows:
                     idx = tm._windows.index(self)

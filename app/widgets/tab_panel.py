@@ -69,9 +69,7 @@ class TabItem(QFrame):
 
         # 标题（使用系统 UI 字号，不自设固定大小）
         self._title_label = BodyLabel(self._title, self)
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
-        )
+        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
         self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._title_label, 1)
 
@@ -97,9 +95,7 @@ class TabItem(QFrame):
             from PyQt5.QtGui import QPixmap
 
             if isinstance(icon, QPixmap):
-                self._icon_label.setPixmap(
-                    icon.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
+                self._icon_label.setPixmap(icon.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 try:
                     pixmap = icon.pixmap(20, 20)
@@ -156,10 +152,10 @@ class TabItem(QFrame):
 class TabPanel(QWidget):
     """左侧 Tab 列表面板"""
 
-    tabSelected = pyqtSignal(int)        # 选中 Tab 索引
-    tabCloseRequested = pyqtSignal(int)   # 关闭 Tab 索引
-    newTabRequested = pyqtSignal()        # 新建 Tab
-    tabsReordered = pyqtSignal(list)      # 拖拽排序后新顺序（索引列表）
+    tabSelected = pyqtSignal(int)  # 选中 Tab 索引
+    tabCloseRequested = pyqtSignal(int)  # 关闭 Tab 索引
+    newTabRequested = pyqtSignal()  # 新建 Tab
+    tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -172,13 +168,24 @@ class TabPanel(QWidget):
             background: transparent;
             color: {Colors.TEXT_SECONDARY};
             border: none;
-            border-radius: 4px;
-            padding: 6px 12px;
+            border-radius: 6px;
+            padding: 8px 16px;
             text-align: left;
+            font-size: 13px;
         }}
         QPushButton:hover {{
             background: {Colors.HOVER_BG};
             color: {Colors.TEXT_PRIMARY};
+        }}
+        QPushButton:pressed {{
+            background: {Colors.SELECTED_BG};
+        }}
+    """
+
+    _SEPARATOR_STYLE = f"""
+        QFrame {{
+            background: {Colors.BORDER};
+            max-height: 1px;
         }}
     """
 
@@ -190,13 +197,13 @@ class TabPanel(QWidget):
         # ── 顶部：新建按钮 ──
         top_bar = QWidget(self)
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(4, 4, 4, 2)
-        self._new_btn = QPushButton("＋ 新建", top_bar)
+        top_layout.setContentsMargins(6, 6, 6, 4)
+        self._new_btn = QPushButton("＋ 新建标签页", top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setStyleSheet(self._BTN_STYLE)
+        self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
-        top_layout.addStretch()
         layout.addWidget(top_bar)
 
         # ── 中间：Tab 列表 ──
@@ -208,29 +215,36 @@ class TabPanel(QWidget):
 
         self._list_widget = QWidget()
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(4, 0, 4, 0)
+        self._list_layout.setContentsMargins(6, 0, 6, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
         layout.addWidget(self._scroll_area, 1)
 
+        # ── 分隔线 ──
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet(self._SEPARATOR_STYLE)
+        layout.addWidget(separator)
+
         # ── 底部：设置按钮 ──
         bottom_bar = QWidget(self)
         bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(4, 2, 4, 4)
+        bottom_layout.setContentsMargins(6, 4, 6, 6)
 
         self._settings_btn = QPushButton("⚙ 设置", bottom_bar)
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.setStyleSheet(self._BTN_STYLE)
+        self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
         bottom_layout.addWidget(self._settings_btn)
-        bottom_layout.addStretch()
 
         layout.addWidget(bottom_bar)
 
     def _on_settings_clicked(self):
         """打开设置卡片"""
         from PyQt5.QtWidgets import QWidget
+
         # 沿父链向上找 OpenAIChatToolWindow
         parent = self.parent()
         while parent is not None:
@@ -240,6 +254,7 @@ class TabPanel(QWidget):
             parent = parent.parent()
         # 兜底：通过 TabManagerWindow 切换回独立模式
         from app.widgets.tab_manager_window import TabManagerWindow
+
         tm = TabManagerWindow.get_instance()
         if tm:
             current = tm.get_current_window()
@@ -258,6 +273,7 @@ class TabPanel(QWidget):
         def on_click(ev, i=idx):
             if ev.button() == Qt.LeftButton:
                 self.set_active_index(i)
+
         item.mousePressEvent = on_click
 
         # 在 stretch 之前插入
