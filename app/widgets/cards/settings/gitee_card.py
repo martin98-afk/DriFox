@@ -232,19 +232,22 @@ class GiteeAccountRow(QFrame):
         text_container.addWidget(self._repo_label)
         layout.addLayout(text_container, 1)
 
-        # ── 竖向三点按钮 ──
+        # ── 竖向三点装饰（视觉提示，无独立按钮区） ──
         self._more_btn = QPushButton("⋮", self)
-        self._more_btn.setFixedSize(scale_font_size(28), scale_font_size(28))
+        btn_size = scale_font_size(22)
+        self._more_btn.setFixedSize(btn_size, btn_size)
         self._more_btn.setCursor(Qt.PointingHandCursor)
         self._more_btn.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self._more_btn)
 
+        # 整块区域点击都触发弹出（头像/标签/按钮统一指向 popup）
+        self.setCursor(Qt.PointingHandCursor)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._name_label.setCursor(Qt.PointingHandCursor)
         self._repo_label.setCursor(Qt.PointingHandCursor)
-        self._avatar.clicked.connect(self._open_repository)
-        self._name_label.clicked.connect(self._open_repository)
-        self._repo_label.clicked.connect(self._open_repository)
+        self._avatar.clicked.connect(self._toggle_popup)
+        self._name_label.clicked.connect(self._toggle_popup)
+        self._repo_label.clicked.connect(self._toggle_popup)
         self._more_btn.clicked.connect(self._toggle_popup)
         self.oauthResult.connect(self._on_oauth_result)
         self._popup: "_GiteeMorePopup" | None = None
@@ -282,16 +285,8 @@ class GiteeAccountRow(QFrame):
             self._repo_label.setText("绑定后可备份与分享")
             self._repo_label.setToolTip("绑定后可备份与分享")
 
-        # 更新三点按钮 tooltip
-        if self._binding:
-            self._more_btn.setToolTip("授权中…")
-            self._more_btn.setEnabled(False)
-        else:
-            self._more_btn.setEnabled(True)
-            if self._bound_owner:
-                self._more_btn.setToolTip(f"{owner} — 点击展开")
-            else:
-                self._more_btn.setToolTip("Gitee — 点击展开")
+        # 更新整行可点状态
+        self._more_btn.setEnabled(not self._binding)
         self._apply_style()
 
     def _apply_style(self):
@@ -308,26 +303,22 @@ class GiteeAccountRow(QFrame):
         self._repo_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
-        btn_size = scale_font_size(28)
+        btn_size = scale_font_size(22)
         self._more_btn.setFixedSize(btn_size, btn_size)
         self._more_btn.setStyleSheet(f"""
             QPushButton {{
                 color: {Colors.TEXT_MUTED};
                 background: transparent;
-                border: 1px solid {Colors.BORDER};
-                border-radius: {btn_size // 2}px;
+                border: none;
                 {font_size_css(14)}
                 font-weight: bold;
                 padding: 0;
             }}
             QPushButton:hover {{
-                background: {Colors.HOVER_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border-color: {Colors.INFO};
+                color: {Colors.TEXT_SECONDARY};
             }}
             QPushButton:disabled {{
                 color: {Colors.TEXT_MUTED};
-                background: {Colors.HOVER_BG};
             }}
         """)
 
@@ -453,7 +444,7 @@ class GiteeAccountRow(QFrame):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
         self._avatar.setFixedSize(avatar_size, avatar_size)
-        btn_size = scale_font_size(28)
+        btn_size = scale_font_size(22)
         self._more_btn.setFixedSize(btn_size, btn_size)
         self._refresh_ui()
 
@@ -464,7 +455,9 @@ class GiteeAccountRow(QFrame):
             self._popup = None
 
     def _toggle_popup(self):
-        """点击 ⋮ 按钮切换浮动卡片显示状态"""
+        """点击整块区域切换浮动卡片显示状态"""
+        if self._binding:
+            return
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -550,8 +543,9 @@ class _GiteeMorePopup(QWidget):
         sep1 = self._make_separator()
         layout.addWidget(sep1)
 
-        # ── 账号信息区域 ──
+        # ── 账号信息区域（可点击跳转仓库） ──
         self._info_widget = QWidget(self._container)
+        self._info_widget.setCursor(Qt.PointingHandCursor)
         info_layout = QHBoxLayout(self._info_widget)
         info_layout.setContentsMargins(14, 8, 14, 8)
         info_layout.setSpacing(10)
@@ -559,6 +553,8 @@ class _GiteeMorePopup(QWidget):
         self._popup_avatar = QLabel(self._info_widget)
         self._popup_avatar.setFixedSize(36, 36)
         self._popup_avatar.setAlignment(Qt.AlignCenter)
+        # 鼠标事件穿透，由 _info_widget 统一处理点击
+        self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
 
         text_col = QVBoxLayout()
@@ -569,13 +565,17 @@ class _GiteeMorePopup(QWidget):
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
         )
+        self._popup_name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._popup_repo = QLabel("", self._info_widget)
         self._popup_repo.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
+        self._popup_repo.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         text_col.addWidget(self._popup_name)
         text_col.addWidget(self._popup_repo)
         info_layout.addLayout(text_col, 1)
+        # 整行点击打开仓库
+        self._info_widget.mousePressEvent = lambda ev: self._on_info_clicked(ev)
         layout.addWidget(self._info_widget)
 
         # ── 绑定/解绑按钮 ──
@@ -693,7 +693,8 @@ class _GiteeMorePopup(QWidget):
 
         if is_bound and owner:
             self._popup_avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
-            self._popup_avatar.setToolTip(f"{owner}/{repo}")
+            hint = f"点击打开 {owner}/{repo}"
+            self._info_widget.setToolTip(hint)
             self._popup_name.setText(owner)
             self._popup_repo.setText(f"{repo} ↗")
             self._popup_action_btn.setText("解绑账号")
@@ -729,6 +730,11 @@ class _GiteeMorePopup(QWidget):
                     background: {Colors.INFO};
                 }}
             """)
+
+    def _on_info_clicked(self, event):
+        """点击账号信息区域 → 打开仓库"""
+        if event.button() == Qt.LeftButton and self._account_row:
+            self._account_row._open_repository()
 
     def _on_action_clicked(self):
         """点击浮动卡片中的绑定/解绑按钮"""

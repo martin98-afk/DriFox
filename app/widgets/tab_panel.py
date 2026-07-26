@@ -73,6 +73,22 @@ _RAINBOW_COLORS = [
 ]
 _RAINBOW_N = len(_RAINBOW_COLORS)
 
+# 悬停渐层颜色常量（避免 paintEvent 中反复创建 QColor）
+_HOVER_DARK_COLORS = (_QColor(99, 102, 241, 32), _QColor(139, 92, 246, 18))
+_HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
+
+# 流光 shimmer 渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
+_SHIMMER_COLORS = (
+    _QColor(255, 255, 255, 0),
+    _QColor(130, 200, 255, 55),
+    _QColor(180, 220, 255, 100),
+    _QColor(130, 200, 255, 55),
+    _QColor(255, 255, 255, 0),
+)
+
+# 错误态红条颜色
+_CACHED_ERROR_RED = _QColor(220, 50, 50)
+
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件"""
@@ -269,15 +285,15 @@ class TabItem(QFrame):
         if self._selected:
             painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
 
-        # ── 悬停：圆角渐变背景 ──
+        # ── 悬停：圆角渐变背景（使用缓存颜色常量） ──
         if self._hovered and not self._selected:
             hover_grad = _QLinearGradient(0, 0, w, 0)
             if isDarkTheme():
-                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 32))
-                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 18))
+                hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
+                hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
             else:
-                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 22))
-                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 12))
+                hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
+                hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
             hover_path = _QPainterPath()
             hover_path.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
             painter.fillPath(hover_path, hover_grad)
@@ -286,7 +302,7 @@ class TabItem(QFrame):
         if self._streaming or self._stream_error:
             y0, y1 = 4, h - 8
             if self._stream_error:
-                painter.fillRect(0, y0, 3, y1, _QColor(220, 50, 50))
+                painter.fillRect(0, y0, 3, y1, _CACHED_ERROR_RED)
             else:
                 # 左侧彩虹逐帧单色指示条
                 phase = self._panel._anim_phase if self._panel else 0
@@ -294,25 +310,33 @@ class TabItem(QFrame):
                 painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
 
                 # ── 整条标签来回脉冲流光（加亮加宽） ──
-                # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
-                sweep = _math.sin(_math.radians(phase))
-                sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-                # 光斑中心在标签上从 -20% 扫到 120%
-                shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+                # ★ resize 期间跳过昂贵渐层，仅保留左侧指示条
+                if self._panel and self._panel._is_resizing:
+                    pass  # 跳过 shimmer 渐层
+                else:
+                    # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
+                    sweep = _math.sin(_math.radians(phase))
+                    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+                    # 光斑中心在标签上从 -20% 扫到 120%
+                    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
 
-                shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
-                shimmer_grad.setColorAt(0.0, _QColor(255, 255, 255, 0))
-                shimmer_grad.setColorAt(0.3, _QColor(130, 200, 255, 55))
-                shimmer_grad.setColorAt(0.5, _QColor(180, 220, 255, 100))
-                shimmer_grad.setColorAt(0.7, _QColor(130, 200, 255, 55))
-                shimmer_grad.setColorAt(1.0, _QColor(255, 255, 255, 0))
-                painter.fillRect(self.rect(), shimmer_grad)
+                    shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
+                    shimmer_grad.setColorAt(0.0, _SHIMMER_COLORS[0])
+                    shimmer_grad.setColorAt(0.3, _SHIMMER_COLORS[1])
+                    shimmer_grad.setColorAt(0.5, _SHIMMER_COLORS[2])
+                    shimmer_grad.setColorAt(0.7, _SHIMMER_COLORS[3])
+                    shimmer_grad.setColorAt(1.0, _SHIMMER_COLORS[4])
+                    painter.fillRect(self.rect(), shimmer_grad)
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             y0, y1 = 4, h - 8
             phase = self._panel._question_phase if self._panel else 0
-            # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
-            alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
+            # resize 期间跳过 sin 计算取固定亮度
+            if self._panel and self._panel._is_resizing:
+                alpha = 150
+            else:
+                # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
             painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
             # 左侧选中指示条
@@ -412,6 +436,7 @@ class TabPanel(QWidget):
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
         self._streaming_count: int = 0  # 当前流式 tab 计数
         self._question_count: int = 0  # 当前 question 状态 tab 计数
+        self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -888,10 +913,25 @@ class TabPanel(QWidget):
             self._anim_timer.stop()
         self._anim_phase = 0.0
 
+    def set_resizing(self, active: bool):
+        """设置 resize 活跃状态
+
+        resize 期间 TabItem.paintEvent 跳过昂贵的流光渐层覆盖层；
+        动画定时器持续运转但不再触发 update()，resize 结束后恢复。
+        """
+        self._is_resizing = active
+
     def _on_anim_tick(self):
-        """动画帧：推进相位 + 刷新所有流式 / question tab"""
+        """动画帧：推进相位 + 刷新所有流式 / question tab
+
+        resize 期间只更新相位不触发重绘，避免动画定时器与
+        resize 驱动双重叠加导致重绘风暴。
+        """
         self._anim_phase = (self._anim_phase + 12) % 360
         self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
+        if self._is_resizing:
+            # resize 期间仅推进相位，不触发重绘
+            return
         for item in self._items:
             if item._streaming or item._question:
                 item.update()
