@@ -499,6 +499,12 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.setInterval(200)
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
+        # ── Resize 动画节流：100ms 无 resize 事件后退出节流模式 ──
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(100)
+        self._resize_timer.timeout.connect(self._on_resize_finished)
+
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
         self.setMinimumSize(600, 450)
@@ -858,8 +864,6 @@ class TabManagerWindow(QWidget):
             self.activeTabChanged.emit(index)
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
-            # 刷新共享 Launcher 的卡片目标窗口为当前 Tab
-            self._update_shared_launcher()
 
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):
@@ -1538,12 +1542,30 @@ class TabManagerWindow(QWidget):
                 pass
         return super().nativeEvent(eventType, message)
 
+    def _on_resize_finished(self):
+        """resize 结束后恢复 TabPanel 动画更新
+
+        防抖：连续 resize 事件后 100ms 无新事件时触发，
+        恢复 TabPanel 的动画定时器 update() 调用。
+        """
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(False)
+
     def resizeEvent(self, event):
-        """保持右下角 QSizeGrip 的位置 + 防抖保存几何"""
+        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 动画节流
+
+        resize 期间通知 TabPanel 跳过昂贵动画绘制（流光渐层/脉动计算），
+        同时暂停动画定时器的 update() 调用，避免与 resize 重绘叠加成
+        重绘风暴导致窗口卡顿。resize 停止 100ms 后自动恢复。
+        """
         super().resizeEvent(event)
         if hasattr(self, "_size_grip") and not self.isMaximized():
             g = self._size_grip
             g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
+        # 通知 TabPanel 进入 resize 节流模式（跳过昂贵动画绘制）
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(True)
+            self._resize_timer.start()  # 防抖：连续 resize 事件重置计时器
         self._save_geometry()  # 防抖，缩放结束后才真正写盘
 
     def closeEvent(self, event: QCloseEvent):

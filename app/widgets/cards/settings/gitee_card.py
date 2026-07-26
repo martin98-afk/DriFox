@@ -473,20 +473,31 @@ class GiteeAccountRow(QFrame):
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()
 
-        # 定位：在 ⋮ 按钮上方弹出，右对齐
+        # 定位：在 ⋮ 按钮上方弹出，与窗口左边缘对齐，确保不超出窗口
         btn_global = self._more_btn.mapToGlobal(QPoint(0, 0))
-        screen_rect = QApplication.primaryScreen().availableGeometry()
+        window = self.window()
+        if window:
+            win_rect = window.frameGeometry()
+        else:
+            win_rect = QApplication.primaryScreen().availableGeometry()
 
-        # 计算 X：右对齐按钮右侧，避免超出屏幕右边界
-        x = btn_global.x() + self._more_btn.width() - popup_width
-        if x < screen_rect.left() + 4:
-            x = screen_rect.left() + 4
+        # X：左边缘与窗口左边缘对齐（留 8px 边距），不超出窗口左右边界
+        x = win_rect.left() + 8
+        if x + popup_width > win_rect.right() - 8:
+            x = win_rect.right() - 8 - popup_width
+        if x < win_rect.left() + 4:
+            x = win_rect.left() + 4
 
-        # 计算 Y：在按钮上方弹出
+        # Y：在按钮上方弹出，不超出窗口上下边界
         y = btn_global.y() - popup_height - 6
-        if y < screen_rect.top() + 4:
+        if y < win_rect.top() + 4:
             # 空间不够则向下弹出
             y = btn_global.y() + self._more_btn.height() + 6
+            # 向下弹出也超出底部时，对齐窗口底部
+            if y + popup_height > win_rect.bottom() - 4:
+                y = win_rect.bottom() - 4 - popup_height
+        if y < win_rect.top() + 4:
+            y = win_rect.top() + 4
 
         popup.setFixedSize(popup_width, popup_height)
         popup.move(x, y)
@@ -678,7 +689,7 @@ class _GiteeMorePopup(QWidget):
         row_layout.addWidget(switch)
 
         # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
-        if not hasattr(self, '_switch_refs'):
+        if not hasattr(self, "_switch_refs"):
             self._switch_refs = []
         self._switch_refs.append(switch)
 

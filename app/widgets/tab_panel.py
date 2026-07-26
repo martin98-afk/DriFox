@@ -366,6 +366,12 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
+        # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
+        from app.utils.utils import get_unified_font
+
+        self._title_label.setFont(get_unified_font(12))
+        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+        self._icon_label.setStyleSheet("background: transparent;")
 
     def set_icon(self, icon: Optional[QIcon]):
         size = scale_icon_size(16)
@@ -729,6 +735,10 @@ class TabPanel(QWidget):
         expanded = not self._custom_plugin_scroll.isVisible()
         self._custom_plugin_scroll.setVisible(expanded)
         self._custom_plugin_arrow.setText("▼" if expanded else "▶")
+        # 展开时刷新样式，确保折叠期间的主题变更被应用
+        if expanded:
+            for row in self._custom_plugin_buttons:
+                row.refresh_style()
 
     @staticmethod
     def _get_plugin_icon(plugin_manager, plugin_name):
@@ -774,10 +784,9 @@ class TabPanel(QWidget):
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
-        # 自定义插件（折叠状态下跳过，不可见无需刷新）
-        if self._custom_plugin_scroll.isVisible():
-            for row in self._custom_plugin_buttons:
-                row.refresh_style()
+        # 自定义插件（即使折叠也需刷新，否则展开后样式仍为旧主题）
+        for row in self._custom_plugin_buttons:
+            row.refresh_style()
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
         if hasattr(self, "_custom_plugin_label"):
@@ -801,6 +810,9 @@ class TabPanel(QWidget):
             if ev.button() == Qt.LeftButton:
                 if _item in self._items:
                     self.set_active_index(self._items.index(_item))
+                ev.accept()
+            else:
+                ev.ignore()
 
         item.mousePressEvent = _on_tab_click
 
