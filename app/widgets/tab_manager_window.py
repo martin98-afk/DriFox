@@ -66,6 +66,49 @@ if platform.system() == "Windows":
         ]
 
 
+class _SidebarToggleButton(QPushButton):
+    """侧栏折叠/展开按钮 — 绘制 <| / |> 图标"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._collapsed = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("折叠侧栏")
+        self.setStyleSheet("""
+            QPushButton { background: transparent; border: none; border-radius: 5px; }
+            QPushButton:hover { background: rgba(255,255,255,0.08); }
+        """)
+
+    def set_collapsed(self, collapsed: bool):
+        self._collapsed = collapsed
+        self.setToolTip("展开侧栏" if collapsed else "折叠侧栏")
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt5.QtGui import QColor, QPainter, QPen
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        cx, cy = w // 2, h // 2
+        pen = QPen(QColor(Colors.TEXT_MUTED), 1.8)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+
+        if self._collapsed:
+            # 展开图标: ▷|
+            p.drawLine(cx - 3, cy - 5, cx - 3, cy + 5)
+            p.drawLine(cx + 3, cy - 5, cx - 1, cy)
+            p.drawLine(cx + 3, cy + 5, cx - 1, cy)
+        else:
+            # 折叠图标: |◁
+            p.drawLine(cx + 3, cy - 5, cx + 3, cy + 5)
+            p.drawLine(cx - 3, cy - 5, cx + 1, cy)
+            p.drawLine(cx - 3, cy + 5, cx + 1, cy)
+        p.end()
+
+
 class TabManagerTitleBar(QWidget):
     """TabManagerWindow 自定义标题栏（Frameless）
 
@@ -76,6 +119,7 @@ class TabManagerTitleBar(QWidget):
     minimizeRequested = pyqtSignal()
     maximizeRestoreRequested = pyqtSignal()
     closeRequested = pyqtSignal()
+    toggleSidebarRequested = pyqtSignal()
 
     # ── 右键系统菜单 Action IDs ──
     _ACTION_RESTORE = 1
@@ -101,14 +145,11 @@ class TabManagerTitleBar(QWidget):
         layout.setContentsMargins(12, 0, 4, 0)
         layout.setSpacing(6)
 
-        # ── 图标（加载 drifox.ico） ──
-        self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(20, 20)
-        self._icon_label.setStyleSheet("background: transparent;")
-        icon = QIcon(":/icons/drifox.ico")
-        pix = icon.pixmap(20, 20)
-        self._icon_label.setPixmap(pix)
-        layout.addWidget(self._icon_label)
+        # ── 折叠/展开侧栏按钮 ──
+        self._sidebar_toggle_btn = _SidebarToggleButton(self)
+        self._sidebar_toggle_btn.setFixedSize(28, 26)
+        self._sidebar_toggle_btn.clicked.connect(self.toggleSidebarRequested.emit)
+        layout.addWidget(self._sidebar_toggle_btn)
 
         # ── 标题 ──
         self._title_label = QLabel("飘狐-DriFox", self)
@@ -216,6 +257,12 @@ class TabManagerTitleBar(QWidget):
                 font-size: {scale_font_size(11)}px;
                 background: transparent;
             }}
+        """)
+
+        # 侧栏折叠按钮
+        self._sidebar_toggle_btn.setStyleSheet("""
+            QPushButton { background: transparent; border: none; border-radius: 5px; }
+            QPushButton:hover { background: rgba(255,255,255,0.08); }
         """)
 
         # 关闭按钮 hover 特殊处理（红色）
