@@ -754,10 +754,57 @@ class TabManagerWindow(QWidget):
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
 
+        # 恢复折叠状态
+        if Settings.get_instance().tab_panel_collapsed.value:
+            QTimer.singleShot(0, self._restore_collapsed_state)
+
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+        self._title_bar.toggleSidebarRequested.connect(self._on_toggle_sidebar)
+
+    def _on_toggle_sidebar(self):
+        """切换侧栏展开/折叠（带动画）"""
+        from PyQt5.QtCore import QVariantAnimation, QEasingCurve
+
+        target_collapsed = not Settings.get_instance().tab_panel_collapsed.value
+
+        if target_collapsed:
+            target_left = 48
+        else:
+            saved = Settings.get_instance().tab_panel_width.value
+            target_left = saved if saved and saved > 48 else 200
+
+        current_sizes = self._splitter.sizes()
+        start_left = current_sizes[0]
+        total = sum(current_sizes)
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(200)
+        anim.setStartValue(start_left)
+        anim.setEndValue(target_left)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def on_value_changed(val):
+            self._splitter.setSizes([int(val), total - int(val) - self._splitter.handleWidth()])
+
+        anim.valueChanged.connect(on_value_changed)
+
+        def on_finished():
+            Settings.get_instance().tab_panel_collapsed.value = target_collapsed
+            self._tab_panel.set_collapsed(target_collapsed)
+            self._title_bar._sidebar_toggle_btn.set_collapsed(target_collapsed)
+
+        anim.finished.connect(on_finished)
+        anim.start()
+
+    def _restore_collapsed_state(self):
+        """恢复上次的折叠状态（无动画）"""
+        Settings.get_instance().tab_panel_collapsed.value = True
+        self._splitter.setSizes([48, self.width() - 48 - self._splitter.handleWidth()])
+        self._tab_panel.set_collapsed(True)
+        self._title_bar._sidebar_toggle_btn.set_collapsed(True)
 
     # ── 窗口管理 ──
 
