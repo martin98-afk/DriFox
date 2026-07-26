@@ -380,10 +380,13 @@ class TabPanel(QWidget):
         self._active_index: int = -1
         self._plugin_section: Optional[QWidget] = None
         self._plugin_layout: Optional[QVBoxLayout] = None
-        self._plugin_title: Optional[CaptionLabel] = None
         self._plugin_infos: list[tuple[str, str, str]] = []
         self._plugin_buttons: list[UIPluginRow] = []
         self._gitee_account_row: Optional[GiteeAccountRow] = None
+        self._session_count_label: Optional[QLabel] = None
+        self._glow_line: Optional[QWidget] = None
+        self._collapsed: bool = False
+        self._icon_strip: Optional[QWidget] = None  # IconStripWidget，Task 5 创建
         self._anim_phase: float = 0.0  # 彩虹动画相位
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
@@ -405,14 +408,37 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：UI 插件标题（固定在滚动区外） ──
-        plugin_title = CaptionLabel("UI 插件", self)
-        self._plugin_title = plugin_title
-        plugin_title.setAlignment(Qt.AlignCenter)
-        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
-        layout.addWidget(plugin_title)
+        # ── 品牌区块 ──
+        brand_widget = QWidget(self)
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(12, 10, 12, 6)
+        brand_layout.setSpacing(8)
 
-        # ── 顶部：UI 插件列表（带滚动） ──
+        brand_icon = QLabel(brand_widget)
+        brand_icon.setFixedSize(22, 22)
+        brand_icon.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
+            " stop:0 #66c6ff, stop:1 #8b5cf6); border-radius: 6px;"
+        )
+        brand_layout.addWidget(brand_icon)
+
+        brand_name = QLabel("DriFox", brand_widget)
+        brand_name.setObjectName("brandName")
+        brand_layout.addWidget(brand_name)
+
+        self._session_count_label = QLabel("0 会话", brand_widget)
+        self._session_count_label.setObjectName("sessionCountBadge")
+        brand_layout.addWidget(self._session_count_label)
+
+        layout.addWidget(brand_widget)
+
+        # ── 顶部渐变发光线 ──
+        self._glow_line = QWidget(self)
+        self._glow_line.setFixedHeight(1)
+        self._glow_line.setObjectName("glowLine")
+        layout.addWidget(self._glow_line)
+
+        # ── UI 插件列表（带滚动） ──
         self._plugin_scroll = QScrollArea(self)
         self._plugin_scroll.setWidgetResizable(True)
         self._plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -554,7 +580,7 @@ class TabPanel(QWidget):
 
         if self._plugin_layout is None or self._plugin_section is None:
             return
-        while self._plugin_layout.count() > 1:  # 保留索引 0 的标题
+        while self._plugin_layout.count() > 0:  # 清除所有旧项（不再保留标题行）
             item = self._plugin_layout.takeAt(1)
             widget = item.widget()
             if widget is not None:
@@ -613,8 +639,6 @@ class TabPanel(QWidget):
         """刷新插件区域的主题和字号样式"""
         if self._plugin_section is None:
             return
-        if self._plugin_title is not None:
-            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
         for row in self._plugin_buttons:
             row.refresh_style()
 
