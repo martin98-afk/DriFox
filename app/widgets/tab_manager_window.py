@@ -110,13 +110,18 @@ def _show_edge_launcher(window):
 
 
 def _update_tab_icon(tab_idx: int, project: str):
-    """更新指定 Tab 的项目图标"""
+    """更新指定 Tab 的项目图标
+
+    使用系统配置字体 + scale_icon_size 缩放尺寸，保证字号变化后图标随之变化。
+    """
     from PyQt5.QtGui import QPixmap, QColor as QClr, QPainter as QPnt
 
     tm = TabManagerWindow.get_instance()
     if tm is None:
         return
     try:
+        from app.utils.design_tokens import scale_font_size, scale_icon_size
+        from app.utils.utils import get_unified_font
         from app.widgets.cards.settings.project_selector_card import (
             extract_project_initials,
             get_project_color,
@@ -126,18 +131,22 @@ def _update_tab_icon(tab_idx: int, project: str):
         color_str = get_project_color(project, alpha=255)
         parts = color_str.replace("rgba(", "").replace(")", "").split(",")
         r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-        pix = QPixmap(20, 20)
+
+        # 跟随系统字号缩放
+        size = scale_icon_size(20)
+        # icon 内文字：7px 为基准（小/中两档受 8px 下限保护保底在 8px），随系统字号缩放
+        scaled_font_px = scale_font_size(7)
+        radius = max(2, size * 4 // 20)
+
+        pix = QPixmap(size, size)
         pix.fill(Qt.transparent)
         p = QPnt(pix)
         p.setRenderHint(QPnt.Antialiasing)
         p.setBrush(QClr(r, g, b))
         p.setPen(Qt.NoPen)
-        p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+        p.drawRoundedRect(0, 0, size, size, radius, radius)
         p.setPen(QClr(255, 255, 255))
-        f = p.font()
-        f.setPixelSize(11)
-        f.setBold(True)
-        p.setFont(f)
+        p.setFont(get_unified_font(scaled_font_px, bold=True))
         p.drawText(pix.rect(), Qt.AlignCenter, initials)
         p.end()
         tm._tab_panel.update_tab_icon(tab_idx, pix)
@@ -226,6 +235,22 @@ class TabManagerWindow(QWidget):
         if self._shared_edge_launcher is not None:
             try:
                 self._shared_edge_launcher.apply_theme()
+            except Exception:
+                pass
+        # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
+        try:
+            self._tab_panel.refresh_style()
+            # 强制重绘子控件（setStyleSheet 后保险调用一次 update）
+            self._tab_panel.repaint()
+        except Exception:
+            pass
+        # 重画所有 tab 的项目图标（背景色来自项目，颜色不受主题影响，但
+        # 随字号缩放 + 重画保证主题切换后图标尺寸与文字一致）
+        for idx, win in enumerate(self._windows):
+            try:
+                project = getattr(win, "_current_project", None) or ""
+                if project:
+                    _update_tab_icon(idx, project)
             except Exception:
                 pass
 

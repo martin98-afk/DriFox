@@ -29,7 +29,8 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, scale_icon_size
+from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
@@ -91,24 +92,29 @@ class TabItem(QFrame):
         self.setFixedHeight(40)
         self.setCursor(Qt.PointingHandCursor)
 
+        # 图标尺寸：跟随系统字体缩放
+        self._icon_size = scale_icon_size(20)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 4, 4, 4)
         layout.setSpacing(6)
 
         # 图标
         self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(20, 20)
+        self._icon_label.setFixedSize(self._icon_size, self._icon_size)
         if self._icon_pixmap:
             from PyQt5.QtGui import QPixmap
 
             if isinstance(self._icon_pixmap, QPixmap):
                 self._icon_label.setPixmap(
-                    self._icon_pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self._icon_pixmap.scaled(
+                        self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
                 )
             else:
                 # QIcon 等类型：转为 QPixmap
                 try:
-                    pixmap = self._icon_pixmap.pixmap(20, 20)
+                    pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
                     if pixmap:
                         self._icon_label.setPixmap(pixmap)
                 except Exception:
@@ -124,7 +130,7 @@ class TabItem(QFrame):
 
         # 标题（使用 _ElidedLabel 自动省略，保证关闭按钮始终可见）
         self._title_label = _ElidedLabel(self._title, self)
-        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
+        self._apply_title_style()
         layout.addWidget(self._title_label, 1)
 
         # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE）
@@ -134,6 +140,52 @@ class TabItem(QFrame):
         self._close_btn.setVisible(False)
         self._close_btn.clicked.connect(self.closeRequested.emit)
         layout.addWidget(self._close_btn)
+
+    def _apply_title_style(self):
+        """应用标题样式：使用系统字体 + 缩放字号 + 当前主题色
+
+        注意：单纯用 setStyleSheet 设置 font-family 在某些 Qt 场景下会被父级
+        stylesheet 覆盖。这里同时调用 setFont，setFont 优先级最高，确保生效。
+
+        每次主题或字体设置变更后都需调用，确保颜色和字体一致。
+        """
+        from app.utils.utils import get_unified_font
+
+        # 直接通过 setFont 强制应用字体（避开 stylesheet 继承坑）
+        self._title_label.setFont(get_unified_font(13))
+        # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
+        self._title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; "
+            f"background: transparent; "
+            f"{get_font_family_css()} "
+            f"{font_size_css(13)}"
+        )
+
+    def refresh_style(self):
+        """主题 / 字体变更后刷新样式，重新调整图标尺寸与文字字号/颜色"""
+        # 重新读取缩放后的图标尺寸
+        new_size = scale_icon_size(20)
+        if new_size != self._icon_size:
+            self._icon_size = new_size
+            self._icon_label.setFixedSize(self._icon_size, self._icon_size)
+            if self._icon_pixmap:
+                from PyQt5.QtGui import QPixmap
+
+                if isinstance(self._icon_pixmap, QPixmap):
+                    self._icon_label.setPixmap(
+                        self._icon_pixmap.scaled(
+                            self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        )
+                    )
+                else:
+                    try:
+                        pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
+                        if pixmap:
+                            self._icon_label.setPixmap(pixmap)
+                    except Exception:
+                        pass
+        self._apply_title_style()
+        self.update()
 
     def set_selected(self, selected: bool):
         self._selected = selected
@@ -154,10 +206,14 @@ class TabItem(QFrame):
             from PyQt5.QtGui import QPixmap
 
             if isinstance(icon, QPixmap):
-                self._icon_label.setPixmap(icon.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._icon_label.setPixmap(
+                    icon.scaled(
+                        self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                )
             else:
                 try:
-                    pixmap = icon.pixmap(20, 20)
+                    pixmap = icon.pixmap(self._icon_size, self._icon_size)
                     if pixmap:
                         self._icon_label.setPixmap(pixmap)
                 except Exception:
@@ -237,6 +293,8 @@ class TabPanel(QWidget):
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式时启动
         self._streaming_count: int = 0  # 当前流式 tab 计数
         self._setup_ui()
+        # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
+        theme_manager.register_refresh_target(self)
 
     _SEPARATOR_STYLE = f"""
         QFrame {{
@@ -437,6 +495,16 @@ class TabPanel(QWidget):
         for item in self._items:
             if item._streaming:
                 item.update()
+
+    def refresh_style(self):
+        """ThemeManager 统一刷新入口：主题/字体变更后调用"""
+        from app.utils.design_tokens import Colors as _Colors
+
+        _Colors.refresh()
+        for item in self._items:
+            item.refresh_style()
+            # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
+            item.repaint()
 
     @property
     def count(self) -> int:
