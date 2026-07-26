@@ -95,3 +95,43 @@ class TestTabPanel:
             panel._items[1].closeRequested.emit()
 
         assert blocker.args == [1]
+
+    def test_brand_header_present(self, panel):
+        """品牌区块存在且会话计数初始为 0"""
+        assert panel._session_count_label is not None
+        assert panel._session_count_label.text() == "0 会话"
+
+    def test_session_count_updates(self, panel):
+        """添加/移除 Tab 时会话计数更新"""
+        panel.add_tab("A")
+        assert panel._session_count_label.text() == "1 会话"
+        panel.add_tab("B")
+        assert panel._session_count_label.text() == "2 会话"
+        panel.remove_tab(0)
+        assert panel._session_count_label.text() == "1 会话"
+
+    def test_set_collapsed_toggle(self, panel):
+        """折叠/展开切换不崩溃"""
+        panel.add_tab("A")
+        panel.add_tab("B")
+        panel.set_collapsed(True)
+        assert panel._collapsed is True
+        panel.set_collapsed(False)
+        assert panel._collapsed is False
+
+    def test_collapsed_icon_strip_created(self, panel):
+        """折叠后图标条存在且同步"""
+        panel.add_tab("A")
+        panel.add_tab("B")
+        panel.set_collapsed(True)
+        assert panel._icon_strip is not None
+        assert panel._icon_strip._active_index == panel._active_index
+
+    def test_collapsed_add_remove_sync(self, panel):
+        """折叠态下添加/移除 Tab 不崩溃"""
+        panel.add_tab("A")
+        panel.set_collapsed(True)
+        panel.add_tab("B")
+        panel.remove_tab(0)
+        # 不崩溃即为通过
+

@@ -634,7 +634,7 @@ class TabPanel(QWidget):
         # ── 渐变分隔线 ──
         for child in self.findChildren(QFrame):
             if child.objectName() == "gradientDivider":
-                child.setStyleSheet(f"""
+                child.setStyleSheet("""
                     #gradientDivider {{
                         background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                             stop:0 rgba(0,0,0,0),
@@ -1127,6 +1127,20 @@ class TabPanel(QWidget):
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
+        # 折叠态图标条同步
+        if self._collapsed and self._icon_strip:
+            ir, ig, ib = self._info_rgb()
+            self._icon_strip._glow_line.setStyleSheet(f"""
+                #iconStripGlowLine {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(0,0,0,0),
+                        stop:0.3 rgba({ir},{ig},{ib}, 0.25),
+                        stop:0.7 rgba({ir},{ig},{ib}, 0.25),
+                        stop:1 rgba(0,0,0,0));
+                    margin: 0 4px;
+                }}
+            """)
+            self._sync_icon_strip()
 
     @property
     def count(self) -> int:
