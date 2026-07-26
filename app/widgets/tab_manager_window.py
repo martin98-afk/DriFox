@@ -1440,13 +1440,8 @@ class TabManagerWindow(QWidget):
             self.showMaximized()
 
     def _on_titlebar_close(self):
-        """标题栏关闭按钮触发（最小化到任务栏，不销毁）
-
-        注意：必须用 showMinimized() 而非 hide()。
-        hide() 在 Windows 上会移除任务栏入口，导致用户无法通过
-        点击任务栏图标恢复窗口。
-        """
-        self.showMinimized()
+        """标题栏关闭按钮触发（隐藏到系统托盘，不销毁）"""
+        self.hide()
 
     def changeEvent(self, event):
         """监听窗口状态变化（最大化/还原），同步标题栏按钮图标"""
@@ -1552,9 +1547,9 @@ class TabManagerWindow(QWidget):
         self._save_geometry()  # 防抖，缩放结束后才真正写盘
 
     def closeEvent(self, event: QCloseEvent):
-        """关闭 TabManagerWindow 时不销毁，仅最小化到任务栏"""
+        """关闭 TabManagerWindow 时不销毁，仅隐藏到系统托盘"""
         event.ignore()
-        self.showMinimized()
+        self.hide()
 
     # ── 资源清理 ──
 
