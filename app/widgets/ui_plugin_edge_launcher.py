@@ -285,9 +285,14 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 显示 / 位置同步（作为主窗口内部子控件，父坐标定位）────────
     def showEvent(self, event) -> None:  # noqa: N802
-        """显示时同步一次位置（首次显示或窗口恢复时触发）"""
+        """显示时同步一次位置（首次显示或窗口恢复时触发）
+
+        使用 singleShot(0) 延迟执行：确保父窗口（特别是从 Tab 模式迁出后
+        重新创建的 ToolPopupDialog）已完成几何初始化，避免定位到 (0,0) 区域。
+        """
         super().showEvent(event)
-        self._sync_position()
+        # 延迟同步：让父窗口先完成布局和几何初始化
+        QTimer.singleShot(0, self._sync_position)
         self.raise_()
 
     def _ensure_parent(self) -> QWidget:
@@ -327,6 +332,11 @@ class UIPluginEdgeLauncher(QWidget):
 
         parent = self._ensure_parent()
         if parent is None or not parent.isVisible():
+            return
+
+        # 父窗口几何无效（刚创建未完成布局）→ 延迟重试
+        if parent.width() < 10 or parent.height() < 10:
+            QTimer.singleShot(50, self._sync_position)
             return
 
         h = max(LINE_HEIGHT, CAPSULE_HEIGHT) + 12

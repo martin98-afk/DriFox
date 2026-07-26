@@ -405,13 +405,20 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # ── 顶部：UI 插件标题（固定在滚动区外） ──
+        plugin_title = CaptionLabel("UI 插件", self)
+        self._plugin_title = plugin_title
+        plugin_title.setAlignment(Qt.AlignCenter)
+        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
+        layout.addWidget(plugin_title)
+
         # ── 顶部：UI 插件列表（带滚动） ──
         self._plugin_scroll = QScrollArea(self)
         self._plugin_scroll.setWidgetResizable(True)
         self._plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._plugin_scroll.setFrameShape(QFrame.NoFrame)
-        self._plugin_scroll.setMaximumHeight(180)  # 最多显示 ~4 个插件项，超出滚动
+        self._plugin_scroll.setMaximumHeight(160)  # 标题在外，剩余空间给列表
         self._plugin_scroll.setStyleSheet(
             f"""
             QScrollArea {{
@@ -428,13 +435,9 @@ class TabPanel(QWidget):
 
         self._plugin_section = QWidget(self._plugin_scroll)
         plugin_layout = QVBoxLayout(self._plugin_section)
-        plugin_layout.setContentsMargins(6, 6, 6, 4)
+        plugin_layout.setContentsMargins(6, 0, 6, 4)
         plugin_layout.setSpacing(2)
         self._plugin_layout = plugin_layout
-        plugin_title = CaptionLabel("UI 插件", self._plugin_section)
-        self._plugin_title = plugin_title
-        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(11)}")
-        plugin_layout.addWidget(plugin_title)
         self._plugin_section.setStyleSheet("background: transparent;")
         self._plugin_section.setVisible(False)
         self._plugin_scroll.setVisible(False)  # 无插件时隐藏整个滚动区域
@@ -611,7 +614,7 @@ class TabPanel(QWidget):
         if self._plugin_section is None:
             return
         if self._plugin_title is not None:
-            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(11)}")
+            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
         for row in self._plugin_buttons:
             row.refresh_style()
 
