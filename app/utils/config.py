@@ -492,7 +492,7 @@ class Settings(QConfig):
 
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", False, BoolValidator())
-    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 200, RangeValidator(120, 500))
+    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 250, RangeValidator(120, 500))
     tab_panel_collapsed = ConfigItem("UI", "TabPanelCollapsed", False, BoolValidator())
     tab_manager_geometry = ConfigItem("UI", "TabManagerGeometry", "")
 

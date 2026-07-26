@@ -3976,6 +3976,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._on_agent_changed(agent_name)
                     self._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
+                    self._team_agent_name = agent_name
                     self._refresh_team_ui(agent_name)
                     self._sync_active_windows_to_team_manager()
                     self._start_team_watcher()
@@ -3985,6 +3986,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         win._on_agent_changed(agent_name)
                     if hasattr(win, "_apply_agent_command_permissions"):
                         win._apply_agent_command_permissions(agent_name)
+                    win._team_agent_name = agent_name
                     tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
                     if hasattr(win, "_refresh_team_ui"):
                         try:
@@ -4061,6 +4063,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._on_agent_changed(agent_name)
             if hasattr(win, "_apply_agent_command_permissions"):
                 win._apply_agent_command_permissions(agent_name)
+            win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):

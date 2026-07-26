@@ -20,7 +20,14 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import CaptionLabel, FluentIcon as FIF, PushButton, TransparentPushButton, TransparentToolButton, isDarkTheme
+from qfluentwidgets import (
+    CaptionLabel,
+    FluentIcon as FIF,
+    PushButton,
+    TransparentPushButton,
+    TransparentToolButton,
+    isDarkTheme,
+)
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -32,11 +39,14 @@ class TabItem(QFrame):
 
     closeRequested = pyqtSignal()
 
-    def __init__(self, title: str, icon=None, parent=None):
+    def __init__(self, title: str, icon=None, parent=None, panel=None):
         super().__init__(parent)
         self._title = title
         self._icon_pixmap = icon
         self._selected = False
+        self._streaming = False
+        self._stream_error = False
+        self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         self._setup_ui()
 
     def _setup_ui(self):
@@ -89,6 +99,11 @@ class TabItem(QFrame):
 
     def set_selected(self, selected: bool):
         self._selected = selected
+        self.update()
+
+    def set_streaming(self, streaming: bool, error: bool = False):
+        self._streaming = streaming
+        self._stream_error = error
         self.update()
 
     def set_title(self, title: str):
@@ -163,6 +178,35 @@ class TabItem(QFrame):
             except Exception:
                 painter.fillRect(self.rect(), QColor(102, 198, 255, 90))
 
+        # ── 流式/错误状态指示条 ──
+        if self._streaming or self._stream_error:
+            from math import sin, pi
+
+            h = self.height()
+            y0, y1 = 4, h - 8
+            if self._stream_error:
+                c = QColor(220, 50, 50)
+                painter.fillRect(0, y0, 3, y1, c)
+            else:
+                # 彩虹渐变动画
+                phase = self._panel._anim_phase if self._panel else 0
+                _rainbow = [
+                    QColor("#60D4FF"),
+                    QColor("#40C8FF"),
+                    QColor("#4DA6FF"),
+                    QColor("#8B7BFF"),
+                    QColor("#C084FC"),
+                    QColor("#F472B6"),
+                    QColor("#FB7185"),
+                    QColor("#F59E0B"),
+                    QColor("#34D399"),
+                    QColor("#22D3EE"),
+                ]
+                N = len(_rainbow)
+                idx = int((phase / 360) * N) % N
+                c = _rainbow[idx]
+                painter.fillRect(0, y0, 3, y1, c)
+        elif self._selected:
             # 左侧选中指示条
             inf_str = Colors.INFO
             try:
@@ -191,6 +235,9 @@ class TabPanel(QWidget):
         super().__init__(parent)
         self._items: List[TabItem] = []
         self._active_index: int = -1
+        self._anim_phase: float = 0.0  # 彩虹动画相位
+        self._anim_timer: Optional[QTimer] = None  # 有 tab 流式时启动
+        self._streaming_count: int = 0  # 当前流式 tab 计数
         self._setup_ui()
 
     _SEPARATOR_STYLE = f"""
@@ -273,7 +320,7 @@ class TabPanel(QWidget):
     def add_tab(self, title: str, icon=None) -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
-        item = TabItem(title, icon, self._list_widget)
+        item = TabItem(title, icon, self._list_widget, panel=self)
 
         # 连接信号
         item.closeRequested.connect(lambda i=idx: self.tabCloseRequested.emit(i))
@@ -299,6 +346,11 @@ class TabPanel(QWidget):
         """移除指定索引的 Tab"""
         if 0 <= index < len(self._items):
             item = self._items.pop(index)
+            # 如果该 tab 正在流式，递减计数
+            if item._streaming:
+                self._streaming_count = max(0, self._streaming_count - 1)
+                if self._streaming_count == 0:
+                    self._stop_anim_timer()
             self._list_layout.removeWidget(item)
             item.deleteLater()
 
@@ -343,6 +395,42 @@ class TabPanel(QWidget):
         """隐藏团队角色胶囊"""
         if 0 <= index < len(self._items):
             self._items[index].clear_capsule()
+
+    def update_tab_streaming(self, index: int, streaming: bool, error: bool = False):
+        """更新 Tab 的流式/错误状态"""
+        if 0 <= index < len(self._items):
+            old = self._items[index]._streaming
+            self._items[index].set_streaming(streaming, error)
+            if streaming and not old:
+                self._streaming_count += 1
+                self._ensure_anim_timer()
+            elif not streaming and old:
+                self._streaming_count = max(0, self._streaming_count - 1)
+                if self._streaming_count == 0:
+                    self._stop_anim_timer()
+
+    def _ensure_anim_timer(self):
+        """确保彩虹动画定时器已启动"""
+        if self._anim_timer is None:
+            from PyQt5.QtCore import QTimer
+
+            self._anim_timer = QTimer(self)
+            self._anim_timer.setInterval(50)  # 50ms ≈ 20fps
+            self._anim_timer.timeout.connect(self._on_anim_tick)
+        if not self._anim_timer.isActive():
+            self._anim_timer.start()
+
+    def _stop_anim_timer(self):
+        if self._anim_timer and self._anim_timer.isActive():
+            self._anim_timer.stop()
+        self._anim_phase = 0.0
+
+    def _on_anim_tick(self):
+        """动画帧：推进相位 + 刷新所有流式 tab"""
+        self._anim_phase = (self._anim_phase + 12) % 360
+        for item in self._items:
+            if item._streaming:
+                item.update()
 
     @property
     def count(self) -> int:

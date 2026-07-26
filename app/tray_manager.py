@@ -196,12 +196,14 @@ class TrayManager(QObject):
             tm_action = QAction("📑 Tab 管理器", self._tray_menu)
             tm_action.triggered.connect(
                 lambda: (
-                    self._tab_manager_window.show(),
-                    self._tab_manager_window.activateWindow(),
-                    self._tab_manager_window.raise_(),
+                    (
+                        self._tab_manager_window.show(),
+                        self._tab_manager_window.activateWindow(),
+                        self._tab_manager_window.raise_(),
+                    )
+                    if self._tab_manager_window
+                    else None
                 )
-                if self._tab_manager_window
-                else None
             )
             self._tray_menu.addAction(tm_action)
             self._tray_menu.addSeparator()
@@ -792,6 +794,17 @@ class TrayManager(QObject):
     def _show_or_create_window(self) -> None:
         """显示所有窗口或创建新窗口"""
         logger.info(f"[_show_or_create] windows count: {len(self._windows)}")
+
+        # Tab 模式：即使没有独立窗口也要恢复 TabManagerWindow
+        if self._tab_manager_window is not None:
+            if self._tab_manager_window.isVisible():
+                self._tab_manager_window.activateWindow()
+                self._tab_manager_window.raise_()
+            else:
+                self._tab_manager_window.show()
+                self._tab_manager_window.activateWindow()
+                self._tab_manager_window.raise_()
+            return
 
         if not self._windows:
             logger.warning("[_show_or_create] 没有已注册的窗口")

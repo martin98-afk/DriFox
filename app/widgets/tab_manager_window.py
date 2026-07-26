@@ -346,6 +346,17 @@ class TabManagerWindow(QWidget):
 
         window.windowTitleChanged.connect(_on_win_title_changed)
 
+        # 监听 AI 状态变化（流式/错误 → Tab 边框指示）
+        def _on_ai_state_changed(state, _idx=tab_idx):
+            if state in ("streaming", "thinking"):
+                self._tab_panel.update_tab_streaming(_idx, True, False)
+            elif state == "error":
+                self._tab_panel.update_tab_streaming(_idx, False, True)
+            else:  # idle / question
+                self._tab_panel.update_tab_streaming(_idx, False, False)
+
+        window.ai_state_changed.connect(_on_ai_state_changed)
+
         # 立即触发一次初始图标更新 + 团队胶囊状态同步
         logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
         _update_tab_icon(tab_idx, project)
