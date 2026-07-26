@@ -1543,20 +1543,28 @@ class TabManagerWindow(QWidget):
         return super().nativeEvent(eventType, message)
 
     def _on_resize_finished(self):
-        """resize 结束后恢复 TabPanel 动画更新
+        """resize 结束后恢复 TabPanel 动画 + 内容区绘制
 
-        防抖：连续 resize 事件后 100ms 无新事件时触发，
-        恢复 TabPanel 的动画定时器 update() 调用。
+        防抖：连续 resize 事件后 100ms 无新事件时触发：
+        - 恢复 TabPanel 的动画定时器 update() 调用
+        - 恢复内容区绘制（重新启用 setUpdatesEnabled）
         """
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(True)
 
     def resizeEvent(self, event):
-        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 动画节流
+        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 动画/绘制节流
 
-        resize 期间通知 TabPanel 跳过昂贵动画绘制（流光渐层/脉动计算），
-        同时暂停动画定时器的 update() 调用，避免与 resize 重绘叠加成
-        重绘风暴导致窗口卡顿。resize 停止 100ms 后自动恢复。
+        resize 期间做三件事：
+        1. 通知 TabPanel 跳过昂贵动画绘制（流光渐层/脉动 sin 计算）
+        2. 禁用内容区（QStackedWidget）的绘制，避免消息卡片文本重排
+           的 paintEvent 拖慢 resize 帧率；布局仍正常计算，视觉无闪烁
+        3. 暂停动画定时器的 update() 调用，避免与 resize 重绘叠加成
+           重绘风暴
+
+        resize 停止 100ms 后自动恢复（_on_resize_finished）。
         """
         super().resizeEvent(event)
         if hasattr(self, "_size_grip") and not self.isMaximized():
@@ -1565,7 +1573,11 @@ class TabManagerWindow(QWidget):
         # 通知 TabPanel 进入 resize 节流模式（跳过昂贵动画绘制）
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
-            self._resize_timer.start()  # 防抖：连续 resize 事件重置计时器
+        # 禁用内容区绘制（布局仍继续，仅跳过 paintEvent），
+        # 防止 OpenAIChatToolWindow 及其子卡片文本重排拖慢 resize
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(False)
+        self._resize_timer.start()  # 防抖：连续 resize 事件重置计时器
         self._save_geometry()  # 防抖，缩放结束后才真正写盘
 
     def closeEvent(self, event: QCloseEvent):

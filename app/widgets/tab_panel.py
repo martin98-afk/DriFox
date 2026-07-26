@@ -54,9 +54,17 @@ def _parse_rgba(rgba_str: str) -> _QColor:
     return _QColor(rgba_str)
 
 
-# 预解析常用颜色（首次导入时计算一次）
+# 预解析常用颜色（首次导入时计算一次，后续通过 _invalidate_cached_colors() 刷新）
 _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
 _CACHED_INFO = _parse_rgba(Colors.INFO)
+
+
+def _invalidate_cached_colors():
+    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值"""
+    global _CACHED_SELECTED_BG, _CACHED_INFO
+    _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
+    _CACHED_INFO = _parse_rgba(Colors.INFO)
+
 
 # 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
 _RAINBOW_COLORS = [
@@ -954,10 +962,13 @@ class TabPanel(QWidget):
         注意：调用方（TabManagerWindow._on_theme_changed）已执行 Colors.refresh()，
         此处不再重复调用。
         """
+        # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
+        _invalidate_cached_colors()
+        # 先全部调用 update()（异步，Qt 自动合并绘制事件），
+        # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
             item.refresh_style()
-            # 保持同步重绘，确保 stylesheet 变更立即生效
-            item.repaint()
+        self.update()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
