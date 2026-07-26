@@ -6098,10 +6098,20 @@ class MessageCard(SimpleCardWidget):
                 theme["bg"] = f"rgba({r}, {g}, {b}, {new_a})"
 
         if error:
-            bg = Colors.ERROR  # 使用语义色
-            theme["bg"] = "#2A1F1F"
-            theme["border"] = "#A94444"
-            theme["accent"] = "#FF7B7B"
+            # 检测深浅色模式，选择合适的错误配色
+            try:
+                from app.utils.theme_manager import theme_manager
+                _is_light = theme_manager.is_light_theme()
+            except Exception:
+                _is_light = False
+            if _is_light:
+                theme["bg"] = "#FFF5F5"       # 浅粉底
+                theme["border"] = "#FCA5A5"    # 浅红边框
+                theme["accent"] = "#DC2626"    # 深红强调
+            else:
+                theme["bg"] = "#2A1F1F"       # 暗红褐底
+                theme["border"] = "#A94444"    # 暗红边框
+                theme["accent"] = "#FF7B7B"    # 亮红强调
         return theme
 
     def refresh_theme(self):
@@ -6859,8 +6869,14 @@ class MessageCard(SimpleCardWidget):
 
     def _on_webengine_context_lost(self):
         """WebEngine 上下文丢失时显示恢复提示"""
-        # 设置卡片为错误状态样式
-        self._apply_card_style(border="#A94444")
+        # 设置卡片为错误状态样式（根据深浅模式选择边框色）
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+        _border = "#FCA5A5" if _is_light else "#A94444"
+        self._apply_card_style(border=_border)
         # 标记需要恢复
         self._webengine_needs_restore = True
 
@@ -7121,7 +7137,14 @@ class MessageCard(SimpleCardWidget):
             self._retrying = False
             # 显示错误状态栏（而不是隐藏）
             self._show_error_status(error_message)
-            bd, bg = "#ff4d4d", "#2a1f1f"
+            # 检测深浅色模式，选择合适背景
+            try:
+                from app.utils.theme_manager import theme_manager
+                _is_light = theme_manager.is_light_theme()
+            except Exception:
+                _is_light = False
+            bd = "#ff4d4d"
+            bg = "#FFF5F5" if _is_light else "#2a1f1f"
         else:
             self._retry_status_widget.setVisible(False)
             bd, bg = self._base_border, self._base_bg
@@ -7134,6 +7157,14 @@ class MessageCard(SimpleCardWidget):
         self._retry_attempt_label.setText(error_message if error_message else "请求失败")
         self._retry_wait_label.setText("")
         self._retry_spinner.setText("⚠")
+        # 检测深浅色模式，选择合适的错误文字颜色
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+        _err_text_color = "#DC2626" if _is_light else "#ff6b6b"
+        _err_sub_color = "#B91C1C" if _is_light else "#ff9999"
         # 改变状态栏样式为错误风格
         self._retry_status_widget.setStyleSheet(
             """
@@ -7147,7 +7178,7 @@ class MessageCard(SimpleCardWidget):
         self._retry_type_label.setStyleSheet(
             f"""
             QLabel {{
-                color: #ff6b6b;
+                color: {_err_text_color};
                 font-size: {scale_font_size(14)}px;
                 font-weight: bold;
             }}
@@ -7156,7 +7187,7 @@ class MessageCard(SimpleCardWidget):
         self._retry_attempt_label.setStyleSheet(
             f"""
             QLabel {{
-                color: #ff9999;
+                color: {_err_sub_color};
                 font-size: {scale_font_size(12)}px;
             }}
             """

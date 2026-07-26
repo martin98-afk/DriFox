@@ -1002,6 +1002,33 @@ class OpenAIChatToolWindow(ToolWindow):
         checker = UpdateChecker.get_instance(self)
         checker.check_update(silent=True)
 
+    # ── Tab 模式焦点守卫 ──
+
+    def _is_tab_active(self) -> bool:
+        """判断当前窗口是否为 Tab 管理器中的活动标签页
+
+        在 Tab 模式下，非活动标签页不应该通过 setFocus 抢夺输入焦点。
+        非 Tab 模式始终返回 True（独立窗口正常聚焦）。
+
+        Returns:
+            True — 可以安全调用 setFocus（非 Tab 模式 或 是当前活动标签页）
+            False — 当前窗口不是活动标签页，应跳过焦点操作
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None and tm.isVisible():
+                return tm.get_current_window() is self
+        except Exception:
+            pass
+        return True  # 非 Tab 模式：始终允许
+
+    def _focus_input_if_active(self, reason=Qt.OtherFocusReason):
+        """仅在活动窗口时聚焦输入框，避免 Tab 模式下焦点被后台窗口劫持"""
+        if self._is_tab_active() and self.input_area:
+            self.input_area.setFocus(reason)
+
     def _setup_engine_callbacks(self):
         """设置 ChatEngine 的回调"""
         callbacks = {
@@ -13418,8 +13445,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 被 _is_streaming 守卫拦住，现在重新触发处理
             self._check_and_process_pending()
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
@@ -14140,8 +14166,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.approve_tool_permission(tool_call_id, False, True)
             else:
                 self.backend.deny_tool_permission(tool_call_id)
-            if self.input_area:
-                self.input_area.setFocus()
+            self._focus_input_if_active()
             return
 
         if not self._question_tool_call_id:
@@ -14153,8 +14178,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.chat_engine:
             self.backend.provide_question_answer(answer)
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _on_question_cancelled(self):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
@@ -14177,8 +14201,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
             self.backend.deny_tool_permission(tool_call_id)
-            if self.input_area:
-                self.input_area.setFocus()
+            self._focus_input_if_active()
             return
 
         if not self._question_tool_call_id:
@@ -14189,8 +14212,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.chat_engine:
             self.backend.provide_question_answer("")
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _on_question_preview_requested(self, payload: object):
         """显示权限请求的完整工具参数预览。"""
@@ -16034,8 +16056,7 @@ class OpenAIChatToolWindow(ToolWindow):
             duration=2000,
             parent=self,
         )
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
         # ⚠️ 立即更新时间线节点（即使后台 finalize 还未完成）
         self._update_node_preview()
@@ -16543,8 +16564,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 
-        # 重新聚焦输入框
-        self.input_area.setFocus()
+        # 重新聚焦输入框（仅当此窗口为活动 Tab 时）
+        self._focus_input_if_active()
         logger.info("[AutoLoop] UI unlocked")
         logger.info("[AutoLoop] UI unlocked")
 

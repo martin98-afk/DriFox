@@ -22,9 +22,7 @@ from PyQt5.QtWidgets import (
 )
 from loguru import logger
 from qfluentwidgets import (
-    CaptionLabel,
     FluentIcon as FIF,
-    PushButton,
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
@@ -159,10 +157,7 @@ class TabItem(QFrame):
         self._title_label.setFont(get_unified_font(13))
         # 颜色随主题刷新（字体同一行写也能 setFont，但颜色走 stylesheet 更稳）
         self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; "
-            f"background: transparent; "
-            f"{get_font_family_css()} "
-            f"{font_size_css(13)}"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(13)}"
         )
 
     def refresh_style(self):
@@ -216,9 +211,7 @@ class TabItem(QFrame):
 
             if isinstance(icon, QPixmap):
                 self._icon_label.setPixmap(
-                    icon.scaled(
-                        self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                    )
+                    icon.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 )
             else:
                 try:
@@ -330,11 +323,7 @@ class UIPluginRow(QFrame):
 
         # 应用系统字体（避免 stylesheet 继承问题）
         self._title_label.setFont(get_unified_font(12))
-        self._title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; "
-            f"{get_font_family_css()} "
-            f"{font_size_css(12)}"
-        )
+        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
         self._icon_label.setStyleSheet("background: transparent;")
         self.setStyleSheet(f"""
             #uiPluginRow {{
@@ -378,11 +367,11 @@ class TabPanel(QWidget):
         super().__init__(parent)
         self._items: List[TabItem] = []
         self._active_index: int = -1
-        self._plugin_section: Optional[QWidget] = None
-        self._plugin_layout: Optional[QVBoxLayout] = None
-        self._plugin_title: Optional[CaptionLabel] = None
         self._plugin_infos: list[tuple[str, str, str]] = []
-        self._plugin_buttons: list[UIPluginRow] = []
+        self._system_plugin_layout: Optional[QVBoxLayout] = None
+        self._system_plugin_buttons: list[UIPluginRow] = []
+        self._custom_plugin_layout: Optional[QVBoxLayout] = None
+        self._custom_plugin_buttons: list[UIPluginRow] = []
         self._gitee_account_row: Optional[GiteeAccountRow] = None
         self._anim_phase: float = 0.0  # 彩虹动画相位
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
@@ -393,11 +382,11 @@ class TabPanel(QWidget):
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
 
-    _SEPARATOR_STYLE = f"""
-        QFrame {{
-            background: {Colors.BORDER};
+    _SEPARATOR_STYLE = """
+        QFrame {
+            background: rgba(128, 128, 128, 0.18);
             max-height: 1px;
-        }}
+        }
     """
 
     def _setup_ui(self):
@@ -405,21 +394,71 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：UI 插件标题（固定在滚动区外） ──
-        plugin_title = CaptionLabel("UI 插件", self)
-        self._plugin_title = plugin_title
-        plugin_title.setAlignment(Qt.AlignCenter)
-        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
-        layout.addWidget(plugin_title)
+        # ── 顶部：品牌区 ──
+        self._brand_widget = QWidget(self)
+        brand_layout = QVBoxLayout(self._brand_widget)
+        brand_layout.setContentsMargins(10, 8, 10, 2)
+        brand_layout.setSpacing(1)
+        self._brand_title = QLabel("DriFox", self._brand_widget)
+        self._brand_title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
+        )
+        self._brand_version = QLabel("v0.4.7", self._brand_widget)
+        self._brand_version.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}")
+        brand_layout.addWidget(self._brand_title)
+        brand_layout.addWidget(self._brand_version)
+        layout.addWidget(self._brand_widget)
 
-        # ── 顶部：UI 插件列表（带滚动） ──
-        self._plugin_scroll = QScrollArea(self)
-        self._plugin_scroll.setWidgetResizable(True)
-        self._plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._plugin_scroll.setFrameShape(QFrame.NoFrame)
-        self._plugin_scroll.setMaximumHeight(160)  # 标题在外，剩余空间给列表
-        self._plugin_scroll.setStyleSheet(
+        # ── 品牌区下分隔线 ──
+        self._brand_separator = QFrame(self)
+        self._brand_separator.setFrameShape(QFrame.HLine)
+        self._brand_separator.setStyleSheet(self._SEPARATOR_STYLE)
+        layout.addWidget(self._brand_separator)
+
+        # ── 系统 UI 插件（常驻显示，无滚动） ──
+        self._system_plugin_section = QWidget(self)
+        system_plugin_layout = QVBoxLayout(self._system_plugin_section)
+        system_plugin_layout.setContentsMargins(6, 0, 6, 4)
+        system_plugin_layout.setSpacing(2)
+        self._system_plugin_layout = system_plugin_layout
+        self._system_plugin_section.setStyleSheet("background: transparent;")
+        self._system_plugin_section.setVisible(False)
+        layout.addWidget(self._system_plugin_section)
+
+        # ── 分隔线：系统插件 ↔ 自定义插件 ──
+        self._plugin_separator_1 = QFrame(self)
+        self._plugin_separator_1.setFrameShape(QFrame.HLine)
+        self._plugin_separator_1.setStyleSheet(self._SEPARATOR_STYLE)
+        self._plugin_separator_1.setVisible(False)
+        layout.addWidget(self._plugin_separator_1)
+
+        # ── 自定义 UI 插件折叠区 ──
+        self._custom_plugin_header = QWidget(self)
+        self._custom_plugin_header.setCursor(Qt.PointingHandCursor)
+        custom_header_layout = QHBoxLayout(self._custom_plugin_header)
+        custom_header_layout.setContentsMargins(6, 4, 6, 4)
+        custom_header_layout.setSpacing(4)
+        self._custom_plugin_arrow = QLabel("▶", self._custom_plugin_header)
+        self._custom_plugin_arrow.setFixedWidth(12)
+        self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
+        self._custom_plugin_label = QLabel("自定义插件", self._custom_plugin_header)
+        self._custom_plugin_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(12)}"
+        )
+        custom_header_layout.addWidget(self._custom_plugin_arrow)
+        custom_header_layout.addWidget(self._custom_plugin_label, 1)
+        self._custom_plugin_header.setVisible(False)
+        self._custom_plugin_header.mousePressEvent = lambda ev: self._on_custom_plugin_toggle()
+        layout.addWidget(self._custom_plugin_header)
+
+        # ── 自定义 UI 插件滚动区 ──
+        self._custom_plugin_scroll = QScrollArea(self)
+        self._custom_plugin_scroll.setWidgetResizable(True)
+        self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._custom_plugin_scroll.setFrameShape(QFrame.NoFrame)
+        self._custom_plugin_scroll.setMaximumHeight(160)
+        self._custom_plugin_scroll.setStyleSheet(
             f"""
             QScrollArea {{
                 background: transparent;
@@ -431,18 +470,23 @@ class TabPanel(QWidget):
             {get_unified_scrollbar_style(4)}
             """
         )
-        self._plugin_scroll.viewport().setStyleSheet("background: transparent;")
+        self._custom_plugin_scroll.viewport().setStyleSheet("background: transparent;")
+        self._custom_plugin_section = QWidget(self._custom_plugin_scroll)
+        custom_plugin_layout = QVBoxLayout(self._custom_plugin_section)
+        custom_plugin_layout.setContentsMargins(6, 0, 6, 4)
+        custom_plugin_layout.setSpacing(2)
+        self._custom_plugin_layout = custom_plugin_layout
+        self._custom_plugin_section.setStyleSheet("background: transparent;")
+        self._custom_plugin_scroll.setWidget(self._custom_plugin_section)
+        self._custom_plugin_scroll.setVisible(False)
+        layout.addWidget(self._custom_plugin_scroll)
 
-        self._plugin_section = QWidget(self._plugin_scroll)
-        plugin_layout = QVBoxLayout(self._plugin_section)
-        plugin_layout.setContentsMargins(6, 0, 6, 4)
-        plugin_layout.setSpacing(2)
-        self._plugin_layout = plugin_layout
-        self._plugin_section.setStyleSheet("background: transparent;")
-        self._plugin_section.setVisible(False)
-        self._plugin_scroll.setVisible(False)  # 无插件时隐藏整个滚动区域
-        self._plugin_scroll.setWidget(self._plugin_section)
-        layout.addWidget(self._plugin_scroll)
+        # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
+        self._plugin_separator_2 = QFrame(self)
+        self._plugin_separator_2.setFrameShape(QFrame.HLine)
+        self._plugin_separator_2.setStyleSheet(self._SEPARATOR_STYLE)
+        self._plugin_separator_2.setVisible(False)
+        layout.addWidget(self._plugin_separator_2)
 
         # ── 顶部：新建按钮 ──
         top_bar = QWidget(self)
@@ -534,7 +578,11 @@ class TabPanel(QWidget):
                 current._toggle_settings_card()
 
     def refresh_ui_plugins(self):
-        """刷新 Tab 模式顶部的 UI 插件按钮列表"""
+        """刷新 Tab 模式顶部的 UI 插件按钮列表
+
+        系统 UI 插件（plugins/ 目录下自带）→ 常驻显示，无滚动。
+        自定义 UI 插件（~/.drifox/plugins/ 用户安装）→ 默认折叠，展开后可滚轮滚动。
+        """
         try:
             from app.core.ui_plugin_registry import UIPluginRegistry
 
@@ -542,42 +590,84 @@ class TabPanel(QWidget):
         except Exception:
             cards = {}
 
-        infos = []
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+
+        # 按 plugin_type 分组
+        system_infos: list[tuple[str, str, str]] = []
+        custom_infos: list[tuple[str, str, str]] = []
         for card_id, info in cards.items():
             try:
                 title = (info.title or "").strip() or card_id
-                infos.append((card_id, title, info.plugin_name))
+                plugin_info = pm.get_plugin(info.plugin_name)
+                is_system = plugin_info.is_system if plugin_info else False
+                entry = (card_id, title, info.plugin_name)
+                if is_system:
+                    system_infos.append(entry)
+                else:
+                    custom_infos.append(entry)
             except Exception:
                 continue
-        infos.sort(key=lambda item: item[1].lower())
-        self._plugin_infos = infos
+        system_infos.sort(key=lambda item: item[1].lower())
+        custom_infos.sort(key=lambda item: item[1].lower())
+        self._plugin_infos = system_infos + custom_infos
 
-        if self._plugin_layout is None or self._plugin_section is None:
-            return
-        while self._plugin_layout.count() > 1:  # 保留索引 0 的标题
-            item = self._plugin_layout.takeAt(1)
+        # ── 系统插件区 ──
+        while self._system_plugin_layout.count() > 0:
+            item = self._system_plugin_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        self._plugin_buttons = []
-
-        from app.core.plugin_manager import PluginManager
-
-        plugin_manager = PluginManager.get_instance()
-        for card_id, title, plugin_name in infos:
+        self._system_plugin_buttons = []
+        for card_id, title, plugin_name in system_infos:
             row = UIPluginRow(
                 title,
-                self._get_plugin_icon(plugin_manager, plugin_name),
-                self._plugin_section,
-                plugin_name=plugin_name,  # 传入插件名，主题刷新时重新获取图标
+                self._get_plugin_icon(pm, plugin_name),
+                self._system_plugin_section,
+                plugin_name=plugin_name,
             )
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
-            self._plugin_layout.addWidget(row)
-            self._plugin_buttons.append(row)
+            self._system_plugin_layout.addWidget(row)
+            self._system_plugin_buttons.append(row)
+        has_system = bool(system_infos)
+        self._system_plugin_section.setVisible(has_system)
 
-        self._plugin_section.setVisible(bool(infos))
-        self._plugin_scroll.setVisible(bool(infos))
+        # ── 自定义插件区 ──
+        while self._custom_plugin_layout.count() > 0:
+            item = self._custom_plugin_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._custom_plugin_buttons = []
+        for card_id, title, plugin_name in custom_infos:
+            row = UIPluginRow(
+                title,
+                self._get_plugin_icon(pm, plugin_name),
+                self._custom_plugin_section,
+                plugin_name=plugin_name,
+            )
+            row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
+            self._custom_plugin_layout.addWidget(row)
+            self._custom_plugin_buttons.append(row)
+        has_custom = bool(custom_infos)
+        self._custom_plugin_header.setVisible(has_custom)
+        # 默认折叠
+        self._custom_plugin_scroll.setVisible(False)
+        self._custom_plugin_arrow.setText("▶")
+        self._custom_plugin_label.setText(f"自定义插件 ({len(custom_infos)})")
+
+        # ── 分隔符可见性 ──
+        self._plugin_separator_1.setVisible(has_system and has_custom)
+        self._plugin_separator_2.setVisible(has_system or has_custom)
+
         self._refresh_plugin_style()
+
+    def _on_custom_plugin_toggle(self):
+        """切换自定义插件折叠/展开状态"""
+        expanded = not self._custom_plugin_scroll.isVisible()
+        self._custom_plugin_scroll.setVisible(expanded)
+        self._custom_plugin_arrow.setText("▼" if expanded else "▶")
 
     @staticmethod
     def _get_plugin_icon(plugin_manager, plugin_name):
@@ -611,12 +701,27 @@ class TabPanel(QWidget):
 
     def _refresh_plugin_style(self):
         """刷新插件区域的主题和字号样式"""
-        if self._plugin_section is None:
-            return
-        if self._plugin_title is not None:
-            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
-        for row in self._plugin_buttons:
+        # 品牌区
+        if hasattr(self, "_brand_title"):
+            self._brand_title.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
+            )
+        if hasattr(self, "_brand_version"):
+            self._brand_version.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+            )
+        # 系统插件
+        for row in self._system_plugin_buttons:
             row.refresh_style()
+        # 自定义插件
+        for row in self._custom_plugin_buttons:
+            row.refresh_style()
+        if hasattr(self, "_custom_plugin_arrow"):
+            self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
+        if hasattr(self, "_custom_plugin_label"):
+            self._custom_plugin_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(12)}"
+            )
 
     def add_tab(self, title: str, icon=None) -> int:
         """添加 Tab 项，返回其索引"""

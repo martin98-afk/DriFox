@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentToolButton, FluentIcon as FIF
+from qfluentwidgets import TransparentToolButton
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
@@ -127,9 +127,9 @@ class TabManagerTitleBar(QWidget):
         self._memory_label.hide()
         layout.addWidget(self._memory_label)
 
-        # ── 窗口控制按钮 ──
+        # ── 窗口控制按钮（Windows 11 通用风格） ──
         self._min_btn = TransparentToolButton(self)
-        self._min_btn.setIcon(FIF.MINIMIZE)
+        self._min_btn.setIcon(self._draw_minimize_icon())
         self._min_btn.setFixedSize(36, 30)
         self._min_btn.setToolTip("最小化")
         self._min_btn.clicked.connect(self.minimizeRequested.emit)
@@ -141,7 +141,7 @@ class TabManagerTitleBar(QWidget):
         self._max_btn.clicked.connect(self._on_max_clicked)
 
         self._close_btn = TransparentToolButton(self)
-        self._close_btn.setIcon(FIF.CLOSE)
+        self._close_btn.setIcon(self._draw_close_icon())
         self._close_btn.setFixedSize(36, 30)
         self._close_btn.setToolTip("关闭")
         self._close_btn.clicked.connect(self.closeRequested.emit)
@@ -150,8 +150,27 @@ class TabManagerTitleBar(QWidget):
         layout.addWidget(self._max_btn)
         layout.addWidget(self._close_btn)
 
+    def _draw_minimize_icon(self) -> "QIcon":
+        """绘制 Windows 11 风格最小化图标（水平线）"""
+        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
+
+        size = 14
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        # 居中水平线，略偏下使视觉平衡
+        cx, cy = size // 2, size // 2 + 1
+        half = 5
+        p.drawLine(cx - half, cy, cx + half, cy)
+        p.end()
+        return QIcon(pix)
+
     def _draw_maximize_icon(self) -> "QIcon":
-        """绘制 Fluent Design 风格最大化图标（空心方形）"""
+        """绘制 Windows 11 风格最大化图标（空心方形）"""
         from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
 
         size = 14
@@ -191,6 +210,24 @@ class TabManagerTitleBar(QWidget):
         p.drawLine(bx + bw, by, bx + bw, by + bh)
         p.drawLine(bx + bw, by + bh, bx, by + bh)
         p.drawLine(bx, by + bh, bx, by)
+        p.end()
+        return QIcon(pix)
+
+    def _draw_close_icon(self) -> "QIcon":
+        """绘制 Windows 11 风格关闭图标（X 形）"""
+        from PyQt5.QtGui import QPixmap, QPainter, QColor, QIcon, QPen
+
+        size = 14
+        pix = QPixmap(size, size)
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(Colors.TEXT_PRIMARY), 1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        margin = 3
+        p.drawLine(margin, margin, size - margin, size - margin)
+        p.drawLine(size - margin, margin, margin, size - margin)
         p.end()
         return QIcon(pix)
 
@@ -255,13 +292,15 @@ class TabManagerTitleBar(QWidget):
     def _on_max_clicked(self):
         self.maximizeRestoreRequested.emit()
 
-    # ── 鼠标事件：窗口拖拽 + 双击最大化 ──
+    # ── 鼠标事件：窗口拖拽（混合模式） ──
+    # Windows 原生（HTCAPTION）接管失败时，由 Python 模拟拖拽兜底。
+    # FramelessWindowHint 下 HTCAPTION 不一定生效，保留 Python 拖拽确保可用。
+    # 拖拽期间 _is_dragging=True → nativeEvent 跳过 _nchittest 避免冲突。
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self._drag_pos = event.globalPos() - self.parentWidget().frameGeometry().topLeft()
-            # 通知父窗口进入拖拽状态——nativeEvent 在此期间跳过 _nchittest
             self.parentWidget()._is_dragging = True
             event.accept()
         super().mousePressEvent(event)
@@ -270,9 +309,7 @@ class TabManagerTitleBar(QWidget):
         if self._dragging and event.buttons() == Qt.LeftButton:
             win = self.parentWidget()
             if win.isMaximized():
-                # 从最大化拖拽 → 先还原再继续拖
                 win.showNormal()
-                # 计算比例：拖拽点相对窗口宽度的比例
                 ratio = self._drag_pos.x() / win.width() if win.width() > 0 else 0.5
                 new_pos = event.globalPos() - QPoint(int(win.width() * ratio), self._drag_pos.y())
                 win.move(new_pos)
@@ -510,7 +547,8 @@ class TabManagerWindow(QWidget):
 
     _instance: Optional["TabManagerWindow"] = None
     _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
-    _is_dragging: bool = False  # 标题栏拖拽中 → nativeEvent 跳过 _nchittest
+    _is_dragging: bool = False  # Python 拖拽中 → nativeEvent 跳过 _nchittest 避免与 HTCAPTION 冲突
+
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
 
@@ -1446,9 +1484,11 @@ class TabManagerWindow(QWidget):
         super().changeEvent(event)
 
     def _nchittest(self, msg) -> int:
-        """WM_NCHITTEST 处理：边缘缩放
+        """WM_NCHITTEST 处理：边缘缩放 + 标题栏拖拽/Snap
 
-        拖拽期间（_is_dragging=True）完全跳过，由 Python mouseMoveEvent 负责。
+        - 标题栏非按钮区域 → HTCAPTION（Windows 原生拖拽 + Snap Layout）
+        - 标题栏按钮区域   → HTCLIENT（Qt 正常处理按钮点击）
+        - 窗口边缘热区     → HTLEFT/HTRIGHT/HTTOP/HTBOTTOM 等（边缘缩放）
         """
         import ctypes.wintypes as wintypes
 
@@ -1456,10 +1496,17 @@ class TabManagerWindow(QWidget):
         y = wintypes.HIWORD(msg.lParam)
         pt = self.mapFromGlobal(QPoint(x, y))
 
-        # 标题栏区域 → 返回 HTCLIENT，让 Qt 正常处理鼠标事件
-        # drag 由 mousePressEvent 中的 WM_NCLBUTTONDOWN 发起
-        if self._title_bar.geometry().contains(pt):
-            return _HTCLIENT
+        # 标题栏区域
+        title_bar_rect = self._title_bar.geometry()
+        if title_bar_rect.contains(pt):
+            # 标题栏按钮区域 → HTCLIENT 让 Qt 正常处理点击
+            for btn in (self._title_bar._min_btn, self._title_bar._max_btn, self._title_bar._close_btn):
+                # 按钮在标题栏中的局部坐标 → 转换到窗口坐标
+                btn_rect = btn.geometry().translated(title_bar_rect.topLeft())
+                if btn_rect.contains(pt):
+                    return _HTCLIENT
+            # 标题栏其他区域 → HTCAPTION（Windows 原生拖拽，自动触发 Snap Layout）
+            return _HTCAPTION
 
         # 边缘缩放热区（_EDGE_RESIZE_BORDER px）
         w, h = self.width(), self.height()
@@ -1489,18 +1536,16 @@ class TabManagerWindow(QWidget):
     def nativeEvent(self, eventType, message):
         """处理 Windows 原生消息
 
-        - WM_NCHITTEST: 边缘缩放（_EDGE_RESIZE_BORDER px 热区）
+        - WM_NCHITTEST: 边缘缩放 + 标题栏 HTCAPTION（Snap Layout 支持）
         - WM_NCCALCSIZE: 保留 DWM 阴影
-        拖拽期间 _nchittest 被跳过，消除与 Python 拖拽的冲突。
+        Python 拖拽期间跳过 _nchittest，避免与 HTCAPTION 冲突。
+        HTCAPTION 在 Frameless 窗口下不一定生效，未生效时由 Python 拖拽兜底。
         """
         if platform.system() == "Windows" and eventType == "windows_generic_MSG":
             try:
                 import ctypes
 
                 msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
-                # 拖拽期间跳过 WM_NCHITTEST——避免 _nchittest 与 Python
-                # mouseMoveEvent 中的 win.move() 产生双重开销。边缘缩放
-                # 在拖拽期间也不需要。
                 if msg.message == _WM_NCHITTEST:
                     if self._is_dragging:
                         return (True, _HTCLIENT)
