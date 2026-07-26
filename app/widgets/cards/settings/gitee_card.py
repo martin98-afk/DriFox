@@ -10,15 +10,16 @@ import hashlib
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
-from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard
+from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.common_dialogs import ConfirmDialog
+from app.widgets.elided_label import _ElidedLabel
 
 _AVATAR_COLORS = [
     "#c71d23",
@@ -62,6 +63,15 @@ class _ClickableAvatar(QLabel):
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
+
+
+class _ClickableElidedLabel(_ElidedLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 # ── 仓库可见性选择弹窗（参考 _ProjectExportChoiceDialog） ──
@@ -174,6 +184,618 @@ class _RepoVisibilityDialog(MaskDialogBase):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._center()
+
+
+# ── Tab 模式紧凑账户行 ────────────────────────────────────
+
+
+class GiteeAccountRow(QFrame):
+    """Tab 模式底部的紧凑 Gitee 账户快捷栏。"""
+
+    oauthResult = pyqtSignal(bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("giteeAccountRow")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.cfg = Settings.get_instance()
+        self._binding = False
+        self._bound_owner = ""
+        self._bound_repo = ""
+
+        from app.core.config_sync import ConfigSyncService
+
+        self._sync_svc = ConfigSyncService.get_instance()
+        self._setup_ui()
+        self._connect_config_signals()
+        self._refresh_ui()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 5, 8, 7)
+        layout.setSpacing(8)
+
+        avatar_size = scale_font_size(28)
+        self._avatar = _ClickableAvatar(self)
+        self._avatar.setFixedSize(avatar_size, avatar_size)
+        self._avatar.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._avatar)
+
+        text_container = QVBoxLayout()
+        text_container.setContentsMargins(0, 0, 0, 0)
+        text_container.setSpacing(0)
+
+        self._name_label = _ClickableElidedLabel("", self)
+        self._repo_label = _ClickableElidedLabel("", self)
+        text_container.addWidget(self._name_label)
+        text_container.addWidget(self._repo_label)
+        layout.addLayout(text_container, 1)
+
+        # ── 竖向三点按钮 ──
+        self._more_btn = QPushButton("⋮", self)
+        self._more_btn.setFixedSize(scale_font_size(28), scale_font_size(28))
+        self._more_btn.setCursor(Qt.PointingHandCursor)
+        self._more_btn.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(self._more_btn)
+
+        self._avatar.setCursor(Qt.PointingHandCursor)
+        self._name_label.setCursor(Qt.PointingHandCursor)
+        self._repo_label.setCursor(Qt.PointingHandCursor)
+        self._avatar.clicked.connect(self._open_repository)
+        self._name_label.clicked.connect(self._open_repository)
+        self._repo_label.clicked.connect(self._open_repository)
+        self._more_btn.clicked.connect(self._toggle_popup)
+        self.oauthResult.connect(self._on_oauth_result)
+        self._popup: "_GiteeMorePopup" | None = None
+
+    def _connect_config_signals(self):
+        for item in (
+            self.cfg.gitee_bound,
+            self.cfg.gitee_user_owner,
+            self.cfg.gitee_user_repo,
+        ):
+            item.valueChanged.connect(self._refresh_ui)
+
+    def _refresh_ui(self, _value=None):
+        is_bound = bool(self.cfg.gitee_bound.value)
+        owner = str(self.cfg.gitee_user_owner.value or "")
+        repo = str(self.cfg.gitee_user_repo.value or "")
+        avatar_size = scale_font_size(28)
+
+        if is_bound and owner:
+            self._bound_owner = owner
+            self._bound_repo = repo
+            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
+            self._name_label.setText(owner)
+            self._name_label.setToolTip(owner)
+            self._repo_label.setText(f"{repo} ↗")
+            self._repo_label.setToolTip(repo)
+        else:
+            self._bound_owner = ""
+            self._bound_repo = ""
+            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.setToolTip("未绑定")
+            self._name_label.setText("Gitee 未绑定")
+            self._name_label.setToolTip("Gitee 未绑定")
+            self._repo_label.setText("绑定后可备份与分享")
+            self._repo_label.setToolTip("绑定后可备份与分享")
+
+        # 更新三点按钮 tooltip
+        if self._binding:
+            self._more_btn.setToolTip("授权中…")
+            self._more_btn.setEnabled(False)
+        else:
+            self._more_btn.setEnabled(True)
+            if self._bound_owner:
+                self._more_btn.setToolTip(f"{owner} — 点击展开")
+            else:
+                self._more_btn.setToolTip("Gitee — 点击展开")
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QFrame#giteeAccountRow {
+                background: transparent;
+                border: none;
+            }
+        """)
+        self._name_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._repo_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        btn_size = scale_font_size(28)
+        self._more_btn.setFixedSize(btn_size, btn_size)
+        self._more_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {Colors.TEXT_MUTED};
+                background: transparent;
+                border: 1px solid {Colors.BORDER};
+                border-radius: {btn_size // 2}px;
+                {font_size_css(14)}
+                font-weight: bold;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                background: {Colors.HOVER_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border-color: {Colors.INFO};
+            }}
+            QPushButton:disabled {{
+                color: {Colors.TEXT_MUTED};
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+
+    def _open_repository(self):
+        if self._bound_owner and self._bound_repo:
+            webbrowser.open(f"https://gitee.com/{self._bound_owner}/{self._bound_repo}")
+
+    def _on_bind(self):
+        if self._binding:
+            return
+        dialog = _RepoVisibilityDialog(self.window())
+        dialog.chosen.connect(self._start_oauth_with_backup)
+        dialog.exec_()
+
+    def _start_oauth_with_backup(self, repo_private: bool):
+        self._sync_svc.backup_local()
+        self._start_oauth(repo_private)
+
+    def _start_oauth(self, repo_private: bool):
+        self._binding = True
+        self._refresh_ui()
+        worker = threading.Thread(
+            target=self._do_oauth,
+            args=(repo_private,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _do_oauth(self, repo_private: bool):
+        try:
+            from app.gateway.auth import get_oauth_backend
+
+            success, message = get_oauth_backend("gitee").bind(
+                repo_private=repo_private,
+            )
+            self.oauthResult.emit(success, message)
+        except Exception as error:
+            logger.error(f"[GiteeAccountRow] OAuth 异常: {error}")
+            self.oauthResult.emit(False, f"绑定异常：{error}")
+
+    def _on_oauth_result(self, success: bool, message: str):
+        self._binding = False
+        if success:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            GiteeUploader.get_instance().reset_config()
+            self._refresh_ui()
+            self._auto_enable_sync()
+            InfoBar.success(
+                title="绑定成功",
+                content=message,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+            return
+
+        self._refresh_ui()
+        InfoBar.error(
+            title="绑定失败",
+            content=message,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self.window(),
+        )
+
+    def _auto_enable_sync(self):
+        if self._sync_svc._state != "disabled":
+            return
+        from app.gateway.auth import get_oauth_backend
+
+        bound_info = get_oauth_backend("gitee").get_bound_info()
+        if bound_info and bound_info.get("token") and bound_info.get("owner"):
+            logger.info("[GiteeAccountRow] 检测到已绑定，自动启动配置同步")
+            self._sync_svc.enable(bound_info["token"], bound_info["owner"])
+
+    def _on_unbind(self):
+        owner = str(self.cfg.gitee_user_owner.value or "")
+        dialog = ConfirmDialog(
+            title="确认解绑",
+            content=f"解绑后上传将恢复使用共享图床仓库。\n当前绑定：{owner}",
+            confirm_text="确定解绑",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._do_unbind)
+        dialog.exec_()
+
+    def _do_unbind(self):
+        try:
+            from app.gateway.auth import get_oauth_backend
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            self._sync_svc.disable()
+            success, message = get_oauth_backend("gitee").unbind()
+            if not success:
+                raise RuntimeError(message)
+            GiteeUploader.get_instance().reset_config()
+
+            if self._sync_svc.restore_local():
+                self.cfg.load()
+
+            self._refresh_ui()
+            InfoBar.success(
+                title="已解绑",
+                content="Gitee 账号已解绑，配置已恢复",
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+        except Exception as error:
+            logger.error(f"[GiteeAccountRow] 解绑异常: {error}")
+            self._refresh_ui()
+            InfoBar.error(
+                title="解绑失败",
+                content=str(error),
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+
+    def refresh_style(self):
+        """主题或字号变化后重建头像、尺寸和样式。"""
+        avatar_size = scale_font_size(28)
+        self._avatar.setFixedSize(avatar_size, avatar_size)
+        btn_size = scale_font_size(28)
+        self._more_btn.setFixedSize(btn_size, btn_size)
+        self._refresh_ui()
+
+    def close_popup(self):
+        """关闭弹出的浮动卡片（供外部调用，如 TabPanel 切换时）"""
+        if self._popup and self._popup.isVisible():
+            self._popup.close()
+            self._popup = None
+
+    def _toggle_popup(self):
+        """点击 ⋮ 按钮切换浮动卡片显示状态"""
+        if self._popup and self._popup.isVisible():
+            self._popup.close()
+            self._popup = None
+            return
+
+        # 确保旧 popup 已清理
+        if self._popup:
+            self._popup.deleteLater()
+            self._popup = None
+
+        popup = _GiteeMorePopup(self)
+        popup.adjustSize()
+        popup_width = max(popup.sizeHint().width(), 220)
+        popup_height = popup.sizeHint().height()
+
+        # 定位：在 ⋮ 按钮上方弹出，右对齐
+        btn_global = self._more_btn.mapToGlobal(QPoint(0, 0))
+        screen_rect = QApplication.primaryScreen().availableGeometry()
+
+        # 计算 X：右对齐按钮右侧，避免超出屏幕右边界
+        x = btn_global.x() + self._more_btn.width() - popup_width
+        if x < screen_rect.left() + 4:
+            x = screen_rect.left() + 4
+
+        # 计算 Y：在按钮上方弹出
+        y = btn_global.y() - popup_height - 6
+        if y < screen_rect.top() + 4:
+            # 空间不够则向下弹出
+            y = btn_global.y() + self._more_btn.height() + 6
+
+        popup.setFixedSize(popup_width, popup_height)
+        popup.move(x, y)
+        popup.show()
+        self._popup = popup
+
+    def _on_popup_closed(self):
+        """浮动卡片关闭后的清理"""
+        self._popup = None
+
+
+# ── 浮动卡片 ──────────────────────────────────────────────
+
+
+class _GiteeMorePopup(QWidget):
+    """Gitee 更多操作浮动卡片 — WorkBuddy 风格
+
+    点击 GiteeAccountRow 的 ⋮ 按钮后弹出，
+    包含账号绑定/解绑操作 + 快捷设置（主题、输出模式、桌宠）。
+    """
+
+    def __init__(self, account_row: "GiteeAccountRow", parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._account_row = account_row
+        self._cfg = account_row.cfg
+        self._build_ui()
+
+    def _build_ui(self):
+        Colors.refresh()
+
+        # ── 主容器 ──
+        self._container = QWidget(self)
+        self._container.setObjectName("giteePopupContainer")
+        layout = QVBoxLayout(self._container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── 标题行 ──
+        title_label = QLabel("Gitee 账号", self._container)
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(13)};
+                font-weight: bold;
+                padding: 10px 14px 4px;
+            }}
+        """)
+        layout.addWidget(title_label)
+
+        # ── 虚线分隔 ──
+        sep1 = self._make_separator()
+        layout.addWidget(sep1)
+
+        # ── 账号信息区域 ──
+        self._info_widget = QWidget(self._container)
+        info_layout = QHBoxLayout(self._info_widget)
+        info_layout.setContentsMargins(14, 8, 14, 8)
+        info_layout.setSpacing(10)
+
+        self._popup_avatar = QLabel(self._info_widget)
+        self._popup_avatar.setFixedSize(36, 36)
+        self._popup_avatar.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(self._popup_avatar)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+        self._popup_name = QLabel("", self._info_widget)
+        self._popup_name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        )
+        self._popup_repo = QLabel("", self._info_widget)
+        self._popup_repo.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
+        )
+        text_col.addWidget(self._popup_name)
+        text_col.addWidget(self._popup_repo)
+        info_layout.addLayout(text_col, 1)
+        layout.addWidget(self._info_widget)
+
+        # ── 绑定/解绑按钮 ──
+        self._popup_action_btn = QPushButton("", self._container)
+        self._popup_action_btn.setCursor(Qt.PointingHandCursor)
+        self._popup_action_btn.setFixedHeight(32)
+        self._popup_action_btn.clicked.connect(self._on_action_clicked)
+        layout.addWidget(self._popup_action_btn, 0, Qt.AlignCenter)
+
+        # ── 间距 ──
+        layout.addSpacing(4)
+
+        # ── 分隔线 ──
+        sep2 = self._make_separator()
+        layout.addWidget(sep2)
+
+        # ── 快捷设置标题 ──
+        quick_title = QLabel("快捷设置", self._container)
+        quick_title.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_MUTED};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(11)};
+                padding: 6px 14px 2px;
+            }}
+        """)
+        layout.addWidget(quick_title)
+
+        # ── 深色模式切换 ──
+        self._dark_mode_row = self._make_switch_row(
+            "🌓  深色模式",
+            not self._cfg.ui_light_mode.value,
+            self._on_dark_mode_toggled,
+        )
+        layout.addWidget(self._dark_mode_row)
+
+        # ── 简洁输出切换 ──
+        self._compact_row = self._make_switch_row(
+            "📝  简洁输出",
+            self._cfg.ui_compact_tool_area.value,
+            self._on_compact_toggled,
+        )
+        layout.addWidget(self._compact_row)
+
+        # ── 桌宠开关 ──
+        self._pet_row = self._make_switch_row(
+            "🐾  桌宠",
+            self._cfg.pet_enabled.value,
+            self._on_pet_toggled,
+        )
+        layout.addWidget(self._pet_row)
+
+        # ── Tab 模式开关 ──
+        self._tab_row = self._make_switch_row(
+            "📑  Tab 模式",
+            self._cfg.enable_tab_manager.value,
+            self._on_tab_toggled,
+        )
+        layout.addWidget(self._tab_row)
+
+        layout.addSpacing(6)
+
+        # 容器样式
+        self._container.setStyleSheet("""
+            #giteePopupContainer {
+                background: transparent;
+            }
+        """)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self._container)
+
+        # 刷新账号状态
+        self._refresh_account_state()
+
+    def _make_separator(self) -> QFrame:
+        sep = QFrame(self._container)
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+        return sep
+
+    def _make_switch_row(self, label_text: str, checked: bool, callback) -> QWidget:
+        row = QWidget(self._container)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 3, 14, 3)
+        row_layout.setSpacing(8)
+
+        lbl = QLabel(label_text, row)
+        lbl.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)};"
+        )
+        switch = SwitchButton(row)
+        switch.setChecked(checked)
+        switch.checkedChanged.connect(callback)
+
+        row_layout.addWidget(lbl)
+        row_layout.addStretch(1)
+        row_layout.addWidget(switch)
+
+        # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
+        if not hasattr(self, '_switch_refs'):
+            self._switch_refs = []
+        self._switch_refs.append(switch)
+
+        return row
+
+    def _refresh_account_state(self):
+        """根据当前绑定状态刷新账号信息区域"""
+        is_bound = bool(self._cfg.gitee_bound.value)
+        owner = str(self._cfg.gitee_user_owner.value or "")
+        repo = str(self._cfg.gitee_user_repo.value or "")
+        avatar_size = 36
+
+        if is_bound and owner:
+            self._popup_avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._popup_avatar.setToolTip(f"{owner}/{repo}")
+            self._popup_name.setText(owner)
+            self._popup_repo.setText(f"{repo} ↗")
+            self._popup_action_btn.setText("解绑账号")
+            self._popup_action_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {Colors.ERROR};
+                    background: transparent;
+                    border: 1px solid {Colors.ERROR};
+                    border-radius: 6px;
+                    padding: 4px 20px;
+                    {get_font_family_css()} {font_size_css(12)};
+                }}
+                QPushButton:hover {{
+                    background: rgba(250, 81, 81, 0.10);
+                }}
+            """)
+        else:
+            self._popup_avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._popup_avatar.setToolTip("未绑定")
+            self._popup_name.setText("未绑定 Gitee")
+            self._popup_repo.setText("绑定后可备份与分享")
+            self._popup_action_btn.setText("绑定账号")
+            self._popup_action_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: #ffffff;
+                    background: {Colors.INFO};
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 20px;
+                    {get_font_family_css()} {font_size_css(12)};
+                }}
+                QPushButton:hover {{
+                    background: {Colors.INFO};
+                }}
+            """)
+
+    def _on_action_clicked(self):
+        """点击浮动卡片中的绑定/解绑按钮"""
+        if self._cfg.gitee_bound.value:
+            self._account_row._on_unbind()
+        else:
+            self._account_row._on_bind()
+        self.close()
+
+    # ── 快捷设置回调 ──
+
+    def _on_dark_mode_toggled(self, checked: bool):
+        """深色模式切换"""
+        self._cfg.ui_light_mode.value = not checked
+        self._cfg.save()
+
+    def _on_compact_toggled(self, checked: bool):
+        """简洁输出模式切换"""
+        self._cfg.ui_compact_tool_area.value = checked
+        self._cfg.save()
+
+    def _on_pet_toggled(self, checked: bool):
+        """桌宠开关切换"""
+        self._cfg.pet_enabled.value = checked
+        self._cfg.save()
+
+    def _on_tab_toggled(self, checked: bool):
+        """Tab 模式切换：先关闭浮动卡片，再切换模式"""
+        self._cfg.enable_tab_manager.value = checked
+        self._cfg.save()
+        # 延迟关闭浮动卡片：避免在 Signal 处理链（Indicator.mouseReleaseEvent）中
+        # 同步销毁 Indicator 导致 RuntimeError: wrapped C/C++ object deleted
+        QTimer.singleShot(0, self.close)
+        QTimer.singleShot(0, self._do_tab_toggle)
+
+    def _do_tab_toggle(self):
+        """实际执行 Tab 模式切换"""
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        TabManagerWindow.toggle_mode(enable=self._cfg.enable_tab_manager.value)
+
+    # ── 绘制圆角背景 ──
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        Colors.refresh()
+        bg = QColor(Colors.CONTENT_BG)
+        painter.setBrush(bg)
+        painter.setPen(Qt.NoPen)
+        r = 10
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), r, r)
+
+        # 边框
+        painter.setPen(QColor(Colors.BORDER))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), r, r)
+        painter.setPen(Qt.NoPen)
+
+    def sizeHint(self):
+        return self._container.sizeHint()
+
+    def closeEvent(self, event):
+        if self._account_row:
+            self._account_row._on_popup_closed()
+        super().closeEvent(event)
 
 
 # ── 卡片 ──────────────────────────────────────────────────

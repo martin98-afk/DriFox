@@ -322,6 +322,17 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard.checkedChanged.connect(self._on_lock_remote_toggled)
         content_layout.addWidget(self.lockRemoteCard)
 
+        # Tab 管理器
+        self.tabManagerCard = SwitchSettingCard(
+            get_icon("tab切换"),
+            "启用 Tab 管理器",
+            "将所有窗口整合到 Tab 面板",
+            configItem=self.cfg.enable_tab_manager,
+            parent=self,
+        )
+        self.tabManagerCard.checkedChanged.connect(self._on_tab_manager_toggled)
+        content_layout.addWidget(self.tabManagerCard)
+
         # 开机自启
         self.autoStartCard = SwitchSettingCard(
             get_icon("开机自动启动"),
@@ -885,6 +896,11 @@ class LLMSettingsCard(SystemCardFrame):
             service.start(background=True)
         if hasattr(self, "llmApiEnabledCard"):
             self.llmApiEnabledCard.setContent(f"http://localhost:{port}/docs")
+
+    def _on_tab_manager_toggled(self, enabled: bool):
+        """Tab 管理器开关切换"""
+        from app.widgets.tab_manager_window import TabManagerWindow
+        TabManagerWindow.toggle_mode(enable=enabled)
 
     def _on_lock_remote_toggled(self, enabled: bool):
         """锁屏远程开关：开启时保持系统/屏幕唤醒并锁屏，关闭时恢复休眠策略"""

@@ -227,7 +227,10 @@ class SimpleHoverTooltip(QWidget):
 
     def hide_tip(self):
         """隐藏 tooltip。"""
-        self.hide()
+        try:
+            self.hide()
+        except RuntimeError:
+            pass
 
     # ── 自绘 ─────────────────────────────────────────
 
@@ -310,10 +313,16 @@ class _HoverTooltipFilter(QObject):
 
     def _hide(self):
         if self._tooltip:
-            self._tooltip.hide_tip()
+            try:
+                self._tooltip.hide_tip()
+            except RuntimeError:
+                pass
 
     def _cleanup(self):
-        self._timer.stop()
+        try:
+            self._timer.stop()
+        except (RuntimeError, AttributeError):
+            pass
         self._hide()
 
     def refresh_theme(self):

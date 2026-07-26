@@ -490,6 +490,12 @@ class Settings(QConfig):
     # 开启后锁屏状态下也保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行
     lock_screen_remote_enabled = ConfigItem("System", "LockScreenRemote", False, BoolValidator())
 
+    # ========== Tab 管理器 ==========
+    enable_tab_manager = ConfigItem("UI", "EnableTabManager", False, BoolValidator())
+    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 250, RangeValidator(120, 500))
+    tab_panel_collapsed = ConfigItem("UI", "TabPanelCollapsed", False, BoolValidator())
+    tab_manager_geometry = ConfigItem("UI", "TabManagerGeometry", "")
+
 
 def update_theme_options():
     """从 ThemeManager 动态更新主题选项验证器

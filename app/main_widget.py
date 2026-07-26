@@ -1002,6 +1002,33 @@ class OpenAIChatToolWindow(ToolWindow):
         checker = UpdateChecker.get_instance(self)
         checker.check_update(silent=True)
 
+    # ── Tab 模式焦点守卫 ──
+
+    def _is_tab_active(self) -> bool:
+        """判断当前窗口是否为 Tab 管理器中的活动标签页
+
+        在 Tab 模式下，非活动标签页不应该通过 setFocus 抢夺输入焦点。
+        非 Tab 模式始终返回 True（独立窗口正常聚焦）。
+
+        Returns:
+            True — 可以安全调用 setFocus（非 Tab 模式 或 是当前活动标签页）
+            False — 当前窗口不是活动标签页，应跳过焦点操作
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None and tm.isVisible():
+                return tm.get_current_window() is self
+        except Exception:
+            pass
+        return True  # 非 Tab 模式：始终允许
+
+    def _focus_input_if_active(self, reason=Qt.OtherFocusReason):
+        """仅在活动窗口时聚焦输入框，避免 Tab 模式下焦点被后台窗口劫持"""
+        if self._is_tab_active() and self.input_area:
+            self.input_area.setFocus(reason)
+
     def _setup_engine_callbacks(self):
         """设置 ChatEngine 的回调"""
         callbacks = {
@@ -1538,6 +1565,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # 并标记为新会话模式，跳过历史会话恢复
             # 注意：不要设置 _session_initialized，让 showEvent 正常执行初始化
             new_instance._skip_restore_history = True  # 跳过历史会话恢复
+
+            # ── Tab 模式分支 ──
+            if self.cfg.enable_tab_manager.value:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.add_window(new_instance)
+                    logger.debug("[TabMode] 已添加新窗口到 Tab 管理器")
+                    return
+                # TabManagerWindow 实例不存在，降级到原有逻辑
 
             # 以弹窗方式显示
             from app.tool_popup import ToolPopupDialog
@@ -3290,8 +3328,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # 以便失败时隐藏入口、清理残留菜单）
             launcher = getattr(self, "_ui_plugin_edge_launcher", None)
             if launcher is not None and hasattr(self, "chat_scroll_area"):
+                # 先刷新卡片列表（更新内部状态）
                 launcher.refresh_plugins()
                 launcher.update_geometry(self.chat_scroll_area.geometry())
+                # Tab 模式下：共享 Launcher 由 TabManagerWindow 管理，隐藏 per-window launcher
+                try:
+                    from app.widgets.tab_manager_window import TabManagerWindow
+                    _tm = TabManagerWindow.get_instance()
+                    if _tm is not None and _tm.isVisible():
+                        launcher.hide()
+                except ImportError:
+                    pass
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -3815,6 +3862,35 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:  # noqa: BLE001
             InfoBar.error("保存失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
+    def _collect_active_windows_for_template(self) -> List["OpenAIChatToolWindow"]:
+        """收集模板加载时可用的活跃窗口。
+
+        Tab 模式特殊处理：QStackedWidget 隐藏非当前 tab（isVisible=False），
+        导致模板加载器只能看到当前 tab。改为直接读取 TabManagerWindow._windows。
+        """
+        if self.cfg.enable_tab_manager.value:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                windows = []
+                for w in tm._windows:
+                    try:
+                        if not getattr(w, "_is_destroyed", False):
+                            windows.append(w)
+                    except Exception:
+                        continue
+                return windows
+        # 独立模式：用 isVisible() 过滤
+        windows = []
+        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            try:
+                if not getattr(win, "_is_destroyed", False) and win.isVisible():
+                    windows.append(win)
+            except Exception:
+                continue
+        return windows
+
     def _handle_team_load(self, name: str):
         """应用模板：重新分配所有活跃窗口的 agent 身份并 join team。
 
@@ -3876,13 +3952,8 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 收集当前活跃窗口（排除已销毁的）
-        active_windows: List["OpenAIChatToolWindow"] = []
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
-            try:
-                if not getattr(win, "_is_destroyed", False) and win.isVisible():
-                    active_windows.append(win)
-            except Exception:
-                continue
+        # Tab 模式特殊处理：QStackedWidget 隐藏了非当前 tab，导致 isVisible 为 False
+        active_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
 
         # 排序：当前窗口排第一，其他窗口按 window_id 稳定排序
         def _sort_key(w: "OpenAIChatToolWindow"):
@@ -3912,13 +3983,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
             # 重新收集活跃窗口
-            after_windows: List["OpenAIChatToolWindow"] = []
-            for win in getattr(OpenAIChatToolWindow, "_instances", []):
-                try:
-                    if not getattr(win, "_is_destroyed", False) and win.isVisible():
-                        after_windows.append(win)
-                except Exception:
-                    continue
+            after_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
             after_windows.sort(key=_sort_key)
             new_windows = [w for w in after_windows if getattr(w, "_window_id", None) not in before_ids]
             active_windows = after_windows
@@ -3947,6 +4012,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._on_agent_changed(agent_name)
                     self._apply_agent_command_permissions(agent_name)
                     tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
+                    self._team_agent_name = agent_name
                     self._refresh_team_ui(agent_name)
                     self._sync_active_windows_to_team_manager()
                     self._start_team_watcher()
@@ -3956,6 +4022,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         win._on_agent_changed(agent_name)
                     if hasattr(win, "_apply_agent_command_permissions"):
                         win._apply_agent_command_permissions(agent_name)
+                    win._team_agent_name = agent_name
                     tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
                     if hasattr(win, "_refresh_team_ui"):
                         try:
@@ -4032,6 +4099,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._on_agent_changed(agent_name)
             if hasattr(win, "_apply_agent_command_permissions"):
                 win._apply_agent_command_permissions(agent_name)
+            win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
@@ -4361,12 +4429,18 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # 同时更新自身标题（供 Tab 管理器监听 windowTitleChanged）
+        try:
+            self.setWindowTitle(title)
+        except Exception:
+            pass
+
     def _sync_dialog_title(self):
         """同步对话框窗口标题为当前会话标题，供 Windows 任务栏区分各窗口
 
         当会话标题变更（用户重命名 / 主题摘要生成 / 切换会话）时调用，
         确保每个窗口在 Windows 任务栏右键菜单中显示不同的会话标题。
-        
+
         团队模式下窗口标题由 _refresh_team_ui 管理（显示 agent 名称），
         此处跳过以避免覆盖。
         """
@@ -4380,6 +4454,11 @@ class OpenAIChatToolWindow(ToolWindow):
             dialog = self.window() if hasattr(self, "window") else None
             if dialog and hasattr(dialog, "setWindowTitle"):
                 dialog.setWindowTitle(title)
+        except Exception:
+            pass
+        # 同时更新自身标题（供 Tab 管理器监听 windowTitleChanged）
+        try:
+            self.setWindowTitle(title)
         except Exception:
             pass
 
@@ -6736,7 +6815,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 重新定位 UI 插件左侧边缘入口（基于 chat_scroll_area 几何）
         launcher = getattr(self, "_ui_plugin_edge_launcher", None)
         if launcher is not None and hasattr(self, "chat_scroll_area"):
-            launcher.update_geometry(self.chat_scroll_area.geometry())
+            try:
+                if not sip.isdeleted(launcher):
+                    launcher.update_geometry(self.chat_scroll_area.geometry())
+            except RuntimeError, AttributeError:
+                pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
             self.pixel_pet.resize_handle(self.width(), self.height())
@@ -7007,6 +7090,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
+
+        # ── Tab 模式：刷新 TabManagerWindow 样式 ──
+        # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
+        # OpenAIChatToolWindow._instances，导致 TabManagerWindow 注册的
+        # refresh_target 回调从未触发。此处直接更新。
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow as _TabManagerWindow
+
+            _tm = _TabManagerWindow.get_instance()
+            if _tm is not None:
+                _tm._on_theme_changed()
+        except Exception as e:
+            logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -7302,6 +7398,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         launcher.refresh_plugins()
                 except RuntimeError, AttributeError:
                     pass
+            # Tab 模式下也刷新共享 Launcher
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None and _tm.isVisible():
+                    _tm._update_shared_launcher()
+            except Exception:
+                pass
             logger.debug("[HotReload] UI 插件边缘入口已刷新")
 
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
@@ -13341,8 +13445,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 被 _is_streaming 守卫拦住，现在重新触发处理
             self._check_and_process_pending()
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _do_post_stream_cleanup(self):
         """流式完成后延迟执行的清理和同步操作（不阻塞 UI 渲染流程）"""
@@ -14063,8 +14166,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.approve_tool_permission(tool_call_id, False, True)
             else:
                 self.backend.deny_tool_permission(tool_call_id)
-            if self.input_area:
-                self.input_area.setFocus()
+            self._focus_input_if_active()
             return
 
         if not self._question_tool_call_id:
@@ -14076,8 +14178,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.chat_engine:
             self.backend.provide_question_answer(answer)
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _on_question_cancelled(self):
         """用户关闭问题窗口时，返回空答案让大模型继续"""
@@ -14100,8 +14201,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
             self.backend.deny_tool_permission(tool_call_id)
-            if self.input_area:
-                self.input_area.setFocus()
+            self._focus_input_if_active()
             return
 
         if not self._question_tool_call_id:
@@ -14112,8 +14212,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend.chat_engine:
             self.backend.provide_question_answer("")
 
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
     def _on_question_preview_requested(self, payload: object):
         """显示权限请求的完整工具参数预览。"""
@@ -14625,6 +14724,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._create_new_session()
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
+
+        # Tab 模式下同步更新 Tab 图标
+        if self.cfg.enable_tab_manager.value:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
+                tm = TabManagerWindow.get_instance()
+                if tm and self in tm._windows:
+                    idx = tm._windows.index(self)
+                    _update_tab_icon(idx, project)
+            except Exception:
+                pass
 
     def _on_project_filter_changed(self, text: str):
         """输入过滤文本变化时同步过滤项目列表"""
@@ -15945,8 +16056,7 @@ class OpenAIChatToolWindow(ToolWindow):
             duration=2000,
             parent=self,
         )
-        if self.input_area:
-            self.input_area.setFocus()
+        self._focus_input_if_active()
 
         # ⚠️ 立即更新时间线节点（即使后台 finalize 还未完成）
         self._update_node_preview()
@@ -16454,8 +16564,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
 
-        # 重新聚焦输入框
-        self.input_area.setFocus()
+        # 重新聚焦输入框（仅当此窗口为活动 Tab 时）
+        self._focus_input_if_active()
         logger.info("[AutoLoop] UI unlocked")
         logger.info("[AutoLoop] UI unlocked")
 

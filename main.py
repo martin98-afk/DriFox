@@ -303,14 +303,27 @@ def main():
             window.showNormal()
 
     def _show_popup():
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.config import Settings
 
-        popup = ToolPopupDialog(chat_window, None)
-        popup.setWindowTitle("Drifox")
-        chat_window._skip_restore_history = True
-        _guard.show_requested.connect(lambda: _activate_window(popup))
-        popup.show()
-        logger.info("LLM Chatter 启动成功")
+        if Settings.get_instance().enable_tab_manager.value:
+            # ── Tab 模式 ──
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.create_instance()
+            tm.add_window(chat_window)
+            _guard.show_requested.connect(lambda: _activate_window(tm))
+            tm.show()
+            logger.info("DriFox 以 Tab 管理器模式启动")
+        else:
+            # ── 独立窗口模式（原有逻辑）──
+            from app.tool_popup import ToolPopupDialog
+
+            popup = ToolPopupDialog(chat_window, None)
+            popup.setWindowTitle("Drifox")
+            chat_window._skip_restore_history = True
+            _guard.show_requested.connect(lambda: _activate_window(popup))
+            popup.show()
+            logger.info("DriFox 以独立窗口模式启动")
 
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)

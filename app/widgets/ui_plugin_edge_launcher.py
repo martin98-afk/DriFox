@@ -223,6 +223,9 @@ class UIPluginEdgeLauncher(QWidget):
         super().__init__(main_widget)
         # 保留 main_widget 强引用（用于取窗口高度做垂直居中）
         self._main_widget = main_widget
+        # 共享 Launcher 模式下，卡片操作的目标窗口（与 _main_widget 分离）
+        # 独立模式下 = _main_widget；Tab 模式下 = 当前活跃标签页窗口
+        self._card_target_widget: Optional[QWidget] = None
         # 是否已重定父到顶层窗口（保证"窗口左边缘"而非"内容区左边缘"）
         self._reparented_to_top: bool = False
         # 缓存的插件列表 [(card_id, title, plugin_name), ...]
@@ -262,6 +265,15 @@ class UIPluginEdgeLauncher(QWidget):
         self.setMouseTracking(True)
 
     # ── 公开 API ────────────────────────────────────────────
+    def set_card_target(self, widget: QWidget) -> None:
+        """设置卡片操作的目标窗口（共享 Launcher 使用）
+
+        Args:
+            widget: 目标 OpenAIChatToolWindow 实例，菜单点击时传递给
+                    UIPluginRegistry.toggle_floating_card 以定位到正确窗口。
+        """
+        self._card_target_widget = widget
+
     def update_geometry(self, chat_rect: QRect = QRect()) -> None:
         """兼容接口 —— 被 MainWidget.resizeEvent 调用，重定向到位置同步。
 
@@ -273,9 +285,14 @@ class UIPluginEdgeLauncher(QWidget):
 
     # ── 显示 / 位置同步（作为主窗口内部子控件，父坐标定位）────────
     def showEvent(self, event) -> None:  # noqa: N802
-        """显示时同步一次位置（首次显示或窗口恢复时触发）"""
+        """显示时同步一次位置（首次显示或窗口恢复时触发）
+
+        使用 singleShot(0) 延迟执行：确保父窗口（特别是从 Tab 模式迁出后
+        重新创建的 ToolPopupDialog）已完成几何初始化，避免定位到 (0,0) 区域。
+        """
         super().showEvent(event)
-        self._sync_position()
+        # 延迟同步：让父窗口先完成布局和几何初始化
+        QTimer.singleShot(0, self._sync_position)
         self.raise_()
 
     def _ensure_parent(self) -> QWidget:
@@ -315,6 +332,11 @@ class UIPluginEdgeLauncher(QWidget):
 
         parent = self._ensure_parent()
         if parent is None or not parent.isVisible():
+            return
+
+        # 父窗口几何无效（刚创建未完成布局）→ 延迟重试
+        if parent.width() < 10 or parent.height() < 10:
+            QTimer.singleShot(50, self._sync_position)
             return
 
         h = max(LINE_HEIGHT, CAPSULE_HEIGHT) + 12
@@ -568,12 +590,17 @@ class UIPluginEdgeLauncher(QWidget):
             self._click_just_closed_menu = False
 
     def _on_menu_action(self, card_id: str) -> None:
-        """菜单项点击：调用当前窗口的 UIPluginRegistry.toggle_floating_card"""
+        """菜单项点击：调用当前窗口的 UIPluginRegistry.toggle_floating_card
+
+        使用 _card_target_widget（共享 Launcher 可动态设置）作为目标窗口，
+        回退到 _main_widget。使用 getattr 安全访问（测试中可能绕过 __init__）。
+        """
         try:
             from app.core.ui_plugin_registry import UIPluginRegistry
 
             registry = UIPluginRegistry.get_instance()
-            registry.toggle_floating_card(card_id, main_widget=self._main_widget)
+            target = getattr(self, '_card_target_widget', None) or self._main_widget
+            registry.toggle_floating_card(card_id, main_widget=target)
         except Exception as e:
             logger.warning(f"[EdgeLauncher] 打开卡片 {card_id!r} 失败：{e}")
 

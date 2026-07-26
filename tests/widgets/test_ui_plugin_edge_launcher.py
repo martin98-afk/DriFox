@@ -104,6 +104,7 @@ def _build_logic_only_launcher(launcher_mod, main_widget_mock):
     """
     inst = launcher_mod.UIPluginEdgeLauncher.__new__(launcher_mod.UIPluginEdgeLauncher)
     inst._main_widget = main_widget_mock
+    inst._card_target_widget = None  # 共享 Launcher 模式用
     inst._card_infos = []
     inst._state = "COLLAPSED"
     inst._menu = None

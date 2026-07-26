@@ -92,6 +92,7 @@ from app.utils.design_tokens import (
     current_theme,
     fade_in_widget,
     font_size_css,
+    get_unified_scrollbar_style,
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
@@ -4311,7 +4312,7 @@ class CodeWebViewer(QWebEngineView):
                     // Page Down / 键盘滚动 增量可能更大（~视口高度），
                     // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
                     // 仅过滤 auto-scroll 直接跳到底部的大跳变。
-                    if (delta < 2000) {{
+                    if (delta > 0 && delta < 2000) {{
                         window._userScrolledWithin = true;
                     }}
                 }});
@@ -4794,6 +4795,7 @@ class CodeWebViewer(QWebEngineView):
             # 流式分支：复用共享的 save+restore 模板，末尾追加 auto-scroll 逻辑
             # （工具块 restore 后 scrollHeight 可能增加，需要重新判断滚到底）
             auto_scroll_js = (
+                "window._suppressScrollEvent=true;"
                 "if(!window._userScrolledWithin){"
                 "document.body.scrollTop=document.body.scrollHeight;"
                 "}else{"
@@ -5651,7 +5653,11 @@ class PlainTextViewer(QWidget):
         self.setMaximumHeight(self.MAX_HEIGHT)
 
     def _apply_text_style(self):
-        """应用文本样式（从 Colors token 读取颜色）"""
+        """应用文本样式（从 Colors token 读取颜色）
+
+        滚动条复用项目统一的 get_unified_scrollbar_style，与
+        tab_panel / project_selector / settings 等列表的视觉风格保持一致。
+        """
         font_css = get_font_family_css()
         text_color = Colors.USER_CARD_TEXT
         self.text_edit.setStyleSheet(f"""
@@ -5664,6 +5670,7 @@ class PlainTextViewer(QWidget):
                 line-height: 1.5;
                 selection-background-color: rgba(102, 198, 255, 0.28);
             }}
+            {get_unified_scrollbar_style(6)}
         """)
 
     def refresh_theme(self):
@@ -6091,10 +6098,20 @@ class MessageCard(SimpleCardWidget):
                 theme["bg"] = f"rgba({r}, {g}, {b}, {new_a})"
 
         if error:
-            bg = Colors.ERROR  # 使用语义色
-            theme["bg"] = "#2A1F1F"
-            theme["border"] = "#A94444"
-            theme["accent"] = "#FF7B7B"
+            # 检测深浅色模式，选择合适的错误配色
+            try:
+                from app.utils.theme_manager import theme_manager
+                _is_light = theme_manager.is_light_theme()
+            except Exception:
+                _is_light = False
+            if _is_light:
+                theme["bg"] = "#FFF5F5"       # 浅粉底
+                theme["border"] = "#FCA5A5"    # 浅红边框
+                theme["accent"] = "#DC2626"    # 深红强调
+            else:
+                theme["bg"] = "#2A1F1F"       # 暗红褐底
+                theme["border"] = "#A94444"    # 暗红边框
+                theme["accent"] = "#FF7B7B"    # 亮红强调
         return theme
 
     def refresh_theme(self):
@@ -6852,8 +6869,14 @@ class MessageCard(SimpleCardWidget):
 
     def _on_webengine_context_lost(self):
         """WebEngine 上下文丢失时显示恢复提示"""
-        # 设置卡片为错误状态样式
-        self._apply_card_style(border="#A94444")
+        # 设置卡片为错误状态样式（根据深浅模式选择边框色）
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+        _border = "#FCA5A5" if _is_light else "#A94444"
+        self._apply_card_style(border=_border)
         # 标记需要恢复
         self._webengine_needs_restore = True
 
@@ -7114,7 +7137,14 @@ class MessageCard(SimpleCardWidget):
             self._retrying = False
             # 显示错误状态栏（而不是隐藏）
             self._show_error_status(error_message)
-            bd, bg = "#ff4d4d", "#2a1f1f"
+            # 检测深浅色模式，选择合适背景
+            try:
+                from app.utils.theme_manager import theme_manager
+                _is_light = theme_manager.is_light_theme()
+            except Exception:
+                _is_light = False
+            bd = "#ff4d4d"
+            bg = "#FFF5F5" if _is_light else "#2a1f1f"
         else:
             self._retry_status_widget.setVisible(False)
             bd, bg = self._base_border, self._base_bg
@@ -7127,6 +7157,14 @@ class MessageCard(SimpleCardWidget):
         self._retry_attempt_label.setText(error_message if error_message else "请求失败")
         self._retry_wait_label.setText("")
         self._retry_spinner.setText("⚠")
+        # 检测深浅色模式，选择合适的错误文字颜色
+        try:
+            from app.utils.theme_manager import theme_manager
+            _is_light = theme_manager.is_light_theme()
+        except Exception:
+            _is_light = False
+        _err_text_color = "#DC2626" if _is_light else "#ff6b6b"
+        _err_sub_color = "#B91C1C" if _is_light else "#ff9999"
         # 改变状态栏样式为错误风格
         self._retry_status_widget.setStyleSheet(
             """
@@ -7140,7 +7178,7 @@ class MessageCard(SimpleCardWidget):
         self._retry_type_label.setStyleSheet(
             f"""
             QLabel {{
-                color: #ff6b6b;
+                color: {_err_text_color};
                 font-size: {scale_font_size(14)}px;
                 font-weight: bold;
             }}
@@ -7149,7 +7187,7 @@ class MessageCard(SimpleCardWidget):
         self._retry_attempt_label.setStyleSheet(
             f"""
             QLabel {{
-                color: #ff9999;
+                color: {_err_sub_color};
                 font-size: {scale_font_size(12)}px;
             }}
             """
