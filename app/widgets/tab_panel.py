@@ -299,8 +299,9 @@ class UIPluginRow(QFrame):
 
     clicked = pyqtSignal()
 
-    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None):
+    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = ""):
         super().__init__(parent)
+        self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         self._title_label = QLabel(title, self)
@@ -324,7 +325,16 @@ class UIPluginRow(QFrame):
             self._icon_label.clear()
 
     def refresh_style(self):
-        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(12)}")
+        """刷新主题样式：字体 + 颜色 + 主题相关图标"""
+        from app.utils.utils import get_unified_font
+
+        # 应用系统字体（避免 stylesheet 继承问题）
+        self._title_label.setFont(get_unified_font(12))
+        self._title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; "
+            f"{get_font_family_css()} "
+            f"{font_size_css(12)}"
+        )
         self._icon_label.setStyleSheet("background: transparent;")
         self.setStyleSheet(f"""
             #uiPluginRow {{
@@ -335,6 +345,20 @@ class UIPluginRow(QFrame):
                 background: {Colors.HOVER_BG};
             }}
         """)
+
+        # 重新获取主题相关图标（浅/深色主题图标不同）
+        if self._plugin_name:
+            try:
+                from app.core.plugin_manager import PluginManager
+
+                pm = PluginManager.get_instance()
+                plugin = pm.get_plugin(self._plugin_name)
+                icon_config = getattr(plugin, "icon_config", None) if plugin else None
+                icon_path = icon_config.get("dark" if isDarkTheme() else "light") if icon_config else None
+                if icon_path:
+                    self.set_icon(QIcon(str(icon_path)))
+            except Exception:
+                pass
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -381,19 +405,41 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：UI 插件列表 ──
-        self._plugin_section = QWidget(self)
+        # ── 顶部：UI 插件列表（带滚动） ──
+        self._plugin_scroll = QScrollArea(self)
+        self._plugin_scroll.setWidgetResizable(True)
+        self._plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._plugin_scroll.setFrameShape(QFrame.NoFrame)
+        self._plugin_scroll.setMaximumHeight(180)  # 最多显示 ~4 个插件项，超出滚动
+        self._plugin_scroll.setStyleSheet(
+            f"""
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            {get_unified_scrollbar_style(4)}
+            """
+        )
+        self._plugin_scroll.viewport().setStyleSheet("background: transparent;")
+
+        self._plugin_section = QWidget(self._plugin_scroll)
         plugin_layout = QVBoxLayout(self._plugin_section)
-        self._plugin_layout = plugin_layout
         plugin_layout.setContentsMargins(6, 6, 6, 4)
         plugin_layout.setSpacing(2)
+        self._plugin_layout = plugin_layout
         plugin_title = CaptionLabel("UI 插件", self._plugin_section)
         self._plugin_title = plugin_title
         plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(11)}")
         plugin_layout.addWidget(plugin_title)
         self._plugin_section.setStyleSheet("background: transparent;")
         self._plugin_section.setVisible(False)
-        layout.addWidget(self._plugin_section)
+        self._plugin_scroll.setVisible(False)  # 无插件时隐藏整个滚动区域
+        self._plugin_scroll.setWidget(self._plugin_section)
+        layout.addWidget(self._plugin_scroll)
 
         # ── 顶部：新建按钮 ──
         top_bar = QWidget(self)
@@ -516,12 +562,18 @@ class TabPanel(QWidget):
 
         plugin_manager = PluginManager.get_instance()
         for card_id, title, plugin_name in infos:
-            row = UIPluginRow(title, self._get_plugin_icon(plugin_manager, plugin_name), self._plugin_section)
+            row = UIPluginRow(
+                title,
+                self._get_plugin_icon(plugin_manager, plugin_name),
+                self._plugin_section,
+                plugin_name=plugin_name,  # 传入插件名，主题刷新时重新获取图标
+            )
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
             self._plugin_layout.addWidget(row)
             self._plugin_buttons.append(row)
 
         self._plugin_section.setVisible(bool(infos))
+        self._plugin_scroll.setVisible(bool(infos))
         self._refresh_plugin_style()
 
     @staticmethod
