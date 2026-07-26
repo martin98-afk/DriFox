@@ -324,22 +324,34 @@ class TabManagerWindow(QWidget):
 
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 
-        # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标
+        # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
         def _on_win_title_changed(_new_title, _idx=tab_idx, _win=window):
             if _sip.isdeleted(_win):
                 return
-            # 更新标题
+            # 更新 Tab 标题
             t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
             self._tab_panel.update_tab_title(_idx, t)
             # 更新项目图标
             p = getattr(_win, "_current_project", None) or ""
             _update_tab_icon(_idx, p)
+            # 团队模式：显示角色胶囊
+            team_agent = getattr(_win, "_team_agent_name", "") or ""
+            if team_agent:
+                self._tab_panel.update_tab_capsule(_idx, team_agent)
+            else:
+                self._tab_panel.clear_tab_capsule(_idx)
+            # 如果该窗口是当前选中 Tab，同步宿主窗口标题
+            if self._tab_panel.active_index == _idx:
+                self._sync_window_title()
 
         window.windowTitleChanged.connect(_on_win_title_changed)
 
-        # 立即触发一次初始图标更新
+        # 立即触发一次初始图标更新 + 团队胶囊状态同步
         logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
         _update_tab_icon(tab_idx, project)
+        team_agent = getattr(window, "_team_agent_name", "") or ""
+        if team_agent:
+            self._tab_panel.update_tab_capsule(tab_idx, team_agent)
 
         # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
         _hide_edge_launcher(window)
@@ -384,10 +396,22 @@ class TabManagerWindow(QWidget):
 
     # ── Tab 回调 ──
 
+    def _sync_window_title(self):
+        """将 TabManagerWindow 标题同步为当前窗口的会话标题"""
+        win = self.get_current_window()
+        if win:
+            t = win.windowTitle()
+            if t:
+                self.setWindowTitle(t)
+                return
+        self.setWindowTitle("飘狐-DriFox")
+
     def _on_tab_selected(self, index: int):
         if 0 <= index < len(self._windows):
             self._content_area.setCurrentWidget(self._windows[index])
             self.activeTabChanged.emit(index)
+            # 切换 tab 时同步宿主窗口标题
+            self._sync_window_title()
 
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):

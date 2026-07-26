@@ -15,16 +15,16 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon as FIF, TransparentToolButton, isDarkTheme
+from qfluentwidgets import CaptionLabel, FluentIcon as FIF, PushButton, TransparentPushButton, TransparentToolButton, isDarkTheme
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
+from app.widgets.elided_label import _ElidedLabel
 
 
 class TabItem(QFrame):
@@ -44,7 +44,7 @@ class TabItem(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(8, 4, 4, 4)
         layout.setSpacing(6)
 
         # 图标
@@ -67,10 +67,16 @@ class TabItem(QFrame):
                     pass
         layout.addWidget(self._icon_label)
 
-        # 标题（使用系统 UI 字号，不自设固定大小）
-        self._title_label = BodyLabel(self._title, self)
+        # ── 团队角色胶囊（默认隐藏）──
+        self._capsule_label = QLabel(self)
+        self._capsule_label.setVisible(False)
+        self._capsule_label.setFixedHeight(20)
+        self._capsule_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        layout.addWidget(self._capsule_label)
+
+        # 标题（使用 _ElidedLabel 自动省略，保证关闭按钮始终可见）
+        self._title_label = _ElidedLabel(self._title, self)
         self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; background: transparent;")
-        self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._title_label, 1)
 
         # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE）
@@ -103,6 +109,30 @@ class TabItem(QFrame):
                         self._icon_label.setPixmap(pixmap)
                 except Exception:
                     pass
+
+    def set_capsule(self, text: str, color: str = ""):
+        """显示团队角色胶囊"""
+        if not color:
+            # 从 agent 名 hash 生成稳定色
+            h = abs(hash(text)) % 360
+            color = f"hsl({h}, 65%, 50%)"
+        self._capsule_label.setText(text)
+        self._capsule_label.setStyleSheet(f"""
+            QLabel {{
+                background: {color};
+                color: white;
+                border-radius: 4px;
+                padding: 1px 6px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+        """)
+        self._capsule_label.setVisible(True)
+
+    def clear_capsule(self):
+        """隐藏团队角色胶囊"""
+        self._capsule_label.setVisible(False)
+        self._capsule_label.setText("")
 
     def enterEvent(self, event):
         self._close_btn.setVisible(True)
@@ -163,25 +193,6 @@ class TabPanel(QWidget):
         self._active_index: int = -1
         self._setup_ui()
 
-    _BTN_STYLE = f"""
-        QPushButton {{
-            background: transparent;
-            color: {Colors.TEXT_SECONDARY};
-            border: none;
-            border-radius: 6px;
-            padding: 8px 16px;
-            text-align: left;
-            font-size: 13px;
-        }}
-        QPushButton:hover {{
-            background: {Colors.HOVER_BG};
-            color: {Colors.TEXT_PRIMARY};
-        }}
-        QPushButton:pressed {{
-            background: {Colors.SELECTED_BG};
-        }}
-    """
-
     _SEPARATOR_STYLE = f"""
         QFrame {{
             background: {Colors.BORDER};
@@ -198,9 +209,8 @@ class TabPanel(QWidget):
         top_bar = QWidget(self)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(6, 6, 6, 4)
-        self._new_btn = QPushButton("＋ 新建标签页", top_bar)
+        self._new_btn = TransparentPushButton(FIF.ADD, "新建标签页", top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setStyleSheet(self._BTN_STYLE)
         self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
@@ -232,9 +242,8 @@ class TabPanel(QWidget):
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(6, 4, 6, 6)
 
-        self._settings_btn = QPushButton("⚙ 设置", bottom_bar)
+        self._settings_btn = TransparentPushButton(FIF.SETTING, "设置", bottom_bar)
         self._settings_btn.setCursor(Qt.PointingHandCursor)
-        self._settings_btn.setStyleSheet(self._BTN_STYLE)
         self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
         bottom_layout.addWidget(self._settings_btn)
@@ -324,6 +333,16 @@ class TabPanel(QWidget):
         """更新 Tab 图标"""
         if 0 <= index < len(self._items):
             self._items[index].set_icon(icon)
+
+    def update_tab_capsule(self, index: int, text: str):
+        """显示团队角色胶囊"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_capsule(text)
+
+    def clear_tab_capsule(self, index: int):
+        """隐藏团队角色胶囊"""
+        if 0 <= index < len(self._items):
+            self._items[index].clear_capsule()
 
     @property
     def count(self) -> int:
