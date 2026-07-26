@@ -12,13 +12,14 @@ import webbrowser
 from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.common_dialogs import ConfirmDialog
+from app.widgets.elided_label import _ElidedLabel
 
 _AVATAR_COLORS = [
     "#c71d23",
@@ -62,6 +63,15 @@ class _ClickableAvatar(QLabel):
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
+
+
+class _ClickableElidedLabel(_ElidedLabel):
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 # ── 仓库可见性选择弹窗（参考 _ProjectExportChoiceDialog） ──
@@ -174,6 +184,147 @@ class _RepoVisibilityDialog(MaskDialogBase):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._center()
+
+
+# ── Tab 模式紧凑账户行 ────────────────────────────────────
+
+
+class GiteeAccountRow(QFrame):
+    """Tab 模式底部的紧凑 Gitee 账户快捷栏。"""
+
+    oauthResult = pyqtSignal(bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("giteeAccountRow")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.cfg = Settings.get_instance()
+        self._binding = False
+        self._bound_owner = ""
+        self._bound_repo = ""
+
+        from app.core.config_sync import ConfigSyncService
+
+        self._sync_svc = ConfigSyncService.get_instance()
+        self._setup_ui()
+        self._connect_config_signals()
+        self._refresh_ui()
+
+    def _setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 5, 8, 7)
+        layout.setSpacing(8)
+
+        avatar_size = scale_font_size(28)
+        self._avatar = _ClickableAvatar(self)
+        self._avatar.setFixedSize(avatar_size, avatar_size)
+        self._avatar.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._avatar)
+
+        text_container = QVBoxLayout()
+        text_container.setContentsMargins(0, 0, 0, 0)
+        text_container.setSpacing(0)
+
+        self._name_label = _ClickableElidedLabel("", self)
+        self._repo_label = _ClickableElidedLabel("", self)
+        text_container.addWidget(self._name_label)
+        text_container.addWidget(self._repo_label)
+        layout.addLayout(text_container, 1)
+
+        self._action_btn = QPushButton("绑定", self)
+        self._action_btn.setFixedWidth(scale_font_size(58))
+        self._action_btn.setMinimumHeight(scale_font_size(28))
+        self._action_btn.setCursor(Qt.PointingHandCursor)
+        layout.addWidget(self._action_btn)
+
+    def _connect_config_signals(self):
+        for item in (
+            self.cfg.gitee_bound,
+            self.cfg.gitee_user_owner,
+            self.cfg.gitee_user_repo,
+        ):
+            item.valueChanged.connect(self._refresh_ui)
+
+    def _refresh_ui(self, _value=None):
+        is_bound = bool(self.cfg.gitee_bound.value)
+        owner = str(self.cfg.gitee_user_owner.value or "")
+        repo = str(self.cfg.gitee_user_repo.value or "")
+        avatar_size = scale_font_size(28)
+
+        if is_bound and owner:
+            self._bound_owner = owner
+            self._bound_repo = repo
+            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
+            self._name_label.setText(owner)
+            self._name_label.setToolTip(owner)
+            self._repo_label.setText(f"{repo} ↗")
+            self._repo_label.setToolTip(repo)
+        else:
+            self._bound_owner = ""
+            self._bound_repo = ""
+            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.setToolTip("未绑定")
+            self._name_label.setText("Gitee 未绑定")
+            self._name_label.setToolTip("Gitee 未绑定")
+            self._repo_label.setText("绑定后可备份与分享")
+            self._repo_label.setToolTip("绑定后可备份与分享")
+
+        if self._binding:
+            self._action_btn.setText("授权中…")
+            self._action_btn.setEnabled(False)
+        else:
+            self._action_btn.setEnabled(True)
+            self._action_btn.setText("解绑" if self._bound_owner else "绑定")
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QFrame#giteeAccountRow {
+                background: transparent;
+                border: none;
+            }
+        """)
+        self._name_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._repo_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        if self._bound_owner:
+            self._action_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: #fa5151;
+                    background: transparent;
+                    border: 1px solid #fa5151;
+                    border-radius: 5px;
+                    {font_size_css(11)}
+                }}
+                QPushButton:hover {{ background: rgba(250, 81, 81, 0.10); }}
+            """)
+        else:
+            self._action_btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: #ffffff;
+                    background: {Colors.INFO};
+                    border: none;
+                    border-radius: 5px;
+                    {font_size_css(11)}
+                }}
+                QPushButton:hover {{ background: {Colors.BORDER_ACCENT}; }}
+                QPushButton:disabled {{ color: {Colors.TEXT_MUTED}; background: {Colors.HOVER_BG}; }}
+            """)
+
+    def refresh_style(self):
+        """主题或字号变化后重建头像、尺寸和样式。"""
+        avatar_size = scale_font_size(28)
+        self._avatar.setFixedSize(avatar_size, avatar_size)
+        self._action_btn.setFixedWidth(scale_font_size(58))
+        self._action_btn.setMinimumHeight(scale_font_size(28))
+        self._refresh_ui()
 
 
 # ── 卡片 ──────────────────────────────────────────────────
