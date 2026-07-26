@@ -33,6 +33,7 @@ from qfluentwidgets import (
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
+from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
@@ -341,6 +342,7 @@ class UIPluginRow(QFrame):
         super().mousePressEvent(event)
 
 
+class TabPanel(QWidget):
     """左侧 Tab 列表面板"""
 
     tabSelected = pyqtSignal(int)  # 选中 Tab 索引
@@ -357,6 +359,7 @@ class UIPluginRow(QFrame):
         self._plugin_title: Optional[CaptionLabel] = None
         self._plugin_infos: list[tuple[str, str, str]] = []
         self._plugin_buttons: list[UIPluginRow] = []
+        self._gitee_account_row: Optional[GiteeAccountRow] = None
         self._anim_phase: float = 0.0  # 彩虹动画相位
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
@@ -452,6 +455,14 @@ class UIPluginRow(QFrame):
         bottom_layout.addWidget(self._settings_btn)
 
         layout.addWidget(bottom_bar)
+
+        account_separator = QFrame(self)
+        account_separator.setFrameShape(QFrame.HLine)
+        account_separator.setStyleSheet(self._SEPARATOR_STYLE)
+        layout.addWidget(account_separator)
+
+        self._gitee_account_row = GiteeAccountRow(self)
+        layout.addWidget(self._gitee_account_row)
 
     def _on_settings_clicked(self):
         """打开设置卡片"""
@@ -698,6 +709,8 @@ class UIPluginRow(QFrame):
             # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
             item.repaint()
         self._refresh_plugin_style()
+        if self._gitee_account_row is not None:
+            self._gitee_account_row.refresh_style()
 
     @property
     def count(self) -> int:

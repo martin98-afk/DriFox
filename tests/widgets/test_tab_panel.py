@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """TabPanel 组件测试"""
 
+from unittest.mock import patch
+
 import pytest
 from PyQt5.QtCore import Qt
 
@@ -9,12 +11,24 @@ from app.widgets.tab_panel import TabItem, TabPanel
 
 @pytest.fixture
 def panel(qtbot):
-    p = TabPanel()
+    with patch(
+        "app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"
+    ):
+        p = TabPanel()
     qtbot.addWidget(p)
     return p
 
 
 class TestTabPanel:
+    def test_gitee_account_row_is_below_settings(self, panel):
+        from app.widgets.cards.settings.gitee_card import GiteeAccountRow
+
+        assert isinstance(panel._gitee_account_row, GiteeAccountRow)
+        panel_layout = panel.layout()
+        settings_bar_index = panel_layout.indexOf(panel._settings_btn.parentWidget())
+        account_row_index = panel_layout.indexOf(panel._gitee_account_row)
+        assert account_row_index > settings_bar_index
+
     def test_initial_state(self, panel):
         assert panel.count == 0
         assert panel.active_index == -1
