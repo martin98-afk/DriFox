@@ -90,6 +90,7 @@ class TabItem(QFrame):
         self._streaming = False
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
+        self._hovered = False  # 鼠标悬停态
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         self._setup_ui()
 
@@ -255,19 +256,35 @@ class TabItem(QFrame):
 
     def enterEvent(self, event):
         self._close_btn.setVisible(True)
+        self._hovered = True
+        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if not self._selected:
             self._close_btn.setVisible(False)
+        self._hovered = False
+        self.update()
         super().leaveEvent(event)
 
     def paintEvent(self, event):
+        from PyQt5.QtGui import QLinearGradient
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        w, h = self.width(), self.height()
+
+        # hover 态（非选中时）
+        if not self._selected and self._hovered:
+            painter.fillRect(self.rect(), _QColor(255, 255, 255, 10))
+
+        # 选中态：渐变背景
         if self._selected:
-            painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
+            grad = QLinearGradient(0, 0, w, h)
+            grad.setColorAt(0.0, _QColor(_CACHED_INFO.red(), _CACHED_INFO.green(), _CACHED_INFO.blue(), 46))
+            grad.setColorAt(1.0, _QColor(139, 92, 246, 20))
+            painter.fillRect(self.rect(), grad)
 
         # ── 流式/错误状态指示条 ──
         if self._streaming or self._stream_error:
@@ -289,8 +306,12 @@ class TabItem(QFrame):
             alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
             painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
-            # 左侧选中指示条
-            painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
+            # 左侧选中指示条（渐变）
+            y0, y1 = 4, h - 8
+            grad = QLinearGradient(0, y0, 0, y1)
+            grad.setColorAt(0.0, _CACHED_INFO)
+            grad.setColorAt(1.0, _QColor(139, 92, 246))
+            painter.fillRect(0, y0, 2, y1, grad)
 
         super().paintEvent(event)
 
