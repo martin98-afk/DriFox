@@ -427,6 +427,61 @@ def test_unbind_failure_preserves_bound_state(row_factory):
     assert row._action_btn.text() == "解绑"
     assert row._bound_owner == "martin98-afk"
     show_error.assert_called_once()
+
+
+def test_bound_render_does_not_start_remote_sync(qtbot):
+    cfg = _FakeSettings(bound=True, owner="martin98-afk")
+    sync_service = MagicMock()
+    sync_service._state = "disabled"
+    backend = MagicMock()
+    backend.get_bound_info.return_value = {
+        "token": "test-token",
+        "owner": "martin98-afk",
+    }
+
+    with (
+        patch(
+            "app.widgets.cards.settings.gitee_card.Settings.get_instance",
+            return_value=cfg,
+        ),
+        patch(
+            "app.core.config_sync.ConfigSyncService.get_instance",
+            return_value=sync_service,
+        ),
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+    ):
+        row = GiteeAccountRow()
+
+    qtbot.addWidget(row)
+    backend.get_bound_info.assert_not_called()
+    sync_service.enable.assert_not_called()
+
+
+def test_oauth_success_enables_sync(row_factory):
+    row, cfg, sync_service = row_factory()
+    sync_service._state = "disabled"
+    cfg.gitee_bound._value = True
+    cfg.gitee_user_owner._value = "martin98-afk"
+    cfg.gitee_user_repo._value = "DriFox_uploads"
+    backend = MagicMock()
+    backend.get_bound_info.return_value = {
+        "token": "test-token",
+        "owner": "martin98-afk",
+    }
+    uploader = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+            return_value=uploader,
+        ),
+        patch("app.widgets.cards.settings.gitee_card.InfoBar.success"),
+    ):
+        row._on_oauth_result(True, "绑定成功")
+
+    uploader.reset_config.assert_called_once_with()
+    sync_service.enable.assert_called_once_with("test-token", "martin98-afk")
 ```
 
 - [ ] **Step 2: Run the interaction tests to verify they fail**
@@ -454,11 +509,7 @@ At the end of `GiteeAccountRow._setup_ui()`, add:
         self.oauthResult.connect(self._on_oauth_result)
 ```
 
-At the end of the bound branch in `_refresh_ui()`, after setting the repository Tooltip, add:
-
-```python
-            self._auto_enable_sync()
-```
+Do not call `_auto_enable_sync()` from `_refresh_ui()`: constructing or repainting `TabPanel` must remain local-only and must not start network synchronization. The existing full `GiteeCard` retains restart-time sync recovery; this compact row enables sync only after its own successful OAuth flow.
 
 Add these methods to `GiteeAccountRow` before `refresh_style()`:
 
@@ -513,6 +564,7 @@ Add these methods to `GiteeAccountRow` before `refresh_style()`:
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
+            self._auto_enable_sync()
             InfoBar.success(
                 title="绑定成功",
                 content=message,
@@ -597,7 +649,7 @@ Run:
 pytest tests/widgets/test_gitee_account_row.py -v
 ```
 
-Expected: 9 tests pass.
+Expected: 11 tests pass.
 
 - [ ] **Step 5: Commit the action slice**
 

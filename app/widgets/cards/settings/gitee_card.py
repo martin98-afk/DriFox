@@ -270,7 +270,6 @@ class GiteeAccountRow(QFrame):
             self._name_label.setToolTip(owner)
             self._repo_label.setText(f"{repo} ↗")
             self._repo_label.setToolTip(repo)
-            self._auto_enable_sync()
         else:
             self._bound_owner = ""
             self._bound_repo = ""
@@ -307,9 +306,9 @@ class GiteeAccountRow(QFrame):
         if self._bound_owner:
             self._action_btn.setStyleSheet(f"""
                 QPushButton {{
-                    color: #fa5151;
+                    color: {Colors.ERROR};
                     background: transparent;
-                    border: 1px solid #fa5151;
+                    border: 1px solid {Colors.ERROR};
                     border-radius: 5px;
                     {font_size_css(11)}
                 }}
@@ -324,7 +323,7 @@ class GiteeAccountRow(QFrame):
                     border-radius: 5px;
                     {font_size_css(11)}
                 }}
-                QPushButton:hover {{ background: {Colors.BORDER_ACCENT}; }}
+                QPushButton:hover {{ background: {Colors.INFO}; }}
                 QPushButton:disabled {{ color: {Colors.TEXT_MUTED}; background: {Colors.HOVER_BG}; }}
             """)
 
@@ -378,6 +377,7 @@ class GiteeAccountRow(QFrame):
 
             GiteeUploader.get_instance().reset_config()
             self._refresh_ui()
+            self._auto_enable_sync()
             InfoBar.success(
                 title="绑定成功",
                 content=message,

@@ -72,8 +72,10 @@ https://gitee.com/{owner}/{repo}
 3. 用户选择公开或私有仓库。
 4. 使用 `ConfigSyncService.backup_local()` 备份当前本地配置。
 5. 按钮进入“授权中…”状态并禁用，后台线程调用 Gitee OAuth 后端。
-6. OAuth 成功后重置 `GiteeUploader` 配置，刷新快捷栏，并使用 OAuth 后端的当前绑定信息调用 `ConfigSyncService.enable()`；组件初始化时若检测到已绑定且同步尚未启动，也执行同样的自动启用逻辑。
+6. OAuth 成功后重置 `GiteeUploader` 配置，刷新快捷栏，并使用 OAuth 后端的当前绑定信息调用 `ConfigSyncService.enable()`。
 7. OAuth 失败时恢复按钮状态，通过 InfoBar 显示错误。
+
+快捷栏初始化和普通状态刷新只读取本地绑定配置，不调用 `get_bound_info()` 或启动远端同步，避免 `TabPanel` 构造过程发生网络请求。应用启动时的已绑定同步恢复继续由现有完整 `GiteeCard` 负责。
 
 OAuth 网络请求不得在 UI 主线程执行。界面和新增日志不得展示 access token、refresh token 或 OAuth 密钥。
 

@@ -178,6 +178,61 @@ def test_do_unbind_stops_sync_and_resets_state(row_factory):
     assert row._action_btn.text() == "绑定"
 
 
+def test_bound_render_does_not_start_remote_sync(qtbot):
+    cfg = _FakeSettings(bound=True, owner="martin98-afk")
+    sync_service = MagicMock()
+    sync_service._state = "disabled"
+    backend = MagicMock()
+    backend.get_bound_info.return_value = {
+        "token": "test-token",
+        "owner": "martin98-afk",
+    }
+
+    with (
+        patch(
+            "app.widgets.cards.settings.gitee_card.Settings.get_instance",
+            return_value=cfg,
+        ),
+        patch(
+            "app.core.config_sync.ConfigSyncService.get_instance",
+            return_value=sync_service,
+        ),
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+    ):
+        row = GiteeAccountRow()
+
+    qtbot.addWidget(row)
+    backend.get_bound_info.assert_not_called()
+    sync_service.enable.assert_not_called()
+
+
+def test_oauth_success_enables_sync(row_factory):
+    row, cfg, sync_service = row_factory()
+    sync_service._state = "disabled"
+    cfg.gitee_bound._value = True
+    cfg.gitee_user_owner._value = "martin98-afk"
+    cfg.gitee_user_repo._value = "DriFox_uploads"
+    backend = MagicMock()
+    backend.get_bound_info.return_value = {
+        "token": "test-token",
+        "owner": "martin98-afk",
+    }
+    uploader = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+            return_value=uploader,
+        ),
+        patch("app.widgets.cards.settings.gitee_card.InfoBar.success"),
+    ):
+        row._on_oauth_result(True, "绑定成功")
+
+    uploader.reset_config.assert_called_once_with()
+    sync_service.enable.assert_called_once_with("test-token", "martin98-afk")
+
+
 def test_unbind_failure_preserves_bound_state(row_factory):
     row, _, sync_service = row_factory(bound=True, owner="martin98-afk")
     backend = MagicMock()
