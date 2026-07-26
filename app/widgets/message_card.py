@@ -4312,7 +4312,7 @@ class CodeWebViewer(QWebEngineView):
                     // Page Down / 键盘滚动 增量可能更大（~视口高度），
                     // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
                     // 仅过滤 auto-scroll 直接跳到底部的大跳变。
-                    if (delta < 2000) {{
+                    if (delta > 0 && delta < 2000) {{
                         window._userScrolledWithin = true;
                     }}
                 }});
@@ -4795,6 +4795,7 @@ class CodeWebViewer(QWebEngineView):
             # 流式分支：复用共享的 save+restore 模板，末尾追加 auto-scroll 逻辑
             # （工具块 restore 后 scrollHeight 可能增加，需要重新判断滚到底）
             auto_scroll_js = (
+                "window._suppressScrollEvent=true;"
                 "if(!window._userScrolledWithin){"
                 "document.body.scrollTop=document.body.scrollHeight;"
                 "}else{"
