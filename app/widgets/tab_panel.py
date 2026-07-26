@@ -37,7 +37,7 @@ from app.widgets.elided_label import _ElidedLabel
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 import re as _re
 import math as _math
-from PyQt5.QtGui import QColor as _QColor
+from PyQt5.QtGui import QColor as _QColor, QLinearGradient as _QLinearGradient, QPainterPath as _QPainterPath
 
 
 def _parse_rgba(rgba_str: str) -> _QColor:
@@ -87,6 +87,7 @@ class TabItem(QFrame):
         self._streaming = False
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
+        self._hovered = False  # 鼠标悬停态
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         self._setup_ui()
 
@@ -247,34 +248,67 @@ class TabItem(QFrame):
 
     def enterEvent(self, event):
         self._close_btn.setVisible(True)
+        self._hovered = True
+        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._hovered = False
         if not self._selected:
             self._close_btn.setVisible(False)
+        self.update()
         super().leaveEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        w, h = self.width(), self.height()
+
+        # ── 选中背景 ──
         if self._selected:
             painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
 
-        # ── 流式/错误状态指示条 ──
+        # ── 悬停：圆角渐变背景 ──
+        if self._hovered and not self._selected:
+            hover_grad = _QLinearGradient(0, 0, w, 0)
+            if isDarkTheme():
+                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 32))
+                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 18))
+            else:
+                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 22))
+                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 12))
+            hover_path = _QPainterPath()
+            hover_path.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+            painter.fillPath(hover_path, hover_grad)
+
+        # ── 流式/错误状态 ──
         if self._streaming or self._stream_error:
-            h = self.height()
             y0, y1 = 4, h - 8
             if self._stream_error:
                 painter.fillRect(0, y0, 3, y1, _QColor(220, 50, 50))
             else:
-                # 彩虹渐变动画
+                # 左侧彩虹逐帧单色指示条
                 phase = self._panel._anim_phase if self._panel else 0
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
                 painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
+
+                # ── 整条标签来回脉冲流光（加亮加宽） ──
+                # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
+                sweep = _math.sin(_math.radians(phase))
+                sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+                # 光斑中心在标签上从 -20% 扫到 120%
+                shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+
+                shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
+                shimmer_grad.setColorAt(0.0, _QColor(255, 255, 255, 0))
+                shimmer_grad.setColorAt(0.3, _QColor(130, 200, 255, 55))
+                shimmer_grad.setColorAt(0.5, _QColor(180, 220, 255, 100))
+                shimmer_grad.setColorAt(0.7, _QColor(130, 200, 255, 55))
+                shimmer_grad.setColorAt(1.0, _QColor(255, 255, 255, 0))
+                painter.fillRect(self.rect(), shimmer_grad)
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
-            h = self.height()
             y0, y1 = 4, h - 8
             phase = self._panel._question_phase if self._panel else 0
             # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
@@ -445,7 +479,7 @@ class TabPanel(QWidget):
         self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
         self._custom_plugin_label = QLabel("自定义插件", self._custom_plugin_header)
         self._custom_plugin_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(12)}"
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
         )
         custom_header_layout.addWidget(self._custom_plugin_arrow)
         custom_header_layout.addWidget(self._custom_plugin_label, 1)
@@ -715,14 +749,15 @@ class TabPanel(QWidget):
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
-        # 自定义插件
-        for row in self._custom_plugin_buttons:
-            row.refresh_style()
+        # 自定义插件（折叠状态下跳过，不可见无需刷新）
+        if self._custom_plugin_scroll.isVisible():
+            for row in self._custom_plugin_buttons:
+                row.refresh_style()
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
         if hasattr(self, "_custom_plugin_label"):
             self._custom_plugin_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(12)}"
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
 
     def add_tab(self, title: str, icon=None) -> int:
@@ -862,13 +897,14 @@ class TabPanel(QWidget):
                 item.update()
 
     def refresh_style(self):
-        """ThemeManager 统一刷新入口：主题/字体变更后调用"""
-        from app.utils.design_tokens import Colors as _Colors
+        """ThemeManager 统一刷新入口：主题/字体变更后调用
 
-        _Colors.refresh()
+        注意：调用方（TabManagerWindow._on_theme_changed）已执行 Colors.refresh()，
+        此处不再重复调用。
+        """
         for item in self._items:
             item.refresh_style()
-            # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
+            # 保持同步重绘，确保 stylesheet 变更立即生效
             item.repaint()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:

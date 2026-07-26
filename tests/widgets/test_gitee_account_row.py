@@ -67,7 +67,8 @@ def test_unbound_state_shows_bind_action(row_factory):
 
     assert row._name_label._full_text == "Gitee 未绑定"
     assert row._repo_label._full_text == "绑定后可备份与分享"
-    assert row._action_btn.text() == "绑定"
+    assert row._more_btn.toolTip() == "Gitee — 点击展开"
+    assert row._more_btn.isEnabled() is True
     assert row._bound_owner == ""
     assert row._avatar.toolTip() == "未绑定"
 
@@ -77,7 +78,8 @@ def test_bound_state_shows_owner_and_repository(row_factory):
 
     assert row._name_label._full_text == "martin98-afk"
     assert row._repo_label._full_text == "DriFox_uploads ↗"
-    assert row._action_btn.text() == "解绑"
+    assert row._more_btn.isEnabled() is True
+    assert row._more_btn.toolTip() == "martin98-afk — 点击展开"
     assert row._bound_owner == "martin98-afk"
     assert row._bound_repo == "DriFox_uploads"
     assert row._name_label.toolTip() == "martin98-afk"
@@ -93,7 +95,8 @@ def test_config_changes_refresh_existing_row(row_factory):
 
     assert row._name_label._full_text == "new-owner"
     assert row._repo_label._full_text == "DriFox_uploads ↗"
-    assert row._action_btn.text() == "解绑"
+    assert row._more_btn.isEnabled() is True
+    assert row._more_btn.toolTip() == "new-owner — 点击展开"
 
 
 def test_clicking_account_opens_bound_repository(row_factory):
@@ -112,8 +115,8 @@ def test_start_oauth_disables_button_and_starts_worker(row_factory):
         row._start_oauth(repo_private=True)
 
     assert row._binding is True
-    assert row._action_btn.text() == "授权中…"
-    assert row._action_btn.isEnabled() is False
+    assert row._more_btn.toolTip() == "授权中…"
+    assert row._more_btn.isEnabled() is False
     thread_cls.assert_called_once_with(target=row._do_oauth, args=(True,), daemon=True)
     thread_cls.return_value.start.assert_called_once_with()
 
@@ -127,8 +130,8 @@ def test_oauth_failure_restores_bind_action(row_factory):
         row._on_oauth_result(False, "授权超时")
 
     assert row._binding is False
-    assert row._action_btn.isEnabled() is True
-    assert row._action_btn.text() == "绑定"
+    assert row._more_btn.isEnabled() is True
+    assert row._more_btn.toolTip() == "Gitee — 点击展开"
     show_error.assert_called_once()
 
 
@@ -175,7 +178,7 @@ def test_do_unbind_stops_sync_and_resets_state(row_factory):
     uploader.reset_config.assert_called_once_with()
     sync_service.restore_local.assert_called_once_with()
     cfg.load.assert_called_once_with()
-    assert row._action_btn.text() == "绑定"
+    assert row._more_btn.toolTip() == "Gitee — 点击展开"
 
 
 def test_bound_render_does_not_start_remote_sync(qtbot):
@@ -245,6 +248,7 @@ def test_unbind_failure_preserves_bound_state(row_factory):
         row._do_unbind()
 
     sync_service.disable.assert_called_once_with()
-    assert row._action_btn.text() == "解绑"
+    assert row._more_btn.isEnabled() is True
+    assert row._more_btn.toolTip() == "martin98-afk — 点击展开"
     assert row._bound_owner == "martin98-afk"
     show_error.assert_called_once()

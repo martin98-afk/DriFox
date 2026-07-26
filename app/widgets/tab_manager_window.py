@@ -216,16 +216,15 @@ class TabManagerTitleBar(QWidget):
     def _on_max_clicked(self):
         self.maximizeRestoreRequested.emit()
 
-    # ── 鼠标事件：窗口拖拽（混合模式） ──
-    # Windows 原生（HTCAPTION）接管失败时，由 Python 模拟拖拽兜底。
-    # FramelessWindowHint 下 HTCAPTION 不一定生效，保留 Python 拖拽确保可用。
-    # 拖拽期间 _is_dragging=True → nativeEvent 跳过 _nchittest 避免冲突。
+    # ── 鼠标事件：窗口拖拽 ──
+    # 拖拽优先走 Windows 原生（HTCAPTION + DefWindowProc），
+    # 原生不生效时由 Python 模拟拖拽兜底保证窗口可移动。
+    # _dragging 仅用于 Python 兜底，不干预 nativeEvent。
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self._drag_pos = event.globalPos() - self.parentWidget().frameGeometry().topLeft()
-            self.parentWidget()._is_dragging = True
             event.accept()
         super().mousePressEvent(event)
 
@@ -246,7 +245,6 @@ class TabManagerTitleBar(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._dragging = False
-            self.parentWidget()._is_dragging = False
             event.accept()
         super().mouseReleaseEvent(event)
 
@@ -471,7 +469,7 @@ class TabManagerWindow(QWidget):
 
     _instance: Optional["TabManagerWindow"] = None
     _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
-    _is_dragging: bool = False  # Python 拖拽中 → nativeEvent 跳过 _nchittest 避免与 HTCAPTION 冲突
+    # 标题栏拖拽由 Windows 原生管理（HTCAPTION + WS_CAPTION），Python 不干预
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -512,6 +510,13 @@ class TabManagerWindow(QWidget):
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
 
+        # 立即创建平台窗口（HWND）并启用 Snap Layout 样式
+        # 必须在 show() 之前设置 WS_CAPTION + WS_THICKFRAME，
+        # 否则 Windows 在窗口显示后可能不响应样式变更。
+        if platform.system() == "Windows":
+            self.winId()  # 确保 HWND 已创建
+            self._enable_snap_layout()
+
         self._setup_ui()
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
@@ -528,18 +533,20 @@ class TabManagerWindow(QWidget):
         theme_manager.register_refresh_target(self)
 
     def _on_theme_changed(self):
-        """主题切换时刷新配色"""
-        Colors.refresh()
+        """主题切换时刷新配色
+
+        注意：调用方（dispatch_refresh / _execute_batched_theme_refresh）
+        已执行 Colors.refresh()，此处不再重复调用。
+        """
         # 重建样式表
         self._apply_theme_stylesheet()
         # 刷新标题栏
         if hasattr(self, "_title_bar"):
             self._title_bar.refresh_style()
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
+        # refresh_style 内部已执行 repaint，此处不再重复
         try:
             self._tab_panel.refresh_style()
-            # 强制重绘子控件（setStyleSheet 后保险调用一次 update）
-            self._tab_panel.repaint()
         except Exception:
             pass
         # 重画所有 tab 的项目图标（背景色来自项目，颜色不受主题影响，但
@@ -1357,6 +1364,46 @@ class TabManagerWindow(QWidget):
         except Exception:
             self._shadow_enabled = False
 
+    def _enable_snap_layout(self):
+        """为 Frameless 窗口启用 Snap Layout（贴靠布局）
+
+        Qt.FramelessWindowHint 会移除 WS_CAPTION 和 WS_THICKFRAME，
+        导致 Windows 不认为这是一个标准窗口，贴靠到屏幕边缘时不触发
+        Snap Layout。通过 Windows API 显式加回关键样式，同时用
+        WM_NCCALCSIZE 返回 0 保持无边框外观。
+
+        WS_CAPTION (0x00C00000)   — 有标题栏区域，Snap 依赖此样式识别
+        WS_THICKFRAME (0x00040000) — 可调整大小边框，Snap 依赖此样式
+        WS_MINIMIZEBOX | WS_MAXIMIZEBOX — 最小/最大按钮（仅标志位，无UI）
+        """
+        if platform.system() != "Windows":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            current_style = ctypes.windll.user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE)
+
+            # 加回 FramelessWindowHint 移除的关键样式（不加 WS_SYSMENU，
+            # 避免右键系统菜单与自定义 contextMenuEvent 冲突）
+            WS_CAPTION = 0x00C00000
+            WS_THICKFRAME = 0x00040000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+
+            new_style = current_style | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+            ctypes.windll.user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE, new_style)
+
+            # 通知 Windows 样式已变更（重新计算非客户区）
+            ctypes.windll.user32.SetWindowPos(
+                wintypes.HWND(hwnd), 0, 0, 0, 0, 0,
+                0x0020 | 0x0002 | 0x0001  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
+            )
+        except Exception:
+            pass
+
     def _apply_rounded_corners(self):
         """通过 DWM API 为窗口启用圆角 (Windows 11)
 
@@ -1461,9 +1508,12 @@ class TabManagerWindow(QWidget):
         """处理 Windows 原生消息
 
         - WM_NCHITTEST: 边缘缩放 + 标题栏 HTCAPTION（Snap Layout 支持）
+        - WM_NCLBUTTONDOWN: 显式调用 DefWindowProc 启动原生拖拽
         - WM_NCCALCSIZE: 保留 DWM 阴影
-        Python 拖拽期间跳过 _nchittest，避免与 HTCAPTION 冲突。
-        HTCAPTION 在 Frameless 窗口下不一定生效，未生效时由 Python 拖拽兜底。
+
+        DefWindowProc 处理 WM_NCLBUTTONDOWN+HTCAPTION 会进入原生拖拽循环，
+        期间鼠标被捕获，Qt 事件不触发，Python 拖拽不会干扰。
+        DefWindowProc 失败时返回 False → Qt 正常处理 → Python 拖拽兜底。
         """
         if platform.system() == "Windows" and eventType == "windows_generic_MSG":
             try:
@@ -1471,9 +1521,17 @@ class TabManagerWindow(QWidget):
 
                 msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
                 if msg.message == _WM_NCHITTEST:
-                    if self._is_dragging:
-                        return (True, _HTCLIENT)
                     return (True, self._nchittest(msg))
+                if msg.message == 0x00A1:  # WM_NCLBUTTONDOWN
+                    if msg.wParam == _HTCAPTION:
+                        # 调用 DefWindowProc 启动原生窗口拖拽
+                        ctypes.windll.user32.DefWindowProcW(
+                            msg.hwnd, msg.message, msg.wParam, msg.lParam
+                        )
+                        # 返回 False 而非 True：DefWindowProc 若成功会捕获鼠标
+                        # 进入模态拖拽循环，Qt 不会再收到后续事件；
+                        # 若失败则 Qt 正常处理，Python 拖拽兜底。
+                        return (False, 0)
                 if msg.message == 0x0083:  # WM_NCCALCSIZE
                     return (True, 0)
             except Exception:
