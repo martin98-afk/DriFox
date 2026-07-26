@@ -316,6 +316,130 @@ class TabItem(QFrame):
         super().paintEvent(event)
 
 
+class IconStripWidget(QWidget):
+    """折叠态图标条 — 仅显示项目图标 + 状态徽标 + 新建按钮"""
+
+    tabSelected = pyqtSignal(int)
+    newTabRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._icons: list = []  # [(QPixmap, streaming, error, question), ...]
+        self._active_index = -1
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFixedWidth(48)
+        self.setObjectName("iconStrip")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignTop)
+
+        # 渐变发光线
+        self._glow_line = QWidget(self)
+        self._glow_line.setFixedHeight(1)
+        self._glow_line.setObjectName("iconStripGlowLine")
+        layout.addWidget(self._glow_line)
+
+        self._icon_layout = QVBoxLayout()
+        self._icon_layout.setSpacing(6)
+        layout.addLayout(self._icon_layout)
+
+        layout.addStretch()
+
+        # 新建按钮
+        self._new_btn = QPushButton("+", self)
+        self._new_btn.setFixedSize(32, 32)
+        self._new_btn.setCursor(Qt.PointingHandCursor)
+        self._new_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px dashed rgba(255,255,255,0.15);
+                border-radius: 7px;
+                color: rgba(255,255,255,0.4);
+                font-size: 16px;
+                font-weight: 300;
+            }
+            QPushButton:hover {
+                border-color: rgba(102,198,255,0.4);
+                color: #66c6ff;
+            }
+        """)
+        self._new_btn.clicked.connect(self.newTabRequested.emit)
+        layout.addWidget(self._new_btn, alignment=Qt.AlignCenter)
+
+    def set_icons(self, icons: list):
+        self._icons = icons
+        self._rebuild()
+
+    def set_active_index(self, idx: int):
+        self._active_index = idx
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._icon_layout.count():
+            item = self._icon_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for i, (pix, streaming, error, question) in enumerate(self._icons):
+            btn = QPushButton(self)
+            btn.setFixedSize(32, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            is_active = (i == self._active_index)
+
+            # 背景样式
+            if is_active:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: transparent;
+                        border: 2px solid rgba(102,198,255,0.5);
+                        border-radius: 7px;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: transparent;
+                        border: none;
+                        border-radius: 7px;
+                    }
+                    QPushButton:hover {
+                        background: rgba(255,255,255,0.06);
+                    }
+                """)
+
+            if pix and not pix.isNull():
+                scaled = pix.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                btn.setIcon(QIcon(scaled))
+                btn.setIconSize(QSize(28, 28))
+
+            idx = i
+            btn.clicked.connect(lambda checked, i=idx: self.tabSelected.emit(i))
+
+            # 容器 widget 用于叠加徽标
+            container = QWidget(self)
+            container.setFixedSize(32, 32)
+            cl = QHBoxLayout(container)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.addWidget(btn)
+
+            # 状态徽标
+            if streaming or error or question:
+                badge = QLabel(container)
+                badge.setFixedSize(8, 8)
+                color = "#ef4444" if error else "#f59e0b" if question else "#60D4FF"
+                badge.setStyleSheet(
+                    f"background: {color}; border-radius: 4px; border: 2px solid rgba(30,35,55,0.97);"
+                )
+                badge.move(24, 0)
+                badge.raise_()
+
+            self._icon_layout.addWidget(container, alignment=Qt.AlignCenter)
+
+
 class UIPluginRow(QFrame):
     """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
 
@@ -543,6 +667,47 @@ class TabPanel(QWidget):
             n = len(self._items)
             self._session_count_label.setText(f"{n} 会话")
 
+    def _on_icon_strip_tab_selected(self, idx: int):
+        """折叠态图标条点击 Tab"""
+        self.set_active_index(idx)
+        self.tabSelected.emit(idx)
+
+    def set_collapsed(self, collapsed: bool):
+        """切换到折叠/展开态"""
+        if self._collapsed == collapsed:
+            return
+        self._collapsed = collapsed
+
+        main_layout = self.layout()
+        if collapsed:
+            self._sync_icon_strip()
+            self._icon_strip.show()
+            if main_layout:
+                for i in range(main_layout.count()):
+                    w = main_layout.itemAt(i).widget()
+                    if w and w is not self._icon_strip:
+                        w.hide()
+        else:
+            self._icon_strip.hide()
+            if main_layout:
+                for i in range(main_layout.count()):
+                    w = main_layout.itemAt(i).widget()
+                    if w and w is not self._icon_strip:
+                        w.show()
+
+    def _sync_icon_strip(self):
+        """同步图标条数据：从当前 Tab 列表生成图标数据"""
+        if self._icon_strip is None:
+            return
+        icons = []
+        for item in self._items:
+            pix = item._icon_pixmap
+            if pix is None or (hasattr(pix, 'isNull') and pix.isNull()):
+                pix = QPixmap()
+            icons.append((pix, item._streaming, item._stream_error, item._question))
+        self._icon_strip.set_icons(icons)
+        self._icon_strip.set_active_index(self._active_index)
+
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -681,6 +846,13 @@ class TabPanel(QWidget):
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
 
+        # ── 折叠态图标条（初始隐藏） ──
+        self._icon_strip = IconStripWidget(self)
+        self._icon_strip.hide()
+        self._icon_strip.tabSelected.connect(self._on_icon_strip_tab_selected)
+        self._icon_strip.newTabRequested.connect(self.newTabRequested.emit)
+        layout.addWidget(self._icon_strip)
+
         self._apply_panel_stylesheet()
 
     def _on_settings_clicked(self):
@@ -814,6 +986,8 @@ class TabPanel(QWidget):
             self.set_active_index(0)
 
         self._update_session_count()
+        if self._collapsed:
+            self._sync_icon_strip()
         return idx
 
     def remove_tab(self, index: int):
@@ -838,6 +1012,9 @@ class TabPanel(QWidget):
 
         self._update_session_count()
 
+        if self._collapsed:
+            self._sync_icon_strip()
+
     def set_active_index(self, index: int):
         """设置选中 Tab"""
         # 取消旧的选中态
@@ -852,6 +1029,9 @@ class TabPanel(QWidget):
             self._items[index].set_selected(True)
             self.tabSelected.emit(index)
 
+        if self._collapsed:
+            self._icon_strip.set_active_index(index)
+
     def update_tab_title(self, index: int, title: str):
         """更新 Tab 标题"""
         if 0 <= index < len(self._items):
@@ -861,6 +1041,9 @@ class TabPanel(QWidget):
         """更新 Tab 图标"""
         if 0 <= index < len(self._items):
             self._items[index].set_icon(icon)
+
+        if self._collapsed:
+            self._sync_icon_strip()
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
@@ -885,6 +1068,9 @@ class TabPanel(QWidget):
                 if self._streaming_count + self._question_count == 0:
                     self._stop_anim_timer()
 
+        if self._collapsed:
+            self._sync_icon_strip()
+
     def update_tab_question(self, index: int, question: bool):
         """更新 Tab 的 question 状态（AI 提问等待用户回答）"""
         if not (0 <= index < len(self._items)):
@@ -900,6 +1086,9 @@ class TabPanel(QWidget):
             self._question_count = max(0, self._question_count - 1)
             if self._streaming_count + self._question_count == 0:
                 self._stop_anim_timer()
+
+        if self._collapsed:
+            self._sync_icon_strip()
 
     def _ensure_anim_timer(self):
         """确保彩虹动画定时器已启动"""
