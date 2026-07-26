@@ -9,6 +9,8 @@ Gitee OAuth 平台后端
     本模块只负责 Gitee 特有的初始化动作（拉用户信息、建仓库、存配置）。
 """
 
+import json
+import threading
 import time
 from typing import Optional, Tuple
 
@@ -171,6 +173,9 @@ class GiteeOAuthBackend(OAuthBackend):
     name = "gitee"
     display_name = "Gitee"
 
+    # 防止并发刷新导致 refresh_token 旋转竞争
+    _refresh_lock = threading.Lock()
+
     def bind(self, **options) -> Tuple[bool, str]:
         """
         绑定 Gitee 账号（阻塞，约 120s 超时）。
@@ -233,11 +238,17 @@ class GiteeOAuthBackend(OAuthBackend):
         cfg.gitee_user_owner.value = owner
         cfg.gitee_user_repo.value = FIXED_REPO_NAME
         cfg.gitee_bound.value = True
+        self._persist_tokens(cfg)
+
+        # 验证是否真的写进去了（_persist_tokens 内部会尝试直接写文件兜底）
         try:
-            cfg.save()
-        except Exception as e:
-            logger.error(f"[OAuth] 绑定后保存配置失败: {e}")
-            return False, f"绑定失败（配置保存错误）：{e}"
+            with open(cfg.file, encoding="utf-8") as f:
+                _after = json.load(f)
+            if not _after.get("Gitee", {}).get("UserRefreshToken"):
+                logger.error("[OAuth] 绑定后 token 未正确持久化")
+                return False, "绑定失败（token 写入磁盘失败）"
+        except Exception:
+            pass
 
         logger.info(f"[OAuth] 平台绑定成功: {self.name} — {owner}/{FIXED_REPO_NAME}")
         return True, f"绑定成功！仓库：{owner}/{FIXED_REPO_NAME}"
@@ -295,28 +306,74 @@ class GiteeOAuthBackend(OAuthBackend):
         if not needs_refresh:
             return access_token, ""
 
-        # ── 执行刷新 ─────────────────────────────────────
-        client_id = cfg.gitee_oauth_client_id.value
-        client_secret = cfg.gitee_oauth_client_secret.value
+        # ── 加锁防并发：同一时刻只有一个线程能刷新 ─────────────
+        with self._refresh_lock:
+            # 拿到锁后二次检查：另一个线程可能已经刷新过了
+            access_token = cfg.gitee_user_token.value
+            refresh_token = cfg.gitee_user_refresh_token.value
+            expires_at = cfg.gitee_token_expires_at.value
+            if not (not expires_at or time.time() >= expires_at - 60):
+                return access_token, ""
 
-        new_tokens, err = refresh_access_token(refresh_token, client_id, client_secret)
-        if new_tokens is None:
-            logger.warning(f"[GiteeOAuth] token 刷新失败，请重新绑定: {err}")
-            return None, f"token 已过期且刷新失败：{err}"
+            # ── 执行刷新 ─────────────────────────────────────
+            client_id = cfg.gitee_oauth_client_id.value
+            client_secret = cfg.gitee_oauth_client_secret.value
 
-        # 更新配置
-        cfg.gitee_user_token.value = new_tokens["access_token"]
-        if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
-            cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
-        if "expires_in" in new_tokens:
-            cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
+            new_tokens, err = refresh_access_token(refresh_token, client_id, client_secret)
+            if new_tokens is None:
+                logger.warning(f"[GiteeOAuth] token 刷新失败，请重新绑定: {err}")
+                return None, f"token 已过期且刷新失败：{err}"
+
+            # ── 更新内存 ─────────────────────────────────────
+            cfg.gitee_user_token.value = new_tokens["access_token"]
+            if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
+                cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
+            if "expires_in" in new_tokens:
+                cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
+
+            # ── 持久化到磁盘（两种方式双重保险） ──────────────
+            self._persist_tokens(cfg)
+
+            logger.info("[GiteeOAuth] access_token 已续期")
+            return new_tokens["access_token"], ""
+
+    # ── 持久化辅助 ──────────────────────────────────────────
+
+    @staticmethod
+    def _persist_tokens(cfg):
+        """
+        将 token 配置写入磁盘。
+
+        cfg.save() 有三道静默守卫（_closing_down / _closing / QApplication.closingDown），
+        任何一道命中都会跳过写入，导致新 refresh_token 丢失。
+        这里先调 cfg.save()，再补一道直接写文件确保 token 一定落地。
+        """
+        # 第一道：走正常 save（附带完整校验）
+        save_ok = False
         try:
             cfg.save()
+            # 快速验证：读回文件检查 refresh_token 是否一致
+            try:
+                with open(cfg.file, encoding="utf-8") as f:
+                    saved = json.load(f)
+                stored = saved.get("Gitee", {}).get("UserRefreshToken", "")
+                current = cfg.gitee_user_refresh_token.value
+                if stored and stored == current:
+                    save_ok = True
+            except Exception:
+                pass
         except Exception as e:
-            logger.error(f"[GiteeOAuth] token 刷新后保存配置失败: {e}")
+            logger.warning(f"[GiteeOAuth] cfg.save() 异常: {e}")
 
-        logger.info("[GiteeOAuth] access_token 已续期")
-        return new_tokens["access_token"], ""
+        # 第二道：直接写文件（绕过 save 的三道守卫）
+        if not save_ok:
+            try:
+                cfg.file.parent.mkdir(parents=True, exist_ok=True)
+                with open(cfg.file, "w", encoding="utf-8") as f:
+                    json.dump(cfg.toDict(), f, ensure_ascii=False, indent=2)
+                logger.info("[GiteeOAuth] token 已通过直接写文件持久化")
+            except Exception as e:
+                logger.error(f"[GiteeOAuth] 直接写 token 到文件失败: {e}")
 
     def get_bound_info(self) -> Optional[dict]:
         from app.utils.config import Settings

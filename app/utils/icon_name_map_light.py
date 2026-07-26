@@ -12,6 +12,7 @@ ICON_NAME_TO_FILE_LIGHT = {
     "read": "read.svg",
     "Search": "Search.svg",
     "shell": "shell.svg",
+    "tab切换": "tab切换.svg",
     "todo": "todo.svg",
     "upload-file": "upload-file.svg",
     "websearch": "websearch.svg",

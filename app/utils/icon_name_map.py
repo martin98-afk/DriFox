@@ -25,6 +25,7 @@ ICON_NAME_TO_FILE = {
     "shell": "shell.svg",
     "siliconflow": "siliconflow.png",
     "slack": "slack.svg",
+    "tab切换": "tab切换.svg",
     "Telegram": "Telegram.svg",
     "todo": "todo.svg",
     "upload-file": "upload-file.svg",
