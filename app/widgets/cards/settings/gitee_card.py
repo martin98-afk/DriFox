@@ -238,6 +238,15 @@ class GiteeAccountRow(QFrame):
         self._action_btn.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self._action_btn)
 
+        self._avatar.setCursor(Qt.PointingHandCursor)
+        self._name_label.setCursor(Qt.PointingHandCursor)
+        self._repo_label.setCursor(Qt.PointingHandCursor)
+        self._avatar.clicked.connect(self._open_repository)
+        self._name_label.clicked.connect(self._open_repository)
+        self._repo_label.clicked.connect(self._open_repository)
+        self._action_btn.clicked.connect(self._on_action_clicked)
+        self.oauthResult.connect(self._on_oauth_result)
+
     def _connect_config_signals(self):
         for item in (
             self.cfg.gitee_bound,
@@ -261,6 +270,7 @@ class GiteeAccountRow(QFrame):
             self._name_label.setToolTip(owner)
             self._repo_label.setText(f"{repo} ↗")
             self._repo_label.setToolTip(repo)
+            self._auto_enable_sync()
         else:
             self._bound_owner = ""
             self._bound_repo = ""
@@ -317,6 +327,129 @@ class GiteeAccountRow(QFrame):
                 QPushButton:hover {{ background: {Colors.BORDER_ACCENT}; }}
                 QPushButton:disabled {{ color: {Colors.TEXT_MUTED}; background: {Colors.HOVER_BG}; }}
             """)
+
+    def _open_repository(self):
+        if self._bound_owner and self._bound_repo:
+            webbrowser.open(f"https://gitee.com/{self._bound_owner}/{self._bound_repo}")
+
+    def _on_action_clicked(self):
+        if self.cfg.gitee_bound.value:
+            self._on_unbind()
+        else:
+            self._on_bind()
+
+    def _on_bind(self):
+        if self._binding:
+            return
+        dialog = _RepoVisibilityDialog(self.window())
+        dialog.chosen.connect(self._start_oauth_with_backup)
+        dialog.exec_()
+
+    def _start_oauth_with_backup(self, repo_private: bool):
+        self._sync_svc.backup_local()
+        self._start_oauth(repo_private)
+
+    def _start_oauth(self, repo_private: bool):
+        self._binding = True
+        self._refresh_ui()
+        worker = threading.Thread(
+            target=self._do_oauth,
+            args=(repo_private,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _do_oauth(self, repo_private: bool):
+        try:
+            from app.gateway.auth import get_oauth_backend
+
+            success, message = get_oauth_backend("gitee").bind(
+                repo_private=repo_private,
+            )
+            self.oauthResult.emit(success, message)
+        except Exception as error:
+            logger.error(f"[GiteeAccountRow] OAuth 异常: {error}")
+            self.oauthResult.emit(False, f"绑定异常：{error}")
+
+    def _on_oauth_result(self, success: bool, message: str):
+        self._binding = False
+        if success:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            GiteeUploader.get_instance().reset_config()
+            self._refresh_ui()
+            InfoBar.success(
+                title="绑定成功",
+                content=message,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+            return
+
+        self._refresh_ui()
+        InfoBar.error(
+            title="绑定失败",
+            content=message,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=5000,
+            parent=self.window(),
+        )
+
+    def _auto_enable_sync(self):
+        if self._sync_svc._state != "disabled":
+            return
+        from app.gateway.auth import get_oauth_backend
+
+        bound_info = get_oauth_backend("gitee").get_bound_info()
+        if bound_info and bound_info.get("token") and bound_info.get("owner"):
+            logger.info("[GiteeAccountRow] 检测到已绑定，自动启动配置同步")
+            self._sync_svc.enable(bound_info["token"], bound_info["owner"])
+
+    def _on_unbind(self):
+        owner = str(self.cfg.gitee_user_owner.value or "")
+        dialog = ConfirmDialog(
+            title="确认解绑",
+            content=f"解绑后上传将恢复使用共享图床仓库。\n当前绑定：{owner}",
+            confirm_text="确定解绑",
+            cancel_text="取消",
+            parent=self.window(),
+        )
+        dialog.confirmed.connect(self._do_unbind)
+        dialog.exec_()
+
+    def _do_unbind(self):
+        try:
+            from app.gateway.auth import get_oauth_backend
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            self._sync_svc.disable()
+            success, message = get_oauth_backend("gitee").unbind()
+            if not success:
+                raise RuntimeError(message)
+            GiteeUploader.get_instance().reset_config()
+
+            if self._sync_svc.restore_local():
+                self.cfg.load()
+
+            self._refresh_ui()
+            InfoBar.success(
+                title="已解绑",
+                content="Gitee 账号已解绑，配置已恢复",
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
+        except Exception as error:
+            logger.error(f"[GiteeAccountRow] 解绑异常: {error}")
+            self._refresh_ui()
+            InfoBar.error(
+                title="解绑失败",
+                content=str(error),
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
 
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
