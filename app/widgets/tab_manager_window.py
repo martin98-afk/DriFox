@@ -66,49 +66,6 @@ if platform.system() == "Windows":
         ]
 
 
-class _SidebarToggleButton(QPushButton):
-    """侧栏折叠/展开按钮 — 绘制 <| / |> 图标"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._collapsed = False
-        self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("折叠侧栏")
-        self.setStyleSheet("""
-            QPushButton { background: transparent; border: none; border-radius: 5px; }
-            QPushButton:hover { background: rgba(255,255,255,0.08); }
-        """)
-
-    def set_collapsed(self, collapsed: bool):
-        self._collapsed = collapsed
-        self.setToolTip("展开侧栏" if collapsed else "折叠侧栏")
-        self.update()
-
-    def paintEvent(self, event):
-        from PyQt5.QtGui import QColor, QPainter, QPen
-
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-        cx, cy = w // 2, h // 2
-        pen = QPen(QColor(Colors.TEXT_MUTED), 1.8)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        p.setPen(pen)
-
-        if self._collapsed:
-            # 展开图标: ▷|
-            p.drawLine(cx - 3, cy - 5, cx - 3, cy + 5)
-            p.drawLine(cx + 3, cy - 5, cx - 1, cy)
-            p.drawLine(cx + 3, cy + 5, cx - 1, cy)
-        else:
-            # 折叠图标: |◁
-            p.drawLine(cx + 3, cy - 5, cx + 3, cy + 5)
-            p.drawLine(cx - 3, cy - 5, cx + 1, cy)
-            p.drawLine(cx - 3, cy + 5, cx + 1, cy)
-        p.end()
-
-
 class TabManagerTitleBar(QWidget):
     """TabManagerWindow 自定义标题栏（Frameless）
 
@@ -119,7 +76,6 @@ class TabManagerTitleBar(QWidget):
     minimizeRequested = pyqtSignal()
     maximizeRestoreRequested = pyqtSignal()
     closeRequested = pyqtSignal()
-    toggleSidebarRequested = pyqtSignal()
 
     # ── 右键系统菜单 Action IDs ──
     _ACTION_RESTORE = 1
@@ -145,11 +101,14 @@ class TabManagerTitleBar(QWidget):
         layout.setContentsMargins(12, 0, 4, 0)
         layout.setSpacing(6)
 
-        # ── 折叠/展开侧栏按钮 ──
-        self._sidebar_toggle_btn = _SidebarToggleButton(self)
-        self._sidebar_toggle_btn.setFixedSize(28, 26)
-        self._sidebar_toggle_btn.clicked.connect(self.toggleSidebarRequested.emit)
-        layout.addWidget(self._sidebar_toggle_btn)
+        # ── 图标（加载 drifox.ico） ──
+        self._icon_label = QLabel(self)
+        self._icon_label.setFixedSize(20, 20)
+        self._icon_label.setStyleSheet("background: transparent;")
+        icon = QIcon(":/icons/drifox.ico")
+        pix = icon.pixmap(20, 20)
+        self._icon_label.setPixmap(pix)
+        layout.addWidget(self._icon_label)
 
         # ── 标题 ──
         self._title_label = QLabel("飘狐-DriFox", self)
@@ -257,12 +216,6 @@ class TabManagerTitleBar(QWidget):
                 font-size: {scale_font_size(11)}px;
                 background: transparent;
             }}
-        """)
-
-        # 侧栏折叠按钮
-        self._sidebar_toggle_btn.setStyleSheet("""
-            QPushButton { background: transparent; border: none; border-radius: 5px; }
-            QPushButton:hover { background: rgba(255,255,255,0.08); }
         """)
 
         # 关闭按钮 hover 特殊处理（红色）
@@ -754,57 +707,10 @@ class TabManagerWindow(QWidget):
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
 
-        # 恢复折叠状态
-        if Settings.get_instance().tab_panel_collapsed.value:
-            QTimer.singleShot(0, self._restore_collapsed_state)
-
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
-        self._title_bar.toggleSidebarRequested.connect(self._on_toggle_sidebar)
-
-    def _on_toggle_sidebar(self):
-        """切换侧栏展开/折叠（带动画）"""
-        from PyQt5.QtCore import QVariantAnimation, QEasingCurve
-
-        target_collapsed = not Settings.get_instance().tab_panel_collapsed.value
-
-        if target_collapsed:
-            target_left = 48
-        else:
-            saved = Settings.get_instance().tab_panel_width.value
-            target_left = saved if saved and saved > 48 else 200
-
-        current_sizes = self._splitter.sizes()
-        start_left = current_sizes[0]
-        total = sum(current_sizes)
-
-        anim = QVariantAnimation(self)
-        anim.setDuration(200)
-        anim.setStartValue(start_left)
-        anim.setEndValue(target_left)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-
-        def on_value_changed(val):
-            self._splitter.setSizes([int(val), total - int(val) - self._splitter.handleWidth()])
-
-        anim.valueChanged.connect(on_value_changed)
-
-        def on_finished():
-            Settings.get_instance().tab_panel_collapsed.value = target_collapsed
-            self._tab_panel.set_collapsed(target_collapsed)
-            self._title_bar._sidebar_toggle_btn.set_collapsed(target_collapsed)
-
-        anim.finished.connect(on_finished)
-        anim.start()
-
-    def _restore_collapsed_state(self):
-        """恢复上次的折叠状态（无动画）"""
-        Settings.get_instance().tab_panel_collapsed.value = True
-        self._splitter.setSizes([48, self.width() - 48 - self._splitter.handleWidth()])
-        self._tab_panel.set_collapsed(True)
-        self._title_bar._sidebar_toggle_btn.set_collapsed(True)
 
     # ── 窗口管理 ──
 

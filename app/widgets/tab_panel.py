@@ -15,7 +15,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -90,7 +89,6 @@ class TabItem(QFrame):
         self._streaming = False
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
-        self._hovered = False  # 鼠标悬停态
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         self._setup_ui()
 
@@ -256,35 +254,19 @@ class TabItem(QFrame):
 
     def enterEvent(self, event):
         self._close_btn.setVisible(True)
-        self._hovered = True
-        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if not self._selected:
             self._close_btn.setVisible(False)
-        self._hovered = False
-        self.update()
         super().leaveEvent(event)
 
     def paintEvent(self, event):
-        from PyQt5.QtGui import QLinearGradient
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        w, h = self.width(), self.height()
-
-        # hover 态（非选中时）
-        if not self._selected and self._hovered:
-            painter.fillRect(self.rect(), _QColor(255, 255, 255, 10))
-
-        # 选中态：渐变背景
         if self._selected:
-            grad = QLinearGradient(0, 0, w, h)
-            grad.setColorAt(0.0, _QColor(_CACHED_INFO.red(), _CACHED_INFO.green(), _CACHED_INFO.blue(), 46))
-            grad.setColorAt(1.0, _QColor(139, 92, 246, 20))
-            painter.fillRect(self.rect(), grad)
+            painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
 
         # ── 流式/错误状态指示条 ──
         if self._streaming or self._stream_error:
@@ -306,138 +288,10 @@ class TabItem(QFrame):
             alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
             painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
-            # 左侧选中指示条（渐变）
-            y0, y1 = 4, h - 8
-            grad = QLinearGradient(0, y0, 0, y1)
-            grad.setColorAt(0.0, _CACHED_INFO)
-            grad.setColorAt(1.0, _QColor(139, 92, 246))
-            painter.fillRect(0, y0, 2, y1, grad)
+            # 左侧选中指示条
+            painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
 
         super().paintEvent(event)
-
-
-class IconStripWidget(QWidget):
-    """折叠态图标条 — 仅显示项目图标 + 状态徽标 + 新建按钮"""
-
-    tabSelected = pyqtSignal(int)
-    newTabRequested = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._icons: list = []  # [(QPixmap, streaming, error, question), ...]
-        self._active_index = -1
-        self._setup_ui()
-
-    def _setup_ui(self):
-        self.setFixedWidth(48)
-        self.setObjectName("iconStrip")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 10, 6, 6)
-        layout.setSpacing(6)
-        layout.setAlignment(Qt.AlignTop)
-
-        # 渐变发光线
-        self._glow_line = QWidget(self)
-        self._glow_line.setFixedHeight(1)
-        self._glow_line.setObjectName("iconStripGlowLine")
-        layout.addWidget(self._glow_line)
-
-        self._icon_layout = QVBoxLayout()
-        self._icon_layout.setSpacing(6)
-        layout.addLayout(self._icon_layout)
-
-        layout.addStretch()
-
-        # 新建按钮
-        self._new_btn = QPushButton("+", self)
-        self._new_btn.setFixedSize(32, 32)
-        self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: 1px dashed rgba(255,255,255,0.15);
-                border-radius: 7px;
-                color: rgba(255,255,255,0.4);
-                font-size: 16px;
-                font-weight: 300;
-            }
-            QPushButton:hover {
-                border-color: rgba(102,198,255,0.4);
-                color: #66c6ff;
-            }
-        """)
-        self._new_btn.clicked.connect(self.newTabRequested.emit)
-        layout.addWidget(self._new_btn, alignment=Qt.AlignCenter)
-
-    def set_icons(self, icons: list):
-        self._icons = icons
-        self._rebuild()
-
-    def set_active_index(self, idx: int):
-        self._active_index = idx
-        self._rebuild()
-
-    def _rebuild(self):
-        while self._icon_layout.count():
-            item = self._icon_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        for i, (pix, streaming, error, question) in enumerate(self._icons):
-            btn = QPushButton(self)
-            btn.setFixedSize(32, 32)
-            btn.setCursor(Qt.PointingHandCursor)
-            is_active = (i == self._active_index)
-
-            # 背景样式
-            if is_active:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: transparent;
-                        border: 2px solid rgba(102,198,255,0.5);
-                        border-radius: 7px;
-                    }
-                """)
-            else:
-                btn.setStyleSheet("""
-                    QPushButton {
-                        background: transparent;
-                        border: none;
-                        border-radius: 7px;
-                    }
-                    QPushButton:hover {
-                        background: rgba(255,255,255,0.06);
-                    }
-                """)
-
-            if pix and not pix.isNull():
-                scaled = pix.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                btn.setIcon(QIcon(scaled))
-                btn.setIconSize(QSize(28, 28))
-
-            idx = i
-            btn.clicked.connect(lambda checked, i=idx: self.tabSelected.emit(i))
-
-            # 容器 widget 用于叠加徽标
-            container = QWidget(self)
-            container.setFixedSize(32, 32)
-            cl = QHBoxLayout(container)
-            cl.setContentsMargins(0, 0, 0, 0)
-            cl.addWidget(btn)
-
-            # 状态徽标
-            if streaming or error or question:
-                badge = QLabel(container)
-                badge.setFixedSize(8, 8)
-                color = "#ef4444" if error else "#f59e0b" if question else "#60D4FF"
-                badge.setStyleSheet(
-                    f"background: {color}; border-radius: 4px; border: 2px solid rgba(30,35,55,0.97);"
-                )
-                badge.move(24, 0)
-                badge.raise_()
-
-            self._icon_layout.addWidget(container, alignment=Qt.AlignCenter)
 
 
 class UIPluginRow(QFrame):
@@ -526,13 +380,10 @@ class TabPanel(QWidget):
         self._active_index: int = -1
         self._plugin_section: Optional[QWidget] = None
         self._plugin_layout: Optional[QVBoxLayout] = None
+        self._plugin_title: Optional[CaptionLabel] = None
         self._plugin_infos: list[tuple[str, str, str]] = []
         self._plugin_buttons: list[UIPluginRow] = []
         self._gitee_account_row: Optional[GiteeAccountRow] = None
-        self._session_count_label: Optional[QLabel] = None
-        self._glow_line: Optional[QWidget] = None
-        self._collapsed: bool = False
-        self._icon_strip: Optional[QWidget] = None  # IconStripWidget，Task 5 创建
         self._anim_phase: float = 0.0  # 彩虹动画相位
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
@@ -549,201 +400,19 @@ class TabPanel(QWidget):
         }}
     """
 
-    @staticmethod
-    def _info_rgb() -> tuple:
-        """返回 Colors.INFO 的 (r, g, b) 整数值"""
-        c = _QColor(Colors.INFO)
-        return c.red(), c.green(), c.blue()
-
-    @staticmethod
-    def _card_bg_rgb() -> tuple:
-        """从 Colors.CARD_BG rgba 字符串提取 (r, g, b)"""
-        s = Colors.CARD_BG
-        try:
-            if s.startswith("rgba("):
-                parts = s.strip("rgba() ").split(",")
-                return int(parts[0]), int(parts[1]), int(parts[2])
-        except Exception:
-            pass
-        return 33, 33, 38  # fallback
-
-    def _apply_panel_stylesheet(self):
-        """应用/刷新面板所有动态样式（渐变/颜色/字体随主题变化）"""
-        ir, ig, ib = self._info_rgb()
-        cr, cg, cb = self._card_bg_rgb()
-        cr2, cg2, cb2 = max(0, cr - 5), max(0, cg - 5), max(0, cb - 5)
-
-        # ── 面板背景渐变 ──
-        self.setStyleSheet(f"""
-            #tabPanel {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba({cr},{cg},{cb}, 0.97),
-                    stop:0.5 rgba({cr},{cg},{cb}, 0.98),
-                    stop:1 rgba({cr2},{cg2},{cb2}, 0.99));
-            }}
-        """)
-
-        # ── 顶部渐变发光线 ──
-        if self._glow_line:
-            self._glow_line.setStyleSheet(f"""
-                #glowLine {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 rgba(0,0,0,0),
-                        stop:0.2 rgba({ir},{ig},{ib}, 0.35),
-                        stop:0.5 rgba(139, 92, 246, 0.35),
-                        stop:0.8 rgba({ir},{ig},{ib}, 0.35),
-                        stop:1 rgba(0,0,0,0));
-                    margin: 0 12px;
-                }}
-            """)
-
-        # ── 品牌文字 ──
-        for child in self.findChildren(QLabel):
-            name = child.objectName()
-            if name == "brandName":
-                child.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
-                    f"{font_size_css(13)} font-weight: 600;"
-                )
-            elif name == "sessionCountBadge":
-                child.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; background: rgba(255,255,255,0.05); "
-                    f"border-radius: 10px; padding: 2px 8px; {font_size_css(11)};"
-                )
-
-        # ── 新建按钮渐变 ──
-        self._new_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba({ir},{ig},{ib}, 0.12),
-                    stop:1 rgba(139, 92, 246, 0.08));
-                border: 1px solid rgba({ir},{ig},{ib}, 0.18);
-                color: {Colors.INFO};
-                border-radius: 8px;
-                padding: 6px 12px;
-                {font_size_css(12)}
-            }}
-            QPushButton:hover {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba({ir},{ig},{ib}, 0.20),
-                    stop:1 rgba(139, 92, 246, 0.15));
-                border: 1px solid rgba({ir},{ig},{ib}, 0.35);
-            }}
-        """)
-
-        # ── 渐变分隔线 ──
-        for child in self.findChildren(QFrame):
-            if child.objectName() == "gradientDivider":
-                child.setStyleSheet("""
-                    #gradientDivider {{
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                            stop:0 rgba(0,0,0,0),
-                            stop:0.5 rgba(255,255,255, 0.08),
-                            stop:1 rgba(0,0,0,0));
-                        margin: 0 16px;
-                        border: none;
-                    }}
-                """)
-
-        # ── 底部扁平按钮 ──
-        self._settings_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                color: {Colors.TEXT_MUTED};
-                border: none;
-                border-radius: 5px;
-                padding: 4px 8px;
-                {font_size_css(11)}
-            }}
-            QPushButton:hover {{
-                background: rgba(255,255,255,0.06);
-                color: {Colors.TEXT_PRIMARY};
-            }}
-        """)
-
-    def _update_session_count(self):
-        """同步品牌区会话计数"""
-        if self._session_count_label:
-            n = len(self._items)
-            self._session_count_label.setText(f"{n} 会话")
-
-    def _on_icon_strip_tab_selected(self, idx: int):
-        """折叠态图标条点击 Tab"""
-        self.set_active_index(idx)
-        self.tabSelected.emit(idx)
-
-    def set_collapsed(self, collapsed: bool):
-        """切换到折叠/展开态"""
-        if self._collapsed == collapsed:
-            return
-        self._collapsed = collapsed
-
-        main_layout = self.layout()
-        if collapsed:
-            self._sync_icon_strip()
-            self._icon_strip.show()
-            if main_layout:
-                for i in range(main_layout.count()):
-                    w = main_layout.itemAt(i).widget()
-                    if w and w is not self._icon_strip:
-                        w.hide()
-        else:
-            self._icon_strip.hide()
-            if main_layout:
-                for i in range(main_layout.count()):
-                    w = main_layout.itemAt(i).widget()
-                    if w and w is not self._icon_strip:
-                        w.show()
-
-    def _sync_icon_strip(self):
-        """同步图标条数据：从当前 Tab 列表生成图标数据"""
-        if self._icon_strip is None:
-            return
-        icons = []
-        for item in self._items:
-            pix = item._icon_pixmap
-            if pix is None or (hasattr(pix, 'isNull') and pix.isNull()):
-                pix = QPixmap()
-            icons.append((pix, item._streaming, item._stream_error, item._question))
-        self._icon_strip.set_icons(icons)
-        self._icon_strip.set_active_index(self._active_index)
-
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 品牌区块 ──
-        brand_widget = QWidget(self)
-        brand_layout = QHBoxLayout(brand_widget)
-        brand_layout.setContentsMargins(12, 10, 12, 6)
-        brand_layout.setSpacing(8)
+        # ── 顶部：UI 插件标题（固定在滚动区外） ──
+        plugin_title = CaptionLabel("UI 插件", self)
+        self._plugin_title = plugin_title
+        plugin_title.setAlignment(Qt.AlignCenter)
+        plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
+        layout.addWidget(plugin_title)
 
-        brand_icon = QLabel(brand_widget)
-        brand_icon.setFixedSize(22, 22)
-        brand_icon.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-            " stop:0 #66c6ff, stop:1 #8b5cf6); border-radius: 6px;"
-        )
-        brand_layout.addWidget(brand_icon)
-
-        brand_name = QLabel("DriFox", brand_widget)
-        brand_name.setObjectName("brandName")
-        brand_layout.addWidget(brand_name)
-
-        self._session_count_label = QLabel("0 会话", brand_widget)
-        self._session_count_label.setObjectName("sessionCountBadge")
-        brand_layout.addWidget(self._session_count_label)
-
-        layout.addWidget(brand_widget)
-
-        # ── 顶部渐变发光线 ──
-        self._glow_line = QWidget(self)
-        self._glow_line.setFixedHeight(1)
-        self._glow_line.setObjectName("glowLine")
-        layout.addWidget(self._glow_line)
-
-        # ── UI 插件列表（带滚动） ──
+        # ── 顶部：UI 插件列表（带滚动） ──
         self._plugin_scroll = QScrollArea(self)
         self._plugin_scroll.setWidgetResizable(True)
         self._plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -779,7 +448,7 @@ class TabPanel(QWidget):
         top_bar = QWidget(self)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(6, 6, 6, 4)
-        self._new_btn = QPushButton("＋ 新建标签页", top_bar)
+        self._new_btn = TransparentPushButton(FIF.ADD, "新建标签页", top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.clicked.connect(self.newTabRequested.emit)
@@ -819,9 +488,8 @@ class TabPanel(QWidget):
 
         # ── 分隔线 ──
         separator = QFrame(self)
-        separator.setObjectName("gradientDivider")
         separator.setFrameShape(QFrame.HLine)
-        separator.setFixedHeight(1)
+        separator.setStyleSheet(self._SEPARATOR_STYLE)
         layout.addWidget(separator)
 
         # ── 底部：设置按钮 ──
@@ -829,7 +497,7 @@ class TabPanel(QWidget):
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(6, 4, 6, 6)
 
-        self._settings_btn = QPushButton("设置", bottom_bar)
+        self._settings_btn = TransparentPushButton(FIF.SETTING, "设置", bottom_bar)
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._settings_btn.clicked.connect(self._on_settings_clicked)
@@ -838,22 +506,12 @@ class TabPanel(QWidget):
         layout.addWidget(bottom_bar)
 
         account_separator = QFrame(self)
-        account_separator.setObjectName("gradientDivider")
         account_separator.setFrameShape(QFrame.HLine)
-        account_separator.setFixedHeight(1)
+        account_separator.setStyleSheet(self._SEPARATOR_STYLE)
         layout.addWidget(account_separator)
 
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
-
-        # ── 折叠态图标条（初始隐藏） ──
-        self._icon_strip = IconStripWidget(self)
-        self._icon_strip.hide()
-        self._icon_strip.tabSelected.connect(self._on_icon_strip_tab_selected)
-        self._icon_strip.newTabRequested.connect(self.newTabRequested.emit)
-        layout.addWidget(self._icon_strip)
-
-        self._apply_panel_stylesheet()
 
     def _on_settings_clicked(self):
         """打开设置卡片"""
@@ -896,7 +554,7 @@ class TabPanel(QWidget):
 
         if self._plugin_layout is None or self._plugin_section is None:
             return
-        while self._plugin_layout.count() > 0:  # 清除所有旧项（不再保留标题行）
+        while self._plugin_layout.count() > 1:  # 保留索引 0 的标题
             item = self._plugin_layout.takeAt(1)
             widget = item.widget()
             if widget is not None:
@@ -955,6 +613,8 @@ class TabPanel(QWidget):
         """刷新插件区域的主题和字号样式"""
         if self._plugin_section is None:
             return
+        if self._plugin_title is not None:
+            self._plugin_title.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(13)}")
         for row in self._plugin_buttons:
             row.refresh_style()
 
@@ -985,9 +645,6 @@ class TabPanel(QWidget):
         if len(self._items) == 1:
             self.set_active_index(0)
 
-        self._update_session_count()
-        if self._collapsed:
-            self._sync_icon_strip()
         return idx
 
     def remove_tab(self, index: int):
@@ -1010,11 +667,6 @@ class TabPanel(QWidget):
             elif self._active_index > index:
                 self._active_index -= 1
 
-        self._update_session_count()
-
-        if self._collapsed:
-            self._sync_icon_strip()
-
     def set_active_index(self, index: int):
         """设置选中 Tab"""
         # 取消旧的选中态
@@ -1029,9 +681,6 @@ class TabPanel(QWidget):
             self._items[index].set_selected(True)
             self.tabSelected.emit(index)
 
-        if self._collapsed:
-            self._icon_strip.set_active_index(index)
-
     def update_tab_title(self, index: int, title: str):
         """更新 Tab 标题"""
         if 0 <= index < len(self._items):
@@ -1041,9 +690,6 @@ class TabPanel(QWidget):
         """更新 Tab 图标"""
         if 0 <= index < len(self._items):
             self._items[index].set_icon(icon)
-
-        if self._collapsed:
-            self._sync_icon_strip()
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
@@ -1068,9 +714,6 @@ class TabPanel(QWidget):
                 if self._streaming_count + self._question_count == 0:
                     self._stop_anim_timer()
 
-        if self._collapsed:
-            self._sync_icon_strip()
-
     def update_tab_question(self, index: int, question: bool):
         """更新 Tab 的 question 状态（AI 提问等待用户回答）"""
         if not (0 <= index < len(self._items)):
@@ -1086,9 +729,6 @@ class TabPanel(QWidget):
             self._question_count = max(0, self._question_count - 1)
             if self._streaming_count + self._question_count == 0:
                 self._stop_anim_timer()
-
-        if self._collapsed:
-            self._sync_icon_strip()
 
     def _ensure_anim_timer(self):
         """确保彩虹动画定时器已启动"""
@@ -1119,7 +759,6 @@ class TabPanel(QWidget):
         from app.utils.design_tokens import Colors as _Colors
 
         _Colors.refresh()
-        self._apply_panel_stylesheet()
         for item in self._items:
             item.refresh_style()
             # 强制重绘（解决 stylesheet 重应用后 widget 未及时更新的问题）
@@ -1127,20 +766,6 @@ class TabPanel(QWidget):
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
-        # 折叠态图标条同步
-        if self._collapsed and self._icon_strip:
-            ir, ig, ib = self._info_rgb()
-            self._icon_strip._glow_line.setStyleSheet(f"""
-                #iconStripGlowLine {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 rgba(0,0,0,0),
-                        stop:0.3 rgba({ir},{ig},{ib}, 0.25),
-                        stop:0.7 rgba({ir},{ig},{ib}, 0.25),
-                        stop:1 rgba(0,0,0,0));
-                    margin: 0 4px;
-                }}
-            """)
-            self._sync_icon_strip()
 
     @property
     def count(self) -> int:
