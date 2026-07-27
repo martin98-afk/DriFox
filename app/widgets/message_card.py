@@ -3140,7 +3140,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #ff7b72;
                 }}
                 .tool-diff-stats__sep {{
-                    color: #6e7681;
+                    color: {"var(--text-muted)" if _is_light_diff else "#6e7681"};
                 }}
                 .tool-diff-inline {{
                     margin: 0;

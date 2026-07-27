@@ -1587,10 +1587,13 @@ def render_tool_block(
         added = diff_summary["added"]
         deleted = diff_summary["deleted"]
         if added or deleted:
+            # sep 不再写内联颜色——交给 message_card.py 的 .tool-diff-stats__sep
+            # CSS 类按主题自适应（浅色用 --text-muted，深色用 #6e7681）。
+            # 之前写死 rgba(255,255,255,0.3) 在浅色背景下几乎不可见。
             diff_stats_html = f"""
             <span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px; {get_font_family_css()}">
                 <span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{added}</span>
-                <span class="tool-diff-stats__sep" style="color: rgba(255,255,255,0.3);">/</span>
+                <span class="tool-diff-stats__sep">/</span>
                 <span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{deleted}</span>
             </span>"""
 
