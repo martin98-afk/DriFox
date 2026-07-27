@@ -13467,14 +13467,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
 
-        # 🛡️ 立即持久化会话，防止用户在延迟保存窗口内切换会话导致
-        # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
-        # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
-        # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
-        # 其内部的 _save_current_session_to_history 因 _session_dirty=False 而跳过。
+        # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
+        # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
+        # save 是内存操作+SQLite INSERT（~1-3ms），flush 是 fsync 写盘（~10-50ms）。
+        # 立即 save 保留会话数据以防用户切换，延迟 flush 让 WebEngine 先完成布局/绘制。
+        # _do_post_stream_cleanup 中的 flush 会补上磁盘同步。
         if self.history_manager and not getattr(self, "_session_switched", False):
             self._save_current_session_to_history()
-            self.history_manager.flush()
+            # flush 延迟到 _do_post_stream_cleanup，避免阻塞主线程渲染
 
         # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
         # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
