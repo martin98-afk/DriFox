@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.8] - 2026-07-28
 
-自上一版本以来的变更 | 提交数：85 · 文件变更：70 · +9297/-2336 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：89 · 文件变更：71 · +9487/-2341 | 贡献者：dingma, mading, martin98-afk
 
 > 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
 
@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
 - **FileTreeView 重构**: 将 FileTreeWidget 重构为 FileTreeView，增强模型和委托结构
 - **UI 插件注册增强**: 新增 `system_card` 参数，支持更好的卡片管理
 - **卡片容器智能展开**: showEvent 检测可见卡片时自动展开
+- **Tab 管理器 resize 处理增强**: 优化 resize 事件处理和事件过滤，实现更流畅的 UI 体验
+
+### 🎨 样式改进 (Style)
+
+- **文件树字体样式统一**: 更新文件树字体大小和样式，提升 UI 一致性
 
 ### 🐛 问题修复 (Bug Fixes)
 

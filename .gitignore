@@ -25,6 +25,7 @@ logs/
 Thumbs.db
 /.drifox/
 /.drifox/app.config
+.workbuddy/
 /docs/
 .superpowers/
 /tests/
