@@ -3334,6 +3334,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # Tab 模式下：共享 Launcher 由 TabManagerWindow 管理，隐藏 per-window launcher
                 try:
                     from app.widgets.tab_manager_window import TabManagerWindow
+
                     _tm = TabManagerWindow.get_instance()
                     if _tm is not None and _tm.isVisible():
                         launcher.hide()
@@ -6466,10 +6467,14 @@ class OpenAIChatToolWindow(ToolWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _apply_bg_from_theme(self):
-        """从当前主题配置加载背景图片"""
+        """从当前主题配置加载背景图片
+
+        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        """
         try:
             from app.utils.design_tokens import Colors
             from app.utils.theme_manager import theme_manager
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
 
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
@@ -6480,6 +6485,16 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 image = None
                 opacity = 0.1
+
+            # ── 缓存检查：同一背景配置跳过重建 ──
+            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
+            if (
+                getattr(self, "_last_bg_key", None) == bg_key
+                and hasattr(self, "_bg_label")
+                and self._bg_label is not None
+            ):
+                return
+            self._last_bg_key = bg_key
 
             if image:
                 # 先清除旧背景
@@ -7065,11 +7080,16 @@ class OpenAIChatToolWindow(ToolWindow):
         1. 全局操作：Colors.refresh / setTheme / on_theme_changed 只执行一次
         2. Per-window：迭代所有窗口执行样式更新
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator.timer_start("batched_total")
+
         cls._theme_batch_timer = None
         final_scope = cls._theme_batch_scope
         cls._theme_batch_scope = None
 
         # ── 全局操作：只执行一次 ──
+        ThemeRefreshCoordinator.timer_start("global")
         Colors.refresh()
         theme_manager.on_theme_changed()
         try:
@@ -7081,8 +7101,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 setTheme(Theme.DARK)
         except Exception:
             pass
+        ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
+        ThemeRefreshCoordinator.timer_start("windows")
         for win in getattr(OpenAIChatToolWindow, "_instances", []):
             if getattr(win, "_is_destroyed", False):
                 continue
@@ -7090,6 +7112,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
+        ThemeRefreshCoordinator.timer_end("windows")
 
         # ── Tab 模式：刷新 TabManagerWindow 样式 ──
         # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
@@ -7103,6 +7126,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 _tm._on_theme_changed()
         except Exception as e:
             logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
+
+        ThemeRefreshCoordinator.timer_end("batched_total")
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -7401,6 +7426,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # Tab 模式下也刷新共享 Launcher
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
+
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None and _tm.isVisible():
                     _tm._update_shared_launcher()
@@ -7421,10 +7447,22 @@ class OpenAIChatToolWindow(ToolWindow):
         _skip_global   — 批处理模式：全局操作（Colors.refresh/setTheme）
                          已由协调器执行，跳过来自本窗口的重复调用。
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator.timer_start("total")
+
+        # ── 幂等跳过：同一主题重复刷新直接 return ──
         is_color = scope in (None, "theme")
         is_font_family = scope in (None, "font_family")
         is_font_size = scope in (None, "font_size")
         is_font = scope in (None, "font_family", "font_size")
+
+        # ── 幂等跳过：同一主题直接跳过颜色/主题块 ──
+        current_theme_id = theme_manager.get_current_theme_id()
+        if is_color and getattr(self, "_last_color_theme_id", None) == current_theme_id:
+            is_color = False  # 主题未变，跳过颜色块；字体相关块照常执行
+        else:
+            self._last_color_theme_id = current_theme_id
 
         # Colors.refresh() 在 preamble 中无条件执行，
         # 保证后续公共块中所有 Colors.* 引用使用最新值。
@@ -7434,6 +7472,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
         # 避免后续 scope 分支中重复 findChildren 遍历全树
+        ThemeRefreshCoordinator.timer_start("findChildren")
         _message_cards = self.findChildren(MessageCard)
         _base_settings = self.findChildren(BaseSettingsCard)
         from qfluentwidgets import SettingCard
@@ -7443,6 +7482,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         _worktree_widgets = self.findChildren(WorktreeSectionWidget)
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
+        ThemeRefreshCoordinator.timer_end("findChildren")
 
         # ── 1. 颜色/主题相关块 ──
         if is_color:
@@ -7502,9 +7542,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     ring.refresh_theme()
 
             # 消息卡片主题
+            ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
                     card.refresh_theme()
+            ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新
             from app.widgets.simple_hover_tooltip import refresh_all_tooltips
@@ -7727,6 +7769,8 @@ class OpenAIChatToolWindow(ToolWindow):
         launcher = getattr(self, "_ui_plugin_edge_launcher", None)
         if launcher is not None and hasattr(launcher, "apply_theme"):
             launcher.apply_theme()
+
+        ThemeRefreshCoordinator.timer_end("total")
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行

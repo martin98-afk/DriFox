@@ -550,6 +550,10 @@ class TabManagerWindow(QWidget):
         注意：调用方（dispatch_refresh / _execute_batched_theme_refresh）
         已执行 Colors.refresh()，此处不再重复调用。
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator.timer_start("tab_manager")
+
         # 重建样式表
         self._apply_theme_stylesheet()
         # 刷新标题栏
@@ -578,6 +582,8 @@ class TabManagerWindow(QWidget):
                         _update_tab_icon(idx, project)
                 except Exception:
                     pass
+
+        ThemeRefreshCoordinator.timer_end("tab_manager")
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""

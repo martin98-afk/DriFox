@@ -4681,7 +4681,14 @@ class CodeWebViewer(QWebEngineView):
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
 
     def refresh_theme(self):
-        """刷新主题颜色，响应全局主题切换"""
+        """刷新主题颜色，响应全局主题切换
+
+        优化：使用 ThemeRefreshCoordinator 全局缓存 JS 字符串。
+        同一主题版本内所有 MessageCard 共享同一份 JS 代码，
+        避免逐卡重复构建字符串。
+        """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
         try:
             from app.utils.theme_manager import theme_manager
 
@@ -4689,29 +4696,15 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             _is_light = False
 
-        theme = current_theme()
+        # 版本号检查：同一主题版本内跳过 JS 注入
+        v = ThemeRefreshCoordinator.get_version()
+        if getattr(self, "_last_theme_version", -1) == v:
+            return
+        self._last_theme_version = v
 
-        # 通过 JS 更新 :root CSS 变量，使已有 DOM 即时反映新主题
-        js_code = f"""
-        (function() {{
-            var root = document.documentElement;
-            if (!root) return;
-            root.style.setProperty('--bg', 'transparent');
-            root.style.setProperty('--panel', '{theme["card_bg_solid"]}');
-            root.style.setProperty('--panel-elevated', '{theme["card_bg_solid"]}');
-            root.style.setProperty('--panel-soft', '{theme["content_bg"]}');
-            root.style.setProperty('--border', '{theme["border"]}');
-            root.style.setProperty('--border-strong', '{theme["border_accent"]}');
-            root.style.setProperty('--text', '{theme["text_primary"]}');
-            root.style.setProperty('--text-secondary', '{theme["text_secondary"]}');
-            root.style.setProperty('--text-muted', '{theme["text_muted"]}');
-            root.style.setProperty('--accent', '{theme["accent"]}');
-            root.style.setProperty('--accent-warm', '{theme["accent_warm"]}');
-            root.style.setProperty('--code-bg', '{"var(--panel-soft)" if _is_light else "transparent"}');
-            root.style.setProperty('--code-toolbar', '{"rgba(0,0,0,0.03)" if _is_light else "rgba(255, 255, 255, 0.03)"}');
-            root.style.setProperty('--code-border', '{"var(--border)" if _is_light else "#2a3447"}');
-        }})();
-        """
+        theme = current_theme()
+        js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+
         try:
             if self.page():
                 self.page().runJavaScript(js_code)
@@ -6101,17 +6094,18 @@ class MessageCard(SimpleCardWidget):
             # 检测深浅色模式，选择合适的错误配色
             try:
                 from app.utils.theme_manager import theme_manager
+
                 _is_light = theme_manager.is_light_theme()
             except Exception:
                 _is_light = False
             if _is_light:
-                theme["bg"] = "#FFF5F5"       # 浅粉底
-                theme["border"] = "#FCA5A5"    # 浅红边框
-                theme["accent"] = "#DC2626"    # 深红强调
+                theme["bg"] = "#FFF5F5"  # 浅粉底
+                theme["border"] = "#FCA5A5"  # 浅红边框
+                theme["accent"] = "#DC2626"  # 深红强调
             else:
-                theme["bg"] = "#2A1F1F"       # 暗红褐底
-                theme["border"] = "#A94444"    # 暗红边框
-                theme["accent"] = "#FF7B7B"    # 亮红强调
+                theme["bg"] = "#2A1F1F"  # 暗红褐底
+                theme["border"] = "#A94444"  # 暗红边框
+                theme["accent"] = "#FF7B7B"  # 亮红强调
         return theme
 
     def refresh_theme(self):
@@ -6872,6 +6866,7 @@ class MessageCard(SimpleCardWidget):
         # 设置卡片为错误状态样式（根据深浅模式选择边框色）
         try:
             from app.utils.theme_manager import theme_manager
+
             _is_light = theme_manager.is_light_theme()
         except Exception:
             _is_light = False
@@ -7140,6 +7135,7 @@ class MessageCard(SimpleCardWidget):
             # 检测深浅色模式，选择合适背景
             try:
                 from app.utils.theme_manager import theme_manager
+
                 _is_light = theme_manager.is_light_theme()
             except Exception:
                 _is_light = False
@@ -7160,6 +7156,7 @@ class MessageCard(SimpleCardWidget):
         # 检测深浅色模式，选择合适的错误文字颜色
         try:
             from app.utils.theme_manager import theme_manager
+
             _is_light = theme_manager.is_light_theme()
         except Exception:
             _is_light = False
