@@ -12442,6 +12442,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型开始调用工具时激活彩虹边框（即使返回内容不含文本）
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
+            # 🚀 [PERF] 工具调用触发时强制渲染待处理的正文
+            # 工具调用前到达的 content_batch 已通过 append_chunk 写入
+            # _markdown_text，但若未达自然边界（无句号/换行），安全定时器
+            # 要等 300ms 才渲染。强制立即渲染让用户在工具执行前先看到正文，
+            # 避免"正文等工具执行完才出现"的感知。
+            # ⚠️ _schedule_render 是 CodeWebViewer 的方法，不是 MessageCard 的，
+            # 需通过 .viewer 访问。viewer 可能为 None（懒渲染未就绪）。
+            _vwr = getattr(self._current_assistant_card, "viewer", None)
+            if _vwr is not None:
+                _vwr._schedule_render(immediate=True)
 
         # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
         # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。

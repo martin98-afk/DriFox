@@ -4447,7 +4447,10 @@ class CodeWebViewer(QWebEngineView):
 
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
-    _SAFETY_RENDER_INTERVAL = 2000
+    # 🔧 2000ms → 300ms：原 2 秒导致工具调用前的小段正文被延迟渲染，
+    # 用户感知为"等待工具执行完正文才出现"。300ms 足够合并连续 chunk，
+    # 又不会让用户在工具执行期间看不到已到达的文本。
+    _SAFETY_RENDER_INTERVAL = 300
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
 
@@ -4761,7 +4764,13 @@ class CodeWebViewer(QWebEngineView):
                 # 因为 finish_tool_streaming 注入的已完成块 (data-streaming="false")
                 # 不在 _content_data 中，不会被 markdown 重新生成，若不保存也会被抹掉。
                 # 非流式分支：使用共享的 _build_save_and_restore_js 模板
-                self.page().runJavaScript(self._build_save_and_restore_js(html_content))
+                # 🚀 [PERF] 使用异步 runJavaScript（带 callback）避免主线程阻塞
+                # 等待 WebEngine 处理 DOM。同步版本会卡 30-120ms。
+                # 异步后主线程立即释放，WebEngine 在后台解析 HTML 和替换 DOM。
+                self.page().runJavaScript(
+                    self._build_save_and_restore_js(html_content),
+                    lambda _result: None
+                )
                 self._last_rendered_html = None
                 return
 
@@ -4922,11 +4931,9 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
-        # 🆕 流式结束：自动折叠工具与思考区。在最终渲染完成后执行，
-        # 减少"弹到抬头"时的视觉跳跃，让已完成内容的展示更紧凑。
-        # 若有流式进行中的工具块（data-streaming="true"）则暂不折叠，
-        # 等待后续 tool_result_received 处理完成后自然收敛。
-        self._auto_collapse_tool_section()
+        # 🚀 [PERF] 延迟工具区折叠，让 WebEngine 先完成 _schedule_render 的
+        # 布局/绘制后再执行 DOM 属性操作，分离连续 runJavaScript 阻塞。
+        QTimer.singleShot(0, self._auto_collapse_tool_section)
 
     def _auto_collapse_tool_section(self):
         """流式结束时自动折叠工具与思考区
