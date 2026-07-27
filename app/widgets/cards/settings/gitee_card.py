@@ -63,6 +63,61 @@ def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
     return pix
 
 
+class _AvatarCircleWidget(QWidget):
+    """使用 QPainter 绘制的圆形头像 — DPI 感知
+
+    替代 QLabel + QPixmap + setDevicePixelRatio 方案。
+    直接在 paintEvent 中用 QPainter 绘制圆 + 文字，Qt 自动处理 DPI 缩放，
+    避免物理像素四舍五入导致的逻辑尺寸不匹配和裁剪问题。
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "?", parent=None):
+        super().__init__(parent)
+        self._text = text[0].upper() if text else "?"
+        self._bg_color = QColor(_color_for_name(text))
+        self._size = 32
+        self.setFixedSize(self._size, self._size)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_avatar(self, text: str):
+        """更新头像文字和背景色"""
+        self._text = text[0].upper() if text else "?"
+        self._bg_color = QColor(_color_for_name(text))
+        self.setToolTip(text)
+        self.update()
+
+    def set_size(self, size: int):
+        """更新头像逻辑尺寸"""
+        self._size = size
+        self.setFixedSize(size, size)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        rect = self.rect()
+        size = min(rect.width(), rect.height())
+
+        # 圆形裁剪区域（留 1px 内边距避免抗锯齿溢出）
+        ellipse_rect = QRectF(1, 1, size - 2, size - 2)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._bg_color)
+        painter.drawEllipse(ellipse_rect)
+
+        # 居中白色文字
+        painter.setPen(QColor("#ffffff"))
+        font = get_unified_font(int(size * 0.42), bold=True)
+        painter.setFont(font)
+        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, self._text)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self.clicked.emit()
+
+
 class _ClickableAvatar(QLabel):
     clicked = pyqtSignal()
 
@@ -222,9 +277,8 @@ class GiteeAccountRow(QFrame):
         layout.setSpacing(8)
 
         avatar_size = scale_font_size(28)
-        self._avatar = _ClickableAvatar(self)
-        self._avatar.setFixedSize(avatar_size, avatar_size)
-        self._avatar.setAlignment(Qt.AlignCenter)
+        self._avatar = _AvatarCircleWidget("?", self)
+        self._avatar.set_size(avatar_size)
         layout.addWidget(self._avatar)
 
         text_container = QVBoxLayout()
@@ -274,7 +328,8 @@ class GiteeAccountRow(QFrame):
         if is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
-            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.set_avatar(owner)
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._name_label.setText(owner)
             self._name_label.setToolTip(owner)
@@ -283,7 +338,8 @@ class GiteeAccountRow(QFrame):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
-            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.set_avatar("?")
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
             self._name_label.setText("Gitee 未绑定")
             self._name_label.setToolTip("Gitee 未绑定")
@@ -448,7 +504,7 @@ class GiteeAccountRow(QFrame):
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
-        self._avatar.setFixedSize(avatar_size, avatar_size)
+        self._avatar.set_size(avatar_size)
         btn_size = scale_font_size(22)
         self._more_btn.setFixedSize(btn_size, btn_size)
         self._refresh_ui()
@@ -566,9 +622,8 @@ class _GiteeMorePopup(QWidget):
         info_layout.setContentsMargins(14, 8, 14, 8)
         info_layout.setSpacing(10)
 
-        self._popup_avatar = QLabel(self._info_widget)
-        self._popup_avatar.setFixedSize(36, 36)
-        self._popup_avatar.setAlignment(Qt.AlignCenter)
+        self._popup_avatar = _AvatarCircleWidget("?", self._info_widget)
+        self._popup_avatar.set_size(36)
         # 鼠标事件穿透，由 _info_widget 统一处理点击
         self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
@@ -708,7 +763,8 @@ class _GiteeMorePopup(QWidget):
         avatar_size = 36
 
         if is_bound and owner:
-            self._popup_avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._popup_avatar.set_avatar(owner)
+            self._popup_avatar.set_size(avatar_size)
             hint = f"点击打开 {owner}/{repo}"
             self._info_widget.setToolTip(hint)
             self._popup_name.setText(owner)
@@ -728,7 +784,8 @@ class _GiteeMorePopup(QWidget):
                 }}
             """)
         else:
-            self._popup_avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._popup_avatar.set_avatar("?")
+            self._popup_avatar.set_size(avatar_size)
             self._popup_avatar.setToolTip("未绑定")
             self._popup_name.setText("未绑定 Gitee")
             self._popup_repo.setText("绑定后可备份与分享")
@@ -847,10 +904,8 @@ class GiteeCard(SettingCard):
 
     def _setup_right(self):
         avatar_size = scale_font_size(32)
-        self._avatar = _ClickableAvatar()
-        self._avatar.setFixedSize(avatar_size, avatar_size)
-        self._avatar.setCursor(Qt.PointingHandCursor)
-        self._avatar.setAlignment(Qt.AlignCenter)
+        self._avatar = _AvatarCircleWidget("?", self)
+        self._avatar.set_size(avatar_size)
         self._avatar.clicked.connect(self._on_avatar_clicked)
         self.hBoxLayout.addWidget(self._avatar)
 
@@ -910,7 +965,8 @@ class GiteeCard(SettingCard):
         if is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
-            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.set_avatar(owner)
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
@@ -927,7 +983,8 @@ class GiteeCard(SettingCard):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
-            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.set_avatar("?")
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
             self._bind_btn.setText("绑定")
             self._bind_btn.setCursor(Qt.PointingHandCursor)

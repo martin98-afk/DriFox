@@ -9,7 +9,7 @@ TabPanel — Tab 管理器左侧面板
 from typing import List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QIcon, QMouseEvent, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,9 +28,9 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 
@@ -103,15 +103,104 @@ _SHIMMER_COLORS = (
 _CACHED_ERROR_RED = _QColor(220, 50, 50)
 
 
+class _TabProjectIcon(QWidget):
+    """标签页项目图标 — 与 _SquareAvatar（project_selector_card.py）一致的 DPI 感知方案
+
+    直接 paintEvent 绘制纯色圆角矩形 + 白色缩写字母，
+    Qt 自动处理 devicePixelRatio，无需中间 QPixmap / 手动 round(ceil) 物理像素。
+    """
+
+    def __init__(self, parent=None, size: int = 20):
+        super().__init__(parent)
+        self._size = size
+        self._initials = ""
+        self._color = QColor(128, 128, 128)
+        self._fallback_pixmap: Optional[QPixmap] = None
+        self.setFixedSize(size, size)
+
+    def set_project(self, initials: str, color_rgba: str):
+        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）"""
+        self._initials = initials if initials else "?"
+        self._color = self._parse_rgba(color_rgba)
+        self._fallback_pixmap = None  # 清除 pixmap fallback
+        self.update()
+
+    def set_fallback_pixmap(self, pixmap):
+        """设置通用 pixmap 兜底（非项目头像时使用）"""
+        self._fallback_pixmap = pixmap
+        self._initials = ""  # 清除 project 模式
+        self.update()
+
+    @staticmethod
+    def _parse_rgba(rgba_str: str) -> QColor:
+        """解析 'rgba(r,g,b,a)' 字符串为 QColor，与 _SquareAvatar 一致"""
+        if rgba_str.startswith("#"):
+            return QColor(rgba_str)
+        try:
+            import re
+            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
+            if m:
+                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                a = int(m.group(4)) if m.group(4) else 255
+                return QColor(r, g, b, a)
+        except Exception:
+            pass
+        return QColor(128, 128, 128)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        rect = self.rect()
+
+        # ── 项目头像模式：直接画圆角矩形 + 白字 ──
+        if self._initials:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._color)
+            painter.drawRoundedRect(rect, 5, 5)
+
+            painter.setPen(Qt.white)
+            font = get_unified_font()
+            font.setPixelSize(scale_font_size(self._size * 14 // 24))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignCenter, self._initials)
+            return
+
+        # ── 兜底：画 QPixmap ──
+        pix = self._fallback_pixmap
+        if pix is not None:
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            if isinstance(pix, QPixmap):
+                # source 用 logical 坐标：Qt 期望的逻辑坐标系
+                dpr = pix.devicePixelRatio()
+                if dpr > 1.0:
+                    lw = pix.width() / dpr
+                    lh = pix.height() / dpr
+                    painter.drawPixmap(QRectF(rect), pix, QRectF(0, 0, lw, lh))
+                else:
+                    scaled = pix.scaled(rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    x = (rect.width() - scaled.width()) / 2
+                    y = (rect.height() - scaled.height()) / 2
+                    painter.drawPixmap(int(x), int(y), scaled)
+            elif isinstance(pix, QIcon):
+                p = pix.pixmap(rect.size().toSize())
+                if p and not p.isNull():
+                    painter.drawPixmap(rect, p, p.rect())
+
+
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件"""
 
     closeRequested = pyqtSignal()
 
-    def __init__(self, title: str, icon=None, parent=None, panel=None):
+    def __init__(self, title: str, icon=None, parent=None, panel=None,
+                 project_initials: str = "", project_color: str = ""):
         super().__init__(parent)
         self._title = title
-        self._icon_pixmap = icon
+        self._project_initials = project_initials
+        self._project_color = project_color
         self._selected = False
         self._streaming = False
         self._stream_error = False
@@ -134,11 +223,10 @@ class TabItem(QFrame):
         layout.setContentsMargins(8, 4, 4, 4)
         layout.setSpacing(6)
 
-        # 图标
-        self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-        self._apply_icon_to_label()
-        layout.addWidget(self._icon_label)
+        # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
+        self._icon_widget = _TabProjectIcon(self, size=self._icon_size)
+        self._apply_project_to_icon()
+        layout.addWidget(self._icon_widget)
 
         # ── 团队角色胶囊（默认隐藏）──
         self._capsule_label = QLabel(self)
@@ -183,8 +271,8 @@ class TabItem(QFrame):
         new_size = scale_icon_size(20)
         if new_size != self._icon_size:
             self._icon_size = new_size
-            self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-            self._apply_icon_to_label()
+            self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
+            self._apply_project_to_icon()
         self._apply_title_style()
         self.update()
 
@@ -206,33 +294,22 @@ class TabItem(QFrame):
         self._title = title
         self._title_label.setText(title)
 
-    def _apply_icon_to_label(self):
-        """统一处理 _icon_pixmap 缩放并赋值给 _icon_label，消除三处重复代码"""
-        pixmap = self._icon_pixmap
-        if pixmap is None:
-            self._icon_label.clear()
-            return
-        from PyQt5.QtGui import QPixmap as _QP
+    def _apply_project_to_icon(self):
+        """将项目信息交给 _TabProjectIcon 绘制"""
+        if self._project_initials and self._project_color:
+            self._icon_widget.set_project(self._project_initials, self._project_color)
 
-        if isinstance(pixmap, _QP):
-            if pixmap.devicePixelRatio() > 1.0:
-                # HiDPI 感知 pixmap，直接设避免二次缩放破坏清晰度
-                self._icon_label.setPixmap(pixmap)
-            else:
-                self._icon_label.setPixmap(
-                    pixmap.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-        else:
-            try:
-                p = pixmap.pixmap(self._icon_size, self._icon_size)
-                if p:
-                    self._icon_label.setPixmap(p)
-            except Exception as exc:
-                logger.debug(f"[TabItem] 无法获取图标 pixmap: {exc}")
+    def set_project(self, initials: str, color_rgba: str):
+        """设置项目头像（缩写+颜色）"""
+        self._project_initials = initials
+        self._project_color = color_rgba
+        self._apply_project_to_icon()
 
     def set_icon(self, icon):
-        self._icon_pixmap = icon
-        self._apply_icon_to_label()
+        """设置通用 icon（QPixmap/QIcon 兜底）"""
+        self._project_initials = ""
+        self._project_color = ""
+        self._icon_widget.set_fallback_pixmap(icon)
 
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
@@ -811,10 +888,11 @@ class TabPanel(QWidget):
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
 
-    def add_tab(self, title: str, icon=None) -> int:
+    def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
-        item = TabItem(title, icon, self._list_widget, panel=self)
+        item = TabItem(title, icon, self._list_widget, panel=self,
+                       project_initials=project_initials, project_color=project_color)
 
         # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
         # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
@@ -883,9 +961,14 @@ class TabPanel(QWidget):
             self._items[index].set_title(title)
 
     def update_tab_icon(self, index: int, icon):
-        """更新 Tab 图标"""
+        """更新 Tab 图标（QPixmap/QIcon 兜底）"""
         if 0 <= index < len(self._items):
             self._items[index].set_icon(icon)
+
+    def update_tab_project(self, index: int, initials: str, color_rgba: str):
+        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制）"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_project(initials, color_rgba)
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
