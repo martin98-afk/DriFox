@@ -498,6 +498,10 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.setInterval(200)
         # ── Win10 圆角 Region 标记 ──
         self._use_window_rgn: bool = False
+        # ── window → index O(1) 映射（替代 _windows.index() O(n) 查找） ──
+        self._window_to_index: Dict[int, int] = {}
+        # ── 上次图标缩放值，主题切换时用于判断是否需要重绘图标 ──
+        self._last_icon_scale: int = -1
 
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
@@ -560,15 +564,20 @@ class TabManagerWindow(QWidget):
             self._tab_panel.refresh_style()
         except Exception:
             pass
-        # 重画所有 tab 的项目图标（背景色来自项目，颜色不受主题影响，但
-        # 随字号缩放 + 重画保证主题切换后图标尺寸与文字一致）
-        for idx, win in enumerate(self._windows):
-            try:
-                project = getattr(win, "_current_project", None) or ""
-                if project:
-                    _update_tab_icon(idx, project)
-            except Exception:
-                pass
+        # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
+        # （纯主题色切换不影响图标，跳过可避免 QPainter 开销）
+        from app.utils.design_tokens import scale_icon_size as _scale_size
+
+        current_scale = _scale_size(20)
+        if current_scale != self._last_icon_scale:
+            self._last_icon_scale = current_scale
+            for idx, win in enumerate(self._windows):
+                try:
+                    project = getattr(win, "_current_project", None) or ""
+                    if project:
+                        _update_tab_icon(idx, project)
+                except Exception:
+                    pass
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
@@ -710,11 +719,13 @@ class TabManagerWindow(QWidget):
 
     def add_window(self, window) -> int:
         """添加窗口到 Tab 管理器，返回索引"""
-        if window in self._windows:
-            return self._windows.index(window)
+        existing = self._window_to_index.get(id(window), -1)
+        if existing >= 0 and existing < len(self._windows):
+            return existing
 
         self._windows.append(window)
-        idx = len(self._windows)
+        idx = len(self._windows) - 1  # 0-based
+        self._window_to_index[id(window)] = idx
 
         # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
         self._content_area.addWidget(window)
@@ -778,13 +789,13 @@ class TabManagerWindow(QWidget):
         tab_idx = self._tab_panel.add_tab(title, tab_icon)
 
         # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
-        # ★ 使用窗口对象引用 + 动态索引查找，防止删除前序 tab 后 _idx 漂移
+        # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
         def _on_win_title_changed(_new_title, _win=window):
             if _sip.isdeleted(_win):
                 return
-            if _win not in self._windows:
+            cur_idx = self._window_to_index.get(id(_win), -1)
+            if cur_idx < 0 or cur_idx >= len(self._windows):
                 return
-            cur_idx = self._windows.index(_win)
             # 更新 Tab 标题
             t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
             self._tab_panel.update_tab_title(cur_idx, t)
@@ -807,9 +818,9 @@ class TabManagerWindow(QWidget):
         def _on_ai_state_changed(state, _win=window):
             if _sip.isdeleted(_win):
                 return
-            if _win not in self._windows:
+            cur_idx = self._window_to_index.get(id(_win), -1)
+            if cur_idx < 0 or cur_idx >= len(self._windows):
                 return
-            cur_idx = self._windows.index(_win)
             if state in ("streaming", "thinking"):
                 self._tab_panel.update_tab_streaming(cur_idx, True, False)
                 self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
@@ -837,18 +848,21 @@ class TabManagerWindow(QWidget):
 
         # 隐藏空状态页，切换到新窗口
         self._content_area.widget(0).hide()
-        self._tab_panel.set_active_index(idx - 1)
+        self._tab_panel.set_active_index(idx)
 
         self.tabCountChanged.emit(len(self._windows))
-        return idx - 1
+        return idx
 
     def remove_window(self, window):
         """从 Tab 管理器移除窗口"""
-        if window not in self._windows:
+        idx = self._window_to_index.pop(id(window), -1)
+        if idx < 0 or idx >= len(self._windows):
             return
 
-        idx = self._windows.index(window)
-        self._windows.remove(window)
+        self._windows.pop(idx)
+        # 被移除窗口之后的所有窗口索引减 1
+        for j in range(idx, len(self._windows)):
+            self._window_to_index[id(self._windows[j])] = j
 
         # 从 QStackedWidget 移除
         self._content_area.removeWidget(window)
@@ -901,6 +915,10 @@ class TabManagerWindow(QWidget):
             window = self._windows[index]
             # 先从列表中移除，避免后续操作访问到已销毁的窗口
             self._windows.pop(index)
+            del self._window_to_index[id(window)]
+            # 被移除窗口之后的所有窗口索引减 1
+            for j in range(index, len(self._windows)):
+                self._window_to_index[id(self._windows[j])] = j
             self._content_area.removeWidget(window)
             self._tab_panel.remove_tab(index)
 
@@ -1137,6 +1155,7 @@ class TabManagerWindow(QWidget):
             w = tab_mgr._content_area.widget(1)
             tab_mgr._content_area.removeWidget(w)
         tab_mgr._windows.clear()
+        tab_mgr._window_to_index.clear()
         tab_mgr._cached_dialogs.clear()
         tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
 
@@ -1248,9 +1267,10 @@ class TabManagerWindow(QWidget):
         tab_mgr._is_transitioning = True
 
         try:
-            # 先清空引用，边恢复边移除
+            # 先清空旧状态，再重新迁入所有窗口（add_window 会重建 _window_to_index）
             windows = list(tab_mgr._windows)
             tab_mgr._windows.clear()
+            tab_mgr._window_to_index.clear()
 
             for tool_instance in windows:
                 try:
@@ -1723,5 +1743,6 @@ class TabManagerWindow(QWidget):
             except Exception:
                 pass
         self._windows.clear()
+        self._window_to_index.clear()
         self._cached_dialogs.clear()
         self.close()

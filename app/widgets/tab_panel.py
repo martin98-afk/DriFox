@@ -118,6 +118,9 @@ class TabItem(QFrame):
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._hovered = False  # 鼠标悬停态
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
+        # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
+        self._cached_rect_key = (-1, -1)
+        self._cached_round_rect = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -134,27 +137,7 @@ class TabItem(QFrame):
         # 图标
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-        if self._icon_pixmap:
-            from PyQt5.QtGui import QPixmap
-
-            if isinstance(self._icon_pixmap, QPixmap):
-                if self._icon_pixmap.devicePixelRatio() > 1.0:
-                    # HiDPI 感知 pixmap（已设 DPR），直接设避免二次缩放破坏清晰度
-                    self._icon_label.setPixmap(self._icon_pixmap)
-                else:
-                    self._icon_label.setPixmap(
-                        self._icon_pixmap.scaled(
-                            self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                        )
-                    )
-            else:
-                # QIcon 等类型：转为 QPixmap
-                try:
-                    pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
-                    if pixmap:
-                        self._icon_label.setPixmap(pixmap)
-                except Exception:
-                    pass
+        self._apply_icon_to_label()
         layout.addWidget(self._icon_label)
 
         # ── 团队角色胶囊（默认隐藏）──
@@ -201,26 +184,7 @@ class TabItem(QFrame):
         if new_size != self._icon_size:
             self._icon_size = new_size
             self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-            if self._icon_pixmap:
-                from PyQt5.QtGui import QPixmap
-
-                if isinstance(self._icon_pixmap, QPixmap):
-                    if self._icon_pixmap.devicePixelRatio() > 1.0:
-                        # HiDPI 感知 pixmap（稍后 _update_tab_icon 会重新生成正确尺寸）
-                        self._icon_label.setPixmap(self._icon_pixmap)
-                    else:
-                        self._icon_label.setPixmap(
-                            self._icon_pixmap.scaled(
-                                self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                            )
-                        )
-                else:
-                    try:
-                        pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
-                        if pixmap:
-                            self._icon_label.setPixmap(pixmap)
-                    except Exception:
-                        pass
+            self._apply_icon_to_label()
         self._apply_title_style()
         self.update()
 
@@ -242,26 +206,33 @@ class TabItem(QFrame):
         self._title = title
         self._title_label.setText(title)
 
+    def _apply_icon_to_label(self):
+        """统一处理 _icon_pixmap 缩放并赋值给 _icon_label，消除三处重复代码"""
+        pixmap = self._icon_pixmap
+        if pixmap is None:
+            self._icon_label.clear()
+            return
+        from PyQt5.QtGui import QPixmap as _QP
+
+        if isinstance(pixmap, _QP):
+            if pixmap.devicePixelRatio() > 1.0:
+                # HiDPI 感知 pixmap，直接设避免二次缩放破坏清晰度
+                self._icon_label.setPixmap(pixmap)
+            else:
+                self._icon_label.setPixmap(
+                    pixmap.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+        else:
+            try:
+                p = pixmap.pixmap(self._icon_size, self._icon_size)
+                if p:
+                    self._icon_label.setPixmap(p)
+            except Exception as exc:
+                logger.debug(f"[TabItem] 无法获取图标 pixmap: {exc}")
+
     def set_icon(self, icon):
         self._icon_pixmap = icon
-        if icon:
-            from PyQt5.QtGui import QPixmap
-
-            if isinstance(icon, QPixmap):
-                if icon.devicePixelRatio() > 1.0:
-                    # HiDPI 感知 pixmap，直接设
-                    self._icon_label.setPixmap(icon)
-                else:
-                    self._icon_label.setPixmap(
-                        icon.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    )
-            else:
-                try:
-                    pixmap = icon.pixmap(self._icon_size, self._icon_size)
-                    if pixmap:
-                        self._icon_label.setPixmap(pixmap)
-                except Exception:
-                    pass
+        self._apply_icon_to_label()
 
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
@@ -307,8 +278,13 @@ class TabItem(QFrame):
         w, h = self.width(), self.height()
 
         # ── 构建统一圆角路径（与 hover 一致，8px 圆角 + 2px 内边距） ──
-        _round_rect = _QPainterPath()
-        _round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+        # ★ 缓存：尺寸未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
+        _key = (w, h)
+        if _key != self._cached_rect_key:
+            self._cached_round_rect = _QPainterPath()
+            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+            self._cached_rect_key = _key
+        _round_rect = self._cached_round_rect
 
         # ── 选中背景（圆角矩形，视觉与 hover 统一） ──
         if self._selected:
@@ -969,22 +945,25 @@ class TabPanel(QWidget):
     def set_resizing(self, active: bool):
         """设置 resize 活跃状态
 
-        resize 期间 TabItem.paintEvent 跳过昂贵的流光渐层覆盖层；
-        动画定时器持续运转但不再触发 update()，resize 结束后恢复。
+        resize 期间完全暂停动画定时器（避免无意义相位计算），
+        resize 结束后如有流式 / question tab 则恢复。
         """
         self._is_resizing = active
+        if active:
+            if self._anim_timer and self._anim_timer.isActive():
+                self._anim_timer.stop()
+        else:
+            if self._streaming_count + self._question_count > 0:
+                self._ensure_anim_timer()
 
     def _on_anim_tick(self):
         """动画帧：推进相位 + 刷新所有流式 / question tab
 
-        resize 期间只更新相位不触发重绘，避免动画定时器与
-        resize 驱动双重叠加导致重绘风暴。
+        resize 期间动画定时器已完全暂停（见 set_resizing），
+        此处不再需要 _is_resizing 判断。
         """
         self._anim_phase = (self._anim_phase + 12) % 360
         self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
-        if self._is_resizing:
-            # resize 期间仅推进相位，不触发重绘
-            return
         for item in self._items:
             if item._streaming or item._question:
                 item.update()
