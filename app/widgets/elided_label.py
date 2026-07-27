@@ -4,6 +4,7 @@ ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 
 从 mcp_setting_card._ElidedLabel 提取为共享模块，消除多处重复定义。
 """
+
 import html
 from typing import List
 
@@ -24,6 +25,7 @@ class _ElidedLabel(QLabel):
         self._hl_query = ""
         self._hl_queries: List[str] = []  # 多关键字高亮
         self._hl_color = ""
+        self.setToolTip(self._full_text)
         # 防止布局根据文本内容自动扩展宽度，确保宽度由父布局决定
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
@@ -33,6 +35,7 @@ class _ElidedLabel(QLabel):
         self._hl_query = ""
         self._hl_queries = []
         self._hl_color = ""
+        self.setToolTip(self._full_text)
         self._update_elided()
 
     def setHighlight(self, query: str, color: str):
@@ -110,12 +113,12 @@ class _ElidedLabel(QLabel):
                         parts.append(html.escape(elided[pos:start]))
                     parts.append(
                         f'<span style="color: {self._hl_color}; font-weight: bold;">'
-                        f'{html.escape(elided[start:end])}</span>'
+                        f"{html.escape(elided[start:end])}</span>"
                     )
                     pos = end
                 if pos < len(elided):
                     parts.append(html.escape(elided[pos:]))
-                html_text = ''.join(parts)
+                html_text = "".join(parts)
                 if self.text() != html_text:
                     super().setText(html_text)
                 return
@@ -165,11 +168,10 @@ class _ElidedLabel(QLabel):
         # 策略 3：匹配在中间 → 构建 match-centered 省略
         return self._build_match_centered(text, match_start, match_end, width)
 
-    def _build_match_centered(self, text: str, match_start: int, match_end: int,
-                              width: int) -> str:
+    def _build_match_centered(self, text: str, match_start: int, match_end: int, width: int) -> str:
         """从匹配位置向两侧扩展，构建以匹配为中心的省略文本"""
         fm = self.fontMetrics()
-        ellipsis = '…'
+        ellipsis = "…"
         ellipsis_w = fm.horizontalAdvance(ellipsis)
 
         prefix = text[:match_start]
@@ -186,8 +188,8 @@ class _ElidedLabel(QLabel):
                 return fm.elidedText(actual_match, Qt.ElideRight, width)
 
         # 从两侧贪婪地添加字符
-        left_pad = ''
-        right_pad = ''
+        left_pad = ""
+        right_pad = ""
         left_w = 0
         right_w = 0
 
@@ -214,7 +216,7 @@ class _ElidedLabel(QLabel):
         clip_left = left_pad != prefix
         clip_right = right_pad != suffix
 
-        result = ''
+        result = ""
         if clip_left:
             result += ellipsis
         result += left_pad + actual_match + right_pad
@@ -227,7 +229,7 @@ class _ElidedLabel(QLabel):
                 right_pad = right_pad[:-1]
             elif left_pad:
                 left_pad = left_pad[:-1]
-            result = ''
+            result = ""
             if clip_left:
                 result += ellipsis
             result += left_pad + actual_match + right_pad
