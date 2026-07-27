@@ -611,6 +611,7 @@ class TabManagerWindow(QWidget):
                 background: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
+                margin: 4px;
             }}
             #contentArea {{
                 background: {Colors.CONTENT_BG};
