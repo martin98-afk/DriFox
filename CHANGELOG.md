@@ -1,7 +1,43 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.4.7] - 2026-07-25
+## [v0.4.8] - 2026-07-28
+
+自上一版本以来的变更 | 提交数：85 · 文件变更：70 · +9297/-2336 | 贡献者：dingma, mading, martin98-afk
+
+> 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
+
+### ✨ 新功能 (New Features)
+
+- **Tab 管理器全面重构**: 全新的 Tab 模式 UI —— 自定义标题栏（拖拽/最大化/恢复）、侧边栏折叠/展开动画（QVariantAnimation）、渐变玻璃风格面板（glow 指示器、渐变激活态）；品牌头部、新标签按钮、分割线、会话计数；标签分支信号（tabBranchRequested）、项目级图标感知（DPI 感知、颜色缓存、主题变更失效）；侧边栏折叠/展开同步（IconStripWidget）
+- **Tab 管理器开关与环境集成**: LLM 设置页添加 Tab 管理器切换开关；系统托盘支持 Tab 模式（简化菜单、热键切换）；新增 `enable_tab_manager`、`panel_width` 等配置项；main.py 添加 Tab 模式启动路径；`_duplicate_window` 添加 Tab 模式分支
+- **Gitee 账户快捷入口**: 标签面板中添加 Gitee 账户快捷操作，支持仓库和绑定操作；紧凑绑定状态展示；渲染时避免同步
+- **消息卡片性能优化**: 减少安全渲染间隔，使用异步 JavaScript 执行；缓存渲染 HTML，延迟移除字符计数；ElidedLabel 悬停时展示完整文本
+- **Hook 管理器并行执行**: 实现 UI 线程安全的并行 Hook 执行机制
+- **主题刷新协调器**: 实现 ThemeRefreshCoordinator 优化主题管理和缓存刷新
+- **FileTreeView 重构**: 将 FileTreeWidget 重构为 FileTreeView，增强模型和委托结构
+- **UI 插件注册增强**: 新增 `system_card` 参数，支持更好的卡片管理
+- **卡片容器智能展开**: showEvent 检测可见卡片时自动展开
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Tab 管理器窗口稳定性增强**: 修复 macOS 隐藏适配（hide() 替代 close() 保留状态）；SIP 保护；QColor 解析、windowTitle 同步、任务栏标志修复；首次启动居中、保存/恢复位置限制到屏幕边界；销毁 title_bar 重建修复；拖拽性能诊断；主题刷新处理增强；流式/错误状态指示修正；标签图标缩放和主题变更刷新；EdgeLauncher 检测与保护
+- **代码查看器滚动修复**: 优化 CodeWebViewer 滚动事件处理，防止意外自动滚动
+- **差异视图主题适配**: render_helpers 中差异分隔符颜色跟随主题切换
+- **UI 插件处理增强**: 改进 TabPanel 和 TabManagerWindow 中问题状态指示
+
+### ♻️ 代码重构 (Refactoring)
+
+- **异常处理语法统一**: 多处改用元组语法捕获多个异常，提升代码可读性和一致性（涉及 25+ 个文件）
+- **LSP 集成重构**: 优化 CodeWebViewer 的 LSP 集成，提升性能
+- **清理废弃规范**: 移除 Tab 面板渐变玻璃设计规范及相关测试文件
+
+### 📚 文档 (Docs)
+
+- Tab 面板渐变玻璃设计实现计划与规范（含折叠功能）
+- Gitee 账户行实现计划与设计规范
+- UI 插件列表实现计划与设计规范
+- Tab 管理器设计规范更新与审查反馈
 
 自上一版本以来的变更 | 提交数：16 · 文件变更：24 · +1543/-608 | 贡献者：dingma, mading
 
