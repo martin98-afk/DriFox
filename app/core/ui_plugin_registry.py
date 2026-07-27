@@ -319,7 +319,7 @@ class UIPluginRegistry:
             win_instances[card_id] = widget
             # 加入容器布局并注册到 CardManager
             container.add_card(card_id, widget)
-            card_manager.register_card(window_id, container_type, card_id, widget)
+            card_manager.register_card(window_id, container_type, card_id, widget, system_card=True)
 
             # 连接 closed 信号：手动关闭时同步 CardManager 状态
             # 避免再次 toggle 时 visible_cards 状态过时导致无法显示
@@ -331,6 +331,19 @@ class UIPluginRegistry:
             # 幂等：register_system_card 内部用 set 去重，重复注册不会重复绑定回调。
             if hasattr(mw, "register_system_card"):
                 mw.register_system_card(card_id)
+
+        # ── 显式关闭命令卡片和文件卡片 ──
+        # UI 插件卡片以 system_card 身份打开时，CardManager 的系统卡片分支
+        # 会通过 _hide_same_container_cards 或跨容器遍历隐藏它们，但由于
+        # CommandCard 没有 hide_card 方法，hide_card 仅调 setVisible(False)
+        # 而不清理内部 _visible 状态。此处直接调用 dismiss() 确保彻底关闭。
+        for pc in ("command", "file_mention"):
+            if card_manager.is_card_visible(pc, window_id):
+                card_manager.hide_card(pc, window_id)
+        if hasattr(mw, "_command_card") and mw._command_card.is_card_visible:
+            mw._command_card.dismiss()
+        if hasattr(mw, "_file_mention_card") and mw._file_mention_card.is_card_visible:
+            mw._file_mention_card.dismiss()
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
