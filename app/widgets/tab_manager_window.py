@@ -345,7 +345,7 @@ class TabManagerTitleBar(QWidget):
             # 模拟系统菜单的"大小"行为 - 用鼠标模拟调整
             pass
         elif act_id == self._ACTION_MINIMIZE:
-            win.showMinimized()
+            win._on_minimize_clicked()
         elif act_id == self._ACTION_MAXIMIZE:
             if is_maxed:
                 win.showNormal()
@@ -627,7 +627,7 @@ class TabManagerWindow(QWidget):
 
         # ── 自定义标题栏 ──
         self._title_bar = TabManagerTitleBar(self)
-        self._title_bar.minimizeRequested.connect(self.showMinimized)
+        self._title_bar.minimizeRequested.connect(self._on_minimize_clicked)
         self._title_bar.maximizeRestoreRequested.connect(self._on_titlebar_max_restore)
         self._title_bar.closeRequested.connect(self._on_titlebar_close)
         main_layout.addWidget(self._title_bar)
@@ -1543,6 +1543,19 @@ class TabManagerWindow(QWidget):
     def _on_titlebar_close(self):
         """标题栏关闭按钮触发（隐藏到系统托盘，不销毁）"""
         self.hide()
+
+    def _on_minimize_clicked(self):
+        """标题栏最小化按钮 + 右键菜单"最小化"统一处理
+
+        macOS: PyQt5 对 FramelessWindowHint 窗口的 showMinimized() 完全无效
+        （实测不触发任何 NSWindow.miniaturize:），改用 hide() 后通过
+        托盘/Dock 的"显示"项或再次唤起 tab 模式调 show() 恢复。
+        Windows/Linux: 走标准 showMinimized() 保持原生最小化行为。
+        """
+        if platform.system() == "Darwin":
+            self.hide()
+        else:
+            self.showMinimized()
 
     def changeEvent(self, event):
         """监听窗口状态变化（最大化/还原），同步标题栏按钮图标 + Win10 圆角"""
