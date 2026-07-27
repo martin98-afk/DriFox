@@ -253,7 +253,7 @@ class BalanceDisplay(QWidget):
                 if balance_str:
                     return float(balance_str)
             return None
-        except ValueError, TypeError, KeyError:
+        except (ValueError, TypeError, KeyError):
             return None
 
     def _update_display(self):

@@ -1888,14 +1888,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
-        # 更新消息卡片背景色透明度
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item is None:
-                continue
-            card = item.widget()
-            if card is not None and isinstance(card, MessageCard):
-                card.refresh_theme()
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
@@ -3248,6 +3240,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # param.description 被重置为默认值。此处重新应用当前配置。
         self._update_subagents_param_description()
         self._update_title_gen_param_description()
+
+        # ── 全局热键同步 ──
+        # TrayManager.__init__() 在命令加载前已调用 _setup_global_hotkey()，
+        # 当时 CommandManager 为空，回退读取了系统默认快捷键，未感知 user-custom 的自定义覆盖。
+        # 此处重新同步，与 reload_all_commands / _on_plugin_hot_reload 保持一致。
+        try:
+            from app.tray_manager import TrayManager
+
+            tray = TrayManager.get_instance()
+            tray._setup_global_hotkey()
+        except Exception:
+            pass
 
     def _register_system_card_commands(self):
         """为顶层系统设置卡片注册 FUNCTION 命令，使其出现在快捷键管理中
@@ -6833,7 +6837,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 if not sip.isdeleted(launcher):
                     launcher.update_geometry(self.chat_scroll_area.geometry())
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
@@ -7205,7 +7209,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7270,7 +7274,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7281,7 +7285,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7306,7 +7310,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7340,7 +7344,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7381,7 +7385,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7408,7 +7412,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7421,7 +7425,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     launcher = getattr(win, "_ui_plugin_edge_launcher", None)
                     if launcher is not None:
                         launcher.refresh_plugins()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # Tab 模式下也刷新共享 Launcher
             try:
@@ -15954,7 +15958,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -15981,7 +15985,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

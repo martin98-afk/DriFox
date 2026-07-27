@@ -1710,7 +1710,7 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
-_LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
+_LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
 @lru_cache(maxsize=64)  # 256→64：实际唯一渲染内容通常 < 32 条，64 覆盖 2 个会话绰绰有余
@@ -1745,18 +1745,10 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool =
     if reasoning:
         raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
-    # 大文本跳过缓存，防止内存膨胀
+    # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        # 大文本直接渲染，绕过缓存
-        # 临时禁用缓存
-        original_cache_info = _render_markdown_to_html_cached_impl.cache_info()
-        _render_markdown_to_html_cached_impl.cache_clear()
-        try:
-            return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
-        finally:
-            # 恢复缓存状态
-            pass
+        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, reasoning, compact=compact)
 
     return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
 
@@ -5639,7 +5631,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -8520,7 +8512,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

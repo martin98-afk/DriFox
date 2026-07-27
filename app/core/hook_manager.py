@@ -485,7 +485,7 @@ class HookWorker(QRunnable):
                 enc = preferred
             try:
                 result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
-            except UnicodeDecodeError, LookupError:
+            except (UnicodeDecodeError, LookupError):
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode
@@ -587,9 +587,19 @@ class HookWorker(QRunnable):
         except Exception as e:
             return f"HTTP request failed: {str(e)}", False
 
+    # 相对模块函数缓存：{(config_file, function_path): Callable}
+    _relative_func_cache: Dict[str, Callable] = {}
+
+    @classmethod
+    def _clear_relative_func_cache(cls):
+        """清除相对模块函数缓存（热重载时调用）"""
+        cls._relative_func_cache.clear()
+
     @staticmethod
     def _import_relative_function(function_path: str, config_file: str) -> Optional[Callable]:
         """从相对模块路径导入函数（.module:func → <config_dir>/module.py 中的 func）
+
+        缓存已导入的模块函数，避免每次 hook 触发都重复 exec_module。
 
         Args:
             function_path: 函数路径，如 .evolver_hook:hook_session_start
@@ -598,6 +608,12 @@ class HookWorker(QRunnable):
         Returns:
             可调用的函数对象，失败返回 None
         """
+        # 缓存键：(config_file, function_path) 确保不同 hooks.json 的同名模块不冲突
+        cache_key = f"{config_file}::{function_path}"
+        cached = HookWorker._relative_func_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         parts = function_path.rsplit(":", 1)
         if len(parts) != 2:
             return None
@@ -630,7 +646,10 @@ class HookWorker(QRunnable):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             func = getattr(module, func_name, None)
-            return func if callable(func) else None
+            if callable(func):
+                HookWorker._relative_func_cache[cache_key] = func
+                return func
+            return None
         except Exception as e:
             logger.error(f"[HookWorker] Failed to load relative module {abs_path}: {e}")
             return None
@@ -1152,6 +1171,8 @@ class HookManager:
             return False
 
         try:
+            # 清除相对模块函数缓存，让热重载生效
+            HookWorker._clear_relative_func_cache()
             current_mtime = os.path.getmtime(config_file)
             last_mtime = self._config_watchers.get(config_file, 0)
 

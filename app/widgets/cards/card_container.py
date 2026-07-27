@@ -172,7 +172,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
         # 解除 minHeight 限制，确保折叠动画能跑到 0
@@ -272,7 +272,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except TypeError, RuntimeError:
+                    except (TypeError, RuntimeError):
                         pass
 
             self._expand_animation.finished.connect(_on_done)

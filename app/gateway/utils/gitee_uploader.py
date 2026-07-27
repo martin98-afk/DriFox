@@ -142,7 +142,7 @@ class GiteeUploader:
 
     def upload_file(self, local_path: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        上传本地文件到 Gitee 仓库
+        上传本地文件到 Gitee 仓库（同步版本，请勿在 async 上下文中直接调用）
 
         Args:
             local_path: 本地文件路径
@@ -164,6 +164,11 @@ class GiteeUploader:
             return self.upload_bytes(data, fp.name, ext)
         except Exception as e:
             return None, f"读取文件失败: {e}"
+
+    async def upload_file_async(self, local_path: str) -> Tuple[Optional[str], Optional[str]]:
+        """上传本地文件到 Gitee 仓库（异步版本，不阻塞事件循环）"""
+        import asyncio
+        return await asyncio.to_thread(self.upload_file, local_path)
 
     def upload_bytes(self, data: bytes, filename: str = "", ext: str = "") -> Tuple[Optional[str], Optional[str]]:
         """

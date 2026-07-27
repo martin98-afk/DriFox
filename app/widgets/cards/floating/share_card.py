@@ -44,7 +44,7 @@ def _format_timestamp(msg: Dict[str, Any]) -> str:
         try:
             dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return dt.strftime("%m-%d %H:%M")
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return ts
     return ""
 

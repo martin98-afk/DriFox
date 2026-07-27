@@ -139,6 +139,18 @@ _BINARY_EXTENSIONS = frozenset({
     ".min.js", ".min.css",
 })
 
+# 已知文本扩展名：精确匹配直接跳过嗅探，避免为每个文件读 8KB
+_TEXT_EXTENSIONS = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss", ".less",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".md", ".markdown", ".rst", ".txt", ".csv", ".xml", ".log",
+    ".sh", ".bash", ".zsh", ".fish", ".bat", ".ps1",
+    ".c", ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".rb", ".php",
+    ".swift", ".kt", ".scala", ".lua", ".r", ".sql",
+    ".gitignore", ".env", ".dockerfile", ".makefile", ".editorconfig",
+    ".lock", ".gradle", ".sbt",
+})
+
 # 二进制文件嗅探：读取前 8192 字节，如果含 null 字节则视为二进制
 _BINARY_NULL_LIMIT = 8192
 
@@ -146,6 +158,13 @@ _BINARY_NULL_LIMIT = 8192
 def _is_binary_file(file_path: Path) -> bool:
     """快速判断文件是否为二进制"""
     ext = file_path.suffix.lower()
+    # 已知文本扩展名 → 直接返回 False，无需遍历和嗅探（热路径优化）
+    if ext in _TEXT_EXTENSIONS:
+        return False
+    # 简单扩展名命中二进制集合 → 直接返回 True
+    if ext in _BINARY_EXTENSIONS:
+        return True
+    # 复合扩展名（如 .tar.gz, .min.js）→ 检查完整文件名
     for bin_ext in _BINARY_EXTENSIONS:
         if file_path.name.endswith(bin_ext):
             return True
@@ -295,17 +314,25 @@ class FileTools:
             # 记录文件修改时间
             self._file_mtimes[str(full_path)] = full_path.stat().st_mtime
 
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
+            from itertools import islice
 
-            total_lines = len(all_lines)
             start_idx = max(0, startline - 1)
             if endline is not None:
-                end_idx = min(total_lines, endline)
+                read_end = endline
             else:
-                end_idx = min(total_lines, start_idx + 500)
+                read_end = startline + 500  # 默认读取 500 行
 
-            content_slice = all_lines[start_idx:end_idx]
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                # 使用 islice 按需读取，避免大文件全量 readlines()
+                content_slice = list(islice(f, start_idx, read_end))
+
+            end_idx = start_idx + len(content_slice)
+            # 如果实际行数少于请求量，说明已到文件末尾，可准确获知总行数
+            if len(content_slice) < (read_end - start_idx):
+                total_lines = end_idx
+            else:
+                total_lines = f"{end_idx}+"
+
             # 文件头用相对路径（根目录外 fallback 到原始路径）
             try:
                 display_path = str(full_path.relative_to(self.workdir))
