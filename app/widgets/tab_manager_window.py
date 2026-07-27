@@ -39,8 +39,12 @@ from app.utils.utils import get_font_family_css
 # ── 边缘缩放热区尺寸（4px） ──
 _EDGE_RESIZE_BORDER = 4
 
-# ── Windows 原生消息常量（nativeEvent 边缘缩放用） ──
+# ── Windows 原生消息常量（nativeEvent 用） ──
 _WM_NCHITTEST = 0x0084
+_WM_NCLBUTTONDOWN = 0x00A1
+_WM_NCCALCSIZE = 0x0083
+_WM_SYSCOMMAND = 0x0112
+_SC_DRAGMOVE = 0xF012  # SC_MOVE | 2，启动窗口拖拽
 _HTLEFT = 10
 _HTRIGHT = 11
 _HTTOP = 12
@@ -497,6 +501,9 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
         self._geo_save_timer.setInterval(200)
+        # ── Win10 圆角 Region 标记 ──
+        self._use_window_rgn: bool = False
+
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
         # ── Resize 动画节流：100ms 无 resize 事件后退出节流模式 ──
@@ -1402,33 +1409,98 @@ class TabManagerWindow(QWidget):
 
             # 通知 Windows 样式已变更（重新计算非客户区）
             ctypes.windll.user32.SetWindowPos(
-                wintypes.HWND(hwnd), 0, 0, 0, 0, 0,
-                0x0020 | 0x0002 | 0x0001  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
+                wintypes.HWND(hwnd),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x0020 | 0x0002 | 0x0001,  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
             )
         except Exception:
             pass
 
     def _apply_rounded_corners(self):
-        """通过 DWM API 为窗口启用圆角 (Windows 11)
+        """为窗口启用圆角
 
-        使用 DWMWA_WINDOW_CORNER_PREFERENCE (33) 设置圆角风格，
-        DWMWCP_ROUND (2) 为标准圆角。
-        Windows 11 原生支持该属性，最大化时自动变为直角。
+        - Windows 11: 使用 DwmSetWindowAttribute DWMWA_WINDOW_CORNER_PREFERENCE
+          (原生支持，最大化时自动变直角)
+        - Windows 10: 使用 SetWindowRgn 创建圆角裁剪区域
+          (最大化时由 changeEvent 清除 Region)
         """
         if platform.system() != "Windows":
             return
         try:
             import ctypes
+            from ctypes import wintypes
 
             hwnd = int(self.winId())
-            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
-            corner_pref = ctypes.c_int(2)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                ctypes.wintypes.HWND(hwnd),
-                33,
-                ctypes.byref(corner_pref),
-                ctypes.sizeof(ctypes.c_int),
+
+            # 判断 Windows 版本：build >= 22000 为 Win11
+            win_ver = platform.version()  # "10.0.19045" / "10.0.22621"
+            parts = win_ver.split(".")
+            build = int(parts[2]) if len(parts) > 2 else 0
+
+            if build >= 22000:
+                # Windows 11: DwmSetWindowAttribute 原生圆角
+                corner_pref = ctypes.c_int(2)  # DWMWCP_ROUND
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd),
+                    33,  # DWMWA_WINDOW_CORNER_PREFERENCE
+                    ctypes.byref(corner_pref),
+                    ctypes.sizeof(ctypes.c_int),
+                )
+                # 标记不用 SetWindowRgn
+                self._use_window_rgn = False
+            else:
+                # Windows 10: SetWindowRgn 圆角裁剪
+                self._apply_win10_rounded_region()
+        except Exception:
+            self._use_window_rgn = False
+
+    def _apply_win10_rounded_region(self):
+        """Win10: 用 SetWindowRgn 设置圆角裁剪区域（DPI 感知 8px 基准半径）"""
+        if platform.system() != "Windows" or self.isMaximized():
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            # DPI 感知缩放（devicePixelRatioF: 100%=1.0, 150%=1.5, 200%=2.0）
+            scale = self.devicePixelRatioF()
+            # 半径和尺寸均按 DPI 缩放
+            radius = max(4, int(8 * scale))
+            w_dev = int(self.width() * scale)
+            h_dev = int(self.height() * scale)
+            hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(
+                0,
+                0,
+                w_dev + 1,
+                h_dev + 1,
+                radius,
+                radius,
             )
+            if hrgn:
+                ctypes.windll.user32.SetWindowRgn(wintypes.HWND(hwnd), hrgn, True)
+                # hrgn 所有权已移交给窗口，不 DeleteObject
+                self._use_window_rgn = True
+            else:
+                self._use_window_rgn = False
+        except Exception:
+            self._use_window_rgn = False
+
+    def _clear_win10_rounded_region(self):
+        """Win10: 清除圆角 Region（最大化/全屏时调用）"""
+        if platform.system() != "Windows" or not getattr(self, "_use_window_rgn", False):
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            ctypes.windll.user32.SetWindowRgn(wintypes.HWND(hwnd), None, True)
+            self._use_window_rgn = False
         except Exception:
             pass
 
@@ -1448,7 +1520,7 @@ class TabManagerWindow(QWidget):
         self.hide()
 
     def changeEvent(self, event):
-        """监听窗口状态变化（最大化/还原），同步标题栏按钮图标"""
+        """监听窗口状态变化（最大化/还原），同步标题栏按钮图标 + Win10 圆角"""
         if event.type() == event.WindowStateChange:
             is_maxed = self.isMaximized()
             if hasattr(self, "_title_bar"):
@@ -1456,6 +1528,17 @@ class TabManagerWindow(QWidget):
             # 最大化时不需要 size grip
             if hasattr(self, "_size_grip"):
                 self._size_grip.setVisible(not is_maxed)
+            # Win10: 最大化时清除圆角 Region（直角），还原时恢复圆角
+            # Win11 走 DWM 原生圆角（DwmSetWindowAttribute），不碰 SetWindowRgn
+            if platform.system() == "Windows":
+                win_ver = platform.version()
+                parts = win_ver.split(".")
+                build = int(parts[2]) if len(parts) > 2 else 0
+                if build < 22000:  # Win10
+                    if is_maxed:
+                        self._clear_win10_rounded_region()
+                    else:
+                        self._apply_win10_rounded_region()
         super().changeEvent(event)
 
     def _nchittest(self, msg) -> int:
@@ -1512,12 +1595,14 @@ class TabManagerWindow(QWidget):
         """处理 Windows 原生消息
 
         - WM_NCHITTEST: 边缘缩放 + 标题栏 HTCAPTION（Snap Layout 支持）
-        - WM_NCLBUTTONDOWN: 显式调用 DefWindowProc 启动原生拖拽
-        - WM_NCCALCSIZE: 保留 DWM 阴影
+        - WM_NCLBUTTONDOWN(HTCAPTION): ReleaseCapture + SendMessage(WM_SYSCOMMAND,
+          SC_DRAGMOVE) 启动 Windows 原生拖拽循环，自动处理 Aero Snap
+          (拖到屏幕边缘触发填充/最大化/半屏等效果)
+        - WM_NCCALCSIZE: 返回 0 保持无边框外观
 
-        DefWindowProc 处理 WM_NCLBUTTONDOWN+HTCAPTION 会进入原生拖拽循环，
-        期间鼠标被捕获，Qt 事件不触发，Python 拖拽不会干扰。
-        DefWindowProc 失败时返回 False → Qt 正常处理 → Python 拖拽兜底。
+        SC_DRAGMOVE 方案比 DefWindowProcW 更可靠——不依赖 WS_CAPTION
+        的 Qt 内部状态一致性，且明确告诉 Windows 进入拖拽模式，
+        与 Qt 事件循环无冲突。
         """
         if platform.system() == "Windows" and eventType == "windows_generic_MSG":
             try:
@@ -1526,17 +1611,23 @@ class TabManagerWindow(QWidget):
                 msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
                 if msg.message == _WM_NCHITTEST:
                     return (True, self._nchittest(msg))
-                if msg.message == 0x00A1:  # WM_NCLBUTTONDOWN
+                if msg.message == _WM_NCLBUTTONDOWN:
                     if msg.wParam == _HTCAPTION:
-                        # 调用 DefWindowProc 启动原生窗口拖拽
-                        ctypes.windll.user32.DefWindowProcW(
-                            msg.hwnd, msg.message, msg.wParam, msg.lParam
+                        # ★ Snap Layout 支持：
+                        # ReleaseCapture 释放非客户区鼠标捕获，
+                        # SendMessage(WM_SYSCOMMAND, SC_DRAGMOVE) 启动
+                        # Windows 原生拖拽循环，自动处理 Aero Snap。
+                        # 此方案比 DefWindowProcW 更可靠——不依赖 WS_CAPTION
+                        # 的 Qt 内部状态一致性，且不会与 Qt 事件循环冲突。
+                        ctypes.windll.user32.ReleaseCapture()
+                        ctypes.windll.user32.SendMessageW(
+                            msg.hwnd,
+                            _WM_SYSCOMMAND,
+                            _SC_DRAGMOVE,
+                            0,
                         )
-                        # 返回 False 而非 True：DefWindowProc 若成功会捕获鼠标
-                        # 进入模态拖拽循环，Qt 不会再收到后续事件；
-                        # 若失败则 Qt 正常处理，Python 拖拽兜底。
-                        return (False, 0)
-                if msg.message == 0x0083:  # WM_NCCALCSIZE
+                        return (True, 0)
+                if msg.message == _WM_NCCALCSIZE:
                     return (True, 0)
             except Exception:
                 pass
@@ -1570,6 +1661,11 @@ class TabManagerWindow(QWidget):
         if hasattr(self, "_size_grip") and not self.isMaximized():
             g = self._size_grip
             g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
+
+        # Win10: resize 后重设圆角 Region（新尺寸裁剪）
+        if platform.system() == "Windows" and not self.isMaximized():
+            self._apply_win10_rounded_region()
+
         # 通知 TabPanel 进入 resize 节流模式（跳过昂贵动画绘制）
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)

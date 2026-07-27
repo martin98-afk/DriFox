@@ -1,28 +1,50 @@
 # -*- coding: utf-8 -*-
-"""可拖拽文件树控件 — FileTreeWidget
+"""文件树控件 — QTreeView + FileTreeModel + RenameDelegate + FilterProxy
 
 设计约束（闭包）：
 - 不导入 app.core 或 app.widgets 内部的任何模块
+
+架构：
+  FileTreeModel (QAbstractItemModel) — 懒加载数据模型
+      ↓ need_scan 信号
+  FileTreeFilterProxy (QSortFilterProxyModel) — 搜索过滤
+      ↓
+  FileTreeView (QTreeView) — 多选/拖拽/键盘
+      ↓ delete/move/copy 信号
+  cards.py 响应信号，处理实际操作
 """
 
 import os
 import shutil
 import traceback
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
 
-from PyQt5.QtCore import QEvent, QFileInfo, QMimeData, Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon
+from PyQt5.QtCore import (
+    QAbstractItemModel,
+    QFileInfo,
+    QMimeData,
+    QModelIndex,
+    QSize,
+    QSortFilterProxyModel,
+    Qt,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QIcon, QKeyEvent, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileIconProvider,
+    QFrame,
     QHBoxLayout,
-    QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QStyle,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -30,16 +52,17 @@ from qfluentwidgets import BodyLabel, MaskDialogBase, isDarkTheme
 from loguru import logger
 
 
-# ── 文件类型图标缓存 ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+# 文件图标工具
+# ══════════════════════════════════════════════════════════
 
-_FILE_ICON_PROVIDER = None
+_FILE_ICON_PROVIDER: Optional[QFileIconProvider] = None
 
 
 def _get_file_icon(file_path: str) -> QIcon:
     global _FILE_ICON_PROVIDER
     if _FILE_ICON_PROVIDER is None:
         _FILE_ICON_PROVIDER = QFileIconProvider()
-
     info = QFileInfo(file_path)
     icon = _FILE_ICON_PROVIDER.icon(info)
     if icon and not icon.isNull():
@@ -51,69 +74,532 @@ def _get_dir_icon() -> QIcon:
     global _FILE_ICON_PROVIDER
     if _FILE_ICON_PROVIDER is None:
         _FILE_ICON_PROVIDER = QFileIconProvider()
-
     icon = _FILE_ICON_PROVIDER.icon(QFileIconProvider.Folder)
     if icon and not icon.isNull():
         return icon
     return QApplication.style().standardIcon(QStyle.SP_DirIcon)
 
 
-def _get_dir_open_icon() -> QIcon:
-    global _FILE_ICON_PROVIDER
-    if _FILE_ICON_PROVIDER is None:
-        _FILE_ICON_PROVIDER = QFileIconProvider()
-
-    icon = _FILE_ICON_PROVIDER.icon(QFileIconProvider.Folder)
-    if icon and not icon.isNull():
-        return icon
-    return QApplication.style().standardIcon(QStyle.SP_DirOpenIcon)
-
-
 # ══════════════════════════════════════════════════════════
-# 可拖拽文件树控件
+# 数据节点
 # ══════════════════════════════════════════════════════════
 
 
-class FileTreeWidget(QTreeWidget):
-    """支持拖拽和删除的文件树控件"""
+@dataclass
+class _FileNode:
+    """文件树数据节点"""
+    name: str
+    path: str
+    is_dir: bool
+    children: Optional[List["_FileNode"]] = None
+    loaded: bool = False
+    parent_node: Optional["_FileNode"] = None
+
+
+# ══════════════════════════════════════════════════════════
+# FileTreeModel — 数据模型
+# ══════════════════════════════════════════════════════════
+
+
+class FileTreeModel(QAbstractItemModel):
+    """自定义文件树 Model — 懒加载 + 排序（文件夹优先）"""
+
+    need_scan = pyqtSignal(str)  # 请求异步扫描 dir_path
+
+    COL_PATH = Qt.UserRole
+    COL_IS_DIR = Qt.UserRole + 1
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._root_entries: List[_FileNode] = []
+        self._project_root: str = ""
+        self._loading: set = set()  # 正在扫描中的目录路径
+
+    # ── 公开 API（cards.py 调用） ──
+
+    def set_project(self, project_root: str, entries):
+        """设置项目根目录并加载顶级条目（scanner 结果）"""
+        self.beginResetModel()
+        self._project_root = os.path.normpath(project_root)
+        self._root_entries = self._build_nodes(entries, None)
+        self.endResetModel()
+
+    def populate_children(self, dir_path: str, entries) -> bool:
+        """扫描完成后填充子节点"""
+        node = self._find_node(dir_path)
+        if not node:
+            self._loading.discard(dir_path)
+            return False
+        parent_idx = self._index_for_node(node)
+        if not parent_idx.isValid() and node.parent_node is not None:
+            self._loading.discard(dir_path)
+            return False
+        if node.loaded:
+            self._clear_children(node, parent_idx)
+        self._insert_children(node, parent_idx, entries)
+        node.loaded = True
+        self._loading.discard(dir_path)
+        return True
+
+    def refresh_children(self, dir_path: str, entries):
+        """外部变更后刷新子节点"""
+        node = self._find_node(dir_path)
+        if not node or not node.loaded:
+            return
+        parent_idx = self._index_for_node(node)
+        self._clear_children(node, parent_idx)
+        self._insert_children(node, parent_idx, entries)
+
+    def rename_node(self, old_path: str, new_name: str) -> Optional[str]:
+        """重命名节点，返回新路径；失败返回 None"""
+        node = self._find_node(old_path)
+        if not node:
+            return None
+        new_path = os.path.join(os.path.dirname(old_path), new_name)
+        node.name = new_name
+        node.path = new_path
+        idx = self._index_for_node(node)
+        if idx.isValid():
+            self.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.ToolTipRole])
+        return new_path
+
+    def remove_node(self, path: str):
+        """从模型移除节点"""
+        node = self._find_node(path)
+        if not node:
+            return
+        parent = node.parent_node
+        if parent is None:
+            # 顶级
+            row = self._find_row_in_list(self._root_entries, node)
+            if row >= 0:
+                self.beginRemoveRows(QModelIndex(), row, row)
+                self._root_entries.pop(row)
+                self.endRemoveRows()
+        elif parent.children is not None:
+            parent_idx = self._index_for_node(parent)
+            row = self._find_row_in_list(parent.children, node)
+            if row >= 0:
+                self.beginRemoveRows(parent_idx, row, row)
+                parent.children.pop(row)
+                self.endRemoveRows()
+
+    def add_node(self, parent_path: str, entry) -> Optional[QModelIndex]:
+        """添加新子节点（按排序位置插入），返回 index"""
+        parent_node = self._find_node(parent_path)
+        if not parent_node:
+            return None
+        if parent_node.children is None:
+            parent_node.children = []
+            parent_node.loaded = True
+
+        parent_idx = self._index_for_node(parent_node)
+        insert_row = self._sorted_insert_pos(parent_node.children, entry)
+        self.beginInsertRows(parent_idx, insert_row, insert_row)
+        new_node = _FileNode(
+            name=entry.name, path=entry.path, is_dir=entry.is_dir,
+            parent_node=parent_node, loaded=False,
+        )
+        parent_node.children.insert(insert_row, new_node)
+        self.endInsertRows()
+        return self._index_for_node(new_node)
+
+    def find_node(self, path: str) -> Optional[_FileNode]:
+        return self._find_node(path)
+
+    def node_is_loading(self, path: str) -> bool:
+        """检查某路径是否正在异步扫描中"""
+        return os.path.normpath(path) in self._loading
+
+    def clear_loading(self, path: str):
+        """扫描失败时清除加载标记"""
+        self._loading.discard(os.path.normpath(path))
+
+    def node_is_loaded(self, idx: QModelIndex) -> bool:
+        if not idx.isValid():
+            return False
+        node: _FileNode = idx.internalPointer()
+        return node.loaded
+
+    # ── QAbstractItemModel 接口 ──
+
+    def index(self, row: int, column: int, parent: QModelIndex = QModelIndex()) -> QModelIndex:
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        if not parent.isValid():
+            if row < len(self._root_entries):
+                return self.createIndex(row, column, self._root_entries[row])
+        else:
+            parent_node: _FileNode = parent.internalPointer()
+            if parent_node.children is not None and row < len(parent_node.children):
+                return self.createIndex(row, column, parent_node.children[row])
+        return QModelIndex()
+
+    def parent(self, index: QModelIndex) -> QModelIndex:
+        if not index.isValid():
+            return QModelIndex()
+        node: _FileNode = index.internalPointer()
+        if node.parent_node is None:
+            return QModelIndex()
+        return self._index_for_node(node.parent_node)
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if not parent.isValid():
+            return len(self._root_entries)
+        node: _FileNode = parent.internalPointer()
+        if node.children is not None:
+            return len(node.children)
+        return 0
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 1
+
+    def hasChildren(self, parent: QModelIndex = QModelIndex()) -> bool:
+        """告知 Qt 该节点是否有子节点（未加载的目录假设有）"""
+        if not parent.isValid():
+            return len(self._root_entries) > 0
+        node: _FileNode = parent.internalPointer()
+        if not node.is_dir:
+            return False
+        if node.loaded:
+            return bool(node.children)
+        return True  # 未加载的目录假设有子节点
+
+    def canFetchMore(self, parent: QModelIndex) -> bool:
+        """Qt 在展开节点前调用 — 未加载且未在扫描中才返回 True"""
+        if not parent.isValid():
+            return False
+        node: _FileNode = parent.internalPointer()
+        if not node.is_dir:
+            return False
+        if node.loaded:
+            return False
+        if node.path in self._loading:
+            return False
+        return True
+
+    def fetchMore(self, parent: QModelIndex):
+        """Qt 自动调用 — 触发异步扫描"""
+        node: _FileNode = parent.internalPointer()
+        if not node or not node.is_dir:
+            return
+        self._loading.add(node.path)
+        self.need_scan.emit(node.path)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        node: _FileNode = index.internalPointer()
+        if role == Qt.DisplayRole:
+            return node.name
+        if role == Qt.DecorationRole:
+            return _get_dir_icon() if node.is_dir else _get_file_icon(node.path)
+        if role == self.COL_PATH:
+            return node.path
+        if role == self.COL_IS_DIR:
+            return node.is_dir
+        return None
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        if not index.isValid():
+            return Qt.ItemIsDropEnabled
+        node: _FileNode = index.internalPointer()
+        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled
+        if node.is_dir:
+            flags |= Qt.ItemIsDropEnabled
+        return flags
+
+    def supportedDropActions(self) -> Qt.DropActions:
+        return Qt.MoveAction | Qt.CopyAction
+
+    def mimeTypes(self) -> List[str]:
+        return ["text/uri-list", "application/x-drifox-filelist"]
+
+    def mimeData(self, indexes: List[QModelIndex]) -> QMimeData:
+        mime_data = QMimeData()
+        paths = [idx.data(self.COL_PATH) for idx in indexes if idx.isValid()]
+        if paths:
+            mime_data.setUrls([QUrl.fromLocalFile(p) for p in paths])
+            mime_data.setData("application/x-drifox-filelist", "\n".join(paths).encode("utf-8"))
+        return mime_data
+
+    def canDropMimeData(self, data, action, row, column, parent):
+        if not parent.isValid():
+            return False
+        node: _FileNode = parent.internalPointer()
+        return node.is_dir
+
+    def dropMimeData(self, data, action, row, column, parent):
+        # 实际操作由 FileTreeView.dropEvent 处理
+        return False
+
+    # ── 内部辅助 ──
+
+    def _build_nodes(self, entries, parent) -> List[_FileNode]:
+        nodes = []
+        for e in entries:
+            nodes.append(_FileNode(
+                name=e.name, path=e.path, is_dir=e.is_dir,
+                parent_node=parent, loaded=False,
+            ))
+        return nodes
+
+    def _insert_children(self, node: _FileNode, parent_idx: QModelIndex, entries):
+        children = self._build_nodes(entries, node)
+        if not children:
+            node.children = []
+            return
+        self.beginInsertRows(parent_idx, 0, len(children) - 1)
+        node.children = children
+        self.endInsertRows()
+
+    def _clear_children(self, node: _FileNode, parent_idx: QModelIndex):
+        if node.children:
+            count = len(node.children)
+            self.beginRemoveRows(parent_idx, 0, count - 1)
+            node.children = None
+            self.endRemoveRows()
+
+    def _find_node(self, norm_path: str) -> Optional[_FileNode]:
+        target = os.path.normpath(norm_path)
+        for entry in self._root_entries:
+            result = self._find_node_recursive(entry, target)
+            if result:
+                return result
+        return None
+
+    def _find_node_recursive(self, node: _FileNode, target: str) -> Optional[_FileNode]:
+        if os.path.normpath(node.path) == target:
+            return node
+        if node.children:
+            for child in node.children:
+                result = self._find_node_recursive(child, target)
+                if result:
+                    return result
+        return None
+
+    def _index_for_node(self, node: _FileNode) -> QModelIndex:
+        if node is None:
+            return QModelIndex()
+        if node.parent_node is None:
+            row = self._find_row_in_list(self._root_entries, node)
+            return self.createIndex(row, 0, node) if row >= 0 else QModelIndex()
+        parent_idx = self._index_for_node(node.parent_node)
+        if not parent_idx.isValid():
+            return QModelIndex()
+        if node.parent_node.children is None:
+            return QModelIndex()
+        row = self._find_row_in_list(node.parent_node.children, node)
+        return self.createIndex(row, 0, node) if row >= 0 else QModelIndex()
+
+    @staticmethod
+    def _find_row_in_list(lst: List[_FileNode], node: _FileNode) -> int:
+        for i, item in enumerate(lst):
+            if item is node:
+                return i
+        return -1
+
+    @staticmethod
+    def _sorted_insert_pos(children: List[_FileNode], entry) -> int:
+        """找到排序插入位置：文件夹在前，按名称小写字母序"""
+        for i, child in enumerate(children):
+            if child.is_dir and not entry.is_dir:
+                continue
+            if not child.is_dir and entry.is_dir:
+                return i
+            if entry.name.lower() < child.name.lower():
+                return i
+        return len(children)
+
+
+# ══════════════════════════════════════════════════════════
+# FileTreeFilterProxy — 搜索过滤
+# ══════════════════════════════════════════════════════════
+
+
+class FileTreeFilterProxy(QSortFilterProxyModel):
+    """文件树搜索过滤代理 — 仅根据文件名过滤"""
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.setRecursiveFilteringEnabled(True)
+        self.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.setFilterRole(Qt.DisplayRole)
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        model = self.sourceModel()
+        if not isinstance(model, FileTreeModel):
+            return super().filterAcceptsRow(source_row, source_parent)
+
+        pattern = self.filterRegularExpression().pattern()
+        if not pattern:
+            return True
+
+        idx = model.index(source_row, 0, source_parent)
+        name = model.data(idx, Qt.DisplayRole) or ""
+        is_dir = model.data(idx, model.COL_IS_DIR)
+
+        if pattern.lower() in name.lower():
+            return True
+
+        # 未加载的目录 — 乐观显示（可能子节点会匹配）
+        if is_dir:
+            node = model.find_node(model.data(idx, model.COL_PATH))
+            if node and node.children is None:
+                return True
+
+        # 已加载的依赖 recursiveFilteringEnabled 检查子节点
+        return False
+
+
+# ══════════════════════════════════════════════════════════
+# RenameDelegate — 原地重命名
+# ══════════════════════════════════════════════════════════
+
+
+class RenameDelegate(QStyledItemDelegate):
+    """文件/文件夹原地重命名编辑器"""
+
+    rename_requested = pyqtSignal(str, str)  # old_path, new_name
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._colors: dict = {}
+
+    def set_colors(self, colors: dict):
+        self._colors = colors
+
+    def createEditor(self, parent_widget, option, index):
+        editor = QLineEdit(parent_widget)
+        accent = self._colors.get("accent", QColor("#62a0ea"))
+        tc = self._colors.get("text", QColor(255, 255, 255))
+        ff = self._colors.get("font_family", "Microsoft YaHei")
+        fs = self._colors.get("font_size", 14)
+
+        editor.setStyleSheet(
+            f"QLineEdit {{"
+            f"  background: rgba(255,255,255,0.08);"
+            f"  border: 2px solid {accent.name()};"
+            f"  border-radius: 3px;"
+            f"  padding: 2px 6px;"
+            f"  color: {tc.name()};"
+            f"  font-family: '{ff}';"
+            f"  font-size: {fs - 2}px;"
+            f"}}"
+        )
+        return editor
+
+    def setEditorData(self, editor, index):
+        name = index.data(Qt.DisplayRole) or ""
+        editor.setText(name)
+        is_dir = index.data(FileTreeModel.COL_IS_DIR)
+        if not is_dir:
+            dot = name.rfind(".")
+            if dot > 0:
+                editor.setSelection(0, dot)
+            else:
+                editor.selectAll()
+        else:
+            editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        new_name = editor.text().strip()
+        old_name = index.data(Qt.DisplayRole)
+        if not new_name or new_name == old_name:
+            return
+        if "/" in new_name or "\\" in new_name:
+            logger.warning("[FileTree] 文件名含非法字符，取消重命名")
+            return
+        old_path = index.data(FileTreeModel.COL_PATH)
+        self.rename_requested.emit(old_path, new_name)
+
+
+# ══════════════════════════════════════════════════════════
+# FileTreeView — 视图控件
+# ══════════════════════════════════════════════════════════
+
+
+class FileTreeView(QTreeView):
+    """多选文件树视图 — 键盘/拖拽/右键"""
+
+    # 请求卡片处理实际操作
+    delete_requested = pyqtSignal(list)   # List[str] paths
+    move_requested = pyqtSignal(list, str)  # paths, dest_dir
+    copy_requested = pyqtSignal(list, str)  # paths, dest_dir
+    context_menu_requested = pyqtSignal(QModelIndex, object)  # index, global_pos
+    double_clicked_file = pyqtSignal(str)  # file_path
+    enter_expand_requested = pyqtSignal(str)  # dir_path (Enter 键展开)
+    clipboard_copy = pyqtSignal()   # Ctrl+C
+    clipboard_cut = pyqtSignal()    # Ctrl+X
+    clipboard_paste = pyqtSignal()  # Ctrl+V
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDrop)
-        self._tree_card: Optional[QWidget] = None
-        self._drag_hover_item: Optional[QTreeWidgetItem] = None
-        logger.debug("[FileTreeWidget] 已创建，拖拽模式=DragDrop")
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setAnimated(True)
+        self.setIndentation(20)
+        self.setHeaderHidden(True)
+        self.setIconSize(QSize(18, 18))
+        self.setFrameShape(QFrame.NoFrame)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setExpandsOnDoubleClick(False)
+        self._drag_action: Optional[Qt.DropAction] = None
 
-    def set_tree_card(self, card):
-        """设置所属的 FileTreeCard 引用"""
-        self._tree_card = card
+    # ── 键盘 ──
 
-    # ── 拖拽数据（拖到外部） ──
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_Delete:
+            self._emit_delete()
+        elif event.key() == Qt.Key_F2:
+            self._start_rename()
+        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            self._handle_enter()
+        elif event.matches(QKeySequence.Copy):
+            self.clipboard_copy.emit()
+        elif event.matches(QKeySequence.Cut):
+            self.clipboard_cut.emit()
+        elif event.matches(QKeySequence.Paste):
+            self.clipboard_paste.emit()
+        elif event.matches(QKeySequence.SelectAll):
+            self.selectAll()
+        else:
+            super().keyPressEvent(event)
 
-    def mimeData(self, items: List[QTreeWidgetItem]) -> QMimeData:
-        mime_data = super().mimeData(items)
-        paths: List[str] = []
-        for item in items:
-            path = item.data(0, Qt.UserRole)
+    # ── 双击 ──
+
+    def mouseDoubleClickEvent(self, event):
+        idx = self.indexAt(event.pos())
+        if not idx.isValid():
+            super().mouseDoubleClickEvent(event)
+            return
+        src_idx = self._map_to_source(idx)
+        is_dir = src_idx.data(FileTreeModel.COL_IS_DIR)
+        if is_dir:
+            # 双击目录：展开/折叠
+            self.setExpanded(idx, not self.isExpanded(idx))
+        else:
+            path = src_idx.data(FileTreeModel.COL_PATH)
             if path:
-                paths.append(path)
+                self.double_clicked_file.emit(path)
+        # 不调用 super，避免 QTreeView 默认行为
 
-        if not paths:
-            return mime_data
+    # ── 右键菜单 ──
 
-        urls = [QUrl.fromLocalFile(p) for p in paths]
-        mime_data.setUrls(urls)
-        mime_data.setText("\n".join(paths))
-        return mime_data
+    def contextMenuEvent(self, event):
+        idx = self.indexAt(event.pos())
+        src_idx = self._map_to_source(idx) if idx.isValid() else QModelIndex()
+        self.context_menu_requested.emit(src_idx, event.globalPos())
 
-    # ── 内部拖放移动 ──
+    # ── 拖拽 ──
 
     def dragEnterEvent(self, event):
         if event.source() is self:
-            super().dragEnterEvent(event)
             event.acceptProposedAction()
+            super().dragEnterEvent(event)
         else:
             super().dragEnterEvent(event)
 
@@ -122,349 +608,132 @@ class FileTreeWidget(QTreeWidget):
             event.ignore()
             return
 
-        self._clear_drag_highlight()
+        # 根据键盘修饰符切换移动/复制
+        if event.keyboardModifiers() & Qt.ControlModifier:
+            self._drag_action = Qt.CopyAction
+            event.setDropAction(Qt.CopyAction)
+        else:
+            self._drag_action = Qt.MoveAction
+            event.setDropAction(Qt.MoveAction)
+
         super().dragMoveEvent(event)
 
-        target_item = self.itemAt(event.pos())
-        if target_item is None:
-            return
-
-        target_is_dir = target_item.data(0, Qt.UserRole + 1)
-        if target_is_dir:
-            accent = self._theme_accent_color()
-            accent.setAlpha(40)
-            target_item.setBackground(0, accent)
-            self._drag_hover_item = target_item
-
-    def dragLeaveEvent(self, event):
-        self._clear_drag_highlight()
-        super().dragLeaveEvent(event)
-
-    def _clear_drag_highlight(self):
-        if self._drag_hover_item is not None:
-            try:
-                self._drag_hover_item.setBackground(0, QColor())
-            except RuntimeError:
-                pass
-            self._drag_hover_item = None
-
-    def _theme_accent_color(self) -> QColor:
-        if self._tree_card is not None:
-            colors = getattr(self._tree_card, "_colors", {})
-            if colors:
-                return colors.get("accent", QColor("#62a0ea"))
-        return QColor("#62a0ea" if isDarkTheme() else "#2878dc")
-
-    def _styled_message_box(
-        self,
-        icon: QMessageBox.Icon,
-        title: str,
-        text: str,
-        buttons: QMessageBox.StandardButtons = QMessageBox.Yes | QMessageBox.No,
-        default_button: QMessageBox.StandardButton = QMessageBox.No,
-    ) -> int:
-        """创建适配主题色的消息框 — 统一 MaskDialogBase 风格"""
-        # 从 card 上下文获取主题色
-        if self._tree_card is not None:
-            colors = getattr(self._tree_card, "_colors", {})
-            if colors:
-                bg = colors.get("card_bg", QColor(33, 33, 38))
-                tc = colors.get("text", QColor(255, 255, 255))
-                accent = colors.get("accent", QColor(102, 198, 255))
-                border = colors.get("border", QColor(61, 61, 61))
-                font_size = colors.get("font_size", 14)
-                ff = colors.get("font_family", "Microsoft YaHei")
-                is_dark = colors.get("is_dark", True)
-            else:
-                bg = QColor(33, 33, 38)
-                tc = QColor(255, 255, 255)
-                accent = QColor(102, 198, 255)
-                border = QColor(61, 61, 61)
-                font_size = 14
-                ff = "Microsoft YaHei"
-                is_dark = True
-        else:
-            bg = QColor(33, 33, 38)
-            tc = QColor(255, 255, 255)
-            accent = QColor(102, 198, 255)
-            border = QColor(61, 61, 61)
-            font_size = 14
-            ff = "Microsoft YaHei"
-            is_dark = True
-
-        hover_bg = bg.lighter(115) if is_dark else bg.darker(110)
-
-        has_yes = bool(buttons & QMessageBox.Yes)
-        has_no = bool(buttons & QMessageBox.No)
-        has_ok = bool(buttons & QMessageBox.Ok)
-        has_cancel = bool(buttons & QMessageBox.Cancel)
-
-        class _Dialog(MaskDialogBase):
-            def __init__(self, parent_widget):
-                super().__init__(parent_widget)
-                self._result = QMessageBox.No
-                self._setup()
-
-            def _setup(self):
-                self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
-                self.setClosableOnMaskClicked(True)
-                self.setDraggable(True)
-                self.setMaskColor(QColor(0, 0, 0, 76))
-
-                self.widget.setObjectName("fileTreeStyledDialog")
-                self.widget.setStyleSheet(f"""
-                    #fileTreeStyledDialog {{
-                        background-color: {bg.name()};
-                        border: 1px solid {border.name()};
-                        border-radius: 8px;
-                    }}
-                """)
-
-                layout = QVBoxLayout(self.widget)
-                layout.setContentsMargins(28, 28, 28, 20)
-                layout.setSpacing(0)
-
-                title_lb = BodyLabel(title, self.widget)
-                title_lb.setWordWrap(True)
-                title_lb.setStyleSheet(
-                    f"color: {tc.name()}; background: transparent; "
-                    f"font-family: '{ff}';"
-                    f"font-size: {font_size + 2}px; font-weight: bold;"
-                )
-                layout.addWidget(title_lb)
-                layout.addSpacing(6)
-
-                content_lb = BodyLabel(text, self.widget)
-                content_lb.setWordWrap(True)
-                content_lb.setStyleSheet(
-                    f"color: {tc.name()}; background: transparent; "
-                    f"font-family: '{ff}';"
-                    f"font-size: {font_size - 1}px; line-height: 1.6;"
-                )
-                layout.addWidget(content_lb)
-                layout.addStretch()
-
-                btn_layout = QHBoxLayout()
-                btn_layout.setSpacing(10)
-
-                def _make_btn(label_text: str, result_code, is_default: bool, is_primary: bool):
-                    btn = QPushButton(label_text, self.widget)
-                    btn.setCursor(Qt.PointingHandCursor)
-                    btn.setFixedHeight(36)
-                    if is_primary:
-                        btn.setStyleSheet(f"""
-                            QPushButton {{
-                                background-color: {accent.name()};
-                                color: #ffffff;
-                                border: none;
-                                border-radius: 8px;
-                                padding: 4px 28px;
-                                font-family: '{ff}';
-                                font-size: {font_size - 1}px;
-                                font-weight: bold;
-                            }}
-                            QPushButton:hover {{
-                                background-color: {accent.name()};
-                            }}
-                        """)
-                    else:
-                        btn.setStyleSheet(f"""
-                            QPushButton {{
-                                background-color: {bg.name()};
-                                color: {tc.name()};
-                                border: 1px solid {border.name()};
-                                border-radius: 8px;
-                                padding: 4px 28px;
-                                font-family: '{ff}';
-                                font-size: {font_size - 1}px;
-                            }}
-                            QPushButton:hover {{
-                                background-color: {hover_bg.name()};
-                                border-color: {accent.name()};
-                            }}
-                        """)
-                    if is_default:
-                        btn.setDefault(True)
-                        btn.setFocus()
-                    btn.clicked.connect(lambda: [setattr(self, "_result", result_code), self.close()])
-                    return btn
-
-                btn_layout.addStretch()
-
-                if has_ok:
-                    btn_layout.addWidget(_make_btn("确定", QMessageBox.Ok, True, True))
-                else:
-                    if has_no:
-                        btn_layout.addWidget(_make_btn("否", QMessageBox.No, default_button == QMessageBox.No, False))
-                    if has_yes:
-                        btn_layout.addWidget(_make_btn("是", QMessageBox.Yes, default_button == QMessageBox.Yes, True))
-                    if has_cancel:
-                        btn_layout.addWidget(
-                            _make_btn("取消", QMessageBox.Cancel, default_button == QMessageBox.Cancel, False)
-                        )
-
-                layout.addLayout(btn_layout)
-                self.widget.setFixedSize(400, 200)
-
-        dialog = _Dialog(self.window())
-        dialog.exec_()
-        return dialog._result
-
     def dropEvent(self, event):
-        self._clear_drag_highlight()
-
         if event.source() is not self:
             event.ignore()
             return
 
-        target_item = self.itemAt(event.pos())
-        if target_item is None:
+        action = self._drag_action or event.dropAction()
+        self._drag_action = None
+
+        target_idx = self.indexAt(event.pos())
+        if not target_idx.isValid():
             event.ignore()
             return
-
-        target_path = target_item.data(0, Qt.UserRole)
-        target_is_dir = target_item.data(0, Qt.UserRole + 1)
-
+        target_src = self._map_to_source(target_idx)
+        target_path = target_src.data(FileTreeModel.COL_PATH)
+        target_is_dir = target_src.data(FileTreeModel.COL_IS_DIR)
         if not target_path:
             event.ignore()
             return
 
-        if not target_is_dir:
-            target_path = os.path.dirname(target_path)
-            if not target_path:
-                event.ignore()
-                return
-
-        source_items = self.selectedItems()
-        if not source_items:
+        dest_dir = target_path if target_is_dir else os.path.dirname(target_path)
+        if not dest_dir:
             event.ignore()
             return
 
+        selected_idxs = self.selectionModel().selectedRows()
         source_paths: List[str] = []
-        for item in source_items:
-            path = item.data(0, Qt.UserRole)
-            if not path:
+        for idx in selected_idxs:
+            src_idx = self._map_to_source(idx)
+            p = src_idx.data(FileTreeModel.COL_PATH)
+            if not p:
                 continue
-            norm_src = os.path.normpath(path)
-            norm_dst = os.path.normpath(target_path)
+            norm_src = os.path.normpath(p)
+            norm_dst = os.path.normpath(dest_dir)
             if norm_src == norm_dst:
                 continue
             if norm_dst.startswith(norm_src + os.sep):
-                logger.warning(f"[FileTree] 循环移动被阻止: {path} → {target_path}")
+                logger.warning(f"[FileTree] 禁止循环拖拽: {p} → {dest_dir}")
                 continue
-            source_paths.append(path)
+            source_paths.append(p)
 
         if not source_paths:
             event.ignore()
             return
 
-        names = "\n".join(os.path.basename(p) for p in source_paths)
-        target_name = os.path.basename(target_path) or target_path
-        reply = self._styled_message_box(
-            QMessageBox.Question,
-            "确认移动",
-            f"确定要将以下项目移动到「{target_name}」？\n\n{names}",
-        )
-        if reply != QMessageBox.Yes:
-            event.ignore()
-            return
+        if action == Qt.CopyAction:
+            self.copy_requested.emit(source_paths, dest_dir)
+        else:
+            self.move_requested.emit(source_paths, dest_dir)
 
-        self._move_files(source_paths, target_path)
         event.acceptProposedAction()
 
-    def _move_files(self, source_paths: List[str], target_dir: str):
-        moved_count = 0
-        for src in source_paths:
-            dest = os.path.join(target_dir, os.path.basename(src))
-            if os.path.exists(dest):
-                logger.warning(f"[FileTree] 目标已存在，跳过: {dest}")
-                continue
-            try:
-                shutil.move(src, dest)
-                moved_count += 1
-                logger.info(f"[FileTree] 已移动: {src} → {dest}")
-            except Exception as e:
-                logger.error(f"[FileTree] 移动失败: {src} → {dest}: {e}")
-                self._styled_message_box(
-                    QMessageBox.Critical,
-                    "移动失败",
-                    f"无法移动「{os.path.basename(src)}」:\n{e}",
-                    QMessageBox.Ok,
-                    QMessageBox.Ok,
-                )
+    # ── 重命名 ──
 
-        if moved_count > 0 and self._tree_card is not None:
-            self._tree_card._on_refresh()
+    def start_rename_at_index(self, src_idx: QModelIndex):
+        """外部触发重命名（右键菜单或 F2）"""
+        if not src_idx.isValid():
+            return
+        proxy_idx = self._map_from_source(src_idx)
+        if proxy_idx.isValid():
+            self.edit(proxy_idx)
 
-    # ── Delete 键删除 ──
+    def _start_rename(self):
+        idxs = self.selectionModel().selectedRows()
+        if not idxs:
+            return
+        self.edit(idxs[0])
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete:
-            self._delete_selected()
+    # ── Delete ──
+
+    def _emit_delete(self):
+        idxs = self.selectionModel().selectedRows()
+        paths = []
+        for idx in idxs:
+            src_idx = self._map_to_source(idx)
+            p = src_idx.data(FileTreeModel.COL_PATH)
+            if p:
+                paths.append(p)
+        if paths:
+            self.delete_requested.emit(paths)
+
+    # ── Enter ──
+
+    def _handle_enter(self):
+        idxs = self.selectionModel().selectedRows()
+        if not idxs:
+            return
+        src_idx = self._map_to_source(idxs[0])
+        is_dir = src_idx.data(FileTreeModel.COL_IS_DIR)
+        path = src_idx.data(FileTreeModel.COL_PATH)
+        if not path:
+            return
+        if is_dir:
+            self.enter_expand_requested.emit(path)
         else:
-            super().keyPressEvent(event)
+            self.double_clicked_file.emit(path)
 
-    def _delete_selected(self):
-        items = self.selectedItems()
-        if not items:
-            return
+    # ── 索引映射（source ↔ proxy） ──
 
-        deletable: List[QTreeWidgetItem] = []
-        for item in items:
-            path = item.data(0, Qt.UserRole)
-            if not path:
-                continue
-            if (
-                self._tree_card is not None
-                and getattr(self._tree_card, "_project_root", None)
-                and os.path.normpath(path) == os.path.normpath(self._tree_card._project_root)
-            ):
-                continue
-            deletable.append(item)
+    def _map_to_source(self, proxy_idx: QModelIndex) -> QModelIndex:
+        p = self.model()
+        if isinstance(p, QSortFilterProxyModel):
+            return p.mapToSource(proxy_idx)
+        return proxy_idx
 
-        if not deletable:
-            self._styled_message_box(
-                QMessageBox.Information,
-                "提示",
-                "不能删除项目根目录",
-                QMessageBox.Ok,
-                QMessageBox.Ok,
-            )
-            return
+    def _map_from_source(self, src_idx: QModelIndex) -> QModelIndex:
+        p = self.model()
+        if isinstance(p, QSortFilterProxyModel):
+            return p.mapFromSource(src_idx)
+        return src_idx
 
-        if len(deletable) == 1:
-            name = deletable[0].text(0)
-            path = deletable[0].data(0, Qt.UserRole)
-            msg = f"确定要永久删除「{name}」？\n\n路径: {path}\n\n⚠️ 此操作不可撤销！"
-        else:
-            names = "\n".join(f"• {item.text(0)}" for item in deletable)
-            msg = f"确定要永久删除以下 {len(deletable)} 个项目？\n\n{names}\n\n⚠️ 此操作不可撤销！"
-
-        reply = self._styled_message_box(QMessageBox.Warning, "确认永久删除", msg)
-        if reply != QMessageBox.Yes:
-            return
-
-        deleted_count = 0
-        for item in deletable:
-            path = item.data(0, Qt.UserRole)
-            if not path:
-                continue
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path)
-                else:
-                    os.remove(path)
-                deleted_count += 1
-                logger.info(f"[FileTree] 已删除: {path}")
-            except Exception as e:
-                logger.error(f"[FileTree] 删除失败: {path}: {e}")
-                self._styled_message_box(
-                    QMessageBox.Critical,
-                    "删除失败",
-                    f"无法删除「{item.text(0)}」:\n{e}",
-                    QMessageBox.Ok,
-                    QMessageBox.Ok,
-                )
-
-        if deleted_count > 0 and self._tree_card is not None:
-            self._tree_card._on_refresh()
+    def selected_source_paths(self) -> List[str]:
+        """获取选中项路径（直接查 source model）"""
+        paths = []
+        for idx in self.selectionModel().selectedRows():
+            src_idx = self._map_to_source(idx)
+            p = src_idx.data(FileTreeModel.COL_PATH)
+            if p:
+                paths.append(p)
+        return paths

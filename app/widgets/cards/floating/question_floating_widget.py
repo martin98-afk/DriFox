@@ -263,6 +263,13 @@ class _CustomInputCard(QWidget):
         self.setMinimumHeight(44)
         self._setup_ui()
 
+    def showEvent(self, event):
+        """控件变为可见时自动聚焦到文本输入框（如果处于激活态）"""
+        super().showEvent(event)
+        if self._active and event.isAccepted():
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._text_edit.setFocus() if self.isVisible() else None)
+
     def _setup_ui(self):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -401,7 +408,9 @@ class _CustomInputCard(QWidget):
         self._text_edit.setVisible(active)
         if active:
             self._text_edit.setFixedHeight(self.MIN_INPUT_HEIGHT)
-            self._text_edit.setFocus()
+            # ★ 仅在可见时聚焦——防止 QStackedWidget 隐藏页窃取焦点
+            if self.isVisible():
+                self._text_edit.setFocus()
             if self._text_value:
                 self._text_edit.setPlainText(self._text_value)
             # 延迟到下一轮事件循环，等布局完成（viewport().width() > 0）后再算高度
@@ -504,6 +513,14 @@ class QuestionFloatingWidget(QWidget):
         self._preview_payload = None
         self._collapsed = False
         self._setup_ui()
+
+    def showEvent(self, event):
+        """控件变为可见时自动聚焦到下一步按钮"""
+        super().showEvent(event)
+        if event.isAccepted() and self._questions:
+            # 延迟到布局完成后聚焦，确保按钮在正确位置
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._next_btn.setFocus() if self.isVisible() else None)
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -919,7 +936,10 @@ class QuestionFloatingWidget(QWidget):
 
         self._update_footer(total)
         # 自动聚焦到下一步按钮，键盘操作立即可用
-        self._next_btn.setFocus()
+        # ★ 仅在可见时聚焦——否则 QStackedWidget 隐藏页的 setFocus()
+        #   会从当前活动 Tab 的输入框窃取焦点（Tab 模式 bug）。
+        if self.isVisible():
+            self._next_btn.setFocus()
 
     def _update_footer(self, total: int):
         is_first = self._current_index == 0
