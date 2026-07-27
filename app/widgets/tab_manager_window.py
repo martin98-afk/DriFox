@@ -21,7 +21,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPushButton,
     QSizeGrip,
     QSizePolicy,
     QStackedWidget,
@@ -31,7 +30,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import TransparentToolButton
 
 from app.utils.config import Settings
-from app.utils.utils import get_icon
+from app.utils.utils import get_icon, get_unified_font
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
@@ -348,8 +347,6 @@ class TabManagerTitleBar(QWidget):
 class EmptyStateWidget(QWidget):
     """空状态页 — 最后一个 Tab 关闭时显示"""
 
-    newTabRequested = pyqtSignal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -361,29 +358,20 @@ class EmptyStateWidget(QWidget):
         icon_label.setStyleSheet("font-size: 48px; background: transparent;")
         layout.addWidget(icon_label)
 
-        text_label = QLabel("没有打开的窗口", self)
-        text_label.setAlignment(Qt.AlignCenter)
-        text_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}")
-        layout.addWidget(text_label)
+        self._text_label = QLabel("没有打开的窗口", self)
+        self._text_label.setAlignment(Qt.AlignCenter)
+        self._text_label.setFont(get_unified_font(14))
+        self._text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
+        )
+        layout.addWidget(self._text_label)
 
-        new_btn = QPushButton("＋ 新建标签页", self)
-        new_btn.setCursor(Qt.PointingHandCursor)
-        new_btn.setFixedSize(160, 36)
-        new_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {Colors.CARD_BG.format(alpha=200)};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-                {font_size_css(13)}
-            }}
-            QPushButton:hover {{
-                background: {Colors.HOVER_BG};
-                border-color: {Colors.INFO};
-            }}
-        """)
-        new_btn.clicked.connect(self.newTabRequested.emit)
-        layout.addWidget(new_btn)
+    def refresh_style(self):
+        """主题/字体变更后刷新样式"""
+        self._text_label.setFont(get_unified_font(14))
+        self._text_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
+        )
 
 
 def _find_edge_launchers(window):
@@ -563,6 +551,9 @@ class TabManagerWindow(QWidget):
         # 刷新标题栏
         if hasattr(self, "_title_bar"):
             self._title_bar.refresh_style()
+        # 刷新空状态页（字体/颜色随主题或字号刷新）
+        if hasattr(self, "_empty_state"):
+            self._empty_state.refresh_style()
         # 刷新所有 Tab 项（标题颜色/字体/图标尺寸随主题或字号刷新）
         # refresh_style 内部已执行 repaint，此处不再重复
         try:
@@ -662,7 +653,6 @@ class TabManagerWindow(QWidget):
 
         # 空状态页（索引 0）
         self._empty_state = EmptyStateWidget(content_widget)
-        self._empty_state.newTabRequested.connect(self._on_new_tab_requested)
         self._content_area.addWidget(self._empty_state)  # index 0
 
         # ── 右侧对话区域圆角矩形包裹框架 ──
@@ -713,6 +703,7 @@ class TabManagerWindow(QWidget):
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
 
     # ── 窗口管理 ──
@@ -924,6 +915,13 @@ class TabManagerWindow(QWidget):
                 self._content_area.widget(0).show()
 
             self.tabCountChanged.emit(len(self._windows))
+
+    def _on_tab_branch_requested(self, index: int):
+        """分支窗口 — 从指定标签页创建分支"""
+        if 0 <= index < len(self._windows):
+            window = self._windows[index]
+            if hasattr(window, "_duplicate_window"):
+                window._duplicate_window(branch=True)
 
     def _on_new_tab_requested(self):
         """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""

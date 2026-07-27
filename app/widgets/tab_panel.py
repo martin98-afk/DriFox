@@ -464,6 +464,7 @@ class TabPanel(QWidget):
 
     tabSelected = pyqtSignal(int)  # 选中 Tab 索引
     tabCloseRequested = pyqtSignal(int)  # 关闭 Tab 索引
+    tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
 
@@ -1036,11 +1037,10 @@ class TabPanel(QWidget):
         """)
         close_action = menu.addAction("关闭标签页")
         menu.addSeparator()
-        duplicate_action = menu.addAction("复制窗口")
         branch_action = menu.addAction("分支窗口")
-        menu.addSeparator()
-        rename_action = menu.addAction("重命名会话")
 
         action = menu.exec_(event.globalPos())
         if action == close_action:
             self.tabCloseRequested.emit(self._active_index)
+        elif action == branch_action:
+            self.tabBranchRequested.emit(self._active_index)
