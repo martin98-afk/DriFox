@@ -713,9 +713,9 @@ class ChatBackend(QObject):
 
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
-                from app.core.lsp.lsp_manager import LspManager
+                from app.core.lsp.lsp_manager import get_lsp_manager
 
-                lsp_mgr = LspManager.get_instance()
+                lsp_mgr = get_lsp_manager()
                 lsp_configs = pm.get_lsp_configs()
                 workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 lsp_mgr.initialize(workdir, lsp_configs)
@@ -1314,9 +1314,9 @@ class ChatBackend(QObject):
             # 6. LSP：增量注册，不重启已有服务器
             if comps.get("lsp"):
                 try:
-                    from app.core.lsp.lsp_manager import LspManager
+                    from app.core.lsp.lsp_manager import get_lsp_manager
 
-                    lsp_mgr = LspManager.get_instance()
+                    lsp_mgr = get_lsp_manager()
                     lsp_config = pm.get_plugin_lsp_config(plugin_name)
                     if lsp_config:
                         count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
@@ -1454,9 +1454,9 @@ class ChatBackend(QObject):
 
                 # LSP：增量移除该插件的 LSP 服务器（如有），不重启已有服务器
                 try:
-                    from app.core.lsp.lsp_manager import LspManager
+                    from app.core.lsp.lsp_manager import get_lsp_manager
 
-                    lsp_mgr = LspManager.get_instance()
+                    lsp_mgr = get_lsp_manager()
                     removed = lsp_mgr.remove_plugin_servers(plugin_name)
                     result["lsp"] = True
                     if removed:
@@ -1538,9 +1538,9 @@ class ChatBackend(QObject):
             #    不走 LspManager.initialize 全量重建路径
             if component == "lsp":
                 try:
-                    from app.core.lsp.lsp_manager import LspManager
+                    from app.core.lsp.lsp_manager import get_lsp_manager
 
-                    lsp_mgr = LspManager.get_instance()
+                    lsp_mgr = get_lsp_manager()
                     # 先移除旧服务器（如果 .lsp.json 被删除也需要清理）
                     lsp_mgr.remove_plugin_servers(plugin_name)
                     # 再注册并启动新服务器（如果 .lsp.json 还存在）
@@ -1676,9 +1676,9 @@ class ChatBackend(QObject):
                 # 不重启已有服务器，不走 LspManager.initialize 全量重建路径
                 if comps.get("lsp"):
                     try:
-                        from app.core.lsp.lsp_manager import LspManager
+                        from app.core.lsp.lsp_manager import get_lsp_manager
 
-                        lsp_mgr = LspManager.get_instance()
+                        lsp_mgr = get_lsp_manager()
                         lsp_config = pm.get_plugin_lsp_config(name)
                         if lsp_config:
                             count = lsp_mgr.add_plugin_servers(name, lsp_config["config"])
@@ -1741,9 +1741,9 @@ class ChatBackend(QObject):
 
             # 7. LSP 配置：重新初始化 LspManager（停止旧服务 → 加载新配置 → 启动新服务）
             try:
-                from app.core.lsp.lsp_manager import LspManager
+                from app.core.lsp.lsp_manager import get_lsp_manager
 
-                lsp_mgr = LspManager.get_instance()
+                lsp_mgr = get_lsp_manager()
                 lsp_configs = pm.get_lsp_configs()
                 workdir = os.getcwd()
                 if self._tool_executor and getattr(self._tool_executor, "_workdir", None):

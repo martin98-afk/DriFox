@@ -72,7 +72,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     TransparentToolButton,
 )
-from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
@@ -98,12 +97,13 @@ from app.utils.design_tokens import (
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render_helpers import (
     _format_natural_preview,
-    _get_tool_icon,
-    _get_tool_icon_name,
-    _get_tool_icon_html,
     _get_tool_cn_name,
+    _get_tool_icon,
+    _get_tool_icon_html,
+    _get_tool_icon_name,
     render_tool_block,
 )
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== Markdown 实例 ========
 _md_instance = None
@@ -2136,6 +2136,10 @@ class CodeWebViewer(QWebEngineView):
         # <think> 标签文本流式思考标志：与 _reasoning_streaming_started 对应，
         # 用于 text 块中包含 <think> 标签时的静默累积策略
         self._think_text_streaming_started = False
+
+        # [PERF] 流式速度跟踪：用于自适应安全渲染间隔
+        self._last_chunk_time = 0.0  # 上次 append_chunk 的时间戳（monotonic ns）
+        self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL  # 当前自适应间隔
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -4447,10 +4451,16 @@ class CodeWebViewer(QWebEngineView):
 
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
-    # 🔧 2000ms → 300ms：原 2 秒导致工具调用前的小段正文被延迟渲染，
-    # 用户感知为"等待工具执行完正文才出现"。300ms 足够合并连续 chunk，
-    # 又不会让用户在工具执行期间看不到已到达的文本。
+    # 🔧 300ms 基础值，实际值根据流式速度在 150-500ms 间自适应
     _SAFETY_RENDER_INTERVAL = 300
+    # 自适应安全渲染间隔参数：
+    # - 快速流式（chunk 间隔 < 200ms）：用 150ms，响应更及时
+    # - 慢速流式（chunk 间隔 > 500ms）：用 500ms，减少冗余渲染
+    # - 默认：300ms
+    _ADAPTIVE_INTERVAL_FAST = 150
+    _ADAPTIVE_INTERVAL_SLOW = 500
+    _ADAPTIVE_THRESHOLD_FAST = 200  # ms
+    _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
 
@@ -4478,6 +4488,18 @@ class CodeWebViewer(QWebEngineView):
             return
 
         self._markdown_text += text
+
+        # [PERF] 更新流式速度跟踪
+        now = time.monotonic_ns()
+        if self._last_chunk_time > 0:
+            elapsed_ms = (now - self._last_chunk_time) / 1_000_000
+            if elapsed_ms < self._ADAPTIVE_THRESHOLD_FAST:
+                self._current_adaptive_interval = self._ADAPTIVE_INTERVAL_FAST
+            elif elapsed_ms > self._ADAPTIVE_THRESHOLD_SLOW:
+                self._current_adaptive_interval = self._ADAPTIVE_INTERVAL_SLOW
+            else:
+                self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL
+        self._last_chunk_time = now
 
         if not self._is_js_ready:
             return
@@ -4664,8 +4686,9 @@ class CodeWebViewer(QWebEngineView):
                 self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
+            # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
             if not self._render_timer.isActive():
-                self._render_timer.start(self._SAFETY_RENDER_INTERVAL)
+                self._render_timer.start(self._current_adaptive_interval)
         else:
             # 非流式模式（历史加载）：40ms 防抖后渲染
             if not self._render_timer.isActive():
@@ -4742,10 +4765,14 @@ class CodeWebViewer(QWebEngineView):
                 # ⚡ 哈希验证：确认 _markdown_text 自缓存以来未改变
                 # （防止 _lazy_markdown_cb 在缓存后更新了 _markdown_text）。
                 # 移除流式模式追加的字符统计 <div>，它只在流式期间有用。
-                if (self._cached_streaming_html is not None
-                        and hash(str(self._markdown_text)) == self._cached_raw_md_hash):
+                if (
+                    self._cached_streaming_html is not None
+                    and hash(str(self._markdown_text)) == self._cached_raw_md_hash
+                ):
                     if _CHAR_COUNT_HTML in self._cached_streaming_html:
-                        html_content = self._cached_streaming_html[:self._cached_streaming_html.rfind(_CHAR_COUNT_HTML)]
+                        html_content = self._cached_streaming_html[
+                            : self._cached_streaming_html.rfind(_CHAR_COUNT_HTML)
+                        ]
                     else:
                         html_content = self._cached_streaming_html
                 else:
@@ -4767,10 +4794,7 @@ class CodeWebViewer(QWebEngineView):
                 # 🚀 [PERF] 使用异步 runJavaScript（带 callback）避免主线程阻塞
                 # 等待 WebEngine 处理 DOM。同步版本会卡 30-120ms。
                 # 异步后主线程立即释放，WebEngine 在后台解析 HTML 和替换 DOM。
-                self.page().runJavaScript(
-                    self._build_save_and_restore_js(html_content),
-                    lambda _result: None
-                )
+                self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
                 self._last_rendered_html = None
                 return
 
@@ -4882,7 +4906,9 @@ class CodeWebViewer(QWebEngineView):
             # 【修复】保存后立即 el.remove()，让 reorganizeContent 干净迁移新块。
             # restore 时只恢复 data-streaming="true" 的流式块（不在 markdown 中），
             # 已完成块由 markdown 重新生成 + reorganizeContent 迁移。
-            "if(_tc){Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
+            # [PERF] 快速路径：_tc 无子元素时跳过 save 循环，减少 JS 执行开销
+            "if(_tc&&_tc.children.length){"
+            "Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
@@ -4894,7 +4920,8 @@ class CodeWebViewer(QWebEngineView):
             # 🐛 修复：只恢复流式进行中的块（data-streaming="true"）。
             # 已完成块已由 markdown 重新生成 + reorganizeContent 迁移到 #tool-content。
             # 恢复流式块时检查同 ID 是否已存在（避免与 reorganizeContent 迁移的块重复）。
-            f"if(_saved.length>0){{_tc=document.getElementById('{_target_id}');if(_tc){{"
+            # [PERF] _saved 为空时跳过 restore，这是最常见场景（无活跃工具块）
+            f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
             "if(b.streaming==='true'&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"

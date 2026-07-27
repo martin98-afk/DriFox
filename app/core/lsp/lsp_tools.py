@@ -4,6 +4,7 @@ LSP 工具 — 统一入口，通过 operation 参数分派
 
 延迟导入 ToolResult 以避免与 app/tools/__init__.py 的循环依赖。
 """
+
 from __future__ import annotations
 
 import os
@@ -13,6 +14,7 @@ from typing import Optional
 
 def _make_result(success: bool, content=None, error: Optional[str] = None):
     from app.tools.result import ToolResult
+
     return ToolResult(success, content=content, error=error)
 
 
@@ -20,8 +22,9 @@ class LspToolsIntegration:
     """LSP 工具集成 — 桥接 LspManager 与 BuiltinTools/ToolExecutor"""
 
     def __init__(self, lsp_manager=None, owner=None):
-        from app.core.lsp.lsp_manager import LspManager
-        self._manager = lsp_manager or LspManager.get_instance()
+        from app.core.lsp.lsp_manager import get_lsp_manager
+
+        self._manager = lsp_manager or get_lsp_manager()
         self._owner = owner  # BuiltinTools 引用，用于动态读取 workdir
 
     @property
@@ -35,8 +38,7 @@ class LspToolsIntegration:
     # 统一入口
     # ═══════════════════════════════════════════════════════════
 
-    def lsp(self, path: str, operation: str,
-            line: int = 0, column: int = 0, language: Optional[str] = None):
+    def lsp(self, path: str, operation: str, line: int = 0, column: int = 0, language: Optional[str] = None):
         file_path = self._resolve(path)
 
         if operation == "listServers":
@@ -52,10 +54,9 @@ class LspToolsIntegration:
         client = self._manager.get_client_for_file(fp)
         if not client:
             ext = os.path.splitext(fp)[1].lower()
-            return _make_result(False, error=(
-                f"无 LSP 服务器支持 {ext} 文件。"
-                f"已注册 {len(self._manager._clients)} 个服务器。"
-            ))
+            return _make_result(
+                False, error=(f"无 LSP 服务器支持 {ext} 文件。已注册 {len(self._manager._clients)} 个服务器。")
+            )
 
         try:
             if op == "diagnostics":
@@ -69,12 +70,16 @@ class LspToolsIntegration:
             elif op == "hover":
                 return self._do_hover(fp, line, column)
             else:
-                return _make_result(False, error=(
-                    f"未知操作: {operation}。支持: diagnostics, documentSymbols, "
-                    f"goToDefinition, findReferences, hover, listServers"
-                ))
+                return _make_result(
+                    False,
+                    error=(
+                        f"未知操作: {operation}。支持: diagnostics, documentSymbols, "
+                        f"goToDefinition, findReferences, hover, listServers"
+                    ),
+                )
         except Exception as e:
             from loguru import logger
+
             logger.error(f"[LspTools] {operation} 失败: {e}")
             return _make_result(False, error=f"LSP {operation} 失败: {e}")
 
@@ -90,6 +95,7 @@ class LspToolsIntegration:
             return _make_result(True, content=f"(无诊断问题: {os.path.basename(fp)})")
         # 状态异常：把"为什么失败"显式告诉 LLM，避免静默误判为"无问题"
         from loguru import logger
+
         logger.warning(f"[LspTools] diagnostics 状态={status}: {payload}")
         return _make_result(False, error=f"[LSP] 诊断失败 ({status}): {payload}")
 
@@ -98,9 +104,7 @@ class LspToolsIntegration:
         if symbols:
             lines = [f"符号列表 ({len(symbols)} 个):"]
             for s in symbols:
-                lines.append(
-                    f"  [{s['kind']}] {s['name']} @ L{s['line']}:C{s['column']}"
-                )
+                lines.append(f"  [{s['kind']}] {s['name']} @ L{s['line']}:C{s['column']}")
             return _make_result(True, content="\n".join(lines))
         return _make_result(True, content=f"(无符号: {os.path.basename(fp)})")
 

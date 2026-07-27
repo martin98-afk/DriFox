@@ -107,6 +107,8 @@ class ConfigSyncService(QObject):
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
         self._pending_sync_message: Optional[str] = None  # 延迟 syncDone 消息（Settings 在主线程重载完成后发射）
+        self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
+        self._suppress_retry_scheduled: bool = False  # 抑制窗口结束后的重试已调度
 
         # 从磁盘恢复持久化的 SHA 缓存（避免每次重启全量下载）
         self._load_sha_cache()
@@ -219,6 +221,7 @@ class ConfigSyncService(QObject):
         # 残留清理由 _start_watching 内部的 _stop_watching 处理
         self._token = token
         self._owner = owner
+        self._initial_sync_completed = False
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.timeout.connect(self._on_debounce_timeout)
@@ -244,6 +247,7 @@ class ConfigSyncService(QObject):
         self._config_remote_sha = None
         self._custom_remote_sha = None
         self._records_remote_sha = None
+        self._initial_sync_completed = False
         try:
             if self._sha_cache_path.exists():
                 self._sha_cache_path.unlink()
@@ -252,7 +256,19 @@ class ConfigSyncService(QObject):
         self._set_state("disabled")
 
     def upload(self) -> bool:
-        """强制立即上传当前配置、user-custom 和分享记录到远端（公开方法，供手动重试）"""
+        """强制立即上传当前配置、user-custom 和分享记录到远端（公开方法，供手动重试）
+
+        初始同步未完成时（_initial_sync_completed=False），说明首次检查远端因网络异常中断，
+        此时不盲目上传本地配置，而是重新触发 _initial_sync 走完整检查流程：
+          - 远端有配置 → 下载覆盖本地
+          - 远端无配置 → 上传本地到远端
+        """
+        if not self._initial_sync_completed:
+            logger.info("[ConfigSync] 初始同步未完成，手动重试触发完整同步流程")
+            t = threading.Thread(target=self._initial_sync, daemon=True)
+            t.start()
+            return True
+
         self._config_dirty = True
         self._custom_dirty = True
         self._records_dirty = True
@@ -361,18 +377,46 @@ class ConfigSyncService(QObject):
         """主线程：重置防抖计时器。timeout 后由后台线程执行上传，不阻塞 UI。"""
         if self._state == "disabled":
             return
-        # 下载后 5 秒内抑制上传，覆盖 下载→Settings重载→UI刷新→再写盘 的级联
         if time.time() < self._suppress_until:
-            logger.debug("[ConfigSync] 处于下载后抑制窗口，跳过上传")
+            # 抑制窗口内不启动防抖，但调度一次窗口结束后的检查
+            # 防止窗口内仅有的一次变更被永久丢失
+            if not self._suppress_retry_scheduled:
+                self._suppress_retry_scheduled = True
+                remaining = self._suppress_until - time.time() + 0.5
+                if 0 < remaining < 3600:
+                    logger.debug(f"[ConfigSync] 抑制窗口内，{remaining:.0f}s 后检查待上传变更")
+                    QTimer.singleShot(int(remaining * 1000), self._flush_suppressed_changes)
             return
-        if self._debounce_timer:
-            logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
-            self._debounce_timer.start(DEBOUNCE_MS)
+        self._start_debounce_timer()
+
+    def _start_debounce_timer(self):
+        """启动防抖计时器（仅在有脏标记时）"""
+        if not self._debounce_timer:
+            return
+        if not (self._config_dirty or self._custom_dirty or self._records_dirty):
+            return
+        logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
+        self._debounce_timer.start(DEBOUNCE_MS)
+
+    def _flush_suppressed_changes(self):
+        """抑制窗口结束：处理被延迟的变更（由 QTimer.singleShot 调用）"""
+        self._suppress_retry_scheduled = False
+        if self._state == "disabled":
+            return
+        # 抑制窗口可能已被新的下载刷新，再次检查
+        if time.time() < self._suppress_until:
+            return
+        if not self._initial_sync_completed:
+            return
+        self._start_debounce_timer()
 
     def _on_debounce_timeout(self):
         """防抖到期 → 检查抑制窗口 → 启动后台上传线程"""
         if time.time() < self._suppress_until:
             logger.debug("[ConfigSync] 下载后抑制窗口内，取消本次上传")
+            return
+        if not self._initial_sync_completed:
+            logger.debug("[ConfigSync] 初始同步未完成，跳过防抖上传")
             return
         logger.info("[ConfigSync] 防抖到期，启动后台上传线程")
         t = threading.Thread(target=self._do_upload, daemon=True)
@@ -463,12 +507,16 @@ class ConfigSyncService(QObject):
         Returns:
             True: token 有效
             False: token 无效（未绑定/刷新失败）
+
+        注意：刷新失败时不会回退到旧 token，而是清空 self._token 并返回 False，
+        防止下游流程使用过期 token 导致误判远端状态。
         """
         try:
             from app.gateway.auth.gitee import GiteeOAuthBackend
 
             backend = GiteeOAuthBackend()
             if not backend.is_bound():
+                self._token = ""
                 return False
 
             token, err = backend._ensure_valid_token()
@@ -476,20 +524,16 @@ class ConfigSyncService(QObject):
                 self._token = token
                 return True
 
+            # 刷新失败 → 清空 self._token，下游检查 token 为空会走保守路径
+            self._token = ""
             if err:
                 logger.warning(f"[ConfigSync] token 同步失败: {err}")
             return False
         except Exception as e:
-            logger.debug(f"[ConfigSync] token 同步异常（回退到旧 token）: {e}")
-            # 回退：尝试直接从 config 读
-            if not self._token:
-                try:
-                    from app.utils.config import Settings as Cfg
-
-                    self._token = Cfg.get_instance().gitee_user_token.value or ""
-                except Exception:
-                    pass
-            return bool(self._token)
+            logger.warning(f"[ConfigSync] token 同步异常: {e}")
+            # 异常时同样清空 token，不让过期 token 继续流通
+            self._token = ""
+            return False
 
     # ── 远端同步 ──────────────────────────────────────────
 
@@ -500,6 +544,7 @@ class ConfigSyncService(QObject):
 
         self._set_state("syncing")
         self._pending_sync_message = None  # 确保无残留
+        remote_status: bool | None = None
         try:
             remote_status = self._check_remote()
             if remote_status is True:
@@ -507,6 +552,7 @@ class ConfigSyncService(QObject):
                 logger.info("[ConfigSync] 远端有配置，开始恢复…")
                 ok = self._do_download()
                 if ok:
+                    self._initial_sync_completed = True
                     if self._pending_sync_message:
                         # Settings 重载已延迟到主线程执行，syncDone 会在
                         # _reload_settings_on_main_thread 中自动发射
@@ -523,8 +569,9 @@ class ConfigSyncService(QObject):
                 self._config_dirty = True
                 self._custom_dirty = True
                 self._records_dirty = True
-                ok = self._do_upload()
+                ok = self._do_upload(initial_sync=True)
                 if ok:
+                    self._initial_sync_completed = True
                     self._set_state("idle")
                     self.syncDone.emit(True, "配置与用户插件已备份到云端")
                 else:
@@ -536,9 +583,10 @@ class ConfigSyncService(QObject):
                 self._set_state("error")
                 self.syncDone.emit(False, "网络异常，无法同步")
         finally:
-            # 同步完成（无论成败），释放 enable() 设的长抑制窗口
-            # 保留 5s 冷静期，让下载/解压的级联事件自然平息
-            self._suppress_until = time.time() + 5.0
+            # 上传路径（远端无配置/初次上传）：短抑制 5s
+            # 下载路径（远端有配置）：_do_download 已设 30s 长抑制，保留不动
+            if remote_status is False:
+                self._suppress_until = time.time() + 5.0
 
     def _check_remote(self) -> bool | None:
         """检查远端是否存在 app.config。
@@ -567,18 +615,25 @@ class ConfigSyncService(QObject):
             url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=remote_path)
             with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
                 resp = client.get(url, params={"access_token": self._token})
+            if resp.status_code == 404:
+                return False  # 文件确定不存在
             if resp.status_code != 200:
-                return False
+                logger.warning(f"[ConfigSync] 检查远端文件失败: HTTP {resp.status_code}")
+                return None  # 其他错误 → 不确定状态，保守处理不上传
             body = resp.json()
             return isinstance(body, dict) and "content" in body
         except Exception:
             return None
 
-    def _do_upload(self) -> bool:
+    def _do_upload(self, initial_sync: bool = False) -> bool:
         """上传有变更的项到远端（基于 _config_dirty / _custom_dirty 脏标记）。
 
         防抖触发时只上传被标记的项；
         手动 upload() / 首次同步强制全量（两项都标记）。
+
+        Args:
+            initial_sync: 是否由 _initial_sync 调用。为 True 时跳过
+                         _initial_sync_completed 检查（初始同步本身就是建立首次同步状态）。
         """
         # 先同步有效 token（自动刷新），防止使用过期 token 导致 401
         if not self._sync_token():
@@ -587,6 +642,11 @@ class ConfigSyncService(QObject):
 
         if not self._token or not self._owner:
             logger.warning("[ConfigSync] 无法上传：缺少 token/owner")
+            return False
+
+        # 初始同步未完成时禁止上传，防止未确认远端状态就覆盖云端配置
+        if not initial_sync and not self._initial_sync_completed:
+            logger.warning("[ConfigSync] 初始同步未完成，禁止上传（防止覆盖远端现有配置）")
             return False
 
         # 抑制窗口检查已在 _on_config_changed_main / _on_debounce_timeout 中执行，
@@ -816,7 +876,9 @@ class ConfigSyncService(QObject):
             # ★ 设 30s 抑制窗口，覆盖下载写盘 + Settings.load 级联效应的全过程
             self._suppress_until = time.time() + 30.0
 
-            # ── 1. app.config：独立下载并立即应用，不等其他项 ──
+            # ── 1. app.config：必须成功，否则整个下载失败 ──
+            # app.config 是核心配置，下载失败意味着本地配置未同步，后续不允许上传覆盖远端。
+            # user-custom / share_records 依赖 app.config 的上下文，单独成功无意义。
             try:
                 remote_config_sha = self._get_remote_file_sha(REMOTE_PATH)
                 if remote_config_sha and remote_config_sha == self._config_remote_sha:
@@ -832,10 +894,11 @@ class ConfigSyncService(QObject):
                         self._reloadSettings.emit()
                         results.append(True)
                     else:
-                        results.append(False)
+                        logger.error("[ConfigSync] app.config 下载失败，中止后续下载")
+                        return False
             except Exception as e:
                 logger.error(f"[ConfigSync] app.config 下载异常: {e}")
-                results.append(False)
+                return False
 
             # ── 2. user-custom：独立下载（可能很大，失败不影响 app.config） ──
             try:

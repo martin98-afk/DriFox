@@ -23,7 +23,7 @@ from app.tools.tool_name_mapper import ToolNameMapper
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
-from app.core.lsp.lsp_manager import LspManager
+from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
 from app.tools import BuiltinTools, ToolResult
 from app.tools.file_tools import _resolve_path
 from app.utils.config import Settings
@@ -519,13 +519,20 @@ class ToolExecutor:
                     # 交给后端处理（带冷却）
                     self._backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (_json.JSONDecodeError, ValueError, TypeError):
+            except _json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
 
+    # 自动诊断冷却（秒）：防止连续文件编辑时 LSP 诊断洪流
+    _DIAG_COOLDOWN_SECONDS = 3.0
+    _last_diag_time: float = 0.0
+
     def _try_auto_lsp_diagnose(self, tool_name: str, args: dict, result: "ToolResult") -> "ToolResult":
         """文件编辑成功后，若开启自动诊断则运行 LSP 诊断并追加到结果
+
+        冷却机制：_DIAG_COOLDOWN_SECONDS（3 秒）内不重复触发，
+        防止连续 write/edit/multi_edit 操作造成 LSP CLI 诊断洪流。
 
         Args:
             tool_name: 工具名 (write/edit/multi_edit)
@@ -535,6 +542,12 @@ class ToolExecutor:
         Returns:
             追加了诊断信息的结果（或原始结果）
         """
+        # 0. 冷却检查
+        now = time.monotonic()
+        if now - self._last_diag_time < self._DIAG_COOLDOWN_SECONDS:
+            return result  # 冷却期内跳过
+        self._last_diag_time = now
+
         # 1. 检查自动诊断开关
         try:
             cfg = Settings.get_instance()
@@ -557,7 +570,7 @@ class ToolExecutor:
 
         # 3. 检查是否有对应的 LSP 客户端
         try:
-            lsp_mgr = LspManager.get_instance()
+            lsp_mgr = get_lsp_manager()
             client = lsp_mgr.get_client_for_file(str(full_path))
             if not client:
                 return result  # 无对应 LSP 服务器
