@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -23,10 +24,46 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 # 常见脚本扩展名（用于从 hook command 中解析脚本路径，以确定 cwd）
 _SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
+
+# 全局共享的并行执行器（延迟初始化，避免模块加载时创建线程）
+_PARALLEL_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_PARALLEL_MAX_WORKERS = 4
+
+
+def _get_parallel_executor() -> ThreadPoolExecutor:
+    """获取全局共享的 ThreadPoolExecutor，用于并行执行 hook"""
+    global _PARALLEL_EXECUTOR
+    if _PARALLEL_EXECUTOR is None:
+        _PARALLEL_EXECUTOR = ThreadPoolExecutor(
+            max_workers=_PARALLEL_MAX_WORKERS,
+            thread_name_prefix="hook_parallel",
+        )
+    return _PARALLEL_EXECUTOR
+
+
+def shutdown_parallel_executor():
+    """由应用退出路径调用，释放并行执行器资源"""
+    global _PARALLEL_EXECUTOR
+    if _PARALLEL_EXECUTOR is not None:
+        _PARALLEL_EXECUTOR.shutdown(wait=False)
+        _PARALLEL_EXECUTOR = None
+
+
+def _is_ui_thread() -> bool:
+    """检测当前是否运行在 Qt 主线程（UI 线程）上"""
+    try:
+        from PyQt5.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return False
+        return QThread.currentThread() == app.thread()
+    except ImportError:
+        return False
 
 
 def _parse_function_params(function_path: str) -> tuple:
@@ -290,6 +327,7 @@ class HookMatchRule:
             actual = context.get("tool_name", "")
             # 两边都用 ToolNameMapper 归一化（懒导入，避免触发 app.tools 全量加载）
             from app.tools.tool_name_mapper import ToolNameMapper
+
             return ToolNameMapper.to_native(pattern) == ToolNameMapper.to_native(actual)
 
         # 正则匹配用户消息
@@ -364,8 +402,6 @@ class HookWorkerSignals(QObject):
 
     finished = pyqtSignal(str, str, bool, str)  # event_name, output, success, status_message
     status_changed = pyqtSignal(str, str, bool)  # event_name, status_message, is_start
-
-
 
 
 class HookWorker(QRunnable):
@@ -449,7 +485,7 @@ class HookWorker(QRunnable):
                 enc = preferred
             try:
                 result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
-            except (UnicodeDecodeError, LookupError):
+            except UnicodeDecodeError, LookupError:
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode
@@ -711,6 +747,7 @@ class HookManager:
     def _get_hook_states_path() -> str:
         """获取 hook 状态持久化文件路径"""
         from app.utils.utils import get_app_data_dir
+
         data_dir = get_app_data_dir() / "plugins" / "user-custom" / "hooks"
         return str(data_dir / "hook_states.json")
 
@@ -1199,7 +1236,7 @@ class HookManager:
         self, event_name: str, context: Dict[str, Any] = None, current_message: str = "", trigger_async: bool = True
     ) -> List[HookExecutionResult]:
         """
-        触发事件，执行所有匹配的 Hooks
+        触发事件，执行所有匹配的 Hooks（支持同事件内 Hook 级并行）
 
         Args:
             event_name: 事件名
@@ -1208,7 +1245,7 @@ class HookManager:
             trigger_async: 是否异步执行
 
         Returns:
-            执行结果列表
+            执行结果列表（按原始注册顺序返回）
         """
         context = context or {}
         context["message"] = current_message
@@ -1218,25 +1255,148 @@ class HookManager:
         if event_name not in self._hooks:
             return []
 
-        results = []
+        # Phase 1: 收集所有匹配的 hook（串行，仅做规则匹配，不执行实际 hook）
+        all_hooks: List[Hook] = []
         for rule in self._hooks[event_name]:
             if not rule.matches(context):
                 continue
-
             for hook in rule.hooks:
                 if not hook.enabled:
                     continue
-
-                # 检查执行条件
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
                     continue
+                all_hooks.append(hook)
 
-                # 执行 hook
-                result = self._execute_hook(hook, context, trigger_async)
-                results.append(result)
+        if not all_hooks:
+            return []
 
-        return results
+        # 分离 PROMPT 类型（必须同步执行，保持注入顺序）和其他类型（可并行）
+        n = len(all_hooks)
+        prompt_indices = [i for i in range(n) if all_hooks[i].type == HookType.PROMPT.value]
+        parallel_indices = [i for i in range(n) if all_hooks[i].type != HookType.PROMPT.value]
+
+        # 预分配结果列表，保持原始顺序
+        results: List[Optional[HookExecutionResult]] = [None] * n
+
+        # Phase 2: PROMPT hook 同步执行（按顺序，输出需立即注入）
+        for idx in prompt_indices:
+            hook = all_hooks[idx]
+            results[idx] = self._execute_hook(hook, context, trigger_async=False)
+
+        # Phase 3: 非 PROMPT hook 并行执行
+        if parallel_indices:
+            parallel_hooks = [all_hooks[i] for i in parallel_indices]
+            parallel_results = self._execute_hooks_parallel(parallel_hooks, context)
+            for orig_idx, result in zip(parallel_indices, parallel_results):
+                results[orig_idx] = result
+
+        # 兜底：填充因异常未能赋值的结果 slot（正常情况下 assert 不触发）
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = HookExecutionResult(success=False, output="Unknown hook execution error")
+        return results  # type: ignore[return-value]
+
+    def _execute_hooks_parallel(self, hooks: List[Hook], context: Dict[str, Any]) -> List[HookExecutionResult]:
+        """并行执行多个 Hook（非 PROMPT 类型），返回结果列表（顺序与输入一致）
+
+        每个 hook 获得独立的 context 浅拷贝，避免并发读写竞争。
+        内部通过 ThreadPoolExecutor 调度，所有 hook 完成后统一返回。
+
+        UI 线程安全：若当前在 UI 线程，等待期间会持续处理 Qt 事件循环，
+        避免界面冻结。
+
+        并发安全性说明：
+        - 每个 hook 使用 dict(context) 浅拷贝，hook 之间无共享可变状态
+        - self._registered_functions 是只读的（运行期不修改），并发安全
+        - self._cwd_resolve_cache 由 Python GIL 保护单操作原子性，最坏情况缓存未命中重算
+        - 回调 self._on_finished_callback 等使用 queue.Queue（线程安全）+ Qt 信号跨线程发射
+        """
+        n = len(hooks)
+        if n == 0:
+            return []
+        if n == 1:
+            # 单条 hook 不走线程池，减少开销
+            return [self._execute_hook(hooks[0], dict(context), trigger_async=False)]
+
+        logger.debug(f"[HookManager] Executing {n} hooks in parallel")
+        results: List[Optional[HookExecutionResult]] = [None] * n
+
+        executor = _get_parallel_executor()
+        future_to_idx = {}
+        for i, hook in enumerate(hooks):
+            # 浅拷贝 context：保证每个 hook 有自己的 context 副本，
+            # _execute_hook 中的 context["skill_root"] = ... 等写入不影响其他 hook
+            future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
+            future_to_idx[future] = i
+
+        # 等待全部完成 —— UI 线程安全模式
+        if _is_ui_thread():
+            # ⚡ 在 UI 线程上使用 QEventLoop 驱动事件循环，不阻塞界面渲染
+            self._wait_futures_ui_safe(future_to_idx, results)
+        else:
+            # 工作线程：直接阻塞等待
+            done, _ = futures_wait(future_to_idx)
+            for future in done:
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    logger.error(f"[HookManager] Parallel hook failed: {e}")
+                    results[idx] = HookExecutionResult(success=False, output=str(e))
+
+        # 兜底：填充因异常未能赋值的结果 slot
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = HookExecutionResult(success=False, output="Unknown parallel hook error")
+        return results  # type: ignore[return-value]
+
+    def _wait_futures_ui_safe(
+        self,
+        future_to_idx: Dict[Future, int],
+        results: List[Optional[HookExecutionResult]],
+    ):
+        """在 UI 线程安全地等待 Future 完成：循环检查 + QEventLoop 保活
+
+        不阻塞 UI 事件处理，用户操作（缩放/滚动/输入）仍然响应。
+        内置 5 分钟超时保护，防止挂起 hook 无限阻塞。
+        """
+        from PyQt5.QtCore import QEventLoop, QTimer
+
+        pending = set(future_to_idx.keys())
+        check_interval = 50  # 每 50ms 检查一次
+        timeout_ms = 300_000  # 5 分钟总超时
+        elapsed = 0
+
+        while pending:
+            # 处理 Qt 事件 50ms，保持 UI 响应
+            loop = QEventLoop()
+            QTimer.singleShot(check_interval, loop.quit)
+            loop.exec_()
+            elapsed += check_interval
+
+            # 超时保护：取消未完成 futures 并标记失败
+            if elapsed >= timeout_ms:
+                for future in pending:
+                    idx = future_to_idx[future]
+                    future.cancel()
+                    results[idx] = HookExecutionResult(
+                        success=False,
+                        output="Parallel hook execution timed out",
+                    )
+                logger.warning("[HookManager] Parallel hook timeout, cancelled remaining futures")
+                break
+
+            # 检查哪些 future 已完成
+            done = {f for f in pending if f.done()}
+            for future in done:
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    logger.error(f"[HookManager] Parallel hook failed: {e}")
+                    results[idx] = HookExecutionResult(success=False, output=str(e))
+            pending -= done
 
     def _execute_hook(self, hook: Hook, context: Dict[str, Any], trigger_async: bool = True) -> HookExecutionResult:
         """执行单个 Hook"""
@@ -1872,9 +2032,18 @@ class HookManager:
             # 系统 hook / skill hook：持久化到 _hook_overrides（与 hook_states 共享同一文件）
             # 只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
             override_fields = {
-                "type", "command", "url", "function", "prompt",
-                "cwd", "add_output_to_context", "timeout", "retry",
-                "commandWindows", "statusMessage", "function_args",
+                "type",
+                "command",
+                "url",
+                "function",
+                "prompt",
+                "cwd",
+                "add_output_to_context",
+                "timeout",
+                "retry",
+                "commandWindows",
+                "statusMessage",
+                "function_args",
                 "matcher",
             }
             overrides = {k: v for k, v in new_data.items() if k in override_fields}
@@ -2153,5 +2322,3 @@ class HookManager:
 
     # [已移除] 旧技能 hooks 加载路径（load_hooks_from_skills / _load_skill_hooks_from_markdown / _parse_inline_hooks）
     # 所有 hooks 现在只从插件 hooks/ 目录加载
-
-
