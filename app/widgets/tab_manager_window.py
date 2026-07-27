@@ -44,6 +44,7 @@ _WM_NCHITTEST = 0x0084
 _WM_NCLBUTTONDOWN = 0x00A1
 _WM_NCCALCSIZE = 0x0083
 _WM_SYSCOMMAND = 0x0112
+_WM_GETMINMAXINFO = 0x0024
 _SC_DRAGMOVE = 0xF012  # SC_MOVE | 2，启动窗口拖拽
 _HTLEFT = 10
 _HTRIGHT = 11
@@ -68,6 +69,16 @@ if platform.system() == "Windows":
             ("lParam", wintypes.LPARAM),
             ("time", wintypes.DWORD),
             ("pt", wintypes.POINT),
+        ]
+
+    class _MINMAXINFO(ctypes.Structure):
+        """WM_GETMINMAXINFO 的 lParam 结构"""
+        _fields_ = [
+            ("ptReserved", wintypes.POINT),
+            ("ptMaxSize", wintypes.POINT),
+            ("ptMaxPosition", wintypes.POINT),
+            ("ptMinTrackSize", wintypes.POINT),
+            ("ptMaxTrackSize", wintypes.POINT),
         ]
 
 
@@ -338,6 +349,9 @@ class TabManagerTitleBar(QWidget):
         elif act_id == self._ACTION_MAXIMIZE:
             if is_maxed:
                 win.showNormal()
+            elif platform.system() == "Windows":
+                import ctypes
+                ctypes.windll.user32.ShowWindow(int(win.winId()), 3)  # SW_MAXIMIZE
             else:
                 win.showMaximized()
         elif act_id == self._ACTION_CLOSE:
@@ -415,18 +429,13 @@ def _show_edge_launcher(window):
 def _update_tab_icon(tab_idx: int, project: str):
     """更新指定 Tab 的项目图标
 
-    使用系统配置字体 + scale_icon_size 缩放尺寸，保证字号变化后图标随之变化。
-    HiDPI 感知：物理像素 = 逻辑尺寸 × DPR，setDevicePixelRatio 保证清晰渲染。
+    直接提取缩写+颜色，交给 _TabProjectIcon 用 QPainter 绘制圆角矩形+白字。
+    Qt 自动处理 DPI，无需手动创建 QPixmap / round(ceil) 物理像素。
     """
-    from PyQt5.QtGui import QPixmap, QColor as QClr, QPainter as QPnt
-    from PyQt5.QtWidgets import QApplication
-
     tm = TabManagerWindow.get_instance()
     if tm is None:
         return
     try:
-        from app.utils.design_tokens import scale_font_size, scale_icon_size
-        from app.utils.utils import get_unified_font
         from app.widgets.cards.settings.project_selector_card import (
             extract_project_initials,
             get_project_color,
@@ -434,31 +443,7 @@ def _update_tab_icon(tab_idx: int, project: str):
 
         initials = extract_project_initials(project)
         color_str = get_project_color(project, alpha=255)
-        parts = color_str.replace("rgba(", "").replace(")", "").split(",")
-        r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-
-        # 跟随系统字号缩放（逻辑像素）
-        size = scale_icon_size(20)
-        dpr = QApplication.instance().devicePixelRatio()
-        physical_size = max(1, int(round(size * dpr)))
-        # icon 内文字：7px 为基准（小/中两档受 8px 下限保护保底在 8px），随系统字号缩放
-        scaled_font_px = scale_font_size(7)
-        radius = max(2, size * 4 // 20)
-
-        pix = QPixmap(physical_size, physical_size)
-        pix.setDevicePixelRatio(dpr)
-        pix.fill(Qt.transparent)
-        p = QPnt(pix)
-        p.setRenderHint(QPnt.Antialiasing)
-        p.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
-        p.setBrush(QClr(r, g, b))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(0, 0, size, size, radius, radius)
-        p.setPen(QClr(255, 255, 255))
-        p.setFont(get_unified_font(scaled_font_px, bold=True))
-        p.drawText(0, 0, size, size, Qt.AlignCenter, initials)
-        p.end()
-        tm._tab_panel.update_tab_icon(tab_idx, pix)
+        tm._tab_panel.update_tab_project(tab_idx, initials, color_str)
     except Exception:
         pass
 
@@ -740,10 +725,9 @@ class TabManagerWindow(QWidget):
         project = getattr(window, "_current_project", None) or ""
         title = window.windowTitle() or project or "新建会话"
 
-        # 获取初始图标：使用项目选择器风格的项目头像
-        from PyQt5.QtGui import QIcon, QPixmap, QColor as QClr, QPainter as QPnt
-
-        tab_icon = None
+        # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
+        tab_project_initials = ""
+        tab_project_color = ""
         if project:
             try:
                 from app.widgets.cards.settings.project_selector_card import (
@@ -751,48 +735,14 @@ class TabManagerWindow(QWidget):
                     get_project_color,
                 )
 
-                initials = extract_project_initials(project)
-                color_str = get_project_color(project, alpha=255)
-                # 解析 "rgba(r,g,b,a)"
-                parts = color_str.replace("rgba(", "").replace(")", "").split(",")
-                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-                # HiDPI 感知：逻辑尺寸 scale_icon_size(20) × DPR
-                from app.utils.design_tokens import scale_icon_size
-                from PyQt5.QtWidgets import QApplication
-
-                icon_size = scale_icon_size(20)
-                dpr = QApplication.instance().devicePixelRatio()
-                physical_size = max(1, int(round(icon_size * dpr)))
-                pix = QPixmap(physical_size, physical_size)
-                pix.setDevicePixelRatio(dpr)
-                pix.fill(Qt.transparent)
-                p = QPnt(pix)
-                p.setRenderHint(QPnt.Antialiasing)
-                p.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
-                p.setBrush(QClr(r, g, b))
-                p.setPen(Qt.NoPen)
-                p.drawRoundedRect(0, 0, icon_size, icon_size, 4, 4)
-                p.setPen(QClr(255, 255, 255))
-                f = p.font()
-                f.setPixelSize(11)
-                f.setBold(True)
-                p.setFont(f)
-                p.drawText(0, 0, icon_size, icon_size, Qt.AlignCenter, initials)
-                p.end()
-                tab_icon = pix
+                tab_project_initials = extract_project_initials(project)
+                tab_project_color = get_project_color(project, alpha=255)
             except Exception:
                 pass
-        if tab_icon is None:
-            raw_icon = getattr(window, "icon", None)
-            if isinstance(raw_icon, QIcon):
-                from app.utils.design_tokens import scale_icon_size
 
-                icon_size = scale_icon_size(20)
-                tab_icon = raw_icon.pixmap(icon_size, icon_size)
-            elif raw_icon is not None:
-                tab_icon = raw_icon
-
-        tab_idx = self._tab_panel.add_tab(title, tab_icon)
+        tab_idx = self._tab_panel.add_tab(title, icon=None,
+                                          project_initials=tab_project_initials,
+                                          project_color=tab_project_color)
 
         # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
         # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
@@ -1417,12 +1367,25 @@ class TabManagerWindow(QWidget):
     def _enable_shadow(self):
         """通过 DWM API 为 Frameless 窗口启用原生阴影 (Windows only)
 
-        使用 DwmExtendFrameIntoClientArea + WM_NCCALCSIZE 返回 0
-        的标准方案保留 Windows 窗口阴影。
+        Win10：使用 DwmExtendFrameIntoClientArea(-1...)+WM_NCCALCSIZE=0
+        标准方案。
+
+        Win11：_enable_snap_layout() 添加的 WS_THICKFRAME 已提供原生
+        阴影，DwmExtendFrameIntoClientArea(-1...) 反而会在最大化时
+        导致 DWM 帧渲染异常（仅左上角显示内容），故跳过。
         """
         if platform.system() != "Windows":
             return
         try:
+            # Win11 (build >= 22000)：WS_THICKFRAME 已提供阴影，
+            # DwmExtendFrameIntoClientArea 与最大化不兼容。
+            win_ver = platform.version()
+            parts = win_ver.split(".")
+            build = int(parts[2]) if len(parts) > 2 else 0
+            if build >= 22000:
+                self._shadow_enabled = True
+                return
+
             import ctypes
 
             hwnd = int(self.winId())
@@ -1435,14 +1398,13 @@ class TabManagerWindow(QWidget):
     def _enable_snap_layout(self):
         """为 Frameless 窗口启用 Snap Layout（贴靠布局）
 
-        Qt.FramelessWindowHint 会移除 WS_CAPTION 和 WS_THICKFRAME，
-        导致 Windows 不认为这是一个标准窗口，贴靠到屏幕边缘时不触发
-        Snap Layout。通过 Windows API 显式加回关键样式，同时用
-        WM_NCCALCSIZE 返回 0 保持无边框外观。
+        Qt.FramelessWindowHint 会移除 WS_THICKFRAME，导致 Windows 不认
+        为这是一个可调整大小的窗口，贴靠到屏幕边缘时不触发 Snap Layout。
+        加回 WS_THICKFRAME 恢复 resize + snap 能力。
 
-        WS_CAPTION (0x00C00000)   — 有标题栏区域，Snap 依赖此样式识别
-        WS_THICKFRAME (0x00040000) — 可调整大小边框，Snap 依赖此样式
-        WS_MINIMIZEBOX | WS_MAXIMIZEBOX — 最小/最大按钮（仅标志位，无UI）
+        ★ 不加 WS_CAPTION：WS_CAPTION 与 WM_NCCALCSIZE=0 在 Win11 上
+        存在冲突——系统认为有标题栏但非客户区为 0，最大化时 DWM 渲染混乱。
+        Win11 上仅 WS_THICKFRAME 就足以支持 Snap Layout + 阴影。
         """
         if platform.system() != "Windows":
             return
@@ -1454,14 +1416,12 @@ class TabManagerWindow(QWidget):
             GWL_STYLE = -16
             current_style = ctypes.windll.user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE)
 
-            # 加回 FramelessWindowHint 移除的关键样式（不加 WS_SYSMENU，
-            # 避免右键系统菜单与自定义 contextMenuEvent 冲突）
-            WS_CAPTION = 0x00C00000
             WS_THICKFRAME = 0x00040000
             WS_MINIMIZEBOX = 0x00020000
             WS_MAXIMIZEBOX = 0x00010000
 
-            new_style = current_style | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+            # Win11 不加 WS_CAPTION（避免与 NCCALCSIZE=0 冲突）
+            new_style = current_style | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
             ctypes.windll.user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE, new_style)
 
             # 通知 Windows 样式已变更（重新计算非客户区）
@@ -1566,11 +1526,19 @@ class TabManagerWindow(QWidget):
         self._save_geometry()
 
     def _on_titlebar_max_restore(self):
-        """标题栏最大化/还原按钮触发"""
+        """标题栏最大化/还原按钮触发
+
+        Win11 上 Qt 的 showMaximized() 与 WS_THICKFRAME+NCCALCSIZE=0
+        组合存在兼容问题，直接用 Win32 ShowWindow(SW_MAXIMIZE) 绕过。
+        """
         if self.isMaximized():
             self.showNormal()
         else:
-            self.showMaximized()
+            if platform.system() == "Windows":
+                import ctypes
+                ctypes.windll.user32.ShowWindow(int(self.winId()), 3)  # SW_MAXIMIZE
+            else:
+                self.showMaximized()
 
     def _on_titlebar_close(self):
         """标题栏关闭按钮触发（隐藏到系统托盘，不销毁）"""
@@ -1651,6 +1619,8 @@ class TabManagerWindow(QWidget):
     def nativeEvent(self, eventType, message):
         """处理 Windows 原生消息
 
+        - WM_GETMINMAXINFO: 修正 WS_THICKFRAME 导致的最大化位置偏移，
+          用 MonitorFromWindow 获取工作区直接覆盖，避免客户区被推到屏幕外。
         - WM_NCHITTEST: 边缘缩放 + 标题栏 HTCAPTION（Snap Layout 支持）
         - WM_NCLBUTTONDOWN(HTCAPTION): ReleaseCapture + SendMessage(WM_SYSCOMMAND,
           SC_DRAGMOVE) 启动 Windows 原生拖拽循环，自动处理 Aero Snap
@@ -1666,6 +1636,41 @@ class TabManagerWindow(QWidget):
                 import ctypes
 
                 msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
+
+                # ── WM_GETMINMAXINFO：修正最大化窗口矩形 ──
+                # _enable_snap_layout() 添加的 WS_THICKFRAME 导致 Windows
+                # 最大化时将边框推到屏幕外（ptMaxPosition 变为负数偏移），
+                # 但 WM_NCCALCSIZE 返回 0（整个窗口都是客户区），造成客户区
+                # 也被推到屏幕外，Win11 上仅左上角部分可见。
+                # 这里直接用 MonitorFromWindow + GetMonitorInfo 获取显示器
+                # 工作区，覆盖 MINMAXINFO 的 ptMaxPosition/ptMaxSize，
+                # 确保最大化后客户区完整填充屏幕工作区。
+                if msg.message == _WM_GETMINMAXINFO:
+                    try:
+                        mmi = ctypes.cast(msg.lParam, ctypes.POINTER(_MINMAXINFO))[0]
+                        monitor = ctypes.windll.user32.MonitorFromWindow(
+                            msg.hwnd, 0x00000002  # MONITOR_DEFAULTTONEAREST
+                        )
+                        if monitor:
+                            class _MONITORINFO(ctypes.Structure):
+                                _fields_ = [
+                                    ("cbSize", wintypes.DWORD),
+                                    ("rcMonitor", wintypes.RECT),
+                                    ("rcWork", wintypes.RECT),
+                                    ("dwFlags", wintypes.DWORD),
+                                ]
+                            mi = _MONITORINFO()
+                            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                            if ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi)):
+                                # 直接用工作区矩形覆盖最大化位置/尺寸
+                                mmi.ptMaxPosition.x = mi.rcWork.left
+                                mmi.ptMaxPosition.y = mi.rcWork.top
+                                mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left
+                                mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top
+                    except Exception:
+                        pass
+                    return (True, 0)
+
                 if msg.message == _WM_NCHITTEST:
                     return (True, self._nchittest(msg))
                 if msg.message == _WM_NCLBUTTONDOWN:
