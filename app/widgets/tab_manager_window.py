@@ -493,7 +493,7 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
         # ── Resize 动画节流：100ms 无 resize 事件后退出节流模式 ──
-        self._resize_blocking: bool = False  # resize 期间拦截 _chat_frame 的 Resize 事件
+        self._resize_blocking: bool = False  # resize 期间跳过 super().resizeEvent，冻结全部布局
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(100)
@@ -661,7 +661,6 @@ class TabManagerWindow(QWidget):
         # ── 右侧对话区域圆角矩形包裹框架 ──
         self._chat_frame = QFrame(content_widget)
         self._chat_frame.setObjectName("chatFrame")
-        self._chat_frame.installEventFilter(self)  # 拦截 Resize 事件，用于 resize 期间布局冻结
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
@@ -1717,77 +1716,93 @@ class TabManagerWindow(QWidget):
         return super().nativeEvent(eventType, message)
 
     def _on_resize_finished(self):
-        """resize 结束后恢复 TabPanel 动画 + 内容区绘制 + 布局事件拦截
+        """resize 结束后恢复布局 + 绘制 + 强制收拢
 
         防抖：连续 resize 事件后 100ms 无新事件时触发：
-        - 恢复 TabPanel 的动画定时器 update() 调用
-        - 恢复内容区绘制（重新启用 setUpdatesEnabled）
-        - 恢复左侧 TabPanel 绘制（resize 期间禁用以避免 paintEvent 风暴）
-        - 允许 _chat_frame 的 Resize 事件正常传播，子控件一次性布局收拢
+        - 解除 blocking，允许布局事件正常传播
+        - 恢复 TabPanel 动画、内容区绘制
+        - 强制触发一次完整 relayout，收拢到正确尺寸
         """
         self._resize_blocking = False
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)
             self._tab_panel.setUpdatesEnabled(True)
-            self._tab_panel.update()  # 恢复后强制刷新一次，消除禁用期间积累的脏区
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(True)
+        # 强制完整 relayout：blocking 期间跳过了 super().resizeEvent，
+        # 子控件 geometry 与窗口新尺寸已不同步。通过 invalidate + activate
+        # 强制 Qt 从顶层布局开始重新计算整棵 widget 树。
+        self._force_relayout()
+        # 触发重绘：relayout 更新了 geometry 但不会自动 paint，
+        # 显式 update() 确保两个面板都进入下一次绘制循环。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.update()
+        if hasattr(self, "_content_area"):
+            self._content_area.update()
 
-    def eventFilter(self, obj, event):
-        """拦截 _chat_frame 的 Resize 事件，resize 期间阻止布局向下传播
+    def _force_relayout(self):
+        """blocking 结束后强制完整布局收拢
 
-        缩小窗口时，QSplitter 分配给 _chat_frame 新宽度 → resizeEvent 向下
-        传播到 OpenAIChatToolWindow → 所有 MessageCard 布局重算。
-        eventFilter 在此处拦截 Resize 事件，不传给 _chat_frame 的子控件，
-        从而避免整个右侧内容区的布局瀑布。
-
-        _resize_blocking 由 resizeEvent 设为 True，_on_resize_finished 恢复。
+        blocking 期间跳过了 super().resizeEvent()，子控件的 geometry
+        与窗口新尺寸已不同步。通过 invalidate + activate 链使 Qt 从
+        顶层布局开始重新计算整棵 widget 树的 geometry，触发完整的
+        resizeEvent 传播链，一次性收拢到正确尺寸。
         """
-        if obj is self._chat_frame and event.type() == event.Resize:
-            if getattr(self, "_resize_blocking", False):
-                return True  # 吞掉事件，阻止子控件收到 Resize
-        return super().eventFilter(obj, event)
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
 
     def resizeEvent(self, event):
-        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 动画/绘制节流
+        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 布局/绘制节流
 
-        resize 期间做三件事：
-        1. 通知 TabPanel 跳过昂贵动画绘制（流光渐层/脉动 sin 计算）
-        2. 禁用内容区（QStackedWidget）的绘制，避免消息卡片文本重排
-           的 paintEvent 拖慢 resize 帧率；布局仍正常计算，视觉无闪烁
-        3. 暂停动画定时器的 update() 调用，避免与 resize 重绘叠加成
-           重绘风暴
+        resize 期间通过 _resize_blocking 标志做两阶段处理：
 
-        resize 停止 100ms 后自动恢复（_on_resize_finished）。
+        阶段一（首个 resize 事件 → blocking 开启）：
+        1. 正常调用 super().resizeEvent() 让布局引擎处理首帧
+        2. 禁用左右两侧面板绘制（setUpdatesEnabled=False）
+        3. 通知 TabPanel 暂停动画
+        4. 开启 blocking 标志
+
+        阶段二（后续连续 resize 事件 → blocking 活跃）：
+        - 跳过 super().resizeEvent()，完全阻止布局引擎递归计算
+          子控件 geometry（这是缩小窗口卡顿的根因）
+        - 仅更新窗口 chrome（size_grip 位置、圆角 Region）
+
+        resize 停止 100ms 后 blocking 解除，_on_resize_finished 触发
+        一次完整 relayout 收拢到正确尺寸。
         """
+        if self._resize_blocking:
+            # ── 阶段二：blocking 活跃，跳过布局传播 ──
+            if hasattr(self, "_size_grip") and not self.isMaximized():
+                g = self._size_grip
+                g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
+            if platform.system() == "Windows" and not self.isMaximized():
+                self._apply_win10_rounded_region()
+            self._resize_timer.start()  # 重置防抖
+            self._save_geometry()
+            return
+
+        # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
         if hasattr(self, "_size_grip") and not self.isMaximized():
             g = self._size_grip
             g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
-
-        # Win10: resize 后重设圆角 Region（新尺寸裁剪）
         if platform.system() == "Windows" and not self.isMaximized():
             self._apply_win10_rounded_region()
-
-        # 通知 TabPanel 进入 resize 节流模式（跳过昂贵动画绘制）
+        # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
-        # 禁用内容区绘制（布局仍继续，仅跳过 paintEvent），
-        # 防止 OpenAIChatToolWindow 及其子卡片文本重排拖慢 resize
+        # 禁用内容区绘制
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(False)
-        # 禁用左侧 TabPanel 绘制：resize 期间 TabItem 的 paintEvent（QPainterPath
-        # 重建、渐变、圆角裁剪等）会显著拖慢帧率。布局仍在运行，切回时视觉无跳跃。
+        # 禁用左侧 TabPanel 绘制
         if hasattr(self, "_tab_panel"):
             self._tab_panel.setUpdatesEnabled(False)
-        # 启用 Resize 事件拦截：通过 eventFilter 阻止 _chat_frame 的 Resize
-        # 事件传播到子控件，从而避免 OpenAIChatToolWindow 内部所有 MessageCard
-        # 的布局重算（即使 setUpdatesEnabled(False) 禁了绘制，布局引擎仍会
-        # 递归计算每个子控件的 geometry，这是缩小窗口卡顿的根因）。
-        # resize 结束后 _on_resize_finished 解除拦截，布局一次性收拢。
+        # 开启 blocking：后续连续 resize 事件将跳过 super().resizeEvent()
         self._resize_blocking = True
-        self._resize_timer.start()  # 防抖：连续 resize 事件重置计时器
-        self._save_geometry()  # 防抖，缩放结束后才真正写盘
+        self._resize_timer.start()
+        self._save_geometry()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏到系统托盘"""

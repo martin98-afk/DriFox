@@ -440,7 +440,10 @@ class FileTreeCard(QWidget):
         font_family = ctx.get("font_family", "Microsoft YaHei")
         font_size = ctx.get("font_size", 14)
 
-        self._title_label.setStyleSheet(f"color: {tc}; background: transparent;")
+        self._title_label.setStyleSheet(
+            f"color: {tc}; background: transparent; "
+            f"font-family: '{font_family}'; font-size: {font_size}px; font-weight: bold;"
+        )
 
         self._top_bar.setStyleSheet(
             f"#file-tree-top-bar {{"
@@ -457,7 +460,7 @@ class FileTreeCard(QWidget):
             f"  background: {search_bg};"
             f"  border: 1px solid {border_c.name()};"
             f"  border-radius: 6px; padding: 0 10px;"
-            f"  color: {tc}; font-size: {font_size - 3}px;"
+            f"  color: {tc}; font-size: {font_size - 2}px;"
             f"}}"
             f"#file-tree-search:focus {{"
             f"  border: 1px solid {self._colors['accent'].name()};"
@@ -469,7 +472,7 @@ class FileTreeCard(QWidget):
         self._tree_view.setStyleSheet(
             f"#file-tree-widget {{"
             f"  background: transparent; border: none;"
-            f"  color: {tc_hex}; font-size: {font_size - 2}px;"
+            f"  color: {tc_hex}; font-size: {font_size}px;"
             f"}}"
             f"#file-tree-widget::item:selected {{"
             f"  background: {accent_hex}40; color: {tc_hex};"
@@ -482,8 +485,8 @@ class FileTreeCard(QWidget):
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
 
-        self._tree_view.setFont(QFont(font_family, font_size - 2))
-        self._search_input.setFont(QFont(font_family, font_size - 3))
+        self._tree_view.setFont(QFont(font_family, font_size))
+        self._search_input.setFont(QFont(font_family, font_size - 2))
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
@@ -503,7 +506,8 @@ class FileTreeCard(QWidget):
         self._scanner = _TreeScanner()
         self._scanner.moveToThread(self._worker_thread)
 
-        self._worker_thread.started.connect(lambda: self._scanner.scan(scan_dir))
+        _scanner = self._scanner
+        self._worker_thread.started.connect(lambda: _scanner.scan(scan_dir))
         self._scanner.finished.connect(lambda entries: self._on_scan_finished(entries, scan_dir))
         self._scanner.error.connect(self._on_scan_error)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
@@ -561,7 +565,8 @@ class FileTreeCard(QWidget):
         self._scanner = _TreeScanner()
         self._scanner.moveToThread(self._worker_thread)
 
-        self._worker_thread.started.connect(lambda: self._scanner.scan(dir_path))
+        _scanner = self._scanner
+        self._worker_thread.started.connect(lambda: _scanner.scan(dir_path))
         self._scanner.finished.connect(lambda entries: self._on_lazy_scan_done(entries, dir_path))
         self._scanner.error.connect(self._on_scan_error)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
@@ -626,7 +631,8 @@ class FileTreeCard(QWidget):
         self._worker_thread = QThread()
         self._scanner = _TreeScanner()
         self._scanner.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(lambda: self._scanner.scan(dir_path))
+        _scanner = self._scanner
+        self._worker_thread.started.connect(lambda: _scanner.scan(dir_path))
         self._scanner.finished.connect(lambda entries: self._on_watcher_reload(entries, dir_path))
         self._scanner.error.connect(self._on_scan_error)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
@@ -693,7 +699,9 @@ class FileTreeCard(QWidget):
                 if is_cut:
                     if os.path.exists(dst):
                         reply = _styled_message_box(
-                            self._colors, QMessageBox.Warning, "确认覆盖",
+                            self._colors,
+                            QMessageBox.Warning,
+                            "确认覆盖",
                             f"「{name}」已存在，确定覆盖？",
                             parent_widget=self.window(),
                         )
@@ -724,8 +732,12 @@ class FileTreeCard(QWidget):
             except Exception as e:
                 logger.error(f"[FileTree] 粘贴失败 {src_path}: {e}")
                 _styled_message_box(
-                    self._colors, QMessageBox.Critical, "操作失败",
-                    f"无法粘贴「{name}」:\n{e}", QMessageBox.Ok, QMessageBox.Ok,
+                    self._colors,
+                    QMessageBox.Critical,
+                    "操作失败",
+                    f"无法粘贴「{name}」:\n{e}",
+                    QMessageBox.Ok,
+                    QMessageBox.Ok,
                     parent_widget=self.window(),
                 )
 
@@ -739,8 +751,12 @@ class FileTreeCard(QWidget):
         deletable = [p for p in paths if os.path.normpath(p) != os.path.normpath(self._project_root)]
         if not deletable:
             _styled_message_box(
-                self._colors, QMessageBox.Information, "提示",
-                "不能删除项目根目录", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Information,
+                "提示",
+                "不能删除项目根目录",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -752,7 +768,10 @@ class FileTreeCard(QWidget):
             msg = f"确定要永久删除以下 {len(deletable)} 个项目？\n\n{names}\n\n⚠️ 此操作不可撤销！"
 
         reply = _styled_message_box(
-            self._colors, QMessageBox.Warning, "确认永久删除", msg,
+            self._colors,
+            QMessageBox.Warning,
+            "确认永久删除",
+            msg,
             parent_widget=self.window(),
         )
         if reply != QMessageBox.Yes:
@@ -771,9 +790,13 @@ class FileTreeCard(QWidget):
             except Exception as e:
                 logger.error(f"[FileTree] 删除失败: {path}: {e}")
                 _styled_message_box(
-                    self._colors, QMessageBox.Critical, "删除失败",
+                    self._colors,
+                    QMessageBox.Critical,
+                    "删除失败",
                     f"无法删除「{os.path.basename(path)}」:\n{e}",
-                    QMessageBox.Ok, QMessageBox.Ok, parent_widget=self.window(),
+                    QMessageBox.Ok,
+                    QMessageBox.Ok,
+                    parent_widget=self.window(),
                 )
 
     # ── 拖拽移动/复制 ──
@@ -782,7 +805,9 @@ class FileTreeCard(QWidget):
         names = "\n".join(os.path.basename(p) for p in source_paths)
         target_name = os.path.basename(dest_dir) or dest_dir
         reply = _styled_message_box(
-            self._colors, QMessageBox.Question, "确认移动",
+            self._colors,
+            QMessageBox.Question,
+            "确认移动",
             f"确定要将以下项目移动到「{target_name}」？\n\n{names}",
             parent_widget=self.window(),
         )
@@ -827,8 +852,12 @@ class FileTreeCard(QWidget):
         new_path = os.path.join(os.path.dirname(old_path), new_name)
         if os.path.exists(new_path):
             _styled_message_box(
-                self._colors, QMessageBox.Warning, "重命名失败",
-                f"「{new_name}」已存在", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Warning,
+                "重命名失败",
+                f"「{new_name}」已存在",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -841,23 +870,34 @@ class FileTreeCard(QWidget):
         except Exception as e:
             logger.error(f"[FileTree] 重命名失败: {e}")
             _styled_message_box(
-                self._colors, QMessageBox.Critical, "重命名失败",
-                str(e), QMessageBox.Ok, QMessageBox.Ok, parent_widget=self.window(),
+                self._colors,
+                QMessageBox.Critical,
+                "重命名失败",
+                str(e),
+                QMessageBox.Ok,
+                QMessageBox.Ok,
+                parent_widget=self.window(),
             )
 
     # ── 新建文件/文件夹 ──
 
     def _create_new_file(self, parent_path: str):
         name, ok = QInputDialog.getText(
-            self.window(), "新建文件", "请输入文件名:",
+            self.window(),
+            "新建文件",
+            "请输入文件名:",
         )
         if not ok or not name.strip():
             return
         name = name.strip()
         if "/" in name or "\\" in name:
             _styled_message_box(
-                self._colors, QMessageBox.Warning, "无效名称",
-                "文件名不能包含路径分隔符", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Warning,
+                "无效名称",
+                "文件名不能包含路径分隔符",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -865,8 +905,12 @@ class FileTreeCard(QWidget):
         new_path = os.path.join(parent_path, name)
         if os.path.exists(new_path):
             _styled_message_box(
-                self._colors, QMessageBox.Warning, "创建失败",
-                f"「{name}」已存在", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Warning,
+                "创建失败",
+                f"「{name}」已存在",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -880,15 +924,21 @@ class FileTreeCard(QWidget):
 
     def _create_new_dir(self, parent_path: str):
         name, ok = QInputDialog.getText(
-            self.window(), "新建文件夹", "请输入文件夹名:",
+            self.window(),
+            "新建文件夹",
+            "请输入文件夹名:",
         )
         if not ok or not name.strip():
             return
         name = name.strip()
         if "/" in name or "\\" in name:
             _styled_message_box(
-                self._colors, QMessageBox.Warning, "无效名称",
-                "文件夹名不能包含路径分隔符", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Warning,
+                "无效名称",
+                "文件夹名不能包含路径分隔符",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -896,8 +946,12 @@ class FileTreeCard(QWidget):
         new_path = os.path.join(parent_path, name)
         if os.path.exists(new_path):
             _styled_message_box(
-                self._colors, QMessageBox.Warning, "创建失败",
-                f"「{name}」已存在", QMessageBox.Ok, QMessageBox.Ok,
+                self._colors,
+                QMessageBox.Warning,
+                "创建失败",
+                f"「{name}」已存在",
+                QMessageBox.Ok,
+                QMessageBox.Ok,
                 parent_widget=self.window(),
             )
             return
@@ -933,6 +987,39 @@ class FileTreeCard(QWidget):
 
     def _on_context_menu(self, src_idx: QModelIndex, global_pos):
         menu = QMenu(self)
+        # 应用统一字体和主题样式
+        ff = self._colors.get("font_family", "Microsoft YaHei")
+        fs = self._colors.get("font_size", 14)
+        bg = self._colors.get("card_bg", QColor(33, 33, 38))
+        tc = self._colors.get("text", QColor(255, 255, 255))
+        border = self._colors.get("border", QColor(255, 255, 255, 30))
+        is_dark = self._colors.get("is_dark", True)
+        hover_bg = bg.lighter(120) if is_dark else bg.darker(110)
+        sep_color = border.name()
+
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {bg.name()};
+                border: 1px solid {sep_color};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 10px;
+                color: {tc.name()};
+                font-family: '{ff}';
+                font-size: {fs - 2}px;
+            }}
+            QMenu::item:selected {{
+                background-color: {hover_bg.name()};
+                border-radius: 4px;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {sep_color};
+                margin: 4px 8px;
+            }}
+        """)
 
         # 获取右键目标路径
         if src_idx.isValid():

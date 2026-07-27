@@ -484,7 +484,7 @@ class RenameDelegate(QStyledItemDelegate):
             f"  padding: 2px 6px;"
             f"  color: {tc.name()};"
             f"  font-family: '{ff}';"
-            f"  font-size: {fs - 2}px;"
+            f"  font-size: {fs}px;"
             f"}}"
         )
         return editor
