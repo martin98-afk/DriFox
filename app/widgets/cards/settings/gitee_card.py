@@ -43,10 +43,15 @@ def _color_for_name(name: str) -> str:
 
 
 def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
-    pix = QPixmap(size, size)
+    """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
+    dpr = QApplication.instance().devicePixelRatio()
+    physical_size = max(1, int(round(size * dpr)))
+    pix = QPixmap(physical_size, physical_size)
+    pix.setDevicePixelRatio(dpr)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.Antialiasing)
+    painter.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
     painter.setBrush(QColor(_color_for_name(text)))
     painter.setPen(Qt.NoPen)
     painter.drawEllipse(QRectF(1, 1, size - 2, size - 2))

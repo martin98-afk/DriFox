@@ -17,6 +17,7 @@ from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QMouseEvent
 from PyQt5.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -427,8 +428,10 @@ def _update_tab_icon(tab_idx: int, project: str):
     """更新指定 Tab 的项目图标
 
     使用系统配置字体 + scale_icon_size 缩放尺寸，保证字号变化后图标随之变化。
+    HiDPI 感知：物理像素 = 逻辑尺寸 × DPR，setDevicePixelRatio 保证清晰渲染。
     """
     from PyQt5.QtGui import QPixmap, QColor as QClr, QPainter as QPnt
+    from PyQt5.QtWidgets import QApplication
 
     tm = TabManagerWindow.get_instance()
     if tm is None:
@@ -446,22 +449,26 @@ def _update_tab_icon(tab_idx: int, project: str):
         parts = color_str.replace("rgba(", "").replace(")", "").split(",")
         r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
 
-        # 跟随系统字号缩放
+        # 跟随系统字号缩放（逻辑像素）
         size = scale_icon_size(20)
+        dpr = QApplication.instance().devicePixelRatio()
+        physical_size = max(1, int(round(size * dpr)))
         # icon 内文字：7px 为基准（小/中两档受 8px 下限保护保底在 8px），随系统字号缩放
         scaled_font_px = scale_font_size(7)
         radius = max(2, size * 4 // 20)
 
-        pix = QPixmap(size, size)
+        pix = QPixmap(physical_size, physical_size)
+        pix.setDevicePixelRatio(dpr)
         pix.fill(Qt.transparent)
         p = QPnt(pix)
         p.setRenderHint(QPnt.Antialiasing)
+        p.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
         p.setBrush(QClr(r, g, b))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(0, 0, size, size, radius, radius)
         p.setPen(QClr(255, 255, 255))
         p.setFont(get_unified_font(scaled_font_px, bold=True))
-        p.drawText(pix.rect(), Qt.AlignCenter, initials)
+        p.drawText(0, 0, size, size, Qt.AlignCenter, initials)
         p.end()
         tm._tab_panel.update_tab_icon(tab_idx, pix)
     except Exception:
@@ -600,6 +607,11 @@ class TabManagerWindow(QWidget):
                 background: {Colors.CONTENT_BG};
                 border-radius: 8px;
             }}
+            #chatFrame {{
+                background: {Colors.CONTENT_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
             #contentArea {{
                 background: {Colors.CONTENT_BG};
             }}
@@ -652,12 +664,20 @@ class TabManagerWindow(QWidget):
         self._empty_state.newTabRequested.connect(self._on_new_tab_requested)
         self._content_area.addWidget(self._empty_state)  # index 0
 
+        # ── 右侧对话区域圆角矩形包裹框架 ──
+        self._chat_frame = QFrame(content_widget)
+        self._chat_frame.setObjectName("chatFrame")
+        chat_frame_layout = QVBoxLayout(self._chat_frame)
+        chat_frame_layout.setContentsMargins(6, 6, 6, 6)
+        chat_frame_layout.setSpacing(0)
+        chat_frame_layout.addWidget(self._content_area)
+
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter
 
         self._splitter = QSplitter(Qt.Horizontal, content_widget)
         self._splitter.addWidget(self._tab_panel)
-        self._splitter.addWidget(self._content_area)
+        self._splitter.addWidget(self._chat_frame)
         self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
         self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
         # handle 宽设为 1 并由 _apply_theme_stylesheet 给它上 BORDER 颜色，
@@ -727,19 +747,28 @@ class TabManagerWindow(QWidget):
                 # 解析 "rgba(r,g,b,a)"
                 parts = color_str.replace("rgba(", "").replace(")", "").split(",")
                 r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
-                pix = QPixmap(20, 20)
+                # HiDPI 感知：逻辑尺寸 scale_icon_size(20) × DPR
+                from app.utils.design_tokens import scale_icon_size
+                from PyQt5.QtWidgets import QApplication
+
+                icon_size = scale_icon_size(20)
+                dpr = QApplication.instance().devicePixelRatio()
+                physical_size = max(1, int(round(icon_size * dpr)))
+                pix = QPixmap(physical_size, physical_size)
+                pix.setDevicePixelRatio(dpr)
                 pix.fill(Qt.transparent)
                 p = QPnt(pix)
                 p.setRenderHint(QPnt.Antialiasing)
+                p.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
                 p.setBrush(QClr(r, g, b))
                 p.setPen(Qt.NoPen)
-                p.drawRoundedRect(0, 0, 20, 20, 4, 4)
+                p.drawRoundedRect(0, 0, icon_size, icon_size, 4, 4)
                 p.setPen(QClr(255, 255, 255))
                 f = p.font()
                 f.setPixelSize(11)
                 f.setBold(True)
                 p.setFont(f)
-                p.drawText(pix.rect(), Qt.AlignCenter, initials)
+                p.drawText(0, 0, icon_size, icon_size, Qt.AlignCenter, initials)
                 p.end()
                 tab_icon = pix
             except Exception:
@@ -747,7 +776,10 @@ class TabManagerWindow(QWidget):
         if tab_icon is None:
             raw_icon = getattr(window, "icon", None)
             if isinstance(raw_icon, QIcon):
-                tab_icon = raw_icon.pixmap(20, 20)
+                from app.utils.design_tokens import scale_icon_size
+
+                icon_size = scale_icon_size(20)
+                tab_icon = raw_icon.pixmap(icon_size, icon_size)
             elif raw_icon is not None:
                 tab_icon = raw_icon
 

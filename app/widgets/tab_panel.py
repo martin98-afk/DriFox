@@ -37,7 +37,12 @@ from app.widgets.elided_label import _ElidedLabel
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 import re as _re
 import math as _math
-from PyQt5.QtGui import QColor as _QColor, QLinearGradient as _QLinearGradient, QPainterPath as _QPainterPath
+from PyQt5.QtGui import (
+    QColor as _QColor,
+    QLinearGradient as _QLinearGradient,
+    QPainterPath as _QPainterPath,
+    QPen as _QPen,
+)
 
 
 def _parse_rgba(rgba_str: str) -> _QColor:
@@ -133,11 +138,15 @@ class TabItem(QFrame):
             from PyQt5.QtGui import QPixmap
 
             if isinstance(self._icon_pixmap, QPixmap):
-                self._icon_label.setPixmap(
-                    self._icon_pixmap.scaled(
-                        self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                if self._icon_pixmap.devicePixelRatio() > 1.0:
+                    # HiDPI 感知 pixmap（已设 DPR），直接设避免二次缩放破坏清晰度
+                    self._icon_label.setPixmap(self._icon_pixmap)
+                else:
+                    self._icon_label.setPixmap(
+                        self._icon_pixmap.scaled(
+                            self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                        )
                     )
-                )
             else:
                 # QIcon 等类型：转为 QPixmap
                 try:
@@ -196,11 +205,15 @@ class TabItem(QFrame):
                 from PyQt5.QtGui import QPixmap
 
                 if isinstance(self._icon_pixmap, QPixmap):
-                    self._icon_label.setPixmap(
-                        self._icon_pixmap.scaled(
-                            self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    if self._icon_pixmap.devicePixelRatio() > 1.0:
+                        # HiDPI 感知 pixmap（稍后 _update_tab_icon 会重新生成正确尺寸）
+                        self._icon_label.setPixmap(self._icon_pixmap)
+                    else:
+                        self._icon_label.setPixmap(
+                            self._icon_pixmap.scaled(
+                                self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                            )
                         )
-                    )
                 else:
                     try:
                         pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
@@ -235,9 +248,13 @@ class TabItem(QFrame):
             from PyQt5.QtGui import QPixmap
 
             if isinstance(icon, QPixmap):
-                self._icon_label.setPixmap(
-                    icon.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
+                if icon.devicePixelRatio() > 1.0:
+                    # HiDPI 感知 pixmap，直接设
+                    self._icon_label.setPixmap(icon)
+                else:
+                    self._icon_label.setPixmap(
+                        icon.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
             else:
                 try:
                     pixmap = icon.pixmap(self._icon_size, self._icon_size)
@@ -289,9 +306,13 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 选中背景 ──
+        # ── 构建统一圆角路径（与 hover 一致，8px 圆角 + 2px 内边距） ──
+        _round_rect = _QPainterPath()
+        _round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+
+        # ── 选中背景（圆角矩形，视觉与 hover 统一） ──
         if self._selected:
-            painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
+            painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
 
         # ── 悬停：圆角渐变背景（使用缓存颜色常量） ──
         if self._hovered and not self._selected:
@@ -302,22 +323,31 @@ class TabItem(QFrame):
             else:
                 hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
                 hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
-            hover_path = _QPainterPath()
-            hover_path.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
-            painter.fillPath(hover_path, hover_grad)
+            painter.fillPath(_round_rect, hover_grad)
+
+        # ── 左侧指示条通用绘制函数：沿圆角路径描边 3px，clip 到左侧 5px 显示 ──
+        def _draw_left_indicator(painter_obj, color):
+            """用 3px 粗笔沿 _round_rect 描边，clip 到左 5px，自然呈现贴合圆角的曲线"""
+            painter_obj.save()
+            painter_obj.setClipRect(0, 0, 5, h)
+            pen = _QPen(color, 3)
+            pen.setCapStyle(Qt.RoundCap)
+            painter_obj.setPen(pen)
+            painter_obj.setBrush(_QColor(0, 0, 0, 0))
+            painter_obj.drawPath(_round_rect)
+            painter_obj.restore()
 
         # ── 流式/错误状态 ──
         if self._streaming or self._stream_error:
-            y0, y1 = 4, h - 8
             if self._stream_error:
-                painter.fillRect(0, y0, 3, y1, _CACHED_ERROR_RED)
+                _draw_left_indicator(painter, _CACHED_ERROR_RED)
             else:
-                # 左侧彩虹逐帧单色指示条
+                # 左侧彩虹逐帧单色指示条（贴合圆角曲线）
                 phase = self._panel._anim_phase if self._panel else 0
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
-                painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
+                _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
 
-                # ── 整条标签来回脉冲流光（加亮加宽） ──
+                # ── 整条标签来回脉冲流光（约束在圆角路径内） ──
                 # ★ resize 期间跳过昂贵渐层，仅保留左侧指示条
                 if self._panel and self._panel._is_resizing:
                     pass  # 跳过 shimmer 渐层
@@ -334,10 +364,12 @@ class TabItem(QFrame):
                     shimmer_grad.setColorAt(0.5, _SHIMMER_COLORS[2])
                     shimmer_grad.setColorAt(0.7, _SHIMMER_COLORS[3])
                     shimmer_grad.setColorAt(1.0, _SHIMMER_COLORS[4])
+                    painter.save()
+                    painter.setClipPath(_round_rect)
                     painter.fillRect(self.rect(), shimmer_grad)
+                    painter.restore()
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
-            y0, y1 = 4, h - 8
             phase = self._panel._question_phase if self._panel else 0
             # resize 期间跳过 sin 计算取固定亮度
             if self._panel and self._panel._is_resizing:
@@ -345,10 +377,10 @@ class TabItem(QFrame):
             else:
                 # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
                 alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
-            painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
+            _draw_left_indicator(painter, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
-            # 左侧选中指示条
-            painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
+            # 左侧选中指示条（贴合圆角曲线）
+            _draw_left_indicator(painter, _CACHED_INFO)
 
         super().paintEvent(event)
 
