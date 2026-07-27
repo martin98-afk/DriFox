@@ -118,7 +118,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except RuntimeError, Exception:
+        except (RuntimeError, Exception):
             return False
 
     def __init__(self, parent=None):
@@ -636,7 +636,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except RuntimeError, Exception:
+            except (RuntimeError, Exception):
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -1199,7 +1199,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except RuntimeError, Exception:
+                except (RuntimeError, Exception):
                     continue
 
             if not valid_windows:

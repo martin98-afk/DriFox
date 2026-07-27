@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject
 
-from app.core.lsp.lsp_manager import LspManager
+from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
 from app.core.lsp.lsp_tools import LspToolsIntegration
 from app.tools.automation import AutomationTools
 
@@ -102,7 +102,7 @@ class BuiltinTools(QObject):
         self._tools["automation"] = AutomationTools(self)
 
         # LSP 工具集成
-        self._lsp_tools = LspToolsIntegration(LspManager.get_instance(), owner=self)
+        self._lsp_tools = LspToolsIntegration(get_lsp_manager(), owner=self)
         self._tools["lsp"] = self._lsp_tools
 
         # CodeGraph 代码智能引擎
@@ -1201,9 +1201,9 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
 
     # 动态注入 LSP 服务器状态到 lsp 工具描述
     try:
-        from app.core.lsp.lsp_manager import LspManager
+        from app.core.lsp.lsp_manager import get_lsp_manager
 
-        lsp_mgr = LspManager.get_instance()
+        lsp_mgr = get_lsp_manager()
         clients = lsp_mgr._clients
         if clients:
             running = [n for n, c in clients.items() if c.is_running]

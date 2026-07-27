@@ -70,7 +70,7 @@ class ThemeManager:
             if pm.is_initialized():
                 for theme_path in pm.get_theme_paths():
                     self._load_from_dir(theme_path, is_builtin=True)
-        except ImportError, Exception:
+        except (ImportError, Exception):
             pass
 
         # 4. 用户主题（~/.drifox/themes/，可写，优先级最高，不可被内置覆盖）

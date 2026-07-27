@@ -192,7 +192,7 @@ def _fetch_session_stats() -> dict:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_sessions_map[label] = row["cnt"]
                 daily_messages_map[label] = row["msgs"]
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 pass
 
         # 5. ═══ Token 用量 ═══
@@ -211,7 +211,7 @@ def _fetch_session_stats() -> dict:
             try:
                 label = datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
                 daily_tokens_map[label] = row["total_tokens"]
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 pass
 
         # 回退：对 context_usage=0 的旧会话，从 messages 估算 token

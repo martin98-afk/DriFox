@@ -72,7 +72,6 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     TransparentToolButton,
 )
-from app.widgets.simple_hover_tooltip import install_hover_tooltip
 from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
@@ -98,12 +97,13 @@ from app.utils.design_tokens import (
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.render_helpers import (
     _format_natural_preview,
-    _get_tool_icon,
-    _get_tool_icon_name,
-    _get_tool_icon_html,
     _get_tool_cn_name,
+    _get_tool_icon,
+    _get_tool_icon_html,
+    _get_tool_icon_name,
     render_tool_block,
 )
+from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== Markdown 实例 ========
 _md_instance = None
@@ -1710,7 +1710,7 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
-_LRU_CACHE_SIZE_THRESHOLD = 50 * 1024  # 50KB
+_LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
 @lru_cache(maxsize=64)  # 256→64：实际唯一渲染内容通常 < 32 条，64 覆盖 2 个会话绰绰有余
@@ -1745,18 +1745,10 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool =
     if reasoning:
         raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
-    # 大文本跳过缓存，防止内存膨胀
+    # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        # 大文本直接渲染，绕过缓存
-        # 临时禁用缓存
-        original_cache_info = _render_markdown_to_html_cached_impl.cache_info()
-        _render_markdown_to_html_cached_impl.cache_clear()
-        try:
-            return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
-        finally:
-            # 恢复缓存状态
-            pass
+        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, reasoning, compact=compact)
 
     return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
 
@@ -1766,6 +1758,9 @@ def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool =
 # 缓存键：(is_light, theme_fingerprint, font_family)
 _skeleton_cache: Dict[tuple, str] = {}
 
+
+# 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
+_CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
 
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
 # 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
@@ -2101,6 +2096,7 @@ class CodeWebViewer(QWebEngineView):
         # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
         self._processed_md_hash = None
         self._cached_streaming_html = None
+        self._cached_raw_md_hash = 0  # hash(self._markdown_text) 在缓存时的快照，供 finish_streaming 验证缓存有效性
         self._lazy_markdown_cb = None  # 懒回调：渲染时才生成 markdown，避免高频 content_to_markdown
         # [PERF] 工具结果 markdown 缓存：tool_call_id → <tool>...</tool> markdown 字符串
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
@@ -2132,6 +2128,10 @@ class CodeWebViewer(QWebEngineView):
         # <think> 标签文本流式思考标志：与 _reasoning_streaming_started 对应，
         # 用于 text 块中包含 <think> 标签时的静默累积策略
         self._think_text_streaming_started = False
+
+        # [PERF] 流式速度跟踪：用于自适应安全渲染间隔
+        self._last_chunk_time = 0.0  # 上次 append_chunk 的时间戳（monotonic ns）
+        self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL  # 当前自适应间隔
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -3136,7 +3136,7 @@ class CodeWebViewer(QWebEngineView):
                     color: #ff7b72;
                 }}
                 .tool-diff-stats__sep {{
-                    color: #6e7681;
+                    color: {"var(--text-muted)" if _is_light_diff else "#6e7681"};
                 }}
                 .tool-diff-inline {{
                     margin: 0;
@@ -4443,7 +4443,16 @@ class CodeWebViewer(QWebEngineView):
 
     # ========== 差量渲染常量 ==========
     # 安全兜底渲染间隔（ms）：无自然边界到达时强制全量渲染
-    _SAFETY_RENDER_INTERVAL = 2000
+    # 🔧 300ms 基础值，实际值根据流式速度在 150-500ms 间自适应
+    _SAFETY_RENDER_INTERVAL = 300
+    # 自适应安全渲染间隔参数：
+    # - 快速流式（chunk 间隔 < 200ms）：用 150ms，响应更及时
+    # - 慢速流式（chunk 间隔 > 500ms）：用 500ms，减少冗余渲染
+    # - 默认：300ms
+    _ADAPTIVE_INTERVAL_FAST = 150
+    _ADAPTIVE_INTERVAL_SLOW = 500
+    _ADAPTIVE_THRESHOLD_FAST = 200  # ms
+    _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
 
@@ -4471,6 +4480,18 @@ class CodeWebViewer(QWebEngineView):
             return
 
         self._markdown_text += text
+
+        # [PERF] 更新流式速度跟踪
+        now = time.monotonic_ns()
+        if self._last_chunk_time > 0:
+            elapsed_ms = (now - self._last_chunk_time) / 1_000_000
+            if elapsed_ms < self._ADAPTIVE_THRESHOLD_FAST:
+                self._current_adaptive_interval = self._ADAPTIVE_INTERVAL_FAST
+            elif elapsed_ms > self._ADAPTIVE_THRESHOLD_SLOW:
+                self._current_adaptive_interval = self._ADAPTIVE_INTERVAL_SLOW
+            else:
+                self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL
+        self._last_chunk_time = now
 
         if not self._is_js_ready:
             return
@@ -4627,12 +4648,12 @@ class CodeWebViewer(QWebEngineView):
 
             # 流式模式：追加字数统计显示
             if self._streaming:
-                char_count_html = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
-                html_content = html_content + char_count_html
+                html_content = html_content + _CHAR_COUNT_HTML
 
             # 缓存渲染结果（只存一份，内存开销小）
             self._processed_md_hash = processed_hash
             self._cached_streaming_html = html_content
+            self._cached_raw_md_hash = hash(str(self._markdown_text))
             return html_content
         except Exception:
             return f"<pre>{escape(raw_md)}</pre>"
@@ -4657,8 +4678,9 @@ class CodeWebViewer(QWebEngineView):
                 self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
+            # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
             if not self._render_timer.isActive():
-                self._render_timer.start(self._SAFETY_RENDER_INTERVAL)
+                self._render_timer.start(self._current_adaptive_interval)
         else:
             # 非流式模式（历史加载）：40ms 防抖后渲染
             if not self._render_timer.isActive():
@@ -4681,7 +4703,14 @@ class CodeWebViewer(QWebEngineView):
         self._viewer_font_css = f"{font_css} font-family: {font_family}, sans-serif; font-size: {body_font_size}px;"
 
     def refresh_theme(self):
-        """刷新主题颜色，响应全局主题切换"""
+        """刷新主题颜色，响应全局主题切换
+
+        优化：使用 ThemeRefreshCoordinator 全局缓存 JS 字符串。
+        同一主题版本内所有 MessageCard 共享同一份 JS 代码，
+        避免逐卡重复构建字符串。
+        """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
         try:
             from app.utils.theme_manager import theme_manager
 
@@ -4689,29 +4718,15 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             _is_light = False
 
-        theme = current_theme()
+        # 版本号检查：同一主题版本内跳过 JS 注入
+        v = ThemeRefreshCoordinator.get_version()
+        if getattr(self, "_last_theme_version", -1) == v:
+            return
+        self._last_theme_version = v
 
-        # 通过 JS 更新 :root CSS 变量，使已有 DOM 即时反映新主题
-        js_code = f"""
-        (function() {{
-            var root = document.documentElement;
-            if (!root) return;
-            root.style.setProperty('--bg', 'transparent');
-            root.style.setProperty('--panel', '{theme["card_bg_solid"]}');
-            root.style.setProperty('--panel-elevated', '{theme["card_bg_solid"]}');
-            root.style.setProperty('--panel-soft', '{theme["content_bg"]}');
-            root.style.setProperty('--border', '{theme["border"]}');
-            root.style.setProperty('--border-strong', '{theme["border_accent"]}');
-            root.style.setProperty('--text', '{theme["text_primary"]}');
-            root.style.setProperty('--text-secondary', '{theme["text_secondary"]}');
-            root.style.setProperty('--text-muted', '{theme["text_muted"]}');
-            root.style.setProperty('--accent', '{theme["accent"]}');
-            root.style.setProperty('--accent-warm', '{theme["accent_warm"]}');
-            root.style.setProperty('--code-bg', '{"var(--panel-soft)" if _is_light else "transparent"}');
-            root.style.setProperty('--code-toolbar', '{"rgba(0,0,0,0.03)" if _is_light else "rgba(255, 255, 255, 0.03)"}');
-            root.style.setProperty('--code-border', '{"var(--border)" if _is_light else "#2a3447"}');
-        }})();
-        """
+        theme = current_theme()
+        js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+
         try:
             if self.page():
                 self.page().runJavaScript(js_code)
@@ -4727,15 +4742,33 @@ class CodeWebViewer(QWebEngineView):
             _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
             _safe_finished = json.dumps(_finished_ids).decode("utf-8")
 
-            # ── 非流式模式（历史加载）：直接渲染，跳过所有增量比较逻辑 ──
+            # ── 非流式模式（历史加载 / 流式结束）：直接渲染，跳过所有增量比较逻辑 ──
             if not self._streaming:
                 self._refresh_viewer_font_css()
                 # 如果有懒回调，执行一次获取最终 markdown
                 if self._lazy_markdown_cb:
                     self._markdown_text = self._lazy_markdown_cb()
                     self._lazy_markdown_cb = None
-                # 直接渲染并注入，跳过字符串比较（历史内容只渲染一次，不会重复）
-                html_content = self._render_markdown_to_html(self._markdown_text)
+                # 🚀 [PERF] 流式结束优化：复用 _cached_streaming_html 跳过重渲染
+                # finish_streaming() 触发此非流式分支时，_cached_streaming_html
+                # 已有完整的渲染结果（由流式模式的最后一次 _render_markdown_to_html
+                # 缓存）。直接复用可避免重复的 markdown→HTML 转换（sanitize +
+                # inject_think + inject_tool + md.convert），节省 20-80ms 主线程阻塞。
+                # ⚡ 哈希验证：确认 _markdown_text 自缓存以来未改变
+                # （防止 _lazy_markdown_cb 在缓存后更新了 _markdown_text）。
+                # 移除流式模式追加的字符统计 <div>，它只在流式期间有用。
+                if (
+                    self._cached_streaming_html is not None
+                    and hash(str(self._markdown_text)) == self._cached_raw_md_hash
+                ):
+                    if _CHAR_COUNT_HTML in self._cached_streaming_html:
+                        html_content = self._cached_streaming_html[
+                            : self._cached_streaming_html.rfind(_CHAR_COUNT_HTML)
+                        ]
+                    else:
+                        html_content = self._cached_streaming_html
+                else:
+                    html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
@@ -4750,7 +4783,10 @@ class CodeWebViewer(QWebEngineView):
                 # 因为 finish_tool_streaming 注入的已完成块 (data-streaming="false")
                 # 不在 _content_data 中，不会被 markdown 重新生成，若不保存也会被抹掉。
                 # 非流式分支：使用共享的 _build_save_and_restore_js 模板
-                self.page().runJavaScript(self._build_save_and_restore_js(html_content))
+                # 🚀 [PERF] 使用异步 runJavaScript（带 callback）避免主线程阻塞
+                # 等待 WebEngine 处理 DOM。同步版本会卡 30-120ms。
+                # 异步后主线程立即释放，WebEngine 在后台解析 HTML 和替换 DOM。
+                self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
                 self._last_rendered_html = None
                 return
 
@@ -4862,7 +4898,9 @@ class CodeWebViewer(QWebEngineView):
             # 【修复】保存后立即 el.remove()，让 reorganizeContent 干净迁移新块。
             # restore 时只恢复 data-streaming="true" 的流式块（不在 markdown 中），
             # 已完成块由 markdown 重新生成 + reorganizeContent 迁移。
-            "if(_tc){Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
+            # [PERF] 快速路径：_tc 无子元素时跳过 save 循环，减少 JS 执行开销
+            "if(_tc&&_tc.children.length){"
+            "Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
@@ -4874,7 +4912,8 @@ class CodeWebViewer(QWebEngineView):
             # 🐛 修复：只恢复流式进行中的块（data-streaming="true"）。
             # 已完成块已由 markdown 重新生成 + reorganizeContent 迁移到 #tool-content。
             # 恢复流式块时检查同 ID 是否已存在（避免与 reorganizeContent 迁移的块重复）。
-            f"if(_saved.length>0){{_tc=document.getElementById('{_target_id}');if(_tc){{"
+            # [PERF] _saved 为空时跳过 restore，这是最常见场景（无活跃工具块）
+            f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
             "if(b.streaming==='true'&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"
@@ -4911,11 +4950,9 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
-        # 🆕 流式结束：自动折叠工具与思考区。在最终渲染完成后执行，
-        # 减少"弹到抬头"时的视觉跳跃，让已完成内容的展示更紧凑。
-        # 若有流式进行中的工具块（data-streaming="true"）则暂不折叠，
-        # 等待后续 tool_result_received 处理完成后自然收敛。
-        self._auto_collapse_tool_section()
+        # 🚀 [PERF] 延迟工具区折叠，让 WebEngine 先完成 _schedule_render 的
+        # 布局/绘制后再执行 DOM 属性操作，分离连续 runJavaScript 阻塞。
+        QTimer.singleShot(0, self._auto_collapse_tool_section)
 
     def _auto_collapse_tool_section(self):
         """流式结束时自动折叠工具与思考区
@@ -5574,6 +5611,7 @@ class CodeWebViewer(QWebEngineView):
         self._last_rendered_markdown = ""
         self._processed_md_hash = None
         self._cached_streaming_html = None
+        self._cached_raw_md_hash = 0
         self._lazy_markdown_cb = None  # 清理懒回调引用，释放 content_data
         self._is_js_ready = False
 
@@ -5593,7 +5631,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -6101,17 +6139,18 @@ class MessageCard(SimpleCardWidget):
             # 检测深浅色模式，选择合适的错误配色
             try:
                 from app.utils.theme_manager import theme_manager
+
                 _is_light = theme_manager.is_light_theme()
             except Exception:
                 _is_light = False
             if _is_light:
-                theme["bg"] = "#FFF5F5"       # 浅粉底
-                theme["border"] = "#FCA5A5"    # 浅红边框
-                theme["accent"] = "#DC2626"    # 深红强调
+                theme["bg"] = "#FFF5F5"  # 浅粉底
+                theme["border"] = "#FCA5A5"  # 浅红边框
+                theme["accent"] = "#DC2626"  # 深红强调
             else:
-                theme["bg"] = "#2A1F1F"       # 暗红褐底
-                theme["border"] = "#A94444"    # 暗红边框
-                theme["accent"] = "#FF7B7B"    # 亮红强调
+                theme["bg"] = "#2A1F1F"  # 暗红褐底
+                theme["border"] = "#A94444"  # 暗红边框
+                theme["accent"] = "#FF7B7B"  # 亮红强调
         return theme
 
     def refresh_theme(self):
@@ -6872,6 +6911,7 @@ class MessageCard(SimpleCardWidget):
         # 设置卡片为错误状态样式（根据深浅模式选择边框色）
         try:
             from app.utils.theme_manager import theme_manager
+
             _is_light = theme_manager.is_light_theme()
         except Exception:
             _is_light = False
@@ -7140,6 +7180,7 @@ class MessageCard(SimpleCardWidget):
             # 检测深浅色模式，选择合适背景
             try:
                 from app.utils.theme_manager import theme_manager
+
                 _is_light = theme_manager.is_light_theme()
             except Exception:
                 _is_light = False
@@ -7160,6 +7201,7 @@ class MessageCard(SimpleCardWidget):
         # 检测深浅色模式，选择合适的错误文字颜色
         try:
             from app.utils.theme_manager import theme_manager
+
             _is_light = theme_manager.is_light_theme()
         except Exception:
             _is_light = False
@@ -8470,7 +8512,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

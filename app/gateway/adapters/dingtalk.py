@@ -356,23 +356,15 @@ class DingTalkAdapter(BasePlatformAdapter):
             media_types=media_types,
         )
 
-        # 在新事件循环中运行异步处理
+        # 在已有或新的事件循环中运行异步处理
         import asyncio
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果已经在运行，创建任务
-                asyncio.create_task(self.handle_message(event))
-            else:
-                loop.run_until_complete(self.handle_message(event))
+            loop = asyncio.get_running_loop()
+            # 当前线程已有运行中的事件循环 → 创建任务
+            asyncio.create_task(self.handle_message(event))
         except RuntimeError:
-            # 没有事件循环，创建一个
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(self.handle_message(event))
-            finally:
-                loop.close()
+            # 当前线程无运行中的事件循环 → 用 asyncio.run 驱动
+            asyncio.run(self.handle_message(event))
 
     def _extract_text(self, message: Any) -> str:
         """提取文本内容"""

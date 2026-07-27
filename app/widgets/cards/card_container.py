@@ -2,7 +2,7 @@
 from typing import Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QTimer
+from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Colors
@@ -87,6 +87,17 @@ class CardContainer(QWidget):
         self._card_manager = card_manager
         self._window_id = window_id
 
+    def showEvent(self, event):
+        """容器从隐藏变为可见时，如果有可见卡片则重新展开
+
+        关键场景：Tab模式下，非活跃Tab触发了提问卡片后，切换到该Tab时
+        容器需要重新展开（之前因父窗口隐藏，_do_expand 未正确展开）。
+        """
+        super().showEvent(event)
+        # 延迟到当前 show 事件处理完成后再展开（此时布局已激活）
+        if any(w.testAttribute(Qt.WA_WState_Visible) for w in self._cards.values()):
+            QTimer.singleShot(0, self._schedule_expand)
+
     def _is_expanded(self) -> bool:
         """容器是否已展开"""
         return self.maximumHeight() >= self._EXPAND_MAX
@@ -161,7 +172,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
         # 解除 minHeight 限制，确保折叠动画能跑到 0
@@ -261,7 +272,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except TypeError, RuntimeError:
+                    except (TypeError, RuntimeError):
                         pass
 
             self._expand_animation.finished.connect(_on_done)

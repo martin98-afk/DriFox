@@ -219,10 +219,25 @@ class PlatformStatusRow(CardWidget):
         try:
             from app.gateway.config import get_gateway_config
             cfg = get_gateway_config().get_platform_config(self._resolve_enum())
-            self.enable_switch.setChecked(cfg.enabled)
+            # 加载存档开关状态时屏蔽信号：避免被误判为「用户拨动开关」触发自动连接。
+            # 复制窗口时新 PlatformStatusRow 的默认状态(False)与存档(True)不一致，
+            # setChecked 会 emit checkedChanged → _on_enabled_changed → _do_connect，
+            # 进而调用 manager.start_platform(Platform.DINGTALK)。
+            # 当 dingtalk_stream 依赖未安装、_adapters[DINGTALK] 缺失时，
+            # 会在 _start_platform_async:357 反复打 ERROR("No adapter for dingtalk")。
+            # blockSignals 是 Qt 加载配置的标准做法，setChecked 后立即恢复即可。
+            self.enable_switch.blockSignals(True)
+            try:
+                self.enable_switch.setChecked(cfg.enabled)
+            finally:
+                self.enable_switch.blockSignals(False)
             self._refresh_status_from_manager()
         except Exception:
-            pass
+            # 异常兜底：确保信号不会因外部异常被永久屏蔽
+            try:
+                self.enable_switch.blockSignals(False)
+            except Exception:
+                pass
 
     def _on_enabled_changed(self, checked: bool):
         """开关变化时自动连接或断开"""

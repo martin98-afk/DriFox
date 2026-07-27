@@ -73,6 +73,13 @@ class FeishuAdapter(BasePlatformAdapter):
         self._handler_loop: Optional[asyncio.AbstractEventLoop] = None
         self._handler_loop_thread: Optional[threading.Thread] = None
 
+        # Token 缓存：tenant_access_token 有效期 2 小时，缓存避免每次 send 都请求
+        self._token: Optional[str] = None
+        self._token_expiry: float = 0.0
+
+        # 共享 HTTP 客户端：连接复用，避免每次 send 新建 AsyncClient
+        self._http_client: Optional[httpx.AsyncClient] = None
+
     def set_message_handler(self, handler) -> None:
         """设置消息处理器"""
         self._message_handler = handler
@@ -140,6 +147,10 @@ class FeishuAdapter(BasePlatformAdapter):
 
             # 等待连接建立
             await asyncio.sleep(2)
+
+            # 创建共享 HTTP 客户端（连接复用，避免每次 send 新建 AsyncClient）
+            if self._http_client is None:
+                self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
             self._running = True
             self._connected = True
@@ -340,6 +351,18 @@ class FeishuAdapter(BasePlatformAdapter):
         self._handler_loop = None
         self._handler_loop_thread = None
 
+        # 关闭共享 HTTP 客户端
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+
+        # 清除 token 缓存
+        self._token = None
+        self._token_expiry = 0.0
+
         logger.info("[Feishu] Disconnected")
 
     async def send(
@@ -354,8 +377,6 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            import httpx
-
             # 获取 token
             token = await self._get_access_token()
             if not token:
@@ -369,39 +390,42 @@ class FeishuAdapter(BasePlatformAdapter):
 
             message_ids = []
 
-            async with httpx.AsyncClient() as client:
-                for i, chunk in enumerate(chunks):
-                    if len(chunks) > 1:
-                        chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
+            client = self._http_client
+            if client is None:
+                import httpx
+                client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
-                    headers = {
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    }
+            for i, chunk in enumerate(chunks):
+                if len(chunks) > 1:
+                    chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
 
-                    json_data = {
-                        "receive_id": chat_id,
-                        "msg_type": "text",
-                        "content": json.dumps({"text": chunk}),
-                    }
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
 
-                    if reply_to and i == 0:
-                        endpoint = f"https://open.feishu.cn/open-apis/im/v1/messages/{reply_to}/reply"
-                    else:
-                        endpoint = "https://open.feishu.cn/open-apis/im/v1/messages"
+                json_data = {
+                    "receive_id": chat_id,
+                    "msg_type": "text",
+                    "content": json.dumps({"text": chunk}),
+                }
 
-                    response = await client.post(
-                        endpoint,
-                        params={"receive_id_type": "chat_id"},
-                        headers=headers,
-                        json=json_data,
-                        timeout=30.0,
-                    )
+                if reply_to and i == 0:
+                    endpoint = f"https://open.feishu.cn/open-apis/im/v1/messages/{reply_to}/reply"
+                else:
+                    endpoint = "https://open.feishu.cn/open-apis/im/v1/messages"
 
-                    if response.status_code == 200:
-                        resp_data = response.json()
-                        if resp_data.get("code") == 0:
-                            message_ids.append(resp_data.get("data", {}).get("message_id", ""))
+                response = await client.post(
+                    endpoint,
+                    params={"receive_id_type": "chat_id"},
+                    headers=headers,
+                    json=json_data,
+                )
+
+                if response.status_code == 200:
+                    resp_data = response.json()
+                    if resp_data.get("code") == 0:
+                        message_ids.append(resp_data.get("data", {}).get("message_id", ""))
 
             return SendResult(
                 success=True,
@@ -413,24 +437,32 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     async def _get_access_token(self) -> Optional[str]:
-        """获取 tenant access token"""
+        """获取 tenant access token（带缓存，有效期 2 小时，提前 5 分钟刷新）"""
+        import time
+        now = time.time()
+        if self._token and (now < self._token_expiry - 300):
+            return self._token
+
         try:
-            import httpx
+            client = self._http_client
+            if client is None:
+                import httpx
+                client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-                    json={
-                        "app_id": self._app_id,
-                        "app_secret": self._app_secret,
-                    },
-                    timeout=30.0,
-                )
+            response = await client.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={
+                    "app_id": self._app_id,
+                    "app_secret": self._app_secret,
+                },
+            )
 
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("code") == 0:
-                        return data.get("tenant_access_token")
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == 0:
+                    self._token = data.get("tenant_access_token")
+                    self._token_expiry = now + data.get("expire", 7200)
+                    return self._token
 
             return None
 

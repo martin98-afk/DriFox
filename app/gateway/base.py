@@ -305,7 +305,7 @@ class BasePlatformAdapter(ABC):
 
         from pathlib import Path
         fp = Path(file_path)
-        url, err = uploader.upload_file(str(fp))
+        url, err = await uploader.upload_file_async(str(fp))
         if err:
             return SendResult(
                 success=False,
@@ -346,7 +346,7 @@ class BasePlatformAdapter(ABC):
             if not uploader.is_configured():
                 return file_path
 
-            url, err = uploader.upload_file(file_path)
+            url, err = await uploader.upload_file_async(file_path)
             if url:
                 logger.info(f"[{self.name}] Gitee 上传成功: {url}")
                 return url

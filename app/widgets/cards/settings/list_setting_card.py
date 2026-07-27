@@ -39,11 +39,13 @@ class _ElidedLabel(QLabel):
     def __init__(self, text: str = "", parent=None):
         super().__init__(text, parent)
         self._full_text = text
+        self.setToolTip(self._full_text)
         # 防止布局根据文本内容自动扩展宽度，确保宽度由父布局决定
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
     def setText(self, text: str):
         self._full_text = text
+        self.setToolTip(self._full_text)
         self._update_elided()
 
     def resizeEvent(self, event):
@@ -93,7 +95,7 @@ class SkillItem(CardWidget):
 
         # 技能名称
         name_label = StrongBodyLabel(name)
-        name_label.setFixedWidth(120)
+        name_label.setFixedWidth(150)
         layout.addWidget(name_label)
 
         # 描述（自动省略）
@@ -226,7 +228,7 @@ class SkillListSettingCard(ExpandSettingCard):
         header_layout.setContentsMargins(12, 6, 12, 6)
 
         self._header_title = QLabel("技能名称", header_widget)
-        self._header_title.setFixedWidth(120)
+        self._header_title.setFixedWidth(150)
         self._header_title.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} font-weight: bold; {get_font_family_css()}"
         )

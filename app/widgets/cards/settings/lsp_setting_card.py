@@ -149,9 +149,9 @@ class LspListSettingCard(ExpandSettingCard):
     def _get_lsp_manager(self):
         """获取 LspManager 实例"""
         try:
-            from app.core.lsp.lsp_manager import LspManager
+            from app.core.lsp.lsp_manager import get_lsp_manager
 
-            return LspManager.get_instance()
+            return get_lsp_manager()
         except Exception:
             return None
 

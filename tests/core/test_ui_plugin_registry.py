@@ -271,7 +271,7 @@ class _FakeCardManager:
         self.shown_callbacks: dict = {}  # card_id -> [callback]
         self.hidden_callbacks: dict = {}  # card_id -> [callback]
 
-    def register_card(self, window_id, container_type, card_id, widget):
+    def register_card(self, window_id, container_type, card_id, widget, system_card=False):
         self.registered.append((window_id, container_type, card_id, widget))
 
     def toggle_card(self, card_id, window_id):

@@ -43,10 +43,15 @@ def _color_for_name(name: str) -> str:
 
 
 def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
-    pix = QPixmap(size, size)
+    """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
+    dpr = QApplication.instance().devicePixelRatio()
+    physical_size = max(1, int(round(size * dpr)))
+    pix = QPixmap(physical_size, physical_size)
+    pix.setDevicePixelRatio(dpr)
     pix.fill(Qt.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.Antialiasing)
+    painter.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
     painter.setBrush(QColor(_color_for_name(text)))
     painter.setPen(Qt.NoPen)
     painter.drawEllipse(QRectF(1, 1, size - 2, size - 2))
@@ -56,6 +61,61 @@ def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
     painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, text[0].upper())
     painter.end()
     return pix
+
+
+class _AvatarCircleWidget(QWidget):
+    """使用 QPainter 绘制的圆形头像 — DPI 感知
+
+    替代 QLabel + QPixmap + setDevicePixelRatio 方案。
+    直接在 paintEvent 中用 QPainter 绘制圆 + 文字，Qt 自动处理 DPI 缩放，
+    避免物理像素四舍五入导致的逻辑尺寸不匹配和裁剪问题。
+    """
+
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "?", parent=None):
+        super().__init__(parent)
+        self._text = text[0].upper() if text else "?"
+        self._bg_color = QColor(_color_for_name(text))
+        self._size = 32
+        self.setFixedSize(self._size, self._size)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_avatar(self, text: str):
+        """更新头像文字和背景色"""
+        self._text = text[0].upper() if text else "?"
+        self._bg_color = QColor(_color_for_name(text))
+        self.setToolTip(text)
+        self.update()
+
+    def set_size(self, size: int):
+        """更新头像逻辑尺寸"""
+        self._size = size
+        self.setFixedSize(size, size)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        rect = self.rect()
+        size = min(rect.width(), rect.height())
+
+        # 圆形裁剪区域（留 1px 内边距避免抗锯齿溢出）
+        ellipse_rect = QRectF(1, 1, size - 2, size - 2)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._bg_color)
+        painter.drawEllipse(ellipse_rect)
+
+        # 居中白色文字
+        painter.setPen(QColor("#ffffff"))
+        font = get_unified_font(int(size * 0.42), bold=True)
+        painter.setFont(font)
+        painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, self._text)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        self.clicked.emit()
 
 
 class _ClickableAvatar(QLabel):
@@ -217,9 +277,8 @@ class GiteeAccountRow(QFrame):
         layout.setSpacing(8)
 
         avatar_size = scale_font_size(28)
-        self._avatar = _ClickableAvatar(self)
-        self._avatar.setFixedSize(avatar_size, avatar_size)
-        self._avatar.setAlignment(Qt.AlignCenter)
+        self._avatar = _AvatarCircleWidget("?", self)
+        self._avatar.set_size(avatar_size)
         layout.addWidget(self._avatar)
 
         text_container = QVBoxLayout()
@@ -232,19 +291,22 @@ class GiteeAccountRow(QFrame):
         text_container.addWidget(self._repo_label)
         layout.addLayout(text_container, 1)
 
-        # ── 竖向三点按钮 ──
+        # ── 竖向三点装饰（视觉提示，无独立按钮区） ──
         self._more_btn = QPushButton("⋮", self)
-        self._more_btn.setFixedSize(scale_font_size(28), scale_font_size(28))
+        btn_size = scale_font_size(22)
+        self._more_btn.setFixedSize(btn_size, btn_size)
         self._more_btn.setCursor(Qt.PointingHandCursor)
         self._more_btn.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self._more_btn)
 
+        # 整块区域点击都触发弹出（头像/标签/按钮统一指向 popup）
+        self.setCursor(Qt.PointingHandCursor)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._name_label.setCursor(Qt.PointingHandCursor)
         self._repo_label.setCursor(Qt.PointingHandCursor)
-        self._avatar.clicked.connect(self._open_repository)
-        self._name_label.clicked.connect(self._open_repository)
-        self._repo_label.clicked.connect(self._open_repository)
+        self._avatar.clicked.connect(self._toggle_popup)
+        self._name_label.clicked.connect(self._toggle_popup)
+        self._repo_label.clicked.connect(self._toggle_popup)
         self._more_btn.clicked.connect(self._toggle_popup)
         self.oauthResult.connect(self._on_oauth_result)
         self._popup: "_GiteeMorePopup" | None = None
@@ -266,7 +328,8 @@ class GiteeAccountRow(QFrame):
         if is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
-            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.set_avatar(owner)
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._name_label.setText(owner)
             self._name_label.setToolTip(owner)
@@ -275,23 +338,16 @@ class GiteeAccountRow(QFrame):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
-            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.set_avatar("?")
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
             self._name_label.setText("Gitee 未绑定")
             self._name_label.setToolTip("Gitee 未绑定")
             self._repo_label.setText("绑定后可备份与分享")
             self._repo_label.setToolTip("绑定后可备份与分享")
 
-        # 更新三点按钮 tooltip
-        if self._binding:
-            self._more_btn.setToolTip("授权中…")
-            self._more_btn.setEnabled(False)
-        else:
-            self._more_btn.setEnabled(True)
-            if self._bound_owner:
-                self._more_btn.setToolTip(f"{owner} — 点击展开")
-            else:
-                self._more_btn.setToolTip("Gitee — 点击展开")
+        # 更新整行可点状态
+        self._more_btn.setEnabled(not self._binding)
         self._apply_style()
 
     def _apply_style(self):
@@ -308,26 +364,22 @@ class GiteeAccountRow(QFrame):
         self._repo_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
-        btn_size = scale_font_size(28)
+        btn_size = scale_font_size(22)
         self._more_btn.setFixedSize(btn_size, btn_size)
         self._more_btn.setStyleSheet(f"""
             QPushButton {{
                 color: {Colors.TEXT_MUTED};
                 background: transparent;
-                border: 1px solid {Colors.BORDER};
-                border-radius: {btn_size // 2}px;
+                border: none;
                 {font_size_css(14)}
                 font-weight: bold;
                 padding: 0;
             }}
             QPushButton:hover {{
-                background: {Colors.HOVER_BG};
-                color: {Colors.TEXT_PRIMARY};
-                border-color: {Colors.INFO};
+                color: {Colors.TEXT_SECONDARY};
             }}
             QPushButton:disabled {{
                 color: {Colors.TEXT_MUTED};
-                background: {Colors.HOVER_BG};
             }}
         """)
 
@@ -452,8 +504,8 @@ class GiteeAccountRow(QFrame):
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
-        self._avatar.setFixedSize(avatar_size, avatar_size)
-        btn_size = scale_font_size(28)
+        self._avatar.set_size(avatar_size)
+        btn_size = scale_font_size(22)
         self._more_btn.setFixedSize(btn_size, btn_size)
         self._refresh_ui()
 
@@ -464,7 +516,9 @@ class GiteeAccountRow(QFrame):
             self._popup = None
 
     def _toggle_popup(self):
-        """点击 ⋮ 按钮切换浮动卡片显示状态"""
+        """点击整块区域切换浮动卡片显示状态"""
+        if self._binding:
+            return
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -480,20 +534,31 @@ class GiteeAccountRow(QFrame):
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()
 
-        # 定位：在 ⋮ 按钮上方弹出，右对齐
+        # 定位：在 ⋮ 按钮上方弹出，与窗口左边缘对齐，确保不超出窗口
         btn_global = self._more_btn.mapToGlobal(QPoint(0, 0))
-        screen_rect = QApplication.primaryScreen().availableGeometry()
+        window = self.window()
+        if window:
+            win_rect = window.frameGeometry()
+        else:
+            win_rect = QApplication.primaryScreen().availableGeometry()
 
-        # 计算 X：右对齐按钮右侧，避免超出屏幕右边界
-        x = btn_global.x() + self._more_btn.width() - popup_width
-        if x < screen_rect.left() + 4:
-            x = screen_rect.left() + 4
+        # X：左边缘与窗口左边缘对齐（留 8px 边距），不超出窗口左右边界
+        x = win_rect.left() + 8
+        if x + popup_width > win_rect.right() - 8:
+            x = win_rect.right() - 8 - popup_width
+        if x < win_rect.left() + 4:
+            x = win_rect.left() + 4
 
-        # 计算 Y：在按钮上方弹出
+        # Y：在按钮上方弹出，不超出窗口上下边界
         y = btn_global.y() - popup_height - 6
-        if y < screen_rect.top() + 4:
+        if y < win_rect.top() + 4:
             # 空间不够则向下弹出
             y = btn_global.y() + self._more_btn.height() + 6
+            # 向下弹出也超出底部时，对齐窗口底部
+            if y + popup_height > win_rect.bottom() - 4:
+                y = win_rect.bottom() - 4 - popup_height
+        if y < win_rect.top() + 4:
+            y = win_rect.top() + 4
 
         popup.setFixedSize(popup_width, popup_height)
         popup.move(x, y)
@@ -550,15 +615,17 @@ class _GiteeMorePopup(QWidget):
         sep1 = self._make_separator()
         layout.addWidget(sep1)
 
-        # ── 账号信息区域 ──
+        # ── 账号信息区域（可点击跳转仓库） ──
         self._info_widget = QWidget(self._container)
+        self._info_widget.setCursor(Qt.PointingHandCursor)
         info_layout = QHBoxLayout(self._info_widget)
         info_layout.setContentsMargins(14, 8, 14, 8)
         info_layout.setSpacing(10)
 
-        self._popup_avatar = QLabel(self._info_widget)
-        self._popup_avatar.setFixedSize(36, 36)
-        self._popup_avatar.setAlignment(Qt.AlignCenter)
+        self._popup_avatar = _AvatarCircleWidget("?", self._info_widget)
+        self._popup_avatar.set_size(36)
+        # 鼠标事件穿透，由 _info_widget 统一处理点击
+        self._popup_avatar.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         info_layout.addWidget(self._popup_avatar)
 
         text_col = QVBoxLayout()
@@ -569,13 +636,17 @@ class _GiteeMorePopup(QWidget):
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
         )
+        self._popup_name.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._popup_repo = QLabel("", self._info_widget)
         self._popup_repo.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
+        self._popup_repo.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         text_col.addWidget(self._popup_name)
         text_col.addWidget(self._popup_repo)
         info_layout.addLayout(text_col, 1)
+        # 整行点击打开仓库
+        self._info_widget.mousePressEvent = lambda ev: self._on_info_clicked(ev)
         layout.addWidget(self._info_widget)
 
         # ── 绑定/解绑按钮 ──
@@ -678,7 +749,7 @@ class _GiteeMorePopup(QWidget):
         row_layout.addWidget(switch)
 
         # 保持 Python 引用，防止 SwitchButton 被提前 GC 回收
-        if not hasattr(self, '_switch_refs'):
+        if not hasattr(self, "_switch_refs"):
             self._switch_refs = []
         self._switch_refs.append(switch)
 
@@ -692,8 +763,10 @@ class _GiteeMorePopup(QWidget):
         avatar_size = 36
 
         if is_bound and owner:
-            self._popup_avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
-            self._popup_avatar.setToolTip(f"{owner}/{repo}")
+            self._popup_avatar.set_avatar(owner)
+            self._popup_avatar.set_size(avatar_size)
+            hint = f"点击打开 {owner}/{repo}"
+            self._info_widget.setToolTip(hint)
             self._popup_name.setText(owner)
             self._popup_repo.setText(f"{repo} ↗")
             self._popup_action_btn.setText("解绑账号")
@@ -711,7 +784,8 @@ class _GiteeMorePopup(QWidget):
                 }}
             """)
         else:
-            self._popup_avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._popup_avatar.set_avatar("?")
+            self._popup_avatar.set_size(avatar_size)
             self._popup_avatar.setToolTip("未绑定")
             self._popup_name.setText("未绑定 Gitee")
             self._popup_repo.setText("绑定后可备份与分享")
@@ -729,6 +803,11 @@ class _GiteeMorePopup(QWidget):
                     background: {Colors.INFO};
                 }}
             """)
+
+    def _on_info_clicked(self, event):
+        """点击账号信息区域 → 打开仓库"""
+        if event.button() == Qt.LeftButton and self._account_row:
+            self._account_row._open_repository()
 
     def _on_action_clicked(self):
         """点击浮动卡片中的绑定/解绑按钮"""
@@ -825,10 +904,8 @@ class GiteeCard(SettingCard):
 
     def _setup_right(self):
         avatar_size = scale_font_size(32)
-        self._avatar = _ClickableAvatar()
-        self._avatar.setFixedSize(avatar_size, avatar_size)
-        self._avatar.setCursor(Qt.PointingHandCursor)
-        self._avatar.setAlignment(Qt.AlignCenter)
+        self._avatar = _AvatarCircleWidget("?", self)
+        self._avatar.set_size(avatar_size)
         self._avatar.clicked.connect(self._on_avatar_clicked)
         self.hBoxLayout.addWidget(self._avatar)
 
@@ -888,7 +965,8 @@ class GiteeCard(SettingCard):
         if is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
-            self._avatar.setPixmap(_make_avatar_pixmap(owner, avatar_size))
+            self._avatar.set_avatar(owner)
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._bind_btn.setText("解绑")
             self._bind_btn.setCursor(Qt.PointingHandCursor)
@@ -905,7 +983,8 @@ class GiteeCard(SettingCard):
         else:
             self._bound_owner = ""
             self._bound_repo = ""
-            self._avatar.setPixmap(_make_avatar_pixmap("?", avatar_size))
+            self._avatar.set_avatar("?")
+            self._avatar.set_size(avatar_size)
             self._avatar.setToolTip("未绑定")
             self._bind_btn.setText("绑定")
             self._bind_btn.setCursor(Qt.PointingHandCursor)

@@ -1888,14 +1888,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新服务商编辑卡片
         if self._provider_edit_card:
             self._provider_edit_card.set_opacity(opacity)
-        # 更新消息卡片背景色透明度
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item is None:
-                continue
-            card = item.widget()
-            if card is not None and isinstance(card, MessageCard):
-                card.refresh_theme()
         # 更新主窗口背景透明度
         self._update_window_bg_opacity(opacity)
 
@@ -3249,6 +3241,18 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_subagents_param_description()
         self._update_title_gen_param_description()
 
+        # ── 全局热键同步 ──
+        # TrayManager.__init__() 在命令加载前已调用 _setup_global_hotkey()，
+        # 当时 CommandManager 为空，回退读取了系统默认快捷键，未感知 user-custom 的自定义覆盖。
+        # 此处重新同步，与 reload_all_commands / _on_plugin_hot_reload 保持一致。
+        try:
+            from app.tray_manager import TrayManager
+
+            tray = TrayManager.get_instance()
+            tray._setup_global_hotkey()
+        except Exception:
+            pass
+
     def _register_system_card_commands(self):
         """为顶层系统设置卡片注册 FUNCTION 命令，使其出现在快捷键管理中
 
@@ -3334,6 +3338,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # Tab 模式下：共享 Launcher 由 TabManagerWindow 管理，隐藏 per-window launcher
                 try:
                     from app.widgets.tab_manager_window import TabManagerWindow
+
                     _tm = TabManagerWindow.get_instance()
                     if _tm is not None and _tm.isVisible():
                         launcher.hide()
@@ -6466,10 +6471,14 @@ class OpenAIChatToolWindow(ToolWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _apply_bg_from_theme(self):
-        """从当前主题配置加载背景图片"""
+        """从当前主题配置加载背景图片
+
+        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        """
         try:
             from app.utils.design_tokens import Colors
             from app.utils.theme_manager import theme_manager
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
 
             Colors.refresh()
             bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
@@ -6480,6 +6489,16 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 image = None
                 opacity = 0.1
+
+            # ── 缓存检查：同一背景配置跳过重建 ──
+            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
+            if (
+                getattr(self, "_last_bg_key", None) == bg_key
+                and hasattr(self, "_bg_label")
+                and self._bg_label is not None
+            ):
+                return
+            self._last_bg_key = bg_key
 
             if image:
                 # 先清除旧背景
@@ -6818,7 +6837,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 if not sip.isdeleted(launcher):
                     launcher.update_geometry(self.chat_scroll_area.geometry())
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
@@ -7065,11 +7084,16 @@ class OpenAIChatToolWindow(ToolWindow):
         1. 全局操作：Colors.refresh / setTheme / on_theme_changed 只执行一次
         2. Per-window：迭代所有窗口执行样式更新
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator.timer_start("batched_total")
+
         cls._theme_batch_timer = None
         final_scope = cls._theme_batch_scope
         cls._theme_batch_scope = None
 
         # ── 全局操作：只执行一次 ──
+        ThemeRefreshCoordinator.timer_start("global")
         Colors.refresh()
         theme_manager.on_theme_changed()
         try:
@@ -7081,8 +7105,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 setTheme(Theme.DARK)
         except Exception:
             pass
+        ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
+        ThemeRefreshCoordinator.timer_start("windows")
         for win in getattr(OpenAIChatToolWindow, "_instances", []):
             if getattr(win, "_is_destroyed", False):
                 continue
@@ -7090,6 +7116,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
+        ThemeRefreshCoordinator.timer_end("windows")
 
         # ── Tab 模式：刷新 TabManagerWindow 样式 ──
         # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
@@ -7103,6 +7130,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 _tm._on_theme_changed()
         except Exception as e:
             logger.warning(f"[batched theme refresh] TabManagerWindow: {e}")
+
+        ThemeRefreshCoordinator.timer_end("batched_total")
 
     def _on_providers_config_changed(self):
         """服务商配置变更时的回调（多窗口同步）
@@ -7180,7 +7209,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7245,7 +7274,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7256,7 +7285,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7281,7 +7310,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7315,7 +7344,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7356,7 +7385,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7383,7 +7412,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7396,11 +7425,12 @@ class OpenAIChatToolWindow(ToolWindow):
                     launcher = getattr(win, "_ui_plugin_edge_launcher", None)
                     if launcher is not None:
                         launcher.refresh_plugins()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # Tab 模式下也刷新共享 Launcher
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
+
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None and _tm.isVisible():
                     _tm._update_shared_launcher()
@@ -7421,10 +7451,22 @@ class OpenAIChatToolWindow(ToolWindow):
         _skip_global   — 批处理模式：全局操作（Colors.refresh/setTheme）
                          已由协调器执行，跳过来自本窗口的重复调用。
         """
+        from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+        ThemeRefreshCoordinator.timer_start("total")
+
+        # ── 幂等跳过：同一主题重复刷新直接 return ──
         is_color = scope in (None, "theme")
         is_font_family = scope in (None, "font_family")
         is_font_size = scope in (None, "font_size")
         is_font = scope in (None, "font_family", "font_size")
+
+        # ── 幂等跳过：同一主题直接跳过颜色/主题块 ──
+        current_theme_id = theme_manager.get_current_theme_id()
+        if is_color and getattr(self, "_last_color_theme_id", None) == current_theme_id:
+            is_color = False  # 主题未变，跳过颜色块；字体相关块照常执行
+        else:
+            self._last_color_theme_id = current_theme_id
 
         # Colors.refresh() 在 preamble 中无条件执行，
         # 保证后续公共块中所有 Colors.* 引用使用最新值。
@@ -7434,6 +7476,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
         # 避免后续 scope 分支中重复 findChildren 遍历全树
+        ThemeRefreshCoordinator.timer_start("findChildren")
         _message_cards = self.findChildren(MessageCard)
         _base_settings = self.findChildren(BaseSettingsCard)
         from qfluentwidgets import SettingCard
@@ -7443,6 +7486,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         _worktree_widgets = self.findChildren(WorktreeSectionWidget)
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
+        ThemeRefreshCoordinator.timer_end("findChildren")
 
         # ── 1. 颜色/主题相关块 ──
         if is_color:
@@ -7502,9 +7546,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     ring.refresh_theme()
 
             # 消息卡片主题
+            ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
                     card.refresh_theme()
+            ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新
             from app.widgets.simple_hover_tooltip import refresh_all_tooltips
@@ -7727,6 +7773,8 @@ class OpenAIChatToolWindow(ToolWindow):
         launcher = getattr(self, "_ui_plugin_edge_launcher", None)
         if launcher is not None and hasattr(launcher, "apply_theme"):
             launcher.apply_theme()
+
+        ThemeRefreshCoordinator.timer_end("total")
 
     def _load_model_configs(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -12398,6 +12446,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型开始调用工具时激活彩虹边框（即使返回内容不含文本）
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
+            # 🚀 [PERF] 工具调用触发时强制渲染待处理的正文
+            # 工具调用前到达的 content_batch 已通过 append_chunk 写入
+            # _markdown_text，但若未达自然边界（无句号/换行），安全定时器
+            # 要等 300ms 才渲染。强制立即渲染让用户在工具执行前先看到正文，
+            # 避免"正文等工具执行完才出现"的感知。
+            # ⚠️ _schedule_render 是 CodeWebViewer 的方法，不是 MessageCard 的，
+            # 需通过 .viewer 访问。viewer 可能为 None（懒渲染未就绪）。
+            _vwr = getattr(self._current_assistant_card, "viewer", None)
+            if _vwr is not None:
+                _vwr._schedule_render(immediate=True)
 
         # 🐛 修复：在工具启动路径也触发 _maybe_finish_thinking_for_tool，
         # 覆盖 LLM 只输出 reasoning 然后直接调用工具（无 update_tool_streaming）的场景。
@@ -13423,14 +13481,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
 
-        # 🛡️ 立即持久化会话，防止用户在延迟保存窗口内切换会话导致
-        # AI 回复丢失（竞态条件：切换会话前 _do_post_stream_cleanup 的
-        # QTimer.singleShot 尚未触发，导致旧会话数据未落盘）。
-        # 延迟的 _do_post_stream_cleanup 仍会执行 batch sync 等非持久化操作，
-        # 其内部的 _save_current_session_to_history 因 _session_dirty=False 而跳过。
+        # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
+        # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
+        # save 是内存操作+SQLite INSERT（~1-3ms），flush 是 fsync 写盘（~10-50ms）。
+        # 立即 save 保留会话数据以防用户切换，延迟 flush 让 WebEngine 先完成布局/绘制。
+        # _do_post_stream_cleanup 中的 flush 会补上磁盘同步。
         if self.history_manager and not getattr(self, "_session_switched", False):
             self._save_current_session_to_history()
-            self.history_manager.flush()
+            # flush 延迟到 _do_post_stream_cleanup，避免阻塞主线程渲染
 
         # 🛡️ 延迟非UI关键操作到下一轮事件循环，让上一次 _perform_update 的
         # WebEngine layout/paint 事件有机会先被处理，避免主线程连续阻塞导致
@@ -15900,7 +15958,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -15927,7 +15985,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

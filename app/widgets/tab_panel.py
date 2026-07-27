@@ -9,7 +9,7 @@ TabPanel — Tab 管理器左侧面板
 from typing import List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QIcon, QMouseEvent, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,16 +28,21 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
 import re as _re
 import math as _math
-from PyQt5.QtGui import QColor as _QColor, QLinearGradient as _QLinearGradient, QPainterPath as _QPainterPath
+from PyQt5.QtGui import (
+    QColor as _QColor,
+    QLinearGradient as _QLinearGradient,
+    QPainterPath as _QPainterPath,
+    QPen as _QPen,
+)
 
 
 def _parse_rgba(rgba_str: str) -> _QColor:
@@ -54,9 +59,17 @@ def _parse_rgba(rgba_str: str) -> _QColor:
     return _QColor(rgba_str)
 
 
-# 预解析常用颜色（首次导入时计算一次）
+# 预解析常用颜色（首次导入时计算一次，后续通过 _invalidate_cached_colors() 刷新）
 _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
 _CACHED_INFO = _parse_rgba(Colors.INFO)
+
+
+def _invalidate_cached_colors():
+    """主题变更后重新解析缓存颜色，确保 paintEvent 使用最新色值"""
+    global _CACHED_SELECTED_BG, _CACHED_INFO
+    _CACHED_SELECTED_BG = _parse_rgba(Colors.SELECTED_BG)
+    _CACHED_INFO = _parse_rgba(Colors.INFO)
+
 
 # 彩虹动画颜色列表（模块级常量，避免每次 paint 创建 10 个 QColor）
 _RAINBOW_COLORS = [
@@ -73,22 +86,130 @@ _RAINBOW_COLORS = [
 ]
 _RAINBOW_N = len(_RAINBOW_COLORS)
 
+# 悬停渐层颜色常量（避免 paintEvent 中反复创建 QColor）
+_HOVER_DARK_COLORS = (_QColor(99, 102, 241, 32), _QColor(139, 92, 246, 18))
+_HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
+
+# 流光 shimmer 渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
+_SHIMMER_COLORS = (
+    _QColor(255, 255, 255, 0),
+    _QColor(130, 200, 255, 55),
+    _QColor(180, 220, 255, 100),
+    _QColor(130, 200, 255, 55),
+    _QColor(255, 255, 255, 0),
+)
+
+# 错误态红条颜色
+_CACHED_ERROR_RED = _QColor(220, 50, 50)
+
+
+class _TabProjectIcon(QWidget):
+    """标签页项目图标 — 与 _SquareAvatar（project_selector_card.py）一致的 DPI 感知方案
+
+    直接 paintEvent 绘制纯色圆角矩形 + 白色缩写字母，
+    Qt 自动处理 devicePixelRatio，无需中间 QPixmap / 手动 round(ceil) 物理像素。
+    """
+
+    def __init__(self, parent=None, size: int = 20):
+        super().__init__(parent)
+        self._size = size
+        self._initials = ""
+        self._color = QColor(128, 128, 128)
+        self._fallback_pixmap: Optional[QPixmap] = None
+        self.setFixedSize(size, size)
+
+    def set_project(self, initials: str, color_rgba: str):
+        """设置项目头像：缩写 + 颜色（rgba 字符串如 'rgba(33,139,255,255)'）"""
+        self._initials = initials if initials else "?"
+        self._color = self._parse_rgba(color_rgba)
+        self._fallback_pixmap = None  # 清除 pixmap fallback
+        self.update()
+
+    def set_fallback_pixmap(self, pixmap):
+        """设置通用 pixmap 兜底（非项目头像时使用）"""
+        self._fallback_pixmap = pixmap
+        self._initials = ""  # 清除 project 模式
+        self.update()
+
+    @staticmethod
+    def _parse_rgba(rgba_str: str) -> QColor:
+        """解析 'rgba(r,g,b,a)' 字符串为 QColor，与 _SquareAvatar 一致"""
+        if rgba_str.startswith("#"):
+            return QColor(rgba_str)
+        try:
+            import re
+            m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
+            if m:
+                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                a = int(m.group(4)) if m.group(4) else 255
+                return QColor(r, g, b, a)
+        except Exception:
+            pass
+        return QColor(128, 128, 128)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        rect = self.rect()
+
+        # ── 项目头像模式：直接画圆角矩形 + 白字 ──
+        if self._initials:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._color)
+            painter.drawRoundedRect(rect, 5, 5)
+
+            painter.setPen(Qt.white)
+            font = get_unified_font()
+            font.setPixelSize(scale_font_size(self._size * 14 // 24))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignCenter, self._initials)
+            return
+
+        # ── 兜底：画 QPixmap ──
+        pix = self._fallback_pixmap
+        if pix is not None:
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            if isinstance(pix, QPixmap):
+                # source 用 logical 坐标：Qt 期望的逻辑坐标系
+                dpr = pix.devicePixelRatio()
+                if dpr > 1.0:
+                    lw = pix.width() / dpr
+                    lh = pix.height() / dpr
+                    painter.drawPixmap(QRectF(rect), pix, QRectF(0, 0, lw, lh))
+                else:
+                    scaled = pix.scaled(rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    x = (rect.width() - scaled.width()) / 2
+                    y = (rect.height() - scaled.height()) / 2
+                    painter.drawPixmap(int(x), int(y), scaled)
+            elif isinstance(pix, QIcon):
+                p = pix.pixmap(rect.size().toSize())
+                if p and not p.isNull():
+                    painter.drawPixmap(rect, p, p.rect())
+
 
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件"""
 
     closeRequested = pyqtSignal()
 
-    def __init__(self, title: str, icon=None, parent=None, panel=None):
+    def __init__(self, title: str, icon=None, parent=None, panel=None,
+                 project_initials: str = "", project_color: str = ""):
         super().__init__(parent)
         self._title = title
-        self._icon_pixmap = icon
+        self._project_initials = project_initials
+        self._project_color = project_color
         self._selected = False
         self._streaming = False
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._hovered = False  # 鼠标悬停态
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
+        # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
+        self._cached_rect_key = (-1, -1)
+        self._cached_round_rect = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -102,27 +223,10 @@ class TabItem(QFrame):
         layout.setContentsMargins(8, 4, 4, 4)
         layout.setSpacing(6)
 
-        # 图标
-        self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-        if self._icon_pixmap:
-            from PyQt5.QtGui import QPixmap
-
-            if isinstance(self._icon_pixmap, QPixmap):
-                self._icon_label.setPixmap(
-                    self._icon_pixmap.scaled(
-                        self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                    )
-                )
-            else:
-                # QIcon 等类型：转为 QPixmap
-                try:
-                    pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
-                    if pixmap:
-                        self._icon_label.setPixmap(pixmap)
-                except Exception:
-                    pass
-        layout.addWidget(self._icon_label)
+        # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
+        self._icon_widget = _TabProjectIcon(self, size=self._icon_size)
+        self._apply_project_to_icon()
+        layout.addWidget(self._icon_widget)
 
         # ── 团队角色胶囊（默认隐藏）──
         self._capsule_label = QLabel(self)
@@ -167,23 +271,8 @@ class TabItem(QFrame):
         new_size = scale_icon_size(20)
         if new_size != self._icon_size:
             self._icon_size = new_size
-            self._icon_label.setFixedSize(self._icon_size, self._icon_size)
-            if self._icon_pixmap:
-                from PyQt5.QtGui import QPixmap
-
-                if isinstance(self._icon_pixmap, QPixmap):
-                    self._icon_label.setPixmap(
-                        self._icon_pixmap.scaled(
-                            self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                        )
-                    )
-                else:
-                    try:
-                        pixmap = self._icon_pixmap.pixmap(self._icon_size, self._icon_size)
-                        if pixmap:
-                            self._icon_label.setPixmap(pixmap)
-                    except Exception:
-                        pass
+            self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
+            self._apply_project_to_icon()
         self._apply_title_style()
         self.update()
 
@@ -205,22 +294,22 @@ class TabItem(QFrame):
         self._title = title
         self._title_label.setText(title)
 
-    def set_icon(self, icon):
-        self._icon_pixmap = icon
-        if icon:
-            from PyQt5.QtGui import QPixmap
+    def _apply_project_to_icon(self):
+        """将项目信息交给 _TabProjectIcon 绘制"""
+        if self._project_initials and self._project_color:
+            self._icon_widget.set_project(self._project_initials, self._project_color)
 
-            if isinstance(icon, QPixmap):
-                self._icon_label.setPixmap(
-                    icon.scaled(self._icon_size, self._icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-            else:
-                try:
-                    pixmap = icon.pixmap(self._icon_size, self._icon_size)
-                    if pixmap:
-                        self._icon_label.setPixmap(pixmap)
-                except Exception:
-                    pass
+    def set_project(self, initials: str, color_rgba: str):
+        """设置项目头像（缩写+颜色）"""
+        self._project_initials = initials
+        self._project_color = color_rgba
+        self._apply_project_to_icon()
+
+    def set_icon(self, icon):
+        """设置通用 icon（QPixmap/QIcon 兜底）"""
+        self._project_initials = ""
+        self._project_color = ""
+        self._icon_widget.set_fallback_pixmap(icon)
 
     def set_capsule(self, text: str, color: str = ""):
         """显示团队角色胶囊"""
@@ -265,58 +354,86 @@ class TabItem(QFrame):
 
         w, h = self.width(), self.height()
 
-        # ── 选中背景 ──
-        if self._selected:
-            painter.fillRect(self.rect(), _CACHED_SELECTED_BG)
+        # ── 构建统一圆角路径（与 hover 一致，8px 圆角 + 2px 内边距） ──
+        # ★ 缓存：尺寸未变时复用 QPainterPath（用 tuple key 避免 mutable 污染）
+        _key = (w, h)
+        if _key != self._cached_rect_key:
+            self._cached_round_rect = _QPainterPath()
+            self._cached_round_rect.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
+            self._cached_rect_key = _key
+        _round_rect = self._cached_round_rect
 
-        # ── 悬停：圆角渐变背景 ──
+        # ── 选中背景（圆角矩形，视觉与 hover 统一） ──
+        if self._selected:
+            painter.fillPath(_round_rect, _CACHED_SELECTED_BG)
+
+        # ── 悬停：圆角渐变背景（使用缓存颜色常量） ──
         if self._hovered and not self._selected:
             hover_grad = _QLinearGradient(0, 0, w, 0)
             if isDarkTheme():
-                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 32))
-                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 18))
+                hover_grad.setColorAt(0.0, _HOVER_DARK_COLORS[0])
+                hover_grad.setColorAt(1.0, _HOVER_DARK_COLORS[1])
             else:
-                hover_grad.setColorAt(0.0, _QColor(99, 102, 241, 22))
-                hover_grad.setColorAt(1.0, _QColor(139, 92, 246, 12))
-            hover_path = _QPainterPath()
-            hover_path.addRoundedRect(2, 2, w - 4, h - 4, 8, 8)
-            painter.fillPath(hover_path, hover_grad)
+                hover_grad.setColorAt(0.0, _HOVER_LIGHT_COLORS[0])
+                hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
+            painter.fillPath(_round_rect, hover_grad)
+
+        # ── 左侧指示条通用绘制函数：沿圆角路径描边 3px，clip 到左侧 5px 显示 ──
+        def _draw_left_indicator(painter_obj, color):
+            """用 3px 粗笔沿 _round_rect 描边，clip 到左 5px，自然呈现贴合圆角的曲线"""
+            painter_obj.save()
+            painter_obj.setClipRect(0, 0, 5, h)
+            pen = _QPen(color, 3)
+            pen.setCapStyle(Qt.RoundCap)
+            painter_obj.setPen(pen)
+            painter_obj.setBrush(_QColor(0, 0, 0, 0))
+            painter_obj.drawPath(_round_rect)
+            painter_obj.restore()
 
         # ── 流式/错误状态 ──
         if self._streaming or self._stream_error:
-            y0, y1 = 4, h - 8
             if self._stream_error:
-                painter.fillRect(0, y0, 3, y1, _QColor(220, 50, 50))
+                _draw_left_indicator(painter, _CACHED_ERROR_RED)
             else:
-                # 左侧彩虹逐帧单色指示条
+                # 左侧彩虹逐帧单色指示条（贴合圆角曲线）
                 phase = self._panel._anim_phase if self._panel else 0
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
-                painter.fillRect(0, y0, 3, y1, _RAINBOW_COLORS[idx])
+                _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
 
-                # ── 整条标签来回脉冲流光（加亮加宽） ──
-                # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
-                sweep = _math.sin(_math.radians(phase))
-                sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-                # 光斑中心在标签上从 -20% 扫到 120%
-                shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+                # ── 整条标签来回脉冲流光（约束在圆角路径内） ──
+                # ★ resize 期间跳过昂贵渐层，仅保留左侧指示条
+                if self._panel and self._panel._is_resizing:
+                    pass  # 跳过 shimmer 渐层
+                else:
+                    # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
+                    sweep = _math.sin(_math.radians(phase))
+                    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+                    # 光斑中心在标签上从 -20% 扫到 120%
+                    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
 
-                shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
-                shimmer_grad.setColorAt(0.0, _QColor(255, 255, 255, 0))
-                shimmer_grad.setColorAt(0.3, _QColor(130, 200, 255, 55))
-                shimmer_grad.setColorAt(0.5, _QColor(180, 220, 255, 100))
-                shimmer_grad.setColorAt(0.7, _QColor(130, 200, 255, 55))
-                shimmer_grad.setColorAt(1.0, _QColor(255, 255, 255, 0))
-                painter.fillRect(self.rect(), shimmer_grad)
+                    shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
+                    shimmer_grad.setColorAt(0.0, _SHIMMER_COLORS[0])
+                    shimmer_grad.setColorAt(0.3, _SHIMMER_COLORS[1])
+                    shimmer_grad.setColorAt(0.5, _SHIMMER_COLORS[2])
+                    shimmer_grad.setColorAt(0.7, _SHIMMER_COLORS[3])
+                    shimmer_grad.setColorAt(1.0, _SHIMMER_COLORS[4])
+                    painter.save()
+                    painter.setClipPath(_round_rect)
+                    painter.fillRect(self.rect(), shimmer_grad)
+                    painter.restore()
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
-            y0, y1 = 4, h - 8
             phase = self._panel._question_phase if self._panel else 0
-            # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
-            alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
-            painter.fillRect(0, y0, 3, y1, _QColor(245, 158, 11, max(0, min(255, alpha))))
+            # resize 期间跳过 sin 计算取固定亮度
+            if self._panel and self._panel._is_resizing:
+                alpha = 150
+            else:
+                # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
+            _draw_left_indicator(painter, _QColor(245, 158, 11, max(0, min(255, alpha))))
         elif self._selected:
-            # 左侧选中指示条
-            painter.fillRect(0, 4, 3, self.height() - 8, _CACHED_INFO)
+            # 左侧选中指示条（贴合圆角曲线）
+            _draw_left_indicator(painter, _CACHED_INFO)
 
         super().paintEvent(event)
 
@@ -342,6 +459,12 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
+        # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
+        from app.utils.utils import get_unified_font
+
+        self._title_label.setFont(get_unified_font(12))
+        self._title_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}")
+        self._icon_label.setStyleSheet("background: transparent;")
 
     def set_icon(self, icon: Optional[QIcon]):
         size = scale_icon_size(16)
@@ -394,6 +517,7 @@ class TabPanel(QWidget):
 
     tabSelected = pyqtSignal(int)  # 选中 Tab 索引
     tabCloseRequested = pyqtSignal(int)  # 关闭 Tab 索引
+    tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
 
@@ -412,6 +536,7 @@ class TabPanel(QWidget):
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
         self._streaming_count: int = 0  # 当前流式 tab 计数
         self._question_count: int = 0  # 当前 question 状态 tab 计数
+        self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -704,6 +829,10 @@ class TabPanel(QWidget):
         expanded = not self._custom_plugin_scroll.isVisible()
         self._custom_plugin_scroll.setVisible(expanded)
         self._custom_plugin_arrow.setText("▼" if expanded else "▶")
+        # 展开时刷新样式，确保折叠期间的主题变更被应用
+        if expanded:
+            for row in self._custom_plugin_buttons:
+                row.refresh_style()
 
     @staticmethod
     def _get_plugin_icon(plugin_manager, plugin_name):
@@ -749,10 +878,9 @@ class TabPanel(QWidget):
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
-        # 自定义插件（折叠状态下跳过，不可见无需刷新）
-        if self._custom_plugin_scroll.isVisible():
-            for row in self._custom_plugin_buttons:
-                row.refresh_style()
+        # 自定义插件（即使折叠也需刷新，否则展开后样式仍为旧主题）
+        for row in self._custom_plugin_buttons:
+            row.refresh_style()
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
         if hasattr(self, "_custom_plugin_label"):
@@ -760,10 +888,11 @@ class TabPanel(QWidget):
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
 
-    def add_tab(self, title: str, icon=None) -> int:
+    def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
-        item = TabItem(title, icon, self._list_widget, panel=self)
+        item = TabItem(title, icon, self._list_widget, panel=self,
+                       project_initials=project_initials, project_color=project_color)
 
         # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
         # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
@@ -776,6 +905,9 @@ class TabPanel(QWidget):
             if ev.button() == Qt.LeftButton:
                 if _item in self._items:
                     self.set_active_index(self._items.index(_item))
+                ev.accept()
+            else:
+                ev.ignore()
 
         item.mousePressEvent = _on_tab_click
 
@@ -829,9 +961,14 @@ class TabPanel(QWidget):
             self._items[index].set_title(title)
 
     def update_tab_icon(self, index: int, icon):
-        """更新 Tab 图标"""
+        """更新 Tab 图标（QPixmap/QIcon 兜底）"""
         if 0 <= index < len(self._items):
             self._items[index].set_icon(icon)
+
+    def update_tab_project(self, index: int, initials: str, color_rgba: str):
+        """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制）"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_project(initials, color_rgba)
 
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
@@ -888,8 +1025,26 @@ class TabPanel(QWidget):
             self._anim_timer.stop()
         self._anim_phase = 0.0
 
+    def set_resizing(self, active: bool):
+        """设置 resize 活跃状态
+
+        resize 期间完全暂停动画定时器（避免无意义相位计算），
+        resize 结束后如有流式 / question tab 则恢复。
+        """
+        self._is_resizing = active
+        if active:
+            if self._anim_timer and self._anim_timer.isActive():
+                self._anim_timer.stop()
+        else:
+            if self._streaming_count + self._question_count > 0:
+                self._ensure_anim_timer()
+
     def _on_anim_tick(self):
-        """动画帧：推进相位 + 刷新所有流式 / question tab"""
+        """动画帧：推进相位 + 刷新所有流式 / question tab
+
+        resize 期间动画定时器已完全暂停（见 set_resizing），
+        此处不再需要 _is_resizing 判断。
+        """
         self._anim_phase = (self._anim_phase + 12) % 360
         self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
         for item in self._items:
@@ -902,10 +1057,13 @@ class TabPanel(QWidget):
         注意：调用方（TabManagerWindow._on_theme_changed）已执行 Colors.refresh()，
         此处不再重复调用。
         """
+        # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
+        _invalidate_cached_colors()
+        # 先全部调用 update()（异步，Qt 自动合并绘制事件），
+        # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
             item.refresh_style()
-            # 保持同步重绘，确保 stylesheet 变更立即生效
-            item.repaint()
+        self.update()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
@@ -941,11 +1099,10 @@ class TabPanel(QWidget):
         """)
         close_action = menu.addAction("关闭标签页")
         menu.addSeparator()
-        duplicate_action = menu.addAction("复制窗口")
         branch_action = menu.addAction("分支窗口")
-        menu.addSeparator()
-        rename_action = menu.addAction("重命名会话")
 
         action = menu.exec_(event.globalPos())
         if action == close_action:
             self.tabCloseRequested.emit(self._active_index)
+        elif action == branch_action:
+            self.tabBranchRequested.emit(self._active_index)
