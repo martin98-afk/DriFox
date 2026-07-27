@@ -73,6 +73,7 @@ if platform.system() == "Windows":
 
     class _MINMAXINFO(ctypes.Structure):
         """WM_GETMINMAXINFO 的 lParam 结构"""
+
         _fields_ = [
             ("ptReserved", wintypes.POINT),
             ("ptMaxSize", wintypes.POINT),
@@ -351,6 +352,7 @@ class TabManagerTitleBar(QWidget):
                 win.showNormal()
             elif platform.system() == "Windows":
                 import ctypes
+
                 ctypes.windll.user32.ShowWindow(int(win.winId()), 3)  # SW_MAXIMIZE
             else:
                 win.showMaximized()
@@ -491,6 +493,7 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
         # ── Resize 动画节流：100ms 无 resize 事件后退出节流模式 ──
+        self._resize_blocking: bool = False  # resize 期间拦截 _chat_frame 的 Resize 事件
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(100)
@@ -658,6 +661,7 @@ class TabManagerWindow(QWidget):
         # ── 右侧对话区域圆角矩形包裹框架 ──
         self._chat_frame = QFrame(content_widget)
         self._chat_frame.setObjectName("chatFrame")
+        self._chat_frame.installEventFilter(self)  # 拦截 Resize 事件，用于 resize 期间布局冻结
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
@@ -740,9 +744,9 @@ class TabManagerWindow(QWidget):
             except Exception:
                 pass
 
-        tab_idx = self._tab_panel.add_tab(title, icon=None,
-                                          project_initials=tab_project_initials,
-                                          project_color=tab_project_color)
+        tab_idx = self._tab_panel.add_tab(
+            title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+        )
 
         # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
         # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
@@ -1536,6 +1540,7 @@ class TabManagerWindow(QWidget):
         else:
             if platform.system() == "Windows":
                 import ctypes
+
                 ctypes.windll.user32.ShowWindow(int(self.winId()), 3)  # SW_MAXIMIZE
             else:
                 self.showMaximized()
@@ -1662,9 +1667,11 @@ class TabManagerWindow(QWidget):
                     try:
                         mmi = ctypes.cast(msg.lParam, ctypes.POINTER(_MINMAXINFO))[0]
                         monitor = ctypes.windll.user32.MonitorFromWindow(
-                            msg.hwnd, 0x00000002  # MONITOR_DEFAULTTONEAREST
+                            msg.hwnd,
+                            0x00000002,  # MONITOR_DEFAULTTONEAREST
                         )
                         if monitor:
+
                             class _MONITORINFO(ctypes.Structure):
                                 _fields_ = [
                                     ("cbSize", wintypes.DWORD),
@@ -1672,6 +1679,7 @@ class TabManagerWindow(QWidget):
                                     ("rcWork", wintypes.RECT),
                                     ("dwFlags", wintypes.DWORD),
                                 ]
+
                             mi = _MONITORINFO()
                             mi.cbSize = ctypes.sizeof(_MONITORINFO)
                             if ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi)):
@@ -1709,16 +1717,36 @@ class TabManagerWindow(QWidget):
         return super().nativeEvent(eventType, message)
 
     def _on_resize_finished(self):
-        """resize 结束后恢复 TabPanel 动画 + 内容区绘制
+        """resize 结束后恢复 TabPanel 动画 + 内容区绘制 + 布局事件拦截
 
         防抖：连续 resize 事件后 100ms 无新事件时触发：
         - 恢复 TabPanel 的动画定时器 update() 调用
         - 恢复内容区绘制（重新启用 setUpdatesEnabled）
+        - 恢复左侧 TabPanel 绘制（resize 期间禁用以避免 paintEvent 风暴）
+        - 允许 _chat_frame 的 Resize 事件正常传播，子控件一次性布局收拢
         """
+        self._resize_blocking = False
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)
+            self._tab_panel.setUpdatesEnabled(True)
+            self._tab_panel.update()  # 恢复后强制刷新一次，消除禁用期间积累的脏区
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(True)
+
+    def eventFilter(self, obj, event):
+        """拦截 _chat_frame 的 Resize 事件，resize 期间阻止布局向下传播
+
+        缩小窗口时，QSplitter 分配给 _chat_frame 新宽度 → resizeEvent 向下
+        传播到 OpenAIChatToolWindow → 所有 MessageCard 布局重算。
+        eventFilter 在此处拦截 Resize 事件，不传给 _chat_frame 的子控件，
+        从而避免整个右侧内容区的布局瀑布。
+
+        _resize_blocking 由 resizeEvent 设为 True，_on_resize_finished 恢复。
+        """
+        if obj is self._chat_frame and event.type() == event.Resize:
+            if getattr(self, "_resize_blocking", False):
+                return True  # 吞掉事件，阻止子控件收到 Resize
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event):
         """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 动画/绘制节流
@@ -1748,6 +1776,16 @@ class TabManagerWindow(QWidget):
         # 防止 OpenAIChatToolWindow 及其子卡片文本重排拖慢 resize
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(False)
+        # 禁用左侧 TabPanel 绘制：resize 期间 TabItem 的 paintEvent（QPainterPath
+        # 重建、渐变、圆角裁剪等）会显著拖慢帧率。布局仍在运行，切回时视觉无跳跃。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.setUpdatesEnabled(False)
+        # 启用 Resize 事件拦截：通过 eventFilter 阻止 _chat_frame 的 Resize
+        # 事件传播到子控件，从而避免 OpenAIChatToolWindow 内部所有 MessageCard
+        # 的布局重算（即使 setUpdatesEnabled(False) 禁了绘制，布局引擎仍会
+        # 递归计算每个子控件的 geometry，这是缩小窗口卡顿的根因）。
+        # resize 结束后 _on_resize_finished 解除拦截，布局一次性收拢。
+        self._resize_blocking = True
         self._resize_timer.start()  # 防抖：连续 resize 事件重置计时器
         self._save_geometry()  # 防抖，缩放结束后才真正写盘
 

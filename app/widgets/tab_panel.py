@@ -6,10 +6,27 @@ TabPanel — Tab 管理器左侧面板
 支持拖拽排序、右键菜单、滚轮滚动。
 """
 
+import math as _math
+
+# ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
+import re as _re
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from loguru import logger
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap
+from PyQt5.QtGui import (
+    QColor as _QColor,
+)
+from PyQt5.QtGui import (
+    QLinearGradient as _QLinearGradient,
+)
+from PyQt5.QtGui import (
+    QPainterPath as _QPainterPath,
+)
+from PyQt5.QtGui import (
+    QPen as _QPen,
+)
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,29 +37,21 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from loguru import logger
 from qfluentwidgets import (
     FluentIcon as FIF,
+)
+from qfluentwidgets import (
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
 
+from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
-
-# ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
-import re as _re
-import math as _math
-from PyQt5.QtGui import (
-    QColor as _QColor,
-    QLinearGradient as _QLinearGradient,
-    QPainterPath as _QPainterPath,
-    QPen as _QPen,
-)
 
 
 def _parse_rgba(rgba_str: str) -> _QColor:
@@ -564,7 +573,7 @@ class TabPanel(QWidget):
         self._brand_title.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
         )
-        self._brand_version = QLabel("v0.4.7", self._brand_widget)
+        self._brand_version = QLabel(Settings.current_version, self._brand_widget)
         self._brand_version.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}")
         brand_layout.addWidget(self._brand_title)
         brand_layout.addWidget(self._brand_version)
