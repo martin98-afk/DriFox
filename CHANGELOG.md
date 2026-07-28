@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.8] - 2026-07-28
 
-自上一版本以来的变更 | 提交数：96 · 文件变更：74 · +9111/-2449 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：102 · 文件变更：250 · +16047/-9196 | 贡献者：dingma, mading, martin98-afk
 
 > 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
 
@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 - **Tab 管理器开关与环境集成**: LLM 设置页添加 Tab 管理器切换开关；系统托盘支持 Tab 模式（简化菜单、热键切换）；新增 `enable_tab_manager`、`panel_width` 等配置项；main.py 添加 Tab 模式启动路径；`_duplicate_window` 添加 Tab 模式分支
 - **Gitee 账户快捷入口**: 标签面板中添加 Gitee 账户快捷操作，支持仓库和绑定操作；紧凑绑定状态展示；渲染时避免同步
 - **消息卡片性能优化**: 减少安全渲染间隔，使用异步 JavaScript 执行；缓存渲染 HTML，延迟移除字符计数；ElidedLabel 悬停时展示完整文本
-- **Hook 管理器并行执行**: 实现 UI 线程安全的并行 Hook 执行机制
+- **Hook 管理器并行执行**: 实现 UI 线程安全的并行 Hook 执行机制；增强命令执行和环境变量处理，兼容第三方插件
 - **主题刷新协调器**: 实现 ThemeRefreshCoordinator 优化主题管理和缓存刷新
 - **FileTreeView 重构**: 将 FileTreeWidget 重构为 FileTreeView，增强模型和委托结构
 - **UI 插件注册增强**: 新增 `system_card` 参数，支持更好的卡片管理
@@ -27,13 +27,15 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **Tab 管理器窗口稳定性增强**: 修复 macOS 隐藏适配（hide() 替代 close() 保留状态）；SIP 保护；QColor 解析、windowTitle 同步、任务栏标志修复；首次启动居中、保存/恢复位置限制到屏幕边界；销毁 title_bar 重建修复；拖拽性能诊断；主题刷新处理增强；流式/错误状态指示修正；标签图标缩放和主题变更刷新；EdgeLauncher 检测与保护
+- **Tab 管理器窗口稳定性增强**: 修复 macOS 隐藏适配（hide() 替代 close() 保留状态）；SIP 保护；QColor 解析、windowTitle 同步、任务栏标志修复；首次启动居中、保存/恢复位置限制到屏幕边界；销毁 title_bar 重建修复；拖拽性能诊断；主题刷新处理增强；流式/错误状态指示修正；标签图标缩放和主题变更刷新；EdgeLauncher 检测与保护；关闭时事件处理优化；分割器手柄宽度优化，在 relayout 时保留用户调整
 - **代码查看器滚动修复**: 优化 CodeWebViewer 滚动事件处理，防止意外自动滚动
 - **差异视图主题适配**: render_helpers 中差异分隔符颜色跟随主题切换
 - **UI 插件处理增强**: 改进 TabPanel 和 TabManagerWindow 中问题状态指示
 - **ConfigSyncService 全量手动同步修复**: 确保配置文件到内存的全量手动同步，绕过静默加载失败问题
 - **Tab 管理器 Aero Snap 修复**: 在 showEvent 中重新应用 _enable_snap_layout 并清理原生拖拽状态，支持 Windows Aero Snap
 - **ToolPopupDialog Aero Snap 支持**: 添加 nativeEvent 和 WS_THICKFRAME 实现 Windows Aero Snap 窗口吸附
+- **ChatBackend 热重载修复**: 跳过未知组件目录外的插件变更，避免无效热重载
+- **输入框高度抖动修复**: 调整底部输入框高度计算，添加 resize 消除回弹
 
 ### ♻️ 代码重构 (Refactoring)
 
