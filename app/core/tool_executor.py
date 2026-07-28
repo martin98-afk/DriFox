@@ -409,6 +409,9 @@ class ToolExecutor:
                 "has_error": bool(result.error),
                 "error": result.error or "",
             }
+            # Claude Code 兼容字段：tool_output（第三方插件如 agent-memory 依赖此字段）
+            context["tool_output"] = result_str[:_MAX_RESULT_LEN]
+            context["tool_output_truncated"] = is_truncated
 
         # 注入文件路径
         file_path = args.get("path") or args.get("file")
@@ -519,7 +522,7 @@ class ToolExecutor:
                     # 交给后端处理（带冷却）
                     self._backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (_json.JSONDecodeError, ValueError, TypeError):
+            except _json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========
