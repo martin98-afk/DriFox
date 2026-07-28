@@ -706,46 +706,9 @@ class TabPanel(QWidget):
         separator.setStyleSheet(self._SEPARATOR_STYLE)
         layout.addWidget(separator)
 
-        # ── 底部：设置按钮 ──
-        bottom_bar = QWidget(self)
-        bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(6, 4, 6, 6)
-
-        self._settings_btn = TransparentPushButton(FIF.SETTING, "设置", bottom_bar)
-        self._settings_btn.setCursor(Qt.PointingHandCursor)
-        self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self._settings_btn.clicked.connect(self._on_settings_clicked)
-        bottom_layout.addWidget(self._settings_btn)
-
-        layout.addWidget(bottom_bar)
-
-        account_separator = QFrame(self)
-        account_separator.setFrameShape(QFrame.HLine)
-        account_separator.setStyleSheet(self._SEPARATOR_STYLE)
-        layout.addWidget(account_separator)
-
+        # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
-
-    def _on_settings_clicked(self):
-        """打开设置卡片"""
-        from PyQt5.QtWidgets import QWidget
-
-        # 沿父链向上找 OpenAIChatToolWindow
-        parent = self.parent()
-        while parent is not None:
-            if hasattr(parent, "_toggle_settings_card"):
-                parent._toggle_settings_card()
-                return
-            parent = parent.parent()
-        # 兜底：通过 TabManagerWindow 切换回独立模式
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        tm = TabManagerWindow.get_instance()
-        if tm:
-            current = tm.get_current_window()
-            if current and hasattr(current, "_toggle_settings_card"):
-                current._toggle_settings_card()
 
     def refresh_ui_plugins(self):
         """刷新 Tab 模式顶部的 UI 插件按钮列表

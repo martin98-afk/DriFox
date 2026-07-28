@@ -20,14 +20,14 @@ def panel(qtbot):
 
 
 class TestTabPanel:
-    def test_gitee_account_row_is_below_settings(self, panel):
+    def test_gitee_account_row_exists(self, panel):
+        """验证底部存在 GiteeAccountRow 且其右侧为设置按钮"""
         from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 
         assert isinstance(panel._gitee_account_row, GiteeAccountRow)
-        panel_layout = panel.layout()
-        settings_bar_index = panel_layout.indexOf(panel._settings_btn.parentWidget())
-        account_row_index = panel_layout.indexOf(panel._gitee_account_row)
-        assert account_row_index > settings_bar_index
+        # 验证 GiteeAccountRow 内有设置按钮
+        assert hasattr(panel._gitee_account_row, "_settings_btn")
+        assert panel._gitee_account_row._settings_btn is not None
 
     def test_initial_state(self, panel):
         assert panel.count == 0

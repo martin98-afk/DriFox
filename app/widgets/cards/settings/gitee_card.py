@@ -291,15 +291,21 @@ class GiteeAccountRow(QFrame):
         text_container.addWidget(self._repo_label)
         layout.addLayout(text_container, 1)
 
-        # ── 竖向三点装饰（视觉提示，无独立按钮区） ──
-        self._more_btn = QPushButton("⋮", self)
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
-        self._more_btn.setCursor(Qt.PointingHandCursor)
-        self._more_btn.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self._more_btn)
+        # ── 设置按钮（齿轮图标，点击打开完整设置卡片） ──
+        from qfluentwidgets import FluentIcon as _FIF
+        from qfluentwidgets import TransparentToolButton as _TransparentToolButton
 
-        # 整块区域点击都触发弹出（头像/标签/按钮统一指向 popup）
+        self._settings_btn = _TransparentToolButton(self)
+        self._settings_btn.setIcon(_FIF.SETTING)
+        btn_size = scale_font_size(32)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setToolTip("设置")
+        self._settings_btn.setCursor(Qt.PointingHandCursor)
+        self._settings_btn.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(self._settings_btn)
+
+        # 整块区域点击触发 Gitee 管理弹窗（头像/名称/仓库）
+        # 设置按钮独立触发完整设置卡片
         self.setCursor(Qt.PointingHandCursor)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._name_label.setCursor(Qt.PointingHandCursor)
@@ -307,7 +313,7 @@ class GiteeAccountRow(QFrame):
         self._avatar.clicked.connect(self._toggle_popup)
         self._name_label.clicked.connect(self._toggle_popup)
         self._repo_label.clicked.connect(self._toggle_popup)
-        self._more_btn.clicked.connect(self._toggle_popup)
+        self._settings_btn.clicked.connect(self._toggle_settings_card)
         self.oauthResult.connect(self._on_oauth_result)
         self._popup: "_GiteeMorePopup" | None = None
 
@@ -347,7 +353,7 @@ class GiteeAccountRow(QFrame):
             self._repo_label.setToolTip("绑定后可备份与分享")
 
         # 更新整行可点状态
-        self._more_btn.setEnabled(not self._binding)
+        self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
 
     def _apply_style(self):
@@ -364,23 +370,13 @@ class GiteeAccountRow(QFrame):
         self._repo_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
-        self._more_btn.setStyleSheet(f"""
-            QPushButton {{
-                color: {Colors.TEXT_MUTED};
+        btn_size = scale_font_size(32)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setStyleSheet("""
+            TransparentToolButton {
                 background: transparent;
                 border: none;
-                {font_size_css(14)}
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                color: {Colors.TEXT_SECONDARY};
-            }}
-            QPushButton:disabled {{
-                color: {Colors.TEXT_MUTED};
-            }}
+            }
         """)
 
     def _open_repository(self):
@@ -505,8 +501,8 @@ class GiteeAccountRow(QFrame):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
         self._avatar.set_size(avatar_size)
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
+        btn_size = scale_font_size(32)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
         self._refresh_ui()
 
     def close_popup(self):
@@ -534,8 +530,8 @@ class GiteeAccountRow(QFrame):
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()
 
-        # 定位：在 ⋮ 按钮上方弹出，与窗口左边缘对齐，确保不超出窗口
-        btn_global = self._more_btn.mapToGlobal(QPoint(0, 0))
+        # 定位：在当前行上方弹出，与窗口左边缘对齐，确保不超出窗口
+        row_global = self.mapToGlobal(QPoint(0, 0))
         window = self.window()
         if window:
             win_rect = window.frameGeometry()
@@ -549,11 +545,11 @@ class GiteeAccountRow(QFrame):
         if x < win_rect.left() + 4:
             x = win_rect.left() + 4
 
-        # Y：在按钮上方弹出，不超出窗口上下边界
-        y = btn_global.y() - popup_height - 6
+        # Y：在当前行上方弹出，不超出窗口上下边界
+        y = row_global.y() - popup_height - 6
         if y < win_rect.top() + 4:
             # 空间不够则向下弹出
-            y = btn_global.y() + self._more_btn.height() + 6
+            y = row_global.y() + self.height() + 6
             # 向下弹出也超出底部时，对齐窗口底部
             if y + popup_height > win_rect.bottom() - 4:
                 y = win_rect.bottom() - 4 - popup_height
@@ -564,6 +560,24 @@ class GiteeAccountRow(QFrame):
         popup.move(x, y)
         popup.show()
         self._popup = popup
+
+    def _toggle_settings_card(self):
+        """打开完整设置卡片"""
+        # 沿父链向上找 OpenAIChatToolWindow._toggle_settings_card
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_toggle_settings_card"):
+                parent._toggle_settings_card()
+                return
+            parent = parent.parent()
+        # 兜底：通过 TabManagerWindow 获取当前窗口
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm:
+            current = tm.get_current_window()
+            if current and hasattr(current, "_toggle_settings_card"):
+                current._toggle_settings_card()
 
     def _on_popup_closed(self):
         """浮动卡片关闭后的清理"""

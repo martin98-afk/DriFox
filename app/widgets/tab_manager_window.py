@@ -98,6 +98,25 @@ def _show_edge_launcher(window):
             pass
 
 
+def _apply_window_topmost(window):
+    """应用窗口置顶配置（Settings.window_always_on_top）到指定窗口
+
+    用于启动时和模式切换后，确保配置生效。
+    """
+    from app.utils.config import Settings as _Settings
+
+    if _Settings.get_instance().window_always_on_top.value:
+        flags = window.windowFlags()
+        if not (flags & Qt.WindowStaysOnTopHint):
+            flags |= Qt.WindowStaysOnTopHint
+            was_visible = window.isVisible()
+            window.setWindowFlags(flags)
+            if was_visible:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+
+
 def _update_tab_icon(tab_idx: int, project: str):
     """更新指定 Tab 的项目图标
 
@@ -864,6 +883,9 @@ class TabManagerWindow(QWidget):
             tab_mgr.activateWindow()
             tab_mgr.raise_()
 
+            # 应用窗口置顶配置
+            _apply_window_topmost(tab_mgr)
+
             logger.info(f"[TabMode] 已启用，迁入 {len(migrated_windows)} 个窗口")
 
         finally:
@@ -922,6 +944,8 @@ class TabManagerWindow(QWidget):
                     # 显示 dialog 并注册到 TrayManager
                     dialog.show()
                     dialog.activateWindow()
+                    # 应用窗口置顶配置
+                    _apply_window_topmost(dialog)
                     tray_manager.register_window(dialog)
 
                     # 恢复 EdgeLauncher

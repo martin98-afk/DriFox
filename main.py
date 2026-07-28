@@ -309,10 +309,12 @@ def main():
             # ── Tab 模式 ──
             from app.widgets.tab_manager_window import TabManagerWindow
 
+            from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
             tm = TabManagerWindow.create_instance()
             tm.add_window(chat_window)
             _guard.show_requested.connect(lambda: _activate_window(tm))
             tm.show()
+            _apply_window_topmost(tm)
             logger.info("DriFox 以 Tab 管理器模式启动")
         else:
             # ── 独立窗口模式（原有逻辑）──
@@ -323,6 +325,8 @@ def main():
             chat_window._skip_restore_history = True
             _guard.show_requested.connect(lambda: _activate_window(popup))
             popup.show()
+            from app.widgets.tab_manager_window import _apply_window_topmost
+            _apply_window_topmost(popup)
             logger.info("DriFox 以独立窗口模式启动")
 
     # 应用退出时清理
