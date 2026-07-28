@@ -432,6 +432,10 @@ class ConfigSyncService(QObject):
         避免大量 valueChanged 信号从非主线程发射导致 UI 卡顿。
 
         ⚠️ 重载前保存 token 相关值，防止远端旧配置覆盖本地刷新后的 token。
+
+        本方法不使用 cfg.load() —— QConfig.load() 被 @exceptionHandler() 装饰，
+        任何一个 ConfigItem 反序列化异常都会导致整个 load 静默失败、所有值保持原样。
+        改为全量手动从文件同步，确保 100% 生效。
         """
         try:
             cfg = Settings.get_instance()
@@ -446,30 +450,29 @@ class ConfigSyncService(QObject):
                 "repo": cfg.gitee_user_repo.value,
             }
 
-            cfg.load()
-
-            # ⚠️ QConfig.load() 被 @exceptionHandler() 装饰，任何 ConfigItem
-            # 反序列化异常都会被静默吞掉，导致整个加载失败，所有值保持原样。
-            # 此处从文件直接读取并设置关键 section 的所有配置项，确保远端值同步到内存。
+            # ── 全量手动从文件同步（绕过 @exceptionHandler 的静默吞异常问题） ──
             try:
                 import json as _json
                 from qfluentwidgets.common.config import ConfigItem as _CI
 
                 with open(cfg.file, encoding="utf-8") as _f:
                     _file_data = _json.load(_f)
-                # 保护 LLM section（子智能体模型、标题生成模型等）+ Gateway section（各平台配置）
-                for _section in ("LLM", "Gateway"):
-                    _data = _file_data.get(_section, {})
-                    for _key, _value in _data.items():
-                        # 在 cfg 类上找到匹配的 ConfigItem 属性名
+
+                # 遍历所有 section，Gitee 段稍后由 token 保护逻辑处理
+                for _section_name, _section_data in _file_data.items():
+                    if _section_name == "Gitee":
+                        continue
+                    for _key, _value in _section_data.items():
                         _matched = None
                         for _name in dir(cfg.__class__):
                             _item = getattr(cfg.__class__, _name)
-                            if isinstance(_item, _CI) and _item.group == _section and _item.name == _key:
+                            if isinstance(_item, _CI) and _item.group == _section_name and _item.name == _key:
                                 _matched = _name
                                 break
                         if _matched:
                             getattr(cfg, _matched).value = _value
+
+                logger.debug("[ConfigSync] 全量配置已从文件同步到内存")
             except Exception as _e:
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
@@ -483,7 +486,7 @@ class ConfigSyncService(QObject):
                 cfg.gitee_user_owner.value = _saved["owner"]
                 cfg.gitee_user_repo.value = _saved["repo"]
 
-            logger.info("[ConfigSync] Settings 已重新加载（主线程，token 已保护）")
+            logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，token 已保护）")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
@@ -512,26 +515,53 @@ class ConfigSyncService(QObject):
         防止下游流程使用过期 token 导致误判远端状态。
         """
         try:
-            from app.gateway.auth.gitee import GiteeOAuthBackend
+            from app.gateway.auth.gitee import GiteeOAuthBackend, refresh_access_token
 
             backend = GiteeOAuthBackend()
             if not backend.is_bound():
                 self._token = ""
                 return False
 
-            token, err = backend._ensure_valid_token()
-            if token:
-                self._token = token
+            cfg = Settings.get_instance()
+            access_token = cfg.gitee_user_token.value
+            refresh_token = cfg.gitee_user_refresh_token.value
+            expires_at = cfg.gitee_token_expires_at.value
+
+            # ── 判断是否需要刷新 ──
+            needs_refresh = False
+            if refresh_token:
+                if not expires_at or time.time() >= expires_at - 60:
+                    needs_refresh = True
+            elif not access_token:
+                self._token = ""
+                return False
+            # 无 refresh_token 但有 access_token → 直接使用
+
+            if not needs_refresh:
+                self._token = access_token
                 return True
 
-            # 刷新失败 → 清空 self._token，下游检查 token 为空会走保守路径
-            self._token = ""
-            if err:
-                logger.warning(f"[ConfigSync] token 同步失败: {err}")
-            return False
+            # ── 自行刷新（不调 _ensure_valid_token → 不触发 _persist_tokens 写 app.config） ──
+            client_id = cfg.gitee_oauth_client_id.value
+            client_secret = cfg.gitee_oauth_client_secret.value
+            new_tokens, err = refresh_access_token(refresh_token, client_id, client_secret)
+            if new_tokens is None:
+                self._token = ""
+                logger.warning(f"[ConfigSync] token 刷新失败: {err}")
+                return False
+
+            # 仅更新内存，不写 app.config（避免触发文件 watcher）
+            cfg.gitee_user_token.value = new_tokens["access_token"]
+            if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
+                cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
+            if "expires_in" in new_tokens:
+                cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
+
+            self._token = new_tokens["access_token"]
+            logger.info("[ConfigSync] access_token 已续期（内存，未写盘）")
+            return True
         except Exception as e:
             logger.warning(f"[ConfigSync] token 同步异常: {e}")
-            # 异常时同样清空 token，不让过期 token 继续流通
             self._token = ""
             return False
 
@@ -655,18 +685,18 @@ class ConfigSyncService(QObject):
             logger.debug("[ConfigSync] 无可上传的变更，跳过")
             return True
 
-        # 读取脏标记后立刻清空，避免重复触发
+        # ★ 先获取锁，再清脏标记：防止锁被占用时脏标记永久丢失
+        acquired = self._upload_lock.acquire(blocking=False)
+        if not acquired:
+            logger.debug("[ConfigSync] 上传已在进行中，跳过")
+            return False
+
         upload_config = self._config_dirty
         upload_custom = self._custom_dirty
         upload_records = self._records_dirty
         self._config_dirty = False
         self._custom_dirty = False
         self._records_dirty = False
-
-        acquired = self._upload_lock.acquire(blocking=False)
-        if not acquired:
-            logger.debug("[ConfigSync] 上传已在进行中，跳过")
-            return False
 
         try:
             config_ok = True
@@ -1046,7 +1076,7 @@ class ConfigSyncService(QObject):
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
                 shutil.move(str(_tmp_extract), str(self._user_custom_path))
-            except (RuntimeError, zipfile.BadZipFile):
+            except RuntimeError, zipfile.BadZipFile:
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))

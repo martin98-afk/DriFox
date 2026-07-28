@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QProgressBar,
     QScrollArea,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -65,8 +66,10 @@ class AutoLoopConfigCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("autoLoopConfigCard")
-        self._refresh_theme_style()
+        # 注意：先 _build_ui 创建控件，再 _refresh_theme_style 刷新样式
+        # 确保 _refresh_component_styles 访问控件时它们已存在
         self._build_ui()
+        self._refresh_theme_style()
 
     def refresh_font_size(self):
         """刷新字体大小配置"""
@@ -104,9 +107,9 @@ class AutoLoopConfigCard(QFrame):
         self._path_edit.setStyleSheet(self._line_style())
         self._prompt_edit.setStyleSheet(f"""
             QTextEdit {{
-                background: rgba(255, 255, 255, 0.05);
-                color: #EAF2FF;
-                border: 1px solid rgba(255, 255, 255, 0.12);
+                background: {Colors.TOOLBAR_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 padding: 6px 10px;
                 {FONT_CSS} font-size: {scale_font_size(13)}px;
@@ -132,6 +135,7 @@ class AutoLoopConfigCard(QFrame):
                 {FONT_CSS}
             }}
         """)
+        self._refresh_component_styles()
 
     def _build_ui(self):
         # 从配置读取默认值，避免硬编码不一致
@@ -191,7 +195,8 @@ class AutoLoopConfigCard(QFrame):
             row = QHBoxLayout()
             row.setSpacing(8)
             lbl = BodyLabel(label_text)
-            lbl.setStyleSheet(f"color: #B4C2D9; {FONT_CSS} font-size: {scale_font_size(14)}px;")
+            Colors.refresh()
+            lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {FONT_CSS} font-size: {scale_font_size(14)}px;")
             lbl.setFixedWidth(120)
             row.addWidget(lbl)
             row.addWidget(widget, 1)
@@ -325,62 +330,6 @@ class AutoLoopConfigCard(QFrame):
         self.setVisible(False)
         self.closed.emit()
 
-    def refresh_font_size(self):
-        """刷新字体大小配置"""
-        self._refresh_theme_style()
-        self._refresh_component_styles()
-
-    def _refresh_component_styles(self):
-        """刷新内部组件样式"""
-        from qfluentwidgets import StrongBodyLabel
-        # 刷新 StrongBodyLabel
-        for label in self.findChildren(StrongBodyLabel):
-            label.setStyleSheet(f"color: #EAF2FF; font-size: {scale_font_size(14)}px; {FONT_CSS}")
-        # 刷新停止按钮
-        self._stop_btn.setStyleSheet(f"""
-            PushButton {{
-                background: rgba(255, 80, 80, 0.8);
-                color: white;
-                border: none;
-                border-radius: 6px;
-                {FONT_CSS} font-size: {scale_font_size(12)}px;
-                font-weight: bold;
-            }}
-            PushButton:hover {{
-                background: {Colors.ERROR};
-            }}
-        """)
-        Colors.refresh()
-        # 刷新任务标签
-        if hasattr(self, '_task_label'):
-            self._task_label.setStyleSheet(f"""
-                color: {Colors.TEXT_MUTED};
-                font-size: {scale_font_size(12)}px;
-                {FONT_CSS}
-                padding: 4px 8px;
-                background: rgba(0,0,0,0.15);
-                border-radius: 6px;
-            """)
-        # 刷新信息标签
-        for label in [self._iter_label, self._time_label, self._token_label,
-                      self._status_label, self._phase_label]:
-            if hasattr(self, label.property('objectName')) or hasattr(label, 'setStyleSheet'):
-                label.setStyleSheet(f"font-size: {scale_font_size(13)}px; {FONT_CSS}")
-        # 刷新 Token 百分比标签
-        Colors.refresh()
-        if self._token_percent_label:
-            self._token_percent_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-size: {scale_font_size(12)}px; {FONT_CSS}")
-        # 刷新日志标签
-        Colors.refresh()
-        if hasattr(self, '_log_label'):
-            self._log_label.setStyleSheet(f"""
-                color: {Colors.TEXT_MUTED};
-                font-size: {scale_font_size(11)}px;
-                {FONT_CSS}
-                padding: 3px 6px;
-                background: rgba(0,0,0,0.1);
-                border-radius: 4px;
-            """)
 
 
 # ============================================================
@@ -396,14 +345,13 @@ class AutoLoopRunningCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("autoLoopRunningCard")
-        self._refresh_theme_style()
 
-        # 彩虹边框动画
+        # 彩虹边框动画 — 60 帧/3秒 (≈20fps)，平衡流畅度与避免无谓重绘
         self._hue_offset = 0
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(3000)
-        self._anim.setStartValue(0)
-        self._anim.setEndValue(360)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(360.0)
         self._anim.setLoopCount(-1)
         self._anim.valueChanged.connect(self._on_hue_changed)
 
@@ -424,7 +372,13 @@ class AutoLoopRunningCard(QFrame):
         # 声明跳过容器展开/折叠动画（自带彩虹动画，避免容器动画抖动）
         self.setProperty("noContainerAnimation", True)
 
+        # 水平填充容器宽度，垂直方向由内容决定
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        # 注意：先 _build_ui 创建控件，再 _refresh_theme_style 刷新样式
+        # 确保 _refresh_component_styles 访问控件时它们已存在
         self._build_ui()
+        self._refresh_theme_style()
 
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""
@@ -435,6 +389,51 @@ class AutoLoopRunningCard(QFrame):
                 background: {Colors.CARD_BG_SOLID};
                 border-radius: 12px;
                 {FONT_CSS}
+            }}
+        """)
+        self._refresh_component_styles()
+
+    def _refresh_component_styles(self):
+        """刷新内部组件样式 — 主题切换时刷新所有内嵌控件的颜色/字体"""
+        Colors.refresh()
+        # 标题
+        self._task_label.setStyleSheet(f"""
+            color: {Colors.TEXT_MUTED};
+            {font_size_css(12)}
+            {FONT_CSS}
+            padding: 4px 8px;
+            background: {Colors.TOOLBAR_BG};
+            border-radius: 6px;
+        """)
+        # 状态卡片背景
+        self._status_widget.setStyleSheet(f"background: {Colors.TOOLBAR_BG}; border-radius: 6px;")
+        # 信息标签
+        self._time_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._token_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._status_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} {FONT_CSS}")
+        self._step_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; {font_size_css(13)} {FONT_CSS}")
+        self._phase_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._token_percent_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; {font_size_css(12)} {FONT_CSS}")
+        # 日志标签
+        self._log_label.setStyleSheet(f"""
+            color: {Colors.TEXT_MUTED};
+            {font_size_css(11)}
+            {FONT_CSS}
+            padding: 3px 6px;
+            background: {Colors.TOOLBAR_BG};
+            border-radius: 4px;
+        """)
+        # 进度条
+        self._token_progress.setStyleSheet(f"""
+            QProgressBar {{
+                background: {Colors.TOOLBAR_BG};
+                border-radius: 4px;
+                border: none;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {Colors.REALTIME_SUCCESS}, stop:1 {Colors.REALTIME_SUCCESS});
+                border-radius: 4px;
             }}
         """)
 
@@ -500,7 +499,7 @@ class AutoLoopRunningCard(QFrame):
             {font_size_css(12)}
             {FONT_CSS}
             padding: 4px 8px;
-            background: rgba(0,0,0,0.15);
+            background: {Colors.TOOLBAR_BG};
             border-radius: 6px;
         """)
         self._task_label.setWordWrap(True)
@@ -508,7 +507,7 @@ class AutoLoopRunningCard(QFrame):
 
         # ---- 信息区（两行布局）----
         self._status_widget = QWidget()
-        self._status_widget.setStyleSheet("background: rgba(0,0,0,0.1); border-radius: 6px;")  # fallback kept
+        self._status_widget.setStyleSheet(f"background: {Colors.TOOLBAR_BG}; border-radius: 6px;")
         status_layout = QVBoxLayout(self._status_widget)
         status_layout.setContentsMargins(12, 10, 12, 10)
         status_layout.setSpacing(8)
@@ -548,7 +547,7 @@ class AutoLoopRunningCard(QFrame):
         Colors.refresh()
         self._token_progress.setStyleSheet(f"""
             QProgressBar {{
-                background: rgba(255, 255, 255, 0.1);
+                background: {Colors.TOOLBAR_BG};
                 border-radius: 4px;
                 border: none;
             }}
@@ -560,7 +559,7 @@ class AutoLoopRunningCard(QFrame):
         """)
         token_layout.addWidget(self._token_progress)
         self._token_percent_label = QLabel("0%")
-        self._token_percent_label.setStyleSheet(f"color: #7FDBFF; {font_size_css(12)} {FONT_CSS}")
+        self._token_percent_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; {font_size_css(12)} {FONT_CSS}")
         self._token_percent_label.setFixedWidth(32)
         token_layout.addWidget(self._token_percent_label)
         row1.addWidget(token_w, 1)
@@ -614,11 +613,11 @@ class AutoLoopRunningCard(QFrame):
         self._log_label = QLabel("")
         self._log_label.setFixedHeight(20)
         self._log_label.setStyleSheet(f"""
-            color: #7A9BBF;
+            color: {Colors.TEXT_MUTED};
             {font_size_css(11)}
             {FONT_CSS}
             padding: 3px 6px;
-            background: rgba(0,0,0,0.1);
+            background: {Colors.TOOLBAR_BG};
             border-radius: 4px;
         """)
         self._log_label.setWordWrap(False)
@@ -626,20 +625,33 @@ class AutoLoopRunningCard(QFrame):
         layout.addWidget(self._log_label)
 
     def paintEvent(self, event):
-        """绘制彩虹边框"""
+        """绘制彩虹边框 — 使用主题感知的透明度，浅色模式降低饱和度"""
+        if not self.isVisible():
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # 彩虹渐变边框
+        # 浅色模式降饱和、降透明度，避免彩虹边框过于突兀
+        is_light = False
+        try:
+            from app.utils.theme_manager import theme_manager
+            is_light = theme_manager.is_light_theme()
+        except Exception:
+            pass
+
+        alpha = 100 if is_light else 160  # 浅色模式用更透的边框
+        saturation = 180 if is_light else 255
+        value = 180 if is_light else 200
+
         rect = self.rect()
         gradient = QLinearGradient(0, 0, rect.width(), rect.height())
         hue = self._hue_offset
         colors = [
-            (0.0, QColor.fromHsv(hue % 360, 255, 200, 160)),
-            (0.25, QColor.fromHsv((hue + 72) % 360, 255, 200, 160)),
-            (0.5, QColor.fromHsv((hue + 144) % 360, 255, 200, 160)),
-            (0.75, QColor.fromHsv((hue + 216) % 360, 255, 200, 160)),
-            (1.0, QColor.fromHsv((hue + 288) % 360, 255, 200, 160)),
+            (0.0, QColor.fromHsv(hue % 360, saturation, value, alpha)),
+            (0.25, QColor.fromHsv((hue + 72) % 360, saturation, value, alpha)),
+            (0.5, QColor.fromHsv((hue + 144) % 360, saturation, value, alpha)),
+            (0.75, QColor.fromHsv((hue + 216) % 360, saturation, value, alpha)),
+            (1.0, QColor.fromHsv((hue + 288) % 360, saturation, value, alpha)),
         ]
         for pos, color in colors:
             gradient.setColorAt(pos, color)
@@ -649,7 +661,7 @@ class AutoLoopRunningCard(QFrame):
 
         painter.end()
 
-    def _on_hue_changed(self, value: int):
+    def _on_hue_changed(self, value: float):
         self._hue_offset = value
         self.update()  # 触发重绘
 
@@ -687,12 +699,13 @@ class AutoLoopRunningCard(QFrame):
         """追加一行日志到可视化区域（单行滚动，带时间戳）"""
         timestamp = time.strftime("%H:%M:%S")
         self._log_label.setText(f"[{timestamp}] {text}")
-        self._log_label.repaint()
+        # repaint 改为 update（延迟合并绘制，减少不必要的重绘竞争）
+        self._log_label.update()
 
     def update_log(self, text: str):
         """流式更新日志内容（不添加时间戳，用于实时内容预览）"""
         self._log_label.setText(text)
-        self._log_label.repaint()
+        self._log_label.update()
 
     def set_task(self, task: str):
         """设置任务目标显示（完整显示，自动换行）"""
@@ -732,8 +745,6 @@ class AutoLoopRunningCard(QFrame):
             self._status_label.setText("📦 归档清理中...")
         elif phase == "completed":
             self._status_label.setText("✅ 全部完成")
-
-        self.update()
 
     # ========== 更新方法 ==========
 
@@ -793,7 +804,7 @@ class AutoLoopRunningCard(QFrame):
             self._token_label.setText(format_token(total_tokens))
             self._token_percent_label.setText("")
 
-        self._token_label.repaint()
+        self._token_label.update()
 
     def set_max_tokens(self, max_tokens: int):
         """设置最大 token 上限（启动时从 config 传入）"""

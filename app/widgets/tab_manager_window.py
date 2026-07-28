@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -26,7 +27,7 @@ from PyQt5.QtWidgets import (
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_unified_font
 
 
 class EmptyStateWidget(QWidget):
