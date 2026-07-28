@@ -647,11 +647,11 @@ class AutoLoopRunningCard(QFrame):
         gradient = QLinearGradient(0, 0, rect.width(), rect.height())
         hue = self._hue_offset
         colors = [
-            (0.0, QColor.fromHsv(hue % 360, saturation, value, alpha)),
-            (0.25, QColor.fromHsv((hue + 72) % 360, saturation, value, alpha)),
-            (0.5, QColor.fromHsv((hue + 144) % 360, saturation, value, alpha)),
-            (0.75, QColor.fromHsv((hue + 216) % 360, saturation, value, alpha)),
-            (1.0, QColor.fromHsv((hue + 288) % 360, saturation, value, alpha)),
+            (0.0, QColor.fromHsv(int(hue % 360), saturation, value, alpha)),
+            (0.25, QColor.fromHsv(int((hue + 72) % 360), saturation, value, alpha)),
+            (0.5, QColor.fromHsv(int((hue + 144) % 360), saturation, value, alpha)),
+            (0.75, QColor.fromHsv(int((hue + 216) % 360), saturation, value, alpha)),
+            (1.0, QColor.fromHsv(int((hue + 288) % 360), saturation, value, alpha)),
         ]
         for pos, color in colors:
             gradient.setColorAt(pos, color)

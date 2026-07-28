@@ -118,7 +118,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except (RuntimeError, Exception):
+        except RuntimeError, Exception:
             return False
 
     def __init__(self, parent=None):
@@ -636,7 +636,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except (RuntimeError, Exception):
+            except RuntimeError, Exception:
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -797,14 +797,32 @@ class TrayManager(QObject):
 
         # Tab 模式：即使没有独立窗口也要恢复 TabManagerWindow
         if self._tab_manager_window is not None:
-            if self._tab_manager_window.isVisible():
-                self._tab_manager_window.activateWindow()
-                self._tab_manager_window.raise_()
-            else:
-                self._tab_manager_window.show()
-                self._tab_manager_window.activateWindow()
-                self._tab_manager_window.raise_()
-            return
+            try:
+                if self._tab_manager_window.isVisible():
+                    self._tab_manager_window.activateWindow()
+                    self._tab_manager_window.raise_()
+                else:
+                    self._tab_manager_window.show()
+                    self._tab_manager_window.activateWindow()
+                    self._tab_manager_window.raise_()
+                return
+            except RuntimeError:
+                # C++ 对象已销毁，重建引用
+                self._tab_manager_window = None
+
+        # 防御性：从单例恢复 _tab_manager_window 引用
+        if self._tab_manager_window is None:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+                if _TMW._instance is not None:
+                    self._tab_manager_window = _TMW._instance
+                    self._tab_manager_window.show()
+                    self._tab_manager_window.activateWindow()
+                    self._tab_manager_window.raise_()
+                    return
+            except Exception:
+                self._tab_manager_window = None
 
         if not self._windows:
             logger.warning("[_show_or_create] 没有已注册的窗口")
@@ -1179,7 +1197,21 @@ class TrayManager(QObject):
                     self._tab_manager_window.activateWindow()
                     self._tab_manager_window.raise_()
             except RuntimeError:
-                pass
+                self._tab_manager_window = None
+
+        # 引用丢失时尝试从单例恢复
+        if self._tab_manager_window is None:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+                if _TMW._instance is not None:
+                    self._tab_manager_window = _TMW._instance
+                    if not self._tab_manager_window.isVisible():
+                        self._tab_manager_window.show()
+                        self._tab_manager_window.activateWindow()
+                        self._tab_manager_window.raise_()
+            except Exception:
+                self._tab_manager_window = None
             return
 
         # ── 独立窗口模式（原有逻辑）──
@@ -1199,7 +1231,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except (RuntimeError, Exception):
+                except RuntimeError, Exception:
                     continue
 
             if not valid_windows:

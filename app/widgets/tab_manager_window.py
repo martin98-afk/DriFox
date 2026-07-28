@@ -1082,9 +1082,14 @@ class TabManagerWindow(QWidget):
         self._save_geometry()
 
     def closeEvent(self, event: QCloseEvent):
-        """关闭 TabManagerWindow 时不销毁，仅隐藏到系统托盘"""
-        event.ignore()
-        self.hide()
+        """关闭 TabManagerWindow 时不销毁，仅隐藏到系统托盘
+
+        对于标准系统窗口，必须 accept 事件让 Qt 正确更新内部状态；
+        WA_DeleteOnClose=False 防止窗口被销毁，Qt 只会隐藏窗口。
+        event.ignore() 在此场景下会导致 Qt 内部状态不一致，
+        后续 show() 无法正常恢复窗口。
+        """
+        event.accept()
 
     # ── 资源清理 ──
 
