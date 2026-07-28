@@ -6,6 +6,7 @@
 """
 
 from datetime import datetime
+from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -28,6 +29,12 @@ class SessionRepository:
         # 内容地址缓存：session_id -> (message_count, last_msg_hash)
         # 用于跳过内容未变的重复持久化，节省全量序列化+zstd压缩开销
         self._content_hash_cache: Dict[str, tuple] = {}
+        # 保护 _content_hash_cache 的读写原子性。
+        # Gateway（异步写入）+ UI（同步 save）跨线程访问同一缓存时，
+        # 裸 dict 的复合判断+赋值在 GIL 释放窗口内可能丢失更新或脏命中，
+        # 导致两个线程都走昂贵的 serialize+INSERT OR REPLACE 路径。
+        # RLock 而非 Lock：get() 可能在持锁状态下再次访问缓存。
+        self._cache_lock = RLock()
 
     @property
     def is_initialized(self) -> bool:
@@ -139,9 +146,12 @@ class SessionRepository:
             content_key = (len(messages), hash(str(last_msg)))
         else:
             content_key = (0, 0)
-        cached = self._content_hash_cache.get(session_id)
-        if cached is not None and cached == content_key:
-            return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
+        # 持锁读 cache：判断是否可跳过序列化+写盘。
+        # 锁粒度最小（仅 cache 读 / 写），不阻塞后续长时间的 serialize+SQL。
+        with self._cache_lock:
+            cached = self._content_hash_cache.get(session_id)
+            if cached is not None and cached == content_key:
+                return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
 
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -200,8 +210,9 @@ class SessionRepository:
             )
 
             if success:
-                # 更新内容 hash 缓存
-                self._content_hash_cache[session_id] = content_key
+                # 更新内容 hash 缓存（持锁写）
+                with self._cache_lock:
+                    self._content_hash_cache[session_id] = content_key
                 # INSERT OR REPLACE = DELETE 旧行 + INSERT 新行，旧页全部进 freelist
                 # 高频率 save（每次用户发消息+Agent 回复）叠加 zstd 压缩后 blob
                 # 大小波动（50KB~500KB），持续制造不可复用的空闲页。
@@ -213,6 +224,7 @@ class SessionRepository:
 
         except Exception as e:
             logger.error(f"[SessionRepository] save_session 异常: {e}")
+            # 失败时不更新 cache，下次 save 会重新尝试序列化+写盘
             return False
 
     def _reclaim_freelist_if_needed(self, threshold_pages: int = 5000, reclaim_pages: int = 500):
@@ -252,7 +264,8 @@ class SessionRepository:
             success, rows = self._execute(f"SELECT * FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             if success and rows and len(rows) > 0:
                 # 外部加载了最新数据，失效内容缓存，下次 save 会重建
-                self._content_hash_cache.pop(session_id, None)
+                with self._cache_lock:
+                    self._content_hash_cache.pop(session_id, None)
                 return self._row_to_session(rows[0])
             return None
         except Exception as e:

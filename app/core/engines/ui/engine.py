@@ -23,7 +23,7 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
-from app.core.token_estimator import count_messages_tokens, count_tools_tokens, get_model_token_ratio
+from app.core.token_estimator import count_tools_tokens, get_model_token_ratio, per_message_tokens
 from app.tools import get_builtin_tools_schema
 
 
@@ -566,11 +566,15 @@ class UIEngine(BaseEngine):
 
         budget_tokens = max(1, self._conversation_core.context_builder.get_context_budget(llm_config))
         # 估算总量：系统提示 + 全部消息 + 工具定义（含模型分词校正系数）
-        est_total = count_messages_tokens(approx_messages, model, tools=available_tools)
+        # 性能优化（O-01）：用 per_message_tokens 累加替代 count_messages_tokens(messages)，
+        # 避免内部 is 身份缓存的 [msg] 临时列表构造与查找开销。
+        # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
+        # 内部自洽（scale 等比缩放基线准确）。
+        est_total = sum(per_message_tokens(m, model) for m in approx_messages) + tools_tokens
 
         # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
         system_tokens = (
-            count_messages_tokens([{"role": "system", "content": system_prompt}], model)
+            per_message_tokens({"role": "system", "content": system_prompt}, model)
             if system_prompt
             else 0
         )
@@ -580,10 +584,13 @@ class UIEngine(BaseEngine):
         # 避免与下面的 工具定义 重复计入。
         # 带 _hook_event 标记的消息是 hook 注入的动态上下文（如长期记忆、系统时间等），
         # 独立统计以便用户直观了解 hook 机制对上下文的占用。
+        # 性能优化（O-01）：用 per_message_tokens 替代 count_messages_tokens([msg])，
+        # 消除 [msg] 临时列表分配 + 4-entry is 缓存必然 MISS 的开销，
+        # 100 条消息场景从 ~102 次 count_messages_tokens 降至 ~N+1 次 per_message_tokens。
         user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
         for msg in session.messages:
             role = msg.get("role", "")
-            t = count_messages_tokens([msg], model)  # 不含 tools
+            t = per_message_tokens(msg, model)
             # 分离 hook 注入消息（带 _hook_event 标记），独立统计
             if msg.get("_hook_event"):
                 hook_tokens += t
@@ -619,8 +626,9 @@ class UIEngine(BaseEngine):
             current_msg_count = len(session.messages)
             if api_message_count > 0 and current_msg_count > api_message_count:
                 # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
+                # 性能优化（O-01）：per_message_tokens 累加，避免临时列表+缓存 MISS
                 new_msgs = session.messages[api_message_count:]
-                delta = count_messages_tokens(new_msgs, model)
+                delta = sum(per_message_tokens(m, model) for m in new_msgs)
                 used_tokens = api_prompt_tokens + delta
             else:
                 used_tokens = api_prompt_tokens
@@ -644,7 +652,8 @@ class UIEngine(BaseEngine):
             compaction_cache = getattr(session, "compaction_cache", {}) or {}
             summary_msg = compaction_cache.get("summary_message")
             if summary_msg:
-                compacted_tokens = count_messages_tokens([summary_msg], model)
+                # 性能优化（O-01）：per_message_tokens 直接处理单条 summary_msg
+                compacted_tokens = per_message_tokens(summary_msg, model)
                 normal_tokens = used_tokens - compacted_tokens
             else:
                 summarized_count = compaction.get("summarized_count", 0)
