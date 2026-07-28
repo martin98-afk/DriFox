@@ -1359,9 +1359,13 @@ class TabManagerWindow(QWidget):
         )
 
     def showEvent(self, event):
-        """每次显示时恢复位置 + 启用 Windows 窗口阴影 + 圆角"""
+        """每次显示时恢复位置 + 启用 Windows 窗口阴影 + 圆角 + Snap Layout"""
         super().showEvent(event)
         self._restore_geometry()
+        # 在 show() 之后重新应用 Snap Layout 样式，确保最终 HWND 包含 WS_THICKFRAME
+        # （__init__ 中首次调用时 HWND 可能被 Qt 在 show() 时重建，导致样式丢失）
+        if platform.system() == "Windows":
+            self._enable_snap_layout()
         # 启用 DWM 窗口阴影 + 圆角（仅首次）
         if not getattr(self, "_shadow_enabled", False):
             self._enable_shadow()
@@ -1708,6 +1712,11 @@ class TabManagerWindow(QWidget):
                             _SC_DRAGMOVE,
                             0,
                         )
+                        # ★ SendMessage 在这里阻塞，直到原生拖拽循环结束才返回。
+                        # 拖拽结束后清理 Python 拖拽状态，防止 _dragging 残留
+                        # 导致后续鼠标移动触发 Python 级拖拽，与原生拖拽竞争。
+                        if hasattr(self, "_title_bar"):
+                            self._title_bar._dragging = False
                         return (True, 0)
                 if msg.message == _WM_NCCALCSIZE:
                     return (True, 0)

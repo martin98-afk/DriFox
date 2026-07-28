@@ -1019,6 +1019,9 @@ class ToolPopupDialog(QDialog):
         super().showEvent(event)
         self._restore_geometry()
         self.tool_instance.show()
+        # 在 show() 之后重新应用 Snap Layout 样式，确保最终 HWND 包含 WS_THICKFRAME
+        if platform.system() == "Windows":
+            self._enable_snap_layout()
         # 显示锁定按钮在窗口右侧
         self._sync_lock_btn_position()
         self._lock_btn_widget.show()
