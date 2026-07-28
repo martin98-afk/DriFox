@@ -1,363 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-TabManagerWindow — Tab 管理器宿主窗口
+TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 
 左侧 TabPanel + 右侧 QStackedWidget 嵌入 OpenAIChatToolWindow 实例。
-支持模式切换（独立 ↔ 嵌入），窗口状态通过 setParent 迁移完全保留。
+使用标准系统标题栏，Windows 自动提供 Aero Snap / 摇动 / 任务栏预览等。
 """
 
 import json
-import platform
 from typing import Any, Dict, List, Optional
 
 from PyQt5 import sip as _sip
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QIcon, QMouseEvent
+from PyQt5.QtGui import QCloseEvent, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QLabel,
-    QMenu,
-    QSizeGrip,
-    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentToolButton
 
 from app.utils.config import Settings
-from app.utils.utils import get_icon, get_unified_font
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css
-
-
-# ── 边缘缩放热区尺寸（4px） ──
-_EDGE_RESIZE_BORDER = 4
-
-# ── Windows 原生消息常量（nativeEvent 用） ──
-_WM_NCHITTEST = 0x0084
-_WM_NCLBUTTONDOWN = 0x00A1
-_WM_NCCALCSIZE = 0x0083
-_WM_SYSCOMMAND = 0x0112
-_WM_GETMINMAXINFO = 0x0024
-_SC_DRAGMOVE = 0xF012  # SC_MOVE | 2，启动窗口拖拽
-_HTLEFT = 10
-_HTRIGHT = 11
-_HTTOP = 12
-_HTTOPLEFT = 13
-_HTTOPRIGHT = 14
-_HTBOTTOM = 15
-_HTBOTTOMLEFT = 16
-_HTBOTTOMRIGHT = 17
-_HTCAPTION = 2
-_HTCLIENT = 1
-
-if platform.system() == "Windows":
-    import ctypes
-    from ctypes import wintypes
-
-    class _WINDOWS_MSG(ctypes.Structure):
-        _fields_ = [
-            ("hwnd", wintypes.HWND),
-            ("message", wintypes.UINT),
-            ("wParam", wintypes.WPARAM),
-            ("lParam", wintypes.LPARAM),
-            ("time", wintypes.DWORD),
-            ("pt", wintypes.POINT),
-        ]
-
-    class _MINMAXINFO(ctypes.Structure):
-        """WM_GETMINMAXINFO 的 lParam 结构"""
-
-        _fields_ = [
-            ("ptReserved", wintypes.POINT),
-            ("ptMaxSize", wintypes.POINT),
-            ("ptMaxPosition", wintypes.POINT),
-            ("ptMinTrackSize", wintypes.POINT),
-            ("ptMaxTrackSize", wintypes.POINT),
-        ]
-
-
-class TabManagerTitleBar(QWidget):
-    """TabManagerWindow 自定义标题栏（Frameless）
-
-    风格与主 UI 一致：深色半透明背景 + 亚克力质感按钮。
-    支持拖拽移动、双击最大化、右键系统菜单。
-    """
-
-    minimizeRequested = pyqtSignal()
-    maximizeRestoreRequested = pyqtSignal()
-    closeRequested = pyqtSignal()
-
-    # ── 右键系统菜单 Action IDs ──
-    _ACTION_RESTORE = 1
-    _ACTION_MOVE = 2
-    _ACTION_SIZE = 3
-    _ACTION_MINIMIZE = 4
-    _ACTION_MAXIMIZE = 5
-    _ACTION_CLOSE = 6
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._dragging = False
-        self._drag_pos = None
-        self._is_maximized = False
-        self._setup_ui()
-        self._apply_style()
-
-    def _setup_ui(self):
-        self.setFixedHeight(36)
-        self.setMouseTracking(True)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 4, 0)
-        layout.setSpacing(6)
-
-        # ── 图标（加载 drifox.ico） ──
-        self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(20, 20)
-        self._icon_label.setStyleSheet("background: transparent;")
-        icon = QIcon(":/icons/drifox.ico")
-        pix = icon.pixmap(20, 20)
-        self._icon_label.setPixmap(pix)
-        layout.addWidget(self._icon_label)
-
-        # ── 标题 ──
-        self._title_label = QLabel("飘狐-DriFox", self)
-        self._title_label.setObjectName("tabManagerTitle")
-        self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout.addWidget(self._title_label, 1)
-
-        # ── 内存标签（预留，与 ToolWindowTitleBar 保持一致） ──
-        self._memory_label = QLabel(self)
-        self._memory_label.setObjectName("tabManagerMemoryLabel")
-        self._memory_label.setFixedHeight(20)
-        self._memory_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
-            f"padding: 1px 8px; background: transparent; border: none; border-radius: 3px;"
-        )
-        self._memory_label.hide()
-        layout.addWidget(self._memory_label)
-
-        # ── 窗口控制按钮（主题感知图标，适配浅色/深色） ──
-        self._min_btn = TransparentToolButton(self)
-        self._min_btn.setIcon(get_icon("最小化"))
-        self._min_btn.setFixedSize(36, 30)
-        self._min_btn.setToolTip("最小化")
-        self._min_btn.clicked.connect(self.minimizeRequested.emit)
-
-        self._max_btn = TransparentToolButton(self)
-        self._max_btn.setIcon(get_icon("最大化"))
-        self._max_btn.setFixedSize(36, 30)
-        self._max_btn.setToolTip("最大化")
-        self._max_btn.clicked.connect(self._on_max_clicked)
-
-        self._close_btn = TransparentToolButton(self)
-        self._close_btn.setIcon(get_icon("关闭"))
-        self._close_btn.setFixedSize(36, 30)
-        self._close_btn.setToolTip("关闭")
-        self._close_btn.clicked.connect(self.closeRequested.emit)
-
-        layout.addWidget(self._min_btn)
-        layout.addWidget(self._max_btn)
-        layout.addWidget(self._close_btn)
-
-    def _apply_style(self):
-        Colors.refresh()
-        font_name = Settings.get_instance().llm_font_family.value
-
-        self.setStyleSheet(f"""
-            TabManagerTitleBar {{
-                background: {Colors.CARD_BG.format(alpha=250)};
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-            #tabManagerTitle {{
-                color: {Colors.TEXT_PRIMARY};
-                font-size: {scale_font_size(14)}px;
-                font-weight: 600;
-                font-family: "{font_name}";
-                background: transparent;
-                padding: 0 4px;
-            }}
-            #tabManagerMemoryLabel {{
-                color: {Colors.TEXT_SECONDARY};
-                font-size: {scale_font_size(11)}px;
-                background: transparent;
-            }}
-        """)
-
-        # 关闭按钮 hover 特殊处理（红色）
-        self._close_btn.setStyleSheet("""
-            TransparentToolButton {
-                background: transparent;
-                border: none;
-                border-radius: 4px;
-            }
-            TransparentToolButton:hover {
-                background: #e81123;
-            }
-            TransparentToolButton:hover QToolTip {
-                background: #e81123;
-            }
-            TransparentToolButton:pressed {
-                background: #f1707a;
-            }
-        """)
-
-    def refresh_style(self):
-        """主题/字体变更时刷新样式和图标"""
-        self._apply_style()
-        # 刷新窗口控制图标（主题感知，自动适配浅色/深色）
-        self._min_btn.setIcon(get_icon("最小化"))
-        self._max_btn.setIcon(get_icon("还原" if self._is_maximized else "最大化"))
-        self._close_btn.setIcon(get_icon("关闭"))
-
-    def set_title(self, title: str):
-        self._title_label.setText(title)
-
-    def set_maximized(self, maximized: bool):
-        self._is_maximized = maximized
-        if maximized:
-            self._max_btn.setToolTip("还原")
-            self._max_btn.setIcon(get_icon("还原"))
-        else:
-            self._max_btn.setToolTip("最大化")
-            self._max_btn.setIcon(get_icon("最大化"))
-
-    def _on_max_clicked(self):
-        self.maximizeRestoreRequested.emit()
-
-    # ── 鼠标事件：窗口拖拽 ──
-    # 拖拽优先走 Windows 原生（HTCAPTION + DefWindowProc），
-    # 原生不生效时由 Python 模拟拖拽兜底保证窗口可移动。
-    # _dragging 仅用于 Python 兜底，不干预 nativeEvent。
-
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self._dragging = True
-            self._drag_pos = event.globalPos() - self.parentWidget().frameGeometry().topLeft()
-            event.accept()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if self._dragging and event.buttons() == Qt.LeftButton:
-            win = self.parentWidget()
-            if win.isMaximized():
-                win.showNormal()
-                ratio = self._drag_pos.x() / win.width() if win.width() > 0 else 0.5
-                new_pos = event.globalPos() - QPoint(int(win.width() * ratio), self._drag_pos.y())
-                win.move(new_pos)
-                self._drag_pos = event.globalPos() - win.frameGeometry().topLeft()
-            else:
-                win.move(event.globalPos() - self._drag_pos)
-            event.accept()
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self._dragging = False
-            event.accept()
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self.maximizeRestoreRequested.emit()
-            event.accept()
-        super().mouseDoubleClickEvent(event)
-
-    def contextMenuEvent(self, event):
-        """右键系统菜单"""
-        win = self.parentWidget()
-        if not win:
-            return
-
-        menu = QMenu(self)
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background: {Colors.CARD_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 20px;
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                font-size: {scale_font_size(13)}px;
-            }}
-            QMenu::item:selected {{
-                background: {Colors.HOVER_BG};
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background: {Colors.BORDER};
-                margin: 4px 8px;
-            }}
-        """)
-
-        is_maxed = win.isMaximized()
-
-        restore_act = menu.addAction("还原")
-        restore_act.setEnabled(is_maxed)
-        restore_act.setData(self._ACTION_RESTORE)
-
-        move_act = menu.addAction("移动")
-        move_act.setEnabled(not is_maxed)
-        move_act.setData(self._ACTION_MOVE)
-
-        size_act = menu.addAction("大小")
-        size_act.setEnabled(not is_maxed)
-        size_act.setData(self._ACTION_SIZE)
-
-        menu.addSeparator()
-
-        min_act = menu.addAction("最小化")
-        min_act.setData(self._ACTION_MINIMIZE)
-
-        max_act = menu.addAction("最大化" if not is_maxed else "还原")
-        max_act.setData(self._ACTION_MAXIMIZE)
-
-        menu.addSeparator()
-
-        close_act = menu.addAction("关闭")
-        close_act.setData(self._ACTION_CLOSE)
-
-        action = menu.exec_(event.globalPos())
-        if action is None:
-            return
-
-        act_id = action.data()
-        if act_id == self._ACTION_RESTORE:
-            win.showNormal()
-        elif act_id == self._ACTION_MOVE:
-            # 使用 Windows WM_SYSCOMMAND SC_MOVE 模拟标准系统"移动"行为
-            if is_maxed:
-                win.showNormal()
-            if platform.system() == "Windows":
-                import ctypes
-
-                ctypes.windll.user32.PostMessageW(int(win.winId()), 0x0112, 0xF010, 0)  # WM_SYSCOMMAND SC_MOVE
-        elif act_id == self._ACTION_SIZE:
-            # 模拟系统菜单的"大小"行为 - 用鼠标模拟调整
-            pass
-        elif act_id == self._ACTION_MINIMIZE:
-            win._on_minimize_clicked()
-        elif act_id == self._ACTION_MAXIMIZE:
-            if is_maxed:
-                win.showNormal()
-            elif platform.system() == "Windows":
-                import ctypes
-
-                ctypes.windll.user32.ShowWindow(int(win.winId()), 3)  # SW_MAXIMIZE
-            else:
-                win.showMaximized()
-        elif act_id == self._ACTION_CLOSE:
-            win.close()
 
 
 class EmptyStateWidget(QWidget):
@@ -483,8 +152,6 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
         self._geo_save_timer.setInterval(200)
-        # ── Win10 圆角 Region 标记 ──
-        self._use_window_rgn: bool = False
         # ── window → index O(1) 映射（替代 _windows.index() O(n) 查找） ──
         self._window_to_index: Dict[int, int] = {}
         # ── 上次图标缩放值，主题切换时用于判断是否需要重绘图标 ──
@@ -503,19 +170,12 @@ class TabManagerWindow(QWidget):
         self.setObjectName("tabManagerWindow")
         self.setMinimumSize(600, 450)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        # 窗口标志：Frameless 自定义标题栏 + 置顶
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
+        # 标准系统窗口：原生标题栏 + Aero Snap + 任务栏预览 + 摇动等全部恢复
+        self.setWindowFlags(Qt.Window)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
 
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
-
-        # 立即创建平台窗口（HWND）并启用 Snap Layout 样式
-        # 必须在 show() 之前设置 WS_CAPTION + WS_THICKFRAME，
-        # 否则 Windows 在窗口显示后可能不响应样式变更。
-        if platform.system() == "Windows":
-            self.winId()  # 确保 HWND 已创建
-            self._enable_snap_layout()
 
         self._setup_ui()
         self._setup_signals()
@@ -544,9 +204,6 @@ class TabManagerWindow(QWidget):
 
         # 重建样式表
         self._apply_theme_stylesheet()
-        # 刷新标题栏
-        if hasattr(self, "_title_bar"):
-            self._title_bar.refresh_style()
         # 刷新空状态页（字体/颜色随主题或字号刷新）
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
@@ -618,22 +275,12 @@ class TabManagerWindow(QWidget):
                     background: {Colors.BORDER};
                 }}
             """)
-        # 刷新标题栏样式
-        if hasattr(self, "_title_bar"):
-            self._title_bar.refresh_style()
 
     def _setup_ui(self):
-        # ── 外层纵向布局：标题栏 + 内容区 ──
+        # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-
-        # ── 自定义标题栏 ──
-        self._title_bar = TabManagerTitleBar(self)
-        self._title_bar.minimizeRequested.connect(self._on_minimize_clicked)
-        self._title_bar.maximizeRestoreRequested.connect(self._on_titlebar_max_restore)
-        self._title_bar.closeRequested.connect(self._on_titlebar_close)
-        main_layout.addWidget(self._title_bar)
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
         content_widget = QWidget(self)
@@ -682,18 +329,6 @@ class TabManagerWindow(QWidget):
         content_layout.addWidget(self._splitter)
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
-
-        # ── 右下角调整手柄 ──
-        self._size_grip = QSizeGrip(self)
-        self._size_grip.setFixedSize(12, 12)
-        self._size_grip.setStyleSheet("""
-            QSizeGrip {
-                background: transparent;
-                border: none;
-            }
-        """)
-        # 把 SizeGrip 放到右下角（在父窗口 resize 时通过 moveEvent 调整位置）
-        self._size_grip.raise_()
 
         # 恢复面板宽度
         saved_w = Settings.get_instance().tab_panel_width.value
@@ -849,18 +484,14 @@ class TabManagerWindow(QWidget):
     # ── Tab 回调 ──
 
     def _sync_window_title(self):
-        """将标题同步为当前窗口的会话标题（标题栏 + windowTitle）"""
+        """将标题同步为当前窗口的会话标题（系统标题栏）"""
         win = self.get_current_window()
         if win:
             t = win.windowTitle()
             if t:
                 self.setWindowTitle(t)
-                if hasattr(self, "_title_bar"):
-                    self._title_bar.set_title(t)
                 return
         self.setWindowTitle("飘狐-DriFox")
-        if hasattr(self, "_title_bar"):
-            self._title_bar.set_title("飘狐-DriFox")
 
     def _on_tab_selected(self, index: int):
         if 0 <= index < len(self._windows):
@@ -1359,370 +990,17 @@ class TabManagerWindow(QWidget):
         )
 
     def showEvent(self, event):
-        """每次显示时恢复位置 + 启用 Windows 窗口阴影 + 圆角 + Snap Layout"""
+        """每次显示时恢复位置（标准系统窗口自带阴影/边框/圆角）"""
         super().showEvent(event)
         self._restore_geometry()
-        # 在 show() 之后重新应用 Snap Layout 样式，确保最终 HWND 包含 WS_THICKFRAME
-        # （__init__ 中首次调用时 HWND 可能被 Qt 在 show() 时重建，导致样式丢失）
-        if platform.system() == "Windows":
-            self._enable_snap_layout()
-        # 启用 DWM 窗口阴影 + 圆角（仅首次）
-        if not getattr(self, "_shadow_enabled", False):
-            self._enable_shadow()
-            self._apply_rounded_corners()
-
-    def _enable_shadow(self):
-        """通过 DWM API 为 Frameless 窗口启用原生阴影 (Windows only)
-
-        Win10：使用 DwmExtendFrameIntoClientArea(-1...)+WM_NCCALCSIZE=0
-        标准方案。
-
-        Win11：_enable_snap_layout() 添加的 WS_THICKFRAME 已提供原生
-        阴影，DwmExtendFrameIntoClientArea(-1...) 反而会在最大化时
-        导致 DWM 帧渲染异常（仅左上角显示内容），故跳过。
-        """
-        if platform.system() != "Windows":
-            return
-        try:
-            # Win11 (build >= 22000)：WS_THICKFRAME 已提供阴影，
-            # DwmExtendFrameIntoClientArea 与最大化不兼容。
-            win_ver = platform.version()
-            parts = win_ver.split(".")
-            build = int(parts[2]) if len(parts) > 2 else 0
-            if build >= 22000:
-                self._shadow_enabled = True
-                return
-
-            import ctypes
-
-            hwnd = int(self.winId())
-            margins = ctypes.wintypes.RECT(-1, -1, -1, -1)
-            ctypes.windll.dwmapi.DwmExtendFrameIntoClientArea(ctypes.wintypes.HWND(hwnd), ctypes.byref(margins))
-            self._shadow_enabled = True
-        except Exception:
-            self._shadow_enabled = False
-
-    def _enable_snap_layout(self):
-        """为 Frameless 窗口启用 Snap Layout（贴靠布局）
-
-        Qt.FramelessWindowHint 会移除 WS_THICKFRAME，导致 Windows 不认
-        为这是一个可调整大小的窗口，贴靠到屏幕边缘时不触发 Snap Layout。
-        加回 WS_THICKFRAME 恢复 resize + snap 能力。
-
-        ★ 不加 WS_CAPTION：WS_CAPTION 与 WM_NCCALCSIZE=0 在 Win11 上
-        存在冲突——系统认为有标题栏但非客户区为 0，最大化时 DWM 渲染混乱。
-        Win11 上仅 WS_THICKFRAME 就足以支持 Snap Layout + 阴影。
-        """
-        if platform.system() != "Windows":
-            return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            hwnd = int(self.winId())
-            GWL_STYLE = -16
-            current_style = ctypes.windll.user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE)
-
-            WS_THICKFRAME = 0x00040000
-            WS_MINIMIZEBOX = 0x00020000
-            WS_MAXIMIZEBOX = 0x00010000
-
-            # Win11 不加 WS_CAPTION（避免与 NCCALCSIZE=0 冲突）
-            new_style = current_style | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-            ctypes.windll.user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE, new_style)
-
-            # 通知 Windows 样式已变更（重新计算非客户区）
-            ctypes.windll.user32.SetWindowPos(
-                wintypes.HWND(hwnd),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0x0020 | 0x0002 | 0x0001,  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
-            )
-        except Exception:
-            pass
-
-    def _apply_rounded_corners(self):
-        """为窗口启用圆角
-
-        - Windows 11: 使用 DwmSetWindowAttribute DWMWA_WINDOW_CORNER_PREFERENCE
-          (原生支持，最大化时自动变直角)
-        - Windows 10: 使用 SetWindowRgn 创建圆角裁剪区域
-          (最大化时由 changeEvent 清除 Region)
-        """
-        if platform.system() != "Windows":
-            return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            hwnd = int(self.winId())
-
-            # 判断 Windows 版本：build >= 22000 为 Win11
-            win_ver = platform.version()  # "10.0.19045" / "10.0.22621"
-            parts = win_ver.split(".")
-            build = int(parts[2]) if len(parts) > 2 else 0
-
-            if build >= 22000:
-                # Windows 11: DwmSetWindowAttribute 原生圆角
-                corner_pref = ctypes.c_int(2)  # DWMWCP_ROUND
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    wintypes.HWND(hwnd),
-                    33,  # DWMWA_WINDOW_CORNER_PREFERENCE
-                    ctypes.byref(corner_pref),
-                    ctypes.sizeof(ctypes.c_int),
-                )
-                # 标记不用 SetWindowRgn
-                self._use_window_rgn = False
-            else:
-                # Windows 10: SetWindowRgn 圆角裁剪
-                self._apply_win10_rounded_region()
-        except Exception:
-            self._use_window_rgn = False
-
-    def _apply_win10_rounded_region(self):
-        """Win10: 用 SetWindowRgn 设置圆角裁剪区域（DPI 感知 8px 基准半径）"""
-        if platform.system() != "Windows" or self.isMaximized():
-            return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            hwnd = int(self.winId())
-            # DPI 感知缩放（devicePixelRatioF: 100%=1.0, 150%=1.5, 200%=2.0）
-            scale = self.devicePixelRatioF()
-            # 半径和尺寸均按 DPI 缩放
-            radius = max(4, int(8 * scale))
-            w_dev = int(self.width() * scale)
-            h_dev = int(self.height() * scale)
-            hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(
-                0,
-                0,
-                w_dev + 1,
-                h_dev + 1,
-                radius,
-                radius,
-            )
-            if hrgn:
-                ctypes.windll.user32.SetWindowRgn(wintypes.HWND(hwnd), hrgn, True)
-                # hrgn 所有权已移交给窗口，不 DeleteObject
-                self._use_window_rgn = True
-            else:
-                self._use_window_rgn = False
-        except Exception:
-            self._use_window_rgn = False
-
-    def _clear_win10_rounded_region(self):
-        """Win10: 清除圆角 Region（最大化/全屏时调用）"""
-        if platform.system() != "Windows" or not getattr(self, "_use_window_rgn", False):
-            return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            hwnd = int(self.winId())
-            ctypes.windll.user32.SetWindowRgn(wintypes.HWND(hwnd), None, True)
-            self._use_window_rgn = False
-        except Exception:
-            pass
 
     def moveEvent(self, event):
         super().moveEvent(event)
         self._save_geometry()
 
-    def _on_titlebar_max_restore(self):
-        """标题栏最大化/还原按钮触发
-
-        Win11 上 Qt 的 showMaximized() 与 WS_THICKFRAME+NCCALCSIZE=0
-        组合存在兼容问题，直接用 Win32 ShowWindow(SW_MAXIMIZE) 绕过。
-        """
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            if platform.system() == "Windows":
-                import ctypes
-
-                ctypes.windll.user32.ShowWindow(int(self.winId()), 3)  # SW_MAXIMIZE
-            else:
-                self.showMaximized()
-
-    def _on_titlebar_close(self):
-        """标题栏关闭按钮触发（隐藏到系统托盘，不销毁）"""
-        self.hide()
-
-    def _on_minimize_clicked(self):
-        """标题栏最小化按钮 + 右键菜单"最小化"统一处理
-
-        macOS: PyQt5 对 FramelessWindowHint 窗口的 showMinimized() 完全无效
-        （实测不触发任何 NSWindow.miniaturize:），改用 hide() 后通过
-        托盘/Dock 的"显示"项或再次唤起 tab 模式调 show() 恢复。
-        Windows/Linux: 走标准 showMinimized() 保持原生最小化行为。
-        """
-        if platform.system() == "Darwin":
-            self.hide()
-        else:
-            self.showMinimized()
-
     def changeEvent(self, event):
-        """监听窗口状态变化（最大化/还原），同步标题栏按钮图标 + Win10 圆角"""
-        if event.type() == event.WindowStateChange:
-            is_maxed = self.isMaximized()
-            if hasattr(self, "_title_bar"):
-                self._title_bar.set_maximized(is_maxed)
-            # 最大化时不需要 size grip
-            if hasattr(self, "_size_grip"):
-                self._size_grip.setVisible(not is_maxed)
-            # Win10: 最大化时清除圆角 Region（直角），还原时恢复圆角
-            # Win11 走 DWM 原生圆角（DwmSetWindowAttribute），不碰 SetWindowRgn
-            if platform.system() == "Windows":
-                win_ver = platform.version()
-                parts = win_ver.split(".")
-                build = int(parts[2]) if len(parts) > 2 else 0
-                if build < 22000:  # Win10
-                    if is_maxed:
-                        self._clear_win10_rounded_region()
-                    else:
-                        self._apply_win10_rounded_region()
+        """标准系统窗口自带最大化/还原处理，无需自定义逻辑"""
         super().changeEvent(event)
-
-    def _nchittest(self, msg) -> int:
-        """WM_NCHITTEST 处理：边缘缩放 + 标题栏拖拽/Snap
-
-        - 标题栏非按钮区域 → HTCAPTION（Windows 原生拖拽 + Snap Layout）
-        - 标题栏按钮区域   → HTCLIENT（Qt 正常处理按钮点击）
-        - 窗口边缘热区     → HTLEFT/HTRIGHT/HTTOP/HTBOTTOM 等（边缘缩放）
-        """
-        import ctypes.wintypes as wintypes
-
-        x = wintypes.LOWORD(msg.lParam)
-        y = wintypes.HIWORD(msg.lParam)
-        pt = self.mapFromGlobal(QPoint(x, y))
-
-        # 标题栏区域
-        title_bar_rect = self._title_bar.geometry()
-        if title_bar_rect.contains(pt):
-            # 标题栏按钮区域 → HTCLIENT 让 Qt 正常处理点击
-            for btn in (self._title_bar._min_btn, self._title_bar._max_btn, self._title_bar._close_btn):
-                # 按钮在标题栏中的局部坐标 → 转换到窗口坐标
-                btn_rect = btn.geometry().translated(title_bar_rect.topLeft())
-                if btn_rect.contains(pt):
-                    return _HTCLIENT
-            # 标题栏其他区域 → HTCAPTION（Windows 原生拖拽，自动触发 Snap Layout）
-            return _HTCAPTION
-
-        # 边缘缩放热区（_EDGE_RESIZE_BORDER px）
-        w, h = self.width(), self.height()
-        left = pt.x() < _EDGE_RESIZE_BORDER
-        right = pt.x() > w - _EDGE_RESIZE_BORDER
-        top = pt.y() < _EDGE_RESIZE_BORDER
-        bottom = pt.y() > h - _EDGE_RESIZE_BORDER
-
-        if top and left:
-            return _HTTOPLEFT
-        if top and right:
-            return _HTTOPRIGHT
-        if bottom and left:
-            return _HTBOTTOMLEFT
-        if bottom and right:
-            return _HTBOTTOMRIGHT
-        if top:
-            return _HTTOP
-        if bottom:
-            return _HTBOTTOM
-        if left:
-            return _HTLEFT
-        if right:
-            return _HTRIGHT
-        return _HTCLIENT
-
-    def nativeEvent(self, eventType, message):
-        """处理 Windows 原生消息
-
-        - WM_GETMINMAXINFO: 修正 WS_THICKFRAME 导致的最大化位置偏移，
-          用 MonitorFromWindow 获取工作区直接覆盖，避免客户区被推到屏幕外。
-        - WM_NCHITTEST: 边缘缩放 + 标题栏 HTCAPTION（Snap Layout 支持）
-        - WM_NCLBUTTONDOWN(HTCAPTION): ReleaseCapture + SendMessage(WM_SYSCOMMAND,
-          SC_DRAGMOVE) 启动 Windows 原生拖拽循环，自动处理 Aero Snap
-          (拖到屏幕边缘触发填充/最大化/半屏等效果)
-        - WM_NCCALCSIZE: 返回 0 保持无边框外观
-
-        SC_DRAGMOVE 方案比 DefWindowProcW 更可靠——不依赖 WS_CAPTION
-        的 Qt 内部状态一致性，且明确告诉 Windows 进入拖拽模式，
-        与 Qt 事件循环无冲突。
-        """
-        if platform.system() == "Windows" and eventType == "windows_generic_MSG":
-            try:
-                import ctypes
-
-                msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
-
-                # ── WM_GETMINMAXINFO：修正最大化窗口矩形 ──
-                # _enable_snap_layout() 添加的 WS_THICKFRAME 导致 Windows
-                # 最大化时将边框推到屏幕外（ptMaxPosition 变为负数偏移），
-                # 但 WM_NCCALCSIZE 返回 0（整个窗口都是客户区），造成客户区
-                # 也被推到屏幕外，Win11 上仅左上角部分可见。
-                # 这里直接用 MonitorFromWindow + GetMonitorInfo 获取显示器
-                # 工作区，覆盖 MINMAXINFO 的 ptMaxPosition/ptMaxSize，
-                # 确保最大化后客户区完整填充屏幕工作区。
-                if msg.message == _WM_GETMINMAXINFO:
-                    try:
-                        mmi = ctypes.cast(msg.lParam, ctypes.POINTER(_MINMAXINFO))[0]
-                        monitor = ctypes.windll.user32.MonitorFromWindow(
-                            msg.hwnd,
-                            0x00000002,  # MONITOR_DEFAULTTONEAREST
-                        )
-                        if monitor:
-
-                            class _MONITORINFO(ctypes.Structure):
-                                _fields_ = [
-                                    ("cbSize", wintypes.DWORD),
-                                    ("rcMonitor", wintypes.RECT),
-                                    ("rcWork", wintypes.RECT),
-                                    ("dwFlags", wintypes.DWORD),
-                                ]
-
-                            mi = _MONITORINFO()
-                            mi.cbSize = ctypes.sizeof(_MONITORINFO)
-                            if ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi)):
-                                # 直接用工作区矩形覆盖最大化位置/尺寸
-                                mmi.ptMaxPosition.x = mi.rcWork.left
-                                mmi.ptMaxPosition.y = mi.rcWork.top
-                                mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left
-                                mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top
-                    except Exception:
-                        pass
-                    return (True, 0)
-
-                if msg.message == _WM_NCHITTEST:
-                    return (True, self._nchittest(msg))
-                if msg.message == _WM_NCLBUTTONDOWN:
-                    if msg.wParam == _HTCAPTION:
-                        # ★ Snap Layout 支持：
-                        # ReleaseCapture 释放非客户区鼠标捕获，
-                        # SendMessage(WM_SYSCOMMAND, SC_DRAGMOVE) 启动
-                        # Windows 原生拖拽循环，自动处理 Aero Snap。
-                        # 此方案比 DefWindowProcW 更可靠——不依赖 WS_CAPTION
-                        # 的 Qt 内部状态一致性，且不会与 Qt 事件循环冲突。
-                        ctypes.windll.user32.ReleaseCapture()
-                        ctypes.windll.user32.SendMessageW(
-                            msg.hwnd,
-                            _WM_SYSCOMMAND,
-                            _SC_DRAGMOVE,
-                            0,
-                        )
-                        # ★ SendMessage 在这里阻塞，直到原生拖拽循环结束才返回。
-                        # 拖拽结束后清理 Python 拖拽状态，防止 _dragging 残留
-                        # 导致后续鼠标移动触发 Python 级拖拽，与原生拖拽竞争。
-                        if hasattr(self, "_title_bar"):
-                            self._title_bar._dragging = False
-                        return (True, 0)
-                if msg.message == _WM_NCCALCSIZE:
-                    return (True, 0)
-            except Exception:
-                pass
-        return super().nativeEvent(eventType, message)
 
     def _on_resize_finished(self):
         """resize 结束后恢复布局 + 绘制 + 强制收拢
@@ -1763,7 +1041,7 @@ class TabManagerWindow(QWidget):
             layout.activate()
 
     def resizeEvent(self, event):
-        """保持右下角 QSizeGrip 的位置 + 防抖保存几何 + resize 布局/绘制节流
+        """标准系统窗口自带 resize 处理 + resize 节流防抖
 
         resize 期间通过 _resize_blocking 标志做两阶段处理：
 
@@ -1776,29 +1054,18 @@ class TabManagerWindow(QWidget):
         阶段二（后续连续 resize 事件 → blocking 活跃）：
         - 跳过 super().resizeEvent()，完全阻止布局引擎递归计算
           子控件 geometry（这是缩小窗口卡顿的根因）
-        - 仅更新窗口 chrome（size_grip 位置、圆角 Region）
 
         resize 停止 100ms 后 blocking 解除，_on_resize_finished 触发
         一次完整 relayout 收拢到正确尺寸。
         """
         if self._resize_blocking:
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
-            if hasattr(self, "_size_grip") and not self.isMaximized():
-                g = self._size_grip
-                g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
-            if platform.system() == "Windows" and not self.isMaximized():
-                self._apply_win10_rounded_region()
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
-        if hasattr(self, "_size_grip") and not self.isMaximized():
-            g = self._size_grip
-            g.move(self.width() - g.width() - 2, self.height() - g.height() - 2)
-        if platform.system() == "Windows" and not self.isMaximized():
-            self._apply_win10_rounded_region()
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
