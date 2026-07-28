@@ -964,12 +964,11 @@ class ChatBackend(QObject):
                                     )
                                     self._hot_reload_requested.emit(pname, component)
                             else:
-                                if _is_duplicate(pname, ""):
-                                    continue
-                                logger.info(
-                                    f"[ChatBackend] 插件 [{pname}] (根目录) 跨插件文件变更，请求主线程增量重载..."
+                                # 变更不在已知组件目录中（如 data/ 等非相关目录），跳过不触发重载
+                                logger.debug(
+                                    f"[ChatBackend] 插件 [{pname}] 跨插件文件变更不涉及已知组件，"
+                                    f"跳过重载: {relevant_changes[0][1]}"
                                 )
-                                self._hot_reload_requested.emit(pname, "")
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/lsp/ui）
                         # 多组件批处理：一次 watchfiles batch 中可能同时修改多个组件目录
@@ -994,16 +993,11 @@ class ChatBackend(QObject):
                                 )
                                 self._hot_reload_requested.emit(plugin_name, component)
                         else:
-                            # 没有匹配到任何已知组件（如根目录文件变更）
-                            detail = " (根目录)"
-                            if _is_duplicate(plugin_name, ""):
-                                logger.debug(f"[ChatBackend] 插件 [{plugin_name}]{detail} 文件变更，去重跳过...")
-                                continue
-                            logger.info(
-                                f"[ChatBackend] 插件 [{plugin_name}]{detail} "
-                                f"文件变更 ({len(relevant_changes)} 处)，请求主线程增量重载..."
+                            # 变更不在已知组件目录中（如 data/ 等非相关目录），跳过不触发重载
+                            logger.debug(
+                                f"[ChatBackend] 插件 [{plugin_name}] 文件变更不涉及已知组件，"
+                                f"跳过重载: {relevant_changes[0][1]}"
                             )
-                            self._hot_reload_requested.emit(plugin_name, "")
                     else:
                         # 无法通过路径索引识别：尝试直接从文件系统检测新插件
                         new_names = _try_identify_new_plugins(relevant_changes)
