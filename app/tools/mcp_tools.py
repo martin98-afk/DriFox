@@ -544,6 +544,13 @@ class MCPClientManager:
             # 取消 Task 作为备份（CancelledError 在 async with 内触发 __aexit__）
             if conn._task and not conn._task.done():
                 conn._task.cancel()
+                # 等待 Task 完全退出，确保子进程释放资源（文件锁、端口等）
+                # 避免热重载时旧进程未完全退出 → 新进程初始化失败
+                try:
+                    await asyncio.wait_for(conn._task, timeout=5)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    # 超时或任务已被取消，不阻塞
+                    pass
 
             # 立即清除引用，不等待 Task 完成
             conn.session = None

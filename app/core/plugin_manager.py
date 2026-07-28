@@ -40,7 +40,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from loguru import logger
 
@@ -916,17 +916,59 @@ class PluginManager:
 
         return list(servers.values())
 
+    @staticmethod
+    def _expand_mcp_vars(value: "Any", plugin_root: Path) -> "Any":
+        """递归展开 MCP 配置中的变量占位符。
+
+        ${CLAUDE_PLUGIN_ROOT} → plugin_root
+        ${CLAUDE_PLUGIN_DATA} → plugin_root / "data"
+        """
+        if isinstance(value, str):
+            root_str = plugin_root.as_posix()
+            data_str = (plugin_root / "data").as_posix()
+            # 归一化反斜杠，兼容 Windows 用户手动编辑的路径
+            normalized = value.replace("\\", "/")
+            # 先替换长的（DATA 包含 ROOT 路径前缀），避免 `${CLAUDE_PLUGIN_ROOT}/data` 被部分替换
+            return normalized.replace("${CLAUDE_PLUGIN_DATA}", data_str).replace("${CLAUDE_PLUGIN_ROOT}", root_str)
+        if isinstance(value, dict):
+            return {k: PluginManager._expand_mcp_vars(v, plugin_root) for k, v in value.items()}
+        if isinstance(value, list):
+            return [PluginManager._expand_mcp_vars(v, plugin_root) for v in value]
+        return value
+
+    @staticmethod
+    def _unexpand_mcp_vars(value: "Any", plugin_root: Path) -> "Any":
+        """递归逆展开：将运行时绝对路径还原为变量占位符。
+
+        plugin_root / "data" → ${CLAUDE_PLUGIN_DATA}
+        plugin_root → ${CLAUDE_PLUGIN_ROOT}
+        """
+        if isinstance(value, str):
+            root_str = plugin_root.as_posix()
+            data_str = (plugin_root / "data").as_posix()
+            # 归一化反斜杠，确保 Windows 用户手动编辑的路径也能匹配
+            normalized = value.replace("\\", "/")
+            # 先替换长的（data），再替换短的（root），避免部分匹配
+            result = normalized.replace(data_str, "${CLAUDE_PLUGIN_DATA}")
+            return result.replace(root_str, "${CLAUDE_PLUGIN_ROOT}")
+        if isinstance(value, dict):
+            return {k: PluginManager._unexpand_mcp_vars(v, plugin_root) for k, v in value.items()}
+        if isinstance(value, list):
+            return [PluginManager._unexpand_mcp_vars(v, plugin_root) for v in value]
+        return value
+
     def _build_mcp_entry(self, name: str, cfg: dict, source_file: Path) -> dict:
-        """构建统一格式的 MCP 服务器条目"""
+        """构建统一格式的 MCP 服务器条目（展开 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} 变量）"""
+        plugin_root = source_file.parent
         return {
             "name": name,
             "type": cfg.get("type", "stdio"),
             "enabled": cfg.get("enabled", True),
-            "command": cfg.get("command", ""),
-            "args": cfg.get("args", []),
-            "env": cfg.get("env", {}),
-            "url": cfg.get("url", ""),
-            "headers": cfg.get("headers", {}),
+            "command": PluginManager._expand_mcp_vars(cfg.get("command", ""), plugin_root),
+            "args": PluginManager._expand_mcp_vars(cfg.get("args", []), plugin_root),
+            "env": PluginManager._expand_mcp_vars(cfg.get("env", {}), plugin_root),
+            "url": PluginManager._expand_mcp_vars(cfg.get("url", ""), plugin_root),
+            "headers": PluginManager._expand_mcp_vars(cfg.get("headers", {}), plugin_root),
             "_source": str(source_file),
         }
 
@@ -961,6 +1003,15 @@ class PluginManager:
         if not source_path.exists():
             logger.warning(f"[PluginManager] MCP source file not found: {source_path}")
             return
+
+        # 逆展开：将运行时绝对路径还原为 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA}
+        # 只处理持久化字段，避免污染 _source 等元数据
+        _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers")
+        for key in _MCP_PERSIST_FIELDS:
+            if key in server_data:
+                server_data[key] = PluginManager._unexpand_mcp_vars(
+                    server_data[key], source_path.parent
+                )
 
         try:
             content = json.loads(source_path.read_text(encoding="utf-8"))

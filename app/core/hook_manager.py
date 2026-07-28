@@ -424,13 +424,18 @@ class HookWorker(QRunnable):
 
     @staticmethod
     def _run_command_sync(
-        command: str, cwd: Optional[str] = None, timeout: int = 300, stdin_data: Optional[str] = None
+        command: str,
+        cwd: Optional[str] = None,
+        timeout: int = 300,
+        stdin_data: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> tuple:
         """
         统一的命令同步执行方法（公共提取，避免代码重复）。
         返回 (output, success, exit_code)。
         处理 echo 快捷方式、Windows 编码回退、路径分隔符转换。
         stdin_data: 可选的 stdin 输入（传递给脚本的 JSON 上下文）
+        extra_env: 额外环境变量，合并到当前环境后传递给子进程
         """
         # echo 快捷方式 — 仅对纯单行 echo 有效，无任何命令分隔符
         # 排除换行/&&/||/;/&/| 等，避免截胡多命令（如 echo "msg"\nexit 2）
@@ -468,6 +473,11 @@ class HookWorker(QRunnable):
             "timeout": timeout,
             "creationflags": subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         }
+        # 注入额外环境变量（Claude Code 兼容变量等），合并到当前环境
+        if extra_env:
+            merged = dict(os.environ)
+            merged.update(extra_env)
+            subprocess_kwargs["env"] = merged
         if stdin_data is not None:
             subprocess_kwargs["input"] = stdin_data
         else:
@@ -556,8 +566,14 @@ class HookWorker(QRunnable):
         # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
         effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
         stdin_data = _json.dumps(self.context) if self.context else None
+        # 注入 Claude Code 兼容环境变量（第三方插件依赖）
+        extra_env = HookManager._build_claude_env(self.context)
         output, success, _ = HookWorker._run_command_sync(
-            effective_cmd, self.cwd, self.hook.timeout, stdin_data=stdin_data
+            effective_cmd,
+            self.cwd,
+            self.hook.timeout,
+            stdin_data=stdin_data,
+            extra_env=extra_env,
         )
         return output, success
 
@@ -1494,8 +1510,13 @@ class HookManager:
                 _exit2_skip = False  # exit code 2 跳过标记（Claude Code 兼容）
 
                 if hook.type == HookType.COMMAND.value:
+                    extra_env = HookManager._build_claude_env(context)
                     output, success, exit_code = HookWorker._run_command_sync(
-                        command, cwd, hook.timeout, stdin_data=json.dumps(context)
+                        command,
+                        cwd,
+                        hook.timeout,
+                        stdin_data=json.dumps(context),
+                        extra_env=extra_env,
                     )
                     _exit2_skip = exit_code == 2
 
@@ -1742,6 +1763,36 @@ class HookManager:
         text = re.sub(r"\$(\w+)", lambda m: os.environ.get(m.group(1), ""), text)
 
         return text
+
+    @staticmethod
+    def _build_claude_env(context: Dict[str, Any]) -> Dict[str, str]:
+        """从 hook context 构建 Claude Code 兼容的环境变量
+
+        第三方插件（如 agent-memory）依赖这些环境变量来识别项目、会话和代理身份。
+        """
+        env: Dict[str, str] = {}
+
+        # CLAUDE_PLUGIN_ROOT: 插件根目录（用于查找 src/ 等依赖）
+        skill_root = context.get("skill_root", "")
+        if skill_root:
+            plugin_root = str(Path(skill_root).parent) if Path(skill_root).name == "hooks" else skill_root
+            env["CLAUDE_PLUGIN_ROOT"] = plugin_root
+
+        # CLAUDE_PROJECT: 项目标识，记忆按项目分组
+        project_root = context.get("project_root", "")
+        if project_root:
+            env["CLAUDE_PROJECT"] = os.path.basename(project_root.rstrip("/\\"))
+
+        # CLAUDE_SESSION_ID: 会话标识，记忆按会话粒度检索
+        session_id = context.get("session_id", "")
+        if session_id:
+            env["CLAUDE_SESSION_ID"] = session_id
+
+        # CLAUDE_AGENT_ID: 代理身份标识
+        agent_id = context.get("current_role", "primary")
+        env["CLAUDE_AGENT_ID"] = agent_id
+
+        return env
 
     def get_registered_events(self) -> List[str]:
         """获取所有已注册事件"""
