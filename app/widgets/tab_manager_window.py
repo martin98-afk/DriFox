@@ -172,6 +172,13 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
         self._geo_save_timer.setInterval(200)
+        # ── 窗口拖拽检测：moveEvent 持续触发时视为拖拽中，100ms 无新事件视为结束 ──
+        self._window_dragging_timer = QTimer(self)
+        self._window_dragging_timer.setSingleShot(True)
+        self._window_dragging_timer.setInterval(100)
+        self._window_dragging_timer.timeout.connect(self._on_window_drag_end)
+        # 编程式移动（如 _restore_geometry）期间跳过拖拽检测，避免误触
+        self._suppress_drag_detection: bool = False
         # ── window → index O(1) 映射（替代 _windows.index() O(n) 查找） ──
         self._window_to_index: Dict[int, int] = {}
         # ── 上次图标缩放值，主题切换时用于判断是否需要重绘图标 ──
@@ -1026,18 +1033,23 @@ class TabManagerWindow(QWidget):
                 g = json.loads(geo_str)
                 x = max(screen_rect.x(), min(g["x"], screen_rect.right() - 100))
                 y = max(screen_rect.y(), min(g["y"], screen_rect.bottom() - 50))
+                self._suppress_drag_detection = True
                 self.setGeometry(x, y, g["w"], g["h"])
                 return
         except Exception:
             pass
+        finally:
+            self._suppress_drag_detection = False
 
         # 首次：居中
+        self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
             screen_rect.y() + (screen_rect.height() - h) // 2,
             w,
             h,
         )
+        self._suppress_drag_detection = False
 
     def showEvent(self, event):
         """每次显示时恢复位置（标准系统窗口自带阴影/边框/圆角）"""
@@ -1046,7 +1058,45 @@ class TabManagerWindow(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # ── 窗口拖拽检测：持续 move 视为拖拽中，暂停耗时操作 ──
+        # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
+        if not self._suppress_drag_detection:
+            if not self._window_dragging_timer.isActive():
+                self._on_window_drag_start()
+            self._window_dragging_timer.start()  # 持续重置防抖
         self._save_geometry()
+
+    # ── 窗口拖拽节流 ──
+
+    def _on_window_drag_start(self):
+        """窗口拖拽开始：暂停动画定时器 + 禁用子控件绘制 + 通知各组件进入节流模式
+
+        利用 ToolPopupDialog._any_window_dragging 全局标志（多窗口模式原有），
+        使 Tab 模式下的嵌入窗口（main_widget/bottom_input_area/card_container）
+        跳过耗时的布局重算和高度调整，与多窗口模式享受同等的拖拽性能优化。
+        """
+        from app.tool_popup import ToolPopupDialog
+
+        ToolPopupDialog._any_window_dragging = True
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(True)  # 暂停动画定时器
+            self._tab_panel.setUpdatesEnabled(False)
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(False)
+
+    def _on_window_drag_end(self):
+        """窗口拖拽结束：恢复动画定时器 + 恢复子控件绘制 + 解除节流
+
+        拖拽停止后 100ms 无新 move 事件时触发，与 _on_resize_finished 逻辑对称。
+        """
+        from app.tool_popup import ToolPopupDialog
+
+        ToolPopupDialog._any_window_dragging = False
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(False)  # 如有流式则恢复动画
+            self._tab_panel.setUpdatesEnabled(True)
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(True)
 
     def changeEvent(self, event):
         """标准系统窗口自带最大化/还原处理，无需自定义逻辑"""
