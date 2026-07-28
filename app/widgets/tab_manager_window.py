@@ -244,8 +244,9 @@ class TabManagerWindow(QWidget):
 
         左侧 Tab 面板的右边框线由 splitter handle 区域绘制：
         QSplitter 自己的子控件绘制顺序会吞掉普通 widget 的 border-right，
-        直接给 #tabPanel 设 border 看不到；用 1px handle + BORDER 颜色
-        是最可靠的方案（拖拽热区收到 1px，但 Qt 对窄 handle 也有命中扩展）。
+        直接给 #tabPanel 设 border 看不到；用 4px handle + BORDER 颜色
+        在视觉上约 1px 可见（两侧被 BORDER 着色），保留拖拽热区但视觉
+        上仍接近细边框的观感。
         """
         self.setStyleSheet(f"""
             #tabPanel {{
@@ -322,10 +323,11 @@ class TabManagerWindow(QWidget):
         self._splitter.addWidget(self._chat_frame)
         self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
         self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
-        # handle 宽设为 1 并由 _apply_theme_stylesheet 给它上 BORDER 颜色，
-        # 形成清晰的"左边框线"；QSplitter 自身的子控件绘制顺序会吞掉普通
-        # widget 的 border-right，所以用 handle 区域显示更可靠。
-        self._splitter.setHandleWidth(1)
+        # handle 宽 4px：足够宽的拖拽热区确保交互稳定（Qt 中 1px handle
+        # 配合 QSplitter::handle 样式表在某些版本下命中区域会被覆盖，
+        # 导致拖拽不可靠）；由 _apply_theme_stylesheet 给它上 BORDER 颜色，
+        # 形成清晰的"左边框线"视觉效果。
+        self._splitter.setHandleWidth(4)
         self._splitter.setChildrenCollapsible(False)
         content_layout.addWidget(self._splitter)
         content_widget.setLayout(content_layout)
@@ -1010,6 +1012,12 @@ class TabManagerWindow(QWidget):
         - 解除 blocking，允许布局事件正常传播
         - 恢复 TabPanel 动画、内容区绘制
         - 强制触发一次完整 relayout，收拢到正确尺寸
+
+        ★ 在 _force_relayout 前后保存/恢复 splitter 的 children sizes：
+        blocking 期间用户可能拖拽了 splitter handle 调整了左右面板宽度，
+        而 layout.invalidate() + activate() 会导致 QSplitter 重新按
+        stretch factor 分配空间（左 0 右 1），把左侧面板压到最小宽度。
+        先保存再恢复，确保用户拖拽设定的宽度被保留。
         """
         self._resize_blocking = False
         if hasattr(self, "_tab_panel"):
@@ -1017,10 +1025,38 @@ class TabManagerWindow(QWidget):
             self._tab_panel.setUpdatesEnabled(True)
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(True)
+
+        # ★ 保存 splitter 当前 sizes（含用户拖拽设定），_force_relayout 后恢复
+        _saved_splitter_sizes = None
+        if hasattr(self, "_splitter") and self._splitter.count() > 0:
+            _saved_splitter_sizes = list(self._splitter.sizes())
+
         # 强制完整 relayout：blocking 期间跳过了 super().resizeEvent，
         # 子控件 geometry 与窗口新尺寸已不同步。通过 invalidate + activate
         # 强制 Qt 从顶层布局开始重新计算整棵 widget 树。
         self._force_relayout()
+
+        # ★ 恢复 splitter sizes（阻止 stretch factor 重算覆盖用户拖拽尺寸）
+        if _saved_splitter_sizes is not None and hasattr(self, "_splitter"):
+            try:
+                cur = self._splitter.sizes()
+                # 只在 total width 一致或接近时才恢复（防止窗口尺寸变化后越界）
+                if cur and abs(sum(cur) - sum(_saved_splitter_sizes)) < 20:
+                    self._splitter.setSizes(_saved_splitter_sizes)
+            except Exception:
+                pass
+
+        # ★ 安全守卫：检查左面板宽度是否异常（被压缩到 ≤最小宽度的 80%）
+        if hasattr(self, "_splitter") and self._splitter.count() > 0:
+            try:
+                sizes = self._splitter.sizes()
+                tab_min = self._tab_panel.minimumWidth() if hasattr(self, "_tab_panel") else 120
+                if sizes and sizes[0] < tab_min * 0.8 and _saved_splitter_sizes:
+                    # 左面板被异常压缩，恢复缓存值
+                    self._splitter.setSizes(_saved_splitter_sizes)
+            except Exception:
+                pass
+
         # 触发重绘：relayout 更新了 geometry 但不会自动 paint，
         # 显式 update() 确保两个面板都进入下一次绘制循环。
         if hasattr(self, "_tab_panel"):
