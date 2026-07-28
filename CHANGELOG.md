@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.8] - 2026-07-28
 
-自上一版本以来的变更 | 提交数：89 · 文件变更：71 · +9487/-2341 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：96 · 文件变更：74 · +9111/-2449 | 贡献者：dingma, mading, martin98-afk
 
 > 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
 
@@ -31,12 +31,16 @@ All notable changes to this project will be documented in this file.
 - **代码查看器滚动修复**: 优化 CodeWebViewer 滚动事件处理，防止意外自动滚动
 - **差异视图主题适配**: render_helpers 中差异分隔符颜色跟随主题切换
 - **UI 插件处理增强**: 改进 TabPanel 和 TabManagerWindow 中问题状态指示
+- **ConfigSyncService 全量手动同步修复**: 确保配置文件到内存的全量手动同步，绕过静默加载失败问题
+- **Tab 管理器 Aero Snap 修复**: 在 showEvent 中重新应用 _enable_snap_layout 并清理原生拖拽状态，支持 Windows Aero Snap
+- **ToolPopupDialog Aero Snap 支持**: 添加 nativeEvent 和 WS_THICKFRAME 实现 Windows Aero Snap 窗口吸附
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **异常处理语法统一**: 多处改用元组语法捕获多个异常，提升代码可读性和一致性（涉及 25+ 个文件）
 - **LSP 集成重构**: 优化 CodeWebViewer 的 LSP 集成，提升性能
 - **清理废弃规范**: 移除 Tab 面板渐变玻璃设计规范及相关测试文件
+- **TabManagerWindow 标准窗口重构**: 切换到标准系统窗口以支持原生 Aero Snap，大幅精简代码（-743 行）
 
 ### 📚 文档 (Docs)
 

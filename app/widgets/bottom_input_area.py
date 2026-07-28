@@ -1070,10 +1070,15 @@ class SendableTextEdit(TextEdit):
     def _adjust_height_to_content(self):
         """根据内容自动调整高度
 
-        setFixedHeight + updateGeometry 把尺寸变更交给 Qt 事件循环处理，
-        父卡片、工具栏、发送按钮由 layout 级联 resize / debounce timer
-        自然到位；不在 textChanged 回调里同步冲刷事件，避免超高内容
-        切回原高时阻塞 UI 线程造成的卡顿。_adjusting_height 防重入。
+        setFixedHeight + resize + updateGeometry 三步保证：
+        1. setFixedHeight(new_h) 固定约束（min = max = new_h）
+        2. resize(w, new_h) 立即应用新高度，不等布局 defer → 消除发送超高内容时
+           空输入框滞留高位的"回弹"卡顿感（旧行为只用 setFixedHeight，实际高度要等
+           下一轮布局传递才生效，clear 后输入框短暂悬在 300px 再回落 44px）
+        3. updateGeometry() 通知父布局尺寸变更，级联调整父卡片与工具栏位置
+
+        防重入：_adjusting_height 标识在 resize 全程保持 True，嵌套的 resizeEvent
+        再入 _adjust_height_to_content 时直接返回。
         """
         if getattr(self, "_initializing", False):
             return
@@ -1097,9 +1102,10 @@ class SendableTextEdit(TextEdit):
             self._adjusting_height = True
             try:
                 self.setFixedHeight(new_height)
+                # ⭐ 立即 apply 新高度，不等布局 defer → clear 后输入框不回弹
+                self.resize(self.width(), new_height)
                 self.updateGeometry()
-                # 发送按钮位置由 resizeEvent → debounce timer(0ms) 在
-                # 事件循环下一轮自然定位，不在这里强行同步冲刷。
+                # 发送按钮位置由 resizeEvent → _position_send_button 同步到位
             finally:
                 self._adjusting_height = False
 
