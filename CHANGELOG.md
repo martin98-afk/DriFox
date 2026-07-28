@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - **UI 插件注册增强**: 新增 `system_card` 参数，支持更好的卡片管理
 - **卡片容器智能展开**: showEvent 检测可见卡片时自动展开
 - **Tab 管理器 resize 处理增强**: 优化 resize 事件处理和事件过滤，实现更流畅的 UI 体验
+- **ChatBackend hook_states.json 变更检测**: 新增对 hook_states.json 文件的变更检测支持，提升 Hook 状态管理的实时性和可靠性
 
 ### 🎨 样式改进 (Style)
 
@@ -43,6 +44,8 @@ All notable changes to this project will be documented in this file.
 - Gitee 账户行实现计划与设计规范
 - UI 插件列表实现计划与设计规范
 - Tab 管理器设计规范更新与审查反馈
+
+## [v0.4.7] - 2026-07-25
 
 自上一版本以来的变更 | 提交数：16 · 文件变更：24 · +1543/-608 | 贡献者：dingma, mading
 
