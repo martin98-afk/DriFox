@@ -965,10 +965,25 @@ class ChatBackend(QObject):
                                     self._hot_reload_requested.emit(pname, component)
                             else:
                                 # 变更不在已知组件目录中（如 data/ 等非相关目录），跳过不触发重载
-                                logger.debug(
-                                    f"[ChatBackend] 插件 [{pname}] 跨插件文件变更不涉及已知组件，"
-                                    f"跳过重载: {relevant_changes[0][1]}"
+                                # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
+                                # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
+                                # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
+                                _root_deleted = any(
+                                    ct == 3 and cp.lower() == path
+                                    for path, name in current_prefixes.items()
+                                    if name == pname
+                                    for ct, cp in relevant_changes
                                 )
+                                if _root_deleted:
+                                    logger.info(
+                                        f"[ChatBackend] 插件 [{pname}] 目录已被删除，跨插件变更中触发全组件卸载..."
+                                    )
+                                    self._hot_reload_requested.emit(pname, "")
+                                else:
+                                    logger.debug(
+                                        f"[ChatBackend] 插件 [{pname}] 跨插件文件变更不涉及已知组件，"
+                                        f"跳过重载: {relevant_changes[0][1]}"
+                                    )
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/lsp/ui）
                         # 多组件批处理：一次 watchfiles batch 中可能同时修改多个组件目录
@@ -994,10 +1009,23 @@ class ChatBackend(QObject):
                                 self._hot_reload_requested.emit(plugin_name, component)
                         else:
                             # 变更不在已知组件目录中（如 data/ 等非相关目录），跳过不触发重载
-                            logger.debug(
-                                f"[ChatBackend] 插件 [{plugin_name}] 文件变更不涉及已知组件，"
-                                f"跳过重载: {relevant_changes[0][1]}"
+                            # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
+                            # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
+                            # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
+                            _root_deleted = any(
+                                ct == 3 and cp.lower() == path
+                                for path, name in current_prefixes.items()
+                                if name == plugin_name
+                                for ct, cp in relevant_changes
                             )
+                            if _root_deleted:
+                                logger.info(f"[ChatBackend] 插件 [{plugin_name}] 目录已被删除，触发全组件卸载...")
+                                self._hot_reload_requested.emit(plugin_name, "")
+                            else:
+                                logger.debug(
+                                    f"[ChatBackend] 插件 [{plugin_name}] 文件变更不涉及已知组件，"
+                                    f"跳过重载: {relevant_changes[0][1]}"
+                                )
                     else:
                         # 无法通过路径索引识别：尝试直接从文件系统检测新插件
                         new_names = _try_identify_new_plugins(relevant_changes)

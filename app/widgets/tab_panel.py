@@ -49,7 +49,7 @@ from qfluentwidgets import (
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css, get_unified_font
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 from app.widgets.elided_label import _ElidedLabel
 
@@ -658,15 +658,26 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：新建按钮 ──
+        # ── 顶部：分支 + 新建按钮 ──
         top_bar = QWidget(self)
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(6, 6, 6, 4)
-        self._new_btn = TransparentPushButton(FIF.ADD, "新建标签页", top_bar)
+        top_layout.setSpacing(2)
+
+        self._branch_btn = TransparentPushButton(get_icon("分支"), "分支", top_bar)
+        self._branch_btn.setCursor(Qt.PointingHandCursor)
+        self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._branch_btn.setToolTip("从当前标签页分支")
+        self._branch_btn.clicked.connect(self._on_branch_clicked)
+        top_layout.addWidget(self._branch_btn)
+
+        self._new_btn = TransparentPushButton(FIF.ADD, "新建", top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._new_btn.setToolTip("新建空白标签页")
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
+
         layout.addWidget(top_bar)
 
         # ── 中间：Tab 列表 ──
@@ -706,46 +717,9 @@ class TabPanel(QWidget):
         separator.setStyleSheet(self._SEPARATOR_STYLE)
         layout.addWidget(separator)
 
-        # ── 底部：设置按钮 ──
-        bottom_bar = QWidget(self)
-        bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(6, 4, 6, 6)
-
-        self._settings_btn = TransparentPushButton(FIF.SETTING, "设置", bottom_bar)
-        self._settings_btn.setCursor(Qt.PointingHandCursor)
-        self._settings_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self._settings_btn.clicked.connect(self._on_settings_clicked)
-        bottom_layout.addWidget(self._settings_btn)
-
-        layout.addWidget(bottom_bar)
-
-        account_separator = QFrame(self)
-        account_separator.setFrameShape(QFrame.HLine)
-        account_separator.setStyleSheet(self._SEPARATOR_STYLE)
-        layout.addWidget(account_separator)
-
+        # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
-
-    def _on_settings_clicked(self):
-        """打开设置卡片"""
-        from PyQt5.QtWidgets import QWidget
-
-        # 沿父链向上找 OpenAIChatToolWindow
-        parent = self.parent()
-        while parent is not None:
-            if hasattr(parent, "_toggle_settings_card"):
-                parent._toggle_settings_card()
-                return
-            parent = parent.parent()
-        # 兜底：通过 TabManagerWindow 切换回独立模式
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        tm = TabManagerWindow.get_instance()
-        if tm:
-            current = tm.get_current_window()
-            if current and hasattr(current, "_toggle_settings_card"):
-                current._toggle_settings_card()
 
     def refresh_ui_plugins(self):
         """刷新 Tab 模式顶部的 UI 插件按钮列表
@@ -832,6 +806,11 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(has_system or has_custom)
 
         self._refresh_plugin_style()
+
+    def _on_branch_clicked(self):
+        """分支按钮点击：从当前活动 Tab 分支"""
+        if 0 <= self._active_index < len(self._items):
+            self.tabBranchRequested.emit(self._active_index)
 
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""

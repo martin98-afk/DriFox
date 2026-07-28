@@ -98,6 +98,25 @@ def _show_edge_launcher(window):
             pass
 
 
+def _apply_window_topmost(window):
+    """应用窗口置顶配置（Settings.window_always_on_top）到指定窗口
+
+    用于启动时和模式切换后，确保配置生效。
+    """
+    from app.utils.config import Settings as _Settings
+
+    if _Settings.get_instance().window_always_on_top.value:
+        flags = window.windowFlags()
+        if not (flags & Qt.WindowStaysOnTopHint):
+            flags |= Qt.WindowStaysOnTopHint
+            was_visible = window.isVisible()
+            window.setWindowFlags(flags)
+            if was_visible:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+
+
 def _update_tab_icon(tab_idx: int, project: str):
     """更新指定 Tab 的项目图标
 
@@ -251,6 +270,14 @@ class TabManagerWindow(QWidget):
         self.setStyleSheet(f"""
             #tabPanel {{
                 background: {Colors.CARD_BG.format(alpha=240)};
+                border-radius: 8px;
+            }}
+            #tabFrame {{
+                /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
+                background: {Colors.CARD_BG.format(alpha=240)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
             }}
             #tabManagerWindow {{
                 background: {Colors.CONTENT_BG};
@@ -264,17 +291,18 @@ class TabManagerWindow(QWidget):
                 background: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
-                margin: 4px;
+                margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle */
             }}
             #contentArea {{
                 background: {Colors.CONTENT_BG};
             }}
         """)
-        # splitter handle 区域显示为 BORDER 颜色，形成可视右边框线
+        # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
+        # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
         if getattr(self, "_splitter", None) is not None:
             self._splitter.setStyleSheet(f"""
                 QSplitter::handle:horizontal {{
-                    background: {Colors.BORDER};
+                    background: {Colors.CONTENT_BG};
                 }}
             """)
 
@@ -299,6 +327,17 @@ class TabManagerWindow(QWidget):
         self._tab_panel.setMinimumWidth(120)
         self._tab_panel.setMaximumWidth(400)
 
+        # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
+        # 在 splitter 里直接给 #tabPanel 设 border 会被 splitter handle 子控件
+        # 绘制顺序吞掉，所以再包一层 QFrame 用 objectName 给样式。
+        self._tab_frame = QFrame(content_widget)
+        self._tab_frame.setObjectName("tabFrame")
+        tab_frame_layout = QVBoxLayout(self._tab_frame)
+        # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
+        tab_frame_layout.setContentsMargins(6, 6, 6, 6)
+        tab_frame_layout.setSpacing(0)
+        tab_frame_layout.addWidget(self._tab_panel)
+
         # 右侧内容区
         self._content_area = QStackedWidget(content_widget)
         self._content_area.setObjectName("contentArea")
@@ -319,7 +358,7 @@ class TabManagerWindow(QWidget):
         from PyQt5.QtWidgets import QSplitter
 
         self._splitter = QSplitter(Qt.Horizontal, content_widget)
-        self._splitter.addWidget(self._tab_panel)
+        self._splitter.addWidget(self._tab_frame)
         self._splitter.addWidget(self._chat_frame)
         self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
         self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
@@ -336,7 +375,10 @@ class TabManagerWindow(QWidget):
         # 恢复面板宽度
         saved_w = Settings.get_instance().tab_panel_width.value
         if saved_w:
-            self._splitter.setSizes([saved_w, self.width() - saved_w])
+            # 补偿新增 #tabFrame 的 layout margins(12) + border(2) = 14px，
+            # 保证 panel 的视觉宽度与改造前一致，避免用户配置缩水
+            frame_w = saved_w + 14
+            self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
@@ -841,6 +883,9 @@ class TabManagerWindow(QWidget):
             tab_mgr.activateWindow()
             tab_mgr.raise_()
 
+            # 应用窗口置顶配置
+            _apply_window_topmost(tab_mgr)
+
             logger.info(f"[TabMode] 已启用，迁入 {len(migrated_windows)} 个窗口")
 
         finally:
@@ -899,6 +944,8 @@ class TabManagerWindow(QWidget):
                     # 显示 dialog 并注册到 TrayManager
                     dialog.show()
                     dialog.activateWindow()
+                    # 应用窗口置顶配置
+                    _apply_window_topmost(dialog)
                     tray_manager.register_window(dialog)
 
                     # 恢复 EdgeLauncher
@@ -958,11 +1005,11 @@ class TabManagerWindow(QWidget):
             "h": g.height(),
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
-        # 保存面板宽度
+        # 保存面板宽度（去除新增 #tabFrame 的 layout margins + border 14px）
         if hasattr(self, "_splitter"):
             sizes = self._splitter.sizes()
             if sizes:
-                Settings.get_instance().tab_panel_width.value = sizes[0]
+                Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
 
     def _restore_geometry(self):
         """恢复窗口位置（屏幕居中），确保不超出屏幕"""

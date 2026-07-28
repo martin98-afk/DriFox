@@ -10,7 +10,7 @@ import hashlib
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRectF, QTimer
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
@@ -42,7 +42,7 @@ def _color_for_name(name: str) -> str:
     return _AVATAR_COLORS[idx]
 
 
-def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
+def _make_avatar_pixmap(text: str, size: int = 28) -> QPixmap:
     """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
     dpr = QApplication.instance().devicePixelRatio()
     physical_size = max(1, int(round(size * dpr)))
@@ -77,7 +77,7 @@ class _AvatarCircleWidget(QWidget):
         super().__init__(parent)
         self._text = text[0].upper() if text else "?"
         self._bg_color = QColor(_color_for_name(text))
-        self._size = 32
+        self._size = 28
         self.setFixedSize(self._size, self._size)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -229,7 +229,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
         private_hint.setStyleSheet(hint_style)
         layout.addWidget(private_hint)
 
-        self.widget.setFixedSize(400, 320)
+        self.widget.setFixedSize(400, 280)
         self._center()
 
     def _choose(self, is_private: bool):
@@ -273,7 +273,7 @@ class GiteeAccountRow(QFrame):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 5, 8, 7)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
 
         avatar_size = scale_font_size(28)
@@ -291,15 +291,22 @@ class GiteeAccountRow(QFrame):
         text_container.addWidget(self._repo_label)
         layout.addLayout(text_container, 1)
 
-        # ── 竖向三点装饰（视觉提示，无独立按钮区） ──
-        self._more_btn = QPushButton("⋮", self)
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
-        self._more_btn.setCursor(Qt.PointingHandCursor)
-        self._more_btn.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self._more_btn)
+        # ── 设置按钮（齿轮图标，点击打开完整设置卡片） ──
+        from qfluentwidgets import FluentIcon as _FIF
+        from qfluentwidgets import TransparentToolButton as _TransparentToolButton
 
-        # 整块区域点击都触发弹出（头像/标签/按钮统一指向 popup）
+        self._settings_btn = _TransparentToolButton(self)
+        self._settings_btn.setIcon(_FIF.SETTING)
+        btn_size = scale_font_size(24)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+        self._settings_btn.setToolTip("设置")
+        self._settings_btn.setCursor(Qt.PointingHandCursor)
+        self._settings_btn.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(self._settings_btn)
+
+        # 整块区域点击触发 Gitee 管理弹窗（头像/名称/仓库）
+        # 设置按钮独立触发完整设置卡片
         self.setCursor(Qt.PointingHandCursor)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._name_label.setCursor(Qt.PointingHandCursor)
@@ -307,7 +314,7 @@ class GiteeAccountRow(QFrame):
         self._avatar.clicked.connect(self._toggle_popup)
         self._name_label.clicked.connect(self._toggle_popup)
         self._repo_label.clicked.connect(self._toggle_popup)
-        self._more_btn.clicked.connect(self._toggle_popup)
+        self._settings_btn.clicked.connect(self._toggle_settings_card)
         self.oauthResult.connect(self._on_oauth_result)
         self._popup: "_GiteeMorePopup" | None = None
 
@@ -347,7 +354,7 @@ class GiteeAccountRow(QFrame):
             self._repo_label.setToolTip("绑定后可备份与分享")
 
         # 更新整行可点状态
-        self._more_btn.setEnabled(not self._binding)
+        self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
 
     def _apply_style(self):
@@ -364,23 +371,14 @@ class GiteeAccountRow(QFrame):
         self._repo_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
-        self._more_btn.setStyleSheet(f"""
-            QPushButton {{
-                color: {Colors.TEXT_MUTED};
+        btn_size = scale_font_size(24)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+        self._settings_btn.setStyleSheet("""
+            TransparentToolButton {
                 background: transparent;
                 border: none;
-                {font_size_css(14)}
-                font-weight: bold;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                color: {Colors.TEXT_SECONDARY};
-            }}
-            QPushButton:disabled {{
-                color: {Colors.TEXT_MUTED};
-            }}
+            }
         """)
 
     def _open_repository(self):
@@ -505,8 +503,9 @@ class GiteeAccountRow(QFrame):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
         self._avatar.set_size(avatar_size)
-        btn_size = scale_font_size(22)
-        self._more_btn.setFixedSize(btn_size, btn_size)
+        btn_size = scale_font_size(24)
+        self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
         self._refresh_ui()
 
     def close_popup(self):
@@ -534,8 +533,8 @@ class GiteeAccountRow(QFrame):
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()
 
-        # 定位：在 ⋮ 按钮上方弹出，与窗口左边缘对齐，确保不超出窗口
-        btn_global = self._more_btn.mapToGlobal(QPoint(0, 0))
+        # 定位：在当前行上方弹出，与窗口左边缘对齐，确保不超出窗口
+        row_global = self.mapToGlobal(QPoint(0, 0))
         window = self.window()
         if window:
             win_rect = window.frameGeometry()
@@ -549,11 +548,11 @@ class GiteeAccountRow(QFrame):
         if x < win_rect.left() + 4:
             x = win_rect.left() + 4
 
-        # Y：在按钮上方弹出，不超出窗口上下边界
-        y = btn_global.y() - popup_height - 6
+        # Y：在当前行上方弹出，不超出窗口上下边界
+        y = row_global.y() - popup_height - 6
         if y < win_rect.top() + 4:
             # 空间不够则向下弹出
-            y = btn_global.y() + self._more_btn.height() + 6
+            y = row_global.y() + self.height() + 6
             # 向下弹出也超出底部时，对齐窗口底部
             if y + popup_height > win_rect.bottom() - 4:
                 y = win_rect.bottom() - 4 - popup_height
@@ -564,6 +563,24 @@ class GiteeAccountRow(QFrame):
         popup.move(x, y)
         popup.show()
         self._popup = popup
+
+    def _toggle_settings_card(self):
+        """打开完整设置卡片"""
+        # 沿父链向上找 OpenAIChatToolWindow._toggle_settings_card
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "_toggle_settings_card"):
+                parent._toggle_settings_card()
+                return
+            parent = parent.parent()
+        # 兜底：通过 TabManagerWindow 获取当前窗口
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm:
+            current = tm.get_current_window()
+            if current and hasattr(current, "_toggle_settings_card"):
+                current._toggle_settings_card()
 
     def _on_popup_closed(self):
         """浮动卡片关闭后的清理"""
@@ -652,7 +669,7 @@ class _GiteeMorePopup(QWidget):
         # ── 绑定/解绑按钮 ──
         self._popup_action_btn = QPushButton("", self._container)
         self._popup_action_btn.setCursor(Qt.PointingHandCursor)
-        self._popup_action_btn.setFixedHeight(32)
+        self._popup_action_btn.setFixedHeight(28)
         self._popup_action_btn.clicked.connect(self._on_action_clicked)
         layout.addWidget(self._popup_action_btn, 0, Qt.AlignCenter)
 
@@ -706,6 +723,14 @@ class _GiteeMorePopup(QWidget):
             self._on_tab_toggled,
         )
         layout.addWidget(self._tab_row)
+
+        # ── 窗口置顶开关 ──
+        self._topmost_row = self._make_switch_row(
+            "📌  窗口置顶",
+            self._cfg.window_always_on_top.value,
+            self._on_topmost_toggled,
+        )
+        layout.addWidget(self._topmost_row)
 
         layout.addSpacing(6)
 
@@ -815,7 +840,11 @@ class _GiteeMorePopup(QWidget):
             self._account_row._on_unbind()
         else:
             self._account_row._on_bind()
-        self.close()
+        # 延迟关闭：_on_unbind/_on_bind 中的模态对话框可能已导致
+        # Qt 自动关闭 Qt.Popup 并触发 WA_DeleteOnClose 销毁 C++ 对象，
+        # 同步调用 self.close() 会触发 RuntimeError。
+        # 参考 _on_tab_toggled 中的相同处理模式。
+        QTimer.singleShot(0, self.close)
 
     # ── 快捷设置回调 ──
 
@@ -848,6 +877,33 @@ class _GiteeMorePopup(QWidget):
         from app.widgets.tab_manager_window import TabManagerWindow
 
         TabManagerWindow.toggle_mode(enable=self._cfg.enable_tab_manager.value)
+
+    def _on_topmost_toggled(self, checked: bool):
+        """窗口置顶开关切换
+
+        注意：self.window() 返回的是 popup 自身（Qt.Popup 自带 Window 标志），
+        必须通过 _account_row 的父链才能获取真正的应用顶层窗口（TabManagerWindow / OpenAIChatToolWindow）
+        """
+        self._cfg.window_always_on_top.value = checked
+        self._cfg.save()
+
+        window = self._account_row.window() if self._account_row else None
+        if not window:
+            return
+
+        flags = window.windowFlags()
+        if checked:
+            flags |= Qt.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+
+        # setWindowFlags 内部会 hide()，双 show() 确保恢复可见并正确生效
+        was_visible = window.isVisible()
+        window.setWindowFlags(flags)
+        if was_visible:
+            window.show()
+            window.raise_()
+            window.activateWindow()
 
     # ── 绘制圆角背景 ──
 
@@ -903,7 +959,7 @@ class GiteeCard(SettingCard):
         self._refresh_ui()
 
     def _setup_right(self):
-        avatar_size = scale_font_size(32)
+        avatar_size = scale_font_size(28)
         self._avatar = _AvatarCircleWidget("?", self)
         self._avatar.set_size(avatar_size)
         self._avatar.clicked.connect(self._on_avatar_clicked)
@@ -960,7 +1016,7 @@ class GiteeCard(SettingCard):
         is_bound = self.cfg.gitee_bound.value
         owner = self.cfg.gitee_user_owner.value
         repo = self.cfg.gitee_user_repo.value
-        avatar_size = scale_font_size(32)
+        avatar_size = scale_font_size(28)
 
         if is_bound and owner:
             self._bound_owner = owner

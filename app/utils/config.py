@@ -495,6 +495,7 @@ class Settings(QConfig):
     tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 250, RangeValidator(120, 500))
     tab_panel_collapsed = ConfigItem("UI", "TabPanelCollapsed", False, BoolValidator())
     tab_manager_geometry = ConfigItem("UI", "TabManagerGeometry", "")
+    window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
 
 
 def update_theme_options():
