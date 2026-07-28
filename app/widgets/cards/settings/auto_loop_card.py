@@ -1,10 +1,11 @@
-  # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 AutoLoop 卡片组件 — 配置卡 + 运行卡
 
 - AutoLoopConfigCard: 配置参数 + 任务输入 + 开始按钮（竖排布局，插入到聊天区）
 - AutoLoopRunningCard: 运行状态显示 + 停止按钮（彩虹渐变边框动画）
 """
+
 import time
 
 from PyQt5.QtCore import (
@@ -55,6 +56,7 @@ FONT_CSS = get_font_family_css()
 # ============================================================
 #  AutoLoop 配置卡
 # ============================================================
+
 
 class AutoLoopConfigCard(QFrame):
     """AutoLoop 配置卡片 — 插入到聊天区的竖排布局"""
@@ -126,6 +128,7 @@ class AutoLoopConfigCard(QFrame):
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         self.setStyleSheet(f"""
             #autoLoopConfigCard {{
@@ -287,8 +290,10 @@ class AutoLoopConfigCard(QFrame):
     def _browse_folder(self):
         """打开文件夹选择对话框"""
         from PyQt5.QtWidgets import QFileDialog
+
         folder = QFileDialog.getExistingDirectory(
-            self, "选择项目文件夹",
+            self,
+            "选择项目文件夹",
             self._path_edit.text().strip() or "",
         )
         if folder:
@@ -331,10 +336,10 @@ class AutoLoopConfigCard(QFrame):
         self.closed.emit()
 
 
-
 # ============================================================
 #  AutoLoop 运行卡（彩虹边框动画）
 # ============================================================
+
 
 class AutoLoopRunningCard(QFrame):
     """AutoLoop 运行状态卡 — 彩虹渐变边框 + 进度 + 停止按钮"""
@@ -383,6 +388,7 @@ class AutoLoopRunningCard(QFrame):
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         self.setStyleSheet(f"""
             #autoLoopRunningCard {{
@@ -408,11 +414,17 @@ class AutoLoopRunningCard(QFrame):
         # 状态卡片背景
         self._status_widget.setStyleSheet(f"background: {Colors.TOOLBAR_BG}; border-radius: 6px;")
         # 信息标签
-        self._time_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
-        self._token_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._time_label.setStyleSheet(
+            f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
+        self._token_label.setStyleSheet(
+            f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
         self._status_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} {FONT_CSS}")
         self._step_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; {font_size_css(13)} {FONT_CSS}")
-        self._phase_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._phase_label.setStyleSheet(
+            f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
         self._token_percent_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; {font_size_css(12)} {FONT_CSS}")
         # 日志标签
         self._log_label.setStyleSheet(f"""
@@ -445,8 +457,9 @@ class AutoLoopRunningCard(QFrame):
         # ---- 标题行 ----
         title_bar = QHBoxLayout()
         title_bar.setSpacing(8)
-        icon_label = QLabel("🤖")
-        icon_label.setStyleSheet(font_size_css(18))
+        icon_label = QLabel()
+        icon_label.setPixmap(get_icon("设置-subagent").pixmap(20, 20))
+        icon_label.setFixedSize(20, 20)
         title_bar.addWidget(icon_label)
         Colors.refresh()
         title = QLabel("AutoLoop 运行中")
@@ -524,7 +537,9 @@ class AutoLoopRunningCard(QFrame):
         time_layout.addWidget(QLabel("⏱"))
         self._time_label = QLabel("0秒")
         Colors.refresh()
-        self._time_label.setStyleSheet(f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._time_label.setStyleSheet(
+            f"color: {Colors.STATUS_INFO}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
         time_layout.addWidget(self._time_label)
         row1.addWidget(time_w)
 
@@ -536,7 +551,9 @@ class AutoLoopRunningCard(QFrame):
         token_layout.addWidget(QLabel("🔢"))
         self._token_label = QLabel("0 / 500K")
         Colors.refresh()
-        self._token_label.setStyleSheet(f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._token_label.setStyleSheet(
+            f"color: {Colors.REALTIME_SUCCESS}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
         token_layout.addWidget(self._token_label)
         self._token_progress = QProgressBar()
         self._token_progress.setRange(0, 100)
@@ -588,7 +605,9 @@ class AutoLoopRunningCard(QFrame):
         phase_layout.addWidget(QLabel("🎯"))
         self._phase_label = QLabel("待开始")
         Colors.refresh()
-        self._phase_label.setStyleSheet(f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}")
+        self._phase_label.setStyleSheet(
+            f"color: {Colors.SEND_BTN_START}; font-weight: bold; {font_size_css(13)} {FONT_CSS}"
+        )
         phase_layout.addWidget(self._phase_label)
         row2.addWidget(phase_w)
 
@@ -635,6 +654,7 @@ class AutoLoopRunningCard(QFrame):
         is_light = False
         try:
             from app.utils.theme_manager import theme_manager
+
             is_light = theme_manager.is_light_theme()
         except Exception:
             pass
@@ -750,7 +770,7 @@ class AutoLoopRunningCard(QFrame):
 
     def update_progress_no_token(self, progress: dict):
         """更新进度显示（不更新 token，避免与 update_tokens() 竞争）
-        
+
         注意：token 更新由 update_tokens() 专门处理，避免竞争条件导致显示被覆盖。
         这个方法只更新迭代、时间、状态。
         """
@@ -853,6 +873,7 @@ class AutoLoopRunningCard(QFrame):
 #  AutoLoop 全屏运行页面（QStackedWidget 中的 Page 1）
 # ============================================================
 
+
 class AutoLoopFullPage(QFrame):
     """AutoLoop 全屏运行页面 — 撑满 chat 区域，替换消息列表+输入框
 
@@ -881,6 +902,7 @@ class AutoLoopFullPage(QFrame):
     def _refresh_theme_style(self):
         """刷新主题色"""
         from app.utils.design_tokens import Colors
+
         Colors.refresh()
         self.setStyleSheet(f"""
             #autoLoopFullPage {{
@@ -901,8 +923,9 @@ class AutoLoopFullPage(QFrame):
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
 
-        icon_label = QLabel("🤖")
-        icon_label.setStyleSheet(font_size_css(20))
+        icon_label = QLabel()
+        icon_label.setPixmap(get_icon("设置-subagent").pixmap(24, 24))
+        icon_label.setFixedSize(24, 24)
         top_bar.addWidget(icon_label)
 
         title = StrongBodyLabel("AutoLoop 运行中")
@@ -1113,7 +1136,7 @@ class AutoLoopFullPage(QFrame):
 
     def stop(self):
         """停止计时器"""
-        if hasattr(self, '_timer') and self._timer:
+        if hasattr(self, "_timer") and self._timer:
             self._timer.stop()
 
     def _update_elapsed(self):

@@ -273,7 +273,7 @@ class GiteeAccountRow(QFrame):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 5, 8, 7)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
 
         avatar_size = scale_font_size(28)
