@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.8] - 2026-07-28
 
-自上一版本以来的变更 | 提交数：102 · 文件变更：250 · +16047/-9196 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：110 · 文件变更：265 · +16935/-9384 | 贡献者：dingma, mading, martin98-afk
 
 > 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
 
@@ -20,10 +20,17 @@ All notable changes to this project will be documented in this file.
 - **卡片容器智能展开**: showEvent 检测可见卡片时自动展开
 - **Tab 管理器 resize 处理增强**: 优化 resize 事件处理和事件过滤，实现更流畅的 UI 体验
 - **ChatBackend hook_states.json 变更检测**: 新增对 hook_states.json 文件的变更检测支持，提升 Hook 状态管理的实时性和可靠性
+- **Gitee 账户行设置入口改进**: GiteeAccountRow 使用设置按钮替换更多按钮，提供更直观的设置访问入口
+- **Gitee 弹出窗口置顶切换**: GiteeMorePopup 添加窗口置顶开关功能，提升多窗口场景使用便捷性
+- **Tab 管理器窗口置顶功能**: TabManagerWindow 实现窗口置顶功能（基于配置开关），方便用户固定管理窗口
 
 ### 🎨 样式改进 (Style)
 
 - **文件树字体样式统一**: 更新文件树字体大小和样式，提升 UI 一致性
+- **GiteeAccountRow 布局间距优化**: 调整 Gitee 账户行布局边距，改善视觉一致性和间距一致性
+- **GiteeCard 控件尺寸调整**: 优化头像和按钮尺寸，提升 UI 一致性
+- **GiteeAccountRow 设置按钮改进**: 调整设置按钮大小和图标样式，优化交互体验
+- **Tab 管理器标签区域视觉增强**: 为标签区域添加圆角边框和统一边距，提升细节质感
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -36,6 +43,7 @@ All notable changes to this project will be documented in this file.
 - **ToolPopupDialog Aero Snap 支持**: 添加 nativeEvent 和 WS_THICKFRAME 实现 Windows Aero Snap 窗口吸附
 - **ChatBackend 热重载修复**: 跳过未知组件目录外的插件变更，避免无效热重载
 - **输入框高度抖动修复**: 调整底部输入框高度计算，添加 resize 消除回弹
+- **ChatBackend 插件根目录删除卸载修复**: 修复插件根目录被删除时无法触发完整组件卸载的问题，提升插件生命周期管理可靠性
 
 ### ♻️ 代码重构 (Refactoring)
 
@@ -43,6 +51,10 @@ All notable changes to this project will be documented in this file.
 - **LSP 集成重构**: 优化 CodeWebViewer 的 LSP 集成，提升性能
 - **清理废弃规范**: 移除 Tab 面板渐变玻璃设计规范及相关测试文件
 - **TabManagerWindow 标准窗口重构**: 切换到标准系统窗口以支持原生 Aero Snap，大幅精简代码（-743 行）
+
+### ⚡ 性能优化 (Performance)
+
+- **快照与保存性能优化**: O-01 token 单次扫描累加计算 + O-04 _content_hash_cache 线程安全改进，减少重复计算提升响应速度
 
 ### 📚 文档 (Docs)
 
