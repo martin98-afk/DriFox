@@ -42,7 +42,7 @@ def _color_for_name(name: str) -> str:
     return _AVATAR_COLORS[idx]
 
 
-def _make_avatar_pixmap(text: str, size: int = 32) -> QPixmap:
+def _make_avatar_pixmap(text: str, size: int = 28) -> QPixmap:
     """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
     dpr = QApplication.instance().devicePixelRatio()
     physical_size = max(1, int(round(size * dpr)))
@@ -77,7 +77,7 @@ class _AvatarCircleWidget(QWidget):
         super().__init__(parent)
         self._text = text[0].upper() if text else "?"
         self._bg_color = QColor(_color_for_name(text))
-        self._size = 32
+        self._size = 28
         self.setFixedSize(self._size, self._size)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -229,7 +229,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
         private_hint.setStyleSheet(hint_style)
         layout.addWidget(private_hint)
 
-        self.widget.setFixedSize(400, 320)
+        self.widget.setFixedSize(400, 280)
         self._center()
 
     def _choose(self, is_private: bool):
@@ -669,7 +669,7 @@ class _GiteeMorePopup(QWidget):
         # ── 绑定/解绑按钮 ──
         self._popup_action_btn = QPushButton("", self._container)
         self._popup_action_btn.setCursor(Qt.PointingHandCursor)
-        self._popup_action_btn.setFixedHeight(32)
+        self._popup_action_btn.setFixedHeight(28)
         self._popup_action_btn.clicked.connect(self._on_action_clicked)
         layout.addWidget(self._popup_action_btn, 0, Qt.AlignCenter)
 
@@ -959,7 +959,7 @@ class GiteeCard(SettingCard):
         self._refresh_ui()
 
     def _setup_right(self):
-        avatar_size = scale_font_size(32)
+        avatar_size = scale_font_size(28)
         self._avatar = _AvatarCircleWidget("?", self)
         self._avatar.set_size(avatar_size)
         self._avatar.clicked.connect(self._on_avatar_clicked)
@@ -1016,7 +1016,7 @@ class GiteeCard(SettingCard):
         is_bound = self.cfg.gitee_bound.value
         owner = self.cfg.gitee_user_owner.value
         repo = self.cfg.gitee_user_repo.value
-        avatar_size = scale_font_size(32)
+        avatar_size = scale_font_size(28)
 
         if is_bound and owner:
             self._bound_owner = owner
