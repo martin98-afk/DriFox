@@ -10,7 +10,7 @@ import hashlib
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRectF, QTimer
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
 from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
@@ -297,8 +297,9 @@ class GiteeAccountRow(QFrame):
 
         self._settings_btn = _TransparentToolButton(self)
         self._settings_btn.setIcon(_FIF.SETTING)
-        btn_size = scale_font_size(32)
+        btn_size = scale_font_size(24)
         self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
         self._settings_btn.setToolTip("设置")
         self._settings_btn.setCursor(Qt.PointingHandCursor)
         self._settings_btn.setFocusPolicy(Qt.NoFocus)
@@ -370,8 +371,9 @@ class GiteeAccountRow(QFrame):
         self._repo_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(10)};"
         )
-        btn_size = scale_font_size(32)
+        btn_size = scale_font_size(24)
         self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
         self._settings_btn.setStyleSheet("""
             TransparentToolButton {
                 background: transparent;
@@ -501,8 +503,9 @@ class GiteeAccountRow(QFrame):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
         self._avatar.set_size(avatar_size)
-        btn_size = scale_font_size(32)
+        btn_size = scale_font_size(24)
         self._settings_btn.setFixedSize(btn_size, btn_size)
+        self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
         self._refresh_ui()
 
     def close_popup(self):
