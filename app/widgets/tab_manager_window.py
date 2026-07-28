@@ -1088,6 +1088,10 @@ class TabManagerWindow(QWidget):
         """窗口拖拽结束：恢复动画定时器 + 恢复子控件绘制 + 解除节流
 
         拖拽停止后 100ms 无新 move 事件时触发，与 _on_resize_finished 逻辑对称。
+
+        Phase 1（同步）：解除 dragging 标志、恢复 tab 面板绘制（轻量）。
+        Phase 2（异步）：启用内容区绘制 → 延迟到下一事件循环迭代，
+        避免积压的大量 paint events 一次性阻塞 UI 主线程。
         """
         from app.tool_popup import ToolPopupDialog
 
@@ -1095,6 +1099,28 @@ class TabManagerWindow(QWidget):
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)  # 如有流式则恢复动画
             self._tab_panel.setUpdatesEnabled(True)
+        # 内容区包含 QStackedWidget + 嵌入的 OpenAIChatToolWindow
+        # （含大量 MessageCard），延迟启用绘制避免主线程阻塞
+        # ★ 延迟启用 + 拖拽恢复守卫：
+        # QTimer.singleShot(0) 的异步回调与下一帧 moveEvent 存在竞态：
+        # 拖拽暂停 → _window_dragging_timer 超时 → _on_window_drag_end
+        # → 调度 singleShot(0) → 用户恢复拖拽 → moveEvent 重设 _window_dragging_timer
+        # → singleShot(0) 执行 → setUpdatesEnabled(True) 覆盖了 moveEvent 刚设置的 False
+        # → 后续 moveEvent 在 updates 启用下运行 → 内容区在每个 moveEvent 尝试重绘 → 卡顿。
+        # 守卫：延迟执行时检查 timer 是否已被 moveEvent 重新激活
+        if hasattr(self, "_content_area"):
+            QTimer.singleShot(0, self._deferred_enable_content_after_drag)
+
+    def _deferred_enable_content_after_drag(self):
+        """延迟启用内容区绘制 — 带拖拽恢复守卫
+
+        在 _on_window_drag_end 调度后下一个事件循环迭代执行。
+        如果在此期间 moveEvent 已恢复拖拽（_window_dragging_timer 被重启），
+        则跳过启用，让 moveEvent 中的 _on_window_drag_start 保持 updates 禁用。
+        """
+        # 拖拽已恢复：_window_dragging_timer 被 moveEvent 重新激活
+        if self._window_dragging_timer.isActive():
+            return
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(True)
 
@@ -1107,55 +1133,72 @@ class TabManagerWindow(QWidget):
 
         防抖：连续 resize 事件后 100ms 无新事件时触发：
         - 解除 blocking，允许布局事件正常传播
-        - 恢复 TabPanel 动画、内容区绘制
-        - 强制触发一次完整 relayout，收拢到正确尺寸
+        - 恢复 TabPanel 动画
+        - 将全量布局重算延迟到下一事件循环迭代，**不阻塞 UI 主线程**
 
-        ★ 在 _force_relayout 前后保存/恢复 splitter 的 children sizes：
-        blocking 期间用户可能拖拽了 splitter handle 调整了左右面板宽度，
-        而 layout.invalidate() + activate() 会导致 QSplitter 重新按
-        stretch factor 分配空间（左 0 右 1），把左侧面板压到最小宽度。
-        先保存再恢复，确保用户拖拽设定的宽度被保留。
+        ★ blocking 期间用户可能拖拽了 splitter handle 调整了左右面板宽度，
+        需先保存 splitter sizes，延迟恢复时重新应用。
         """
         self._resize_blocking = False
+        # Phase 1（同步）：恢复标志/动画，保存 splitter sizes（轻量）
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)
-            self._tab_panel.setUpdatesEnabled(True)
-        if hasattr(self, "_content_area"):
-            self._content_area.setUpdatesEnabled(True)
-
-        # ★ 保存 splitter 当前 sizes（含用户拖拽设定），_force_relayout 后恢复
+            # 保持 updates 禁用，等 deferred 阶段与 relayout 一起恢复，
+            # 避免旧 geometry 被 paint 出一帧视觉闪烁
         _saved_splitter_sizes = None
         if hasattr(self, "_splitter") and self._splitter.count() > 0:
             _saved_splitter_sizes = list(self._splitter.sizes())
+
+        # Phase 2（异步）：启用绘制 + 全量 relayout → 延迟到下一事件循环迭代
+        QTimer.singleShot(0, lambda: self._deferred_resize_complete(_saved_splitter_sizes))
+
+    def _deferred_resize_complete(self, saved_splitter_sizes):
+        """延迟执行的全量布局恢复 — 不阻塞 UI 主线程
+
+        在 _on_resize_finished 的同步阶段之后，于下一事件循环迭代执行：
+        - 启用子控件绘制（setUpdatesEnabled=True）
+        - 强制完整 relayout（layout.invalidate + activate）
+        - 恢复用户拖拽设定的 splitter 面板宽度
+        - 触发重绘
+
+        ★ 守卫：如果新的 resize 循环已在 deferred 前启动（_resize_blocking 为 True），
+        则跳过本次 deferred 执行，避免干扰新 resize 循环的 blocking 机制。
+        """
+        if self._resize_blocking:
+            # 新的 resize 循环已开始，放弃本次延迟恢复
+            return
+        # 启用子控件绘制
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.setUpdatesEnabled(True)
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(True)
 
         # 强制完整 relayout：blocking 期间跳过了 super().resizeEvent，
         # 子控件 geometry 与窗口新尺寸已不同步。通过 invalidate + activate
         # 强制 Qt 从顶层布局开始重新计算整棵 widget 树。
         self._force_relayout()
 
-        # ★ 恢复 splitter sizes（阻止 stretch factor 重算覆盖用户拖拽尺寸）
-        if _saved_splitter_sizes is not None and hasattr(self, "_splitter"):
+        # 恢复 splitter sizes（阻止 stretch factor 重算覆盖用户拖拽尺寸）
+        if saved_splitter_sizes is not None and hasattr(self, "_splitter"):
             try:
                 cur = self._splitter.sizes()
                 # 只在 total width 一致或接近时才恢复（防止窗口尺寸变化后越界）
-                if cur and abs(sum(cur) - sum(_saved_splitter_sizes)) < 20:
-                    self._splitter.setSizes(_saved_splitter_sizes)
+                if cur and abs(sum(cur) - sum(saved_splitter_sizes)) < 20:
+                    self._splitter.setSizes(saved_splitter_sizes)
             except Exception:
                 pass
 
-        # ★ 安全守卫：检查左面板宽度是否异常（被压缩到 ≤最小宽度的 80%）
+        # 安全守卫：检查左面板宽度是否异常（被压缩到 ≤最小宽度的 80%）
         if hasattr(self, "_splitter") and self._splitter.count() > 0:
             try:
                 sizes = self._splitter.sizes()
                 tab_min = self._tab_panel.minimumWidth() if hasattr(self, "_tab_panel") else 120
-                if sizes and sizes[0] < tab_min * 0.8 and _saved_splitter_sizes:
-                    # 左面板被异常压缩，恢复缓存值
-                    self._splitter.setSizes(_saved_splitter_sizes)
+                if sizes and sizes[0] < tab_min * 0.8 and saved_splitter_sizes:
+                    self._splitter.setSizes(saved_splitter_sizes)
             except Exception:
                 pass
 
-        # 触发重绘：relayout 更新了 geometry 但不会自动 paint，
-        # 显式 update() 确保两个面板都进入下一次绘制循环。
+        # 触发重绘：relayout 更新了 geometry 但不会自动 paint
         if hasattr(self, "_tab_panel"):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
