@@ -707,6 +707,14 @@ class _GiteeMorePopup(QWidget):
         )
         layout.addWidget(self._tab_row)
 
+        # ── 窗口置顶开关 ──
+        self._topmost_row = self._make_switch_row(
+            "📌  窗口置顶",
+            self._cfg.window_always_on_top.value,
+            self._on_topmost_toggled,
+        )
+        layout.addWidget(self._topmost_row)
+
         layout.addSpacing(6)
 
         # 容器样式
@@ -815,7 +823,11 @@ class _GiteeMorePopup(QWidget):
             self._account_row._on_unbind()
         else:
             self._account_row._on_bind()
-        self.close()
+        # 延迟关闭：_on_unbind/_on_bind 中的模态对话框可能已导致
+        # Qt 自动关闭 Qt.Popup 并触发 WA_DeleteOnClose 销毁 C++ 对象，
+        # 同步调用 self.close() 会触发 RuntimeError。
+        # 参考 _on_tab_toggled 中的相同处理模式。
+        QTimer.singleShot(0, self.close)
 
     # ── 快捷设置回调 ──
 
@@ -848,6 +860,33 @@ class _GiteeMorePopup(QWidget):
         from app.widgets.tab_manager_window import TabManagerWindow
 
         TabManagerWindow.toggle_mode(enable=self._cfg.enable_tab_manager.value)
+
+    def _on_topmost_toggled(self, checked: bool):
+        """窗口置顶开关切换
+
+        注意：self.window() 返回的是 popup 自身（Qt.Popup 自带 Window 标志），
+        必须通过 _account_row 的父链才能获取真正的应用顶层窗口（TabManagerWindow / OpenAIChatToolWindow）
+        """
+        self._cfg.window_always_on_top.value = checked
+        self._cfg.save()
+
+        window = self._account_row.window() if self._account_row else None
+        if not window:
+            return
+
+        flags = window.windowFlags()
+        if checked:
+            flags |= Qt.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+
+        # setWindowFlags 内部会 hide()，双 show() 确保恢复可见并正确生效
+        was_visible = window.isVisible()
+        window.setWindowFlags(flags)
+        if was_visible:
+            window.show()
+            window.raise_()
+            window.activateWindow()
 
     # ── 绘制圆角背景 ──
 
