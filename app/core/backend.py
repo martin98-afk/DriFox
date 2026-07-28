@@ -926,7 +926,7 @@ class ChatBackend(QObject):
                         # 这些是 hook 持久化的数据文件，不是插件源码，修改它们不需要触发插件热更新
                         if "user-custom" in p:
                             pname = change_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-                            if pname in ("hooks_overrides.json", "hooks.json"):
+                            if pname in ("hooks_overrides.json", "hooks.json", "hook_states.json"):
                                 continue
                         relevant_changes.append((change_type, change_path))
 
