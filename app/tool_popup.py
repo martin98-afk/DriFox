@@ -32,6 +32,47 @@ from app.utils.utils import get_font_family_css
 from app.utils.utils import get_icon
 from app.utils.utils import _is_current_theme_light
 
+# ── Windows 原生消息常量（nativeEvent 用） ──
+if platform.system() == "Windows":
+    import ctypes
+    from ctypes import wintypes
+
+    class _WINDOWS_MSG(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("message", wintypes.UINT),
+            ("wParam", wintypes.WPARAM),
+            ("lParam", wintypes.LPARAM),
+            ("time", wintypes.DWORD),
+            ("pt", wintypes.POINT),
+        ]
+
+    class _MINMAXINFO(ctypes.Structure):
+        _fields_ = [
+            ("ptReserved", wintypes.POINT),
+            ("ptMaxSize", wintypes.POINT),
+            ("ptMaxPosition", wintypes.POINT),
+            ("ptMinTrackSize", wintypes.POINT),
+            ("ptMaxTrackSize", wintypes.POINT),
+        ]
+
+    _WM_NCHITTEST = 0x0084
+    _WM_NCLBUTTONDOWN = 0x00A1
+    _WM_NCCALCSIZE = 0x0083
+    _WM_SYSCOMMAND = 0x0112
+    _WM_GETMINMAXINFO = 0x0024
+    _SC_DRAGMOVE = 0xF012  # SC_MOVE | 2，启动窗口拖拽
+    _HTLEFT = 10
+    _HTRIGHT = 11
+    _HTTOP = 12
+    _HTTOPLEFT = 13
+    _HTTOPRIGHT = 14
+    _HTBOTTOM = 15
+    _HTBOTTOMLEFT = 16
+    _HTBOTTOMRIGHT = 17
+    _HTCAPTION = 2
+    _HTCLIENT = 1
+
 
 class ToolWindowTitleBar(QWidget):
     popupRequested = pyqtSignal()
@@ -741,6 +782,151 @@ class ToolPopupDialog(QDialog):
         self._show_anim = None
         self._fade_anim = None
         self._anim_target_geometry = None
+
+        # ========== 启用 Snap Layout（Windows 贴靠填充） ==========
+        # 必须在 show() 之前调用，让 Windows 原生拖拽循环支持 Aero Snap
+        self._enable_snap_layout()
+
+    def _enable_snap_layout(self):
+        """为 Frameless 窗口启用 Snap Layout（贴靠布局）
+
+        Qt.FramelessWindowHint 会移除 WS_THICKFRAME，导致 Windows 不认为
+        这是一个可调整大小的窗口，贴靠到屏幕边缘时不触发 Snap Layout。
+        加回 WS_THICKFRAME 恢复 snap 能力。
+
+        与 TabManagerWindow 方案一致。
+        """
+        if platform.system() != "Windows":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.winId())
+            GWL_STYLE = -16
+            current_style = ctypes.windll.user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE)
+
+            WS_THICKFRAME = 0x00040000
+            WS_MINIMIZEBOX = 0x00020000
+            WS_MAXIMIZEBOX = 0x00010000
+
+            new_style = current_style | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+            ctypes.windll.user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE, new_style)
+
+            ctypes.windll.user32.SetWindowPos(
+                wintypes.HWND(hwnd),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x0020 | 0x0002 | 0x0001,  # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
+            )
+        except Exception:
+            pass
+
+    def nativeEvent(self, eventType, message):
+        """处理 Windows 原生消息，启用 Aero Snap 拖拽
+
+        - WM_NCHITTEST: 标题栏区域 → HTCAPTION（原生拖拽 + Snap）
+        - WM_NCLBUTTONDOWN(HTCAPTION): ReleaseCapture + SendMessage(WM_SYSCOMMAND,
+          SC_DRAGMOVE) 启动 Windows 原生拖拽循环，自动处理 Aero Snap
+        - WM_NCCALCSIZE: 返回 0 保持无边框外观（尽管加了 WS_THICKFRAME）
+        - WM_GETMINMAXINFO: 修正最大化窗口位置
+        """
+        if platform.system() == "Windows" and eventType == "windows_generic_MSG":
+            try:
+                import ctypes
+
+                msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
+
+                # ── WM_GETMINMAXINFO：修正最大化窗口矩形 ──
+                # _enable_snap_layout() 添加的 WS_THICKFRAME 导致 Windows
+                # 最大化时将边框推到屏幕外，用工作区覆盖修正
+                if msg.message == _WM_GETMINMAXINFO:
+                    try:
+                        mmi = ctypes.cast(msg.lParam, ctypes.POINTER(_MINMAXINFO))[0]
+                        monitor = ctypes.windll.user32.MonitorFromWindow(
+                            msg.hwnd,
+                            0x00000002,  # MONITOR_DEFAULTTONEAREST
+                        )
+                        if monitor:
+
+                            class _MONITORINFO(ctypes.Structure):
+                                _fields_ = [
+                                    ("cbSize", wintypes.DWORD),
+                                    ("rcMonitor", wintypes.RECT),
+                                    ("rcWork", wintypes.RECT),
+                                    ("dwFlags", wintypes.DWORD),
+                                ]
+
+                            mi = _MONITORINFO()
+                            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                            if ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi)):
+                                mmi.ptMaxPosition.x = mi.rcWork.left
+                                mmi.ptMaxPosition.y = mi.rcWork.top
+                                mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left
+                                mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top
+                    except Exception:
+                        pass
+                    return (True, 0)
+
+                if msg.message == _WM_NCHITTEST:
+                    return (True, self._nchittest(msg))
+
+                if msg.message == _WM_NCLBUTTONDOWN:
+                    if msg.wParam == _HTCAPTION:
+                        # ★ Snap Layout 支持：
+                        # ReleaseCapture 释放非客户区鼠标捕获，
+                        # SendMessage(WM_SYSCOMMAND, SC_DRAGMOVE) 启动
+                        # Windows 原生拖拽循环，自动处理 Aero Snap。
+                        ctypes.windll.user32.ReleaseCapture()
+                        ctypes.windll.user32.SendMessageW(
+                            msg.hwnd,
+                            _WM_SYSCOMMAND,
+                            _SC_DRAGMOVE,
+                            0,
+                        )
+                        return (True, 0)
+
+                if msg.message == _WM_NCCALCSIZE:
+                    return (True, 0)
+
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
+
+    def _nchittest(self, msg) -> int:
+        """WM_NCHITTEST 处理：标题栏 → HTCAPTION（原生拖拽 + Snap Layout）
+
+        标题栏按钮区域 → HTCLIENT（Qt 正常处理按钮点击）
+        标题栏非按钮区域 → HTCAPTION（Windows 原生拖拽，自动触发 Snap Layout）
+        其他区域 → HTCLIENT（Qt 自行处理，包括 Python 级边缘缩放）
+        """
+        import ctypes.wintypes as wintypes
+
+        x = wintypes.LOWORD(msg.lParam)
+        y = wintypes.HIWORD(msg.lParam)
+        pt = self.mapFromGlobal(QPoint(x, y))
+
+        # 标题栏区域（title_bar 在 _fade_container 内，需偏移）
+        title_bar = self.tool_instance.get_title_bar()
+        if title_bar is not None and title_bar.isVisible():
+            title_bar_rect = title_bar.geometry()
+            title_bar_rect.translate(self._fade_container.pos())
+
+            if title_bar_rect.contains(pt):
+                # 标题栏按钮区域 → HTCLIENT 让 Qt 正常处理点击
+                for btn_name in ("_min_btn", "_popup_btn"):
+                    btn = getattr(title_bar, btn_name, None)
+                    if btn and btn.isVisible():
+                        btn_rect = btn.geometry().translated(title_bar_rect.topLeft())
+                        if btn_rect.contains(pt):
+                            return _HTCLIENT
+                # 标题栏其他区域 → HTCAPTION（原生拖拽 + Snap）
+                return _HTCAPTION
+
+        return _HTCLIENT
 
     def _on_lock_changed(self, locked: bool):
         """处理窗口锁定状态变化"""
