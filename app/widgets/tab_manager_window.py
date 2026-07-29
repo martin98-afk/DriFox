@@ -7,6 +7,7 @@ TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 """
 
 import json
+import platform
 from typing import Any, Dict, List, Optional
 
 from PyQt5 import sip as _sip
@@ -145,6 +146,10 @@ class TabManagerWindow(QWidget):
     _instance: Optional["TabManagerWindow"] = None
     _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
     # 标题栏拖拽由 Windows 原生管理（HTCAPTION + WS_CAPTION），Python 不干预
+    # Windows 原生移动/缩放模态循环消息：拖拽起止的权威信号，
+    # 用于替代 moveEvent + 防抖定时器的"猜测式"拖拽检测
+    _WM_ENTERSIZEMOVE = 0x0231
+    _WM_EXITSIZEMOVE = 0x0232
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -1058,13 +1063,51 @@ class TabManagerWindow(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        # ── 窗口拖拽检测：持续 move 视为拖拽中，暂停耗时操作 ──
-        # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
-        if not self._suppress_drag_detection:
-            if not self._window_dragging_timer.isActive():
-                self._on_window_drag_start()
-            self._window_dragging_timer.start()  # 持续重置防抖
+        # ── 窗口拖拽检测 ──
+        # Windows：拖拽起止由系统原生消息 WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
+        # 精确驱动（见 nativeEvent），不再用 moveEvent + 100ms 防抖定时器猜测。
+        # 旧方案的缺陷：拖拽中途鼠标停顿 >100ms 会被误判为"拖拽结束"，
+        # setUpdatesEnabled(True) 触发积压重绘轰炸主线程，手一动又重新禁用，
+        # 造成周期性掉帧卡顿。
+        # 非 Windows：无原生模态循环消息，保留防抖检测作为回退。
+        if platform.system() != "Windows":
+            # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
+            if not self._suppress_drag_detection:
+                if not self._window_dragging_timer.isActive():
+                    self._on_window_drag_start()
+                self._window_dragging_timer.start()  # 持续重置防抖
         self._save_geometry()
+
+    def nativeEvent(self, eventType, message):
+        """Windows 原生消息处理：精确捕获拖拽/缩放模态循环的起止
+
+        WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE 是 OS 对"用户正在拖动/缩放窗口"
+        的权威信号——标题栏拖拽由系统原生管理（WS_CAPTION），Qt 收不到
+        mousePress/Release，只能靠这两条消息准确判定拖拽区间。
+        """
+        if platform.system() == "Windows" and eventType == "windows_generic_MSG":
+            try:
+                import ctypes
+
+                from app.tool_popup import _WINDOWS_MSG
+
+                msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
+                if msg.message == self._WM_ENTERSIZEMOVE:
+                    self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
+                    self._on_window_drag_start()
+                elif msg.message == self._WM_EXITSIZEMOVE:
+                    if self._resize_blocking:
+                        # 本次模态循环是"缩放"：布局/绘制恢复交给
+                        # _on_resize_finished（防抖 100ms 后触发），
+                        # 此处仅复位全局拖拽标志，避免双重恢复冲突
+                        from app.tool_popup import ToolPopupDialog
+
+                        ToolPopupDialog._any_window_dragging = False
+                    else:
+                        self._on_window_drag_end()
+            except Exception:
+                pass
+        return super().nativeEvent(eventType, message)
 
     # ── 窗口拖拽节流 ──
 

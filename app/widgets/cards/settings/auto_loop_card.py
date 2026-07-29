@@ -629,8 +629,10 @@ class AutoLoopRunningCard(QFrame):
         layout.addWidget(self._status_widget)
 
         # ---- 日志行 ----
+        # 参考设置卡片（_task_label 等）：宽度由父布局约束，按需自动换行，
+        # 避免长日志撑开卡片宽度。水平 Expanding 确保占满可用宽度，
+        # 垂直 Preferred 让高度根据行数自适应。
         self._log_label = QLabel("")
-        self._log_label.setFixedHeight(20)
         self._log_label.setStyleSheet(f"""
             color: {Colors.TEXT_MUTED};
             {font_size_css(11)}
@@ -639,8 +641,9 @@ class AutoLoopRunningCard(QFrame):
             background: {Colors.TOOLBAR_BG};
             border-radius: 4px;
         """)
-        self._log_label.setWordWrap(False)
+        self._log_label.setWordWrap(True)
         self._log_label.setTextFormat(Qt.PlainText)
+        self._log_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._log_label)
 
     def paintEvent(self, event):
@@ -1090,7 +1093,6 @@ class AutoLoopFullPage(QFrame):
         syslog_header.setStyleSheet(f"color: #7A9BBF; {font_size_css(10)} font-weight: bold; {FONT_CSS}")
         syslog_layout.addWidget(syslog_header)
         self._sys_log = QLabel("")
-        self._sys_log.setFixedHeight(24)
         self._sys_log.setStyleSheet(f"""
             color: #7A9BBF;
             {font_size_css(12)}
@@ -1099,6 +1101,9 @@ class AutoLoopFullPage(QFrame):
             background: rgba(0,0,0,0.05);
             border-radius: 4px;
         """)
+        # 参考设置卡片：宽度由父布局约束，自动换行，避免长日志撑开布局
+        self._sys_log.setWordWrap(True)
+        self._sys_log.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         syslog_layout.addWidget(self._sys_log)
         main_layout.addWidget(syslog_widget)
 
