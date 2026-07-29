@@ -1268,9 +1268,24 @@ class CommandCard(QWidget):
         super().moveEvent(event)
         self._sync_desc_tooltip_position()
 
+    def showEvent(self, event):
+        """卡片显示时同步 _visible 标志位
+
+        当 CardManager 或其他外部代码直接调用 setVisible(True) 时，
+        _visible 应当反映 widget 的实际可见性。此方法确保两者一致。
+        """
+        super().showEvent(event)
+        self._visible = True
+
     def hideEvent(self, event):
-        """卡片隐藏时同步隐藏悬浮气泡（气泡为独立窗口，不会随卡片自动隐藏）"""
+        """卡片隐藏时同步 _visible 标志位并隐藏悬浮气泡
+
+        当 CardManager 或其他外部代码直接调用 setVisible(False) 时，
+        _visible 会被正确置为 False，避免 refresh_if_visible 误以为
+        卡片仍可见而去刷新数据但不显示卡片。
+        """
         super().hideEvent(event)
+        self._visible = False
         lbl = getattr(self, "_desc_tooltip_label", None)
         if lbl is not None:
             lbl.hide()
@@ -2726,6 +2741,11 @@ class CommandCard(QWidget):
             return
         # 列表模式：用当前 query 重新加载（非增量以保证排序/分组准确）
         self.load_items(self._current_query, incremental=False)
+        # 热重载后确保卡片可见：load_items 不会自动调用 setVisible，
+        # 若卡片因外部原因（如其他卡片互斥切换）被隐藏但 _visible 仍为 True，
+        # 新数据渲染后需显式恢复可见性。
+        if len(self._filtered_items) > 0:
+            self.setVisible(True)
 
     def _refresh_detail_view(self):
         """重建 detail 模式的参数视图（命令元数据变更后调用）
