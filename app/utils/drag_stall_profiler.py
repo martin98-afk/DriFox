@@ -31,7 +31,7 @@ from loguru import logger
 from PyQt5.QtCore import Qt, QTimer
 
 # 一键开关：定位完成后置 False，start()/stop() 变为空操作
-DRAG_PROFILER_ENABLED = True
+DRAG_PROFILER_ENABLED = False
 
 # 主线程阻塞判定阈值（秒）。35ms ≈ 掉 2 帧（60fps），肉眼可感知
 _STALL_THRESHOLD = 0.035
