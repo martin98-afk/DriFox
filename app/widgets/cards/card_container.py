@@ -131,6 +131,10 @@ class CardContainer(QWidget):
         子卡片（如 CommandCard 切 detail 模式）可能在已展开容器内
         通过 setFixedHeight 改变自身高度，需要容器重新跑 _do_expand
         以动画到新高度。_do_expand 内部会用 sizeHint 差异判断避免无谓动画。
+
+        性能优化：source="resize" 时走 timer 路径防抖，避免布局级联中
+        连续触发 _do_expand（每次都会 activate 布局 → 级联 Resize → 再触发）。
+        卡片 show/hide 事件仍立即展开，防止父容器高度为 0 时卡片不可见。
         """
         # 窗口拖拽过程中跳过容器展开/折叠，防止布局级联干扰
         try:
@@ -151,9 +155,12 @@ class CardContainer(QWidget):
             self._expand_timer.timeout.connect(self._do_expand)
 
         if has_visible:
-            # ⚡ 有可见卡片：立即展开，不等到 timer 触发
-            # 否则父容器高度为 0 时，卡片虽然 setVisible(True) 但在屏幕上看不见
-            self._do_expand()
+            if source == "resize":
+                # Resize 事件防抖：走 timer 路径，连续 Resize 只触发一次展开
+                self._expand_timer.start()
+            else:
+                # 卡片 show/hide：立即展开，防止父容器高度为 0 时卡片不可见
+                self._do_expand()
         else:
             # 无可见卡片：通过 timer 折叠（延迟一点没关系）
             self._expand_timer.start()
@@ -172,7 +179,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除 minHeight 限制，确保折叠动画能跑到 0
@@ -216,13 +223,14 @@ class CardContainer(QWidget):
                 if natural_h <= 0:
                     # 仍然为 0：渐进重试，让 Qt 在下一轮事件循环完成测量
                     self._expand_retry_count += 1
-                    if self._expand_retry_count >= 5:
-                        # 重试 5 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
+                    if self._expand_retry_count >= 2:
+                        # 重试 2 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
                         # 在后续 layout pass 中通过 sizeHint 自行分配高度。
                         self._expand_retry_count = 0
                         self.setMaximumHeight(self._EXPAND_MAX)
                         return
-                    QTimer.singleShot(0, self._do_expand)
+                    # singleShot(1) 而非 0：给 Qt 一个完整事件循环完成测量
+                    QTimer.singleShot(1, self._do_expand)
                     return
 
             self._expand_retry_count = 0
@@ -257,12 +265,28 @@ class CardContainer(QWidget):
             )
 
     def _animate_height(self, start_h: int, end_h: int, on_finished=None):
-        """用 QPropertyAnimation 动画 maximumHeight，200ms OutCubic"""
-        self._expand_animation = QPropertyAnimation(self, b"maximumHeight")
-        self._expand_animation.setDuration(200)
-        self._expand_animation.setEasingCurve(QEasingCurve.OutCubic)
-        self._expand_animation.setStartValue(start_h)
-        self._expand_animation.setEndValue(end_h)
+        """用 QPropertyAnimation 动画 maximumHeight，200ms OutCubic
+
+        性能优化：复用 _expand_animation 对象，避免每次展开/折叠都创建新动画实例。
+        动画已停止时：直接重置 start/end 值并 restart。
+        动画运行中：stop 后被 _do_expand 截获并取消，不会进入此方法。
+        """
+        anim = self._expand_animation
+        if anim is None:
+            anim = QPropertyAnimation(self, b"maximumHeight")
+            anim.setDuration(200)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._expand_animation = anim
+
+        # 断开上次的 on_finished 回调（避免重复连接）
+        try:
+            anim.finished.disconnect()
+        except TypeError, RuntimeError:
+            pass
+
+        anim.setStartValue(start_h)
+        anim.setEndValue(end_h)
+
         if on_finished is not None:
 
             def _on_done():
@@ -272,11 +296,11 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
-            self._expand_animation.finished.connect(_on_done)
-        self._expand_animation.start()
+            anim.finished.connect(_on_done)
+        anim.start()
 
     def add_card(self, card_id: str, card_widget: QWidget):
         """添加卡片到容器，并注册专属回调"""
@@ -315,7 +339,7 @@ class CardContainer(QWidget):
             # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
             if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
                 return False
-            self._schedule_expand()
+            self._schedule_expand(source="resize")
         return super().eventFilter(obj, event)
 
 

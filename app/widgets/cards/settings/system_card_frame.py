@@ -60,6 +60,7 @@ class SystemCardFrame(QFrame):
 
     def _build_base_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        Colors.refresh()
         self._apply_base_style()
 
         main_layout = QVBoxLayout(self)
@@ -75,7 +76,6 @@ class SystemCardFrame(QFrame):
 
         self.title_label = StrongBodyLabel(self)
         self.title_label.setFont(get_unified_font(11, True))
-        Colors.refresh()
         self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
 
         self._header_layout.addWidget(self.icon_label)
@@ -90,6 +90,7 @@ class SystemCardFrame(QFrame):
 
         # 标题栏标签（如吸顶服务商名称，默认隐藏）
         self._header_sticky_label = QLabel("", self)
+        self._header_sticky_label.setObjectName("headerStickyLabel")
         self._header_sticky_label.setVisible(False)
         self._header_layout.addWidget(self._header_sticky_label)
 
@@ -144,7 +145,7 @@ class SystemCardFrame(QFrame):
     # ── 样式 ──────────────────────────────────────────
 
     def _apply_base_style(self):
-        Colors.refresh()
+        # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
         self.setStyleSheet(f"""
             SystemCardFrame {{
                 background: {Colors.CARD_BG.format(alpha=230)};
@@ -154,40 +155,37 @@ class SystemCardFrame(QFrame):
         """)
 
     def refresh_style(self):
+        """刷新主题底色和边框 — 子控件样式各自独立更新，不依赖 Qt 级联
+
+        设计理由（2026-07-29）：
+        - 滚动区/搜索框/粘性标签的样式各自独立设置，不存在「清理→级联」中间态
+        - 避免 QScrollArea 在样式表清空到父级重设之间的窗口期以默认 QFrame 样式绘制
+        - setStyleSheet 本身已触发样式重评，不需要 unpolish/polish 暴力刷新
+        """
         Colors.refresh()
+
+        # ── 卡片本体（背景 + 边框） ──
         self._apply_base_style()
+
+        # ── 字体/图标 ──
         self.title_label.setFont(get_unified_font(12, True))
-        self.title_label.setStyleSheet(f"color: {Colors.TEXT_ACCENT};")
         if self.icon_label is not None:
             self.icon_label.setFont(get_unified_font(12))
-        # 头部自定义图标 widget 同步缩放
         icon_widget = getattr(self, "_icon_widget", None)
         if icon_widget is not None:
             base_size = getattr(self, "_icon_base_size", 20)
             s = scale_icon_size(base_size)
             icon_widget.setFixedSize(s, s)
         self._count_label.setFont(get_unified_font(10))
-        self._count_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; padding-left: 2px;")
-        self.scroll_area.setStyleSheet(self._scroll_style())
-        # 强制滚动条重新应用样式表：unpolish/polish 让 Qt 重新评估 QSS
-        # 深色/浅色切换后旧样式可能被缓存，unpolish+polish 迫使 Qt 重新解析颜色
-        sb_vertical = self.scroll_area.verticalScrollBar()
-        if sb_vertical is not None:
-            sb_style = sb_vertical.style()
-            if sb_style is not None:
-                sb_style.unpolish(sb_vertical)
-                sb_style.polish(sb_vertical)
-        sb_horizontal = self.scroll_area.horizontalScrollBar()
-        if sb_horizontal is not None:
-            sb_style = sb_horizontal.style()
-            if sb_style is not None:
-                sb_style.unpolish(sb_horizontal)
-                sb_style.polish(sb_horizontal)
+
+        # ── Tab 按钮样式 ──
         if hasattr(self, "_tab_buttons"):
             self._update_tab_styles()
-        # 刷新搜索框样式（如果存在）
+
+        # ── 搜索框（直接刷新自身样式） ──
         if hasattr(self, "_search_input") and self._search_input is not None:
-            self._search_input.setStyleSheet(f"""
+            si = self._search_input
+            si.setStyleSheet(f"""
                 QLineEdit {{
                     background: {Colors.HOVER_BG};
                     border: 1px solid {Colors.BORDER};
@@ -204,15 +202,17 @@ class SystemCardFrame(QFrame):
                     color: {Colors.INPUT_PLACEHOLDER};
                 }}
             """)
-        # 刷新头部粘性标签样式（如果存在）
-        if hasattr(self, "_header_sticky_label") and self._header_sticky_label.isVisible():
+
+        # ── 头部粘性标签（直接刷新自身样式） ──
+        if hasattr(self, "_header_sticky_label"):
             self._header_sticky_label.setStyleSheet(f"""
                 color: {Colors.ACCENT_WARM};
                 {font_size_css(11)}
                 padding: 0 2px 0 6px;
                 font-weight: bold;
             """)
-        # 内容区子控件递归刷新（如 HistoryCard/MemoryCardContent 等）
+
+        # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
         self._refresh_content_children()
 
     def _refresh_content_children(self):
@@ -319,16 +319,13 @@ class SystemCardFrame(QFrame):
         self._count_label.setVisible(bool(text))
 
     def set_header_sticky(self, text: str):
-        """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间"""
+        """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间
+
+        样式由父级 SystemCardFrame 的 stylesheet 统一管理（通过 #headerStickyLabel 选择器），
+        此处只设置文本和可见性，不单独 setStyleSheet。
+        """
         if text:
-            Colors.refresh()
             self._header_sticky_label.setText(f"❮{text}❯")
-            self._header_sticky_label.setStyleSheet(f"""
-                color: {Colors.ACCENT_WARM};
-                {font_size_css(11)}
-                padding: 0 2px 0 6px;
-                font-weight: bold;
-            """)
             self._header_sticky_label.setVisible(True)
         else:
             self._header_sticky_label.setVisible(False)
@@ -464,6 +461,10 @@ class SystemCardFrame(QFrame):
                         绕过 QScrollArea.sizeHint() 传播问题）
 
         CardContainer._do_expand() 读取此值进行展开动画。
+
+        性能说明：不在 sizeHint() 中调用 layout().invalidate() + activate()，
+        sizeHint 应基于当前有效布局缓存快速返回。布局失效由显式 updateGeometry()
+        或 Qt 系统在 resize/layout pass 中统一处理。
         """
         from PyQt5.QtCore import QSize
 
@@ -471,8 +472,6 @@ class SystemCardFrame(QFrame):
         w = max(base.width(), 200)
         # content 模式：直接计算 header + 内容区实际高度
         if self._height_mode == "content":
-            self.layout().invalidate()
-            self.layout().activate()
             # header 高度 + 边距 + spacing
             h = self._header_layout.sizeHint().height()
             h += self.layout().contentsMargins().top() + self.layout().contentsMargins().bottom()

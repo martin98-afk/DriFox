@@ -133,6 +133,7 @@ class CommandItemWidget(QWidget):
 
         # 名称标签（不压缩，显示完整名称）
         self._name_label = QLabel()
+        self._name_label.setObjectName("nameLabel")
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._name_label)
@@ -140,6 +141,7 @@ class CommandItemWidget(QWidget):
         # 描述标签（Elided，空间不够时省略，仅技能显示描述）
         desc = self._data.get("description", "")
         self._desc_label = _ElidedLabel(desc)
+        self._desc_label.setObjectName("descLabel")
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._desc_label.setMinimumWidth(0)
@@ -147,12 +149,14 @@ class CommandItemWidget(QWidget):
 
         # 快捷键标签（仅内建命令的 function 类型显示）
         self._shortcut_label = QLabel()
+        self._shortcut_label.setObjectName("shortcutLabel")
         self._shortcut_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._shortcut_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._shortcut_label)
 
         # 类型标签（始终创建，根据 item 类型动态显示/隐藏）
         self._tag_label = QLabel()
+        self._tag_label.setObjectName("tagLabel")
         self._tag_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._tag_label)
@@ -169,24 +173,16 @@ class CommandItemWidget(QWidget):
         else:
             self._shortcut_label.setVisible(False)
 
-        # 设置快捷键静态样式（只在创建时设置一次，避免每次导航都触发 setStyleSheet）
-        # 注意：_name_label 和 _desc_label 的样式在 _apply_style 中动态更新
-        self._shortcut_label.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_SECONDARY};
-                {get_font_family_css()} {font_size_css(10)};
-                background: rgba(128,128,128,0.1);
-                border-radius: 3px;
-                padding: 1px 5px;
-                font-weight: bold;
-            }}
-        """)
-
         self._apply_style()
         self._update_display()
 
     def _apply_style(self):
-        """应用当前状态的样式（仅更新变化的颜色，静态样式在 _setup_ui 中已设置）"""
+        """应用当前状态的样式 — 单次 setStyleSheet 合并所有子标签样式
+
+        性能优化：所有子标签的样式通过对象选择器级联，统一写在父级样式表中。
+        避免每次 hover/selected 切换时对 4~5 个子标签分别调用 setStyleSheet
+        （每个 setStyleSheet 触发完整的样式重算和布局刷新）。
+        """
         # Colors.refresh() 不在此处调用——颜色在 show_card 时刷新一次即可
         # 避免每次导航/悬停都读配置文件
 
@@ -197,92 +193,57 @@ class CommandItemWidget(QWidget):
         else:
             bg = "transparent"
 
+        desc_fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_SECONDARY
+
+        item_type = self._data["type"]
+        is_ui_plugin = item_type == "command" and self._data.get("subtype") == "ui_plugin"
+
+        # 标签颜色（根据类型 + 选中状态）
+        if is_ui_plugin:
+            tag_fg = Colors.TAG_GREEN if not self._selected else Colors.TAG_GREEN_TEXT
+        elif item_type == "skill":
+            tag_fg = Colors.TAG_ACCENT if not self._selected else Colors.TAG_ACCENT_TEXT
+        elif item_type == "agent":
+            tag_fg = Colors.TAG_PURPLE if not self._selected else Colors.TAG_PURPLE_TEXT
+        elif item_type == "prompt":
+            tag_fg = Colors.TAG_ORANGE if not self._selected else Colors.TAG_ORANGE_TEXT
+        else:
+            tag_fg = "transparent"
+
+        ff = get_font_family_css()
+
+        # 单次 setStyleSheet：父级背景 + 所有子标签样式通过 #objectName 级联
         self.setStyleSheet(f"""
             CommandItemWidget {{
                 background-color: {bg};
                 border: none;
                 border-radius: 4px;
             }}
-        """)
-
-        # 描述样式（选中时变亮）
-        desc_fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_SECONDARY
-        self._desc_label.setStyleSheet(f"""
-            QLabel {{
+            CommandItemWidget QLabel#nameLabel {{
+                color: {Colors.TEXT_PRIMARY};
+                {ff} {font_size_css(13)};
+                background: transparent;
+            }}
+            CommandItemWidget QLabel#descLabel {{
                 color: {desc_fg};
-                {get_font_family_css()} {font_size_css(11)};
+                {ff} {font_size_css(11)};
+                background: transparent;
+            }}
+            CommandItemWidget QLabel#shortcutLabel {{
+                color: {Colors.TEXT_SECONDARY};
+                {ff} {font_size_css(10)};
+                background: rgba(128,128,128,0.1);
+                border-radius: 3px;
+                padding: 1px 5px;
+                font-weight: bold;
+            }}
+            CommandItemWidget QLabel#tagLabel {{
+                color: {tag_fg};
+                {ff} {font_size_css(11)};
+                font-weight: bold;
                 background: transparent;
             }}
         """)
-
-        # 标签样式：UI 插件绿色，技能蓝色，智能体紫色，提示词橙色
-        item_type = self._data["type"]
-        is_ui_plugin = item_type == "command" and self._data.get("subtype") == "ui_plugin"
-        if is_ui_plugin:
-            tag_fg = Colors.TAG_GREEN if not self._selected else Colors.TAG_GREEN_TEXT
-            self._tag_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {tag_fg};
-                    {get_font_family_css()} {font_size_css(11)};
-                    font-weight: bold;
-                    background: transparent;
-                }}
-            """)
-        elif item_type == "skill":
-            tag_fg = Colors.TAG_ACCENT if not self._selected else Colors.TAG_ACCENT_TEXT
-            self._tag_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {tag_fg};
-                    {get_font_family_css()} {font_size_css(11)};
-                    font-weight: bold;
-                    background: transparent;
-                }}
-            """)
-        elif item_type == "agent":
-            tag_fg = Colors.TAG_PURPLE if not self._selected else Colors.TAG_PURPLE_TEXT
-            self._tag_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {tag_fg};
-                    {get_font_family_css()} {font_size_css(11)};
-                    font-weight: bold;
-                    background: transparent;
-                }}
-            """)
-        elif item_type == "prompt":
-            tag_fg = Colors.TAG_ORANGE if not self._selected else Colors.TAG_ORANGE_TEXT
-            self._tag_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {tag_fg};
-                    {get_font_family_css()} {font_size_css(11)};
-                    font-weight: bold;
-                    background: transparent;
-                }}
-            """)
-
-        # 名称样式
-        fg = Colors.TEXT_PRIMARY if self._selected else Colors.TEXT_PRIMARY
-        self._name_label.setStyleSheet(f"""
-            QLabel {{
-                color: {fg};
-                {get_font_family_css()} {font_size_css(13)};
-                background: transparent;
-            }}
-        """)
-
-        # 快捷键标签样式：类键盘键帽风格，加粗（仅非 UI 插件的命令）
-        shortcut = self._data.get("shortcut", "")
-        if item_type == "command" and shortcut and not is_ui_plugin:
-            shortcut_fg = Colors.TEXT_SECONDARY
-            self._shortcut_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {shortcut_fg};
-                    {get_font_family_css()} {font_size_css(10)};
-                    background: rgba(128,128,128,0.1);
-                    border-radius: 3px;
-                    padding: 1px 5px;
-                    font-weight: bold;
-                }}
-            """)
 
     @staticmethod
     def _all_highlight_queries(text: str, query: str) -> List[str]:
@@ -629,6 +590,7 @@ class ValueItemWidget(QWidget):
         layout.setSpacing(0)
 
         self._text_label = QLabel(self._value)
+        self._text_label.setObjectName("valueLabel")
         self._text_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._text_label)
@@ -636,7 +598,11 @@ class ValueItemWidget(QWidget):
         self._apply_style()
 
     def _apply_style(self):
-        """应用当前状态的样式（仅自身背景，文字颜色固定为 PRIMARY）"""
+        """应用当前状态的样式 — 单次 setStyleSheet
+
+        性能优化：文本标签样式（固定 PRIMARY）合并到父级样式表中，
+        避免每次 hover/selected 时对子标签单独调用 setStyleSheet。
+        """
         if self._selected:
             bg = Colors.REALTIME_TAG_BG
         elif self._hovered:
@@ -644,18 +610,17 @@ class ValueItemWidget(QWidget):
         else:
             bg = "transparent"
 
+        ff = get_font_family_css()
         self.setStyleSheet(f"""
             ValueItemWidget {{
                 background-color: {bg};
                 border: none;
                 border-radius: 4px;
             }}
-        """)
-        self._text_label.setStyleSheet(f"""
-            QLabel {{
+            ValueItemWidget QLabel#valueLabel {{
                 color: {Colors.TEXT_PRIMARY};
                 background: transparent;
-                {get_font_family_css()} {font_size_css(12)};
+                {ff} {font_size_css(12)};
             }}
         """)
 
