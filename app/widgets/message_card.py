@@ -6782,6 +6782,14 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
+        # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
+        # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
+        # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
+        # 松手后 _any_window_dragging 复位，下一拍定时器自然恢复动画。
+        from app.tool_popup import ToolPopupDialog
+
+        if ToolPopupDialog._any_window_dragging:
+            return
         self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
         if self._retrying:

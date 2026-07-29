@@ -20,6 +20,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+from loguru import logger
 from PyQt5.QtCore import (
     QAbstractItemModel,
     QFileInfo,
@@ -49,8 +50,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import BodyLabel, MaskDialogBase, isDarkTheme
-from loguru import logger
-
 
 # ══════════════════════════════════════════════════════════
 # 文件图标工具
@@ -88,6 +87,7 @@ def _get_dir_icon() -> QIcon:
 @dataclass
 class _FileNode:
     """文件树数据节点"""
+
     name: str
     path: str
     is_dir: bool
@@ -197,8 +197,11 @@ class FileTreeModel(QAbstractItemModel):
         insert_row = self._sorted_insert_pos(parent_node.children, entry)
         self.beginInsertRows(parent_idx, insert_row, insert_row)
         new_node = _FileNode(
-            name=entry.name, path=entry.path, is_dir=entry.is_dir,
-            parent_node=parent_node, loaded=False,
+            name=entry.name,
+            path=entry.path,
+            is_dir=entry.is_dir,
+            parent_node=parent_node,
+            loaded=False,
         )
         parent_node.children.insert(insert_row, new_node)
         self.endInsertRows()
@@ -338,10 +341,15 @@ class FileTreeModel(QAbstractItemModel):
     def _build_nodes(self, entries, parent) -> List[_FileNode]:
         nodes = []
         for e in entries:
-            nodes.append(_FileNode(
-                name=e.name, path=e.path, is_dir=e.is_dir,
-                parent_node=parent, loaded=False,
-            ))
+            nodes.append(
+                _FileNode(
+                    name=e.name,
+                    path=e.path,
+                    is_dir=e.is_dir,
+                    parent_node=parent,
+                    loaded=False,
+                )
+            )
         return nodes
 
     def _insert_children(self, node: _FileNode, parent_idx: QModelIndex, entries):
@@ -523,14 +531,14 @@ class FileTreeView(QTreeView):
     """多选文件树视图 — 键盘/拖拽/右键"""
 
     # 请求卡片处理实际操作
-    delete_requested = pyqtSignal(list)   # List[str] paths
+    delete_requested = pyqtSignal(list)  # List[str] paths
     move_requested = pyqtSignal(list, str)  # paths, dest_dir
     copy_requested = pyqtSignal(list, str)  # paths, dest_dir
     context_menu_requested = pyqtSignal(QModelIndex, object)  # index, global_pos
     double_clicked_file = pyqtSignal(str)  # file_path
     enter_expand_requested = pyqtSignal(str)  # dir_path (Enter 键展开)
-    clipboard_copy = pyqtSignal()   # Ctrl+C
-    clipboard_cut = pyqtSignal()    # Ctrl+X
+    clipboard_copy = pyqtSignal()  # Ctrl+C
+    clipboard_cut = pyqtSignal()  # Ctrl+X
     clipboard_paste = pyqtSignal()  # Ctrl+V
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -548,6 +556,7 @@ class FileTreeView(QTreeView):
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setExpandsOnDoubleClick(False)
         self._drag_action: Optional[Qt.DropAction] = None
+        self.project_root: str = ""
 
     # ── 键盘 ──
 
@@ -600,12 +609,30 @@ class FileTreeView(QTreeView):
         if event.source() is self:
             event.acceptProposedAction()
             super().dragEnterEvent(event)
+        elif event.mimeData().hasUrls():
+            # 直接 accept，不走 super → super 会咨询 canDropMimeData，
+            # 空白区域返回 False 导致事件被吞
+            event.accept()
+            event.acceptProposedAction()
         else:
             super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event):
+        # ── 外部拖拽（系统文件管理器） ──
         if event.source() is not self:
-            event.ignore()
+            if not event.mimeData().hasUrls():
+                event.ignore()
+                return
+            target_idx = self.indexAt(event.pos())
+            if target_idx.isValid():
+                # 有效节点（文件/目录）→ 让 QTreeView 显示高亮或行间指示器
+                super().dragMoveEvent(event)
+                return
+            # 空白区域 → 有根目录才接受（不能走 super，理由同上）
+            if not self.project_root or not os.path.isdir(self.project_root):
+                event.ignore()
+                return
+            event.accept()
             return
 
         # 根据键盘修饰符切换移动/复制
@@ -619,10 +646,59 @@ class FileTreeView(QTreeView):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event):
+        # ── 外部拖拽（系统文件管理器） ──
         if event.source() is not self:
-            event.ignore()
+            if not event.mimeData().hasUrls():
+                event.ignore()
+                return
+
+            # 从 URLs 提取本地文件路径
+            source_paths = []
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if os.path.exists(file_path):
+                        source_paths.append(file_path)
+
+            if not source_paths:
+                event.ignore()
+                return
+
+            # 确定目标目录
+            target_idx = self.indexAt(event.pos())
+            if target_idx.isValid():
+                target_src = self._map_to_source(target_idx)
+                target_path = target_src.data(FileTreeModel.COL_PATH)
+                target_is_dir = target_src.data(FileTreeModel.COL_IS_DIR)
+                if target_path:
+                    dest_dir = target_path if target_is_dir else os.path.dirname(target_path)
+                else:
+                    dest_dir = ""
+            else:
+                # 空白区域 → 回退到项目根目录
+                dest_dir = self.project_root
+
+            if not dest_dir or not os.path.isdir(dest_dir):
+                event.ignore()
+                return
+
+            # 防拖拽到自身
+            for src in source_paths:
+                if os.path.normpath(src) == os.path.normpath(dest_dir):
+                    logger.warning(f"[FileTree] 禁止拖拽到自身: {src}")
+                    event.ignore()
+                    return
+
+            action = event.dropAction()
+            if action == Qt.CopyAction:
+                self.copy_requested.emit(source_paths, dest_dir)
+            else:
+                self.move_requested.emit(source_paths, dest_dir)
+
+            event.acceptProposedAction()
             return
 
+        # ── 内部拖拽（树内节点移动/复制） ──
         action = self._drag_action or event.dropAction()
         self._drag_action = None
 

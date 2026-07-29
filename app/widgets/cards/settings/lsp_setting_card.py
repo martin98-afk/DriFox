@@ -261,7 +261,13 @@ class LspListSettingCard(ExpandSettingCard):
         apply_font_size_to_widget(self, 14)
 
     def _refresh_status(self):
-        """定时刷新——配置变化时自动重建列表，否则只更新状态灯"""
+        """定时刷新——配置变化时自动重建列表，否则只更新状态灯
+
+        主线程零 I/O：命令可用性只读缓存（is_command_available_cached），
+        实际的 PATH 扫描（shutil.which，同步磁盘 I/O）由后台 daemon 线程预热。
+        采样器曾抓到同步版本在主线程阻塞 793ms~2108ms（磁盘 I/O 高压时），
+        且拖拽守卫只能推迟——松手瞬间补课照样卡，必须彻底移出主线程。
+        """
         mgr = self._get_lsp_manager()
         if not mgr:
             return
@@ -273,13 +279,39 @@ class LspListSettingCard(ExpandSettingCard):
             self._rebuild()
             return
 
-        # 只更新现有的运行/安装状态
+        # 只更新现有的运行/安装状态（仅读缓存，绝不扫盘）
+        need_warm = []
         for name, row in self._rows.items():
             client = mgr._clients.get(name)
             if client:
                 row.set_running(client.is_running)
-                if not client.is_running and not client.is_command_available():
-                    row._install_hint = client.config.install_hint
+                if not client.is_running:
+                    cached = client.is_command_available_cached()
+                    if cached is False:
+                        row._install_hint = client.config.install_hint
+                    need_warm.append(client)
+
+        # 后台预热命令解析缓存（缓存新鲜时该线程几乎零开销即退出）
+        if need_warm:
+            self._warm_cmd_cache_async(need_warm)
+
+    def _warm_cmd_cache_async(self, clients: list):
+        """后台 daemon 线程预热 LSP 命令解析缓存（PATH 扫描不进主线程）"""
+        t = getattr(self, "_cmd_warm_thread", None)
+        if t is not None and t.is_alive():
+            return
+
+        import threading
+
+        def _work():
+            for c in clients:
+                try:
+                    c.is_command_available()  # 命中 TTL 缓存时无 I/O
+                except Exception:
+                    pass
+
+        self._cmd_warm_thread = threading.Thread(target=_work, name="lsp-cmd-warm", daemon=True)
+        self._cmd_warm_thread.start()
 
     def _on_install_requested(self, server_name: str, install_hint: str):
         """处理安装按钮点击 — 在终端中执行安装命令"""

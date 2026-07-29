@@ -470,13 +470,48 @@ class LspClient:
         self._diag_callback = cb
 
     def is_command_available(self) -> bool:
-        """检查 LSP 服务器可执行文件是否在 PATH 中"""
+        """检查 LSP 服务器可执行文件是否在 PATH 中
+
+        注意：缓存未命中时会执行同步磁盘 I/O（PATH 扫描），
+        UI 主线程请改用 is_command_available_cached() + 后台线程预热。
+        """
         return self._resolve_command() is not None
+
+    def is_command_available_cached(self) -> Optional[bool]:
+        """非阻塞版本：仅读缓存，绝不做磁盘 I/O。
+
+        Returns:
+            True/False = 缓存中的可用性结论（可能超过 TTL，属可接受的陈旧值）；
+            None = 从未解析过（调用方应视为"未知"，勿据此显示安装提示）。
+        """
+        if getattr(self, "_cmd_cache_time", 0.0) <= 0.0:
+            return None
+        return self._cmd_cache_result is not None
+
+    def invalidate_command_cache(self) -> None:
+        """手动失效命令解析缓存（安装新 LSP 服务器后调用）"""
+        self._cmd_cache_time = 0.0
 
     # ── 内部 ─────────────────────────────────────────────────────
 
+    # 命令解析缓存 TTL（秒）。shutil.which + venv 目录探测是同步磁盘 I/O，
+    # 曾被设置卡片的 3s 定时器在主线程反复触发，单次最高阻塞 793ms（拖拽掉帧元凶）。
+    # 命令可用性极少变化，60s 缓存足够新鲜。
+    _CMD_CACHE_TTL = 60.0
+
     def _resolve_command(self) -> Optional[str]:
-        """解析 LSP 服务器可执行文件路径"""
+        """解析 LSP 服务器可执行文件路径（带 TTL 缓存，避免主线程反复扫盘）"""
+        now = time.monotonic()
+        cache_time = getattr(self, "_cmd_cache_time", 0.0)
+        if now - cache_time < self._CMD_CACHE_TTL:
+            return self._cmd_cache_result
+        result = self._resolve_command_uncached()
+        self._cmd_cache_result = result
+        self._cmd_cache_time = now
+        return result
+
+    def _resolve_command_uncached(self) -> Optional[str]:
+        """实际执行命令解析（PATH 扫描 + venv 目录探测，含磁盘 I/O）"""
         cmd = self.config.command
         # 如果是绝对路径，直接使用
         if Path(cmd).is_absolute():

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from loguru import logger
 from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
@@ -49,7 +50,6 @@ from qfluentwidgets import (
     TransparentToolButton,
     isDarkTheme,
 )
-from loguru import logger
 
 from .scanner import _DirEntry, _TreeScanner
 from .tree_widget import (
@@ -59,7 +59,6 @@ from .tree_widget import (
     RenameDelegate,
 )
 from .watcher import _DirWatcher
-
 
 # ── 路径常量 ──────────────────────────────────────────────
 
@@ -434,6 +433,7 @@ class FileTreeCard(QWidget):
 
         self._colors = _make_colors_from_context(ctx)
         self._project_root = ctx.get("project_root", "")
+        self._tree_view.project_root = self._project_root
 
         tc = _ctx_text_color(ctx)
         border_c = self._colors.get("border", QColor(255, 255, 255, 30))
@@ -828,7 +828,19 @@ class FileTreeCard(QWidget):
         self._refresh_dir_in_model(dest_dir)
 
     def _on_copy_drop_requested(self, source_paths: List[str], dest_dir: str):
-        """Ctrl+拖拽 → 复制"""
+        """拖拽复制 — 外部/内部统一确认"""
+        names = "\n".join(os.path.basename(p) for p in source_paths)
+        target_name = os.path.basename(dest_dir) or dest_dir
+        reply = _styled_message_box(
+            self._colors,
+            QMessageBox.Question,
+            "确认复制",
+            f"确定要将以下项目复制到「{target_name}」？\n\n{names}",
+            parent_widget=self.window(),
+        )
+        if reply != QMessageBox.Yes:
+            return
+
         for src in source_paths:
             name = os.path.basename(src)
             dst = os.path.join(dest_dir, name)

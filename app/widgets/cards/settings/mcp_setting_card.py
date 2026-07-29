@@ -676,9 +676,14 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # 内部信号（从后台线程桥接到主线程 UI 更新）
     _hotConnectResult = pyqtSignal(str, bool, str)
+    _tokenCountReady = pyqtSignal(str)
 
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
+        # 必须在任何可能触发 _update_mcp_token_count 的路径之前初始化，
+        # 否则 _status_timer(3s) 首次触发时若 __init__ 中途异常被吞，会抛
+        # AttributeError 并惊动主线程异常钩子做昂贵 traceback 格式化（拖拽卡顿源之一）。
+        self._token_calc_running = False
         super().__init__(icon, title, content, parent)
         # 防抖节流：300ms 滚动防抖，等待用户停止操作
         self._switch_debounce_timer = QTimer(self)
@@ -707,6 +712,9 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 连接信号（主线程处理 UI）
         self._hotConnectResult.connect(self._on_hot_connect_result)
+        self._tokenCountReady.connect(self.setCount)
+        # token 估算后台线程运行标志（避免重复启动）
+        self._token_calc_running = False
 
     def _get_pm(self):
         """获取 PluginManager 实例"""
@@ -889,6 +897,11 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _refresh_status_dots(self):
         """刷新所有行的连接状态指示灯"""
+        # 拖拽守卫：拖拽期间跳过本轮刷新，避免主线程 UI 更新加剧掉帧
+        from app.tool_popup import ToolPopupDialog
+
+        if ToolPopupDialog._any_window_dragging:
+            return
         try:
             mgr = self._get_mcp_manager()
             if not mgr:
@@ -1092,24 +1105,46 @@ class MCPListSettingCard(ExpandSettingCard):
     # ── Token 占用估算 ──────────────────────────────
 
     def _update_mcp_token_count(self):
-        """更新头部 subtitle：服务器计数 + token 占用估算"""
-        from app.core.token_estimator import estimate_tokens
+        """更新头部 subtitle：服务器计数 + token 占用估算（后台线程计算）
 
-        servers = self._get_servers()
-        count = len(servers)
-        enabled_count = sum(1 for s in servers if s.get("enabled", True))
-        base = f"{enabled_count}/{count}"
+        全部重活（.mcp.json 读取解析 + json.dumps(全部工具 schema) + token 估算）
+        都在 daemon 线程执行，结果经 _tokenCountReady 信号（Qt 队列连接）回
+        主线程 setCount。主线程路径零 I/O 零重计算——采样器曾抓到同步版本
+        在主线程阻塞 2582ms（磁盘 I/O 高压时单次 stat 可达 2s）。
+        """
+        if getattr(self, "_token_calc_running", False):
+            return
+        self._token_calc_running = True
 
-        # 获取已连接的 MCP 工具 schema 并计算 token 数
-        mgr = self._get_mcp_manager()
-        token_count = 0
-        if mgr and self.cfg.mcp_enabled.value:
-            schemas = mgr.get_tool_schemas()
-            if schemas:
-                text = json.dumps(schemas, ensure_ascii=False)
-                token_count = estimate_tokens(text)
+        import threading
 
-        self.setCount(f"{base} · ~{token_count:,} tokens")
+        def _work():
+            try:
+                from app.core.token_estimator import estimate_tokens
+
+                servers = self._get_servers()
+                count = len(servers)
+                enabled_count = sum(1 for s in servers if s.get("enabled", True))
+                base = f"{enabled_count}/{count}"
+
+                # 获取已连接的 MCP 工具 schema 并计算 token 数
+                mgr = self._get_mcp_manager()
+                token_count = 0
+                if mgr and self.cfg.mcp_enabled.value:
+                    schemas = mgr.get_tool_schemas()
+                    if schemas:
+                        text = json.dumps(schemas, ensure_ascii=False)
+                        token_count = estimate_tokens(text)
+
+                self._tokenCountReady.emit(f"{base} · ~{token_count:,} tokens")
+            except RuntimeError:
+                pass  # 卡片已销毁
+            except Exception as e:
+                logger.debug(f"[MCP] token 估算后台计算失败: {e}")
+            finally:
+                self._token_calc_running = False
+
+        threading.Thread(target=_work, name="mcp-token-calc", daemon=True).start()
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 

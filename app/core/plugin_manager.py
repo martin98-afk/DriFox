@@ -383,6 +383,7 @@ class PluginManager:
         if name not in enabled:
             enabled.add(name)
             self._save_enabled_set(enabled)
+            self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
             logger.info(f"[PluginManager] Enabled plugin: {name}")
         # 联动加载 UI 组件
         self._load_plugin_ui(name)
@@ -396,6 +397,7 @@ class PluginManager:
         if name in enabled:
             enabled.discard(name)
             self._save_enabled_set(enabled)
+            self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
             logger.info(f"[PluginManager] Disabled plugin: {name}")
         # 联动卸载 UI 组件
         self._unload_plugin_ui(name)
@@ -879,7 +881,17 @@ class PluginManager:
         3. .claude-plugin 格式：{"ServerName": {"type": "http", "url": "..."}}
 
         同名策略：后加载的覆盖先加载的（user plugin 覆盖 system plugin）
+
+        性能：结果带 30s TTL 缓存。此方法涉及逐插件 stat + read_text + json 解析，
+        曾被设置卡片 3s 定时器在主线程反复触发（采样器实测单次 os.path.exists
+        在高 I/O 压力下阻塞 2s+）。配置变更走 invalidate_mcp_cache() 主动失效。
         """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._mcp_servers_cache is not None and now - self._mcp_servers_cache_time < self._MCP_CACHE_TTL:
+            return list(self._mcp_servers_cache)  # 浅拷贝，防调用方增删元素污染缓存
+
         servers: dict = {}  # name → entry dict（同名时后加载的覆盖先加载的）
 
         for mcp_file in self.get_mcp_configs():
@@ -914,7 +926,20 @@ class PluginManager:
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load MCP config from {mcp_file}: {e}")
 
-        return list(servers.values())
+        result = list(servers.values())
+        self._mcp_servers_cache = result
+        self._mcp_servers_cache_time = now
+        return result
+
+    # MCP 服务器列表缓存（类属性声明默认值，实例首次访问即可用）
+    _MCP_CACHE_TTL = 30.0
+    _mcp_servers_cache: Optional[list] = None
+    _mcp_servers_cache_time: float = 0.0
+
+    def invalidate_mcp_cache(self) -> None:
+        """失效 MCP 服务器列表缓存（配置增删改/插件启停后调用）"""
+        self._mcp_servers_cache = None
+        self._mcp_servers_cache_time = 0.0
 
     @staticmethod
     def _expand_mcp_vars(value: "Any", plugin_root: Path) -> "Any":
@@ -1069,6 +1094,7 @@ class PluginManager:
                         if k not in ("name", "_source", "_builtin")
                     }
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+            self.invalidate_mcp_cache()
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
         except Exception as e:
             logger.error(f"[PluginManager] Failed to update MCP server '{name}': {e}")
@@ -1143,6 +1169,7 @@ class PluginManager:
             self._discover_user_plugins(get_app_data_dir())
             self.enable_plugin("user-custom")
 
+        self.invalidate_mcp_cache()
         logger.info(f"[PluginManager] Added MCP server '{name}' to user-custom plugin")
 
     def remove_mcp_server(self, name: str):
@@ -1193,5 +1220,6 @@ class PluginManager:
                         source.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
                     logger.info(f"[PluginManager] Removed MCP server '{name}'")
 
+            self.invalidate_mcp_cache()
         except Exception as e:
             logger.error(f"[PluginManager] Failed to remove MCP server '{name}': {e}")
