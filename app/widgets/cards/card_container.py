@@ -22,10 +22,11 @@ class CardContainer(QWidget):
     # 展开时放开最大高度限制，让 Qt 布局系统自动计算合适高度
     _EXPAND_MAX = 16777215
 
-    # 横向停靠区（LEFT/RIGHT）展开后的最小宽度：
-    # 展开动画结束后释放 maximumWidth 并锁定此最小宽度，
+    # 停靠区展开后的轴向最小尺寸：
+    # 展开动画结束后释放轴向 max 并锁定此最小尺寸，
     # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
-    _DOCK_MIN = 140
+    _DOCK_MIN_H = 140  # 横向停靠区（LEFT/RIGHT）最小宽
+    _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
 
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
@@ -44,6 +45,11 @@ class CardContainer(QWidget):
         self._expand_timer: Optional[QTimer] = None  # 防抖展开定时器
         self._expand_animation: Optional[QPropertyAnimation] = None  # 展开/折叠动画
         self._expand_retry_count = 0  # 实例变量：防止 _do_expand 无限重试（每个容器独立计数）
+        # ── 停靠模式（enable_dock_mode 开启）──
+        # 容器位于 QSplitter 中：展开后释放轴向 max、占比交给 splitter 拖拽；
+        # 折叠时记忆当前尺寸并显式归还空间；重开时恢复上次拖出的占比。
+        self._dock_splitter = None  # 宿主 QSplitter（None = 普通布局模式）
+        self._dock_last_size = 0  # 折叠前记忆的轴向尺寸（重开恢复用）
         self._setup_ui()
 
     # ── 轴向抽象：纵向容器操作高度，横向容器操作宽度 ──
@@ -105,11 +111,12 @@ class CardContainer(QWidget):
         """
         Colors.refresh()
         bg = Colors.CARD_BG.format(alpha=232)
-        if self._horizontal:
-            # 左右停靠区：四角圆角（独立面板视觉）
+        if self._horizontal or self._dock_splitter is not None:
+            # 停靠区（左右容器 / 启用停靠模式的上下容器）：
+            # 四角圆角独立面板视觉 + 更实的背景，与对话区形成明确边界
             self.setStyleSheet(f"""
                 CardContainer {{
-                    background: {bg};
+                    background: {Colors.CARD_BG.format(alpha=246)};
                     border: 1px solid {Colors.BORDER};
                     border-radius: 8px;
                 }}
@@ -141,6 +148,92 @@ class CardContainer(QWidget):
         self._card_manager = card_manager
         self._window_id = window_id
 
+    # ── 停靠模式（QSplitter 协作协议） ──
+
+    def enable_dock_mode(self, splitter):
+        """启用停靠模式：容器位于 QSplitter 中，占比可拖拽调整
+
+        协作协议（与 _do_expand / 折叠路径配合）：
+        1. 展开动画结束 → 释放轴向 max、锁定停靠最小尺寸，宽/高交给 splitter；
+        2. 用户拖拽 → 容器尺寸变化不回弹（已展开分支早退）；
+        3. 折叠 → 先记忆当前尺寸（_dock_last_size），动画收到 0 后 hide()
+           并显式把空间归还给 splitter 邻居（_release_dock_space）；
+        4. 重新展开 → show() 后动画展开，完成时若有记忆尺寸则恢复上次占比。
+        """
+        self._dock_splitter = splitter
+        # 停靠面板样式（四角圆角独立面板，与对话区边界更清晰）
+        self._apply_background_style()
+        # 折叠态直接隐藏：让 splitter handle 一并消失，避免 0 宽容器留下拖拽缝
+        if self._axis_max() == 0:
+            self.hide()
+
+    def _dock_min(self) -> int:
+        return self._DOCK_MIN_H if self._horizontal else self._DOCK_MIN_V
+
+    def _splitter_index(self) -> int:
+        if self._dock_splitter is None:
+            return -1
+        return self._dock_splitter.indexOf(self)
+
+    def _remember_dock_size(self):
+        """折叠前记忆当前轴向尺寸，供下次展开恢复占比"""
+        cur = self._axis_current()
+        if cur >= self._dock_min():
+            self._dock_last_size = cur
+
+    def _restore_dock_size(self):
+        """展开完成后：恢复上次记忆的占比（显式 setSizes，splitter 不会自己做）"""
+        sp = self._dock_splitter
+        idx = self._splitter_index()
+        if sp is None or idx < 0:
+            return
+        target = self._dock_last_size or self._axis_current()
+        if target < self._dock_min():
+            return
+        sizes = sp.sizes()
+        if idx >= len(sizes):
+            return
+        delta = target - sizes[idx]
+        if delta == 0:
+            return
+        # 从最大的邻居窗格里借空间，保持其余窗格不动
+        donor = max(
+            (i for i in range(len(sizes)) if i != idx),
+            key=lambda i: sizes[i],
+            default=-1,
+        )
+        if donor < 0 or sizes[donor] - delta < 0:
+            return
+        sizes[idx] = target
+        sizes[donor] -= delta
+        sp.setSizes(sizes)
+
+    def _release_dock_space(self):
+        """折叠完成后：hide + 显式把空间归还给 splitter 邻居
+
+        QSplitter 不会因子控件 maximumWidth/Height 变 0 而自动重排，
+        必须 setSizes 归还，否则内容区右侧留白（“关闭后不恢复”问题根因）。
+        """
+        self.hide()
+        sp = self._dock_splitter
+        idx = self._splitter_index()
+        if sp is None or idx < 0:
+            return
+        sizes = sp.sizes()
+        if idx >= len(sizes) or sizes[idx] == 0:
+            return
+        freed = sizes[idx]
+        sizes[idx] = 0
+        # 归还给最大的邻居（通常是内容区）
+        donor = max(
+            (i for i in range(len(sizes)) if i != idx),
+            key=lambda i: sizes[i],
+            default=-1,
+        )
+        if donor >= 0:
+            sizes[donor] += freed
+        sp.setSizes(sizes)
+
     def showEvent(self, event):
         """容器从隐藏变为可见时，如果有可见卡片则重新展开
 
@@ -149,7 +242,9 @@ class CardContainer(QWidget):
         """
         super().showEvent(event)
         # 延迟到当前 show 事件处理完成后再展开（此时布局已激活）
-        if any(w.testAttribute(Qt.WA_WState_Visible) for w in self._cards.values()):
+        # not isHidden()：容器自身隐藏期间被 setVisible(True) 的卡片
+        # isVisible()/WA_WState_Visible 均为 False，但 isHidden() 能正确反映意图
+        if any(not w.isHidden() for w in self._cards.values()):
             QTimer.singleShot(0, self._schedule_expand)
 
     def _is_expanded(self) -> bool:
@@ -198,7 +293,8 @@ class CardContainer(QWidget):
                 return
         except ImportError:
             pass
-        has_visible = any(w.isVisible() for w in self._cards.values())
+        # not isHidden()：兼容停靠模式下容器自身处于 hide() 状态的场景
+        has_visible = any(not w.isHidden() for w in self._cards.values())
         # 取消上次未执行的防抖
         if self._expand_timer:
             self._expand_timer.stop()
@@ -225,8 +321,13 @@ class CardContainer(QWidget):
         若当前唯一可见卡片声明了 NO_ANIMATION_PROP（例如自带 resize 的 todo 卡片），
         则跳过动画、直接 snap 到目标高度，避免容器高度在拖拽过程中滞后于卡片内容。
         """
-        has_visible = any(w.isVisible() for w in self._cards.values())
+        has_visible = any(not w.isHidden() for w in self._cards.values())
         skip_anim = self._should_skip_animation()
+
+        # 停靠模式：折叠态容器是 hide() 的，展开前必须先 show()
+        # （否则动画属性变化对不可见 widget 无视觉效果，splitter 也不给它分配空间）
+        if has_visible and self._dock_splitter is not None and self.isHidden():
+            self.show()
 
         # 取消进行中的动画，避免叠加造成跳变
         if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
@@ -240,10 +341,10 @@ class CardContainer(QWidget):
         self._set_axis_min(0)
 
         if has_visible:
-            # ── 横向停靠区已展开（maximumWidth 已释放、宽度由外层 QSplitter 控制）──
-            # 卡片内容变化不回弹宽度，保持用户拖拽出的占比；仅恢复最小宽度锁。
-            if self._horizontal and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
-                self._set_axis_min(self._DOCK_MIN)
+            # ── 停靠区已展开（轴向 max 已释放、尺寸由外层 QSplitter 控制）──
+            # 卡片内容变化不回弹尺寸，保持用户拖拽出的占比；仅恢复最小尺寸锁。
+            if self._dock_splitter is not None and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
+                self._set_axis_min(self._dock_min())
                 return
 
             # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
@@ -293,16 +394,22 @@ class CardContainer(QWidget):
             # 父级布局在动画中通过轴向 max 属性的 updateGeometry 级联刷新。
             current_h = self._axis_current()
 
-            # 横向停靠区：展开完成后释放 maximumWidth 并锁定最小宽度，
-            # 把宽度控制权交给外层 QSplitter（用户可拖拽 handle 调整占比）
+            # 停靠模式：展开完成后释放轴向 max 并锁定最小尺寸，
+            # 把尺寸控制权交给外层 QSplitter，并恢复上次拖出的占比
             on_expand_done = None
-            if self._horizontal:
+            if self._dock_splitter is not None:
 
                 def _release_to_splitter():
-                    self._set_axis_min(self._DOCK_MIN)
+                    self._set_axis_min(self._dock_min())
                     self._set_axis_max(self._EXPAND_MAX)
+                    self._restore_dock_size()
 
                 on_expand_done = _release_to_splitter
+
+                # 记忆的占比比自然尺寸大时，直接以记忆尺寸为展开目标，
+                # 避免"先展到自然尺寸再跳到记忆尺寸"的二段动画
+                if self._dock_last_size > natural_h:
+                    natural_h = self._dock_last_size
 
             # 尺寸差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
@@ -317,21 +424,23 @@ class CardContainer(QWidget):
             self._animate_height(current_h, natural_h, on_finished=on_expand_done)
         else:
             # ── 折叠：snap 或动画到 0，结束后锁定轴向 max=0 ──
+            # 停靠模式：折叠前记忆当前占比（重开时恢复）
+            if self._dock_splitter is not None:
+                self._remember_dock_size()
+
+            def _on_collapsed():
+                self._set_axis_max(0)
+                if self._dock_splitter is not None:
+                    self._release_dock_space()
+
             # 折叠前轴向 max 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实尺寸
             if self._axis_max() < self._EXPAND_MAX:
                 self._set_axis_max(self._EXPAND_MAX)
             current_h = self._axis_current()
-            if current_h <= 0:
-                self._set_axis_max(0)
+            if current_h <= 0 or skip_anim:
+                _on_collapsed()
                 return
-            if skip_anim:
-                self._set_axis_max(0)
-                return
-            self._animate_height(
-                current_h,
-                0,
-                on_finished=lambda: self._set_axis_max(0),
-            )
+            self._animate_height(current_h, 0, on_finished=_on_collapsed)
 
     def _animate_height(self, start_h: int, end_h: int, on_finished=None):
         """用 QPropertyAnimation 动画轴向 max 属性（纵向 maximumHeight / 横向 maximumWidth），200ms OutCubic

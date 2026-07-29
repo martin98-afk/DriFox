@@ -354,11 +354,31 @@ class TabManagerWindow(QWidget):
                     background: {Colors.CONTENT_BG};
                 }}
             """)
-        # 停靠区 splitter：handle 融入内容区背景，靠停靠面板自身 border 形成分隔线
+        # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
+        # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
+        # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
         if getattr(self, "_dock_splitter", None) is not None:
             self._dock_splitter.setStyleSheet(f"""
                 #dockSplitter::handle:horizontal {{
                     background: {Colors.CONTENT_BG};
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 10px 2px;
+                    border-radius: 1px;
+                }}
+                #dockSplitter::handle:horizontal:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
+                }}
+            """)
+        if getattr(self, "_vdock_splitter", None) is not None:
+            self._vdock_splitter.setStyleSheet(f"""
+                #vDockSplitter::handle:vertical {{
+                    background: {Colors.CONTENT_BG};
+                    border-top: 2px solid {Colors.BORDER};
+                    margin: 2px 10px;
+                    border-radius: 1px;
+                }}
+                #vDockSplitter::handle:vertical:hover {{
+                    border-top: 2px solid {Colors.BORDER_ACCENT};
                 }}
             """)
 
@@ -457,12 +477,15 @@ class TabManagerWindow(QWidget):
         self._left_card_container = self._global_left_container
         self._right_card_container = self._global_right_container
 
-        chat_frame_layout.addWidget(self._global_top_container)
-
-        # 中段：左停靠区 | 内容区 | 右停靠区（QSplitter，可拖拽调整占比）
-        # CardContainer 横向容器展开动画结束后会释放 maximumWidth 并锁定
-        # 最小宽度（_DOCK_MIN），此后宽度完全由本 splitter 的 handle 拖拽控制；
-        # 折叠时 maximumWidth 动画到 0，splitter 自动把空间还给内容区。
+        # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
+        # 结构：vDockSplitter(纵向)
+        #         ├─ 上停靠区（top 容器）
+        #         ├─ dockSplitter(横向)：左停靠区 | 内容区 | 右停靠区
+        #         └─ 下停靠区（bottom 容器）
+        # CardContainer 停靠模式协议（enable_dock_mode）：
+        #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
+        #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
+        #   重开 → 恢复上次拖出的占比。
         from PyQt5.QtWidgets import QSplitter as _DockSplitter
 
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
@@ -473,12 +496,27 @@ class TabManagerWindow(QWidget):
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 对话区吃掉多余空间
         self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
-        self._dock_splitter.setHandleWidth(4)
-        # 折叠依赖 maximumWidth=0 约束而非用户拖拽收起，禁止拖拽塌陷
+        self._dock_splitter.setHandleWidth(6)
+        # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
-        chat_frame_layout.addWidget(self._dock_splitter, 1)
 
-        chat_frame_layout.addWidget(self._global_bottom_container)
+        self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
+        self._vdock_splitter.setObjectName("vDockSplitter")
+        self._vdock_splitter.addWidget(self._global_top_container)
+        self._vdock_splitter.addWidget(self._dock_splitter)
+        self._vdock_splitter.addWidget(self._global_bottom_container)
+        self._vdock_splitter.setStretchFactor(0, 0)  # 上停靠区不随窗口拉伸
+        self._vdock_splitter.setStretchFactor(1, 1)  # 中段吃掉多余空间
+        self._vdock_splitter.setStretchFactor(2, 0)  # 下停靠区不随窗口拉伸
+        self._vdock_splitter.setHandleWidth(6)
+        self._vdock_splitter.setChildrenCollapsible(False)
+        chat_frame_layout.addWidget(self._vdock_splitter, 1)
+
+        # 四个全局容器统一启用停靠模式（绑定各自宿主 splitter）
+        self._global_left_container.enable_dock_mode(self._dock_splitter)
+        self._global_right_container.enable_dock_mode(self._dock_splitter)
+        self._global_top_container.enable_dock_mode(self._vdock_splitter)
+        self._global_bottom_container.enable_dock_mode(self._vdock_splitter)
 
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter
