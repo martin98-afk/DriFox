@@ -58,7 +58,7 @@ class FloatingCardInfo:
         plugin_name: 所属插件名
         card_id: 卡片唯一 ID（同时也是自动注册的命令名）
         widget_class: QWidget 子类
-        container: 容器位置 "top" | "bottom"
+        container: 容器位置 "top" | "bottom" | "left" | "right"
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
         metadata: 附加元数据
@@ -181,7 +181,8 @@ class UIPluginRegistry:
             plugin_name: 所属插件名
             card_id: 卡片唯一 ID
             widget_class: QWidget 子类
-            container: "top" | "bottom"
+            container: "top" | "bottom" | "left" | "right"
+                       （Tab 模式下卡片挂在 Tab 窗口级全局容器的对应方位）
             title: 卡片标题
             default_visible: 默认是否可见
             metadata: 附加元数据
@@ -191,8 +192,8 @@ class UIPluginRegistry:
         Side Effects:
             自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
         """
-        if container not in ("top", "bottom"):
-            raise ValueError(f"container must be 'top' or 'bottom', got {container!r}")
+        if container not in ("top", "bottom", "left", "right"):
+            raise ValueError(f"container must be one of 'top'/'bottom'/'left'/'right', got {container!r}")
         if metadata is None:
             metadata = {}
         info = FloatingCardInfo(
@@ -244,6 +245,74 @@ class UIPluginRegistry:
 
         FunctionCommandHandlers.register(cmd_name, _handler)
 
+    def _resolve_global_host(self):
+        """获取 Tab 管理器全局卡片宿主（Tab 模式下浮动卡片统一挂这里）
+
+        Returns:
+            TabManagerWindow 实例（具备 _card_manager/_window_id/四向容器属性），
+            不可用时返回 None（回退到 per-window 模式）。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None and getattr(tm, "_card_manager", None) is not None:
+                return tm
+        except Exception:
+            pass
+        return None
+
+    def move_floating_card(self, card_id: str, container: str, main_widget=None) -> bool:
+        """动态移动浮动卡片到另一方位（top/bottom/left/right）
+
+        实现方式：更新注册信息 → 销毁旧实例 → 若原本可见则在新方位立即重建显示。
+        卡片 widget 会以新容器为父级重新创建（带新方位的展开动画）。
+
+        Args:
+            card_id: 卡片唯一 ID
+            container: 目标方位 "top" | "bottom" | "left" | "right"
+            main_widget: 目标主窗口（仅 per-window 回退模式需要）
+
+        Returns:
+            True 移动成功；False 卡片未注册或方位非法
+        """
+        if container not in ("top", "bottom", "left", "right"):
+            return False
+        info = self._floating_cards.get(card_id)
+        if info is None:
+            return False
+        if info.container == container:
+            return True
+
+        from dataclasses import replace as _dc_replace
+
+        self._floating_cards[card_id] = _dc_replace(info, container=container)
+
+        # 记录迁移前是否可见（任一窗口）
+        was_visible = False
+        host = self._resolve_global_host()
+        if host is not None:
+            cm = getattr(host, "_card_manager", None)
+            wid = getattr(host, "_window_id", None)
+            if cm is not None and wid is not None:
+                was_visible = cm.is_card_visible(card_id, wid)
+        if not was_visible:
+            for win_id, mw in list(self._window_main_widgets.items()):
+                cm = getattr(mw, "_card_manager", None)
+                if cm is not None and cm.is_card_visible(card_id, win_id):
+                    was_visible = True
+                    break
+
+        # 销毁所有已创建实例（下次显示时按新方位重建）
+        for win_id, win_instances in list(self._card_widget_instances.items()):
+            widget = win_instances.pop(card_id, None)
+            if widget is not None:
+                self._remove_widget_from_container(win_id, card_id, widget)
+
+        if was_visible:
+            self._show_floating_card(card_id, main_widget=main_widget)
+        return True
+
     def toggle_floating_card(self, card_id: str, main_widget=None) -> None:
         """切换浮动卡片显示（公开的窗口级入口，供 Launcher / 外部触发器调用）
 
@@ -262,12 +331,17 @@ class UIPluginRegistry:
 
         首次调用时自动创建 widget 实例、加入容器布局并注册到 CardManager。
 
+        Tab 模式：卡片统一挂在 TabManagerWindow 的四向全局容器
+        （GLOBAL_WINDOW_ID 作用域），不再绑定单个对话窗口；
+        上下文通过 provider 动态解析到当前活跃对话窗口。
+        TabManagerWindow 不可用时回退到 per-window 模式（main_widget）。
+
         Args:
             card_id: 卡片唯一 ID
-            main_widget: 目标主窗口实例（多窗口隔离用）。
-                         不传则使用 self._main_widget（单例模式，多窗口会被覆盖）。
+            main_widget: 回退模式的目标主窗口实例（多窗口隔离用）。
         """
-        mw = main_widget or self._main_widget
+        host = self._resolve_global_host()
+        mw = host or main_widget or self._main_widget
         if mw is None:
             return
         card_manager = getattr(mw, "_card_manager", None)
@@ -288,11 +362,17 @@ class UIPluginRegistry:
         if widget is None:
             from app.widgets.cards.card_manager import ContainerType
 
-            # 确定容器类型
-            container_type = ContainerType.TOP if card_info.container == "top" else ContainerType.BOTTOM
-            # 获取正确的容器控件（TopCardContainer / BottomCardContainer）
-            container_attr = "_top_card_container" if card_info.container == "top" else "_bottom_card_container"
-            container = getattr(mw, container_attr, None)
+            # 确定容器类型（top/bottom/left/right 与 ContainerType 值一一对应）
+            try:
+                container_type = ContainerType(card_info.container)
+            except ValueError:
+                container_type = ContainerType.TOP
+            # 获取对应方位的容器控件（命名约定：_{方位}_card_container）
+            container = getattr(mw, f"_{container_type.value}_card_container", None)
+            if container is None:
+                # 回退：旧对话窗口没有 left/right 容器时挂到 top
+                container_type = ContainerType.TOP
+                container = getattr(mw, "_top_card_container", None)
             if container is None:
                 return
             # 以容器为父级创建卡片 widget
@@ -599,8 +679,14 @@ class UIPluginRegistry:
                 ctx.update(card_info.context_provider())
             elif window_id and window_id in self._context_providers:
                 ctx.update(self._context_providers[window_id]())
-            elif self._context_provider is not None:
-                ctx.update(self._context_provider())
+            else:
+                # 全局作用域（Tab 级卡片）：动态解析当前活跃对话窗口的 provider，
+                # 切 Tab 后卡片拉到的是新活跃窗口的 project_root/session_id
+                active_provider = self._resolve_active_window_provider()
+                if active_provider is not None:
+                    ctx.update(active_provider())
+                elif self._context_provider is not None:
+                    ctx.update(self._context_provider())
         except Exception:
             pass
         # 卡片元信息始终注入
@@ -625,6 +711,28 @@ class UIPluginRegistry:
             pass
 
         return ctx
+
+    def _resolve_active_window_provider(self) -> Optional[Callable[[], Dict[str, Any]]]:
+        """解析当前活跃对话窗口的上下文 provider（全局卡片作用域用）
+
+        Returns:
+            活跃窗口的 provider；Tab 管理器不可用或无对应 provider 时返回 None
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return None
+            active = tm.get_current_window()
+            if active is None:
+                return None
+            wid = getattr(active, "_window_id", None)
+            if wid and wid in self._context_providers:
+                return self._context_providers[wid]
+        except Exception:
+            pass
+        return None
 
     def _make_context_provider(
         self, card_info: FloatingCardInfo, window_id: str = None

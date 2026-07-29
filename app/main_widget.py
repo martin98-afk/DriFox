@@ -688,10 +688,12 @@ class OpenAIChatToolWindow(ToolWindow):
         "history",
         "auto_loop_config",
         "auto_loop_running",
-        "settings",
-        "provider_edit",
-        "mcp_edit",
-        "hook_edit",
+        # 以下四张全局卡片已迁移到 TabManagerWindow 的 GLOBAL_WINDOW_ID 作用域，
+        # 不再属于 per-window 系统卡片，故不在此列表（它们不再隐藏对话输入区）。
+        # "settings",
+        # "provider_edit",
+        # "mcp_edit",
+        # "hook_edit",
         "project_selector",
         "tool_control",
         "share",
@@ -1400,10 +1402,12 @@ class OpenAIChatToolWindow(ToolWindow):
         title_bar.insert_button(2, self._settings_btn)
 
     def _toggle_settings_card(self):
-        """切换设置卡片的显示"""
-        # 确保懒构建的设置弹窗已就绪
-        self._build_settings_popup()
-        self._card_manager.toggle_card("settings", self._window_id)
+        """切换设置卡片的显示（委托全局卡片控制器）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.toggle_settings()
 
     def _open_api_docs(self):
         """打开 API 文档页面"""
@@ -2267,15 +2271,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 下载+UI 刷新（~300ms 主线程工作），避免在窗口刚出现时发生可见的 UI 闪烁。
         QTimer.singleShot(3500, self._build_settings_popup)
 
-        # ── 隐藏编辑卡片懒创建标记 ──
-        # hook/provider/mcp 三张编辑卡片从直接创建改为首次显示时懒创建，
-        # 避免在 setup_ui 关键路径上构建设置子卡片（每张 ~20-50ms）
-        self._hook_edit_card = None
-        self._hook_edit_popup = None
-        self._provider_edit_card = None
-        self._provider_edit_popup = None
-        self._mcp_edit_card = None
-        self._mcp_edit_popup = None
+        # ── 全局卡片（settings/provider/hook/mcp）已迁移到 Tab 窗口层 ──
+        # 实例由 GlobalCardController 持有，本类通过下方只读 property 兼容旧读取点
+        # （透明度调节、主题刷新、字体缩放等仍按旧属性名访问）
 
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
@@ -3006,50 +3004,12 @@ class OpenAIChatToolWindow(ToolWindow):
         batch_install_hover_tooltips(self)
 
     def _build_settings_popup(self):
-        """性能优化：懒构建设置弹窗（重型，隐藏构件）。
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        原在 setup_ui 中同步构建 LLMSettingsCard（内含服务商/Hook/MCP/Gateway 等
-        全部子卡片，含 get_icon 加载与数据加载，较重），拖慢窗口首帧。改为首帧绘制后
-        （QTimer 0）再构建，窗口外壳先出现。幂等：重复调用安全（showEvent 等路径）。
-        """
-        if getattr(self, "_settings_popup", None) is not None:
-            return
-        self._settings_popup = LLMSettingsCard(self)
-        self._settings_popup.setVisible(False)
-        self._settings_popup.configChanged.connect(self._on_settings_config_changed)
-        self._settings_popup.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("settings", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        # 连接服务商添加/编辑信号
-        self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
-        self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
-        # 连接 Hook 添加/编辑信号
-        self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
-        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
-        # Hook 开关/增删 → 广播到其他窗口同步
-        self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
-        # Hook 轻量开关同步（仅更新 switch 状态，不触发全量刷新）
-        self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
-        # 连接 MCP 添加/编辑信号
-        self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
-        self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
-        # MCP 开关变更 → 广播到其他窗口（热更新防抖 2 秒太慢）
-        self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
-        # Gateway 开关/保存变更 → 广播到其他窗口
-        self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
-        # 注册到 CardManager 与顶层容器（原在 _register_cards_to_manager 中，随弹窗一起延迟）
-        mgr = self._card_manager
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "settings",
-            self._settings_popup,
-            system_card=True,
-        )
-        self._top_card_container.add_card("settings", self._settings_popup)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.ensure_settings_popup()
 
     def _position_bottom_toolbar(self):
         """将底部工具栏绝对定位到窗口底部 36px。
@@ -5680,72 +5640,28 @@ class OpenAIChatToolWindow(ToolWindow):
         self._coding_plan_refresh_timer.start(60000)
 
     def _open_settings_popup(self):
-        """打开设置卡片"""
-        # 确保懒构建的设置弹窗已就绪（首帧后才会构建）
-        self._build_settings_popup()
-        self._card_manager.toggle_card("settings", self._window_id)
-        if self._card_manager.is_card_visible("settings", self._window_id):
-            # 确保顶层窗口从最小化恢复并激活
-            top_window = self.window()
-            if top_window:
-                if top_window.isMinimized():
-                    top_window.showNormal()
-                top_window.activateWindow()
-                top_window.raise_()
-            self._settings_popup.raise_()
-            self._settings_popup.activateWindow()
+        """打开设置卡片（委托全局卡片控制器）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.open_settings()
 
     def _check_gitee_sync_reminder(self):
-        """启动后检查：未绑定 Gitee 且提醒开启时，弹 InfoBar 引导绑定"""
-        if self.cfg.gitee_bound.value:
-            return
-        if not self.cfg.gitee_sync_remind.value:
-            return
-        if not hasattr(self, "_settings_popup") or self._settings_popup is None:
-            return
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
-        from PyQt5.QtWidgets import QWidget, QHBoxLayout
-        from PyQt5.QtCore import Qt
-
-        infobar = InfoBar(
-            icon=InfoBarIcon.INFORMATION,
-            title="绑定 Gitee 账号",
-            content=("• 配置与自定义插件自动备份，仅自己可见\n• 会话记录与项目文件分享可选择公开或私有仓库\n"),
-            orient=Qt.Vertical,
-            isClosable=True,
-            duration=-1,
-            position=InfoBarPosition.BOTTOM,
-            parent=self,
-        )
-
-        # 按钮容器（水平布局，右对齐）
-        btn_container = QWidget()
-        btn_layout = QHBoxLayout(btn_container)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(8)
-
-        btn_bind = PrimaryPushButton("立即绑定")
-        btn_bind.setFixedWidth(90)
-        btn_bind.clicked.connect(lambda: self._open_gitee_bind_from_reminder(infobar))
-        btn_layout.addWidget(btn_bind)
-
-        btn_dismiss = PushButton("不再提醒")
-        btn_dismiss.setFixedWidth(90)
-        btn_dismiss.clicked.connect(lambda: self._dismiss_gitee_reminder(infobar))
-        btn_layout.addWidget(btn_dismiss)
-
-        infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
-        infobar.show()
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.check_gitee_sync_reminder()
 
     def _open_gitee_bind_from_reminder(self, infobar):
-        """提醒中点击「立即绑定」：关闭提醒，打开设置定位到 Gitee 卡片"""
-        infobar.close()
-        self._open_settings_popup()
-        # GiteeCard 在设置页最顶部，滚动到顶部即可
-        if hasattr(self, "_settings_popup") and self._settings_popup:
-            scroll_bar = self._settings_popup.scroll_area.verticalScrollBar()
-            scroll_bar.setValue(0)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.open_gitee_bind_from_reminder(infobar)
 
     def _dismiss_gitee_reminder(self, infobar):
         """提醒中点击「不再提醒」：持久化设置并关闭"""
@@ -5753,503 +5669,212 @@ class OpenAIChatToolWindow(ToolWindow):
         infobar.close()
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):
-        """服务商编辑保存后的回调
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        config_id 改用 apikey 的稳定 hash（见 app.core.provider_profile.apply_provider_save），
-        编辑同 apikey 始终命中同一条目，避免 uuid 时代"保存产生重复"的 bug。
-        """
-        # 注意：必须用 deepcopy！ConfigItem.value 返回内部 dict 引用，原地修改后 set 回同一对象不会触发 valueChanged 信号
-        saved_providers = copy.deepcopy(self.cfg.llm_saved_providers.value) or {}
-        old_selected = self._current_provider_name
-
-        from app.core.provider_profile import (
-            ProviderConfigCollision,
-            apply_provider_save,
-        )
-
-        try:
-            new_config_id = apply_provider_save(saved_providers, provider_info, provider_name, is_new=is_new)
-        except ProviderConfigCollision:
-            # 撞 id 冲突：弹简单提示，保留表单让用户修改
-            from app.widgets.common_dialogs import InfoDialog
-
-            _dialog = InfoDialog(
-                title="配置冲突",
-                content="该 (API_URL, API_KEY) 组合已被其他配置占用，请修改后重试。\n\n"
-                "同名服务商可以使用不同 base_url 分别配置（如 coding plan / 普通 plan），\n"
-                "但 (URL, KEY) 必须唯一。",
-                confirm_text="知道了",
-                parent=self.window(),
-            )
-            _dialog.exec_()
-            return  # 不隐藏表单，用户继续编辑
-
-        self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
-
-        # 如果 apikey 改了导致 config_id 变化（apply_provider_save 删了旧条目），
-        # 同步更新当前窗口的选择，避免 _current_provider_name 指向已删除的 key
-        if old_selected and old_selected != new_config_id and self._valid_configs.get(old_selected):
-            # 当前选择被新条目替换时，迁移窗口级选择
-            if saved_providers.get(new_config_id) is provider_info and old_selected not in saved_providers:
-                self._current_provider_name = new_config_id
-                if self.cfg.llm_selected_model.value == old_selected:
-                    self.cfg.set(self.cfg.llm_selected_model, new_config_id, save=True)
-
-        # 隐藏服务商编辑卡片，显示设置卡片
-        self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
-
-        # 模型选择卡片数据将在下次打开时自动刷新
-        # 刷新配置
-        self._load_model_configs()
-        InfoBar.success(
-            "已保存",
-            f"服务商 '{provider_name}' 已保存",
-            parent=self,
-            duration=2000,
-            position=InfoBarPosition.BOTTOM,
-        )
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_provider_edit_saved(provider_name, provider_info, is_new)
 
     def _on_provider_edit_closed(self):
-        """服务商编辑关闭后的回调"""
-        # 隐藏服务商编辑卡片，显示设置卡片
-        self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
-        self._restore_after_system_close()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_provider_edit_closed()
 
     def _show_provider_add_card(self):
-        """显示添加服务商卡片"""
-        self._ensure_provider_edit_card()
-        # 隐藏设置卡片
-        self._card_manager.hide_card("settings", self._window_id)
-        # 设置卡片标题
-        self._provider_edit_card.set_title("⚙️ 添加服务商")
-        # 重新创建 ProviderEditCard 用于添加
-        self._provider_edit_popup = ProviderEditCard(provider_name="", provider_info={}, is_new=True, parent=self)
-        # 新建流程必须把 is_new=True 透传给保存回调
-        self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
-        )
-        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        # 替换卡片内容
-        while self._provider_edit_card.content_layout.count():
-            item = self._provider_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        # 重新绑定保存按钮
-        self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
-        self._card_manager.show_card("provider_edit", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-    # ========== Hook 编辑卡片 ==========
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_provider_add_card()
 
     def _show_hook_add_card(self):
-        """显示添加 Hook 卡片"""
-        self._ensure_hook_edit_card()
-        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        self._card_manager.hide_card("settings", self._window_id)
-        self._hook_edit_card.set_title("➕ 添加 Hook")
-        # 获取 hook_manager
-        hm = None
-        if hasattr(self, "_settings_popup") and hasattr(self._settings_popup, "hookListCard"):
-            hm = self._settings_popup.hookListCard._hook_manager
-        # 重新创建 HookEditCard
-        self._hook_edit_popup = HookEditCard(parent=self, hook_manager=hm)
-        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
-        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
-        while self._hook_edit_card.content_layout.count():
-            item = self._hook_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
-        self._hook_edit_card.set_save_button_handler(lambda: self._hook_edit_popup._on_save())
-        self._hook_edit_card.set_header_sticky("")  # 新增时无来源标签
-        self._card_manager.show_card("hook_edit", self._window_id)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_hook_add_card()
 
     def _show_hook_edit_card(self, hook_id: str, hook_data: dict):
-        """显示编辑 Hook 卡片"""
-        self._ensure_hook_edit_card()
-        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        self._card_manager.hide_card("settings", self._window_id)
-        self._hook_edit_card.set_title("✏️ 编辑 Hook")
-        # 获取 hook_manager
-        hm = None
-        if hasattr(self, "_settings_popup") and hasattr(self._settings_popup, "hookListCard"):
-            hm = self._settings_popup.hookListCard._hook_manager
-        # 创建携带原始数据的 HookEditCard
-        self._hook_edit_popup = HookEditCard(hook_data=hook_data, parent=self, hook_manager=hm)
-        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
-        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
-        while self._hook_edit_card.content_layout.count():
-            item = self._hook_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
-        self._hook_edit_card.set_save_button_handler(lambda: self._hook_edit_popup._on_save())
-        # 来源信息显示到卡片标题栏
-        self._hook_edit_card.set_header_sticky(self._hook_edit_popup.get_source_display())
-        self._card_manager.show_card("hook_edit", self._window_id)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_hook_edit_card(hook_id, hook_data)
 
     def _on_hook_edit_saved(self, values: dict):
-        """Hook 保存回调"""
-        self._card_manager.hide_card("hook_edit", self._window_id)
-        # 显示设置卡片（使用 show_card 触发系统卡片互斥）
-        self._card_manager.show_card("settings", self._window_id)
-        if hasattr(self._settings_popup, "hookListCard"):
-            original = self._hook_edit_popup.get_original_data()
-            hook_id = original.get("id", "") if original else ""
-            hm = self._settings_popup.hookListCard._hook_manager
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-            # ── inject_agent_identity hook：同步下拉框选择到 Settings.llm_primary_agent ──
-            # 下拉框是用户主智能体身份定义的源头，写入 Settings 后
-            # AgentManager.get_agent_system_prompt() 会优先用其构建身份内容。
-            if hook_id == "builtin_inject_agent_identity" and "agent" in values:
-                try:
-                    from app.utils.config import Settings
-
-                    selected_agent = values["agent"]
-                    Settings.get_instance().llm_primary_agent.value = selected_agent
-                    # 切换主智能体后必须清空 session 缓存，否则下次构建会复用旧身份
-                    if self.backend and self.backend.chat_engine:
-                        try:
-                            self.backend.chat_engine._invalidate_session_system_prompt_cache()
-                        except Exception:
-                            pass
-                    logger.info(
-                        f"[_on_hook_edit_saved] llm_primary_agent = {selected_agent}, session cache invalidated"
-                    )
-                except Exception as e:
-                    logger.warning(f"[_on_hook_edit_saved] Failed to sync llm_primary_agent: {e}")
-
-            if hook_id and hm:
-                # 编辑已有 hook（edit_hook_by_id 内部处理事件变更移动逻辑）
-                hm.edit_hook_by_id(hook_id, values)
-                hm.reload_global_hooks(str(self._settings_popup.hookListCard._hooks_config_file))
-                self._settings_popup.hookListCard._refresh(reload=True)
-            elif hm:
-                # 新增 hook
-                add_kwargs = dict(
-                    event=values["event"],
-                    command=values["command"],
-                    matcher=values["matcher"],
-                    hook_type=values["type"],
-                    enabled=values["enabled"],
-                )
-                if "commandWindows" in values:
-                    add_kwargs["commandWindows"] = values["commandWindows"]
-                self._settings_popup.hookListCard._add_hook(**add_kwargs)
-        # 广播给所有其他窗口刷新 hook 列表
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            hook_card = getattr(settings_popup, "hookListCard", None)
-            if hook_card is None:
-                continue
-            # 通知设置卡片已打开的其他窗口刷新 hook 列表
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                # 先重新加载 HookManager 内存（从文件读取）
-                if hook_card._hook_manager:
-                    hook_card._hook_manager.reload_global_hooks(str(hook_card._hooks_config_file))
-                hook_card._refresh(reload=True)
-        self._card_manager.show_card("settings", self._window_id)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_hook_edit_saved(values)
 
     def _on_hook_edit_closed(self):
-        """Hook 编辑关闭回调"""
-        self._card_manager.hide_card("hook_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_hook_edit_closed()
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
-        """显示编辑服务商卡片"""
-        self._ensure_provider_edit_card()
-        # 隐藏设置卡片
-        self._card_manager.hide_card("settings", self._window_id)
-        # 设置卡片标题
-        # 优先使用用户填写的配置名称（name），其次使用服务商名称（provider_name），最后回退到 config_id
-        display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
-        self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
-        # 在 provider_info 中添加 provider_name（如果不存在）
-        if "provider_name" not in provider_info:
-            provider_info["provider_name"] = display_name
-        # 重新创建 ProviderEditCard 用于编辑
-        self._provider_edit_popup = ProviderEditCard(
-            provider_name=provider_info["provider_name"],
-            provider_info=provider_info,
-            is_new=False,
-            parent=self,
-        )
-        # 编辑流程透传 is_new=False；provider_info 里的旧 config_id 由表单带到回调
-        self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=False)
-        )
-        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        # 替换卡片内容
-        while self._provider_edit_card.content_layout.count():
-            item = self._provider_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        # 重新绑定保存按钮
-        self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
-        self._card_manager.show_card("provider_edit", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-    # ========== MCP 编辑卡片 ==========
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_provider_edit_card(config_id, provider_info)
 
     def _show_mcp_add_card(self):
-        """显示添加 MCP 服务器卡片"""
-        self._ensure_mcp_edit_card()
-        self._card_manager.hide_card("settings", self._window_id)
-        self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
-        self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self)
-        self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
-        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
-        while self._mcp_edit_card.content_layout.count():
-            item = self._mcp_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._mcp_edit_card.content_layout.addWidget(self._mcp_edit_popup)
-        self._mcp_edit_card.set_save_button_handler(lambda: self._mcp_edit_popup._on_save())
-        self._setup_mcp_edit_mode_buttons()
-        # 新创建的 MCPEditCard 需要应用当前字体大小
-        apply_font_size_to_widget(self._mcp_edit_popup, 14)
-        self._card_manager.show_card("mcp_edit", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_mcp_add_card()
 
     def _show_mcp_edit_card(self, name: str, server_data: dict):
-        """显示编辑 MCP 服务器卡片"""
-        self._ensure_mcp_edit_card()
-        self._card_manager.hide_card("settings", self._window_id)
-        self._card_manager.show_card("mcp_edit", self._window_id)
-        self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
-        self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self)
-        self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
-        self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
-        while self._mcp_edit_card.content_layout.count():
-            item = self._mcp_edit_card.content_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._mcp_edit_card.content_layout.addWidget(self._mcp_edit_popup)
-        self._mcp_edit_card.set_save_button_handler(lambda: self._mcp_edit_popup._on_save())
-        self._setup_mcp_edit_mode_buttons()
-        # 新创建的 MCPEditCard 需要应用当前字体大小
-        apply_font_size_to_widget(self._mcp_edit_popup, 14)
-        self._card_manager.show_card("mcp_edit", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._show_mcp_edit_card(name, server_data)
 
     def _setup_mcp_edit_mode_buttons(self):
-        """设置 MCP 编辑卡头的模式切换按钮"""
-        self._mcp_edit_popup.modeChanged.connect(self._refresh_mcp_mode_buttons)
-        self._refresh_mcp_mode_buttons(self._mcp_edit_popup._json_mode)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._setup_mcp_edit_mode_buttons()
 
     def _refresh_mcp_mode_buttons(self, is_json: bool):
-        """刷新 MCP 编辑卡头的模式切换按钮状态"""
-        self._mcp_edit_card.set_mode_buttons(
-            [
-                {
-                    "label": "表单",
-                    "active": not is_json,
-                    "handler": lambda: self._try_toggle_to_form(),
-                },
-                {
-                    "label": "JSON",
-                    "active": is_json,
-                    "handler": lambda: self._try_toggle_to_json(),
-                },
-            ]
-        )
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._refresh_mcp_mode_buttons(is_json)
 
     def _try_toggle_to_form(self):
-        if self._mcp_edit_popup and not self._mcp_edit_popup._json_mode:
-            return
-        self._mcp_edit_popup._toggle_mode()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._try_toggle_to_form()
 
     def _try_toggle_to_json(self):
-        if self._mcp_edit_popup and self._mcp_edit_popup._json_mode:
-            return
-        self._mcp_edit_popup._toggle_mode()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._try_toggle_to_json()
 
     def _on_mcp_edit_saved(self, server_data: dict):
-        """MCP 编辑保存回调"""
-        self._card_manager.hide_card("mcp_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
-        if hasattr(self._settings_popup, "mcpListCard"):
-            from app.core.plugin_manager import PluginManager
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-            pm = PluginManager.get_instance()
-            new_name = server_data.get("name", "")
-            original_name = getattr(self._mcp_edit_popup, "_original_name", None)
-            lookup_name = original_name if original_name else new_name
-
-            servers = self._settings_popup.mcpListCard._get_servers()
-            is_edit = any(s.get("name") == lookup_name for s in servers)
-            if is_edit:
-                pm.update_mcp_server(lookup_name, server_data)
-            else:
-                pm.add_mcp_server(new_name, server_data)
-
-            self._settings_popup.mcpListCard._refresh()
-            QTimer.singleShot(500, self._settings_popup.mcpListCard.refresh_connections)
-
-        # 广播给所有其他窗口刷新 MCP 列表
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            mcp_card = getattr(settings_popup, "mcpListCard", None)
-            if mcp_card is None:
-                continue
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                mcp_card._refresh()
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_mcp_edit_saved(server_data)
 
     def _on_mcp_edit_closed(self):
-        """MCP 编辑关闭回调"""
-        self._card_manager.hide_card("mcp_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
-        if hasattr(self._settings_popup, "mcpListCard"):
-            self._settings_popup.mcpListCard.refresh_connections()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_mcp_edit_closed()
 
     def _on_hook_edit_card_closed(self):
-        """Hook 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("hook_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_hook_edit_card_closed()
 
     def _on_provider_edit_card_closed(self):
-        """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("provider_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_provider_edit_card_closed()
 
     def _on_mcp_edit_card_closed(self):
-        """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("mcp_edit", self._window_id)
-        self._card_manager.show_card("settings", self._window_id)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-    # ── 编辑卡片懒创建（避免 setup_ui 关键路径构建隐藏卡片） ──
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_mcp_edit_card_closed()
 
     def _ensure_hook_edit_card(self):
-        """确保 Hook 编辑卡片已创建并注册到 CardManager"""
-        if self._hook_edit_card is not None:
-            return
-        from app.widgets.cards.settings.hook_setting_card import HookEditCard
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self)
-        self._hook_edit_card.setMinimumHeight(200)
-        self._hook_edit_card.set_height_mode("proportional")
-        self._hook_edit_popup = HookEditCard(parent=self)
-        self._hook_edit_popup.saved.connect(self._on_hook_edit_saved)
-        self._hook_edit_popup.closed.connect(self._on_hook_edit_closed)
-        self._hook_edit_card.content_layout.addWidget(self._hook_edit_popup)
-        self._hook_edit_card.set_save_button_handler(self._hook_edit_popup._on_save)
-        self._hook_edit_card.setVisible(False)
-        self._hook_edit_card.closed.connect(self._on_hook_edit_card_closed)
-        # 注册到 CardManager 和容器
-        mgr = self._card_manager
-        mgr.register_card(self._window_id, ContainerType.TOP, "hook_edit", self._hook_edit_card, system_card=True)
-        self._top_card_container.add_card("hook_edit", self._hook_edit_card)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._ensure_hook_edit_card()
 
     def _ensure_provider_edit_card(self):
-        """确保服务商编辑卡片已创建并注册到 CardManager"""
-        if self._provider_edit_card is not None:
-            return
-        self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self)
-        self._provider_edit_card.setMinimumHeight(300)
-        self._provider_edit_card.set_height_mode("content")
-        self._provider_edit_popup = ProviderEditCard(parent=self)
-        self._provider_edit_popup.saved.connect(
-            lambda name, info: self._on_provider_edit_saved(name, info, is_new=True)
-        )
-        self._provider_edit_popup.closed.connect(self._on_provider_edit_closed)
-        self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
-        self._provider_edit_card.set_save_button_handler(self._provider_edit_popup._on_save)
-        self._provider_edit_card.setVisible(False)
-        self._provider_edit_card.closed.connect(self._on_provider_edit_card_closed)
-        # 注册到 CardManager 和容器
-        mgr = self._card_manager
-        mgr.register_card(
-            self._window_id, ContainerType.TOP, "provider_edit", self._provider_edit_card, system_card=True
-        )
-        self._top_card_container.add_card("provider_edit", self._provider_edit_card)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._ensure_provider_edit_card()
 
     def _ensure_mcp_edit_card(self):
-        """确保 MCP 编辑卡片已创建并注册到 CardManager"""
-        if self._mcp_edit_card is not None:
-            return
-        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self)
-        self._mcp_edit_card.setMinimumHeight(200)
-        self._mcp_edit_card.set_height_mode("content")
-        self._mcp_edit_popup = None
-        self._mcp_edit_card.setVisible(False)
-        self._mcp_edit_card.closed.connect(self._on_mcp_edit_card_closed)
-        # 注册到 CardManager 和容器
-        mgr = self._card_manager
-        mgr.register_card(self._window_id, ContainerType.TOP, "mcp_edit", self._mcp_edit_card, system_card=True)
-        self._top_card_container.add_card("mcp_edit", self._mcp_edit_card)
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._ensure_mcp_edit_card()
 
     def _on_hook_toggled(self):
-        """Hook 开关/增删 → 广播到所有窗口刷新列表"""
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            hook_card = getattr(settings_popup, "hookListCard", None)
-            if hook_card is None:
-                continue
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                hm = hook_card._hook_manager
-                if hm:
-                    hm.reload_global_hooks(str(hook_card._hooks_config_file))
-                    hook_card._refresh(reload=True)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_hook_toggled()
 
     def _on_hook_toggled_light(self, hook_id: str, enabled: bool):
-        """Hook 单项开关同步 → 仅更新其他窗口对应 Switch 状态，不重渲整个列表
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        避免 reload_global_hooks + 全量 _refresh 引起的卡顿和 source_type 退化。
-        """
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            hook_card = getattr(settings_popup, "hookListCard", None)
-            if hook_card is None:
-                continue
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                hook_card.update_toggle_state(hook_id, enabled)
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_hook_toggled_light(hook_id, enabled)
 
     def _on_mcp_servers_toggled(self):
-        """MCP 服务器开关变更 → 广播到其他窗口刷新列表"""
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            mcp_card = getattr(settings_popup, "mcpListCard", None)
-            if mcp_card is None:
-                continue
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                mcp_card._refresh()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_mcp_servers_toggled()
 
     def _on_gateway_toggled(self):
-        """Gateway 平台开关/配置变更 → 广播到其他窗口刷新状态"""
-        for win in OpenAIChatToolWindow._instances:
-            if win._is_destroyed or win is self:
-                continue
-            settings_popup = getattr(win, "_settings_popup", None)
-            if settings_popup is None:
-                continue
-            gateway_card = getattr(settings_popup, "gatewayCard", None)
-            if gateway_card is None:
-                continue
-            if win._card_manager.is_card_visible("settings", win._window_id):
-                gateway_card._refresh()
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc._on_gateway_toggled()
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
@@ -6269,16 +5894,19 @@ class OpenAIChatToolWindow(ToolWindow):
             "question",
             "model_config",
             "history",
-            "settings",
             "memory",
-            "provider_edit",
             "auto_loop_config",
-            "hook_edit",
             "undo_delete",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
         if not self._is_auto_loop_running:
             self._card_manager.hide_card("auto_loop_running", self._window_id)
+        # 全局卡片（settings/provider_edit/hook_edit/mcp_edit）已迁移到 Tab 窗口层，统一隐藏
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.hide_all_global_cards()
 
     def register_system_card(self, card_id: str) -> None:
         """将一个卡片 ID 注册为"系统卡片" — 显示时自动隐藏输入区域
@@ -6382,19 +6010,60 @@ class OpenAIChatToolWindow(ToolWindow):
             self._input_card.update()
 
     def _system_cards(self) -> list:
-        """返回所有系统卡片的列表，用于检查是否有系统卡片可见"""
-        # 设置弹窗为懒构建，首帧后才会存在；过滤 None 防止 _is_any_system_card_visible
-        # 在弹窗构建前调用时触发 None.isVisible() 异常。
+        """返回所有系统卡片的列表，用于检查是否有系统卡片可见
+
+        注意：系统配置/服务商编辑/Hook 编辑/MCP 编辑四张全局卡片已迁移到
+        TabManagerWindow 的全局作用域（GLOBAL_WINDOW_ID），不再属于 per-window
+        系统卡片，故不在此列表中（它们的显隐由 GlobalCardController 管理）。
+        """
         cards = [
             self._model_config_card,
             self._history_card,
-            self._settings_popup,
             self._memory_card,
-            self._provider_edit_card,
             self._auto_loop_config_card,
-            self._hook_edit_card,
         ]
         return [c for c in cards if c is not None]
+
+    # ───────────────────────────────────────────────────────────
+    # 全局卡片兼容属性（只读委托）
+    # 四张全局卡片实例由 GlobalCardController 持有；旧代码中的
+    # 透明度调节 / 主题刷新 / 字体缩放等读取点通过这些 property 兼容。
+    # ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _global_card_attr(attr: str):
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        return getattr(cc, attr, None) if cc is not None else None
+
+    @property
+    def _settings_popup(self):
+        return self._global_card_attr("_settings_popup")
+
+    @property
+    def _provider_edit_card(self):
+        return self._global_card_attr("_provider_edit_card")
+
+    @property
+    def _provider_edit_popup(self):
+        return self._global_card_attr("_provider_edit_popup")
+
+    @property
+    def _hook_edit_card(self):
+        return self._global_card_attr("_hook_edit_card")
+
+    @property
+    def _hook_edit_popup(self):
+        return self._global_card_attr("_hook_edit_popup")
+
+    @property
+    def _mcp_edit_card(self):
+        return self._global_card_attr("_mcp_edit_card")
+
+    @property
+    def _mcp_edit_popup(self):
+        return self._global_card_attr("_mcp_edit_popup")
 
     def _is_any_system_card_visible(self) -> bool:
         """检查是否有任何系统卡片可见"""
@@ -6837,7 +6506,7 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 if not sip.isdeleted(launcher):
                     launcher.update_geometry(self.chat_scroll_area.geometry())
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
@@ -7209,7 +6878,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7274,7 +6943,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7285,7 +6954,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7310,7 +6979,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7344,7 +7013,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7385,7 +7054,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7412,7 +7081,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -7425,7 +7094,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     launcher = getattr(win, "_ui_plugin_edge_launcher", None)
                     if launcher is not None:
                         launcher.refresh_plugins()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # Tab 模式下也刷新共享 Launcher
             try:
@@ -15958,7 +15627,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -15985,7 +15654,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

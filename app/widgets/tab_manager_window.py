@@ -232,6 +232,12 @@ class TabManagerWindow(QWidget):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
+        # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
+        # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        get_global_card_controller()
+
         # 刷新 Tab 面板内嵌的 UI 插件列表
         self._tab_panel.refresh_ui_plugins()
         # 注册到 TrayManager
@@ -264,6 +270,18 @@ class TabManagerWindow(QWidget):
             self._tab_panel.refresh_style()
         except Exception:
             pass
+        # 刷新四向全局卡片容器背景（主题色/边框随主题切换）
+        for _c in (
+            getattr(self, "_global_top_container", None),
+            getattr(self, "_global_bottom_container", None),
+            getattr(self, "_global_left_container", None),
+            getattr(self, "_global_right_container", None),
+        ):
+            if _c is not None:
+                try:
+                    _c.refresh_style()
+                except Exception:
+                    pass
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
         # （纯主题色切换不影响图标，跳过可避免 QPainter 开销）
         from app.utils.design_tokens import scale_icon_size as _scale_size
@@ -336,6 +354,13 @@ class TabManagerWindow(QWidget):
                     background: {Colors.CONTENT_BG};
                 }}
             """)
+        # 停靠区 splitter：handle 融入内容区背景，靠停靠面板自身 border 形成分隔线
+        if getattr(self, "_dock_splitter", None) is not None:
+            self._dock_splitter.setStyleSheet(f"""
+                #dockSplitter::handle:horizontal {{
+                    background: {Colors.CONTENT_BG};
+                }}
+            """)
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
@@ -390,7 +415,70 @@ class TabManagerWindow(QWidget):
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
-        chat_frame_layout.addWidget(self._content_area)
+
+        # ── 全局卡片宿主容器（Tab 级系统卡片） ──
+        # 系统配置 / 服务商编辑 / Hook 编辑 / MCP 编辑等全局卡片不再绑定
+        # 单个对话窗口，统一挂在此容器（位于对话区上方，随卡片显隐展开/折叠）。
+        # 对话级卡片（项目/会话/模型选择）仍留在各 OpenAIChatToolWindow 内部。
+        from app.widgets.cards.card_container import CardContainer
+        from app.widgets.cards.card_manager import (
+            GLOBAL_WINDOW_ID,
+            CardManager,
+            ContainerType,
+        )
+
+        _card_mgr = CardManager.get_instance()
+        _card_mgr.register_window(GLOBAL_WINDOW_ID)
+
+        # 四向全局容器：上/下沿高度折叠，左/右沿宽度折叠（停靠区）
+        self._global_top_container = CardContainer(ContainerType.TOP)
+        self._global_top_container.setObjectName("globalCardContainer")
+        self._global_bottom_container = CardContainer(ContainerType.BOTTOM)
+        self._global_bottom_container.setObjectName("globalBottomContainer")
+        self._global_left_container = CardContainer(ContainerType.LEFT)
+        self._global_left_container.setObjectName("globalLeftContainer")
+        self._global_right_container = CardContainer(ContainerType.RIGHT)
+        self._global_right_container.setObjectName("globalRightContainer")
+        for _c in (
+            self._global_top_container,
+            self._global_bottom_container,
+            self._global_left_container,
+            self._global_right_container,
+        ):
+            _c.bind_card_manager(_card_mgr, GLOBAL_WINDOW_ID)
+
+        # 兼容别名：GlobalCardController 及旧代码通过 _global_card_container 访问 TOP 容器
+        self._global_card_container = self._global_top_container
+        # UIPluginRegistry 复用的鸭子类型属性（与 OpenAIChatToolWindow 对齐）
+        self._card_manager = _card_mgr
+        self._window_id = GLOBAL_WINDOW_ID
+        self._top_card_container = self._global_top_container
+        self._bottom_card_container = self._global_bottom_container
+        self._left_card_container = self._global_left_container
+        self._right_card_container = self._global_right_container
+
+        chat_frame_layout.addWidget(self._global_top_container)
+
+        # 中段：左停靠区 | 内容区 | 右停靠区（QSplitter，可拖拽调整占比）
+        # CardContainer 横向容器展开动画结束后会释放 maximumWidth 并锁定
+        # 最小宽度（_DOCK_MIN），此后宽度完全由本 splitter 的 handle 拖拽控制；
+        # 折叠时 maximumWidth 动画到 0，splitter 自动把空间还给内容区。
+        from PyQt5.QtWidgets import QSplitter as _DockSplitter
+
+        self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
+        self._dock_splitter.setObjectName("dockSplitter")
+        self._dock_splitter.addWidget(self._global_left_container)
+        self._dock_splitter.addWidget(self._content_area)
+        self._dock_splitter.addWidget(self._global_right_container)
+        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
+        self._dock_splitter.setStretchFactor(1, 1)  # 对话区吃掉多余空间
+        self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
+        self._dock_splitter.setHandleWidth(4)
+        # 折叠依赖 maximumWidth=0 约束而非用户拖拽收起，禁止拖拽塌陷
+        self._dock_splitter.setChildrenCollapsible(False)
+        chat_frame_layout.addWidget(self._dock_splitter, 1)
+
+        chat_frame_layout.addWidget(self._global_bottom_container)
 
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter

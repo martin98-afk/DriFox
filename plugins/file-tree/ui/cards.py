@@ -306,7 +306,9 @@ class FileTreeCard(QWidget):
         self._search_input.setObjectName("file-tree-search")
         self._search_input.setPlaceholderText("过滤文件...")
         self._search_input.setClearButtonEnabled(True)
-        self._search_input.setFixedWidth(200)
+        # 左侧停靠区宽度可被 splitter 拖窄，搜索框允许收缩（80~200px）
+        self._search_input.setMinimumWidth(80)
+        self._search_input.setMaximumWidth(200)
         self._search_input.setFixedHeight(32)
 
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
@@ -1168,11 +1170,26 @@ class FileTreeCard(QWidget):
         except Exception as e:
             logger.error(f"[FileTree] 打开文件失败: {e}")
 
-    # ── 比例高度 ──
+    # ── 比例尺寸（按停靠方位自适应） ──
+
+    def _in_horizontal_dock(self) -> bool:
+        """是否停靠在左/右横向停靠区（容器沿宽度轴折叠）"""
+        try:
+            from app.widgets.cards.card_manager import ContainerType
+
+            ct = getattr(self.parent(), "container_type", None)
+            return ct in (ContainerType.LEFT, ContainerType.RIGHT)
+        except Exception:
+            return False
 
     def sizeHint(self):
         base = super().sizeHint()
         win = self.window()
+        if self._in_horizontal_dock():
+            # 左/右停靠：自然宽度 300px（展开动画目标），高度填满停靠区；
+            # 展开后宽度由 dockSplitter 拖拽控制，此处仅提供初始值
+            h = win.height() if win and win.height() > 0 else base.height()
+            return QSize(300, h)
         if win and win.height() > 0:
             return QSize(max(base.width(), 200), int(win.height() * 0.85))
         return base

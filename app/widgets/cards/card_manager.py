@@ -16,6 +16,7 @@
   3. 系统卡片（settings/history/memory 等）
   4. 实时卡片（todo/tool/sub_agent）—— 系统卡片存在时被压制
 """
+
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
@@ -23,14 +24,31 @@ from loguru import logger
 
 
 class ContainerType(Enum):
-    TOP = "top"      # chatscroll 上方
+    TOP = "top"  # chatscroll 上方
     BOTTOM = "bottom"  # chatscroll 下方
+    LEFT = "left"  # 内容区左侧停靠区（Tab 级全局卡片 / UI 插件卡片）
+    RIGHT = "right"  # 内容区右侧停靠区（Tab 级全局卡片 / UI 插件卡片）
+
+
+# ── 停靠区容器 ──
+# LEFT/RIGHT 作为独立停靠区：
+# - 仅同容器互斥（同一侧一次显示一张卡片）
+# - 不参与系统卡片的跨容器压制（打开设置卡片不会关掉左右停靠面板）
+# - 不被 question 卡片强制关闭
+DOCK_CONTAINER_TYPES = frozenset({ContainerType.LEFT, ContainerType.RIGHT})
+
+
+# ── 全局卡片作用域 ──
+# Tab 管理器级别的卡片（系统配置/服务商编辑/Hook 编辑/MCP 编辑等）
+# 不再绑定单个对话窗口，统一注册在该保留 window_id 下。
+# 对话级卡片（项目/会话/模型选择等）仍使用各窗口自己的 window_id。
+GLOBAL_WINDOW_ID = "__global__"
 
 
 class CardManager:
     """
     中央卡片管理器 - 按窗口隔离
-    
+
     数据结构：
     {
         "window_1": {
@@ -83,16 +101,10 @@ class CardManager:
         """确保窗口数据已初始化"""
         if window_id not in self._window_data:
             self._window_data[window_id] = {
-                "cards": {
-                    ContainerType.TOP: {},
-                    ContainerType.BOTTOM: {},
-                },
+                "cards": {ct: {} for ct in ContainerType},
                 "containers": {},  # card_id -> ContainerType
                 "system_cards": set(),
-                "visible_cards": {
-                    ContainerType.TOP: None,
-                    ContainerType.BOTTOM: None,
-                },
+                "visible_cards": {ct: None for ct in ContainerType},
                 "shown_callbacks": {},
                 "hidden_callbacks": {},
                 "suppress_others_map": {},  # card_id -> set of suppressed card_ids
@@ -112,9 +124,17 @@ class CardManager:
         if window_id in self._window_data:
             del self._window_data[window_id]
 
-    def register_card(self, window_id: str, container_type: ContainerType, card_id: str, card_widget, system_card: bool = False, suppress_others: list = None):
+    def register_card(
+        self,
+        window_id: str,
+        container_type: ContainerType,
+        card_id: str,
+        card_widget,
+        system_card: bool = False,
+        suppress_others: list = None,
+    ):
         """注册卡片到管理器
-        
+
         Args:
             window_id: 窗口标识
             container_type: 容器类型
@@ -143,6 +163,31 @@ class CardManager:
             for suppressed_id in suppress_others:
                 win_data["suppressed_by_others"].add(suppressed_id)
 
+    def unregister_card(self, card_id: str, window_id: str):
+        """注销单张卡片（卡片销毁重建前调用）
+
+        清理 cards/containers/system_cards/visible_cards/压制关系中的所有痕迹，
+        使同名 card_id 可被重新 register_card 而不触发覆盖警告。
+        """
+        win_data = self._window_data.get(window_id)
+        if win_data is None:
+            return
+        container_type = win_data["containers"].pop(card_id, None)
+        if container_type is not None:
+            win_data["cards"].get(container_type, {}).pop(card_id, None)
+            if win_data["visible_cards"].get(container_type) == card_id:
+                win_data["visible_cards"][container_type] = None
+        win_data["system_cards"].discard(card_id)
+        win_data["shown_callbacks"].pop(card_id, None)
+        win_data["hidden_callbacks"].pop(card_id, None)
+        suppressed = win_data["suppress_others_map"].pop(card_id, None)
+        if suppressed:
+            # 重算被压制集合（其他卡片可能仍压制相同目标）
+            still_suppressed = set()
+            for ids in win_data["suppress_others_map"].values():
+                still_suppressed |= ids
+            win_data["suppressed_by_others"] &= still_suppressed
+
     def show_card(self, card_id: str, window_id: str):
         """显示指定窗口的指定卡片"""
         if window_id not in self._window_data:
@@ -166,6 +211,23 @@ class CardManager:
         if win_data["visible_cards"].get(container_type) == card_id:
             return
 
+        # ── 停靠区卡片（LEFT/RIGHT）：独立于系统卡片压制体系 ──
+        # 仅同容器互斥，不受 question / 系统卡片 / 优先卡片影响
+        if container_type in DOCK_CONTAINER_TYPES:
+            self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            try:
+                if hasattr(card_widget, "show_card"):
+                    card_widget.show_card()
+                else:
+                    card_widget.setVisible(True)
+            except RuntimeError:
+                self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
+                return
+            win_data["visible_cards"][container_type] = card_id
+            for cb in win_data["shown_callbacks"].get(card_id, []):
+                cb(card_id)
+            return
+
         # ── Question 最高优先级：如果 question 已显示，其他非 question 卡片不能打断 ──
         if card_id != "question" and self.is_card_visible("question", window_id):
             logger.debug(f"[CardManager] question 已显示，跳过显示 {card_id}（question 强制覆盖所有）")
@@ -187,7 +249,10 @@ class CardManager:
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             # 系统卡片激活时，隐藏所有可见的非系统卡片（跨容器），
             # 例如 BOTTOM 容器的 command/file_mention 应随 TOP 容器 settings 打开而关闭
+            # 停靠区（LEFT/RIGHT）豁免：左右停靠面板不随系统卡片关闭
             for ct in ContainerType:
+                if ct in DOCK_CONTAINER_TYPES:
+                    continue
                 vid = win_data["visible_cards"].get(ct)
                 if vid and vid not in win_data["system_cards"]:
                     self.hide_card(vid, window_id)
@@ -218,7 +283,7 @@ class CardManager:
         # 显示卡片
         try:
             # 调用卡片的 show_card 方法（由卡片自己管理计时器）
-            if hasattr(card_widget, 'show_card'):
+            if hasattr(card_widget, "show_card"):
                 card_widget.show_card()
             else:
                 card_widget.setVisible(True)
@@ -257,7 +322,7 @@ class CardManager:
             return
 
         try:
-            if hasattr(card_widget, 'hide_card'):
+            if hasattr(card_widget, "hide_card"):
                 card_widget.hide_card()
             else:
                 card_widget.setVisible(False)
@@ -269,10 +334,7 @@ class CardManager:
 
         # 如果隐藏的是系统卡片，检查是否还有系统卡片可见，没有则解除压制
         if card_id in win_data["system_cards"]:
-            has_visible_system = any(
-                self.is_card_visible(sc_id, window_id)
-                for sc_id in win_data["system_cards"]
-            )
+            has_visible_system = any(self.is_card_visible(sc_id, window_id) for sc_id in win_data["system_cards"])
             if not has_visible_system:
                 win_data["suppressed_by_system"] = False
 
@@ -324,7 +386,9 @@ class CardManager:
 
     # ========== 内部辅助方法 ==========
 
-    def _check_and_remove_deleted_card(self, window_id: str, card_id: str, container_type: ContainerType, card_widget) -> bool:
+    def _check_and_remove_deleted_card(
+        self, window_id: str, card_id: str, container_type: ContainerType, card_widget
+    ) -> bool:
         """检查 widget 是否已删除，已删除则从管理器移除"""
         try:
             _ = card_widget.windowTitle()
@@ -349,10 +413,12 @@ class CardManager:
                 self.hide_card(card_id, window_id)
 
     def _hide_all_cards(self, window_id: str):
-        """隐藏窗口内所有卡片"""
+        """隐藏窗口内所有卡片（停靠区 LEFT/RIGHT 豁免）"""
         if window_id not in self._window_data:
             return
         for container_type in ContainerType:
+            if container_type in DOCK_CONTAINER_TYPES:
+                continue
             self._hide_same_container_cards(window_id, container_type)
 
     def _hide_same_container_cards(self, window_id: str, container_type: ContainerType, exclude_card_id: str = None):
@@ -368,7 +434,7 @@ class CardManager:
                 if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
                     continue
                 try:
-                    if hasattr(card_widget, 'hide_card'):
+                    if hasattr(card_widget, "hide_card"):
                         card_widget.hide_card()
                     else:
                         card_widget.setVisible(False)

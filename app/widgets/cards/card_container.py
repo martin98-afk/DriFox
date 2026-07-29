@@ -22,6 +22,11 @@ class CardContainer(QWidget):
     # 展开时放开最大高度限制，让 Qt 布局系统自动计算合适高度
     _EXPAND_MAX = 16777215
 
+    # 横向停靠区（LEFT/RIGHT）展开后的最小宽度：
+    # 展开动画结束后释放 maximumWidth 并锁定此最小宽度，
+    # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
+    _DOCK_MIN = 140
+
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
     # 容器动画会与这些交互产生约一个动画时长的高度延迟 / 抖动。
@@ -31,6 +36,8 @@ class CardContainer(QWidget):
     def __init__(self, container_type: ContainerType):
         super().__init__()
         self._container_type = container_type
+        # 横向容器（LEFT/RIGHT 停靠区）：沿宽度轴折叠/展开；纵向容器沿高度轴
+        self._horizontal = container_type in (ContainerType.LEFT, ContainerType.RIGHT)
         self._cards: Dict[str, QWidget] = {}
         self._card_manager: Optional[CardManager] = None
         self._window_id: Optional[str] = None  # 多窗口隔离
@@ -39,14 +46,51 @@ class CardContainer(QWidget):
         self._expand_retry_count = 0  # 实例变量：防止 _do_expand 无限重试（每个容器独立计数）
         self._setup_ui()
 
+    # ── 轴向抽象：纵向容器操作高度，横向容器操作宽度 ──
+
+    def _axis_max(self) -> int:
+        return self.maximumWidth() if self._horizontal else self.maximumHeight()
+
+    def _set_axis_max(self, value: int):
+        if self._horizontal:
+            self.setMaximumWidth(value)
+        else:
+            self.setMaximumHeight(value)
+
+    def _set_axis_min(self, value: int):
+        if self._horizontal:
+            self.setMinimumWidth(value)
+        else:
+            self.setMinimumHeight(value)
+
+    def _axis_current(self) -> int:
+        return self.width() if self._horizontal else self.height()
+
+    def _axis_natural(self) -> int:
+        """layout 计算出的自然尺寸（轴向）"""
+        if self._horizontal:
+            return max(self._layout.sizeHint().width(), self._layout.minimumSize().width())
+        return max(self._layout.sizeHint().height(), self._layout.minimumSize().height())
+
+    def _axis_property(self) -> bytes:
+        return b"maximumWidth" if self._horizontal else b"maximumHeight"
+
     def _setup_ui(self):
         """初始化UI"""
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.setMinimumHeight(0)
-        self.setMaximumHeight(0)  # 默认折叠
+        if self._horizontal:
+            self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Expanding)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(0)  # 默认折叠
+        else:
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(0)  # 默认折叠
 
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 8, 0)  # 右 padding 8px，让卡片内容不贴右边缘
+        if self._horizontal:
+            self._layout.setContentsMargins(4, 0, 4, 0)  # 左右停靠区：横向 padding
+        else:
+            self._layout.setContentsMargins(0, 0, 8, 0)  # 右 padding 8px，让卡片内容不贴右边缘
         self._layout.setSpacing(0)
 
         # 应用主题背景
@@ -61,6 +105,16 @@ class CardContainer(QWidget):
         """
         Colors.refresh()
         bg = Colors.CARD_BG.format(alpha=232)
+        if self._horizontal:
+            # 左右停靠区：四角圆角（独立面板视觉）
+            self.setStyleSheet(f"""
+                CardContainer {{
+                    background: {bg};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 8px;
+                }}
+            """)
+            return
         self.setStyleSheet(f"""
             CardContainer {{
                 background: {bg};
@@ -100,7 +154,7 @@ class CardContainer(QWidget):
 
     def _is_expanded(self) -> bool:
         """容器是否已展开"""
-        return self.maximumHeight() >= self._EXPAND_MAX
+        return self._axis_max() >= self._EXPAND_MAX
 
     def _should_skip_animation(self) -> bool:
         """当前可见卡片中是否存在声明跳过容器动画的卡片
@@ -182,23 +236,26 @@ class CardContainer(QWidget):
             except TypeError, RuntimeError:
                 pass
 
-        # 解除 minHeight 限制，确保折叠动画能跑到 0
-        self.setMinimumHeight(0)
+        # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
+        self._set_axis_min(0)
 
         if has_visible:
-            # ── 展开：snap 或动画到 layout 算出的自然高度 ──
-            # 先放开 maxHeight，让 layout 算出"展开后该有多高"
-            self.setMaximumHeight(self._EXPAND_MAX)
+            # ── 横向停靠区已展开（maximumWidth 已释放、宽度由外层 QSplitter 控制）──
+            # 卡片内容变化不回弹宽度，保持用户拖拽出的占比；仅恢复最小宽度锁。
+            if self._horizontal and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
+                self._set_axis_min(self._DOCK_MIN)
+                return
+
+            # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
+            # 先放开轴向 max，让 layout 算出"展开后该有多大"
+            self._set_axis_max(self._EXPAND_MAX)
             # 强制激活布局：修复 setUpdatesEnabled(False) 期间填充内容后，
             # layout.sizeHint() 可能返回过期缓存值（输入框隐藏但卡片不显示，
             # resize 窗口后恢复正常）。activate() 确保子 widget 的最新内容
-            # 被计入容器高度。
+            # 被计入容器尺寸。
             self._layout.activate()
 
-            natural_h = max(
-                self._layout.sizeHint().height(),
-                self._layout.minimumSize().height(),
-            )
+            natural_h = self._axis_natural()
             if natural_h <= 0:
                 # 兜底：layout 没算出高度，尝试强制子控件 adjustSize + 父级布局激活后重测
                 for w in self._cards.values():
@@ -215,57 +272,69 @@ class CardContainer(QWidget):
                 if pl is not None:
                     pl.invalidate()
                     pl.activate()
-                natural_h = max(
-                    self._layout.sizeHint().height(),
-                    self._layout.minimumSize().height(),
-                )
+                natural_h = self._axis_natural()
 
                 if natural_h <= 0:
                     # 仍然为 0：渐进重试，让 Qt 在下一轮事件循环完成测量
                     self._expand_retry_count += 1
                     if self._expand_retry_count >= 2:
                         # 重试 2 次仍为 0：不锁为 0，保留 EXPAND_MAX 让父级
-                        # 在后续 layout pass 中通过 sizeHint 自行分配高度。
+                        # 在后续 layout pass 中通过 sizeHint 自行分配尺寸。
                         self._expand_retry_count = 0
-                        self.setMaximumHeight(self._EXPAND_MAX)
+                        self._set_axis_max(self._EXPAND_MAX)
                         return
                     # singleShot(1) 而非 0：给 Qt 一个完整事件循环完成测量
                     QTimer.singleShot(1, self._do_expand)
                     return
 
             self._expand_retry_count = 0
-            # ⚡ 读 current_h 前不激活父级布局 — 父级此刻仍用过期高度（如 0），
+            # ⚡ 读 current_h 前不激活父级布局 — 父级此刻仍用过期尺寸（如 0），
             # current_h ≈ 0 而 natural_h ≈ 200，差值巨大 → 触发平滑展开动画。
-            # 父级布局在动画中通过 maximumHeight 的 updateGeometry 级联刷新。
-            current_h = self.height()
+            # 父级布局在动画中通过轴向 max 属性的 updateGeometry 级联刷新。
+            current_h = self._axis_current()
 
-            # 高度差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
+            # 横向停靠区：展开完成后释放 maximumWidth 并锁定最小宽度，
+            # 把宽度控制权交给外层 QSplitter（用户可拖拽 handle 调整占比）
+            on_expand_done = None
+            if self._horizontal:
+
+                def _release_to_splitter():
+                    self._set_axis_min(self._DOCK_MIN)
+                    self._set_axis_max(self._EXPAND_MAX)
+
+                on_expand_done = _release_to_splitter
+
+            # 尺寸差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
+                if on_expand_done is not None:
+                    on_expand_done()
                 return
             if skip_anim:
-                self.setMaximumHeight(natural_h)
+                self._set_axis_max(natural_h)
+                if on_expand_done is not None:
+                    on_expand_done()
                 return
-            self._animate_height(current_h, natural_h, on_finished=None)
+            self._animate_height(current_h, natural_h, on_finished=on_expand_done)
         else:
-            # ── 折叠：snap 或动画到 0，结束后锁定 maxHeight=0 ──
-            # 折叠前 maxHeight 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实 height
-            if self.maximumHeight() < self._EXPAND_MAX:
-                self.setMaximumHeight(self._EXPAND_MAX)
-            current_h = self.height()
+            # ── 折叠：snap 或动画到 0，结束后锁定轴向 max=0 ──
+            # 折叠前轴向 max 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实尺寸
+            if self._axis_max() < self._EXPAND_MAX:
+                self._set_axis_max(self._EXPAND_MAX)
+            current_h = self._axis_current()
             if current_h <= 0:
-                self.setMaximumHeight(0)
+                self._set_axis_max(0)
                 return
             if skip_anim:
-                self.setMaximumHeight(0)
+                self._set_axis_max(0)
                 return
             self._animate_height(
                 current_h,
                 0,
-                on_finished=lambda: self.setMaximumHeight(0),
+                on_finished=lambda: self._set_axis_max(0),
             )
 
     def _animate_height(self, start_h: int, end_h: int, on_finished=None):
-        """用 QPropertyAnimation 动画 maximumHeight，200ms OutCubic
+        """用 QPropertyAnimation 动画轴向 max 属性（纵向 maximumHeight / 横向 maximumWidth），200ms OutCubic
 
         性能优化：复用 _expand_animation 对象，避免每次展开/折叠都创建新动画实例。
         动画已停止时：直接重置 start/end 值并 restart。
@@ -273,7 +342,7 @@ class CardContainer(QWidget):
         """
         anim = self._expand_animation
         if anim is None:
-            anim = QPropertyAnimation(self, b"maximumHeight")
+            anim = QPropertyAnimation(self, self._axis_property())
             anim.setDuration(200)
             anim.setEasingCurve(QEasingCurve.OutCubic)
             self._expand_animation = anim
@@ -329,7 +398,7 @@ class CardContainer(QWidget):
         del self._cards[card_id]
 
         if len(self._cards) == 0:
-            self.setMaximumHeight(0)
+            self._set_axis_max(0)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Resize and obj in self._cards.values():

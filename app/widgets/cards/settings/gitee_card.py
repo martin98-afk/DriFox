@@ -716,13 +716,7 @@ class _GiteeMorePopup(QWidget):
         )
         layout.addWidget(self._pet_row)
 
-        # ── Tab 模式开关 ──
-        self._tab_row = self._make_switch_row(
-            "📑  Tab 模式",
-            self._cfg.enable_tab_manager.value,
-            self._on_tab_toggled,
-        )
-        layout.addWidget(self._tab_row)
+        # Tab 模式开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
 
         # ── 窗口置顶开关 ──
         self._topmost_row = self._make_switch_row(
@@ -1133,14 +1127,13 @@ class GiteeCard(SettingCard):
                 except Exception as e:
                     logger.warning(f"[GiteeCard] 窗口 {win._window_id} 刷新失败: {e}")
 
-            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建，
+            # 2. 销毁全局设置弹窗：下次打开时重建，
             #    所有子卡片（provider/MCP/gateway/font 等）从 Settings 读取最新值
-            if main_win and hasattr(main_win, "_settings_popup"):
-                popup = main_win._settings_popup
-                if popup is not None and popup.isVisible():
-                    if hasattr(main_win, "_card_manager") and hasattr(main_win, "_window_id"):
-                        main_win._card_manager.hide_card("settings", main_win._window_id)
-                main_win._settings_popup = None
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            cc = get_global_card_controller()
+            if cc is not None:
+                cc.invalidate_settings_popup()
 
             logger.info("[GiteeCard] UI 已根据恢复的配置全面刷新")
         except Exception as e:

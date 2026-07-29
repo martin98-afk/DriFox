@@ -219,10 +219,10 @@ def main():
     from app.core.single_instance import SingleInstanceGuard
 
     _guard = SingleInstanceGuard("Drifox")
-    if not _guard.try_lock():
-        _guard.request_show_window()
-        _guard.cleanup()
-        return
+    # if not _guard.try_lock():
+    #     _guard.request_show_window()
+    #     _guard.cleanup()
+    #     return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
@@ -305,29 +305,23 @@ def main():
     def _show_popup():
         from app.utils.config import Settings
 
-        if Settings.get_instance().enable_tab_manager.value:
-            # ── Tab 模式 ──
-            from app.widgets.tab_manager_window import TabManagerWindow
+        # 多窗口模式已暂时下线：无论配置如何，一律以 Tab 管理器模式启动。
+        # 配置项 enable_tab_manager 与 ToolPopupDialog 路径暂保留，便于未来回退。
+        settings = Settings.get_instance()
+        if not settings.enable_tab_manager.value:
+            settings.enable_tab_manager.value = True
+            settings.save()
+            logger.info("检测到多窗口模式配置，已强制修正为 Tab 管理器模式")
 
-            from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
-            tm = TabManagerWindow.create_instance()
-            tm.add_window(chat_window)
-            _guard.show_requested.connect(lambda: _activate_window(tm))
-            tm.show()
-            _apply_window_topmost(tm)
-            logger.info("DriFox 以 Tab 管理器模式启动")
-        else:
-            # ── 独立窗口模式（原有逻辑）──
-            from app.tool_popup import ToolPopupDialog
+        # ── Tab 模式 ──
+        from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
-            popup = ToolPopupDialog(chat_window, None)
-            popup.setWindowTitle("Drifox")
-            chat_window._skip_restore_history = True
-            _guard.show_requested.connect(lambda: _activate_window(popup))
-            popup.show()
-            from app.widgets.tab_manager_window import _apply_window_topmost
-            _apply_window_topmost(popup)
-            logger.info("DriFox 以独立窗口模式启动")
+        tm = TabManagerWindow.create_instance()
+        tm.add_window(chat_window)
+        _guard.show_requested.connect(lambda: _activate_window(tm))
+        tm.show()
+        _apply_window_topmost(tm)
+        logger.info("DriFox 以 Tab 管理器模式启动")
 
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)
