@@ -1,11 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.4.8] - 2026-07-28
+## [v0.4.8] - 2026-07-29
 
-自上一版本以来的变更 | 提交数：110 · 文件变更：265 · +16935/-9384 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：115 · 文件变更：275 · +17684/-9501 | 贡献者：dingma, mading, martin98-afk
 
-> 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构。
+> 重点：**Tab 管理器全面重构** — 自定义标题栏、侧边栏折叠/展开、渐变玻璃风格、项目级图标感知、Gitee 账户快捷入口；Hook 管理器并行执行；消息卡片渲染性能优化；异常处理元组语法一致性重构；窗口拖拽性能优化与卡顿分析器。
 
 ### ✨ 新功能 (New Features)
 
@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - **Gitee 账户行设置入口改进**: GiteeAccountRow 使用设置按钮替换更多按钮，提供更直观的设置访问入口
 - **Gitee 弹出窗口置顶切换**: GiteeMorePopup 添加窗口置顶开关功能，提升多窗口场景使用便捷性
 - **Tab 管理器窗口置顶功能**: TabManagerWindow 实现窗口置顶功能（基于配置开关），方便用户固定管理窗口
+- **拖拽卡顿分析器 (Drag Stall Profiler)**: 实现窗口拖拽期间的 UI 卡顿检测与分析功能，优化 LSP/MCP 命令可用性检查机制，提升拖拽场景下的 UI 响应性能
 
 ### 🎨 样式改进 (Style)
 
@@ -44,6 +45,10 @@ All notable changes to this project will be documented in this file.
 - **ChatBackend 热重载修复**: 跳过未知组件目录外的插件变更，避免无效热重载
 - **输入框高度抖动修复**: 调整底部输入框高度计算，添加 resize 消除回弹
 - **ChatBackend 插件根目录删除卸载修复**: 修复插件根目录被删除时无法触发完整组件卸载的问题，提升插件生命周期管理可靠性
+- **拖拽卡顿分析器默认禁用**: 默认关闭拖拽分析器，避免在非调试场景下产生意外性能影响
+- **Tab 管理器拖拽检测增强 (nativeEvent)**: 使用原生 Windows 事件（WM_NCHITTEST/WM_MOVING）增强拖拽检测，提升拖拽期间性能表现
+- **Tab 管理器拖拽处理与布局优化**: 优化拖拽处理和布局更新逻辑，防止拖拽窗口时 UI 阻塞
+- **Tab 管理器窗口拖拽检测与性能优化**: 实现窗口拖拽检测与性能优化机制；FileTreeCard 拖放确认对话框增强；FileTreeView 外部拖放处理优化与自拖拽防护
 
 ### ♻️ 代码重构 (Refactoring)
 
