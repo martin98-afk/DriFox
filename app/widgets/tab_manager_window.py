@@ -30,6 +30,24 @@ from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
+# ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
+# 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
+# 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
+_IS_WINDOWS = platform.system() == "Windows"
+_MSG_CAST = None
+if _IS_WINDOWS:
+    try:
+        import ctypes as _ctypes
+
+        from app.tool_popup import _WINDOWS_MSG as _WMSG
+
+        _MSG_STRUCT_PTR = _ctypes.POINTER(_WMSG)
+
+        def _MSG_CAST(addr, _cast=_ctypes.cast, _ptr=_MSG_STRUCT_PTR):  # noqa: E731
+            return _cast(addr, _ptr)
+    except Exception:
+        _MSG_CAST = None
+
 
 class EmptyStateWidget(QWidget):
     """空状态页 — 最后一个 Tab 关闭时显示"""
@@ -150,6 +168,7 @@ class TabManagerWindow(QWidget):
     # 用于替代 moveEvent + 防抖定时器的"猜测式"拖拽检测
     _WM_ENTERSIZEMOVE = 0x0231
     _WM_EXITSIZEMOVE = 0x0232
+    _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -996,7 +1015,17 @@ class TabManagerWindow(QWidget):
     # ── 几何持久化（简化版）──
 
     def _save_geometry(self):
-        """防抖：记录位置/尺寸，等拖拽/缩放结束后 200ms 再写盘"""
+        """防抖：记录位置/尺寸，等拖拽/缩放结束后 200ms 再写盘
+
+        ★ 拖拽/缩放模态循环期间直接跳过：否则鼠标中途停顿 >200ms 时
+        _do_save_geometry 会在拖拽帧里触发（遍历 splitter + 写配置项）
+        → 偶发掉帧。循环结束后由 _on_window_drag_end / EXITSIZEMOVE
+        分支统一补一次。
+        """
+        from app.tool_popup import ToolPopupDialog
+
+        if ToolPopupDialog._any_window_dragging:
+            return
         self._geo_save_timer.start()  # 连续调用时不断重置计时器
 
     def _do_save_geometry(self):
@@ -1070,12 +1099,13 @@ class TabManagerWindow(QWidget):
         # setUpdatesEnabled(True) 触发积压重绘轰炸主线程，手一动又重新禁用，
         # 造成周期性掉帧卡顿。
         # 非 Windows：无原生模态循环消息，保留防抖检测作为回退。
-        if platform.system() != "Windows":
+        if not _IS_WINDOWS:
             # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
             if not self._suppress_drag_detection:
                 if not self._window_dragging_timer.isActive():
                     self._on_window_drag_start()
                 self._window_dragging_timer.start()  # 持续重置防抖
+        # 几何保存防抖（拖拽期间由 _save_geometry 内部守卫跳过）
         self._save_geometry()
 
     def nativeEvent(self, eventType, message):
@@ -1085,24 +1115,39 @@ class TabManagerWindow(QWidget):
         的权威信号——标题栏拖拽由系统原生管理（WS_CAPTION），Qt 收不到
         mousePress/Release，只能靠这两条消息准确判定拖拽区间。
         """
-        if platform.system() == "Windows" and eventType == "windows_generic_MSG":
+        # ★ 热路径：拖拽时每秒有上千条原生消息经过这里（WM_MOUSEMOVE /
+        # WM_NCHITTEST 等），任何 per-call 开销都会被放大。
+        # 判定/结构体/cast 全部使用模块级缓存（_IS_WINDOWS / _MSG_CAST），
+        # 禁止在此函数内做 import 或 platform.system() 调用。
+        if _IS_WINDOWS and _MSG_CAST is not None and eventType == "windows_generic_MSG":
             try:
-                import ctypes
-
-                from app.tool_popup import _WINDOWS_MSG
-
-                msg = ctypes.cast(int(message), ctypes.POINTER(_WINDOWS_MSG))[0]
-                if msg.message == self._WM_ENTERSIZEMOVE:
+                msg_id = _MSG_CAST(int(message))[0].message
+                if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()
-                elif msg.message == self._WM_EXITSIZEMOVE:
+                elif msg_id == self._WM_MOVING:
+                    # ★ 纯移动：客户区内容不随位置变化，禁用整窗重绘。
+                    # DWM 仅平移已有纹理即可，无需 app 重绘；这能消除拖拽时标题栏
+                    # SVG 按钮（qfluentwidgets）每次 paintEvent 现场 new QSvgRenderer
+                    # 解析 SVG 的昂贵同步开销（见 [DRAG-PROF] 热点 #2），拖拽丝滑。
+                    # 仅对"移动"生效；"缩放"走 _resize_blocking 独立机制，互不干扰。
+                    self.setUpdatesEnabled(False)
+                elif msg_id == self._WM_EXITSIZEMOVE:
+                    # 任何拖拽（移动/缩放）结束都恢复整窗重绘权。移动路径依赖此
+                    # 恢复；缩放路径的子面板重绘由 _deferred_resize_complete 负责，
+                    # 此处恢复顶层窗口不会与之冲突（顶层本就可重绘标题栏）。
+                    self.setUpdatesEnabled(True)
                     if self._resize_blocking:
                         # 本次模态循环是"缩放"：布局/绘制恢复交给
                         # _on_resize_finished（防抖 100ms 后触发），
                         # 此处仅复位全局拖拽标志，避免双重恢复冲突
                         from app.tool_popup import ToolPopupDialog
+                        from app.utils.drag_stall_profiler import drag_profiler
 
                         ToolPopupDialog._any_window_dragging = False
+                        # 循环期间几何保存被守卫跳过，此处补一次防抖保存
+                        self._save_geometry()
+                        drag_profiler.stop_deferred()
                     else:
                         self._on_window_drag_end()
             except Exception:
@@ -1112,60 +1157,42 @@ class TabManagerWindow(QWidget):
     # ── 窗口拖拽节流 ──
 
     def _on_window_drag_start(self):
-        """窗口拖拽开始：暂停动画定时器 + 禁用子控件绘制 + 通知各组件进入节流模式
+        """窗口拖拽开始：暂停动画定时器 + 通知各组件进入节流模式
 
         利用 ToolPopupDialog._any_window_dragging 全局标志（多窗口模式原有），
         使 Tab 模式下的嵌入窗口（main_widget/bottom_input_area/card_container）
         跳过耗时的布局重算和高度调整，与多窗口模式享受同等的拖拽性能优化。
+
+        ★ 不再 setUpdatesEnabled(False)：纯移动窗口时 DWM 直接在新位置合成，
+        客户区根本不需要重绘，禁用绘制毫无收益；而重新启用时 Qt 会把整棵
+        控件树标脏 → 松手瞬间全窗口（含所有 MessageCard）一次性全量重绘，
+        这正是"松手卡一下"的根因。缩放路径仍由 resizeEvent 的 blocking
+        机制独立管理（缩放确实需要冻结绘制）。
         """
         from app.tool_popup import ToolPopupDialog
+        from app.utils.drag_stall_profiler import drag_profiler
 
         ToolPopupDialog._any_window_dragging = True
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)  # 暂停动画定时器
-            self._tab_panel.setUpdatesEnabled(False)
-        if hasattr(self, "_content_area"):
-            self._content_area.setUpdatesEnabled(False)
+        # 诊断：拖拽期间抓取主线程阻塞现场（定位偶发卡顿元凶）
+        drag_profiler.start()
 
     def _on_window_drag_end(self):
-        """窗口拖拽结束：恢复动画定时器 + 恢复子控件绘制 + 解除节流
+        """窗口拖拽结束：恢复动画定时器 + 解除节流 + 触发一次几何保存
 
-        拖拽停止后 100ms 无新 move 事件时触发，与 _on_resize_finished 逻辑对称。
-
-        Phase 1（同步）：解除 dragging 标志、恢复 tab 面板绘制（轻量）。
-        Phase 2（异步）：启用内容区绘制 → 延迟到下一事件循环迭代，
-        避免积压的大量 paint events 一次性阻塞 UI 主线程。
+        无 setUpdatesEnabled(True) → 无积压重绘炸弹，松手零代价。
         """
         from app.tool_popup import ToolPopupDialog
+        from app.utils.drag_stall_profiler import drag_profiler
 
         ToolPopupDialog._any_window_dragging = False
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)  # 如有流式则恢复动画
-            self._tab_panel.setUpdatesEnabled(True)
-        # 内容区包含 QStackedWidget + 嵌入的 OpenAIChatToolWindow
-        # （含大量 MessageCard），延迟启用绘制避免主线程阻塞
-        # ★ 延迟启用 + 拖拽恢复守卫：
-        # QTimer.singleShot(0) 的异步回调与下一帧 moveEvent 存在竞态：
-        # 拖拽暂停 → _window_dragging_timer 超时 → _on_window_drag_end
-        # → 调度 singleShot(0) → 用户恢复拖拽 → moveEvent 重设 _window_dragging_timer
-        # → singleShot(0) 执行 → setUpdatesEnabled(True) 覆盖了 moveEvent 刚设置的 False
-        # → 后续 moveEvent 在 updates 启用下运行 → 内容区在每个 moveEvent 尝试重绘 → 卡顿。
-        # 守卫：延迟执行时检查 timer 是否已被 moveEvent 重新激活
-        if hasattr(self, "_content_area"):
-            QTimer.singleShot(0, self._deferred_enable_content_after_drag)
-
-    def _deferred_enable_content_after_drag(self):
-        """延迟启用内容区绘制 — 带拖拽恢复守卫
-
-        在 _on_window_drag_end 调度后下一个事件循环迭代执行。
-        如果在此期间 moveEvent 已恢复拖拽（_window_dragging_timer 被重启），
-        则跳过启用，让 moveEvent 中的 _on_window_drag_start 保持 updates 禁用。
-        """
-        # 拖拽已恢复：_window_dragging_timer 被 moveEvent 重新激活
-        if self._window_dragging_timer.isActive():
-            return
-        if hasattr(self, "_content_area"):
-            self._content_area.setUpdatesEnabled(True)
+        # 拖拽期间 moveEvent 跳过了几何保存防抖，此处统一补一次（200ms 后落盘）
+        self._save_geometry()
+        # 诊断：延迟 1.5s 停止采样，覆盖"松手瞬间卡顿"窗口期
+        drag_profiler.stop_deferred()
 
     def changeEvent(self, event):
         """标准系统窗口自带最大化/还原处理，无需自定义逻辑"""
