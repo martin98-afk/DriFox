@@ -363,6 +363,13 @@ class TabManagerWindow(QWidget):
         # 绘制顺序吞掉，所以再包一层 QFrame 用 objectName 给样式。
         self._tab_frame = QFrame(content_widget)
         self._tab_frame.setObjectName("tabFrame")
+        # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
+        # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
+        # _tab_panel 的约束：
+        #   frame max = panel max(400) + margins(12) + border(2) = 414
+        #   frame min = panel min(120) + margins(12) + border(2) = 134
+        self._tab_frame.setMinimumWidth(134)
+        self._tab_frame.setMaximumWidth(414)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
         tab_frame_layout.setContentsMargins(6, 6, 6, 6)
@@ -813,6 +820,11 @@ class TabManagerWindow(QWidget):
         if tab_mgr._is_transitioning:
             return
         tab_mgr._is_transitioning = True
+
+        # ★ 确保 TrayManager 引用已注册
+        # _disable_mode 会清空 tray_manager._tab_manager_window，而实例可能
+        # 已存在（走 get_instance 不走 __init__），必须在此显式重新注册。
+        tray_manager._tab_manager_window = tab_mgr
 
         # 清理旧的 Tab 面板和内容区（防止上次 Tab 模式残留）
         for i in range(tab_mgr._tab_panel.count - 1, -1, -1):

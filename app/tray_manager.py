@@ -118,7 +118,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except RuntimeError, Exception:
+        except Exception:
             return False
 
     def __init__(self, parent=None):
@@ -636,7 +636,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except RuntimeError, Exception:
+            except Exception:
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -1187,6 +1187,24 @@ class TrayManager(QObject):
         任意窗口可见 → 全部隐藏
         全部已隐藏 → 全部显示并激活
         """
+        # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
+        now = time.perf_counter()
+        if now - self._last_toggle_time < 0.5:
+            return
+        self._last_toggle_time = now
+
+        # ── 恢复可能丢失的 Tab 管理器引用（仅 Tab 模式下）──
+        # _enable_mode 已确保引用注册，但以防 C++ 对象重建或异常导致引用丢失，
+        # 此处安全兜底：仅在无独立窗口（Tab 模式特征）时恢复引用，不自动显示。
+        if self._tab_manager_window is None and not self._windows:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+                if _TMW._instance is not None:
+                    self._tab_manager_window = _TMW._instance
+            except Exception:
+                self._tab_manager_window = None
+
         # ── Tab 模式分支 ──
         if self._tab_manager_window is not None:
             try:
@@ -1196,30 +1214,14 @@ class TrayManager(QObject):
                     self._tab_manager_window.show()
                     self._tab_manager_window.activateWindow()
                     self._tab_manager_window.raise_()
+                    # 从最小化状态恢复
+                    if self._tab_manager_window.isMinimized():
+                        self._tab_manager_window.showNormal()
             except RuntimeError:
                 self._tab_manager_window = None
-
-        # 引用丢失时尝试从单例恢复
-        if self._tab_manager_window is None:
-            try:
-                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
-
-                if _TMW._instance is not None:
-                    self._tab_manager_window = _TMW._instance
-                    if not self._tab_manager_window.isVisible():
-                        self._tab_manager_window.show()
-                        self._tab_manager_window.activateWindow()
-                        self._tab_manager_window.raise_()
-            except Exception:
-                self._tab_manager_window = None
-            return
-
-        # ── 独立窗口模式（原有逻辑）──
-        # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
-        now = time.perf_counter()
-        if now - self._last_toggle_time < 0.5:
-            return
-        self._last_toggle_time = now
+                # C++ 对象已销毁，降级到独立窗口逻辑
+            else:
+                return  # Tab 模式正常完成，跳过独立窗口逻辑
 
         try:
             # 过滤有效窗口，同时剔除已销毁的 C++ 对象
@@ -1231,7 +1233,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except RuntimeError, Exception:
+                except Exception:
                     continue
 
             if not valid_windows:
