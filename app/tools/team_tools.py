@@ -16,6 +16,8 @@ class TeamTools:
     _STATUS_LABELS = {
         "busy": "🟡 执行任务中",
         "idle": "🟢 空闲",
+        "running": "🟡 执行任务中",
+        "pending": "⏳ 等待处理",
     }
 
     def __init__(self, builtin_tools):
@@ -53,7 +55,21 @@ class TeamTools:
             if m["window_id"] == window_id and m["agent_name"] == agent_name:
                 suffix = " ← 你"
             status = tm.get_member_busy_status(m["window_id"])
-            status_label = self._STATUS_LABELS.get(status, "⚪ 未知")
+            # 细化状态：区分 running 和 pending，显示任务摘要
+            running_tasks = tm.get_running_tasks(m["window_id"])
+            pending_tasks = tm.get_pending_tasks(m["window_id"])
+            if running_tasks:
+                status_label = self._STATUS_LABELS.get("running", "🟡 执行任务中")
+                task_summary = running_tasks[0].get("subject", "")[:40]
+                if task_summary:
+                    status_label += f" 「{task_summary}」"
+            elif pending_tasks:
+                status_label = self._STATUS_LABELS.get("pending", "⏳ 等待处理")
+                task_summary = pending_tasks[0].get("subject", "")[:40]
+                if task_summary:
+                    status_label += f" 「{task_summary}」"
+            else:
+                status_label = self._STATUS_LABELS.get("idle", "🟢 空闲")
             lines.append(f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}")
         return ToolResult(True, content="\n".join(lines))
 
