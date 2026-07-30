@@ -27,6 +27,11 @@ class CardContainer(QWidget):
     # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
     _DOCK_MIN_H = 140  # 横向停靠区（LEFT/RIGHT）最小宽
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
+    # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
+    # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
+    # 容器被压成极矮细条。用户已手动拖拽调过比例（_dock_last_size>0）后
+    # 不再覆盖其设定。左右栏为横向轴、卡片天然较宽，沿用最小宽即可。
+    _DOCK_DEFAULT_RATIO_V = 0.30
 
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
@@ -45,6 +50,10 @@ class CardContainer(QWidget):
         self._expand_timer: Optional[QTimer] = None  # 防抖展开定时器
         self._expand_animation: Optional[QPropertyAnimation] = None  # 展开/折叠动画
         self._expand_retry_count = 0  # 实例变量：防止 _do_expand 无限重试（每个容器独立计数）
+        # 最近一次展开算出的目标轴向尺寸（已含首次最小占比）。
+        # 停靠模式下 splitter 按 sizeHint 分配空间（可能远小于目标），
+        # 展开完成时由 _restore_dock_size 用此值显式 setSizes，避免占比被丢弃。
+        self._last_expand_target = 0
         # ── 停靠模式（enable_dock_mode 开启）──
         # 容器位于 QSplitter 中：展开后释放轴向 max、占比交给 splitter 拖拽；
         # 折叠时记忆当前尺寸并显式归还空间；重开时恢复上次拖出的占比。
@@ -181,13 +190,17 @@ class CardContainer(QWidget):
         if cur >= self._dock_min():
             self._dock_last_size = cur
 
-    def _restore_dock_size(self):
-        """展开完成后：恢复上次记忆的占比（显式 setSizes，splitter 不会自己做）"""
+    def _restore_dock_size(self, target: int):
+        """展开完成后：把占比交还给外层 QSplitter（显式 setSizes）
+
+        target 已是含最小占比下限的最终目标尺寸。setSizes 是一次性覆盖，
+        可能被后续异步布局重排冲掉；真正的稳定兜底来自 _release_to_splitter
+        锁定的 minimumHeight（见下），此处仅做精确归位。
+        """
         sp = self._dock_splitter
         idx = self._splitter_index()
         if sp is None or idx < 0:
             return
-        target = self._dock_last_size or self._axis_current()
         if target < self._dock_min():
             return
         sizes = sp.sizes()
@@ -334,7 +347,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -342,7 +355,9 @@ class CardContainer(QWidget):
 
         if has_visible:
             # ── 停靠区已展开（轴向 max 已释放、尺寸由外层 QSplitter 控制）──
-            # 卡片内容变化不回弹尺寸，保持用户拖拽出的占比；仅恢复最小尺寸锁。
+            # 卡片内容变化：仅恢复一个较小的绝对最小锁，保证不缩成 1px 细条，
+            # 同时允许用户把槽位拖小（双向拖拽）。默认占比（30%）由"首次展开
+            # 的 setSizes 归位"保证，不在此用 minimum 钳死，否则手柄只能单向拖。
             if self._dock_splitter is not None and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
                 self._set_axis_min(self._dock_min())
                 return
@@ -394,22 +409,49 @@ class CardContainer(QWidget):
             # 父级布局在动画中通过轴向 max 属性的 updateGeometry 级联刷新。
             current_h = self._axis_current()
 
-            # 停靠模式：展开完成后释放轴向 max 并锁定最小尺寸，
-            # 把尺寸控制权交给外层 QSplitter，并恢复上次拖出的占比
+            # 停靠模式：计算展开目标 + 最小占比下限（首次/二次都生效）
             on_expand_done = None
             if self._dock_splitter is not None:
+                # 纵向停靠区（TOP/BOTTOM）强制至少占对话区 _DOCK_DEFAULT_RATIO_V：
+                # ① 首次展开，卡片天然尺寸过小（内容未测量/空卡片/异步加载）会被压成细条；
+                # ② 更关键：二次及以后，用户拖拽/折叠时记忆的占比 _dock_last_size 也
+                #    可能偏小，若不兜底就会缩回细条。因此无论是否拖拽过，都以下限
+                #    max(记忆占比, 最小比) 钳制，保证不存在"小于最小占比"的细条。
+                # 横向停靠区（LEFT/RIGHT）卡片天然较宽，沿用最小宽、尊重记忆占比即可。
+                chat_h = self._dock_splitter.height()
+                ratio_floor = (
+                    int(chat_h * self._DOCK_DEFAULT_RATIO_V)
+                    if (not self._horizontal and chat_h > 0)
+                    else 0
+                )
+                if self._horizontal:
+                    target = self._dock_last_size if self._dock_last_size > natural_h else natural_h
+                    min_floor = self._dock_min()
+                else:
+                    if self._dock_last_size > 0:
+                        target = max(self._dock_last_size, ratio_floor)
+                    else:
+                        target = max(natural_h, ratio_floor)
+                    # 持久下限用较小的绝对值（_dock_min），保证不缩成 1px 细条即可；
+                    # 默认占比（30%）由 target 经 setSizes 一次性归位保证。若把
+                    # minimum 钳到 30%，QSplitter 会禁止把手柄拖回更小，导致"单向拖"。
+                    min_floor = self._dock_min()
 
                 def _release_to_splitter():
-                    self._set_axis_min(self._dock_min())
+                    # minimum 钳制是稳定兜底：splitter 按 sizeHint 分配空间，纵向卡片
+                    # sizeHint 常因异步加载变化，单次 setSizes 会被后续重排冲掉；用
+                    # minimum 锁死下限后，无论 sizeHint 怎么变，splitter 都必须给到
+                    # 至少该高度，首次/二次及以后都不会缩回细条。
+                    self._set_axis_min(min_floor)
                     self._set_axis_max(self._EXPAND_MAX)
-                    self._restore_dock_size()
+                    self._restore_dock_size(target)
 
                 on_expand_done = _release_to_splitter
-
-                # 记忆的占比比自然尺寸大时，直接以记忆尺寸为展开目标，
-                # 避免"先展到自然尺寸再跳到记忆尺寸"的二段动画
-                if self._dock_last_size > natural_h:
-                    natural_h = self._dock_last_size
+                # 记录本次展开目标（已含最小占比），供 _restore_dock_size 精确 setSizes
+                self._last_expand_target = target
+                natural_h = target
+            else:
+                self._last_expand_target = natural_h
 
             # 尺寸差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
@@ -459,7 +501,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except TypeError, RuntimeError:
+        except (TypeError, RuntimeError):
             pass
 
         anim.setStartValue(start_h)
@@ -474,7 +516,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except TypeError, RuntimeError:
+                    except (TypeError, RuntimeError):
                         pass
 
             anim.finished.connect(_on_done)
@@ -484,6 +526,12 @@ class CardContainer(QWidget):
         """添加卡片到容器，并注册专属回调"""
         self._cards[card_id] = card_widget
         self._layout.addWidget(card_widget)
+        # 纵向停靠区（TOP/BOTTOM）：让卡片纵向填满槽位，使"可见卡片高度 = 槽位高度"。
+        # 否则 Fixed/Preferred 的卡片在放大后的槽位里只占天然高度，视觉上仍是"细条"。
+        # 横向停靠区保持卡片自带策略。
+        if not self._horizontal:
+            sp = card_widget.sizePolicy()
+            card_widget.setSizePolicy(sp.horizontalPolicy(), QSizePolicy.Minimum)
         card_widget.setVisible(False)
         card_widget.installEventFilter(self)
 

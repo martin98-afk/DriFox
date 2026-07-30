@@ -710,6 +710,22 @@ class MarketplaceCard(QWidget):
 
         header_layout.addStretch(1)
 
+        # ── 搜索框（与 plugin-manager 一致，放在标题栏）──
+        self._search_edit = LineEdit(header)
+        self._search_edit.setPlaceholderText("搜索插件…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(160)
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
+        # 防抖 300ms，避免每敲一个字就全量重建
+        from PyQt5.QtCore import QTimer
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.timeout.connect(self._filter_plugins)
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        header_layout.addWidget(self._search_edit)
+
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
@@ -758,26 +774,6 @@ class MarketplaceCard(QWidget):
         self._filter_bar.setCurrentItem("all")
         self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
         browse_root.addWidget(self._filter_bar)
-
-        # ── 搜索框 ──
-        search_row = QWidget(self._browse_page)
-        search_layout = QHBoxLayout(search_row)
-        search_layout.setContentsMargins(16, 4, 16, 4)
-
-        self._search_edit = LineEdit(search_row)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
-        # 防抖 300ms，避免每敲一个字就全量重建
-        from PyQt5.QtCore import QTimer
-        self._search_debounce = QTimer(self)
-        self._search_debounce.setSingleShot(True)
-        self._search_debounce.timeout.connect(self._filter_plugins)
-        self._search_edit.textChanged.connect(self._on_search_text_changed)
-        search_layout.addWidget(self._search_edit)
-        browse_root.addWidget(search_row)
 
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")

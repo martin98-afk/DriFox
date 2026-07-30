@@ -146,7 +146,7 @@
 
 | 问题 | 选项 | 影响 |
 |------|------|------|
-| 放在**底部**还是**顶部**？ | `container="bottom"` / `container="top"` | 布局差异，bottom 会隐藏输入区 |
+| 放在哪个**方位**？ | `container="bottom"` / `container="top"` / `container="left"` / `container="right"` | bottom 隐藏输入区；left/right 停靠在 Tab 窗口左右侧（类似 IDE 侧边栏） |
 | 数据来源？ | 本地（SQLite / 文件）/ 远程（HTTP API） | 决定异步 worker 是否需要 |
 | 需要**异步操作**吗？ | 是 → QThread + pyqtSignal | 列表加载、安装/卸载、网络请求都算 |
 | 需要**上下文注入**吗？ | 是 → `set_context_provider` + 拉模型 | 主题色/字体跟随系统变化 |
@@ -156,6 +156,10 @@
 
 ### 1.1 容器选择详解
 
+- **`container="left"`**：停靠在 Tab 窗口左侧停靠区（类似 VS Code 左侧栏）
+  - 适合：文件浏览器、项目导航等需要常驻左侧的面板
+- **`container="right"`**：停靠在 Tab 窗口右侧停靠区（类似 VS Code 右侧栏）
+  - 适合：监控面板、参考手册、历史记录等不遮挡主对话区的辅助面板
 - **`container="bottom"`**：与系统配置卡片一致，显示在 chat_layout 下方并隐藏输入区
   - 适合：设置卡片、统计面板、管理界面（占用屏幕中下部）
 - **`container="top"`**：独立浮动，不影响输入区
