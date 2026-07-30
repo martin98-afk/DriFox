@@ -9185,13 +9185,25 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session_record:
             return
         session_id = session_record.get("session_id")
-        if session_id:
-            session = self.history_manager.get_session_by_session_id(session_id)
-            if session:
-                idx = self.history_manager.find_index_by_session_id(session_id)
-                if idx is not None:
-                    self.history_manager.update_session_title(idx, new_title)
-        # 刷新历史会话卡片
+        if not session_id:
+            return
+        idx = self.history_manager.find_index_by_session_id(session_id)
+        if idx is None:
+            return
+        # 1. 更新 history_manager 内存缓存
+        self.history_manager.update_session_title(idx, new_title)
+        self.history_manager.set_user_edited_title(idx, True)
+        # 2. 持久化到 DB
+        if self.session_store:
+            self.session_store.update_session_title(session_id, new_title)
+        # 3. 同步当前 session 对象（若正在查看该会话）
+        current_session = self.session_manager.get_current_session() if self.session_manager else None
+        if current_session and current_session.session_id == session_id:
+            current_session.set_topic_summary(new_title)
+            current_session.set_user_edited_title(True)
+            # 4. 同步窗口标题 → Tab 标题（windowTitleChanged 信号自动传播）
+            self._sync_dialog_title()
+        # 5. 刷新历史会话卡片
         refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     def _on_session_imported(self, data: dict):
@@ -15392,6 +15404,7 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if session:
             session.set_user_edited_title(True)
+            session.set_topic_summary(new_title)
 
         # 更新 history_manager 中的标题
         if self._current_session_id is not None:
@@ -15400,6 +15413,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.history_manager.update_session_title(idx, new_title)
                 # 同步 user_edited_title 标记
                 self.history_manager.set_user_edited_title(idx, True)
+
+        # 持久化到 DB
+        if self._current_session_id and self.session_store:
+            self.session_store.update_session_title(self._current_session_id, new_title)
 
         # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
         self._sync_dialog_title()

@@ -555,11 +555,13 @@ class HistoryManager:
     def update_session_title(self, index: int, new_title: str):
         if 0 <= index < len(self._history_sessions):
             self._history_sessions[index]["title"] = new_title
+            self._cache_dirty = True
 
     def set_user_edited_title(self, index: int, edited: bool = True):
         """标记会话标题已被用户编辑"""
         if 0 <= index < len(self._history_sessions):
             self._history_sessions[index]["user_edited_title"] = edited
+            self._cache_dirty = True
 
     def get_user_edited_title(self, index: int) -> bool:
         """获取会话标题是否被用户编辑"""

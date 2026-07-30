@@ -1444,6 +1444,12 @@ class ChatBackend(QObject):
                 if removed_components.get("agents") and self._agent_manager:
                     self._agent_manager.cleanup_plugin_artifacts(plugin_name)
 
+                # Hooks-only 插件：无 agents 时需单独清理 hooks 注册
+                if removed_components.get("hooks") and not removed_components.get("agents"):
+                    if self._hook_manager:
+                        self._hook_manager.unregister_skill_hooks(plugin_name)
+                        logger.debug(f"[ChatBackend] Plugin '{plugin_name}' hooks-only cleanup: unregistered skill hooks")
+
                 # 命令（agents 发布的命令也需反注册）
                 if removed_components.get("commands") or removed_components.get("agents"):
                     try:
@@ -1466,8 +1472,10 @@ class ChatBackend(QObject):
                     except (ImportError, Exception) as e:
                         logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
 
-                # Hooks（含 agents 隐式拥有的 hooks）
-                result["hooks"] = removed_components.get("agents", False) or removed_components.get("hooks", False)
+                # Hooks：仅当插件原有 hooks 组件时触发 UI 刷新
+                # agents-only 插件的 hooks 清理由 cleanup_plugin_artifacts 完成，
+                # 但若插件本身无 hooks 目录则无需刷新 UI
+                result["hooks"] = removed_components.get("hooks", False)
 
                 # 技能 / MCP：PluginManager 已移除该插件的目录，
                 # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除

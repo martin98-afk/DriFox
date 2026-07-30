@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.widgets import MessageCard
+from app.widgets.elided_label import _ElidedLabel
 
 __all__ = [
     # 代码保存辅助
@@ -1845,7 +1846,7 @@ def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
 
 
 class TitleEditWidget(QWidget):
-    """标题编辑控件：显示时用 QLabel（自动省略），点击切换到 QLineEdit 行内编辑
+    """标题编辑控件：显示时用 _ElidedLabel（中间省略），点击切换到 QLineEdit 行内编辑
 
     对外暴露 text() / setText() / setStyleSheet() 等兼容 QLineEdit 的 API，
     使得 main_widget.py 中 self.title_edit 的引用几乎无需修改。
@@ -1865,8 +1866,8 @@ class TitleEditWidget(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
 
-        # 显示标签 — 有省略能力
-        self._label = QLabel(text, self)
+        # 显示标签 — 使用 _ElidedLabel 实现中间省略，与 TabItem 风格一致
+        self._label = _ElidedLabel(text, self)
         self._label.setCursor(Qt.IBeamCursor)
         self._label.setMinimumWidth(0)  # 允许缩窄以触发省略
         self._layout.addWidget(self._label)
@@ -1891,7 +1892,6 @@ class TitleEditWidget(QWidget):
         self._full_text = text
         self._label.setText(text)
         self._edit.setText(text)
-        self._update_label_elide()
 
     def setReadOnly(self, readonly: bool):
         """True = 显示模式（QLabel），False = 编辑模式（QLineEdit）"""
@@ -1976,13 +1976,3 @@ class TitleEditWidget(QWidget):
         self._label.setText(self._full_text)
         self.setReadOnly(True)
         return False
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_label_elide()
-
-    def _update_label_elide(self):
-        fm = self._label.fontMetrics()
-        elided = fm.elidedText(self._full_text, Qt.ElideRight, self._label.width())
-        if elided != self._label.text():
-            self._label.setText(elided)
