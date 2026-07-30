@@ -350,6 +350,11 @@ class TeamManager:
         pending = [m for m in mails if m.get("type") == "task" and m.get("status") == "pending"]
         return pending[:1]  # 串行处理
 
+    def get_running_tasks(self, window_id: str, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
+        """获取该成员正在运行的任务邮件"""
+        mails = self.get_mailbox_mails(window_id, team_name)
+        return [m for m in mails if m.get("type") == "task" and m.get("status") == "running"]
+
     def get_member_busy_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:
         """返回成员的工作状态: 'busy'（有 running/pending 任务）| 'idle'（空闲）"""
         mails = self.get_mailbox_mails(window_id, team_name)
