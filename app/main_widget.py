@@ -32,12 +32,11 @@ from PyQt5.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import QColor, QDesktopServices, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QDesktopServices, QPainter
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -681,6 +680,11 @@ class OpenAIChatToolWindow(ToolWindow):
     # 列表可由 register_system_card() 动态扩展（UI 插件注册浮动卡片时调用）。
     # 单一真相源：_on_system_card_opened/_on_system_card_closed 通过 instance 属性访问，
     # 避免两处硬编码列表漂移。
+    # aboutToQuit 全局注册守卫（仅首个窗口连接一次）
+    _about_to_quit_connected: bool = False
+    # 子智能体日志全局清理 timer（类级单例，不随窗口销毁）
+    _class_subagent_log_cleanup_timer = None
+
     _BASE_SYSTEM_CARD_IDS = (
         "model_selector",
         "model_config",
@@ -709,6 +713,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # 自动压缩
     _auto_compact_in_progress: bool = False  # 防重入守卫
+    # Tab 模式下延迟刷新的标记（主题变更时非可见窗口跳过刷新，激活时补刷）
+    _theme_needs_refresh: bool = False
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -951,13 +957,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 初始化历史管理器
         self._project_label.setText(self._current_project)
 
-        # 应用退出时自动保存
-        app = QApplication.instance()
-        if app is not None:
-            try:
-                app.aboutToQuit.connect(self._auto_save_current_session)
-            except Exception:
-                pass
+        # 应用退出时自动保存（仅首个窗口注册一次，遍历所有实例批量保存）
+        cls = type(self)
+        if not cls._about_to_quit_connected:
+            app = QApplication.instance()
+            if app is not None:
+                try:
+                    app.aboutToQuit.connect(cls._on_app_about_to_quit)
+                    cls._about_to_quit_connected = True
+                except Exception:
+                    pass
 
         # 设置文件操作记录的会话上下文
         if self.backend.tool_executor:
@@ -1773,13 +1782,28 @@ class OpenAIChatToolWindow(ToolWindow):
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
             QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
 
-    def _start_subagent_log_cleanup(self):
-        """定期清理子智能体日志，避免无限堆积"""
-        self._do_clean_subagent_logs()
-        self._subagent_log_cleanup_timer = QTimer(self)
-        self._subagent_log_cleanup_timer.setInterval(6 * 60 * 60 * 1000)  # 6小时
-        self._subagent_log_cleanup_timer.timeout.connect(self._do_clean_subagent_logs)
-        self._subagent_log_cleanup_timer.start()
+    @classmethod
+    def _on_class_cleanup_timer(cls):
+        """类级清理 timer 回调：找任意存活窗口执行清理"""
+        for win in getattr(cls, "_instances", []):
+            if not getattr(win, "_is_destroyed", False):
+                win._do_clean_subagent_logs()
+                return
+
+    @classmethod
+    def _start_subagent_log_cleanup(cls):
+        """定期清理子智能体日志，避免无限堆积（全局仅一个 timer）"""
+        if cls._class_subagent_log_cleanup_timer is not None:
+            return  # 已有全局 timer
+        # 找任意一个存活窗口执行首次清理
+        for win in getattr(cls, "_instances", []):
+            if not getattr(win, "_is_destroyed", False):
+                win._do_clean_subagent_logs()
+                break
+        cls._class_subagent_log_cleanup_timer = QTimer()
+        cls._class_subagent_log_cleanup_timer.setInterval(6 * 60 * 60 * 1000)  # 6小时
+        cls._class_subagent_log_cleanup_timer.timeout.connect(cls._on_class_cleanup_timer)
+        cls._class_subagent_log_cleanup_timer.start()
 
     def _do_clean_subagent_logs(self):
         """执行子智能体日志清理（保留14天）"""
@@ -1818,10 +1842,7 @@ class OpenAIChatToolWindow(ToolWindow):
             raise
 
     def eventFilter(self, obj, event):
-        """处理窗口大小变化，调整背景图片"""
-        if obj == self and event.type() == event.Type.Resize:
-            if hasattr(self, "_bg_label") and self._bg_label is not None:
-                self._bg_label.resize(self.size())
+        """处理窗口大小变化"""
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
         if event.type() == event.Type.Resize and obj in (
@@ -1897,8 +1918,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_window_bg_opacity(opacity)
 
     def _update_window_bg_opacity(self, opacity: float):
-        """更新窗口背景透明度（不影响背景图）"""
-        # 更新窗口调色板颜色
+        """更新窗口背景透明度（通过 stylesheet 半透明让背景图透出）"""
         if not hasattr(self, "_window_bg_color"):
             return
         import re
@@ -1906,15 +1926,10 @@ class OpenAIChatToolWindow(ToolWindow):
         m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", self._window_bg_color)
         if m:
             r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            # 原始 alpha * 窗口透明度
             base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-            final_alpha = int(base_alpha * opacity)
-            from PyQt5.QtGui import QColor, QPalette
-
-            color = QColor(r, g, b, max(0, final_alpha))
-            p = QPalette()
-            p.setColor(QPalette.Window, color)
-            self.setPalette(p)
+            final_alpha = max(0, int(base_alpha * opacity))
+            self.setStyleSheet(f"background: rgba({r},{g},{b},{final_alpha/255});")
+            self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -2315,9 +2330,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self.chat_scroll_area.setWidgetResizable(True)
         self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
         self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        # 背景图片层 - 从主题配置加载（延迟到首帧后，背景为纯装饰，不阻塞出现）
-        QTimer.singleShot(0, self._apply_bg_from_theme)
 
         self.chat_container = QWidget()
         self.chat_container.setStyleSheet("background: transparent;")
@@ -6237,70 +6249,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ══════════════════════════════════════════════════════════════
 
-    def _apply_bg_from_theme(self):
-        """从当前主题配置加载背景图片
-
-        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
-        """
-        try:
-            from app.utils.design_tokens import Colors
-            from app.utils.theme_manager import theme_manager
-            from app.utils.theme_refresh import ThemeRefreshCoordinator
-
-            Colors.refresh()
-            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
-            chat_list = bg_config.get("chat_list", {})
-            if chat_list.get("enabled", True):
-                image = chat_list.get("image", ":/icons/fox_bg.png")
-                opacity = chat_list.get("opacity", 0.1)
-            else:
-                image = None
-                opacity = 0.1
-
-            # ── 缓存检查：同一背景配置跳过重建 ──
-            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
-            if (
-                getattr(self, "_last_bg_key", None) == bg_key
-                and hasattr(self, "_bg_label")
-                and self._bg_label is not None
-            ):
-                return
-            self._last_bg_key = bg_key
-
-            if image:
-                # 先清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-                # 解析图片路径：主题文件夹内的相对路径基于主题目录
-                import os as _os
-
-                if not image.startswith(":") and not _os.path.isabs(image):
-                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
-                    if theme_dir:
-                        abs_path = str(theme_dir / image)
-                        if _os.path.exists(abs_path):
-                            image = abs_path
-                self._bg_label = QLabel(self)
-                self._bg_label.setPixmap(QPixmap(image))
-                self._bg_label.setScaledContents(True)
-                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
-                self._bg_opacity.setOpacity(opacity)
-                self._bg_label.setGraphicsEffect(self._bg_opacity)
-                self._bg_label.lower()
-                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                self._bg_label.resize(self.size())
-                self._bg_label.show()
-                # 安装事件过滤器监听窗口大小变化
-                self.installEventFilter(self)
-            else:
-                # 主题禁用背景图，清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-        except Exception:
-            pass
-
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
         if self._card_manager.is_card_visible("model_config", self._window_id):
@@ -6875,12 +6823,27 @@ class OpenAIChatToolWindow(ToolWindow):
         ThemeRefreshCoordinator.timer_end("global")
 
         # ── Per-window：所有窗口执行样式更新 ──
+        # Tab 模式下仅刷新可见窗口，非可见窗口标记延迟刷新（切换到该 tab 时补刷）
         ThemeRefreshCoordinator.timer_start("windows")
+        _tab_active_win = None
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+            _tm = _TMW.get_instance()
+            if _tm is not None and _tm.isVisible():
+                _tab_active_win = _tm.get_current_window()
+        except Exception:
+            pass
         for win in getattr(OpenAIChatToolWindow, "_instances", []):
             if getattr(win, "_is_destroyed", False):
                 continue
+            # Tab 模式下非可见窗口跳过刷新，标记延迟
+            if _tab_active_win is not None and win is not _tab_active_win:
+                win._theme_needs_refresh = True
+                continue
             try:
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
+                win._theme_needs_refresh = False
             except Exception as e:
                 logger.warning(f"[batched theme refresh] window {win._window_id}: {e}")
         ThemeRefreshCoordinator.timer_end("windows")
@@ -7283,20 +7246,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if m:
                 r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-                from PyQt5.QtGui import QColor, QPalette
+                from PyQt5.QtGui import QColor
 
-                color = QColor(r, g, b, alpha)
-                p = QPalette()
-                p.setColor(QPalette.Window, color)
-                self.setPalette(p)
-                self.setAutoFillBackground(True)
+                # Tab 模式下 MainWidget 背景改为半透明，让 TabManagerWindow 的
+                # 全局背景图能透出。使用 stylesheet 确保 alpha 正确 blend。
+                self.setStyleSheet(f"background: rgba({r},{g},{b},{alpha/255});")
+                self.setAutoFillBackground(False)
 
             # 分支标签
             if hasattr(self, "_project_label"):
                 self._refresh_project_branch_style()
-
-            # 背景图片
-            self._apply_bg_from_theme()
 
             # 分支标签（git worktree）
             if hasattr(self, "_update_branch"):
@@ -15564,6 +15523,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info(f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）")
 
+    @classmethod
+    def _on_app_about_to_quit(cls):
+        """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
+        for win in getattr(cls, "_instances", []):
+            if getattr(win, "_is_destroyed", False):
+                continue
+            try:
+                win._auto_save_current_session()
+            except Exception:
+                pass
+
     def _auto_save_current_session(self):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
@@ -15700,7 +15670,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception:
                     pass
         # 条件性 timer（可能未创建）
-        for timer_attr in ("_coding_plan_refresh_timer", "_subagent_log_cleanup_timer"):
+        for timer_attr in ("_coding_plan_refresh_timer",):
             timer = getattr(self, timer_attr, None)
             if timer is not None:
                 try:

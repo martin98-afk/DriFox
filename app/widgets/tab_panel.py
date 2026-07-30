@@ -1158,7 +1158,22 @@ class TabPanel(QWidget):
         return self._active_index
 
     def contextMenuEvent(self, event):
-        """显示右键菜单"""
+        """显示右键菜单
+
+        右键点击了哪个标签页就操作哪个标签页；
+        如果没有点击到任何标签页（如点击空白区域），则操作当前选中的标签页。
+        """
+        # ── 确定右键点击对应的标签页索引 ──
+        clicked_index = self._active_index  # 默认回退到当前选中
+        list_pos = self._list_widget.mapFromGlobal(event.globalPos())
+        child = self._list_widget.childAt(list_pos)
+        while child is not None and child is not self._list_widget:
+            if isinstance(child, TabItem):
+                if child in self._items:
+                    clicked_index = self._items.index(child)
+                break
+            child = child.parentWidget()
+
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
@@ -1178,15 +1193,15 @@ class TabPanel(QWidget):
         new_action = menu.addAction("新建标签页")
         menu.addSeparator()
 
-        if self._active_index >= 0:
+        if clicked_index >= 0:
             close_action = menu.addAction("关闭标签页")
             branch_action = menu.addAction("分支标签页")
 
         action = menu.exec_(event.globalPos())
         if action == new_action:
             self.newTabRequested.emit()
-        elif self._active_index >= 0:
+        elif clicked_index >= 0:
             if action == close_action:
-                self.tabCloseRequested.emit(self._active_index)
+                self.tabCloseRequested.emit(clicked_index)
             elif action == branch_action:
-                self.tabBranchRequested.emit(self._active_index)
+                self.tabBranchRequested.emit(clicked_index)

@@ -14,10 +14,11 @@ from PyQt5 import sip as _sip
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QIcon
+from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -249,6 +250,9 @@ class TabManagerWindow(QWidget):
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
 
+        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
+        QTimer.singleShot(0, self._apply_bg_from_theme)
+
     def _on_theme_changed(self):
         """主题切换时刷新配色
 
@@ -297,6 +301,9 @@ class TabManagerWindow(QWidget):
                 except Exception:
                     pass
 
+        # 刷新全局背景图
+        self._apply_bg_from_theme()
+
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
     def refresh_theme(self):
@@ -318,12 +325,12 @@ class TabManagerWindow(QWidget):
         """
         self.setStyleSheet(f"""
             #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=240)};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border-radius: 8px;
             }}
             #tabFrame {{
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
-                background: {Colors.CARD_BG.format(alpha=240)};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
@@ -333,34 +340,32 @@ class TabManagerWindow(QWidget):
                 border-radius: 8px;
             }}
             #tabManagerContent {{
-                background: {Colors.CONTENT_BG};
+                background: transparent;
                 border-radius: 8px;
             }}
             #chatFrame {{
-                background: {Colors.CONTENT_BG};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle */
             }}
             #contentArea {{
-                background: {Colors.CONTENT_BG};
+                background: transparent;
             }}
         """)
         # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
         # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
         if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet(f"""
-                QSplitter::handle:horizontal {{
-                    background: {Colors.CONTENT_BG};
-                }}
-            """)
+            self._splitter.setStyleSheet(
+                "QSplitter::handle:horizontal { background: transparent; }"
+            )
         # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
         # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
         # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
         if getattr(self, "_dock_splitter", None) is not None:
             self._dock_splitter.setStyleSheet(f"""
                 #dockSplitter::handle:horizontal {{
-                    background: {Colors.CONTENT_BG};
+                    background: transparent;
                     border-left: 2px solid {Colors.BORDER};
                     margin: 10px 2px;
                     border-radius: 1px;
@@ -372,7 +377,7 @@ class TabManagerWindow(QWidget):
         if getattr(self, "_vdock_splitter", None) is not None:
             self._vdock_splitter.setStyleSheet(f"""
                 #vDockSplitter::handle:vertical {{
-                    background: {Colors.CONTENT_BG};
+                    background: transparent;
                     border-top: 2px solid {Colors.BORDER};
                     margin: 2px 10px;
                     border-radius: 1px;
@@ -381,6 +386,66 @@ class TabManagerWindow(QWidget):
                     border-top: 2px solid {Colors.BORDER_ACCENT};
                 }}
             """)
+
+    def _apply_bg_from_theme(self):
+        """从当前主题配置加载背景图片，作为 TabManagerWindow 全局背景
+
+        背景为纯装饰：单例窗口全局一张，不随对话框各自加载。
+        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        """
+        try:
+            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
+            chat_list = bg_config.get("chat_list", {})
+            if chat_list.get("enabled", True):
+                image = chat_list.get("image", ":/icons/fox_bg.png")
+                opacity = chat_list.get("opacity", 0.1)
+            else:
+                image = None
+                opacity = 0.1
+
+            # ── 缓存检查：同一背景配置跳过重建 ──
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
+            if (
+                getattr(self, "_last_bg_key", None) == bg_key
+                and hasattr(self, "_bg_label")
+                and self._bg_label is not None
+            ):
+                return
+            self._last_bg_key = bg_key
+
+            if image:
+                # 先清除旧背景
+                if hasattr(self, "_bg_label") and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
+                # 解析图片路径：主题文件夹内的相对路径基于主题目录
+                import os as _os
+
+                if not image.startswith(":") and not _os.path.isabs(image):
+                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+                    if theme_dir:
+                        abs_path = str(theme_dir / image)
+                        if _os.path.exists(abs_path):
+                            image = abs_path
+                self._bg_label = QLabel(self)
+                self._bg_label.setPixmap(QPixmap(image))
+                self._bg_label.setScaledContents(True)
+                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
+                self._bg_opacity.setOpacity(opacity)
+                self._bg_label.setGraphicsEffect(self._bg_opacity)
+                self._bg_label.lower()
+                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                self._bg_label.resize(self.size())
+                self._bg_label.show()
+            else:
+                # 主题禁用背景图，清除旧背景
+                if hasattr(self, "_bg_label") and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
+        except Exception:
+            pass
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
@@ -746,10 +811,21 @@ class TabManagerWindow(QWidget):
 
     def _on_tab_selected(self, index: int):
         if 0 <= index < len(self._windows):
-            self._content_area.setCurrentWidget(self._windows[index])
+            win = self._windows[index]
+            self._content_area.setCurrentWidget(win)
             self.activeTabChanged.emit(index)
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
+            # 补刷新延迟的主题变更（Tab 模式下主题刷新跳过非可见窗口）
+            if getattr(win, "_theme_needs_refresh", False):
+                try:
+                    win._theme_needs_refresh = False
+                    from app.main_widget import OpenAIChatToolWindow
+
+                    # 该窗口未参与 batched refresh，scope 用 None 做全量刷新
+                    win._apply_runtime_ui_settings(scope=None, _skip_global=True)
+                except Exception:
+                    pass
 
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):
@@ -1491,10 +1567,16 @@ class TabManagerWindow(QWidget):
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
+            # 背景图尺寸跟随（轻量操作，不触发布局）
+            if hasattr(self, "_bg_label") and self._bg_label is not None:
+                self._bg_label.resize(self.size())
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
+        # 背景图尺寸跟随（轻量操作，不触发布局）
+        if hasattr(self, "_bg_label") and self._bg_label is not None:
+            self._bg_label.resize(self.size())
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
