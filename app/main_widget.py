@@ -4239,25 +4239,29 @@ class OpenAIChatToolWindow(ToolWindow):
         self._check_and_process_pending()
 
     def _check_and_process_pending(self):
-        """检查并处理待办任务邮件（串行：一次只处理一个）"""
+        """检查并处理待办任务邮件（串行：一次只处理一个）
+
+        流式路径：作为 hook 消息注入到当前消息流，不中断流式。
+        LLM 在下一轮 API 调用时自动看到（与子智能体完成信号机制相同）。
+        非流式路径：正常走对话流程处理。
+        """
         if self._team_processing:
             return  # 正在处理中，跳过
-
-        # 🛡️ 流式守卫：正在流式输出时不处理团队邮件，避免 _on_send_clicked 内的
-        # _on_stop_clicked() 中断当前 AI 回复。流式结束后由 _on_stream_finished
-        # 重新触发本函数。
-        if self._is_streaming:
-            return
 
         tm = self._get_team_manager()
         pending = tm.get_pending_tasks(self._window_id)
         if not pending:
             return
 
-        # 串行处理第一封
-        self._team_processing = True
         mail = pending[0]
-        self._process_team_task(mail)
+
+        # 🆕 流式路径：作为 hook 消息注入到当前消息流，不中断流式
+        if self._is_streaming:
+            self._inject_team_mail_as_hook(mail)
+        else:
+            # 非流式路径：正常走对话流程处理
+            self._team_processing = True
+            self._process_team_task(mail)
 
     def _process_team_task(self, mail: dict):
         """处理任务邮件：标记运行中，插入聊天流走正常对话流程"""
