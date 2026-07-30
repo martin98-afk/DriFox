@@ -4286,7 +4286,7 @@ class OpenAIChatToolWindow(ToolWindow):
             f"{task_desc}\n\n"
             f"（以上是系统自动注入的团队成员任务邮件，请根据上下文酌情处理）"
         )
-        hook_content = _format_hook_output("TeamMail", content)
+        hook_content = _format_hook_output("TeamMail", content, wrap_system_reminder=False)
 
         # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
         self.backend._hook_message_queue.put(
@@ -12884,7 +12884,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 使用 hook 消息格式包裹
         from app.core.backend import _format_hook_output
 
-        hook_content = _format_hook_output("SubAgentFinished", content)
+        hook_content = _format_hook_output("SubAgentFinished", content, wrap_system_reminder=False)
 
         # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
         self.backend._hook_message_queue.put(

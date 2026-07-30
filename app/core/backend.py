@@ -72,11 +72,21 @@ def _strip_hook_wrapper(content: str) -> str:
     return content
 
 
-def _format_hook_output(event_name: str, output: str, status_message: str = "") -> str:
-    """格式化 hook 输出为 Claude Code 兼容的双层 XML 标签格式
+def _format_hook_output(
+    event_name: str,
+    output: str,
+    status_message: str = "",
+    wrap_system_reminder: bool = True,
+) -> str:
+    """格式化 hook 输出为 Claude Code 兼容的 XML 标签格式
 
-    外层: <system-reminder>...</system-reminder>
-    内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+    当 wrap_system_reminder=True（默认）：
+        外层: <system-reminder>...</system-reminder>
+        内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+    当 wrap_system_reminder=False：
+        仅输出内层: <{kebab-case-event}-hook>...</{kebab-case-event}-hook>
+        （用于团队邮件、子智能体消息等非系统 hook 注入，避免 LLM 误判为系统指令）
+        注意：此时 status_message 会被静默丢弃（当前调用方均未传 status_message）
 
     当传入 status_message 时，在 <system-reminder> 和 <xxx-hook> 之间以纯文本形式插入状态描述。
 
@@ -89,18 +99,21 @@ def _format_hook_output(event_name: str, output: str, status_message: str = "") 
     避免 LLM 将 hook 注入的消息误认为用户已确认/同意，导致跳过确认环节。
     """
     tag = _event_to_tag(event_name)
-    parts = ["<system-reminder>"]
-    if status_message:
-        parts.append(status_message)
+    parts: list[str] = []
+    if wrap_system_reminder:
+        parts.append("<system-reminder>")
+        if status_message:
+            parts.append(status_message)
     parts.append(f"<{tag}-hook>")
     parts.append(output)
     parts.append(f"</{tag}-hook>")
-    # 🛡️ Stop 事件：追加「等待用户回复」指令，防止 LLM 将 hook 注入消息
-    # 误认为用户已确认。该标记在 <system-reminder> 内部，LLM 可见但明确
-    # 告知其系统身份，不污染用户消息流。
-    if event_name == "Stop":
-        parts.append("以上是系统自动注入的辅助信息，不是用户的输入。")
-    parts.append("</system-reminder>")
+    if wrap_system_reminder:
+        # 🛡️ Stop 事件：追加「等待用户回复」指令，防止 LLM 将 hook 注入消息
+        # 误认为用户已确认。该标记在 <system-reminder> 内部，LLM 可见但明确
+        # 告知其系统身份，不污染用户消息流。
+        if event_name == "Stop":
+            parts.append("以上是系统自动注入的辅助信息，不是用户的输入。")
+        parts.append("</system-reminder>")
     return "\n".join(parts)
 
 
