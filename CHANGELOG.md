@@ -68,6 +68,10 @@ All notable changes to this project will be documented in this file.
 - UI 插件列表实现计划与设计规范
 - Tab 管理器设计规范更新与审查反馈
 
+### 🗑️ 移除 (Removed)
+
+- **UI 插件左侧边缘入口 (`UIPluginEdgeLauncher`)**: 删除 `app/widgets/ui_plugin_edge_launcher.py` 及其测试 `tests/widgets/test_ui_plugin_edge_launcher.py`；移除 `app/main_widget.py` 中的导入/实例化/resizeEvent/主题刷新/热重载调用，以及 `app/widgets/tab_manager_window.py` 中的辅助函数（`_find_edge_launchers` / `_hide_edge_launcher` / `_show_edge_launcher` / `_hide_shared_launcher`）。插件入口完全由 `TabPanel` 内嵌的 UI 插件列表承担。
+
 ## [v0.4.7] - 2026-07-25
 
 自上一版本以来的变更 | 提交数：16 · 文件变更：24 · +1543/-608 | 贡献者：dingma, mading

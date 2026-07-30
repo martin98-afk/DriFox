@@ -2602,17 +2602,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
-        # ===== UI 插件左侧边缘入口 =====
-        # 独立窗口模式左侧入口（浮层，不参与主布局，自动跟踪位置）
-        try:
-            from app.widgets.ui_plugin_edge_launcher import UIPluginEdgeLauncher
-
-            self._ui_plugin_edge_launcher = UIPluginEdgeLauncher(main_widget=self)
-            self._ui_plugin_edge_launcher.hide()
-        except Exception as e:
-            logger.error(f"[MainWidget] UI plugin edge launcher init failed: {e}")
-            self._ui_plugin_edge_launcher = None
-
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -3300,23 +3289,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._function_command_handlers[cmd_name] = _make_handler()
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
-        finally:
-            # 通知左侧边缘入口刷新插件列表（无论加载成功与否都要调用，
-            # 以便失败时隐藏入口、清理残留菜单）
-            launcher = getattr(self, "_ui_plugin_edge_launcher", None)
-            if launcher is not None and hasattr(self, "chat_scroll_area"):
-                # 先刷新卡片列表（更新内部状态）
-                launcher.refresh_plugins()
-                launcher.update_geometry(self.chat_scroll_area.geometry())
-                # Tab 模式下：共享 Launcher 由 TabManagerWindow 管理，隐藏 per-window launcher
-                try:
-                    from app.widgets.tab_manager_window import TabManagerWindow
-
-                    _tm = TabManagerWindow.get_instance()
-                    if _tm is not None and _tm.isVisible():
-                        launcher.hide()
-                except ImportError:
-                    pass
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -6546,14 +6518,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
-        # 重新定位 UI 插件左侧边缘入口（基于 chat_scroll_area 几何）
-        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
-        if launcher is not None and hasattr(self, "chat_scroll_area"):
-            try:
-                if not sip.isdeleted(launcher):
-                    launcher.update_geometry(self.chat_scroll_area.geometry())
-            except RuntimeError, AttributeError:
-                pass
         # 桌宠跟随窗口大小修正位置
         if self.pixel_pet:
             self.pixel_pet.resize_handle(self.width(), self.height())
@@ -7146,18 +7110,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
-            # 通知每个窗口的左侧边缘入口重新读取插件列表
-            # （热重载可能新增 / 卸载了 UI 插件）
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
-                    continue
-                try:
-                    launcher = getattr(win, "_ui_plugin_edge_launcher", None)
-                    if launcher is not None:
-                        launcher.refresh_plugins()
-                except RuntimeError, AttributeError:
-                    pass
-            # Tab 模式下也刷新共享 Launcher
+            # Tab 模式下刷新共享 Launcher（热重载可能新增 / 卸载了 UI 插件）
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -7166,7 +7119,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     _tm._update_shared_launcher()
             except Exception:
                 pass
-            logger.debug("[HotReload] UI 插件边缘入口已刷新")
+            logger.debug("[HotReload] UI 插件列表已刷新")
 
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
@@ -7495,10 +7448,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工具控制卡片
         if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
             self._tool_control_card.refresh_style()
-        # UI 插件左侧边缘入口：主题切换后刷新颜色
-        launcher = getattr(self, "_ui_plugin_edge_launcher", None)
-        if launcher is not None and hasattr(launcher, "apply_theme"):
-            launcher.apply_theme()
 
         ThemeRefreshCoordinator.timer_end("total")
 

@@ -80,44 +80,6 @@ class EmptyStateWidget(QWidget):
         )
 
 
-def _find_edge_launchers(window):
-    """查找窗口的所有 UIPluginEdgeLauncher 实例"""
-    from PyQt5 import sip
-
-    if window is None or sip.isdeleted(window):
-        return []
-    try:
-        result = []
-        for child in window.findChildren(QWidget):
-            if sip.isdeleted(child):
-                continue
-            # 检查类名（PyQt5 中 Python 子类的 metaObject className）
-            name = child.metaObject().className()
-            if name and "UIPluginEdgeLauncher" in name:
-                result.append(child)
-        return result
-    except Exception:
-        return []
-
-
-def _hide_edge_launcher(window):
-    """隐藏窗口的 UIPluginEdgeLauncher"""
-    for child in _find_edge_launchers(window):
-        try:
-            child.hide()
-        except Exception:
-            pass
-
-
-def _show_edge_launcher(window):
-    """显示窗口的 UIPluginEdgeLauncher"""
-    for child in _find_edge_launchers(window):
-        try:
-            child.show()
-        except Exception:
-            pass
-
-
 def _apply_window_topmost(window):
     """应用窗口置顶配置（Settings.window_always_on_top）到指定窗口
 
@@ -753,9 +715,6 @@ class TabManagerWindow(QWidget):
         if team_agent:
             self._tab_panel.update_tab_capsule(tab_idx, team_agent)
 
-        # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
-        _hide_edge_launcher(window)
-
         # 隐藏空状态页，切换到新窗口
         self._content_area.widget(0).hide()
         self._tab_panel.set_active_index(idx)
@@ -881,10 +840,6 @@ class TabManagerWindow(QWidget):
     def _show_shared_launcher(self) -> None:
         """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
         self._tab_panel.refresh_ui_plugins()
-
-    def _hide_shared_launcher(self) -> None:
-        """兼容模式切换调用：插件列表内嵌在 TabPanel，无独立入口需要隐藏"""
-        logger.debug("[TabMode] 跳过隐藏共享 EdgeLauncher：插件列表已内嵌在 TabPanel")
 
     @staticmethod
     def _create_fake_page():
@@ -1158,10 +1113,6 @@ class TabManagerWindow(QWidget):
             # 更新 Tray 菜单
             tray_manager._rebuild_context_menu()
 
-            # 隐藏所有窗口的独立 EdgeLauncher
-            for w in migrated_windows:
-                _hide_edge_launcher(w)
-
             # Tab 模式下使用共享 Launcher（单例）
             tab_mgr._show_shared_launcher()
 
@@ -1235,9 +1186,6 @@ class TabManagerWindow(QWidget):
                     _apply_window_topmost(dialog)
                     tray_manager.register_window(dialog)
 
-                    # 恢复 EdgeLauncher
-                    _show_edge_launcher(tool_instance)
-
                     # ★ 迁出后重新注册命令快捷键：窗口从 TabManagerWindow
                     # 移回独立 ToolPopupDialog，parent widget 的 window()
                     # 再次变化，需重新注册 QShortcut 以匹配新的窗口上下文。
@@ -1251,9 +1199,6 @@ class TabManagerWindow(QWidget):
                     import traceback
 
                     logger.error(traceback.format_exc())
-
-            # 隐藏共享 Launcher（切换到独立模式后每个窗口使用自己的）
-            tab_mgr._hide_shared_launcher()
 
             # 清空缓存
             tab_mgr._cached_dialogs.clear()
