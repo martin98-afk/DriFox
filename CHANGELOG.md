@@ -49,6 +49,7 @@ All notable changes to this project will be documented in this file.
 - **Tab 管理器拖拽检测增强 (nativeEvent)**: 使用原生 Windows 事件（WM_NCHITTEST/WM_MOVING）增强拖拽检测，提升拖拽期间性能表现
 - **Tab 管理器拖拽处理与布局优化**: 优化拖拽处理和布局更新逻辑，防止拖拽窗口时 UI 阻塞
 - **Tab 管理器窗口拖拽检测与性能优化**: 实现窗口拖拽检测与性能优化机制；FileTreeCard 拖放确认对话框增强；FileTreeView 外部拖放处理优化与自拖拽防护
+- **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
 
 ### ♻️ 代码重构 (Refactoring)
 
