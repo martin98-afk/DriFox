@@ -129,6 +129,7 @@ class TrayManager(QObject):
 
         self._windows: list = []  # 已注册的 ToolPopupDialog 列表
         self._pending_notification: dict = {}  # 当前待处理的托盘通知 {notification_id: window}
+        self._last_notification_tab_index: int = -1  # 最近通知关联的 tab 索引（Tab 模式）
 
         # 创建托盘图标
         self._tray_icon = QSystemTrayIcon(self)
@@ -664,13 +665,14 @@ class TrayManager(QObject):
             self._update_selection_visuals()
         logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
 
-    def notify(self, title: str, message: str, window: QObject = None) -> None:
+    def notify(self, title: str, message: str, window: QObject = None, tab_index: int = -1) -> None:
         """发送 Windows 通知
 
         Args:
             title: 通知标题
             message: 通知内容
             window: 触发通知的窗口对象，点击通知时会显示该窗口
+            tab_index: Tab 模式下，关联的标签页索引（-1 表示不跳转）
         """
         if self._tray_icon.isVisible():
             # 生成唯一 ID 关联通知和窗口
@@ -678,6 +680,7 @@ class TrayManager(QObject):
             self._pending_notification[notification_id] = window or self._get_first_valid_window()
             # 保存到实例属性，供 messageClicked 信号处理器使用
             self._last_notification_window = self._pending_notification.get(notification_id)
+            self._last_notification_tab_index = tab_index
             self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon(1), 4000)
             # 4秒后清理（与 showMessage 的显示时长一致）
             QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
@@ -784,6 +787,14 @@ class TrayManager(QObject):
             window = self._get_first_valid_window()
             if window:
                 self._show_window(window)
+
+        # Tab 模式：跳转到通知对应的标签页
+        if self._tab_manager_window is not None and self._last_notification_tab_index >= 0:
+            try:
+                logger.debug(f"[_on_message_clicked] 跳转到 tab {self._last_notification_tab_index}")
+                self._tab_manager_window._tab_panel.set_active_index(self._last_notification_tab_index)
+            except Exception as e:
+                logger.warning(f"[_on_message_clicked] 跳转 tab 失败: {e}")
 
     def _on_tray_activated(self, reason):
         """Windows 托盘图标点击处理"""

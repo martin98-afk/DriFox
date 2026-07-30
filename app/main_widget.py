@@ -13141,8 +13141,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 传递顶层窗口引用，确保点击通知时能正确恢复最小化的对话框
         from app.tray_manager import TrayManager
 
+        # Tab 模式：计算当前窗口对应的标签页索引，点击通知时自动跳转
+        tab_index = -1
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tab_index = tm._window_to_index.get(id(self), -1)
+        except Exception:
+            pass
+
         top_window = self.window() if callable(self.window) else self
-        TrayManager.get_instance().notify(title, message, window=top_window)
+        TrayManager.get_instance().notify(title, message, window=top_window, tab_index=tab_index)
 
     def _should_show_inactive_notification(self) -> bool:
         """Only notify when the app window is not effectively visible to the user."""

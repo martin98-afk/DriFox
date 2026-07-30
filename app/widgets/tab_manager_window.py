@@ -400,7 +400,8 @@ class TabManagerWindow(QWidget):
 
         self._tab_panel = TabPanel(content_widget)
         self._tab_panel.setObjectName("tabPanel")
-        self._tab_panel.setMinimumWidth(120)
+        # 最小宽度取收起状态的窄宽度(46px)，展开时由 splitter 控制实际宽度
+        self._tab_panel.setMinimumWidth(self._tab_panel._collapsed_min_width)
         self._tab_panel.setMaximumWidth(400)
 
         # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
@@ -412,8 +413,8 @@ class TabManagerWindow(QWidget):
         # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
         # _tab_panel 的约束：
         #   frame max = panel max(400) + margins(12) + border(2) = 414
-        #   frame min = panel min(120) + margins(12) + border(2) = 134
-        self._tab_frame.setMinimumWidth(134)
+        #   frame min = panel min(46) + margins(12) + border(2) = 60
+        self._tab_frame.setMinimumWidth(60)
         self._tab_frame.setMaximumWidth(414)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
@@ -544,6 +545,9 @@ class TabManagerWindow(QWidget):
             frame_w = saved_w + 14
             self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
+        # 恢复侧边栏收起状态（必须在 splitter sizes 设置之后执行）
+        QTimer.singleShot(0, self._restore_sidebar_collapsed)
+
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
 
@@ -552,6 +556,44 @@ class TabManagerWindow(QWidget):
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+        self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
+
+    # ── 侧边栏收起/展开 ──
+
+    def _on_sidebar_toggled(self, collapsed: bool):
+        """侧边栏收起/展开：通过 splitter 调整面板宽度"""
+        sizes = self._splitter.sizes()
+        total_w = sum(sizes) if sizes else self.width()
+
+        if collapsed:
+            # 收起前保存当前宽度（供展开时恢复）
+            if sizes:
+                self._saved_panel_frame_width = sizes[0]
+            # 使用 _tab_panel 的收起最小宽度
+            collapsed_frame_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
+            self._splitter.setSizes([collapsed_frame_w, max(0, total_w - collapsed_frame_w)])
+        else:
+            # 展开：恢复保存的宽度，若无保存则用 250
+            restore_w = getattr(self, "_saved_panel_frame_width", 250)
+            # 至少保证宽度不小于展开最小视觉宽度
+            restore_w = max(120, restore_w)
+            self._splitter.setSizes([restore_w, max(0, total_w - restore_w)])
+
+        # 持久化收起状态
+        Settings.get_instance().tab_panel_collapsed.value = collapsed
+        if not collapsed:
+            # 展开时保存当前宽度（去除 frame 补偿）
+            new_sizes = self._splitter.sizes()
+            if new_sizes:
+                Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
+
+    def _restore_sidebar_collapsed(self):
+        """启动时根据配置恢复侧边栏收起状态"""
+        collapsed = Settings.get_instance().tab_panel_collapsed.value
+        if collapsed:
+            self._on_sidebar_toggled(True)
+            # 让 TabPanel 内部状态同步（不重复发射信号）
+            self._tab_panel.set_collapsed(True)
 
     # ── 窗口管理 ──
 
@@ -1185,10 +1227,12 @@ class TabManagerWindow(QWidget):
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
         # 保存面板宽度（去除新增 #tabFrame 的 layout margins + border 14px）
-        if hasattr(self, "_splitter"):
-            sizes = self._splitter.sizes()
-            if sizes:
-                Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
+        # 收起状态下不覆盖已保存的正常宽度
+        if hasattr(self, "_splitter") and hasattr(self, "_tab_panel"):
+            if not self._tab_panel._collapsed:
+                sizes = self._splitter.sizes()
+                if sizes:
+                    Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
 
     def _restore_geometry(self):
         """恢复窗口位置（屏幕居中），确保不超出屏幕"""

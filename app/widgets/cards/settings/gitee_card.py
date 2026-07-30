@@ -263,6 +263,7 @@ class GiteeAccountRow(QFrame):
         self._binding = False
         self._bound_owner = ""
         self._bound_repo = ""
+        self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
 
         from app.core.config_sync import ConfigSyncService
 
@@ -356,6 +357,59 @@ class GiteeAccountRow(QFrame):
         # 更新整行可点状态
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
+
+    def set_compact_mode(self, compact: bool):
+        """切换紧凑模式：收起时头像和设置按钮垂直堆叠"""
+        if self._compact == compact:
+            return
+        self._compact = compact
+
+        # 保存要重用的子控件
+        avatar = self._avatar
+        name_label = self._name_label
+        repo_label = self._repo_label
+        settings_btn = self._settings_btn
+
+        # 卸载旧布局（用临时 widget 接管 old layout 使其析构）
+        old_layout = self.layout()
+        temp = QWidget()
+        temp.setLayout(old_layout)
+        temp.deleteLater()
+
+        if compact:
+            # 垂直堆叠：头像居中（缩小），设置按钮居中
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(4, 2, 4, 2)
+            layout.setSpacing(2)
+            avatar_size = scale_font_size(20)
+            self._avatar.set_size(avatar_size)
+            layout.addWidget(avatar, 0, Qt.AlignCenter)
+            btn_size = scale_font_size(20)
+            settings_btn.setFixedSize(btn_size, btn_size)
+            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+            layout.addWidget(settings_btn, 0, Qt.AlignCenter)
+            name_label.setVisible(False)
+            repo_label.setVisible(False)
+        else:
+            # 水平恢复：头像 + 文字 + 设置按钮
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(8)
+            avatar_size = scale_font_size(28)
+            self._avatar.set_size(avatar_size)
+            layout.addWidget(avatar)
+            text_container = QVBoxLayout()
+            text_container.setContentsMargins(0, 0, 0, 0)
+            text_container.setSpacing(0)
+            text_container.addWidget(name_label)
+            text_container.addWidget(repo_label)
+            layout.addLayout(text_container, 1)
+            btn_size = scale_font_size(24)
+            settings_btn.setFixedSize(btn_size, btn_size)
+            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+            layout.addWidget(settings_btn)
+            name_label.setVisible(True)
+            repo_label.setVisible(True)
 
     def _apply_style(self):
         self.setStyleSheet("""

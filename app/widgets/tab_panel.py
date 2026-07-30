@@ -147,6 +147,7 @@ class _TabProjectIcon(QWidget):
             return QColor(rgba_str)
         try:
             import re
+
             m = re.match(r"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+))?\s*\)", rgba_str)
             if m:
                 r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -204,8 +205,9 @@ class TabItem(QFrame):
 
     closeRequested = pyqtSignal()
 
-    def __init__(self, title: str, icon=None, parent=None, panel=None,
-                 project_initials: str = "", project_color: str = ""):
+    def __init__(
+        self, title: str, icon=None, parent=None, panel=None, project_initials: str = "", project_color: str = ""
+    ):
         super().__init__(parent)
         self._title = title
         self._project_initials = project_initials
@@ -457,8 +459,8 @@ class UIPluginRow(QFrame):
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
-        self._title_label = QLabel(title, self)
-        self._title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # 使用与 TabItem 同款的 _ElidedLabel，收起时自动省略文本
+        self._title_label = _ElidedLabel(title, self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -529,6 +531,7 @@ class TabPanel(QWidget):
     tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
+    sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -546,6 +549,8 @@ class TabPanel(QWidget):
         self._streaming_count: int = 0  # 当前流式 tab 计数
         self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
+        self._collapsed: bool = False  # 侧边栏收起状态
+        self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -564,19 +569,35 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：品牌区 ──
+        # ── 顶部：品牌区（水平布局：左侧产品标识 + 右侧侧边栏收起/展开按钮）──
         self._brand_widget = QWidget(self)
-        brand_layout = QVBoxLayout(self._brand_widget)
-        brand_layout.setContentsMargins(10, 8, 10, 2)
-        brand_layout.setSpacing(1)
-        self._brand_title = QLabel("DriFox", self._brand_widget)
+        brand_layout = QHBoxLayout(self._brand_widget)
+        brand_layout.setContentsMargins(10, 4, 6, 4)
+        brand_layout.setSpacing(4)
+
+        # 左侧：产品标识（水平：标题 + 版本号同排，降低整体高度）
+        self._brand_left = QWidget(self._brand_widget)
+        brand_left_layout = QHBoxLayout(self._brand_left)
+        brand_left_layout.setContentsMargins(0, 0, 0, 0)
+        brand_left_layout.setSpacing(4)
+        self._brand_title = QLabel("DriFox", self._brand_left)
         self._brand_title.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
         )
-        self._brand_version = QLabel(Settings.current_version, self._brand_widget)
+        self._brand_version = QLabel(Settings.current_version, self._brand_left)
         self._brand_version.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}")
-        brand_layout.addWidget(self._brand_title)
-        brand_layout.addWidget(self._brand_version)
+        brand_left_layout.addWidget(self._brand_title)
+        brand_left_layout.addWidget(self._brand_version)
+        brand_layout.addWidget(self._brand_left, 1)
+
+        # 右侧：侧边栏收起/展开按钮
+        self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
+        self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+        self._sidebar_toggle_btn.setFixedSize(28, 28)
+        self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+        self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
+        brand_layout.addWidget(self._sidebar_toggle_btn)
+
         layout.addWidget(self._brand_widget)
 
         # ── 品牌区下分隔线 ──
@@ -659,26 +680,26 @@ class TabPanel(QWidget):
         layout.addWidget(self._plugin_separator_2)
 
         # ── 顶部：分支 + 新建按钮 ──
-        top_bar = QWidget(self)
-        top_layout = QHBoxLayout(top_bar)
+        self._top_bar = QWidget(self)
+        top_layout = QHBoxLayout(self._top_bar)
         top_layout.setContentsMargins(6, 6, 6, 4)
         top_layout.setSpacing(2)
 
-        self._branch_btn = TransparentPushButton(get_icon("分支"), "分支", top_bar)
+        self._branch_btn = TransparentPushButton(get_icon("分支"), "分支", self._top_bar)
         self._branch_btn.setCursor(Qt.PointingHandCursor)
         self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._branch_btn.setToolTip("从当前标签页分支")
         self._branch_btn.clicked.connect(self._on_branch_clicked)
         top_layout.addWidget(self._branch_btn)
 
-        self._new_btn = TransparentPushButton(FIF.ADD, "新建", top_bar)
+        self._new_btn = TransparentPushButton(FIF.ADD, "新建", self._top_bar)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.setToolTip("新建空白标签页")
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
 
-        layout.addWidget(top_bar)
+        layout.addWidget(self._top_bar)
 
         # ── 中间：Tab 列表 ──
         self._scroll_area = QScrollArea(self)
@@ -712,14 +733,29 @@ class TabPanel(QWidget):
         layout.addWidget(self._scroll_area, 1)
 
         # ── 分隔线 ──
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet(self._SEPARATOR_STYLE)
-        layout.addWidget(separator)
+        self._separator = QFrame(self)
+        self._separator.setFrameShape(QFrame.HLine)
+        self._separator.setStyleSheet(self._SEPARATOR_STYLE)
+        layout.addWidget(self._separator)
 
         # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
+
+    def resizeEvent(self, event):
+        """手动拖拽拉开侧边栏时自动展开
+
+        收起状态下面板宽度很窄（~46px），用户拖拽 splitter 把手拉开时
+        宽度会超过阈值，自动切回展开态。
+        """
+        super().resizeEvent(event)
+        if self._collapsed and self.width() > self._collapsed_min_width + 10:
+            self._collapsed = False
+            self._update_toggle_button()
+            # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda: self.sidebarToggled.emit(False))
 
     def refresh_ui_plugins(self):
         """刷新 Tab 模式顶部的 UI 插件按钮列表
@@ -812,6 +848,44 @@ class TabPanel(QWidget):
         if 0 <= self._active_index < len(self._items):
             self.tabBranchRequested.emit(self._active_index)
 
+    # ── 侧边栏收起/展开 ──
+
+    def _toggle_sidebar(self):
+        """切换侧边栏收起/展开状态"""
+        self._collapsed = not self._collapsed
+        self._update_toggle_button()
+        self.sidebarToggled.emit(self._collapsed)
+
+    def set_collapsed(self, collapsed: bool):
+        """外部设置侧边栏收起/展开状态（如启动时恢复配置，不发射信号）"""
+        if self._collapsed == collapsed:
+            return
+        self._collapsed = collapsed
+        self._update_toggle_button()
+
+    def _update_toggle_button(self):
+        """更新收起/展开按钮的图标和提示，以及收起态下的可见元素"""
+        if self._collapsed:
+            self._sidebar_toggle_btn.setIcon(get_icon("展开侧边栏"))
+            self._sidebar_toggle_btn.setToolTip("展开侧边栏")
+            # 收起时隐藏产品标识
+            self._brand_left.setVisible(False)
+            # 收起时分支/新建按钮仅保留图标
+            self._branch_btn.setText("")
+            self._branch_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self._new_btn.setText("")
+            self._new_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        else:
+            self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+            self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+            # 展开时恢复产品标识
+            self._brand_left.setVisible(True)
+            # 展开时恢复按钮文字
+            self._branch_btn.setText("分支")
+            self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._new_btn.setText("新建")
+            self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""
         expanded = not self._custom_plugin_scroll.isVisible()
@@ -863,6 +937,9 @@ class TabPanel(QWidget):
             self._brand_version.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
             )
+        if hasattr(self, "_sidebar_toggle_btn"):
+            # 按钮样式由 TransparentToolButton 处理，无需额外样式
+            pass
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
@@ -879,8 +956,9 @@ class TabPanel(QWidget):
     def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
-        item = TabItem(title, icon, self._list_widget, panel=self,
-                       project_initials=project_initials, project_color=project_color)
+        item = TabItem(
+            title, icon, self._list_widget, panel=self, project_initials=project_initials, project_color=project_color
+        )
 
         # 连接信号 — ★ 使用动态索引查找，防止删除前序 tab 后索引漂移
         # 不能用 lambda 捕获 idx，否则删除 tab 0 后 tab 1 的 lambda 中 idx 仍为 1
@@ -1066,9 +1144,6 @@ class TabPanel(QWidget):
 
     def contextMenuEvent(self, event):
         """显示右键菜单"""
-        if self._active_index < 0:
-            return
-
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
@@ -1085,12 +1160,18 @@ class TabPanel(QWidget):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        close_action = menu.addAction("关闭标签页")
+        new_action = menu.addAction("新建标签页")
         menu.addSeparator()
-        branch_action = menu.addAction("分支窗口")
+
+        if self._active_index >= 0:
+            close_action = menu.addAction("关闭标签页")
+            branch_action = menu.addAction("分支标签页")
 
         action = menu.exec_(event.globalPos())
-        if action == close_action:
-            self.tabCloseRequested.emit(self._active_index)
-        elif action == branch_action:
-            self.tabBranchRequested.emit(self._active_index)
+        if action == new_action:
+            self.newTabRequested.emit()
+        elif self._active_index >= 0:
+            if action == close_action:
+                self.tabCloseRequested.emit(self._active_index)
+            elif action == branch_action:
+                self.tabBranchRequested.emit(self._active_index)
