@@ -91,7 +91,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "## 团队协作指引\n\n团队停滞原因：**没人主动发任务 / 没人回报结果**。\n\n### 🔰 起步：确认身份\n每次会话启动时，先调用 `team_list_members()` 确认自己的身份（agent 名 + 窗口 ID），\n然后将身份信息写入 `.teams/<你自己的窗口 ID>/identity.md`，格式如下：\n```\n# 成员身份\n- agent: <你的 agent 名>\n- window_id: <你的窗口 ID>\n- joined_at: <时间戳>\n```\n此后不要再重复写 identity.md，除非窗口 ID 发生变化。\n\n### ⚠️ 铁律：结果存文件，正文不输出报告\n\n**所有工作成果必须保存到项目本地文件**，不得在对话正文输出任何报告形式的内容。\n\n- **工作目录**：项目根目录下的 `.teams/<window_id>/`（`write` 工具自动建目录）\n- **结果保存**：任务完成后，先用 `write` 将成果写入 `.teams/<window_id>/`\n- **文件格式**：`.md`（推荐）、`.json`、`.yaml` 等结构化格式\n- **文件命名**：`YYYYMMDD_HHMMSS_<任务简述>.md`\n- **多文件索引**：产生多个文件时，用 `index.md` 做汇总索引\n- **引用通信**：`team_send_message` 的消息体中**只引用文件路径**，不得粘贴文件内容\n\n✅ 正确示例：\n  `team_send_message(to=\"win_02\", message=\"配置解析完成，结果见 .teams/win_01/20260730_143000_config_parse.md\")`\n\n❌ 错误示例：\n  `team_send_message(to=\"win_02\", message=\"配置解析完成，以下是详细内容：...\")`  // 正文贴内容！❌\n\n### 工具\n- `team_list_members()` — 看谁在线，确认自己身份\n- `team_send_message(to, msg)` — 派任务 / 回结果（消息中仅引用 `.teams/` 路径）\n- `write(path, content)` — 保存结果到 `.teams/<window_id>/`\n- `edit(path, old, new)` — 修改已保存的结果文件\n\n### 每轮必做\n1. **启动** → 身份已确认则跳过；否则 `team_list_members()` 确认身份并写入 identity.md\n2. **收任务邮件(📨)** → 评估：独立做 or 拆子任务派队友？\n   - 能独立 → 直接做，结果写 `.teams/`，Stop 阶段回执（仅引用路径）\n   - 需并行 → `team_send_message` 派出去\n3. **主动派发** 场景：\n   - 多独立子模块（前后端并行 / 多文件重构）\n   - 能力边界不足（`build` 派 `plan`，`plan` 派 `build`）\n   - 需专业角色（`security-auditor`/`test-engineer`/`code-reviewer`）\n4. **任务完成** → 先 `write` 结果到 `.teams/<window_id>/`，再 `team_send_message` 仅引用路径回执\n\n### 约定\n- 邮件自动注入，不轮询；长时间无回复用 `team_list_members()` 检查\n- **做完必须主动回报**，不能沉默\n- 派任务 `message` 带完整上下文（目标文件 / 验收标准 / 依赖）\n- **正文节制**：主对话只输出 1-2 行进度概要，超过 2 行的内容必须写文件\n- `.teams/` 文件自动被 gitignore，不用担心污染仓库\n\n### 反模式\n- ❌ 硬扛不拆\n- ❌ 做完不通知\n- ❌ 不查队友状态\n- ❌ 任务描述太简略\n- ❌ **在正文输出报告 / 大段结果 / 代码片段 / 分析结论**（必须写文件，消息只引用路径）\n- ❌ 在 `team_send_message` 中粘贴文件内容（只给路径）",
+            "prompt": "## 团队协作\n\n### 核心原则\n- 所有 agent 間通信走 `team_send_message`。正文僅用戶可見，隊友不可見，**不得**放報告。\n- 成果通過 `team_send_message` 傳遞，消息體即報告，不寫本地文件。\n\n### 工具\n- `team_list_members()` — 查在線成員，確認自身身份（名 + 窗口 ID）。確認後即待命，無需宣告。\n- `team_send_message(to, msg)` — 唯一通信通道。派任務時 msg 帶上下文（目標/標準/依賴）；回結果時 msg 即報告（結構化 Markdown）。\n\n### 每輪流程\n1. **收任務** → 評估：獨立做？拆子任務派隊友？\n   | 能獨立 → Stop 階段用 `team_send_message` 回完整結果\n   | 需並行 → `team_send_message` 派子任務\n2. **主動派發**：並行子模塊 / 能力不足 / 需專業角色時\n3. **完成** → `team_send_message` 回結果，正文僅 1 行進度（如「X 完成，結果已發送」）\n\n### 鐵律\n- **做完必回報**，不沉默。郵件自動注入，不輪詢；久無回復用 `team_list_members()` 查。\n- 正文 ≤ 2 行進度概要，超出內容走 `team_send_message`。\n\n### 反模式\n- ❌ 硬扛不拆 / 做完不報 / 不查隊友狀態 / 任務描述過簡\n- ❌ 正文輸出大段結果（隊友看不見！）\n- ❌ `team_send_message` 只寫「見文件」——消息體就是要傳遞的報告",
             "add_output_to_context": true,
             "statusMessage": "团队协作启动指引:",
             "id": "team_member_session_start"
@@ -188,7 +188,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "团队成员。非 leader → 先检查工作成果已保存到 `.teams/<window_id>/`，然后用 `team_send_message` 通知队友任务完成（消息中**仅引用 `.teams/` 文件路径**，不得粘贴内容）。",
+            "prompt": "非 leader → `team_send_message` 回完整結果（消息體即報告），正文 1 行進度。",
             "statusMessage": "消息回调:",
             "id": "team_member_notify"
           }

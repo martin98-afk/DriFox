@@ -63,16 +63,10 @@ _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def _check_team_member(backend) -> bool:
-    """检查当前窗口是否是团队成员（供 hook context 使用）"""
-    try:
-        wid = getattr(backend, "_window_id", None)
-        if not wid:
-            return False
-        from app.core.team_manager import TeamManager
+    """检查当前窗口是否是团队成员（委托给共用函数）"""
+    from app.core.team_manager import check_team_member
 
-        return TeamManager.get_instance().is_team_member(wid)
-    except Exception:
-        return False
+    return check_team_member(backend)
 
 
 def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
@@ -781,7 +775,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     @staticmethod
@@ -816,7 +810,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except json.JSONDecodeError, TypeError, ValueError:
             pass
 
         # 优先级 4: raw output 兜底
@@ -1541,7 +1535,7 @@ class OpenAIChatWorker(QThread):
                         # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
-                    except (ValueError, TypeError, RuntimeError):
+                    except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
@@ -2206,7 +2200,7 @@ class OpenAIChatWorker(QThread):
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except (ValueError, SyntaxError):
+                            except ValueError, SyntaxError:
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2551,7 +2545,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except (httpx.ReadError, httpcore.ReadError):
+                except httpx.ReadError, httpcore.ReadError:
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:
@@ -3726,7 +3720,16 @@ class OpenAIChatWorker(QThread):
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
         try:
-            result = self.tool_executor.execute(tool_name, arguments, call_id=tool_call_id)
+            result = self.tool_executor.execute(
+                tool_name,
+                arguments,
+                call_id=tool_call_id,
+                hook_context={
+                    "current_role": "primary",
+                    "is_subagent_call": False,
+                    "is_team_member": _check_team_member(getattr(self.tool_executor, "_backend", None)),
+                },
+            )
         except Exception as e:
             logger.exception(f"[Tool] Tool '{tool_name}' execution failed: {e}")
             return None, f"Tool execution error: {str(e)}", False

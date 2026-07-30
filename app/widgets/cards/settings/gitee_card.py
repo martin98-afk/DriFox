@@ -7,6 +7,7 @@ Gitee 账号绑定设置卡片
 """
 
 import hashlib
+import sip
 import threading
 import webbrowser
 from loguru import logger
@@ -570,6 +571,9 @@ class GiteeAccountRow(QFrame):
 
     def close_popup(self):
         """关闭弹出的浮动卡片（供外部调用，如 TabPanel 切换时）"""
+        if self._popup is not None and sip.isdeleted(self._popup):
+            self._popup = None
+            return
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -578,6 +582,11 @@ class GiteeAccountRow(QFrame):
         """点击整块区域切换浮动卡片显示状态"""
         if self._binding:
             return
+
+        # 防御性检查：如果 C++ 对象已被删除，清理引用
+        if self._popup is not None and sip.isdeleted(self._popup):
+            self._popup = None
+
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -589,6 +598,7 @@ class GiteeAccountRow(QFrame):
             self._popup = None
 
         popup = _GiteeMorePopup(self)
+        popup.destroyed.connect(self._on_popup_closed)
         popup.adjustSize()
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()

@@ -2180,6 +2180,35 @@ class CodeWebViewer(QWebEngineView):
 
         self._load_skeleton()
 
+        # ── 对话框层级管理 ──
+        # 已隐含 self._dialog_hide_count=0（对象初始化后属性不存在即 0）
+
+    # ──────────────────────────────────────────────
+    # 对话框 HWND 穿透防护
+    # ──────────────────────────────────────────────
+    # QWebEngineView 在 Windows 上创建原生 HWND 子窗口，
+    # 遇到 WA_TranslucentBackground 的 MaskDialog 分层窗口时，
+    # Chromium GPU 合成表面可能穿透遮罩渲染在对话框之上。
+    # 策略：检测到全屏对话框显示时隐藏 WebView，对话框销毁后恢复。
+
+    def _hide_for_dialog(self, dialog):
+        """对话框显示时隐藏 WebView，防止原生 HWND 穿透遮罩"""
+        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) + 1
+        if self._dialog_hide_count == 1:
+            self.hide()
+        try:
+            dialog.destroyed.disconnect(self._restore_from_dialog)
+        except TypeError, RuntimeError:
+            pass
+        dialog.destroyed.connect(self._restore_from_dialog)
+
+    def _restore_from_dialog(self, _obj=None):
+        """对话框销毁后恢复 WebView 显示"""
+        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) - 1
+        if self._dialog_hide_count <= 0:
+            self._dialog_hide_count = 0
+            self.show()
+
     @property
     def _tool_compact_mode(self) -> bool:
         try:
@@ -2367,18 +2396,22 @@ class CodeWebViewer(QWebEngineView):
                 "ToolTip",
             ]
             if any(kw in obj_class for kw in popup_keywords):
-                # 降低当前WebView及其父组件的层级
-                self.lower()
-                parent = self.parent()
-                while parent:
-                    parent.lower()
-                    # 找到 MessageCard 或聊天容器为止
-                    if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
-                        break
-                    parent = parent.parent()
-                # 同时将弹窗提升到最顶层
-                if hasattr(obj, "raise_"):
-                    obj.raise_()
+                # 区分全屏对话框 vs 小弹窗
+                if "Dialog" in obj_class and hasattr(obj, "winId"):
+                    # 全屏 MaskDialog → 隐藏 WebView 防止原生 HWND 穿透遮罩
+                    self._hide_for_dialog(obj)
+                else:
+                    # 小弹窗（Menu/ComboBox/ToolTip等）→ 降低 Qt 层级
+                    self.lower()
+                    parent = self.parent()
+                    while parent:
+                        parent.lower()
+                        # 找到 MessageCard 或聊天容器为止
+                        if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
+                            break
+                        parent = parent.parent()
+                    if hasattr(obj, "raise_"):
+                        obj.raise_()
         return super().eventFilter(obj, event)
 
     def lower_for_popup(self):
@@ -5631,7 +5664,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -8520,7 +8553,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):

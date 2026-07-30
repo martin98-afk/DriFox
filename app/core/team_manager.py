@@ -18,6 +18,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def check_team_member(backend_or_window_id) -> bool:
+    """检查窗口是否是团队成员（共用函數，供 ToolExecutor / chat_worker 調用）
+
+    Args:
+        backend_or_window_id: ChatBackend 实例或 window_id 字串
+
+    Returns:
+        True 若該窗口已加入團隊
+    """
+    try:
+        if isinstance(backend_or_window_id, str):
+            wid = backend_or_window_id
+        else:
+            wid = getattr(backend_or_window_id, "_window_id", None)
+        if not wid:
+            return False
+        return TeamManager.get_instance().is_team_member(wid)
+    except Exception:
+        return False
+
+
 class TeamManager:
     """团队协作管理器（单例）"""
 
