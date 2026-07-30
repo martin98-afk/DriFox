@@ -857,6 +857,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_processing: bool = False  # 串行处理锁
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
 
+        # 团队流式注入状态：把接收方（邮件接收方）流式产出的回复，以 hook 格式
+        # 渐进注入到发起方窗口，使其无需等待流式结束即可实时看到回复。
+        self._team_stream_task: Optional[dict] = None  # 当前正在流式回复的团队任务上下文
+        self._team_stream_injected_msg: Optional[dict] = None  # 已注入发起方会话的 hook 消息引用
+        self._team_stream_partial: str = ""  # 流式累计的回复文本
+        self._team_stream_last_push: float = 0.0  # 上次推送时间戳（节流用）
+
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
         self._bottom_anchor_timer.setSingleShot(True)
@@ -2729,6 +2736,14 @@ class OpenAIChatToolWindow(ToolWindow):
         #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
         self._truncation_sentinel = None
 
+        # 🛡️ 后台 finalize 在途标志：_on_stop_clicked → _deferred_stop_handler 在 daemon
+        # 线程启动 finalize_stop 后（worker 可能还需最多数秒才结束）置 True，
+        # 直到主线程收到 _on_finalize_complete 回调才置 False。
+        # 用途：判断"是否有 worker 仍可能回传旧消息快照"。
+        # ⚠️ 关键：暂停会把 _is_streaming 置 False，但 daemon 线程的 finalize 可能稍后才
+        # 完成并回传旧消息。因此"是否需要保留截断哨兵"必须看本标志，而非 _is_streaming。
+        self._finalize_pending = False
+
         # 🛡️ 截断后发送标志：用户撤销消息后又快速发送新消息时置 True，
         # 用于 _on_finalize_complete / _on_messages_updated 识别并丢弃旧 worker 的过期回调。
         self._pending_send_after_truncation = False
@@ -3875,6 +3890,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠ 破坏性操作：先弹确认框，避免用户误操作导致正在进行的任务被无感切换
         from app.widgets.common_dialogs import ConfirmDialog
 
+        # 在 tab 模式下，弹框以整个 TabManagerWindow 为 parent，居中于全局窗口
+        from app.widgets.tab_manager_window import TabManagerWindow
+        _tab_parent = TabManagerWindow.get_instance()
+        if _tab_parent is None:
+            _tab_parent = self
+
         _confirmed: list[bool] = [False]
 
         def _on_load_confirm():
@@ -3885,7 +3906,7 @@ class OpenAIChatToolWindow(ToolWindow):
             content=f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
             confirm_text="确认",
             cancel_text="取消",
-            parent=self,
+            parent=_tab_parent,
         )
         _dialog.confirmed.connect(_on_load_confirm)
         _dialog.exec_()
@@ -3896,13 +3917,19 @@ class OpenAIChatToolWindow(ToolWindow):
             tm = TemplateManager.get_instance()
             template = tm.load(name)
         except TemplateError as e:
-            InfoBar.error("加载失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error("加载失败", str(e), parent=_tab_parent, duration=5000, position=InfoBarPosition.BOTTOM)
             return
 
         # 校验 agent_name 在系统中存在
         agent_mgr = self.backend.agent_manager
         if not agent_mgr:
-            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "未就绪",
+                "智能体管理器未初始化",
+                parent=_tab_parent,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
         available_names = [a.name for a in agent_mgr.list_agents(include_hidden=False) if a.mode in ("subagent", "all")]
         missing = template.validate_agent_names(available_names)
@@ -3910,7 +3937,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "模板角色缺失",
                 f"以下 agent 在系统中不存在: {', '.join(missing)}\n模板 {name} 加载中止",
-                parent=self,
+                parent=_tab_parent,
                 duration=6000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -3937,7 +3964,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 "正在准备窗口",
                 f"模板需要 {needed_count} 个窗口，当前 {current_count} 个，正在新建 {missing_n} 个…",
-                parent=self,
+                parent=_tab_parent,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4047,7 +4074,7 @@ class OpenAIChatToolWindow(ToolWindow):
             f"已分配 {len(reassign_pairs)} 个角色:\n"
             + "\n".join(results[:8])
             + (f"\n  ... 共 {len(results)} 项" if len(results) > 8 else ""),
-            parent=self,
+            parent=_tab_parent,
             duration=6000,
             position=InfoBarPosition.BOTTOM,
         )
@@ -4276,6 +4303,17 @@ class OpenAIChatToolWindow(ToolWindow):
         from_window = mail.get("from_window", "?")
         sender_id = f"{from_agent}@{from_window}"
 
+        # 初始化团队流式注入状态：让发起方（邮件接收方）在流式过程中实时看到回复
+        self._team_stream_task = {
+            "mail_id": mail["id"],
+            "from_window": from_window,
+            "from_agent": from_agent,
+            "sender_id": sender_id,
+        }
+        self._team_stream_injected_msg = None
+        self._team_stream_partial = ""
+        self._team_stream_last_push = 0.0
+
         # 像正常对话一样发送任务消息
         user_msg = f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n{task_desc}"
         self._on_send_clicked(user_msg)
@@ -4303,6 +4341,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         content = content_to_text(content)
                     result = content or ""
                     break
+
+        # 流式期间已渐进把回复注入到发起方窗口；这里推送最终完整内容并清理状态
+        self._push_team_stream_to_requester(is_final=True)
+        self._team_stream_task = None
+        self._team_stream_injected_msg = None
+        self._team_stream_partial = ""
 
         tm.mark_mail_done(mail["id"], self._window_id, result)
         self._team_processing = False
@@ -4340,6 +4384,86 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team_manager import TeamManager
 
         return TeamManager.get_instance()
+
+    def _find_team_window_by_id(self, window_id: str):
+        """跨窗口查找：按 window_id 定位团队伙伴窗口实例（用于实时注入）"""
+        for inst in OpenAIChatToolWindow._instances:
+            if getattr(inst, "_window_id", None) == window_id and not getattr(inst, "_is_destroyed", False):
+                return inst
+        return None
+
+    def _push_team_stream_to_requester(self, is_final: bool = False):
+        """将当前团队任务流式产出的回复，以 hook 格式渐进注入到发起方（邮件接收方）窗口。
+
+        与子智能体 _inject_subagent_completion_into_stream 思路一致：
+        用 _format_hook_output 包裹为 hook 消息写入发起方会话，使其无需等待
+        接收方流式结束即可实时看到回复进展，而不是等流式结束才 mark_mail_done 回传。
+
+        多次调用时只就地更新同一条 hook 消息（由 _team_stream_task_id 关联），
+        发起方窗口始终只看到一条演进中的消息，避免消息碎片化。
+        """
+        task = getattr(self, "_team_stream_task", None)
+        if not task:
+            return
+        requester = self._find_team_window_by_id(task["from_window"])
+        if (
+            requester is None
+            or requester is self
+            or getattr(requester, "_window_id", None) == self._window_id
+        ):
+            # 发起方窗口不可用，或与自身为同一窗口（跨窗口团队不应出现），跳过
+            return
+
+        # 文本来源：最终态优先用卡片完整文本，流式态用累计增量
+        if is_final and self._current_assistant_card:
+            try:
+                text = self._current_assistant_card.get_plain_text() or ""
+            except Exception:
+                text = self._team_stream_partial
+        else:
+            text = self._team_stream_partial
+
+        from app.core.backend import _format_hook_output
+
+        prefix = (
+            f"📨 成员 [{self._team_agent_name or '?'}@{self._window_id}] "
+            f"回复任务 #{task['mail_id']}（{'已完成' if is_final else '生成中'}）：\n\n"
+        )
+        hook_body = prefix + (text or "（等待回复…）")
+        hook_content = _format_hook_output("TeamMemberMessage", hook_body)
+
+        rsession = (
+            requester.session_manager.get_current_session()
+            if hasattr(requester, "session_manager")
+            else None
+        )
+        if not rsession:
+            return
+
+        injected = getattr(self, "_team_stream_injected_msg", None)
+        if injected is None:
+            # 首次：在发起方会话中创建一条 hook 消息并保存引用（后续就地更新）
+            injected = {
+                "role": "user",
+                "content": hook_content,
+                "_hook_event": "TeamMemberMessage",
+                "_team_stream_task_id": task["mail_id"],
+            }
+            self._team_stream_injected_msg = injected
+            if isinstance(getattr(rsession, "messages", None), list):
+                rsession.messages.append(injected)
+            if isinstance(getattr(rsession, "current_messages", None), list):
+                rsession.current_messages.append(injected)
+            logger.debug(f"[TeamStream] 发起方窗口首次注入 hook 消息: task={task['mail_id']}")
+        else:
+            # 后续 tick：就地更新同一条 hook 消息内容，发起方只看到一条演进中的消息
+            injected["content"] = hook_content
+
+        # 通知发起方 UI 刷新（与 backend._on_hook_messages_changed 同一刷新路径）
+        try:
+            requester.backend._hook_messages_updated.emit()
+        except Exception:
+            pass
 
     def _agent_to_color(self, agent_name: str) -> str:
         """用智能体名称的 hash 生成稳定的辨识色
@@ -10237,8 +10361,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 执行删除（清理状态后才设缓存，此时 hide_card 的清空效果对本次缓存无害）
         self._delete_user_round(card)
 
-        # 非流式场景：_on_finalize_complete 不会运行，手动清除哨兵
-        if not was_streaming:
+        # 非流式且无后台 finalize 在途时才清除哨兵：
+        # 🛡️ 修复"发送→暂停→撤回"消息复活 bug。
+        # 暂停已将 _is_streaming 置 False，但 daemon 线程的 finalize_stop 可能稍后才完成
+        # 并回传含被撤回消息的旧快照。若此时清除哨兵，迟到的 _on_finalize_complete →
+        # _apply_interrupted_messages_to_session 会把已撤回的消息写回 session（消息"复活"）。
+        # 因此只要 _finalize_pending 为真（仍有 worker 可能回传旧消息），就必须保留哨兵，
+        # 交给 _on_finalize_complete / _on_messages_updated 的哨兵逻辑去丢弃过期数据。
+        if not was_streaming and not self._finalize_pending:
             self._truncation_sentinel = None
 
         # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
@@ -12065,6 +12195,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._update_assistant_message(self._current_assistant_card, content_piece)
         # 内容已由 MessageCard.append_chunk 内部累加，无需主窗口冗余存储
+
+        # 团队任务：把流式产出的回复渐进注入发起方窗口（hook 格式，不等流式结束）
+        # 与子智能体 SubAgentFinished 同一思路——接收方流式过程中就把结果回传给发起方。
+        if self._team_stream_task:
+            self._team_stream_partial += content_piece
+            _now = time.time()
+            if _now - self._team_stream_last_push >= 0.8:
+                self._team_stream_last_push = _now
+                self._push_team_stream_to_requester(is_final=False)
 
     def _on_reasoning_content_received(self, reasoning_piece: str):
         """处理 DeepSeek 思考内容（流式接收）"""
@@ -13976,6 +14115,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛠️ 与 _on_question_asked 对齐：切到 question 状态，让 Tab 切到橙黄脉动指示
+        # 否则 Tab 会停留在上一个状态（通常是 streaming/彩虹），用户感知不到这是提问
+        self._set_ai_state("question")
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
@@ -15811,6 +15953,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             engine_ref = self.backend.chat_engine
 
+            # 标记后台 finalize 在途：daemon 线程的 finalize_stop 可能需数秒才完成，
+            # 期间仍可能回传旧消息快照。_delete_message / _truncate_session_from_user_round
+            # 会据此决定是否保留截断哨兵（见 _truncation_sentinel 相关逻辑）。
+            self._finalize_pending = True
+
             def _do_finalize():
                 try:
                     interrupted_messages = engine_ref.finalize_stop() or []
@@ -15824,7 +15971,9 @@ class OpenAIChatToolWindow(ToolWindow):
             t = threading.Thread(target=_do_finalize, daemon=True)
             t.start()
         else:
-            # 无 chat_engine，仍然需要更新时间线
+            # 无 chat_engine：无 worker 可 finalize，立即标记无 finalize 在途
+            self._finalize_pending = False
+            # 仍然需要更新时间线
             self._update_node_preview()
 
     def _persist_stop_elapsed(self):
@@ -15892,6 +16041,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
+
+        # 后台 finalize 已回调，标记无 finalize 在途
+        self._finalize_pending = False
 
         # 🛡️ 会话切换哨兵：用户在 AI 流式期间切换了项目或新建了会话，
         # finalize_stop 此时才到达，apply_interrupted_messages 会把旧消息写到新会话，

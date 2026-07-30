@@ -52,6 +52,7 @@ class TeamManager:
     @staticmethod
     def _get_teams_dir() -> Path:
         from app.utils.utils import get_app_data_dir
+
         return get_app_data_dir() / "teams"
 
     def _team_dir(self, team_name: str) -> Path:
@@ -75,7 +76,7 @@ class TeamManager:
                     counter = int(self._window_counter_file.read_text().strip())
                 else:
                     counter = 1
-            except (ValueError, FileNotFoundError):
+            except ValueError, FileNotFoundError:
                 counter = 1
 
             window_id = f"win_{counter:02d}"
@@ -119,7 +120,7 @@ class TeamManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             return {}
 
     @staticmethod
@@ -146,7 +147,7 @@ class TeamManager:
         try:
             if active_file.exists():
                 return set(json.loads(active_file.read_text()))
-        except (json.JSONDecodeError, FileNotFoundError):
+        except json.JSONDecodeError, FileNotFoundError:
             pass
         return set()
 
@@ -349,6 +350,14 @@ class TeamManager:
         pending = [m for m in mails if m.get("type") == "task" and m.get("status") == "pending"]
         return pending[:1]  # 串行处理
 
+    def get_member_busy_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:
+        """返回成员的工作状态: 'busy'（有 running/pending 任务）| 'idle'（空闲）"""
+        mails = self.get_mailbox_mails(window_id, team_name)
+        for m in mails:
+            if m.get("type") == "task" and m.get("status") in ("running", "pending"):
+                return "busy"
+        return "idle"
+
     def mark_mail_running(self, mail_id: str, window_id: str, team_name: str = DEFAULT_TEAM):
         self._update_mail_status(mail_id, window_id, "running", team_name)
 
@@ -356,8 +365,12 @@ class TeamManager:
         self._update_mail_status(mail_id, window_id, "done", team_name, result)
 
     def _update_mail_status(
-        self, mail_id: str, window_id: str, status: str,
-        team_name: str = DEFAULT_TEAM, result: str = "",
+        self,
+        mail_id: str,
+        window_id: str,
+        status: str,
+        team_name: str = DEFAULT_TEAM,
+        result: str = "",
     ):
         mailbox_dir = self._mailbox_dir(team_name, window_id)
         mail_file = mailbox_dir / f"{mail_id}.json"
