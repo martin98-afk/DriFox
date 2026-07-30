@@ -4263,6 +4263,47 @@ class OpenAIChatToolWindow(ToolWindow):
             self._team_processing = True
             self._process_team_task(mail)
 
+    def _inject_team_mail_as_hook(self, mail: dict):
+        """流式中：将团队任务邮件作为 hook 消息注入到当前消息流
+
+        复用 backend._hook_message_queue 机制（与子智能体完成信号相同），
+        邮件包装为 <system-reminder> 格式，chat_worker 在下一轮 API 调用前
+        自动消费并注入上下文，LLM 在下一轮响应中即可感知任务邮件。
+        """
+        from app.core.backend import _format_hook_output
+
+        tm = self._get_team_manager()
+        tm.mark_mail_running(mail["id"], self._window_id)
+
+        task_desc = mail.get("body", mail.get("subject", ""))
+        from_agent = mail.get("from_agent", "?")
+        from_window = mail.get("from_window", "?")
+        sender_id = f"{from_agent}@{from_window}"
+
+        # 构建 hook 内容
+        content = (
+            f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n"
+            f"{task_desc}\n\n"
+            f"（以上是系统自动注入的团队成员任务邮件，请根据上下文酌情处理）"
+        )
+        hook_content = _format_hook_output("TeamMail", content)
+
+        # 推送到 _hook_message_queue，worker 在下一轮 API 调用前自动消费
+        self.backend._hook_message_queue.put({
+            "role": "user",
+            "content": hook_content,
+            "_hook_event": "TeamMail",
+        })
+
+        # 记录注入的邮件信息，供流结束时标记完成
+        self._injected_team_mails.append({
+            "mail_id": mail["id"],
+            "mail": mail,
+            "injected_at": time.time(),
+        })
+
+        logger.info(f"[TeamMail] 流式注入团队邮件: #{mail['id']} from [{sender_id}]")
+
     def _process_team_task(self, mail: dict):
         """处理任务邮件：标记运行中，插入聊天流走正常对话流程"""
         tm = self._get_team_manager()
