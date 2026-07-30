@@ -4354,6 +4354,35 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_processing = False
         self._check_and_process_pending()
 
+    def _finalize_injected_team_mails(self):
+        """流式结束时，标记所有 hook 注入的团队邮件为已完成"""
+        injected = getattr(self, "_injected_team_mails", None)
+        if not injected:
+            return
+
+        tm = self._get_team_manager()
+        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
+
+        # 获取最后一条 assistant 回复作为结果
+        result = ""
+        if session and session.messages:
+            for msg in reversed(session.messages):
+                if msg.get("role") == "assistant" and not msg.get("_hook_event"):
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        from app.core import content_to_text
+
+                        content = content_to_text(content)
+                    result = content or ""
+                    break
+
+        for ctx in injected:
+            mail = ctx["mail"]
+            tm.mark_mail_done(mail["id"], self._window_id, result)
+
+        self._injected_team_mails.clear()
+        logger.info(f"[TeamMail] 流式结束，标记 {len(injected)} 封 hook 注入的邮件为 done")
+
     def _get_model_config_obj(self) -> dict:
         """获取当前模型配置（兜底）"""
         try:
@@ -13217,6 +13246,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🆕 流式结束（非团队任务场景），检查流式过程中是否有新到达的团队邮件
             # 被 _is_streaming 守卫拦住，现在重新触发处理
             self._check_and_process_pending()
+
+        # 🆕 流式结束：标记流式中 hook 注入的团队邮件为已完成
+        self._finalize_injected_team_mails()
 
         self._focus_input_if_active()
 
