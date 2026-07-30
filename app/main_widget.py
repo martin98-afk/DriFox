@@ -4383,6 +4383,25 @@ class OpenAIChatToolWindow(ToolWindow):
         self._injected_team_mails.clear()
         logger.info(f"[TeamMail] 流式结束，标记 {len(injected)} 封 hook 注入的邮件为 done")
 
+    def _sync_team_mail_on_stop(self):
+        """手动停止时，更新所有团队邮件状态为已完成"""
+        tm = self._get_team_manager()
+
+        # 1. 正在处理的团队任务邮件（_process_team_task 路径）
+        if getattr(self, "_current_team_mail", None):
+            mail = self._current_team_mail["mail"]
+            tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+            self._current_team_mail = None
+            self._team_processing = False
+
+        # 2. hook 注入的团队邮件（_inject_team_mail_as_hook 路径）
+        injected = getattr(self, "_injected_team_mails", None)
+        if injected:
+            for ctx in injected:
+                mail = ctx["mail"]
+                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+            self._injected_team_mails.clear()
+
     def _get_model_config_obj(self) -> dict:
         """获取当前模型配置（兜底）"""
         try:
@@ -15865,6 +15884,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ⚠️ 立即更新时间线节点（即使后台 finalize 还未完成）
         self._update_node_preview()
+
+        # 🆕 手动停止时同步团队邮件状态
+        self._sync_team_mail_on_stop()
 
         # ===== 第二阶段：延迟执行阻塞操作（等待 worker + 收集中断消息）=====
         # 使用 QTimer.singleShot 延迟到 UI 事件处理完成后执行，
