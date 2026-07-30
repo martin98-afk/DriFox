@@ -2196,14 +2196,15 @@ class CodeWebViewer(QWebEngineView):
         self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) + 1
         if self._dialog_hide_count == 1:
             self.hide()
+        # 用 finished 而非 destroyed：对话框 dismiss 即恢复，不等 GC 销毁
         try:
-            dialog.destroyed.disconnect(self._restore_from_dialog)
+            dialog.finished.disconnect(self._restore_from_dialog)
         except TypeError, RuntimeError:
             pass
-        dialog.destroyed.connect(self._restore_from_dialog)
+        dialog.finished.connect(self._restore_from_dialog)
 
-    def _restore_from_dialog(self, _obj=None):
-        """对话框销毁后恢复 WebView 显示"""
+    def _restore_from_dialog(self, _result=None):
+        """对话框关闭后恢复 WebView 显示（_result 为 QDialog.finished 的 result code）"""
         self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) - 1
         if self._dialog_hide_count <= 0:
             self._dialog_hide_count = 0
@@ -2383,7 +2384,8 @@ class CodeWebViewer(QWebEngineView):
     def eventFilter(self, obj, event):
         # 监听对话框显示/激活事件
         event_type = event.type()
-        if event_type == 24 or event_type == 9:  # QEvent.Show = 24, QEvent.FocusIn = 9
+        # 注意：QEvent.Show=17, QEvent.FocusIn=8（不是24/9！历史bug，24是WindowActivate）
+        if event_type == 17 or event_type == 8:  # QEvent.Show, QEvent.FocusIn
             obj_class = obj.__class__.__name__
             popup_keywords = [
                 "Dialog",
