@@ -701,6 +701,15 @@ class TabPanel(QWidget):
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
 
+        # 收起态专用：纯图标新建按钮（与 _new_btn 共享点击事件）
+        self._new_icon_btn = TransparentToolButton(self._top_bar)
+        self._new_icon_btn.setIcon(FIF.ADD)
+        self._new_icon_btn.setFixedSize(28, 28)
+        self._new_icon_btn.setToolTip("新建空白标签页")
+        self._new_icon_btn.clicked.connect(self.newTabRequested.emit)
+        self._new_icon_btn.setVisible(False)
+        top_layout.addWidget(self._new_icon_btn)
+
         layout.addWidget(self._top_bar)
 
         # ── 中间：Tab 列表 ──
@@ -872,11 +881,10 @@ class TabPanel(QWidget):
             self._sidebar_toggle_btn.setToolTip("展开侧边栏")
             # 收起时隐藏产品标识
             self._brand_left.setVisible(False)
-            # 收起时分支/新建按钮仅保留图标
-            self._branch_btn.setText("")
-            self._branch_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-            self._new_btn.setText("")
-            self._new_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            # 收起时仅保留新建图标按钮，隐藏分支和文字新建按钮
+            self._branch_btn.setVisible(False)
+            self._new_btn.setVisible(False)
+            self._new_icon_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
@@ -884,11 +892,12 @@ class TabPanel(QWidget):
             self._sidebar_toggle_btn.setToolTip("收起侧边栏")
             # 展开时恢复产品标识
             self._brand_left.setVisible(True)
-            # 展开时恢复按钮文字
+            # 展开时恢复文字新建按钮，隐藏图标按钮
+            self._branch_btn.setVisible(True)
             self._branch_btn.setText("分支")
             self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            self._new_btn.setText("新建")
-            self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self._new_btn.setVisible(True)
+            self._new_icon_btn.setVisible(False)
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
