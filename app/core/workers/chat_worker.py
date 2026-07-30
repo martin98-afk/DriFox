@@ -3631,6 +3631,10 @@ class OpenAIChatWorker(QThread):
         True 表示继续执行。
         当权限被拒绝时，自动追加错误结果到 results。
         """
+        # 团队工具：无条件放行（schema 层已按团队成员身份过滤，执行层不再拦截）
+        if tool_name in ("team_send_message", "team_list_members"):
+            return True
+
         if not self.permission_check_callback:
             return True
 

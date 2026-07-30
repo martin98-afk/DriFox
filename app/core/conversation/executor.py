@@ -171,6 +171,9 @@ class ConversationExecutor:
         )
 
         def check(tool_name: str, arguments: dict) -> str:
+            # 团队工具：无条件放行（schema 层已按团队身份过滤，执行层不再拦截）
+            if tool_name in ("team_send_message", "team_list_members"):
+                return "allow"
             result = resolver.resolve(tool_name)
             if result == "ask":
                 return "deny"
