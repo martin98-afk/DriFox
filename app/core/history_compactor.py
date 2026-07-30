@@ -203,7 +203,7 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     """
     try:
         parsed = json.loads(args)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return args
 
     def _shrink(obj: Any) -> Any:
@@ -233,7 +233,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     """
     try:
         args = json.loads(tool_args) if tool_args else {}
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         args = {}
 
     content = tool_content or ""
@@ -482,12 +482,18 @@ def _prune_old_tool_results(
         if tool_name in PROTECTED_TOOLS:
             continue  # 保护特定工具不被剪枝
 
-        content = msg.get("content", "")
+        content = msg.get("content", "") or ""
         if not content:
             continue
 
         # 如果内容很短，不需要摘要
         if isinstance(content, str) and len(content) < 1000:
+            continue
+
+        # 🔒 保护 <persisted-output> 块不被剪枝:
+        #   这些块包含文件路径, 如果被摘要替换, LLM 将丢失路径无法 read_persisted_output,
+        #   被迫重读原始文件 → 超大结果 → 再次固化 → 死循环
+        if content.lstrip().startswith("<persisted-output>"):
             continue
 
         # 生成信息丰富的 1-line 摘要

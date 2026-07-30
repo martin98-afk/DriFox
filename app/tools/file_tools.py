@@ -99,6 +99,7 @@ def _compile_grep_pattern(pattern: str) -> re.Pattern:
 # ========== grep_files 优化：.gitignore 加载与缓存 ==========
 _GITIGNORE_CACHE: dict[str, list[str]] = {}
 
+
 def _load_gitignore_patterns(search_root: Path) -> list[str]:
     """读取项目的 .gitignore 并返回 fnmatch 模式列表"""
     key = str(search_root)
@@ -126,30 +127,122 @@ def _load_gitignore_patterns(search_root: Path) -> list[str]:
         _GITIGNORE_CACHE.pop(next(iter(_GITIGNORE_CACHE)))
     return patterns
 
+
 # 常见二进制文件扩展名（跳过不必要的扫描）
-_BINARY_EXTENSIONS = frozenset({
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
-    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
-    ".exe", ".dll", ".so", ".dylib", ".pyd", ".bin",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wav", ".flac",
-    ".pyc", ".pyo", ".class", ".o", ".a", ".lib",
-    ".wasm", ".dat", ".dmg", ".iso",
-    ".min.js", ".min.css",
-})
+_BINARY_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".svg",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".pyd",
+        ".bin",
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".mp3",
+        ".mp4",
+        ".avi",
+        ".mkv",
+        ".mov",
+        ".wav",
+        ".flac",
+        ".pyc",
+        ".pyo",
+        ".class",
+        ".o",
+        ".a",
+        ".lib",
+        ".wasm",
+        ".dat",
+        ".dmg",
+        ".iso",
+        ".min.js",
+        ".min.css",
+    }
+)
 
 # 已知文本扩展名：精确匹配直接跳过嗅探，避免为每个文件读 8KB
-_TEXT_EXTENSIONS = frozenset({
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss", ".less",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-    ".md", ".markdown", ".rst", ".txt", ".csv", ".xml", ".log",
-    ".sh", ".bash", ".zsh", ".fish", ".bat", ".ps1",
-    ".c", ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".rb", ".php",
-    ".swift", ".kt", ".scala", ".lua", ".r", ".sql",
-    ".gitignore", ".env", ".dockerfile", ".makefile", ".editorconfig",
-    ".lock", ".gradle", ".sbt",
-})
+_TEXT_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".js",
+        ".ts",
+        ".jsx",
+        ".tsx",
+        ".html",
+        ".css",
+        ".scss",
+        ".less",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".txt",
+        ".csv",
+        ".xml",
+        ".log",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".bat",
+        ".ps1",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".java",
+        ".go",
+        ".rs",
+        ".rb",
+        ".php",
+        ".swift",
+        ".kt",
+        ".scala",
+        ".lua",
+        ".r",
+        ".sql",
+        ".gitignore",
+        ".env",
+        ".dockerfile",
+        ".makefile",
+        ".editorconfig",
+        ".lock",
+        ".gradle",
+        ".sbt",
+    }
+)
 
 # 二进制文件嗅探：读取前 8192 字节，如果含 null 字节则视为二进制
 _BINARY_NULL_LIMIT = 8192
@@ -389,6 +482,28 @@ class FileTools:
                 )
 
             content = p.read_text(encoding="utf-8", errors="replace")
+
+            # 格式化内容以提高 LLM 可读性:
+            #   1. JSON 内容 prettify 为多行
+            #   2. 非 JSON 超长单行强制在 100 字符处换行
+            stripped = content.strip()
+            if stripped and stripped[0] in ("{", "["):
+                try:
+                    import orjson
+
+                    parsed = orjson.loads(stripped)
+                    formatted = orjson.dumps(parsed, option=orjson.OPT_INDENT_2).decode("utf-8")
+                    if len(formatted) < len(content) * 3:  # 防止异常膨胀(格式化的 JSON 通常 < 3x)
+                        content = formatted
+                except Exception:
+                    pass  # 非 JSON 或解析失败, 保持原样
+            elif "\n" not in content and len(content) > 100:
+                # 非 JSON 超长单行: 强制换行, 避免 LLM 无法定位行尾
+                wrapped_lines = []
+                for i in range(0, len(content), 100):
+                    wrapped_lines.append(content[i : i + 100])
+                content = "\n".join(wrapped_lines)
+
             # 二级软截断: 避免"恢复"时再爆 context
             if len(content) > 200_000:
                 content = (
@@ -607,18 +722,12 @@ class FileTools:
                 dirs[:] = [d for d in dirs if d not in _GREP_EXCLUDE_DIRS]
                 # 1b. .gitignore 排除目录
                 if gitignore_patterns:
-                    dirs[:] = [
-                        d
-                        for d in dirs
-                        if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)
-                    ]
+                    dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)]
                 for filename in files:
                     if include and not fnmatch.fnmatch(filename, include):
                         continue
                     # 1c. .gitignore 排除文件
-                    if gitignore_patterns and any(
-                        fnmatch.fnmatch(filename, p) for p in gitignore_patterns
-                    ):
+                    if gitignore_patterns and any(fnmatch.fnmatch(filename, p) for p in gitignore_patterns):
                         continue
                     fp = Path(root) / filename
                     # 1d. 跳过二进制 / 大文件
@@ -694,8 +803,10 @@ class FileTools:
 
             # ── 3. 组装结果 ──
             if not all_results:
-                content = (f"No matches found for pattern: {pattern}"
-                           f" (scanned {scanned_count} files, skipped binaries/large files)")
+                content = (
+                    f"No matches found for pattern: {pattern}"
+                    f" (scanned {scanned_count} files, skipped binaries/large files)"
+                )
                 return ToolResult(True, content=content)
 
             content = "\n".join(all_results[:result_limit])
@@ -789,15 +900,9 @@ class FileTools:
             for root, dirs, files in os.walk(search_path):
                 dirs[:] = [d for d in dirs if d not in _GREP_EXCLUDE_DIRS]
                 if gitignore_patterns:
-                    dirs[:] = [
-                        d
-                        for d in dirs
-                        if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)
-                    ]
+                    dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in gitignore_patterns)]
                 for filename in files:
-                    if gitignore_patterns and any(
-                        fnmatch.fnmatch(filename, p) for p in gitignore_patterns
-                    ):
+                    if gitignore_patterns and any(fnmatch.fnmatch(filename, p) for p in gitignore_patterns):
                         continue
                     candidates.append(Path(root) / filename)
 
@@ -807,9 +912,7 @@ class FileTools:
             start_time = time.time()
 
             # ── 2. 并行 fnmatch ──
-            _compiled_glob = re.compile(
-                fnmatch.translate(pattern), re.IGNORECASE
-            )
+            _compiled_glob = re.compile(fnmatch.translate(pattern), re.IGNORECASE)
 
             results: list[str] = []
 
