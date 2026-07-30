@@ -553,6 +553,12 @@ class GiteeAccountRow(QFrame):
                 parent=self.window(),
             )
 
+    def set_show_only_avatar(self, avatar_only: bool):
+        """收起侧边栏时仅显示头像，隐藏文字和设置按钮"""
+        self._settings_btn.setVisible(not avatar_only)
+        self._name_label.setVisible(not avatar_only)
+        self._repo_label.setVisible(not avatar_only)
+
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
@@ -782,6 +788,33 @@ class _GiteeMorePopup(QWidget):
 
         layout.addSpacing(6)
 
+        # ── 分隔线 ──
+        sep3 = self._make_separator()
+        layout.addWidget(sep3)
+
+        # ── 打开设置按钮（点击跳转到完整设置卡片） ──
+        self._open_settings_btn = QPushButton("⚙️  打开全部设置", self._container)
+        self._open_settings_btn.setCursor(Qt.PointingHandCursor)
+        self._open_settings_btn.setFixedHeight(36)
+        self._open_settings_btn.clicked.connect(self._on_open_settings)
+        self._open_settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 14px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            QPushButton:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        layout.addWidget(self._open_settings_btn)
+
+        layout.addSpacing(2)
+
         # 容器样式
         self._container.setStyleSheet("""
             #giteePopupContainer {
@@ -893,6 +926,12 @@ class _GiteeMorePopup(QWidget):
         # 同步调用 self.close() 会触发 RuntimeError。
         # 参考 _on_tab_toggled 中的相同处理模式。
         QTimer.singleShot(0, self.close)
+
+    def _on_open_settings(self):
+        """打开全部设置卡片"""
+        self.close()
+        if self._account_row:
+            self._account_row._toggle_settings_card()
 
     # ── 快捷设置回调 ──
 

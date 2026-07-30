@@ -236,6 +236,7 @@ class TabItem(QFrame):
 
         # 图标 — _TabProjectIcon 直接 QPainter 绘制圆角矩形+文字，与 _SquareAvatar 一致
         self._icon_widget = _TabProjectIcon(self, size=self._icon_size)
+        self._icon_widget.setToolTip(self._title)
         self._apply_project_to_icon()
         layout.addWidget(self._icon_widget)
 
@@ -304,6 +305,7 @@ class TabItem(QFrame):
     def set_title(self, title: str):
         self._title = title
         self._title_label.setText(title)
+        self._icon_widget.setToolTip(title)
 
     def _apply_project_to_icon(self):
         """将项目信息交给 _TabProjectIcon 绘制"""
@@ -726,7 +728,7 @@ class TabPanel(QWidget):
         self._list_widget = QWidget()
         self._list_widget.setStyleSheet("background: transparent;")
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(6, 0, 6, 0)
+        self._list_layout.setContentsMargins(2, 0, 2, 0)
         self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
         self._scroll_area.setWidget(self._list_widget)
@@ -875,6 +877,8 @@ class TabPanel(QWidget):
             self._branch_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             self._new_btn.setText("")
             self._new_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            # 收起时 Gitee 仅显示头像
+            self._gitee_account_row.set_show_only_avatar(True)
         else:
             self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
             self._sidebar_toggle_btn.setToolTip("收起侧边栏")
@@ -885,6 +889,8 @@ class TabPanel(QWidget):
             self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self._new_btn.setText("新建")
             self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            # 展开时恢复 Gitee 完整显示
+            self._gitee_account_row.set_show_only_avatar(False)
 
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""
