@@ -27,6 +27,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtGui import (
     QPen as _QPen,
 )
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -451,6 +452,52 @@ class TabItem(QFrame):
         super().paintEvent(event)
 
 
+# ── 插入方位菜单图标：2x2 方块，黑=卡片显示位置，白=空白区域 ──
+# 深色主题下黑块融入菜单背景，故黑块带浅灰描边保证轮廓可辨；
+# 白块带同色描边保证浅色主题下同样清晰。
+_POSITION_CELLS = {
+    # (col, row): 方块左上角 (x, y)，16x16 viewBox，每格 7x7、间距 1
+    (0, 0): (1, 1),
+    (1, 0): (8, 1),
+    (0, 1): (1, 8),
+    (1, 1): (8, 8),
+}
+_POSITION_BLACK = "#151515"
+_POSITION_WHITE = "#f0f0f0"
+_POSITION_STROKE = "#9a9a9a"
+_POSITION_ICON_CACHE: dict = {}
+
+
+def _make_position_icon(black_cells) -> QIcon:
+    """生成 2x2 方块方位图标（黑=显示位置，白=空白），带缓存"""
+    key = frozenset(black_cells)
+    cached = _POSITION_ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    parts = []
+    for (cx, cy), (x, y) in _POSITION_CELLS.items():
+        fill = _POSITION_BLACK if (cx, cy) in key else _POSITION_WHITE
+        parts.append(
+            f'<rect x="{x}" y="{y}" width="7" height="7" rx="1.5" '
+            f'fill="{fill}" stroke="{_POSITION_STROKE}" stroke-width="0.6"/>'
+        )
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">{"".join(parts)}</svg>'
+    # 渲染 32px 物理像素后由 QIcon 按需缩放，HiDPI 屏上保持清晰。
+    # 注意：不能 setDevicePixelRatio —— QSvgRenderer 对带 DPR 的 QPixmap
+    # 渲染异常（只渲染首个元素），实测 32px 无 DPR 正常。
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.transparent)
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    painter = QPainter(pm)
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()
+    icon = QIcon(pm)
+    _POSITION_ICON_CACHE[key] = icon
+    return icon
+
+
 class UIPluginRow(QFrame):
     """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
 
@@ -459,10 +506,13 @@ class UIPluginRow(QFrame):
 
     def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = "", card_id: str = ""):
         super().__init__(parent)
+        self._title = title  # 存储标题，图标 tooltip 使用（侧边栏收起时只剩图标）
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
         self._card_id = card_id  # 存储卡片 ID，右键菜单定位用
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
+        # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
+        self._icon_label.setToolTip(title)
         # 使用与 TabItem 同款的 _ElidedLabel，收起时自动省略文本
         self._title_label = _ElidedLabel(title, self)
 
@@ -529,8 +579,8 @@ class UIPluginRow(QFrame):
             self.clicked.emit()
         super().mousePressEvent(event)
 
-    def _show_position_menu(self, pos):
-        """显示插入方位菜单：上/下/左/右/替换（仅内存生效，不持久化）"""
+    def _build_position_menu(self) -> QMenu:
+        """构建插入方位菜单：下/左/右/替换（「上」与 full 行为重复，不提供）"""
         menu = QMenu(self)
         # 样式与 TabPanel.contextMenuEvent 保持一致（运行时插值，跟随主题色）
         menu.setStyleSheet(f"""
@@ -548,11 +598,21 @@ class UIPluginRow(QFrame):
                 background: {Colors.HOVER_BG};
             }}
         """)
-        positions = (("上", "top"), ("下", "bottom"), ("左", "left"), ("右", "right"), ("替换", "full"))
-        for label, container in positions:
-            action = menu.addAction(label)
+        # 图标：2x2 方块，黑=卡片显示位置（下/左/右为半黑，替换=全黑）
+        positions = (
+            ("下", "bottom", {(0, 1), (1, 1)}),
+            ("左", "left", {(0, 0), (0, 1)}),
+            ("右", "right", {(1, 0), (1, 1)}),
+            ("替换", "full", {(0, 0), (1, 0), (0, 1), (1, 1)}),
+        )
+        for label, container, black_cells in positions:
+            action = menu.addAction(_make_position_icon(black_cells), label)
             action.triggered.connect(lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c))
-        menu.exec_(self.mapToGlobal(pos))
+        return menu
+
+    def _show_position_menu(self, pos):
+        """显示插入方位菜单（仅内存生效，不持久化）"""
+        self._build_position_menu().exec_(self.mapToGlobal(pos))
 
 
 class TabPanel(QWidget):

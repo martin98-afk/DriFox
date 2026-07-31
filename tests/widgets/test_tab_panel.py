@@ -5,16 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QAction, QMenu, QWidget
+from PyQt5.QtWidgets import QWidget
 
 from app.widgets.tab_panel import TabItem, TabPanel, UIPluginRow
 
 
 @pytest.fixture
 def panel(qtbot):
-    with patch(
-        "app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"
-    ):
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
         p = TabPanel()
     qtbot.addWidget(p)
     return p
@@ -107,33 +105,22 @@ class TestUIPluginRowPositionMenu:
         assert row.contextMenuPolicy() == Qt.CustomContextMenu
 
     def test_position_menu_actions_and_signal(self, panel, qtbot):
-        """菜单项为上/下/左/右/替换，触发后发射 positionRequested(card_id, container)"""
+        """菜单项为下/左/右/替换（无「上」，与 full 行为重复），带图标，触发后发射 positionRequested"""
         row = UIPluginRow("测试插件", None, panel, plugin_name="test", card_id="card_x")
         received = []
         row.positionRequested.connect(lambda cid, cont: received.append((cid, cont)))
 
-        captured_actions = []
-        kept_menus = []
-
-        def fake_add_action(menu_self, *args, **kwargs):
-            if menu_self not in kept_menus:
-                kept_menus.append(menu_self)
-            act = QAction(*args, menu_self)
-            captured_actions.append(act)
-            return act
-
-        with patch.object(QMenu, "addAction", side_effect=fake_add_action), patch.object(
-            QMenu, "exec_", return_value=None
-        ):
-            row.customContextMenuRequested.emit(row.rect().topLeft())
-
-        labels = [a.text() for a in captured_actions]
-        assert labels == ["上", "下", "左", "右", "替换"]
+        menu = row._build_position_menu()
+        actions = menu.actions()
+        labels = [a.text() for a in actions]
+        assert labels == ["下", "左", "右", "替换"]
+        # 每项都带图标（黑=显示位置，白=空白）
+        assert all(not a.icon().isNull() for a in actions)
         # 触发「替换」→ full
-        captured_actions[4].trigger()
+        actions[3].trigger()
         assert received == [("card_x", "full")]
         # 触发「左」→ left
-        captured_actions[2].trigger()
+        actions[1].trigger()
         assert received == [("card_x", "full"), ("card_x", "left")]
 
     def test_refresh_ui_plugins_position_requested_connected(self, panel, qtbot):
@@ -164,9 +151,10 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host  # 强引用，避免测试结束被 GC 连带销毁 panel
         panel.setParent(host)
 
-        with patch(
-            "app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry
-        ), patch("app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm):
+        with (
+            patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
+            patch("app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+        ):
             panel.refresh_ui_plugins()
             # 真实 emit 信号 → 已连接的 handler → move_floating_card 被调用
             panel._system_plugin_buttons[0].positionRequested.emit("sys_card", "top")
@@ -199,9 +187,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch(
-            "app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry
-        ):
+        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "right")
 
         registry.move_floating_card.assert_called_once_with("card_1", "right", main_widget=fake_win)
@@ -226,9 +212,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch(
-            "app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry
-        ):
+        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "full")
 
         registry.move_floating_card.assert_called_once_with("card_1", "full", main_widget=fake_win)
@@ -253,9 +237,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch(
-            "app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry
-        ):
+        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "invalid")
 
         registry.move_floating_card.assert_called_once_with("card_1", "invalid", main_widget=fake_win)
