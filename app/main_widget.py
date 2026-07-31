@@ -1170,48 +1170,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "history",
-            self._history_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("history", self._history_card)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "share",
-            self._share_card,
-            system_card=True,
-        )
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "history_questions",
-            self._history_questions_card,
-            system_card=True,
-        )
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "memory",
-            self._memory_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("memory", self._memory_card)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "model_config",
-            self._model_config_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("model_config", self._model_config_card)
+        # 注：history/share/history_questions/memory/model_config/model_selector
+        # 六张系统卡片框架已懒创建（P0-1），注册/入容器在各自 _ensure_xxx_card() 中执行，
+        # 由 _deferred_build_cards 链预构建 + 打开入口兜底，避免 setup_ui 关键路径开销。
 
         mgr.register_card(
             self._window_id,
@@ -1240,16 +1201,136 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
 
-        # 模型选择卡片
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "model_selector",
-            self._model_selector_card,
-            system_card=True,
+        # 注：model_selector 卡片框架懒创建，注册/入容器见 _ensure_model_selector_card()
+
+    # ── 六张系统卡片框架懒创建（P0-1 性能优化）──
+    # 原 setup_ui 同步段直接创建框架（每窗口 ~160ms），改为惰性创建：
+    # 由 _deferred_build_cards 链（800ms 后）预构建 + 卡片打开入口 ensure 兜底，
+    # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
+
+    def _ensure_history_card(self):
+        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）"""
+        if self._history_card is not None:
+            return
+        self._history_card = BaseSettingsCard("历史会话", "📜", self)
+        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
+        # 设置历史/归档标签
+        self._history_card.setup_tabs(
+            [
+                ("history", "历史会话"),
+                ("archived", "归档"),
+            ],
+            "history",
         )
-        # 重新 add_card 注册 _on_card_shown/_on_card_hidden 回调
-        # 初始化时 add_card 先执行（L1318），但当时 _card_manager 尚未绑定，回调未生效
+        # 强制触发首次 tab 渲染
+        self._history_card.tabChanged.connect(self._on_history_tab_changed)
+        self._history_card.set_current_tab("history")
+        self._history_card.tabChanged.connect(self._on_history_tab_changed)
+        self._history_card.setVisible(False)
+        self._history_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("history", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True
+        )
+        self._bottom_card_container.add_card("history", self._history_card)
+
+    def _ensure_share_card(self):
+        """确保分享卡片框架已创建（内容由 _build_deferred_card_share 填充）"""
+        if self._share_card is not None:
+            return
+        self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
+        self._share_card.set_height_mode("content")
+        self._share_card.setVisible(False)
+        self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
+        self._card_manager.register_card(
+            self._window_id, ContainerType.TOP, "share", self._share_card, system_card=True
+        )
+        self._top_card_container.add_card("share", self._share_card)
+
+    def _ensure_history_questions_card(self):
+        """确保历史问题卡片框架已创建（内容由 _build_deferred_card_history_questions 填充）"""
+        if self._history_questions_card is not None:
+            return
+        self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
+        self._history_questions_card.set_height_mode("content")
+        self._history_questions_card.setVisible(False)
+        self._history_questions_card.closed.connect(
+            lambda: self._card_manager.hide_card("history_questions", self._window_id)
+        )
+        self._card_manager.register_card(
+            self._window_id, ContainerType.TOP, "history_questions", self._history_questions_card, system_card=True
+        )
+        self._top_card_container.add_card("history_questions", self._history_questions_card)
+
+    def _ensure_memory_card(self):
+        """确保记忆管理卡片框架已创建（内容由 _build_deferred_card_memory 填充）"""
+        if self._memory_card is not None:
+            return
+        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
+        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
+        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
+        self._memory_card.setup_tabs(
+            [
+                ("entries", "条目记忆"),
+                ("notes", "项目笔记"),
+                ("docs", "关键文档"),
+            ],
+            "entries",
+        )
+        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
+        # 强制触发首次 tab 渲染
+        self._memory_card.set_current_tab("entries")
+        self._memory_card.setVisible(False)
+        self._memory_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("memory", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "memory", self._memory_card, system_card=True
+        )
+        self._bottom_card_container.add_card("memory", self._memory_card)
+
+    def _ensure_model_config_card(self):
+        """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
+        if self._model_config_card is not None:
+            return
+        self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
+        self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
+        self._model_config_card.set_height_mode("content")  # 按内容自适应高度
+        self._model_config_card.setVisible(False)
+        self._model_config_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("model_config", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "model_config", self._model_config_card, system_card=True
+        )
+        self._bottom_card_container.add_card("model_config", self._model_config_card)
+
+    def _ensure_model_selector_card(self):
+        """确保模型选择卡片框架已创建（内容由 _build_deferred_card_model_selector 填充）"""
+        if self._model_selector_card is not None:
+            return
+        self._model_selector_card = BaseSettingsCard("", "", self)
+        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
+        self._model_selector_card.setVisible(False)
+        self._model_selector_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("model_selector", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "model_selector", self._model_selector_card, system_card=True
+        )
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
 
     def _deferred_build_cards(self):
@@ -1283,6 +1364,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_history(self):
         """── ① 历史会话卡片 ──"""
         try:
+            self._ensure_history_card()  # P0-1：框架惰性创建
             self._history_popup_card = HistoryCard()
             self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
             self._history_popup_card.sessionArchived.connect(self._archive_history_session)
@@ -1309,6 +1391,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_share(self):
         """── ② 分享卡片 ──"""
         try:
+            self._ensure_share_card()  # P0-1：框架惰性创建
             self._share_card_content = ShareCardContent(self)
             self._share_card.content_layout.addWidget(self._share_card_content)
         except Exception:
@@ -1319,6 +1402,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_history_questions(self):
         """── ③ 历史问题卡片 ──"""
         try:
+            self._ensure_history_questions_card()  # P0-1：框架惰性创建
             self._history_questions_card_content = HistoryQuestionsCardContent(self)
             self._history_questions_card_content.questionClicked.connect(self._on_history_question_clicked)
             self._history_questions_card_content.questionClicked.connect(
@@ -1333,6 +1417,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_memory(self):
         """── ④ 记忆管理卡片 ──"""
         try:
+            self._ensure_memory_card()  # P0-1：框架惰性创建
             self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
             self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
             self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
@@ -1350,6 +1435,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_model_config(self):
         """── ⑤ 模型配置卡片 ──"""
         try:
+            self._ensure_model_config_card()  # P0-1：框架惰性创建
             self._model_config_popup = ModelConfigCard()
             self._model_config_popup.configApplied.connect(self._on_config_applied)
             self._model_config_card.content_layout.addWidget(self._model_config_popup)
@@ -1361,6 +1447,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_model_selector(self):
         """── ⑥ 模型选择卡片 ──"""
         try:
+            self._ensure_model_selector_card()  # P0-1：框架惰性创建
             self._model_selector_card_content = ModelSelectorCardContent()
             self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
             self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
@@ -1928,7 +2015,7 @@ class OpenAIChatToolWindow(ToolWindow):
             r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
             base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
             final_alpha = max(0, int(base_alpha * opacity))
-            self.setStyleSheet(f"background: rgba({r},{g},{b},{final_alpha/255});")
+            self.setStyleSheet(f"background: rgba({r},{g},{b},{final_alpha / 255});")
             self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
@@ -2350,90 +2437,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # 下方卡片容器
         layout.addWidget(self._bottom_card_container)
 
-        # 历史会话卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置历史/归档标签
-        self._history_card.setup_tabs(
-            [
-                ("history", "历史会话"),
-                ("archived", "归档"),
-            ],
-            "history",
-        )
-        # 强制触发首次 tab 渲染
-        self._history_card.tabChanged.connect(self._on_history_tab_changed)
-        self._history_card.set_current_tab("history")
-        self._history_card.tabChanged.connect(self._on_history_tab_changed)
-
-        # 内容 widget 将在 deferred 阶段创建
+        # ── 六张系统卡片框架懒创建（P0-1 性能优化）──
+        # 原 setup_ui 同步段直接创建 6 张 BaseSettingsCard 框架（~160ms），
+        # 改为 _ensure_xxx_card() 惰性创建：deferred 链预构建 + 打开入口兜底。
+        # 属性名保持稳定（None 占位），引用点已有 hasattr/getattr/if 保护。
+        self._history_card = None
         self._history_popup_card = None
-        self._history_card.setVisible(False)
-        self._history_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("history", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._bottom_card_container.add_card("history", self._history_card)
-
-        # 分享卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
-        self._share_card.set_height_mode("content")
-        self._share_card.setVisible(False)
-        self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
-        self._top_card_container.add_card("share", self._share_card)
+        self._share_card = None
         self._share_card_content = None
-
-        # 历史问题卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
-        self._history_questions_card.set_height_mode("content")
-        self._history_questions_card.setVisible(False)
-        self._history_questions_card.closed.connect(
-            lambda: self._card_manager.hide_card("history_questions", self._window_id)
-        )
-        self._top_card_container.add_card("history_questions", self._history_questions_card)
+        self._history_questions_card = None
         self._history_questions_card_content = None
-
-        # 记忆管理卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
-        self._memory_card.setup_tabs(
-            [
-                ("entries", "条目记忆"),
-                ("notes", "项目笔记"),
-                ("docs", "关键文档"),
-            ],
-            "entries",
-        )
-        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
-        # 强制触发首次 tab 渲染
-        self._memory_card.set_current_tab("entries")
-        # 内容 widget 将在 deferred 阶段创建
+        self._memory_card = None
         self._memory_card_popup = None
-        self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("memory", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._bottom_card_container.add_card("memory", self._memory_card)
-
-        # 模型配置卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
-        self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
-        self._model_config_card.set_height_mode("content")  # 按内容自适应高度
-        self._model_config_popup = None  # 将在 deferred 阶段创建
-        self._model_config_card.setVisible(False)
-        self._model_config_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("model_config", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._bottom_card_container.add_card("model_config", self._model_config_card)
+        self._model_config_card = None
+        self._model_config_popup = None
+        self._model_selector_card = None
+        self._model_selector_card_content = None
 
         # 工具控制卡片（controller 由 _tool_permission_controller 在后续 set_controller 注入）
         self._tool_control_card = ToolControlCardFrame(self)
@@ -2452,18 +2471,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
         self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
-        # 模型选择卡片（框架先创建，内容在 _deferred_build_cards 中填充）
-        self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
-        self._model_selector_card_content = None  # 将在 deferred 阶段创建
-        self._model_selector_card.setVisible(False)
-        self._model_selector_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("model_selector", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._bottom_card_container.add_card("model_selector", self._model_selector_card)
+        # 模型选择卡片框架懒创建（P0-1）：见上方 _ensure_model_selector_card() 说明
 
         # 项目选择卡片（Top 卡片，与 settings 同容器）
         self._project_selector_card = BaseSettingsCard("", "", self)
@@ -4373,6 +4381,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         from app.core import content_to_text
+
                         content = content_to_text(content)
                     result = content or ""
                     break
@@ -5240,6 +5249,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_model_selector_card(self):
         """切换模型选择卡片的显示"""
+        self._ensure_model_selector_card()  # P0-1：框架懒创建，确保注册/入容器
         self._card_manager.toggle_card("model_selector", self._window_id)
         if self._card_manager.is_card_visible("model_selector", self._window_id):
             self._load_model_selector_to_card()
@@ -6275,6 +6285,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_model_config_card(self):
         """切换模型配置卡片的显示"""
+        self._ensure_model_config_card()  # P0-1：框架懒创建，确保注册/入容器
         if self._card_manager.is_card_visible("model_config", self._window_id):
             # 已可见 → 隐藏
             self._card_manager.hide_card("model_config", self._window_id)
@@ -6397,6 +6408,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
+        self._ensure_history_card()  # P0-1：框架懒创建，确保注册/入容器
         self._card_manager.toggle_card("history", self._window_id)
         # 显示时刷新历史会话数据
         if self._card_manager.is_card_visible("history", self._window_id):
@@ -7255,7 +7267,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 # Tab 模式下 MainWidget 背景改为半透明，让 TabManagerWindow 的
                 # 全局背景图能透出。使用 stylesheet 确保 alpha 正确 blend。
-                self.setStyleSheet(f"background: rgba({r},{g},{b},{alpha/255});")
+                self.setStyleSheet(f"background: rgba({r},{g},{b},{alpha / 255});")
                 self.setAutoFillBackground(False)
 
             # 分支标签
@@ -8315,6 +8327,20 @@ class OpenAIChatToolWindow(ToolWindow):
         return True
 
     def _get_or_create_welcome_card(self) -> MessageCard:
+        # P1-4：按 _window_id 缓存 welcome 卡片（窗口维度复用，同窗口重复调用不重建）。
+        # 不能做跨窗口全局单例：recent_sessions/top_by_count 按当前项目过滤，
+        # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
+        cached = self._welcome_card_cache.get(self._window_id)
+        if cached is not None:
+            try:
+                from PyQt5 import sip
+
+                if not sip.isdeleted(cached):
+                    return cached
+            except Exception:
+                pass
+            self._welcome_card_cache.pop(self._window_id, None)
+
         agent = self.backend.get_agent(self._current_agent)
         agent_name = agent.name if agent else ""
         agent_desc = agent.description if agent else ""
@@ -8347,10 +8373,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 }
             )
 
-        # 每次都重新创建，确保会话列表是最新的
+        # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
         welcome_card = create_welcome_card(self, agent_name, agent_desc, recent_sessions, top_by_count)
         welcome_card._is_welcome = True
         welcome_card.contextActionRequested.connect(self.handle_recommended_question)
+        self._welcome_card_cache[self._window_id] = welcome_card
         return welcome_card
 
     def _sanitize_user_message_for_display(self, content: str) -> str:
@@ -9451,8 +9478,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._display_current_session()
         self._release_inactive_session_messages()
 
-        # 刷新历史会话卡片
-        if self._history_card.isVisible():
+        # 刷新历史会话卡片（P0-1：卡片懒创建，需判空）
+        if getattr(self, "_history_card", None) and self._history_card.isVisible():
             self._refresh_history_toggle_panel()
 
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
@@ -9975,8 +10002,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_share_clicked(self):
         """分享当前对话：切换分享卡片显示"""
-        if not hasattr(self, "_share_card") or not self._share_card:
-            return
+        self._ensure_share_card()  # P0-1：框架懒创建（原 hasattr 检查改为惰性创建）
 
         # 如果卡片正在关闭中（状态为 visible），直接 toggle 关闭
         if self._card_manager.is_card_visible("share", self._window_id):
@@ -10054,8 +10080,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_history_questions_popup(self):
         """切换历史问题卡片的显示"""
-        if not hasattr(self, "_history_questions_card") or not self._history_questions_card:
-            return
+        self._ensure_history_questions_card()  # P0-1：框架懒创建（原 hasattr 检查改为惰性创建）
 
         if self._card_manager.is_card_visible("history_questions", self._window_id):
             self._card_manager.hide_card("history_questions", self._window_id)
@@ -11871,8 +11896,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if _cmd_def and _cmd_def.prompt_sections:
                         _active = cmd_mgr.parse_active_params(cmd_result.remainder)
                         _prompt_matched = any(
-                            p.name in _active and p.name in _cmd_def.prompt_sections
-                            for p in _cmd_def.parameters
+                            p.name in _active and p.name in _cmd_def.prompt_sections for p in _cmd_def.parameters
                         )
                     if _prompt_matched:
                         # 走 PROMPT 注入：select_prompt 按参数过滤 body 段落，
@@ -14583,7 +14607,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_popup_card.refreshRequested.emit()
         # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
         if not suppress_memory_card:
-            if not self._memory_card.isVisible():
+            # P0-1：卡片懒创建，未创建视为不可见 → toggle 内部会 ensure
+            if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
                 self._toggle_memory_card()
             # 卡片弹出后，再切换到关键文档标签
             if hasattr(self, "_memory_card") and self._memory_card:
@@ -15331,6 +15356,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""
+        self._ensure_memory_card()  # P0-1：框架懒创建，确保注册/入容器
         self._card_manager.toggle_card("memory", self._window_id)
         # 显示时刷新记忆数据
         if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, "_memory_card_popup"):

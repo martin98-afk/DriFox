@@ -674,90 +674,110 @@ class TabManagerWindow(QWidget):
         idx = len(self._windows) - 1  # 0-based
         self._window_to_index[id(window)] = idx
 
-        # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
-        self._content_area.addWidget(window)
+        # ── P0-2 性能优化：冻结更新，批量完成 addWidget + addTab + 激活 ──
+        # setCurrentWidget 会触发新窗口 showEvent 与整棵子控件树的布局/绘制，
+        # 冻结期间抑制逐控件绘制，恢复后一次性 polish + updateGeometry，
+        # 把绘制/样式传播开销压缩到单次重绘。
+        # 信号时序不变：set_active_index → tabSelected → setCurrentWidget 仍同步，
+        # 恢复更新后才发射 tabCountChanged。
+        stack = self._content_area
+        panel = self._tab_panel
+        stack.setUpdatesEnabled(False)
+        panel.setUpdatesEnabled(False)
+        window.setUpdatesEnabled(False)
+        try:
+            # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
+            stack.addWidget(window)
 
-        # 获取初始标题：优先用项目名，其次窗口标题，最后默认
-        project = getattr(window, "_current_project", None) or ""
-        title = window.windowTitle() or project or "新建会话"
+            # 获取初始标题：优先用项目名，其次窗口标题，最后默认
+            project = getattr(window, "_current_project", None) or ""
+            title = window.windowTitle() or project or "新建会话"
 
-        # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
-        tab_project_initials = ""
-        tab_project_color = ""
-        if project:
-            try:
-                from app.widgets.cards.settings.project_selector_card import (
-                    extract_project_initials,
-                    get_project_color,
-                )
+            # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
+            tab_project_initials = ""
+            tab_project_color = ""
+            if project:
+                try:
+                    from app.widgets.cards.settings.project_selector_card import (
+                        extract_project_initials,
+                        get_project_color,
+                    )
 
-                tab_project_initials = extract_project_initials(project)
-                tab_project_color = get_project_color(project, alpha=255)
-            except Exception:
-                pass
+                    tab_project_initials = extract_project_initials(project)
+                    tab_project_color = get_project_color(project, alpha=255)
+                except Exception:
+                    pass
 
-        tab_idx = self._tab_panel.add_tab(
-            title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
-        )
+            tab_idx = panel.add_tab(
+                title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+            )
 
-        # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
-        # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
-        def _on_win_title_changed(_new_title, _win=window):
-            if _sip.isdeleted(_win):
-                return
-            cur_idx = self._window_to_index.get(id(_win), -1)
-            if cur_idx < 0 or cur_idx >= len(self._windows):
-                return
-            # 更新 Tab 标题
-            t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
-            self._tab_panel.update_tab_title(cur_idx, t)
-            # 更新项目图标
-            p = getattr(_win, "_current_project", None) or ""
-            _update_tab_icon(cur_idx, p)
-            # 团队模式：显示角色胶囊
-            team_agent = getattr(_win, "_team_agent_name", "") or ""
+            # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
+            # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
+            def _on_win_title_changed(_new_title, _win=window):
+                if _sip.isdeleted(_win):
+                    return
+                cur_idx = self._window_to_index.get(id(_win), -1)
+                if cur_idx < 0 or cur_idx >= len(self._windows):
+                    return
+                # 更新 Tab 标题
+                t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
+                self._tab_panel.update_tab_title(cur_idx, t)
+                # 更新项目图标
+                p = getattr(_win, "_current_project", None) or ""
+                _update_tab_icon(cur_idx, p)
+                # 团队模式：显示角色胶囊
+                team_agent = getattr(_win, "_team_agent_name", "") or ""
+                if team_agent:
+                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                else:
+                    self._tab_panel.clear_tab_capsule(cur_idx)
+                # 如果该窗口是当前选中 Tab，同步宿主窗口标题
+                if self._tab_panel.active_index == cur_idx:
+                    self._sync_window_title()
+
+            window.windowTitleChanged.connect(_on_win_title_changed)
+
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
+            def _on_ai_state_changed(state, _win=window):
+                if _sip.isdeleted(_win):
+                    return
+                cur_idx = self._window_to_index.get(id(_win), -1)
+                if cur_idx < 0 or cur_idx >= len(self._windows):
+                    return
+                if state in ("streaming", "thinking"):
+                    self._tab_panel.update_tab_streaming(cur_idx, True, False)
+                    self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
+                elif state == "error":
+                    self._tab_panel.update_tab_streaming(cur_idx, False, True)
+                    self._tab_panel.update_tab_question(cur_idx, False)
+                elif state == "question":
+                    self._tab_panel.update_tab_question(cur_idx, True)
+                    self._tab_panel.update_tab_streaming(cur_idx, False, False)
+                else:  # idle
+                    self._tab_panel.update_tab_streaming(cur_idx, False, False)
+                    self._tab_panel.update_tab_question(cur_idx, False)
+
+            window.ai_state_changed.connect(_on_ai_state_changed)
+
+            # 立即触发一次初始图标更新 + 团队胶囊状态同步
+            logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
+            _update_tab_icon(tab_idx, project)
+            team_agent = getattr(window, "_team_agent_name", "") or ""
             if team_agent:
-                self._tab_panel.update_tab_capsule(cur_idx, team_agent)
-            else:
-                self._tab_panel.clear_tab_capsule(cur_idx)
-            # 如果该窗口是当前选中 Tab，同步宿主窗口标题
-            if self._tab_panel.active_index == cur_idx:
-                self._sync_window_title()
+                panel.update_tab_capsule(tab_idx, team_agent)
 
-        window.windowTitleChanged.connect(_on_win_title_changed)
-
-        # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
-        def _on_ai_state_changed(state, _win=window):
-            if _sip.isdeleted(_win):
-                return
-            cur_idx = self._window_to_index.get(id(_win), -1)
-            if cur_idx < 0 or cur_idx >= len(self._windows):
-                return
-            if state in ("streaming", "thinking"):
-                self._tab_panel.update_tab_streaming(cur_idx, True, False)
-                self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
-            elif state == "error":
-                self._tab_panel.update_tab_streaming(cur_idx, False, True)
-                self._tab_panel.update_tab_question(cur_idx, False)
-            elif state == "question":
-                self._tab_panel.update_tab_question(cur_idx, True)
-                self._tab_panel.update_tab_streaming(cur_idx, False, False)
-            else:  # idle
-                self._tab_panel.update_tab_streaming(cur_idx, False, False)
-                self._tab_panel.update_tab_question(cur_idx, False)
-
-        window.ai_state_changed.connect(_on_ai_state_changed)
-
-        # 立即触发一次初始图标更新 + 团队胶囊状态同步
-        logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
-        _update_tab_icon(tab_idx, project)
-        team_agent = getattr(window, "_team_agent_name", "") or ""
-        if team_agent:
-            self._tab_panel.update_tab_capsule(tab_idx, team_agent)
-
-        # 隐藏空状态页，切换到新窗口
-        self._content_area.widget(0).hide()
-        self._tab_panel.set_active_index(idx)
+            # 隐藏空状态页，切换到新窗口
+            stack.widget(0).hide()
+            panel.set_active_index(idx)
+        finally:
+            window.setUpdatesEnabled(True)
+            panel.setUpdatesEnabled(True)
+            stack.setUpdatesEnabled(True)
+            # 恢复更新后一次性重算布局/绘制
+            stack.updateGeometry()
+            panel.updateGeometry()
+            window.update()
 
         self.tabCountChanged.emit(len(self._windows))
         return idx
