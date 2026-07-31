@@ -95,6 +95,13 @@
             "add_output_to_context": true,
             "statusMessage": "团队协作启动指引:",
             "id": "team_member_session_start"
+          },
+          {
+            "type": "python",
+            "function": ".inject_team_context:hook",
+            "add_output_to_context": true,
+            "statusMessage": "团队上下文:",
+            "id": "builtin_inject_team_context"
           }
         ]
       }

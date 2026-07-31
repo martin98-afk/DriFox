@@ -3960,6 +3960,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # join_team 内部是覆盖式赋值（members[wid]={...}），不会清空邮箱文件。
         tm_mgr = self._get_team_manager()
 
+        # 记录团队模板上下文（供 SessionStart hook 注入团队描述）
+        tm_mgr.set_template(
+            {
+                "name": template.template_name,
+                "description": template.description,
+                "agents": [a.agent_name for a in template.agents],
+            }
+        )
+
         for win, agent_name in reassign_pairs:
             try:
                 if win is self:

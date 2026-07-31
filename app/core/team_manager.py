@@ -276,6 +276,24 @@ class TeamManager:
         data = self._get_team_data(team_name)
         return window_id in data.get("members", {})
 
+    # ── 团队模板上下文 ────────────────────────────────
+
+    def set_template(self, template_info: dict, team_name: str = DEFAULT_TEAM):
+        """设置当前团队的模板上下文（/team --load=<name> 加载模板时写入）
+
+        Args:
+            template_info: {"name": ..., "description": ..., "agents": [...]}
+                供 SessionStart hook 读取并注入团队描述
+        """
+        data = self._get_team_data(team_name)
+        data["template"] = template_info
+        self._save_team_data(team_name)
+
+    def get_template(self, team_name: str = DEFAULT_TEAM) -> Optional[Dict[str, Any]]:
+        """获取当前团队的模板上下文（无模板时返回 None）"""
+        data = self._get_team_data(team_name)
+        return data.get("template")
+
     # ── 邮件系统 ─────────────────────────────────────
 
     def _next_mail_id(self) -> str:

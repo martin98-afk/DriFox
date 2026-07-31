@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -648,7 +649,9 @@ class DiffHtmlGenerator:
             fid = f"file-{i}"
             tree_html += cls._tree_item(fi, fid)
             # 将每文件的 lines 单独序列化，避免一个巨大 JSON 导致解析卡死
-            lines_json = json.dumps(fi["lines"]).decode("utf-8")
+            # 转义 "</"，防止 diff 内容中的 </script> 提前终止 ld- 数据标签、
+            # 破坏后续 HTML/JS 解析（与 _gen_files_meta 的处理保持一致）
+            lines_json = json.dumps(fi["lines"]).decode("utf-8").replace("</", "\\u003C/")
             if i < preload_n:
                 blocks_html += cls._file_block(fi, fid)
                 blocks_html += f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
@@ -1399,7 +1402,58 @@ var tip=document.getElementById('copied');tip.style.display='inline';setTimeout(
 
 
 # ==========================================================================
-# 5. DiffViewerWindow
+# 5. WebView HTML 加载辅助（规避 setHtml 大内容限制）
+# ==========================================================================
+# Qt 的 setHtml() 对较大内容（实测约 100KB+ 即可能失败：页面能显示但 JS
+# 不执行，或 loadFinished 不触发）不可靠。差异报告（大 diff 经 Pygments
+# 高亮后膨胀数倍）很容易超限，表现为按钮回调报 "openFile/switchView is
+# not defined"、文件列表点击无响应。统一改用临时文件 + setUrl 加载，
+# 无大小限制且行为一致。
+def _write_temp_html(html: str) -> Optional[str]:
+    """把 HTML 写入系统临时文件，返回路径；失败返回 None"""
+    try:
+        fd, path = tempfile.mkstemp(suffix=".html", prefix="drifox_diff_", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+    except Exception as e:
+        logger.warning(f"[DiffViewer] 写入临时 HTML 失败: {e}")
+        return None
+
+
+def _cleanup_temp_files(tmp_files: Optional[List[str]]) -> None:
+    """清理临时 HTML 文件列表"""
+    if not tmp_files:
+        return
+    for p in tmp_files[:]:
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+    tmp_files.clear()
+
+
+def _load_html_to_webview(webview: QWebEngineView, html_content: str, tmp_files: Optional[List[str]] = None) -> None:
+    """把差异 HTML 加载进 webview（临时文件 + setUrl，规避 setHtml 大小限制）
+
+    Args:
+        webview: 目标 QWebEngineView
+        html_content: 完整 HTML 报告
+        tmp_files: 调用方持有的临时文件列表（追加新文件、供后续清理）；为 None 时使用 setHtml
+    """
+    html = html_content or ""
+    if tmp_files is not None:
+        path = _write_temp_html(html)
+        if path is not None:
+            tmp_files.append(path)
+            webview.setUrl(QUrl.fromLocalFile(path))
+            return
+    # 临时文件写入失败（或调用方不管理临时文件）→ 回退 setHtml
+    webview.setHtml(html)
+
+
+# ==========================================================================
+# 6. DiffViewerWindow（弹窗回退实现）
 # ==========================================================================
 class _DiffWebPage(QWebEnginePage):
     """自定义 QWebEnginePage，拦截 drifox:// 协议以打开文件。"""
@@ -1445,6 +1499,7 @@ class DiffViewerWindow:
     def __init__(self, parent=None, title: str = "文件差异对比"):
         self._disposed = False
         self._current_html = None
+        self._tmp_files: List[str] = []
         self._window = QDialog(parent)
         self._window.setWindowTitle(title)
         self._window.resize(1300, 850)
@@ -1484,6 +1539,9 @@ class DiffViewerWindow:
             self._webview.setHtml("")
         except Exception:
             pass
+
+        # 清理临时 HTML 文件
+        _cleanup_temp_files(getattr(self, "_tmp_files", None))
 
     def _log_rss(self, stage: str):
         rss_mb = _get_rss_mb()
@@ -1529,7 +1587,7 @@ class DiffViewerWindow:
     def load_html(self, html_content: str):
         html_len = len(html_content or "")
         self._log_rss(f"load_html_begin html_len={html_len}")
-        self._webview.setHtml(html_content or "")
+        _load_html_to_webview(self._webview, html_content or "", self._tmp_files)
         self._current_html = None
         self._log_rss(f"load_html_called html_len={html_len}")
         QTimer.singleShot(

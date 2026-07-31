@@ -4,11 +4,16 @@ DiffViewerCard — 内嵌差异对比卡片，覆盖右侧对话区域（类似�
 
 替代弹窗式 DiffViewerWindow（QDialog），以系统卡片形式嵌入全局卡片容器，
 利用 TabManagerWindow 的覆盖层栈（QStackedWidget）切换对话区/差异面板。
+
+HTML 加载统一走 diff_viewer._load_html_to_webview（临时文件 + setUrl），
+规避 Qt setHtml() 对较大内容（实测约 100KB+）无法可靠执行 JS 的问题。
 """
 
+from PyQt5.QtCore import QUrl
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 from app.core.webengine_profile import create_transient_web_profile
+from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 
@@ -60,6 +65,7 @@ class DiffViewerCard(BaseSettingsCard):
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
         self._current_html = None
+        self._tmp_files = []
 
         # 构建 WebEngine 视图
         self._webview = QWebEngineView()
@@ -79,9 +85,12 @@ class DiffViewerCard(BaseSettingsCard):
         """
         self._current_html = html_content
         self.set_title_text(title)
-        self._webview.setHtml(html_content or "")
+        # 替换旧内容前先清理上一份临时文件，避免残留
+        _cleanup_temp_files(self._tmp_files)
+        _load_html_to_webview(self._webview, html_content or "", self._tmp_files)
 
     def clear(self):
-        """清除内容，释放 WebEngine 页面"""
+        """清除内容，释放 WebEngine 页面与临时文件"""
         self._current_html = None
         self._webview.setHtml("")
+        _cleanup_temp_files(self._tmp_files)
