@@ -3810,10 +3810,15 @@ class CodeWebViewer(QWebEngineView):
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
                         // 记录当前展开状态的思考块
-                        const expandedStates = new Map();
-                        container.querySelectorAll('.think-block').forEach(block => {{
-                            expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
-                        }});
+                        // [PERF] 简洁模式：completed 思考块是 think-compact（无折叠），跳过 save
+                        //       节省 querySelectorAll + Map 构造；非简洁模式行为不变
+                        var expandedStates = null;
+                        if (!window._toolCompactMode) {{
+                            expandedStates = new Map();
+                            container.querySelectorAll('.think-block').forEach(function(block) {{
+                                expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
+                            }});
+                        }}
 
                         // ── 冻结折叠框 CSS transition 避免 DOM 重建时边框闪烁 ──
                         // container.innerHTML = newHtml 会销毁所有已有 DOM 节点，
@@ -3904,17 +3909,20 @@ class CodeWebViewer(QWebEngineView):
                         restoreCollapsibleStates(container);
 
                         // 恢复展开状态
-                        container.querySelectorAll('.think-block').forEach(block => {{
-                            const savedState = expandedStates.get(block.dataset.blockKey);
-                            if (savedState !== undefined) {{
-                                block.dataset.expanded = savedState ? 'true' : 'false';
-                                const body = block.querySelector('.cm-collapsible__body');
-                                if (body) {{
-                                    body.style.height = savedState ? 'auto' : '0px';
-                                    body.style.opacity = savedState ? '1' : '0';
+                        // [PERF] 简洁模式：expandedStates 为 null，跳过整段（think-compact 无折叠）
+                        if (expandedStates) {{
+                            container.querySelectorAll('.think-block').forEach(function(block) {{
+                                var savedState = expandedStates.get(block.dataset.blockKey);
+                                if (savedState !== undefined) {{
+                                    block.dataset.expanded = savedState ? 'true' : 'false';
+                                    var body = block.querySelector('.cm-collapsible__body');
+                                    if (body) {{
+                                        body.style.height = savedState ? 'auto' : '0px';
+                                        body.style.opacity = savedState ? '1' : '0';
+                                    }}
                                 }}
-                            }}
-                        }});
+                            }});
+                        }}
 
                         // ── 恢复 CSS transition（requestAnimationFrame 使浏览器在下一次
                         // 重绘前已发现元素处于 target 状态，不会触发过渡动画） ──
