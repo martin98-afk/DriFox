@@ -1,28 +1,63 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.4.9] - 2026-07-31
 
-### ⚡ 性能优化 (Performance)
+自上一版本以来的变更 | 提交数：59 · 文件变更：187 · +6768/-5624 | 贡献者：dingma, mading
 
-- **消息卡片简洁模式 `reorganizeContent` 增量重排 (v2)**: 将原版 4 次独立 forEach 重复扫描合并为单次扫描；将过期 think-block / tool-block 清理合并为单次遍历；引入"顺序哈希 diff"取代无脑 sort+appendChild（流式期间 ~80% updateContent 走快路径跳过 sort）。理论加速 1.4x~2.6x（按块数），长会话（100+ 块）卡顿显著改善
-- **简洁模式 `updateContent` 跳过 `think-block` 展开状态 save/restore**: 简洁模式下 completed 思考块是 `think-compact` 纯文本行（无折叠），`expandedStates` Map 始终为空。短路 save/restore 两段 querySelectorAll + Map 操作；非简洁模式行为不变
+> 重点：**Tab 卡片系统全面重构** — 引入 `GlobalCardController` 统一管理全局卡片生命周期，新增 `TabManagerWindow` / `CardContainer` dock 模式与可调分割器比例；**内嵌卡片替代弹窗** —— file-undo、sub-agent 会话改为全局内嵌卡片；**diff-viewer 增强** —— 侧边栏折叠/窄屏自动折叠/默认视图改为 unified；**团队协作系统 (Team)** 全面升级 —— leader 强制首位、team mail 流式注入、`.teams/` 文件级结果存储、self-identity 步骤、成员状态汇总；**UI 插件行增强** —— 卡片位置右键菜单 + SVG 位置图标 + 插件选项帮助；**消息卡片性能 v2 优化** —— `reorganizeContent` 单次扫描 + 顺序哈希 diff，跳过简洁模式 think-block save/restore；**Gitee OAuth token 双入口收敛** —— 统一到 `_ensure_valid_token()`。
 
 ### ✨ 新功能 (New Features)
 
-- **diff-viewer 侧边栏折叠按钮**: 在 view-bar 最左新增 `sidebar-toggle` 按钮（chevron 图标），可手动折叠/展开文件列表面板；CSS transition 0.15s 平滑过渡；折叠态 `width:0 + overflow:hidden` 仅保留按钮可见
-- **diff-viewer 窄屏自动折叠**: 窗口宽度 `<900px` 时自动折叠侧边栏；用户手动切换后（`_sbUser=true`）不再自动干预
-- **diff-viewer 默认视图改为 unified**: `generate_html_report` 的 `default_view` 默认值由 `"split"` 改为 `"unified"`（更适合绝大多数修改场景；用户仍可在 view-bar 切换为并排对比）
+- **Tab/卡片系统重构** (`GlobalCardController` 上线): 全局卡片控制器统一管理 file-undo、diff-viewer、sub-agent、settings 等系统级卡片的生命周期（注册/显示/隐藏/销毁/缓存失效）；新增 `TabManagerWindow` / `CardContainer` dock 模式与可调分割器比例；`enable_tab_manager` / `panel_width` 等配置项接入；`TabPanel` 内嵌 UI 插件列表完全承担插件入口（旧 `UIPluginEdgeLauncher` 移除）；后台图片迁移到 `TabManagerWindow` 单例以优化多 Tab 性能
+- **Tab 管理器增强**: 新增 icon-only 新标签按钮（紧凑模式）；标签标题管理与 UI 更新跨组件统一；侧边栏折叠状态同步；floating card container 新增 `full` 选项用于沉浸式展示
+- **Gitee 账户行重构**: 头像+设置按钮双形态（avatar-only / avatar + 名称 + 设置）；紧凑模式可折叠边栏；标签面板整合 Gitee 仓库与绑定操作；OAuth token 刷新收敛到 `_ensure_valid_token()` 并新增 `ConfigSyncService.pause_upload()` 抑制上传竞态
+- **内嵌卡片替代弹窗**: `file-undo` 不再使用独立弹窗，改为 global card 内嵌显示并通过 diff viewer 切换；`sub-agent` 会话日志改为内嵌卡片实时刷新（替代 `SubAgentSessionDialog` 弹窗）
+- **diff-viewer 折叠与视图优化**: view-bar 新增 `sidebar-toggle` 按钮（chevron 图标）手动折叠侧边栏；窗口宽度 <900px 时自动折叠且不覆盖用户手动选择；`generate_html_report` 默认视图由 `"split"` 改为 `"unified"`
+- **团队协作 (Team) 全面升级**: 强制 leader 角色为团队模板首位；新增团队模板上下文管理并接入 session-start hook；成员会话启动增加 self-identity 步骤；成员结果强制写入 `.teams/` 目录；team mail 作为 hook 消息在流式期间注入（`_inject_team_mail_as_hook` + `_injected_team_mails` 跟踪 + 手动停止同步 + 流结束时固化）；成员状态展示包含任务摘要；`TeamManager` 新增 `get_running_tasks` 方法；`TeamManager` / `TeamTools` 增强成员状态上报与代码可读性
+- **UI 插件行增强**: `ui-plugin-row` 新增右键菜单用于选择卡片位置（positionChanged 信号）；新增 SVG 位置图标并附 tooltip；插件管理支持 options 与帮助文档
+- **使用统计卡片字体自适应**: 根据 context 设置动态调整 usage stats card 字体大小
+
+### ♻️ 代码重构 (Refactoring)
+
+- **团队协作机制重构**: 重构 team 模块并优化对话框层级管理（`refactor(team)`）
+- **移除 UI 插件左侧边缘入口**: 彻底删除 `UIPluginEdgeLauncher` 及其辅助函数 `_find_edge_launchers` / `_hide_edge_launcher` / `_show_edge_launcher` / `_hide_shared_launcher`，移除 `main_widget.py` 中的导入/实例化/resizeEvent/主题刷新/热重载调用，插件入口完全由 `TabPanel` 内嵌 UI 插件列表承担
+
+### ⚡ 性能优化 (Performance)
+
+- **消息卡片 `reorganizeContent` 增量重排 v2**: 将原版 4 次独立 forEach 重复扫描合并为单次扫描；过期 think-block / tool-block 清理合并为单次遍历；引入"顺序哈希 diff"取代无脑 sort+appendChild（流式期间 ~80% updateContent 走快路径跳过 sort）。理论加速 1.4x~2.6x（按块数），长会话（100+ 块）卡顿显著改善
+- **简洁模式跳过 `think-block` 展开状态 save/restore**: 简洁模式下 completed 思考块是 `think-compact` 纯文本行（无折叠），`expandedStates` Map 始终为空。短路 save/restore 两段 querySelectorAll + Map 操作；非简洁模式行为不变
+- **Tab 管理器批量更新**: `TabManagerWindow` 新增窗口添加时的批量更新机制，减少布局开销
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **OpenAIChatToolWindow 欢迎卡片生命周期修复**: 修复 `_hide_welcome_cards` 仅调用 `hide()` 而未 `removeWidget()`，导致多次显示/隐藏循环后布局中累积孤儿 widget；`_load_message_batch` 卡片提取循环改用逆序遍历避免索引漂移；显式跳过 `_is_welcome` 标记的卡片，防止被 `_cache_current_session_cards` 的 `deleteLater` 误删（欢迎卡片由 `_welcome_card_cache` 独立管理生命周期）
-- **Gitee OAuth token 刷新双入口修复**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
+- **chat-window 欢迎卡片生命周期**: `_hide_welcome_cards` 仅调用 `hide()` 而未 `removeWidget()`，导致多次显示/隐藏循环后布局中累积孤儿 widget；`_load_message_batch` 卡片提取循环改用逆序遍历避免索引漂移；显式跳过 `_is_welcome` 标记的卡片，防止被 `_cache_current_session_cards` 的 `deleteLater` 误删（欢迎卡片由 `_welcome_card_cache` 独立管理生命周期）
+- **Gitee OAuth token 刷新双入口**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
 - **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
+- **message-card 紧凑模式流式滚动**: 防止 compact 模式下 tool-content 在流式输出时意外滚动到顶部
+- **OpenAIChatToolWindow 压缩缓存**: 简化 `_compaction_cache_summary` 消息逻辑
+- **团队邮件流式注入**: team mail 在流式期间未通过 hook 注入（Qt 事件循环调度延迟导致）；新增直接 `TeamManager` 检查解决；后续 revert 后再次以更准确方案修复
+- **团队模板输出目录**: 修正 team template 文件创建的输出目录描述与实际行为不一致
+- **message_card 事件过滤器**: 修正事件过滤器事件号（24→17、9→8）及信号（`destroyed` → `finished`）
+- **persister JSON 死循环**: 格式化持久化内容避免单行 JSON 死循环
+- **tab 命令带后缀不触发参数卡片**: 带 `-agent` / `-prompt` 后缀的命令名无法触发参数卡片（命令解析修正）
+- **strip system-reminder wrapper**: 团队邮件与 subagent 消息中剥除 `system-reminder` 包装（防止其意外泄漏给模型）
+- **team tools 权限检查**: 团队成员绕过所有权限检查（安全修复）
+- **异常处理统一**: 多文件改用元组语法捕获多个异常，提升代码可读性和一致性
+- **CommandCard 可见性同步**: 在 show/hide 事件中同步可见性状态，防止数据刷新问题
+- **TrayManager / TabManagerWindow 注册**: 改进异常处理并确保 `TabManager` 引用正确注册
+- **label styling 优化**: 统一标签样式与刷新逻辑，提升性能与一致性
+- **CardContainer resize + CommandItem + SystemCardFrame**: 优化 resize 处理与动画性能，防止布局级联问题；精简 `CommandItemWidget` 标签样式应用以提升状态变更性能；细化 `SystemCardFrame` 样式刷新逻辑与布局处理
+- **系统 UI 插件硬编码优化**: 清理 `app/widgets/` 内 UI 插件的硬编码内容
 
-### 🗑️ 移除 (Removed)
+### 🔧 其他 (Chores & Build)
 
-- **UI 插件左侧边缘入口 (`UIPluginEdgeLauncher`)**: 删除 `app/widgets/ui_plugin_edge_launcher.py` 及其测试 `tests/widgets/test_ui_plugin_edge_launcher.py`；移除 `app/main_widget.py` 中的导入/实例化/resizeEvent/主题刷新/热重载调用，以及 `app/widgets/tab_manager_window.py` 中的辅助函数（`_find_edge_launchers` / `_hide_edge_launcher` / `_show_edge_launcher` / `_hide_shared_launcher`）。插件入口完全由 `TabPanel` 内嵌的 UI 插件列表承担。
+- **question-floating 主题色 token**: ruff format + 改用主题色 token（导航按钮颜色统一从主题读取）
+- **global-card 占位符**: 为 file-undo diff 相关辅助方法新增占位签名
+
+### 📚 文档 (Docs)
+
+- **消息卡片紧凑模式性能优化说明**: 文档化 `reorganizeContent` v2 与 think-block save/restore 跳过的设计权衡
 
 ## [v0.4.8] - 2026-07-29
 
