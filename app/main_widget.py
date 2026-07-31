@@ -4986,16 +4986,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id == session_id:
             self._display_current_session()
 
-        # 自动压缩：将压缩摘要存入 compaction_cache，供后续对话提供上下文
+        # 将压缩摘要存入 compaction_cache，供后续对话提供上下文
         if target_session and result:
-            src_msg_count = len(target_session.messages) if target_session.messages else 0
             target_session.set_compaction_cache(
                 {
                     "active": True,
                     "kind": "auto_compact",
                     "summary_message": {"role": "system", "content": str(result)},
                     "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "source_message_count": src_msg_count,
+                    "source_message_count": len(target_session.messages),
                 }
             )
 
