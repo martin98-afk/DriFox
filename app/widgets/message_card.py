@@ -4068,120 +4068,145 @@ class CodeWebViewer(QWebEngineView):
                         if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                         return;
                     }}
-                    // ── 增量搬移：用稳定标识（data-block-key / data-tool-call-id）
-                    // 做精确去重 —— 比"count 比对"可靠，因为 updateContent 重写
-                    // content-placeholder 后，里面的块全是新 DOM 节点，单纯比数量会
-                    // 误判"已搬移过"而漏搬新块，导致工具/思考在正文里也出现。
-                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
-                    // 原实现 remove+append 导致闪烁；保留旧的导致内容过期被吞。
-                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
-                    var _oldThinkStreaming = toolContent.querySelector('.think-streaming');
-                    var _hasNewThinkStreaming = false;
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        if (el.classList.contains('think-streaming')) _hasNewThinkStreaming = true;
-                    }});
-                    if (!_hasNewThinkStreaming && _oldThinkStreaming) {{
-                        // reasoning 已完成，#content-placeholder 没有 think-streaming
-                        // 安全移除 #tool-content 中残留的旧 think-streaming
-                        _oldThinkStreaming.remove();
-                    }}
-                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block / think-compact
-                    // 多轮思考场景：旧完成的折叠框持续堆积在 tool-content 底部不清理。
-                    // 收集 content-placeholder 中当前 think 块的 block-key 集合，
-                    // 移除 tool-content 中不在集合内的旧 think 块。
+                    // ── [PERF v2] 单次扫描 blocks：posMap + thinkKeys + toolIds + thinkStreaming ──
+                    // 原实现有 4 个独立 forEach 重复遍历，v2 合并为单次，O(n²) → O(n)
+                    var posMap = Object.create(null);
                     var _currentThinkKeys = new Set();
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var _bk = el.getAttribute('data-block-key');
-                        if (_bk && (el.classList.contains('think-block') || el.classList.contains('think-streaming') || el.classList.contains('think-compact'))) {{
-                            _currentThinkKeys.add(_bk);
-                        }}
-                    }});
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-block, .think-compact'), function(el) {{
-                        var _bk = el.getAttribute('data-block-key');
-                        if (_bk && !_currentThinkKeys.has(_bk) && !el.getAttribute('data-tool-call-id')) {{
-                            el.remove();
-                        }}
-                    }});
-                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 tool-block
-                    // 多轮工具调用场景：旧已完成 tool-block 堆积在 tool-content 底部不清理。
-                    // 收集 content-placeholder 中当前 tool 块的 tool-call-id 集合，
-                    // 移除 tool-content 中不在集合内的已完成 tool 块（保留流式进行中的块）。
                     var _currentToolIds = new Set();
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var _tid = el.getAttribute('data-tool-call-id');
+                    var _hasNewThinkStreaming = false;
+                    var _thinkStreamingEl = null;
+                    for (var _bi = 0; _bi < blocks.length; _bi++) {{
+                        var _el = blocks[_bi];
+                        var _bk = _el.getAttribute('data-block-key');
+                        var _tid = _el.getAttribute('data-tool-call-id');
+                        if (_bk) posMap['bk:' + _bk] = _bi;
                         if (_tid) {{
+                            posMap['tcid:' + _tid] = _bi;
                             _currentToolIds.add(_tid);
                         }}
-                    }});
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.tool-block'), function(el) {{
-                        var _tid = el.getAttribute('data-tool-call-id');
-                        var _streaming = el.getAttribute('data-streaming');
-                        if (_tid && !_currentToolIds.has(_tid) && _streaming !== 'true') {{
-                            el.remove();
+                        if (_bk && (
+                            _el.classList.contains('think-block')
+                            || _el.classList.contains('think-streaming')
+                            || _el.classList.contains('think-compact')
+                        )) {{
+                            _currentThinkKeys.add(_bk);
                         }}
-                    }});
-                    // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
-                    // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
-                    var posMap = Object.create(null);
-                    Array.prototype.forEach.call(blocks, function(el, idx) {{
-                        var bk = el.getAttribute('data-block-key');
-                        var tid = el.getAttribute('data-tool-call-id');
-                        if (bk) posMap['bk:' + bk] = idx;
-                        if (tid) posMap['tcid:' + tid] = idx;
-                        // 无稳定标识的块（.think-streaming）用其在 blocks 中的序号
-                        if (!bk && !tid) el._posIdx = idx;
-                    }});
-                    // 从正文移除已有稳定标识的重叠块，其余搬移到工具区
-                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
-                    // 原实现 remove+append 闪烁；保留旧的导致 reasoning 累积内容被吞。
-                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
-                    var moved = false;
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var bk = el.getAttribute('data-block-key');
-                        var tid = el.getAttribute('data-tool-call-id');
-                        var dup = (bk && toolContent.querySelector('[data-block-key="' + bk + '"]'))
-                               || (tid && toolContent.querySelector('[data-tool-call-id="' + tid + '"]'));
-                        if (dup) {{
-                            if (el.parentNode === container) el.remove();
-                        }} else if (el.classList.contains('think-streaming') && _oldThinkStreaming) {{
-                            // think-streaming 原地替换：保持 DOM 位置，更新内容
-                            if (el.parentNode === container) {{
-                                if (_oldThinkStreaming.parentNode) {{
-                                    _oldThinkStreaming.parentNode.replaceChild(el, _oldThinkStreaming);
-                                }}
-                                _oldThinkStreaming = el;  // 更新引用，供后续排序使用
-                            }}
-                        }} else if (el.parentNode === container) {{
-                            toolContent.appendChild(el);
-                            moved = true;
-                        }}
-                    }});
-                    // 整体排序：使工具区所有子元素顺序与 content-placeholder 匹配
-                    // 🐛 修复闪烁：只在顺序确实变化时才 appendChild 重排。
-                    // 原实现无脑 allChildren.forEach(appendChild) 即使顺序未变
-                    // 也会移动 DOM 节点，触发浏览器重绘导致已稳定显示的块闪烁。
-                    var allChildren = Array.prototype.slice.call(toolContent.children);
-                    var _needsReorder = false;
-                    var _sortedChildren = allChildren.slice().sort(function(a, b) {{
-                        function getPos(el) {{
-                            var bk = el.getAttribute('data-block-key');
-                            var tid = el.getAttribute('data-tool-call-id');
-                            if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
-                            if (tid && posMap['tcid:' + tid] !== undefined) return posMap['tcid:' + tid];
-                            if (el._posIdx !== undefined) return el._posIdx;
-                            return 1e9;
-                        }}
-                        return getPos(a) - getPos(b);
-                    }});
-                    // 检查排序后是否有元素位置变化
-                    for (var _i = 0; _i < _sortedChildren.length; _i++) {{
-                        if (_sortedChildren[_i] !== allChildren[_i]) {{
-                            _needsReorder = true;
-                            break;
+                        if (_el.classList.contains('think-streaming')) {{
+                            _hasNewThinkStreaming = true;
+                            _thinkStreamingEl = _el;
+                        }} else if (!_bk && !_tid) {{
+                            // 无稳定标识的块（备用扩展）—— 用 blocks 中的序号
+                            _el._posIdx = _bi;
                         }}
                     }}
-                    if (_needsReorder) {{
-                        _sortedChildren.forEach(function(el) {{ toolContent.appendChild(el); }});
+                    // ── [PERF v2] 单次遍历 toolContent 子节点：think-streaming + 过期清理 ──
+                    var _oldThinkStreaming = null;
+                    var _toolKids = toolContent.children;
+                    for (var _ti = 0; _ti < _toolKids.length; _ti++) {{
+                        var _tk = _toolKids[_ti];
+                        if (_tk.classList.contains('think-streaming') && !_oldThinkStreaming) {{
+                            _oldThinkStreaming = _tk;
+                        }}
+                    }}
+                    if (!_hasNewThinkStreaming && _oldThinkStreaming) {{
+                        _oldThinkStreaming.remove();
+                        _oldThinkStreaming = null;
+                    }}
+                    // 清理过期 think-block / think-compact + 过期 tool-block
+                    var _existingKids = Array.prototype.slice.call(toolContent.children);
+                    for (var _ei = 0; _ei < _existingKids.length; _ei++) {{
+                        var _eel = _existingKids[_ei];
+                        if (!_eel || !_eel.parentNode) continue;
+                        var _ebk = _eel.getAttribute('data-block-key');
+                        var _etid = _eel.getAttribute('data-tool-call-id');
+                        // 过期 think 块
+                        if (
+                            _ebk
+                            && !_currentThinkKeys.has(_ebk)
+                            && !_etid
+                            && (
+                                _eel.classList.contains('think-block')
+                                || _eel.classList.contains('think-compact')
+                            )
+                        ) {{
+                            _eel.remove();
+                            continue;
+                        }}
+                        // 过期 tool 块（保留流式进行中的块）
+                        if (
+                            _etid
+                            && !_currentToolIds.has(_etid)
+                            && _eel.getAttribute('data-streaming') !== 'true'
+                            && _eel.classList.contains('tool-block')
+                        ) {{
+                            _eel.remove();
+                            continue;
+                        }}
+                    }}
+                    // 从正文移除已存在稳定标识的重叠块，其余搬移到工具区
+                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换
+                    // （保 DOM 位置，更新内容）
+                    var moved = false;
+                    for (var _mi = 0; _mi < blocks.length; _mi++) {{
+                        var _mel = blocks[_mi];
+                        var _mbk = _mel.getAttribute('data-block-key');
+                        var _mtid = _mel.getAttribute('data-tool-call-id');
+                        var _dup = (_mbk && toolContent.querySelector('[data-block-key="' + _mbk + '"]'))
+                                || (_mtid && toolContent.querySelector('[data-tool-call-id="' + _mtid + '"]'));
+                        if (_dup) {{
+                            if (_mel.parentNode === container) _mel.remove();
+                        }} else if (_mel.classList.contains('think-streaming') && _oldThinkStreaming) {{
+                            if (_mel.parentNode === container && _oldThinkStreaming.parentNode) {{
+                                _oldThinkStreaming.parentNode.replaceChild(_mel, _oldThinkStreaming);
+                            }}
+                        }} else if (_mel.parentNode === container) {{
+                            toolContent.appendChild(_mel);
+                            moved = true;
+                        }}
+                    }}
+                    // ── [PERF v2] 顺序哈希 diff：键序列未变时跳过 sort + appendChild ──
+                    // 流式期间大部分 updateContent 走"键序列未变"快路径，避免 sort 抖动
+                    var _curKeys = [];
+                    var _curKids = toolContent.children;
+                    for (var _ci = 0; _ci < _curKids.length; _ci++) {{
+                        var _ck = _curKids[_ci];
+                        var _ckbk = _ck.getAttribute('data-block-key');
+                        var _cktid = _ck.getAttribute('data-tool-call-id');
+                        if (_ckbk) {{
+                            _curKeys.push('bk:' + _ckbk);
+                        }} else if (_cktid) {{
+                            _curKeys.push('tcid:' + _cktid);
+                        }} else {{
+                            _curKeys.push('idx:' + _ci);
+                        }}
+                    }}
+                    var _lastOrder = toolContent.__lastOrder;
+                    var _orderChanged = !_lastOrder || _lastOrder.length !== _curKeys.length;
+                    if (!_orderChanged) {{
+                        for (var _di = 0; _di < _curKeys.length; _di++) {{
+                            if (_curKeys[_di] !== _lastOrder[_di]) {{
+                                _orderChanged = true;
+                                break;
+                            }}
+                        }}
+                    }}
+                    if (_orderChanged) {{
+                        // 顺序变了：用 sort 一次性重排（避免多次 appendChild 抖动）
+                        var _sortedChildren = Array.prototype.slice.call(toolContent.children).sort(function(a, b) {{
+                            function getPos(el) {{
+                                var bk = el.getAttribute('data-block-key');
+                                var tid = el.getAttribute('data-tool-call-id');
+                                if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
+                                if (tid && posMap['tcid:' + tid] !== undefined) return posMap['tcid:' + tid];
+                                if (el._posIdx !== undefined) return el._posIdx;
+                                return 1e9;
+                            }}
+                            return getPos(a) - getPos(b);
+                        }});
+                        for (var _ri = 0; _ri < _sortedChildren.length; _ri++) {{
+                            toolContent.appendChild(_sortedChildren[_ri]);
+                        }}
+                        toolContent.__lastOrder = _curKeys;
                     }}
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
