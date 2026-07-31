@@ -3558,6 +3558,7 @@ class OpenAIChatToolWindow(ToolWindow):
           /team --load=<name>         一键应用模板（重新分配所有活跃窗口的身份）
           /team --load                显示所有可用模板
           /team --delete=<name>       删除模板（不指定名称时列出可用模板）
+          /team --create=<描述>       走 PROMPT 注入（prompt_sections 自动匹配，无需 Python handler）
         """
         import re
 
@@ -3572,6 +3573,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "  /team --save=<name>         保存当前窗口的 agent 列表为模板\n"
                 "  /team --load=<name>         加载模板（不指定名称时列出可用模板）\n"
                 "  /team --delete=<name>       删除模板（不指定名称时列出可用模板）\n"
+                "  /team --create=<描述>       创建团队模板（AI 自动生成 yaml 文件）\n"
                 "（消息发送请直接在 UI 中操作）",
                 parent=self,
                 duration=6000,
@@ -3630,6 +3632,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 # --delete 或 --delete= 不指定名称 → 显示可用模板列表
                 self._handle_team_templates()
             return
+
+        # --create=<描述> 不在此处理：参数命中 prompt_sections 时
+        # _on_send_clicked 会自动走 PROMPT 注入流程（纯声明式，无需 Python handler）。
 
         InfoBar.warning(
             "未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
@@ -8072,16 +8077,23 @@ class OpenAIChatToolWindow(ToolWindow):
                 diff_output = ""
 
             # 生成 HTML 报告
-            from app.utils.diff_viewer import DiffViewerWindow
-
             html = DiffHtmlGenerator.generate_html_report(diff_output or "", session_id)
 
-            # 创建并显示差异查看窗口
-            viewer = DiffViewerWindow(parent=self)
-            viewer.load_html(html)
-            viewer.show()
+            # 内嵌显示差异（覆盖右侧对话区域，类似系统设置）
+            from app.widgets.cards.global_card_controller import get_global_card_controller
 
-            logger.info(f"[DiffViewer] 已打开差异查看窗口，文件数: {len(file_paths)}")
+            controller = get_global_card_controller()
+            if controller is not None:
+                controller.show_diff_viewer(html)
+                logger.info(f"[DiffViewer] 已内嵌显示差异面板，文件数: {len(file_paths)}")
+            else:
+                # 回退：弹窗模式
+                from app.utils.diff_viewer import DiffViewerWindow
+
+                viewer = DiffViewerWindow(parent=self)
+                viewer.load_html(html)
+                viewer.show()
+                logger.info(f"[DiffViewer] 已打开差异查看窗口，文件数: {len(file_paths)}")
 
         except ImportError as e:
             logger.error(f"[DiffViewer] 导入模块失败: {e}")
@@ -11805,11 +11817,35 @@ class OpenAIChatToolWindow(ToolWindow):
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
-                    # 用户插件 FUNCTION 命令无 Python 处理器注册
-                    # （如插件 .md 文件定义了 type: function + shortcut 但无可执行代码）
-                    # → 不拦截、不清理输入，让命令走正常 prompt 发送流程，
-                    #    /xxx 文本会作为普通用户消息发送给 AI。
-                    if not self._has_command_handler(cmd_result.command_name):
+                    # 🆕 参数命中 prompt_sections（如 /team --create=xxx）→ 自动走 PROMPT 注入流程。
+                    # 纯声明式：md 的 prompt_sections 定义即生效，无需为每个带提示词的参数写 Python handler。
+                    _cmd_def = cmd_mgr.get_command(cmd_result.command_name)
+                    _prompt_matched = False
+                    if _cmd_def and _cmd_def.prompt_sections:
+                        _active = cmd_mgr.parse_active_params(cmd_result.remainder)
+                        _prompt_matched = any(
+                            p.name in _active and p.name in _cmd_def.prompt_sections
+                            for p in _cmd_def.parameters
+                        )
+                    if _prompt_matched:
+                        # 走 PROMPT 注入：select_prompt 按参数过滤 body 段落，
+                        # _pending_command 由 inject_command_prompt.py PreUserMessage hook 自动格式化注入。
+                        # 用户原始 /cmd --param=xxx 文本保持原样发送给 AI。
+                        _selected = cmd_mgr.select_prompt(cmd_result.command_name, cmd_result.remainder)
+                        _session = self.session_manager.get_current_session()
+                        if _session:
+                            _session.metadata.pop("_pending_skill", None)
+                            _session.metadata["_pending_command"] = {
+                                "prompt_text": _selected,
+                                "command_name": cmd_result.command_name,
+                                "remainder": cmd_result.remainder or "",
+                            }
+                        # 不 return → 继续走 engine.send_message（与 PROMPT 命令一致）
+                    elif not self._has_command_handler(cmd_result.command_name):
+                        # 用户插件 FUNCTION 命令无 Python 处理器注册
+                        # （如插件 .md 文件定义了 type: function + shortcut 但无可执行代码）
+                        # → 不拦截、不清理输入，让命令走正常 prompt 发送流程，
+                        #    /xxx 文本会作为普通用户消息发送给 AI。
                         cmd_result = None  # 重置标记，走后续 skill / 普通发送流程
                     else:
                         # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
@@ -12299,7 +12335,7 @@ class OpenAIChatToolWindow(ToolWindow):
           --detail   → 显示子智能体详细日志面板
           --model=X  → 设置子智能体默认模型
           --reset    → 清空子智能体默认模型设置
-          --create=X → 进入创建子智能体工作流，AI 自动在 user-custom 插件下生成 agent md 文件
+          --create=X → 走 PROMPT 注入（prompt_sections 自动匹配，无需 Python handler）
         """
         import re
 
@@ -12366,62 +12402,6 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             # 更新命令卡参数描述
             self._update_subagents_param_description()
-            return
-
-        # ---- --create=<描述>：启动创建子智能体工作流 ----
-        create_match = re.match(r"^--create=(.+)$", args)
-        if create_match:
-            user_description = create_match.group(1).strip()
-            if not user_description:
-                InfoBar.warning(
-                    title="参数错误",
-                    content="--create= 后需要输入子智能体的功能描述",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            # 从命令定义的 prompt_sections 中读取 --create= 分段提示词
-            # prompt_sections 存的是标记 ID，实际内容在 body 的 <!-- section:id --> 标记中
-            from app.core.command_manager import CommandManager
-
-            cmd_mgr = CommandManager.get_instance()
-            cmd_def = cmd_mgr.get_command("subagents")
-            section_prompt = ""
-            if cmd_def and cmd_def.prompt_sections:
-                marker_id = cmd_def.prompt_sections.get("--create=", "")
-                if marker_id:
-                    # 从 body 中提取标记段内容
-                    filtered = CommandManager._build_filtered_body(cmd_def.prompt_text, {marker_id})
-                    if filtered:
-                        section_prompt = filtered
-
-            if not section_prompt:
-                InfoBar.error(
-                    title="提示词缺失",
-                    content="subagents.md 中未找到 --create= 的 prompt_sections 配置",
-                    parent=self,
-                    duration=3000,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            # 替换 $ARGUMENTS 占位符
-            prompt = section_prompt.replace("$ARGUMENTS", user_description)
-            self.input_area.clear()
-            self.input_area.setPlainText(prompt)
-            # 延迟触发发送，让当前 _on_send_clicked 先完整返回
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(50, self.input_area.sendMessageRequested.emit)
-            InfoBar.success(
-                title="创建子智能体",
-                content="已注入创建提示词，AI 将自动生成智能体文件",
-                parent=self,
-                duration=2000,
-                position=InfoBarPosition.BOTTOM,
-            )
             return
 
         # ---- 无参数：显示紧凑卡片 ----

@@ -58,6 +58,7 @@ class GlobalCardController:
         self._provider_edit_popup = None
         self._hook_edit_popup = None
         self._mcp_edit_popup = None
+        self._diff_viewer_card = None
 
     # ───────────────────────────────────────────────────────────
     # 窗口辅助
@@ -572,6 +573,69 @@ class GlobalCardController:
         self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
 
     # ───────────────────────────────────────────────────────────
+    # 内嵌差异对比卡片（替代弹窗 DiffViewerWindow，覆盖对话区域）
+    # ───────────────────────────────────────────────────────────
+
+    def ensure_diff_viewer(self):
+        """懒构建内嵌差异对比卡片（重型，隐藏构件），仅构建一次"""
+        if self._diff_viewer_card is not None:
+            return
+        from app.widgets.cards.settings.diff_viewer_card import DiffViewerCard
+
+        self._diff_viewer_card = DiffViewerCard(self._tab_manager)
+        self._diff_viewer_card.setVisible(False)
+        self._diff_viewer_card.closed.connect(lambda: self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID))
+
+        mgr = self._card_manager
+        mgr.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "diff_viewer", self._diff_viewer_card, system_card=True)
+        self._global_card_container.add_card("diff_viewer", self._diff_viewer_card)
+
+    def show_diff_viewer(self, html: str, title: str = "文件差异对比"):
+        """内嵌显示差异对比面板
+
+        Args:
+            html: DiffHtmlGenerator 生成的完整 HTML 报告
+            title: 卡片标题
+        """
+        self.ensure_diff_viewer()
+        card = self._diff_viewer_card
+        card.load_html(html, title)
+        # 隐藏其他全局系统卡片（如设置），避免覆盖层堆叠
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._card_manager.show_card("diff_viewer", GLOBAL_WINDOW_ID)
+
+    def hide_diff_viewer(self):
+        """隐藏内嵌差异对比面板"""
+        if self._diff_viewer_card is None:
+            return
+        self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)
+
+    def toggle_diff_viewer(self):
+        """切换内嵌差异对比面板显隐"""
+        self.ensure_diff_viewer()
+        if self._card_manager.is_card_visible("diff_viewer", GLOBAL_WINDOW_ID):
+            self.hide_diff_viewer()
+        else:
+            # 无内容时重新构建（如当前 HTML 已失效）
+            self._card_manager.show_card("diff_viewer", GLOBAL_WINDOW_ID)
+
+    def invalidate_diff_viewer(self):
+        """销毁内嵌差异卡片，下次打开时重建（配置/会话切换后调用）"""
+        card = self._diff_viewer_card
+        if card is None:
+            return
+        if card.isVisible():
+            self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)
+        self._card_manager.unregister_card("diff_viewer", GLOBAL_WINDOW_ID)
+        self._global_card_container.remove_card("diff_viewer")
+        try:
+            card.setParent(None)
+            card.deleteLater()
+        except RuntimeError:
+            pass
+        self._diff_viewer_card = None
+
+    # ───────────────────────────────────────────────────────────
     # 列表变更广播（Hook/MCP/Gateway 开关 → 刷新全局列表 + 各窗口后端）
     # ───────────────────────────────────────────────────────────
 
@@ -672,7 +736,7 @@ class GlobalCardController:
 
     def hide_all_global_cards(self):
         """隐藏所有全局卡片（供 per-window 系统卡片互斥时调用）"""
-        for cid in ("settings", "provider_edit", "hook_edit", "mcp_edit"):
+        for cid in ("settings", "provider_edit", "hook_edit", "mcp_edit", "diff_viewer"):
             self._card_manager.hide_card(cid, GLOBAL_WINDOW_ID)
 
     def invalidate_settings_popup(self):

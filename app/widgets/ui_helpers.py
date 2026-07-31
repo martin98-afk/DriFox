@@ -1248,7 +1248,7 @@ def truncate_and_remove_round(session, round_index, round_ranges, remove_cards_f
 
 def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     """
-    显示差异查看器
+    显示差异查看器（内嵌卡片模式，覆盖右侧对话区域；无全局卡片容器时回退弹窗）
 
     Args:
         parent: 父控件
@@ -1256,11 +1256,24 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
         title: 窗口标题
 
     Returns:
-        DiffViewerWindow 实例
+        DiffViewerWindow 实例 或 GlobalCardController 实例
     """
+    logger.debug(f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}")
+
+    # 内嵌卡片模式：与系统设置一致，覆盖右侧对话区域
+    try:
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None:
+            controller.show_diff_viewer(html, title)
+            return controller
+    except Exception as e:
+        logger.warning(f"[DiffViewer] 内嵌模式失败，回退到弹窗: {e}")
+
+    # 回退：弹窗模式
     from app.utils.diff_viewer import DiffViewerWindow
 
-    logger.debug(f"[DiffViewer] show_diff_viewer title={title}, html_len={len(html or '')}")
     viewer = DiffViewerWindow(parent=parent, title=title)
     viewer.load_html(html)
     viewer.show()

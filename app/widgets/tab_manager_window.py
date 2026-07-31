@@ -314,13 +314,18 @@ class TabManagerWindow(QWidget):
             #contentArea {{
                 background: transparent;
             }}
+            #contentStack {{
+                background: transparent;
+            }}
+            #globalOverlay {{
+                background: {Colors.CARD_BG.format(alpha=246)};
+                border-radius: 8px;
+            }}
         """)
         # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
         # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
         if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet(
-                "QSplitter::handle:horizontal { background: transparent; }"
-            )
+            self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
         # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
         # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
         # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
@@ -481,6 +486,8 @@ class TabManagerWindow(QWidget):
         # 四向全局容器：上/下沿高度折叠，左/右沿宽度折叠（停靠区）
         self._global_top_container = CardContainer(ContainerType.TOP)
         self._global_top_container.setObjectName("globalCardContainer")
+        # TOP 容器启用覆盖层模式：不再在 splitter 中展开，而是作为 QStackedWidget 覆盖层
+        self._global_top_container.set_overlay_mode(True)
         self._global_bottom_container = CardContainer(ContainerType.BOTTOM)
         self._global_bottom_container.setObjectName("globalBottomContainer")
         self._global_left_container = CardContainer(ContainerType.LEFT)
@@ -507,14 +514,14 @@ class TabManagerWindow(QWidget):
 
         # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
         # 结构：vDockSplitter(纵向)
-        #         ├─ 上停靠区（top 容器）
-        #         ├─ dockSplitter(横向)：左停靠区 | 内容区 | 右停靠区
+        #         ├─ _content_stack(QStackedWidget)：对话区 Page0 | 系统卡片覆盖层 Page1
         #         └─ 下停靠区（bottom 容器）
+        # systemCard_frame(横向)：左停靠区 | 内容区 | 右停靠区
         # CardContainer 停靠模式协议（enable_dock_mode）：
         #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
         #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
         #   重开 → 恢复上次拖出的占比。
-        from PyQt5.QtWidgets import QSplitter as _DockSplitter
+        from PyQt5.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
 
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
         self._dock_splitter.setObjectName("dockSplitter")
@@ -528,23 +535,43 @@ class TabManagerWindow(QWidget):
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
 
+        # ── 覆盖层堆栈（QStackedWidget）：系统卡片覆盖对话区 ──
+        # Page 0: 正常对话视图（_dock_splitter）
+        # Page 1: 系统卡片覆盖层（_global_top_container 内的全局卡片）
+        self._content_stack = _QStackedWidget(self._chat_frame)
+        self._content_stack.setObjectName("contentStack")
+        self._content_stack.addWidget(self._dock_splitter)  # index 0: 对话区
+
+        # 覆盖层页面：包裹 _global_top_container，使其填满覆盖层空间
+        self._global_overlay = QWidget(self._chat_frame)
+        self._global_overlay.setObjectName("globalOverlay")
+        _overlay_layout = QVBoxLayout(self._global_overlay)
+        _overlay_layout.setContentsMargins(0, 0, 0, 0)
+        _overlay_layout.setSpacing(0)
+        _overlay_layout.addWidget(self._global_top_container)
+        self._content_stack.addWidget(self._global_overlay)  # index 1: 覆盖层
+
+        # 默认显示对话区
+        self._content_stack.setCurrentIndex(0)
+
         self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
         self._vdock_splitter.setObjectName("vDockSplitter")
-        self._vdock_splitter.addWidget(self._global_top_container)
-        self._vdock_splitter.addWidget(self._dock_splitter)
+        self._vdock_splitter.addWidget(self._content_stack)
         self._vdock_splitter.addWidget(self._global_bottom_container)
-        self._vdock_splitter.setStretchFactor(0, 0)  # 上停靠区不随窗口拉伸
-        self._vdock_splitter.setStretchFactor(1, 1)  # 中段吃掉多余空间
-        self._vdock_splitter.setStretchFactor(2, 0)  # 下停靠区不随窗口拉伸
+        self._vdock_splitter.setStretchFactor(0, 1)  # 覆盖层堆栈吃掉多余空间
+        self._vdock_splitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
         self._vdock_splitter.setHandleWidth(6)
         self._vdock_splitter.setChildrenCollapsible(False)
         chat_frame_layout.addWidget(self._vdock_splitter, 1)
 
-        # 四个全局容器统一启用停靠模式（绑定各自宿主 splitter）
+        # 全局容器启用停靠模式
         self._global_left_container.enable_dock_mode(self._dock_splitter)
         self._global_right_container.enable_dock_mode(self._dock_splitter)
-        self._global_top_container.enable_dock_mode(self._vdock_splitter)
+        # TOP 容器处于覆盖层模式，不启用 dock mode
         self._global_bottom_container.enable_dock_mode(self._vdock_splitter)
+
+        # ── 覆盖层状态切换 ──
+        self._global_top_container.overlayStateChanged.connect(self._on_overlay_state_changed)
 
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter
@@ -621,6 +648,19 @@ class TabManagerWindow(QWidget):
             self._on_sidebar_toggled(True)
             # 让 TabPanel 内部状态同步（不重复发射信号）
             self._tab_panel.set_collapsed(True)
+
+    # ── 覆盖层状态切换 ──
+
+    def _on_overlay_state_changed(self, has_visible: bool):
+        """系统卡片覆盖层显隐切换：QStackedWidget 页面 0←→1
+
+        当 _global_top_container 报告有可见卡片时，切换到覆盖层页面（index 1），
+        隐藏对话区、仅显示系统卡片；全部卡片关闭后切回对话区（index 0）。
+        """
+        if has_visible:
+            self._content_stack.setCurrentIndex(1)
+        else:
+            self._content_stack.setCurrentIndex(0)
 
     # ── 窗口管理 ──
 

@@ -2,7 +2,7 @@
 from typing import Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer
+from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Colors
@@ -39,6 +39,11 @@ class CardContainer(QWidget):
     # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
     NO_ANIMATION_PROP = "noContainerAnimation"
 
+    # ── 覆盖层模式信号 ──
+    # 当容器处于覆盖层模式（overlay_mode）且卡片显隐状态变化时发射，
+    # 携带 bool 参数：True=有可见卡片（需展示覆盖层），False=无可见卡片（需隐藏覆盖层）
+    overlayStateChanged = pyqtSignal(bool)
+
     def __init__(self, container_type: ContainerType):
         super().__init__()
         self._container_type = container_type
@@ -59,6 +64,10 @@ class CardContainer(QWidget):
         # 折叠时记忆当前尺寸并显式归还空间；重开时恢复上次拖出的占比。
         self._dock_splitter = None  # 宿主 QSplitter（None = 普通布局模式）
         self._dock_last_size = 0  # 折叠前记忆的轴向尺寸（重开恢复用）
+        # ── 覆盖层模式 ──
+        # 容器不在 splitter 中展开/折叠，而是作为 QStackedWidget 的覆盖层。
+        # 卡片显隐时直接 show/hide 容器，发射 overlayStateChanged 信号供外部切换 stack。
+        self._overlay_mode = False
         self._setup_ui()
 
     # ── 轴向抽象：纵向容器操作高度，横向容器操作宽度 ──
@@ -120,6 +129,16 @@ class CardContainer(QWidget):
         """
         Colors.refresh()
         bg = Colors.CARD_BG.format(alpha=232)
+        if self._overlay_mode:
+            # 覆盖层模式：四角圆角独立面板视觉 + 较实背景，与对话区形成明确边界
+            self.setStyleSheet(f"""
+                CardContainer {{
+                    background: {Colors.CARD_BG.format(alpha=246)};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 8px;
+                }}
+            """)
+            return
         if self._horizontal or self._dock_splitter is not None:
             # 停靠区（左右容器 / 启用停靠模式的上下容器）：
             # 四角圆角独立面板视觉 + 更实的背景，与对话区形成明确边界
@@ -175,6 +194,22 @@ class CardContainer(QWidget):
         # 折叠态直接隐藏：让 splitter handle 一并消失，避免 0 宽容器留下拖拽缝
         if self._axis_max() == 0:
             self.hide()
+
+    def set_overlay_mode(self, enabled: bool):
+        """启用覆盖层模式：容器作为 QStackedWidget 覆盖层，不参与 splitter 展开/折叠
+
+        覆盖模式下：
+        - 卡片显示时容器直接 show() 并放开轴向 max（填满覆盖层空间）
+        - 卡片全部隐藏时容器 hide() 并锁定轴向 max=0
+        - 发射 overlayStateChanged 信号供外部（TabManagerWindow）切换 QStackedWidget 页面
+        """
+        self._overlay_mode = enabled
+        if enabled:
+            self._set_axis_max(0)
+            self._set_axis_min(0)
+            self.hide()
+            # 覆盖模式使用四角圆角独立面板样式
+            self._apply_background_style()
 
     def _dock_min(self) -> int:
         return self._DOCK_MIN_H if self._horizontal else self._DOCK_MIN_V
@@ -337,6 +372,20 @@ class CardContainer(QWidget):
         has_visible = any(not w.isHidden() for w in self._cards.values())
         skip_anim = self._should_skip_animation()
 
+        # ── 覆盖层模式：不操作 splitter，直接 show/hide + 发射信号 ──
+        if self._overlay_mode:
+            if has_visible:
+                self._set_axis_max(self._EXPAND_MAX)
+                self._set_axis_min(0)
+                self.show()
+            else:
+                self._set_axis_max(0)
+                self._set_axis_min(0)
+                self.hide()
+            self._layout.activate()
+            self.overlayStateChanged.emit(has_visible)
+            return
+
         # 停靠模式：折叠态容器是 hide() 的，展开前必须先 show()
         # （否则动画属性变化对不可见 widget 无视觉效果，splitter 也不给它分配空间）
         if has_visible and self._dock_splitter is not None and self.isHidden():
@@ -347,7 +396,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -419,11 +468,7 @@ class CardContainer(QWidget):
                 #    max(记忆占比, 最小比) 钳制，保证不存在"小于最小占比"的细条。
                 # 横向停靠区（LEFT/RIGHT）卡片天然较宽，沿用最小宽、尊重记忆占比即可。
                 chat_h = self._dock_splitter.height()
-                ratio_floor = (
-                    int(chat_h * self._DOCK_DEFAULT_RATIO_V)
-                    if (not self._horizontal and chat_h > 0)
-                    else 0
-                )
+                ratio_floor = int(chat_h * self._DOCK_DEFAULT_RATIO_V) if (not self._horizontal and chat_h > 0) else 0
                 if self._horizontal:
                     target = self._dock_last_size if self._dock_last_size > natural_h else natural_h
                     min_floor = self._dock_min()
@@ -501,7 +546,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
 
         anim.setStartValue(start_h)
@@ -516,7 +561,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
             anim.finished.connect(_on_done)

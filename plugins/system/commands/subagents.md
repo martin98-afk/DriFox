@@ -23,7 +23,7 @@ $ARGUMENTS
 
 ### 输出要求
 
-使用 `write` 工具创建文件，目标目录：`.drifox/plugins/user-custom/agents/<agent-name>.md`
+使用 `write` 工具创建文件，目标目录：`~/.drifox/plugins/user-custom/agents/<agent-name>.md`
 
 文件名 `<agent-name>` 请根据描述自动生成，规则：
 - 使用英文小写 + 连字符（kebab-case）
