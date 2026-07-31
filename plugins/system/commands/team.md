@@ -24,7 +24,6 @@ $ARGUMENTS
 
 ### 输出要求
 使用 `write` 工具创建文件，目标目录：
-| 用户安装插件（开发环境） | `.drifox/plugins/user-custom/team_templates/<name>.yaml` |
 | 用户安装插件（打包环境） | `~/.drifox/plugins/user-custom/team_templates/<name>.yaml`（用 home 目录展开） |
 
 文件名 `<name>` 请根据描述自动生成，规则：
