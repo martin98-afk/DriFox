@@ -1,6 +1,21 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.10] - 2026-08-01
+
+自上一版本以来的变更 | 提交数：3 · 文件变更：10 · +374/-18 | 贡献者：dingma
+
+> 重点：**欢迎卡片缓存生命周期修正** —— 项目/代理/会话切换时使 `_welcome_card_cache` 失效，避免卡片内容过期；**OpenAIChatToolWindow 快捷键去重** —— 命令重载时清除快捷方式缓存，防止重复注册。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **chat-window 欢迎卡片缓存失效**: 项目 / 代理 / 会话变更时使欢迎卡片缓存失效，防止切换到不同上下文后仍展示旧项目/旧代理的欢迎卡片（配合 v0.4.9 的 `_welcome_card_cache` 生命周期管理）
+- **OpenAIChatToolWindow 快捷键去重**: 命令重载时清除快捷方式缓存，防止重复注册导致快捷键触发多次
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级**: config / installer / README / pyproject 同步更新至 v0.4.10
+
 ## [v0.4.9] - 2026-07-31
 
 自上一版本以来的变更 | 提交数：59 · 文件变更：187 · +6768/-5624 | 贡献者：dingma, mading
