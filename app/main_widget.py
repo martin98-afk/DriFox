@@ -7903,12 +7903,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._add_chat_widget(welcome_card)
 
     def _hide_welcome_cards(self):
-        """隐藏所有欢迎卡片"""
-        for i in range(self.chat_layout.count()):
+        """从布局中移除所有欢迎卡片（widget 不删除，由 _welcome_card_cache 管理）"""
+        for i in range(self.chat_layout.count() - 1, -1, -1):
             item = self.chat_layout.itemAt(i)
             if item and item.widget():
                 widget = item.widget()
                 if getattr(widget, "_is_welcome", False):
+                    self.chat_layout.removeWidget(widget)
                     widget.hide()
 
     def _load_message_batch(self, initial: bool = False):
@@ -8197,8 +8198,14 @@ class OpenAIChatToolWindow(ToolWindow):
         while self.chat_layout.count():
             item = self.chat_layout.takeAt(0)
             if item and item.widget():
-                item.widget().hide()
-                widgets.append(item.widget())
+                w = item.widget()
+                # 跳过欢迎卡片：它由 _welcome_card_cache 独立管理，
+                # 不应被 _cache_current_session_cards 的 deleteLater 误删。
+                if getattr(w, "_is_welcome", False):
+                    w.hide()
+                    continue
+                w.hide()
+                widgets.append(w)
         return widgets
 
     def _cache_current_session_cards(self):

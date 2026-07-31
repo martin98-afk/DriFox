@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **OpenAIChatToolWindow 欢迎卡片生命周期修复**: 修复 `_hide_welcome_cards` 仅调用 `hide()` 而未 `removeWidget()`，导致多次显示/隐藏循环后布局中累积孤儿 widget；`_load_message_batch` 卡片提取循环改用逆序遍历避免索引漂移；显式跳过 `_is_welcome` 标记的卡片，防止被 `_cache_current_session_cards` 的 `deleteLater` 误删（欢迎卡片由 `_welcome_card_cache` 独立管理生命周期）
 - **Gitee OAuth token 刷新双入口修复**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
 - **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
 
