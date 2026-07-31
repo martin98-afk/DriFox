@@ -59,6 +59,7 @@ class GlobalCardController:
         self._hook_edit_popup = None
         self._mcp_edit_popup = None
         self._diff_viewer_card = None
+        self._sub_agent_session_card = None
 
     # ───────────────────────────────────────────────────────────
     # 窗口辅助
@@ -636,6 +637,55 @@ class GlobalCardController:
         self._diff_viewer_card = None
 
     # ───────────────────────────────────────────────────────────
+    # 内嵌子智能体会话卡片（替代弹窗 SubAgentSessionDialog，覆盖对话区域）
+    # ───────────────────────────────────────────────────────────
+
+    def ensure_sub_agent_session(self):
+        """懒构建内嵌子智能体会话卡片（重型，隐藏构件），仅构建一次"""
+        if self._sub_agent_session_card is not None:
+            return
+        from app.widgets.cards.settings.sub_agent_session_card import SubAgentSessionCard
+
+        self._sub_agent_session_card = SubAgentSessionCard(self._tab_manager)
+        self._sub_agent_session_card.setVisible(False)
+        self._sub_agent_session_card.closed.connect(
+            lambda: self._card_manager.hide_card("sub_agent_session", GLOBAL_WINDOW_ID)
+        )
+
+        mgr = self._card_manager
+        mgr.register_card(
+            GLOBAL_WINDOW_ID,
+            ContainerType.TOP,
+            "sub_agent_session",
+            self._sub_agent_session_card,
+            system_card=True,
+        )
+        self._global_card_container.add_card("sub_agent_session", self._sub_agent_session_card)
+
+    def show_sub_agent_session(self, task_id, agent_name, logs, summary=None, logs_provider=None):
+        """内嵌显示子智能体会话面板
+
+        Args:
+            task_id: 任务ID
+            agent_name: 智能体名称
+            logs: 初始日志列表
+            summary: 任务摘要
+            logs_provider: 可选。获取最新日志的回调（运行中自动轮询刷新）
+        """
+        self.ensure_sub_agent_session()
+        card = self._sub_agent_session_card
+        card.load(task_id, agent_name, logs, summary, logs_provider)
+        # 隐藏其他全局系统卡片（如设置），避免覆盖层堆叠
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._card_manager.show_card("sub_agent_session", GLOBAL_WINDOW_ID)
+
+    def hide_sub_agent_session(self):
+        """隐藏内嵌子智能体会话面板"""
+        if self._sub_agent_session_card is None:
+            return
+        self._card_manager.hide_card("sub_agent_session", GLOBAL_WINDOW_ID)
+
+    # ───────────────────────────────────────────────────────────
     # 列表变更广播（Hook/MCP/Gateway 开关 → 刷新全局列表 + 各窗口后端）
     # ───────────────────────────────────────────────────────────
 
@@ -736,7 +786,7 @@ class GlobalCardController:
 
     def hide_all_global_cards(self):
         """隐藏所有全局卡片（供 per-window 系统卡片互斥时调用）"""
-        for cid in ("settings", "provider_edit", "hook_edit", "mcp_edit", "diff_viewer"):
+        for cid in ("settings", "provider_edit", "hook_edit", "mcp_edit", "diff_viewer", "sub_agent_session"):
             self._card_manager.hide_card(cid, GLOBAL_WINDOW_ID)
 
     def invalidate_settings_popup(self):

@@ -12309,7 +12309,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
     def _on_sub_agent_enter_session(self, task_id: str, agent_name: str):
-        """进入子智能体会话 - 弹出对话框显示该子智能体的运行日志/消息"""
+        """进入子智能体会话 - 内嵌卡片显示该子智能体的运行日志/消息"""
         if getattr(self, "_is_destroyed", False):
             return
 
@@ -12326,18 +12326,19 @@ class OpenAIChatToolWindow(ToolWindow):
         summary["status"] = status
         summary["agent_name"] = agent_name
 
-        # 弹出会话对话框（传入 logs_provider 实现运行中实时更新）
-        from app.widgets.cards.floating.sub_agent_session_dialog import SubAgentSessionDialog
+        # 显示子智能体会话卡片（内嵌于软件窗口内部，覆盖对话区域，与 DiffViewerCard 同模式）
+        from app.widgets.cards.global_card_controller import get_global_card_controller
 
-        dialog = SubAgentSessionDialog(
+        controller = get_global_card_controller()
+        if controller is None:
+            return
+        controller.show_sub_agent_session(
             task_id=task_id,
             agent_name=agent_name,
             logs=logs,
             summary=summary,
-            parent=self,
             logs_provider=lambda: sub_agent_mgr.get_task_logs(task_id),
         )
-        dialog.exec_()
 
     def _handle_compact_command(self, args: str):
         """/compact 命令：触发上下文压缩
