@@ -109,6 +109,7 @@ class _CacheItemRow(QWidget):
             tcs = f"rgba(0,0,0,{0.45 * opacity})"
 
         font_qss = f"font-family: '{ff}';" if ff else ""
+        self._icon_label.setStyleSheet(f"background: transparent; font-size: {max(12, fs + 1)}px;")
         self._name_label.setStyleSheet(
             f"color: {tc}; background: transparent; font-size: {max(13, fs - 1)}px; {font_qss}"
         )

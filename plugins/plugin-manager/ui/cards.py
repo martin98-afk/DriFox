@@ -864,6 +864,10 @@ class _PluginRow(QFrame):
         self._font_size = font_size
         if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
             self._avatar.set_font_size(font_size)
+        # 标题字号写在 HTML span 中（不走 QSS），需手动重设
+        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
+        name_html = _highlight_html(self._name_raw, self._search_query)
+        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{self._version_suffix}</span>')
         self._build_buttons()
 
 
