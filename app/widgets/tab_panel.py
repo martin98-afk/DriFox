@@ -455,10 +455,12 @@ class UIPluginRow(QFrame):
     """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
 
     clicked = pyqtSignal()
+    positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
 
-    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = ""):
+    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = "", card_id: str = ""):
         super().__init__(parent)
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
+        self._card_id = card_id  # 存储卡片 ID，右键菜单定位用
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 使用与 TabItem 同款的 _ElidedLabel，收起时自动省略文本
@@ -472,6 +474,9 @@ class UIPluginRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
+        # 右键菜单：选择卡片插入方位（仅内存生效，不持久化）
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_position_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -523,6 +528,31 @@ class UIPluginRow(QFrame):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+    def _show_position_menu(self, pos):
+        """显示插入方位菜单：上/下/左/右/替换（仅内存生效，不持久化）"""
+        menu = QMenu(self)
+        # 样式与 TabPanel.contextMenuEvent 保持一致（运行时插值，跟随主题色）
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        positions = (("上", "top"), ("下", "bottom"), ("左", "left"), ("右", "right"), ("替换", "full"))
+        for label, container in positions:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda checked=False, c=container: self.positionRequested.emit(self._card_id, c))
+        menu.exec_(self.mapToGlobal(pos))
 
 
 class TabPanel(QWidget):
@@ -817,8 +847,10 @@ class TabPanel(QWidget):
                 self._get_plugin_icon(pm, plugin_name),
                 self._system_plugin_section,
                 plugin_name=plugin_name,
+                card_id=card_id,
             )
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
+            row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
         has_system = bool(system_infos)
@@ -837,8 +869,10 @@ class TabPanel(QWidget):
                 self._get_plugin_icon(pm, plugin_name),
                 self._custom_plugin_section,
                 plugin_name=plugin_name,
+                card_id=card_id,
             )
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
+            row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._custom_plugin_layout.addWidget(row)
             self._custom_plugin_buttons.append(row)
         has_custom = bool(custom_infos)
@@ -940,6 +974,34 @@ class TabPanel(QWidget):
             UIPluginRegistry.get_instance().toggle_floating_card(card_id, main_widget=current_window)
         except Exception as e:
             logger.error(f"[TabPanel] UI 插件 {card_id} 打开失败：{e}")
+
+    def _on_ui_plugin_position_requested(self, card_id: str, container: str):
+        """按指定方位移动 UI 插件卡片（仅内存生效，不持久化）"""
+        parent = self.parent()
+        while parent is not None and not hasattr(parent, "get_current_window"):
+            parent = parent.parent()
+        if parent is None:
+            logger.warning(f"[TabPanel] UI 插件 {card_id} 定位：无法找到 TabManagerWindow")
+            return
+        current_window = parent.get_current_window()
+        if current_window is None:
+            logger.warning(f"[TabPanel] UI 插件 {card_id} 定位：当前窗口为空")
+            return
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            registry = UIPluginRegistry.get_instance()
+            if not registry.move_floating_card(card_id, container, main_widget=current_window):
+                return
+            # move_floating_card 仅在卡片原本可见时自动重建显示；原本隐藏时
+            # 只更新方位注册，这里统一确保卡片显示（已可见则保持不动）
+            host = parent  # TabManagerWindow（Tab 模式全局容器宿主）
+            cm = getattr(host, "_card_manager", None)
+            wid = getattr(host, "_window_id", None)
+            if cm is not None and wid is not None and not cm.is_card_visible(card_id, wid):
+                registry.toggle_floating_card(card_id, main_widget=current_window)
+        except Exception as e:
+            logger.error(f"[TabPanel] UI 插件 {card_id} 定位失败：{e}")
 
     def _refresh_plugin_style(self):
         """刷新插件区域的主题和字号样式"""
@@ -1191,11 +1253,11 @@ class TabPanel(QWidget):
             }}
         """)
         new_action = menu.addAction("新建标签页")
+        if clicked_index >= 0:
+            branch_action = menu.addAction("分支标签页")
         menu.addSeparator()
-
         if clicked_index >= 0:
             close_action = menu.addAction("关闭标签页")
-            branch_action = menu.addAction("分支标签页")
 
         action = menu.exec_(event.globalPos())
         if action == new_action:
