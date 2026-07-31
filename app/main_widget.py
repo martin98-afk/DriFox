@@ -3263,6 +3263,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _clear_command_shortcuts(self):
         """清除已注册的命令快捷键"""
+        # 清理窗口级去重缓存（当前实例对应的窗口）
+        shortcut_parent = self.window() or self
+        win_id = id(shortcut_parent)
+        # 统计同一窗口下残余的 MainWidget 实例数
+        remaining = sum(
+            1 for w in OpenAIChatToolWindow._instances
+            if not w._is_destroyed and id(w.window() or w) == win_id
+        )
+        if remaining <= 1:
+            # 最后一个实例销毁时清除窗口级缓存
+            OpenAIChatToolWindow._window_shortcut_cache.pop(win_id, None)
+
         for qs in getattr(self, "_command_shortcuts", []):
             try:
                 qs.setEnabled(False)
@@ -3433,6 +3445,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.error(f"[MainWidget] Message factory {factory.name} failed: {e}")
         return None
 
+    # ── 快捷键窗口级注册去重 ──────────────────────────────
+    # 在 Tab 模式下，多个 MainWidget 共享同一个顶层窗口（TabManagerWindow），
+    # 如果每个 MainWidget 都向同一个窗口注册 QShortcut，将产生重复注册导致
+    # 快捷键行为 undefined（Qt 官方文档明确指出同一 context 下重复 key sequence 行为未定义）。
+    # 此处维护每个窗口已注册的 shortcut key sequences 集合，在注册前检查去重。
+    _window_shortcut_cache: Dict[int, set] = {}
+
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的命令注册 QShortcut
 
@@ -3478,12 +3497,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 顶层窗口在覆盖层打开时仍可见，确保快捷键持续可触发
         shortcut_parent = self.window() or self
+        win_id = id(shortcut_parent)
+
+        # Tab 模式去重：同一窗口已注册的 key sequence 跳过（防止多标签页重复注册）
+        registered = OpenAIChatToolWindow._window_shortcut_cache.get(win_id, set())
+
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if not cmd_def.shortcut:
                     continue
-                qs = QShortcut(QKeySequence(cmd_def.shortcut), shortcut_parent)
+                key_seq = cmd_def.shortcut
+                # 去重：同一窗口下相同快捷键只需注册一次
+                if key_seq in registered:
+                    continue
+                registered.add(key_seq)
+
+                qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
 
                 name = cmd_def.name
 
@@ -3507,6 +3537,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 qs.activated.connect(_on_shortcut)
                 self._command_shortcuts.append(qs)
+
+        # 更新窗口级缓存
+        OpenAIChatToolWindow._window_shortcut_cache[win_id] = registered
 
     def _command_has_params(self, name: str) -> bool:
         """检查命令是否定义了参数（用于快捷键触发的参数卡片决策）
@@ -7001,7 +7034,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7066,18 +7099,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
+            # 清除窗口级快捷键缓存，允许重新注册
+            OpenAIChatToolWindow._window_shortcut_cache.clear()
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7102,7 +7137,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7136,7 +7171,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7177,7 +7212,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7204,7 +7239,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -15834,7 +15869,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -15861,7 +15896,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话
