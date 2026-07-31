@@ -5199,11 +5199,22 @@ class CodeWebViewer(QWebEngineView):
     def _copy_to_clipboard(self):
         """复制内容到剪贴板（使用系统原生 API）
 
+        优先复制页面选中文本（右键菜单标准行为），无选中时降级复制全文。
+
         🐛 修复：使用 get_plain_text() 替代直接读 _markdown_text，
         因为 _cleanup_render_cache 会将 _markdown_text 清空。
         get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
         """
-        text = self.get_plain_text()
+        # 优先复制选中文本：QWebEnginePage.selectedText() 返回 DOM 选区，
+        # 无选中时返回空字符串；\u2029 为 WebEngine 块级换行分隔符，规范化为 \n。
+        try:
+            selected = self.page().selectedText()
+            if selected:
+                text = selected.replace("\u2029", "\n")
+            else:
+                text = self.get_plain_text()
+        except Exception:
+            text = self.get_plain_text()
         if not text:
             return
         try:
