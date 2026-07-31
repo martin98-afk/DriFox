@@ -7709,6 +7709,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_agent = agent_name
         self.backend.switch_agent(agent_name)
         self._update_agent_status(agent_name)
+        # 🛡️ 失效欢迎卡片缓存：卡片内容依赖 _current_agent（智能体名称/描述）。
+        # 切换智能体不影响当前会话消息，但若欢迎卡片正在显示需重建。
+        self._invalidate_welcome_card()
+        if self._displayed_session_id is None:
+            # 当前正显示欢迎卡片（空会话），立即重建
+            self._show_initial_welcome()
 
     def _on_input_area_height_changed(self):
         """输入框高度变化时同步调整卡片高度
@@ -7776,6 +7782,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
         except Exception:
             pass
+
+        # 🛡️ 失效欢迎卡片缓存（必须在 _clear_chat_area 之前同步执行，
+        # 避免 sip.isdeleted 竞态导致 _show_initial_welcome 命中旧缓存）。
+        # 缓存内容依赖 _current_project/_current_agent，新建会话时这两个字段
+        # 可能因项目切换 / 智能体切换而变化，必须重建。
+        self._invalidate_welcome_card()
 
         if self._is_auto_loop_running:
             InfoBar.warning(
@@ -7946,6 +7958,46 @@ class OpenAIChatToolWindow(ToolWindow):
                 if getattr(widget, "_is_welcome", False):
                     self.chat_layout.removeWidget(widget)
                     widget.hide()
+
+    def _invalidate_welcome_card(self):
+        """显式失效欢迎卡片缓存（pop + delete widget）
+
+        修复 bug：_welcome_card_cache 仅按 _window_id 缓存，但卡片内容依赖
+        _current_project 和 _current_agent。切换项目/智能体/会话数据时必须
+        主动失效，否则会展示上一个项目/智能体的陈旧数据。
+
+        性能：失效后下次显示会重建 QWebEngineView（~100-500ms 主线程占用）。
+        同窗口内无变化的重复调用仍走缓存命中路径，性能优化保留。
+        之所以不能仅靠 sip.isdeleted 兜底：_clear_chat_area 之后
+        QTimer.singleShot(0, _show_initial_welcome) 存在竞态——
+        若 singleShot 回调先于 deleteLater 真正执行，sip.isdeleted 仍为 False，
+        缓存命中即返回旧卡片，导致「新建/切项目后欢迎卡片数据不刷新」。
+
+        调用点：
+        - _on_project_selected 切换 _current_project 之后
+        - _on_agent_changed 切换 _current_agent 之后
+        - _create_new_session 入口（确保 _show_initial_welcome 走重建路径）
+        - _on_archived_session_deleted / _renamed 之后（recent_sessions 列表已变化）
+        """
+        cached = self._welcome_card_cache.pop(self._window_id, None)
+        if cached is None:
+            return
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(cached):
+                return
+        except Exception:
+            pass
+        # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
+        # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
+        # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
+        try:
+            if cached.parent() is not None:
+                cached.setParent(None)
+        except Exception:
+            pass
+        cached.deleteLater()
 
     def _load_message_batch(self, initial: bool = False):
         """按当前可见窗口加载消息。"""
@@ -9387,6 +9439,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 刷新归档列表
             self._refresh_archived_sessions()
+            # 🛡️ 失效欢迎卡片：归档删除会让 recent_sessions / top_by_count 顺序变化
+            self._invalidate_welcome_card()
+            if self._displayed_session_id is None:
+                self._show_initial_welcome()
 
             InfoBar.success(
                 title="删除成功",
@@ -9428,6 +9484,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 刷新归档列表
             self._refresh_archived_sessions()
+            # 🛡️ 失效欢迎卡片：归档重命名会让 recent_sessions 标题变化
+            self._invalidate_welcome_card()
+            if self._displayed_session_id is None:
+                self._show_initial_welcome()
 
             InfoBar.success(
                 title="重命名成功",
@@ -14548,6 +14608,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_branch()
         self.cfg.current_project.value = project
         self.cfg.save()
+        # 🛡️ 失效欢迎卡片缓存：recent_sessions/top_by_count 按 _current_project 过滤，
+        # 项目切换后必须重建。虽然下方 _create_new_session 内部也会失效一次，
+        # 这里提前失效可在 _create_new_session 早期失败/跳过时仍有兜底。
+        self._invalidate_welcome_card()
         # 更新 tool_executor 的当前项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)

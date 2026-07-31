@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复 (Bug Fixes)
 
 - **chat-window 欢迎卡片生命周期**: `_hide_welcome_cards` 仅调用 `hide()` 而未 `removeWidget()`，导致多次显示/隐藏循环后布局中累积孤儿 widget；`_load_message_batch` 卡片提取循环改用逆序遍历避免索引漂移；显式跳过 `_is_welcome` 标记的卡片，防止被 `_cache_current_session_cards` 的 `deleteLater` 误删（欢迎卡片由 `_welcome_card_cache` 独立管理生命周期）
+- **chat-window 欢迎卡片不刷新（点击新建 / 切换项目后）**: `_welcome_card_cache` 仅按 `_window_id` 缓存，但卡片内容依赖 `_current_project` / `_current_agent`；原唯一失效路径 `sip.isdeleted(cached)` 存在竞态——`_clear_chat_area` 之后 `QTimer.singleShot(0, _show_initial_welcome)` 可能在 `deleteLater` 实际执行前先触发，导致缓存命中返回旧卡片。新增 `_invalidate_welcome_card()` 显式失效辅助，在 `_create_new_session` 入口、`_on_project_selected`、`_on_agent_changed`、`_on_archived_session_deleted/renamed` 等变更点同步 pop 缓存 + `setParent(None)` + `deleteLater()`，消除竞态。同窗口内无变化的重复调用仍走缓存命中路径，性能优化保留
 - **Gitee OAuth token 刷新双入口**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
 - **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
 - **message-card 紧凑模式流式滚动**: 防止 compact 模式下 tool-content 在流式输出时意外滚动到顶部
