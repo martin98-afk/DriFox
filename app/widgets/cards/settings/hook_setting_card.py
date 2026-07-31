@@ -217,6 +217,14 @@ class HookItem(QWidget):
         self.setStyleSheet("background-color: transparent;")
         self.hBoxLayout = QHBoxLayout(self)
 
+        # 预计算共享 CSS 值（避免重复调用 get_font_family_css / scale_font_size）
+        ff = get_font_family_css()
+        fs10 = f"font-size: {scale_font_size(10)}px;"
+        fs9 = f"font-size: {scale_font_size(9)}px;"
+        fs13 = f"font-size: {scale_font_size(13)}px;"
+        tag_bold = "font-weight: bold; padding: 1px 2px; border-radius: 4px;"
+        tag_sm = "font-weight: bold; padding: 1px 2px; border-radius: 3px;"
+
         # 来源标签（彩色小 tag）
         source_type = self._hook_data.get("_source_type", "user")
         display_name = self._hook_data.get("_display_name", "自定义")
@@ -226,11 +234,7 @@ class HookItem(QWidget):
         else:
             source_text = display_name[:12] + ("…" if len(display_name) > 12 else "")
         self.sourceLabel = QLabel(source_text, self)
-        self.sourceLabel.setStyleSheet(
-            f"background-color: {source_color}; color: white; "
-            f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
-        )
+        self.sourceLabel.setStyleSheet(f"background-color: {source_color}; color: white; {ff} {fs10} {tag_bold}")
         self.sourceLabel.setFixedHeight(18)
 
         # 类型标签
@@ -239,43 +243,30 @@ class HookItem(QWidget):
         type_color = type_colors.get(hook_type, "#888")
         type_labels = {"command": "CMD", "http": "HTTP", "python": "PY", "prompt": "PROMPT"}
         self.typeLabel = QLabel(type_labels.get(hook_type, hook_type.upper()), self)
-        self.typeLabel.setStyleSheet(
-            f"background-color: {type_color}; color: white; "
-            f"{get_font_family_css()} font-size: {scale_font_size(10)}px; "
-            f"padding: 1px 2px; border-radius: 4px; font-weight: bold;"
-        )
+        self.typeLabel.setStyleSheet(f"background-color: {type_color}; color: white; {ff} {fs10} {tag_bold}")
         self.typeLabel.setFixedHeight(18)
 
         # Matcher 标签（仅在非空时显示，如 #team_member）
         self._matcherLabel = None
         matcher = self._hook_data.get("matcher", "") or ""
         if matcher:
-            # 缩短过长的 matcher 显示
             display_matcher = matcher[:18] + ("…" if len(matcher) > 18 else "")
             self._matcherLabel = QLabel(display_matcher, self)
-            self._matcherLabel.setStyleSheet(
-                f"background-color: #8E44AD; color: white; "
-                f"{get_font_family_css()} font-size: {scale_font_size(9)}px; "
-                f"padding: 1px 2px; border-radius: 3px; font-weight: bold;"
-            )
+            self._matcherLabel.setStyleSheet(f"background-color: #8E44AD; color: white; {ff} {fs9} {tag_sm}")
             self._matcherLabel.setFixedHeight(16)
 
         # 命令文本
         display_cmd = self._get_effective_command()
         self.commandLabel = _ElidedLabel(display_cmd, self)
         self.commandLabel.setObjectName("titleLabel")
-        self.commandLabel.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(13)}px;")
+        self.commandLabel.setStyleSheet(f"{ff} {fs13}")
         self.commandLabel.setMinimumWidth(40)
 
         # Windows 标签（仅在 commandWindows 存在时显示）
         self._winLabel = None
         if self._hook_data.get("commandWindows"):
             self._winLabel = QLabel("Win", self)
-            self._winLabel.setStyleSheet(
-                f"background-color: #FF8C00; color: white; "
-                f"{get_font_family_css()} font-size: {scale_font_size(9)}px; "
-                f"padding: 1px 2px; border-radius: 3px; font-weight: bold;"
-            )
+            self._winLabel.setStyleSheet(f"background-color: #FF8C00; color: white; {ff} {fs9} {tag_sm}")
             self._winLabel.setFixedHeight(16)
 
         # 开关

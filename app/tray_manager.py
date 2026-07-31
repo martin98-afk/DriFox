@@ -118,7 +118,7 @@ class TrayManager(QObject):
             # 已销毁的 C++ 对象调用 isVisible 会抛 RuntimeError
             w.isVisible()
             return True
-        except RuntimeError, Exception:
+        except Exception:
             return False
 
     def __init__(self, parent=None):
@@ -129,6 +129,7 @@ class TrayManager(QObject):
 
         self._windows: list = []  # 已注册的 ToolPopupDialog 列表
         self._pending_notification: dict = {}  # 当前待处理的托盘通知 {notification_id: window}
+        self._last_notification_tab_index: int = -1  # 最近通知关联的 tab 索引（Tab 模式）
 
         # 创建托盘图标
         self._tray_icon = QSystemTrayIcon(self)
@@ -636,7 +637,7 @@ class TrayManager(QObject):
             try:
                 _ = w.isVisible()  # 已销毁对象会抛 RuntimeError
                 alive.append(w)
-            except RuntimeError, Exception:
+            except Exception:
                 continue
         if len(alive) != len(self._selected_windows):
             self._selected_windows = alive
@@ -664,13 +665,14 @@ class TrayManager(QObject):
             self._update_selection_visuals()
         logger.debug(f"窗口已从 TrayManager 注销: {window.windowTitle()}")
 
-    def notify(self, title: str, message: str, window: QObject = None) -> None:
+    def notify(self, title: str, message: str, window: QObject = None, tab_index: int = -1) -> None:
         """发送 Windows 通知
 
         Args:
             title: 通知标题
             message: 通知内容
             window: 触发通知的窗口对象，点击通知时会显示该窗口
+            tab_index: Tab 模式下，关联的标签页索引（-1 表示不跳转）
         """
         if self._tray_icon.isVisible():
             # 生成唯一 ID 关联通知和窗口
@@ -678,6 +680,7 @@ class TrayManager(QObject):
             self._pending_notification[notification_id] = window or self._get_first_valid_window()
             # 保存到实例属性，供 messageClicked 信号处理器使用
             self._last_notification_window = self._pending_notification.get(notification_id)
+            self._last_notification_tab_index = tab_index
             self._tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon(1), 4000)
             # 4秒后清理（与 showMessage 的显示时长一致）
             QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
@@ -784,6 +787,14 @@ class TrayManager(QObject):
             window = self._get_first_valid_window()
             if window:
                 self._show_window(window)
+
+        # Tab 模式：跳转到通知对应的标签页
+        if self._tab_manager_window is not None and self._last_notification_tab_index >= 0:
+            try:
+                logger.debug(f"[_on_message_clicked] 跳转到 tab {self._last_notification_tab_index}")
+                self._tab_manager_window._tab_panel.set_active_index(self._last_notification_tab_index)
+            except Exception as e:
+                logger.warning(f"[_on_message_clicked] 跳转 tab 失败: {e}")
 
     def _on_tray_activated(self, reason):
         """Windows 托盘图标点击处理"""
@@ -1187,6 +1198,24 @@ class TrayManager(QObject):
         任意窗口可见 → 全部隐藏
         全部已隐藏 → 全部显示并激活
         """
+        # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
+        now = time.perf_counter()
+        if now - self._last_toggle_time < 0.5:
+            return
+        self._last_toggle_time = now
+
+        # ── 恢复可能丢失的 Tab 管理器引用（仅 Tab 模式下）──
+        # _enable_mode 已确保引用注册，但以防 C++ 对象重建或异常导致引用丢失，
+        # 此处安全兜底：仅在无独立窗口（Tab 模式特征）时恢复引用，不自动显示。
+        if self._tab_manager_window is None and not self._windows:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+                if _TMW._instance is not None:
+                    self._tab_manager_window = _TMW._instance
+            except Exception:
+                self._tab_manager_window = None
+
         # ── Tab 模式分支 ──
         if self._tab_manager_window is not None:
             try:
@@ -1196,30 +1225,14 @@ class TrayManager(QObject):
                     self._tab_manager_window.show()
                     self._tab_manager_window.activateWindow()
                     self._tab_manager_window.raise_()
+                    # 从最小化状态恢复
+                    if self._tab_manager_window.isMinimized():
+                        self._tab_manager_window.showNormal()
             except RuntimeError:
                 self._tab_manager_window = None
-
-        # 引用丢失时尝试从单例恢复
-        if self._tab_manager_window is None:
-            try:
-                from app.widgets.tab_manager_window import TabManagerWindow as _TMW
-
-                if _TMW._instance is not None:
-                    self._tab_manager_window = _TMW._instance
-                    if not self._tab_manager_window.isVisible():
-                        self._tab_manager_window.show()
-                        self._tab_manager_window.activateWindow()
-                        self._tab_manager_window.raise_()
-            except Exception:
-                self._tab_manager_window = None
-            return
-
-        # ── 独立窗口模式（原有逻辑）──
-        # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
-        now = time.perf_counter()
-        if now - self._last_toggle_time < 0.5:
-            return
-        self._last_toggle_time = now
+                # C++ 对象已销毁，降级到独立窗口逻辑
+            else:
+                return  # Tab 模式正常完成，跳过独立窗口逻辑
 
         try:
             # 过滤有效窗口，同时剔除已销毁的 C++ 对象
@@ -1231,7 +1244,7 @@ class TrayManager(QObject):
                     # 验证 C++ 对象存活；已销毁对象会抛 RuntimeError
                     w.isVisible()
                     valid_windows.append(w)
-                except RuntimeError, Exception:
+                except Exception:
                     continue
 
             if not valid_windows:

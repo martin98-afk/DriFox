@@ -62,7 +62,6 @@ to_remove_linux = [
     "PyQt5/Qt5/qml/QtPositioning",
     "PyQt5/Qt5/qml/QtMultimedia",
     "PyQt5/Qt5/qml/QtAudioEngine",
-    "PyQt5/Qt5/resources/qtwebengine_devtools_resources.pak",
     "PyQt5/Qt5/resources/qtwebengine_resources_200p.pak",
     "PyQt5/Qt5/resources/qtwebengine_resources_100p.pak",
 ]
@@ -95,7 +94,6 @@ to_remove_windows = [
     "PyQt5/Qt5/qml/QtTest",
     "PyQt5/Qt5/qml/QtWebSockets",
     "PyQt5/Qt5/qml/QtQuick.2",
-    "PyQt5/Qt5/resources/qtwebengine_devtools_resources.pak",
     "PyQt5/Qt5/resources/qtwebengine_resources_200p.pak",
     "PyQt5/Qt5/resources/qtwebengine_resources_100p.pak",
 ]

@@ -998,7 +998,15 @@ class SubAgentExecutor(QThread):
             self._last_activity_time = time.time()
             # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
             # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
-            result = self.tool_executor.execute(tool_name, arguments)
+            # 传入 hook_context 覆盖默认角色，防止 subagent 工具调用误用 primary 角色
+            result = self.tool_executor.execute(
+                tool_name,
+                arguments,
+                hook_context={
+                    "current_role": "subagent",
+                    "is_subagent_call": True,
+                },
+            )
             result_content = str(result) if result else ""
             success = getattr(result, "success", True) if result else False
 

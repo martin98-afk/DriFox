@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -40,15 +41,54 @@ _HUNK_HEADER_PATTERN = re.compile(r"@@ -(\d+),?\d* \+(\d+),?\d* @@")
 
 # 扩展名 → 高亮语言标签（仅用于决定客户端用哪套着色规则；'other' 不高亮）
 _LANG_EXT_MAP = {
-    "py": "py", "pyi": "py", "js": "js", "mjs": "js", "cjs": "js", "jsx": "jsx",
-    "ts": "ts", "tsx": "tsx", "java": "java", "go": "go", "rs": "rust", "c": "c",
-    "h": "c", "cpp": "cpp", "cc": "cpp", "cxx": "cpp", "hpp": "cpp", "cs": "csharp",
-    "rb": "ruby", "php": "php", "sh": "sh", "bash": "sh", "zsh": "sh", "fish": "sh",
-    "sql": "sql", "json": "json", "jsonc": "json", "yml": "yaml", "yaml": "yaml",
-    "toml": "toml", "ini": "ini", "cfg": "ini", "conf": "ini", "lua": "lua", "kt": "kt",
-    "kts": "kt", "swift": "swift", "r": "r", "dart": "dart", "vue": "vue", "xml": "xml",
-    "html": "html", "htm": "html", "css": "css", "scss": "css", "less": "css",
-    "md": "md", "markdown": "md",
+    "py": "py",
+    "pyi": "py",
+    "js": "js",
+    "mjs": "js",
+    "cjs": "js",
+    "jsx": "jsx",
+    "ts": "ts",
+    "tsx": "tsx",
+    "java": "java",
+    "go": "go",
+    "rs": "rust",
+    "c": "c",
+    "h": "c",
+    "cpp": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "hpp": "cpp",
+    "cs": "csharp",
+    "rb": "ruby",
+    "php": "php",
+    "sh": "sh",
+    "bash": "sh",
+    "zsh": "sh",
+    "fish": "sh",
+    "sql": "sql",
+    "json": "json",
+    "jsonc": "json",
+    "yml": "yaml",
+    "yaml": "yaml",
+    "toml": "toml",
+    "ini": "ini",
+    "cfg": "ini",
+    "conf": "ini",
+    "lua": "lua",
+    "kt": "kt",
+    "kts": "kt",
+    "swift": "swift",
+    "r": "r",
+    "dart": "dart",
+    "vue": "vue",
+    "xml": "xml",
+    "html": "html",
+    "htm": "html",
+    "css": "css",
+    "scss": "css",
+    "less": "css",
+    "md": "md",
+    "markdown": "md",
 }
 
 
@@ -232,7 +272,10 @@ THEME_CSS = r"""
         width:260px; min-width:260px;
         background:var(--bg2); border-right:1px solid var(--border);
         display:flex; flex-direction:column; overflow:hidden;
+        transition:width 0.15s ease, min-width 0.15s ease;
     }
+    /* 折叠状态：宽度归零，内容被 overflow:hidden 裁掉，仅保留 view-bar 上的展开按钮 */
+    .sidebar.collapsed { width:0; min-width:0; border-right:none; }
     .sb-hdr {
         padding:12px 14px 8px; border-bottom:1px solid var(--border);
         font-size:11px; font-weight:600; text-transform:uppercase;
@@ -291,6 +334,16 @@ THEME_CSS = r"""
         gap:8px; flex-shrink:0;
     }
     .view-bar .spacer { flex:1; }
+    .view-bar .side-btn {
+        padding:4px 8px; font-size:11px; font-family:var(--sans);
+        background:transparent; border:1px solid var(--border); border-radius:4px;
+        color:var(--text2); cursor:pointer; flex-shrink:0;
+        transition:all 0.15s ease;
+    }
+    .view-bar .side-btn:hover {
+        border-color:var(--accent); color:var(--accent);
+        background:rgba(88,166,255,0.1);
+    }
     .view-tgl {
         display:flex; border:1px solid var(--border); border-radius:4px;
         overflow:hidden;
@@ -608,6 +661,7 @@ function postHighlight(block){
 }
 """
 
+
 # ==========================================================================
 # 3. HTML 生成器
 # ==========================================================================
@@ -618,8 +672,13 @@ class DiffHtmlGenerator:
     def escape_html(cls, text: str) -> str:
         if not text:
             return ""
-        return (text.replace("&", "&amp;").replace("<", "&lt;")
-                .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;"))
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
 
     @classmethod
     def _lang_for_path(cls, path: str) -> str:
@@ -628,8 +687,7 @@ class DiffHtmlGenerator:
 
     @classmethod
     def generate_html_report(
-        cls, diff_output: str, session_id: str = "",
-        lazy_load: bool = True, default_view: str = "split"
+        cls, diff_output: str, session_id: str = "", lazy_load: bool = True, default_view: str = "unified"
     ) -> str:
         if diff_output is None:
             diff_output = ""
@@ -648,7 +706,9 @@ class DiffHtmlGenerator:
             fid = f"file-{i}"
             tree_html += cls._tree_item(fi, fid)
             # 将每文件的 lines 单独序列化，避免一个巨大 JSON 导致解析卡死
-            lines_json = json.dumps(fi["lines"]).decode("utf-8")
+            # 转义 "</"，防止 diff 内容中的 </script> 提前终止 ld- 数据标签、
+            # 破坏后续 HTML/JS 解析（与 _gen_files_meta 的处理保持一致）
+            lines_json = json.dumps(fi["lines"]).decode("utf-8").replace("</", "\\u003C/")
             if i < preload_n:
                 blocks_html += cls._file_block(fi, fid)
                 blocks_html += f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
@@ -684,6 +744,7 @@ class DiffHtmlGenerator:
 </div>
 <div class="content">
     <div class="view-bar">
+        <button class="side-btn" id="sidebar-toggle" onclick="toggleSidebar()" title="折叠/展开文件列表">&#171;</button>
         <div class="view-tgl">
             <button class="{split_on}" id="btn-split" onclick="switchView('split')">并排对比</button>
             <button class="{unified_on}" id="btn-unified" onclick="switchView('unified')">统一直列</button>
@@ -842,6 +903,26 @@ function switchView(v){{
     document.querySelectorAll('.file-block').forEach(function(b){{applyView(b);}});
 }}
 
+// ---- Sidebar collapse (宽度不足时自动折叠，手动切换后不再自动干预) ----
+var _sbUser=false;
+function setSidebar(collapsed){{
+    var sb=document.querySelector('.sidebar');
+    if(!sb)return;
+    sb.classList.toggle('collapsed',!!collapsed);
+    var btn=document.getElementById('sidebar-toggle');
+    if(btn)btn.innerHTML=collapsed?'&#9776;':'&#171;';
+}}
+function toggleSidebar(){{
+    var sb=document.querySelector('.sidebar');
+    _sbUser=true;
+    setSidebar(!(sb&&sb.classList.contains('collapsed')));
+}}
+function autoSidebar(){{
+    if(_sbUser)return;
+    setSidebar(window.innerWidth<900);
+}}
+window.addEventListener('resize',autoSidebar);
+
 // Context folding
 function applyFold(c){{
     var TH=8,HD=3,TL=3;
@@ -953,6 +1034,7 @@ document.querySelectorAll('.file-block').forEach(function(b){{window._do.observe
 requestAnimationFrame(function(){{
     document.querySelectorAll('.file-block').forEach(function(b){{ try{{postHighlight(b);}}catch(e){{}} try{{applyFold(b);}}catch(e){{}} try{{applyView(b);}}catch(e){{}} }});
     var f=document.querySelector('.tree-item');if(f)f.classList.add('active');
+    autoSidebar();
 }});
 
 // ---- Horizontal scroll sync ----
@@ -1011,10 +1093,16 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             if line.startswith("--- "):
                 if cur_file and cur_lines:
                     merged = DiffHunkMerger.merge_file_hunks(cur_lines)
-                    files.append({"path": cur_file, "additions": cur_stats["additions"],
-                                  "deletions": cur_stats["deletions"], "status": cur_status,
-                                  "lang": cls._lang_for_path(cur_file),
-                                  "lines": merged})
+                    files.append(
+                        {
+                            "path": cur_file,
+                            "additions": cur_stats["additions"],
+                            "deletions": cur_stats["deletions"],
+                            "status": cur_status,
+                            "lang": cls._lang_for_path(cur_file),
+                            "lines": merged,
+                        }
+                    )
                 parts = line[4:].strip()
                 cur_status = "added" if parts == "/dev/null" else "modified"
                 if parts.startswith("a/") or parts.startswith("b/"):
@@ -1037,10 +1125,16 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             cur_lines.append(line)
         if cur_file and cur_lines:
             merged = DiffHunkMerger.merge_file_hunks(cur_lines)
-            files.append({"path": cur_file, "additions": cur_stats["additions"],
-                          "deletions": cur_stats["deletions"], "status": cur_status,
-                          "lang": cls._lang_for_path(cur_file),
-                          "lines": merged})
+            files.append(
+                {
+                    "path": cur_file,
+                    "additions": cur_stats["additions"],
+                    "deletions": cur_stats["deletions"],
+                    "status": cur_status,
+                    "lang": cls._lang_for_path(cur_file),
+                    "lines": merged,
+                }
+            )
         return files
 
     # ---- Tree item ----
@@ -1053,15 +1147,18 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
         icon = cls._icon(p)
         name = Path(p).name
         d = str(Path(p).parent).replace("\\", "/")
-        if d == ".": d = ""
+        if d == ".":
+            d = ""
         badges = ""
         if st == "added":
             badges += '<span class="tree-badge new">新增</span>'
         elif st == "deleted":
             badges += '<span class="tree-badge rm">删除</span>'
         else:
-            if adds > 0: badges += f'<span class="tree-badge add">+{adds}</span>'
-            if dels > 0: badges += f'<span class="tree-badge del">-{dels}</span>'
+            if adds > 0:
+                badges += f'<span class="tree-badge add">+{adds}</span>'
+            if dels > 0:
+                badges += f'<span class="tree-badge del">-{dels}</span>'
         dir_h = f'<span class="dir">{cls.escape_html(d)}</span>' if d else ""
         return f'''<a href="#{fid}" class="tree-item" data-target="{fid}" title="{cls.escape_html(p)}">
             <span class="icon">{icon}</span>
@@ -1080,11 +1177,11 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
         ep = cls.escape_html(p)
         ep_js = p.replace("\\", "\\\\").replace("'", "\\'")
 
-        header = f'''<div class="file-hdr">
+        header = f"""<div class="file-hdr">
             <span class="fh-icon">{icon}</span>
             <a class="fh-path" href="drifox://open-file?path={ep}" title="点击打开">{ep}</a>
             {add_s}{del_s}
-            <button class="fh-open" onclick="openFile('{ep_js}')">打开</button></div>'''
+            <button class="fh-open" onclick="openFile('{ep_js}')">打开</button></div>"""
 
         rows = cls._gen_rows(fi)
         return f'''<div class="file-block" id="{fid}" data-lang="{lang}">
@@ -1118,7 +1215,9 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
         _wd = lambda o, n: cls._pyg_word_diff(o, n, lexer)  # noqa: E731
         u = []
         s = []
-        oln = 1; nln = 1; i = 0
+        oln = 1
+        nln = 1
+        i = 0
 
         while i < len(lines):
             ln = lines[i]
@@ -1126,103 +1225,147 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             if ln.startswith("@@"):
                 m = _HUNK_HEADER_PATTERN.search(ln)
                 if m:
-                    oln = int(m.group(1)); nln = int(m.group(2))
+                    oln = int(m.group(1))
+                    nln = int(m.group(2))
                 esc = cls.escape_html(ln)
-                u.append(f'<div class="du-row hh" data-type="hunk-header">'
-                         f'<span class="du-num"></span><span class="du-num"></span>'
-                         f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>')
-                s.append('<div class="ds-pair hh" data-type="hunk-header">'
-                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
+                u.append(
+                    f'<div class="du-row hh" data-type="hunk-header">'
+                    f'<span class="du-num"></span><span class="du-num"></span>'
+                    f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>'
+                )
+                s.append(
+                    '<div class="ds-pair hh" data-type="hunk-header">'
+                    '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                    '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>'
+                )
                 i += 1
 
             elif ln.startswith("-") and not ln.startswith("---"):
                 # 收集删除块
                 del_start = i
-                del_texts = []; del_nums = []
+                del_texts = []
+                del_nums = []
                 while i < len(lines) and lines[i].startswith("-") and not lines[i].startswith("---"):
-                    del_texts.append(lines[i][1:]); del_nums.append(oln); oln += 1; i += 1
+                    del_texts.append(lines[i][1:])
+                    del_nums.append(oln)
+                    oln += 1
+                    i += 1
                 dc = len(del_texts)
 
                 # 收集紧随的新增块
                 add_start = i
-                add_texts = []; add_nums = []
+                add_texts = []
+                add_nums = []
                 while i < len(lines) and lines[i].startswith("+") and not lines[i].startswith("+++"):
-                    add_texts.append(lines[i][1:]); add_nums.append(nln); nln += 1; i += 1
+                    add_texts.append(lines[i][1:])
+                    add_nums.append(nln)
+                    nln += 1
+                    i += 1
                 ac = len(add_texts)
                 pc = min(dc, ac)
 
                 # ===== UNIFIED: 删除块 + 新增块，不逐行配对 =====
                 for k in range(dc):
                     cls_suffix = "del-s" if (k == 0 and dc > 1) else ("del-e" if k == dc - 1 else "del-m")
-                    if dc == 1: cls_suffix = "del-e"
+                    if dc == 1:
+                        cls_suffix = "del-e"
                     # 仅在可配对的行上做 word-diff
                     if k < pc:
                         o_h, n_h = _wd(del_texts[k], add_texts[k])
-                        u.append(f'<div class="du-row {cls_suffix}" data-type="deleted">'
-                                 f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
-                                 f'<span class="du-sign">-</span><span class="du-code">{o_h}</span></div>')
+                        u.append(
+                            f'<div class="du-row {cls_suffix}" data-type="deleted">'
+                            f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
+                            f'<span class="du-sign">-</span><span class="du-code">{o_h}</span></div>'
+                        )
                     else:
-                        u.append(f'<div class="du-row {cls_suffix}" data-type="deleted">'
-                                 f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
-                                 f'<span class="du-sign">-</span><span class="du-code">{_h(del_texts[k])}</span></div>')
+                        u.append(
+                            f'<div class="du-row {cls_suffix}" data-type="deleted">'
+                            f'<span class="du-num">{del_nums[k]}</span><span class="du-num"></span>'
+                            f'<span class="du-sign">-</span><span class="du-code">{_h(del_texts[k])}</span></div>'
+                        )
                 for k in range(ac):
                     cls_suffix = "add-s" if (k == 0 and ac > 1) else ("add-e" if k == ac - 1 else "add-m")
-                    if ac == 1: cls_suffix = "add-e"
+                    if ac == 1:
+                        cls_suffix = "add-e"
                     if k < pc:
                         o_h, n_h = _wd(del_texts[k], add_texts[k])
-                        u.append(f'<div class="du-row {cls_suffix}" data-type="added">'
-                                 f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
-                                 f'<span class="du-sign">+</span><span class="du-code">{n_h}</span></div>')
+                        u.append(
+                            f'<div class="du-row {cls_suffix}" data-type="added">'
+                            f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
+                            f'<span class="du-sign">+</span><span class="du-code">{n_h}</span></div>'
+                        )
                     else:
-                        u.append(f'<div class="du-row {cls_suffix}" data-type="added">'
-                                 f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
-                                 f'<span class="du-sign">+</span><span class="du-code">{_h(add_texts[k])}</span></div>')
+                        u.append(
+                            f'<div class="du-row {cls_suffix}" data-type="added">'
+                            f'<span class="du-num"></span><span class="du-num">{add_nums[k]}</span>'
+                            f'<span class="du-sign">+</span><span class="du-code">{_h(add_texts[k])}</span></div>'
+                        )
 
                 # ===== SPLIT: 修改行做 word-diff，纯删/纯增行 做空对侧 =====
                 for k in range(dc):
                     if k < pc:
                         o_h, n_h = _wd(del_texts[k], add_texts[k])
-                        s.append(f'<div class="ds-pair mod" data-type="modified">'
-                                 f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{o_h}</span></div>'
-                                 f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{n_h}</span></div></div>')
+                        s.append(
+                            f'<div class="ds-pair mod" data-type="modified">'
+                            f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{o_h}</span></div>'
+                            f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{n_h}</span></div></div>'
+                        )
                     else:
-                        s.append(f'<div class="ds-pair del" data-type="deleted">'
-                                 f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{_h(del_texts[k])}</span></div>'
-                                 f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
+                        s.append(
+                            f'<div class="ds-pair del" data-type="deleted">'
+                            f'<div class="ds-side"><span class="ds-num">{del_nums[k]}</span><span class="ds-code">{_h(del_texts[k])}</span></div>'
+                            f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>'
+                        )
                 for k in range(pc, ac):
-                    s.append(f'<div class="ds-pair add" data-type="added">'
-                             f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                             f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{_h(add_texts[k])}</span></div></div>')
+                    s.append(
+                        f'<div class="ds-pair add" data-type="added">'
+                        f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                        f'<div class="ds-side"><span class="ds-num">{add_nums[k]}</span><span class="ds-code">{_h(add_texts[k])}</span></div></div>'
+                    )
 
             elif ln.startswith("+") and not ln.startswith("+++"):
                 # 孤立新增（前面没有删除行）— 无底部边框
-                u.append(f'<div class="du-row add-m" data-type="added">'
-                         f'<span class="du-num"></span><span class="du-num">{nln}</span>'
-                         f'<span class="du-sign">+</span><span class="du-code">{_h(ln[1:])}</span></div>')
-                s.append(f'<div class="ds-pair add" data-type="added">'
-                         f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{_h(ln[1:])}</span></div></div>')
-                nln += 1; i += 1
+                u.append(
+                    f'<div class="du-row add-m" data-type="added">'
+                    f'<span class="du-num"></span><span class="du-num">{nln}</span>'
+                    f'<span class="du-sign">+</span><span class="du-code">{_h(ln[1:])}</span></div>'
+                )
+                s.append(
+                    f'<div class="ds-pair add" data-type="added">'
+                    f'<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                    f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{_h(ln[1:])}</span></div></div>'
+                )
+                nln += 1
+                i += 1
 
             elif ln.startswith(" "):
                 ct = _h(ln[1:] if ln else "")
-                u.append(f'<div class="du-row ctx" data-type="context">'
-                         f'<span class="du-num">{oln}</span><span class="du-num">{nln}</span>'
-                         f'<span class="du-sign"></span><span class="du-code">{ct}</span></div>')
-                s.append(f'<div class="ds-pair ctx" data-type="context">'
-                         f'<div class="ds-side"><span class="ds-num">{oln}</span><span class="ds-code">{ct}</span></div>'
-                         f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{ct}</span></div></div>')
-                oln += 1; nln += 1; i += 1
+                u.append(
+                    f'<div class="du-row ctx" data-type="context">'
+                    f'<span class="du-num">{oln}</span><span class="du-num">{nln}</span>'
+                    f'<span class="du-sign"></span><span class="du-code">{ct}</span></div>'
+                )
+                s.append(
+                    f'<div class="ds-pair ctx" data-type="context">'
+                    f'<div class="ds-side"><span class="ds-num">{oln}</span><span class="ds-code">{ct}</span></div>'
+                    f'<div class="ds-side"><span class="ds-num">{nln}</span><span class="ds-code">{ct}</span></div></div>'
+                )
+                oln += 1
+                nln += 1
+                i += 1
 
             else:
                 esc = _h(ln)
-                u.append(f'<div class="du-row ctx" data-type="context">'
-                         f'<span class="du-num"></span><span class="du-num"></span>'
-                         f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>')
-                s.append('<div class="ds-pair ctx" data-type="context">'
-                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
-                         '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>')
+                u.append(
+                    f'<div class="du-row ctx" data-type="context">'
+                    f'<span class="du-num"></span><span class="du-num"></span>'
+                    f'<span class="du-sign"></span><span class="du-code">{esc}</span></div>'
+                )
+                s.append(
+                    '<div class="ds-pair ctx" data-type="context">'
+                    '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div>'
+                    '<div class="ds-side"><span class="ds-num"></span><span class="ds-code"></span></div></div>'
+                )
                 i += 1
 
         return {"u": "\n".join(u), "s": "\n".join(s)}
@@ -1252,22 +1395,33 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
     def _gen_files_meta(cls, files: List[Dict]) -> str:
         data = []
         for i, fi in enumerate(files):
-            data.append({"id": f"file-{i}", "path": fi["path"],
-                         "icon": cls._icon(fi["path"]),
-                         "additions": fi["additions"], "deletions": fi["deletions"],
-                         "status": fi.get("status", "modified"),
-                         "lang": fi.get("lang", "other")})
+            data.append(
+                {
+                    "id": f"file-{i}",
+                    "path": fi["path"],
+                    "icon": cls._icon(fi["path"]),
+                    "additions": fi["additions"],
+                    "deletions": fi["deletions"],
+                    "status": fi.get("status", "modified"),
+                    "lang": fi.get("lang", "other"),
+                }
+            )
         r = json.dumps(data).decode("utf-8")
         return r.replace("</", "\\u003C/")
 
     # ---- Icon ----
     @classmethod
     def _icon(cls, path: str) -> str:
-        if path.endswith(".py"): return "&#128464;"
-        elif path.endswith(".json"): return "&#128196;"
-        elif path.endswith((".js", ".ts")): return "&#128203;"
-        elif path.endswith((".html", ".css", ".htm")): return "&#127760;"
-        elif path.endswith((".md", ".txt")): return "&#128214;"
+        if path.endswith(".py"):
+            return "&#128464;"
+        elif path.endswith(".json"):
+            return "&#128196;"
+        elif path.endswith((".js", ".ts")):
+            return "&#128203;"
+        elif path.endswith((".html", ".css", ".htm")):
+            return "&#127760;"
+        elif path.endswith((".md", ".txt")):
+            return "&#128214;"
         return "&#128196;"
 
     # ---- Diff generation ----
@@ -1279,6 +1433,7 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                 logger.warning("[DiffHtml] 没有有效文件路径")
                 return ""
             from app.utils.utils import get_app_data_dir
+
             bd = get_app_data_dir() / "backups" / session_id
             if not bd.exists():
                 logger.warning(f"[DiffHtml] 备份目录不存在: {bd}")
@@ -1288,7 +1443,8 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                 try:
                     stem = Path(fp).stem
                     baks = sorted(f for f in bd.glob(f"{stem}*.bak") if not f.name.endswith(".after.bak"))
-                    if not baks: continue
+                    if not baks:
+                        continue
                     with open(baks[0], "r", encoding="utf-8", errors="replace") as f:
                         old = f.read()
                     with open(fp, "r", encoding="utf-8", errors="replace") as f:
@@ -1296,15 +1452,21 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
 
                     def _nl(c):
                         ls = c.splitlines(keepends=True)
-                        if ls and not ls[-1].endswith("\n"): ls[-1] += "\n"
+                        if ls and not ls[-1].endswith("\n"):
+                            ls[-1] += "\n"
                         return ls
 
-                    d = difflib.unified_diff(_nl(old), _nl(new),
-                                             fromfile=str(Path(fp).resolve()),
-                                             tofile=str(Path(fp).resolve()),
-                                             lineterm="\n", n=10)
+                    d = difflib.unified_diff(
+                        _nl(old),
+                        _nl(new),
+                        fromfile=str(Path(fp).resolve()),
+                        tofile=str(Path(fp).resolve()),
+                        lineterm="\n",
+                        n=10,
+                    )
                     dt = "".join(d)
-                    if dt: parts.append(dt)
+                    if dt:
+                        parts.append(dt)
                 except Exception as e:
                     logger.warning(f"[DiffHtml] 对比失败 {fp}: {e}")
             return "\n".join(parts)
@@ -1332,7 +1494,20 @@ class ToolPayloadHtmlGenerator:
     def _field_summary(cls, arguments: Dict) -> str:
         if not isinstance(arguments, dict) or not arguments:
             return '<div class="field-empty">无参数</div>'
-        high_risk = {"command","cmd","path","file","files","content","oldString","newString","edits","tasks","url","query"}
+        high_risk = {
+            "command",
+            "cmd",
+            "path",
+            "file",
+            "files",
+            "content",
+            "oldString",
+            "newString",
+            "edits",
+            "tasks",
+            "url",
+            "query",
+        }
         rows = []
         for k, v in arguments.items():
             vt = cls._safe_json(v) if isinstance(v, (dict, list)) else str(v)
@@ -1399,13 +1574,66 @@ var tip=document.getElementById('copied');tip.style.display='inline';setTimeout(
 
 
 # ==========================================================================
-# 5. DiffViewerWindow
+# 5. WebView HTML 加载辅助（规避 setHtml 大内容限制）
+# ==========================================================================
+# Qt 的 setHtml() 对较大内容（实测约 100KB+ 即可能失败：页面能显示但 JS
+# 不执行，或 loadFinished 不触发）不可靠。差异报告（大 diff 经 Pygments
+# 高亮后膨胀数倍）很容易超限，表现为按钮回调报 "openFile/switchView is
+# not defined"、文件列表点击无响应。统一改用临时文件 + setUrl 加载，
+# 无大小限制且行为一致。
+def _write_temp_html(html: str) -> Optional[str]:
+    """把 HTML 写入系统临时文件，返回路径；失败返回 None"""
+    try:
+        fd, path = tempfile.mkstemp(suffix=".html", prefix="drifox_diff_", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+    except Exception as e:
+        logger.warning(f"[DiffViewer] 写入临时 HTML 失败: {e}")
+        return None
+
+
+def _cleanup_temp_files(tmp_files: Optional[List[str]]) -> None:
+    """清理临时 HTML 文件列表"""
+    if not tmp_files:
+        return
+    for p in tmp_files[:]:
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+    tmp_files.clear()
+
+
+def _load_html_to_webview(webview: QWebEngineView, html_content: str, tmp_files: Optional[List[str]] = None) -> None:
+    """把差异 HTML 加载进 webview（临时文件 + setUrl，规避 setHtml 大小限制）
+
+    Args:
+        webview: 目标 QWebEngineView
+        html_content: 完整 HTML 报告
+        tmp_files: 调用方持有的临时文件列表（追加新文件、供后续清理）；为 None 时使用 setHtml
+    """
+    html = html_content or ""
+    if tmp_files is not None:
+        path = _write_temp_html(html)
+        if path is not None:
+            tmp_files.append(path)
+            webview.setUrl(QUrl.fromLocalFile(path))
+            return
+    # 临时文件写入失败（或调用方不管理临时文件）→ 回退 setHtml
+    webview.setHtml(html)
+
+
+# ==========================================================================
+# 6. DiffViewerWindow（弹窗回退实现）
 # ==========================================================================
 class _DiffWebPage(QWebEnginePage):
     """自定义 QWebEnginePage，拦截 drifox:// 协议以打开文件。"""
+
     def acceptNavigationRequest(self, url: QUrl, _type, is_main_frame):
         if url.scheme() == "drifox" and url.host() == "open-file":
             from urllib.parse import parse_qs, unquote
+
             qs = parse_qs(url.query())
             path = qs.get("path", [None])[0]
             if path:
@@ -1438,13 +1666,16 @@ class DiffViewerWindow:
     @classmethod
     def close_all(cls):
         for w in cls._instances[:]:
-            try: w.close()
-            except Exception: pass
+            try:
+                w.close()
+            except Exception:
+                pass
         cls._instances.clear()
 
     def __init__(self, parent=None, title: str = "文件差异对比"):
         self._disposed = False
         self._current_html = None
+        self._tmp_files: List[str] = []
         self._window = QDialog(parent)
         self._window.setWindowTitle(title)
         self._window.resize(1300, 850)
@@ -1484,6 +1715,9 @@ class DiffViewerWindow:
             self._webview.setHtml("")
         except Exception:
             pass
+
+        # 清理临时 HTML 文件
+        _cleanup_temp_files(getattr(self, "_tmp_files", None))
 
     def _log_rss(self, stage: str):
         rss_mb = _get_rss_mb()
@@ -1529,15 +1763,15 @@ class DiffViewerWindow:
     def load_html(self, html_content: str):
         html_len = len(html_content or "")
         self._log_rss(f"load_html_begin html_len={html_len}")
-        self._webview.setHtml(html_content or "")
+        _load_html_to_webview(self._webview, html_content or "", self._tmp_files)
         self._current_html = None
         self._log_rss(f"load_html_called html_len={html_len}")
-        QTimer.singleShot(
-            1000, lambda: self._log_rss(f"load_html_post_1s html_len={html_len}")
-        )
+        QTimer.singleShot(1000, lambda: self._log_rss(f"load_html_post_1s html_len={html_len}"))
 
     def show(self):
-        self._window.show(); self._window.raise_(); self._window.activateWindow()
+        self._window.show()
+        self._window.raise_()
+        self._window.activateWindow()
 
     def close(self):
         try:

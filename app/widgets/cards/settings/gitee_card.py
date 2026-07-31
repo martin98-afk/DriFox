@@ -7,6 +7,7 @@ Gitee 账号绑定设置卡片
 """
 
 import hashlib
+import sip
 import threading
 import webbrowser
 from loguru import logger
@@ -263,6 +264,7 @@ class GiteeAccountRow(QFrame):
         self._binding = False
         self._bound_owner = ""
         self._bound_repo = ""
+        self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
 
         from app.core.config_sync import ConfigSyncService
 
@@ -356,6 +358,59 @@ class GiteeAccountRow(QFrame):
         # 更新整行可点状态
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
+
+    def set_compact_mode(self, compact: bool):
+        """切换紧凑模式：收起时头像和设置按钮垂直堆叠"""
+        if self._compact == compact:
+            return
+        self._compact = compact
+
+        # 保存要重用的子控件
+        avatar = self._avatar
+        name_label = self._name_label
+        repo_label = self._repo_label
+        settings_btn = self._settings_btn
+
+        # 卸载旧布局（用临时 widget 接管 old layout 使其析构）
+        old_layout = self.layout()
+        temp = QWidget()
+        temp.setLayout(old_layout)
+        temp.deleteLater()
+
+        if compact:
+            # 垂直堆叠：头像居中（缩小），设置按钮居中
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(4, 2, 4, 2)
+            layout.setSpacing(2)
+            avatar_size = scale_font_size(20)
+            self._avatar.set_size(avatar_size)
+            layout.addWidget(avatar, 0, Qt.AlignCenter)
+            btn_size = scale_font_size(20)
+            settings_btn.setFixedSize(btn_size, btn_size)
+            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+            layout.addWidget(settings_btn, 0, Qt.AlignCenter)
+            name_label.setVisible(False)
+            repo_label.setVisible(False)
+        else:
+            # 水平恢复：头像 + 文字 + 设置按钮
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(8)
+            avatar_size = scale_font_size(28)
+            self._avatar.set_size(avatar_size)
+            layout.addWidget(avatar)
+            text_container = QVBoxLayout()
+            text_container.setContentsMargins(0, 0, 0, 0)
+            text_container.setSpacing(0)
+            text_container.addWidget(name_label)
+            text_container.addWidget(repo_label)
+            layout.addLayout(text_container, 1)
+            btn_size = scale_font_size(24)
+            settings_btn.setFixedSize(btn_size, btn_size)
+            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
+            layout.addWidget(settings_btn)
+            name_label.setVisible(True)
+            repo_label.setVisible(True)
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -499,6 +554,12 @@ class GiteeAccountRow(QFrame):
                 parent=self.window(),
             )
 
+    def set_show_only_avatar(self, avatar_only: bool):
+        """收起侧边栏时仅显示头像，隐藏文字和设置按钮"""
+        self._settings_btn.setVisible(not avatar_only)
+        self._name_label.setVisible(not avatar_only)
+        self._repo_label.setVisible(not avatar_only)
+
     def refresh_style(self):
         """主题或字号变化后重建头像、尺寸和样式。"""
         avatar_size = scale_font_size(28)
@@ -510,6 +571,9 @@ class GiteeAccountRow(QFrame):
 
     def close_popup(self):
         """关闭弹出的浮动卡片（供外部调用，如 TabPanel 切换时）"""
+        if self._popup is not None and sip.isdeleted(self._popup):
+            self._popup = None
+            return
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -518,6 +582,11 @@ class GiteeAccountRow(QFrame):
         """点击整块区域切换浮动卡片显示状态"""
         if self._binding:
             return
+
+        # 防御性检查：如果 C++ 对象已被删除，清理引用
+        if self._popup is not None and sip.isdeleted(self._popup):
+            self._popup = None
+
         if self._popup and self._popup.isVisible():
             self._popup.close()
             self._popup = None
@@ -529,6 +598,7 @@ class GiteeAccountRow(QFrame):
             self._popup = None
 
         popup = _GiteeMorePopup(self)
+        popup.destroyed.connect(self._on_popup_closed)
         popup.adjustSize()
         popup_width = max(popup.sizeHint().width(), 220)
         popup_height = popup.sizeHint().height()
@@ -716,13 +786,7 @@ class _GiteeMorePopup(QWidget):
         )
         layout.addWidget(self._pet_row)
 
-        # ── Tab 模式开关 ──
-        self._tab_row = self._make_switch_row(
-            "📑  Tab 模式",
-            self._cfg.enable_tab_manager.value,
-            self._on_tab_toggled,
-        )
-        layout.addWidget(self._tab_row)
+        # Tab 模式开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
 
         # ── 窗口置顶开关 ──
         self._topmost_row = self._make_switch_row(
@@ -733,6 +797,33 @@ class _GiteeMorePopup(QWidget):
         layout.addWidget(self._topmost_row)
 
         layout.addSpacing(6)
+
+        # ── 分隔线 ──
+        sep3 = self._make_separator()
+        layout.addWidget(sep3)
+
+        # ── 打开设置按钮（点击跳转到完整设置卡片） ──
+        self._open_settings_btn = QPushButton("⚙️  打开全部设置", self._container)
+        self._open_settings_btn.setCursor(Qt.PointingHandCursor)
+        self._open_settings_btn.setFixedHeight(36)
+        self._open_settings_btn.clicked.connect(self._on_open_settings)
+        self._open_settings_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                padding: 4px 14px;
+                text-align: left;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            QPushButton:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        layout.addWidget(self._open_settings_btn)
+
+        layout.addSpacing(2)
 
         # 容器样式
         self._container.setStyleSheet("""
@@ -845,6 +936,12 @@ class _GiteeMorePopup(QWidget):
         # 同步调用 self.close() 会触发 RuntimeError。
         # 参考 _on_tab_toggled 中的相同处理模式。
         QTimer.singleShot(0, self.close)
+
+    def _on_open_settings(self):
+        """打开全部设置卡片"""
+        self.close()
+        if self._account_row:
+            self._account_row._toggle_settings_card()
 
     # ── 快捷设置回调 ──
 
@@ -1133,14 +1230,13 @@ class GiteeCard(SettingCard):
                 except Exception as e:
                     logger.warning(f"[GiteeCard] 窗口 {win._window_id} 刷新失败: {e}")
 
-            # 2. 关闭设置弹窗：下次 _open_settings_popup 会因 _settings_popup=None 而重建，
+            # 2. 销毁全局设置弹窗：下次打开时重建，
             #    所有子卡片（provider/MCP/gateway/font 等）从 Settings 读取最新值
-            if main_win and hasattr(main_win, "_settings_popup"):
-                popup = main_win._settings_popup
-                if popup is not None and popup.isVisible():
-                    if hasattr(main_win, "_card_manager") and hasattr(main_win, "_window_id"):
-                        main_win._card_manager.hide_card("settings", main_win._window_id)
-                main_win._settings_popup = None
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            cc = get_global_card_controller()
+            if cc is not None:
+                cc.invalidate_settings_popup()
 
             logger.info("[GiteeCard] UI 已根据恢复的配置全面刷新")
         except Exception as e:

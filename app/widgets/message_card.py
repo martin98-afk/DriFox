@@ -2180,6 +2180,36 @@ class CodeWebViewer(QWebEngineView):
 
         self._load_skeleton()
 
+        # ── 对话框层级管理 ──
+        # 已隐含 self._dialog_hide_count=0（对象初始化后属性不存在即 0）
+
+    # ──────────────────────────────────────────────
+    # 对话框 HWND 穿透防护
+    # ──────────────────────────────────────────────
+    # QWebEngineView 在 Windows 上创建原生 HWND 子窗口，
+    # 遇到 WA_TranslucentBackground 的 MaskDialog 分层窗口时，
+    # Chromium GPU 合成表面可能穿透遮罩渲染在对话框之上。
+    # 策略：检测到全屏对话框显示时隐藏 WebView，对话框销毁后恢复。
+
+    def _hide_for_dialog(self, dialog):
+        """对话框显示时隐藏 WebView，防止原生 HWND 穿透遮罩"""
+        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) + 1
+        if self._dialog_hide_count == 1:
+            self.hide()
+        # 用 finished 而非 destroyed：对话框 dismiss 即恢复，不等 GC 销毁
+        try:
+            dialog.finished.disconnect(self._restore_from_dialog)
+        except TypeError, RuntimeError:
+            pass
+        dialog.finished.connect(self._restore_from_dialog)
+
+    def _restore_from_dialog(self, _result=None):
+        """对话框关闭后恢复 WebView 显示（_result 为 QDialog.finished 的 result code）"""
+        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) - 1
+        if self._dialog_hide_count <= 0:
+            self._dialog_hide_count = 0
+            self.show()
+
     @property
     def _tool_compact_mode(self) -> bool:
         try:
@@ -2354,7 +2384,8 @@ class CodeWebViewer(QWebEngineView):
     def eventFilter(self, obj, event):
         # 监听对话框显示/激活事件
         event_type = event.type()
-        if event_type == 24 or event_type == 9:  # QEvent.Show = 24, QEvent.FocusIn = 9
+        # 注意：QEvent.Show=17, QEvent.FocusIn=8（不是24/9！历史bug，24是WindowActivate）
+        if event_type == 17 or event_type == 8:  # QEvent.Show, QEvent.FocusIn
             obj_class = obj.__class__.__name__
             popup_keywords = [
                 "Dialog",
@@ -2367,18 +2398,22 @@ class CodeWebViewer(QWebEngineView):
                 "ToolTip",
             ]
             if any(kw in obj_class for kw in popup_keywords):
-                # 降低当前WebView及其父组件的层级
-                self.lower()
-                parent = self.parent()
-                while parent:
-                    parent.lower()
-                    # 找到 MessageCard 或聊天容器为止
-                    if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
-                        break
-                    parent = parent.parent()
-                # 同时将弹窗提升到最顶层
-                if hasattr(obj, "raise_"):
-                    obj.raise_()
+                # 区分全屏对话框 vs 小弹窗
+                if "Dialog" in obj_class and hasattr(obj, "winId"):
+                    # 全屏 MaskDialog → 隐藏 WebView 防止原生 HWND 穿透遮罩
+                    self._hide_for_dialog(obj)
+                else:
+                    # 小弹窗（Menu/ComboBox/ToolTip等）→ 降低 Qt 层级
+                    self.lower()
+                    parent = self.parent()
+                    while parent:
+                        parent.lower()
+                        # 找到 MessageCard 或聊天容器为止
+                        if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
+                            break
+                        parent = parent.parent()
+                    if hasattr(obj, "raise_"):
+                        obj.raise_()
         return super().eventFilter(obj, event)
 
     def lower_for_popup(self):
@@ -3610,6 +3645,7 @@ class CodeWebViewer(QWebEngineView):
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
                     overflow-y: auto;
+                    overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
                     border-radius: 6px;
@@ -3775,10 +3811,15 @@ class CodeWebViewer(QWebEngineView):
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
                         // 记录当前展开状态的思考块
-                        const expandedStates = new Map();
-                        container.querySelectorAll('.think-block').forEach(block => {{
-                            expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
-                        }});
+                        // [PERF] 简洁模式：completed 思考块是 think-compact（无折叠），跳过 save
+                        //       节省 querySelectorAll + Map 构造；非简洁模式行为不变
+                        var expandedStates = null;
+                        if (!window._toolCompactMode) {{
+                            expandedStates = new Map();
+                            container.querySelectorAll('.think-block').forEach(function(block) {{
+                                expandedStates.set(block.dataset.blockKey, block.dataset.expanded === 'true');
+                            }});
+                        }}
 
                         // ── 冻结折叠框 CSS transition 避免 DOM 重建时边框闪烁 ──
                         // container.innerHTML = newHtml 会销毁所有已有 DOM 节点，
@@ -3869,17 +3910,20 @@ class CodeWebViewer(QWebEngineView):
                         restoreCollapsibleStates(container);
 
                         // 恢复展开状态
-                        container.querySelectorAll('.think-block').forEach(block => {{
-                            const savedState = expandedStates.get(block.dataset.blockKey);
-                            if (savedState !== undefined) {{
-                                block.dataset.expanded = savedState ? 'true' : 'false';
-                                const body = block.querySelector('.cm-collapsible__body');
-                                if (body) {{
-                                    body.style.height = savedState ? 'auto' : '0px';
-                                    body.style.opacity = savedState ? '1' : '0';
+                        // [PERF] 简洁模式：expandedStates 为 null，跳过整段（think-compact 无折叠）
+                        if (expandedStates) {{
+                            container.querySelectorAll('.think-block').forEach(function(block) {{
+                                var savedState = expandedStates.get(block.dataset.blockKey);
+                                if (savedState !== undefined) {{
+                                    block.dataset.expanded = savedState ? 'true' : 'false';
+                                    var body = block.querySelector('.cm-collapsible__body');
+                                    if (body) {{
+                                        body.style.height = savedState ? 'auto' : '0px';
+                                        body.style.opacity = savedState ? '1' : '0';
+                                    }}
                                 }}
-                            }}
-                        }});
+                            }});
+                        }}
 
                         // ── 恢复 CSS transition（requestAnimationFrame 使浏览器在下一次
                         // 重绘前已发现元素处于 target 状态，不会触发过渡动画） ──
@@ -4030,128 +4074,153 @@ class CodeWebViewer(QWebEngineView):
                         toolSection.style.display = '';
                         _updateToolSectionHeader();
                         // 坞态（流式中）：自动滚底显示最新活动
-                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
                         return;
                     }}
-                    // ── 增量搬移：用稳定标识（data-block-key / data-tool-call-id）
-                    // 做精确去重 —— 比"count 比对"可靠，因为 updateContent 重写
-                    // content-placeholder 后，里面的块全是新 DOM 节点，单纯比数量会
-                    // 误判"已搬移过"而漏搬新块，导致工具/思考在正文里也出现。
-                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
-                    // 原实现 remove+append 导致闪烁；保留旧的导致内容过期被吞。
-                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
-                    var _oldThinkStreaming = toolContent.querySelector('.think-streaming');
-                    var _hasNewThinkStreaming = false;
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        if (el.classList.contains('think-streaming')) _hasNewThinkStreaming = true;
-                    }});
-                    if (!_hasNewThinkStreaming && _oldThinkStreaming) {{
-                        // reasoning 已完成，#content-placeholder 没有 think-streaming
-                        // 安全移除 #tool-content 中残留的旧 think-streaming
-                        _oldThinkStreaming.remove();
-                    }}
-                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 think-block / think-compact
-                    // 多轮思考场景：旧完成的折叠框持续堆积在 tool-content 底部不清理。
-                    // 收集 content-placeholder 中当前 think 块的 block-key 集合，
-                    // 移除 tool-content 中不在集合内的旧 think 块。
+                    // ── [PERF v2] 单次扫描 blocks：posMap + thinkKeys + toolIds + thinkStreaming ──
+                    // 原实现有 4 个独立 forEach 重复遍历，v2 合并为单次，O(n²) → O(n)
+                    var posMap = Object.create(null);
                     var _currentThinkKeys = new Set();
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var _bk = el.getAttribute('data-block-key');
-                        if (_bk && (el.classList.contains('think-block') || el.classList.contains('think-streaming') || el.classList.contains('think-compact'))) {{
-                            _currentThinkKeys.add(_bk);
-                        }}
-                    }});
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.think-block, .think-compact'), function(el) {{
-                        var _bk = el.getAttribute('data-block-key');
-                        if (_bk && !_currentThinkKeys.has(_bk) && !el.getAttribute('data-tool-call-id')) {{
-                            el.remove();
-                        }}
-                    }});
-                    // 🐛 FIX: 清理 tool-content 中不再匹配当前内容的已完成 tool-block
-                    // 多轮工具调用场景：旧已完成 tool-block 堆积在 tool-content 底部不清理。
-                    // 收集 content-placeholder 中当前 tool 块的 tool-call-id 集合，
-                    // 移除 tool-content 中不在集合内的已完成 tool 块（保留流式进行中的块）。
                     var _currentToolIds = new Set();
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var _tid = el.getAttribute('data-tool-call-id');
+                    var _hasNewThinkStreaming = false;
+                    var _thinkStreamingEl = null;
+                    for (var _bi = 0; _bi < blocks.length; _bi++) {{
+                        var _el = blocks[_bi];
+                        var _bk = _el.getAttribute('data-block-key');
+                        var _tid = _el.getAttribute('data-tool-call-id');
+                        if (_bk) posMap['bk:' + _bk] = _bi;
                         if (_tid) {{
+                            posMap['tcid:' + _tid] = _bi;
                             _currentToolIds.add(_tid);
                         }}
-                    }});
-                    Array.prototype.forEach.call(toolContent.querySelectorAll('.tool-block'), function(el) {{
-                        var _tid = el.getAttribute('data-tool-call-id');
-                        var _streaming = el.getAttribute('data-streaming');
-                        if (_tid && !_currentToolIds.has(_tid) && _streaming !== 'true') {{
-                            el.remove();
+                        if (_bk && (
+                            _el.classList.contains('think-block')
+                            || _el.classList.contains('think-streaming')
+                            || _el.classList.contains('think-compact')
+                        )) {{
+                            _currentThinkKeys.add(_bk);
                         }}
-                    }});
-                    // ── 排序法保证工具区顺序与 content-placeholder 一致 ──
-                    // 建立位置映射：content-placeholder 中每个 block 的序号（所有块都有位置）
-                    var posMap = Object.create(null);
-                    Array.prototype.forEach.call(blocks, function(el, idx) {{
-                        var bk = el.getAttribute('data-block-key');
-                        var tid = el.getAttribute('data-tool-call-id');
-                        if (bk) posMap['bk:' + bk] = idx;
-                        if (tid) posMap['tcid:' + tid] = idx;
-                        // 无稳定标识的块（.think-streaming）用其在 blocks 中的序号
-                        if (!bk && !tid) el._posIdx = idx;
-                    }});
-                    // 从正文移除已有稳定标识的重叠块，其余搬移到工具区
-                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换。
-                    // 原实现 remove+append 闪烁；保留旧的导致 reasoning 累积内容被吞。
-                    // replaceChild 保持 DOM 位置不变，内容更新为新版，无闪烁无吞内容。
-                    var moved = false;
-                    Array.prototype.forEach.call(blocks, function(el) {{
-                        var bk = el.getAttribute('data-block-key');
-                        var tid = el.getAttribute('data-tool-call-id');
-                        var dup = (bk && toolContent.querySelector('[data-block-key="' + bk + '"]'))
-                               || (tid && toolContent.querySelector('[data-tool-call-id="' + tid + '"]'));
-                        if (dup) {{
-                            if (el.parentNode === container) el.remove();
-                        }} else if (el.classList.contains('think-streaming') && _oldThinkStreaming) {{
-                            // think-streaming 原地替换：保持 DOM 位置，更新内容
-                            if (el.parentNode === container) {{
-                                if (_oldThinkStreaming.parentNode) {{
-                                    _oldThinkStreaming.parentNode.replaceChild(el, _oldThinkStreaming);
-                                }}
-                                _oldThinkStreaming = el;  // 更新引用，供后续排序使用
-                            }}
-                        }} else if (el.parentNode === container) {{
-                            toolContent.appendChild(el);
-                            moved = true;
-                        }}
-                    }});
-                    // 整体排序：使工具区所有子元素顺序与 content-placeholder 匹配
-                    // 🐛 修复闪烁：只在顺序确实变化时才 appendChild 重排。
-                    // 原实现无脑 allChildren.forEach(appendChild) 即使顺序未变
-                    // 也会移动 DOM 节点，触发浏览器重绘导致已稳定显示的块闪烁。
-                    var allChildren = Array.prototype.slice.call(toolContent.children);
-                    var _needsReorder = false;
-                    var _sortedChildren = allChildren.slice().sort(function(a, b) {{
-                        function getPos(el) {{
-                            var bk = el.getAttribute('data-block-key');
-                            var tid = el.getAttribute('data-tool-call-id');
-                            if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
-                            if (tid && posMap['tcid:' + tid] !== undefined) return posMap['tcid:' + tid];
-                            if (el._posIdx !== undefined) return el._posIdx;
-                            return 1e9;
-                        }}
-                        return getPos(a) - getPos(b);
-                    }});
-                    // 检查排序后是否有元素位置变化
-                    for (var _i = 0; _i < _sortedChildren.length; _i++) {{
-                        if (_sortedChildren[_i] !== allChildren[_i]) {{
-                            _needsReorder = true;
-                            break;
+                        if (_el.classList.contains('think-streaming')) {{
+                            _hasNewThinkStreaming = true;
+                            _thinkStreamingEl = _el;
+                        }} else if (!_bk && !_tid) {{
+                            // 无稳定标识的块（备用扩展）—— 用 blocks 中的序号
+                            _el._posIdx = _bi;
                         }}
                     }}
-                    if (_needsReorder) {{
-                        _sortedChildren.forEach(function(el) {{ toolContent.appendChild(el); }});
+                    // ── [PERF v2] 单次遍历 toolContent 子节点：think-streaming + 过期清理 ──
+                    var _oldThinkStreaming = null;
+                    var _toolKids = toolContent.children;
+                    for (var _ti = 0; _ti < _toolKids.length; _ti++) {{
+                        var _tk = _toolKids[_ti];
+                        if (_tk.classList.contains('think-streaming') && !_oldThinkStreaming) {{
+                            _oldThinkStreaming = _tk;
+                        }}
+                    }}
+                    if (!_hasNewThinkStreaming && _oldThinkStreaming) {{
+                        _oldThinkStreaming.remove();
+                        _oldThinkStreaming = null;
+                    }}
+                    // 清理过期 think-block / think-compact + 过期 tool-block
+                    var _existingKids = Array.prototype.slice.call(toolContent.children);
+                    for (var _ei = 0; _ei < _existingKids.length; _ei++) {{
+                        var _eel = _existingKids[_ei];
+                        if (!_eel || !_eel.parentNode) continue;
+                        var _ebk = _eel.getAttribute('data-block-key');
+                        var _etid = _eel.getAttribute('data-tool-call-id');
+                        // 过期 think 块
+                        if (
+                            _ebk
+                            && !_currentThinkKeys.has(_ebk)
+                            && !_etid
+                            && (
+                                _eel.classList.contains('think-block')
+                                || _eel.classList.contains('think-compact')
+                            )
+                        ) {{
+                            _eel.remove();
+                            continue;
+                        }}
+                        // 过期 tool 块（保留流式进行中的块）
+                        if (
+                            _etid
+                            && !_currentToolIds.has(_etid)
+                            && _eel.getAttribute('data-streaming') !== 'true'
+                            && _eel.classList.contains('tool-block')
+                        ) {{
+                            _eel.remove();
+                            continue;
+                        }}
+                    }}
+                    // 从正文移除已存在稳定标识的重叠块，其余搬移到工具区
+                    // 🐛 修复吞内容 + 闪烁：think-streaming 用 replaceChild 原地替换
+                    // （保 DOM 位置，更新内容）
+                    var moved = false;
+                    for (var _mi = 0; _mi < blocks.length; _mi++) {{
+                        var _mel = blocks[_mi];
+                        var _mbk = _mel.getAttribute('data-block-key');
+                        var _mtid = _mel.getAttribute('data-tool-call-id');
+                        var _dup = (_mbk && toolContent.querySelector('[data-block-key="' + _mbk + '"]'))
+                                || (_mtid && toolContent.querySelector('[data-tool-call-id="' + _mtid + '"]'));
+                        if (_dup) {{
+                            if (_mel.parentNode === container) _mel.remove();
+                        }} else if (_mel.classList.contains('think-streaming') && _oldThinkStreaming) {{
+                            if (_mel.parentNode === container && _oldThinkStreaming.parentNode) {{
+                                _oldThinkStreaming.parentNode.replaceChild(_mel, _oldThinkStreaming);
+                            }}
+                        }} else if (_mel.parentNode === container) {{
+                            toolContent.appendChild(_mel);
+                            moved = true;
+                        }}
+                    }}
+                    // ── [PERF v2] 顺序哈希 diff：键序列未变时跳过 sort + appendChild ──
+                    // 流式期间大部分 updateContent 走"键序列未变"快路径，避免 sort 抖动
+                    var _curKeys = [];
+                    var _curKids = toolContent.children;
+                    for (var _ci = 0; _ci < _curKids.length; _ci++) {{
+                        var _ck = _curKids[_ci];
+                        var _ckbk = _ck.getAttribute('data-block-key');
+                        var _cktid = _ck.getAttribute('data-tool-call-id');
+                        if (_ckbk) {{
+                            _curKeys.push('bk:' + _ckbk);
+                        }} else if (_cktid) {{
+                            _curKeys.push('tcid:' + _cktid);
+                        }} else {{
+                            _curKeys.push('idx:' + _ci);
+                        }}
+                    }}
+                    var _lastOrder = toolContent.__lastOrder;
+                    var _orderChanged = !_lastOrder || _lastOrder.length !== _curKeys.length;
+                    if (!_orderChanged) {{
+                        for (var _di = 0; _di < _curKeys.length; _di++) {{
+                            if (_curKeys[_di] !== _lastOrder[_di]) {{
+                                _orderChanged = true;
+                                break;
+                            }}
+                        }}
+                    }}
+                    if (_orderChanged) {{
+                        // 顺序变了：用 sort 一次性重排（避免多次 appendChild 抖动）
+                        var _sortedChildren = Array.prototype.slice.call(toolContent.children).sort(function(a, b) {{
+                            function getPos(el) {{
+                                var bk = el.getAttribute('data-block-key');
+                                var tid = el.getAttribute('data-tool-call-id');
+                                if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
+                                if (tid && posMap['tcid:' + tid] !== undefined) return posMap['tcid:' + tid];
+                                if (el._posIdx !== undefined) return el._posIdx;
+                                return 1e9;
+                            }}
+                            return getPos(a) - getPos(b);
+                        }});
+                        for (var _ri = 0; _ri < _sortedChildren.length; _ri++) {{
+                            toolContent.appendChild(_sortedChildren[_ri]);
+                        }}
+                        toolContent.__lastOrder = _curKeys;
                     }}
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
-                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -4341,12 +4410,16 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 工具区（#tool-content）自动滚底 =====
                 // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                function _scrollToolContentToBottom() {{
+                // force=true：跳过 _userScrolledUp 检查（用于 reorganizeContent 程序性更新）
+                function _scrollToolContentToBottom(force) {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
                     // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp) return;
+                    if (tc._userScrolledUp && !force) return;
                     tc.scrollTop = tc.scrollHeight;
+                    // ⚡ 修复：reorganizeContent 是程序性内容重组，不受旧 _userScrolledUp 影响，
+                    // 滚底后清除标志，防止异步 scroll 事件在下一轮渲染中误设标志。
+                    if (force) tc._userScrolledUp = false;
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
@@ -5631,7 +5704,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -8520,7 +8593,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):

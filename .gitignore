@@ -65,6 +65,9 @@ htmlcov/
 # CodeGraph 索引（自动生成，不提交）
 .codegraph/
 
+# 团队工作成果（自动生成，不提交）
+.teams/
+
 # 系统文件
 desktop.ini
 $RECYCLE.BIN/

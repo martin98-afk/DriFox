@@ -126,7 +126,7 @@ def _parse_mmdd(date_str: str) -> datetime:
         if dt > now + timedelta(days=30):
             dt = datetime(now.year - 1, month, day)
         return dt
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return datetime.now()
 
 
@@ -168,15 +168,24 @@ class _ChartTooltip(QWidget):
         self._tc = QColor(255, 255, 255, 230)
         self._border = QColor(60, 60, 65, 200)
         self._font_family = "Microsoft YaHei"
-        self._font = QFont(self._font_family, 11)
+        self._font_size = 11
+        self._font = QFont(self._font_family, self._font_size)
         self._font.setWeight(QFont.Normal)
 
     def set_font_family(self, family: str):
         """设置 tooltip 字体族，跟随系统/上下文主题"""
         if family and family != self._font_family:
             self._font_family = family
-            self._font = QFont(family, 11)
+            self._font = QFont(family, self._font_size)
             self._font.setWeight(QFont.Normal)
+
+    def set_font_size(self, size: int):
+        """设置 tooltip 字号，跟随上下文主题基础字号派生"""
+        if size != self._font_size:
+            self._font_size = size
+            self._font = QFont(self._font_family, self._font_size)
+            self._font.setWeight(QFont.Normal)
+            self.update()
 
     def set_text(self, text: str):
         """设置文本并重算尺寸"""
@@ -317,10 +326,12 @@ class _BarChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 date_str = label
             tt = self._get_tooltip()
+            base_fs = self._colors.get("font_size", 14)
             tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_font_size(max(round(base_fs * 11 / 14), 9))
             tt.set_text(f"📊 {date_str}\n会话数: {value}")
             tt.show_at_global(event.globalPos())
 
@@ -437,7 +448,7 @@ class _BarChartWidget(QWidget):
                         display_label = f"{parts[0]}-{parts[1]}"
                 else:
                     display_label = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 display_label = label
 
             painter.drawText(
@@ -548,10 +559,12 @@ class _LineChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 date_str = label
             tt = self._get_tooltip()
+            base_fs = self._colors.get("font_size", 14)
             tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_font_size(max(round(base_fs * 11 / 14), 9))
             tt.set_text(f"📈 {date_str}\n{_format_number(value)}")
             tt.show_at_global(event.globalPos())
 
@@ -717,7 +730,7 @@ class _LineChartWidget(QWidget):
                         display = label
                 else:
                     display = label
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 display = label
 
             x_spacing = chart_w / n if n > 0 else chart_w
@@ -924,7 +937,9 @@ class _ProjectBarWidget(QWidget):
         if self._hovered_index >= 0:
             label, value = self._data[self._hovered_index]
             tt = self._get_tooltip()
+            base_fs = self._colors.get("font_size", 14)
             tt.set_font_family(self._colors.get("font_family", "Microsoft YaHei"))
+            tt.set_font_size(max(round(base_fs * 11 / 14), 9))
             tt.set_text(f"📁 {label}\n会话数: {value}")
             tt.show_at_global(event.globalPos())
 

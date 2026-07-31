@@ -217,10 +217,7 @@ class FileUndoPreviewDialog(QDialog):
 
     def _show_diff(self, index: int):
         """显示指定操作的差异"""
-        from app.utils.diff_viewer import (
-            DiffHtmlGenerator,
-            DiffViewerWindow,
-        )
+        from app.utils.diff_viewer import DiffHtmlGenerator
 
         op = self.operations[index]
         file_path = op.get("file_path", "")
@@ -253,9 +250,19 @@ class FileUndoPreviewDialog(QDialog):
             diff_output = ''.join(diff)
             html = DiffHtmlGenerator.generate_html_report(diff_output, "")
 
-            viewer = DiffViewerWindow(parent=self)
-            viewer.load_html(html)
-            viewer.show()
+            # 内嵌显示差异（覆盖右侧对话区域）
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            controller = get_global_card_controller()
+            if controller is not None:
+                controller.show_diff_viewer(html)
+            else:
+                # 回退：弹窗模式
+                from app.utils.diff_viewer import DiffViewerWindow
+
+                viewer = DiffViewerWindow(parent=self)
+                viewer.load_html(html)
+                viewer.show()
 
         except Exception as e:
             from loguru import logger

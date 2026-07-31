@@ -11,6 +11,7 @@ Gateway 通讯平台设置卡片
 - 连接中时显示"断开"（黄色）
 - 未连接时显示"连接"（默认颜色）
 """
+
 import threading
 
 from loguru import logger
@@ -48,14 +49,15 @@ from app.utils.design_tokens import (
     scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.cards.floating.command_card import _ElidedLabel
+from app.widgets.elided_label import _ElidedLabel
 
 # ═══════════════════════════════════════════════════════════
 # 共用表单样式（白色标签 + 深色输入框）
 # ═══════════════════════════════════════════════════════════
 
+
 def get_label_style() -> str:
-    """获取标签样式（响应主题）"""
+    """获取标签样式（每次调用刷新主题）"""
     Colors.refresh()
     return f"""
 color: {Colors.TEXT_PRIMARY};
@@ -64,19 +66,18 @@ font-weight: bold;
 {font_size_css(13)}
 """
 
+
 def get_gateway_edit_style() -> str:
-    """获取网关输入框样式（响应主题，复用统一编辑样式）"""
-    return CardStyles.edit_card_style() + f"""
+    """获取网关输入框样式（每次调用刷新主题）"""
+    Colors.refresh()
+    return (
+        CardStyles.edit_card_style()
+        + f"""
 QLabel {{
     color: {Colors.TEXT_PRIMARY};
 }}
 """
-
-# 兼容旧引用
-LABEL_STYLE = get_label_style()
-GATEWAY_EDIT_STYLE = get_gateway_edit_style()
-
-
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -146,6 +147,7 @@ PLATFORM_DEFS = {
 # PlatformStatusRow — 平台状态行（优化版）
 # ═══════════════════════════════════════════════════════════
 
+
 class PlatformStatusRow(CardWidget):
     """平台状态行（优化版）"""
 
@@ -183,6 +185,7 @@ class PlatformStatusRow(CardWidget):
         layout.addWidget(self.name_label)
 
         # 状态（使用 ElidedLabel 处理长错误信息）
+        self._last_status_state = None  # 记录上次状态，避免冗余 setStyleSheet
         self.status_label = _ElidedLabel("未连接")
         self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
         self.status_label.setToolTip("")
@@ -205,6 +208,7 @@ class PlatformStatusRow(CardWidget):
 
     def _resolve_enum(self):
         from app.gateway.base import Platform
+
         mapping = {
             "wecom": Platform.WECOM,
             "dingtalk": Platform.DINGTALK,
@@ -218,6 +222,7 @@ class PlatformStatusRow(CardWidget):
     def _load_config(self):
         try:
             from app.gateway.config import get_gateway_config
+
             cfg = get_gateway_config().get_platform_config(self._resolve_enum())
             # 加载存档开关状态时屏蔽信号：避免被误判为「用户拨动开关」触发自动连接。
             # 复制窗口时新 PlatformStatusRow 的默认状态(False)与存档(True)不一致，
@@ -243,6 +248,7 @@ class PlatformStatusRow(CardWidget):
         """开关变化时自动连接或断开"""
         try:
             from app.gateway.config import get_gateway_config
+
             get_gateway_config().set_platform_enabled(self._resolve_enum(), checked)
         except Exception as e:
             logger.warning(f"[PlatformStatusRow] Save enabled error: {e}")
@@ -264,8 +270,6 @@ class PlatformStatusRow(CardWidget):
     def _on_edit(self):
         self.editRequested.emit(self._platform)
 
-
-
     def _do_connect(self):
         """执行连接"""
         if self._is_connecting:
@@ -278,6 +282,7 @@ class PlatformStatusRow(CardWidget):
         def _do():
             try:
                 from app.gateway.manager import get_platform_manager
+
                 manager = get_platform_manager()
                 if not manager:
                     self._update_status_safe(False, "管理器未就绪")
@@ -307,6 +312,7 @@ class PlatformStatusRow(CardWidget):
         def _do():
             try:
                 from app.gateway.manager import get_platform_manager
+
                 manager = get_platform_manager()
                 if manager:
                     manager.stop_platform(platform_enum)
@@ -328,6 +334,7 @@ class PlatformStatusRow(CardWidget):
         """从管理器刷新状态"""
         try:
             from app.gateway.manager import get_platform_manager
+
             manager = get_platform_manager()
             if manager:
                 status = manager.get_status()
@@ -358,25 +365,40 @@ class PlatformStatusRow(CardWidget):
         QTimer.singleShot(0, lambda: self._update_status(connected, error, connecting))
 
     def _update_status(self, connected: bool, error: str = None, connecting: bool = False):
-        """更新状态显示"""
+        """更新状态显示 — 跟踪状态避免冗余 setStyleSheet"""
+        # 确定当前状态标识
         if connected:
-            self.status_label.setText("已连接 ✓")
-            self.status_label.setStyleSheet("color: #52c41a; font-size: 13px;")
-            self.status_label.setToolTip("")
+            new_state = "connected"
+            text = "已连接 ✓"
+            color = "#52c41a"
+            tip = ""
         elif connecting:
-            self.status_label.setText("连接中...")
-            self.status_label.setStyleSheet("color: #faad14; font-size: 13px;")
-            self.status_label.setToolTip("")
+            new_state = "connecting"
+            text = "连接中..."
+            color = "#faad14"
+            tip = ""
         elif error:
-            self.status_label.setText(str(error))
-            self.status_label.setStyleSheet("color: #ff4d4f; font-size: 13px;")
-            self.status_label.setToolTip(error)
+            new_state = "error"
+            text = str(error)
+            color = "#ff4d4f"
+            tip = error
         else:
-            self.status_label.setText("未连接")
-            self.status_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
-            self.status_label.setToolTip("")
+            new_state = "disconnected"
+            text = "未连接"
+            color = Colors.TEXT_MUTED
+            tip = ""
 
+        # 状态未变：只更新文字（setStyleSheet 不碰）
+        if new_state == self._last_status_state:
+            self.status_label.setText(text)
+            if tip:
+                self.status_label.setToolTip(tip)
+            return
 
+        self._last_status_state = new_state
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color}; font-size: 13px;")
+        self.status_label.setToolTip(tip)
 
     def update_status(self, connected: bool, error: str = None):
         """外部更新状态（兼容旧接口）"""
@@ -386,17 +408,18 @@ class PlatformStatusRow(CardWidget):
         self.enable_switch.setChecked(enabled)
 
     def refresh_style(self):
-        """平台图标随系统字号缩放"""
-        if hasattr(self, '_platform_icon') and self._platform_icon is not None:
+        """刷新样式：图标缩放 + 标签颜色（主题切换时调用）"""
+        if hasattr(self, "_platform_icon") and self._platform_icon is not None:
             s = scale_icon_size(24)
             self._platform_icon.setFixedSize(s, s)
-
-
+        # 强制下次 _update_status 重新 setStyleSheet（颜色可能已变）
+        self._last_status_state = None
 
 
 # ═══════════════════════════════════════════════════════════
 # PlatformEditCard — 平台配置编辑表单
 # ═══════════════════════════════════════════════════════════
+
 
 class PlatformEditCard(QWidget):
     """平台配置编辑卡片（通用）"""
@@ -411,10 +434,12 @@ class PlatformEditCard(QWidget):
         self._inputs = {}
         self._load_config()
         self._init_ui()
+        self.refresh_style()
 
     def _resolve_enum(self, platform_name: str):
         """将平台名转为 Platform 枚举"""
         from app.gateway.base import Platform
+
         mapping = {
             "wecom": Platform.WECOM,
             "dingtalk": Platform.DINGTALK,
@@ -429,13 +454,25 @@ class PlatformEditCard(QWidget):
         """加载配置"""
         try:
             from app.gateway.config import get_gateway_config
+
             self._config = get_gateway_config().get_platform_config(self._resolve_enum(self._platform))
         except Exception:
             self._config = None
 
-    def _init_ui(self):
-        self.setStyleSheet(GATEWAY_EDIT_STYLE)
+    def refresh_style(self):
+        """主题切换时刷新输入框和标签颜色"""
+        Colors.refresh()
+        self.setStyleSheet(get_gateway_edit_style())
+        label_style = get_label_style()
+        if hasattr(self, "_title_label"):
+            self._title_label.setStyleSheet(label_style)
+        # 刷新表单标签（存放于 form layout 的 label 角色）
+        for w in self.findChildren(BodyLabel):
+            # hint 标签有独立颜色，不覆盖
+            if w.objectName() != "hintLabel":
+                w.setStyleSheet(label_style)
 
+    def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 4, 8, 4)
         main_layout.setSpacing(12)
@@ -443,7 +480,7 @@ class PlatformEditCard(QWidget):
         # 标题
         name = self._def.get("name", self._platform)
         title = StrongBodyLabel(f"{name} 配置")
-        title.setStyleSheet(LABEL_STYLE)
+        self._title_label = title
         main_layout.addWidget(title)
 
         # 表单
@@ -464,7 +501,6 @@ class PlatformEditCard(QWidget):
 
             # 标签白色
             lbl = BodyLabel(label)
-            lbl.setStyleSheet(LABEL_STYLE)
 
             form.addRow(lbl, input_widget)
             self._inputs[key] = input_widget
@@ -473,8 +509,10 @@ class PlatformEditCard(QWidget):
         hint_text = self._def.get("hint", "")
         if hint_text:
             hint = BodyLabel(hint_text)
+            hint.setObjectName("hintLabel")
             hint.setStyleSheet(
-                f"color: rgba(255,255,255,0.5); padding: 8px 0; {get_font_family_css()} font-size: 11px;")
+                f"color: rgba(255,255,255,0.5); padding: 8px 0; {get_font_family_css()} font-size: 11px;"
+            )
             form.addRow("", hint)
 
         main_layout.addLayout(form)
@@ -590,6 +628,7 @@ class PlatformEditCard(QWidget):
 # GatewaySettingCard — 主卡片
 # ═══════════════════════════════════════════════════════════
 
+
 class GatewaySettingCard(ExpandSettingCard):
     """
     Gateway 通讯平台设置卡片
@@ -696,3 +735,13 @@ class GatewaySettingCard(ExpandSettingCard):
                         pass
         except Exception as e:
             logger.warning(f"[GatewaySettingCard] Refresh error: {e}")
+
+    def refresh_style(self):
+        """主题切换时刷新所有子控件样式"""
+        Colors.refresh()
+        for row in self._rows.values():
+            if hasattr(row, "refresh_style"):
+                row.refresh_style()
+        # 如果当前正在编辑，也刷新编辑卡片
+        if self._current_edit_card is not None and hasattr(self._current_edit_card, "refresh_style"):
+            self._current_edit_card.refresh_style()

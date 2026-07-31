@@ -1,0 +1,7 @@
+schema_version: 1
+template_name: code-review-team
+description: 代码审查流水线团队：plan 规划审查范围与验收标准，build 实施修复，code-reviewer 对照计划与编码规范逐项审查，全流程闭环交付。
+agents:
+  - agent_name: plan
+  - agent_name: build
+  - agent_name: code-reviewer

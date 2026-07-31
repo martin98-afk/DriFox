@@ -97,7 +97,12 @@ class ConfigSyncService(QObject):
         self._upload_lock = threading.Lock()
         self._watch_stop: Optional[threading.Event] = None
         self._watch_thread: Optional[threading.Thread] = None
-        self._suppress_until: float = 0.0  # 下载后抑制上传的时间窗口（时间戳）
+        self._suppress_until: float = 0.0
+        # 抑制上传的时间窗口（Unix 时间戳）。
+        # 写者：watch 后台线程（pause_upload / _do_download）、主线程（_do_download）。
+        # 读者：主线程（_on_config_changed_main）。
+        # 线程安全：CPython float 赋值原子；写者总是写 time.time() + offset
+        # 生成单调递增值，读者读到任一中间状态都不会缩短抑制窗口。
         self._upload_thread: Optional[threading.Thread] = None  # 后台上传线程引用
         self._config_dirty: bool = False  # app.config 有待上传的变更
         self._custom_dirty: bool = False  # user-custom 有待上传的变更
@@ -277,6 +282,24 @@ class ConfigSyncService(QObject):
     def download(self) -> bool:
         """强制从远端下载配置并覆盖本地（公开方法）"""
         return self._do_download()
+
+    def pause_upload(self, seconds: float = 5.0):
+        """
+        临时抑制上传触发（公开方法，供其他模块在「即将写 app.config」前调用）。
+
+        使用场景：例如 Gitee token 刷新会写 app.config，但写盘本身不应该触发
+        一次新的云端上传。调用此方法在指定秒数内忽略 watcher 触发的上传。
+
+        抑制窗口结束后，仍会通过 _flush_suppressed_changes 兜底检查是否有
+        真正的用户配置变更需要上传（与现有 _do_download 的抑制机制一致）。
+
+        Args:
+            seconds: 抑制时长（秒），默认 5s（足以覆盖 watcher 触发 + 防抖窗口）
+        """
+        new_until = time.time() + seconds
+        if new_until > self._suppress_until:
+            self._suppress_until = new_until
+            logger.debug(f"[ConfigSync] 抑制上传 {seconds}s（至 {self._suppress_until:.0f}）")
 
     # ── 状态管理 ──────────────────────────────────────────
 
@@ -507,6 +530,11 @@ class ConfigSyncService(QObject):
         token 过期后不会自动更新。本方法每次 API 调用前调用，确保
         self._token 持有最新有效值。
 
+        收敛到 backend._ensure_valid_token() 这一个刷新入口，
+        避免与 GiteeUploader / gitee_card 等调用方双轨刷新导致
+        Gitee refresh_token rotation 漂移（内存新、磁盘旧 →
+        下次冷启动必报"refresh_token 无效或已被撤销"）。
+
         Returns:
             True: token 有效
             False: token 无效（未绑定/刷新失败）
@@ -515,50 +543,26 @@ class ConfigSyncService(QObject):
         防止下游流程使用过期 token 导致误判远端状态。
         """
         try:
-            from app.gateway.auth.gitee import GiteeOAuthBackend, refresh_access_token
+            from app.gateway.auth.gitee import GiteeOAuthBackend
 
             backend = GiteeOAuthBackend()
             if not backend.is_bound():
                 self._token = ""
                 return False
 
-            cfg = Settings.get_instance()
-            access_token = cfg.gitee_user_token.value
-            refresh_token = cfg.gitee_user_refresh_token.value
-            expires_at = cfg.gitee_token_expires_at.value
+            # 抑制 watcher：_ensure_valid_token 刷新成功后会写 app.config，
+            # 写盘本身不应触发一次云端上传（5s 抑制窗口足以覆盖 watcher
+            # 触发 + 防抖窗口的开头，窗口结束后 _flush_suppressed_changes
+            # 仍会兜底检查真实用户配置变更）。
+            self.pause_upload(5.0)
 
-            # ── 判断是否需要刷新 ──
-            needs_refresh = False
-            if refresh_token:
-                if not expires_at or time.time() >= expires_at - 60:
-                    needs_refresh = True
-            elif not access_token:
+            token, err = backend._ensure_valid_token()
+            if not token:
                 self._token = ""
-                return False
-            # 无 refresh_token 但有 access_token → 直接使用
-
-            if not needs_refresh:
-                self._token = access_token
-                return True
-
-            # ── 自行刷新（不调 _ensure_valid_token → 不触发 _persist_tokens 写 app.config） ──
-            client_id = cfg.gitee_oauth_client_id.value
-            client_secret = cfg.gitee_oauth_client_secret.value
-            new_tokens, err = refresh_access_token(refresh_token, client_id, client_secret)
-            if new_tokens is None:
-                self._token = ""
-                logger.warning(f"[ConfigSync] token 刷新失败: {err}")
+                logger.warning(f"[ConfigSync] token 同步失败: {err}")
                 return False
 
-            # 仅更新内存，不写 app.config（避免触发文件 watcher）
-            cfg.gitee_user_token.value = new_tokens["access_token"]
-            if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
-                cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
-            if "expires_in" in new_tokens:
-                cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
-
-            self._token = new_tokens["access_token"]
-            logger.info("[ConfigSync] access_token 已续期（内存，未写盘）")
+            self._token = token
             return True
         except Exception as e:
             logger.warning(f"[ConfigSync] token 同步异常: {e}")

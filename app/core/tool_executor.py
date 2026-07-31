@@ -169,6 +169,12 @@ class ToolExecutor:
         """获取文件操作记录器"""
         return self._file_recorder
 
+    def _check_team_member(self) -> bool:
+        """检查当前窗口是否是团队成员（委托给共用函数）"""
+        from app.core.team_manager import check_team_member
+
+        return check_team_member(self._backend)
+
     def _record_file_operation_before(self, tool_name: str, args: dict, session_id: str = None, call_id: str = None):
         """
         在文件操作执行前记录备份信息
@@ -723,15 +729,22 @@ class ToolExecutor:
         "lsp": ["operation"],
     }
 
-    def execute(self, tool_name: str, args: dict, call_id: str = None) -> ToolResult:
+    def execute(
+        self,
+        tool_name: str,
+        args: dict,
+        call_id: str = None,
+        hook_context: Optional[Dict] = None,
+    ) -> ToolResult:
         """
         执行工具调用
 
         Args:
             tool_name: 工具名称
             args: 工具参数
-            cancelled_ref: 取消标志引用 [bool]
             call_id: 工具调用 ID（可选，用于并行执行时隔离上下文；不传则使用 self._call_id）
+            hook_context: 调用方提供的 hook context 覆盖字段（如 current_role/is_subagent_call）
+                         用于区分主智能体/子智能体的工具调用，不传则使用默认值。
 
         Returns:
             ToolResult: 执行结果
@@ -776,6 +789,9 @@ class ToolExecutor:
                     if "oldString" in _edit and "old_string" not in _edit:
                         _edit["old_string"] = _edit["oldString"]
 
+            # 调用方 hook context 覆盖（如 subagent 传入 current_role="subagent"）
+            _hook_ctx = hook_context or {}
+
             context = {
                 "project_root": self._workdir or os.getcwd(),
                 # Claude Code 风格工具名（PascalCase），使第三方插件能通过
@@ -786,9 +802,11 @@ class ToolExecutor:
                 # Claude Code 兼容字段（字段名已标准化）
                 "tool_input": _normalized_input,
                 "session_id": local_session_id,
-                # 【新增】让 hook 能识别当前执行角色（与 subagent_worker._build_hook_context 对齐）
-                "current_role": "primary",
-                "is_subagent_call": False,
+                # 默认角色：主智能体。调用方可通过 hook_context 覆盖
+                "current_role": _hook_ctx.get("current_role", "primary"),
+                "is_subagent_call": _hook_ctx.get("is_subagent_call", False),
+                # 团队上下文：当前窗口是否是团队成员
+                "is_team_member": _hook_ctx.get("is_team_member", self._check_team_member()),
             }
             file_path = args.get("path") or args.get("file")
             if file_path:

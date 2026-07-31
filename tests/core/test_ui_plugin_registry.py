@@ -142,6 +142,22 @@ def test_register_floating_card():
     reg.reset()
 
 
+def test_register_floating_card_full_container():
+    """container="full" 合法：完整覆盖对话区（与系统配置卡片一致）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        plugin_name="plug-full",
+        card_id="plug-full:full-card",
+        widget_class=object,
+        container="full",
+        title="Full Card",
+    )
+    info = reg.get_floating_cards()["plug-full:full-card"]
+    assert info.container == "full"
+    reg.reset()
+
+
 def test_floating_card_auto_registers_command():
     """register_floating_card 应自动注册 /card_id 命令（系统插件用短名）"""
     reg = UIPluginRegistry.get_instance()
@@ -322,8 +338,8 @@ class _FakeMainWidgetWithSystemCard:
 def test_show_floating_card_registers_as_system_card():
     """_show_floating_card 首次显示时应调用 register_system_card，让插件卡片像系统配置卡片一样隐藏输入区
 
-    容器选择：plugin-marketplace 和 plugin-manager 已迁移为 container="bottom"，
-    因此 widget 应被加入 _bottom_card_container，并触发 register_system_card。
+    容器选择：插件卡片可注册在 bottom/full 等位置（如 plugin-marketplace / plugin-manager
+    已迁移为 container="full"），显示时均触发 register_system_card。
     """
     reg = UIPluginRegistry.get_instance()
     reg.reset()
@@ -363,6 +379,116 @@ def test_show_floating_card_registers_as_system_card():
 
     cmd_mgr = CommandManager.get_instance()
     cmd_mgr.unregister("plug-bot:plug-bot")
+    reg.reset()
+
+
+class _VisibleCardManager(_FakeCardManager):
+    """模拟卡片始终可见的 CardManager（触发 move_floating_card 重建路径）"""
+
+    def is_card_visible(self, card_id, window_id):
+        return True
+
+
+class _FakeMainWidgetVisibleCard:
+    """带可见 CardManager 的 main_widget stub（含 register_system_card）"""
+
+    def __init__(self):
+        self._window_id = "test"
+        self._card_manager = _VisibleCardManager()
+        self._top_card_container = _FakeContainer()
+        self._bottom_card_container = _FakeContainer()
+        self.system_card_registered: list = []
+
+    def register_system_card(self, card_id: str) -> None:
+        self.system_card_registered.append(card_id)
+
+
+class _FakeCard:
+    """模拟卡片 widget 的最小实现（提供 QWidget 的 parent/setParent/deleteLater 接口）"""
+
+    def __init__(self, parent=None):
+        self._parent = parent
+        self.deleted = False
+
+    def parent(self):
+        return self._parent
+
+    def setParent(self, parent):
+        self._parent = parent
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+def _register_move_card(reg, main_widget):
+    reg.set_main_widget(main_widget)
+    reg.register_floating_card(
+        plugin_name="plug-move",
+        card_id="plug-move",
+        widget_class=_FakeCard,
+        container="top",
+        title="移动测试卡片",
+    )
+
+
+def test_move_floating_card_switches_container_and_rebuilds():
+    """可见卡片 move：更新注册方位 + 销毁旧实例 + 按新方位重建显示"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    main_widget = _FakeMainWidgetVisibleCard()
+    _register_move_card(reg, main_widget)
+
+    # 首次显示 → 挂到 top 容器
+    reg._show_floating_card("plug-move")
+    assert len(main_widget._top_card_container.added) == 1
+    assert main_widget._top_card_container.added[0][0] == "plug-move"
+
+    # 移动到底部 → 注册信息更新 + 重建到 bottom 容器
+    assert reg.move_floating_card("plug-move", "bottom") is True
+    assert reg.get_floating_cards()["plug-move"].container == "bottom"
+    assert len(main_widget._bottom_card_container.added) == 1
+    assert main_widget._bottom_card_container.added[0][0] == "plug-move"
+
+    # 清理
+    from app.core.command_manager import CommandManager
+
+    cmd_mgr = CommandManager.get_instance()
+    cmd_mgr.unregister("plug-move:plug-move")
+    reg.reset()
+
+
+def test_move_floating_card_hidden_card_updates_only_and_bounds():
+    """隐藏卡片 move：只更新注册不重建；同方位 True、非法方位/未注册 False"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    main_widget = _FakeMainWidgetWithSystemCard()
+    _register_move_card(reg, main_widget)
+
+    # 首次显示（is_card_visible 恒 False → 隐藏状态）
+    reg._show_floating_card("plug-move")
+    top_count = len(main_widget._top_card_container.added)
+    assert top_count == 1
+
+    # 隐藏卡片移动 → 注册信息更新，但不重建到新容器
+    assert reg.move_floating_card("plug-move", "bottom") is True
+    assert reg.get_floating_cards()["plug-move"].container == "bottom"
+    assert len(main_widget._bottom_card_container.added) == 0
+
+    # 同方位移动 → 返回 True 且不重复重建
+    assert reg.move_floating_card("plug-move", "bottom") is True
+    assert len(main_widget._top_card_container.added) == top_count
+    assert len(main_widget._bottom_card_container.added) == 0
+
+    # 非法方位 → False
+    assert reg.move_floating_card("plug-move", "diagonal") is False
+    # 未注册卡片 → False
+    assert reg.move_floating_card("not-exist", "top") is False
+
+    # 清理
+    from app.core.command_manager import CommandManager
+
+    cmd_mgr = CommandManager.get_instance()
+    cmd_mgr.unregister("plug-move:plug-move")
     reg.reset()
 
 

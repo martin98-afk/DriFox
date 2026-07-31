@@ -18,6 +18,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def check_team_member(backend_or_window_id) -> bool:
+    """检查窗口是否是团队成员（共用函數，供 ToolExecutor / chat_worker 調用）
+
+    Args:
+        backend_or_window_id: ChatBackend 实例或 window_id 字串
+
+    Returns:
+        True 若該窗口已加入團隊
+    """
+    try:
+        if isinstance(backend_or_window_id, str):
+            wid = backend_or_window_id
+        else:
+            wid = getattr(backend_or_window_id, "_window_id", None)
+        if not wid:
+            return False
+        return TeamManager.get_instance().is_team_member(wid)
+    except Exception:
+        return False
+
+
 class TeamManager:
     """团队协作管理器（单例）"""
 
@@ -52,6 +73,7 @@ class TeamManager:
     @staticmethod
     def _get_teams_dir() -> Path:
         from app.utils.utils import get_app_data_dir
+
         return get_app_data_dir() / "teams"
 
     def _team_dir(self, team_name: str) -> Path:
@@ -75,7 +97,7 @@ class TeamManager:
                     counter = int(self._window_counter_file.read_text().strip())
                 else:
                     counter = 1
-            except (ValueError, FileNotFoundError):
+            except ValueError, FileNotFoundError:
                 counter = 1
 
             window_id = f"win_{counter:02d}"
@@ -119,7 +141,7 @@ class TeamManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             return {}
 
     @staticmethod
@@ -146,7 +168,7 @@ class TeamManager:
         try:
             if active_file.exists():
                 return set(json.loads(active_file.read_text()))
-        except (json.JSONDecodeError, FileNotFoundError):
+        except json.JSONDecodeError, FileNotFoundError:
             pass
         return set()
 
@@ -254,6 +276,24 @@ class TeamManager:
         data = self._get_team_data(team_name)
         return window_id in data.get("members", {})
 
+    # ── 团队模板上下文 ────────────────────────────────
+
+    def set_template(self, template_info: dict, team_name: str = DEFAULT_TEAM):
+        """设置当前团队的模板上下文（/team --load=<name> 加载模板时写入）
+
+        Args:
+            template_info: {"name": ..., "description": ..., "agents": [...]}
+                供 SessionStart hook 读取并注入团队描述
+        """
+        data = self._get_team_data(team_name)
+        data["template"] = template_info
+        self._save_team_data(team_name)
+
+    def get_template(self, team_name: str = DEFAULT_TEAM) -> Optional[Dict[str, Any]]:
+        """获取当前团队的模板上下文（无模板时返回 None）"""
+        data = self._get_team_data(team_name)
+        return data.get("template")
+
     # ── 邮件系统 ─────────────────────────────────────
 
     def _next_mail_id(self) -> str:
@@ -349,6 +389,19 @@ class TeamManager:
         pending = [m for m in mails if m.get("type") == "task" and m.get("status") == "pending"]
         return pending[:1]  # 串行处理
 
+    def get_running_tasks(self, window_id: str, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
+        """获取该成员正在运行的任务邮件"""
+        mails = self.get_mailbox_mails(window_id, team_name)
+        return [m for m in mails if m.get("type") == "task" and m.get("status") == "running"]
+
+    def get_member_busy_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:
+        """返回成员的工作状态: 'busy'（有 running/pending 任务）| 'idle'（空闲）"""
+        mails = self.get_mailbox_mails(window_id, team_name)
+        for m in mails:
+            if m.get("type") == "task" and m.get("status") in ("running", "pending"):
+                return "busy"
+        return "idle"
+
     def mark_mail_running(self, mail_id: str, window_id: str, team_name: str = DEFAULT_TEAM):
         self._update_mail_status(mail_id, window_id, "running", team_name)
 
@@ -356,8 +409,12 @@ class TeamManager:
         self._update_mail_status(mail_id, window_id, "done", team_name, result)
 
     def _update_mail_status(
-        self, mail_id: str, window_id: str, status: str,
-        team_name: str = DEFAULT_TEAM, result: str = "",
+        self,
+        mail_id: str,
+        window_id: str,
+        status: str,
+        team_name: str = DEFAULT_TEAM,
+        result: str = "",
     ):
         mailbox_dir = self._mailbox_dir(team_name, window_id)
         mail_file = mailbox_dir / f"{mail_id}.json"

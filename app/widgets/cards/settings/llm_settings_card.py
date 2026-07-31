@@ -322,16 +322,8 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard.checkedChanged.connect(self._on_lock_remote_toggled)
         content_layout.addWidget(self.lockRemoteCard)
 
-        # Tab 管理器
-        self.tabManagerCard = SwitchSettingCard(
-            get_icon("tab切换"),
-            "启用 Tab 管理器",
-            "将所有窗口整合到 Tab 面板",
-            configItem=self.cfg.enable_tab_manager,
-            parent=self,
-        )
-        self.tabManagerCard.checkedChanged.connect(self._on_tab_manager_toggled)
-        content_layout.addWidget(self.tabManagerCard)
+        # Tab 管理器开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
+        # （回退方式：恢复此处 SwitchSettingCard 并还原 main.py 的模式分支）
 
         # 开机自启
         self.autoStartCard = SwitchSettingCard(
@@ -753,13 +745,14 @@ class LLMSettingsCard(SystemCardFrame):
         # 所有配置控件在变更时已即时保存，这里只负责刷新运行时外观
 
     def _refresh_appearance_from_config(self):
-        """根据当前配置刷新外观样式"""
+        """根据当前配置刷新外观样式
+
+        Colors.refresh() 由 self.refresh_style() 内部第一行调用，
+        此处不重复调用。
+        """
         # 刷新字体大小
         actual_size = get_ui_font_size()
         apply_font_size_to_widget(self, actual_size)
-
-        # 刷新主题样式
-        Colors.refresh()
 
         # 浅/深色切换 → 清除浅色检测缓存（图标由 QIconEngine 自动适配）
         from app.utils.theme_manager import theme_manager
@@ -769,45 +762,44 @@ class LLMSettingsCard(SystemCardFrame):
         if hasattr(self, "refresh_style"):
             self.refresh_style()
 
-        # 刷新所有子设置卡片的主题样式
+        # ── 合并刷新：一次 findChildren(SystemCardFrame) 覆盖所有 SystemCardFrame 子类 ──
+        # BaseSettingsCard 继承自 SystemCardFrame，已在遍历中，无需第二遍 findChildren
         for frame in self.findChildren(SystemCardFrame):
             if hasattr(frame, "refresh_style"):
                 frame.refresh_style()
-        # 刷新 BaseSettingsCard 子卡片
-        for card in self.findChildren(BaseSettingsCard):
-            if hasattr(card, "refresh_style"):
-                card.refresh_style()
-        # 刷新 AppearanceComboCard / FontSettingCard 的下拉样式（SettingCard 子类，不在以上遍历范围）
+        # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
         for card_name in ("uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard"):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
-        # 刷新手风琴类卡片中的文字颜色（ExpandSettingCard 子类，不在以上遍历范围）
+        # 手风琴类卡片（ExpandSettingCard 子类，不在以上遍历范围）
         for card_name in ("llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard"):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
-        # 刷新所有配置项（SettingCard 子类）的图标大小，使其跟随系统字号缩放
+        # ── SettingCard 图标大小（单次 findChildren） ──
         icon_sz = scale_icon_size(16)
         for card in self.findChildren(SettingCard):
             card.setIconSize(icon_sz, icon_sz)
-        # 刷新分隔标签
+        # ── 分隔标签（Colors 已在上游 refresh_style 链中刷新） ──
         self._refresh_sep_labels()
 
     def _refresh_sep_labels(self):
-        """刷新所有分隔标签的样式"""
-        Colors.refresh()
+        """刷新所有分隔标签的样式
+
+        不额外调用 Colors.refresh()——上游 _refresh_appearance_from_config / refresh_style
+        链已确保 Colors 为最新。分隔标签单纯使用 Colors 当前值设置样式。
+        """
         sep_labels = [
             getattr(self, "_sep_llm_label", None),
             getattr(self, "_sep_common_label", None),
             getattr(self, "_sep_appearance_label", None),
             getattr(self, "_sep_update_label", None),
         ]
+        text_muted = Colors.TEXT_MUTED
         for label in sep_labels:
             if label is not None:
-                label.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; padding: 4px 0;{get_font_family_css()} font-weight: bold;"
-                )
+                label.setStyleSheet(f"color: {text_muted}; padding: 4px 0;{get_font_family_css()} font-weight: bold;")
 
     def refresh_theme_options(self):
         """热更新后刷新主题下拉列表（外部由 _on_plugin_hot_reload 调用）"""
@@ -900,6 +892,7 @@ class LLMSettingsCard(SystemCardFrame):
     def _on_tab_manager_toggled(self, enabled: bool):
         """Tab 管理器开关切换"""
         from app.widgets.tab_manager_window import TabManagerWindow
+
         TabManagerWindow.toggle_mode(enable=enabled)
 
     def _on_lock_remote_toggled(self, enabled: bool):

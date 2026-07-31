@@ -14,10 +14,11 @@ from PyQt5 import sip as _sip
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QIcon
+from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -77,44 +78,6 @@ class EmptyStateWidget(QWidget):
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )
-
-
-def _find_edge_launchers(window):
-    """查找窗口的所有 UIPluginEdgeLauncher 实例"""
-    from PyQt5 import sip
-
-    if window is None or sip.isdeleted(window):
-        return []
-    try:
-        result = []
-        for child in window.findChildren(QWidget):
-            if sip.isdeleted(child):
-                continue
-            # 检查类名（PyQt5 中 Python 子类的 metaObject className）
-            name = child.metaObject().className()
-            if name and "UIPluginEdgeLauncher" in name:
-                result.append(child)
-        return result
-    except Exception:
-        return []
-
-
-def _hide_edge_launcher(window):
-    """隐藏窗口的 UIPluginEdgeLauncher"""
-    for child in _find_edge_launchers(window):
-        try:
-            child.hide()
-        except Exception:
-            pass
-
-
-def _show_edge_launcher(window):
-    """显示窗口的 UIPluginEdgeLauncher"""
-    for child in _find_edge_launchers(window):
-        try:
-            child.show()
-        except Exception:
-            pass
 
 
 def _apply_window_topmost(window):
@@ -232,6 +195,12 @@ class TabManagerWindow(QWidget):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
+        # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
+        # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        get_global_card_controller()
+
         # 刷新 Tab 面板内嵌的 UI 插件列表
         self._tab_panel.refresh_ui_plugins()
         # 注册到 TrayManager
@@ -242,6 +211,9 @@ class TabManagerWindow(QWidget):
         # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
+
+        # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
+        QTimer.singleShot(0, self._apply_bg_from_theme)
 
     def _on_theme_changed(self):
         """主题切换时刷新配色
@@ -264,6 +236,18 @@ class TabManagerWindow(QWidget):
             self._tab_panel.refresh_style()
         except Exception:
             pass
+        # 刷新四向全局卡片容器背景（主题色/边框随主题切换）
+        for _c in (
+            getattr(self, "_global_top_container", None),
+            getattr(self, "_global_bottom_container", None),
+            getattr(self, "_global_left_container", None),
+            getattr(self, "_global_right_container", None),
+        ):
+            if _c is not None:
+                try:
+                    _c.refresh_style()
+                except Exception:
+                    pass
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
         # （纯主题色切换不影响图标，跳过可避免 QPainter 开销）
         from app.utils.design_tokens import scale_icon_size as _scale_size
@@ -278,6 +262,9 @@ class TabManagerWindow(QWidget):
                         _update_tab_icon(idx, project)
                 except Exception:
                     pass
+
+        # 刷新全局背景图
+        self._apply_bg_from_theme()
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -300,12 +287,12 @@ class TabManagerWindow(QWidget):
         """
         self.setStyleSheet(f"""
             #tabPanel {{
-                background: {Colors.CARD_BG.format(alpha=240)};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border-radius: 8px;
             }}
             #tabFrame {{
                 /* 左侧圆角矩形容器，与右侧 #chatFrame 对称，提升呼吸感 */
-                background: {Colors.CARD_BG.format(alpha=240)};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 0 4px 4px;  /* 四边与窗口 4px 边距，右 0 让位 splitter handle */
@@ -315,27 +302,117 @@ class TabManagerWindow(QWidget):
                 border-radius: 8px;
             }}
             #tabManagerContent {{
-                background: {Colors.CONTENT_BG};
+                background: transparent;
                 border-radius: 8px;
             }}
             #chatFrame {{
-                background: {Colors.CONTENT_BG};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle */
             }}
             #contentArea {{
-                background: {Colors.CONTENT_BG};
+                background: transparent;
+            }}
+            #contentStack {{
+                background: transparent;
+            }}
+            #globalOverlay {{
+                background: {Colors.CARD_BG.format(alpha=246)};
+                border-radius: 8px;
             }}
         """)
         # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
         # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
         if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet(f"""
-                QSplitter::handle:horizontal {{
-                    background: {Colors.CONTENT_BG};
+            self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
+        # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
+        # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
+        # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
+        if getattr(self, "_dock_splitter", None) is not None:
+            self._dock_splitter.setStyleSheet(f"""
+                #dockSplitter::handle:horizontal {{
+                    background: transparent;
+                    border-left: 2px solid {Colors.BORDER};
+                    margin: 10px 2px;
+                    border-radius: 1px;
+                }}
+                #dockSplitter::handle:horizontal:hover {{
+                    border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
             """)
+        if getattr(self, "_vdock_splitter", None) is not None:
+            self._vdock_splitter.setStyleSheet(f"""
+                #vDockSplitter::handle:vertical {{
+                    background: transparent;
+                    border-top: 2px solid {Colors.BORDER};
+                    margin: 2px 10px;
+                    border-radius: 1px;
+                }}
+                #vDockSplitter::handle:vertical:hover {{
+                    border-top: 2px solid {Colors.BORDER_ACCENT};
+                }}
+            """)
+
+    def _apply_bg_from_theme(self):
+        """从当前主题配置加载背景图片，作为 TabManagerWindow 全局背景
+
+        背景为纯装饰：单例窗口全局一张，不随对话框各自加载。
+        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        """
+        try:
+            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
+            chat_list = bg_config.get("chat_list", {})
+            if chat_list.get("enabled", True):
+                image = chat_list.get("image", ":/icons/fox_bg.png")
+                opacity = chat_list.get("opacity", 0.1)
+            else:
+                image = None
+                opacity = 0.1
+
+            # ── 缓存检查：同一背景配置跳过重建 ──
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
+            if (
+                getattr(self, "_last_bg_key", None) == bg_key
+                and hasattr(self, "_bg_label")
+                and self._bg_label is not None
+            ):
+                return
+            self._last_bg_key = bg_key
+
+            if image:
+                # 先清除旧背景
+                if hasattr(self, "_bg_label") and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
+                # 解析图片路径：主题文件夹内的相对路径基于主题目录
+                import os as _os
+
+                if not image.startswith(":") and not _os.path.isabs(image):
+                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+                    if theme_dir:
+                        abs_path = str(theme_dir / image)
+                        if _os.path.exists(abs_path):
+                            image = abs_path
+                self._bg_label = QLabel(self)
+                self._bg_label.setPixmap(QPixmap(image))
+                self._bg_label.setScaledContents(True)
+                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
+                self._bg_opacity.setOpacity(opacity)
+                self._bg_label.setGraphicsEffect(self._bg_opacity)
+                self._bg_label.lower()
+                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                self._bg_label.resize(self.size())
+                self._bg_label.show()
+            else:
+                # 主题禁用背景图，清除旧背景
+                if hasattr(self, "_bg_label") and self._bg_label is not None:
+                    self._bg_label.deleteLater()
+                    self._bg_label = None
+        except Exception:
+            pass
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
@@ -355,7 +432,8 @@ class TabManagerWindow(QWidget):
 
         self._tab_panel = TabPanel(content_widget)
         self._tab_panel.setObjectName("tabPanel")
-        self._tab_panel.setMinimumWidth(120)
+        # 最小宽度取收起状态的窄宽度(46px)，展开时由 splitter 控制实际宽度
+        self._tab_panel.setMinimumWidth(self._tab_panel._collapsed_min_width)
         self._tab_panel.setMaximumWidth(400)
 
         # ── 左侧 Tab 区域圆角矩形包裹框架（与右侧 #chatFrame 对称，提升呼吸感） ──
@@ -363,6 +441,13 @@ class TabManagerWindow(QWidget):
         # 绘制顺序吞掉，所以再包一层 QFrame 用 objectName 给样式。
         self._tab_frame = QFrame(content_widget)
         self._tab_frame.setObjectName("tabFrame")
+        # QSplitter 控制的 child 是 _tab_frame 而非 _tab_panel，因此
+        # _tab_frame 必须显式设最大/最小宽度，否则 splitter 拖拽会绕过
+        # _tab_panel 的约束：
+        #   frame max = panel max(400) + margins(12) + border(2) = 414
+        #   frame min = panel min(46) + margins(12) + border(2) = 60
+        self._tab_frame.setMinimumWidth(60)
+        self._tab_frame.setMaximumWidth(414)
         tab_frame_layout = QVBoxLayout(self._tab_frame)
         # 与 #chatFrame 内边距完全对齐：让两侧容器视觉一致
         tab_frame_layout.setContentsMargins(6, 6, 6, 6)
@@ -383,7 +468,110 @@ class TabManagerWindow(QWidget):
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
-        chat_frame_layout.addWidget(self._content_area)
+
+        # ── 全局卡片宿主容器（Tab 级系统卡片） ──
+        # 系统配置 / 服务商编辑 / Hook 编辑 / MCP 编辑等全局卡片不再绑定
+        # 单个对话窗口，统一挂在此容器（位于对话区上方，随卡片显隐展开/折叠）。
+        # 对话级卡片（项目/会话/模型选择）仍留在各 OpenAIChatToolWindow 内部。
+        from app.widgets.cards.card_container import CardContainer
+        from app.widgets.cards.card_manager import (
+            GLOBAL_WINDOW_ID,
+            CardManager,
+            ContainerType,
+        )
+
+        _card_mgr = CardManager.get_instance()
+        _card_mgr.register_window(GLOBAL_WINDOW_ID)
+
+        # 四向全局容器：上/下沿高度折叠，左/右沿宽度折叠（停靠区）
+        self._global_top_container = CardContainer(ContainerType.TOP)
+        self._global_top_container.setObjectName("globalCardContainer")
+        # TOP 容器启用覆盖层模式：不再在 splitter 中展开，而是作为 QStackedWidget 覆盖层
+        self._global_top_container.set_overlay_mode(True)
+        self._global_bottom_container = CardContainer(ContainerType.BOTTOM)
+        self._global_bottom_container.setObjectName("globalBottomContainer")
+        self._global_left_container = CardContainer(ContainerType.LEFT)
+        self._global_left_container.setObjectName("globalLeftContainer")
+        self._global_right_container = CardContainer(ContainerType.RIGHT)
+        self._global_right_container.setObjectName("globalRightContainer")
+        for _c in (
+            self._global_top_container,
+            self._global_bottom_container,
+            self._global_left_container,
+            self._global_right_container,
+        ):
+            _c.bind_card_manager(_card_mgr, GLOBAL_WINDOW_ID)
+
+        # 兼容别名：GlobalCardController 及旧代码通过 _global_card_container 访问 TOP 容器
+        self._global_card_container = self._global_top_container
+        # UIPluginRegistry 复用的鸭子类型属性（与 OpenAIChatToolWindow 对齐）
+        self._card_manager = _card_mgr
+        self._window_id = GLOBAL_WINDOW_ID
+        self._top_card_container = self._global_top_container
+        self._bottom_card_container = self._global_bottom_container
+        self._left_card_container = self._global_left_container
+        self._right_card_container = self._global_right_container
+
+        # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
+        # 结构：vDockSplitter(纵向)
+        #         ├─ _content_stack(QStackedWidget)：对话区 Page0 | 系统卡片覆盖层 Page1
+        #         └─ 下停靠区（bottom 容器）
+        # systemCard_frame(横向)：左停靠区 | 内容区 | 右停靠区
+        # CardContainer 停靠模式协议（enable_dock_mode）：
+        #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
+        #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
+        #   重开 → 恢复上次拖出的占比。
+        from PyQt5.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
+
+        self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
+        self._dock_splitter.setObjectName("dockSplitter")
+        self._dock_splitter.addWidget(self._global_left_container)
+        self._dock_splitter.addWidget(self._content_area)
+        self._dock_splitter.addWidget(self._global_right_container)
+        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
+        self._dock_splitter.setStretchFactor(1, 1)  # 对话区吃掉多余空间
+        self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
+        self._dock_splitter.setHandleWidth(6)
+        # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
+        self._dock_splitter.setChildrenCollapsible(False)
+
+        # ── 覆盖层堆栈（QStackedWidget）：系统卡片覆盖对话区 ──
+        # Page 0: 正常对话视图（_dock_splitter）
+        # Page 1: 系统卡片覆盖层（_global_top_container 内的全局卡片）
+        self._content_stack = _QStackedWidget(self._chat_frame)
+        self._content_stack.setObjectName("contentStack")
+        self._content_stack.addWidget(self._dock_splitter)  # index 0: 对话区
+
+        # 覆盖层页面：包裹 _global_top_container，使其填满覆盖层空间
+        self._global_overlay = QWidget(self._chat_frame)
+        self._global_overlay.setObjectName("globalOverlay")
+        _overlay_layout = QVBoxLayout(self._global_overlay)
+        _overlay_layout.setContentsMargins(0, 0, 0, 0)
+        _overlay_layout.setSpacing(0)
+        _overlay_layout.addWidget(self._global_top_container)
+        self._content_stack.addWidget(self._global_overlay)  # index 1: 覆盖层
+
+        # 默认显示对话区
+        self._content_stack.setCurrentIndex(0)
+
+        self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
+        self._vdock_splitter.setObjectName("vDockSplitter")
+        self._vdock_splitter.addWidget(self._content_stack)
+        self._vdock_splitter.addWidget(self._global_bottom_container)
+        self._vdock_splitter.setStretchFactor(0, 1)  # 覆盖层堆栈吃掉多余空间
+        self._vdock_splitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
+        self._vdock_splitter.setHandleWidth(6)
+        self._vdock_splitter.setChildrenCollapsible(False)
+        chat_frame_layout.addWidget(self._vdock_splitter, 1)
+
+        # 全局容器启用停靠模式
+        self._global_left_container.enable_dock_mode(self._dock_splitter)
+        self._global_right_container.enable_dock_mode(self._dock_splitter)
+        # TOP 容器处于覆盖层模式，不启用 dock mode
+        self._global_bottom_container.enable_dock_mode(self._vdock_splitter)
+
+        # ── 覆盖层状态切换 ──
+        self._global_top_container.overlayStateChanged.connect(self._on_overlay_state_changed)
 
         # 使用 QSplitter 让左侧面板可拖拽
         from PyQt5.QtWidgets import QSplitter
@@ -411,6 +599,9 @@ class TabManagerWindow(QWidget):
             frame_w = saved_w + 14
             self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
+        # 恢复侧边栏收起状态（必须在 splitter sizes 设置之后执行）
+        QTimer.singleShot(0, self._restore_sidebar_collapsed)
+
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
 
@@ -419,6 +610,57 @@ class TabManagerWindow(QWidget):
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
+        self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
+
+    # ── 侧边栏收起/展开 ──
+
+    def _on_sidebar_toggled(self, collapsed: bool):
+        """侧边栏收起/展开：通过 splitter 调整面板宽度"""
+        sizes = self._splitter.sizes()
+        total_w = sum(sizes) if sizes else self.width()
+
+        if collapsed:
+            # 收起前保存当前宽度（供展开时恢复）
+            if sizes:
+                self._saved_panel_frame_width = sizes[0]
+            # 使用 _tab_panel 的收起最小宽度
+            collapsed_frame_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
+            self._splitter.setSizes([collapsed_frame_w, max(0, total_w - collapsed_frame_w)])
+        else:
+            # 展开：恢复保存的宽度，若无保存则用 250
+            restore_w = getattr(self, "_saved_panel_frame_width", 250)
+            # 至少保证宽度不小于展开最小视觉宽度
+            restore_w = max(120, restore_w)
+            self._splitter.setSizes([restore_w, max(0, total_w - restore_w)])
+
+        # 持久化收起状态
+        Settings.get_instance().tab_panel_collapsed.value = collapsed
+        if not collapsed:
+            # 展开时保存当前宽度（去除 frame 补偿）
+            new_sizes = self._splitter.sizes()
+            if new_sizes:
+                Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
+
+    def _restore_sidebar_collapsed(self):
+        """启动时根据配置恢复侧边栏收起状态"""
+        collapsed = Settings.get_instance().tab_panel_collapsed.value
+        if collapsed:
+            self._on_sidebar_toggled(True)
+            # 让 TabPanel 内部状态同步（不重复发射信号）
+            self._tab_panel.set_collapsed(True)
+
+    # ── 覆盖层状态切换 ──
+
+    def _on_overlay_state_changed(self, has_visible: bool):
+        """系统卡片覆盖层显隐切换：QStackedWidget 页面 0←→1
+
+        当 _global_top_container 报告有可见卡片时，切换到覆盖层页面（index 1），
+        隐藏对话区、仅显示系统卡片；全部卡片关闭后切回对话区（index 0）。
+        """
+        if has_visible:
+            self._content_stack.setCurrentIndex(1)
+        else:
+            self._content_stack.setCurrentIndex(0)
 
     # ── 窗口管理 ──
 
@@ -432,93 +674,110 @@ class TabManagerWindow(QWidget):
         idx = len(self._windows) - 1  # 0-based
         self._window_to_index[id(window)] = idx
 
-        # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
-        self._content_area.addWidget(window)
+        # ── P0-2 性能优化：冻结更新，批量完成 addWidget + addTab + 激活 ──
+        # setCurrentWidget 会触发新窗口 showEvent 与整棵子控件树的布局/绘制，
+        # 冻结期间抑制逐控件绘制，恢复后一次性 polish + updateGeometry，
+        # 把绘制/样式传播开销压缩到单次重绘。
+        # 信号时序不变：set_active_index → tabSelected → setCurrentWidget 仍同步，
+        # 恢复更新后才发射 tabCountChanged。
+        stack = self._content_area
+        panel = self._tab_panel
+        stack.setUpdatesEnabled(False)
+        panel.setUpdatesEnabled(False)
+        window.setUpdatesEnabled(False)
+        try:
+            # 添加到 QStackedWidget（从索引 1 开始，0 是空状态页）
+            stack.addWidget(window)
 
-        # 获取初始标题：优先用项目名，其次窗口标题，最后默认
-        project = getattr(window, "_current_project", None) or ""
-        title = window.windowTitle() or project or "新建会话"
+            # 获取初始标题：优先用项目名，其次窗口标题，最后默认
+            project = getattr(window, "_current_project", None) or ""
+            title = window.windowTitle() or project or "新建会话"
 
-        # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
-        tab_project_initials = ""
-        tab_project_color = ""
-        if project:
-            try:
-                from app.widgets.cards.settings.project_selector_card import (
-                    extract_project_initials,
-                    get_project_color,
-                )
+            # 获取初始图标：提取项目缩写+颜色，交给 _TabProjectIcon 直接 QPainter 绘制
+            tab_project_initials = ""
+            tab_project_color = ""
+            if project:
+                try:
+                    from app.widgets.cards.settings.project_selector_card import (
+                        extract_project_initials,
+                        get_project_color,
+                    )
 
-                tab_project_initials = extract_project_initials(project)
-                tab_project_color = get_project_color(project, alpha=255)
-            except Exception:
-                pass
+                    tab_project_initials = extract_project_initials(project)
+                    tab_project_color = get_project_color(project, alpha=255)
+                except Exception:
+                    pass
 
-        tab_idx = self._tab_panel.add_tab(
-            title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
-        )
+            tab_idx = panel.add_tab(
+                title, icon=None, project_initials=tab_project_initials, project_color=tab_project_color
+            )
 
-        # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
-        # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
-        def _on_win_title_changed(_new_title, _win=window):
-            if _sip.isdeleted(_win):
-                return
-            cur_idx = self._window_to_index.get(id(_win), -1)
-            if cur_idx < 0 or cur_idx >= len(self._windows):
-                return
-            # 更新 Tab 标题
-            t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
-            self._tab_panel.update_tab_title(cur_idx, t)
-            # 更新项目图标
-            p = getattr(_win, "_current_project", None) or ""
-            _update_tab_icon(cur_idx, p)
-            # 团队模式：显示角色胶囊
-            team_agent = getattr(_win, "_team_agent_name", "") or ""
+            # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
+            # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
+            def _on_win_title_changed(_new_title, _win=window):
+                if _sip.isdeleted(_win):
+                    return
+                cur_idx = self._window_to_index.get(id(_win), -1)
+                if cur_idx < 0 or cur_idx >= len(self._windows):
+                    return
+                # 更新 Tab 标题
+                t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
+                self._tab_panel.update_tab_title(cur_idx, t)
+                # 更新项目图标
+                p = getattr(_win, "_current_project", None) or ""
+                _update_tab_icon(cur_idx, p)
+                # 团队模式：显示角色胶囊
+                team_agent = getattr(_win, "_team_agent_name", "") or ""
+                if team_agent:
+                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                else:
+                    self._tab_panel.clear_tab_capsule(cur_idx)
+                # 如果该窗口是当前选中 Tab，同步宿主窗口标题
+                if self._tab_panel.active_index == cur_idx:
+                    self._sync_window_title()
+
+            window.windowTitleChanged.connect(_on_win_title_changed)
+
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
+            def _on_ai_state_changed(state, _win=window):
+                if _sip.isdeleted(_win):
+                    return
+                cur_idx = self._window_to_index.get(id(_win), -1)
+                if cur_idx < 0 or cur_idx >= len(self._windows):
+                    return
+                if state in ("streaming", "thinking"):
+                    self._tab_panel.update_tab_streaming(cur_idx, True, False)
+                    self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
+                elif state == "error":
+                    self._tab_panel.update_tab_streaming(cur_idx, False, True)
+                    self._tab_panel.update_tab_question(cur_idx, False)
+                elif state == "question":
+                    self._tab_panel.update_tab_question(cur_idx, True)
+                    self._tab_panel.update_tab_streaming(cur_idx, False, False)
+                else:  # idle
+                    self._tab_panel.update_tab_streaming(cur_idx, False, False)
+                    self._tab_panel.update_tab_question(cur_idx, False)
+
+            window.ai_state_changed.connect(_on_ai_state_changed)
+
+            # 立即触发一次初始图标更新 + 团队胶囊状态同步
+            logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
+            _update_tab_icon(tab_idx, project)
+            team_agent = getattr(window, "_team_agent_name", "") or ""
             if team_agent:
-                self._tab_panel.update_tab_capsule(cur_idx, team_agent)
-            else:
-                self._tab_panel.clear_tab_capsule(cur_idx)
-            # 如果该窗口是当前选中 Tab，同步宿主窗口标题
-            if self._tab_panel.active_index == cur_idx:
-                self._sync_window_title()
+                panel.update_tab_capsule(tab_idx, team_agent)
 
-        window.windowTitleChanged.connect(_on_win_title_changed)
-
-        # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
-        def _on_ai_state_changed(state, _win=window):
-            if _sip.isdeleted(_win):
-                return
-            cur_idx = self._window_to_index.get(id(_win), -1)
-            if cur_idx < 0 or cur_idx >= len(self._windows):
-                return
-            if state in ("streaming", "thinking"):
-                self._tab_panel.update_tab_streaming(cur_idx, True, False)
-                self._tab_panel.update_tab_question(cur_idx, False)  # 互斥：退出 question
-            elif state == "error":
-                self._tab_panel.update_tab_streaming(cur_idx, False, True)
-                self._tab_panel.update_tab_question(cur_idx, False)
-            elif state == "question":
-                self._tab_panel.update_tab_question(cur_idx, True)
-                self._tab_panel.update_tab_streaming(cur_idx, False, False)
-            else:  # idle
-                self._tab_panel.update_tab_streaming(cur_idx, False, False)
-                self._tab_panel.update_tab_question(cur_idx, False)
-
-        window.ai_state_changed.connect(_on_ai_state_changed)
-
-        # 立即触发一次初始图标更新 + 团队胶囊状态同步
-        logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
-        _update_tab_icon(tab_idx, project)
-        team_agent = getattr(window, "_team_agent_name", "") or ""
-        if team_agent:
-            self._tab_panel.update_tab_capsule(tab_idx, team_agent)
-
-        # 隐藏 EdgeLauncher（Tab 模式下每个窗口不应显示）
-        _hide_edge_launcher(window)
-
-        # 隐藏空状态页，切换到新窗口
-        self._content_area.widget(0).hide()
-        self._tab_panel.set_active_index(idx)
+            # 隐藏空状态页，切换到新窗口
+            stack.widget(0).hide()
+            panel.set_active_index(idx)
+        finally:
+            window.setUpdatesEnabled(True)
+            panel.setUpdatesEnabled(True)
+            stack.setUpdatesEnabled(True)
+            # 恢复更新后一次性重算布局/绘制
+            stack.updateGeometry()
+            panel.updateGeometry()
+            window.update()
 
         self.tabCountChanged.emit(len(self._windows))
         return idx
@@ -571,10 +830,21 @@ class TabManagerWindow(QWidget):
 
     def _on_tab_selected(self, index: int):
         if 0 <= index < len(self._windows):
-            self._content_area.setCurrentWidget(self._windows[index])
+            win = self._windows[index]
+            self._content_area.setCurrentWidget(win)
             self.activeTabChanged.emit(index)
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
+            # 补刷新延迟的主题变更（Tab 模式下主题刷新跳过非可见窗口）
+            if getattr(win, "_theme_needs_refresh", False):
+                try:
+                    win._theme_needs_refresh = False
+                    from app.main_widget import OpenAIChatToolWindow
+
+                    # 该窗口未参与 batched refresh，scope 用 None 做全量刷新
+                    win._apply_runtime_ui_settings(scope=None, _skip_global=True)
+                except Exception:
+                    pass
 
     def _on_tab_close_requested(self, index: int):
         if 0 <= index < len(self._windows):
@@ -630,10 +900,6 @@ class TabManagerWindow(QWidget):
     def _show_shared_launcher(self) -> None:
         """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
         self._tab_panel.refresh_ui_plugins()
-
-    def _hide_shared_launcher(self) -> None:
-        """兼容模式切换调用：插件列表内嵌在 TabPanel，无独立入口需要隐藏"""
-        logger.debug("[TabMode] 跳过隐藏共享 EdgeLauncher：插件列表已内嵌在 TabPanel")
 
     @staticmethod
     def _create_fake_page():
@@ -814,6 +1080,11 @@ class TabManagerWindow(QWidget):
             return
         tab_mgr._is_transitioning = True
 
+        # ★ 确保 TrayManager 引用已注册
+        # _disable_mode 会清空 tray_manager._tab_manager_window，而实例可能
+        # 已存在（走 get_instance 不走 __init__），必须在此显式重新注册。
+        tray_manager._tab_manager_window = tab_mgr
+
         # 清理旧的 Tab 面板和内容区（防止上次 Tab 模式残留）
         for i in range(tab_mgr._tab_panel.count - 1, -1, -1):
             tab_mgr._tab_panel.remove_tab(i)
@@ -902,10 +1173,6 @@ class TabManagerWindow(QWidget):
             # 更新 Tray 菜单
             tray_manager._rebuild_context_menu()
 
-            # 隐藏所有窗口的独立 EdgeLauncher
-            for w in migrated_windows:
-                _hide_edge_launcher(w)
-
             # Tab 模式下使用共享 Launcher（单例）
             tab_mgr._show_shared_launcher()
 
@@ -979,9 +1246,6 @@ class TabManagerWindow(QWidget):
                     _apply_window_topmost(dialog)
                     tray_manager.register_window(dialog)
 
-                    # 恢复 EdgeLauncher
-                    _show_edge_launcher(tool_instance)
-
                     # ★ 迁出后重新注册命令快捷键：窗口从 TabManagerWindow
                     # 移回独立 ToolPopupDialog，parent widget 的 window()
                     # 再次变化，需重新注册 QShortcut 以匹配新的窗口上下文。
@@ -995,9 +1259,6 @@ class TabManagerWindow(QWidget):
                     import traceback
 
                     logger.error(traceback.format_exc())
-
-            # 隐藏共享 Launcher（切换到独立模式后每个窗口使用自己的）
-            tab_mgr._hide_shared_launcher()
 
             # 清空缓存
             tab_mgr._cached_dialogs.clear()
@@ -1047,10 +1308,12 @@ class TabManagerWindow(QWidget):
         }
         Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
         # 保存面板宽度（去除新增 #tabFrame 的 layout margins + border 14px）
-        if hasattr(self, "_splitter"):
-            sizes = self._splitter.sizes()
-            if sizes:
-                Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
+        # 收起状态下不覆盖已保存的正常宽度
+        if hasattr(self, "_splitter") and hasattr(self, "_tab_panel"):
+            if not self._tab_panel._collapsed:
+                sizes = self._splitter.sizes()
+                if sizes:
+                    Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
 
     def _restore_geometry(self):
         """恢复窗口位置（屏幕居中），确保不超出屏幕"""
@@ -1309,10 +1572,16 @@ class TabManagerWindow(QWidget):
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
+            # 背景图尺寸跟随（轻量操作，不触发布局）
+            if hasattr(self, "_bg_label") and self._bg_label is not None:
+                self._bg_label.resize(self.size())
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
+        # 背景图尺寸跟随（轻量操作，不触发布局）
+        if hasattr(self, "_bg_label") and self._bg_label is not None:
+            self._bg_label.resize(self.size())
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)

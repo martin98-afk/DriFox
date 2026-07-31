@@ -657,6 +657,9 @@ def reload_all_commands():
     try:
         from app.main_widget import OpenAIChatToolWindow
 
+        # 清除窗口级快捷键去重缓存，允许命令变更后重新注册
+        OpenAIChatToolWindow._window_shortcut_cache.clear()
+
         for win in OpenAIChatToolWindow._instances:
             if win._is_destroyed:
                 continue

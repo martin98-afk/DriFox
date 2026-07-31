@@ -205,11 +205,11 @@ class _RecordItem(QFrame):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
 
-        icon_lb = QLabel(_TYPE_ICONS.get(rtype, "📄"))
-        icon_lb.setFixedWidth(24)
-        icon_lb.setAlignment(Qt.AlignCenter)
-        icon_lb.setStyleSheet("background: transparent; font-size: 14px;")
-        row1.addWidget(icon_lb)
+        self._icon_lb = QLabel(_TYPE_ICONS.get(rtype, "📄"))
+        self._icon_lb.setFixedWidth(24)
+        self._icon_lb.setAlignment(Qt.AlignCenter)
+        self._icon_lb.setStyleSheet("background: transparent; font-size: 14px;")
+        row1.addWidget(self._icon_lb)
 
         self._title_lb = QLabel(title)
         self._title_lb.setObjectName("recordRowTitle")
@@ -433,6 +433,12 @@ class _RecordItem(QFrame):
                     background: {t["hover_bg"]};
                 }}
             """)
+
+        # 类型图标
+        if self._icon_lb:
+            self._icon_lb.setStyleSheet(
+                f"background: transparent; font-size: {max(10, fs - 1)}px; color: {t['tc']}; font-family: '{ff}';"
+            )
 
         # 删除按钮
         if self._delete_btn:
@@ -757,6 +763,13 @@ class ShareHistoryCard(QWidget):
             except RuntimeError:
                 pass
 
+        # 搜索图标
+        try:
+            if getattr(self, "_search_icon", None):
+                self._search_icon.setStyleSheet(f"background: transparent; font-size: {max(fs - 2, 11)}px;")
+        except RuntimeError:
+            pass
+
         # 刷新 _RecordItem 子项
         for child in self.findChildren(_RecordItem):
             try:
@@ -868,9 +881,9 @@ class ShareHistoryCard(QWidget):
         layout.setContentsMargins(16, 6, 16, 2)
         layout.setSpacing(0)
 
-        search_icon = QLabel("🔍")
-        search_icon.setStyleSheet("background: transparent; font-size: 12px;")
-        layout.addWidget(search_icon)
+        self._search_icon = QLabel("🔍")
+        self._search_icon.setStyleSheet("background: transparent; font-size: 12px;")
+        layout.addWidget(self._search_icon)
 
         self._search_input = QLineEdit(container)
         self._search_input.setPlaceholderText("搜索标题…")

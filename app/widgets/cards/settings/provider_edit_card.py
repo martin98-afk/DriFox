@@ -386,6 +386,9 @@ class ProviderEditCard(QWidget):
         # 初始可见性由当前服务商决定
         self._update_extra_config_visibility()
 
+        # 底部弹性空间：将所有内容推到上方
+        main_layout.addStretch(1)
+
         # 保存按钮已移到 BaseSettingsCard 标题栏，信号由外部连接
 
         # 新建时调用一次初始化
