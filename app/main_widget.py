@@ -5076,6 +5076,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "model_options": self._get_all_model_options_flat(),
             "agent_options": self._get_subagent_names(),
             "template_options": self._get_team_template_names(),
+            "plugin_options": self._get_plugin_names(),
         }
         # 提取当前输入文本和光标位置，让 show_command_detail 重建 widgets
         # 后能立即应用 active 状态（修复失焦→重新聚焦时 active 状态丢失）
@@ -5197,6 +5198,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
             templates = TemplateManager.get_instance().list_templates()
             return sorted([t["name"] for t in templates])
+        except Exception:
+            return []
+
+    def _get_plugin_names(self) -> list:
+        """获取所有已发现的插件名称列表（系统+用户+Claude 生态）
+
+        供 /help --plugin= 参数卡片的插件列表使用。
+        """
+        try:
+            from app.core.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return []
+            plugins = pm.list_plugins()
+            names = [p.name for p in plugins if p.name]
+            return sorted(names)
         except Exception:
             return []
 
