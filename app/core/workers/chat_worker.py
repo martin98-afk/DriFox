@@ -531,6 +531,10 @@ class OpenAIChatWorker(QThread):
         已由 engine.py 直接注入 session.messages，不经过队列。
         不做去重——每条 PostToolUse 对应一次独立的工具调用，都应保留。
 
+        同时主动检查 TeamManager 中的待处理团队邮件并注入。
+        QFileSystemWatcher 信号在流式高频回调下可能被事件循环延迟派发，
+        此处不依赖信号，每轮 API 调用前直接读取邮箱目录，确保及时注入。
+
         Args:
             session_messages_target: 若传入则同时追加到此列表，
                 确保 worker 结束时随 current_session_messages 一起持久化。
@@ -556,6 +560,38 @@ class OpenAIChatWorker(QThread):
                 if session_messages_target is not None:
                     session_messages_target.extend(msgs)
                 logger.debug(f"[HookManager] Injected {len(msgs)} hook msgs from queue")
+
+            # 🆕 主动检查团队待处理邮件（不依赖 QFileSystemWatcher）
+            window_id = getattr(backend, "_window_id", None)
+            if window_id:
+                from app.core.team_manager import TeamManager
+
+                tm = TeamManager.get_instance()
+                pending = tm.get_pending_tasks(window_id)
+                if pending:
+                    mail = pending[0]
+                    tm.mark_mail_running(mail["id"], window_id)
+
+                    from app.core.backend import _format_hook_output
+
+                    task_desc = mail.get("body", mail.get("subject", ""))
+                    from_agent = mail.get("from_agent", "?")
+                    from_window = mail.get("from_window", "?")
+                    sender_id = f"{from_agent}@{from_window}"
+                    content = (
+                        f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n"
+                        f"{task_desc}\n\n"
+                        f"（以上是系统自动注入的团队成员任务邮件，请根据上下文酌情处理）"
+                    )
+                    hook_content = _format_hook_output("TeamMail", content, wrap_system_reminder=False)
+                    msg = {"role": "user", "content": hook_content, "_hook_event": "TeamMail"}
+
+                    self._append_to_api_cache([msg])
+                    self._current_session_messages.append(msg)
+                    if session_messages_target is not None:
+                        session_messages_target.append(msg)
+
+                    logger.info(f"[TeamMail] Worker 注入团队邮件: #{mail['id']} from [{sender_id}]")
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 

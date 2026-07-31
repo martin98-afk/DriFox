@@ -4357,15 +4357,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._check_and_process_pending()
 
     def _finalize_injected_team_mails(self):
-        """流式结束时，标记所有 hook 注入的团队邮件为已完成"""
-        injected = getattr(self, "_injected_team_mails", None)
-        if not injected:
-            return
+        """流式结束时，标记所有 hook 注入的团队邮件为已完成
 
+        覆盖两条注入路径：
+        1. main_widget._inject_team_mail_as_hook → _injected_team_mails 跟踪
+        2. chat_worker._inject_pending_hook_messages → 邮件状态为 "running"
+        """
         tm = self._get_team_manager()
         session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
 
-        # 获取最后一条 assistant 回复作为结果
         result = ""
         if session and session.messages:
             for msg in reversed(session.messages):
@@ -4373,17 +4373,31 @@ class OpenAIChatToolWindow(ToolWindow):
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         from app.core import content_to_text
-
                         content = content_to_text(content)
                     result = content or ""
                     break
 
-        for ctx in injected:
-            mail = ctx["mail"]
-            tm.mark_mail_done(mail["id"], self._window_id, result)
+        done = 0
+        tracked_ids = set()
 
-        self._injected_team_mails.clear()
-        logger.info(f"[TeamMail] 流式结束，标记 {len(injected)} 封 hook 注入的邮件为 done")
+        # 路径 1：main_widget 跟踪的注入邮件
+        injected = getattr(self, "_injected_team_mails", None)
+        if injected:
+            for ctx in injected:
+                mail = ctx["mail"]
+                tm.mark_mail_done(mail["id"], self._window_id, result)
+                tracked_ids.add(mail["id"])
+                done += 1
+            self._injected_team_mails.clear()
+
+        # 路径 2：worker 直接注入的 "running" 邮件
+        for mail in tm.get_running_tasks(self._window_id):
+            if mail["id"] not in tracked_ids:
+                tm.mark_mail_done(mail["id"], self._window_id, result)
+                done += 1
+
+        if done:
+            logger.info(f"[TeamMail] 流式结束，标记 {done} 封 hook 注入的邮件为 done")
 
     def _sync_team_mail_on_stop(self):
         """手动停止时，更新所有团队邮件状态为已完成"""
@@ -4396,13 +4410,19 @@ class OpenAIChatToolWindow(ToolWindow):
             self._current_team_mail = None
             self._team_processing = False
 
-        # 2. hook 注入的团队邮件（_inject_team_mail_as_hook 路径）
+        # 2. hook 注入的团队邮件（_inject_team_mail_as_hook + worker 路径）
+        tracked_ids = set()
         injected = getattr(self, "_injected_team_mails", None)
         if injected:
             for ctx in injected:
                 mail = ctx["mail"]
                 tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+                tracked_ids.add(mail["id"])
             self._injected_team_mails.clear()
+
+        for mail in tm.get_running_tasks(self._window_id):
+            if mail["id"] not in tracked_ids:
+                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
 
     def _get_model_config_obj(self) -> dict:
         """获取当前模型配置（兜底）"""
