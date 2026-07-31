@@ -626,6 +626,7 @@ class GlobalCardController:
         self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
         on_finished(result, selected)
 
+    def _show_file_undo_diff(self, html, title):
         self.show_diff_viewer(html, title)
         self._diff_viewer_card.closed.connect(self._return_to_file_undo, type=Qt.UniqueConnection)
 
@@ -637,6 +638,7 @@ class GlobalCardController:
     def hide_file_undo(self):
         self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
 
+    def hide_diff_viewer(self):
         """隐藏内嵌差异对比面板"""
         if self._diff_viewer_card is None:
             return
