@@ -3645,6 +3645,7 @@ class CodeWebViewer(QWebEngineView):
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
                     overflow-y: auto;
+                    overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
                     border-radius: 6px;
@@ -4073,7 +4074,7 @@ class CodeWebViewer(QWebEngineView):
                         toolSection.style.display = '';
                         _updateToolSectionHeader();
                         // 坞态（流式中）：自动滚底显示最新活动
-                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
                         return;
                     }}
                     // ── [PERF v2] 单次扫描 blocks：posMap + thinkKeys + toolIds + thinkStreaming ──
@@ -4219,7 +4220,7 @@ class CodeWebViewer(QWebEngineView):
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
-                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -4409,12 +4410,16 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 工具区（#tool-content）自动滚底 =====
                 // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                function _scrollToolContentToBottom() {{
+                // force=true：跳过 _userScrolledUp 检查（用于 reorganizeContent 程序性更新）
+                function _scrollToolContentToBottom(force) {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
                     // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp) return;
+                    if (tc._userScrolledUp && !force) return;
                     tc.scrollTop = tc.scrollHeight;
+                    // ⚡ 修复：reorganizeContent 是程序性内容重组，不受旧 _userScrolledUp 影响，
+                    // 滚底后清除标志，防止异步 scroll 事件在下一轮渲染中误设标志。
+                    if (force) tc._userScrolledUp = false;
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
