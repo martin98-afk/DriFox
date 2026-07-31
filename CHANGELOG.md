@@ -3,14 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.10] - 2026-08-01
 
-自上一版本以来的变更 | 提交数：3 · 文件变更：10 · +374/-18 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：5 · 文件变更：13 · +498/-36 | 贡献者：dingma
 
-> 重点：**欢迎卡片缓存生命周期修正** —— 项目/代理/会话切换时使 `_welcome_card_cache` 失效，避免卡片内容过期；**OpenAIChatToolWindow 快捷键去重** —— 命令重载时清除快捷方式缓存，防止重复注册。
+> 重点：**欢迎卡片缓存生命周期修正** —— 项目/代理/会话切换时使 `_welcome_card_cache` 失效，避免卡片内容过期；**OpenAIChatToolWindow 快捷键去重** —— 命令重载时清除快捷方式缓存，防止重复注册；**消息卡片右键复制选中文本** —— 右键不再复制全文；**CodeWebViewer 非遮罩对话框处理** —— 防止 WebView 被非遮罩对话框意外隐藏。
 
 ### 🐛 问题修复 (Bug Fixes)
 
 - **chat-window 欢迎卡片缓存失效**: 项目 / 代理 / 会话变更时使欢迎卡片缓存失效，防止切换到不同上下文后仍展示旧项目/旧代理的欢迎卡片（配合 v0.4.9 的 `_welcome_card_cache` 生命周期管理）
 - **OpenAIChatToolWindow 快捷键去重**: 命令重载时清除快捷方式缓存，防止重复注册导致快捷键触发多次
+- **message-card 右键复制选中文本**: 修复右键点击消息卡片时复制全部内容的问题，改为仅复制用户选中的文本
+- **CodeWebViewer 对话框处理增强**: 修复非遮罩对话框（无 mask）导致 WebView 被意外隐藏的问题，改进对话框显示/隐藏交互
 
 ### 🔧 其他 (Chores & Build)
 
