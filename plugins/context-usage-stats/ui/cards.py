@@ -349,8 +349,9 @@ class ContextUsageStatsCard(QWidget):
             ff = cs.get("font_family", "Microsoft YaHei") if cs else "Microsoft YaHei"
             tcs2 = cs.get("text_secondary", QColor(255, 255, 255, 100)) if cs else QColor(255, 255, 255, 100)
             ec = f"rgba({tcs2.red()},{tcs2.green()},{tcs2.blue()},{tcs2.alpha()})"
+            base_fs = cs.get("font_size", 14) if cs else 14
             empty_hint.setStyleSheet(
-                f"color: {ec}; font-family: '{ff}'; font-size: 13px; background: transparent; padding: 40px;"
+                f"color: {ec}; font-family: '{ff}'; font-size: {max(round(base_fs * 13 / 14), 10)}px; background: transparent; padding: 40px;"
             )
             self._content_layout.addWidget(empty_hint)
 
