@@ -322,16 +322,8 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard.checkedChanged.connect(self._on_lock_remote_toggled)
         content_layout.addWidget(self.lockRemoteCard)
 
-        # Tab 管理器
-        self.tabManagerCard = SwitchSettingCard(
-            get_icon("tab切换"),
-            "启用 Tab 管理器",
-            "将所有窗口整合到 Tab 面板",
-            configItem=self.cfg.enable_tab_manager,
-            parent=self,
-        )
-        self.tabManagerCard.checkedChanged.connect(self._on_tab_manager_toggled)
-        content_layout.addWidget(self.tabManagerCard)
+        # Tab 管理器开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
+        # （回退方式：恢复此处 SwitchSettingCard 并还原 main.py 的模式分支）
 
         # 开机自启
         self.autoStartCard = SwitchSettingCard(

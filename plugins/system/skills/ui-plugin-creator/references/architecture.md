@@ -47,6 +47,8 @@
 **容器**：
 - `container="bottom"`：显示在聊天下方，隐藏输入区（与系统配置卡片一致）
 - `container="top"`：显示在聊天上方（较少使用）
+- `container="left"` / `container="right"`：停靠在 Tab 窗口左右侧停靠区（类似 IDE 侧边栏）
+- `container="full"`：完整覆盖对话区（与系统配置卡片一致，走覆盖层）
 
 **生命周期**：
 1. 用户输入 `/card-id` → CommandCard 显示 → 回车执行

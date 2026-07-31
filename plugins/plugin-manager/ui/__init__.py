@@ -26,12 +26,12 @@ def register_ui(registry):
     from .cards import PluginManagerCard
 
     # 注册浮动卡片（自动注册对应命令 /plugin-manager）
-    # container="bottom"：与系统配置卡片一致，显示在 chat_layout 下方并隐藏输入区
+    # container="full"：完整覆盖对话区（与系统配置卡片一致，走覆盖层）
     registry.register_floating_card(
         plugin_name="plugin-manager",
         card_id="plugin-manager",
         widget_class=PluginManagerCard,
-        container="bottom",
+        container="full",
         title="插件管理",
         default_visible=False,
     )

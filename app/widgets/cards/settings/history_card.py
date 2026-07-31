@@ -31,6 +31,8 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
+from app.widgets.elided_label import _ElidedLabel
+
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
 
@@ -261,12 +263,11 @@ class _HistoryItemCard(SimpleCardWidget):
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
 
-        self.title_label = BodyLabel(title[:100], self)
-        self.title_label.setWordWrap(True)
+        self.title_label = _ElidedLabel(title, self)
         self.title_label.setStyleSheet(
-            f"color: {_text_primary}; font-weight: bold; font-size: {_font_size}px; {_font_family}"
+            f"color: {_text_primary}; font-weight: bold; font-size: {_font_size}px; background: transparent; {_font_family}"
             if is_current
-            else f"color: {_text_primary}; font-size: {_font_size}px; {_font_family}"
+            else f"color: {_text_primary}; font-size: {_font_size}px; background: transparent; {_font_family}"
         )
         top_row.addWidget(self.title_label, 1)
 
@@ -374,8 +375,8 @@ class _HistoryItemCard(SimpleCardWidget):
         self._index = index
 
         # 标题变化
-        if self.title_label.text() != title[:100]:
-            self.title_label.setText(title[:100])
+        if getattr(self.title_label, "_full_text", "") != title:
+            self.title_label.setText(title)
             self.title_edit.setText(title[:100])
 
         # 活跃状态变化 → 需重设样式
@@ -454,7 +455,7 @@ class _HistoryItemCard(SimpleCardWidget):
         self.title_label.show()
 
     def update_title(self, new_title: str):
-        self.title_label.setText(new_title[:100])
+        self.title_label.setText(new_title)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:
@@ -516,11 +517,10 @@ class _ArchivedItemCard(CardWidget):
         archive_icon.setStyleSheet(f"font-size: {font_size_css(14)};")
         top_row.addWidget(archive_icon)
 
-        self.title_label = BodyLabel(title[:100], self)
-        self.title_label.setWordWrap(True)
+        self.title_label = _ElidedLabel(title, self)
         body_size = scale_font_size(14)
         self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; {get_font_family_css()}"
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; background: transparent; {get_font_family_css()}"
         )
         top_row.addWidget(self.title_label, 1)
 
@@ -632,8 +632,8 @@ class _ArchivedItemCard(CardWidget):
         self._file_path = file_path
         self._session_id = session_id
 
-        if self.title_label.text() != title[:100]:
-            self.title_label.setText(title[:100])
+        if getattr(self.title_label, "_full_text", "") != title:
+            self.title_label.setText(title)
             self.title_edit.setText(title[:100])
 
         rel_time = format_relative_time(last_time)
@@ -682,7 +682,7 @@ class _ArchivedItemCard(CardWidget):
         self.title_label.show()
 
     def update_title(self, new_title: str):
-        self.title_label.setText(new_title[:100])
+        self.title_label.setText(new_title)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:

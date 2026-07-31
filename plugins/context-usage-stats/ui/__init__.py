@@ -26,12 +26,12 @@ def register_ui(registry):
     from .cards import ContextUsageStatsCard
 
     # 注册浮动卡片（自动注册对应命令 /context-usage-stats）
-    # container="bottom"：与系统配置卡片一致，显示在 chat_layout 下方并隐藏输入区
+    # container="right"：停靠在 Tab 窗口右侧停靠区，作为监控面板不遮挡主对话区
     registry.register_floating_card(
         plugin_name="context-usage-stats",
         card_id="context-usage-stats",
         widget_class=ContextUsageStatsCard,
-        container="bottom",
+        container="right",
         title="上下文用量统计",
         default_visible=False,
     )

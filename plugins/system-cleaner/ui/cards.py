@@ -202,7 +202,7 @@ class SystemCleanerCard(QWidget):
 
         try:
             if hasattr(self, "_mem_release_btn"):
-                self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(accent, is_dark))
+                self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(accent, fs, is_dark))
         except RuntimeError:
             pass
 
@@ -224,7 +224,7 @@ class SystemCleanerCard(QWidget):
 
         try:
             if hasattr(self, "_clean_cache_btn"):
-                self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(accent, is_dark))
+                self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(accent, fs, is_dark))
         except RuntimeError:
             pass
 
@@ -253,14 +253,40 @@ class SystemCleanerCard(QWidget):
             if hasattr(self, "_section_title_lb"):
                 self._section_title_lb.setStyleSheet(
                     f"color: {tcs}; background: transparent; "
-                    f"font-size: 11px; letter-spacing: 2px; padding: 12px 16px 4px; {font_qss}"
+                    f"font-size: {max(10, fs - 3)}px; letter-spacing: 2px; padding: 12px 16px 4px; {font_qss}"
+                )
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self, "_last_clean_lb"):
+                self._last_clean_lb.setStyleSheet(
+                    f"color: {tcs}; background: transparent; font-size: {max(10, fs - 3)}px; {font_qss}"
+                )
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self, "_count_lb"):
+                self._count_lb.setStyleSheet(
+                    f"color: {tcs}; background: transparent; font-size: {max(10, fs - 3)}px; {font_qss}"
+                )
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self, "_mem_icon"):
+                self._mem_icon.setStyleSheet(f"background: transparent; font-size: {max(12, fs + 1)}px;")
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(self, "_mem_value"):
+                self._mem_value.setStyleSheet(
+                    f"color: {accent}; background: transparent; font-size: {fs}px; font-weight: 600; {font_qss}"
                 )
         except RuntimeError:
             pass
 
     # ── 按钮样式工厂 ──
 
-    def _mem_release_btn_style(self, accent: str, is_dark: bool = True) -> str:
+    def _mem_release_btn_style(self, accent: str, fs: int, is_dark: bool = True) -> str:
         _text_color = "#ffffff"
         _disabled_text = "rgba(255,255,255,0.5)" if is_dark else "rgba(0,0,0,0.4)"
         _disabled_bg = "rgba(128,128,128,0.3)" if is_dark else "rgba(0,0,0,0.12)"
@@ -274,7 +300,7 @@ class SystemCleanerCard(QWidget):
             color: {_text_color};
             border: none;
             border-radius: 6px;
-            font-size: 12px;
+            font-size: {max(10, fs - 2)}px;
             font-weight: 600;
             padding: 0 10px;
         }}
@@ -291,7 +317,7 @@ class SystemCleanerCard(QWidget):
         }}
         """
 
-    def _clean_cache_btn_style(self, accent: str, is_dark: bool = True) -> str:
+    def _clean_cache_btn_style(self, accent: str, fs: int, is_dark: bool = True) -> str:
         if is_dark:
             _bg = "rgba(255,255,255,0.08)"
             _color = "rgba(255,255,255,0.85)"
@@ -314,7 +340,7 @@ class SystemCleanerCard(QWidget):
             color: {_color};
             border: 1px solid {_border};
             border-radius: 8px;
-            font-size: 13px;
+            font-size: {max(10, fs - 2)}px;
             font-weight: 500;
             padding: 12px 0;
         }}
@@ -421,6 +447,7 @@ class SystemCleanerCard(QWidget):
         _dark = isDarkTheme()
         _mem_bg = "rgba(255,255,255,0.04)" if _dark else "rgba(0,0,0,0.04)"
         _mem_tc = "rgba(255,255,255,0.85)" if _dark else "rgba(0,0,0,0.85)"
+        fs = self._ctx_font_size or 14
         container = QWidget(self._content)
         container.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(container)
@@ -432,9 +459,9 @@ class SystemCleanerCard(QWidget):
         mem_layout.setContentsMargins(14, 8, 6, 8)
         mem_layout.setSpacing(8)
 
-        mem_icon = QLabel("📊", mem_bg)
-        mem_icon.setStyleSheet("background: transparent; font-size: 15px;")
-        mem_layout.addWidget(mem_icon)
+        self._mem_icon = QLabel("📊", mem_bg)
+        self._mem_icon.setStyleSheet("background: transparent; font-size: 15px;")
+        mem_layout.addWidget(self._mem_icon)
 
         self._mem_label = QLabel("DriFox 进程内存", mem_bg)
         self._mem_label.setStyleSheet(f"color: {_mem_tc}; background: transparent; font-size: 13px;")
@@ -448,8 +475,9 @@ class SystemCleanerCard(QWidget):
 
         self._mem_release_btn = QPushButton("⚡ 释放内存", mem_bg)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
-        self._mem_release_btn.setFixedSize(100, 32)
-        self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent, isDarkTheme()))
+        btn_fs = max(10, fs - 2)
+        self._mem_release_btn.setFixedSize(max(100, btn_fs * 6 + 20), 32)
+        self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent, fs, isDarkTheme()))
         self._mem_release_btn.clicked.connect(self._on_memory_release)
         mem_layout.addWidget(self._mem_release_btn)
 
@@ -459,18 +487,18 @@ class SystemCleanerCard(QWidget):
     def _build_cache_section(self):
         container = QWidget(self._content)
         container.setStyleSheet("background: transparent;")
+        fs = self._ctx_font_size or 14
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         _init_tcs = "rgba(255,255,255,0.35)" if isDarkTheme() else "rgba(0,0,0,0.35)"
-        section_title = QLabel("—— 可清理缓存 ——", container)
-        section_title.setStyleSheet(
+        self._section_title_lb = QLabel("—— 可清理缓存 ——", container)
+        self._section_title_lb.setStyleSheet(
             f"color: {_init_tcs}; background: transparent; "
             "font-size: 11px; letter-spacing: 2px; padding: 12px 16px 4px;"
         )
-        self._section_title_lb = section_title
-        layout.addWidget(section_title)
+        layout.addWidget(self._section_title_lb)
 
         btn_container = QWidget(container)
         btn_container.setStyleSheet("background: transparent;")
@@ -480,7 +508,7 @@ class SystemCleanerCard(QWidget):
         self._clean_cache_btn = QPushButton("🗑️ 一键清理选中缓存", btn_container)
         self._clean_cache_btn.setCursor(Qt.PointingHandCursor)
         self._clean_cache_btn.setMinimumHeight(42)
-        self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, isDarkTheme()))
+        self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, fs, isDarkTheme()))
         self._clean_cache_btn.clicked.connect(self._on_clean_cache_clicked)
         btn_layout.addWidget(self._clean_cache_btn)
 
@@ -597,14 +625,15 @@ class SystemCleanerCard(QWidget):
     def _refresh_memory(self):
         mem = _get_process_memory()
         accent = self._ctx_accent
+        fs = self._ctx_font_size or 14
         if mem is not None:
             self._mem_value.setText(_format_size(mem))
             self._mem_value.setStyleSheet(
-                f"color: {accent}; background: transparent; font-size: 14px; font-weight: 600;"
+                f"color: {accent}; background: transparent; font-size: {fs}px; font-weight: 600;"
             )
         else:
             self._mem_value.setText("N/A")
-            self._mem_value.setStyleSheet("color: rgba(255,255,255,0.3); background: transparent; font-size: 14px;")
+            self._mem_value.setStyleSheet(f"color: rgba(255,255,255,0.3); background: transparent; font-size: {fs}px;")
 
     # ── 扫描 ──
 

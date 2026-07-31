@@ -22,11 +22,12 @@ def register_ui(registry):
     from .cards import FileTreeCard
 
     # 注册浮动卡片（自动注册对应命令 /file-tree）
+    # container="left"：停靠在 Tab 窗口左侧停靠区，宽度可通过 dockSplitter 拖拽调整
     registry.register_floating_card(
         plugin_name="file-tree",
         card_id="file-tree",
         widget_class=FileTreeCard,
-        container="bottom",
+        container="left",
         title="项目文件树",
         default_visible=False,
     )

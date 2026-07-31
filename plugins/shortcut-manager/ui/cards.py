@@ -270,8 +270,9 @@ class _KeyCapturePopup(QWidget):
 
     key_captured = pyqtSignal(str)
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, font_size: int = 14):
         super().__init__(parent)
+        self._font_size = font_size
         self._setup_ui()
 
     def _setup_ui(self):
@@ -295,17 +296,32 @@ class _KeyCapturePopup(QWidget):
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(20, 12, 20, 12)
 
+        # 覆盖层始终深色背景，白色文字；与深浅主题无关
         hint = QLabel("按下快捷键组合…", frame)
+        hint.setObjectName("captureHint")
         hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet("color: white; font-size: 14px; font-weight: 500; background: transparent;")
+        hint.setStyleSheet(f"color: white; font-size: {self._font_size}px; font-weight: 500; background: transparent;")
         fl.addWidget(hint)
 
+        esc_fs = max(8, self._font_size - 2)
         esc = QLabel("Esc 取消", frame)
+        esc.setObjectName("captureEsc")
         esc.setAlignment(Qt.AlignCenter)
-        esc.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 12px; background: transparent;")
+        esc.setStyleSheet(f"color: rgba(255,255,255,0.4); font-size: {esc_fs}px; background: transparent;")
         fl.addWidget(esc)
 
         layout.addWidget(frame)
+
+    def update_font_size(self, font_size: int):
+        """动态更新字号（由卡片在主题切换后调用）"""
+        self._font_size = font_size
+        hint = self.findChild(QLabel, "captureHint")
+        esc = self.findChild(QLabel, "captureEsc")
+        if hint:
+            hint.setStyleSheet(f"color: white; font-size: {font_size}px; font-weight: 500; background: transparent;")
+        if esc:
+            esc_fs = max(8, font_size - 2)
+            esc.setStyleSheet(f"color: rgba(255,255,255,0.4); font-size: {esc_fs}px; background: transparent;")
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -769,7 +785,7 @@ class ShortcutManagerCard(QWidget):
         self._pending_cmd = cmd_name
         edit_btn = self._find_edit_button(cmd_name)
 
-        popup = _KeyCapturePopup(self.window())
+        popup = _KeyCapturePopup(self.window(), font_size=self._cached_font_size)
         popup.key_captured.connect(self._on_key_captured)
 
         if edit_btn is not None:

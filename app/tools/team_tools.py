@@ -3,7 +3,7 @@
 团队协作工具集 — 基于任务邮件系统
 
 工具：
-- team_list_members: 列出团队成员（返回 agent_name@window_id 格式）
+- team_list_members: 列出团队成员（含 agent_name@window_id 标识符及工作状态）
 - team_send_message: 向队友发送任务邮件（支持 agent_name 或 agent_name@window_id）
 """
 
@@ -13,6 +13,13 @@ from app.tools.result import ToolResult
 class TeamTools:
     """团队协作工具（由 BuiltinTools 注册）"""
 
+    _STATUS_LABELS = {
+        "busy": "🟡 执行任务中",
+        "idle": "🟢 空闲",
+        "running": "🟡 执行任务中",
+        "pending": "⏳ 等待处理",
+    }
+
     def __init__(self, builtin_tools):
         self._builtin_tools = builtin_tools
 
@@ -20,6 +27,7 @@ class TeamTools:
 
     def _get_team_manager(self):
         from app.core.team_manager import TeamManager
+
         return TeamManager.get_instance()
 
     def _get_window_context(self) -> tuple:
@@ -31,7 +39,7 @@ class TeamTools:
     # ── 工具方法 ────────────────────────────────────
 
     def team_list_members(self) -> ToolResult:
-        """列出团队中的所有成员，返回 agent_name@window_id 格式的标识符"""
+        """列出团队中的所有成员，返回 agent_name@window_id 格式的标识符及工作状态"""
         window_id, agent_name = self._get_window_context()
         if not window_id:
             return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
@@ -46,7 +54,23 @@ class TeamTools:
             suffix = ""
             if m["window_id"] == window_id and m["agent_name"] == agent_name:
                 suffix = " ← 你"
-            lines.append(f"  - {m['agent_name']}@{m['window_id']}{suffix}")
+            status = tm.get_member_busy_status(m["window_id"])
+            # 细化状态：区分 running 和 pending，显示任务摘要
+            running_tasks = tm.get_running_tasks(m["window_id"])
+            pending_tasks = tm.get_pending_tasks(m["window_id"])
+            if running_tasks:
+                status_label = self._STATUS_LABELS.get("running", "🟡 执行任务中")
+                task_summary = running_tasks[0].get("subject", "")[:40]
+                if task_summary:
+                    status_label += f" 「{task_summary}」"
+            elif pending_tasks:
+                status_label = self._STATUS_LABELS.get("pending", "⏳ 等待处理")
+                task_summary = pending_tasks[0].get("subject", "")[:40]
+                if task_summary:
+                    status_label += f" 「{task_summary}」"
+            else:
+                status_label = self._STATUS_LABELS.get("idle", "🟢 空闲")
+            lines.append(f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}")
         return ToolResult(True, content="\n".join(lines))
 
     def team_send_message(self, to_agent: str, message: str) -> ToolResult:

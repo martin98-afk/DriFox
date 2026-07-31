@@ -420,30 +420,36 @@ class SendableTextEdit(TextEdit):
                 # 不能用 raw_cmd or cmd_name 一刀切——当技能名恰好以 -skill/-prompt/-cmd/-agent
                 # 结尾时，raw_cmd 会把真名"my-skill"截断为"my"，导致后续 show_command_detail
                 # 用错误的名字查不到技能，参数卡片不弹出。
-                cmd_match = CommandManager.get_instance().is_known_command_name(cmd_name) or get_skill_by_name(cmd_name)
+                #
+                # ★ 关键修复：用 has_command（精确匹配，不剥后缀）代替 is_known_command_name
+                # （它会内部剥后缀），避免 display_name 后缀导致 check_name 传入带后缀的假名，
+                # 使 show_command_detail 在命令字典中找不到条目而直接 return 不显示参数。
+                cmd_mgr = CommandManager.get_instance()
+                exact_cmd_match = cmd_mgr.has_command(cmd_name)            # 精确匹配（不剥后缀）
+                exact_skill_match = bool(get_skill_by_name(cmd_name))      # 精确技能匹配
+                exact_match = exact_cmd_match or exact_skill_match
                 raw_match = bool(raw_cmd) and (
-                    CommandManager.get_instance().is_known_command_name(raw_cmd) or get_skill_by_name(raw_cmd)
+                    cmd_mgr.has_command(raw_cmd) or bool(get_skill_by_name(raw_cmd))
                 )
 
-                if cmd_match or raw_match:
+                if exact_match or raw_match:
                     # 已知命令/技能 + 参数 → 切换到 detail 模式
                     self._slash_trigger_pos = 0
-                    # check_name：以实际匹配来源为准——优先用精确的 cmd_name（不截断），
-                    # 只有 raw_cmd 才匹配时才用 raw_cmd（处理 display_name 后缀如"tdd-skill"→"tdd"）
-                    check_name = cmd_name if cmd_match else raw_cmd
+                    # check_name：精确匹配用原 cmd_name（防止真名含后缀被截断），
+                    # 只有 raw_cmd 才匹配时用 raw_cmd（处理 display_name 后缀如"tdd-prompt"→"tdd"）
+                    check_name = cmd_name if exact_match else raw_cmd
 
                     # 传入当前选中项的 display_type（供 show_command_detail 显示对应类型的 hint）
                     # 优先使用 _on_command_selected 中由卡片传来的精确类型（_card_selected_type），
                     # 避免 card._current_selected_type 在未导航时仍是首个命令条目的类型而误判。
                     # 同时用 _card_selected_name 做名称匹配校验，防止上次选择残留的类型泄漏。
-                    if self._card_selected_name == check_name and self._card_selected_type:
+                    if suffix_type:
+                        # 用户手工输入了后缀（如 -prompt），类型由后缀精确决定
+                        selected_type = suffix_type
+                    elif self._card_selected_name == check_name and self._card_selected_type:
                         selected_type = self._card_selected_type
                     else:
                         selected_type = card._current_selected_type if card else ""
-                    # 从后缀推断类型：当卡片未提供选中类型时（如用户手动输入 /tdd-skill），
-                    # 确保 detail 模式能正确显示技能参数而非同名命令参数
-                    if suffix_type and not selected_type:
-                        selected_type = suffix_type
                     self.slashShowHint.emit(check_name, selected_type)
                 else:
                     # 未知命令/技能 + 参数 → 关闭

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -31,12 +31,12 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
     QShortcut,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -63,7 +63,7 @@ from .watcher import _DirWatcher
 # ── 路径常量 ──────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_SEARCH_DEBOUNCE_MS = 300
+
 
 
 # ── 主题色辅助 ────────────────────────────────────────────
@@ -302,12 +302,7 @@ class FileTreeCard(QWidget):
         self._title_label = StrongBodyLabel("项目文件树", self._top_bar)
         self._title_label.setObjectName("file-tree-title")
 
-        self._search_input = QLineEdit(self._top_bar)
-        self._search_input.setObjectName("file-tree-search")
-        self._search_input.setPlaceholderText("过滤文件...")
-        self._search_input.setClearButtonEnabled(True)
-        self._search_input.setFixedWidth(200)
-        self._search_input.setFixedHeight(32)
+
 
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
         self._refresh_btn.setFixedSize(32, 32)
@@ -320,7 +315,6 @@ class FileTreeCard(QWidget):
         top_layout.addWidget(self._icon_widget)
         top_layout.addWidget(self._title_label)
         top_layout.addStretch()
-        top_layout.addWidget(self._search_input)
         top_layout.addWidget(self._refresh_btn)
         top_layout.addWidget(self._close_btn)
 
@@ -334,15 +328,23 @@ class FileTreeCard(QWidget):
         self._tree_view.setObjectName("file-tree-widget")
         self._tree_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-        # 占位标签
-        _dark = isDarkTheme()
-        _ph_color = "rgba(255,255,255,0.4)" if _dark else "rgba(0,0,0,0.4)"
-        self._placeholder = QLabel("正在加载文件树...", self._tree_view)
-        self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet(f"color: {_ph_color};")
-        self._placeholder.setWordWrap(True)
+        # 占位页面（QStackedWidget 切换，避免子控件无布局时左上角残留）
+        self._stack = QStackedWidget(self._scroll_area)
+        self._stack.setObjectName("file-tree-stack")
+        self._stack.addWidget(self._tree_view)  # index 0: 文件树视图
 
-        self._scroll_area.setWidget(self._tree_view)
+        self._placeholder = QLabel("正在加载文件树...")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._ph_page = QWidget()
+        _ph_layout = QVBoxLayout(self._ph_page)
+        _ph_layout.setAlignment(Qt.AlignCenter)
+        _ph_layout.addWidget(self._placeholder)
+        self._stack.addWidget(self._ph_page)  # index 1: 居中占位页
+        # 初始显示占位页，等待扫描完成
+        self._stack.setCurrentIndex(1)
+
+        self._scroll_area.setWidget(self._stack)
         self._vbox.addWidget(self._top_bar)
         self._vbox.addWidget(self._scroll_area, 1)
 
@@ -365,7 +367,6 @@ class FileTreeCard(QWidget):
         # 顶栏按钮
         self._close_btn.clicked.connect(self._on_close)
         self._refresh_btn.clicked.connect(self._on_refresh)
-        self._search_input.textChanged.connect(self._on_search_debounced)
 
         # Model 信号
         self._source_model.need_scan.connect(self._on_lazy_scan)
@@ -387,11 +388,6 @@ class FileTreeCard(QWidget):
 
         # RenameDelegate
         self._rename_delegate.rename_requested.connect(self._on_rename_file)
-
-        # 搜索防抖
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.timeout.connect(self._do_filter_tree)
 
     def _setup_shortcuts(self):
         """快捷键已通过 FileTreeView 信号处理（clipboard_copy/cut/paste）"""
@@ -453,19 +449,7 @@ class FileTreeCard(QWidget):
         )
 
         is_dark = ctx.get("is_dark", True)
-        search_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
         hover_bg = "rgba(255,255,255,0.08)" if is_dark else "rgba(0,0,0,0.06)"
-        self._search_input.setStyleSheet(
-            f"#file-tree-search {{"
-            f"  background: {search_bg};"
-            f"  border: 1px solid {border_c.name()};"
-            f"  border-radius: 6px; padding: 0 10px;"
-            f"  color: {tc}; font-size: {font_size - 2}px;"
-            f"}}"
-            f"#file-tree-search:focus {{"
-            f"  border: 1px solid {self._colors['accent'].name()};"
-            f"}}"
-        )
 
         tc_hex = self._colors["text"].name()
         accent_hex = self._colors["accent"].name()
@@ -486,7 +470,15 @@ class FileTreeCard(QWidget):
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none;")
 
         self._tree_view.setFont(QFont(font_family, font_size))
-        self._search_input.setFont(QFont(font_family, font_size - 2))
+
+        # 占位页主题色
+        _ph_color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
+        self._placeholder.setStyleSheet(
+            f"color: {_ph_color}; background: transparent; "
+            f"font-family: '{font_family}'; font-size: {font_size}px;"
+        )
+        self._ph_page.setStyleSheet("background: transparent;")
+        self._stack.setStyleSheet("background: transparent;")
 
         # 通知 delegate 更新主题色
         self._rename_delegate.set_colors(self._colors)
@@ -532,7 +524,7 @@ class FileTreeCard(QWidget):
 
         if is_root:
             self._source_model.set_project(scan_dir, entries)
-            self._placeholder.setVisible(not bool(entries))
+            self._stack.setCurrentIndex(0 if entries else 1)
             if not entries:
                 self._placeholder.setText("项目目录为空")
 
@@ -552,7 +544,7 @@ class FileTreeCard(QWidget):
 
     def _show_error(self, message: str):
         self._placeholder.setText(f"⚠️ {message}")
-        self._placeholder.setVisible(True)
+        self._stack.setCurrentIndex(1)
 
     # ── 懒加载（展开触发扫描） ──
 
@@ -1113,15 +1105,6 @@ class FileTreeCard(QWidget):
 
         menu.exec_(global_pos)
 
-    # ── 搜索过滤 ──
-
-    def _on_search_debounced(self, text: str):
-        self._search_timer.start(_SEARCH_DEBOUNCE_MS)
-
-    def _do_filter_tree(self):
-        text = self._search_input.text()
-        self._proxy_model.setFilterFixedString(text)
-
     # ── 刷新与关闭 ──
 
     def _on_refresh(self):
@@ -1168,11 +1151,26 @@ class FileTreeCard(QWidget):
         except Exception as e:
             logger.error(f"[FileTree] 打开文件失败: {e}")
 
-    # ── 比例高度 ──
+    # ── 比例尺寸（按停靠方位自适应） ──
+
+    def _in_horizontal_dock(self) -> bool:
+        """是否停靠在左/右横向停靠区（容器沿宽度轴折叠）"""
+        try:
+            from app.widgets.cards.card_manager import ContainerType
+
+            ct = getattr(self.parent(), "container_type", None)
+            return ct in (ContainerType.LEFT, ContainerType.RIGHT)
+        except Exception:
+            return False
 
     def sizeHint(self):
         base = super().sizeHint()
         win = self.window()
+        if self._in_horizontal_dock():
+            # 左/右停靠：自然宽度 300px（展开动画目标），高度填满停靠区；
+            # 展开后宽度由 dockSplitter 拖拽控制，此处仅提供初始值
+            h = win.height() if win and win.height() > 0 else base.height()
+            return QSize(300, h)
         if win and win.height() > 0:
             return QSize(max(base.width(), 200), int(win.height() * 0.85))
         return base

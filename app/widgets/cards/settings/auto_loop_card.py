@@ -646,6 +646,11 @@ class AutoLoopRunningCard(QFrame):
         self._log_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout.addWidget(self._log_label)
 
+        # 底部弹性空间：当卡片在 BottomCardContainer 中展开时，
+        # stretch 确保卡片内容贴顶、底部留出弹性空隙，
+        # 避免容器高度计算偏差导致上层 session_bar 布局偏移。
+        layout.addStretch()
+
     def paintEvent(self, event):
         """绘制彩虹边框 — 使用主题感知的透明度，浅色模式降低饱和度"""
         if not self.isVisible():

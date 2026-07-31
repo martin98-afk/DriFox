@@ -1654,6 +1654,8 @@ class CommandCard(QWidget):
             options = self._data_provider.get("template_options", [])
         elif param_name == "--join=":
             options = self._data_provider.get("agent_options", [])
+        elif param_name == "--plugin=":
+            options = self._data_provider.get("plugin_options", [])
         else:
             options = param.value_options or []
 
@@ -1721,6 +1723,8 @@ class CommandCard(QWidget):
             if w.param_name == "--model=":
                 candidate_params.append(w)
             elif w.param_name == "--join=":
+                candidate_params.append(w)
+            elif w.param_name == "--plugin=":
                 candidate_params.append(w)
             elif w._param.value_options:
                 candidate_params.append(w)
@@ -1804,6 +1808,8 @@ class CommandCard(QWidget):
             options = self._data_provider.get("template_options", [])
         elif param_name == "--join=":
             options = self._data_provider.get("agent_options", [])
+        elif param_name == "--plugin=":
+            options = self._data_provider.get("plugin_options", [])
         else:
             # 非 --model= 的 value 参数：从 widget 反查
             for w in self._param_widgets:

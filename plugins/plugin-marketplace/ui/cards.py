@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -288,9 +289,10 @@ class _PluginRow(QFrame):
 
         # 版本更新提示小标签（仅在有更新时显示）
         if self._has_update:
-            update_tag = QLabel("🔄 有新版本", self)
-            update_tag.setStyleSheet("color: #FFA726; font-size: 11px; background: transparent;")
-            info_layout.addWidget(update_tag)
+            self._update_tag = QLabel("🔄 有新版本", self)
+            self._update_tag.setObjectName("pluginRowUpdateTag")
+            self._update_tag.setStyleSheet("color: #FFA726; font-size: 11px; background: transparent;")
+            info_layout.addWidget(self._update_tag)
 
         desc = self._meta.get("description", "")
         self._desc_label = None
@@ -459,7 +461,7 @@ class _PluginRow(QFrame):
         seen: set = set()
         tags: list = []
         # categories（数组）
-        for c in (meta.get("categories", []) or []):
+        for c in meta.get("categories", []) or []:
             if c and c not in seen:
                 tags.append(c)
                 seen.add(c)
@@ -469,7 +471,7 @@ class _PluginRow(QFrame):
             tags.append(cat)
             seen.add(cat)
         # keywords（数组）
-        for k in (meta.get("keywords", []) or []):
+        for k in meta.get("keywords", []) or []:
             if k and k not in seen:
                 tags.append(k)
                 seen.add(k)
@@ -627,6 +629,9 @@ class MarketplaceCard(QWidget):
         "pluginRowTitle": -2,
         "pluginRowDesc": -4,
         "pluginRowTag": -5,
+        "pluginRowUpdateTag": -3,
+        "marketRowName": -1,  # 市场行名称 18px → fs-1
+        "marketRowUrl": -2,  # 市场行 URL   14px → fs-2
     }
 
     def _retheme(self):
@@ -671,6 +676,15 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass
 
+        # QPushButton 字体（"加载更多"按钮等）
+        for child in self.findChildren(QPushButton):
+            try:
+                cur = child.styleSheet()
+                btn_fs = max(fs - 2, 11)
+                child.setStyleSheet(cur + f" font-size: {btn_fs}px; font-family: '{ff}';")
+            except RuntimeError:
+                pass
+
     # ── 界面搭建 ──
 
     def _setup_ui(self):
@@ -709,6 +723,23 @@ class MarketplaceCard(QWidget):
         header_layout.addWidget(self._tab_bar)
 
         header_layout.addStretch(1)
+
+        # ── 搜索框（与 plugin-manager 一致，放在标题栏）──
+        self._search_edit = LineEdit(header)
+        self._search_edit.setPlaceholderText("搜索插件…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(160)
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
+        # 防抖 300ms，避免每敲一个字就全量重建
+        from PyQt5.QtCore import QTimer
+
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.timeout.connect(self._filter_plugins)
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        header_layout.addWidget(self._search_edit)
 
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(
@@ -758,26 +789,6 @@ class MarketplaceCard(QWidget):
         self._filter_bar.setCurrentItem("all")
         self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
         browse_root.addWidget(self._filter_bar)
-
-        # ── 搜索框 ──
-        search_row = QWidget(self._browse_page)
-        search_layout = QHBoxLayout(search_row)
-        search_layout.setContentsMargins(16, 4, 16, 4)
-
-        self._search_edit = LineEdit(search_row)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
-        # 防抖 300ms，避免每敲一个字就全量重建
-        from PyQt5.QtCore import QTimer
-        self._search_debounce = QTimer(self)
-        self._search_debounce.setSingleShot(True)
-        self._search_debounce.timeout.connect(self._filter_plugins)
-        self._search_edit.textChanged.connect(self._on_search_text_changed)
-        search_layout.addWidget(self._search_edit)
-        browse_root.addWidget(search_row)
 
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
@@ -1045,6 +1056,7 @@ class MarketplaceCard(QWidget):
             remote_ver = p.get("version", "")
             if remote_ver:
                 from .data import compare_versions
+
                 has_update = compare_versions(local_ver, remote_ver) < 0
 
         if filter_mode == "installed" and not installed:
@@ -1104,8 +1116,13 @@ class MarketplaceCard(QWidget):
             _, installed, has_update, local_ver = self._matched_plugins[i]
             p = self._all_plugins[i]
             row = _PluginRow(
-                p, installed, has_update=has_update, local_version=local_ver,
-                parent=self._content, font_size=fs, search_query=query,
+                p,
+                installed,
+                has_update=has_update,
+                local_version=local_ver,
+                parent=self._content,
+                font_size=fs,
+                search_query=query,
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
@@ -1331,6 +1348,7 @@ class MarketplaceCard(QWidget):
             self._markets_content_layout.addWidget(row)
 
         self._markets_content_layout.addStretch()
+        self._retheme()
 
     def _create_market_row(self, src_def: dict) -> QWidget:
         """创建单个市场源的行组件"""
@@ -1348,6 +1366,7 @@ class MarketplaceCard(QWidget):
         if src_def.get("builtin"):
             name_text += " (内置)"
         name_label = QLabel(name_text, row)
+        name_label.setObjectName("marketRowName")
         name_label.setStyleSheet(
             f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;"
         )
@@ -1359,6 +1378,7 @@ class MarketplaceCard(QWidget):
         if len(src_text) > 60:
             src_text = src_text[:57] + "..."
         url_label = QLabel(src_text, row)
+        url_label.setObjectName("marketRowUrl")
         url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 14px; background: transparent;")
         info.addWidget(url_label)
 

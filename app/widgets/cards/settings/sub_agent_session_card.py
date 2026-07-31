@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-子智能体会话对话框 - 以 MessageCard 同款样式渲染子智能体的运行日志/消息
+SubAgentSessionCard — 内嵌子智能体会话卡片，覆盖右侧对话区域（类似系统设置）
 
-点击紧凑卡片中的"进入会话"按钮时弹出，展示该子智能体的完整会话记录，
-包括思考过程、AI 回复、工具调用和结果。
+替代弹窗式 SubAgentSessionDialog（QDialog），以系统卡片形式嵌入全局卡片容器，
+利用 TabManagerWindow 的覆盖层栈（QStackedWidget）切换对话区/会话面板，
+与 DiffViewerCard 同构。
 
-优化：左侧导览栏 + 右侧详细消息布局，参考会话分享 HTML 结构。
+以 MessageCard 同款样式渲染子智能体的运行日志/消息：
+左侧导览栏 + 右侧详细消息布局。
 支持 logs_provider 回调实现实时更新（子智能体执行中自动轮询刷新）。
 """
 
@@ -13,22 +15,13 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QCursor, QMouseEvent
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtWidgets import (
-    QDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QSizeGrip,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Colors, scale_font_size
+from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 # 日志类型到图标名的映射（统一使用 设置-subagent.svg）
 LOG_ICON_NAMES = {
@@ -51,9 +44,10 @@ def _get_subagent_icon_html(icon_name: str = "设置-subagent", size: int = 18) 
         from app.utils.theme_manager import theme_manager
 
         prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         prefix = "qrc:/icons"
     return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;vertical-align:middle;" />'
+
 
 LOG_COLORS = {
     "progress": "#9C27B0",
@@ -76,56 +70,66 @@ LOG_TYPE_LABELS = {
 }
 
 
-class _DraggableHeader(QFrame):
-    """可拖拽标题栏 - 无边框窗口通过拖动标题栏移动整体位置"""
+class SubAgentSessionCard(BaseSettingsCard):
+    """内嵌子智能体会话卡片 - 左侧导览栏 + 右侧详细消息布局"""
 
-    def __init__(self, parent_dialog, parent=None):
-        super().__init__(parent)
-        self._dialog = parent_dialog
-        self._drag_offset = None
+    def __init__(self, parent=None):
+        super().__init__("子智能体会话", "🤖", parent=parent)
+        self.setMinimumHeight(200)
+        self.set_height_mode("proportional")
 
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self._drag_offset = event.globalPos() - self._dialog.pos()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
+        self._task_id = ""
+        self._agent_name = ""
+        self._logs: List[Dict[str, Any]] = []
+        self._summary: Dict[str, Any] = {}
+        self._logs_provider: Optional[Callable[[], Dict]] = None
+        self._last_log_count = 0
+        self._result_appended = False
+        self._poll_timer: Optional[QTimer] = None
+        self._tmp_files: List[str] = []
 
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if self._drag_offset is not None and (event.buttons() & Qt.LeftButton):
-            self._dialog.move(event.globalPos() - self._drag_offset)
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
+        self._setup_ui()
 
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        self._drag_offset = None
-        super().mouseReleaseEvent(event)
+    def _setup_ui(self):
+        """初始化内容区：摘要信息栏 + 日志内容 WebView"""
+        Colors.refresh()
 
+        # ── 摘要信息栏 ──
+        summary_bar = self._build_summary_bar()
+        self.content_layout.addWidget(summary_bar)
 
-class SubAgentSessionDialog(QDialog):
-    """子智能体会话对话框 - 左侧导览栏 + 右侧详细消息布局"""
+        # ── 日志内容 WebView ──
+        self._web_view = QWebEngineView(self)
+        self._web_view.setMinimumHeight(200)
+        self._web_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        Colors.refresh()
+        self._web_view.setStyleSheet(f"background-color: {Colors.REALTIME_BG}; border: none;")
+        self.content_layout.addWidget(self._web_view, 1)
 
-    def __init__(
+    # ───────────────────────────────────────────────────────────
+    # 对外接口
+    # ───────────────────────────────────────────────────────────
+
+    def load(
         self,
         task_id: str,
         agent_name: str,
         logs: List[Dict[str, Any]],
         summary: Dict[str, Any] = None,
-        parent=None,
         logs_provider: Optional[Callable[[], Dict]] = None,
     ):
-        """
+        """加载子智能体会话日志并显示
+
         Args:
             task_id: 任务ID
             agent_name: 智能体名称
             logs: 初始日志列表
             summary: 任务摘要
-            parent: 父窗口
             logs_provider: 可选。获取最新日志的回调，返回 get_task_logs() 的 dict。
                           提供后若任务状态为 running，自动启动定时轮询实现实时更新。
         """
-        super().__init__(parent)
+        # 重置状态（卡片复用：可能切换到另一个任务）
+        self._stop_polling()
         self._task_id = task_id
         self._agent_name = agent_name
         self._logs = logs
@@ -134,86 +138,56 @@ class SubAgentSessionDialog(QDialog):
         self._last_log_count = len(logs)
         self._result_appended = bool(self._summary.get("result") or self._summary.get("error"))
 
-        self.setWindowTitle(f"{agent_name} - 会话日志")
-        self.setMinimumSize(800, 520)
-        # 无边框：去掉系统原生标题栏，使用内部绘制的标题栏
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
-        # 半透明背景：让圆角在桌面背景下干净呈现
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self._setup_ui()
+        self.set_title_text(f"{agent_name} — 会话日志")
         self._render_logs()
 
         # ── 如果任务还在运行且提供了 logs_provider，启动定时轮询 ──
-        status = self._summary.get("status", "finished")
-        if status == "running" and logs_provider is not None:
-            self._poll_timer = QTimer(self)
-            self._poll_timer.setInterval(3000)  # 3 秒轮询（减少卡顿）
-            self._poll_timer.timeout.connect(self._poll_update)
-            self._poll_timer.setSingleShot(False)
-            self._poll_timer.start()
-        else:
-            self._poll_timer = None
+        self._start_polling()
 
-    def _setup_ui(self):
-        """初始化 UI"""
-        Colors.refresh()
-        self.setStyleSheet(f"""
-            SubAgentSessionDialog {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-radius: 8px;
-            }}
-        """)
+    def _start_polling(self):
+        """启动定时轮询（幂等）：任务运行中且已提供 logs_provider 时生效"""
+        if self._poll_timer is not None:
+            return
+        if self._logs_provider is None:
+            return
+        if self._summary.get("status") != "running":
+            return
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(3000)  # 3 秒轮询（减少卡顿）
+        self._poll_timer.timeout.connect(self._poll_update)
+        self._poll_timer.setSingleShot(False)
+        self._poll_timer.start()
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        # ── 顶部标题栏 ──
-        header = self._build_header()
-        main_layout.addWidget(header)
-
-        # ── 摘要信息栏 ──
-        summary_bar = self._build_summary_bar()
-        main_layout.addWidget(summary_bar)
-
-        # ── 日志内容 WebView ──
-        self._web_view = QWebEngineView(self)
-        self._web_view.setMinimumHeight(200)
-        self._web_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        Colors.refresh()
-        self._web_view.setStyleSheet(f"background-color: {Colors.REALTIME_BG}; border: none;")
-        main_layout.addWidget(self._web_view, 1)
-
-        # ── 底部圆角封边 + 尺寸调节手柄 ──
-        footer = QFrame(self)
-        footer.setObjectName("SessionFooter")
-        footer.setFixedHeight(16)
-        Colors.refresh()
-        footer.setStyleSheet(f"""
-            #SessionFooter {{
-                background-color: {Colors.REALTIME_BG};
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-            }}
-        """)
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(0, 0, 0, 0)
-        footer_layout.addStretch()
-        grip = QSizeGrip(footer)
-        grip.setStyleSheet("background: transparent;")
-        footer_layout.addWidget(grip, 0, Qt.AlignBottom | Qt.AlignRight)
-        main_layout.addWidget(footer)
-
-    def closeEvent(self, event):
-        """关闭时停止定时器"""
+    def clear(self):
+        """清除内容，停止轮询，释放 WebEngine 页面与临时文件"""
         self._stop_polling()
-        super().closeEvent(event)
+        self._logs = []
+        self._summary = {}
+        self._logs_provider = None
+        self._last_log_count = 0
+        self._result_appended = False
+        try:
+            self._web_view.setHtml("")
+        except RuntimeError:
+            pass
+        _cleanup_temp_files(self._tmp_files)
 
-    def reject(self):
-        """取消时停止定时器（ESC 按键）"""
+    # ── 生命周期 ──
+
+    def _on_close(self):
+        """关闭时停止轮询（SystemCardFrame 关闭按钮回调）"""
         self._stop_polling()
-        super().reject()
+        super()._on_close()
+
+    def hideEvent(self, event):
+        """隐藏时停止轮询（经 CardManager hide_card / 系统卡片互斥隐藏时）"""
+        self._stop_polling()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """重新显示时若任务仍在运行，恢复轮询（被互斥隐藏期间轮询已停）"""
+        super().showEvent(event)
+        self._start_polling()
 
     def _stop_polling(self):
         """停止轮询定时器"""
@@ -223,6 +197,10 @@ class SubAgentSessionDialog(QDialog):
             except Exception:
                 pass
             self._poll_timer = None
+
+    # ───────────────────────────────────────────────────────────
+    # 轮询实时更新
+    # ───────────────────────────────────────────────────────────
 
     def _poll_update(self):
         """轮询最新日志并增量更新右侧内容"""
@@ -254,23 +232,26 @@ class SubAgentSessionDialog(QDialog):
         except Exception as e:
             import logging
 
-            logging.warning(f"[SubAgentSessionDialog] 轮询更新失败: {e}")
+            logging.warning(f"[SubAgentSessionCard] 轮询更新失败: {e}")
 
     def _check_and_update(self, logs, summary, status):
         """检查用户滚动位置后执行更新"""
         # 先用 JS 检查用户是否在底部区域
-        self._web_view.page().runJavaScript(
-            """(function() {
-                var m = document.getElementById('mainContent');
-                if (!m) return true;
-                return (m.scrollHeight - m.scrollTop - m.clientHeight) < 120;
-            })()""",
-            lambda near_bottom: self._apply_update(logs, summary, status, bool(near_bottom)),
-        )
+        try:
+            self._web_view.page().runJavaScript(
+                """(function() {
+                    var m = document.getElementById('mainContent');
+                    if (!m) return true;
+                    return (m.scrollHeight - m.scrollTop - m.clientHeight) < 120;
+                })()""",
+                lambda near_bottom: self._apply_update(logs, summary, status, bool(near_bottom)),
+            )
+        except RuntimeError:
+            pass  # 页面已销毁
 
     def _apply_update(self, logs, summary, status, near_bottom: bool):
         """增量更新 — 只追加新增日志，不重建页面，导航和滚动位置不变"""
-        new_logs = logs[self._last_log_count:]
+        new_logs = logs[self._last_log_count :]
         has_new_logs = len(new_logs) > 0
 
         # 生成新增日志的 HTML
@@ -336,17 +317,20 @@ class SubAgentSessionDialog(QDialog):
 
     def _auto_scroll_latest(self):
         """增量更新后自动滚动到最底部（最新日志）"""
-        QTimer.singleShot(100, lambda: self._web_view.page().runJavaScript(
-            """(function() {
+        QTimer.singleShot(
+            100,
+            lambda: self._web_view.page().runJavaScript(
+                """(function() {
                 var m = document.getElementById('mainContent');
                 if (m) m.scrollTop = m.scrollHeight;
             })()""",
-        ))
+            ),
+        )
 
     def _update_summary_bar(self):
         """更新摘要栏的状态显示（任务结束时刷新）"""
         # 在 Qt Widget 层面更新摘要栏中的状态标签
-        if not hasattr(self, '_status_lbl'):
+        if not hasattr(self, "_status_lbl"):
             return
         status = self._summary.get("status", "finished")
         status_text = "✅ 已完成" if status == "finished" else "⏳ 执行中"
@@ -354,70 +338,19 @@ class SubAgentSessionDialog(QDialog):
 
         # 更新工具调用次数
         tool_count = self._summary.get("tool_call_count", 0)
-        if hasattr(self, '_tool_count_lbl'):
+        if hasattr(self, "_tool_count_lbl"):
             self._tool_count_lbl.setText(f"🔧 {tool_count} 次工具调用")
 
         # 更新耗时
         elapsed = self._summary.get("elapsed_seconds", 0)
         mins = elapsed // 60
         secs = elapsed % 60
-        if hasattr(self, '_elapsed_lbl'):
+        if hasattr(self, "_elapsed_lbl"):
             self._elapsed_lbl.setText(f"⏱ {mins:02d}:{secs:02d}")
 
-    def _build_header(self) -> QWidget:
-        """构建标题栏"""
-        header = _DraggableHeader(self, self)
-        header.setObjectName("SessionHeader")
-        header.setFixedHeight(44)
-        Colors.refresh()
-        header.setStyleSheet(f"""
-            #SessionHeader {{
-                background-color: {Colors.REALTIME_ACCENT};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
-
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 0, 12, 0)
-
-        # 主题感知图标
-        self._header_icon_label = QLabel(header)
-        self._header_icon_label.setFixedSize(20, 20)
-        self._header_icon_label.setStyleSheet("background: transparent; border: none;")
-        self._header_icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        pixmap = get_icon("设置-subagent").pixmap(20, 20)
-        self._header_icon_label.setPixmap(pixmap)
-        layout.addWidget(self._header_icon_label)
-
-        title = QLabel(f"  {self._agent_name}  —  会话日志", header)
-        title.setFont(get_unified_font(12, True))
-        title.setStyleSheet("color: #ffffff; background: transparent;")
-        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        layout.addWidget(title)
-
-        layout.addStretch()
-
-        close_btn = QPushButton("✕", header)
-        close_btn.setFixedSize(28, 28)
-        close_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        close_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: rgba(255,255,255,0.15);
-                color: #ffffff;
-                border: none;
-                border-radius: 14px;
-                font-size: 14px;
-                {get_font_family_css()}
-            }}
-            QPushButton:hover {{
-                background-color: rgba(255,255,255,0.3);
-            }}
-        """)
-        close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn)
-
-        return header
+    # ───────────────────────────────────────────────────────────
+    # UI 构建
+    # ───────────────────────────────────────────────────────────
 
     def _build_summary_bar(self) -> QWidget:
         """构建摘要信息栏"""
@@ -474,19 +407,28 @@ class SubAgentSessionDialog(QDialog):
 
         return bar
 
+    # ───────────────────────────────────────────────────────────
+    # 日志渲染
+    # ───────────────────────────────────────────────────────────
+
     def _render_logs(self):
         """以 MessageCard 同款样式渲染日志"""
         if not self._logs:
             status = self._summary.get("status", "")
             if status == "finished":
                 # 已完成但日志为空 — DB 可能无数据，显示友好提示
-                self._web_view.setHtml(self._build_empty_html(msg="该任务已完成，但日志记录为空（可能是旧数据）。"))
+                self._load_html(self._build_empty_html(msg="该任务已完成，但日志记录为空（可能是旧数据）。"))
             else:
-                self._web_view.setHtml(self._build_empty_html())
+                self._load_html(self._build_empty_html())
             return
 
         html = self._build_html()
-        self._web_view.setHtml(html)
+        self._load_html(html)
+
+    def _load_html(self, html: str):
+        """加载 HTML（临时文件 + setUrl，规避 setHtml 对大内容 JS 失效的问题）"""
+        _cleanup_temp_files(self._tmp_files)
+        _load_html_to_webview(self._web_view, html, self._tmp_files)
 
     def _build_empty_html(self, msg: str = "") -> str:
         """构建无日志时的 HTML"""
@@ -1131,15 +1073,15 @@ class SubAgentSessionDialog(QDialog):
         # 限制超长内容的显示，防止 DOM 过大导致卡顿
         if log_type in ("thinking", "ai_response") and len(content) > 10000:
             escaped = self._escape_html(content[:10000])
-            return f"<div class=\"content-text\">{escaped}…</div><p style=\"color: var(--text-muted); font-size: 11px;\">（内容过长，仅显示前 10000 字符）</p>"
+            return f'<div class="content-text">{escaped}…</div><p style="color: var(--text-muted); font-size: 11px;">（内容过长，仅显示前 10000 字符）</p>'
 
         escaped = self._escape_html(content)
 
         if log_type == "thinking":
-            return f"<div class=\"content-text\">{escaped}</div>"
+            return f'<div class="content-text">{escaped}</div>'
 
         elif log_type == "ai_response":
-            return f"<div class=\"content-text\">{escaped}</div>"
+            return f'<div class="content-text">{escaped}</div>'
 
         elif log_type == "tool_call":
             args = log.get("args")
@@ -1164,7 +1106,7 @@ class SubAgentSessionDialog(QDialog):
             if len(result_text) > 2000:
                 result_text = result_text[:2000]
                 truncated = True
-            html = f"<p>{icon} <strong>{escaped}</strong></p><div class=\"content-text\">{self._escape_html(result_text)}</div>"
+            html = f'<p>{icon} <strong>{escaped}</strong></p><div class="content-text">{self._escape_html(result_text)}</div>'
             if truncated:
                 html += '<p style="color: var(--text-muted); font-size: 11px;">（结果过长，仅显示前 2000 字符）</p>'
             return html

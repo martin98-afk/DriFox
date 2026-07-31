@@ -59,7 +59,7 @@ class ConfirmDialog(MaskDialogBase):
         self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
         self.setClosableOnMaskClicked(True)
         self.setDraggable(True)
-        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.setMaskColor(QColor(0, 0, 0, 180))
 
         self.widget.setObjectName("confirmDialogWidget")
         self.widget.setStyleSheet(f"""
@@ -197,7 +197,7 @@ class InfoDialog(MaskDialogBase):
         self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
         self.setClosableOnMaskClicked(True)
         self.setDraggable(True)
-        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.setMaskColor(QColor(0, 0, 0, 140))
 
         self.widget.setObjectName("infoDialogWidget")
         self.widget.setStyleSheet(f"""

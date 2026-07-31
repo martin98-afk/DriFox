@@ -1,3 +1,0 @@
-# MiniMax Image Understanding Skill - Python Dependencies
-# 这个技能主要使用 Python 标准库，无需额外安装依赖
-# 标准库模块: json, os, sys, base64, urllib.request, argparse

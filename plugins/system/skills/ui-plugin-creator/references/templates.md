@@ -678,11 +678,12 @@ def register_ui(registry):
 
     # 注册浮动卡片（自动注册对应命令 /<card-id>）
     # container="bottom"：与系统配置卡片一致，显示在 chat_layout 下方并隐藏输入区
+    # container="full"：完整覆盖对话区（与系统配置卡片一致，走覆盖层）
     registry.register_floating_card(
         plugin_name="<plugin-name>",
         card_id="<card-id>",
         widget_class=MyCardWidget,
-        container="bottom",          # "bottom" | "top"
+        container="bottom",          # "bottom" | "top" | "left" | "right" | "full"
         title="卡片标题",
         default_visible=False,
     )

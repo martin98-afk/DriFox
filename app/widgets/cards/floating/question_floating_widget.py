@@ -5,6 +5,7 @@
 触发方式：LLM 调用 question 工具
 交互方式：点击选项单选/多选，分页导航，可跳过、可自定答案
 """
+
 from functools import partial
 
 from loguru import logger
@@ -29,8 +30,10 @@ from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 # 单选选项卡片
 # ═══════════════════════════════════════════════════════════
 
+
 class _OptionRadioCard(QWidget):
     """单选选项卡片 — 标题 + 描述"""
+
     clicked = pyqtSignal()
 
     def __init__(self, label: str, description: str = "", parent=None):
@@ -114,16 +117,19 @@ class _OptionRadioCard(QWidget):
 
     def enterEvent(self, e):
         self._hovered = True
-        if not self._selected: self._apply_style()
+        if not self._selected:
+            self._apply_style()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._hovered = False
-        if not self._selected: self._apply_style()
+        if not self._selected:
+            self._apply_style()
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton: self.clicked.emit()
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
         super().mousePressEvent(e)
 
 
@@ -131,8 +137,10 @@ class _OptionRadioCard(QWidget):
 # 多选选项卡片
 # ═══════════════════════════════════════════════════════════
 
+
 class _OptionCheckCard(QWidget):
     """多选选项卡片 — 标题 + 描述"""
+
     toggled = pyqtSignal(bool)
 
     def __init__(self, label: str, description: str = "", parent=None):
@@ -224,22 +232,26 @@ class _OptionCheckCard(QWidget):
 
     def enterEvent(self, e):
         self._hovered = True
-        if not self._checked: self._apply_style()
+        if not self._checked:
+            self._apply_style()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self._hovered = False
-        if not self._checked: self._apply_style()
+        if not self._checked:
+            self._apply_style()
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton: self.toggle()
+        if e.button() == Qt.LeftButton:
+            self.toggle()
         super().mousePressEvent(e)
 
 
 # ═══════════════════════════════════════════════════════════
 # 自定义输入选项卡片
 # ═══════════════════════════════════════════════════════════
+
 
 class _CustomInputCard(QWidget):
     """输入自己的答案选项 — 默认显示描述，选中后变成文本输入框"""
@@ -249,7 +261,7 @@ class _CustomInputCard(QWidget):
     heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
 
     MAX_INPUT_HEIGHT = 220  # 输入框最大高度
-    MIN_INPUT_HEIGHT = 32   # 输入框初始单行高度（一行文字 + 内边距）
+    MIN_INPUT_HEIGHT = 32  # 输入框初始单行高度（一行文字 + 内边距）
 
     def __init__(self, multiple: bool = False, parent=None):
         super().__init__(parent)
@@ -268,6 +280,7 @@ class _CustomInputCard(QWidget):
         super().showEvent(event)
         if self._active and event.isAccepted():
             from PyQt5.QtCore import QTimer
+
             QTimer.singleShot(0, lambda: self._text_edit.setFocus() if self.isVisible() else None)
 
     def _setup_ui(self):
@@ -379,7 +392,7 @@ class _CustomInputCard(QWidget):
                 doc_height = line_height
             else:
                 total_lines = 0
-                for line in text.split('\n'):
+                for line in text.split("\n"):
                     n = len(line)
                     if n == 0:
                         total_lines += 1
@@ -478,7 +491,9 @@ class _CustomInputCard(QWidget):
 
     def enterEvent(self, e):
         if not self._active:
-            self.setStyleSheet(f"_CustomInputCard{{background-color:{Colors.REALTIME_TAG_BG};border:1px solid {Colors.REALTIME_TAG_BORDER};border-radius:8px;}}")
+            self.setStyleSheet(
+                f"_CustomInputCard{{background-color:{Colors.REALTIME_TAG_BG};border:1px solid {Colors.REALTIME_TAG_BORDER};border-radius:8px;}}"
+            )
         super().enterEvent(e)
 
     def leaveEvent(self, e):
@@ -487,7 +502,8 @@ class _CustomInputCard(QWidget):
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton: self.toggle()
+        if e.button() == Qt.LeftButton:
+            self.toggle()
         super().mousePressEvent(e)
 
 
@@ -495,8 +511,10 @@ class _CustomInputCard(QWidget):
 # 主提问卡片
 # ═══════════════════════════════════════════════════════════
 
+
 class QuestionFloatingWidget(QWidget):
     """悬浮提问卡片，支持多问题分页"""
+
     answered = pyqtSignal(str)
     cancelled = pyqtSignal()
     previewRequested = pyqtSignal(object)
@@ -520,6 +538,7 @@ class QuestionFloatingWidget(QWidget):
         if event.isAccepted() and self._questions:
             # 延迟到布局完成后聚焦，确保按钮在正确位置
             from PyQt5.QtCore import QTimer
+
             QTimer.singleShot(0, lambda: self._next_btn.setFocus() if self.isVisible() else None)
 
     def _setup_ui(self):
@@ -656,9 +675,9 @@ class QuestionFloatingWidget(QWidget):
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.setFont(get_unified_font(10))
         self._back_btn.clicked.connect(self._on_back)
-        self._back_btn.setStyleSheet("""
-            QPushButton { color: rgba(255,255,255,0.6); background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 0 14px; }
-            QPushButton:hover { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.15); }
+        self._back_btn.setStyleSheet(f"""
+            QPushButton {{ color: {Colors.TEXT_SECONDARY}; background: {Colors.HOVER_BG}; border: none; border-radius: 6px; padding: 0 14px; }}
+            QPushButton:hover {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.SELECTED_BG}; }}
         """)
 
         self._next_btn = QPushButton("下一步")
@@ -667,7 +686,7 @@ class QuestionFloatingWidget(QWidget):
         self._next_btn.setFont(get_unified_font(10, True))
         self._next_btn.clicked.connect(self._on_next)
         self._next_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {Colors.CARD_BG}; color: #ffffff; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+            QPushButton {{ background-color: {Colors.CARD_BG}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
         """)
 
@@ -696,6 +715,16 @@ class QuestionFloatingWidget(QWidget):
             self._ignore_btn.setStyleSheet(f"""
                 QPushButton {{ color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; padding: 6px 0; }}
                 QPushButton:hover {{ color: {Colors.TEXT_SECONDARY_HOVER}; }}
+            """)
+        if hasattr(self, "_back_btn") and self._back_btn:
+            self._back_btn.setStyleSheet(f"""
+                QPushButton {{ color: {Colors.TEXT_SECONDARY}; background: {Colors.HOVER_BG}; border: none; border-radius: 6px; padding: 0 14px; }}
+                QPushButton:hover {{ color: {Colors.TEXT_PRIMARY}; background: {Colors.SELECTED_BG}; }}
+            """)
+        if hasattr(self, "_next_btn") and self._next_btn:
+            self._next_btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {Colors.CARD_BG}; color: {Colors.TEXT_PRIMARY}; border: none; border-radius: 6px; padding: 0 18px; font-weight: bold; }}
+                QPushButton:hover {{ background-color: {Colors.CARD_BG_SOLID}; }}
             """)
 
     def refresh_style(self):
@@ -795,7 +824,7 @@ class QuestionFloatingWidget(QWidget):
             self._toggle_collapse()
         # 安装窗口 resize 监听（只一次）
         win = self.window()
-        if win is not None and win is not self and not getattr(self, '_win_filtered', False):
+        if win is not None and win is not self and not getattr(self, "_win_filtered", False):
             win.installEventFilter(self)
             self._win_filtered = True
         self._update_dynamic_heights()
@@ -889,8 +918,7 @@ class QuestionFloatingWidget(QWidget):
         self._question_label.setText(question_text)
 
         self._hint_label.setText(
-            "☑ 选择所有适用的选项（可多选）" if multiple and options else
-            "👆 选择一个答案" if options else ""
+            "☑ 选择所有适用的选项（可多选）" if multiple and options else "👆 选择一个答案" if options else ""
         )
 
         # ── 复用 option widgets（不销毁重建） ──
@@ -958,7 +986,7 @@ class QuestionFloatingWidget(QWidget):
     def _on_custom_input_activated(self):
         """单选模式下自定义输入被选中，取消其他选项"""
         for w in self._option_widgets:
-            if hasattr(w, 'set_selected'):
+            if hasattr(w, "set_selected"):
                 w.set_selected(False)
 
     def _on_options_height_changed(self):
@@ -995,9 +1023,9 @@ class QuestionFloatingWidget(QWidget):
         for w in self._option_widgets:
             if not w.isVisible():
                 continue
-            if hasattr(w, '_selected') and w._selected:
+            if hasattr(w, "_selected") and w._selected:
                 results.append({"label": w._label_text, "description": w._desc_text})
-            elif hasattr(w, 'isChecked') and w.isChecked():
+            elif hasattr(w, "isChecked") and w.isChecked():
                 results.append({"label": w._label_text, "description": w._desc_text})
         return results
 
@@ -1028,9 +1056,9 @@ class QuestionFloatingWidget(QWidget):
         if answer is None:
             for w in self._option_widgets:
                 if w.isVisible():
-                    if hasattr(w, 'set_selected'):
+                    if hasattr(w, "set_selected"):
                         w.set_selected(False)
-                    elif hasattr(w, 'set_checked'):
+                    elif hasattr(w, "set_checked"):
                         w.set_checked(False)
             if self._custom_input_widget:
                 self._custom_input_widget.set_active(False)
@@ -1041,9 +1069,9 @@ class QuestionFloatingWidget(QWidget):
 
         for w in self._option_widgets:
             if w.isVisible():
-                if hasattr(w, 'set_selected'):
+                if hasattr(w, "set_selected"):
                     w.set_selected(text and w._label_text in text)
-                elif hasattr(w, 'set_checked'):
+                elif hasattr(w, "set_checked"):
                     w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
@@ -1051,7 +1079,8 @@ class QuestionFloatingWidget(QWidget):
                 custom_text = answer.get("custom_text", "") or answer.get("text", "")
                 # 如果是混合答案（选项+自定义），提取纯自定义部分
                 import re
-                pure = re.sub(r'【[^】]+】[；]?', '', custom_text).strip("；").strip()
+
+                pure = re.sub(r"【[^】]+】[；]?", "", custom_text).strip("；").strip()
                 if pure:
                     self._custom_input_widget.set_content(pure)
 
@@ -1086,7 +1115,7 @@ class QuestionFloatingWidget(QWidget):
     def _build_and_emit_answer(self):
         parts = []
         for i, q in enumerate(self._questions):
-            q_text = q.get("question", f"问题{i+1}")
+            q_text = q.get("question", f"问题{i + 1}")
             data = self._answers.get(i)
             if data:
                 answer_text = data["text"] if isinstance(data, dict) else data
