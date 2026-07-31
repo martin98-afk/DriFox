@@ -8,6 +8,12 @@ All notable changes to this project will be documented in this file.
 - **消息卡片简洁模式 `reorganizeContent` 增量重排 (v2)**: 将原版 4 次独立 forEach 重复扫描合并为单次扫描；将过期 think-block / tool-block 清理合并为单次遍历；引入"顺序哈希 diff"取代无脑 sort+appendChild（流式期间 ~80% updateContent 走快路径跳过 sort）。理论加速 1.4x~2.6x（按块数），长会话（100+ 块）卡顿显著改善
 - **简洁模式 `updateContent` 跳过 `think-block` 展开状态 save/restore**: 简洁模式下 completed 思考块是 `think-compact` 纯文本行（无折叠），`expandedStates` Map 始终为空。短路 save/restore 两段 querySelectorAll + Map 操作；非简洁模式行为不变
 
+### ✨ 新功能 (New Features)
+
+- **diff-viewer 侧边栏折叠按钮**: 在 view-bar 最左新增 `sidebar-toggle` 按钮（chevron 图标），可手动折叠/展开文件列表面板；CSS transition 0.15s 平滑过渡；折叠态 `width:0 + overflow:hidden` 仅保留按钮可见
+- **diff-viewer 窄屏自动折叠**: 窗口宽度 `<900px` 时自动折叠侧边栏；用户手动切换后（`_sbUser=true`）不再自动干预
+- **diff-viewer 默认视图改为 unified**: `generate_html_report` 的 `default_view` 默认值由 `"split"` 改为 `"unified"`（更适合绝大多数修改场景；用户仍可在 view-bar 切换为并排对比）
+
 ### 🐛 问题修复 (Bug Fixes)
 
 - **OpenAIChatToolWindow 欢迎卡片生命周期修复**: 修复 `_hide_welcome_cards` 仅调用 `hide()` 而未 `removeWidget()`，导致多次显示/隐藏循环后布局中累积孤儿 widget；`_load_message_batch` 卡片提取循环改用逆序遍历避免索引漂移；显式跳过 `_is_welcome` 标记的卡片，防止被 `_cache_current_session_cards` 的 `deleteLater` 误删（欢迎卡片由 `_welcome_card_cache` 独立管理生命周期）
