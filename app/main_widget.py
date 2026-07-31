@@ -3436,38 +3436,72 @@ class OpenAIChatToolWindow(ToolWindow):
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的命令注册 QShortcut
 
+        父对象取顶层窗口（self.window()）而非 self(MainWidget)：
+        "替换(full)" 类卡片打开时 TabManagerWindow 会切换 QStackedWidget 隐藏对话区
+        （MainWidget 位于对话区第 0 页内），Qt 的 QShortcutMap 会跳过父对象不可见的
+        快捷键，导致第二次按快捷键无法触发关闭。顶层窗口在覆盖层打开时仍可见，
+        快捷键得以持续生效。
+
         有参数的命令：无论类型，插入 /command 文本到输入框，自动弹出参数卡片。
         无参数的 FUNCTION 命令：有处理器时直接执行，无处理器时回退到插入文本。
         无参数的 PROMPT/AGENT 命令：回退到插入 /command 文本，用户按 Enter 后走正常发送流程。
+
+        handler 在运行时解析当前激活的 MainWidget（Tab 模式取 _content_area 当前页），
+        不捕获 self，避免命中被隐藏或已关闭的标签页。
         """
         self._clear_command_shortcuts()
+
+        # 快捷键挂在顶层窗口上，self 被销毁时不会随之自动清理，连接 destroyed 同步清理，避免泄漏
+        if not getattr(self, "_cmd_shortcuts_destroy_connected", False):
+            try:
+                self.destroyed.connect(lambda *a: self._clear_command_shortcuts())
+                self._cmd_shortcuts_destroy_connected = True
+            except RuntimeError:
+                pass
 
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
         from app.core.command_manager import CommandManager
 
+        def _resolve_target(parent):
+            # 运行时解析当前激活的 MainWidget：Tab 模式取 _content_area 当前页；
+            # 单窗口模式 parent 自身即 MainWidget。不捕获 self，避免命中被隐藏/已关闭标签页。
+            content = getattr(parent, "_content_area", None)
+            if content is not None:
+                w = content.currentWidget()
+                if w is not None:
+                    return w
+            if hasattr(parent, "_execute_command"):
+                return parent
+            return None
+
+        # 顶层窗口在覆盖层打开时仍可见，确保快捷键持续可触发
+        shortcut_parent = self.window() or self
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
             for cmd_type, cmd_def in entries.items():
                 if not cmd_def.shortcut:
                     continue
-                qs = QShortcut(QKeySequence(cmd_def.shortcut), self)
+                qs = QShortcut(QKeySequence(cmd_def.shortcut), shortcut_parent)
 
                 name = cmd_def.name
 
-                def _on_shortcut(n=name):
+                def _on_shortcut(n=name, parent=shortcut_parent):
                     try:
+                        target = _resolve_target(parent)
+                        if target is None:
+                            return
                         # 命令有参数 → 插入 /cmd 到输入框，自动触发参数卡片
-                        if self._command_has_params(n):
+                        if target._command_has_params(n):
                             logger.debug(f"[Shortcut] '{n}' → 插入文本（有参数）")
-                            self._insert_command_text_fallback(n)
-                        elif self._has_command_handler(n):
+                            target._insert_command_text_fallback(n)
+                        elif target._has_command_handler(n):
                             logger.debug(f"[Shortcut] '{n}' → 直接执行（无参数+有handler）")
-                            self._execute_command(n)
+                            target._execute_command(n)
                         else:
                             logger.debug(f"[Shortcut] '{n}' → 插入文本（无handler）")
-                            self._insert_command_text_fallback(n)
+                            target._insert_command_text_fallback(n)
                     except Exception:
                         logger.warning(f"[Shortcut] '{n}' 处理异常", exc_info=True)
 
