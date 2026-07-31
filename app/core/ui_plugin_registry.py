@@ -58,7 +58,8 @@ class FloatingCardInfo:
         plugin_name: 所属插件名
         card_id: 卡片唯一 ID（同时也是自动注册的命令名）
         widget_class: QWidget 子类
-        container: 容器位置 "top" | "bottom" | "left" | "right"
+        container: 容器位置 "top" | "bottom" | "left" | "right" | "full"
+                  "full" 表示完整覆盖对话区（与系统配置卡片一致，走覆盖层）
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
         metadata: 附加元数据
@@ -181,8 +182,9 @@ class UIPluginRegistry:
             plugin_name: 所属插件名
             card_id: 卡片唯一 ID
             widget_class: QWidget 子类
-            container: "top" | "bottom" | "left" | "right"
-                       （Tab 模式下卡片挂在 Tab 窗口级全局容器的对应方位）
+            container: "top" | "bottom" | "left" | "right" | "full"
+                       （Tab 模式下卡片挂在 Tab 窗口级全局容器的对应方位；
+                         "full" 表示完整覆盖对话区，与系统配置卡片一致）
             title: 卡片标题
             default_visible: 默认是否可见
             metadata: 附加元数据
@@ -192,8 +194,10 @@ class UIPluginRegistry:
         Side Effects:
             自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
         """
-        if container not in ("top", "bottom", "left", "right"):
-            raise ValueError(f"container must be one of 'top'/'bottom'/'left'/'right', got {container!r}")
+        if container not in ("top", "bottom", "left", "right", "full"):
+            raise ValueError(
+                f"container must be one of 'top'/'bottom'/'left'/'right'/'full', got {container!r}"
+            )
         if metadata is None:
             metadata = {}
         info = FloatingCardInfo(
@@ -263,20 +267,21 @@ class UIPluginRegistry:
         return None
 
     def move_floating_card(self, card_id: str, container: str, main_widget=None) -> bool:
-        """动态移动浮动卡片到另一方位（top/bottom/left/right）
+        """动态移动浮动卡片到另一方位（top/bottom/left/right/full）
 
         实现方式：更新注册信息 → 销毁旧实例 → 若原本可见则在新方位立即重建显示。
         卡片 widget 会以新容器为父级重新创建（带新方位的展开动画）。
 
         Args:
             card_id: 卡片唯一 ID
-            container: 目标方位 "top" | "bottom" | "left" | "right"
+            container: 目标方位 "top" | "bottom" | "left" | "right" | "full"
+                      "full" 表示完整覆盖对话区（与系统配置卡片一致，走覆盖层）
             main_widget: 目标主窗口（仅 per-window 回退模式需要）
 
         Returns:
             True 移动成功；False 卡片未注册或方位非法
         """
-        if container not in ("top", "bottom", "left", "right"):
+        if container not in ("top", "bottom", "left", "right", "full"):
             return False
         info = self._floating_cards.get(card_id)
         if info is None:
@@ -362,11 +367,18 @@ class UIPluginRegistry:
         if widget is None:
             from app.widgets.cards.card_manager import ContainerType
 
-            # 确定容器类型（top/bottom/left/right 与 ContainerType 值一一对应）
-            try:
-                container_type = ContainerType(card_info.container)
-            except ValueError:
+            # 确定容器类型：
+            # - "full" 表示完整覆盖对话区：映射到 TOP 覆盖层容器（Tab 模式下
+            #   _top_card_container 即 _global_top_container，已启用 overlay
+            #   覆盖层模式，与系统配置卡片行为一致）；per-window 模式回退到 top。
+            # - 其余 top/bottom/left/right 与 ContainerType 值一一对应。
+            if card_info.container == "full":
                 container_type = ContainerType.TOP
+            else:
+                try:
+                    container_type = ContainerType(card_info.container)
+                except ValueError:
+                    container_type = ContainerType.TOP
             # 获取对应方位的容器控件（命名约定：_{方位}_card_container）
             container = getattr(mw, f"_{container_type.value}_card_container", None)
             if container is None:

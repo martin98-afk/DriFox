@@ -771,7 +771,8 @@ class _PluginRow(QFrame):
 
         if self._busy:
             lbl = QLabel("处理中…", self)
-            lbl.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 12px;")
+            busy_fs = max(10, self._font_size if self._font_size > 0 else 14)
+            lbl.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: {busy_fs}px;")
             self._btn_layout.addWidget(lbl)
             return
 
@@ -790,10 +791,11 @@ class _PluginRow(QFrame):
 
     def _add_action_btn(self, text: str, color: str, slot):
         btn = PushButton(text, self)
-        btn.setFixedWidth(60)
+        btn_fs = max(10, self._font_size if self._font_size > 0 else 14)
+        btn.setFixedWidth(max(60, btn_fs * 4))
         btn.setStyleSheet(
             f"PushButton {{ color: {color}; border: 1px solid {color};"
-            f" border-radius: 4px; padding: 4px 8px; font-size: 12px; background: transparent; }}"
+            f" border-radius: 4px; padding: 4px 8px; font-size: {btn_fs}px; background: transparent; }}"
             f"PushButton:hover {{ background: rgba({','.join(str(int(color[i : i + 2], 16)) for i in (1, 3, 5))},0.1); }}"
         )
         btn.clicked.connect(slot)
@@ -858,10 +860,11 @@ class _PluginRow(QFrame):
         )
 
     def set_font_size(self, font_size: int):
-        """根据上下文字体大小动态调整头像尺寸"""
+        """根据上下文字体大小动态调整头像尺寸 + 操作按钮字号"""
         self._font_size = font_size
         if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
             self._avatar.set_font_size(font_size)
+        self._build_buttons()
 
 
 # ── 主卡片 ──────────────────────────────────────────────

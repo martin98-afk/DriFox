@@ -142,6 +142,22 @@ def test_register_floating_card():
     reg.reset()
 
 
+def test_register_floating_card_full_container():
+    """container="full" 合法：完整覆盖对话区（与系统配置卡片一致）"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    reg.register_floating_card(
+        plugin_name="plug-full",
+        card_id="plug-full:full-card",
+        widget_class=object,
+        container="full",
+        title="Full Card",
+    )
+    info = reg.get_floating_cards()["plug-full:full-card"]
+    assert info.container == "full"
+    reg.reset()
+
+
 def test_floating_card_auto_registers_command():
     """register_floating_card 应自动注册 /card_id 命令（系统插件用短名）"""
     reg = UIPluginRegistry.get_instance()
@@ -322,8 +338,8 @@ class _FakeMainWidgetWithSystemCard:
 def test_show_floating_card_registers_as_system_card():
     """_show_floating_card 首次显示时应调用 register_system_card，让插件卡片像系统配置卡片一样隐藏输入区
 
-    容器选择：plugin-marketplace 和 plugin-manager 已迁移为 container="bottom"，
-    因此 widget 应被加入 _bottom_card_container，并触发 register_system_card。
+    容器选择：插件卡片可注册在 bottom/full 等位置（如 plugin-marketplace / plugin-manager
+    已迁移为 container="full"），显示时均触发 register_system_card。
     """
     reg = UIPluginRegistry.get_instance()
     reg.reset()

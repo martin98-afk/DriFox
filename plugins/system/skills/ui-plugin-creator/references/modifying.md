@@ -120,7 +120,7 @@ def _fetch_data(self) -> dict:
 # 3. 如果插件不在 _vendor/，需要把 requests 加进去（见 templates.md §五）
 ```
 
-### 2.5 改容器（bottom → top）
+### 2.5 改容器（bottom → top / full）
 
 ```python
 # ui/__init__.py
@@ -128,10 +128,13 @@ registry.register_floating_card(
     plugin_name="<plugin-name>",
     card_id="my-card",
     widget_class=MyCardWidget,
-    container="top",  # ← 改这里
+    container="top",  # ← 改这里（可选：bottom / top / left / right / full）
     title="我的卡片",
 )
 ```
+
+> **`container="full"`**：完整覆盖整个对话区（与系统配置卡片一致，走覆盖层），
+> 适合全屏沉浸式界面（画布、编辑器、大面板）。
 
 ---
 

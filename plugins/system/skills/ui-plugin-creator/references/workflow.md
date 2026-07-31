@@ -146,7 +146,7 @@
 
 | 问题 | 选项 | 影响 |
 |------|------|------|
-| 放在哪个**方位**？ | `container="bottom"` / `container="top"` / `container="left"` / `container="right"` | bottom 隐藏输入区；left/right 停靠在 Tab 窗口左右侧（类似 IDE 侧边栏） |
+| 放在哪个**方位**？ | `container="bottom"` / `container="top"` / `container="left"` / `container="right"` / `container="full"` | bottom 隐藏输入区；left/right 停靠在 Tab 窗口左右侧（类似 IDE 侧边栏）；full 完整覆盖对话区 |
 | 数据来源？ | 本地（SQLite / 文件）/ 远程（HTTP API） | 决定异步 worker 是否需要 |
 | 需要**异步操作**吗？ | 是 → QThread + pyqtSignal | 列表加载、安装/卸载、网络请求都算 |
 | 需要**上下文注入**吗？ | 是 → `set_context_provider` + 拉模型 | 主题色/字体跟随系统变化 |
@@ -164,6 +164,8 @@
   - 适合：设置卡片、统计面板、管理界面（占用屏幕中下部）
 - **`container="top"`**：独立浮动，不影响输入区
   - 适合：快速信息卡（如通知、提醒）、辅助工具
+- **`container="full"`**：完整覆盖整个对话区（与系统配置卡片一致，走覆盖层）
+  - 适合：需要全屏沉浸式操作的界面（画布、编辑器、大面板）
 
 ### 1.2 异步 vs 同步
 
