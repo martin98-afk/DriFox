@@ -2181,7 +2181,8 @@ class CodeWebViewer(QWebEngineView):
         self._load_skeleton()
 
         # ── 对话框层级管理 ──
-        # 已隐含 self._dialog_hide_count=0（对象初始化后属性不存在即 0）
+        # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
+        self._hidden_dialogs = set()
 
     # ──────────────────────────────────────────────
     # 对话框 HWND 穿透防护
@@ -2189,25 +2190,39 @@ class CodeWebViewer(QWebEngineView):
     # QWebEngineView 在 Windows 上创建原生 HWND 子窗口，
     # 遇到 WA_TranslucentBackground 的 MaskDialog 分层窗口时，
     # Chromium GPU 合成表面可能穿透遮罩渲染在对话框之上。
-    # 策略：检测到全屏对话框显示时隐藏 WebView，对话框销毁后恢复。
+    # 策略：检测到透明遮罩对话框显示时隐藏 WebView，
+    #       对话框关闭（finished）或销毁（destroyed）后恢复；
+    #       额外用 eventFilter 监听 Hide/Close/Destroy 事件兜底，
+    #       避免原生对话框（无 Qt 信号）导致永久隐藏。
 
     def _hide_for_dialog(self, dialog):
         """对话框显示时隐藏 WebView，防止原生 HWND 穿透遮罩"""
-        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) + 1
-        if self._dialog_hide_count == 1:
-            self.hide()
-        # 用 finished 而非 destroyed：对话框 dismiss 即恢复，不等 GC 销毁
-        try:
-            dialog.finished.disconnect(self._restore_from_dialog)
-        except TypeError, RuntimeError:
-            pass
-        dialog.finished.connect(self._restore_from_dialog)
+        hidden = getattr(self, "_hidden_dialogs", None)
+        if hidden is None:
+            hidden = set()
+            self._hidden_dialogs = hidden
+        if dialog in hidden:
+            return  # 同一对话框重复 Show/FocusIn 不叠加计数
+        hidden.add(dialog)
+        self.hide()
+        # finished + destroyed 双信号：dismiss 即恢复，销毁兜底
+        for sig_name in ("finished", "destroyed"):
+            try:
+                sig = getattr(dialog, sig_name, None)
+                if sig is not None:
+                    sig.connect(self._restore_from_dialog)
+            except TypeError, RuntimeError, AttributeError:
+                pass
 
     def _restore_from_dialog(self, _result=None):
         """对话框关闭后恢复 WebView 显示（_result 为 QDialog.finished 的 result code）"""
-        self._dialog_hide_count = getattr(self, "_dialog_hide_count", 0) - 1
-        if self._dialog_hide_count <= 0:
-            self._dialog_hide_count = 0
+        hidden = getattr(self, "_hidden_dialogs", None)
+        if not hidden:
+            return
+        sender = self.sender()
+        if sender is not None:
+            hidden.discard(sender)
+        if not hidden:
             self.show()
 
     @property
@@ -2384,7 +2399,8 @@ class CodeWebViewer(QWebEngineView):
     def eventFilter(self, obj, event):
         # 监听对话框显示/激活事件
         event_type = event.type()
-        # 注意：QEvent.Show=17, QEvent.FocusIn=8（不是24/9！历史bug，24是WindowActivate）
+        # QEvent.Show=17, QEvent.Hide=18, QEvent.Close=19,
+        # QEvent.FocusIn=8, QEvent.Destroy=52
         if event_type == 17 or event_type == 8:  # QEvent.Show, QEvent.FocusIn
             obj_class = obj.__class__.__name__
             popup_keywords = [
@@ -2398,8 +2414,9 @@ class CodeWebViewer(QWebEngineView):
                 "ToolTip",
             ]
             if any(kw in obj_class for kw in popup_keywords):
-                # 区分全屏对话框 vs 小弹窗
-                if "Dialog" in obj_class and hasattr(obj, "winId"):
+                # 只对透明遮罩对话框（MaskDialogBase 等）隐藏 WebView 防穿透；
+                # 普通对话框（QFileDialog 等）无需隐藏，仅降低层级即可
+                if "Dialog" in obj_class and hasattr(obj, "winId") and self._is_mask_dialog(obj):
                     # 全屏 MaskDialog → 隐藏 WebView 防止原生 HWND 穿透遮罩
                     self._hide_for_dialog(obj)
                 else:
@@ -2414,7 +2431,21 @@ class CodeWebViewer(QWebEngineView):
                         parent = parent.parent()
                     if hasattr(obj, "raise_"):
                         obj.raise_()
+        elif event_type in (18, 19, 52):  # QEvent.Hide, QEvent.Close, QEvent.Destroy
+            # 兜底恢复：对话框关闭/隐藏/销毁时，若它是导致 WebView 隐藏的对象则恢复
+            hidden = getattr(self, "_hidden_dialogs", None)
+            if hidden and obj in hidden:
+                hidden.discard(obj)
+                if not hidden:
+                    self.show()
         return super().eventFilter(obj, event)
+
+    def _is_mask_dialog(self, obj) -> bool:
+        """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
+        try:
+            return bool(obj.testAttribute(Qt.WA_TranslucentBackground))
+        except Exception:
+            return False
 
     def lower_for_popup(self):
         """降低控件层级，让弹出窗口可以显示在前面"""
