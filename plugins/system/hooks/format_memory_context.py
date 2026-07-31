@@ -710,7 +710,8 @@ def hook(event: str, context: dict) -> str:
             is_url = doc.get("is_url", False)
             is_wd = doc.get("is_wd", False)
             if is_wd:
-                mem_lines.append(f"- {file_name}（工作目录）")
+                wd_display = display or file_name
+                mem_lines.append(f"- {file_name}（工作目录: {wd_display}）")
             elif is_url:
                 mem_lines.append(f"- 🔗 [{file_name}]({display})")
             else:

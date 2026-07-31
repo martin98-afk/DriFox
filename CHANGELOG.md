@@ -1,6 +1,17 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Gitee OAuth token 刷新双入口修复**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
+- **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
+
+### 🗑️ 移除 (Removed)
+
+- **UI 插件左侧边缘入口 (`UIPluginEdgeLauncher`)**: 删除 `app/widgets/ui_plugin_edge_launcher.py` 及其测试 `tests/widgets/test_ui_plugin_edge_launcher.py`；移除 `app/main_widget.py` 中的导入/实例化/resizeEvent/主题刷新/热重载调用，以及 `app/widgets/tab_manager_window.py` 中的辅助函数（`_find_edge_launchers` / `_hide_edge_launcher` / `_show_edge_launcher` / `_hide_shared_launcher`）。插件入口完全由 `TabPanel` 内嵌的 UI 插件列表承担。
+
 ## [v0.4.8] - 2026-07-29
 
 自上一版本以来的变更 | 提交数：115 · 文件变更：275 · +17684/-9501 | 贡献者：dingma, mading, martin98-afk
@@ -49,7 +60,6 @@ All notable changes to this project will be documented in this file.
 - **Tab 管理器拖拽检测增强 (nativeEvent)**: 使用原生 Windows 事件（WM_NCHITTEST/WM_MOVING）增强拖拽检测，提升拖拽期间性能表现
 - **Tab 管理器拖拽处理与布局优化**: 优化拖拽处理和布局更新逻辑，防止拖拽窗口时 UI 阻塞
 - **Tab 管理器窗口拖拽检测与性能优化**: 实现窗口拖拽检测与性能优化机制；FileTreeCard 拖放确认对话框增强；FileTreeView 外部拖放处理优化与自拖拽防护
-- **MaskDialog 遮罩穿透 webview 文字**: 提升 `ConfirmDialog` / `InfoDialog` 遮罩 alpha（76 → 180 / 140），避免暗色遮罩被 Chromium GPU 合成的代码块文字"透出"
 
 ### ♻️ 代码重构 (Refactoring)
 
@@ -68,10 +78,6 @@ All notable changes to this project will be documented in this file.
 - Gitee 账户行实现计划与设计规范
 - UI 插件列表实现计划与设计规范
 - Tab 管理器设计规范更新与审查反馈
-
-### 🗑️ 移除 (Removed)
-
-- **UI 插件左侧边缘入口 (`UIPluginEdgeLauncher`)**: 删除 `app/widgets/ui_plugin_edge_launcher.py` 及其测试 `tests/widgets/test_ui_plugin_edge_launcher.py`；移除 `app/main_widget.py` 中的导入/实例化/resizeEvent/主题刷新/热重载调用，以及 `app/widgets/tab_manager_window.py` 中的辅助函数（`_find_edge_launchers` / `_hide_edge_launcher` / `_show_edge_launcher` / `_hide_shared_launcher`）。插件入口完全由 `TabPanel` 内嵌的 UI 插件列表承担。
 
 ## [v0.4.7] - 2026-07-25
 
