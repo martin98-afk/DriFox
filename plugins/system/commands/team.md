@@ -41,8 +41,9 @@ schema_version: 1
 template_name: <与文件名 stem 一致>
 description: <一句话描述团队用途>
 agents:
-  - agent_name: <角色名1>
-  - agent_name: <角色名2>
+  - agent_name: leader      # 固定第一位：团队 Leader，统筹任务拆解/分发/汇总
+  - agent_name: <角色名2>   # 其余成员按需选择
+  - agent_name: <角色名3>
   ...
 ```
 
@@ -50,17 +51,21 @@ agents:
 
 `agent_name` 请从你的系统提示词中 `## Available Subagents` 节列出的子智能体名称中选取。所有子智能体都可作为团队成员角色。
 
+#### 固定 Leader 规则
+
+- **必须**包含 `leader` 角色，且置于 `agents` 列表**第一位**，负责统筹管理（任务拆解、分发、进度监控、结果汇总）
+- 其余成员**按需**选择，可 1 个或多个；无特殊需求时无需重复添加
+
 #### 选择建议
 
-- **标准开发团队**：`plan` + `build` + `code-reviewer`（规划→编码→审查）
-- **只读分析团队**：`explore` + `code-reviewer`（探索+审查）
-- **全流程团队**：`plan` + `build` + `review` + `compaction`
-- **自动化流水线**：`auto_loop` + `build` + `review`
-- 2-5 个角色为宜，按执行顺序排列
+- **标准开发团队**：`leader` + `plan` + `build` + `code-reviewer`（统筹→规划→编码→审查）
+- **只读分析团队**：`leader` + `explore` + `code-reviewer`（统筹→探索→审查）
+- 含 `leader` 在内 2-5 个角色为宜，按执行顺序排列
 - 如果用户描述不够具体，请基于常识合理推断
 
 ### 注意事项
 1. 文件创建到 `.drifox/plugins/user-custom/team_templates/` 后，可通过 `/team --load=<name>` 立即加载使用
-2. 不要创建系统中不存在的角色
-3. description 会显示在模板列表界面，请简洁清晰
+2. `leader` 必须存在且位于 `agents` 第一位；不要创建系统中不存在的角色
+3. `agents` 中角色名不能重复（schema 校验会拒绝重复项）
+4. description 会显示在模板列表界面，请简洁清晰
 <!-- end -->
