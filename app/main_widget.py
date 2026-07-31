@@ -165,6 +165,7 @@ from app.widgets.context_usage_ring import (
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
+from app.widgets.cards.settings.file_undo_card import FileUndoCard
 from app.widgets.file_undo_dialog import (
     FileUndoPreviewDialog,
 )
@@ -10724,10 +10725,10 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
             if operations:
-                dialog = FileUndoPreviewDialog(operations, self.backend.file_recorder, self)
+                dialog = FileUndoCard(operations, self.backend.file_recorder, self)
                 result = dialog.exec_()
 
-                if result == FileUndoPreviewDialog.CANCEL:
+                if result == FileUndoCard.CANCEL:
                     return  # 取消撤销，什么都不做
 
                 # 执行回滚 - 只还原选中的操作

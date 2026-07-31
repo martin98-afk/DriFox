@@ -19,7 +19,7 @@ import copy
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, Qt
 
 from app.utils.config import Settings
 from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager, ContainerType
@@ -59,6 +59,7 @@ class GlobalCardController:
         self._hook_edit_popup = None
         self._mcp_edit_popup = None
         self._diff_viewer_card = None
+        self._file_undo_card = None
         self._sub_agent_session_card = None
 
     # ───────────────────────────────────────────────────────────
@@ -605,7 +606,37 @@ class GlobalCardController:
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
         self._card_manager.show_card("diff_viewer", GLOBAL_WINDOW_ID)
 
-    def hide_diff_viewer(self):
+    def show_file_undo(self, operations, file_recorder, on_finished):
+        """显示文件撤销卡片；差异关闭后返回此卡片。"""
+        from app.widgets.cards.settings.file_undo_card import FileUndoCard
+        if self._file_undo_card is not None:
+            self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
+            self._global_card_container.remove_card("file_undo")
+            self._file_undo_card.deleteLater()
+        self._file_undo_card = FileUndoCard(operations, file_recorder, self._tab_manager)
+        self._file_undo_card.finished.connect(lambda result, selected: self._finish_file_undo(on_finished, result, selected))
+        self._file_undo_card.diffRequested.connect(self._show_file_undo_diff)
+        self._file_undo_card.closed.connect(lambda: self._finish_file_undo(on_finished, FileUndoCard.CANCEL, []))
+        self._card_manager.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "file_undo", self._file_undo_card, system_card=True)
+        self._global_card_container.add_card("file_undo", self._file_undo_card)
+        self._card_manager.show_card("file_undo", GLOBAL_WINDOW_ID)
+
+    def _finish_file_undo(self, on_finished, result, selected):
+        """关闭撤销卡片并把用户选择交回原撤销流程。"""
+        self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
+        on_finished(result, selected)
+
+        self.show_diff_viewer(html, title)
+        self._diff_viewer_card.closed.connect(self._return_to_file_undo, type=Qt.UniqueConnection)
+
+    def _return_to_file_undo(self):
+        self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)
+        if self._file_undo_card is not None:
+            self._card_manager.show_card("file_undo", GLOBAL_WINDOW_ID)
+
+    def hide_file_undo(self):
+        self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
+
         """隐藏内嵌差异对比面板"""
         if self._diff_viewer_card is None:
             return
