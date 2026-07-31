@@ -12125,11 +12125,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 当 LLM 实际开始流式响应时切换为停止按钮
         # 这样内建函数/子智能体执行后的回调阶段不会误切换按钮状态
         self._toggle_send_stop(True)
-
-        # 🆕 每次 LLM 开始生成响应时，检查是否有待处理的团队邮件
-        # QFileSystemWatcher 信号在流式高频回调下可能被事件循环延迟派发，
-        # 此处作为兜底，保证团队邮件在下一轮 API 调用前被注入。
-        self._check_and_process_pending()
         if self._current_assistant_card:
             self._current_assistant_card.start_streaming_anim()
 
