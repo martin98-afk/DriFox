@@ -3,6 +3,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ⚡ 性能优化 (Performance)
+
+- **消息卡片简洁模式 `reorganizeContent` 增量重排 (v2)**: 将原版 4 次独立 forEach 重复扫描合并为单次扫描；将过期 think-block / tool-block 清理合并为单次遍历；引入"顺序哈希 diff"取代无脑 sort+appendChild（流式期间 ~80% updateContent 走快路径跳过 sort）。理论加速 1.4x~2.6x（按块数），长会话（100+ 块）卡顿显著改善
+- **简洁模式 `updateContent` 跳过 `think-block` 展开状态 save/restore**: 简洁模式下 completed 思考块是 `think-compact` 纯文本行（无折叠），`expandedStates` Map 始终为空。短路 save/restore 两段 querySelectorAll + Map 操作；非简洁模式行为不变
+
 ### 🐛 问题修复 (Bug Fixes)
 
 - **Gitee OAuth token 刷新双入口修复**: 收敛 `ConfigSyncService._sync_token` 的 token 刷新入口到 `GiteeOAuthBackend._ensure_valid_token()`，避免与 `GiteeUploader` / `gitee_card` 并发/时序竞争导致 Gitee `refresh_token` rotation 漂移（内存新、磁盘旧 → 下次冷启动必报"refresh_token 无效或已被撤销"）。新增 `ConfigSyncService.pause_upload()` 公开方法，token 刷新写盘前抑制 watcher 防止误触发云端上传
