@@ -577,7 +577,10 @@ class GatewayEngine(QObject, BaseEngine):
                 agent_name = s.metadata.get("agent") or self._current_agent
 
         if agent_name and self._agent_manager:
-            tools = self._agent_manager.get_agent_tools_schema(agent_name)
+            tools = self._agent_manager.get_agent_tools_schema(
+                agent_name,
+                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            )
         else:
             tools = get_builtin_tools_schema(
                 agent_manager=self._agent_manager,

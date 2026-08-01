@@ -656,13 +656,30 @@ class AgentManager:
         logger.info(f"[AgentManager] Unloaded skill: {skill_name}")
 
     def get_agent_tools_schema(
-        self, agent_name: str, global_permission: Optional[Dict[str, Any]] = None, is_subagent_call: bool = False
+        self,
+        agent_name: str,
+        global_permission: Optional[Dict[str, Any]] = None,
+        is_subagent_call: bool = False,
+        builtin_tools=None,
     ) -> List[Dict]:
+        """获取智能体的工具 schema。
+
+        Args:
+            agent_name: 智能体名称
+            global_permission: 全局权限覆盖
+            is_subagent_call: 是否为子智能体调用
+            builtin_tools: BuiltinTools 实例，用于获取团队上下文。
+                          多窗口场景下必须传入当前窗口的实例，否则 is_in_team
+                          检查会使用 AgentManager 单例的最后覆盖值（可能指向错误窗口）。
+        """
         agent = self.get_agent(agent_name)
         if not agent:
             return []
 
-        all_tools = get_builtin_tools_schema(self, builtin_tools=self._builtin_tools)
+        # 优先使用调用方传入的 builtin_tools（多窗口隔离），回退到 AgentManager 单例的引用
+        _bt = builtin_tools if builtin_tools is not None else self._builtin_tools
+
+        all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
         forbidden_tools = {"question", "subagent_para", "subagent_status", "subagent_dag"}
@@ -674,16 +691,25 @@ class AgentManager:
 
         # 团队协作工具：仅当当前窗口已加入团队时才暴露
         # 避免浪费 token 和误导 LLM（非团队成员看到也用不了）
+        # 【多窗口修复】使用传入的 builtin_tools（_bt）而非 self._builtin_tools，
+        # 确保 is_in_team 检查的是当前窗口的团队状态，而非全局单例的最后覆盖值。
         is_in_team = False
-        if self._builtin_tools:
-            window_id = getattr(self._builtin_tools, "_team_window_id", "")
-            if window_id:
+        bt_window_id = ""
+
+        if _bt:
+            bt_window_id = getattr(_bt, "_team_window_id", "")
+            if bt_window_id:
                 try:
                     from app.core.team_manager import TeamManager
 
-                    is_in_team = TeamManager.get_instance().is_team_member(window_id)
+                    is_in_team = TeamManager.get_instance().is_team_member(bt_window_id)
                 except Exception:
                     pass  # 团队管理器未就绪时，不暴露团队工具
+
+        logger.info(
+            f"[TeamToolsSchema] agent={agent_name}, is_subagent_call={is_subagent_call}, "
+            f"team_window_id={bt_window_id!r}, is_in_team={is_in_team}"
+        )
 
         team_tools = {"team_send_message", "team_list_members"}
 

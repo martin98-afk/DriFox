@@ -554,7 +554,8 @@ class UIEngine(BaseEngine):
         else:
             if self._current_agent:
                 available_tools = self._get_agent_manager().get_agent_tools_schema(
-                    self._current_agent
+                    self._current_agent,
+                    builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
                 )
             else:
                 available_tools = get_builtin_tools_schema(
@@ -931,7 +932,10 @@ class _PreSendWorker(QThread):
 
         # ---- 6. 获取 tool schema ----
         if self._current_agent:
-            self._available_tools = self._agent_manager.get_agent_tools_schema(self._current_agent)
+            self._available_tools = self._agent_manager.get_agent_tools_schema(
+                self._current_agent,
+                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            )
         else:
             self._available_tools = get_builtin_tools_schema(
                 self._agent_manager,

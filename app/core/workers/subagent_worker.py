@@ -348,7 +348,11 @@ class SubAgentExecutor(QThread):
                     "project_name": _sub_project_name,
                 },
             )
-            tools = self.agent_manager.get_agent_tools_schema(self.agent_name, is_subagent_call=self.is_subagent_call)
+            # 传入当前窗口的 builtin_tools 实例，确保 is_in_team 检查使用正确窗口的 team_window_id
+            _bt = self.tool_executor._builtin_tools if self.tool_executor else None
+            tools = self.agent_manager.get_agent_tools_schema(
+                self.agent_name, is_subagent_call=self.is_subagent_call, builtin_tools=_bt
+            )
 
             # 基于 context budget 构建主智能体历史上下文注入（返回消息对象列表）
             inherited_messages = []
