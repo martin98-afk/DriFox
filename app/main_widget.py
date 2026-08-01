@@ -3875,11 +3875,24 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # description 用「实际非已关闭窗口数」而非 _instances 长度（含已销毁的会偏大）
         active_count = len(active_windows)
+        # 角色描述复用：若当前团队已加载过模板（/team --load），该模板 agents 中
+        # 带有的角色描述可直接复用到保存的模板；手动加入的成员无描述则保持旧格式（兼容）
+        role_descs = {}
+        try:
+            _tm_mgr = self._get_team_manager()
+            _tpl = _tm_mgr.get_template()
+            for item in (_tpl or {}).get("agents") or []:
+                if isinstance(item, dict) and item.get("agent_name"):
+                    desc = str(item.get("description") or "").strip()
+                    if desc:
+                        role_descs[item["agent_name"]] = desc
+        except Exception:
+            role_descs = {}
         template = Template(
             schema_version=1,
             template_name=name,
             description=f"由 {active_count} 个活跃窗口保存（去重 {len(agent_names)} 个角色）",
-            agents=[TemplateAgent(agent_name=a) for a in agent_names],
+            agents=[TemplateAgent(agent_name=a, description=role_descs.get(a, "")) for a in agent_names],
         )
 
         try:
@@ -4040,12 +4053,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # join_team 内部是覆盖式赋值（members[wid]={...}），不会清空邮箱文件。
         tm_mgr = self._get_team_manager()
 
-        # 记录团队模板上下文（供 SessionStart hook 注入团队描述）
+        # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
         tm_mgr.set_template(
             {
                 "name": template.template_name,
                 "description": template.description,
-                "agents": [a.agent_name for a in template.agents],
+                "agents": [
+                    {"agent_name": a.agent_name, "description": a.description} for a in template.agents
+                ],
             }
         )
 

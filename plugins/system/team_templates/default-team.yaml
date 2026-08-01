@@ -2,8 +2,13 @@
 # 用法：/team --load=default-team
 schema_version: 1
 template_name: default-team
-description: 经典三角色团队：构建 + 审查 + 计划
+description: 经典四角色团队：统筹 + 构建 + 审查 + 计划
 agents:
+  - agent_name: leader
+    description: 智能体团队统筹管理 Leader，负责组队、任务拆解、分发、监控进度和汇总结果
   - agent_name: plan
+    description: 面向代码库分析和实现规划的只读智能体，负责理解项目、收集约束、给出明确实施路径
   - agent_name: build
+    description: 面向实际编码实现的构建智能体，负责读取代码、修改文件、运行验证并收敛结果
   - agent_name: review
+    description: 审查更改代码的智能体，负责对照计划与编码规范检查改动质量

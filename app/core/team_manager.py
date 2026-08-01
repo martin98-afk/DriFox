@@ -283,7 +283,9 @@ class TeamManager:
 
         Args:
             template_info: {"name": ..., "description": ..., "agents": [...]}
-                供 SessionStart hook 读取并注入团队描述
+                agents 每项为 {"agent_name": ..., "description": ...}（角色描述可为空，
+                兼容旧模板 / 手动加入成员）
+                供 SessionStart hook 注入团队描述 + 各成员角色描述
         """
         data = self._get_team_data(team_name)
         data["template"] = template_info

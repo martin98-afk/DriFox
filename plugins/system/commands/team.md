@@ -41,14 +41,24 @@ template_name: <与文件名 stem 一致>
 description: <一句话描述团队用途>
 agents:
   - agent_name: leader      # 固定第一位：团队 Leader，统筹任务拆解/分发/汇总
+    description: <leader 的角色描述，从 Available Subagents 节中提取>
   - agent_name: <角色名2>   # 其余成员按需选择
+    description: <该角色的描述>
   - agent_name: <角色名3>
+    description: <该角色的描述>
   ...
 ```
 
 #### 角色名来源
 
 `agent_name` 请从你的系统提示词中 `## Available Subagents` 节列出的子智能体名称中选取。所有子智能体都可作为团队成员角色。
+
+#### 角色描述（description）要求
+
+每个 `agent` 条目必须带 `description` 字段（**必填**），内容从 `## Available Subagents` 节中对应子智能体的描述提取：
+- 描述该角色在团队中的职责定位（如：编码实现、规划分析、代码审查）
+- 简洁一句话，10-40 字为宜
+- 注入团队上下文时每个成员只收到自己的角色描述，所以描述要能让成员明确自身职责
 
 #### 固定 Leader 规则
 
@@ -67,4 +77,5 @@ agents:
 2. `leader` 必须存在且位于 `agents` 第一位；不要创建系统中不存在的角色
 3. `agents` 中角色名不能重复（schema 校验会拒绝重复项）
 4. description 会显示在模板列表界面，请简洁清晰
+5. 每个 `agent` 条目的 `description` 角色描述为必填项，从 Available Subagents 节对应描述提取
 <!-- end -->

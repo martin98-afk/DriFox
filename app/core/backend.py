@@ -2262,6 +2262,9 @@ class ChatBackend(QObject):
         except Exception:
             ctx["is_team_member"] = False
 
+        # 当前窗口 ID：供团队上下文 hook 按成员定位角色（模板 agents 条目 → 角色描述）
+        ctx["window_id"] = getattr(self, "_window_id", "") or ""
+
         # 项目笔记由 read_project_notes hook（BuildSystemPrompt）从本地 AGENTS.md 直接读取，
         # SessionStart 不再预取 notes 内容
 
