@@ -127,7 +127,10 @@ class GlobalCardController:
         # 连接 MCP 添加/编辑信号
         self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
         self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
-        self._settings_popup.mcpListCard.serversChanged.connect(self._on_mcp_servers_toggled)
+        # 注意：MCP 服务器开关/增删改均在各操作点（MCPListSettingCard）内自行完成 UI
+        # 更新（开关=行级更新，增删改=局部 _refresh），此处不再把 serversChanged 接到
+        # _on_mcp_servers_toggled 做全量重建，否则开关 MCP 时整卡闪烁/列表重建。
+        # 跨窗口同步由 .mcp.json 热重载广播负责（见 main_widget HotReload 的 mcp 分支）。
         self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
 
         # 注册到 CardManager 与全局容器（system_card=True 仅做全局互斥，不隐藏输入区）
@@ -745,9 +748,13 @@ class GlobalCardController:
             self._settings_popup.hookListCard.update_toggle_state(hook_id, enabled)
 
     def _on_mcp_servers_toggled(self):
-        """MCP 服务器开关变更 → 刷新全局列表"""
-        if self._settings_popup is not None:
-            self._settings_popup.mcpListCard._refresh()
+        """MCP 服务器开关变更 → 刷新全局列表
+
+        已不再做全量 _refresh()：settings popup 是全局唯一共享卡片，且各操作点
+        （MCPListSettingCard 的开关/增删改）已自行完成 UI 更新。全量重建只由
+        .mcp.json 热重载广播触发（main_widget HotReload mcp 分支）。
+        """
+        return
 
     def _on_gateway_toggled(self):
         """Gateway 平台开关/配置变更 → 刷新全局列表"""

@@ -3,6 +3,8 @@
     "MiniMax": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp<2",
         "minimax-coding-plan-mcp",
         "-y"
       ],

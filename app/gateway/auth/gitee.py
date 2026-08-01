@@ -63,19 +63,35 @@ def refresh_access_token(refresh_token: str, client_id: str, client_secret: str)
     Returns: (token_data|None, err_msg)
     token_data 包含 access_token、refresh_token、expires_in 等字段。
     """
-    resp = requests.post(
-        GITEE_TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        headers={"Accept": "application/json"},
-        timeout=15,
-    )
+    try:
+        resp = requests.post(
+            GITEE_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+    except Exception as _e:
+        # 传输层异常（超时/网络不可达）必须返回 err 而非抛出，
+        # 否则会让上层同步线程崩溃；此类错误不应清除绑定。
+        return None, f"刷新 Token 网络异常：{_e}"
+
     if resp.status_code != 200:
-        return None, f"刷新 Token 失败：{parse_error(resp)}"
+        err = f"刷新 Token 失败：{parse_error(resp)}"
+        # 标记 refresh_token 是否真被吊销（invalid_grant），供上层区分「真失效」与「网络异常」
+        try:
+            body = resp.json()
+            _e = str(body.get("error", "")).lower()
+            _ed = str(body.get("error_description", "")).lower()
+            if _e == "invalid_grant" or "invalid_grant" in _ed:
+                err = "TOKEN_REVOKED::" + err
+        except Exception:
+            pass
+        return None, err
 
     token_data = resp.json()
     if not token_data.get("access_token"):
@@ -211,7 +227,9 @@ class GiteeOAuthBackend(OAuthBackend):
 
         access_token = token_data["access_token"]
         refresh_token = token_data.get("refresh_token", "")
-        expires_in = token_data.get("expires_in", 0)
+        # Gitee 正常返回 expires_in（默认 86400s=1天）。缺省给保守值，
+        # 避免 expires_at 取 0 导致每次启动都刷新并放大 rotation 风险。
+        expires_in = token_data.get("expires_in", 86400)
 
         # 3. 获取用户信息（Gitee 特有）
         owner, err = fetch_user_login(access_token)
@@ -328,8 +346,10 @@ class GiteeOAuthBackend(OAuthBackend):
             cfg.gitee_user_token.value = new_tokens["access_token"]
             if "refresh_token" in new_tokens and new_tokens["refresh_token"]:
                 cfg.gitee_user_refresh_token.value = new_tokens["refresh_token"]
-            if "expires_in" in new_tokens:
-                cfg.gitee_token_expires_at.value = time.time() + new_tokens["expires_in"]
+            # Gitee 刷新响应通常带 expires_in；缺失时给保守缺省，避免 expires_at=0
+            # 导致下次启动误判过期而立即刷新、放大 rotation 风险。
+            expires_in = new_tokens.get("expires_in", 86400)
+            cfg.gitee_token_expires_at.value = time.time() + expires_in
 
             # ── 持久化到磁盘（两种方式双重保险） ──────────────
             self._persist_tokens(cfg)

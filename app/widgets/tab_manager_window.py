@@ -512,35 +512,35 @@ class TabManagerWindow(QWidget):
         self._left_card_container = self._global_left_container
         self._right_card_container = self._global_right_container
 
+        # 标记 LEFT/RIGHT/BOTTOM 为共存容器：四向区域可同时存在、互不关闭。
+        # 覆盖层（TOP）通过 QStackedWidget 仅替换对话区，不影响 LEFT/RIGHT/BOTTOM。
+        _card_mgr.mark_coexist_containers(
+            GLOBAL_WINDOW_ID,
+            frozenset({ContainerType.LEFT, ContainerType.RIGHT, ContainerType.BOTTOM}),
+        )
+
         # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
         # 结构：vDockSplitter(纵向)
-        #         ├─ _content_stack(QStackedWidget)：对话区 Page0 | 系统卡片覆盖层 Page1
+        #         ├─ dockSplitter(横向)：左停靠区 | 内容区(含覆盖层) | 右停靠区
         #         └─ 下停靠区（bottom 容器）
-        # systemCard_frame(横向)：左停靠区 | 内容区 | 右停靠区
+        #
+        # 内容区内嵌 QStackedWidget：
+        #   Page 0: 对话区（_content_area）
+        #   Page 1: 覆盖层（_global_overlay / _global_top_container）
+        #   覆盖层仅替换对话区，LEFT/RIGHT/BOTTOM 不受影响、始终可见。
+        #
         # CardContainer 停靠模式协议（enable_dock_mode）：
         #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
         #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
         #   重开 → 恢复上次拖出的占比。
         from PyQt5.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
 
-        self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
-        self._dock_splitter.setObjectName("dockSplitter")
-        self._dock_splitter.addWidget(self._global_left_container)
-        self._dock_splitter.addWidget(self._content_area)
-        self._dock_splitter.addWidget(self._global_right_container)
-        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
-        self._dock_splitter.setStretchFactor(1, 1)  # 对话区吃掉多余空间
-        self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
-        self._dock_splitter.setHandleWidth(6)
-        # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
-        self._dock_splitter.setChildrenCollapsible(False)
-
-        # ── 覆盖层堆栈（QStackedWidget）：系统卡片覆盖对话区 ──
-        # Page 0: 正常对话视图（_dock_splitter）
+        # ── 覆盖层堆栈（QStackedWidget）：仅替换对话区，不覆盖 LEFT/RIGHT/BOTTOM ──
+        # Page 0: 正常对话视图
         # Page 1: 系统卡片覆盖层（_global_top_container 内的全局卡片）
         self._content_stack = _QStackedWidget(self._chat_frame)
         self._content_stack.setObjectName("contentStack")
-        self._content_stack.addWidget(self._dock_splitter)  # index 0: 对话区
+        self._content_stack.addWidget(self._content_area)  # index 0: 对话区
 
         # 覆盖层页面：包裹 _global_top_container，使其填满覆盖层空间
         self._global_overlay = QWidget(self._chat_frame)
@@ -554,11 +554,24 @@ class TabManagerWindow(QWidget):
         # 默认显示对话区
         self._content_stack.setCurrentIndex(0)
 
+        # dock_splitter: 左停靠区 | 内容区(含覆盖层) | 右停靠区
+        self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
+        self._dock_splitter.setObjectName("dockSplitter")
+        self._dock_splitter.addWidget(self._global_left_container)
+        self._dock_splitter.addWidget(self._content_stack)
+        self._dock_splitter.addWidget(self._global_right_container)
+        self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
+        self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
+        self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
+        self._dock_splitter.setHandleWidth(6)
+        # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
+        self._dock_splitter.setChildrenCollapsible(False)
+
         self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
         self._vdock_splitter.setObjectName("vDockSplitter")
-        self._vdock_splitter.addWidget(self._content_stack)
+        self._vdock_splitter.addWidget(self._dock_splitter)
         self._vdock_splitter.addWidget(self._global_bottom_container)
-        self._vdock_splitter.setStretchFactor(0, 1)  # 覆盖层堆栈吃掉多余空间
+        self._vdock_splitter.setStretchFactor(0, 1)  # 内容区吃掉多余空间
         self._vdock_splitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
         self._vdock_splitter.setHandleWidth(6)
         self._vdock_splitter.setChildrenCollapsible(False)

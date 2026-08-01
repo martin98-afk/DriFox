@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """市场源管理器 — 多市场源的增删改查、拉取合并
 
-持久化到 .drifox/cache/marketplace_sources.json，不依赖 app 核心 Settings。
+市场源配置持久化到 .drifox/plugins/user-custom/marketplaces/sources.json
+（随 user-custom 插件一起被云端备份/同步），拉取缓存仍在 cache 目录。
+不依赖 app 核心 Settings。
 """
 
 import json
@@ -24,22 +26,23 @@ def _drifox_dir() -> Path:
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-    if sys.platform == 'darwin':
+    if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
+        return Path(".drifox")
+    if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
             paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
                 NSApplicationSupportDirectory, NSUserDomainMask
             )
             if paths:
-                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-                app_support = Path(app_support_path) / 'Drifox'
+                app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
+                app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / '.drifox'
+                return app_support / ".drifox"
         except Exception:
             pass
-    return Path.home() / '.drifox'
+    return Path.home() / ".drifox"
 
 
 # ── 默认市场源 ─────────────────────────────────────────────
@@ -62,12 +65,38 @@ class MarketplaceSourceManager:
 
     def __init__(self):
         drifox = _drifox_dir()
+        # 市场源配置存入 user-custom 插件（可随 user-custom 一起云备份/同步）
+        self._user_custom_dir = drifox / "plugins" / "user-custom"
+        self._sources_dir = self._user_custom_dir / "marketplaces"
+        self._sources_file = self._sources_dir / "sources.json"
+        self._sources_dir.mkdir(parents=True, exist_ok=True)
+        # 拉取的市场数据缓存仍放 cache 目录
         self._cache_dir = drifox / "cache" / "marketplaces"
-        self._sources_file = self._cache_dir / "sources.json"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # 迁移旧版 cache 中的市场源配置（仅首次迁移）
+        self._migrate_legacy_sources()
         # 确保默认源存在
         self._ensure_defaults()
+
+    def _migrate_legacy_sources(self):
+        """将旧版 cache/marketplaces/sources.json 迁移到 user-custom
+
+        仅当新位置不存在且旧位置有配置时执行一次，避免用户已添加的市场源丢失。
+        迁移成功后旧文件改名 .bak 备份：既保留回退数据，又避免用户删除
+        新配置文件后被旧文件反复迁移（重置失效）。
+        """
+        if self._sources_file.exists():
+            return
+        legacy = self._cache_dir / "sources.json"
+        if not legacy.exists():
+            return
+        try:
+            self._sources_file.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+            legacy.rename(self._cache_dir / "sources.json.bak")
+            logger.info("[Marketplace] 市场源配置已迁移: cache/marketplaces → user-custom/marketplaces")
+        except Exception as e:
+            logger.warning(f"[Marketplace] 市场源配置迁移失败: {e}")
 
     def _ensure_defaults(self):
         """确保默认市场源已写入持久化文件"""
@@ -179,7 +208,9 @@ class MarketplaceSourceManager:
             else:
                 logger.warning(f"[Marketplace] 不支持的市场源类型: {src_type}")
                 return {
-                    "name": name, "description": "", "plugins": [],
+                    "name": name,
+                    "description": "",
+                    "plugins": [],
                     "_error": f"Unsupported source: {src_type}",
                 }
         except Exception as e:
