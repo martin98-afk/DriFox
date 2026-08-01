@@ -9,6 +9,7 @@
 - 安装/更新状态实时反馈
 """
 
+import json
 import re
 import sys
 import traceback
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,11 +29,13 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
     FluentIcon,
     FluentLabelBase,
     IconWidget,
     InfoBar,
     LineEdit,
+    MaskDialogBase,
     PushButton,
     ScrollArea,
     StrongBodyLabel,
@@ -213,6 +216,203 @@ class _FlowLayout(QLayout):
 # ── 单行插件卡片 ────────────────────────────────────────────
 
 
+# ── 插件内容收集 / 详情弹窗 ──────────────────────────────────
+
+
+def _collect_plugin_contents(plugin_dir: Path) -> dict:
+    """收集已安装插件的组件内容清单
+
+    Returns:
+        {"skills": [...], "mcp": [...], "commands": [...], "agents": [...], "hooks": [...], "themes": [...]}
+        空组件不出现。
+    """
+    contents: dict = {"skills": [], "mcp": [], "commands": [], "agents": [], "hooks": [], "themes": []}
+
+    # 技能：skills/<name>/SKILL.md
+    skills_dir = plugin_dir / "skills"
+    if skills_dir.is_dir():
+        for child in sorted(skills_dir.iterdir()):
+            if child.is_dir() and (child / "SKILL.md").exists():
+                contents["skills"].append(child.name)
+
+    # MCP：.mcp.json → mcpServers 键
+    mcp_file = plugin_dir / ".mcp.json"
+    if mcp_file.exists():
+        try:
+            data = json.loads(mcp_file.read_text(encoding="utf-8"))
+            servers = data.get("mcpServers", {}) or {}
+            contents["mcp"] = sorted(servers.keys())
+        except Exception:
+            pass
+
+    # 命令：commands/*.md
+    commands_dir = plugin_dir / "commands"
+    if commands_dir.is_dir():
+        contents["commands"] = sorted(p.stem for p in commands_dir.glob("*.md"))
+
+    # Agents：agents/*.md
+    agents_dir = plugin_dir / "agents"
+    if agents_dir.is_dir():
+        contents["agents"] = sorted(p.stem for p in agents_dir.glob("*.md"))
+
+    # Hooks：hooks/hooks.json → hooks 键（事件名）
+    hooks_file = plugin_dir / "hooks" / "hooks.json"
+    if hooks_file.exists():
+        try:
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            contents["hooks"] = sorted((data.get("hooks", {}) or {}).keys())
+        except Exception:
+            pass
+
+    # 主题：themes/ 子目录
+    themes_dir = plugin_dir / "themes"
+    if themes_dir.is_dir():
+        contents["themes"] = sorted(p.name for p in themes_dir.iterdir() if p.is_dir())
+
+    return {k: v for k, v in contents.items() if v}
+
+
+class _PluginInfoDialog(MaskDialogBase):
+    """MaskDialogBase 风格的插件内容详情弹窗（技能/MCP/命令等列表）"""
+
+    def __init__(
+        self,
+        parent,
+        title: str,
+        desc: str,
+        contents: dict,
+        *,
+        tc: str,
+        tcs: str,
+        ff: str,
+        fs: int,
+        accent_bg: str,
+        card_bg: str,
+        border_c: str,
+    ):
+        super().__init__(parent)
+        self._init_ui(title, desc, contents, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
+
+    def _init_ui(self, title, desc, contents, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("marketPluginInfo")
+        self.widget.setStyleSheet(
+            f"""
+            #marketPluginInfo {{
+                background-color: {card_bg};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(0)
+
+        # 标题
+        title_lb = BodyLabel(title, self.widget)
+        title_lb.setWordWrap(True)
+        title_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; "
+            f"{f'font-family: "{ff}";' if ff else ''}"
+            f"font-size: {max(8, fs + 2)}px; font-weight: bold;"
+        )
+        layout.addWidget(title_lb)
+
+        # 描述
+        if desc:
+            layout.addSpacing(4)
+            desc_lb = BodyLabel(desc, self.widget)
+            desc_lb.setWordWrap(True)
+            desc_lb.setStyleSheet(
+                f"color: {tcs}; background: transparent; "
+                f"{f'font-family: "{ff}";' if ff else ''}"
+                f"font-size: {max(8, fs - 1)}px; line-height: 1.5;"
+            )
+            layout.addWidget(desc_lb)
+
+        layout.addSpacing(12)
+
+        # 内容区（滚动，组件多时不撑爆弹窗）
+        scroll = ScrollArea(self.widget)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        content_widget = QWidget(scroll)
+        content_widget.setStyleSheet("background: transparent;")
+        c_layout = QVBoxLayout(content_widget)
+        c_layout.setContentsMargins(2, 2, 8, 2)
+        c_layout.setSpacing(6)
+
+        rows = []
+        if contents.get("skills"):
+            rows.append(("🧩 技能", "，".join(contents["skills"])))
+        if contents.get("mcp"):
+            rows.append(("🔌 MCP", "，".join(contents["mcp"])))
+        if contents.get("commands"):
+            rows.append(("📁 命令", "，".join(contents["commands"])))
+        if contents.get("agents"):
+            rows.append(("🤖 Agents", "，".join(contents["agents"])))
+        if contents.get("hooks"):
+            rows.append(("🔗 Hooks", "，".join(contents["hooks"])))
+        if contents.get("themes"):
+            rows.append(("🎨 主题", "，".join(contents["themes"])))
+
+        if not rows:
+            rows.append(("ℹ️ 内容", "该插件未声明可展示的组件"))
+
+        for label, value in rows:
+            row_lb = QLabel(f"<b>{label}</b>：{value}", content_widget)
+            row_lb.setWordWrap(True)
+            row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row_lb.setStyleSheet(
+                f"color: {tc}; background: transparent; "
+                f"{f'font-family: "{ff}";' if ff else ''}"
+                f"font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+            )
+            c_layout.addWidget(row_lb)
+        c_layout.addStretch()
+        scroll.setWidget(content_widget)
+        layout.addWidget(scroll, 1)
+
+        layout.addSpacing(8)
+
+        # 按钮行
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        ok_btn = QPushButton("知道了", self.widget)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setFixedHeight(36)
+        ok_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {accent_bg};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 28px;
+                {f'font-family: "{ff}";' if ff else ""}
+                font-size: {max(8, fs - 1)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {accent_bg};
+            }}
+            """
+        )
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.close)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(480, 360)
+
+
 class _PluginRow(QFrame):
     """单个插件的展示行（简约卡片风格）
 
@@ -225,6 +425,8 @@ class _PluginRow(QFrame):
 
     installRequested = pyqtSignal(dict)  # plugin_meta
     updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
+    openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
+    viewRequested = pyqtSignal(dict)  # 查看已安装插件的内容列表
 
     def __init__(
         self,
@@ -336,6 +538,15 @@ class _PluginRow(QFrame):
 
         layout.addLayout(info_layout, 1)
 
+        # 官网链接按钮（优先 homepage 字段，回退到 source 仓库地址）
+        homepage = self._compute_homepage(self._meta)
+        if homepage:
+            link_btn = TransparentToolButton(FluentIcon.LINK, self)
+            link_btn.setFixedSize(28, 28)
+            link_btn.setToolTip(f"打开官网 {homepage}")
+            link_btn.clicked.connect(lambda checked, u=homepage: self.openUrlRequested.emit(u))
+            layout.addWidget(link_btn)
+
         # 操作按钮
         self._btn = PushButton(self)
         self._btn.setFixedWidth(100)
@@ -366,8 +577,8 @@ class _PluginRow(QFrame):
                 "PushButton:hover { background: rgba(255, 167, 38, 0.35); }"
             )
         elif self._installed:
-            self._btn.setText("已安装")
-            self._btn.setEnabled(False)
+            self._btn.setText("查看")
+            self._btn.setEnabled(True)
             self._btn.setStyleSheet(self._original_btn_style)
         else:
             self._btn.setText("安装")
@@ -387,6 +598,9 @@ class _PluginRow(QFrame):
             self._busy = True
             self._update_btn_text()
             self.updateRequested.emit(self._meta)
+        else:
+            # 已安装且无新版 → 查看插件内容
+            self.viewRequested.emit(self._meta)
 
     def set_installed(self, installed: bool):
         """安装/更新完成后刷新状态"""
@@ -476,6 +690,33 @@ class _PluginRow(QFrame):
                 tags.append(k)
                 seen.add(k)
         return tags
+
+    # ── 官网链接 ─────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_homepage(meta: dict) -> str:
+        """解析插件官网 URL
+
+        优先级：homepage / website / url 字段 → source.repo（github 主页）
+        → source.url（git-subdir / url 类型，raw 地址转仓库主页）
+        """
+        for key in ("homepage", "website", "url"):
+            v = meta.get(key)
+            if isinstance(v, str) and v.startswith(("http://", "https://")):
+                return v
+        source = meta.get("source", {}) or {}
+        repo = source.get("repo")
+        if isinstance(repo, str) and repo:
+            return f"https://github.com/{repo}"
+        u = source.get("url", "")
+        if isinstance(u, str) and u:
+            # raw URL 转成仓库主页
+            if "raw.githubusercontent.com" in u:
+                parts = u.replace("https://raw.githubusercontent.com/", "").split("/")
+                if len(parts) >= 3:
+                    return f"https://github.com/{parts[0]}/{parts[1]}"
+            return u.replace(".git", "")
+        return ""
 
     def _tag_stylesheet(self) -> str:
         """tag 标签 QSS 样式"""
@@ -593,6 +834,7 @@ class MarketplaceCard(QWidget):
         self._cached_tcs = tcs
         self._cached_font_family = font_family
         self._cached_font_size = font_size
+        self._cached_theme_colors = ctx.get("colors", {})
 
         # ── 把 font_size 传播到已存在的行（动态调整头像大小） ──
         for row in self.findChildren(_PluginRow):
@@ -1099,6 +1341,8 @@ class MarketplaceCard(QWidget):
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
+            row.openUrlRequested.connect(self._open_url)
+            row.viewRequested.connect(self._on_view_plugin)
             row.setVisible(matches)
             self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
@@ -1126,6 +1370,8 @@ class MarketplaceCard(QWidget):
             )
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
+            row.openUrlRequested.connect(self._open_url)
+            row.viewRequested.connect(self._on_view_plugin)
             row.setVisible(True)
             self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
@@ -1476,6 +1722,48 @@ class MarketplaceCard(QWidget):
         import webbrowser
 
         webbrowser.open(url)
+
+    # ── 查看已安装插件内容 ──────────────────────────────────
+
+    def _on_view_plugin(self, plugin_meta: dict):
+        """弹窗展示已安装插件的内容清单（技能/MCP/命令等）"""
+        name = plugin_meta.get("name", "")
+        if not name:
+            return
+        local_path = _PluginRow._find_local_plugin_path(name)
+        if local_path is None:
+            return
+        contents = _collect_plugin_contents(local_path)
+
+        # 主题色（从卡片缓存读取）
+        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
+        tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
+        ff = getattr(self, "_cached_font_family", "")
+        fs = getattr(self, "_cached_font_size", 14)
+        theme_colors = getattr(self, "_cached_theme_colors", {})
+        accent_bg = theme_colors.get("accent", "") or ("#62a0ea" if isDarkTheme() else "#2878dc")
+        card_bg = theme_colors.get("content_bg", "#2a2a2e" if isDarkTheme() else "#ffffff")
+        border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
+
+        # 标题：名称 + 版本
+        version = plugin_meta.get("version", "")
+        title = name + (f"  v{version}" if version else "")
+        desc = plugin_meta.get("description", "")
+
+        dialog = _PluginInfoDialog(
+            self,
+            title,
+            desc,
+            contents,
+            tc=tc,
+            tcs=tcs,
+            ff=ff,
+            fs=fs,
+            accent_bg=accent_bg,
+            card_bg=card_bg,
+            border_c=border_c,
+        )
+        dialog.exec_()
 
     # ── 清理 ──
 

@@ -8,15 +8,18 @@ MCP Server 配置卡片
 """
 
 import json
+import time
 from typing import Dict
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -35,6 +38,7 @@ from qfluentwidgets import (
     ToolButton,
 )
 
+from app.tools.mcp_tools import MCPState
 from app.utils.config import Settings
 from app.utils.design_tokens import (
     ButtonStyles,
@@ -61,6 +65,30 @@ class NoWheelComboBox(ComboBox):
 # ═══════════════════════════════════════════════════════════
 
 EDIT_CARD_STYLE = CardStyles.edit_card_style()
+
+
+# ═══════════════════════════════════════════════════════════
+# 连接状态指示灯配色（四态）
+# ═══════════════════════════════════════════════════════════
+
+_STATUS_STYLE = {
+    MCPState.CONNECTING: ("#f59e0b", "正在启动..."),
+    MCPState.CONNECTED: ("#22c55e", "已连接"),
+    MCPState.FAILED: ("#ef4444", "启动失败"),
+    MCPState.DISABLED: ("#000000", "已关闭"),
+}
+
+
+def _disabled_dot_color() -> str:
+    """ "已关闭"用黑色；暗色主题下纯黑不可见，退化为深灰保证可辨识"""
+    try:
+        c = QColor(Colors.TEXT_PRIMARY)
+        # 主文字偏亮 → 当前是暗色主题
+        if c.isValid() and (0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()) > 140:
+            return "#4b5563"
+    except Exception:
+        pass
+    return "#000000"
 
 
 def _make_row(label_text: str, widget: QWidget, label_width: int = 70) -> QHBoxLayout:
@@ -190,6 +218,7 @@ class MCPEditCard(QWidget):
         form_layout = QVBoxLayout(self._form_page)
         form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(6)
+        self._form_layout = form_layout
 
         # ── 名称 ──
         self.nameEdit = QLineEdit()
@@ -292,22 +321,25 @@ class MCPEditCard(QWidget):
         # JSON 页加入 stack 索引 1
         self._stack.addWidget(self._json_page)
 
-        # 初始显隐（表单模式按类型显示字段）
-        self._stack.setCurrentIndex(0)  # 默认表单模式
+        # 初始显隐：编辑已有服务器时默认进入 JSON 模式
+        # （表单字段不易配置，用户更倾向直接编辑 JSON）；新增服务器默认表单模式
+        self._json_mode = self._is_edit
+        self._stack.setCurrentIndex(1 if self._is_edit else 0)
         self._on_type_changed(self.typeCombo.currentText())
 
     def _toggle_mode(self):
         """切换表单/JSON 编辑模式"""
-        self._json_mode = not self._json_mode
-        if self._json_mode:
-            # 切到 JSON 模式：同步表单数据到 JSON 编辑器（标准格式）
+        # 切到 JSON 模式
+        if not self._json_mode:
+            self._json_mode = True
+            # 同步表单数据到 JSON 编辑器（标准格式）
             form_data = self._collect_form_data()
             if form_data:
                 preview = self._build_json_preview()
                 self.jsonEdit.setPlainText(preview if preview else json.dumps(form_data, indent=2, ensure_ascii=False))
             self._stack.setCurrentIndex(1)
+        # 切回表单模式
         else:
-            # 切回表单模式：从 JSON 解析回表单（支持两种格式）
             json_text = self.jsonEdit.toPlainText().strip()
             if json_text:
                 try:
@@ -325,6 +357,10 @@ class MCPEditCard(QWidget):
                     self._json_mode = True  # 保持 JSON 模式
                     self._stack.setCurrentIndex(1)
                     return
+            self._json_mode = False
+            # 同步字段显隐（按当前类型显示/隐藏 cmd/args/url/headers/env，
+            # 并让 http/sse 的 headers 拉伸填满剩余空间）
+            self._on_type_changed(self.typeCombo.currentText())
             self._stack.setCurrentIndex(0)
         self.modeChanged.emit(self._json_mode)
 
@@ -402,14 +438,21 @@ class MCPEditCard(QWidget):
         if "enabled" not in data:
             data["enabled"] = True
 
-        # 自动检测类型
+        # 自动检测类型（仅在 JSON 未显式声明 type 时）
+        # 优先级：command 存在 → stdio（stdio 可并存 url/env 等字段，command 优先）；
+        #         其次 args 显式声明 --transport http/sse → 对应类型；
+        #         其次存在 url → sse（默认）；否则 → stdio。
+        # 注意：不能仅凭 url 判定为 sse，否则一个带 url 字段的 stdio 服务器
+        # （常见于模板/复制配置）会被误判成 sse。
         if "type" not in data:
-            args = data.get("args", [])
+            args = data.get("args", []) or []
             has_http_transport = any(
                 isinstance(a, str) and "--transport" in a and i + 1 < len(args) and args[i + 1] in ("http", "sse")
                 for i, a in enumerate(args)
             )
-            if has_http_transport:
+            if data.get("command"):
+                data["type"] = "stdio"
+            elif has_http_transport:
                 data["type"] = "http"
             elif "url" in data:
                 data["type"] = "sse"
@@ -457,6 +500,18 @@ class MCPEditCard(QWidget):
             w.setVisible(not is_stdio)
         for w in (self._env_label, self.envEdit):
             w.setVisible(is_stdio)
+
+        # http/sse 类型：headers 输入框拉伸填满剩余纵向空间（不再受 100px 上限约束）
+        if not is_stdio:
+            self._form_layout.setStretchFactor(self._headers_row, 1)
+            self.headersEdit.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX，取消上限
+            self.headersEdit.setMinimumHeight(140)
+            self.headersEdit.setSizePolicy(QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding))
+        else:
+            self._form_layout.setStretchFactor(self._headers_row, 0)
+            self.headersEdit.setMaximumHeight(100)
+            self.headersEdit.setMinimumHeight(48)
+            self.headersEdit.setSizePolicy(QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred))
 
     def _on_save(self):
         if self._json_mode:
@@ -580,51 +635,56 @@ class MCPServerRow(CardWidget):
         self.switch.setChecked(enabled)
         self.switch.blockSignals(False)
 
-    def set_status(self, connected: bool, busy: bool):
-        """更新连接状态指示灯
+    def set_status(self, state: str, error: str = "", tool_count: int = 0):
+        """更新连接状态指示灯（四态）
+
+        启动中 → 黄色，启动失败 → 红色，已关闭 → 黑色，成功 → 绿色。
 
         Args:
-            connected: 是否已连接成功
-            busy: 是否正在连接/断开中
+            state: MCPState 之一（connecting / connected / failed / disabled）
+            error: 失败原因（作为 tooltip 展示）
+            tool_count: 已发现的工具数量
         """
-        if busy:
-            self._status_dot.setText("●")
-            self._status_dot.setStyleSheet(
-                f"color: #f59e0b; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-            )
-            self._status_dot.setToolTip("正在连接/断开中...")
-        elif connected:
-            self._status_dot.setText("●")
-            self._status_dot.setStyleSheet(
-                f"color: #22c55e; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-            )
-            self._status_dot.setToolTip("已连接")
-        else:
-            self._status_dot.setText("●")
-            self._status_dot.setStyleSheet(
-                f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
-            )
-            self._status_dot.setToolTip("未连接")
+        color, tip = _STATUS_STYLE.get(state, _STATUS_STYLE[MCPState.DISABLED])
+        if state == MCPState.DISABLED:
+            color = _disabled_dot_color()
+        elif state == MCPState.CONNECTED and tool_count:
+            tip = f"已连接 · {tool_count} 个工具"
+        elif state == MCPState.FAILED and error:
+            tip = error if len(error) <= 400 else error[:400] + "..."
+
+        self._current_state = state
+        self._status_dot.setText("●")
+        self._status_dot.setStyleSheet(
+            f"color: {color}; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
+        )
+        self._status_dot.setToolTip(tip)
 
     def refresh_style(self):
-        """主题变更时刷新命令描述文字颜色"""
+        """主题变更时刷新命令描述文字颜色 + 指示灯（黑色需随明暗主题调整）"""
         Colors.refresh()
         self._desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} font-size: {scale_font_size(12)}px;"
         )
+        if getattr(self, "_current_state", None) == MCPState.DISABLED:
+            self._status_dot.setStyleSheet(
+                f"color: {_disabled_dot_color()}; font-size: {scale_font_size(16)}px;"
+                f" background: transparent; padding: 0;"
+            )
 
     def _setup_ui(self, data: dict):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
         layout.setSpacing(8)
 
-        # 连接状态指示灯
+        # 连接状态指示灯（黄=启动中 / 绿=成功 / 红=失败 / 黑=关闭）
+        self._current_state = MCPState.DISABLED
         self._status_dot = QLabel("●")
         self._status_dot.setFixedWidth(16)
         self._status_dot.setAlignment(Qt.AlignCenter)
-        self._status_dot.setToolTip("未连接")
+        self._status_dot.setToolTip("已关闭")
         self._status_dot.setStyleSheet(
-            f"color: #6b7280; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
+            f"color: {_disabled_dot_color()}; font-size: {scale_font_size(16)}px; background: transparent; padding: 0;"
         )
         layout.addWidget(self._status_dot)
 
@@ -697,8 +757,11 @@ class MCPListSettingCard(ExpandSettingCard):
         self._global_switch_pending = False
         # 行引用（用于开关操作时直接更新，避免全量刷新）
         self._server_rows: Dict[str, "MCPServerRow"] = {}
-        # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷
-        self._suppress_hot_reload = False
+        # 自触发抑制：本卡片的开关操作不触发 watchfiles 热重载回刷。
+        # 用「过期时间戳」而非布尔：全局开关写入的是 settings（不触发插件热重载），
+        # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
+        # 窗口取 3s（> watchfiles 的 2s 防抖），既能在自触发刷新到达时正确抑制，又会自动过期。
+        self._suppress_hot_reload_until = 0.0
         # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(3000)
@@ -872,8 +935,8 @@ class MCPListSettingCard(ExpandSettingCard):
 
         enabled = self._pending_global_switch
 
-        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷
-        self._suppress_hot_reload = True
+        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷（3s 内有效，自动过期）
+        self._suppress_hot_reload_until = time.time() + 3.0
 
         self.cfg.set(self.cfg.mcp_enabled, enabled, save=True)
         if enabled:
@@ -889,10 +952,16 @@ class MCPListSettingCard(ExpandSettingCard):
         # _refresh_status_dots() 更新。全量重建会导致开关时整卡闪烁。
 
     def consume_hot_reload(self) -> bool:
-        """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新"""
-        if self._suppress_hot_reload:
-            self._suppress_hot_reload = False
+        """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新
+
+        采用过期时间戳而非布尔：在窗口内（默认 3s）的自触发刷新会被抑制，
+        窗口过后自动失效，避免布尔标记卡死吞掉后续外部热重载。
+        """
+        now = time.time()
+        if now < self._suppress_hot_reload_until:
+            self._suppress_hot_reload_until = 0.0
             return True
+        self._suppress_hot_reload_until = 0.0
         return False
 
     # ── 列表刷新 ──────────────────────────────────────
@@ -910,14 +979,27 @@ class MCPListSettingCard(ExpandSettingCard):
                 return
             status_list = mgr.get_status()
             status_map = {s["name"]: s for s in status_list}
+            # 配置里被关掉的 server 一律显示"已关闭"，即使管理器里还留着旧记录
+            cfg_enabled = {s.get("name", ""): s.get("enabled", True) for s in self._get_servers()}
+            global_on = self.cfg.mcp_enabled.value
+
             for name, row in list(self._server_rows.items()):
                 if row is None:
                     continue
                 try:
-                    st = status_map.get(name, {})
-                    connected = st.get("connected", False)
-                    busy = st.get("busy", False)
-                    row.set_status(connected, busy)
+                    st = status_map.get(name)
+                    if not global_on or not cfg_enabled.get(name, True):
+                        # 用户主动关闭（全局或单个）→ 黑色
+                        row.set_status(MCPState.DISABLED)
+                    elif st is None:
+                        # 已启用但管理器还没有任何记录 → 尚未开始启动
+                        row.set_status(MCPState.DISABLED)
+                    else:
+                        row.set_status(
+                            st.get("state", MCPState.DISABLED),
+                            st.get("error", ""),
+                            st.get("tool_count", 0),
+                        )
                 except RuntimeError:
                     # widget 已被销毁
                     self._server_rows.pop(name, None)
@@ -1054,8 +1136,8 @@ class MCPListSettingCard(ExpandSettingCard):
         tasks = dict(self._pending_server_switches)
         self._pending_server_switches.clear()
 
-        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷
-        self._suppress_hot_reload = True
+        # 标记：接下来的写文件操作是自触发的，抑制热重载回刷（3s 内有效，自动过期）
+        self._suppress_hot_reload_until = time.time() + 3.0
 
         # 批量更新配置（通过 PluginManager 更新 enabled 状态）
         servers = self._get_servers()
@@ -1075,10 +1157,10 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._hot_connect(name, server_data, force=True)
             else:
                 self._hot_disconnect(name)
-            # 直接更新行的开关状态和指示灯（设黄色，不等异步 busy 状态）
+            # 直接更新行的开关状态和指示灯：开→黄色(启动中)，关→黑色(已关闭)
             if row:
                 row.set_enabled(enabled)
-                row.set_status(connected=False, busy=True)
+                row.set_status(MCPState.CONNECTING if enabled and self.cfg.mcp_enabled.value else MCPState.DISABLED)
 
         # 更新 token 估算
         self._update_mcp_token_count()

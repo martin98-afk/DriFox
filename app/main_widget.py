@@ -3273,8 +3273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         win_id = id(shortcut_parent)
         # 统计同一窗口下残余的 MainWidget 实例数
         remaining = sum(
-            1 for w in OpenAIChatToolWindow._instances
-            if not w._is_destroyed and id(w.window() or w) == win_id
+            1 for w in OpenAIChatToolWindow._instances if not w._is_destroyed and id(w.window() or w) == win_id
         )
         if remaining <= 1:
             # 最后一个实例销毁时清除窗口级缓存
@@ -7039,7 +7038,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7104,7 +7103,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7117,7 +7116,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7142,7 +7141,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7176,7 +7175,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7185,9 +7184,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 且 consume_hot_reload() 的抑制标记是单次消费——若遍历窗口时每个窗口都消费/刷新，
         # 多窗口下第一个窗口消费掉自触发标记后，其余窗口会重复全量重建列表。
         # 因此整轮广播只处理一次：自触发（开关操作）→ consume 返回 True → 跳过刷新；
-        # 外部修改 .mcp.json → consume 返回 False → 执行一次 _refresh()。
-        if result.get("mcp"):
-            refreshed = False
+        # 外部修改 .mcp.json 或插件被热重载 → consume 返回 False → 执行一次 _refresh()。
+        #
+        # 关键修复（2026-08）：PluginManager.rescan_plugin 在【每次】插件热重载时都会失效
+        # MCP 服务器缓存（invalidate_mcp_cache），但触发热重载的未必是 .mcp.json（例如插件
+        # Python 代码变更会被归类到其它 component），此时 result['mcp'] 为 False，下方列表行
+        # （仅由 _refresh() 重建）便残留旧数据；而 x/x 计数由 3s 定时器读取新缓存会自动更新，
+        # 于是出现「计数已更新、列表未更新」的现象。故只要发生了插件重载（任一组件标志为真）
+        # 就刷新一次 MCP 列表。
+        _mcp_reload = bool(result.get("mcp")) or any(
+            result.get(k) for k in ("agents", "commands", "themes", "skills", "lsp", "ui")
+        )
+        if _mcp_reload:
+            mcp_card = None
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
                     continue
@@ -7196,17 +7205,29 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     if not hasattr(win._settings_popup, "mcpListCard"):
                         continue
-                    card = win._settings_popup.mcpListCard
-                    if card.consume_hot_reload():
+                    mcp_card = win._settings_popup.mcpListCard
+                    # 自触发（开关操作）→ consume 返回 True → 跳过刷新（避免整卡闪烁）；
+                    # 外部修改 .mcp.json / 插件被热重载 / 插件被删除 → consume 返回 False → 刷新一次。
+                    if mcp_card.consume_hot_reload():
                         logger.debug("[HotReload] MCP server list: suppress self-triggered refresh")
-                    elif not refreshed:
-                        card._refresh()
-                        refreshed = True
+                    else:
+                        mcp_card._refresh()
                         logger.debug("[HotReload] MCP server list refreshed")
                     break
                 except (RuntimeError, AttributeError) as e:
                     # 多窗口竞态：窗口已被销毁
                     pass
+            # 插件删除 / 服务器移除 / 禁用后，断开已不在启用列表中的运行连接（避免子进程残留）。
+            # 后端删除分支已置 result['mcp']=True（若插件含 MCP 组件），可触发到此分支。
+            if mcp_card is not None:
+                try:
+                    pm = mcp_card._get_pm()
+                    servers = pm.get_mcp_servers()
+                    valid_names = {s.get("name", "") for s in servers if s.get("enabled", True)}
+                    mgr = mcp_card._get_mcp_manager()
+                    mgr.disconnect_missing(valid_names)
+                except Exception as e:
+                    logger.debug(f"[HotReload] MCP 断开失效连接失败: {e}")
 
         # LSP 配置变更：广播刷新所有窗口的 LSP 状态列表
         # 修复：原代码未处理 lsp 字段，导致 LSP 热重载后 settings popup 中
@@ -7223,7 +7244,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7250,7 +7271,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -15880,7 +15901,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -15907,7 +15928,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

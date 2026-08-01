@@ -1,6 +1,31 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **MCP 事件循环死锁（服务经常启动不起来的主因）**: `MCPClientManager._disconnect_single` 在持有 `self._lock`（`threading.Lock`）的情况下 `await` 生命周期 Task。事件循环线程持锁挂起期间，其它协程或 UI 线程（3 秒轮询 `get_status()`）一旦 `with self._lock` 就会阻塞该线程，导致锁永远无法释放 —— 整个 MCP 事件循环死锁、设置页卡死。改为锁内只做摘取与状态标记，`await` 全部移到锁外；等待 Task 退出改用 `asyncio.wait`（不会把 `CancelledError` 抛给调用方）
+- **MCP 多窗口连接踩踏**: 每个窗口 `_init_mcp_connections` 都会调一次 `connect_all_background`，而 `_connect_all` 开头无条件执行 `_disconnect_all()`，后启动的窗口会把前一个窗口刚连好的连接全部拆掉。改为增量同步：跳过已连接且配置未变的 server、只断开已移除/禁用的 server，并在 `connect_all_background` 增加全局去重（已有一轮进行中则跳过）
+- **MCP 超时后子进程残留**: `_connect_single` 超时仅 `task.cancel()` 就返回，不等待回收，且失败记录不入 `_connections`，导致下次连接同名 server 时不会清理旧进程 —— 残留进程占住端口/文件锁使新进程起不来。改为超时后等待 Task 完全退出，并保留失败记录供下次连接前清理
+- **MCP 子进程环境变量丢失**: stdio 连接直接把用户 `env` 传给 SDK，而 SDK 仅继承 `DEFAULT_INHERITED_ENV_VARS`（PATH/APPDATA 等十余个），丢掉 `HTTP_PROXY`/`HTTPS_PROXY`/`NODE_EXTRA_CA_CERTS`/npm 镜像等变量，导致 `npx`/`uvx` 拉包失败后超时。新增 `_build_stdio_env()` 显式继承完整父进程环境（过滤 shell 函数导出）；同时丢弃超过 Windows 单变量 32766 字符上限的超长变量（宿主注入的 `ACC_PRODUCT_CONFIG_V3` 等），否则 `subprocess.Popen` 会直接抛 `ValueError: the environment variable is longer than 32767 characters`，使 stdio 子进程创建失败、服务起不来
+- **MCP 服务端 mcp 2.0 不兼容（MiniMax 启动即崩）**: `minimax-coding-plan-mcp` 0.0.4 用 `from mcp.server.fastmcp import FastMCP`，但其依赖只写下限 `mcp>=1.6.0` 未锁上界，uvx 拉到最新的 2.0.0 后该模块已被移除 → `ModuleNotFoundError` → 子进程启动即崩、stdio 管道关闭报 `Connection closed`。在 `.mcp.json` 的启动参数加 `--with "mcp<2"` 将 mcp 锁在 1.x（含 `fastmcp`），已对 system 默认与 user-custom/pre_bind 配置同步修改（其它 uvx 启动的 MCP server 若用旧 `fastmcp` API，遇到 mcp 2.0 会同样崩，需同样加 `--with "mcp<2"`）
+- **MCP 启动失败无诊断信息**: 子进程 stderr 默认指向 `sys.stderr`，打包后无控制台导致错误信息全部丢失。改为落盘到 `<appdata>/logs/mcp/<name>.stderr.log`，失败时回读尾部内容拼进错误提示与 tooltip
+- **MCP 连接超时过短**: 默认 30s 对 `npx`/`uvx` 首次冷启动（联网拉包）经常不够，改为 90s 并支持 per-server `timeout` 配置；`connect_all` 外层不再叠加 60s 超时（服务器较多时会提前放弃并误报失败）
+- **MCP 热重载后列表行不刷新（计数更新、列表不更新）**: `_on_plugin_hot_reload` 仅当 `result['mcp']` 为真才调用 `MCPListSettingCard._refresh()`。但 `PluginManager.rescan_plugin` 在【每次】插件热重载时都会失效 MCP 缓存（`invalidate_mcp_cache`），MCP 列表头部的 `x/x` 计数由 3 秒定时器读取新缓存会自动更新，而列表行（仅由 `_refresh()` 重建）在触发重载的并非 `.mcp.json`（例如插件 Python 代码变更被归类到其它 component）时便残留旧数据。改为只要发生了插件重载（任一组件标志为真）就刷新一次 MCP 列表（仍尊重自触发抑制，避免开关时整卡闪烁）
+- **MCP 编辑卡 http 类型 headers 不拉伸**: 类型为 `http`/`sse` 时，headers 输入框原固定 `maxHeight=100` 且行不可拉伸。现改为该类型下 header 行 `setStretchFactor=1`、输入框 `verticalSizePolicy=Expanding`、取消 100px 上限，拉伸填满剩余纵向空间；切回 `stdio` 时恢复约束
+- **MCP 编辑卡进入编辑默认 JSON 模式**: 编辑已有服务器时默认进入 JSON 模式（`_stack` 显示 JSON 页），因表单字段不易配置；新增服务器仍默认表单模式。同时修复切回表单模式时未重新调用 `_on_type_changed` 导致 http/sse 字段显隐错乱的既有 bug（切换后 `url`/`headers` 不显示或 `command`/`args` 残留可见）
+- **MCP 编辑卡 stdio 服务器被误判为 sse**: 编辑一个同时带 `url` 字段的 stdio 服务器（模板/复制配置常见残留），切到表单后类型下拉框显示 `sse`。根因：`_build_json_from_data` 对 stdio 省略 `type` 但保留 `url`，而 `_normalize_server_data` 的自动识别规则 `elif "url" in data: type="sse"` 把带 url 的 stdio 误判成 sse。修复识别优先级：有 `command` 即判定为 `stdio`（优先于 `url`），其次 `--transport http/sse`、再次 `url`→`sse`、最后兜底 `stdio`
+- **MCP 热重载后列表仍不刷新（抑制标记卡死）**: 上一轮放宽 `result['mcp']` 触发条件后仍无效的根因是 `MCPListSettingCard._suppress_hot_reload` 是布尔标记——全局开关写入的是 `settings`（不触发插件热重载），导致标记永久停在 `True`，把后续所有热重载的列表刷新全部吞掉（现象：头部 `x/x` 计数更新、列表行不更新，因为计数由独立 3 秒定时器读取已失效的缓存）。改为带时间戳的自动过期抑制（窗口 3s > watchfiles 的 2s 防抖）：自触发刷新在窗口内仍被正确抑制，窗口过后自动失效，彻底避免卡死
+- **插件删除/服务器移除后已启动的 MCP 未断开**: 插件热重载删除插件或 `.mcp.json` 移除服务器后，子进程一直残留运行。新增 `MCPClientManager.disconnect_missing(valid_names)`，并在 `main_widget._on_plugin_hot_reload` 的 MCP 分支刷新列表后调用，断开所有不在「启用服务器列表」中的运行连接（后端删除分支已置 `result['mcp']=True` 以触发此分支）
+
+### ✨ 新功能 (New Features)
+
+- **MCP 状态指示灯四态化**: 新增 `MCPState` 状态机（`connecting`/`connected`/`failed`/`disabled`），设置页 MCP 列表左侧圆点按状态着色 —— 启动中**黄色**（全程保持，不再被 3 秒轮询覆盖成灰色）、启动失败**红色**（tooltip 展示子进程真实报错）、已关闭**黑色**（暗色主题降级为深灰保证可辨识）、连接成功**绿色**（tooltip 展示工具数量）。`get_status()` 现在返回注册表中的全部 server（含失败/启动中/已关闭），旧实现只返回连接成功的条目，UI 因此永远读不到"启动中"和"失败"
+- **插件市场源配置迁移到 user-custom**: 市场源列表（`sources.json`）从 `.drifox/cache/marketplaces/` 迁移到 `.drifox/plugins/user-custom/marketplaces/`，随 user-custom 插件一起被云端备份/同步；旧版 cache 中的配置首次启动自动迁移（旧文件改名 `.bak` 备份）；拉取的市场数据缓存仍保留在 cache 目录
+- **插件市场条目新增官网跳转**: 每个插件条目右侧新增链接按钮，点击在浏览器中打开插件官网 —— URL 优先取元数据 `homepage`/`website`/`url` 字段，无则回退到 `source` 仓库地址（github repo / git-subdir url / raw 地址自动转为仓库主页）
+- **插件市场已安装条目新增内容查看**: 已安装插件按钮由禁用的「已安装」改为可点击的「查看」，点击弹出 MaskDialogBase 风格详情弹窗，展示该插件包含的组件清单 —— 🧩 技能、🔌 MCP、📁 命令、🤖 Agents、🔗 Hooks、🎨 主题（内容区可滚动，组件名可选中复制）；未安装仍为「安装」，有新版仍为「更新」
+
 ## [v0.4.10] - 2026-08-01
 
 自上一版本以来的变更 | 提交数：5 · 文件变更：13 · +498/-36 | 贡献者：dingma

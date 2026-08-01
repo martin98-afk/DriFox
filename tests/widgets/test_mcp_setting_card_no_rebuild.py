@@ -22,6 +22,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -55,7 +56,7 @@ def _make_mcp_card():
     card._pending_server_switches = {}
     card._pending_global_switch = True
     card._global_switch_pending = False
-    card._suppress_hot_reload = False
+    card._suppress_hot_reload_until = 0.0
     card._token_calc_running = False
     card.cfg = MagicMock()
     card.cfg.mcp_enabled.value = True
@@ -90,8 +91,8 @@ class TestSingleServerSwitch:
         # 行级更新仍应执行（热连接/断开 + token 估算）
         card._hot_disconnect.assert_called_once_with("srv1")
         card._update_mcp_token_count.assert_called_once()
-        # 自触发抑制标记已设置，供热重载广播消费
-        assert card._suppress_hot_reload is True
+        # 自触发抑制标记已设置（带时间戳，3s 内有效），供热重载广播消费
+        assert card._suppress_hot_reload_until > time.time()
 
     def test_debounced_switch_enable_does_not_full_refresh(self):
         """开启单个服务器：同样不触发全量刷新"""
