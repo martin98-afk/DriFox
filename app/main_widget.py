@@ -864,6 +864,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_processing: bool = False  # 串行处理锁
         self._injected_team_mails: list = []  # 流式中 hook 注入的团队邮件（流结束时标记完成）
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
+        self._team_name: str = ""  # 团队名（TeamManager 模板名），空=非团队模式；供 Tab 分组使用
 
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
@@ -3777,6 +3778,8 @@ class OpenAIChatToolWindow(ToolWindow):
         tm = self._get_team_manager()
         tm.join_team(window_id=self._window_id, agent_name=agent_name)
         self._team_agent_name = agent_name
+        # 团队名：优先取当前模板名，无模板回退 default（与 TeamManager.DEFAULT_TEAM 一致）
+        self._team_name = (tm.get_template() or {}).get("name") or "default"
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -3805,6 +3808,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 3) 清除团队标记后刷新 UI
         self._team_agent_name = ""
+        self._team_name = ""
         self._refresh_team_ui(is_team=False)
 
         # 4) 同步活跃窗口列表（触发失效成员清理）
@@ -3993,6 +3997,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 win = self._create_fresh_window()
                 if win is not None:
                     new_windows.append(win)
+                    # 同步前置 join：_create_fresh_window 返回后立即登记团队成员身份。
+                    # 此时 showEvent 排队的 QTimer(0) → _create_new_session 仍在事件队列中
+                    # 未执行，join 完成后 create_session 触发 SessionStart hook 时
+                    # is_team_member 已为 True，团队 hook（#team_member matcher）才能命中。
+                    # 同时写入团队名/角色名，供 Tab 管理器分组与胶囊使用。
+                    win._team_agent_name = agent_name
+                    win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+                    tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
 
@@ -4039,6 +4051,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_agent_command_permissions(agent_name)
             win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
+            win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
                 try:
