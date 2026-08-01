@@ -44,7 +44,7 @@ def _get_subagent_icon_html(icon_name: str = "设置-subagent", size: int = 18) 
         from app.utils.theme_manager import theme_manager
 
         prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except ImportError, AttributeError:
+    except (ImportError, AttributeError):
         prefix = "qrc:/icons"
     return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;vertical-align:middle;" />'
 

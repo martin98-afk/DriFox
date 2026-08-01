@@ -203,7 +203,7 @@ def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     """
     try:
         parsed = json.loads(args)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return args
 
     def _shrink(obj: Any) -> Any:
@@ -233,7 +233,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     """
     try:
         args = json.loads(tool_args) if tool_args else {}
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         args = {}
 
     content = tool_content or ""

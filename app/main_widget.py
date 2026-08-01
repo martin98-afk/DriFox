@@ -1673,58 +1673,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # 注意：不要设置 _session_initialized，让 showEvent 正常执行初始化
             new_instance._skip_restore_history = True  # 跳过历史会话恢复
 
-            # ── Tab 模式分支 ──
-            if self.cfg.enable_tab_manager.value:
-                from app.widgets.tab_manager_window import TabManagerWindow
+            # ── 统一路由到 Tab 管理器 ──
+            # 多窗口模式已下线，禁止降级为独立 ToolPopupDialog（幽灵窗口）。
+            # 若单例未就绪则惰性重建并确保可见。
+            from app.widgets.tab_manager_window import TabManagerWindow
 
-                tm = TabManagerWindow.get_instance()
-                if tm is not None:
-                    tm.add_window(new_instance)
-                    logger.debug("[TabMode] 已添加新窗口到 Tab 管理器")
-                    return
-                # TabManagerWindow 实例不存在，降级到原有逻辑
-
-            # 以弹窗方式显示
-            from app.tool_popup import ToolPopupDialog
-
-            popup = ToolPopupDialog(new_instance, None)
-            if branch:
-                popup.setWindowTitle(f"{self.name} - 分支")
-            else:
-                popup.setWindowTitle(f"{self.name} - 副本")
-            popup.resize(600, 900)
-
-            # 保存引用防止被垃圾回收
-            if not hasattr(self, "_popup_refs"):
-                self._popup_refs = []
-
-            # 使用更健壮的方式清理已关闭的弹窗引用
-            valid_refs = []
-            for ref in self._popup_refs:
-                try:
-                    if ref is not None and not sip.isdeleted(ref) and ref.isVisible():
-                        valid_refs.append(ref)
-                except Exception:
-                    pass
-            self._popup_refs = valid_refs
-
-            # 限制最大引用数量，防止无限增长
-            if len(self._popup_refs) >= 10:
-                self._popup_refs = self._popup_refs[-10:]
-
-            self._popup_refs.append(popup)
-
-            # 在 show() 之前再次检查 popup 是否仍然有效
-            if sip.isdeleted(popup):
-                InfoBar.error(
-                    "复制失败",
-                    "窗口创建失败，请重试",
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
-                )
-                return
-
-            popup.show()
+            tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+            if not tm.isVisible():
+                tm.show()
+            tm.add_window(new_instance)
+            logger.debug("[TabMode] 已添加新窗口到 Tab 管理器")
+            return
         except Exception as e:
             InfoBar.error("复制失败", str(e), parent=self, position=InfoBarPosition.BOTTOM)
         except BaseException:
@@ -1757,26 +1716,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 跳过历史会话恢复，创建全新空白会话
             new_instance._skip_restore_history = True
 
-            # Tab 模式：加入 Tab 管理器（纯追加，不动已有 tab）
-            if self.cfg.enable_tab_manager.value:
-                from app.widgets.tab_manager_window import TabManagerWindow
+            # 统一路由到 Tab 管理器：多窗口模式已下线（见 main.py 启动强约束），
+            # 一律以 Tab 形式承载，禁止降级为独立 ToolPopupDialog，
+            # 避免 /team --load 为每个模板角色弹出"幽灵窗口"。
+            # 若单例因异常未就绪则惰性重建，保证模板窗口一定进入 Tab 容器。
+            from app.widgets.tab_manager_window import TabManagerWindow
 
-                tm = TabManagerWindow.get_instance()
-                if tm is not None:
-                    tm.add_window(new_instance)
-                    return new_instance
-                # TabManagerWindow 实例不存在，降级到弹窗
-
-            # 独立模式：弹窗显示
-            from app.tool_popup import ToolPopupDialog
-
-            popup = ToolPopupDialog(new_instance, None)
-            popup.setWindowTitle(f"{self.name} - 新窗口")
-            popup.resize(600, 900)
-            if not hasattr(self, "_popup_refs"):
-                self._popup_refs = []
-            self._popup_refs.append(popup)
-            popup.show()
+            tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
+            if not tm.isVisible():
+                tm.show()
+            tm.add_window(new_instance)
             return new_instance
         except Exception as e:
             logger.error(f"[_create_fresh_window] 创建全新窗口失败: {e}")
@@ -4233,20 +4182,52 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _start_team_watcher(self):
         """启动邮箱目录的文件系统监听"""
-        from app.core.team_manager import TeamManager
-
-        tm = TeamManager.get_instance()
-
-        mailbox_dir = str(tm._mailbox_dir("default", self._window_id))
-        if mailbox_dir not in self._team_watch_paths:
-            self._team_fs_watcher.addPath(mailbox_dir)
-            self._team_watch_paths.add(mailbox_dir)
+        self._rearm_team_watcher()
 
         # 启动时立即处理已有未处理邮件
         self._check_and_process_pending()
 
+        # 🛡️ 邮箱目录一旦被外部删除（清理逻辑 / 手工删除），QFileSystemWatcher 会永久
+        # 丢失该路径且不再回调，成员将彻底收不到任务邮件。用低频定时器自愈。
+        timer = getattr(self, "_team_watch_guard_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(5000)
+            timer.timeout.connect(self._rearm_team_watcher)
+            self._team_watch_guard_timer = timer
+        if not timer.isActive():
+            timer.start()
+
+    def _rearm_team_watcher(self):
+        """确保邮箱目录存在且处于监听中（目录被删后可自愈重建）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if not getattr(self, "_team_agent_name", ""):
+            return  # 非团队模式，无需监听
+        from app.core.team_manager import TeamManager
+
+        try:
+            tm = TeamManager.get_instance()
+            mailbox_path = tm._mailbox_dir("default", self._window_id)
+            mailbox_path.mkdir(parents=True, exist_ok=True)
+            mailbox_dir = str(mailbox_path)
+            # Qt 会在路径失效时把它从 directories() 中剔除，需重新 addPath
+            if mailbox_dir not in self._team_fs_watcher.directories():
+                self._team_fs_watcher.addPath(mailbox_dir)
+                self._team_watch_paths.add(mailbox_dir)
+                # 目录曾经消失过，重新挂载后补一次轮询，避免漏掉期间到达的邮件
+                self._check_and_process_pending()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[TeamWatcher] 重挂邮箱监听失败: {e}")
+
     def _stop_team_watcher(self):
         """停止邮箱文件监听"""
+        timer = getattr(self, "_team_watch_guard_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
         for p in list(self._team_watch_paths):
             try:
                 self._team_fs_watcher.removePath(p)
@@ -4470,10 +4451,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
         tm = TeamManager.get_instance()
         active_ids = set()
-        for inst in OpenAIChatToolWindow._instances:
+        for inst in list(OpenAIChatToolWindow._instances):
             wid = getattr(inst, "_window_id", None)
             if wid and not getattr(inst, "_is_destroyed", False):
                 active_ids.add(wid)
+        # 🛡️ __init__ 阶段本窗口尚未 append 进 _instances（注册在数百行之后），
+        # 若不显式补入：首个窗口会同步出空集合、后续窗口会把自己排除在活跃集之外，
+        # 导致 TeamManager 把在册成员判为 stale 并 rmtree 其邮箱目录。
+        # 窗口关闭路径已先置 _is_destroyed=True，故此处不会把将死窗口重新算作活跃。
+        self_wid = getattr(self, "_window_id", None)
+        if self_wid and not getattr(self, "_is_destroyed", False):
+            active_ids.add(self_wid)
         tm.set_active_window_ids(active_ids)
 
     # ── 内部辅助 ─────────────────────────────────────
@@ -6982,7 +6970,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7047,7 +7035,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7060,7 +7048,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7085,7 +7073,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7119,7 +7107,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7195,7 +7183,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7222,7 +7210,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -15852,7 +15840,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except ValueError, Exception:
+        except (ValueError, Exception):
             pass
 
         # 离开团队并同步活跃窗口
@@ -15879,7 +15867,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

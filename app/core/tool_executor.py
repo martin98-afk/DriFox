@@ -528,7 +528,7 @@ class ToolExecutor:
                     # 交给后端处理（带冷却）
                     self._backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except _json.JSONDecodeError, ValueError, TypeError:
+            except (_json.JSONDecodeError, ValueError, TypeError):
                 pass
 
     # ========== 自动 LSP 诊断（文件编辑后） ==========

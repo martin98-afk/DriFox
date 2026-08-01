@@ -52,6 +52,11 @@ class TeamManager:
         self._teams_dir.mkdir(parents=True, exist_ok=True)
         self._team_cache: Dict[str, Dict[str, Any]] = {}
         self._window_counter_file = self._teams_dir / ".window_counter"
+        # 活跃窗口集合。None = 主窗口尚未同步过（状态未知），此时禁止任何清理。
+        # 绝不能把「未知」和「空集合」混为一谈，否则会误删全部成员邮箱。
+        self._active_window_ids: Optional[set] = None
+        # 保护 _team_cache / 邮箱目录的读写（check_team_member 会在 worker 线程调用）
+        self._data_lock = threading.RLock()
         self._init_team(self.DEFAULT_TEAM)
 
     # ── 单例 ─────────────────────────────────────────
@@ -97,7 +102,7 @@ class TeamManager:
                     counter = int(self._window_counter_file.read_text().strip())
                 else:
                     counter = 1
-            except ValueError, FileNotFoundError:
+            except (ValueError, FileNotFoundError):
                 counter = 1
 
             window_id = f"win_{counter:02d}"
@@ -122,14 +127,19 @@ class TeamManager:
             self._team_cache[team_name] = data
         else:
             self._team_cache[team_name] = self._read_json(team_file)
-        # 每次加载都清理失效成员
+        # 尝试清理失效成员（活跃窗口集合未知时会自动跳过）
         self._cleanup_stale_members(team_name)
 
     def _get_team_data(self, team_name: str) -> Dict[str, Any]:
+        """读取团队数据。
+
+        注意：此处**不做**失效成员清理。
+        清理只由 set_active_window_ids() 驱动（主窗口显式同步活跃窗口时），
+        避免任意读取（如 worker 线程的 check_team_member）在活跃集合
+        尚未就绪时误删全部成员及其邮箱目录。
+        """
         if team_name not in self._team_cache:
             self._init_team(team_name)
-        # 懒清理：每次读取数据前清理失效成员
-        self._cleanup_stale_members(team_name)
         return self._team_cache[team_name]
 
     def _save_team_data(self, team_name: str):
@@ -141,7 +151,7 @@ class TeamManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except FileNotFoundError, json.JSONDecodeError:
+        except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     @staticmethod
@@ -153,60 +163,90 @@ class TeamManager:
     # ── 成员清理 ─────────────────────────────────────
 
     def set_active_window_ids(self, window_ids: set):
-        """由主窗口同步当前真实的活跃窗口 ID 集合（跨 OpenAIChatToolWindow._instances 收集）"""
-        self._active_window_ids = set(window_ids)
-        # 同步清理所有团队中的失效成员
-        for team_name in list(self._team_cache.keys()):
-            self._cleanup_stale_members(team_name)
+        """由主窗口同步当前真实的活跃窗口 ID 集合（跨 OpenAIChatToolWindow._instances 收集）
 
-    def _get_active_windows(self) -> set:
-        """获取当前活跃窗口 ID（优先用主窗口同步的集合）"""
-        if hasattr(self, "_active_window_ids") and self._active_window_ids:
-            return self._active_window_ids
-        # 兜底：读文件
+        🛡️ 空集合表示活跃窗口信息不可靠（窗口 __init__ 阶段自身还未注册进
+        _instances、创建/销毁时序竞态等），既不覆盖已知的有效集合，也不触发清理。
+        否则会把所有成员误判为失效并 rmtree 其邮箱目录 —— 这正是
+        QFileSystemWatcher 报 FindNextChangeNotification failed + 成员无法交互的根因。
+        """
+        ids = set(window_ids or ())
+        if not ids:
+            return
+        with self._data_lock:
+            self._active_window_ids = ids
+            # 同步清理所有团队中的失效成员
+            for team_name in list(self._team_cache.keys()):
+                self._cleanup_stale_members(team_name)
+
+    def _get_active_windows(self) -> Optional[set]:
+        """获取当前活跃窗口 ID 集合；无法确认时返回 None（调用方应保守跳过清理）"""
+        if self._active_window_ids:
+            return set(self._active_window_ids)
+        # 兜底：读文件（历史上从未写入，保留兼容；文件不存在视为"未知"而非"空"，
+        # 避免把所有成员误判为失效而全删邮箱目录）
         active_file = self._teams_dir / ".active_windows"
         try:
             if active_file.exists():
-                return set(json.loads(active_file.read_text()))
-        except json.JSONDecodeError, FileNotFoundError:
+                data = json.loads(active_file.read_text())
+                if data:
+                    return set(data)
+        except (json.JSONDecodeError, FileNotFoundError, OSError, TypeError):
             pass
-        return set()
+        return None
 
     def _cleanup_stale_members(self, team_name: str = DEFAULT_TEAM):
-        """彻底清理失效成员：移除 member 记录 + 删除邮箱目录"""
-        data = self._team_cache.get(team_name)
-        if not data:
-            return
-        members = data.get("members", {})
-        if not members:
-            return
+        """彻底清理失效成员：移除 member 记录 + 删除邮箱目录
 
+        🛡️ 安全保护：活跃窗口集合为空/未知时跳过清理。
+        历史 bug：窗口创建/销毁时序中 _active_window_ids 可能短暂为空集，
+        导致所有成员被误判为失效，邮箱目录（含 QFileSystemWatcher 监视中的）
+        被全部删除，成员无法交互。
+        """
         active = self._get_active_windows()
-        stale_ids = [wid for wid in members if wid not in active]
+        if not active:
+            # 活跃窗口信息未知（未同步 / 空集），保守跳过清理，避免误删邮箱目录
+            return
 
-        for wid in stale_ids:
-            members.pop(wid, None)
-            # 删除该成员的邮箱目录
-            mailbox_dir = self._mailbox_dir(team_name, wid)
-            if mailbox_dir.exists():
+        with self._data_lock:
+            data = self._team_cache.get(team_name)
+            if not data:
+                return
+            members = data.get("members", {})
+            if not members:
+                return
+
+            stale_ids = [wid for wid in members if wid not in active]
+
+            for wid in stale_ids:
+                members.pop(wid, None)
+                self._remove_mailbox_dir(team_name, wid)
+
+            # 清理孤立邮箱目录：必须同时满足「无 member 记录」且「窗口不活跃」。
+            # 只判 members 会误删刚 mkdir、member 记录尚未落库的活跃窗口邮箱，
+            # 而该目录正被 QFileSystemWatcher 监视 → FindNextChangeNotification failed。
+            mailboxes_dir = self._mailboxes_dir(team_name)
+            if mailboxes_dir.exists():
                 try:
-                    shutil.rmtree(str(mailbox_dir))
-                except Exception:
-                    pass
+                    children = list(mailboxes_dir.iterdir())
+                except OSError:
+                    children = []
+                for child in children:
+                    if child.is_dir() and child.name not in members and child.name not in active:
+                        self._remove_mailbox_dir(team_name, child.name)
 
-        # 也清理没有对应 member 记录的孤立邮箱目录
-        mailboxes_dir = self._mailboxes_dir(team_name)
-        if mailboxes_dir.exists():
-            for child in mailboxes_dir.iterdir():
-                if child.is_dir() and child.name not in members:
-                    try:
-                        shutil.rmtree(str(child))
-                    except Exception:
-                        pass
+            if stale_ids:
+                data["members"] = members
+                self._save_team_data(team_name)
 
-        if stale_ids:
-            data["members"] = members
-            self._save_team_data(team_name)
+    def _remove_mailbox_dir(self, team_name: str, window_id: str):
+        """删除某个窗口的邮箱目录（容错，失败不抛异常）"""
+        mailbox_dir = self._mailbox_dir(team_name, window_id)
+        if mailbox_dir.exists():
+            try:
+                shutil.rmtree(str(mailbox_dir), ignore_errors=True)
+            except Exception:
+                pass
 
     # ── 成员管理 ─────────────────────────────────────
 
