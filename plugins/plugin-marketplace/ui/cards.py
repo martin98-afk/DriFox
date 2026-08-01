@@ -10,11 +10,15 @@
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
 import traceback
 from pathlib import Path
 from typing import Callable, Optional
+
+from loguru import logger
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
@@ -427,6 +431,7 @@ class _PluginRow(QFrame):
     updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
     openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
     viewRequested = pyqtSignal(dict)  # 查看已安装插件的内容列表
+    openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
 
     def __init__(
         self,
@@ -538,6 +543,17 @@ class _PluginRow(QFrame):
 
         layout.addLayout(info_layout, 1)
 
+        # 打开插件所在文件夹按钮（仅已安装时可见，未安装无本地目录）
+        self._dir_btn = None
+        local_path = self._find_local_plugin_path(self._meta.get("name", ""))
+        if local_path:
+            self._dir_btn = TransparentToolButton(FluentIcon.FOLDER, self)
+            self._dir_btn.setFixedSize(28, 28)
+            self._dir_btn.setToolTip(f"打开插件所在文件夹 {local_path}")
+            self._dir_btn.clicked.connect(lambda checked, p=local_path: self.openDirRequested.emit(str(p)))
+            self._dir_btn.setVisible(self._installed)
+            layout.addWidget(self._dir_btn)
+
         # 官网链接按钮（优先 homepage 字段，回退到 source 仓库地址）
         homepage = self._compute_homepage(self._meta)
         if homepage:
@@ -579,7 +595,13 @@ class _PluginRow(QFrame):
         elif self._installed:
             self._btn.setText("查看")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet(self._original_btn_style)
+            # 绿色系：与「安装」默认蓝、「更新」橙色区分
+            self._btn.setStyleSheet(
+                "PushButton { background: rgba(76, 175, 80, 0.15); "
+                "color: #4CAF50; border: 1px solid rgba(76, 175, 80, 0.3); "
+                "border-radius: 4px; }"
+                "PushButton:hover { background: rgba(76, 175, 80, 0.3); }"
+            )
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
@@ -607,6 +629,9 @@ class _PluginRow(QFrame):
         self._installed = installed
         self._has_update = False
         self._busy = False
+        # 文件夹按钮仅已安装时可见
+        if self._dir_btn is not None:
+            self._dir_btn.setVisible(installed)
         self._update_btn_text()
 
     def set_has_update(self, has_update: bool):
@@ -705,6 +730,8 @@ class _PluginRow(QFrame):
             if isinstance(v, str) and v.startswith(("http://", "https://")):
                 return v
         source = meta.get("source", {}) or {}
+        if not isinstance(source, dict):
+            return ""
         repo = source.get("repo")
         if isinstance(repo, str) and repo:
             return f"https://github.com/{repo}"
@@ -923,7 +950,11 @@ class MarketplaceCard(QWidget):
             try:
                 cur = child.styleSheet()
                 btn_fs = max(fs - 2, 11)
-                child.setStyleSheet(cur + f" font-size: {btn_fs}px; font-family: '{ff}';")
+                style_extra = f" font-size: {btn_fs}px;"
+                # 仅在上下文提供字体家族时追加，否则保持系统默认字体
+                if ff:
+                    style_extra += f" font-family: '{ff}';"
+                child.setStyleSheet(cur + style_extra)
             except RuntimeError:
                 pass
 
@@ -1328,21 +1359,28 @@ class MarketplaceCard(QWidget):
         """渲染 [start, end) 范围的插件行"""
         fs = self._cached_font_size
         for i in range(start, end):
-            matches, installed, has_update, local_ver = self._matched_plugins[i]
-            p = self._all_plugins[i]
-            row = _PluginRow(
-                p,
-                installed,
-                has_update=has_update,
-                local_version=local_ver,
-                parent=self._content,
-                font_size=fs,
-                search_query=query,
-            )
+            try:
+                matches, installed, has_update, local_ver = self._matched_plugins[i]
+                p = self._all_plugins[i]
+                row = _PluginRow(
+                    p,
+                    installed,
+                    has_update=has_update,
+                    local_version=local_ver,
+                    parent=self._content,
+                    font_size=fs,
+                    search_query=query,
+                )
+            except Exception as e:
+                # 单行渲染失败（异常市场数据）不中断整个批次，避免部分渲染
+                # 导致后续批次从同一索引重复渲染
+                logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
+                continue
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             row.openUrlRequested.connect(self._open_url)
             row.viewRequested.connect(self._on_view_plugin)
+            row.openDirRequested.connect(self._on_open_plugin_dir)
             row.setVisible(matches)
             self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
@@ -1357,21 +1395,27 @@ class MarketplaceCard(QWidget):
         fs = self._cached_font_size
         for idx in range(start, end):
             i = self._matching_indices[idx]
-            _, installed, has_update, local_ver = self._matched_plugins[i]
-            p = self._all_plugins[i]
-            row = _PluginRow(
-                p,
-                installed,
-                has_update=has_update,
-                local_version=local_ver,
-                parent=self._content,
-                font_size=fs,
-                search_query=query,
-            )
+            try:
+                _, installed, has_update, local_ver = self._matched_plugins[i]
+                p = self._all_plugins[i]
+                row = _PluginRow(
+                    p,
+                    installed,
+                    has_update=has_update,
+                    local_version=local_ver,
+                    parent=self._content,
+                    font_size=fs,
+                    search_query=query,
+                )
+            except Exception as e:
+                # 单行渲染失败（异常市场数据）不中断整个批次，避免部分渲染导致重复
+                logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
+                continue
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             row.openUrlRequested.connect(self._open_url)
             row.viewRequested.connect(self._on_view_plugin)
+            row.openDirRequested.connect(self._on_open_plugin_dir)
             row.setVisible(True)
             self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
@@ -1402,22 +1446,22 @@ class MarketplaceCard(QWidget):
             self._content_layout.addWidget(btn)
 
     def _remove_load_more_button(self):
-        """移除现有的「加载更多」按钮"""
+        """移除现有的「加载更多」按钮（删除全部匹配项，防止残留）"""
         for i in range(self._content_layout.count() - 1, -1, -1):
             item = self._content_layout.itemAt(i)
             w = item.widget() if item else None
             if isinstance(w, PushButton) and "更多" in (w.text() or ""):
                 self._content_layout.takeAt(i)
                 w.deleteLater()
-                return
 
     def _on_load_more(self):
         """手动加载下一批（搜索模式用 _matching_indices，普通模式用全索引）"""
         self._remove_load_more_button()
         query = self._search_edit.text().strip().lower()
+        # 防御：已全部加载时只移除按钮，不重复渲染
         if query and hasattr(self, "_matching_indices") and self._rendered_count < len(self._matching_indices):
             self._render_search_batch(query)
-        else:
+        elif not query and self._rendered_count < len(self._matched_plugins):
             self._render_next_batch(query)
         self._retheme()
 
@@ -1429,6 +1473,7 @@ class MarketplaceCard(QWidget):
             item = self._content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            item = None  # 释放 QLayoutItem 引用
 
     def _on_search_text_changed(self):
         """搜索文本变化 → 防抖后触发过滤"""
@@ -1722,6 +1767,18 @@ class MarketplaceCard(QWidget):
         import webbrowser
 
         webbrowser.open(url)
+
+    def _on_open_plugin_dir(self, path: str):
+        """在系统文件管理器中打开插件所在目录（并选中该目录）"""
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            logger.warning(f"[Marketplace] 打开插件目录失败: {e}")
 
     # ── 查看已安装插件内容 ──────────────────────────────────
 
