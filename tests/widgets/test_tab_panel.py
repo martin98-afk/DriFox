@@ -111,10 +111,10 @@ def _outer_widgets(layout):
 
 
 class TestTeamGroupLayout:
-    """团队分组布局完整性（回归：stretch 丢失 + 同一 widget 重复入布局）"""
+    """团队分组布局完整性（回归：stretch 丢失 + 同一 widget 重复入布局 + 团队框置顶）"""
 
     def test_team_group_layout_single_stretch_no_duplicate(self, panel):
-        """团队含 ≥2 成员 tab + 独立 tab：恰 1 个 stretch、无重复 widget、独立在前团队在后"""
+        """团队含 ≥2 成员 tab + 独立 tab：恰 1 个 stretch、无重复 widget、团队框置顶"""
         panel.add_tab("独立A")
         panel.add_tab("团队-1")
         panel.add_tab("团队-2")
@@ -130,12 +130,12 @@ class TestTeamGroupLayout:
         outer = _outer_widgets(panel._list_layout)
         assert len(outer) == len({id(w) for w in outer}), f"顶层存在重复 widget: {outer}"
 
-        # 独立 tab 在前、团队容器在后、stretch 最末
-        # 顶层顺序：[TabItem(独立A), TabItem(独立B), QFrame(teamGroup), stretch]
-        assert isinstance(outer[0], TabItem)
+        # 团队框置顶、独立 tab 在下、stretch 最末
+        # 顶层顺序：[QFrame(teamGroup), TabItem(独立A), TabItem(独立B), stretch]
+        assert isinstance(outer[0], QFrame)
+        assert outer[0].objectName() == "teamGroup"
         assert isinstance(outer[1], TabItem)
-        assert isinstance(outer[2], QFrame)
-        assert outer[2].objectName() == "teamGroup"
+        assert isinstance(outer[2], TabItem)
         # stretch 在最末
         last = panel._list_layout.itemAt(panel._list_layout.count() - 1)
         assert last is not None and last.widget() is None

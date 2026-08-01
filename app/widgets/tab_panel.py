@@ -1125,8 +1125,8 @@ class TabPanel(QWidget):
         self._items.append(item)
         self._item_team[idx] = ""
 
-        # 重建视觉布局：独立 tab 归位（在已有 team 容器之前），
-        # 新 tab 作为独立项加入。_rebuild_team_layout 有快照保护，开销小。
+        # 重建视觉布局：新 tab 作为独立项加入（置于团队框下方）。
+        # _rebuild_team_layout 有快照保护，开销小。
         self._rebuild_team_layout()
 
         # 如果这是第一个 Tab，自动选中
@@ -1151,7 +1151,7 @@ class TabPanel(QWidget):
         # 若旧 team 已空，清理容器
         if old_team and not any(t == old_team for t in self._item_team.values()):
             self._maybe_remove_empty_group(old_team)
-        # 重建视觉布局（独立区在上，team 容器在下）
+        # 重建视觉布局（team 容器置顶在上，独立区在下）
         self._rebuild_team_layout()
 
     def _get_or_create_team_group(self, team_id: str) -> "QFrame":
@@ -1212,8 +1212,9 @@ class TabPanel(QWidget):
     def _rebuild_team_layout(self):
         """按当前 _item_team 重建视觉布局：
 
-        顺序：所有独立 TabItem（在最前的 stretch 之前）→ 所有 team 容器
-        （按 _items 中首次出现顺序排列；同 team 的 TabItem 在容器内按 _items 顺序排列）。
+        顺序：所有 team 容器（置顶，按 _items 中首次出现顺序排列；同 team 的
+        TabItem 在容器内按 _items 顺序排列）→ 所有独立 TabItem（无 team 归属）→
+        末尾 stretch 始终在最末。
 
         实现：将所有现有 widget 从 _list_layout 移除，按规则重新 insert。
         末尾的 stretch 始终在最末。
@@ -1260,11 +1261,7 @@ class TabPanel(QWidget):
             else:
                 independent_indices.append(i)
 
-        # 1) 先放独立 TabItem
-        for i in independent_indices:
-            self._list_layout.addWidget(self._items[i])
-
-        # 2) 再放 team 容器（按首次出现顺序）
+        # 1) 先放 team 容器（置顶，按首次出现顺序）
         for t in team_order:
             grp = self._get_or_create_team_group(t)
             # 清空容器内部旧 widgets（避免重复添加）
@@ -1274,6 +1271,10 @@ class TabPanel(QWidget):
             for i in team_members[t]:
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
+
+        # 2) 再放独立 TabItem（无 team 归属，置于团队框下方）
+        for i in independent_indices:
+            self._list_layout.addWidget(self._items[i])
 
         # 3) 末尾 stretch：找到的真 stretch（QSpacerItem）放回末尾；
         #    找不到（历史损坏 stretch 已丢失）则 addStretch() 自愈重建。
