@@ -1118,14 +1118,15 @@ class TabPanel(QWidget):
 
         item.mousePressEvent = _on_tab_click
 
-        # 在 stretch 之前插入（独立区，无 team 归属）
-        self._list_layout.insertWidget(idx, item)
+        # 新 tab 不直接插入布局：扁平索引 insertWidget 在存在团队容器时会
+        # 越界插到 stretch 之后（布局项数 = 独立 tab + 容器数 + 1(stretch)，
+        # 而扁平 idx = 独立 + 团队 tab 数，团队容器含多 tab 时 idx ≥ 布局项数），
+        # 破坏"stretch 恒在最末"假设。统一交给 _rebuild_team_layout 摆放。
         self._items.append(item)
         self._item_team[idx] = ""
 
-        # 重建视觉布局：保证新独立 tab 归位（在已有 team 容器之前），
-        # 当已有 team 容器时 insertWidget(idx) 会把新 tab 插到容器之后，
-        # 与"独立区在上"规则冲突。_rebuild_team_layout 有快照保护，开销小。
+        # 重建视觉布局：独立 tab 归位（在已有 team 容器之前），
+        # 新 tab 作为独立项加入。_rebuild_team_layout 有快照保护，开销小。
         self._rebuild_team_layout()
 
         # 如果这是第一个 Tab，自动选中
@@ -1195,6 +1196,15 @@ class TabPanel(QWidget):
         # 若还有成员，不删
         if any(t == team_id for t in self._item_team.values()):
             return
+        # 防御：删除容器前把内部残留 widget 脱绑（parent 改回 _list_widget），
+        # 避免容器 deleteLater 时连带销毁仍在 _items 中管理的 tab
+        # （历史布局损坏可能在容器内残留重复 widget）。
+        inner = grp.layout()
+        while inner is not None and inner.count() > 0:
+            child = inner.takeAt(0)
+            w = child.widget() if child is not None else None
+            if w is not None:
+                w.setParent(self._list_widget)
         self._list_layout.removeWidget(grp)
         grp.deleteLater()
         self._team_groups.pop(team_id, None)
@@ -1216,9 +1226,20 @@ class TabPanel(QWidget):
         if getattr(self, "_layout_snapshot", None) == snapshot:
             return
         self._layout_snapshot = snapshot
-        # 取出末尾 stretch（addStretch 创建的 QSpacerItem）
-        last_item = self._list_layout.takeAt(self._list_layout.count() - 1)
-        # 清空布局（移除所有 widget 但不 delete；widget 仍由 _items 持有）
+
+        # 取出布局中的 stretch（QSpacerItem，widget() is None）：
+        # 不假设"恒在最末"——历史 add_tab 用扁平索引 insertWidget 可能把新 tab
+        # 插到 stretch 之后，破坏末尾假设。扫描全布局找到并 takeAt；
+        # 找不到（历史损坏已丢失 stretch）则标记为 None，重建后 addStretch() 自愈。
+        stretch_item = None
+        for i in range(self._list_layout.count()):
+            child = self._list_layout.itemAt(i)
+            if child is not None and child.widget() is None:
+                stretch_item = self._list_layout.takeAt(i)
+                break
+
+        # 清空布局（移除所有 widget 但不 delete；widget 仍由 _items 持有）。
+        # 注意：真正的 stretch 已在上面取出，此处不再有任何 spacer 被静默丢弃。
         while self._list_layout.count() > 0:
             child = self._list_layout.takeAt(0)
             w = child.widget() if child is not None else None
@@ -1254,9 +1275,13 @@ class TabPanel(QWidget):
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
 
-        # 3) 末尾 stretch
-        if last_item is not None:
-            self._list_layout.addItem(last_item)
+        # 3) 末尾 stretch：找到的真 stretch（QSpacerItem）放回末尾；
+        #    找不到（历史损坏 stretch 已丢失）则 addStretch() 自愈重建。
+        #    只有 stretch 会被 addItem，杜绝把 widget item 误当 stretch 重复入布局。
+        if stretch_item is not None:
+            self._list_layout.addItem(stretch_item)
+        else:
+            self._list_layout.addStretch()
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""

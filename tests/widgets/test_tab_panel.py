@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QFrame, QWidget
 
 from app.widgets.tab_panel import TabItem, TabPanel, UIPluginRow
 
@@ -94,6 +94,109 @@ class TestTabPanel:
             panel._items[1].closeRequested.emit()
 
         assert blocker.args == [1]
+
+
+def _stretch_count(layout) -> int:
+    """统计布局中 stretch（QSpacerItem，widget() is None）数量"""
+    return sum(1 for i in range(layout.count()) if layout.itemAt(i) is not None and layout.itemAt(i).widget() is None)
+
+
+def _outer_widgets(layout):
+    """布局顶层所有 widget（不含 stretch）"""
+    return [
+        layout.itemAt(i).widget()
+        for i in range(layout.count())
+        if layout.itemAt(i) is not None and layout.itemAt(i).widget() is not None
+    ]
+
+
+class TestTeamGroupLayout:
+    """团队分组布局完整性（回归：stretch 丢失 + 同一 widget 重复入布局）"""
+
+    def test_team_group_layout_single_stretch_no_duplicate(self, panel):
+        """团队含 ≥2 成员 tab + 独立 tab：恰 1 个 stretch、无重复 widget、独立在前团队在后"""
+        panel.add_tab("独立A")
+        panel.add_tab("团队-1")
+        panel.add_tab("团队-2")
+        panel.set_tab_team(1, "teamA")
+        panel.set_tab_team(2, "teamA")
+        # 再新增独立 tab（历史 bug：扁平索引 insertWidget 越界插到 stretch 后）
+        panel.add_tab("独立B")
+
+        # 恰有 1 个 stretch（未丢失、未重复）
+        assert _stretch_count(panel._list_layout) == 1
+
+        # 顶层无重复 widget（历史 bug：同一 widget 被 addWidget + addItem 两次）
+        outer = _outer_widgets(panel._list_layout)
+        assert len(outer) == len({id(w) for w in outer}), f"顶层存在重复 widget: {outer}"
+
+        # 独立 tab 在前、团队容器在后、stretch 最末
+        # 顶层顺序：[TabItem(独立A), TabItem(独立B), QFrame(teamGroup), stretch]
+        assert isinstance(outer[0], TabItem)
+        assert isinstance(outer[1], TabItem)
+        assert isinstance(outer[2], QFrame)
+        assert outer[2].objectName() == "teamGroup"
+        # stretch 在最末
+        last = panel._list_layout.itemAt(panel._list_layout.count() - 1)
+        assert last is not None and last.widget() is None
+
+        # 团队容器内恰含 2 个成员 tab，且都在 _items 中
+        inner = panel._team_groups["teamA"].layout()
+        inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
+        assert len(inner_widgets) == 2
+        assert all(w in panel._items for w in inner_widgets)
+
+    def test_tab_join_team_stays_in_container_not_duplicated(self, panel):
+        """新 tab 加入团队后：仍在容器内布局中、不在外层重复出现"""
+        panel.add_tab("独立")
+        panel.add_tab("新成员")
+        panel.set_tab_team(1, "teamB")
+
+        grp = panel._team_groups["teamB"]
+        inner = grp.layout()
+        inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
+        assert panel._items[1] in inner_widgets, "加入团队后 tab 应在团队容器内"
+
+        outer = _outer_widgets(panel._list_layout)
+        assert panel._items[1] not in outer, "团队 tab 不应在外层布局重复出现"
+
+        assert _stretch_count(panel._list_layout) == 1
+
+    def test_rebuild_heals_missing_stretch(self, panel):
+        """历史损坏（stretch 丢失）时 rebuild 自愈：addStretch 重新创建"""
+        panel.add_tab("A")
+        panel.add_tab("B")
+        # 模拟历史损坏：把 stretch 从布局移除
+        for i in range(panel._list_layout.count()):
+            item = panel._list_layout.itemAt(i)
+            if item is not None and item.widget() is None:
+                panel._list_layout.takeAt(i)
+                break
+        assert _stretch_count(panel._list_layout) == 0
+
+        # 触发 rebuild（团队归属变化 → 快照必变）
+        panel.set_tab_team(0, "teamC")
+        assert _stretch_count(panel._list_layout) == 1, "rebuild 应自愈补回 stretch"
+
+    def test_remove_team_tab_rebuilds_layout(self, panel):
+        """移除团队 tab 后：布局重建无重复、stretch 完好"""
+        panel.add_tab("独立")
+        panel.add_tab("团队-1")
+        panel.add_tab("团队-2")
+        panel.set_tab_team(1, "teamD")
+        panel.set_tab_team(2, "teamD")
+
+        panel.remove_tab(1)  # 移除团队 tab
+
+        assert _stretch_count(panel._list_layout) == 1
+        outer = _outer_widgets(panel._list_layout)
+        assert len(outer) == len({id(w) for w in outer}), f"移除后存在重复 widget: {outer}"
+        # 剩余团队 tab 仍在容器内
+        grp = panel._team_groups["teamD"]
+        inner = grp.layout()
+        inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
+        assert panel._items[1] in inner_widgets
+        assert len(inner_widgets) == 1
 
 
 class TestUIPluginRowPositionMenu:
