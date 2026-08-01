@@ -820,6 +820,21 @@ class TabManagerWindow(QWidget):
         self.tabCountChanged.emit(len(self._windows))
         return idx
 
+    def refresh_capsule_for_window(self, window):
+        """主动刷新指定窗口的 Tab 胶囊（基于其 _team_agent_name）。
+
+        用途：窗口加入/离开团队时立即同步胶囊状态，不依赖 windowTitleChanged
+        信号触发（Qt 在标题未变时不发射该信号，导致新建空白窗口加入团队后胶囊不显示）。
+        """
+        idx = self._window_to_index.get(id(window), -1)
+        if idx < 0 or idx >= len(self._windows):
+            return
+        team_agent = getattr(window, "_team_agent_name", "") or ""
+        if team_agent:
+            self._tab_panel.update_tab_capsule(idx, team_agent)
+        else:
+            self._tab_panel.clear_tab_capsule(idx)
+
     def remove_window(self, window):
         """从 Tab 管理器移除窗口"""
         idx = self._window_to_index.pop(id(window), -1)

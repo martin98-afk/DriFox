@@ -4531,6 +4531,19 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # Tab 模式下主动同步胶囊状态：加入/离开团队时不依赖 windowTitleChanged 信号
+        # （Qt 在标题未变时不发射该信号，新建空白窗口加入团队后标题仍是默认"飘狐"，
+        # 导致 _on_win_title_changed 不触发、胶囊不显示）
+        try:
+            if self.cfg.enable_tab_manager.value:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None:
+                    _tm.refresh_capsule_for_window(self)
+        except Exception:
+            pass
+
     def _sync_dialog_title(self):
         """同步对话框窗口标题为当前会话标题，供 Windows 任务栏区分各窗口
 
