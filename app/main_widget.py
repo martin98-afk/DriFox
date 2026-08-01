@@ -1654,14 +1654,19 @@ class OpenAIChatToolWindow(ToolWindow):
             # 注：_is_duplicate_window 已在 __init__(source_window=self) 中设置，
             # showEvent 据此跳过冗余初始化步骤（_load_model_configs / _sync_working_directory）。
 
-            # ── 多窗口隔离：复制工具权限设置(user + active + agent 状态) ──
-            try:
-                if hasattr(self, "_tool_permission_controller") and hasattr(
-                    new_instance, "_tool_permission_controller"
-                ):
-                    new_instance._tool_permission_controller.copy_state_from(self._tool_permission_controller)
-            except Exception:
-                pass  # 忽略权限复制失败
+            # ── 多窗口隔离：仅分支会话复制工具权限；新建窗口使用系统默认 ──
+            # branch=True（分支当前对话）需要继承原窗口的工具权限；
+            # branch=False（新建窗口/标签页）跳过 copy_state_from，保持
+            # ToolPermissionController.__init__ 的默认行为，从全局 Settings
+            # 加载系统默认工具偏好。
+            if branch:
+                try:
+                    if hasattr(self, "_tool_permission_controller") and hasattr(
+                        new_instance, "_tool_permission_controller"
+                    ):
+                        new_instance._tool_permission_controller.copy_state_from(self._tool_permission_controller)
+                except Exception:
+                    pass  # 忽略权限复制失败
 
             # 设置 session 初始化的标志，避免重复创建新 session
             # 并标记为新会话模式，跳过历史会话恢复
