@@ -121,6 +121,23 @@ def _update_tab_icon(tab_idx: int, project: str):
         pass
 
 
+def _get_window_session_title(win) -> str:
+    """获取窗口当前会话标题（topic_summary or name），失败返回空串。
+
+    用于团队窗口：Tab 标题保持会话标题，角色名只进胶囊。
+    """
+    try:
+        sm = getattr(win, "session_manager", None)
+        if sm is None:
+            return ""
+        session = sm.get_current_session()
+        if session is None:
+            return ""
+        return session.topic_summary or session.name or ""
+    except Exception:
+        return ""
+
+
 class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -733,18 +750,26 @@ class TabManagerWindow(QWidget):
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
                     return
-                # 更新 Tab 标题
-                t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
-                self._tab_panel.update_tab_title(cur_idx, t)
+                # 团队模式：Tab 标题保持会话标题，角色名只进胶囊
+                team_agent = getattr(_win, "_team_agent_name", "") or ""
+                if team_agent:
+                    # 团队窗口：保持会话标题（不采用窗口标题，避免被角色名覆盖）
+                    t = (
+                        _get_window_session_title(_win)
+                        or _win.windowTitle()
+                        or getattr(_win, "_current_project", None)
+                        or "对话"
+                    )
+                    self._tab_panel.update_tab_title(cur_idx, t)
+                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                else:
+                    # 非团队窗口：Tab 标题取窗口标题
+                    t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
+                    self._tab_panel.update_tab_title(cur_idx, t)
+                    self._tab_panel.clear_tab_capsule(cur_idx)
                 # 更新项目图标
                 p = getattr(_win, "_current_project", None) or ""
                 _update_tab_icon(cur_idx, p)
-                # 团队模式：显示角色胶囊
-                team_agent = getattr(_win, "_team_agent_name", "") or ""
-                if team_agent:
-                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
-                else:
-                    self._tab_panel.clear_tab_capsule(cur_idx)
                 # 如果该窗口是当前选中 Tab，同步宿主窗口标题
                 if self._tab_panel.active_index == cur_idx:
                     self._sync_window_title()
@@ -835,7 +860,12 @@ class TabManagerWindow(QWidget):
         """将标题同步为当前窗口的会话标题（系统标题栏）"""
         win = self.get_current_window()
         if win:
-            t = win.windowTitle()
+            # 团队窗口：宿主窗口标题保持会话标题（角色名只进胶囊），避免被角色名污染
+            team_agent = getattr(win, "_team_agent_name", "") or ""
+            if team_agent:
+                t = _get_window_session_title(win) or win.windowTitle()
+            else:
+                t = win.windowTitle()
             if t:
                 self.setWindowTitle(t)
                 return

@@ -1735,6 +1735,53 @@ class OpenAIChatToolWindow(ToolWindow):
 
             _log.error(f"[_duplicate_window] 未预期的异常: {traceback.format_exc()}")
 
+    def _create_fresh_window(self):
+        """创建一个全新的空白会话窗口（不复制任何已有窗口的上下文/会话内容）。
+
+        用于团队模板加载等需要纯净新窗口的场景：
+        - 不传 source_window（走完整初始化，不继承项目/模型/分支上下文）
+        - 跳过历史恢复（创建全新空白会话）
+        - Tab 模式：加入 Tab 管理器（纯追加，不动已有标签页）
+        """
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self) or sip.isdeleted(self.homepage):
+                return None
+            valid_homepage = self.homepage
+            if valid_homepage is None:
+                return None
+
+            # 全新窗口：不带 source_window，走完整初始化（不复制任何上下文）
+            new_instance = OpenAIChatToolWindow(valid_homepage)
+            # 跳过历史会话恢复，创建全新空白会话
+            new_instance._skip_restore_history = True
+
+            # Tab 模式：加入 Tab 管理器（纯追加，不动已有 tab）
+            if self.cfg.enable_tab_manager.value:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.add_window(new_instance)
+                    return new_instance
+                # TabManagerWindow 实例不存在，降级到弹窗
+
+            # 独立模式：弹窗显示
+            from app.tool_popup import ToolPopupDialog
+
+            popup = ToolPopupDialog(new_instance, None)
+            popup.setWindowTitle(f"{self.name} - 新窗口")
+            popup.resize(600, 900)
+            if not hasattr(self, "_popup_refs"):
+                self._popup_refs = []
+            self._popup_refs.append(popup)
+            popup.show()
+            return new_instance
+        except Exception as e:
+            logger.error(f"[_create_fresh_window] 创建全新窗口失败: {e}")
+            return None
+
     def _request_tool_start_ui_sync(self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None):
         self.toolStartUiSyncRequested.emit(tool_call_id, tool_name, arguments or {}, round_id or "")
 
@@ -3910,70 +3957,25 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:  # noqa: BLE001
             InfoBar.error("保存失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
 
-    def _collect_active_windows_for_template(self) -> List["OpenAIChatToolWindow"]:
-        """收集模板加载时可用的活跃窗口。
-
-        Tab 模式特殊处理：QStackedWidget 隐藏非当前 tab（isVisible=False），
-        导致模板加载器只能看到当前 tab。改为直接读取 TabManagerWindow._windows。
-        """
-        if self.cfg.enable_tab_manager.value:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                windows = []
-                for w in tm._windows:
-                    try:
-                        if not getattr(w, "_is_destroyed", False):
-                            windows.append(w)
-                    except Exception:
-                        continue
-                return windows
-        # 独立模式：用 isVisible() 过滤
-        windows = []
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
-            try:
-                if not getattr(win, "_is_destroyed", False) and win.isVisible():
-                    windows.append(win)
-            except Exception:
-                continue
-        return windows
-
     def _handle_team_load(self, name: str):
-        """应用模板：重新分配所有活跃窗口的 agent 身份并 join team。
+        """应用模板：为模板的每个角色新建一个全新空白窗口并加入团队。
+
+        新语义（方案 A）：
+        - 模板定义的 N 个角色 → 全部由新建的 N 个全新空白窗口承担，
+          每个窗口分配一个模板角色并加入团队。
+        - 已有标签页（标题、顺序、会话内容、agent 归属）完全不参与模板、
+          完全不动。加载后总窗口 = 已有窗口数 + N（模板角色数）。
 
         流程：
         1. 读取 template，校验 agent_name 在系统中存在
-        2. 缺失窗口数 N：调用 _safe_duplicate_window 同步创建 N 个新窗口
-        3. 给每个窗口预分配 agent：当前窗口拿 agents[0]，其他已有窗口按顺序拿 agents[1..K-1]
-        4. 已有的活跃窗口立即切换 + join
-        5. 新建的窗口延后到下一帧（QTimer）切换 + join，确保 backend 初始化完成
-        6. 触发 Ctrl+Shift+G 排列窗口
+        2. 为模板的每个角色调用 _create_fresh_window 新建全新空白窗口
+        3. 新窗口延后到下一帧（QTimer）切换 + join，确保 backend 初始化完成
+        4. 触发 Ctrl+Shift+G 排列窗口
 
-        重要：load 不会调用 leave_team()，避免销毁窗口的 mailbox 目录（含未读任务邮件）。
+        重要：load 不会调用 leave_team()，避免销毁已有窗口的 mailbox 目录（含未读任务邮件）。
         """
         from app.core.team.template_manager import TemplateManager
         from app.core.team.template_schema import TemplateError
-
-        # ⚠ 破坏性操作：先弹确认框，避免用户误操作导致正在进行的任务被无感切换
-        from app.widgets.common_dialogs import ConfirmDialog
-
-        _confirmed: list[bool] = [False]
-
-        def _on_load_confirm():
-            _confirmed[0] = True
-
-        _dialog = ConfirmDialog(
-            title="加载团队模板",
-            content=f"确定要加载模板「{name}」吗？\n当前所有活跃窗口的 agent 身份将被重新分配。",
-            confirm_text="确认",
-            cancel_text="取消",
-            parent=self,
-        )
-        _dialog.confirmed.connect(_on_load_confirm)
-        _dialog.exec_()
-        if not _confirmed[0]:
-            return
 
         try:
             tm = TemplateManager.get_instance()
@@ -3999,146 +4001,74 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 收集当前活跃窗口（排除已销毁的）
-        # Tab 模式特殊处理：QStackedWidget 隐藏了非当前 tab，导致 isVisible 为 False
-        active_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
-
-        # 排序：当前窗口排第一，其他窗口按 window_id 稳定排序
-        def _sort_key(w: "OpenAIChatToolWindow"):
-            return (0 if w is self else 1, getattr(w, "_window_id", ""))
-
-        active_windows.sort(key=_sort_key)
-
         agents_needed = [a.agent_name for a in template.agents]
         needed_count = len(agents_needed)
-        current_count = len(active_windows)
 
-        # 1) 缺窗口：自动创建
-        new_windows: List["OpenAIChatToolWindow"] = []
-        if current_count < needed_count:
-            missing_n = needed_count - current_count
-            InfoBar.info(
-                "正在准备窗口",
-                f"模板需要 {needed_count} 个窗口，当前 {current_count} 个，正在新建 {missing_n} 个…",
-                parent=self,
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            before_ids = {getattr(w, "_window_id", None) for w in active_windows}
-            for _ in range(missing_n):
-                try:
-                    self._safe_duplicate_window(branch=False)
-                except Exception as e:  # noqa: BLE001
-                    logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
-            # 重新收集活跃窗口
-            after_windows: List["OpenAIChatToolWindow"] = self._collect_active_windows_for_template()
-            after_windows.sort(key=_sort_key)
-            new_windows = [w for w in after_windows if getattr(w, "_window_id", None) not in before_ids]
-            active_windows = after_windows
+        # ⚠ 会新建 needed_count 个窗口：先弹确认框，避免用户误操作
+        from app.widgets.common_dialogs import ConfirmDialog
 
-        # 2) 重新分配 agent + join（已有的活跃窗口立即 join；新窗口延后 join）
-        results: List[str] = []
-        reassign_pairs: List[tuple] = []  # (window, agent_name)
-        for i, agent_name in enumerate(agents_needed):
-            if i >= len(active_windows):
-                results.append(f"  {agent_name}: ⚠ 窗口不足（模板第 {i + 1} 项未分配）")
-                continue
-            win = active_windows[i]
-            wid = getattr(win, "_window_id", "?")
-            reassign_pairs.append((win, agent_name))
-            results.append(f"  {agent_name}@{wid}")
+        _confirmed: list[bool] = [False]
 
-        # 当前窗口立即 join（确保用户立即看到反馈）
-        # 注意：不要再调 leave_team()，否则会 rmtree 销毁该窗口 mailbox 目录（含未读任务邮件）。
-        # join_team 内部是覆盖式赋值（members[wid]={...}），不会清空邮箱文件。
-        tm_mgr = self._get_team_manager()
+        def _on_load_confirm():
+            _confirmed[0] = True
+
+        _dialog = ConfirmDialog(
+            title="加载团队模板",
+            content=(
+                f"确定要加载模板「{name}」吗？\n"
+                f"将为模板的 {needed_count} 个角色各新建一个全新窗口并加入团队，已有窗口不受影响。"
+            ),
+            confirm_text="确认",
+            cancel_text="取消",
+            parent=self,
+        )
+        _dialog.confirmed.connect(_on_load_confirm)
+        _dialog.exec_()
+        if not _confirmed[0]:
+            return
 
         # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
+        tm_mgr = self._get_team_manager()
         tm_mgr.set_template(
             {
                 "name": template.template_name,
                 "description": template.description,
-                "agents": [
-                    {"agent_name": a.agent_name, "description": a.description} for a in template.agents
-                ],
+                "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
             }
         )
 
-        for win, agent_name in reassign_pairs:
+        # 1) 为模板的每个角色新建一个全新空白窗口（不复制任何已有窗口的上下文/会话）
+        new_windows: List["OpenAIChatToolWindow"] = []
+        for agent_name in agents_needed:
             try:
-                if win is self:
-                    # 当前窗口：同步切换 + 注入 agent 工具权限 + join + UI 刷新（与 _do_join_team 路径一致）
-                    self._on_agent_changed(agent_name)
-                    self._apply_agent_command_permissions(agent_name)
-                    tm_mgr.join_team(window_id=self._window_id, agent_name=agent_name)
-                    self._team_agent_name = agent_name
-                    self._refresh_team_ui(agent_name)
-                    self._sync_active_windows_to_team_manager()
-                    self._start_team_watcher()
-                else:
-                    # 其他已有窗口：同步切换 + 注入 agent 工具权限 + join（不刷自己的 UI，避免互相干扰）
-                    if hasattr(win, "_on_agent_changed"):
-                        win._on_agent_changed(agent_name)
-                    if hasattr(win, "_apply_agent_command_permissions"):
-                        win._apply_agent_command_permissions(agent_name)
-                    win._team_agent_name = agent_name
-                    tm_mgr.join_team(window_id=getattr(win, "_window_id", ""), agent_name=agent_name)
-                    if hasattr(win, "_refresh_team_ui"):
-                        try:
-                            win._refresh_team_ui(agent_name)
-                        except Exception:
-                            pass
-                    if hasattr(win, "_start_team_watcher"):
-                        try:
-                            win._start_team_watcher()
-                        except Exception:
-                            pass
+                win = self._create_fresh_window()
+                if win is not None:
+                    new_windows.append(win)
             except Exception as e:  # noqa: BLE001
-                logger.error(f"[_handle_team_load] 分配 {agent_name} 失败: {e}")
-                results.append(f"  ({agent_name}: ⚠ {e})")
+                logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
 
-        # 新窗口延后 join（确保 backend.agent_manager 已初始化）
-        for win in new_windows:
-            agent_name = None
-            # 找到 template 中分配给这个新窗口的位置
-            try:
-                idx = active_windows.index(win)
-            except ValueError:
-                idx = -1
-            if 0 <= idx < len(agents_needed):
-                agent_name = agents_needed[idx]
-            if not agent_name:
-                continue
+        # 2) 新窗口延后 join（确保 backend.agent_manager 已初始化）
+        results: List[str] = []
+        for i, win in enumerate(new_windows):
+            if i >= len(agents_needed):
+                break
+            agent_name = agents_needed[i]
             wid = getattr(win, "_window_id", "?")
+            results.append(f"  {agent_name}@{wid}")
             QTimer.singleShot(
                 self._TEMPLATE_JOIN_DELAY_MS,
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
             )
 
-        # 3) 选中已有窗口 + 初始化延迟计数
+        # 3) 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
         self._pending_arrange_count = len(new_windows)
-        try:
-            from app.tray_manager import TrayManager
-
-            tm_tray = TrayManager.get_instance()
-            tm_tray.deselect_all()
-            for win, _ in reassign_pairs:
-                # 已有窗口立即选中，新窗口在 join 完成后再选
-                if win not in new_windows:
-                    dialog = win.window() if hasattr(win, "window") else win
-                    if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
-                        tm_tray._select_window(dialog)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[_handle_team_load] 窗口选中失败: {e}")
-
-        # 新窗口没延迟任务 → 立即排列（纯已有窗口场景）
         if self._pending_arrange_count == 0:
             self._do_team_window_arrange()
 
         # 4) 反馈
         InfoBar.success(
             f"模板已应用: {name}",
-            f"已分配 {len(reassign_pairs)} 个角色:\n"
+            f"已新建 {len(new_windows)} 个窗口:\n"
             + "\n".join(results[:8])
             + (f"\n  ... 共 {len(results)} 项" if len(results) > 8 else ""),
             parent=self,
@@ -4567,24 +4497,25 @@ class OpenAIChatToolWindow(ToolWindow):
     def _refresh_team_ui(self, agent_name: str = "", is_team: bool = True):
         """刷新团队模式下的 UI
 
-        - 更新窗口标题
+        - 更新窗口标题（保持会话标题，角色名只进胶囊/边框颜色，不覆盖标题）
         - 更新窗口边框样式
         """
+        # 标题始终使用会话标题（让 Windows 任务栏能区分各窗口；
+        # 团队模式下角色名通过 Tab 胶囊 / 窗口边框颜色标识，不覆盖标题）
+        session = self.session_manager.get_current_session() if self.session_manager else None
+        if session:
+            title = session.topic_summary or session.name or "飘狐"
+        else:
+            title = "飘狐"
+
         if is_team and agent_name:
-            # 团队模式：标题只显示 agent 名称
-            title = agent_name
-            # 窗口边框 + 标题字体颜色：根据 agent 生成辨识色
+            # 团队模式：窗口边框 + 标题字体颜色：根据 agent 生成辨识色
             color = self._agent_to_color(agent_name)
             self._set_dialog_border(color)
             if self._title_bar:
                 self._title_bar.set_title_color(color)
         else:
-            # 独立模式：使用会话标题（让 Windows 任务栏能区分各窗口）
-            session = self.session_manager.get_current_session() if self.session_manager else None
-            if session:
-                title = session.topic_summary or session.name or "飘狐"
-            else:
-                title = "飘狐"
+            # 独立模式：恢复默认边框与字体颜色
             self._set_dialog_border("none")
             # 恢复默认字体颜色：清除行内颜色样式 + 刷新标题栏样式
             if self._title_bar:
@@ -4618,11 +4549,9 @@ class OpenAIChatToolWindow(ToolWindow):
         当会话标题变更（用户重命名 / 主题摘要生成 / 切换会话）时调用，
         确保每个窗口在 Windows 任务栏右键菜单中显示不同的会话标题。
 
-        团队模式下窗口标题由 _refresh_team_ui 管理（显示 agent 名称），
-        此处跳过以避免覆盖。
+        团队模式下窗口标题同样保持会话标题（角色名只进胶囊/边框颜色），
+        因此此处不再跳过。
         """
-        if self._team_agent_name:
-            return
         session = self.session_manager.get_current_session() if self.session_manager else None
         if not session:
             return
