@@ -1123,6 +1123,11 @@ class TabPanel(QWidget):
         self._items.append(item)
         self._item_team[idx] = ""
 
+        # 重建视觉布局：保证新独立 tab 归位（在已有 team 容器之前），
+        # 当已有 team 容器时 insertWidget(idx) 会把新 tab 插到容器之后，
+        # 与"独立区在上"规则冲突。_rebuild_team_layout 有快照保护，开销小。
+        self._rebuild_team_layout()
+
         # 如果这是第一个 Tab，自动选中
         if len(self._items) == 1:
             self.set_active_index(0)
@@ -1168,11 +1173,14 @@ class TabPanel(QWidget):
         return grp
 
     def _apply_team_group_style(self, grp: "QFrame"):
-        """应用团队分组框样式：细边框 + 透明背景 + 圆角，视觉清晰但不喧宾夺主"""
+        """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主"""
         Colors.refresh()
+        # 注意：Colors.HOVER_BG = "rgba(255, 255, 255, 0.08)" 不含 {alpha} 占位符，
+        # .format(alpha=N) 是空操作（alpha 始终是字面 0.08），背景会过透明。
+        # 用 CARD_BG（"rgba(33, 33, 38, {alpha})"，含占位符）正确代入 alpha。
         grp.setStyleSheet(f"""
             #teamGroup {{
-                background: {Colors.HOVER_BG.format(alpha=40)};
+                background: {Colors.CARD_BG.format(alpha=40)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 margin: 2px 0;
@@ -1199,7 +1207,15 @@ class TabPanel(QWidget):
 
         实现：将所有现有 widget 从 _list_layout 移除，按规则重新 insert。
         末尾的 stretch 始终在最末。
+
+        优化：当 _item_team 与上次构建快照一致且 _items 数量未变时直接 return，
+        避免 add_tab/remove_tab 反复触发时的冗余重建。
         """
+        # 快照对比：_item_team 内容 + _items 数量未变 → 跳过
+        snapshot = (tuple(sorted(self._item_team.items())), len(self._items))
+        if getattr(self, "_layout_snapshot", None) == snapshot:
+            return
+        self._layout_snapshot = snapshot
         # 取出末尾 stretch（addStretch 创建的 QSpacerItem）
         last_item = self._list_layout.takeAt(self._list_layout.count() - 1)
         # 清空布局（移除所有 widget 但不 delete；widget 仍由 _items 持有）
@@ -1263,6 +1279,10 @@ class TabPanel(QWidget):
             # 若被移除 tab 所在 team 已空，移除 group 容器
             if old_team:
                 self._maybe_remove_empty_group(old_team)
+
+            # 重建视觉布局：removeWidget 仅脱绑 widget，不重新排序，
+            # 删除前部独立 tab 后剩余独立 tab 会停留在 team 容器之后。
+            self._rebuild_team_layout()
 
             # 更新选中态
             if self._active_index == index:

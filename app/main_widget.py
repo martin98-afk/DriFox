@@ -4541,8 +4541,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None:
                     _tm.refresh_capsule_for_window(self)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[_refresh_team_ui] 同步 Tab 胶囊/分组跳过: {e}")
 
     def _sync_dialog_title(self):
         """同步对话框窗口标题为当前会话标题，供 Windows 任务栏区分各窗口
