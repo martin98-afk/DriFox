@@ -35,6 +35,11 @@ class ContainerType(Enum):
 # - 仅同容器互斥（同一侧一次显示一张卡片）
 # - 不参与系统卡片的跨容器压制（打开设置卡片不会关掉左右停靠面板）
 # - 不被 question 卡片强制关闭
+#
+# BOTTOM 在 Tab 模式下通过 mark_coexist_containers() 加入共存集合，
+# 与 LEFT/RIGHT 共存（TabManagerWindow._setup_ui 中配置）。
+# 覆盖层（TOP）通过 QStackedWidget 仅替换对话区，与 LEFT/RIGHT/BOTTOM
+# 无互斥关系：四向区域可同时存在、互不关闭。
 DOCK_CONTAINER_TYPES = frozenset({ContainerType.LEFT, ContainerType.RIGHT})
 
 
@@ -96,6 +101,9 @@ class CardManager:
         #   }
         # }
         self._window_data: Dict[str, Dict[str, Any]] = {}
+        # 共存容器：同一窗口内仅同容器互斥、不跨容器互斥的容器类型集合
+        # （如 Tab 模式下 LEFT/RIGHT/BOTTOM 可同时显示、互不关闭）
+        self._coexist_containers: Dict[str, "frozenset[ContainerType]"] = {}
 
     def _ensure_window_initialized(self, window_id: str):
         """确保窗口数据已初始化"""
@@ -111,6 +119,20 @@ class CardManager:
                 "suppressed_by_others": set(),  # 被其他卡片压制的 card_id 集合
             }
 
+    def mark_coexist_containers(self, window_id: str, containers: "frozenset[ContainerType]"):
+        """标记指定窗口中可共存的容器类型
+
+        共存容器之间仅同容器互斥（同一侧一次显示一张卡片），不同容器可同时显示。
+        覆盖层（TOP 容器）与共存容器无互斥关系：四向区域可同时存在、互不关闭。
+        覆盖层通过 QStackedWidget 仅替换对话区，LEFT/RIGHT/BOTTOM 不受影响。
+
+        Args:
+            window_id: 窗口标识
+            containers: 共存容器类型集合（如 frozenset({LEFT, RIGHT, BOTTOM})）
+        """
+        self._ensure_window_initialized(window_id)
+        self._coexist_containers[window_id] = containers
+
     def _ensure_state_initialized(self):
         """兼容旧代码"""
         pass
@@ -123,6 +145,7 @@ class CardManager:
         """注销窗口及其所有卡片数据（窗口关闭时调用）"""
         if window_id in self._window_data:
             del self._window_data[window_id]
+        self._coexist_containers.pop(window_id, None)
 
     def register_card(
         self,
@@ -211,9 +234,11 @@ class CardManager:
         if win_data["visible_cards"].get(container_type) == card_id:
             return
 
-        # ── 停靠区卡片（LEFT/RIGHT）：独立于系统卡片压制体系 ──
+        # ── 共存 / 停靠区卡片（LEFT/RIGHT/BOTTOM）：独立于系统卡片压制体系 ──
         # 仅同容器互斥，不受 question / 系统卡片 / 优先卡片影响
-        if container_type in DOCK_CONTAINER_TYPES:
+        # 与覆盖层（TOP）无互斥关系，四向区域可同时存在
+        coexist_cts = self._coexist_containers.get(window_id, frozenset())
+        if container_type in DOCK_CONTAINER_TYPES or container_type in coexist_cts:
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             try:
                 if hasattr(card_widget, "show_card"):
@@ -244,14 +269,17 @@ class CardManager:
                         return
 
         # 系统卡片：窗口内互斥（隐藏所有其他系统卡片）
+        # 注意：覆盖层（TOP 系统卡片）打开时不关闭共存容器（LEFT/RIGHT/BOTTOM）
+        # 的卡片，仅通过 QStackedWidget 视觉覆盖
         if card_id in win_data["system_cards"]:
-            self._hide_system_cards(window_id, exclude_card_id=card_id)
+            self._hide_system_cards(window_id, exclude_card_id=card_id, exclude_containers=coexist_cts)
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
             # 系统卡片激活时，隐藏所有可见的非系统卡片（跨容器），
             # 例如 BOTTOM 容器的 command/file_mention 应随 TOP 容器 settings 打开而关闭
-            # 停靠区（LEFT/RIGHT）豁免：左右停靠面板不随系统卡片关闭
+            # 停靠区（LEFT/RIGHT）与共存容器（BOTTOM）豁免：
+            # 不随系统卡片关闭非系统卡片
             for ct in ContainerType:
-                if ct in DOCK_CONTAINER_TYPES:
+                if ct in DOCK_CONTAINER_TYPES or ct in coexist_cts:
                     continue
                 vid = win_data["visible_cards"].get(ct)
                 if vid and vid not in win_data["system_cards"]:
@@ -403,21 +431,35 @@ class CardManager:
                     win_data["visible_cards"][container_type] = None
             return True
 
-    def _hide_system_cards(self, window_id: str, exclude_card_id: str = None):
-        """隐藏窗口内所有系统卡片"""
+    def _hide_system_cards(
+        self, window_id: str, exclude_card_id: str = None, exclude_containers: "frozenset[ContainerType]" = None
+    ):
+        """隐藏窗口内所有系统卡片
+
+        Args:
+            exclude_card_id: 不隐藏的卡片 ID
+            exclude_containers: 不隐藏这些容器中的系统卡片（如共存容器 LEFT/RIGHT/BOTTOM）
+        """
         if window_id not in self._window_data:
             return
         win_data = self._window_data[window_id]
         for card_id in list(win_data["system_cards"]):
-            if card_id != exclude_card_id and self.is_card_visible(card_id, window_id):
+            if card_id == exclude_card_id:
+                continue
+            if exclude_containers is not None:
+                ct = win_data["containers"].get(card_id)
+                if ct in exclude_containers:
+                    continue
+            if self.is_card_visible(card_id, window_id):
                 self.hide_card(card_id, window_id)
 
     def _hide_all_cards(self, window_id: str):
-        """隐藏窗口内所有卡片（停靠区 LEFT/RIGHT 豁免）"""
+        """隐藏窗口内所有卡片（停靠区 LEFT/RIGHT 与共存容器豁免）"""
         if window_id not in self._window_data:
             return
+        coexist_cts = self._coexist_containers.get(window_id, frozenset())
         for container_type in ContainerType:
-            if container_type in DOCK_CONTAINER_TYPES:
+            if container_type in DOCK_CONTAINER_TYPES or container_type in coexist_cts:
                 continue
             self._hide_same_container_cards(window_id, container_type)
 

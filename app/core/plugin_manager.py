@@ -48,12 +48,14 @@ from loguru import logger
 # 插件信息数据类
 # ============================================================
 
+
 @dataclass
 class PluginInfo:
     """插件信息"""
-    name: str                  # 插件唯一标识（目录名）
-    manifest: dict             # 原始清单数据
-    path: Path                 # 插件根目录
+
+    name: str  # 插件唯一标识（目录名）
+    manifest: dict  # 原始清单数据
+    path: Path  # 插件根目录
     plugin_type: str = "user"  # "system" | "user"
 
     @property
@@ -118,6 +120,7 @@ class PluginInfo:
 # 插件管理器（单例）
 # ============================================================
 
+
 class PluginManager:
     """
     插件管理器（全局单例）
@@ -172,8 +175,7 @@ class PluginManager:
         if app_data_dir:
             self._discover_user_plugins(app_data_dir)
 
-        logger.info(f"[PluginManager] Loaded {len(self._plugins)} plugins: "
-                     f"{', '.join(self._plugins.keys())}")
+        logger.info(f"[PluginManager] Loaded {len(self._plugins)} plugins: {', '.join(self._plugins.keys())}")
         self._initialized = True
 
         # 自动从 Settings 恢复已启用状态
@@ -183,6 +185,7 @@ class PluginManager:
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用"""
         try:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             saved = cfg.enabled_plugins.value or []
             saved_set = set(saved)
@@ -190,7 +193,7 @@ class PluginManager:
                 if name not in saved_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def reset(self):
@@ -284,6 +287,8 @@ class PluginManager:
             self._restore_enabled_from_settings()
 
         logger.info(f"[PluginManager] Rescan done: added={len(added_names)}, removed={len(removed_names)}")
+        # MCP 配置可能因插件增删而变更，失效缓存（列表刷新/连接清理依赖最新数据）
+        self.invalidate_mcp_cache()
         return result
 
     def rescan_plugin(self, name: str):
@@ -302,12 +307,16 @@ class PluginManager:
         if not old:
             # 新插件：在已知插件目录中搜索并注册
             self._discover_and_register(name)
+            # 新插件可能带入 MCP 配置，失效缓存（否则列表/断连逻辑读到旧数据）
+            self.invalidate_mcp_cache()
             return
 
         plugin_dir = old.path
         if not plugin_dir.exists():
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
+            # 插件被移除，其 MCP 配置需从缓存中剔除
+            self.invalidate_mcp_cache()
             return
 
         # 只扫描这一个插件目录，不走全量遍历
@@ -319,6 +328,8 @@ class PluginManager:
             # manifest 已不存在
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
+        # 无论更新还是移除，MCP 配置都可能变化，失效缓存
+        self.invalidate_mcp_cache()
 
     def _discover_and_register(self, name: str) -> Optional[PluginInfo]:
         """在已知插件目录中按名称搜索新插件，找到后扫描并注册到 _plugins
@@ -425,18 +436,20 @@ class PluginManager:
         """从 Settings 读取已启用的插件名集合"""
         try:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             return set(cfg.enabled_plugins.value or [])
-        except (ImportError, Exception):
+        except ImportError, Exception:
             return set(self._plugins.keys())
 
     def _save_enabled_set(self, enabled: set):
         """保存已启用集合到 Settings"""
         try:
             from app.utils.config import Settings
+
             cfg = Settings.get_instance()
             cfg.set(cfg.enabled_plugins, list(enabled), save=True)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     # ============================================================
@@ -499,14 +512,18 @@ class PluginManager:
                 else:
                     manifest["components"] = components
 
-                discovered.append(PluginInfo(
-                    name=plugin_name,
-                    manifest=manifest,
-                    path=item,
-                    plugin_type=plugin_type,
-                ))
-                logger.debug(f"[PluginManager] Discovered plugin: {plugin_name} "
-                            f"(type={plugin_type}, format={manifest_format}) at {item}")
+                discovered.append(
+                    PluginInfo(
+                        name=plugin_name,
+                        manifest=manifest,
+                        path=item,
+                        plugin_type=plugin_type,
+                    )
+                )
+                logger.debug(
+                    f"[PluginManager] Discovered plugin: {plugin_name} "
+                    f"(type={plugin_type}, format={manifest_format}) at {item}"
+                )
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin at {item}: {e}")
 
@@ -572,8 +589,9 @@ class PluginManager:
                 path=plugin_dir,
                 plugin_type=plugin_type,
             )
-            logger.debug(f"[PluginManager] Rescanned plugin: {plugin_name} "
-                        f"(type={plugin_type}, format={manifest_format})")
+            logger.debug(
+                f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"
+            )
             return info
         except Exception as e:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
@@ -594,8 +612,7 @@ class PluginManager:
             if p.name in self._plugins:
                 existing = self._plugins[p.name]
                 if existing.is_system:
-                    logger.info(f"[PluginManager] User plugin '{p.name}' "
-                               f"overrides system plugin")
+                    logger.info(f"[PluginManager] User plugin '{p.name}' overrides system plugin")
             self._plugins[p.name] = p
 
     def _discover_claude_plugins(self):
@@ -614,8 +631,7 @@ class PluginManager:
                 if p.name in self._plugins:
                     existing = self._plugins[p.name]
                     if existing.is_system:
-                        logger.info(f"[PluginManager] Claude plugin '{p.name}' "
-                                   f"overrides system plugin")
+                        logger.info(f"[PluginManager] Claude plugin '{p.name}' overrides system plugin")
                 self._plugins[p.name] = p
 
     # ============================================================
@@ -724,11 +740,13 @@ class PluginManager:
             d = plugin.path / "skills"
             if not d.exists():
                 continue
-            result.append({
-                "path": d,
-                "plugin_name": plugin.name,
-                "is_system": plugin.is_system,
-            })
+            result.append(
+                {
+                    "path": d,
+                    "plugin_name": plugin.name,
+                    "is_system": plugin.is_system,
+                }
+            )
         return result
 
     def get_theme_paths(self) -> List[Path]:
@@ -745,6 +763,7 @@ class PluginManager:
         用户自定义 hooks 存放位置。如果文件不存在则返回路径但不创建。
         """
         from app.utils.utils import get_app_data_dir
+
         return get_app_data_dir() / "plugins" / "user-custom" / "hooks" / "hooks.json"
 
     def get_mcp_configs(self) -> List[Path]:
@@ -1034,9 +1053,7 @@ class PluginManager:
         _MCP_PERSIST_FIELDS = ("command", "args", "env", "url", "headers")
         for key in _MCP_PERSIST_FIELDS:
             if key in server_data:
-                server_data[key] = PluginManager._unexpand_mcp_vars(
-                    server_data[key], source_path.parent
-                )
+                server_data[key] = PluginManager._unexpand_mcp_vars(server_data[key], source_path.parent)
 
         try:
             content = json.loads(source_path.read_text(encoding="utf-8"))
@@ -1056,43 +1073,33 @@ class PluginManager:
                 found = False
                 for entry in mcp_servers["Servers"]:
                     if entry.get("name") == name:
-                        entry.update({
-                            k: v for k, v in server_data.items()
-                            if k not in ("name", "_source", "_builtin")
-                        })
+                        entry.update({k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")})
                         found = True
                         break
                 if not found:
-                    mcp_servers["Servers"].append({
-                        k: v for k, v in server_data.items()
-                        if k not in ("name", "_source", "_builtin")
-                    })
+                    mcp_servers["Servers"].append(
+                        {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
+                    )
             elif "mcpServers" in content:
                 # DriFoxx 格式：{"mcpServers": {"ServerName": {...}}}
                 if name in mcp_servers:
-                    mcp_servers[name].update({
-                        k: v for k, v in server_data.items()
-                        if k not in ("name", "_source", "_builtin")
-                    })
+                    mcp_servers[name].update(
+                        {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
+                    )
                 else:
                     mcp_servers[name] = {
-                        k: v for k, v in server_data.items()
-                        if k not in ("name", "_source", "_builtin")
+                        k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")
                     }
                 content["mcpServers"] = mcp_servers
             else:
                 # .claude-plugin 格式：{"ServerName": {...}}
                 # 服务器直接在根级，content 本身就是 mcp_servers
                 if name in content:
-                    content[name].update({
-                        k: v for k, v in server_data.items()
-                        if k not in ("name", "_source", "_builtin")
-                    })
+                    content[name].update(
+                        {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
+                    )
                 else:
-                    content[name] = {
-                        k: v for k, v in server_data.items()
-                        if k not in ("name", "_source", "_builtin")
-                    }
+                    content[name] = {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
             self.invalidate_mcp_cache()
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")

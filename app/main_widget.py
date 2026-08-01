@@ -7211,6 +7211,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     if mcp_card.consume_hot_reload():
                         logger.debug("[HotReload] MCP server list: suppress self-triggered refresh")
                     else:
+                        # 强制失效 MCP 缓存（rescan 已失效，此处兜底），确保 _refresh 读到最新列表
+                        try:
+                            mcp_card._get_pm().invalidate_mcp_cache()
+                        except Exception:
+                            pass
                         mcp_card._refresh()
                         logger.debug("[HotReload] MCP server list refreshed")
                     break
@@ -7222,6 +7227,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if mcp_card is not None:
                 try:
                     pm = mcp_card._get_pm()
+                    # 直接以 PluginManager 取最新启用列表（不依赖卡片存活），断开孤儿连接
+                    pm.invalidate_mcp_cache()
                     servers = pm.get_mcp_servers()
                     valid_names = {s.get("name", "") for s in servers if s.get("enabled", True)}
                     mgr = mcp_card._get_mcp_manager()
