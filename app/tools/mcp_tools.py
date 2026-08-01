@@ -10,11 +10,13 @@ MCP 工具模块 - 管理 MCP Server 连接、工具发现与调用
 """
 
 import asyncio
+import copy
 import json
 import os
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -130,6 +132,53 @@ def _build_stdio_env(env: Optional[dict]) -> dict:
             if len(s) <= _MAX_ENV_VALUE_LEN:
                 merged[k] = s
     return merged
+
+
+# ── 插件路径占位符兜底解析 ──────────────────────────────
+# PluginManager.get_mcp_servers() 已在读取 .mcp.json 时把 ${CLAUDE_PLUGIN_ROOT} /
+# ${CLAUDE_PLUGIN_DATA} 展开为绝对路径。但以下情况下配置可能以字面量占位符到达
+# 启动层（导致子进程报 "can't open file '${CLAUDE_PLUGIN_ROOT}/...'"）：
+#   1. 运行中的旧进程（热重载前加载的缓存）尚未失效；
+#   2. 用户通过 UI 直接新增含占位符的服务器（未走 get_mcp_servers）；
+#   3. 旧版打包产物（dist）不含展开逻辑。
+# 在真正拉起子进程前做一次兜底解析，保证子进程永远拿到绝对路径。
+def _expand_mcp_placeholder(value: str, plugin_root: Path) -> str:
+    """将单个字符串中的 ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_PLUGIN_DATA} 解析为绝对路径。"""
+    if not isinstance(value, str) or not value:
+        return value
+    root = plugin_root.as_posix()
+    data = (plugin_root / "data").as_posix()
+    normalized = value.replace("\\", "/")
+    # 先替换长的（DATA 含 ROOT 前缀），避免 ${CLAUDE_PLUGIN_ROOT}/data 被部分替换
+    return normalized.replace("${CLAUDE_PLUGIN_DATA}", data).replace("${CLAUDE_PLUGIN_ROOT}", root)
+
+
+def _resolve_plugin_paths(config: dict) -> dict:
+    """启动前兜底解析 config 中的插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增）。
+
+    通过 config["_source"]（.mcp.json 路径）反推 plugin_root；无法反推时原样返回，
+    不影响普通绝对/相对路径配置。
+    """
+    source = config.get("_source", "")
+    plugin_root = None
+    if source and source.endswith(".json"):
+        p = Path(source)
+        if p.parent.exists():
+            plugin_root = p.parent
+    if plugin_root is None:
+        return config
+    cfg = copy.deepcopy(config)
+    cfg["command"] = _expand_mcp_placeholder(cfg.get("command", ""), plugin_root)
+    cfg["args"] = [_expand_mcp_placeholder(a, plugin_root) for a in cfg.get("args", [])]
+    cfg["url"] = _expand_mcp_placeholder(cfg.get("url", ""), plugin_root)
+    cfg["env"] = {
+        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v for k, v in cfg.get("env", {}).items()
+    }
+    cfg["headers"] = {
+        k: _expand_mcp_placeholder(v, plugin_root) if isinstance(v, str) else v
+        for k, v in cfg.get("headers", {}).items()
+    }
+    return cfg
 
 
 class MCPServerConnection:
@@ -641,6 +690,9 @@ class MCPClientManager:
         注意：无论成败，conn 都会登记进 self._connections，
         以便 UI 能读到 CONNECTING / FAILED 状态（而不是一律显示"未连接"）。
         """
+        # 兜底解析插件路径占位符（防御旧缓存 / 热重载竞态 / UI 直增未展开的情况）
+        config = _resolve_plugin_paths(config)
+
         # 如果已存在，先断开（清理旧进程，避免端口/文件锁被占导致新进程起不来）
         with self._lock:
             existing = self._connections.get(name)
