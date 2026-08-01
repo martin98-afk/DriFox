@@ -1,7 +1,24 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.4.10] - 2026-08-01
+
+自上一版本以来的变更 | 提交数：14 · 文件变更：39 · +2192/-403 | 贡献者：dingma
+
+> 重点：**MCP 系统全面强化** — 状态指示灯四态化、事件循环死锁修复、多窗口连接踩踏、超时子进程残留、环境变量继承、mcp 2.0 不兼容兼容、stderr 落盘、超时调整至 90s、缓存 TTL 失效、热重载链路修正、stdio 服务器类型识别、http/sse headers 拉伸、编辑默认 JSON 模式、插件路径占位符兜底；**插件市场** — 源配置迁移至 user-custom、官网跳转、内容查看、字体修复、加载更多按钮跨筛选防御；**CardManager 三向容器共存** — LEFT/RIGHT/BOTTOM 同时启用且系统卡片按可见性切换；**PluginRow 本地目录快捷打开**；**TrayManager 最小化恢复**；**ConfigSyncService 云端单一来源**。
+
+### ✨ 新功能 (New Features)
+
+- **MCP 状态指示灯四态化**: 新增 `MCPState` 状态机（`connecting`/`connected`/`failed`/`disabled`），设置页 MCP 列表左侧圆点按状态着色 —— 启动中**黄色**（全程保持，不再被 3 秒轮询覆盖成灰色）、启动失败**红色**（tooltip 展示子进程真实报错）、已关闭**黑色**（暗色主题降级为深灰保证可辨识）、连接成功**绿色**（tooltip 展示工具数量）。`get_status()` 现在返回注册表中的全部 server（含失败/启动中/已关闭），旧实现只返回连接成功的条目，UI 因此永远读不到"启动中"和"失败"
+- **MCP 超时延长与 per-server 配置**: 默认连接超时从 30s 提升至 90s，适配 `npx`/`uvx` 首次冷启动（联网拉包）；支持 per-server `timeout` 字段；`connect_all` 外层不再叠加 60s 超时（服务器较多时会提前放弃并误报失败）
+- **MCP 启动失败 stderr 落盘**: 子进程 stderr 默认指向 `sys.stderr`，打包后无控制台导致错误信息全部丢失。改为落盘到 `<appdata>/logs/mcp/<name>.stderr.log`，失败时回读尾部内容拼进错误提示与 tooltip
+- **插件市场源配置迁移到 user-custom**: 市场源列表（`sources.json`）从 `.drifox/cache/marketplaces/` 迁移到 `.drifox/plugins/user-custom/marketplaces/`，随 user-custom 插件一起被云端备份/同步；旧版 cache 中的配置首次启动自动迁移（旧文件改名 `.bak` 备份）；拉取的市场数据缓存仍保留在 cache 目录
+- **插件市场条目新增官网跳转**: 每个插件条目右侧新增链接按钮，点击在浏览器中打开插件官网 —— URL 优先取元数据 `homepage`/`website`/`url` 字段，无则回退到 `source` 仓库地址（github repo / git-subdir url / raw 地址自动转为仓库主页）
+- **插件市场已安装条目新增内容查看**: 已安装插件按钮由禁用的「已安装」改为可点击的「查看」（**绿色高亮**，与「安装」默认蓝、「更新」橙色区分），点击弹出 MaskDialogBase 风格详情弹窗，展示该插件包含的组件清单 —— 🧩 技能、🔌 MCP、📁 命令、🤖 Agents、🔗 Hooks、🎨 主题（内容区可滚动，组件名可选中复制）；未安装仍为「安装」，有新版仍为「更新」
+- **PluginRow 本地目录快捷打开**: 已安装插件条目新增 📁 文件夹按钮，点击在系统文件管理器中打开插件所在目录（仅已安装时可见，安装完成后自动出现）；单行渲染失败时不再中断整个批次，错误状态降级展示（160a709e）
+- **MCPTools 占位符兜底展开**: 插件 `.mcp.json` 中 `command`/`args` 的 `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` 占位符，运行时在 `MCPClientManager._connect_single` 真正拉起子进程前调用 `_resolve_plugin_paths()`，以 `config['_source']`（`.mcp.json` 路径）反推 plugin_root 解析为绝对路径 —— 防御旧进程或旧版打包产物残留字面量占位符导致 `python can't open file '...\${CLAUDE_PLUGIN_ROOT}\mcp\server.py'` 错误；已展开的绝对路径不受影响（幂等）。新增回归测试 `TestResolvePluginPaths`（db8d924e）
+- **CardManager 三向容器共存**: LEFT/RIGHT/BOTTOM 三个容器同时启用并存，新增系统卡片可见性更新逻辑，按容器位置独立管理（fef27d20）
+- **MCP 缓存失效机制**: `PluginManager.rescan_plugin()` / `rescan()` 在每次重扫后主动调用 `invalidate_mcp_cache()`；热重载处理器在刷新/断连前再兜底失效一次（直接以 `PluginManager` 取最新列表，不依赖卡片存活）。新增回归测试 `tests/test_plugin_manager_mcp_cache.py`
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -10,39 +27,26 @@ All notable changes to this project will be documented in this file.
 - **MCP 超时后子进程残留**: `_connect_single` 超时仅 `task.cancel()` 就返回，不等待回收，且失败记录不入 `_connections`，导致下次连接同名 server 时不会清理旧进程 —— 残留进程占住端口/文件锁使新进程起不来。改为超时后等待 Task 完全退出，并保留失败记录供下次连接前清理
 - **MCP 子进程环境变量丢失**: stdio 连接直接把用户 `env` 传给 SDK，而 SDK 仅继承 `DEFAULT_INHERITED_ENV_VARS`（PATH/APPDATA 等十余个），丢掉 `HTTP_PROXY`/`HTTPS_PROXY`/`NODE_EXTRA_CA_CERTS`/npm 镜像等变量，导致 `npx`/`uvx` 拉包失败后超时。新增 `_build_stdio_env()` 显式继承完整父进程环境（过滤 shell 函数导出）；同时丢弃超过 Windows 单变量 32766 字符上限的超长变量（宿主注入的 `ACC_PRODUCT_CONFIG_V3` 等），否则 `subprocess.Popen` 会直接抛 `ValueError: the environment variable is longer than 32767 characters`，使 stdio 子进程创建失败、服务起不来
 - **MCP 服务端 mcp 2.0 不兼容（MiniMax 启动即崩）**: `minimax-coding-plan-mcp` 0.0.4 用 `from mcp.server.fastmcp import FastMCP`，但其依赖只写下限 `mcp>=1.6.0` 未锁上界，uvx 拉到最新的 2.0.0 后该模块已被移除 → `ModuleNotFoundError` → 子进程启动即崩、stdio 管道关闭报 `Connection closed`。在 `.mcp.json` 的启动参数加 `--with "mcp<2"` 将 mcp 锁在 1.x（含 `fastmcp`），已对 system 默认与 user-custom/pre_bind 配置同步修改（其它 uvx 启动的 MCP server 若用旧 `fastmcp` API，遇到 mcp 2.0 会同样崩，需同样加 `--with "mcp<2"`）
-- **MCP 启动失败无诊断信息**: 子进程 stderr 默认指向 `sys.stderr`，打包后无控制台导致错误信息全部丢失。改为落盘到 `<appdata>/logs/mcp/<name>.stderr.log`，失败时回读尾部内容拼进错误提示与 tooltip
-- **MCP 连接超时过短**: 默认 30s 对 `npx`/`uvx` 首次冷启动（联网拉包）经常不够，改为 90s 并支持 per-server `timeout` 配置；`connect_all` 外层不再叠加 60s 超时（服务器较多时会提前放弃并误报失败）
 - **MCP 热重载后列表行不刷新（计数更新、列表不更新）**: `_on_plugin_hot_reload` 仅当 `result['mcp']` 为真才调用 `MCPListSettingCard._refresh()`。但 `PluginManager.rescan_plugin` 在【每次】插件热重载时都会失效 MCP 缓存（`invalidate_mcp_cache`），MCP 列表头部的 `x/x` 计数由 3 秒定时器读取新缓存会自动更新，而列表行（仅由 `_refresh()` 重建）在触发重载的并非 `.mcp.json`（例如插件 Python 代码变更被归类到其它 component）时便残留旧数据。改为只要发生了插件重载（任一组件标志为真）就刷新一次 MCP 列表（仍尊重自触发抑制，避免开关时整卡闪烁）
-- **MCP 编辑卡 http 类型 headers 不拉伸**: 类型为 `http`/`sse` 时，headers 输入框原固定 `maxHeight=100` 且行不可拉伸。现改为该类型下 header 行 `setStretchFactor=1`、输入框 `verticalSizePolicy=Expanding`、取消 100px 上限，拉伸填满剩余纵向空间；切回 `stdio` 时恢复约束
+- **MCP 热重载后列表仍不刷新（抑制标记卡死）**: 上一轮放宽 `result['mcp']` 触发条件后仍无效的根因是 `MCPListSettingCard._suppress_hot_reload` 是布尔标记——全局开关写入的是 `settings`（不触发插件热重载），导致标记永久停在 `True`，把后续所有热重载的列表刷新全部吞掉（现象：头部 `x/x` 计数更新、列表行不更新，因为计数由独立 3 秒定时器读取已失效的缓存）。改为带时间戳的自动过期抑制（窗口 3s > watchfiles 的 2s 防抖）：自触发刷新在窗口内仍被正确抑制，窗口过后自动失效，彻底避免卡死
+- **MCP 开关整卡重建（性能）**: 开关 MCP 服务器/全局开关时，`serversChanged` 信号经 GlobalCardController 无条件触发 `MCPListSettingCard._refresh()` 全量重建（删行+重建+processEvents+高度重算），叠加连接结果回调与多窗口热重载广播对共享卡片的重复刷新，一次开关最多触发 3 次整卡重建。改为：开关操作仅做行级更新（`row.set_enabled`/`set_status`），连接结果仅刷状态灯，增删改在操作点自行 `_refresh()`，热重载 MCP 广播对全局唯一共享卡片只刷新一次；断开 `serversChanged → _on_mcp_servers_toggled` 全量刷新链路
+- **MCP 编辑卡 http/sse headers 不拉伸**: 类型为 `http`/`sse` 时，headers 输入框原固定 `maxHeight=100` 且行不可拉伸。现改为该类型下 header 行 `setStretchFactor=1`、输入框 `verticalSizePolicy=Expanding`、取消 100px 上限，拉伸填满剩余纵向空间；切回 `stdio` 时恢复约束
 - **MCP 编辑卡进入编辑默认 JSON 模式**: 编辑已有服务器时默认进入 JSON 模式（`_stack` 显示 JSON 页），因表单字段不易配置；新增服务器仍默认表单模式。同时修复切回表单模式时未重新调用 `_on_type_changed` 导致 http/sse 字段显隐错乱的既有 bug（切换后 `url`/`headers` 不显示或 `command`/`args` 残留可见）
 - **MCP 编辑卡 stdio 服务器被误判为 sse**: 编辑一个同时带 `url` 字段的 stdio 服务器（模板/复制配置常见残留），切到表单后类型下拉框显示 `sse`。根因：`_build_json_from_data` 对 stdio 省略 `type` 但保留 `url`，而 `_normalize_server_data` 的自动识别规则 `elif "url" in data: type="sse"` 把带 url 的 stdio 误判成 sse。修复识别优先级：有 `command` 即判定为 `stdio`（优先于 `url`），其次 `--transport http/sse`、再次 `url`→`sse`、最后兜底 `stdio`
-- **MCP 热重载后列表仍不刷新（抑制标记卡死）**: 上一轮放宽 `result['mcp']` 触发条件后仍无效的根因是 `MCPListSettingCard._suppress_hot_reload` 是布尔标记——全局开关写入的是 `settings`（不触发插件热重载），导致标记永久停在 `True`，把后续所有热重载的列表刷新全部吞掉（现象：头部 `x/x` 计数更新、列表行不更新，因为计数由独立 3 秒定时器读取已失效的缓存）。改为带时间戳的自动过期抑制（窗口 3s > watchfiles 的 2s 防抖）：自触发刷新在窗口内仍被正确抑制，窗口过后自动失效，彻底避免卡死
 - **插件删除/服务器移除后已启动的 MCP 未断开**: 插件热重载删除插件或 `.mcp.json` 移除服务器后，子进程一直残留运行。新增 `MCPClientManager.disconnect_missing(valid_names)`，并在 `main_widget._on_plugin_hot_reload` 的 MCP 分支刷新列表后调用，断开所有不在「启用服务器列表」中的运行连接（后端删除分支已置 `result['mcp']=True` 以触发此分支）
-
-### ✨ 新功能 (New Features)
-
-- **MCP 状态指示灯四态化**: 新增 `MCPState` 状态机（`connecting`/`connected`/`failed`/`disabled`），设置页 MCP 列表左侧圆点按状态着色 —— 启动中**黄色**（全程保持，不再被 3 秒轮询覆盖成灰色）、启动失败**红色**（tooltip 展示子进程真实报错）、已关闭**黑色**（暗色主题降级为深灰保证可辨识）、连接成功**绿色**（tooltip 展示工具数量）。`get_status()` 现在返回注册表中的全部 server（含失败/启动中/已关闭），旧实现只返回连接成功的条目，UI 因此永远读不到"启动中"和"失败"
-- **插件市场源配置迁移到 user-custom**: 市场源列表（`sources.json`）从 `.drifox/cache/marketplaces/` 迁移到 `.drifox/plugins/user-custom/marketplaces/`，随 user-custom 插件一起被云端备份/同步；旧版 cache 中的配置首次启动自动迁移（旧文件改名 `.bak` 备份）；拉取的市场数据缓存仍保留在 cache 目录
-- **插件市场条目新增官网跳转**: 每个插件条目右侧新增链接按钮，点击在浏览器中打开插件官网 —— URL 优先取元数据 `homepage`/`website`/`url` 字段，无则回退到 `source` 仓库地址（github repo / git-subdir url / raw 地址自动转为仓库主页）
-- **插件市场已安装条目新增内容查看**: 已安装插件按钮由禁用的「已安装」改为可点击的「查看」，点击弹出 MaskDialogBase 风格详情弹窗，展示该插件包含的组件清单 —— 🧩 技能、🔌 MCP、📁 命令、🤖 Agents、🔗 Hooks、🎨 主题（内容区可滚动，组件名可选中复制）；未安装仍为「安装」，有新版仍为「更新」
-
-## [v0.4.10] - 2026-08-01
-
-自上一版本以来的变更 | 提交数：5 · 文件变更：13 · +498/-36 | 贡献者：dingma
-
-> 重点：**欢迎卡片缓存生命周期修正** —— 项目/代理/会话切换时使 `_welcome_card_cache` 失效，避免卡片内容过期；**OpenAIChatToolWindow 快捷键去重** —— 命令重载时清除快捷方式缓存，防止重复注册；**消息卡片右键复制选中文本** —— 右键不再复制全文；**CodeWebViewer 非遮罩对话框处理** —— 防止 WebView 被非遮罩对话框意外隐藏。
-
-### 🐛 问题修复 (Bug Fixes)
-
+- **插件市场 item 字体丢失系统字体**: `_retheme` 对 QPushButton 无条件追加 `font-family: '{ff}'`，上下文未提供字体家族（`ff` 为空）时产生 `font-family: ''` 空值，导致按钮/条目字体异常。改为仅当 `ff` 非空时才追加字体家族，否则保持系统默认字体
+- **插件市场加载更多按钮跨筛选残留/重复插件**: 防御性修复 —— ① 单行渲染失败（异常市场数据，如 `source` 非 dict）不再中断整个批次，避免部分渲染后 `_rendered_count` 未推进导致后续批次从头重复渲染；② `_compute_homepage` 增加 `source` 类型校验；③ `_remove_load_more_button` 删除全部匹配按钮而非仅第一个；④ `_on_load_more` 增加越界防御，已全部加载时只移除按钮不重复渲染
 - **chat-window 欢迎卡片缓存失效**: 项目 / 代理 / 会话变更时使欢迎卡片缓存失效，防止切换到不同上下文后仍展示旧项目/旧代理的欢迎卡片（配合 v0.4.9 的 `_welcome_card_cache` 生命周期管理）
 - **OpenAIChatToolWindow 快捷键去重**: 命令重载时清除快捷方式缓存，防止重复注册导致快捷键触发多次
 - **message-card 右键复制选中文本**: 修复右键点击消息卡片时复制全部内容的问题，改为仅复制用户选中的文本
 - **CodeWebViewer 对话框处理增强**: 修复非遮罩对话框（无 mask）导致 WebView 被意外隐藏的问题，改进对话框显示/隐藏交互
-- **MCP 开关整卡重建（性能）**: 开关 MCP 服务器/全局开关时，`serversChanged` 信号经 GlobalCardController 无条件触发 `MCPListSettingCard._refresh()` 全量重建（删行+重建+processEvents+高度重算），叠加连接结果回调与多窗口热重载广播对共享卡片的重复刷新，一次开关最多触发 3 次整卡重建。改为：开关操作仅做行级更新（`row.set_enabled`/`set_status`），连接结果仅刷状态灯，增删改在操作点自行 `_refresh()`，热重载 MCP 广播对全局唯一共享卡片只刷新一次；断开 `serversChanged → _on_mcp_servers_toggled` 全量刷新链路
+- **TrayManager 最小化窗口状态恢复**: 修复 Windows 上最小化窗口状态恢复异常的问题（4dfc3aaa）
+- **ConfigSyncService 云端单一来源**: 强制 Gitee tokens 以云端为单一来源，避免 refresh_token 漂移导致 401/refresh_token 失效问题（05e7f72e）
 
 ### 🔧 其他 (Chores & Build)
 
 - **版本号升级**: config / installer / README / pyproject 同步更新至 v0.4.10
+- **changelog 增量更新**: v0.4.10 changelog 因 re-release 与 bug 修复多次增补合并
 
 ## [v0.4.9] - 2026-07-31
 
