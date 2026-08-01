@@ -629,6 +629,10 @@ class TabPanel(QWidget):
         super().__init__(parent)
         self._items: List[TabItem] = []
         self._active_index: int = -1
+        # ── 团队分组：_items 保持扁平索引；_item_team 映射 _items[i] → team_id（"" 表示独立）
+        #    _team_groups 缓存 team_id → QFrame 容器（避免反复创建）
+        self._item_team: Dict[int, str] = {}
+        self._team_groups: Dict[str, "QFrame"] = {}
         self._plugin_infos: list[tuple[str, str, str]] = []
         self._system_plugin_layout: Optional[QVBoxLayout] = None
         self._system_plugin_buttons: list[UIPluginRow] = []
@@ -1114,15 +1118,129 @@ class TabPanel(QWidget):
 
         item.mousePressEvent = _on_tab_click
 
-        # 在 stretch 之前插入
+        # 在 stretch 之前插入（独立区，无 team 归属）
         self._list_layout.insertWidget(idx, item)
         self._items.append(item)
+        self._item_team[idx] = ""
 
         # 如果这是第一个 Tab，自动选中
         if len(self._items) == 1:
             self.set_active_index(0)
 
         return idx
+
+    def set_tab_team(self, index: int, team_id: str):
+        """设置指定索引 Tab 的团队归属。
+
+        team_id 为空/None 时移回独立区；否则移入/创建对应 team 容器。
+        _items 保持扁平索引；视觉布局由 _rebuild_team_layout 重建。
+        """
+        if not (0 <= index < len(self._items)):
+            return
+        team_id = team_id or ""
+        old_team = self._item_team.get(index, "")
+        if old_team == team_id:
+            return  # 无变化
+        self._item_team[index] = team_id
+        # 若旧 team 已空，清理容器
+        if old_team and not any(t == old_team for t in self._item_team.values()):
+            self._maybe_remove_empty_group(old_team)
+        # 重建视觉布局（独立区在上，team 容器在下）
+        self._rebuild_team_layout()
+
+    def _get_or_create_team_group(self, team_id: str) -> "QFrame":
+        """获取或创建 team 容器（QFrame + 内部 QVBoxLayout）"""
+        grp = self._team_groups.get(team_id)
+        if grp is not None:
+            return grp
+        from PyQt5.QtWidgets import QVBoxLayout as _QVBL
+
+        grp = QFrame(self._list_widget)
+        grp.setObjectName("teamGroup")
+        grp.setProperty("teamId", team_id)
+        inner = _QVBL(grp)
+        inner.setContentsMargins(6, 4, 6, 4)
+        inner.setSpacing(2)
+        grp.setLayout(inner)
+        grp.layout().setProperty("teamId", team_id)
+        self._apply_team_group_style(grp)
+        self._team_groups[team_id] = grp
+        return grp
+
+    def _apply_team_group_style(self, grp: "QFrame"):
+        """应用团队分组框样式：细边框 + 透明背景 + 圆角，视觉清晰但不喧宾夺主"""
+        Colors.refresh()
+        grp.setStyleSheet(f"""
+            #teamGroup {{
+                background: {Colors.HOVER_BG.format(alpha=40)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                margin: 2px 0;
+            }}
+        """)
+
+    def _maybe_remove_empty_group(self, team_id: str):
+        """若指定 team 容器已无成员，从布局移除并 deleteLater"""
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return
+        # 若还有成员，不删
+        if any(t == team_id for t in self._item_team.values()):
+            return
+        self._list_layout.removeWidget(grp)
+        grp.deleteLater()
+        self._team_groups.pop(team_id, None)
+
+    def _rebuild_team_layout(self):
+        """按当前 _item_team 重建视觉布局：
+
+        顺序：所有独立 TabItem（在最前的 stretch 之前）→ 所有 team 容器
+        （按 _items 中首次出现顺序排列；同 team 的 TabItem 在容器内按 _items 顺序排列）。
+
+        实现：将所有现有 widget 从 _list_layout 移除，按规则重新 insert。
+        末尾的 stretch 始终在最末。
+        """
+        # 取出末尾 stretch（addStretch 创建的 QSpacerItem）
+        last_item = self._list_layout.takeAt(self._list_layout.count() - 1)
+        # 清空布局（移除所有 widget 但不 delete；widget 仍由 _items 持有）
+        while self._list_layout.count() > 0:
+            child = self._list_layout.takeAt(0)
+            w = child.widget() if child is not None else None
+            if w is not None:
+                w.setParent(self._list_widget)  # 仅脱绑布局，不销毁
+
+        # 收集每个 team 的成员（按 _items 顺序）
+        team_order: List[str] = []  # 记录 team 容器插入顺序
+        team_members: Dict[str, List[int]] = {}
+        independent_indices: List[int] = []
+        for i, item in enumerate(self._items):
+            t = self._item_team.get(i, "")
+            if t:
+                if t not in team_members:
+                    team_members[t] = []
+                    team_order.append(t)
+                team_members[t].append(i)
+            else:
+                independent_indices.append(i)
+
+        # 1) 先放独立 TabItem
+        for i in independent_indices:
+            self._list_layout.addWidget(self._items[i])
+
+        # 2) 再放 team 容器（按首次出现顺序）
+        for t in team_order:
+            grp = self._get_or_create_team_group(t)
+            # 清空容器内部旧 widgets（避免重复添加）
+            inner = grp.layout()
+            while inner.count() > 0:
+                inner.takeAt(0)
+            for i in team_members[t]:
+                inner.addWidget(self._items[i])
+            self._list_layout.addWidget(grp)
+
+        # 3) 末尾 stretch
+        if last_item is not None:
+            self._list_layout.addItem(last_item)
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""
@@ -1135,6 +1253,16 @@ class TabPanel(QWidget):
                     self._stop_anim_timer()
             self._list_layout.removeWidget(item)
             item.deleteLater()
+
+            # 清理 team 映射：弹出 index，重建后续索引
+            old_team = self._item_team.pop(index, "")
+            new_mapping: Dict[int, str] = {}
+            for i, t in self._item_team.items():
+                new_mapping[i - 1 if i > index else i] = t
+            self._item_team = new_mapping
+            # 若被移除 tab 所在 team 已空，移除 group 容器
+            if old_team:
+                self._maybe_remove_empty_group(old_team)
 
             # 更新选中态
             if self._active_index == index:
@@ -1266,6 +1394,9 @@ class TabPanel(QWidget):
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
             item.refresh_style()
+        # 同步刷新团队分组框样式（边框/背景色随主题）
+        for grp in self._team_groups.values():
+            self._apply_team_group_style(grp)
         self.update()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:

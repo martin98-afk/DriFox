@@ -804,6 +804,8 @@ class TabManagerWindow(QWidget):
             team_agent = getattr(window, "_team_agent_name", "") or ""
             if team_agent:
                 panel.update_tab_capsule(tab_idx, team_agent)
+            # 同步初始团队分组（窗口加入 Tab 时可能已是团队成员）
+            panel.set_tab_team(tab_idx, team_agent)
 
             # 隐藏空状态页，切换到新窗口
             stack.widget(0).hide()
@@ -825,6 +827,9 @@ class TabManagerWindow(QWidget):
 
         用途：窗口加入/离开团队时立即同步胶囊状态，不依赖 windowTitleChanged
         信号触发（Qt 在标题未变时不发射该信号，导致新建空白窗口加入团队后胶囊不显示）。
+
+        同时同步团队分组（set_tab_team）：胶囊与分组框共同表达团队归属，
+        胶囊显示角色名，分组框圈出同团队多个窗口。
         """
         idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
@@ -834,6 +839,8 @@ class TabManagerWindow(QWidget):
             self._tab_panel.update_tab_capsule(idx, team_agent)
         else:
             self._tab_panel.clear_tab_capsule(idx)
+        # 同步团队分组（team_id 暂用 agent 名占位，多团队时替换为 team_name）
+        self._tab_panel.set_tab_team(idx, team_agent)
 
     def remove_window(self, window):
         """从 Tab 管理器移除窗口"""
