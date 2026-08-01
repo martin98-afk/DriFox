@@ -809,13 +809,15 @@ class TrayManager(QObject):
         # Tab 模式：即使没有独立窗口也要恢复 TabManagerWindow
         if self._tab_manager_window is not None:
             try:
-                if self._tab_manager_window.isVisible():
-                    self._tab_manager_window.activateWindow()
-                    self._tab_manager_window.raise_()
-                else:
+                # ★ 修复：先检查最小化状态。Qt5 在 Windows 上对最小化窗口
+                # isVisible() == True，若仅走可见分支→activateWindow/raise_ 不取消
+                # 最小化，导致"点任务栏图标无法从最小化恢复"的 bug。
+                if self._tab_manager_window.isMinimized():
+                    self._tab_manager_window.showNormal()
+                elif not self._tab_manager_window.isVisible():
                     self._tab_manager_window.show()
-                    self._tab_manager_window.activateWindow()
-                    self._tab_manager_window.raise_()
+                self._tab_manager_window.activateWindow()
+                self._tab_manager_window.raise_()
                 return
             except RuntimeError:
                 # C++ 对象已销毁，重建引用
