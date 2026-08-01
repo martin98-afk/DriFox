@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - **OpenAIChatToolWindow 快捷键去重**: 命令重载时清除快捷方式缓存，防止重复注册导致快捷键触发多次
 - **message-card 右键复制选中文本**: 修复右键点击消息卡片时复制全部内容的问题，改为仅复制用户选中的文本
 - **CodeWebViewer 对话框处理增强**: 修复非遮罩对话框（无 mask）导致 WebView 被意外隐藏的问题，改进对话框显示/隐藏交互
+- **MCP 开关整卡重建（性能）**: 开关 MCP 服务器/全局开关时，`serversChanged` 信号经 GlobalCardController 无条件触发 `MCPListSettingCard._refresh()` 全量重建（删行+重建+processEvents+高度重算），叠加连接结果回调与多窗口热重载广播对共享卡片的重复刷新，一次开关最多触发 3 次整卡重建。改为：开关操作仅做行级更新（`row.set_enabled`/`set_status`），连接结果仅刷状态灯，增删改在操作点自行 `_refresh()`，热重载 MCP 广播对全局唯一共享卡片只刷新一次；断开 `serversChanged → _on_mcp_servers_toggled` 全量刷新链路
 
 ### 🔧 其他 (Chores & Build)
 

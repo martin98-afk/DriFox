@@ -7175,9 +7175,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
-        # MCP 配置变更：广播刷新所有窗口的 MCP 服务器列表
-        # 修复：原代码仅刷新当前窗口，其他窗口仍显示旧的 MCP 列表。
+        # MCP 配置变更：刷新全局 MCP 服务器列表
+        # 注意：settings popup 是全局唯一共享卡片（所有窗口通过 property 访问同一实例），
+        # 且 consume_hot_reload() 的抑制标记是单次消费——若遍历窗口时每个窗口都消费/刷新，
+        # 多窗口下第一个窗口消费掉自触发标记后，其余窗口会重复全量重建列表。
+        # 因此整轮广播只处理一次：自触发（开关操作）→ consume 返回 True → 跳过刷新；
+        # 外部修改 .mcp.json → consume 返回 False → 执行一次 _refresh()。
         if result.get("mcp"):
+            refreshed = False
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
                     continue
@@ -7187,12 +7192,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "mcpListCard"):
                         continue
                     card = win._settings_popup.mcpListCard
-                    # 如果当前是自触发的（开关操作），跳过全量刷新
-                    if not card.consume_hot_reload():
-                        card._refresh()
-                        logger.debug("[HotReload] MCP server list refreshed")
-                    else:
+                    if card.consume_hot_reload():
                         logger.debug("[HotReload] MCP server list: suppress self-triggered refresh")
+                    elif not refreshed:
+                        card._refresh()
+                        refreshed = True
+                        logger.debug("[HotReload] MCP server list refreshed")
+                    break
                 except (RuntimeError, AttributeError) as e:
                     # 多窗口竞态：窗口已被销毁
                     pass

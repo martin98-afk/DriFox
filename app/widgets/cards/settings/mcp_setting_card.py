@@ -839,7 +839,8 @@ class MCPListSettingCard(ExpandSettingCard):
                     duration=5000,
                     position=InfoBarPosition.BOTTOM,
                 )
-        self.serversChanged.emit()
+        # 注意：连接结果不触发全量刷新——状态指示灯已由 _refresh_status_dots() 更新，
+        # token 占用由 3s 状态轮询兜底。全量重建列表会导致开关 MCP 时整卡闪烁。
 
     def _hot_disconnect(self, name: str):
         """后台断开单个服务器"""
@@ -884,7 +885,8 @@ class MCPListSettingCard(ExpandSettingCard):
             self._hot_disconnect_all()
         self._refresh_status_dots()
         self._update_mcp_token_count()
-        self.serversChanged.emit()
+        # 注意：全局开关不触发全量刷新——列表内容未变，行级状态已由上面的
+        # _refresh_status_dots() 更新。全量重建会导致开关时整卡闪烁。
 
     def consume_hot_reload(self) -> bool:
         """检查并消费自触发标记。热重载触发时调用，返回 True 表示本次是自触发的，应跳过刷新"""
@@ -1027,8 +1029,8 @@ class MCPListSettingCard(ExpandSettingCard):
         self._hot_disconnect(name)
         pm = self._get_pm()
         pm.remove_mcp_server(name)
+        # 列表内容已变化，这里自行全量刷新即可（serversChanged 广播已不再触发全量重建）
         self._refresh()
-        self.serversChanged.emit()
 
     def _show_edit_dialog(self, name: str):
         servers = self._get_servers()
@@ -1080,9 +1082,10 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 更新 token 估算
         self._update_mcp_token_count()
-
-        # 通知其他窗口（热更新有 2 秒防抖，这里直接广播加速同步）
-        self.serversChanged.emit()
+        # 注意：开关操作不触发全量刷新——列表内容未变，行级开关/指示灯已就地更新；
+        # 写盘后的跨窗口同步由 .mcp.json 热重载广播负责（_suppress_hot_reload 抑制自触发）。
+        # 此处若 emit serversChanged 会经 GlobalCardController 再触发一次 _refresh() 全量重建，
+        # 导致开关 MCP 时整卡闪烁。
 
     # ── 公开刷新方法（供 settings 弹窗 show 时调用） ──
 
