@@ -329,10 +329,11 @@ class HistoryManager:
 
         # === 轻量列表缓存 ===
         # get_history_list() 的结果缓存，避免每次调用都排序+过滤+重建 dict。
-        # key: project (None=全部), value: (project, [list_of_lightweight_dicts])
+        # key: project (None=全部) 或 ("merge_team", project)（合并模式独立键），
+        # value: [list_of_lightweight_dicts]。
         # 当 _history_sessions 发生变化时置 _cache_dirty = True。
         self._cache_dirty: bool = True
-        self._cached_lightweight: Dict[Optional[str], List[Dict]] = {}
+        self._cached_lightweight: Dict[object, List[Dict]] = {}
 
         # === 异步归档扫描（性能优化）===
         # _archive_meta_cache：file_path → (mtime, info_dict)
@@ -887,7 +888,10 @@ class HistoryManager:
             return False
 
         # 从内存缓存移除
-        self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
+        # 🛡️ 守卫 session_id="unknown"（轻量记录缺失 id 时的兜底值）：
+        # 避免误删多条无 id 会话的内存记录。
+        if session_id != "unknown":
+            self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
         self._mark_cache_dirty()
 
         # 从 SQLite 删除
@@ -1236,19 +1240,33 @@ class HistoryManager:
         sessions = self.get_team_sessions_by_run_id(run_id)
         if not sessions:
             return ""
-        # 懒加载完整会话（含 messages），取消息最后时间（last_time）最早的
-        # 一个——即团队首个产出会话。轻量记录的 last_time 是 updated_at
-        # （保存时刻），同轮保存时区分度不足，须用完整记录的消息时间。
+        # 懒加载完整会话（含 messages），取消息最后时间（messages[-1].timestamp）
+        # 最早的会话——即团队首个产出会话。
+        # ⚠️ 不能依赖轻量记录的 last_time（=updated_at 保存时刻）：同一轮
+        # 团队保存的成员 updated_at 区分度不足，可能选错"最早"成员。
+        # 必须用完整记录的真实消息时间戳参与 min 比较。
         candidates: List[Dict] = []
         for s in sessions:
             session_id = s.get("session_id", "")
-            full = self.get_session_by_session_id(session_id) if session_id else None
+            if not session_id:
+                continue
+            full = self.get_session_by_session_id(session_id)
             if full is None:
                 continue
             candidates.append(full)
         if not candidates:
             return ""
-        earliest = min(candidates, key=lambda s: s.get("last_time") or "")
+
+        def _last_msg_ts(session: Dict) -> str:
+            """取会话最后一条消息的时间戳（兜底 updated_at）。"""
+            messages = session.get("messages") or []
+            if messages:
+                ts = messages[-1].get("timestamp")
+                if ts:
+                    return ts
+            return session.get("updated_at") or session.get("last_time") or ""
+
+        earliest = min(candidates, key=_last_msg_ts)
         for msg in earliest.get("messages", []):
             if msg.get("_hook_event"):
                 continue

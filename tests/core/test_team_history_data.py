@@ -291,3 +291,47 @@ def test_get_team_first_question_empty(hm):
     """无会话 / 无 user 消息时返回空串。"""
     assert hm.get_team_first_question("no-such-run") == ""
     assert hm.get_team_first_question("") == ""
+
+
+def test_get_team_first_question_uses_message_ts_not_updated_at(hm):
+    """I-1 回归：light last_time（updated_at 保存时刻）相同/接近时，
+    首问必须用完整记录的消息时间戳区分最早成员，而非轻量记录 last_time。
+
+    场景：s1 消息时间戳 00:00:01（最早），s2 消息时间戳 00:00:30（更晚）；
+    但两者 updated_at（保存时刻）相同。若误用 updated_at 会选错成员。
+    """
+    import time as _time
+
+    # 直接构造完整记录（不经 HistoryManager.save_session），
+    # updated_at 由 store.save_session 写入（同一秒 → 相同）
+    s1 = _full_session("s1", "a", "首问内容", "2026-01-01 00:00:01", "run-1", "dev", "build")
+    s2 = _full_session("s2", "b", "后续消息", "2026-01-01 00:00:30", "run-1", "dev", "plan")
+    hm._session_store.save_session(s1)
+    hm._session_store.save_session(s2)
+
+    # 轻量记录 last_time 均为空串 → 之前实现会退化；现在必须走消息时间戳
+    hm._history_loaded = True
+    hm._history_sessions = [
+        _light("s1", "a", "", "run-1", "dev", "build"),
+        _light("s2", "b", "", "run-1", "dev", "plan"),
+    ]
+    hm._cache_dirty = True
+
+    assert hm.get_team_first_question("run-1") == "首问内容"
+
+
+def test_get_team_first_question_same_updated_at_distinct_msg_ts(hm):
+    """I-1 补充：updated_at 完全相同（同秒保存）但消息时间戳区分明显。"""
+    s1 = _full_session("s1", "a", "最早", "2026-01-01 00:00:01", "run-1", "dev", "build")
+    s2 = _full_session("s2", "b", "较晚", "2026-01-01 00:00:02", "run-1", "dev", "plan")
+    hm._session_store.save_session(s1)
+    hm._session_store.save_session(s2)
+
+    # 构造相同 updated_at 的轻量记录（模拟同轮保存）
+    light1 = _light("s1", "a", "2026-01-01 00:00:00", "run-1", "dev", "build")
+    light2 = _light("s2", "b", "2026-01-01 00:00:00", "run-1", "dev", "plan")
+    hm._history_loaded = True
+    hm._history_sessions = [light1, light2]
+    hm._cache_dirty = True
+
+    assert hm.get_team_first_question("run-1") == "最早"
