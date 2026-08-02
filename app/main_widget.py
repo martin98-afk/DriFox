@@ -1079,6 +1079,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if sub_agent_mgr:
             sub_agent_mgr.task_started.connect(self._on_sub_agent_task_started)
             sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
+            # ★ T24：子智能体 ask 权限请求 → 主线程弹窗（用户允许/拒绝）
+            sub_agent_mgr.permission_requested.connect(self._on_subagent_permission_requested)
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""
@@ -3882,6 +3884,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
         # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
         self._team_run_id = tm.get_team_run_id()
+        # 应用团队级统一项目（若已设置）：手动加入团队后与团队共享同一项目
+        team_project = tm.get_team_project()
+        if team_project:
+            self._apply_team_project(team_project)
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -4130,6 +4136,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
                     win._team_run_id = team_run_id
                     tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+                    # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
+                    team_project = tm_mgr.get_team_project()
+                    if team_project:
+                        win._apply_team_project(team_project)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
 
@@ -4181,6 +4191,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
             win._team_run_id = tm_mgr.get_team_run_id()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
+            # 应用团队级统一项目（若已设置）：延迟 join 后与团队共享同一项目
+            team_project = tm_mgr.get_team_project()
+            if team_project:
+                win._apply_team_project(team_project)
             if hasattr(win, "_refresh_team_ui"):
                 try:
                     win._refresh_team_ui(agent_name)
@@ -6742,6 +6756,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_history_project = project
         self._history_popup_card.set_current_project(project)
         self._refresh_history_toggle_panel()
+        # 团队模式：历史面板项目切换同样触发团队级同步
+        self._broadcast_team_project(project)
 
     def _on_session_dropped_on_project(self, project: str, session_index: int):
         """将会话拖拽到指定项目"""
@@ -13480,6 +13496,43 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
             )
 
+    def _on_subagent_permission_requested(self, window_id: str, task_id: str, tool_name: str, arguments: dict):
+        """子智能体 ask 权限弹窗（主线程，T24）。
+
+        多窗口隔离：仅本窗口的请求弹窗。用户允许 → respond_permission(True)
+        继续执行；拒绝 → respond_permission(False) 回填失败；关闭弹窗默认拒绝。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if window_id and window_id != self._window_id:
+            return  # 其它窗口的请求，跳过
+        try:
+            args_preview = ""
+            if arguments:
+                try:
+                    args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
+                except Exception:
+                    args_preview = str(arguments)[:200]
+            from PyQt5.QtWidgets import QMessageBox
+
+            box = QMessageBox(self)
+            box.setWindowTitle("子智能体工具权限请求")
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"子智能体请求使用工具「{tool_name}」\n\n参数: {args_preview}\n\n是否允许？")
+            allow_btn = box.addButton("允许", QMessageBox.AcceptRole)
+            deny_btn = box.addButton("拒绝", QMessageBox.RejectRole)
+            box.setDefaultButton(deny_btn)
+            box.setEscapeButton(deny_btn)
+            box.exec_()
+            allow = box.clickedButton() is allow_btn
+            self.backend.sub_agent_manager.respond_permission(task_id, allow)
+        except Exception as e:
+            logger.warning(f"[SubAgent] 权限弹窗失败: {e}")
+            try:
+                self.backend.sub_agent_manager.respond_permission(task_id, False)
+            except Exception:
+                pass
+
     def _on_sub_agent_token_usage(self, task_id: str, prompt_tokens: int, completion_tokens: int, total_tokens: int):
         """子智能体 token 用量更新"""
         if getattr(self, "_is_destroyed", False):
@@ -15317,6 +15370,93 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[MainWidget] 获取项目根目录异常: {e}")
         return root_dir_map
 
+    def _apply_team_project(self, project: str):
+        """团队级项目同步接收方：应用同团队其他成员广播的项目切换
+
+        复用 _on_project_selected 的公共段（_current_project / backend /
+        tool_executor / _project_label / 分支样式 / 记忆卡片 / 历史面板 /
+        Tab 图标），但跳过：
+        - _create_new_session()（避免连环新建会话）
+        - cfg.current_project 全局写入（全局默认项目仅由发送方写）
+        - hide_card("project_selector")（关闭项目卡片仅针对发送方）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._current_project == project:
+            return
+        self._current_project = project
+        if self.backend:
+            self.backend._current_project = project
+            if self.backend.tool_executor:
+                self.backend.tool_executor.set_current_project(project)
+        if getattr(self, "_project_label", None):
+            self._project_label.setText(project)
+        self._refresh_project_branch_style()
+        self._update_branch()
+        # 失效欢迎卡片缓存（recent_sessions/top_by_count 按 _current_project 过滤）
+        self._invalidate_welcome_card()
+        # 刷新记忆卡片（与 _on_project_selected 一致的 workdir 预计算）
+        workdir = self._current_workdir.get(project)
+        if workdir is None and self.backend and self.backend.memory_manager:
+            workdir = self.backend.memory_manager.get_working_directory(project)
+            if workdir:
+                self._current_workdir[project] = workdir
+        if getattr(self, "_memory_card_popup", None):
+            self._memory_card_popup.set_project(project, workdir=workdir)
+            self._sync_working_directory()
+        # 刷新历史面板（切换项目过滤）
+        self._current_history_project = project
+        if getattr(self, "_history_popup_card", None):
+            self._history_popup_card.set_current_project(project)
+            self._refresh_history_toggle_panel()
+        # Tab 模式下同步更新 Tab 图标
+        if self.cfg.enable_tab_manager.value:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
+                tm = TabManagerWindow.get_instance()
+                if tm and self in tm._windows:
+                    idx = tm._windows.index(self)
+                    _update_tab_icon(idx, project)
+            except Exception:
+                pass
+
+    def _broadcast_team_project(self, project: str):
+        """团队内项目切换广播：写团队级 project + 同团队其他成员同步应用
+
+        防循环（风险点 1）：仅遍历其他窗口（不含发送方），且接收方
+        _apply_team_project 内部有「值相等直接跳过」防御。
+        按团队过滤（风险点 3）：仅 _team_agent_name 非空、is_team_member、
+        且同 _team_run_id/_team_name（同一次团队运行）的窗口才应用，
+        不同团队互不影响，非团队成员不受影响。
+        """
+        if not getattr(self, "_team_agent_name", ""):
+            return
+        from app.core.team_manager import TeamManager
+
+        tm_mgr = TeamManager.get_instance()
+        # 写团队级统一项目（team.json 顶层，与 run_id 平级）
+        tm_mgr.set_team_project(project)
+        # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
+        my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
+        for win in type(self)._instances:
+            if win is self or getattr(win, "_is_destroyed", False):
+                continue
+            if not getattr(win, "_team_agent_name", ""):
+                continue
+            try:
+                if not tm_mgr.is_team_member(win._window_id):
+                    continue
+            except Exception:
+                continue
+            win_key = getattr(win, "_team_run_id", "") or getattr(win, "_team_name", "") or TeamManager.DEFAULT_TEAM
+            if win_key != my_key:
+                continue
+            try:
+                win._apply_team_project(project)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[TeamProject] 同步项目到窗口失败: {e}")
+
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
         self._current_project = project
@@ -15358,6 +15498,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._create_new_session()
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
+
+        # 团队模式：一人改项目全员同步（写团队 project + 广播同团队其他窗口）。
+        # ★ 必须在 Tab 图标更新之前执行：广播先写入团队级 project，发送方自身的
+        # _update_tab_icon 团队分支才能读到新值（否则 header 显示旧团队项目——
+        # review #11 问题 1：发送方 header 图标滞后）
+        self._broadcast_team_project(project)
 
         # Tab 模式下同步更新 Tab 图标
         if self.cfg.enable_tab_manager.value:
@@ -15441,6 +15587,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏项目选择卡片
         self._card_manager.hide_card("project_selector", self._window_id)
 
+        # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
+        self._broadcast_team_project(project)
+
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
         ## 触发警示动画
@@ -15475,6 +15624,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_current_project(default_project)
             self._create_new_session()
+            # 团队模式：归档当前项目切回默认项目，同样触发团队级同步
+            self._broadcast_team_project(default_project)
         else:
             self._current_history_project = self._current_project
             self._refresh_history_toggle_panel()

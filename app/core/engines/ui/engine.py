@@ -215,6 +215,11 @@ class UIEngine(BaseEngine):
         if not is_enabled:
             logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}")
             return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
+        # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（跳过模板 deny）
+        # 与子智能体 _check_ui_tool_permission 语义一致："UI 覆盖模板"
+        if controller is not None and controller.is_user_modified(check_name):
+            logger.debug(f"[ToolToggle] tool={tool_name} 用户显式开启，放行（覆盖模板）")
+            return "allow"
         # ========== 工具开关过滤结束 ==========
 
         agent_manager = self._get_agent_manager()

@@ -375,6 +375,31 @@ class TeamManager:
             data = self._get_team_data(team_name)
             return data.get("run_id", "") or ""
 
+    # ── 团队级统一项目（一人改项目全员同步）──
+
+    def set_team_project(self, project: str, team_name: str = DEFAULT_TEAM):
+        """设置团队级统一项目（写入 team.json **顶层**，与 run_id 平级）
+
+        项目是团队共享状态：任一成员切换项目时写入，供同团队其他成员
+        同步应用与恢复路径读取。放顶层而非成员级——_cleanup_stale_members
+        清理失效成员时只动 members，不会丢失 project。
+
+        Args:
+            project: 项目名（空串表示清除）
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            if data.get("project") == project:
+                return
+            data["project"] = project
+            self._save_team_data(team_name)
+
+    def get_team_project(self, team_name: str = DEFAULT_TEAM) -> str:
+        """获取团队级统一项目（未设置 / 老团队无 project 时返回空串）"""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            return data.get("project", "") or ""
+
     # ── 邮件系统 ─────────────────────────────────────
 
     def _next_mail_id(self) -> str:

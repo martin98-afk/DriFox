@@ -104,11 +104,27 @@ def _update_tab_icon(tab_idx: int, project: str):
 
     直接提取缩写+颜色，交给 _TabProjectIcon 用 QPainter 绘制圆角矩形+白字。
     Qt 自动处理 DPI，无需手动创建 QPixmap / round(ceil) 物理像素。
+
+    团队窗口特殊处理：Tab 图标已被团队模式隐藏（项目 icon 移到团队标题处），
+    此处改为刷新团队框 header 的项目 icon；数据源必须为团队级 project
+    （TeamManager.get_team_project，多个成员共享同一 header）——团队级
+    尚未设置时回退本次传入的 project（即正在切换的目标项目，随后
+    _broadcast_team_project 会写入团队级，保证一致）。
     """
     tm = TabManagerWindow.get_instance()
     if tm is None:
         return
     try:
+        # 团队窗口：刷新团队框 header 的项目 icon（团队级数据）
+        if 0 <= tab_idx < len(tm._windows):
+            win = tm._windows[tab_idx]
+            if getattr(win, "_team_agent_name", "") or "":
+                team_id = tm._resolve_tab_team_id(win)
+                if team_id:
+                    initials, color = tm._team_project_icon_data(win, fallback=project)
+                    tm._tab_panel.set_team_project(team_id, initials, color)
+                    return
+
         from app.widgets.cards.settings.project_selector_card import (
             extract_project_initials,
             get_project_color,
@@ -822,6 +838,14 @@ class TabManagerWindow(QWidget):
             # 同步团队框 header 名称（初次加入 Tab 时即同步）
             if team_id:
                 panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+                # 团队模式：隐藏 Tab 项目 icon（项目 icon 移到团队标题处）
+                panel.set_tab_team_mode(tab_idx, True)
+                # 团队标题 icon（团队级 project；团队框此时已创建，重新走
+                # _update_tab_icon 团队分支刷新 header）
+                _update_tab_icon(tab_idx, project)
+            else:
+                # 非团队窗口：Tab 保持显示项目 icon（回归不变）
+                panel.set_tab_team_mode(tab_idx, False)
 
             # 隐藏空状态页，切换到新窗口
             stack.widget(0).hide()
@@ -864,10 +888,20 @@ class TabManagerWindow(QWidget):
         # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
         team_id = self._resolve_tab_team_id(window)
         self._tab_panel.set_tab_team(idx, team_id)
-        # 同步团队框 header 名称：使用窗口 _team_name（团队名/模板名）。
-        # 非团队窗口不更新 header（团队框本身已不会创建）。
+        # 团队模式切换：团队窗口隐藏 Tab 项目 icon（移到团队标题处显示）；
+        # 退出团队时恢复显示（检查点 2：清胶囊与恢复 icon 同时处理，勿漏）
+        self._tab_panel.set_tab_team_mode(idx, bool(team_id))
+        # 同步团队框 header 名称 + 项目 icon（数据源=团队级 project）
         if team_id:
             self._tab_panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+            project = getattr(window, "_current_project", "") or ""
+            self._tab_panel.set_team_project(team_id, *self._team_project_icon_data(window, fallback=project))
+        else:
+            # 退出团队：恢复 Tab 项目 icon 并刷新内容（团队模式期间 _update_tab_icon
+            # 团队分支只刷 header、直接 return，TabItem 自身 icon 数据停留在加入团队
+            # 时的初值——review #11 问题 2：退出团队后 Tab 图标过时）
+            project = getattr(window, "_current_project", "") or ""
+            _update_tab_icon(idx, project)
 
     @staticmethod
     def _resolve_tab_team_id(window) -> str:
@@ -884,6 +918,35 @@ class TabManagerWindow(QWidget):
         if run_id:
             return run_id
         return getattr(window, "_team_name", "") or "default"
+
+    @staticmethod
+    def _team_project_icon_data(window, fallback: str = "") -> tuple:
+        """团队框 header 项目 icon 数据（缩写, 颜色）
+
+        数据源**必须为团队级 project**（TeamManager.get_team_project）：
+        多个成员窗口共享同一个团队框 header，读任一窗口自身项目会导致
+        展示不一致（review 检查点 1）。
+
+        团队级 project 为空（团队尚未统一设置项目）时：回退 fallback 参数
+        （调用方传入的"正在切换的目标项目"——广播后团队级即写入，两者一致）；
+        fallback 也为空则返回 ("", "")（header 不显示 icon）。
+        """
+        try:
+            from app.core.team_manager import TeamManager
+
+            project = TeamManager.get_instance().get_team_project()
+            if not project:
+                project = fallback
+            if not project:
+                return ("", "")
+            from app.widgets.cards.settings.project_selector_card import (
+                extract_project_initials,
+                get_project_color,
+            )
+
+            return (extract_project_initials(project), get_project_color(project, alpha=255))
+        except Exception:
+            return ("", "")
 
     def remove_window(self, window):
         """从 Tab 管理器移除窗口（外部 API：按 window 对象定位）"""

@@ -687,8 +687,6 @@ class AgentManager:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
 
-        perm_resolver = PermissionResolver(agent.permission, global_permission or {}, agent.tools)
-
         # 团队协作工具：仅当当前窗口已加入团队时才暴露
         # 避免浪费 token 和误导 LLM（非团队成员看到也用不了）
         # 【多窗口修复】使用传入的 builtin_tools（_bt）而非 self._builtin_tools，
@@ -721,9 +719,11 @@ class AgentManager:
                 if is_in_team:
                     filtered_tools.append(tool)
                 continue
-            permission = perm_resolver.resolve(tool_name)
-            if permission in ("allow", "ask"):
-                filtered_tools.append(tool)
+            # ★ T24（按产品指示）：schema 保持静态完整——**不过滤 deny 工具**。
+            # 工具定义在请求开头一次性给全（prompt 缓存稳定，不因 UI/运行态
+            # 变化导致 tools 参数漂移），deny 由执行层（engine/subagent_worker
+            # 的 _check_ui_tool_permission）实时拦截。UI 调整立即生效且缓存不丢。
+            filtered_tools.append(tool)
 
         return filtered_tools
 

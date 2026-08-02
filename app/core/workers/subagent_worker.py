@@ -1074,12 +1074,18 @@ class SubAgentExecutor(QThread):
         return tool_results, hook_messages
 
     def _check_ui_tool_permission(self, tool_name: str) -> str:
-        """UI 工具权限检查（T24 方案 B）— 返回 "allow" / "deny" / "ask"。
+        """UI 工具权限检查（T24 执行层唯一控制点）— 返回 "allow" / "deny" / "ask"。
 
-        对齐 engine._check_tool_permission 的判定逻辑：
-        - 团队工具无条件放行
-        - check_name 归一化（mcp__server__tool → tool）
-        - 优先窗口 controller，无 controller（API 模式）回退 Settings.tool_toggles
+        优先级（对齐产品指示）：
+        a) UI controller toggles：用户显式关闭的工具（toggles False）→ UI 为准
+           （behavior=deny → deny；ask → 弹窗询问），覆盖模板 allow
+        b) UI 开启/默认（toggles True）→ 模板 PermissionResolver 判定：
+           模板 deny → 执行层拦截（返回 deny，schema 已静态化不再移除）
+           模板 allow/ask → 执行（子智能体无模板 ask 弹窗机制，视为允许）
+        c) 团队工具无条件放行
+
+        check_name 归一化（mcp__server__tool → tool）；无 controller（API 模式）
+        回退 Settings.tool_toggles。
         """
         if tool_name in ("team_send_message", "team_list_members"):
             return "allow"
@@ -1105,7 +1111,23 @@ class SubAgentExecutor(QThread):
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            return behavior  # "deny" 或 "ask"
+            return behavior  # UI 关闭 → deny 或 ask（UI 为准，覆盖模板）
+
+        # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（覆盖模板 deny）
+        if controller is not None and controller.is_user_modified(check_name):
+            return "allow"
+
+        # 未调整（默认开启）→ 模板 PermissionResolver（模板 deny 执行层拦截）
+        try:
+            agent = self.agent_manager.get_agent(self.agent_name) if self.agent_manager else None
+            if agent is not None:
+                from app.core.agent import PermissionResolver
+
+                resolver = PermissionResolver(agent.permission, {}, agent.tools)
+                if resolver.resolve(check_name) == "deny":
+                    return "deny"
+        except Exception as e:
+            logger.debug(f"[SubAgent] 模板权限解析失败，放行: {e}")
         return "allow"
 
     def _ask_permission(self, tool_name: str, arguments: dict, timeout: float = 30.0) -> bool:
@@ -1176,6 +1198,8 @@ class SubAgentManager(QObject):
     task_started = pyqtSignal(str, str, str)  # task_id, agent_name, task_description
     task_finished = pyqtSignal(str, str)  # task_id, result
     batch_finished = pyqtSignal()  # 批次内所有任务都完成时触发
+    # ★ T24：子智能体 ask 权限请求转发（window_id, task_id, tool_name, arguments）→ 主线程弹窗
+    permission_requested = pyqtSignal(str, str, str, dict)
 
     def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
         super().__init__()
@@ -1482,6 +1506,9 @@ class SubAgentManager(QObject):
             if on_progress:
                 executor.progress_updated.connect(on_progress)
 
+            # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
+            executor.permission_requested.connect(self._forward_permission_request)
+
             self._running_tasks[task_id] = executor
             executor.start()
 
@@ -1505,6 +1532,28 @@ class SubAgentManager(QObject):
             if on_error:
                 on_error(str(e))
             return False
+
+    def _forward_permission_request(self, task_id: str, tool_name: str, arguments: dict):
+        """转发 executor 的权限请求到主线程（SubAgentManager → main_widget）。
+
+        携带 window_id（来自 executor 所在窗口的 backend），供多窗口场景
+        精确定位弹窗归属。
+        """
+        executor = self._running_tasks.get(task_id)
+        window_id = ""
+        if executor is not None and executor.tool_executor is not None:
+            backend = getattr(executor.tool_executor, "_backend", None)
+            if backend is not None:
+                window_id = getattr(backend, "_window_id", "") or ""
+        self.permission_requested.emit(window_id, task_id, tool_name, arguments)
+
+    def respond_permission(self, task_id: str, allow: bool):
+        """主线程响应用户决策 → 转交 executor（ask 分支继续/拒绝）。"""
+        executor = self._running_tasks.get(task_id)
+        if executor is not None:
+            executor.respond_permission(allow)
+        else:
+            logger.warning(f"[SubAgentManager] respond_permission: task {task_id} 不存在")
 
     def execute_dag(self, nodes: List[Dict], edges: List[Dict], session_id: str = "") -> ToolResult:
         """

@@ -218,6 +218,7 @@ class TabItem(QFrame):
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._hovered = False  # 鼠标悬停态
+        self._team_mode = False  # 团队模式：隐藏项目 icon（项目 icon 移到团队标题处）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
         self._cached_rect_key = (-1, -1)
@@ -343,6 +344,19 @@ class TabItem(QFrame):
             }}
         """)
         self._capsule_label.setVisible(True)
+
+    def set_team_mode(self, team_mode: bool):
+        """设置团队模式：隐藏项目 icon（项目 icon 移到团队标题处显示）
+
+        True：TabItem 只显示角色胶囊 + 标题 + 关闭按钮（项目 icon 隐藏）；
+        False：恢复显示项目 icon（非团队模式回归不变）。
+        与胶囊共存：团队模式下胶囊照常显示，二者互不干扰。
+        """
+        if self._team_mode == team_mode:
+            return
+        self._team_mode = team_mode
+        self._icon_widget.setVisible(not team_mode)
+        self.update()
 
     def clear_capsule(self):
         """隐藏团队角色胶囊"""
@@ -1174,6 +1188,42 @@ class TabPanel(QWidget):
         # 空名兜底（与 _get_or_create_team_group 中占位文本一致）
         label.setText(name.strip() if name and name.strip() else "团队")
 
+    def set_team_project(self, team_id: str, initials: str, color: str):
+        """设置团队框 header 的项目 icon（缩写 + 颜色，复用 _TabProjectIcon）
+
+        Args:
+            team_id: Tab 分组 key（与 set_tab_team 使用的 team_id 一致）
+            initials: 项目缩写（空串表示无团队级项目，隐藏 header icon）
+            color: rgba 颜色字符串（如 'rgba(33,139,255,255)'）
+
+        数据源必须是团队级 project（TeamManager.get_team_project）：多个成员
+        窗口共享同一个团队框 header，读任一窗口自身项目会导致展示不一致。
+        值相等时跳过（避免无效重绘）。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return  # 容器尚未创建
+        icon = getattr(grp, "_team_icon", None)
+        if icon is None:
+            return
+        if not initials:
+            icon.setVisible(False)
+            grp._team_icon_key = None
+            return
+        # 值相等跳过：同一 (initials, color) 不重复重绘（纯 key 缓存判断，
+        # 不依赖 isVisible——父链未显示时 isVisible 恒 False 会误判）
+        key = (initials, color)
+        if grp._team_icon_key == key:
+            return
+        icon.set_project(initials, color)
+        icon.setVisible(True)
+        grp._team_icon_key = key
+
+    def set_tab_team_mode(self, index: int, team_mode: bool):
+        """设置指定 Tab 的团队模式（隐藏/显示项目 icon）"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_team_mode(team_mode)
+
     def _get_or_create_team_group(self, team_id: str) -> "QFrame":
         """获取或创建 team 容器
 
@@ -1216,6 +1266,13 @@ class TabPanel(QWidget):
         header_layout.setContentsMargins(0, 2, 0, 4)
         header_layout.setSpacing(4)
 
+        # 团队标题项目 icon（团队级统一项目，复用 _TabProjectIcon；默认隐藏，
+        # 由 set_team_project 在团队级项目存在时显示）。多个成员窗口共享
+        # 同一 header，数据源必须为团队级 project（TeamManager.get_team_project）。
+        team_icon = _TabProjectIcon(header, size=16)
+        team_icon.setVisible(False)
+        header_layout.addWidget(team_icon)
+
         from app.widgets.elided_label import _ElidedLabel as _ELLabel
 
         name_label = _ELLabel("", header)
@@ -1251,6 +1308,8 @@ class TabPanel(QWidget):
         grp._team_header = header
         grp._team_name_label = name_label
         grp._team_close_btn = close_btn
+        grp._team_icon = team_icon
+        grp._team_icon_key = None  # 值相等跳过缓存（initials, color）
         grp._team_inner_widget = inner_widget
         grp._team_inner_layout = inner_layout
 

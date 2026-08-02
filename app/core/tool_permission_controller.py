@@ -64,6 +64,9 @@ class ToolPermissionController(QObject):
         # 用户偏好
         self._user_tool_toggles: Dict[str, bool] = dict(cleaned_toggles)
         self._user_tool_off_behavior: str = settings.tool_off_behavior.value or "deny"
+        # ★ T28：用户显式调整过的工具集合（区分"显式开启"与"默认开启"）
+        # 执行层用它实现"UI 覆盖模板"：显式开启 → UI 为准放行（覆盖模板 deny）
+        self._user_modified: set = set()
 
         # 当前生效(初始 = 用户偏好)
         self._active_tool_toggles: Dict[str, bool] = dict(self._user_tool_toggles)
@@ -127,6 +130,14 @@ class ToolPermissionController(QObject):
     def is_agent_active(self) -> bool:
         return self._active_agent_name is not None
 
+    def is_user_modified(self, tool_name: str) -> bool:
+        """该工具是否被用户显式调整过（T28：UI 覆盖模板的判定依据）。
+
+        返回 True 表示用户在该会话/窗口中明确开启或关闭过此工具——
+        执行层据此让 UI 优先于模板（显式开启 → 放行覆盖模板 deny）。
+        """
+        return tool_name in self._user_modified
+
     # ===================================================================
     #  用户编辑(只更新 user)
     # ===================================================================
@@ -136,6 +147,8 @@ class ToolPermissionController(QObject):
         - 非 agent 模式:同时更新 user(偏好,持久化) 和 active(生效)
         - agent 模式:只更新 active(临时修改 agent 生效权限,user 偏好不变)
         """
+        # ★ T28：记录用户显式调整（两种模式都算——UI 覆盖模板的判定依据）
+        self._user_modified.add(tool_name)
         if self.is_agent_active():
             # agent 模式:只改 active,user 偏好不变
             self._active_tool_toggles[tool_name] = enabled
@@ -151,6 +164,8 @@ class ToolPermissionController(QObject):
 
     def set_user_toggles(self, toggles: Dict[str, bool]):
         """批量更新开关(用于整组开关)"""
+        # ★ T28：逐个记录用户显式调整
+        self._user_modified.update(toggles.keys())
         if self.is_agent_active():
             # agent 模式:只改 active
             self._active_tool_toggles.update(toggles)
@@ -324,6 +339,8 @@ class ToolPermissionController(QObject):
         self._active_tool_toggles = dict(other._active_tool_toggles)
         self._active_tool_off_behavior = other._active_tool_off_behavior
         self._active_agent_name = other._active_agent_name
+        # ★ T28：同步用户显式调整集合（分支窗口行为一致）
+        self._user_modified = set(other._user_modified)
 
         # 主动发射所有信号刷新 UI
         self.togglesChanged.emit(self.get_toggles())
