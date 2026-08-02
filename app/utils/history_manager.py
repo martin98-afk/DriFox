@@ -560,6 +560,11 @@ class HistoryManager:
         if not title:
             for msg in merged_messages:
                 if msg.get("role") == "user" and not msg.get("_hook_event"):
+                    # R3 风格防御：跳过未打标的任务邮件注入路径（旧数据无
+                    # _hook_event 的 "📨 **来自 [...] 的任务邮件：**" 文本），
+                    # 与 get_team_first_question 的防御对齐，title 不被邮件污染。
+                    if str(msg.get("content", "")).startswith("📨 **来自"):
+                        continue
                     content = msg.get("content", "")
                     if isinstance(content, list):
                         content = content_to_text(content)

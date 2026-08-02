@@ -291,3 +291,109 @@ class TestFirstQuestionSkipsMail:
         )
 
         assert hm.get_team_first_question("run-1") == ""
+
+
+class TestBuildSessionRecordTitleSkipsMail:
+    """S-2：_build_session_record 生成 title 时跳过未打标任务邮件（📨 前缀）。
+
+    与 get_team_first_question 的 R3 防御对齐：旧数据无 _hook_event 的
+    邮件文本不污染会话 title。
+    """
+
+    def test_title_skips_mail_without_hook_event(self, hm):
+        """邮件在前、真实用户消息在后 → title 取真实首问。"""
+        record = hm._build_session_record(
+            merged_messages=[
+                {
+                    "role": "user",
+                    "content": "📨 **来自 [leader@w0] 的任务邮件：**\n\n请完成登录功能",
+                    "timestamp": "2026-01-01 00:00:00",
+                },
+                {"role": "user", "content": "真实首问：实现登录", "timestamp": "2026-01-01 00:00:01"},
+            ],
+        )
+        assert record["title"] == "真实首问：实现登录"
+
+    def test_title_mail_with_hook_event_skipped(self, hm):
+        """邮件带 _hook_event='TeamMail' → 跳过（原有 _hook_event 逻辑）。"""
+        record = hm._build_session_record(
+            merged_messages=[
+                {
+                    "role": "user",
+                    "content": "📨 **来自 [leader@w0] 的任务邮件：**\n\n请完成登录功能",
+                    "timestamp": "2026-01-01 00:00:00",
+                    "_hook_event": "TeamMail",
+                },
+                {"role": "user", "content": "真实首问：实现登录", "timestamp": "2026-01-01 00:00:01"},
+            ],
+        )
+        assert record["title"] == "真实首问：实现登录"
+
+    def test_title_mail_only_falls_back(self, hm):
+        """只有邮件消息 → title 回落 '新对话'。"""
+        record = hm._build_session_record(
+            merged_messages=[
+                {
+                    "role": "user",
+                    "content": "📨 **来自 [leader@w0] 的任务邮件：**\n\n请完成登录功能",
+                    "timestamp": "2026-01-01 00:00:00",
+                },
+            ],
+        )
+        assert record["title"] == "新对话"
+
+
+class TestPreSendWorkerHookEventPassthrough:
+    """S-3：engine 透传链路 —— _PreSendWorker 打标写入 session。
+
+    验证 worker 内部 `if self._hook_event:` 分支：
+    - hook_event='TeamMail' → session.add_user_message 收到 _hook_event
+    - hook_event=None → 不写 _hook_event 字段（历史行为不变）
+    """
+
+    @staticmethod
+    def _make_worker(hook_event):
+        import threading
+        from unittest.mock import MagicMock
+
+        from app.core.engines.ui.engine import _PreSendWorker
+
+        worker = _PreSendWorker.__new__(_PreSendWorker)
+        worker._hook_mgr = None  # 无 hook 管理器 → 跳过 hook 注入分支
+        worker._session = MagicMock()
+        worker._user_text = "你好"
+        worker._content_to_store = "你好"
+        worker._user_prompt_ctx = None
+        worker._pre_user_ctx = None
+        worker._post_user_ctx = None
+        worker._llm_config = {}
+        worker._window_workdir = "."
+        worker._lock = threading.Lock()
+        worker._hook_event = hook_event
+        worker._adapter = MagicMock()
+        worker._adapter.build_messages.return_value = []
+        worker._current_agent = None
+        worker._agent_manager = MagicMock()
+        worker._tool_executor = MagicMock()
+        worker._messages = []
+        worker._available_tools = []
+        worker._error = None
+        return worker
+
+    def test_run_passes_hook_event_to_add_user_message(self):
+        """hook_event='TeamMail' → add_user_message 收到 _hook_event 字段。"""
+        from unittest.mock import patch
+
+        worker = self._make_worker("TeamMail")
+        with patch("app.tools.get_builtin_tools_schema", return_value=[]):
+            worker.run()
+        worker._session.add_user_message.assert_called_once_with(content="你好", _hook_event="TeamMail")
+
+    def test_run_without_hook_event_omits_field(self):
+        """hook_event=None → add_user_message 不写 _hook_event（历史行为不变）。"""
+        from unittest.mock import patch
+
+        worker = self._make_worker(None)
+        with patch("app.tools.get_builtin_tools_schema", return_value=[]):
+            worker.run()
+        worker._session.add_user_message.assert_called_once_with(content="你好")

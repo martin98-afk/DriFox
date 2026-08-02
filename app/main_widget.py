@@ -3344,7 +3344,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 else:
                     self.destroyed.disconnect()
                 self._cmd_shortcuts_destroy_connected = False
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
         try:
             self._clear_command_shortcuts()
