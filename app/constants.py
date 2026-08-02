@@ -1,7 +1,7 @@
 MAX_SESSION_CARD_CACHE_SIZE = 10
 
 # OpenCode 免费公用 API key，用于默认服务商配置，让用户下载后开箱即用
-OPENCODE_SHARED_API_KEY = "sk-zAIZkBM2o3MMKHzryhxmIWPffHyhxSwrpPjtIlyaxBIaCNbOkH2Qx0QXEOJlIRre"
+OPENCODE_SHARED_API_KEY = "sk-nUee6hP1bn3GDn9sPApQD6wBv3v2ZBRXx4DLN44E98HSYm86FmWCCbnJNrVAdVoI"
 
 # ============================================================
 # 可识别的图片扩展名（统一常量，多处复用）
