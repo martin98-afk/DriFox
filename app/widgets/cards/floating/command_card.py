@@ -2091,9 +2091,11 @@ class CommandCard(QWidget):
             self._selected_param_index = new_idx
         self._update_param_selection()
 
-        # 自动检测 --model 前缀：进入/刷新值选择模式（实时搜索）
-        # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配
-        if full_text and any_visible:
+        # 自动检测枚举参数：进入/刷新值选择模式（实时搜索）
+        # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配。
+        # 不依赖参数列表可见性：手输参数时，前缀过滤可能暂时隐藏列表项，
+        # 但完整的 value 参数仍应立即触发枚举列表。
+        if full_text:
             self._auto_switch_to_value_selection(full_text, cursor_pos)
 
         # 统一根据值选择模式决定参数/值列表的可见性

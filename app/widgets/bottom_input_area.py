@@ -830,19 +830,25 @@ class SendableTextEdit(TextEdit):
         cursor.setPosition(pos)
         # 智能判断是否需要前导空格：光标前是空格 / -- / 文本开头 → 不加
         need_space = pos > 0 and text[pos - 1] not in (" ", "\t", "\n")
-        if pos >= 2 and text[pos - 2 : pos] == "--":
-            # 光标前是用户手动输入的 --，替换这 2 个字符为完整参数名，
-            # 避免追加到 -- 后面变成 ----parameter
-            cursor.setPosition(pos - 2)
-            cursor.setPosition(pos, QTextCursor.KeepAnchor)
-            if param_type == "flag":
-                cursor.insertText(f"{param_name} ")
-            elif param_type == "value":
-                cursor.insertText(f"{param_name}")
-            self.setTextCursor(cursor)
-            self.setFocus(Qt.OtherFocusReason)
-            self._sync_detail_params()
-            return
+        if pos > 0 and text[pos - 1] == "-":
+            # 光标前是用户手动输入的参数前缀（-、--），替换前缀为完整参数名，
+            # 避免追加到前缀后面变成 `- --parameter` 或 `----parameter`。
+            prefix_start = pos - 1
+            while prefix_start > 0 and text[prefix_start - 1] == "-":
+                prefix_start -= 1
+            # 仅处理独立的参数前缀，避免修改普通文本末尾的连字符。
+            if prefix_start == 0 or text[prefix_start - 1] in (" ", "\t", "\n"):
+                cursor.setPosition(prefix_start)
+                cursor.setPosition(pos, QTextCursor.KeepAnchor)
+                if param_type == "flag":
+                    cursor.insertText(f"{param_name} ")
+                elif param_type == "value":
+                    cursor.insertText(f"{param_name}")
+                self.setTextCursor(cursor)
+                self.setFocus(Qt.OtherFocusReason)
+                self._sync_detail_params()
+                return
+
         prefix = " " if need_space else ""
         if param_type == "flag":
             cursor.insertText(f"{prefix}{param_name} ")
