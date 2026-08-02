@@ -338,9 +338,13 @@ def test_get_team_first_question_same_updated_at_distinct_msg_ts(hm):
 
 
 class TestTeamFirstQuestionI1:
-    """I-1 补测核对（plan 蓝图场景 6）"""
+    """I-1 补测核对（plan 蓝图场景 6）
 
-    def test_first_question_uses_message_ts_when_light_last_time_tied(self):
+    ⚠️ 必须用 hm fixture（临时目录）：直接 HistoryManager() 会创建指向
+    真实 .drifox 数据库的连接并写入测试记录（R-close I-1' 污染修复）。
+    """
+
+    def test_first_question_uses_message_ts_when_light_last_time_tied(self, hm):
         """light last_time（updated_at）相同而消息时间戳区分明显 → 取真正最早的。
 
         M4 已补同语义测试（test_get_team_first_question_same_updated_at_distinct_msg_ts），
@@ -348,7 +352,6 @@ class TestTeamFirstQuestionI1:
         """
         s1 = _full_session("s1", "a", "最早消息", "2026-01-01 00:00:01", "run-1", "dev", "build")
         s2 = _full_session("s2", "b", "较晚消息", "2026-01-01 00:00:02", "run-1", "dev", "plan")
-        hm = _hm_fresh()
         hm._session_store.save_session(s1)
         hm._session_store.save_session(s2)
         # 两条轻量记录 last_time 相同（模拟同轮保存 updated_at 并列）
@@ -360,14 +363,13 @@ class TestTeamFirstQuestionI1:
         hm._cache_dirty = True
         assert hm.get_team_first_question("run-1") == "最早消息"
 
-    def test_first_question_same_message_ts_returns_first(self):
+    def test_first_question_same_message_ts_returns_first(self, hm):
         """两会话消息时间戳完全相同 → 返回确定的首个（防止实现任意选择）。
 
         按 get_team_sessions_by_run_id 返回顺序取首个会话，保证结果稳定。
         """
         s1 = _full_session("s1", "a", "消息一", "2026-01-01 00:00:01", "run-1", "dev", "build")
         s2 = _full_session("s2", "b", "消息二", "2026-01-01 00:00:01", "run-1", "dev", "plan")
-        hm = _hm_fresh()
         hm._session_store.save_session(s1)
         hm._session_store.save_session(s2)
         hm._history_loaded = True
@@ -381,15 +383,6 @@ class TestTeamFirstQuestionI1:
         assert result in ("消息一", "消息二"), "时间戳相同时应返回确定的某个首问"
         # 再次调用结果稳定
         assert hm.get_team_first_question("run-1") == result, "结果应稳定可复现"
-
-
-def _hm_fresh():
-    """构造独立 HistoryManager（复用 session_store 单例临时库）。"""
-    from app.utils.history_manager import HistoryManager
-
-    hm = HistoryManager()
-    hm.archive_dir = None  # 归档测试才需要；本类不用
-    return hm
 
 
 class TestSaveBranchPreserveTeamMeta:
@@ -475,3 +468,33 @@ class TestSaveBranchPreserveTeamMeta:
         assert saved["team_run_id"] == ""
         assert saved["team_name"] == ""
         assert saved["agent_name"] == ""
+
+
+def test_merge_members_dedup_by_session_id(hm):
+    """S-A：同 agent 多会话时 members 按 session_id 去重，长度 == member_count。
+
+    同 agent（build）多轮会话（不同 session_id）时：agent_names/member_count
+    按 agent 去重为 1，members 也必须去重（否则展开区成员行数 > member_count）。
+    """
+    _seed(
+        hm,
+        [
+            _full_session("s1", "a", "第一轮", "2026-01-01 00:00:01", "run-1", "dev", "build"),
+            _full_session("s2", "b", "第二轮", "2026-01-01 00:00:02", "run-1", "dev", "build"),
+            _full_session("s3", "c", "plan 的", "2026-01-01 00:00:03", "run-1", "dev", "plan"),
+        ],
+        [
+            _light("s1", "a", "2026-01-01 00:00:01", "run-1", "dev", "build"),
+            _light("s2", "b", "2026-01-01 00:00:02", "run-1", "dev", "build"),
+            _light("s3", "c", "2026-01-01 00:00:03", "run-1", "dev", "plan"),
+        ],
+    )
+
+    rows = hm.get_history_list(merge_team=True)
+    merged = next(r for r in rows if r.get("team_merged"))
+    assert merged["member_count"] == 2, "agent 去重后 2 位成员（build+plan）"
+    assert len(merged["members"]) == 2, "members 应与 member_count 对齐（S-A 去重）"
+    # 去重后成员 session_id 集合：build 保留最新（s2），plan 保留 s3
+    member_ids = {m.get("session_id") for m in merged["members"]}
+    assert "s1" not in member_ids, "同 agent 旧会话不应出现在 members"
+    assert "s2" in member_ids and "s3" in member_ids, "build 最新 + plan 各保留一条"

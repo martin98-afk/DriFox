@@ -1207,6 +1207,10 @@ class HistoryCard(QWidget):
     def set_team_groups(self, teams: List[Dict]):
         """设置团队对话分组数据（方案 A）
 
+        # TODO: deprecated, remove with TestBuildTeamGroups
+        # M4 混排后无业务调用方（main_widget 改用 get_history_list(merge_team=True)
+        # 混排渲染），仅保留供旧测试引用。
+
         Args:
             teams: 按 run_id 分组的团队信息列表，每项:
                 {"run_id": str, "team_name": str, "agent_names": [str],

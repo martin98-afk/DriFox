@@ -6584,6 +6584,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_team_groups(self, history_list: List[Dict]) -> List[Dict]:
         """从历史会话列表组装团队对话分组（方案 A）
 
+        # TODO: deprecated, remove with TestBuildTeamGroups
+        # M4 混排后无业务调用方（_refresh_history_toggle_panel 改用
+        # get_history_list(merge_team=True)），仅保留供旧测试引用。
+
         按 run_id 聚合：每组包含团队名、成员角色（agent_name 去重）、
         最后活跃时间（组内最新 last_time）、会话数。无 run_id 的会话
         （非团队 / 老团队）跳过。

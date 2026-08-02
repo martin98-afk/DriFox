@@ -786,7 +786,22 @@ class HistoryManager:
                 group["agent_names"].append(agent)
             group["member_count"] = len(group["agent_names"])
             # 成员轻量记录收集（UI 展开成员列表 / 单独进入成员会话用）
-            group["members"].append(self._to_lightweight_entry(s))
+            # 🛡️ 按 agent 去重：agent_names/member_count 按 agent 去重，members
+            # 必须对齐——同 agent 多会话（多轮 run）时展开区成员行数不得 >
+            # member_count（S-A 修复）。同 agent 多条保留 last_time 最新一条
+            # （与 by_agent 恢复去重语义一致）。
+            member_entry = self._to_lightweight_entry(s)
+            member_agent = member_entry.get("agent_name") or ""
+            replaced = False
+            for i, existing in enumerate(group["members"]):
+                if (existing.get("agent_name") or "") == member_agent:
+                    # 同 agent：保留 last_time 最新一条
+                    if (member_entry.get("last_time") or "") >= (existing.get("last_time") or ""):
+                        group["members"][i] = member_entry
+                    replaced = True
+                    break
+            if not replaced:
+                group["members"].append(member_entry)
             # 组内 last_time 最新会话 → 同步 session_id / last_time / saved_at / worktree_path
             if (s.get("last_time") or "") >= (group.get("last_time") or ""):
                 group["session_id"] = s.get("session_id", "")
