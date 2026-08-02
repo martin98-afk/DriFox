@@ -3,12 +3,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-自上一发布版本以来的变更 | 提交数：5 · 文件变更：8 · +910/-152 | 贡献者：dingma
+自上一发布版本以来的变更 | 提交数：6 · 文件变更：12 · +1171/-152 | 贡献者：dingma
 
 > 重点：**团队模板加载行为重写** —— 加载模板时完全新建独立窗口，已有标签页一律不动（不切换 agent、不改标题、不重新入队）；**Tab 标题与胶囊语义分离** —— 团队模式 Tab 标题保持会话标题，角色名只进胶囊/边框颜色/分组框；**Tab 面板团队分组** —— 同团队多个标签页用 `#teamGroup` 边框容器圈出，胶囊与分组框共同表达团队归属。
 
 ### ✨ 新功能 (New Features)
 
+- **团队运行标识 run_id 注入（方案 A 阶段 2）** (`app/core/team_manager.py` + `app/main_widget.py`): TeamManager 新增 `start_team_run()` / `get_team_run_id()`——`/team --load` 加载模板时生成 uuid4 写入 team.json **顶层**（与 members 平级，`_cleanup_stale_members` 清理成员不丢失），幂等复用；`main_widget` 窗口新增 `_team_run_id` 属性，模板加载/手动加入/延后 join 各路径注入，`_auto_save_current_session` 把 `team_run_id`/`team_name`/`agent_name` 透传到 save_session（update_session 仅当 `_team_run_id` 非空才传，None 保留现值避免普通编辑清空团队元数据）。老团队无 run_id 时保持空串不注入，行为与现状一致。新增 10 个测试（tests/core/test_team_run_id.py）+ 1 个 update_session 保留现值回归用例
 - **会话团队元数据落库（方案 A 阶段 1 数据层）** (`app/core/store/session_store.py` / `app/core/store/session_repository.py` / `app/utils/history_manager.py`): sessions 表新增 `team_run_id` / `team_name` / `agent_name` 三列（TEXT DEFAULT ''，第 8 个迁移 `_migrate_add_team_columns`，新库建表即含、老库 ALTER 非破坏性兼容）；`save_session` / `_build_session_record` 签名加 3 个 team 参数（默认空串向后兼容），`update_session` 最小侵入（传 None 保留现有值），`get_history_list` 轻量记录透传 3 字段。为团队会话一键恢复（方案 A）打基础，本阶段不注入、不改 UI。新增 6 个测试（tests/core/test_session_team_columns.py：新库建表/老库迁移/save-load 往返/轻量透传/history_manager 透传）
 - **Tab 面板同团队标签页视觉分组** (`app/widgets/tab_panel.py`): `TabPanel` 新增 `set_tab_team(index, team_id)` 公开方法 + `_item_team`/`_team_groups` 数据层；同 team 的 TabItem 被一个 QFrame 容器（`objectName="teamGroup"`）包裹，QSS 给容器加 1px 边框 + 卡片背景 + 6px 圆角；`_rebuild_team_layout()` 按"team 容器置顶在上、独立区在下、stretch 始终在最末"规则重建视觉布局，**`_items` 保持扁平索引不破坏现有索引 API**；`refresh_style` 同步刷新团队分组框样式（主题切换跟随）。`TabManagerWindow.refresh_capsule_for_window` 与 `add_window` 在已有胶囊同步基础上追加 `set_tab_team` 调用，胶囊与分组框共同表达团队归属；新增 `_rebuild_team_layout` 快照保护（`_item_team` 内容 + `_items` 数量未变时直接 return），add_tab/remove_tab 重复调用零开销
 
