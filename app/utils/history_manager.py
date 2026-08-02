@@ -756,15 +756,19 @@ class HistoryManager:
         - 整体仍按 last_time 降序排序
         """
         result: List[Dict] = []
-        team_groups: Dict[str, Dict] = {}  # run_id -> 合并条目
+        # 聚合 key = (run_id, project)：同 run_id 跨 project 的会话按项目拆分为
+        # 独立合并条目（Bug A 兜底），避免不同项目下团队条目成员/会话互相污染。
+        team_groups: Dict[Tuple[str, str], Dict] = {}  # (run_id, project) -> 合并条目
 
         for s in sessions:
             run_id = (s.get("team_run_id") or "").strip()
             if not run_id:
                 result.append(self._to_lightweight_entry(s))
                 continue
+            # project 归一化：与 _to_lightweight_entry 默认值保持一致
+            project = (s.get("project") or "默认项目").strip()
 
-            group = team_groups.get(run_id)
+            group = team_groups.get((run_id, project))
             if group is None:
                 group = {
                     "team_run_id": run_id,
@@ -784,7 +788,7 @@ class HistoryManager:
                     "agent_name": "",
                     "members": [],
                 }
-                team_groups[run_id] = group
+                team_groups[(run_id, project)] = group
 
             agent = (s.get("agent_name") or "").strip()
             if agent and agent not in group["agent_names"]:
@@ -815,8 +819,8 @@ class HistoryManager:
                 group["worktree_path"] = s.get("worktree_path", "") or ""
             group["message_count"] += s.get("message_count", 0) or 0
 
-        # 为每个团队组填充 preview（团队首问）
-        for run_id, group in team_groups.items():
+        # 为每个团队组填充 preview（团队首问，仍按 run_id 查，跨 project 组共享）
+        for (run_id, _project), group in team_groups.items():
             group["preview"] = self.get_team_first_question(run_id)
             result.append(group)
 

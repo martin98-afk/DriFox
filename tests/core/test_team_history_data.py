@@ -498,3 +498,46 @@ def test_merge_members_dedup_by_session_id(hm):
     member_ids = {m.get("session_id") for m in merged["members"]}
     assert "s1" not in member_ids, "同 agent 旧会话不应出现在 members"
     assert "s2" in member_ids and "s3" in member_ids, "build 最新 + plan 各保留一条"
+
+
+def test_merge_team_splits_by_project(hm):
+    """P3：同 run_id 跨 project 的会话 → 按 (run_id, project) 拆分为独立合并条目。
+
+    Bug A 兜底：团队会话散落多个项目时，每个项目下应只看到该项目的成员子集，
+    而不是跨项目合并导致成员/会话互相污染。
+    """
+
+    def _full(sid, ts, run_id, project, agent):
+        d = _full_session(sid, "t", f"msg {sid}", ts, run_id, "dev", agent)
+        d["project"] = project
+        return d
+
+    def _light_rec(sid, ts, run_id, project, agent):
+        d = _light(sid, "t", ts, run_id, "dev", agent)
+        d["project"] = project
+        return d
+
+    _seed(
+        hm,
+        [
+            _full("s1", "2026-01-01 00:00:01", "run-1", "projA", "build"),
+            _full("s2", "2026-01-01 00:00:02", "run-1", "projA", "plan"),
+            _full("s3", "2026-01-01 00:00:03", "run-1", "projB", "tester"),
+        ],
+        [
+            _light_rec("s1", "2026-01-01 00:00:01", "run-1", "projA", "build"),
+            _light_rec("s2", "2026-01-01 00:00:02", "run-1", "projA", "plan"),
+            _light_rec("s3", "2026-01-01 00:00:03", "run-1", "projB", "tester"),
+        ],
+    )
+
+    rows = hm.get_history_list(merge_team=True)
+    merged = [r for r in rows if r.get("team_merged")]
+    assert len(merged) == 2, "同 run_id 跨 2 个项目 → 2 条独立合并条目（P3）"
+    # 按 (project, run_id) 排序断言：projA 聚合 build+plan，projB 只有 tester
+    by_project = sorted((r["project"], r["team_run_id"], r["member_count"]) for r in merged)
+    assert by_project == [("projA", "run-1", 2), ("projB", "run-1", 1)]
+    a = next(r for r in merged if r["project"] == "projA")
+    assert set(a["agent_names"]) == {"build", "plan"}, "同项目成员仍合并为一条"
+    b = next(r for r in merged if r["project"] == "projB")
+    assert b["agent_names"] == ["tester"], "跨项目成员不并入 projA 条目"

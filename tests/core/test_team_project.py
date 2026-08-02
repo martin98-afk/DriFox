@@ -198,6 +198,51 @@ class TestTeamProjectBroadcast:
         # 若接收方转发，会再次触发 sender 的 _apply_team_project（此处不应发生）
         sender._apply_team_project.assert_not_called()
 
+    def test_broadcast_skips_receiver_with_different_project(self, fresh_tm):
+        """P2-B: 接收方当前项目与发送方切换前项目不一致 → 不应用广播（Bug A）。
+
+        sender 在项目 P0 广播切到 P1：同团队、同 run_id 但当前项目为 P9 的
+        接收方（独立/其他项目窗口）应被跳过，避免 A 项目团队误广播到 B 项目窗口。
+        """
+        from app.main_widget import OpenAIChatToolWindow
+
+        sender = self._make_win(agent_name="build", run_id="run_1", window_id="win_01", project="P0")
+        # 接收方项目与发送方切换前一致（P0）→ 应收到广播
+        member_same = self._make_win(agent_name="plan", run_id="run_1", window_id="win_02", project="P0")
+        # 接收方项目不同（P9）→ 应被跳过
+        member_diff = self._make_win(agent_name="review", run_id="run_1", window_id="win_03", project="P9")
+
+        for w in (sender, member_same, member_diff):
+            fresh_tm.join_team(w._window_id, w._team_agent_name)
+
+        with patch.object(OpenAIChatToolWindow, "_instances", [sender, member_same, member_diff]):
+            sender._broadcast_team_project("P1", prev_project="P0")
+
+        # 团队级 project 已写入
+        assert fresh_tm.get_team_project() == "P1"
+        # 项目一致的接收方收到广播
+        member_same._apply_team_project.assert_called_once_with("P1")
+        # 项目不一致的接收方被跳过（Bug A 防护）
+        member_diff._apply_team_project.assert_not_called()
+
+    def test_broadcast_prev_project_defaults_to_sender_current(self, fresh_tm):
+        """P2-B: 未显式传 prev_project 时，兜底用发送方当前项目做一致性校验。"""
+        from app.main_widget import OpenAIChatToolWindow
+
+        sender = self._make_win(agent_name="build", run_id="run_1", window_id="win_01", project="P0")
+        member_same = self._make_win(agent_name="plan", run_id="run_1", window_id="win_02", project="P0")
+        member_diff = self._make_win(agent_name="review", run_id="run_1", window_id="win_03", project="P5")
+
+        for w in (sender, member_same, member_diff):
+            fresh_tm.join_team(w._window_id, w._team_agent_name)
+
+        with patch.object(OpenAIChatToolWindow, "_instances", [sender, member_same, member_diff]):
+            # 不传 prev_project → 兜底 sender._current_project == "P0"
+            sender._broadcast_team_project("P1")
+
+        member_same._apply_team_project.assert_called_once_with("P1")
+        member_diff._apply_team_project.assert_not_called()
+
 
 class TestTeamProjectApply:
     """A5/A9：_apply_team_project 接收方行为"""

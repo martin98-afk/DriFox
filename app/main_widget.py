@@ -792,9 +792,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
         # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
-        self.backend.set_subagent_model_resolver(
-            lambda v: self._resolve_subagent_model_config(v, show_error=False)
-        )
+        self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
@@ -4116,9 +4114,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
             }
         )
-        # 方案 A：开始一次团队运行（生成/复用 run_id，写入 team.json 顶层），
-        # 本次模板加载的所有新窗口共享同一 run_id，团队会话自动保存时落库。
-        team_run_id = tm_mgr.start_team_run()
+        # 方案 A：开始一次团队运行（force=True 强制生成新 run_id），
+        # 每次新建团队对话都是独立运行，不复用旧 run_id，与一键恢复路径
+        # force=True 语义对齐；本次模板加载的所有新窗口共享同一 run_id，
+        # 团队会话自动保存时落库。
+        team_run_id = tm_mgr.start_team_run(force=True)
 
         # 1) 为模板的每个角色新建一个全新空白窗口（不复制任何已有窗口的上下文/会话）
         new_windows: List["OpenAIChatToolWindow"] = []
@@ -6751,13 +6751,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_history_project_selected(self, project: str):
         """历史面板项目切换（现在和标题栏同步）"""
+        # P2-B：捕获切换前项目，供团队广播校验接收方一致性
+        prev_project = self._current_project
         self._current_project = project
         self.backend._current_project = project
         self._current_history_project = project
         self._history_popup_card.set_current_project(project)
         self._refresh_history_toggle_panel()
         # 团队模式：历史面板项目切换同样触发团队级同步
-        self._broadcast_team_project(project)
+        self._broadcast_team_project(project, prev_project)
 
     def _on_session_dropped_on_project(self, project: str, session_index: int):
         """将会话拖拽到指定项目"""
@@ -10201,6 +10203,40 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(session_project)
+
+        # 🛡️ F4：加载历史会话后同步窗口团队标记，防止普通/团队会话互相污染。
+        # 判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
+        # - 团队会话 → 设置团队上下文（run_id/team_name/agent_name），后续
+        #   保存（_save_current_session_to_history team_kwargs 守卫）继续保留团队分组
+        # - 普通会话 → 清空团队标记，避免团队窗口加载普通会话后 _team_run_id
+        #   残留，导致保存时普通会话被写入团队字段、混入团队合并条目
+        record_run_id = (session_record.get("team_run_id") or "").strip()
+        if record_run_id:
+            self._team_run_id = record_run_id
+            self._team_name = (session_record.get("team_name") or "").strip()
+            self._team_agent_name = (session_record.get("agent_name") or "").strip()
+        else:
+            self._team_run_id = ""
+            self._team_name = ""
+            self._team_agent_name = ""
+            # 🛡️ F4 补充：清空团队标记后刷新 UI，恢复独立模式边框/标题栏配色，
+            # 消除团队窗口加载普通会话后的团队配色残留（对齐 :3924 用法；
+            # try/except 防御，与下方 Tab 同步分支风格一致）
+            try:
+                self._refresh_team_ui(is_team=False)
+            except Exception:
+                pass
+        # Tab 模式：团队标记已变，同步胶囊/分组（对齐 _refresh_team_ui 的
+        # refresh_capsule_for_window 调用；无 Tab 管理器时静默跳过）
+        try:
+            if self.cfg.enable_tab_manager.value:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None:
+                    _tm.refresh_capsule_for_window(self)
+        except Exception:
+            pass
 
         # 自动切换到该会话关联的 worktree
         # 规则：会话有 worktree_path → 切到该 worktree
@@ -15421,7 +15457,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-    def _broadcast_team_project(self, project: str):
+    def _broadcast_team_project(self, project: str, prev_project: str = None):
         """团队内项目切换广播：写团队级 project + 同团队其他成员同步应用
 
         防循环（风险点 1）：仅遍历其他窗口（不含发送方），且接收方
@@ -15429,12 +15465,17 @@ class OpenAIChatToolWindow(ToolWindow):
         按团队过滤（风险点 3）：仅 _team_agent_name 非空、is_team_member、
         且同 _team_run_id/_team_name（同一次团队运行）的窗口才应用，
         不同团队互不影响，非团队成员不受影响。
+        P2-B（Bug A）：接收方当前项目必须与发送方切换前项目一致才应用广播，
+        防止 A 项目团队切项目误广播到 B 项目窗口。
         """
         if not getattr(self, "_team_agent_name", ""):
             return
         from app.core.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
+        # 发送方切换前项目兜底：未显式传入时用当前 _current_project
+        if prev_project is None:
+            prev_project = getattr(self, "_current_project", "")
         # 写团队级统一项目（team.json 顶层，与 run_id 平级）
         tm_mgr.set_team_project(project)
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
@@ -15452,6 +15493,10 @@ class OpenAIChatToolWindow(ToolWindow):
             win_key = getattr(win, "_team_run_id", "") or getattr(win, "_team_name", "") or TeamManager.DEFAULT_TEAM
             if win_key != my_key:
                 continue
+            # P2-B：仅当接收方当前项目与发送方切换前项目一致时才应用广播，
+            # 防止 A 项目团队切项目误广播到 B 项目窗口（Bug A）
+            if getattr(win, "_current_project", "") != prev_project:
+                continue
             try:
                 win._apply_team_project(project)
             except Exception as e:  # noqa: BLE001
@@ -15459,6 +15504,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
+        # P2-B：捕获切换前项目，供团队广播校验接收方一致性
+        prev_project = self._current_project
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
@@ -15503,7 +15550,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 必须在 Tab 图标更新之前执行：广播先写入团队级 project，发送方自身的
         # _update_tab_icon 团队分支才能读到新值（否则 header 显示旧团队项目——
         # review #11 问题 1：发送方 header 图标滞后）
-        self._broadcast_team_project(project)
+        self._broadcast_team_project(project, prev_project)
 
         # Tab 模式下同步更新 Tab 图标
         if self.cfg.enable_tab_manager.value:
@@ -15556,6 +15603,8 @@ class OpenAIChatToolWindow(ToolWindow):
             suppress_memory_card: 为 True 时不自动弹出关键文档卡片
                                   （拖拽/选择文件夹设了根目录时使用）
         """
+        # P2-B：捕获切换前项目，供团队广播校验接收方一致性
+        prev_project = self._current_project
         self._current_project = project
         self.backend._current_project = project
         self._project_label.setText(project)
@@ -15588,7 +15637,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._card_manager.hide_card("project_selector", self._window_id)
 
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
-        self._broadcast_team_project(project)
+        self._broadcast_team_project(project, prev_project)
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
@@ -15625,7 +15674,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self.backend.tool_executor.set_current_project(default_project)
             self._create_new_session()
             # 团队模式：归档当前项目切回默认项目，同样触发团队级同步
-            self._broadcast_team_project(default_project)
+            # P2-B：prev_project = project_name（归档前项目），此时
+            # _current_project 已切到默认项目，不能靠函数内兜底取值。
+            self._broadcast_team_project(default_project, project_name)
         else:
             self._current_history_project = self._current_project
             self._refresh_history_toggle_panel()

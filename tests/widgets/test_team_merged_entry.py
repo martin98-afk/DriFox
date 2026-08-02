@@ -403,6 +403,81 @@ class TestTeamMemberEnter:
         win._card_manager.hide_card.assert_called_once_with("history", "w1")
 
 
+class TestLoadSessionTeamMarks:
+    """F4：加载历史会话后同步窗口团队标记（普通清空 / 团队设置）"""
+
+    @staticmethod
+    def _make_win(record_team: bool = False):
+        """构造可执行 _load_session_from_record 的轻量窗口（跳过 Tab 同步分支）。"""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_streaming = False
+        win.backend = MagicMock()
+        win.backend.chat_engine = MagicMock()
+        win.backend.tool_executor = MagicMock()
+        win.history_manager = MagicMock()
+        win.history_manager.get_session_messages.return_value = [{"role": "user", "content": "hi"}]
+        win._get_current_worktree_path.return_value = ""
+        win._project_label = MagicMock()
+        win.title_edit = MagicMock()
+        win._history_card = MagicMock()
+        win._history_card.isVisible.return_value = False
+        # 跳过 Tab 同步（enable_tab_manager=False），专注验证团队标记赋值
+        win.cfg = SimpleNamespace(enable_tab_manager=SimpleNamespace(value=False))
+        # 预置团队标记（模拟团队窗口），由 F4 按 record 覆盖
+        win._team_run_id = "run-old"
+        win._team_name = "dev"
+        win._team_agent_name = "build"
+        return win
+
+    @staticmethod
+    def _run(win, record):
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        with patch("app.main_widget.create_session_from_record") as mock_create:
+            mock_create.return_value = MagicMock()
+            with patch("app.main_widget.init_after_loading_session") as mock_init:
+                OpenAIChatToolWindow._load_session_from_record(win, record)
+        return mock_create, mock_init
+
+    def test_normal_session_clears_team_marks(self):
+        """F4：加载普通会话（record 无 team_run_id）→ 清空窗口团队标记，防止污染。"""
+        _ensure_qapp()
+        win = self._make_win()
+        record = {"session_id": "s1", "title": "t1", "project": "proj-x"}  # 普通会话无团队字段
+
+        self._run(win, record)
+
+        assert win._team_run_id == "", "普通会话应清空 _team_run_id（防残留污染）"
+        assert win._team_name == ""
+        assert win._team_agent_name == ""
+
+    def test_team_session_sets_team_marks(self):
+        """F4：加载团队会话（带 team_run_id）→ 设置窗口团队标记。"""
+        _ensure_qapp()
+        win = self._make_win()
+        record = {
+            "session_id": "s1",
+            "title": "t1",
+            "project": "proj-x",
+            "team_run_id": "run-1",
+            "team_name": "dev",
+            "agent_name": "build",
+        }
+
+        self._run(win, record)
+
+        assert win._team_run_id == "run-1", "团队会话应设置 _team_run_id"
+        assert win._team_name == "dev"
+        assert win._team_agent_name == "build"
+
+
 class TestMergedCurrentIndex:
     """场景 5：current_idx 高亮"""
 
