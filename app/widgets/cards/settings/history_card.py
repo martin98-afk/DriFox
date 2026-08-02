@@ -793,13 +793,48 @@ class _TeamGroupCard(CardWidget):
 
         layout.addLayout(top_row)
 
-        # 角色胶囊行：各成员 agent_name 胶囊
-        agent_names = group.get("agent_names", [])
+        # 角色胶囊行：各成员 agent_name 胶囊（保存引用供 update_group 增量刷新）
+        self._capsule_row_widget: Optional[QWidget] = None
+        self._capsule_row_layout: Optional[QVBoxLayout] = None
+        self._capsule_container_layout = layout
+        self._update_capsules(group.get("agent_names", []))
+
+    def _update_capsules(self, agent_names: List[str]):
+        """重建角色胶囊行（成员变更时增量刷新 UI，避免整卡重建）
+
+        复用外层 layout（保持顶行/按钮不变），移除旧胶囊行后重建。
+        """
+        Colors.refresh()
+        _accent = Colors.TEXT_ACCENT
+        _tag_bg = Colors.TAB_ACTIVE_BG
+        _text_secondary = Colors.TEXT_SECONDARY
+        _ff = get_font_family_css()
+        _caption = scale_font_size(11)
+
+        # 移除旧胶囊行
+        if self._capsule_row_widget is not None:
+            try:
+                self._capsule_container_layout.removeWidget(self._capsule_row_widget)
+            except Exception:
+                pass
+            old_widget = self._capsule_row_widget
+            self._capsule_row_widget = None
+            # 先从对象树摘除（setParent(None)），确保 findChildren 立即不再
+            # 命中旧胶囊，再延迟销毁 C++ 对象
+            try:
+                old_widget.setParent(None)
+            except Exception:
+                pass
+            old_widget.deleteLater()
+
+        agent_names = [a for a in (agent_names or []) if a]
         if agent_names:
-            capsule_row = QHBoxLayout()
-            capsule_row.setSpacing(6)
+            row = QWidget(self)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
             for agent in agent_names:
-                capsule = QLabel(agent, self)
+                capsule = QLabel(agent, row)
                 capsule.setStyleSheet(f"""
                     QLabel {{
                         color: {_accent};
@@ -810,13 +845,27 @@ class _TeamGroupCard(CardWidget):
                         {_ff}
                     }}
                 """)
-                capsule_row.addWidget(capsule)
-            capsule_row.addStretch()
-            layout.addLayout(capsule_row)
+                row_layout.addWidget(capsule)
+            row_layout.addStretch()
+            self._capsule_row_widget = row
+            self._capsule_container_layout.addWidget(row)
         else:
             empty = CaptionLabel("（无成员会话）", self)
-            empty.setStyleSheet(f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}")
-            layout.addWidget(empty)
+            empty.setStyleSheet(
+                f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}"
+            )
+            self._capsule_row_widget = empty
+            self._capsule_container_layout.addWidget(empty)
+
+    def update_group(self, group: Dict):
+        """增量刷新团队分组卡片（成员胶囊 + 团队名），供渲染缓存命中时调用。
+
+        历史面板数据刷新时，_cached_team_cards 命中的旧卡片直接复用，
+        但 agent_names 可能已变化（如新成员加入/成员清理）——若不刷新，
+        UI 胶囊与实际成员不一致（成员胶囊 4→1 的根因之一）。
+        """
+        self._run_id = group.get("run_id", self._run_id)
+        self._update_capsules(group.get("agent_names", []))
 
     def mousePressEvent(self, event):
         # 点击卡片任意区域也触发恢复（按钮仍可用）
@@ -1066,6 +1115,17 @@ class HistoryCard(QWidget):
             由 main_widget 从 history_list 的团队字段组装后传入。
         """
         self._team_groups = list(teams or [])
+        # 🛡️ 清理已不在新分组列表中的缓存 key：避免团队解散/分组消失后
+        # 旧卡片仍残留缓存，下次渲染时复用过期成员胶囊。
+        new_run_ids = {g.get("run_id", "") for g in self._team_groups}
+        stale_keys = [k for k in self._cached_team_cards if k not in new_run_ids]
+        for k in stale_keys:
+            card = self._cached_team_cards.pop(k, None)
+            if card is not None:
+                try:
+                    card.deleteLater()
+                except Exception:
+                    pass
         if self._current_tab == "history":
             self._update_display()
 
@@ -1238,6 +1298,10 @@ class HistoryCard(QWidget):
                     card = _TeamGroupCard(group, self)
                     card.restoreRequested.connect(self.teamRestoreRequested)
                     self._cached_team_cards[run_id] = card
+                else:
+                    # 🛡️ 缓存命中：增量刷新成员胶囊（agent_names 可能已变化，
+                    # 如新成员加入/成员清理），避免 UI 成员与实际不一致
+                    card.update_group(group)
                 layout.insertWidget(layout.count() - 1, card)
                 card.show()
 

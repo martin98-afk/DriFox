@@ -634,6 +634,15 @@ class SessionStore:
             return self._session_repo.get_all_lightweight(limit, offset)
         return []
 
+    def get_sessions_by_team_run_id(self, run_id: str) -> List[Dict]:
+        """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
+
+        恢复团队会话时使用，绕开 HistoryManager 内存 _history_limit 截断。
+        """
+        if self._session_repo:
+            return self._session_repo.get_by_team_run_id(run_id)
+        return []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:

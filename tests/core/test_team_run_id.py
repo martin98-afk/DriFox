@@ -55,6 +55,24 @@ class TestStartTeamRun:
         run_id_2 = fresh_tm.start_team_run()
         assert run_id_1 == run_id_2, "同一团队应复用同一 run_id"
 
+    def test_start_team_run_force_generates_new(self, fresh_tm):
+        """force=True 无条件生成新 run_id 并落盘（恢复路径使用）。
+
+        回归保护：一键恢复是一次新的团队运行，必须与历史 run_id 区分，
+        否则恢复出的新会话仍归属旧 run_id，历史面板分组/恢复再次串台。
+        """
+        run_id_1 = fresh_tm.start_team_run()
+        run_id_2 = fresh_tm.start_team_run(force=True)
+        assert run_id_1 != run_id_2, "force=True 应生成全新 run_id"
+        data = fresh_tm._read_json(_team_file(fresh_tm, fresh_tm.DEFAULT_TEAM))
+        assert data.get("run_id") == run_id_2, "force 生成的新 run_id 应落盘"
+
+    def test_start_team_run_force_idempotent_without_force(self, fresh_tm):
+        """force=False（默认）对已有 run_id 幂等不变。"""
+        run_id_1 = fresh_tm.start_team_run()
+        run_id_2 = fresh_tm.start_team_run(force=False)
+        assert run_id_1 == run_id_2, "默认（非 force）应复用已有 run_id"
+
     def test_get_team_run_id_returns_value(self, fresh_tm):
         """get_team_run_id 返回已持久化的 run_id。"""
         run_id = fresh_tm.start_team_run()

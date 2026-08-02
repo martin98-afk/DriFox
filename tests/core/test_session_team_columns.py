@@ -183,6 +183,48 @@ def test_get_all_lightweight_passes_team_columns(store):
     assert row["agent_name"] == "build"
 
 
+def test_get_by_team_run_id_returns_only_that_team(store):
+    """get_by_team_run_id 只返回指定 run_id 的会话（恢复收集权威数据源）。
+
+    回归保护：恢复团队会话时直接查 SQLite 绕开 _history_limit=500 截断；
+    该方法必须按 run_id 精确过滤，且只含该团队、不含其他团队/非团队会话。
+    """
+    # 同团队两个成员 + 另一团队 + 非团队
+    for i, agent in enumerate(("build", "plan")):
+        s = _sample_session(team=True)
+        s["session_id"] = f"t-run1-{agent}"
+        s["agent_name"] = agent
+        s["team_run_id"] = "run-1"
+        s["team_name"] = "dev-team"
+        assert store.save_session(s) is True
+
+    other = _sample_session(team=True)
+    other["session_id"] = "t-run2"
+    other["team_run_id"] = "run-2"
+    other["team_name"] = "qa-team"
+    other["agent_name"] = "build"
+    assert store.save_session(other) is True
+
+    non_team = _sample_session(team=False)
+    non_team["session_id"] = "plain"
+    assert store.save_session(non_team) is True
+
+    rows = store.get_sessions_by_team_run_id("run-1")
+    assert len(rows) == 2, "应只返回 run-1 的两条会话"
+    ids = {r["session_id"] for r in rows}
+    assert ids == {"t-run1-build", "t-run1-plan"}
+    for r in rows:
+        assert r["team_run_id"] == "run-1"
+        assert r["team_name"] == "dev-team"
+        assert r["agent_name"] in ("build", "plan")
+
+
+def test_get_by_team_run_id_empty_for_unknown(store):
+    """不存在的 run_id 返回空列表（不抛异常）。"""
+    assert store.get_sessions_by_team_run_id("no-such-run") == []
+    assert store.get_sessions_by_team_run_id("") == []
+
+
 def test_history_manager_save_session_passes_team_fields(store):
     """HistoryManager.save_session 的 team 参数透传到 session_record。"""
     from app.utils.history_manager import HistoryManager

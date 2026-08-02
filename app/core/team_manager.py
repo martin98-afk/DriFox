@@ -339,7 +339,7 @@ class TeamManager:
 
     # ── 团队运行标识（run_id，方案 A 团队会话恢复）──
 
-    def start_team_run(self, team_name: str = DEFAULT_TEAM) -> str:
+    def start_team_run(self, team_name: str = DEFAULT_TEAM, force: bool = False) -> str:
         """开始一次团队运行：生成并持久化 run_id（幂等）
 
         方案 A 团队会话恢复：每次 /team --load 开始一次团队运行时，
@@ -351,13 +351,19 @@ class TeamManager:
         触发时刷新运行标识，导致历史会话与当前运行脱钩）；无 run_id 时
         生成新值并落盘。
 
+        Args:
+            force: True 时无条件生成新 run_id 并落盘（用于"一键恢复"——
+                恢复是一次新的团队运行，必须与历史 run_id 区分，
+                否则恢复出的新会话仍归属旧 run_id，导致历史面板
+                分组/恢复再次串台）。
+
         Returns:
             run_id（uuid4 hex 字符串）
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
             run_id = data.get("run_id")
-            if not run_id:
+            if force or not run_id:
                 run_id = uuid.uuid4().hex
                 data["run_id"] = run_id
                 self._save_team_data(team_name)

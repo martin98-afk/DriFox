@@ -1105,6 +1105,19 @@ class HistoryManager:
             return session.get("messages", [])
         return None
 
+    def get_team_sessions_by_run_id(self, run_id: str) -> List[Dict]:
+        """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
+
+        🛡️ 恢复团队会话专用：直接查 SQLite，绕开 _history_limit=500
+        截断——团队会话长期运行可能被挤出内存前 500 条，若用
+        get_history_list() 收集会漏成员（恢复成员不全的根因之一）。
+        """
+        if self._use_sqlite and self._session_store:
+            return self._session_store.get_sessions_by_team_run_id(run_id)
+        # 非 SQLite 模式（JSON 存储）：退化为内存列表过滤
+        sessions = self.get_history_list(with_messages=False)
+        return [s for s in sessions if (s.get("team_run_id") or "").strip() == run_id]
+
     def update_session(
         self,
         index: int,

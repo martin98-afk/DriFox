@@ -385,6 +385,37 @@ class SessionRepository:
             logger.error(f"[SessionRepository] get_sessions_by_project 异常: {e}")
             return []
 
+    def get_by_team_run_id(self, run_id: str) -> List[Dict]:
+        """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
+
+        恢复团队会话时使用：直接查 SQLite，绕开 HistoryManager 内存
+        _history_limit=500 的截断——团队会话可能因长期运行被挤出
+        内存前 500 条，导致恢复时按 run_id 收集不到部分成员。
+
+        Returns:
+            按 updated_at 倒序的轻量会话字典列表（含团队元数据字段）
+        """
+        if not self.is_initialized or not run_id:
+            return []
+
+        try:
+            # 与 get_all_lightweight 相同的轻量字段投影，避免反序列化重量级 BLOB
+            success, rows = self._execute(
+                f"SELECT session_id, title, project, system_prompt, "
+                f"message_count, user_edited_title, worktree_path, "
+                f"preview, context_usage, created_at, updated_at, "
+                f"team_run_id, team_name, agent_name "
+                f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "
+                f"ORDER BY updated_at DESC",
+                (run_id,),
+            )
+            if success:
+                return [self._row_to_session_lightweight(row) for row in rows]
+            return []
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_by_team_run_id 异常: {e}")
+            return []
+
     def get_projects(self) -> List[str]:
         """获取所有项目名称列表（含无会话但有关键文档的项目）
 
