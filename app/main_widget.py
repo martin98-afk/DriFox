@@ -3973,7 +3973,10 @@ class OpenAIChatToolWindow(ToolWindow):
             ),
             confirm_text="确认",
             cancel_text="取消",
-            parent=self,
+            # parent 取顶层主窗口（Tab 模式下为 TabManagerWindow），而非 self 这个
+            # 嵌入 QStackedWidget 的子 widget——MaskDialogBase 用 parent 尺寸铺遮罩，
+            # 传子 widget 会导致遮罩只覆盖聊天区、弹窗层级/定位异常。
+            parent=self.window(),
         )
         _dialog.confirmed.connect(_on_load_confirm)
         _dialog.exec_()
@@ -5232,37 +5235,64 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.setFocus(Qt.OtherFocusReason)
 
     def _get_all_model_options_flat(self) -> list:
-        """平展所有服务商:模型名列表"""
+        """平展所有服务商:模型名选项列表（带描述）
+
+        条目格式：{"value": "display:model", "description": "..."}，
+        描述来自 models.dev / 硬编码能力字典的 note 字段（无则空串）。
+        供命令卡片枚举值模式显示当前模型描述。
+        """
+        from app.core.model_capabilities import get_model_capabilities
+
         options = []
         for config_id, config in self._valid_configs.items():
             # 用 display_name 给用户看，避免 UUID 出现
             display = config.get("display_name", config.get("provider_name", config_id))
             models = self._get_model_list_for_provider(config_id)
             for model in models:
-                options.append(f"{display}:{model}")
-        return sorted(options)
+                caps = get_model_capabilities(model)
+                note = (caps.get("note", "") or "").strip()
+                options.append({"value": f"{display}:{model}", "description": note})
+        return sorted(options, key=lambda x: x["value"])
 
     def _get_subagent_names(self) -> list:
-        """获取所有可作为子智能体的 agent 名称列表"""
+        """获取所有可作为子智能体的 agent 选项列表（带描述）
+
+        条目格式：{"value": name, "description": "..."}（无描述则空串）。
+        供命令卡片枚举值模式显示当前 agent 描述。
+        """
         if not self.backend or not self.backend.agent_manager:
             return []
         all_agents = self.backend.agent_manager.list_agents(include_hidden=False)
-        return sorted([a.name for a in all_agents if a.mode in ("subagent", "all")])
+        items = [
+            {"value": a.name, "description": (a.description or "").strip()}
+            for a in all_agents
+            if a.mode in ("subagent", "all")
+        ]
+        return sorted(items, key=lambda x: x["value"])
 
     def _get_team_template_names(self) -> list:
-        """获取所有已保存的团队模板名称列表"""
+        """获取所有已保存的团队模板选项列表（带描述）
+
+        条目格式：{"value": name, "description": "..."}（无描述则空串）。
+        供命令卡片枚举值模式显示当前模板描述。
+        """
         try:
             from app.core.team.template_manager import TemplateManager
 
             templates = TemplateManager.get_instance().list_templates()
-            return sorted([t["name"] for t in templates])
+            items = [
+                {"value": t["name"], "description": (t.get("description") or "").strip()}
+                for t in templates
+            ]
+            return sorted(items, key=lambda x: x["value"])
         except Exception:
             return []
 
     def _get_plugin_names(self) -> list:
-        """获取所有已发现的插件名称列表（系统+用户+Claude 生态）
+        """获取所有已发现的插件选项列表（带描述）
 
-        供 /help --plugin= 参数卡片的插件列表使用。
+        条目格式：{"value": name, "description": "..."}（无描述则空串）。
+        供命令卡片枚举值模式显示当前插件描述。
         """
         try:
             from app.core.plugin_manager import PluginManager
@@ -5271,8 +5301,12 @@ class OpenAIChatToolWindow(ToolWindow):
             if not pm.is_initialized():
                 return []
             plugins = pm.list_plugins()
-            names = [p.name for p in plugins if p.name]
-            return sorted(names)
+            items = [
+                {"value": p.name, "description": (p.description or "").strip()}
+                for p in plugins
+                if p.name
+            ]
+            return sorted(items, key=lambda x: x["value"])
         except Exception:
             return []
 
@@ -9453,7 +9487,10 @@ class OpenAIChatToolWindow(ToolWindow):
             content="确定要彻底删除这个归档会话吗？此操作不可恢复。",
             confirm_text="删除",
             cancel_text="取消",
-            parent=self,
+            # parent 取顶层主窗口（Tab 模式下为 TabManagerWindow），而非 self 这个
+            # 嵌入 QStackedWidget 的子 widget——MaskDialogBase 用 parent 尺寸铺遮罩，
+            # 传子 widget 会导致遮罩只覆盖聊天区、弹窗层级/定位异常。
+            parent=self.window(),
         )
         _dialog.confirmed.connect(_on_delete_confirm)
         _dialog.exec_()
@@ -15038,7 +15075,10 @@ class OpenAIChatToolWindow(ToolWindow):
             default_text="https://",
             confirm_text="导入",
             cancel_text="取消",
-            parent=self,
+            # parent 取顶层主窗口（Tab 模式下为 TabManagerWindow），而非 self 这个
+            # 嵌入 QStackedWidget 的子 widget——MaskDialogBase 用 parent 尺寸铺遮罩，
+            # 传子 widget 会导致遮罩只覆盖聊天区、弹窗层级/定位异常。
+            parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_project_import_confirmed)
         dialog.exec_()
@@ -15268,7 +15308,10 @@ class OpenAIChatToolWindow(ToolWindow):
             default_text=folder_name,
             confirm_text="创建",
             cancel_text="取消",
-            parent=self,
+            # parent 取顶层主窗口（Tab 模式下为 TabManagerWindow），而非 self 这个
+            # 嵌入 QStackedWidget 的子 widget——MaskDialogBase 用 parent 尺寸铺遮罩，
+            # 传子 widget 会导致遮罩只覆盖聊天区、弹窗层级/定位异常。
+            parent=self.window(),
         )
         _dialog.confirmed.connect(_on_project_created)
         _dialog.exec_()
