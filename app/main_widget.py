@@ -4082,8 +4082,22 @@ class OpenAIChatToolWindow(ToolWindow):
             position=InfoBarPosition.BOTTOM,
         )
 
-    def _join_new_window_for_template(self, win, agent_name: str, window_id: str):
-        """为模板新建的窗口延后执行 join team（确保 backend 已初始化）。"""
+    def _join_new_window_for_template(
+        self,
+        win,
+        agent_name: str,
+        window_id: str,
+        track_arrange: bool = True,
+        keep_team_name: bool = False,
+    ):
+        """为模板新建的窗口延后执行 join team（确保 backend 已初始化）。
+
+        Args:
+            track_arrange: False 时旁路模板专用排列计数（恢复路径自行排列，
+                避免 _pending_arrange_count 被误递减破坏模板加载计数）
+            keep_team_name: True 时保留调用方已设置的 _team_name
+                （恢复路径用会话记录里的团队名，不覆盖为模板名）
+        """
         try:
             if getattr(win, "_is_destroyed", False):
                 return
@@ -4096,7 +4110,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_agent_command_permissions(agent_name)
             win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
-            win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+            if not keep_team_name:
+                win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
             win._team_run_id = tm_mgr.get_team_run_id()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
@@ -4112,25 +4127,27 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_active_windows_to_team_manager()
             logger.info(f"[_join_new_window_for_template] {agent_name}@{window_id} 已加入模板团队")
 
-            # 选中该窗口并递减待排列计数
-            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
-            try:
-                from app.tray_manager import TrayManager
+            if track_arrange:
+                # 选中该窗口并递减待排列计数
+                self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+                try:
+                    from app.tray_manager import TrayManager
 
-                tm_tray = TrayManager.get_instance()
-                dialog = win.window() if hasattr(win, "window") else win
-                if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
-                    tm_tray._select_window(dialog)
-            except Exception:
-                pass
+                    tm_tray = TrayManager.get_instance()
+                    dialog = win.window() if hasattr(win, "window") else win
+                    if dialog and dialog is not win and hasattr(dialog, "set_selection_indicator"):
+                        tm_tray._select_window(dialog)
+                except Exception:
+                    pass
 
-            if self._pending_arrange_count == 0:
-                self._do_team_window_arrange()
+                if self._pending_arrange_count == 0:
+                    self._do_team_window_arrange()
         except Exception as e:  # noqa: BLE001
             logger.error(f"[_join_new_window_for_template] 失败: {e}")
-            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
-            if self._pending_arrange_count == 0:
-                self._do_team_window_arrange()
+            if track_arrange:
+                self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+                if self._pending_arrange_count == 0:
+                    self._do_team_window_arrange()
 
     def _do_team_window_arrange(self):
         """在模板加载后自动排列已选中的窗口（归零回调）。"""
@@ -5323,10 +5340,7 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.core.team.template_manager import TemplateManager
 
             templates = TemplateManager.get_instance().list_templates()
-            items = [
-                {"value": t["name"], "description": (t.get("description") or "").strip()}
-                for t in templates
-            ]
+            items = [{"value": t["name"], "description": (t.get("description") or "").strip()} for t in templates]
             return sorted(items, key=lambda x: x["value"])
         except Exception:
             return []
@@ -5344,11 +5358,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if not pm.is_initialized():
                 return []
             plugins = pm.list_plugins()
-            items = [
-                {"value": p.name, "description": (p.description or "").strip()}
-                for p in plugins
-                if p.name
-            ]
+            items = [{"value": p.name, "description": (p.description or "").strip()} for p in plugins if p.name]
             return sorted(items, key=lambda x: x["value"])
         except Exception:
             return []
@@ -6720,6 +6730,85 @@ class OpenAIChatToolWindow(ToolWindow):
         # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
         self._card_manager.hide_card("history", self._window_id)
 
+    def _disband_current_team_for_restore(self):
+        """恢复团队会话前解散当前团队 + 关闭所有团队窗口（用户确认语义 D1）。
+
+        语义：恢复是一次全新的团队运行，先清理现有团队状态，避免新旧团队
+        会话/邮箱目录/成员登记互相串扰。
+        - 遍历 OpenAIChatToolWindow._instances 快照，跳过已销毁窗口及非团队窗口
+        - 每个团队窗口：停 watcher（幂等）→ leave_team（清成员登记+邮箱目录）
+          → 清空 _team_agent_name/_team_name/_team_run_id
+        - 主窗口（self）：保留，刷新为独立模式 UI + 新建空白会话
+          （_create_new_session 自动保存旧会话；必须在 _team_run_id 清空后
+          调用，避免新会话污染旧团队会话记录）
+        - 其他团队窗口：从 Tab 管理器移除（remove_window 只移除 tab）+
+          close()（closeEvent 自动保存+清理+从 _instances 移除）
+        """
+        tm_mgr = self._get_team_manager()
+        for win in list(getattr(OpenAIChatToolWindow, "_instances", [])):
+            try:
+                if getattr(win, "_is_destroyed", False):
+                    continue
+                if getattr(win, "windowClosed", False):
+                    continue
+                if not getattr(win, "_team_agent_name", ""):
+                    continue
+
+                # 1) 停 watcher（幂等），避免 leave_team rmtree 邮箱目录时触发重建
+                stop_watcher = getattr(win, "_stop_team_watcher", None)
+                if callable(stop_watcher):
+                    try:
+                        stop_watcher()
+                    except Exception:
+                        pass
+
+                # 2) 离开团队（清理成员登记 + 邮箱目录）
+                wid = getattr(win, "_window_id", "")
+                try:
+                    if wid:
+                        tm_mgr.leave_team(wid)
+                except Exception:
+                    pass
+
+                # 3) 清空团队标记（必须在 _create_new_session 之前，
+                #    避免新会话仍带旧团队 run_id）
+                win._team_agent_name = ""
+                win._team_name = ""
+                win._team_run_id = ""
+
+                if win is self:
+                    # 主窗口保留：刷新独立模式 UI + 新建空白会话
+                    refresh_ui = getattr(win, "_refresh_team_ui", None)
+                    if callable(refresh_ui):
+                        try:
+                            refresh_ui(is_team=False)
+                        except Exception:
+                            pass
+                    create_session = getattr(win, "_create_new_session", None)
+                    if callable(create_session):
+                        try:
+                            create_session()
+                        except Exception:
+                            pass
+                else:
+                    # 其他团队窗口：从 Tab 管理器移除 + 关闭
+                    try:
+                        from app.widgets.tab_manager_window import TabManagerWindow
+
+                        tab_mgr = TabManagerWindow.get_instance()
+                        if tab_mgr is not None:
+                            tab_mgr.remove_window(win)
+                    except Exception:
+                        pass
+                    close_win = getattr(win, "close", None)
+                    if callable(close_win):
+                        try:
+                            close_win()
+                        except Exception:
+                            pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[_disband_current_team_for_restore] 处理窗口异常: {e}")
+
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
 
@@ -6760,13 +6849,18 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 2) 开始一次新的团队运行：force 生成新 run_id（恢复是一次新运行，
+        # 2) 用户确认语义（D1）：恢复前解散现有团队 + 关闭所有团队窗口。
+        #    主窗口保留并新建空白会话（_create_new_session 自动保存旧会话）。
+        #    仅在收集成功校验通过后调用——失败恢复不白解散。
+        self._disband_current_team_for_restore()
+
+        # 3) 开始一次新的团队运行：force 生成新 run_id（恢复是一次新运行，
         #    新会话记录归属新 run_id，与历史记录区分；force 保证不沿用
         #    旧 run_id，避免新会话仍挂到历史分组导致串台）
         tm_mgr = self._get_team_manager()
         new_run_id = tm_mgr.start_team_run(force=True)
 
-        # 3) 按 agent_name 去重：每组取 last_time 最新一条会话，
+        # 4) 按 agent_name 去重：每组取 last_time 最新一条会话，
         #    避免同 agent 多轮会话建重复窗口（恢复成员 4→1 的修复之一）。
         #    空消息 agent 不跳过：窗口照常创建（仅消息为空），
         #    保证恢复窗口数 = agent 数。
@@ -6820,7 +6914,26 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
 
-        # 4) 延后排列恢复的窗口（等窗口初始化完成后统一网格排列）
+        # 5) 延后为每个恢复窗口执行完整初始化（切换 agent + 注册成员 +
+        #    刷新 UI + 启动 watcher）。与模板加载路径共用
+        #    _join_new_window_for_template，但：
+        #    - track_arrange=False：旁路模板专用排列计数（恢复路径自行排列，
+        #      避免 _pending_arrange_count 被误递减破坏模板加载计数）
+        #    - keep_team_name=True：保留会话记录里的团队名（不覆盖为模板名，
+        #      保护 test_restore_uses_team_name_from_session）
+        for win in restored_windows:
+            QTimer.singleShot(
+                self._TEMPLATE_JOIN_DELAY_MS,
+                lambda w=win: self._join_new_window_for_template(
+                    w,
+                    getattr(w, "_team_agent_name", ""),
+                    getattr(w, "_window_id", "?"),
+                    track_arrange=False,
+                    keep_team_name=True,
+                ),
+            )
+
+        # 6) 延后排列恢复的窗口（等窗口初始化完成后统一网格排列）
         if restored_windows:
             QTimer.singleShot(self._TEMPLATE_JOIN_DELAY_MS, self._do_team_window_arrange)
 
@@ -7239,7 +7352,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -7304,7 +7417,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -7317,7 +7430,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
@@ -7342,7 +7455,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered (all windows)")
@@ -7376,7 +7489,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
 
@@ -7452,7 +7565,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] LSP server list refreshed (all windows)")
 
@@ -7479,7 +7592,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except (RuntimeError, AttributeError):
+                except RuntimeError, AttributeError:
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -16175,7 +16288,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
-        except (ValueError, Exception):
+        except ValueError, Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -16202,7 +16315,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
             # 🛡️ 关键修复：同步收集中断消息并应用到会话

@@ -249,6 +249,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
 
         fake = _FakeWin()
+
         # 🛡️ 新实现：_create_fresh_window 内部在 add_window（触发 showEvent）
         # 之前把 branch_data 赋给新窗口；mock 需模拟该语义，否则 fake 的
         # _branch_session_data 不会自动赋值。
@@ -406,6 +407,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
 
         fake = _FakeWin()
+
         # 模拟新实现：_create_fresh_window 内部赋值 branch_data
         def _fake_create(branch_data=None):
             fake._branch_session_data = branch_data
@@ -515,7 +517,9 @@ class TestTeamRestoreLogic:
         win.backend.create_session.return_value.session_id = "new-sid"
         win.backend.create_session.return_value.metadata = {}
 
-        OpenAIChatToolWindow._create_branched_session(win, [{"role": "user", "content": "hi"}], "分支", project="proj-x")
+        OpenAIChatToolWindow._create_branched_session(
+            win, [{"role": "user", "content": "hi"}], "分支", project="proj-x"
+        )
 
         # project 透传生效：metadata + 窗口 + backend 同步
         assert win.backend.create_session.return_value.metadata["project"] == "proj-x"
@@ -525,4 +529,236 @@ class TestTeamRestoreLogic:
         # 无 project（空串）→ 回落当前项目（重置 _current_project 模拟新窗口）
         win._current_project = "旧项目"
         OpenAIChatToolWindow._create_branched_session(win, [{"role": "user", "content": "hi"}], "分支2", project="")
-        assert win.backend.create_session.return_value.metadata["project"] == "旧项目", "空 project 应回落 _current_project"
+        assert win.backend.create_session.return_value.metadata["project"] == "旧项目", (
+            "空 project 应回落 _current_project"
+        )
+
+
+class TestTeamRestoreDisband:
+    """M1' 恢复路径重构：解散现有团队 + 完整初始化恢复窗口
+
+    覆盖：
+    - 恢复前 _disband_current_team_for_restore 被调用（在 start_team_run 之前）
+    - 解散逻辑：团队窗口 _stop_team_watcher / leave_team / 团队标记清空，
+      主窗口保留并新建空白会话，其他团队窗口 remove_window + close
+    - 非团队 / 已销毁窗口被跳过
+    - _join_new_window_for_template 恢复路径参数：
+      track_arrange=False 不递减 _pending_arrange_count，
+      keep_team_name=True 保留会话记录团队名
+    """
+
+    def test_restore_calls_disband_before_start_run(self):
+        """恢复时解散逻辑在 start_team_run(force=True) 之前被调用。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            {
+                "session_id": "s1",
+                "title": "t",
+                "last_time": "2026-01-01 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+            }
+        ]
+        win.history_manager.get_session_messages.return_value = [{"role": "user", "content": "x"}]
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.start_team_run.return_value = "new-run-1"
+        win._get_team_manager.return_value = tm
+        win._create_fresh_window = MagicMock(return_value=MagicMock(_window_id="w1"))
+        win._card_manager = MagicMock()
+        # 记录解散与 start_team_run 的调用顺序
+        win._disband_current_team_for_restore = MagicMock()
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        # 解散逻辑必须被调用
+        win._disband_current_team_for_restore.assert_called_once()
+        # 顺序断言：disband 在 _get_team_manager（→start_team_run）之前被调用
+        _calls = [c[0] for c in win.method_calls]
+        assert _calls.index("_disband_current_team_for_restore") < _calls.index("_get_team_manager")
+
+    def test_disband_stops_watcher_and_leaves_team(self):
+        """解散：每个团队窗口停 watcher + leave_team + 清空团队标记。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        main_win = MagicMock()
+        main_win._is_destroyed = False
+        main_win.windowClosed = False
+        main_win._team_agent_name = "build"
+        main_win._team_name = "dev"
+        main_win._team_run_id = "run-1"
+        main_win._window_id = "main"
+        main_win._stop_team_watcher = MagicMock()
+        main_win._refresh_team_ui = MagicMock()
+        main_win._create_new_session = MagicMock()
+        main_win.close = MagicMock()
+
+        other_win = MagicMock()
+        other_win._is_destroyed = False
+        other_win.windowClosed = False
+        other_win._team_agent_name = "plan"
+        other_win._team_name = "dev"
+        other_win._team_run_id = "run-1"
+        other_win._window_id = "other"
+        other_win._stop_team_watcher = MagicMock()
+        other_win.close = MagicMock()
+
+        tm = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        other_win._get_team_manager = MagicMock(return_value=tm)
+
+        instances = [main_win, other_win]
+        with patch.object(OpenAIChatToolWindow, "_instances", instances):
+            with patch("app.widgets.tab_manager_window.TabManagerWindow") as _mock_tab:
+                _mock_tab.get_instance.return_value = MagicMock()
+                OpenAIChatToolWindow._disband_current_team_for_restore(main_win)
+
+        # 每个团队窗口都停 watcher + leave_team + 清空标记
+        main_win._stop_team_watcher.assert_called_once()
+        other_win._stop_team_watcher.assert_called_once()
+        assert tm.leave_team.call_count == 2
+        assert main_win._team_agent_name == ""
+        assert main_win._team_run_id == ""
+        assert other_win._team_agent_name == ""
+        # 主窗口保留：刷新独立 UI + 新建空白会话；不 close
+        main_win._refresh_team_ui.assert_called_once()
+        main_win._create_new_session.assert_called_once()
+        main_win.close.assert_not_called()
+        # 其他团队窗口：从 Tab 移除 + close
+        other_win.close.assert_called_once()
+
+    def test_disband_skips_non_team_and_destroyed(self):
+        """解散跳过非团队窗口与已销毁窗口。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        main_win = MagicMock()
+        main_win._is_destroyed = False
+        main_win.windowClosed = False
+        main_win._team_agent_name = ""
+        main_win._get_team_manager = MagicMock()
+        main_win._stop_team_watcher = MagicMock()
+        main_win._create_new_session = MagicMock()
+
+        destroyed = MagicMock()
+        destroyed._is_destroyed = True
+        destroyed.windowClosed = True
+        destroyed._team_agent_name = "build"
+        destroyed._stop_team_watcher = MagicMock()
+        destroyed.close = MagicMock()
+
+        closed_flag = MagicMock()
+        closed_flag._is_destroyed = False
+        closed_flag.windowClosed = True
+        closed_flag._team_agent_name = "build"
+        closed_flag._stop_team_watcher = MagicMock()
+        closed_flag.close = MagicMock()
+
+        tm = MagicMock()
+        main_win._get_team_manager.return_value = tm
+
+        instances = [main_win, destroyed, closed_flag]
+        with patch.object(OpenAIChatToolWindow, "_instances", instances):
+            OpenAIChatToolWindow._disband_current_team_for_restore(main_win)
+
+        # 非团队/已销毁/windowClosed 窗口均不处理
+        main_win._stop_team_watcher.assert_not_called()
+        destroyed._stop_team_watcher.assert_not_called()
+        closed_flag._stop_team_watcher.assert_not_called()
+        tm.leave_team.assert_not_called()
+
+    def test_join_template_track_arrange_false_keeps_count(self):
+        """恢复路径 track_arrange=False：完整初始化但不递减 _pending_arrange_count。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.backend = MagicMock()
+        win.backend.agent_manager = MagicMock()
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_agent_name = "build"
+        win._team_name = "dev-team"
+        win._team_run_id = "run-9"
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-9"
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 3
+        main_win._do_team_window_arrange = MagicMock()
+
+        OpenAIChatToolWindow._join_new_window_for_template(
+            main_win, win, "build", "w1", track_arrange=False, keep_team_name=True
+        )
+
+        # 完整初始化执行
+        win._on_agent_changed.assert_called_once_with("build")
+        win._apply_agent_command_permissions.assert_called_once_with("build")
+        win._refresh_team_ui.assert_called_once_with("build")
+        win._start_team_watcher.assert_called_once()
+        # 保留会话记录团队名（不覆盖为模板名）
+        assert win._team_name == "dev-team"
+        # 不递减排列计数、不触发排列
+        assert main_win._pending_arrange_count == 3
+        main_win._do_team_window_arrange.assert_not_called()
+
+    def test_join_template_default_track_arrange_decrements(self):
+        """模板加载路径默认 track_arrange=True：递减计数并在归零时排列。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.backend = MagicMock()
+        win.backend.agent_manager = MagicMock()
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_name = ""
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-x"
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 1
+        main_win._do_team_window_arrange = MagicMock()
+
+        OpenAIChatToolWindow._join_new_window_for_template(main_win, win, "build", "w1")
+
+        assert main_win._pending_arrange_count == 0
+        main_win._do_team_window_arrange.assert_called_once()
+        # 默认 keep_team_name=False：团队名被模板名覆盖
+        assert win._team_name == "模板名"
