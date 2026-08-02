@@ -865,6 +865,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._injected_team_mails: list = []  # 流式中 hook 注入的团队邮件（流结束时标记完成）
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
         self._team_name: str = ""  # 团队名（TeamManager 模板名），空=非团队模式；供 Tab 分组使用
+        self._team_run_id: str = ""  # 团队运行标识（方案 A：/team --load 生成，团队会话自动保存时落库），空=非团队模式
 
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
@@ -3780,6 +3781,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_agent_name = agent_name
         # 团队名：优先取当前模板名，无模板回退 default（与 TeamManager.DEFAULT_TEAM 一致）
         self._team_name = (tm.get_template() or {}).get("name") or "default"
+        # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
+        # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
+        self._team_run_id = tm.get_team_run_id()
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -3809,6 +3813,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 3) 清除团队标记后刷新 UI
         self._team_agent_name = ""
         self._team_name = ""
+        self._team_run_id = ""
         self._refresh_team_ui(is_team=False)
 
         # 4) 同步活跃窗口列表（触发失效成员清理）
@@ -3992,6 +3997,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
             }
         )
+        # 方案 A：开始一次团队运行（生成/复用 run_id，写入 team.json 顶层），
+        # 本次模板加载的所有新窗口共享同一 run_id，团队会话自动保存时落库。
+        team_run_id = tm_mgr.start_team_run()
 
         # 1) 为模板的每个角色新建一个全新空白窗口（不复制任何已有窗口的上下文/会话）
         new_windows: List["OpenAIChatToolWindow"] = []
@@ -4007,6 +4015,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 同时写入团队名/角色名，供 Tab 管理器分组与胶囊使用。
                     win._team_agent_name = agent_name
                     win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+                    win._team_run_id = team_run_id
                     tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
@@ -4055,6 +4064,7 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
             win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+            win._team_run_id = tm_mgr.get_team_run_id()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             if hasattr(win, "_refresh_team_ui"):
                 try:
@@ -15788,6 +15798,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if idx is not None:
                 # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
                 # 避免项目切换后 _current_project 已改变，导致旧会话被错误地划归新项目
+                # 团队元数据：update_session 语义为 None 保留现值，故仅当本窗口
+                # 处于团队模式（_team_run_id 非空）才显式传参覆盖；非团队窗口
+                # 不传（None）→ 保留历史值，避免普通编辑把团队会话元数据清空。
+                team_kwargs = {}
+                if self._team_run_id:
+                    team_kwargs = {
+                        "team_run_id": self._team_run_id,
+                        "team_name": self._team_name or "",
+                        "agent_name": self._team_agent_name or "",
+                    }
                 self.history_manager.update_session(
                     idx,
                     session.messages,
@@ -15795,6 +15815,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
                     **worktree_kwargs,
+                    **team_kwargs,
                 )
             else:
                 # 🛡️ 内存找不到（老会话被截断出 _history_limit）：
@@ -15809,6 +15830,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
                     project=resolved_project,
+                    team_run_id=self._team_run_id,
+                    team_name=self._team_name or "",
+                    agent_name=self._team_agent_name or "",
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id
@@ -15824,6 +15848,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 compaction_cache=getattr(session, "compaction_cache", {}),
                 system_prompt=system_prompt,
                 project=resolved_project,
+                team_run_id=self._team_run_id,
+                team_name=self._team_name or "",
+                agent_name=self._team_agent_name or "",
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id

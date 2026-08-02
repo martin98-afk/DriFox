@@ -14,6 +14,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -335,6 +336,38 @@ class TeamManager:
         """获取当前团队的模板上下文（无模板时返回 None）"""
         data = self._get_team_data(team_name)
         return data.get("template")
+
+    # ── 团队运行标识（run_id，方案 A 团队会话恢复）──
+
+    def start_team_run(self, team_name: str = DEFAULT_TEAM) -> str:
+        """开始一次团队运行：生成并持久化 run_id（幂等）
+
+        方案 A 团队会话恢复：每次 /team --load 开始一次团队运行时，
+        生成 uuid4 写入 team.json **顶层**（与 members 平级）——
+        而非成员级字段。这样 _cleanup_stale_members 清理失效成员时
+        只动 members，不会丢失 run_id，同一团队的所有成员共享同一 run_id。
+
+        幂等语义：团队已存在 run_id 时直接复用（避免 /team --load 重复
+        触发时刷新运行标识，导致历史会话与当前运行脱钩）；无 run_id 时
+        生成新值并落盘。
+
+        Returns:
+            run_id（uuid4 hex 字符串）
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            run_id = data.get("run_id")
+            if not run_id:
+                run_id = uuid.uuid4().hex
+                data["run_id"] = run_id
+                self._save_team_data(team_name)
+            return run_id
+
+    def get_team_run_id(self, team_name: str = DEFAULT_TEAM) -> str:
+        """获取当前团队的 run_id（未开始团队运行 / 老团队无 run_id 时返回空串）"""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            return data.get("run_id", "") or ""
 
     # ── 邮件系统 ─────────────────────────────────────
 
