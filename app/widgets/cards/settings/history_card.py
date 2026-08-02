@@ -712,6 +712,119 @@ class _SectionHeader(QLabel):
         )
 
 
+class _TeamGroupCard(CardWidget):
+    """团队对话分组卡片 - 显示团队名 + 成员角色胶囊 + 恢复按钮
+
+    方案 A：按 run_id 分组的团队历史会话，点击「恢复团队」一次性重建
+    该团队的全部成员窗口并加载各自会话。
+    """
+
+    restoreRequested = pyqtSignal(str)  # run_id
+
+    def __init__(self, group: Dict, parent=None):
+        super().__init__(parent)
+        self._run_id = group.get("run_id", "")
+        self.setCursor(Qt.PointingHandCursor)
+
+        Colors.refresh()
+        _card_bg = Colors.CARD_BG
+        _border = Colors.BORDER
+        _text_primary = Colors.TEXT_PRIMARY
+        _text_secondary = Colors.TEXT_SECONDARY
+        _accent = Colors.TEXT_ACCENT
+        _tag_bg = Colors.TAB_ACTIVE_BG
+        _ff = get_font_family_css()
+        _body = scale_font_size(13)
+        _caption = scale_font_size(11)
+
+        self.setStyleSheet(f"""
+            CardWidget {{
+                background-color: {_card_bg.format(alpha=140)};
+                border: 1px solid {_border};
+                border-radius: 10px;
+            }}
+            CardWidget:hover {{
+                border: 1px solid {_accent};
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # 顶行：团队名 + 相对时间 + 恢复按钮
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+
+        title_label = QLabel(f"👥 {group.get('team_name') or '团队对话'}", self)
+        title_label.setStyleSheet(
+            f"color: {_text_primary}; font-weight: bold; font-size: {_body}px; background: transparent; {_ff}"
+        )
+        top_row.addWidget(title_label, 1)
+
+        last_time = group.get("last_time", "")
+        if last_time:
+            rel = format_relative_time(last_time)
+            time_label = CaptionLabel(f"最近活跃 {rel}", self)
+            time_label.setStyleSheet(
+                f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}"
+            )
+            top_row.addWidget(time_label, 0, Qt.AlignVCenter)
+
+        restore_btn = PrimaryPushButton("恢复团队", self)
+        restore_btn.setFixedHeight(26)
+        restore_btn.setStyleSheet(f"""
+            PrimaryPushButton {{
+                color: white;
+                background-color: {Colors.INFO};
+                border: none;
+                border-radius: 6px;
+                padding: 2px 14px;
+                font-size: {_caption}px;
+                {_ff}
+            }}
+            PrimaryPushButton:hover {{
+                background-color: {Colors.SEND_BTN_END};
+            }}
+        """)
+        restore_btn.setCursor(Qt.PointingHandCursor)
+        restore_btn.clicked.connect(lambda: self.restoreRequested.emit(self._run_id))
+        top_row.addWidget(restore_btn, 0)
+
+        layout.addLayout(top_row)
+
+        # 角色胶囊行：各成员 agent_name 胶囊
+        agent_names = group.get("agent_names", [])
+        if agent_names:
+            capsule_row = QHBoxLayout()
+            capsule_row.setSpacing(6)
+            for agent in agent_names:
+                capsule = QLabel(agent, self)
+                capsule.setStyleSheet(f"""
+                    QLabel {{
+                        color: {_accent};
+                        background-color: {_tag_bg};
+                        border-radius: 8px;
+                        padding: 1px 8px;
+                        font-size: {_caption}px;
+                        {_ff}
+                    }}
+                """)
+                capsule_row.addWidget(capsule)
+            capsule_row.addStretch()
+            layout.addLayout(capsule_row)
+        else:
+            empty = CaptionLabel("（无成员会话）", self)
+            empty.setStyleSheet(f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}")
+            layout.addWidget(empty)
+
+    def mousePressEvent(self, event):
+        # 点击卡片任意区域也触发恢复（按钮仍可用）
+        if event.button() == Qt.LeftButton:
+            self.restoreRequested.emit(self._run_id)
+        super().mousePressEvent(event)
+
+
 class HistoryCard(QWidget):
     """历史会话卡片内容 - 支持历史会话和归档会话切换"""
 
@@ -723,6 +836,7 @@ class HistoryCard(QWidget):
     sessionRestored = pyqtSignal(str)  # 恢复归档会话
     sessionPermanentlyDeleted = pyqtSignal(str)  # 彻底删除归档会话
     archivedSessionRenamed = pyqtSignal(str, str)  # 归档会话重命名
+    teamRestoreRequested = pyqtSignal(str)  # 恢复团队会话（参数 = run_id）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -732,6 +846,13 @@ class HistoryCard(QWidget):
         self._current_tab = "history"  # "history" or "archived"
         self._current_project: Optional[str] = None  # 当前过滤的项目
         self._search_filter: str = ""  # 搜索过滤文本
+
+        # === 团队对话分组（方案 A：按 run_id 分组的历史会话） ===
+        # 每项: {"run_id": str, "team_name": str, "agent_names": [str], "last_time": str}
+        # 由 main_widget 从 history_list 的团队字段组装后注入
+        self._team_groups: List[Dict] = []
+        # run_id → 团队分组卡片缓存（避免重复创建 widget）
+        self._cached_team_cards: Dict[str, QWidget] = {}
 
         # === 分页控制 ===
         self._page_size = _PAGE_SIZE
@@ -906,6 +1027,7 @@ class HistoryCard(QWidget):
         cached_set.update(id(w) for w in self._cached_archived.values())
         cached_set.update(id(w) for w in self._cached_headers.values())
         cached_set.update(id(w) for w in self._cached_spacers)
+        cached_set.update(id(w) for w in self._cached_team_cards.values())
 
         # 清理「加载更多」按钮引用（它不在缓存中，会被 deleteLater 清理）
         self._load_more_btn = None
@@ -931,6 +1053,19 @@ class HistoryCard(QWidget):
         self._current_index = current_index
         if clear_archived:
             self._cached_archived.clear()
+        if self._current_tab == "history":
+            self._update_display()
+
+    def set_team_groups(self, teams: List[Dict]):
+        """设置团队对话分组数据（方案 A）
+
+        Args:
+            teams: 按 run_id 分组的团队信息列表，每项:
+                {"run_id": str, "team_name": str, "agent_names": [str],
+                 "last_time": str, "session_count": int}
+            由 main_widget 从 history_list 的团队字段组装后传入。
+        """
+        self._team_groups = list(teams or [])
         if self._current_tab == "history":
             self._update_display()
 
@@ -1086,6 +1221,26 @@ class HistoryCard(QWidget):
                 layout.insertWidget(layout.count() - 1, header)
                 header.show()
 
+            elif item_type == "team_header":
+                # 「团队对话」区块标题（固定文案，不参与会话计数）
+                header = self._cached_headers.get("__team__")
+                if header is None:
+                    header = _SectionHeader("团队对话", 0, self)
+                    self._cached_headers["__team__"] = header
+                layout.insertWidget(layout.count() - 1, header)
+                header.show()
+
+            elif item_type == "team_group":
+                group = item[1]
+                run_id = group.get("run_id", "")
+                card = self._cached_team_cards.get(run_id)
+                if card is None:
+                    card = _TeamGroupCard(group, self)
+                    card.restoreRequested.connect(self.teamRestoreRequested)
+                    self._cached_team_cards[run_id] = card
+                layout.insertWidget(layout.count() - 1, card)
+                card.show()
+
             elif item_type == "spacer":
                 # 从缓存池复用间隔线
                 spacer = self._cached_spacers.pop() if self._cached_spacers else QWidget()
@@ -1237,6 +1392,15 @@ class HistoryCard(QWidget):
     def _prepare_history_render_queue(self):
         """准备历史会话渲染队列（只做数据分组，不创建 widget）"""
         queue = self._render_queue
+
+        # ── 团队对话分组（方案 A）──
+        # 置于列表顶部，仅在非搜索模式下显示（搜索聚焦单个会话标题/预览，
+        # 团队分组按 run_id 聚合会干扰搜索结果展示）
+        if not self._search_filter and self._team_groups:
+            for group in self._team_groups:
+                queue.append(("team_header", group, 0))
+                queue.append(("team_group", group, 0))
+            queue.append(("spacer",))
 
         if not self._all_history:
             if self._search_filter:

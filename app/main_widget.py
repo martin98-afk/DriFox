@@ -1377,6 +1377,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
             self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
             self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
+            self._history_popup_card.teamRestoreRequested.connect(self._on_team_restore_requested)
             self._history_card.set_extra_button_handler(
                 self._history_popup_card.get_import_button_handler(),
                 tooltip="导入会话",
@@ -6516,14 +6517,53 @@ class OpenAIChatToolWindow(ToolWindow):
                     if session.get("session_id") == self._current_session_id:
                         current_idx = i
                         break
+            # 组装团队对话分组（方案 A）：按 run_id 聚合轻量记录的团队字段，
+            # 无 run_id 的会话（非团队 / 老团队）不进分组
+            team_groups = self._build_team_groups(history_list)
             # 归档操作后需要清理归档会话列表
             if is_archived:
                 self._history_popup_card.set_history(history_list, current_idx, clear_archived=True)
             else:
                 self._history_popup_card.set_history(history_list, current_idx)
+            self._history_popup_card.set_team_groups(team_groups)
         else:
             # 刷新归档会话
             self._refresh_archived_sessions()
+
+    def _build_team_groups(self, history_list: List[Dict]) -> List[Dict]:
+        """从历史会话列表组装团队对话分组（方案 A）
+
+        按 run_id 聚合：每组包含团队名、成员角色（agent_name 去重）、
+        最后活跃时间（组内最新 last_time）、会话数。无 run_id 的会话
+        （非团队 / 老团队）跳过。
+
+        Returns:
+            按最后活跃时间倒序的团队分组列表
+        """
+        groups: Dict[str, Dict] = {}
+        for session in history_list:
+            run_id = (session.get("team_run_id") or "").strip()
+            if not run_id:
+                continue
+            group = groups.setdefault(
+                run_id,
+                {
+                    "run_id": run_id,
+                    "team_name": (session.get("team_name") or "").strip() or "团队对话",
+                    "agent_names": [],
+                    "last_time": "",
+                    "session_count": 0,
+                },
+            )
+            agent = (session.get("agent_name") or "").strip()
+            if agent and agent not in group["agent_names"]:
+                group["agent_names"].append(agent)
+            group["session_count"] += 1
+            last_time = session.get("last_time") or ""
+            if last_time and last_time > group["last_time"]:
+                group["last_time"] = last_time
+
+        return sorted(groups.values(), key=lambda g: g["last_time"], reverse=True)
 
     def _on_history_project_selected(self, project: str):
         """历史面板项目切换（现在和标题栏同步）"""
@@ -6642,6 +6682,117 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             self._load_history_session_from_popup(index)
         # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
+        self._card_manager.hide_card("history", self._window_id)
+
+    def _on_team_restore_requested(self, run_id: str):
+        """从历史面板恢复团队会话（方案 A 一键恢复）
+
+        按 run_id 收集该团队全部成员会话 → 为每个角色新建一个全新窗口、
+        加载对应历史会话内容、重新登记为团队成员（join_team）并共享同一
+        新 run_id（start_team_run 生成），Tab 分组按新 run_id 同组。
+
+        恢复语义：内容恢复 + 新 session_id（恢复是一次新的团队运行，
+        产生新会话记录，不覆盖原历史记录）。
+
+        Args:
+            run_id: 要恢复的团队运行标识（来自 history_card.teamRestoreRequested）
+        """
+        if not run_id or getattr(self, "_is_destroyed", False):
+            return
+        if not self.history_manager:
+            return
+
+        # 1) 从全量历史中收集该团队会话（以 SQLite 会话记录为权威数据源，
+        #    而非 team.json 成员——成员可能已被 _cleanup_stale_members 清理）
+        member_sessions = []
+        try:
+            all_history = self.history_manager.get_history_list(with_messages=False)
+        except Exception:
+            all_history = []
+        for session in all_history:
+            if (session.get("team_run_id") or "").strip() == run_id:
+                member_sessions.append(session)
+
+        if not member_sessions:
+            InfoBar.warning(
+                "恢复失败",
+                "未找到该团队的会话记录",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 2) 开始一次新的团队运行：生成新 run_id（恢复是一次新运行，
+        #    新会话记录归属新 run_id，与历史记录区分）
+        tm_mgr = self._get_team_manager()
+        tm_mgr.set_template(
+            {
+                "name": (member_sessions[0].get("team_name") or "").strip() or "default",
+                "description": "",
+                "agents": [
+                    {"agent_name": (s.get("agent_name") or "").strip(), "description": ""}
+                    for s in member_sessions
+                    if (s.get("agent_name") or "").strip()
+                ],
+            }
+        )
+        new_run_id = tm_mgr.start_team_run()
+
+        # 3) 为每个成员创建窗口并注入恢复数据
+        restored_count = 0
+        restored_windows = []
+        for session in member_sessions:
+            agent_name = (session.get("agent_name") or "").strip()
+            if not agent_name:
+                continue
+            session_id = session.get("session_id", "")
+            messages = self.history_manager.get_session_messages(session_id)
+            if not messages:
+                continue  # 无消息的会话跳过（空会话无法恢复）
+            try:
+                win = self._create_fresh_window()
+                if win is None:
+                    continue
+                # 注入恢复数据：复用分支数据机制，showEvent 自动走
+                # _apply_branch_or_create_session → _create_branched_session
+                # 加载历史消息，避免与 showEvent 的 _create_new_session 竞态
+                title = session.get("title") or session.get("name") or f"团队对话 {agent_name}"
+                win._branch_session_data = {
+                    "messages": messages,
+                    "name": title,
+                }
+                # 团队标记 + 重新登记成员（join_team 幂等）
+                win._team_agent_name = agent_name
+                win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+                win._team_run_id = new_run_id
+                tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+                restored_windows.append(win)
+                restored_count += 1
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
+
+        # 4) 延后排列恢复的窗口（等窗口初始化完成后统一网格排列）
+        if restored_windows:
+            QTimer.singleShot(self._TEMPLATE_JOIN_DELAY_MS, self._do_team_window_arrange)
+
+        if restored_count > 0:
+            InfoBar.success(
+                "团队已恢复",
+                f"已恢复 {restored_count} 个成员会话",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.warning(
+                "恢复失败",
+                "没有可恢复的成员会话（可能为空会话）",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        # 关闭历史会话卡片
         self._card_manager.hide_card("history", self._window_id)
 
     def resizeEvent(self, event):
@@ -15823,6 +15974,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 resolved_project = self._resolve_session_project_fallback(
                     self._current_session_id, self._current_project, session=session
                 )
+                # 团队元数据：与 update 分支语义一致——仅当本窗口处于团队模式
+                # （_team_run_id 非空）才传团队字段；非团队窗口传默认空串会经
+                # INSERT OR REPLACE 清空该团队会话的元数据（截断出内存的
+                # 老会话无法走 update 保留现值路径），故此处也需守卫。
+                team_save_kwargs = {}
+                if self._team_run_id:
+                    team_save_kwargs = {
+                        "team_run_id": self._team_run_id,
+                        "team_name": self._team_name or "",
+                        "agent_name": self._team_agent_name or "",
+                    }
                 self.history_manager.save_session(
                     session.messages,
                     session_id=session.session_id,
@@ -15830,9 +15992,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     compaction_cache=getattr(session, "compaction_cache", {}),
                     system_prompt=system_prompt,
                     project=resolved_project,
-                    team_run_id=self._team_run_id,
-                    team_name=self._team_name or "",
-                    agent_name=self._team_agent_name or "",
+                    **team_save_kwargs,
                     **worktree_kwargs,
                 )
                 self._current_session_id = session.session_id

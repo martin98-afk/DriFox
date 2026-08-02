@@ -805,9 +805,12 @@ class TabManagerWindow(QWidget):
             if team_agent:
                 panel.update_tab_capsule(tab_idx, team_agent)
             # 同步初始团队分组（窗口加入 Tab 时可能已是团队成员）
-            # 分组 key 用团队名（_team_name，模板名），同团队多窗口圈进同一容器；
-            # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
-            team_id = (getattr(window, "_team_name", "") or "default") if team_agent else ""
+            # 分组 key 用团队运行标识（_team_run_id，方案 A：同一次 /team --load
+            # 的所有成员共享同一 run_id），同团队多窗口圈进同一容器；同一模板
+            # 多次加载产生不同 run_id，不再混组。老窗口无 _team_run_id 时回落
+            # 团队名（_team_name，模板名）；非团队窗口传 "" 留在独立区。
+            # 胶囊仍显示角色名（team_agent）。
+            team_id = self._resolve_tab_team_id(window)
             panel.set_tab_team(tab_idx, team_id)
 
             # 隐藏空状态页，切换到新窗口
@@ -842,10 +845,27 @@ class TabManagerWindow(QWidget):
             self._tab_panel.update_tab_capsule(idx, team_agent)
         else:
             self._tab_panel.clear_tab_capsule(idx)
-        # 同步团队分组：分组 key 用团队名（_team_name，模板名），同团队多窗口圈进同一容器；
+        # 同步团队分组：分组 key 用团队运行标识（_team_run_id），同一模板多次
+        # 加载的多个团队（不同 run_id）不再混组；老窗口无 run_id 回落团队名。
         # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
-        team_id = (getattr(window, "_team_name", "") or "default") if team_agent else ""
+        team_id = self._resolve_tab_team_id(window)
         self._tab_panel.set_tab_team(idx, team_id)
+
+    @staticmethod
+    def _resolve_tab_team_id(window) -> str:
+        """计算窗口的 Tab 团队分组 key
+
+        方案 A：分组 key 优先用团队运行标识（_team_run_id）——同一次
+        /team --load 的所有成员共享同一 run_id，同组；同一模板多次加载
+        产生不同 run_id，不再混组。老窗口（无 _team_run_id）回落团队名
+        （_team_name，模板名）兼容；非团队窗口返回 "" 留在独立区。
+        """
+        if not getattr(window, "_team_agent_name", ""):
+            return ""
+        run_id = getattr(window, "_team_run_id", "") or ""
+        if run_id:
+            return run_id
+        return getattr(window, "_team_name", "") or "default"
 
     def remove_window(self, window):
         """从 Tab 管理器移除窗口"""
