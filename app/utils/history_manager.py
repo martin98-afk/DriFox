@@ -449,8 +449,17 @@ class HistoryManager:
         worktree_path: str = None,
         last_api_prompt_tokens: int = 0,
         last_api_message_count: int = 0,
+        team_run_id: str = "",
+        team_name: str = "",
+        agent_name: str = "",
     ):
-        """保存会话"""
+        """保存会话
+
+        Args:
+            team_run_id: 团队运行标识（方案 A 团队会话恢复；非团队会话留空）
+            team_name: 团队名（模板名）
+            agent_name: 产出该会话的 agent 角色名
+        """
         if not messages:
             return
 
@@ -470,6 +479,9 @@ class HistoryManager:
             worktree_path=worktree_path,
             last_api_prompt_tokens=last_api_prompt_tokens,
             last_api_message_count=last_api_message_count,
+            team_run_id=team_run_id,
+            team_name=team_name,
+            agent_name=agent_name,
         )
         new_session_id = session_record["session_id"]
 
@@ -510,6 +522,9 @@ class HistoryManager:
         worktree_path: str = None,
         last_api_prompt_tokens: int = 0,
         last_api_message_count: int = 0,
+        team_run_id: str = "",
+        team_name: str = "",
+        agent_name: str = "",
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -545,6 +560,10 @@ class HistoryManager:
             "context_usage": count_messages_tokens(merged_messages),
             "last_api_prompt_tokens": last_api_prompt_tokens,
             "last_api_message_count": last_api_message_count,
+            # 团队元数据（方案 A 团队会话恢复基础；非团队会话保持空串）
+            "team_run_id": team_run_id or "",
+            "team_name": team_name or "",
+            "agent_name": agent_name or "",
         }
 
     def get_current_title(self, index: int) -> str:
@@ -668,6 +687,10 @@ class HistoryManager:
                         "preview": preview,
                         "user_edited_title": s.get("user_edited_title", False),
                         "worktree_path": s.get("worktree_path", "") or "",
+                        # 团队元数据（方案 A 团队会话恢复基础；非团队会话为空串）
+                        "team_run_id": s.get("team_run_id", "") or "",
+                        "team_name": s.get("team_name", "") or "",
+                        "agent_name": s.get("agent_name", "") or "",
                     }
                 )
 
@@ -1091,8 +1114,16 @@ class HistoryManager:
         system_prompt: str = None,
         project: str = None,
         worktree_path: str = None,
+        team_run_id: str = None,
+        team_name: str = None,
+        agent_name: str = None,
     ):
-        """更新会话"""
+        """更新会话
+
+        team_run_id/team_name/agent_name 为 None 时保留现有值（最小侵入，
+        不传则不触碰团队元数据），传入非 None 才更新——避免 update 链路
+        把团队会话的元数据覆盖成空。
+        """
         if 0 <= index < len(self._history_sessions):
             merged_messages = merge_session_messages(messages)
             # 🛡️ 落地前清理孤立 tool_calls，保证下一轮加载时消息天然干净
@@ -1111,6 +1142,9 @@ class HistoryManager:
                 system_prompt=(system_prompt if system_prompt is not None else existing.get("system_prompt", "")),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
+                team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
+                team_name=team_name if team_name is not None else existing.get("team_name", ""),
+                agent_name=agent_name if agent_name is not None else existing.get("agent_name", ""),
             )
             # 移动到列表开头以保持与 SQLite ORDER BY updated_at DESC 一致
             self._history_sessions.pop(index)

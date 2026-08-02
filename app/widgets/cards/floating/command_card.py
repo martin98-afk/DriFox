@@ -1922,6 +1922,10 @@ class CommandCard(QWidget):
         self._detail_value_scroll.setVisible(False)
         self._detail_params_scroll.setVisible(True)
         self._adjust_detail_height()
+        # 清理残留 tooltip：值选择模式退出后 _value_selection_mode=False，
+        # _update_desc_tooltip 走 detail（参数列表）分支自动隐藏气泡，
+        # 避免刚选中枚举值的描述残留显示到下次切换/关闭。
+        self._update_desc_tooltip()
 
     def _extract_param_filter(self, full_text: str) -> str:
         """从输入文本提取用户当前正在输入的部分参数名

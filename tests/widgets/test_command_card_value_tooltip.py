@@ -203,3 +203,37 @@ class TestValueDescTooltip:
         card._update_desc_tooltip()
         assert card._desc_tooltip_label is not None
         assert not card._desc_tooltip_label.isVisible(), "参数列表 detail 模式不应显示 tooltip"
+
+    def test_exit_value_selection_hides_tooltip(self):
+        """退出值选择模式后气泡隐藏（选中值描述不残留）"""
+        _ensure_qapp()
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        # 进入值选择模式并选中带描述的值 → 气泡显示描述
+        w = ValueItemWidget("plugin-x", "插件 X：文件同步")
+        card._value_widgets = [w]
+        card._value_selection_mode = True
+        card._value_selection_param = "--plugin="
+        card._selected_value_index = 0
+        card._last_selected_value_index = -1
+        card._update_value_selection()
+        assert card._desc_tooltip_label is not None
+        assert card._desc_tooltip_label.isVisible() or card.width() <= 0, "值选择模式气泡应显示"
+        if card.width() > 0:
+            assert "插件 X" in card._desc_tooltip_label.text()
+
+        # 退出值选择模式 → 气泡隐藏（不残留刚选中值的描述）
+        card._exit_value_selection()
+        assert not card._value_selection_mode
+        assert not card._desc_tooltip_label.isVisible(), "退出值选择后气泡应隐藏"
