@@ -627,6 +627,19 @@ class TestTeamRestoreDisband:
         main_win._get_team_manager = MagicMock(return_value=tm)
         other_win._get_team_manager = MagicMock(return_value=tm)
 
+        # S-4 补强：断言"清空团队标记"先于"_create_new_session"（防止顺序颠倒
+        # 回归——若先建新会话，新会话仍带旧 run_id 污染旧团队会话记录）。
+        # 在 _create_new_session 被调用时读取 _team_run_id 当前值：
+        # disband 顺序为「清空 _team_run_id → 再建新会话」，此时应为空串。
+        create_called_with_run_id = None
+
+        def _create_session_wrapper(*args, **kwargs):
+            nonlocal create_called_with_run_id
+            create_called_with_run_id = main_win._team_run_id
+            return MagicMock()
+
+        main_win._create_new_session.side_effect = _create_session_wrapper
+
         instances = [main_win, other_win]
         with patch.object(OpenAIChatToolWindow, "_instances", instances):
             with patch("app.widgets.tab_manager_window.TabManagerWindow") as _mock_tab:
@@ -646,6 +659,10 @@ class TestTeamRestoreDisband:
         main_win.close.assert_not_called()
         # 其他团队窗口：从 Tab 移除 + close
         other_win.close.assert_called_once()
+        # S-4：新建会话时 _team_run_id 必须已清空（清空先于建会话）
+        assert create_called_with_run_id == "", (
+            f"_create_new_session 调用时 _team_run_id 应为空（已清空），实际: {create_called_with_run_id!r}"
+        )
 
     def test_disband_skips_non_team_and_destroyed(self):
         """解散跳过非团队窗口与已销毁窗口。"""

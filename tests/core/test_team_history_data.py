@@ -390,3 +390,88 @@ def _hm_fresh():
     hm = HistoryManager()
     hm.archive_dir = None  # 归档测试才需要；本类不用
     return hm
+
+
+class TestSaveBranchPreserveTeamMeta:
+    """R-fix I-1：save_session 分支 None→保留现值语义（数据损坏防护）
+
+    会话被 _history_limit 挤出内存（find_index_by_session_id 返回 None）后，
+    _auto_save_current_session 走 save_session 分支（INSERT OR REPLACE）。
+    若 save_session 用空串覆盖团队元数据，团队会话从历史分组消失（不可逆）。
+    save_session 必须对 None 参数保留现值，显式空串才清空。
+    """
+
+    def test_save_none_preserves_existing_team_meta(self, hm):
+        """已有团队会话：save_session 不传 team 参数（None）→ 保留现值。"""
+        # 先落库一个团队会话（经 save_session 传 team 字段）
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"}],
+            title="团队会话",
+            session_id="s-team",
+            team_run_id="run-1",
+            team_name="dev",
+            agent_name="build",
+        )
+        hm.flush()
+        # 模拟会话被挤出内存（_history_sessions 清空，仅 SQLite 有记录）
+        hm._history_sessions = []
+        hm._cache_dirty = True
+
+        # 非团队窗口普通编辑 → save_session 不传 team 参数（None）
+        hm.save_session(
+            [
+                {"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"},
+                {"role": "assistant", "content": "ok", "timestamp": "2026-01-01 00:00:02"},
+            ],
+            title="团队会话",
+            session_id="s-team",
+        )
+        hm.flush()
+
+        # 团队元数据必须保留（未被空串覆盖）
+        saved = hm.get_session_by_session_id("s-team")
+        assert saved is not None
+        assert saved["team_run_id"] == "run-1", "save 分支不应清空 team_run_id"
+        assert saved["team_name"] == "dev", "save 分支不应清空 team_name"
+        assert saved["agent_name"] == "build", "save 分支不应清空 agent_name"
+
+    def test_save_explicit_empty_clears_team_meta(self, hm):
+        """显式传空串 "" → 仍清空团队元数据（保留显式清空能力）。"""
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"}],
+            title="团队会话",
+            session_id="s-team2",
+            team_run_id="run-1",
+            team_name="dev",
+            agent_name="build",
+        )
+        hm.flush()
+
+        # 显式传空串（确有清空需求的场景）→ 覆盖为空
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"}],
+            title="团队会话",
+            session_id="s-team2",
+            team_run_id="",
+            team_name="",
+            agent_name="",
+        )
+        hm.flush()
+
+        saved = hm.get_session_by_session_id("s-team2")
+        assert saved["team_run_id"] == ""
+        assert saved["team_name"] == ""
+        assert saved["agent_name"] == ""
+
+    def test_save_none_new_session_defaults_empty(self, hm):
+        """全新会话：save_session 不传 team 参数 → 回落空串（默认非团队）。"""
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"}],
+            title="普通会话",
+            session_id="s-new",
+        )
+        hm.flush()
+        saved = hm.get_session_by_session_id("s-new")
+        assert saved["team_run_id"] == ""
+        assert saved["team_name"] == ""
+        assert saved["agent_name"] == ""

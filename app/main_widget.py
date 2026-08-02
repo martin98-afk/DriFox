@@ -6951,11 +6951,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
         else:
+            # 🛡️ S-3：恢复失败但现有团队已被解散（_disband_current_team_for_restore
+            # 在 start_team_run 前执行），必须明确提示用户，避免"旧团队已解散
+            # 但恢复失败"无反馈。
             InfoBar.warning(
-                "恢复失败",
-                "没有可恢复的成员会话（可能为空会话）",
+                "团队会话恢复失败",
+                "未创建任何恢复窗口（可能为空会话）\n当前团队已解散，可重新发起恢复",
                 parent=self,
-                duration=3000,
+                duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
         # 关闭历史会话卡片

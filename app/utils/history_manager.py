@@ -450,16 +450,20 @@ class HistoryManager:
         worktree_path: str = None,
         last_api_prompt_tokens: int = 0,
         last_api_message_count: int = 0,
-        team_run_id: str = "",
-        team_name: str = "",
-        agent_name: str = "",
+        team_run_id: str = None,
+        team_name: str = None,
+        agent_name: str = None,
     ):
         """保存会话
 
         Args:
             team_run_id: 团队运行标识（方案 A 团队会话恢复；非团队会话留空）
-            team_name: 团队名（模板名）
-            agent_name: 产出该会话的 agent 角色名
+                None 表示保留现值（与 update_session 语义对齐）——当会话已
+                存在（内存/SQLite）时不覆盖其团队元数据，防止普通编辑把
+                团队会话的清空（被 _history_limit 截断出内存的会话无法走
+                update 保留路径，save 分支必须兜底）；显式传空串 "" 才清空。
+            team_name: 团队名（模板名），None 保留现值
+            agent_name: 产出该会话的 agent 角色名，None 保留现值
         """
         if not messages:
             return
@@ -467,6 +471,26 @@ class HistoryManager:
         # 保存前先完成 SQLite 懒加载，避免新会话进入待保存队列后，
         # 首次打开历史面板又用数据库快照覆盖内存记录，导致延迟保存找不到目标。
         self._ensure_history_loaded()
+
+        # 🛡️ None→保留现值：与 update_session 语义对齐，避免 save 分支
+        # （会话被挤出 _history_limit 后走 INSERT OR REPLACE）用空串覆盖
+        # 团队元数据，导致团队会话从历史分组消失（数据损坏，不可逆）。
+        if team_run_id is None or team_name is None or agent_name is None:
+            existing = None
+            if session_id:
+                existing = self.get_session_by_session_id(session_id)
+            if existing:
+                if team_run_id is None:
+                    team_run_id = existing.get("team_run_id", "") or ""
+                if team_name is None:
+                    team_name = existing.get("team_name", "") or ""
+                if agent_name is None:
+                    agent_name = existing.get("agent_name", "") or ""
+            else:
+                # 无现有记录（全新会话）：None 回落空串（与新会话默认一致）
+                team_run_id = team_run_id or ""
+                team_name = team_name or ""
+                agent_name = agent_name or ""
 
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
