@@ -34,7 +34,7 @@ def _extract_json(text: str) -> dict | None:
     brace_start = text.find("{")
     brace_end = text.rfind("}")
     if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
-        candidate = text[brace_start:brace_end + 1]
+        candidate = text[brace_start : brace_end + 1]
         try:
             return json.loads(candidate)
         except Exception:
@@ -69,6 +69,46 @@ class TopicSummaryTask(QRunnable):
         self.previous_summary = previous_summary
         self.cancel_check = cancel_check or (lambda: False)
         self.setAutoDelete(True)
+
+    def _fallback_user_question(self) -> str:
+        """标题生成失败时的回退标题：取第一条真实用户问题，截断 15 字。
+
+        跳过 _hook_event 系统消息与未打标任务邮件（📨 前缀，R3 防御），
+        与 get_team_first_question / _build_session_record 的防御对齐，
+        确保标题不被邮件污染；无可用用户消息时返回空串。
+        """
+        for msg in self.messages:
+            if msg.get("role") != "user":
+                continue
+            # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+            # → mail-only + LLM 失败时也能回退标题（之前被全过滤误伤返回空串）。
+            # 其他 hook 事件（SessionStart 等）仍跳过。
+            if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                texts = [item.get("text", "") for item in content if item.get("type") == "text"]
+                content = "\n".join(texts)
+            if not content:
+                continue
+            # R3 防御：跳过未打标的任务邮件注入路径（旧数据无 _hook_event 的
+            # "📨 **来自 [...] 的任务邮件：**" 文本）
+            if str(content).startswith("📨 **来自"):
+                continue
+            return str(content)[:15]
+        return ""
+
+    def _emit_result_or_fallback(self, summary: str):
+        """发布标题生成结果；结果为空/空白时回退用用户问题作为标题。"""
+        if summary and summary.strip():
+            self.callback({"topic_summary": summary})
+            return
+        fallback = self._fallback_user_question()
+        if fallback:
+            logger.warning("[TopicSummary] 标题生成结果为空，回退用用户问题作为标题")
+            self.callback({"topic_summary": fallback})
+        else:
+            self.callback({"topic_summary": ""})
 
     def _build_conversation_context(self) -> str:
         """构建带问答对的对话上下文（保留 user 和 assistant 消息）"""
@@ -114,7 +154,7 @@ class TopicSummaryTask(QRunnable):
                     "根据对话生成标题。\n\n"
                     "【标题要求】\n"
                     "- 不超过15字，体现用户意图\n"
-                    "- 如：\"生成PPT\"、\"调试bug\"、\"咨询问题\"\n\n"
+                    '- 如："生成PPT"、"调试bug"、"咨询问题"\n\n'
                     "【标题更新原则】\n"
                     "你不应该仅根据最新一条消息就生成新标题。而是应该：\n"
                     "1. 如果已有标题反映的是本次对话的核心主题，即使最新消息是简单问候，也要保留原标题\n"
@@ -137,7 +177,7 @@ class TopicSummaryTask(QRunnable):
                     "根据对话生成标题。\n\n"
                     "【标题要求】\n"
                     "- 不超过15字，体现用户意图\n"
-                    "- 如：\"生成PPT\"、\"调试bug\"、\"咨询问题\"\n\n"
+                    '- 如："生成PPT"、"调试bug"、"咨询问题"\n\n'
                     "输出JSON（注意：topic_summary 必须是非空字符串，请生成合适的标题）：\n"
                     "```json\n"
                     "{\n"
@@ -167,15 +207,17 @@ class TopicSummaryTask(QRunnable):
                 raw_response = resp.choices[0].message.content.strip()
             result = _extract_json(raw_response)
             if result:
-                self.callback({"topic_summary": result.get("topic_summary", "")})
+                self._emit_result_or_fallback(result.get("topic_summary", ""))
             else:
-                # 回退方案：取最后一条用户消息的前 15 个字
-                last_content = self.messages[-1].get("content", "") if self.messages else ""
-                if isinstance(last_content, list):
-                    texts = [item.get("text", "") for item in last_content if item.get("type") == "text"]
-                    last_content = "\n".join(texts)
-                self.callback({"topic_summary": str(last_content)[:15]})
+                logger.warning("[TopicSummary] LLM 返回内容无法解析为 JSON")
+                self._emit_result_or_fallback("")
 
         except Exception as e:
             logger.exception(f"[TopicSummary] 生成摘要失败: {e}")
-            self.callback(None, error=str(e))
+            # 标题生成失败 → 回退用用户问题作为标题
+            fallback = self._fallback_user_question()
+            if fallback:
+                logger.warning("[TopicSummary] 生成失败，回退用用户问题作为标题")
+                self.callback({"topic_summary": fallback})
+            else:
+                self.callback(None, error=str(e))

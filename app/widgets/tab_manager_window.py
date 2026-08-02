@@ -641,6 +641,7 @@ class TabManagerWindow(QWidget):
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
+        self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
 
     # ── 侧边栏收起/展开 ──
 
@@ -812,6 +813,9 @@ class TabManagerWindow(QWidget):
             # 胶囊仍显示角色名（team_agent）。
             team_id = self._resolve_tab_team_id(window)
             panel.set_tab_team(tab_idx, team_id)
+            # 同步团队框 header 名称（初次加入 Tab 时即同步）
+            if team_id:
+                panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
 
             # 隐藏空状态页，切换到新窗口
             stack.widget(0).hide()
@@ -836,6 +840,10 @@ class TabManagerWindow(QWidget):
 
         同时同步团队分组（set_tab_team）：胶囊与分组框共同表达团队归属，
         胶囊显示角色名，分组框圈出同团队多个窗口。
+
+        同时同步团队框 header 名称（set_team_label）：窗口加入团队时把
+        窗口的 _team_name 注入团队框 header，离开团队时清空（set_tab_team
+        移除分组会自然触发 _maybe_remove_empty_group 清理）。
         """
         idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
@@ -850,6 +858,10 @@ class TabManagerWindow(QWidget):
         # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
         team_id = self._resolve_tab_team_id(window)
         self._tab_panel.set_tab_team(idx, team_id)
+        # 同步团队框 header 名称：使用窗口 _team_name（团队名/模板名）。
+        # 非团队窗口不更新 header（团队框本身已不会创建）。
+        if team_id:
+            self._tab_panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
 
     @staticmethod
     def _resolve_tab_team_id(window) -> str:
@@ -868,26 +880,55 @@ class TabManagerWindow(QWidget):
         return getattr(window, "_team_name", "") or "default"
 
     def remove_window(self, window):
-        """从 Tab 管理器移除窗口"""
-        idx = self._window_to_index.pop(id(window), -1)
+        """从 Tab 管理器移除窗口（外部 API：按 window 对象定位）"""
+        idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
             return
+        self._close_window_at(idx)
 
+    def _close_window_at(self, idx: int):
+        """按索引统一关闭窗口：从 _windows 弹出 + removeWidget + remove_tab + close
+
+        被 3 处调用以消除重复清理逻辑：
+        - remove_window（外部按 window 对象定位后调用）
+        - _on_tab_close_requested（标签关闭按钮）
+        - _on_team_close_requested（团队关闭按钮的窗口清理）
+
+        索引越界防御：调用方应保证 idx 有效，此处仍做防御性 return。
+
+        Args:
+            idx: 窗口在 self._windows 中的索引
+        """
+        if not (0 <= idx < len(self._windows)):
+            return
+        window = self._windows[idx]
+        # 先从列表中移除，避免后续操作访问到已销毁的窗口
         self._windows.pop(idx)
+        self._window_to_index.pop(id(window), None)
         # 被移除窗口之后的所有窗口索引减 1
         for j in range(idx, len(self._windows)):
             self._window_to_index[id(self._windows[j])] = j
-
-        # 从 QStackedWidget 移除
-        self._content_area.removeWidget(window)
-
+        # 从 QStackedWidget 移除（异常不影响清理流程）
+        try:
+            self._content_area.removeWidget(window)
+        except Exception:
+            pass
         # 从 Tab 面板移除
-        self._tab_panel.remove_tab(idx)
-
+        try:
+            self._tab_panel.remove_tab(idx)
+        except Exception:
+            pass
+        # 调用窗口的关闭逻辑（自动保存会话）
+        try:
+            window.close()
+        except Exception as e:
+            logger.error(f"[TabManager] 关闭窗口失败: {e}")
         # 如果所有窗口都被移除，显示空状态页
         if not self._windows:
-            self._content_area.widget(0).show()
-
+            try:
+                self._content_area.widget(0).show()
+            except Exception:
+                pass
         self.tabCountChanged.emit(len(self._windows))
 
     def get_current_window(self):
@@ -937,28 +978,61 @@ class TabManagerWindow(QWidget):
                     pass
 
     def _on_tab_close_requested(self, index: int):
-        if 0 <= index < len(self._windows):
-            window = self._windows[index]
-            # 先从列表中移除，避免后续操作访问到已销毁的窗口
-            self._windows.pop(index)
-            del self._window_to_index[id(window)]
-            # 被移除窗口之后的所有窗口索引减 1
-            for j in range(index, len(self._windows)):
-                self._window_to_index[id(self._windows[j])] = j
-            self._content_area.removeWidget(window)
-            self._tab_panel.remove_tab(index)
+        """标签关闭按钮回调：按索引关闭单个窗口"""
+        self._close_window_at(index)
 
-            # 调用窗口的关闭逻辑（自动保存会话）
+    def _on_team_close_requested(self, team_id: str):
+        """团队关闭按钮回调：解散整个团队（匹配 team_id 的所有窗口都退出）
+
+        复用 _handle_team_leave 的 7 步副作用逻辑（silent=True 避免重复弹 InfoBar）：
+        1) 停 watcher 2) tm.leave_team 3) restore_user 工具权限
+        4) 清 _team_* 标记 5) 刷新团队 UI 6) 同步活跃窗口
+        7) 还原默认智能体身份
+
+        索引处理：先收集匹配窗口的索引列表（降序排序），倒序遍历避免 pop 后索引漂移。
+
+        Args:
+            team_id: Tab 分组 key（优先 _team_run_id，回退 _team_name/"default"）
+        """
+        if not team_id:
+            return
+
+        # 收集匹配 team_id 的窗口索引（按 _resolve_tab_team_id 同样优先级）
+        matching_indices = []
+        for idx, win in enumerate(self._windows):
             try:
-                window.close()
+                if self._resolve_tab_team_id(win) == team_id:
+                    matching_indices.append(idx)
+            except Exception:
+                continue
+
+        if not matching_indices:
+            return
+
+        # 倒序遍历：先关高索引再关低索引，避免 pop 后索引漂移
+        for idx in sorted(matching_indices, reverse=True):
+            if idx >= len(self._windows):
+                continue
+            window = self._windows[idx]
+            # 调用窗口的 _handle_team_leave（完整 7 步副作用，silent=True 不弹 InfoBar）；
+            # 不存在时（老窗口/非主窗口）走最小可降级路径：仅调 tm.leave_team
+            try:
+                if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
+                    window._handle_team_leave(silent=True)
+                else:
+                    from app.core.team_manager import TeamManager
+
+                    wid = getattr(window, "_window_id", "")
+                    if wid:
+                        TeamManager.get_instance().leave_team(wid)
             except Exception as e:
-                logger.error(f"[TabManager] 关闭窗口失败: {e}")
+                logger.error(f"[TabManager] 退出团队失败: {e}")
 
-            # 如果所有窗口都被移除，显示空状态页
-            if not self._windows:
-                self._content_area.widget(0).show()
-
-            self.tabCountChanged.emit(len(self._windows))
+            # 关闭窗口（统一走 _close_window_at）
+            try:
+                self._close_window_at(idx)
+            except Exception as e:
+                logger.error(f"[TabManager] 关闭团队窗口失败: {e}")
 
     def _on_tab_branch_requested(self, index: int):
         """分支窗口 — 从指定标签页创建分支"""

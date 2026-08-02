@@ -141,7 +141,7 @@ class TestTeamGroupLayout:
         assert last is not None and last.widget() is None
 
         # 团队容器内恰含 2 个成员 tab，且都在 _items 中
-        inner = panel._team_groups["teamA"].layout()
+        inner = panel._team_groups["teamA"]._team_inner_layout
         inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
         assert len(inner_widgets) == 2
         assert all(w in panel._items for w in inner_widgets)
@@ -153,7 +153,7 @@ class TestTeamGroupLayout:
         panel.set_tab_team(1, "teamB")
 
         grp = panel._team_groups["teamB"]
-        inner = grp.layout()
+        inner = grp._team_inner_layout
         inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
         assert panel._items[1] in inner_widgets, "加入团队后 tab 应在团队容器内"
 
@@ -193,7 +193,7 @@ class TestTeamGroupLayout:
         assert len(outer) == len({id(w) for w in outer}), f"移除后存在重复 widget: {outer}"
         # 剩余团队 tab 仍在容器内
         grp = panel._team_groups["teamD"]
-        inner = grp.layout()
+        inner = grp._team_inner_layout
         inner_widgets = [inner.itemAt(i).widget() for i in range(inner.count())]
         assert panel._items[1] in inner_widgets
         assert len(inner_widgets) == 1

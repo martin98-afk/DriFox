@@ -3871,8 +3871,13 @@ class OpenAIChatToolWindow(ToolWindow):
             position=InfoBarPosition.BOTTOM,
         )
 
-    def _handle_team_leave(self):
-        """离开团队"""
+    def _handle_team_leave(self, silent: bool = False):
+        """离开团队
+
+        Args:
+            silent: True 时跳过 InfoBar 提示（批量退出场景，如团队关闭按钮
+                对每个成员窗口调用此方法时，避免重复弹"已离开团队"提示）。
+        """
         # 1) 先停 watcher，避免后续 rmtree 触发 watcher 事件重建目录
         self._stop_team_watcher()
 
@@ -3903,7 +3908,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 6) 恢复模型选择按钮的 tooltip（离开团队后不再显示 agent 信息）
         self._update_model_selector_btn()
 
-        InfoBar.info("已离开团队", "窗口已恢复独立模式", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+        if not silent:
+            InfoBar.info(
+                "已离开团队",
+                "窗口已恢复独立模式",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     # ── 团队模板（save / load / list / delete）────────
 
@@ -4041,11 +4053,14 @@ class OpenAIChatToolWindow(ToolWindow):
         def _on_load_confirm():
             _confirmed[0] = True
 
+        # 角色列表拼接展示（agent_name 为短英文名，单行拼接避免逐行列表超出弹框固定高度）
+        role_names = "、".join(a.agent_name for a in template.agents)
         _dialog = ConfirmDialog(
             title="加载团队模板",
             content=(
                 f"确定要加载模板「{name}」吗？\n"
-                f"将为模板的 {needed_count} 个角色各新建一个全新窗口并加入团队，已有窗口不受影响。"
+                f"将新建 {needed_count} 个全新窗口并加入团队，已有标签页不会被修改或移动。\n\n"
+                f"将加载角色：{role_names}"
             ),
             confirm_text="确认",
             cancel_text="取消",
@@ -4092,13 +4107,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
 
         # 2) 新窗口延后 join（确保 backend.agent_manager 已初始化）
-        results: List[str] = []
         for i, win in enumerate(new_windows):
             if i >= len(agents_needed):
                 break
             agent_name = agents_needed[i]
             wid = getattr(win, "_window_id", "?")
-            results.append(f"  {agent_name}@{wid}")
             QTimer.singleShot(
                 self._TEMPLATE_JOIN_DELAY_MS,
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
@@ -4108,17 +4121,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_arrange_count = len(new_windows)
         if self._pending_arrange_count == 0:
             self._do_team_window_arrange()
-
-        # 4) 反馈
-        InfoBar.success(
-            f"模板已应用: {name}",
-            f"已新建 {len(new_windows)} 个窗口:\n"
-            + "\n".join(results[:8])
-            + (f"\n  ... 共 {len(results)} 项" if len(results) > 8 else ""),
-            parent=self,
-            duration=6000,
-            position=InfoBarPosition.BOTTOM,
-        )
 
     def _join_new_window_for_template(
         self,
@@ -6724,9 +6726,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     with open(fp, "r", encoding="utf-8") as f:
                         data = json.loads(f.read())
                     messages = data.get("messages", [])
+                    # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）计入 user 消息数
+                    # → mail-only 会话归档后历史列表不再显示"0 条消息"
                     msg_count = data.get(
                         "message_count",
-                        len([m for m in messages if m.get("role") == "user" and not m.get("_hook_event")]),
+                        len(
+                            [
+                                m
+                                for m in messages
+                                if m.get("role") == "user"
+                                and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+                            ]
+                        ),
                     )
                     last_time = data.get("last_time", data.get("saved_at", ""))
                     preview = get_message_preview(messages) if messages else ""
@@ -10750,9 +10761,15 @@ class OpenAIChatToolWindow(ToolWindow):
         questions = []
         for msg in messages:
             if msg.get("role") == "user":
-                if msg.get("_hook_event"):
-                    continue
-                text = content_to_text(msg.get("content", ""))
+                # 🛡️ R7 修复：风格与其他 3 处统一为"正向包含"——
+                # team 邮件（_hook_event="TeamMail"）视为真实用户问题，
+                # 非 TeamMail 的 hook 事件（SessionStart / vision_inject /
+                # SubAgentFinished 等）跳过。
+                if not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail":
+                    text = content_to_text(msg.get("content", ""))
+                    if len(text) > 60:
+                        text = text[:60] + "…"
+                    questions.append((len(questions), text))
                 if len(text) > 60:
                     text = text[:60] + "…"
                 questions.append((len(questions), text))
@@ -10770,7 +10787,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         messages = consolidate_messages(session.messages)
-        count = sum(1 for msg in messages if msg.get("role") == "user" and not msg.get("_hook_event"))
+        # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）计入用户问题数
+        count = sum(
+            1
+            for msg in messages
+            if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+        )
 
         if count > 0:
             self._history_questions_badge.setNum(count)
@@ -12793,8 +12815,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 🛡️ 只在新会话的第一个问题时触发标题生成，避免每次对话都重复生成
             if session:
+                # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+                # → mail-only 会话也能触发标题生成（之前被误伤跳过）
                 user_msg_count = sum(
-                    1 for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")
+                    1
+                    for m in session.messages
+                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
                 )
                 if user_msg_count == 1:
                     self._maybe_generate_topic_summary()
@@ -14206,14 +14232,27 @@ class OpenAIChatToolWindow(ToolWindow):
 
     @staticmethod
     def _count_user_messages(messages: List[Dict]) -> int:
-        """统计非 hook 的用户消息数量（用于截断后新旧 worker 识别）"""
-        return sum(1 for m in messages if m.get("role") == "user" and not m.get("_hook_event"))
+        """统计用户消息数量（用于截断后新旧 worker 识别）
+
+        🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户消息
+        → worker 截断后新旧消息识别不再错位（mail 计入比对基数）
+        """
+        return sum(
+            1
+            for m in messages
+            if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+        )
 
     @staticmethod
     def _contains_user_text(messages: List[Dict], text: str) -> bool:
-        """检查消息列表中是否包含指定文本的用户消息（用于文本指纹比对）"""
+        """检查消息列表中是否包含指定文本的用户消息（用于文本指纹比对）
+
+        🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）参与文本指纹比对
+        """
         for msg in messages:
-            if msg.get("role") != "user" or msg.get("_hook_event"):
+            if msg.get("role") != "user":
+                continue
+            if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
                 continue
             content = msg.get("content", "")
             if isinstance(content, str) and content == text:
@@ -14822,7 +14861,13 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info("[Topic Summary] User edited title, skipping auto generation")
             return
 
-        user_messages = [m for m in session.messages if m.get("role") == "user" and not m.get("_hook_event")]
+        # 🛡️ R6 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+        # → mail-only 会话也能完成标题生成（之前 _hook_event 全过滤误伤）
+        user_messages = [
+            m
+            for m in session.messages
+            if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+        ]
         if not user_messages:
             logger.warning("[Topic Summary] No user messages found, skipping")
             return
@@ -16258,7 +16303,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 跳过没有用户消息的会话（SessionStart hook 产生的空会话不应保存到历史）
-        has_user_message = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in session.messages)
+        # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+        # → mail-only 会话也能自动保存到历史（之前被全过滤误伤，永不落库）
+        has_user_message = any(
+            msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+            for msg in session.messages
+        )
         if not has_user_message:
             return
 
@@ -17141,7 +17191,12 @@ class OpenAIChatToolWindow(ToolWindow):
         auto_loop_messages = list(messages or [])
 
         # 确保 user 消息存在（第一条 user 消息，排除 hook 消息）
-        has_user = any(msg.get("role") == "user" and not msg.get("_hook_event") for msg in auto_loop_messages)
+        # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
+        # → mail-only AutoLoop 会话避免 task_prompt 重复插入
+        has_user = any(
+            msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+            for msg in auto_loop_messages
+        )
         if not has_user and self._auto_loop_worker:
             task_prompt = self._auto_loop_worker.get_task_prompt()
             if task_prompt:

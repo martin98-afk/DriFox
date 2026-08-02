@@ -624,6 +624,7 @@ class TabPanel(QWidget):
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
+    teamCloseRequested = pyqtSignal(str)  # 关闭整个团队（传 team_id）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1154,8 +1155,44 @@ class TabPanel(QWidget):
         # 重建视觉布局（team 容器置顶在上，独立区在下）
         self._rebuild_team_layout()
 
+    def set_team_label(self, team_id: str, name: str):
+        """设置指定 team 框 header 的团队名称
+
+        Args:
+            team_id: Tab 分组 key（与 set_tab_team 使用的 team_id 一致）
+            name: 团队显示名称（空串兜底为"团队"）
+
+        用法：TabManagerWindow 在 add_window / refresh_capsule_for_window 时
+        调用，传入窗口的 _team_name，确保团队框 header 与实际团队名同步。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return  # 容器尚未创建（窗口未 join team / 未 set_tab_team）
+        label = getattr(grp, "_team_name_label", None)
+        if label is None:
+            return
+        # 空名兜底（与 _get_or_create_team_group 中占位文本一致）
+        label.setText(name.strip() if name and name.strip() else "团队")
+
     def _get_or_create_team_group(self, team_id: str) -> "QFrame":
-        """获取或创建 team 容器（QFrame + 内部 QVBoxLayout）"""
+        """获取或创建 team 容器
+
+        结构（自上而下嵌套）：
+        - grp (QFrame) 的主布局 = outer (QVBoxLayout)
+          - header (QWidget)：左侧团队名 QLabel + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
+          - inner_widget (QWidget) 的布局 = inner_layout (QVBoxLayout)：成员 TabItem 列表
+
+        header 默认隐藏关闭按钮，鼠标进入 header 区域时显示（参考 TabItem 实现）。
+        关闭按钮 click → teamCloseRequested(team_id)（含防御属性 WA_NoMousePropagation，
+        避免鼠标事件冒泡到下层 TabItem 触发意外点击）。
+
+        访问器：
+        - grp.layout() = outer（grp 主布局）
+        - grp._team_inner_layout = inner_layout（成员层，供 _rebuild_team_layout / 旧测试用）
+        - grp._team_inner_widget = inner_widget
+        - grp._team_header = header
+        - grp._team_name_label / _team_close_btn = header 子控件
+        """
         grp = self._team_groups.get(team_id)
         if grp is not None:
             return grp
@@ -1164,17 +1201,79 @@ class TabPanel(QWidget):
         grp = QFrame(self._list_widget)
         grp.setObjectName("teamGroup")
         grp.setProperty("teamId", team_id)
-        inner = _QVBL(grp)
-        inner.setContentsMargins(6, 4, 6, 4)
-        inner.setSpacing(2)
-        grp.setLayout(inner)
+
+        # ── outer：grp 主布局（嵌套结构：header + inner_widget） ──
+        outer = _QVBL(grp)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(2)
+
+        # ── header：团队名 + 关闭按钮 ──
+        header = QWidget(grp)
+        header.setObjectName("teamGroupHeader")
+        header.setProperty("teamId", team_id)
+        header.setAttribute(Qt.WA_Hover, True)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 2, 0, 4)
+        header_layout.setSpacing(4)
+
+        from app.widgets.elided_label import _ElidedLabel as _ELLabel
+
+        name_label = _ELLabel("", header)
+        name_label.setObjectName("teamGroupName")
+        name_label.setText("团队")
+        header_layout.addWidget(name_label, 1)
+
+        close_btn = TransparentToolButton(header)
+        close_btn.setObjectName("teamGroupCloseBtn")
+        close_btn.setIcon(FIF.CLOSE)
+        close_btn.setFixedSize(20, 20)
+        close_btn.setVisible(False)
+        close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
+        close_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamCloseRequested.emit(_tid))
+        header_layout.addWidget(close_btn)
+        outer.addWidget(header)
+
+        # ── inner：成员列表（独立 widget + 独立布局，便于访问） ──
+        inner_widget = QWidget(grp)
+        inner_widget.setObjectName("teamGroupInner")
+        inner_widget.setProperty("teamId", team_id)
+        inner_layout = _QVBL(inner_widget)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(2)
+        inner_widget.setLayout(inner_layout)
+        outer.addWidget(inner_widget)
+
+        grp.setLayout(outer)
         grp.layout().setProperty("teamId", team_id)
+
+        # 访问器
+        grp._team_header = header
+        grp._team_name_label = name_label
+        grp._team_close_btn = close_btn
+        grp._team_inner_widget = inner_widget
+        grp._team_inner_layout = inner_layout
+
+        # hover 控制关闭按钮可见性
+        def _enter(_e, _h=header, _btn=close_btn):
+            _btn.setVisible(True)
+
+        def _leave(_e, _h=header, _btn=close_btn):
+            _btn.setVisible(False)
+
+        header.enterEvent = _enter
+        header.leaveEvent = _leave
+
         self._apply_team_group_style(grp)
         self._team_groups[team_id] = grp
         return grp
 
     def _apply_team_group_style(self, grp: "QFrame"):
-        """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主"""
+        """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主
+
+        同时刷新 header 子控件（团队名 QLabel + 关闭按钮）的样式，确保
+        主题切换后 header 文字色与边框同步。
+        """
         Colors.refresh()
         # 注意：Colors.HOVER_BG = "rgba(255, 255, 255, 0.08)" 不含 {alpha} 占位符，
         # .format(alpha=N) 是空操作（alpha 始终是字面 0.08），背景会过透明。
@@ -1186,22 +1285,59 @@ class TabPanel(QWidget):
                 border-radius: 6px;
                 margin: 2px 0;
             }}
+            #teamGroupHeader {{
+                background: transparent;
+                border: none;
+            }}
+            #teamGroupName {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: bold;
+                padding: 0px;
+            }}
+            #teamGroupCloseBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            #teamGroupCloseBtn:hover {{
+                background: {Colors.HOVER_BG};
+            }}
         """)
+        # header 是独立子控件（在 grp 主布局外），需要单独刷新样式避免主题切换遗漏
+        header = getattr(grp, "_team_header", None)
+        if header is not None:
+            header.setStyleSheet("""
+                QWidget#teamGroupHeader {
+                    background: transparent;
+                    border: none;
+                }
+            """)
 
     def _maybe_remove_empty_group(self, team_id: str):
-        """若指定 team 容器已无成员，从布局移除并 deleteLater"""
+        """若指定 team 容器已无成员，从布局移除并 deleteLater
+
+        新结构：grp 主布局 = 成员层（grp.layout() = inner_layout）。
+        header 是 grp 的独立子控件（不在主布局中），容器 deleteLater 时随父子对象树回收。
+        清空成员层残留 widget 时不动 header（header 在 _team_groups 中通过 grp 引用）。
+        """
         grp = self._team_groups.get(team_id)
         if grp is None:
             return
         # 若还有成员，不删
         if any(t == team_id for t in self._item_team.values()):
             return
-        # 防御：删除容器前把内部残留 widget 脱绑（parent 改回 _list_widget），
+        # 防御：删除容器前把内部成员 widget 脱绑（parent 改回 _list_widget），
         # 避免容器 deleteLater 时连带销毁仍在 _items 中管理的 tab
-        # （历史布局损坏可能在容器内残留重复 widget）。
-        inner = grp.layout()
-        while inner is not None and inner.count() > 0:
-            child = inner.takeAt(0)
+        # （历史布局损坏可能在成员层内残留重复 widget）。
+        inner_layout = getattr(grp, "_team_inner_layout", None)
+        if inner_layout is None:
+            # 兜底：兼容旧结构（grp.layout() 直接是成员层）
+            inner_layout = grp.layout()
+        while inner_layout is not None and inner_layout.count() > 0:
+            child = inner_layout.takeAt(0)
             w = child.widget() if child is not None else None
             if w is not None:
                 w.setParent(self._list_widget)
@@ -1264,10 +1400,15 @@ class TabPanel(QWidget):
         # 1) 先放 team 容器（置顶，按首次出现顺序）
         for t in team_order:
             grp = self._get_or_create_team_group(t)
-            # 清空容器内部旧 widgets（避免重复添加）
-            inner = grp.layout()
+            # grp.layout() 是嵌套外层（header + inner_widget），成员层通过
+            # _team_inner_layout 访问（向后兼容旧测试）。
+            inner = getattr(grp, "_team_inner_layout", None)
+            if inner is None:
+                inner = grp.layout()
+            # 清空成员层旧 widgets（header 在外层布局中，不在此层）
             while inner.count() > 0:
                 inner.takeAt(0)
+            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）
             for i in team_members[t]:
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
