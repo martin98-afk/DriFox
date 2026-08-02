@@ -3301,6 +3301,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _clear_command_shortcuts(self):
         """清除已注册的命令快捷键"""
+        # F1 守卫：窗口 C++ 对象已销毁时静默返回，避免访问 self.window() 抛
+        # RuntimeError（wrapped C/C++ object has been deleted）。
+        if _is_sip_deleted(self):
+            return
         # 清理窗口级去重缓存（当前实例对应的窗口）
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
@@ -3319,6 +3323,33 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
         self._command_shortcuts = []
+
+    def _disconnect_command_shortcut_cleanup(self):
+        """closeEvent 主动断开 destroyed 清理连接并立即清理快捷键。
+
+        背景：_register_command_shortcuts 首次执行时连接 self.destroyed →
+        lambda 调 _clear_command_shortcuts()。窗口 C++ 对象销毁触发 destroyed 时，
+        lambda 访问已删除的 self 会抛 RuntimeError（wrapped C/C++ object has
+        been deleted），disband 批量关闭团队窗口时每窗报一次。
+
+        修复：关闭路径主动断开该连接 + 立即清理快捷键（此时 C++ 对象仍存活），
+        destroyed 触发时不再执行 lambda；即使仍有其他注入路径触发 destroyed，
+        F1 的 sip 守卫也会静默兜底。
+        """
+        try:
+            if getattr(self, "_cmd_shortcuts_destroy_connected", False):
+                slot = getattr(self, "_cmd_shortcuts_destroy_slot", None)
+                if slot is not None:
+                    self.destroyed.disconnect(slot)
+                else:
+                    self.destroyed.disconnect()
+                self._cmd_shortcuts_destroy_connected = False
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._clear_command_shortcuts()
+        except RuntimeError:
+            pass
 
     def _init_ui_plugins_deferred(self):
         """延迟加载 UI 插件（首帧渲染后执行，避免阻塞窗口出现）"""
@@ -3508,9 +3539,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._clear_command_shortcuts()
 
         # 快捷键挂在顶层窗口上，self 被销毁时不会随之自动清理，连接 destroyed 同步清理，避免泄漏
+        # F1 守卫：lambda 在 C++ 对象销毁触发 destroyed 时访问 self 会抛 RuntimeError，
+        # 先经 _is_sip_deleted 判定，删除态直接跳过清理（closeEvent 已主动清理，此处为兜底）。
         if not getattr(self, "_cmd_shortcuts_destroy_connected", False):
             try:
-                self.destroyed.connect(lambda *a: self._clear_command_shortcuts())
+                self._cmd_shortcuts_destroy_slot = lambda *a: (
+                    None if _is_sip_deleted(self) else self._clear_command_shortcuts()
+                )
+                self.destroyed.connect(self._cmd_shortcuts_destroy_slot)
                 self._cmd_shortcuts_destroy_connected = True
             except RuntimeError:
                 pass
@@ -16350,6 +16386,11 @@ class OpenAIChatToolWindow(ToolWindow):
         return None
 
     def closeEvent(self, event):
+        # 🔧 F2: 主动断开 destroyed 清理连接 + 立即清理快捷键，避免窗口 C++ 对象
+        # 销毁触发 destroyed 时 lambda 访问已删除的 self 抛 RuntimeError
+        # （wrapped C/C++ object has been deleted）。
+        self._disconnect_command_shortcut_cleanup()
+
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
@@ -17126,6 +17167,19 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
+
+
+def _is_sip_deleted(obj) -> bool:
+    """判断 PyQt 对象是否已被 C++ 侧销毁（防御 wrapped C/C++ object has been deleted）。
+
+    destroyed 信号在 C++ 对象真正销毁时触发，此时 Python 侧的 self 仍存在但
+    C++ 包装已失效，访问 self 的任何 Qt 属性都会抛 RuntimeError。
+    用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
+    """
+    try:
+        return sip.isdeleted(obj)
+    except Exception:
+        return False
 
 
 def _cleanup_global_lru_caches():

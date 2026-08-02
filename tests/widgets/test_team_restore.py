@@ -954,3 +954,108 @@ class TestTeamMergedCard:
         _args, _kwargs = win._load_session_from_record.call_args
         assert _args[0]["session_id"] == "s1", "应加载成员会话记录"
         win._card_manager.hide_card.assert_called_once_with("history", "w1")
+
+
+class TestCommandShortcutDestroyedGuard:
+    """子任务 #B：关闭软件 RuntimeError（wrapped C/C++ object has been deleted）防护
+
+    背景：update_command_shortcuts 首次执行时连接 self.destroyed → lambda 调
+    _clear_command_shortcuts()；窗口 C++ 对象销毁触发 destroyed 时 lambda 访问
+    已删除的 self 抛 RuntimeError。修复 = F1（sip 守卫）+ F2（closeEvent 主动断开）。
+    """
+
+    def test_is_sip_deleted_util(self):
+        """_is_sip_deleted 工具函数：正常对象 False，销毁后 True，异常兜底 False。"""
+        from PyQt5 import sip
+
+        from app.main_widget import OpenAIChatToolWindow, _is_sip_deleted
+
+        w = QLabel("x")
+        assert _is_sip_deleted(w) is False
+        assert _is_sip_deleted(None) is False
+        assert _is_sip_deleted(123) is False  # 非 Qt 对象 → 异常兜底 False
+        sip.delete(w)  # 立即销毁 C++ 对象（确定性，不等事件循环）
+        assert sip.isdeleted(w) is True
+        assert _is_sip_deleted(w) is True
+
+    def test_clear_command_shortcuts_sip_deleted_silent(self):
+        """F1：C++ 对象已销毁后调用 _clear_command_shortcuts 静默返回，不抛 RuntimeError。"""
+        from PyQt5 import sip
+
+        from app.main_widget import OpenAIChatToolWindow, _is_sip_deleted
+
+        w = QLabel("x")
+        w._command_shortcuts = []
+        w._is_destroyed = True
+        sip.delete(w)
+        assert _is_sip_deleted(w) is True, "前置：对象已被 C++ 侧销毁"
+        # 关键断言：不抛 RuntimeError（修复前此处直接访问 self.window() 会崩）
+        OpenAIChatToolWindow._clear_command_shortcuts(w)
+
+    def test_destroyed_signal_lambda_guard_no_crash(self):
+        """F1：destroyed 信号触发时 lambda 经 sip 守卫静默跳过，不抛 RuntimeError。
+
+        模拟真实场景：窗口 close + deleteLater → destroyed 触发（若 closeEvent
+        未断开连接，此 lambda 是兜底防线）。
+        """
+        from app.main_widget import OpenAIChatToolWindow, _is_sip_deleted
+
+        w = QLabel("x")
+        w._command_shortcuts = []
+        w._is_destroyed = False
+        # 复刻 _register_command_shortcuts 中的守卫 lambda（sip 删除态 → None）
+        w.destroyed.connect(lambda *a: None if _is_sip_deleted(w) else OpenAIChatToolWindow._clear_command_shortcuts(w))
+        w.close()
+        w.deleteLater()
+        _ensure_qapp().processEvents()
+        # 不抛异常即通过
+
+    def test_disconnect_command_shortcut_cleanup(self):
+        """F2：_disconnect_command_shortcut_cleanup 断开 destroyed 连接并立即清理。"""
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._cmd_shortcuts_destroy_connected = True
+        win._cmd_shortcuts_destroy_slot = lambda *a: None
+        win._command_shortcuts = []
+        win._is_destroyed = False
+
+        OpenAIChatToolWindow._disconnect_command_shortcut_cleanup(win)
+
+        # 精确断开保存的 slot（而非全断，避免误伤 destroyed 其他连接）
+        win.destroyed.disconnect.assert_called_once_with(win._cmd_shortcuts_destroy_slot)
+        assert win._cmd_shortcuts_destroy_connected is False, "连接标记应复位"
+        win._clear_command_shortcuts.assert_called_once(), "应主动清理快捷键"
+
+    def test_disconnect_cleanup_tolerates_missing_slot(self):
+        """F2：无保存 slot（旧实例）时全断兜底，异常容错不抛。"""
+        from types import SimpleNamespace
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        class _FakeDestroyed:
+            def __init__(self):
+                self.calls = []
+
+            def disconnect(self, *args):
+                self.calls.append(args)
+
+        clear_calls = []
+
+        def _clear():
+            clear_calls.append(1)
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        win = SimpleNamespace(
+            _cmd_shortcuts_destroy_connected=True,
+            destroyed=_FakeDestroyed(),
+            _clear_command_shortcuts=_clear,
+        )
+
+        OpenAIChatToolWindow._disconnect_command_shortcut_cleanup(win)
+
+        assert win.destroyed.calls == [()], "无保存 slot → 全断兜底"
+        assert win._cmd_shortcuts_destroy_connected is False
+        assert len(clear_calls) == 1, "应主动清理快捷键（RuntimeError 被吞）"
