@@ -645,20 +645,26 @@ class HistoryManager:
         except Exception as e:
             logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
 
-    def get_history_list(self, project: str = None, with_messages: bool = False) -> List[Dict]:
+    def get_history_list(
+        self, project: str = None, with_messages: bool = False, merge_team: bool = False
+    ) -> List[Dict]:
         """获取历史会话列表，可选按项目过滤，按最后对话时间排序
 
         Args:
             project: 项目名过滤
             with_messages: 是否包含完整消息数组（为 False 时返回轻量列表）
+            merge_team: 为 True 时，team_run_id 非空的会话按 run_id 聚合为
+                单个合并条目（团队成员不再逐条出现），普通会话条目保持不变。
+                仅在 with_messages=False（轻量列表）时生效。
         """
         self._ensure_history_loaded()
         # 先去重
         self._deduplicate_history_sessions()
 
         # 🚀 轻量列表缓存：避免每次调用都排序+过滤+重建 dict
+        # merge_team 使用独立缓存键，避免与默认列表互相污染
         if not with_messages:
-            cache_key = project  # None 表示全部项目
+            cache_key = ("merge_team", project) if merge_team else project  # None 表示全部项目
             if not self._cache_dirty and cache_key in self._cached_lightweight:
                 return list(self._cached_lightweight[cache_key])
 
@@ -671,28 +677,10 @@ class HistoryManager:
         if not with_messages:
             # 轻量模式：仅保留列表展示所需字段，剔除重量级字段
             # 同时确保 preview 字段存在（兼容旧数据）
-            result = []
-            for s in sessions:
-                preview = s.get("preview")
-                if not preview:
-                    preview = extract_message_preview(s.get("messages", []), 50)
-                result.append(
-                    {
-                        "session_id": s.get("session_id", ""),
-                        "saved_at": s.get("saved_at", ""),
-                        "title": s.get("title", ""),
-                        "project": s.get("project", "默认项目"),
-                        "last_time": s.get("last_time", ""),
-                        "message_count": s.get("message_count", 0),
-                        "preview": preview,
-                        "user_edited_title": s.get("user_edited_title", False),
-                        "worktree_path": s.get("worktree_path", "") or "",
-                        # 团队元数据（方案 A 团队会话恢复基础；非团队会话为空串）
-                        "team_run_id": s.get("team_run_id", "") or "",
-                        "team_name": s.get("team_name", "") or "",
-                        "agent_name": s.get("agent_name", "") or "",
-                    }
-                )
+            if merge_team:
+                result = self._merge_team_lightweight(sessions)
+            else:
+                result = [self._to_lightweight_entry(s) for s in sessions]
 
             # 缓存构建结果，下次直接返回
             self._cached_lightweight[cache_key] = list(result)
@@ -700,6 +688,92 @@ class HistoryManager:
             return result
 
         return sessions
+
+    def _to_lightweight_entry(self, s: Dict) -> Dict:
+        """构建单个会话的轻量列表条目（get_history_list 轻量模式共用）。
+
+        普通会话与团队合并条目共用同一字段结构，保证 UI 层字段访问一致。
+        """
+        preview = s.get("preview")
+        if not preview:
+            preview = extract_message_preview(s.get("messages", []), 50)
+        return {
+            "session_id": s.get("session_id", ""),
+            "saved_at": s.get("saved_at", ""),
+            "title": s.get("title", ""),
+            "project": s.get("project", "默认项目"),
+            "last_time": s.get("last_time", ""),
+            "message_count": s.get("message_count", 0),
+            "preview": preview,
+            "user_edited_title": s.get("user_edited_title", False),
+            "worktree_path": s.get("worktree_path", "") or "",
+            # 团队元数据（方案 A 团队会话恢复基础；非团队会话为空串）
+            "team_run_id": s.get("team_run_id", "") or "",
+            "team_name": s.get("team_name", "") or "",
+            "agent_name": s.get("agent_name", "") or "",
+        }
+
+    def _merge_team_lightweight(self, sessions: List[Dict]) -> List[Dict]:
+        """构建合并团队会话后的轻量列表（merge_team=True 路径）。
+
+        规则：
+        - team_run_id 非空的会话按 run_id 聚合为单个合并条目
+        - 合并条目字段：team_run_id / team_name / agent_names（成员列表）/
+          member_count / team_merged=True / session_id=组内 last_time 最新会话 /
+          last_time=组内最新 / preview=团队首问（get_team_first_question）
+        - 组内成员会话不再逐条出现；普通会话条目保持不变
+        - 整体仍按 last_time 降序排序
+        """
+        result: List[Dict] = []
+        team_groups: Dict[str, Dict] = {}  # run_id -> 合并条目
+
+        for s in sessions:
+            run_id = (s.get("team_run_id") or "").strip()
+            if not run_id:
+                result.append(self._to_lightweight_entry(s))
+                continue
+
+            group = team_groups.get(run_id)
+            if group is None:
+                group = {
+                    "team_run_id": run_id,
+                    "team_name": (s.get("team_name") or "").strip(),
+                    "agent_names": [],
+                    "member_count": 0,
+                    "team_merged": True,
+                    "session_id": s.get("session_id", ""),
+                    "saved_at": s.get("saved_at", ""),
+                    "title": (s.get("team_name") or "").strip() or s.get("title", ""),
+                    "project": s.get("project", "默认项目"),
+                    "last_time": s.get("last_time", ""),
+                    "message_count": 0,
+                    "preview": "",
+                    "user_edited_title": False,
+                    "worktree_path": s.get("worktree_path", "") or "",
+                    "agent_name": "",
+                }
+                team_groups[run_id] = group
+
+            agent = (s.get("agent_name") or "").strip()
+            if agent and agent not in group["agent_names"]:
+                group["agent_names"].append(agent)
+            group["member_count"] = len(group["agent_names"])
+            # 组内 last_time 最新会话 → 同步 session_id / last_time / saved_at / worktree_path
+            if (s.get("last_time") or "") >= (group.get("last_time") or ""):
+                group["session_id"] = s.get("session_id", "")
+                group["last_time"] = s.get("last_time", "")
+                group["saved_at"] = s.get("saved_at", "")
+                group["worktree_path"] = s.get("worktree_path", "") or ""
+            group["message_count"] += s.get("message_count", 0) or 0
+
+        # 为每个团队组填充 preview（团队首问）
+        for run_id, group in team_groups.items():
+            group["preview"] = self.get_team_first_question(run_id)
+            result.append(group)
+
+        # 整体按 last_time 降序（合并条目参与排序）
+        result.sort(key=lambda x: x.get("last_time", ""), reverse=True)
+        return result
 
     def get_projects(self) -> List[str]:
         """获取所有不重复的项目名"""
@@ -782,46 +856,72 @@ class HistoryManager:
 
         return count
 
+    def _archive_session_record(self, session: Dict) -> bool:
+        """归档单个会话记录：写归档 JSON + 从内存缓存移除 + 从 SQLite 删除。
+
+        由 archive_history 与 archive_sessions_by_run_id 复用，保证归档流程单点定义。
+        """
+        # 🛡️ 如果 messages 为空（轻量模式），通过 session_id 懒加载完整数据
+        if not session.get("messages"):
+            session_id = session.get("session_id", "")
+            if session_id:
+                full_session = self.get_session_by_session_id(session_id)
+                if full_session and full_session.get("messages"):
+                    session = full_session
+
+        title = session.get("title", "未命名")
+        last_time = session.get("last_time", datetime.now().strftime("%Y-%m-%d"))
+        session_id = session.get("session_id", "unknown")
+
+        safe_title = sanitize_filename(title[:50])
+        date_str = last_time[:10] if last_time else datetime.now().strftime("%Y-%m-%d")
+        filename = f"{date_str}_{safe_title}_{session_id}.json"
+
+        archive_file = self.archive_dir / filename
+
+        try:
+            with open(archive_file, "wb") as f:
+                f.write(json.dumps(serialize_for_json(session), option=json.OPT_INDENT_2))
+        except Exception:
+            logger.warning(f"[HistoryManager] 归档失败: {archive_file}")
+            return False
+
+        # 从内存缓存移除
+        self._history_sessions = [s for s in self._history_sessions if s.get("session_id") != session_id]
+        self._mark_cache_dirty()
+
+        # 从 SQLite 删除
+        if self._use_sqlite and self._session_store:
+            self._session_store.delete_session(session_id)
+
+        return True
+
     def archive_history(self, index: int) -> bool:
         """归档历史记录"""
         if 0 <= index < len(self._history_sessions):
-            session = self._history_sessions[index]
-
-            # 🛡️ 如果 messages 为空（轻量模式），通过 session_id 懒加载完整数据
-            if not session.get("messages"):
-                session_id = session.get("session_id", "")
-                if session_id:
-                    full_session = self.get_session_by_session_id(session_id)
-                    if full_session and full_session.get("messages"):
-                        session = full_session
-
-            title = session.get("title", "未命名")
-            last_time = session.get("last_time", datetime.now().strftime("%Y-%m-%d"))
-            session_id = session.get("session_id", "unknown")
-
-            safe_title = sanitize_filename(title[:50])
-            date_str = last_time[:10] if last_time else datetime.now().strftime("%Y-%m-%d")
-            filename = f"{date_str}_{safe_title}_{session_id}.json"
-
-            archive_file = self.archive_dir / filename
-
-            try:
-                with open(archive_file, "wb") as f:
-                    f.write(json.dumps(serialize_for_json(session), option=json.OPT_INDENT_2))
-            except Exception:
-                logger.warning(f"[HistoryManager] 归档失败: {archive_file}")
-                return False
-
-            # 从内存缓存移除
-            self._history_sessions.pop(index)
-            self._mark_cache_dirty()
-
-            # 从 SQLite 删除
-            if self._use_sqlite and self._session_store:
-                self._session_store.delete_session(session_id)
-
-            return True
+            return self._archive_session_record(self._history_sessions[index])
         return False
+
+    def archive_sessions_by_run_id(self, run_id: str) -> int:
+        """按团队 run_id 归档该 run 下全部成员会话。
+
+        复用 _archive_session_record 的归档流程（写归档 JSON + 从内存/SQLite 删除），
+        与归档区"逐条显示成员会话"保持一致（归档区不做合并）。
+
+        Args:
+            run_id: 团队运行标识
+
+        Returns:
+            成功归档的会话数量
+        """
+        if not run_id:
+            return 0
+        sessions = self.get_team_sessions_by_run_id(run_id)
+        count = 0
+        for session in sessions:
+            if self._archive_session_record(session):
+                count += 1
+        return count
 
     def import_from_json(self, file_path: str) -> Optional[Dict]:
         """
@@ -1117,6 +1217,50 @@ class HistoryManager:
         # 非 SQLite 模式（JSON 存储）：退化为内存列表过滤
         sessions = self.get_history_list(with_messages=False)
         return [s for s in sessions if (s.get("team_run_id") or "").strip() == run_id]
+
+    def get_team_first_question(self, run_id: str, max_len: int = 50) -> str:
+        """获取团队首问：该 run_id 下最早 last_time 会话的第一条 user 消息文本。
+
+        供团队合并条目（merge_team=True）的 preview 使用。
+        跳过 _hook_event 系统消息；无匹配消息时返回空串。
+
+        Args:
+            run_id: 团队运行标识
+            max_len: 预览截断长度
+
+        Returns:
+            首条 user 消息文本（截断后加省略号），无则空串
+        """
+        if not run_id:
+            return ""
+        sessions = self.get_team_sessions_by_run_id(run_id)
+        if not sessions:
+            return ""
+        # 懒加载完整会话（含 messages），取消息最后时间（last_time）最早的
+        # 一个——即团队首个产出会话。轻量记录的 last_time 是 updated_at
+        # （保存时刻），同轮保存时区分度不足，须用完整记录的消息时间。
+        candidates: List[Dict] = []
+        for s in sessions:
+            session_id = s.get("session_id", "")
+            full = self.get_session_by_session_id(session_id) if session_id else None
+            if full is None:
+                continue
+            candidates.append(full)
+        if not candidates:
+            return ""
+        earliest = min(candidates, key=lambda s: s.get("last_time") or "")
+        for msg in earliest.get("messages", []):
+            if msg.get("_hook_event"):
+                continue
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if isinstance(content, list):
+                content = content_to_text(content)
+            return content[:max_len].strip() + ("..." if len(content) > max_len else "")
+        return ""
 
     def update_session(
         self,
