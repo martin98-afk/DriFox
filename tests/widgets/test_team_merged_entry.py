@@ -428,6 +428,8 @@ class TestLoadSessionTeamMarks:
         win._history_card.isVisible.return_value = False
         # 跳过 Tab 同步（enable_tab_manager=False），专注验证团队标记赋值
         win.cfg = SimpleNamespace(enable_tab_manager=SimpleNamespace(value=False))
+        # F4 修复会读 _window_id 判定 is_team_member
+        win._window_id = "win-f4"
         # 预置团队标记（模拟团队窗口），由 F4 按 record 覆盖
         win._team_run_id = "run-old"
         win._team_name = "dev"
@@ -446,20 +448,49 @@ class TestLoadSessionTeamMarks:
                 OpenAIChatToolWindow._load_session_from_record(win, record)
         return mock_create, mock_init
 
+    @staticmethod
+    def _patch_is_member(result: bool):
+        """patch TeamManager.get_instance().is_team_member 返回值（F4 修复判定）。"""
+        from unittest.mock import MagicMock, patch
+
+        from app.core import team_manager as tm_mod
+
+        fake_tm = MagicMock()
+        fake_tm.is_team_member.return_value = result
+        return patch.object(tm_mod.TeamManager, "get_instance", return_value=fake_tm)
+
     def test_normal_session_clears_team_marks(self):
-        """F4：加载普通会话（record 无 team_run_id）→ 清空窗口团队标记，防止污染。"""
+        """F4：非团队成员窗口加载普通会话 → 清空团队标记（防污染）。"""
         _ensure_qapp()
         win = self._make_win()
         record = {"session_id": "s1", "title": "t1", "project": "proj-x"}  # 普通会话无团队字段
 
-        self._run(win, record)
+        with self._patch_is_member(False):
+            self._run(win, record)
 
-        assert win._team_run_id == "", "普通会话应清空 _team_run_id（防残留污染）"
+        assert win._team_run_id == "", "非成员窗口普通会话应清空 _team_run_id（防残留污染）"
         assert win._team_name == ""
         assert win._team_agent_name == ""
 
+    def test_team_member_keeps_marks_on_normal_session(self):
+        """F4 修复：已登记团队成员窗口加载普通会话 → 保留团队标记（身份不被查看历史清空）。"""
+        _ensure_qapp()
+        win = self._make_win()
+        # 预置成员团队标记（区别于 _make_win 默认 run-old，明确验证保留）
+        win._team_run_id = "run-keep"
+        win._team_name = "dev"
+        win._team_agent_name = "build"
+        record = {"session_id": "s1", "title": "t1", "project": "proj-x"}  # 普通会话
+
+        with self._patch_is_member(True):
+            self._run(win, record)
+
+        assert win._team_run_id == "run-keep", "成员窗口加载普通会话应保留 _team_run_id（防变普通）"
+        assert win._team_name == "dev"
+        assert win._team_agent_name == "build"
+
     def test_team_session_sets_team_marks(self):
-        """F4：加载团队会话（带 team_run_id）→ 设置窗口团队标记。"""
+        """F4：加载团队会话（带 team_run_id）→ 设置窗口团队标记（is_team_member 不影响设置分支）。"""
         _ensure_qapp()
         win = self._make_win()
         record = {
@@ -471,7 +502,8 @@ class TestLoadSessionTeamMarks:
             "agent_name": "build",
         }
 
-        self._run(win, record)
+        with self._patch_is_member(False):
+            self._run(win, record)
 
         assert win._team_run_id == "run-1", "团队会话应设置 _team_run_id"
         assert win._team_name == "dev"

@@ -788,6 +788,85 @@ class TestTeamRestoreDisband:
         # 默认 keep_team_name=False：团队名被模板名覆盖
         assert win._team_name == "模板名"
 
+    def test_join_template_keep_name_preserves_run_id(self):
+        """补丁 B：keep_team_name=True（恢复路径）→ 保留调用方已设 run_id，不被中途刷新覆盖。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.backend = MagicMock()
+        win.backend.agent_manager = MagicMock()
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_agent_name = "build"
+        win._team_name = "dev-team"  # 调用方预设团队名
+        win._team_run_id = "run-pre"  # 调用方预设 run_id（恢复窗口已设 new_run_id）
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-new"  # 延后期被中途刷新的 run_id（不应覆盖）
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 3
+        main_win._do_team_window_arrange = MagicMock()
+
+        OpenAIChatToolWindow._join_new_window_for_template(
+            main_win, win, "build", "w1", track_arrange=False, keep_team_name=True
+        )
+
+        # run_id 保留调用方值（不被 get_team_run_id 覆盖）
+        assert win._team_run_id == "run-pre", "keep_team_name=True 应保留调用方已设 run_id"
+        # 团队名保留调用方值（不覆盖为模板名）
+        assert win._team_name == "dev-team"
+
+    def test_join_template_default_overrides_run_id(self):
+        """补丁 B：keep_team_name=False（模板加载路径）→ run_id 被 get_team_run_id() 覆盖。"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.backend = MagicMock()
+        win.backend.agent_manager = MagicMock()
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_name = "old-team"
+        win._team_run_id = "run-pre"
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-new"
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 1
+        main_win._do_team_window_arrange = MagicMock()
+
+        OpenAIChatToolWindow._join_new_window_for_template(main_win, win, "build", "w1")
+
+        # keep=False：run_id 被 get_team_run_id() 覆盖
+        assert win._team_run_id == "run-new", "keep_team_name=False 时 run_id 应被 get_team_run_id() 覆盖"
+        # 团队名同样被模板名覆盖
+        assert win._team_name == "模板名"
+        assert main_win._pending_arrange_count == 0
+        main_win._do_team_window_arrange.assert_called_once()
+
 
 class TestTeamMergedCard:
     """M4 UI 层：团队合并条目卡片 + 混排渲染 + 归档链路 + 成员进入会话"""

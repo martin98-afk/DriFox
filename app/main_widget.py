@@ -4189,7 +4189,10 @@ class OpenAIChatToolWindow(ToolWindow):
             tm_mgr = self._get_team_manager()
             if not keep_team_name:
                 win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
-            win._team_run_id = tm_mgr.get_team_run_id()
+                # 🛡️ 恢复路径 keep_team_name=True 时保留调用方已设的 run_id
+                # （恢复窗口已设 new_run_id，避免延后期内被中途 start_team_run
+                # 刷新覆盖，导致恢复窗口归入错误 run_id 分组漂移）
+                win._team_run_id = tm_mgr.get_team_run_id()
             tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
             # 应用团队级统一项目（若已设置）：延迟 join 后与团队共享同一项目
             team_project = tm_mgr.get_team_project()
@@ -10216,16 +10219,27 @@ class OpenAIChatToolWindow(ToolWindow):
             self._team_name = (session_record.get("team_name") or "").strip()
             self._team_agent_name = (session_record.get("agent_name") or "").strip()
         else:
-            self._team_run_id = ""
-            self._team_name = ""
-            self._team_agent_name = ""
-            # 🛡️ F4 补充：清空团队标记后刷新 UI，恢复独立模式边框/标题栏配色，
-            # 消除团队窗口加载普通会话后的团队配色残留（对齐 :3924 用法；
-            # try/except 防御，与下方 Tab 同步分支风格一致）
+            # 🛡️ F4 修复：仅非团队成员窗口清空标记；已登记成员（is_team_member）
+            # 保留团队标记，避免"查看普通历史会话"清空成员身份导致后续保存落普通。
+            # 语义：成员身份由 join_team 决定——成员窗口后续编辑/产出会话归团队
+            # （保存时带团队字段入团队合并条目），此为有意设计，非污染。
             try:
-                self._refresh_team_ui(is_team=False)
+                from app.core.team_manager import TeamManager
+
+                is_member = bool(self._window_id) and TeamManager.get_instance().is_team_member(self._window_id)
             except Exception:
-                pass
+                is_member = False
+            if not is_member:
+                self._team_run_id = ""
+                self._team_name = ""
+                self._team_agent_name = ""
+                # 🛡️ F4 补充：清空团队标记后刷新 UI，恢复独立模式边框/标题栏配色，
+                # 消除团队窗口加载普通会话后的团队配色残留（对齐 :3924 用法；
+                # try/except 防御，与下方 Tab 同步分支风格一致）
+                try:
+                    self._refresh_team_ui(is_team=False)
+                except Exception:
+                    pass
         # Tab 模式：团队标记已变，同步胶囊/分组（对齐 _refresh_team_ui 的
         # refresh_capsule_for_window 调用；无 Tab 管理器时静默跳过）
         try:
