@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-自上一发布版本以来的变更 | 提交数：3 · 文件变更：3 · +442/-125 | 贡献者：dingma
+自上一发布版本以来的变更 | 提交数：4 · 文件变更：4 · +580/-149 | 贡献者：dingma
 
 > 重点：**团队模板加载行为重写** —— 加载模板时完全新建独立窗口，已有标签页一律不动（不切换 agent、不改标题、不重新入队）；**Tab 标题与胶囊语义分离** —— 团队模式 Tab 标题保持会话标题，角色名只进胶囊/边框颜色/分组框；**Tab 面板团队分组** —— 同团队多个标签页用 `#teamGroup` 边框容器圈出，胶囊与分组框共同表达团队归属。
 
@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **弹窗遮罩 parent 统一为顶层主窗口（4 处）** (`app/main_widget.py`): `_handle_team_load`（加载团队模板确认框）、`_on_archived_session_deleted`（删除归档会话确认框）、`_on_import_project_from_url`（URL 导入项目输入框）、`_on_project_folder_dropped`（拖拽文件夹新建项目输入框）的 ConfirmDialog / SingleInputDialog parent 由 `self`（嵌入 TabManagerWindow QStackedWidget 的子 widget）改为 `self.window()`（顶层主窗口 TabManagerWindow）。MaskDialogBase 用 parent 尺寸铺遮罩（`setGeometry(0, 0, parent.width(), parent.height())`），传子 widget 导致遮罩只覆盖聊天区、弹窗层级/定位异常；改为顶层窗口后遮罩铺满主窗口、随窗口 resize 同步、以主窗口为中心居中
+- **命令卡片枚举值模式 tooltip 显示当前值描述** (`app/widgets/cards/floating/command_card.py` + `app/main_widget.py`): 值选择列表（`--model=` / `--join=` / `--load=` / `--delete=` / `--plugin=` 等枚举参数）原来只显示枚举值本身、无任何描述。现在枚举值条目支持 `{"value", "description"}` 结构（兼容纯字符串），`ValueItemWidget` 携带描述字段，值选择模式下复用列表模式的顶部悬浮气泡（`_desc_tooltip_label`）显示当前选中枚举值的描述；无描述时隐藏气泡（与列表模式空描述行为一致）。数据源带描述：model 用 models.dev/硬编码能力字典 note、agent 用 `Agent.description`、模板用 `Template.description`、插件用 `PluginInfo.description`
 - **团队模板加载完全新建窗口，不劫持已有标签页** (`app/main_widget.py` `_handle_team_load`): 加载模板时不再把模板 agents 按序分配给所有活跃窗口；模板 N 个角色全部通过 `_safe_duplicate_window` 新建独立窗口，已有窗口保持原样（不切换 agent、不改标题、不改变团队状态、不参与选中/排列）；新增 `before_ids` 用于识别新建窗口；保留 `set_template` 模板上下文注入与 `_do_team_window_arrange` 窗口排列；`_handle_team_save` 描述计数修正为"实际非已关闭窗口数"
 - **新建团队成员无会话标题时胶囊不显示** (`app/main_widget.py` `_refresh_team_ui` / `app/widgets/tab_manager_window.py`): 新建空白窗口默认标题为 "飘狐"；`setWindowTitle` 在标题未变时不发射 `windowTitleChanged` 信号，导致 `TabManagerWindow._on_win_title_changed` 胶囊更新分支不执行。新增 `TabManagerWindow.refresh_capsule_for_window(window)` 公开方法，主动基于 `_team_agent_name` 调用 `update_tab_capsule`/`clear_tab_capsule`，不依赖信号触发；`_refresh_team_ui` 末尾在 Tab 模式下调用，胶囊加入/离开团队时立即生效；`TabPanel._update_tab_title` 中团队窗口标题改用会话标题（保持 Windows 任务栏可区分各窗口），不再被 agent 名覆盖
 - **团队模式下 Tab 标题被角色名覆盖** (`app/widgets/tab_manager_window.py`): 团队窗口的 Tab 标题改用 `_get_window_session_title` 取会话标题（topic_summary/name），不再用 `windowTitle()`（会被 `_refresh_team_ui` 设为角色名覆盖）；宿主窗口标题同样修复。角色名只进胶囊/边框颜色，不进标题
