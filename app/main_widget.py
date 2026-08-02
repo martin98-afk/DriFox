@@ -4409,8 +4409,10 @@ class OpenAIChatToolWindow(ToolWindow):
         sender_id = f"{from_agent}@{from_window}"
 
         # 像正常对话一样发送任务消息
+        # 🔧 hook_event="TeamMail"：给消息打 _hook_event 标记，
+        # 使 get_team_first_question 等预览逻辑能识别并跳过邮件内容（R1 源头打标）
         user_msg = f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n{task_desc}"
-        self._on_send_clicked(user_msg)
+        self._on_send_clicked(user_msg, hook_event="TeamMail")
 
     def _on_task_stream_finished(self):
         """流式完成后标记任务邮件为已完成"""
@@ -12461,7 +12463,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return [{"type": "text", "text": user_text}] + image_blocks
 
-    def _on_send_clicked(self, user_text: str = ""):
+    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None):
         if getattr(self, "_is_destroyed", False):
             return
 
@@ -12732,6 +12734,10 @@ class OpenAIChatToolWindow(ToolWindow):
             engine_kwargs = {}
             if _user_content is not None:
                 engine_kwargs["_user_content"] = _user_content
+            # hook_event 透传给引擎：消息写入 session.messages 时带 _hook_event 标记
+            # （None 时不写入，保持历史行为不变）
+            if hook_event:
+                engine_kwargs["_hook_event"] = hook_event
             # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
             # add_user_message 修改 session.messages。即使后续被 / 命令拦截
             # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。

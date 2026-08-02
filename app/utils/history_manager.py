@@ -1313,6 +1313,10 @@ class HistoryManager:
         for msg in earliest.get("messages", []):
             if msg.get("_hook_event"):
                 continue
+            # R3 防御：跳过未打标的任务邮件注入路径（如旧记录中无 _hook_event 的
+            # "📨 **来自 [...] 的任务邮件：**" 文本），确保首问取真实用户问题。
+            if str(msg.get("content", "")).startswith("📨 **来自"):
+                continue
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")

@@ -368,6 +368,9 @@ class UIEngine(BaseEngine):
         _user_content = kwargs.pop("_user_content", None)
         content_to_store = _user_content or user_text
 
+        # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
+        hook_event = kwargs.pop("_hook_event", None)
+
         # ---- 主线程准备 context（无 I/O，纯数据组装） ----
         _window_workdir = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
         if not _window_workdir:
@@ -423,6 +426,7 @@ class UIEngine(BaseEngine):
             window_workdir=_window_workdir,
             agent_manager=self._get_agent_manager(),
             tool_executor=self._tool_executor,
+            hook_event=hook_event,
         )
         worker.start()
 
@@ -846,6 +850,7 @@ class _PreSendWorker(QThread):
         window_workdir: str,
         agent_manager,
         tool_executor,
+        hook_event: str | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -861,6 +866,7 @@ class _PreSendWorker(QThread):
         self._window_workdir = window_workdir
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
+        self._hook_event = hook_event
 
         # 结果
         self._messages: list = []
@@ -918,7 +924,10 @@ class _PreSendWorker(QThread):
 
         # ---- 3. 添加用户消息 ----
         with self._lock:
-            session.add_user_message(content=self._content_to_store)
+            _add_kwargs = {}
+            if self._hook_event:
+                _add_kwargs["_hook_event"] = self._hook_event
+            session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----
         _trigger_and_inject("PostUserMessage", self._post_user_ctx, session)
