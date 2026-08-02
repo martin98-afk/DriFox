@@ -3,11 +3,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-自上一发布版本以来的变更 | 提交数：7 · 文件变更：16 · +1762/-160 | 贡献者：dingma
+自上一发布版本以来的变更 | 提交数：36 · 文件变更：49 · +6712/-1382 | 贡献者：dingma
 
-> 重点：**团队模板加载行为重写** —— 加载模板时完全新建独立窗口，已有标签页一律不动（不切换 agent、不改标题、不重新入队）；**Tab 标题与胶囊语义分离** —— 团队模式 Tab 标题保持会话标题，角色名只进胶囊/边框颜色/分组框；**Tab 面板团队分组** —— 同团队多个标签页用 `#teamGroup` 边框容器圈出，胶囊与分组框共同表达团队归属。
+> 重点：**团队会话历史合并展示（方案 A 阶段 4-5）** —— 历史面板团队会话合并为单条（按 run_id 聚合、混排于普通会话列表、显示团队首问预览、点击展开成员列表可单独进入成员会话）；团队合并条目新增「归档」按钮（按 run_id 逐条归档，归档区逐条显示不合并）；恢复团队前自动解散现有团队并关闭全部团队窗口（主窗口保留新建空白会话）。
 
 ### ✨ 新功能 (New Features)
+
+- **历史面板团队会话合并为单条展示（方案 A 阶段 4-5）** (`app/utils/history_manager.py` + `app/widgets/cards/settings/history_card.py` + `app/main_widget.py`): 取消历史面板顶部团队分组区，团队会话在普通会话列表内按 run_id 合并为单一条目（`get_history_list(merge_team=True)`）并与普通会话按 last_time 天然混排。合并条目卡片（`_TeamGroupCard` 改造）显示 👥 团队名 + 相对时间 + 「N 位成员 · M 轮」元信息 + 团队首问预览（`get_team_first_question` 取最早会话的第一条 user 消息）+ 「恢复团队」「归档」按钮；点击卡片仅切换成员列表展开/收起（不再触发恢复），展开区渲染成员行（角色胶囊 + 标题 + 相对时间），点击成员行直接进入该成员会话（`_load_session_from_record` 公共逻辑，不依赖面板 index 规避漂移）。数据层 `_merge_team_lightweight` 合并条目含 `members` 成员轻量记录列表
+- **团队合并条目「归档」按钮** (`app/widgets/cards/settings/history_card.py` + `app/main_widget.py`): 合并条目卡片新增 `archiveRequested(run_id)` 信号 → `HistoryCard.teamArchiveRequested` → `_on_team_archive_requested`：按 run_id 收集全部成员会话 → `archive_sessions_by_run_id` 逐条归档（写 JSON + 从内存/SQLite 删除）；若当前会话属于该团队，归档后自动切换新会话（复用 `create_new_session_state` + `init_new_session_after_archive`）；归档区逐条显示成员会话不合并
+- **恢复团队前自动解散现有团队** (`app/main_widget.py` `_disband_current_team_for_restore`): 一键恢复前解散当前团队并关闭全部团队窗口——每个团队窗口停 watcher（幂等）+ `leave_team` + 清空团队标记；主窗口保留并刷新独立模式 UI + 新建空白会话（`_create_new_session` 在 `_team_run_id` 清空后调用，避免污染旧团队会话记录）；其他团队窗口从 Tab 管理器移除 + close。恢复窗口补全 `_join_new_window_for_template` 完整初始化（`track_arrange=False` 旁路模板排列计数、`keep_team_name=True` 保留会话记录团队名）
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **save_session 分支清空被挤出内存的团队会话元数据（数据损坏）** (`app/utils/history_manager.py`): `save_session` 的 `team_run_id/team_name/agent_name` 默认值由 `""` 改为 `None`，新增 None→保留现值语义（与 `update_session` 对齐）——会话被 `_history_limit` 挤出内存（`find_index_by_session_id` 返回 None）后走 save 分支（INSERT OR REPLACE）时不再用空串覆盖团队元数据，防止团队会话从历史分组消失（不可逆）；显式传空串仍清空，全新会话回落空串
+- **团队首问预览选错成员** (`app/utils/history_manager.py` `get_team_first_question`): 最早会话判断由轻量记录 last_time（=updated_at 保存时刻，同轮保存区分度不足）改为完整记录 `messages[-1].timestamp` 参与 min 比较，确保选到真正最早产出的成员
+- **恢复窗口补全完整初始化** (`app/main_widget.py`): 恢复路径为每个恢复窗口调度 `_join_new_window_for_template`（`_on_agent_changed`/`_apply_agent_command_permissions`/`_refresh_team_ui`/`_start_team_watcher`），恢复后成员窗口可正常收发团队邮件
 
 - **历史面板团队分组 + 一键恢复（方案 A 阶段 3）** (`app/widgets/cards/settings/history_card.py` + `app/main_widget.py` + `app/widgets/tab_manager_window.py`): 历史面板列表顶部新增「团队对话」分组区块——按 run_id 聚合（`_build_team_groups`：agent 去重、按最后活跃时间倒序、无 run_id 会话不进分组），每组显示团队名 + 成员角色胶囊 + 「恢复团队」按钮（`teamRestoreRequested(run_id)` 信号）。点击恢复：`_on_team_restore_requested` 按 run_id 从 SQLite 会话记录收集成员（权威数据源，不受 team.json 成员清理影响）→ `_create_fresh_window` 为每个角色建窗口 + `_branch_session_data` 复用分支机制（showEvent 自动加载历史消息，避免与 `_create_new_session` 竞态）+ 团队标记 + `join_team` 重新登记 + `start_team_run` 新 run_id + 延后网格排列。Tab 分组 key 从 `_team_name` 改为 `_team_run_id`（`_resolve_tab_team_id`：run_id 优先，老窗口回落团队名，非团队空串）——同模板多次加载的多个团队不再混组。新增 11 个测试（tests/widgets/test_team_restore.py）
 - **团队运行标识 run_id 注入（方案 A 阶段 2）** (`app/core/team_manager.py` + `app/main_widget.py`): TeamManager 新增 `start_team_run()` / `get_team_run_id()`——`/team --load` 加载模板时生成 uuid4 写入 team.json **顶层**（与 members 平级，`_cleanup_stale_members` 清理成员不丢失），幂等复用；`main_widget` 窗口新增 `_team_run_id` 属性，模板加载/手动加入/延后 join 各路径注入，`_auto_save_current_session` 把 `team_run_id`/`team_name`/`agent_name` 透传到 save_session（update_session 仅当 `_team_run_id` 非空才传，None 保留现值避免普通编辑清空团队元数据）。老团队无 run_id 时保持空串不注入，行为与现状一致。新增 10 个测试（tests/core/test_team_run_id.py）+ 1 个 update_session 保留现值回归用例
