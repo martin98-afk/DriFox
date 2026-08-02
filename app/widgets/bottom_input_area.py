@@ -246,6 +246,15 @@ class SendableTextEdit(TextEdit):
         self._at_trigger_pos = -1  # @ 触发位置
         self._ime_composing = False  # IME 输入法组合状态
 
+        # detail 参数同步防抖（参考 / 命令触发节流：合并快速敲键 + IME 保护）
+        # 值选择模式（枚举列表）每次 textChanged 都会触发 _sync_detail_params →
+        # update_active_params → _refresh_value_list 重建全部 widget。打拼音时
+        # 每敲一个字母 textChanged 就触发一次重建，打断输入法且浪费性能。
+        # 统一 100ms 防抖：快速敲键期间只执行最后一次过滤/渲染。
+        self._detail_sync_timer = QTimer(self)
+        self._detail_sync_timer.setSingleShot(True)
+        self._detail_sync_timer.timeout.connect(self._on_detail_sync_timeout)
+
         # 卡片选中项：供 execute() 按选中类型执行
         self._card_selected_name: Optional[str] = None
         self._card_selected_type: Optional[str] = None  # display_type: command/prompt/agent/skill
@@ -356,7 +365,9 @@ class SendableTextEdit(TextEdit):
             return
 
         # 无论什么分支，先同步 detail 模式参数显隐（删除/修改参数时恢复列表项）
-        self._sync_detail_params()
+        # 走防抖：textChanged 每次敲键都会触发本方法，直接同步会每键重建
+        # 值列表 widget（打断输入法）。参考命令卡片列表 100ms 防抖合并。
+        self._schedule_detail_sync()
 
         card = self._get_card()
         try:
@@ -406,8 +417,8 @@ class SendableTextEdit(TextEdit):
                 # 避免每次敲键都触发 get_skill_by_name（扫描文件系统）和 signal 发射
                 card = self._get_card()
                 if card and card.is_detail_mode and card.detail_cmd_name == cmd_name:
-                    # 同步参数显隐：追踪输入框中的参数变化
-                    self._sync_detail_params()
+                    # 同步参数显隐：追踪输入框中的参数变化（走防抖合并快速敲键）
+                    self._schedule_detail_sync()
                     return
 
                 from app.core.command_manager import CommandManager
@@ -1076,7 +1087,30 @@ class SendableTextEdit(TextEdit):
             idx = self._history_index
             if idx < len(self._history_list) and self._history_list[idx].get("text", "") != self.toPlainText():
                 self._reset_history_mode(clear_attachments=False)
-        # detail 模式参数同步
+        # detail 模式参数同步（防抖：合并快速敲键，参考 / 命令触发节流）
+        # IME 组合进行中（打拼音）跳过同步，避免每次敲键重建值列表打断输入法；
+        # 提交后（preedit 清空）textChanged 再次触发，走防抖后正常同步。
+        self._schedule_detail_sync()
+
+    def _schedule_detail_sync(self):
+        """detail 参数同步防抖调度（参考命令卡片列表刷新方式）
+
+        - IME 组合中（打拼音）直接跳过：每敲一个拼音字母 textChanged 都会
+          触发，若每次重建值列表 widget 会打断输入法。提交后 preedit 清空，
+          textChanged 再次触发，此时正常走防抖同步。
+        - 非组合时统一 100ms 防抖：快速敲键期间合并为最后一次过滤/渲染。
+        """
+        if self._ime_composing:
+            return
+        self._detail_sync_timer.stop()
+        self._detail_sync_timer.start(100)
+
+    def _on_detail_sync_timeout(self):
+        """detail 参数同步防抖超时：执行真正的同步"""
+        # 防抖窗口内若进入 IME 组合（如拼音刚敲下），跳过本次同步，
+        # 等提交后的 textChanged 再触发一轮防抖。
+        if self._ime_composing:
+            return
         self._sync_detail_params()
 
     def _adjust_height_to_content(self):

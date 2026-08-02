@@ -489,6 +489,23 @@ class TeamManager:
     def mark_mail_done(self, mail_id: str, window_id: str, result: str, team_name: str = DEFAULT_TEAM):
         self._update_mail_status(mail_id, window_id, "done", team_name, result)
 
+    def mark_mail_pending(self, mail_id: str, window_id: str, team_name: str = DEFAULT_TEAM):
+        """将邮件状态回滚为 pending 并清空 result（修复 T23：收尾不误标 done）。
+
+        done 是终态（get_pending_tasks 只取 status=="pending"，:470），流式收尾
+        阶段被注入但未被 LLM 实际处理的邮件若被 mark_mail_done 会永久丢失。
+        收尾检测到邮件未被响应时调用本方法回滚 pending，由流结束后的
+        _check_and_process_pending 重新排队处理。
+        """
+        mailbox_dir = self._mailbox_dir(team_name, window_id)
+        mail_file = mailbox_dir / f"{mail_id}.json"
+        if mail_file.exists():
+            mail = self._read_json(mail_file)
+            if mail:
+                mail["status"] = "pending"
+                mail["result"] = ""
+                self._write_json(mail_file, mail)
+
     def _update_mail_status(
         self,
         mail_id: str,

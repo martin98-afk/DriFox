@@ -4,6 +4,7 @@
 """
 
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -73,6 +74,8 @@ class SubAgentExecutor(QThread):
     tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
     token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
     thinking_received = pyqtSignal(str, str)  # task_id, reasoning_content
+    # ★ T24：ask 行为权限请求（task_id, tool_name, arguments）→ 主线程弹窗
+    permission_requested = pyqtSignal(str, str, dict)
 
     def __init__(
         self,
@@ -100,6 +103,10 @@ class SubAgentExecutor(QThread):
         self._pending_answer = None
         self._last_result = None
         self._execution_error = None
+        # ★ T24：ask 权限等待（主线程弹窗响应后 set event，超时按拒绝）
+        self._permission_event = threading.Event()
+        self._permission_allow = False
+        self._permission_answered = False
         self._start_time: Optional[float] = None  # Unix timestamp, 访问用 @property
         self._last_activity_time: float = time.time()  # 最后活跃时间戳（日志/API/工具），供外部 stall 检测
         # 日志存储: [{"type": "progress"|"thinking"|"ai_response"|"tool_call"|"tool_result"|"finish", "content": str, "timestamp": float}]
@@ -353,6 +360,9 @@ class SubAgentExecutor(QThread):
             tools = self.agent_manager.get_agent_tools_schema(
                 self.agent_name, is_subagent_call=self.is_subagent_call, builtin_tools=_bt
             )
+            # ★ T24（按产品指示修订）：**不做** controller schema 过滤——
+            # 工具定义保持静态完整（prompt 缓存稳定），禁用/询问全部由
+            # 执行层 _check_ui_tool_permission 实时控制（UI 调整立即生效）。
 
             # 基于 context budget 构建主智能体历史上下文注入（返回消息对象列表）
             inherited_messages = []
@@ -993,6 +1003,20 @@ class SubAgentExecutor(QThread):
                 # 子智能体不需要 question 工具
                 return None, []
 
+            # ★ T24 方案 B：UI 工具权限检查（执行前）
+            # UI 调整（ToolPermissionController）对子智能体结构性生效：
+            # - deny：跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
+            # - ask：emit 信号桥接主线程弹窗，允许才执行，拒绝/超时回填失败
+            _ui_permission = self._check_ui_tool_permission(tool_name)
+            _ui_denied = False
+            if _ui_permission == "ask":
+                _ui_denied = not self._ask_permission(tool_name, arguments)
+                if _ui_denied:
+                    logger.info(f"[SubAgent] 工具 {tool_name} 被用户拒绝（ask）")
+            elif _ui_permission == "deny":
+                _ui_denied = True
+                logger.info(f"[SubAgent] 工具 {tool_name} 已被 UI 禁用（deny），跳过执行")
+
             self._tool_call_count += 1
             self.tool_call_started.emit(self.task_id, tool_name, arguments)
             self._add_log("tool_call", tool_name, {"args": arguments})
@@ -1000,17 +1024,22 @@ class SubAgentExecutor(QThread):
 
             # 工具执行也算活跃（避免 stall 检测器误杀）
             self._last_activity_time = time.time()
-            # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
-            # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
-            # 传入 hook_context 覆盖默认角色，防止 subagent 工具调用误用 primary 角色
-            result = self.tool_executor.execute(
-                tool_name,
-                arguments,
-                hook_context={
-                    "current_role": "subagent",
-                    "is_subagent_call": True,
-                },
-            )
+
+            if _ui_denied:
+                # 跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
+                result = ToolResult(False, error=f"工具 {tool_name} 已被禁用或拒绝")
+            else:
+                # tool_executor.execute() 内部已同步触发 PreToolUse 和 PostToolUse，
+                # 消息分别进 backend 的 _pre_tool_message_queue / _hook_message_queue
+                # 传入 hook_context 覆盖默认角色，防止 subagent 工具调用误用 primary 角色
+                result = self.tool_executor.execute(
+                    tool_name,
+                    arguments,
+                    hook_context={
+                        "current_role": "subagent",
+                        "is_subagent_call": True,
+                    },
+                )
             result_content = str(result) if result else ""
             success = getattr(result, "success", True) if result else False
 
@@ -1043,6 +1072,64 @@ class SubAgentExecutor(QThread):
                 hook_messages.extend(posttool_msgs)
 
         return tool_results, hook_messages
+
+    def _check_ui_tool_permission(self, tool_name: str) -> str:
+        """UI 工具权限检查（T24 方案 B）— 返回 "allow" / "deny" / "ask"。
+
+        对齐 engine._check_tool_permission 的判定逻辑：
+        - 团队工具无条件放行
+        - check_name 归一化（mcp__server__tool → tool）
+        - 优先窗口 controller，无 controller（API 模式）回退 Settings.tool_toggles
+        """
+        if tool_name in ("team_send_message", "team_list_members"):
+            return "allow"
+        check_name = tool_name
+        if tool_name.startswith("mcp__"):
+            parts = tool_name.split("__", 2)
+            check_name = parts[2] if len(parts) > 2 else tool_name
+
+        controller = None
+        backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
+        if backend is not None:
+            controller = getattr(backend, "tool_permission_controller", None)
+
+        if controller is not None:
+            toggles = controller.get_toggles()
+            behavior = controller.get_behavior()
+        else:
+            from app.utils.config import Settings
+
+            settings = Settings.get_instance()
+            toggles = dict(settings.tool_toggles.value)
+            behavior = settings.tool_off_behavior.value
+
+        is_enabled = toggles.get(check_name, True)
+        if not is_enabled:
+            return behavior  # "deny" 或 "ask"
+        return "allow"
+
+    def _ask_permission(self, tool_name: str, arguments: dict, timeout: float = 30.0) -> bool:
+        """ask 行为：emit 信号桥接主线程弹窗，等待用户决策（超时按拒绝）。
+
+        主线程连接 permission_requested 后弹窗 → respond_permission(allow)
+        → 本方法返回结果。用户 30s 无响应按拒绝处理（不阻塞子智能体任务）。
+        """
+        self._permission_event.clear()
+        self._permission_allow = False
+        self._permission_answered = False
+        try:
+            self.permission_requested.emit(self.task_id, tool_name, arguments)
+        except Exception as e:
+            logger.warning(f"[SubAgent] permission_requested emit failed: {e}")
+            return False
+        self._permission_event.wait(timeout)
+        return self._permission_allow
+
+    def respond_permission(self, allow: bool):
+        """主线程响应权限询问结果（ask 分支继续执行/拒绝）。"""
+        self._permission_allow = bool(allow)
+        self._permission_answered = True
+        self._permission_event.set()
 
     def _drain_pretool_queue(self) -> List[Dict[str, Any]]:
         """仅消费 backend 的 _pre_tool_message_queue（PreToolUse 消息）"""

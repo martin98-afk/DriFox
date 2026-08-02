@@ -28,6 +28,12 @@ from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
+# ── 泄漏修复（6a）：_filters 缓存改弱值字典 ──
+# filter 实例由 widget.installEventFilter 以 parent 链持有（widget 销毁即释放），
+# 模块级 dict 强引用会让 filter 在 widget 销毁后仍残留 → 窗口对象树无法回收。
+# WeakValueDictionary：值（filter）被回收时条目自动消失，id 复用自然重新安装。
+import weakref
+
 
 # ── 自动拦截所有 QWidget.setToolTip，统一接入自绘 tooltip ──
 # 只要某处调用了 setToolTip("xxx")，自动为该 widget 安装 _HoverTooltipFilter。
@@ -319,6 +325,15 @@ class _HoverTooltipFilter(QObject):
                 pass
 
     def _cleanup(self):
+        # 泄漏修复（6a）：目标 widget 销毁（parent.destroyed）时立即移除
+        # _filters 缓存条目，不等弱值兜底回收。WeakValueDictionary 弱值
+        # 语义保证 _filters 不强引用 filter；此处显式 pop 让条目即时消失，
+        # 避免 filter wrapper 被 PyQt 信号连接/event filter 框架层短暂持有时
+        # 条目仍残留（id 复用会误判"已安装"）。
+        try:
+            _filters.pop(id(self._parent), None)
+        except Exception:
+            pass
         try:
             self._timer.stop()
         except (RuntimeError, AttributeError):
@@ -331,7 +346,10 @@ class _HoverTooltipFilter(QObject):
 
 
 # 缓存：同一 widget 不要重复安装
-_filters: dict = {}
+# 弱值字典（泄漏修复 6a）：值即 _HoverTooltipFilter 实例，由 widget 的
+# installEventFilter 以 parent 链持有；widget 销毁后 filter 被释放、条目
+# 自动消失，避免模块级强引用造成窗口对象树残留。
+_filters: "weakref.WeakValueDictionary[int, QObject]" = weakref.WeakValueDictionary()
 
 
 def install_hover_tooltip(widget: QWidget, text: str = "", delay_ms: int = 400):

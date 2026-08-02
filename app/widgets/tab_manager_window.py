@@ -775,6 +775,11 @@ class TabManagerWindow(QWidget):
                 if self._tab_panel.active_index == cur_idx:
                     self._sync_window_title()
 
+            # ★ 泄漏修复（P0）：保存闭包引用到窗口属性，供 _close_window_at 显式断开。
+            # 闭包通过 __defaults__（_win=window）持有窗口引用，C++ 对象销毁后
+            # Qt 虽自动断开信号，但 PyQt 对 Python slot 的释放滞后，wrapper 残留
+            # 导致窗口对象树无法回收（T5 诊断第⑦条引用链：信号表自环）。
+            window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
             # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
@@ -797,6 +802,7 @@ class TabManagerWindow(QWidget):
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
 
+            window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
 
             # 立即触发一次初始图标更新 + 团队胶囊状态同步
@@ -918,11 +924,40 @@ class TabManagerWindow(QWidget):
             self._tab_panel.remove_tab(idx)
         except Exception:
             pass
+        # ★ 泄漏修复（P0）：显式断开 add_window 连接的信号闭包。
+        # 闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
+        # 自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏。
+        # 须在 close() 之前断开（此时 C++ 对象仍存活，disconnect 安全）。
+        for _slot_attr, _signal in (
+            ("_tab_title_changed_slot", "windowTitleChanged"),
+            ("_tab_ai_state_slot", "ai_state_changed"),
+        ):
+            _slot = getattr(window, _slot_attr, None)
+            if _slot is not None:
+                try:
+                    getattr(window, _signal).disconnect(_slot)
+                except Exception:
+                    pass
+                try:
+                    setattr(window, _slot_attr, None)
+                except Exception:
+                    pass
         # 调用窗口的关闭逻辑（自动保存会话）
         try:
             window.close()
         except Exception as e:
             logger.error(f"[TabManager] 关闭窗口失败: {e}")
+        # ★ 内存泄漏修复（P0）：显式断开 Qt parent 链 + 排队删除。
+        # QStackedWidget.removeWidget 不会解除 parent（窗口仍挂在
+        # _content_area 下），close() 仅隐藏不销毁（无 WA_DeleteOnClose）；
+        # 不 deleteLater 则 C++ 对象树存活至 Python GC 回收 wrapper 才析构，
+        # 反复开关 tab 时窗口整树被多根持有（实测 offscreen 每 tab ~11.6MB）。
+        # setParent(None) 断开对象树 + deleteLater 让 Qt 下一轮事件循环即回收。
+        try:
+            window.setParent(None)
+            window.deleteLater()
+        except Exception as e:
+            logger.error(f"[TabManager] 释放窗口对象树失败: {e}")
         # 如果所有窗口都被移除，显示空状态页
         if not self._windows:
             try:

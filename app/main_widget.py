@@ -728,8 +728,6 @@ class OpenAIChatToolWindow(ToolWindow):
     toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
     # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
     ai_state_changed = pyqtSignal(str)
-    # 套餐用量查询结果桥接信号（后台线程 → 主线程）
-    _coding_plan_result_ready = pyqtSignal(object)
     # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
     _opencode_models_ready = pyqtSignal(object)
 
@@ -793,7 +791,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
             self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
-        self.backend.set_subagent_model_resolver(self._resolve_subagent_model_config)
+        # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
+        self.backend.set_subagent_model_resolver(
+            lambda v: self._resolve_subagent_model_config(v, show_error=False)
+        )
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
         # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
@@ -839,8 +840,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
-        # 线程安全桥接：套餐用量查询结果回主线程
-        self._coding_plan_result_ready.connect(self._on_coding_plan_result)
+        # ★ 用量聚合（T6）：套餐用量结果由进程级单例 UsageService 广播
+        # （全局缓存 + 单例轮询，N tab × 同 provider 只发 1 路请求），
+        # 替代旧的 per-window _coding_plan_result_ready 信号桥接。
+        from app.core.usage_service import UsageService
+
+        UsageService.get_instance().coding_plan_ready.connect(self._on_coding_plan_result)
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：后台 git 分支检测结果回主线程
@@ -1186,23 +1191,9 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("tool_control", self._tool_control_card)
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "auto_loop_config",
-            self._auto_loop_config_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
-
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "auto_loop_running",
-            self._auto_loop_running_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
+        # 注：auto_loop_config / auto_loop_running 两张卡片已延迟构建（T7），
+        # 注册/入容器在 _ensure_auto_loop_config_card() /
+        # _ensure_auto_loop_running_card() 中按需执行（_deferred_card_steps 链预构建）。
 
         # 注：model_selector 卡片框架懒创建，注册/入容器见 _ensure_model_selector_card()
 
@@ -1299,6 +1290,47 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
 
+    def _ensure_auto_loop_config_card(self):
+        """确保 AutoLoop 配置卡已创建（延迟构建 T7）。
+
+        原 setup_ui 同步构造（每次新建 tab ~7ms），改为惰性创建：
+        - _deferred_card_steps 链（800ms 后）预构建
+        - 打开入口 _show_auto_loop_config 兜底 ensure
+        信号/注册/容器语义与改造前完全一致。
+        """
+        if self._auto_loop_config_card is not None:
+            return
+        from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard
+
+        self._auto_loop_config_card = AutoLoopConfigCard()
+        self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
+        self._auto_loop_config_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("auto_loop_config", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._auto_loop_config_card.setVisible(False)
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card, system_card=True
+        )
+        self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
+
+    def _ensure_auto_loop_running_card(self):
+        """确保 AutoLoop 运行卡已创建（延迟构建 T7，与配置卡同通道）。"""
+        if self._auto_loop_running_card is not None:
+            return
+        from app.widgets.cards.settings.auto_loop_card import AutoLoopRunningCard
+
+        self._auto_loop_running_card = AutoLoopRunningCard()
+        self._auto_loop_running_card.stopRequested.connect(self._on_auto_loop_stop)
+        self._auto_loop_running_card.archiveRequested.connect(self._on_auto_loop_archive)
+        self._auto_loop_running_card.setVisible(False)
+        self._card_manager.register_card(
+            self._window_id, ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True
+        )
+        self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
+
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
         if self._model_config_card is not None:
@@ -1354,6 +1386,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._build_deferred_card_memory,
             self._build_deferred_card_model_config,
             self._build_deferred_card_model_selector,
+            self._build_deferred_card_auto_loop,
         ]
         self._schedule_next_deferred_card()
 
@@ -1474,6 +1507,16 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
+        finally:
+            self._schedule_next_deferred_card()
+
+    def _build_deferred_card_auto_loop(self):
+        """── ⑦ AutoLoop 配置卡 + 运行卡（延迟构建 T7）──"""
+        try:
+            self._ensure_auto_loop_config_card()
+            self._ensure_auto_loop_running_card()
+        except Exception:
+            logger.exception("[DeferredBuild] AutoLoopCard 构建失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -2586,29 +2629,13 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         )
 
-        # AutoLoop 配置卡片
-        from app.widgets.cards.settings.auto_loop_card import (
-            AutoLoopConfigCard,
-            AutoLoopRunningCard,
-        )
-
-        self._auto_loop_config_card = AutoLoopConfigCard()
-        self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
-        self._auto_loop_config_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("auto_loop_config", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._auto_loop_config_card.setVisible(False)
-        self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
-
-        # AutoLoop 运行卡片
-        self._auto_loop_running_card = AutoLoopRunningCard()
-        self._auto_loop_running_card.stopRequested.connect(self._on_auto_loop_stop)
-        self._auto_loop_running_card.archiveRequested.connect(self._on_auto_loop_archive)
-        self._auto_loop_running_card.setVisible(False)
-        self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
+        # AutoLoop 配置卡 / 运行卡（延迟构建 T7）
+        # 由 _deferred_card_steps 链（800ms 后）经 _ensure_auto_loop_config_card /
+        # _ensure_auto_loop_running_card 惰性创建，移除 setup_ui 同步路径开销
+        # （每次新建 tab 省 ~15ms，setup_ui 的 ~28%）。
+        # 打开入口 _show_auto_loop_config 有 ensure 兜底，行为与同步创建一致。
+        self._auto_loop_config_card = None
+        self._auto_loop_running_card = None
 
         self._question_floating_widget = QuestionFloatingWidget(self)
         self._question_floating_widget.setVisible(False)
@@ -4480,29 +4507,72 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_processing = False
         self._check_and_process_pending()
 
+    def _mail_was_responded(self, session, mail) -> bool:
+        """判断邮件是否被 LLM 实际响应过（修复 T23：收尾不误标 done）。
+
+        标准：session.messages 中存在该邮件对应的 TeamMail user 消息
+        （content 含发送方 agent@window 标识 + "任务邮件" 字样），且其后存在
+        非 hook 的 assistant 消息（LLM 针对该邮件给出了回复）。
+        未定位到邮件消息（可能未注入 session）→ 保守判定未处理（回滚 pending，
+        宁可下次重复处理也不丢失）。
+        """
+        if not session or not session.messages:
+            return False
+        target_sender = f"{mail.get('from_agent', '?')}@{mail.get('from_window', '?')}"
+        mail_id = mail.get("id", "")
+        marker_idx = -1
+        for i, msg in enumerate(session.messages):
+            if msg.get("_hook_event") != "TeamMail":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                from app.core import content_to_text
+
+                content = content_to_text(content)
+            text = str(content)
+            if (mail_id and mail_id in text) or (target_sender in text and "任务邮件" in text):
+                marker_idx = i
+        if marker_idx < 0:
+            return False
+        for msg in session.messages[marker_idx + 1 :]:
+            if msg.get("role") == "assistant" and not msg.get("_hook_event"):
+                return True
+        return False
+
+    @staticmethod
+    def _last_non_hook_assistant_text(session) -> str:
+        """取最后一条非 hook 的 assistant 消息文本（作邮件处理结果）。"""
+        if not session or not session.messages:
+            return ""
+        for msg in reversed(session.messages):
+            if msg.get("role") == "assistant" and not msg.get("_hook_event"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    from app.core import content_to_text
+
+                    content = content_to_text(content)
+                return content or ""
+        return ""
+
     def _finalize_injected_team_mails(self):
-        """流式结束时，标记所有 hook 注入的团队邮件为已完成
+        """流式结束时，按处理状态收尾所有 hook 注入的团队邮件（修复 T23）。
 
         覆盖两条注入路径：
         1. main_widget._inject_team_mail_as_hook → _injected_team_mails 跟踪
         2. chat_worker._inject_pending_hook_messages → 邮件状态为 "running"
+
+        关键修复：**注入 ≠ 处理**。收尾阶段注入的邮件可能未被 LLM 响应
+        （chat_worker 退出前最后一次注入后直接 return，无新一轮 API），
+        无条件 mark_mail_done 会误杀（done 是终态，永久丢失）。改为按
+        _mail_was_responded 判断：有响应 → done（结果取最后一条非 hook
+        assistant 文本）；无响应 → mark_mail_pending 回滚，由流结束后的
+        _check_and_process_pending 重新排队处理。
         """
         tm = self._get_team_manager()
         session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
 
-        result = ""
-        if session and session.messages:
-            for msg in reversed(session.messages):
-                if msg.get("role") == "assistant" and not msg.get("_hook_event"):
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        from app.core import content_to_text
-
-                        content = content_to_text(content)
-                    result = content or ""
-                    break
-
         done = 0
+        requeued = 0
         tracked_ids = set()
 
         # 路径 1：main_widget 跟踪的注入邮件
@@ -4510,28 +4580,47 @@ class OpenAIChatToolWindow(ToolWindow):
         if injected:
             for ctx in injected:
                 mail = ctx["mail"]
-                tm.mark_mail_done(mail["id"], self._window_id, result)
                 tracked_ids.add(mail["id"])
-                done += 1
+                if self._mail_was_responded(session, mail):
+                    tm.mark_mail_done(mail["id"], self._window_id, self._last_non_hook_assistant_text(session))
+                    done += 1
+                else:
+                    tm.mark_mail_pending(mail["id"], self._window_id)
+                    requeued += 1
             self._injected_team_mails.clear()
 
         # 路径 2：worker 直接注入的 "running" 邮件
         for mail in tm.get_running_tasks(self._window_id):
-            if mail["id"] not in tracked_ids:
-                tm.mark_mail_done(mail["id"], self._window_id, result)
+            if mail["id"] in tracked_ids:
+                continue
+            tracked_ids.add(mail["id"])
+            if self._mail_was_responded(session, mail):
+                tm.mark_mail_done(mail["id"], self._window_id, self._last_non_hook_assistant_text(session))
                 done += 1
+            else:
+                tm.mark_mail_pending(mail["id"], self._window_id)
+                requeued += 1
 
-        if done:
-            logger.info(f"[TeamMail] 流式结束，标记 {done} 封 hook 注入的邮件为 done")
+        if done or requeued:
+            logger.info(f"[TeamMail] 流式结束：{done} 封已处理标 done，{requeued} 封未处理回滚 pending")
 
     def _sync_team_mail_on_stop(self):
-        """手动停止时，更新所有团队邮件状态为已完成"""
+        """手动停止时，按处理状态收尾所有团队邮件（修复 T23：未处理回滚 pending）。
+
+        用户停止对话 ≠ 邮件处理完毕：已被 LLM 响应的邮件标 done（结果记录为
+        手动停止）；未被响应的回滚 pending，下次对话 _check_and_process_pending
+        重新处理，避免误标 done 导致邮件永久丢失。
+        """
         tm = self._get_team_manager()
+        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
 
         # 1. 正在处理的团队任务邮件（_process_team_task 路径）
         if getattr(self, "_current_team_mail", None):
             mail = self._current_team_mail["mail"]
-            tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+            if self._mail_was_responded(session, mail):
+                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+            else:
+                tm.mark_mail_pending(mail["id"], self._window_id)
             self._current_team_mail = None
             self._team_processing = False
 
@@ -4541,13 +4630,20 @@ class OpenAIChatToolWindow(ToolWindow):
         if injected:
             for ctx in injected:
                 mail = ctx["mail"]
-                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
                 tracked_ids.add(mail["id"])
+                if self._mail_was_responded(session, mail):
+                    tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+                else:
+                    tm.mark_mail_pending(mail["id"], self._window_id)
             self._injected_team_mails.clear()
 
         for mail in tm.get_running_tasks(self._window_id):
-            if mail["id"] not in tracked_ids:
+            if mail["id"] in tracked_ids:
+                continue
+            if self._mail_was_responded(session, mail):
                 tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
+            else:
+                tm.mark_mail_pending(mail["id"], self._window_id)
 
     def _get_model_config_obj(self) -> dict:
         """获取当前模型配置（兜底）"""
@@ -4806,7 +4902,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 return cid
         return None
 
-    def _resolve_subagent_model_config(self, model_value: str) -> Optional[Dict]:
+    def _resolve_subagent_model_config(self, model_value: str, show_error: bool = True) -> Optional[Dict]:
         """解析 --model=xxx 参数，返回覆盖后的 LLM 配置
 
         支持三种格式：
@@ -4815,6 +4911,12 @@ class OpenAIChatToolWindow(ToolWindow):
           - "服务商名:模型名"  → 切换到指定服务商并覆盖模型名称
 
         "服务商名" 支持：config_id / display_name / provider_name 三种写法。
+
+        Args:
+            show_error: True 时解析失败弹出 InfoBar 警告（用户手动输入场景，
+                如 /subagents --model=、/title-gen --model= 命令）；
+                False 时静默返回 None（后台自动流程，如标题生成、子智能体
+                默认模型解析——解析失败应静默回退主模型，避免打扰用户）。
         """
         if not model_value:
             return None  # 使用默认配置
@@ -4824,12 +4926,13 @@ class OpenAIChatToolWindow(ToolWindow):
             provider, model_query = model_value.split(":", 1)
             config_id = self._resolve_service_provider(provider)
             if config_id is None:
-                InfoBar.warning(
-                    "未知服务商",
-                    f"未找到服务商: {provider}",
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
-                )
+                if show_error:
+                    InfoBar.warning(
+                        "未知服务商",
+                        f"未找到服务商: {provider}",
+                        parent=self,
+                        position=InfoBarPosition.BOTTOM,
+                    )
                 return None
             model_query_lower = model_query.lower()
             matched = self._fuzzy_match_model_name(
@@ -4843,12 +4946,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 return config
             else:
                 available = self._get_model_list_for_provider(config_id)
-                InfoBar.warning(
-                    "模型不存在",
-                    f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
-                    parent=self,
-                    position=InfoBarPosition.BOTTOM,
-                )
+                if show_error:
+                    InfoBar.warning(
+                        "模型不存在",
+                        f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
+                        parent=self,
+                        position=InfoBarPosition.BOTTOM,
+                    )
                 return None
         # 格式: "服务商名" — 切换到该服务商（取默认模型）
         config_id = self._resolve_service_provider(model_value)
@@ -4869,12 +4973,13 @@ class OpenAIChatToolWindow(ToolWindow):
             return config
         else:
             available = self._get_model_list_for_provider(provider)
-            InfoBar.warning(
-                "模型不存在",
-                f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
-                parent=self,
-                position=InfoBarPosition.BOTTOM,
-            )
+            if show_error:
+                InfoBar.warning(
+                    "模型不存在",
+                    f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
+                    parent=self,
+                    position=InfoBarPosition.BOTTOM,
+                )
             return None
 
     def _get_model_list_for_provider(self, provider: str) -> List[str]:
@@ -4888,6 +4993,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 model_list = ast.literal_eval(model_list)
             except Exception:
                 model_list = []
+        # 模型列表缺失/为空 → 回退到 merged_provider_models（硬编码 + models.dev），
+        # 与 _load_model_selector_to_card 的兜底逻辑一致。默认注入的 OpenCode
+        # 免费服务商故意不写"模型列表"键（依赖异步刷新回填），在异步刷新尚未
+        # 完成/失败时，若不回退会导致 _resolve_subagent_model_config 匹配不到
+        # 用户已保存的免费模型（如 mimo-v2.5-free），弹"模型不存在"警告并回退主模型。
+        if not model_list:
+            pname = config.get("provider_name", provider)
+            merged = get_merged_provider_models()
+            if pname in merged:
+                model_list = list(merged[pname])
         # 也把当前选中的模型加进去（万一不在列表里）
         current = config.get("模型名称", "")
         if current and current not in model_list:
@@ -5671,6 +5786,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 更新 _valid_configs 确保 ChatEngine 能读到最新配置
             self._valid_configs[config_id] = saved_providers.get(config_id, {}).copy()
             self._valid_configs[config_id]["模型名称"] = model_name
+            # ★ 用量聚合（T6）：配置快照变更后失效用量/余额缓存（幂等）
+            try:
+                from app.core.usage_service import UsageService
+
+                UsageService.get_instance().invalidate(config_id)
+            except Exception:
+                pass
 
         # 重新加载模型配置（_load_model_configs 已修复：保持窗口自身选择优先）
         self._load_model_configs()
@@ -5804,7 +5926,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._last_context_refresh_time = now
 
     def _update_balance_display(self):
-        """更新余额显示"""
+        """更新余额显示（用量聚合 T6：请求委托 UsageService 全局单例）"""
         balance_display = getattr(self, "balance_display", None)
         if not balance_display:
             return
@@ -5822,26 +5944,26 @@ class OpenAIChatToolWindow(ToolWindow):
         api_key = config.get("API_KEY", "")
         provider_name = config.get("provider_name", "")
 
-        balance_display.set_provider(provider_name, api_key)
+        balance_display.set_provider(provider_name, config_id)
+
+        # 委托 UsageService：缓存命中直接广播，未命中单例后台抓取（全局 1 路）
+        from app.core.usage_service import UsageService
+
+        UsageService.get_instance().request_balance(provider_name, config_id, config)
 
         # 同时刷新套餐用量显示
         self._refresh_coding_plan()
 
     def _refresh_coding_plan(self):
-        """刷新套餐用量同心圆（5小时/每周/每月）
+        """刷新套餐用量同心圆（5小时/每周/每月）— 用量聚合 T6。
 
-        按当前选中的服务商，从注册表中查找对应的获取器异步查询。
-        获取成功后自动安排 60 秒后再次刷新。
-        未注册该功能的服务商不会显示该圆环。
+        请求委托进程级单例 UsageService：全局缓存命中直接广播，未命中
+        单例后台线程抓取后写缓存再广播；active key 由单例 QTimer 统一轮询
+        （60s），N tab × 同 provider 只发 1 路请求。未注册该功能的服务商
+        由服务 emit None，此处隐藏圆环。
         """
         ring = getattr(self, "coding_plan_ring", None)
         if not ring:
-            return
-
-        # 时间戳节流：2 秒内不重复请求（比 bool flag 更可靠，跨窗口/多路径安全）
-        now = time.monotonic()
-        last = getattr(self, "_coding_plan_last_ts", 0.0)
-        if now - last < 2.0:
             return
 
         config_id = getattr(self, "_current_provider_name", "")
@@ -5856,76 +5978,35 @@ class OpenAIChatToolWindow(ToolWindow):
             ring.clear()
             return
 
-        # 检查该服务商是否有注册的获取器
-        from app.core.coding_plan_fetcher import get as get_fetcher
+        from app.core.usage_service import UsageService
 
-        fetcher = get_fetcher(provider_name)
-        if not fetcher:
-            # 按 family 回退匹配
-            from app.core.coding_plan_fetcher import _fetchers
+        UsageService.get_instance().request_coding_plan(provider_name, config_id, config)
 
-            for registered_name in _fetchers:
-                if registered_name in provider_name:
-                    fetcher = _fetchers[registered_name]
-                    break
+    def _on_coding_plan_result(self, provider_name: str, config_id: str, result):
+        """主线程接收套餐用量查询结果（UsageService 广播，全窗口共享）。
 
-        if not fetcher:
-            # 没有注册获取器 → 不显示
-            ring.clear()
-            t = getattr(self, "_coding_plan_refresh_timer", None)
-            if t:
-                t.stop()
+        竞态防护：结果可能属于切换前的 config_id，直接丢弃。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 防竞态：用户已切换服务商，丢弃过期结果
+        if config_id != getattr(self, "_current_provider_name", ""):
             return
 
-        # 交给 fetcher 自己判断所需字段是否齐全
-        # 简单传空值让 fetcher 返回 None 即可
-
-        logger.debug(
-            f"[CodingPlan] provider={provider_name}, config_id={config_id[:20]}..., fetcher={fetcher.__name__}"
-        )
-
-        self._coding_plan_last_ts = now
-        from app.core.coding_plan_fetcher import fetch_async
-
-        def _on_result(result):
-            # 后台线程 → 通过信号桥接回主线程
-            self._coding_plan_result_ready.emit(result)
-
-        fetch_async(provider_name, config, _on_result)
-
-    def _on_coding_plan_result(self, result):
-        """主线程接收套餐用量查询结果"""
         ring = getattr(self, "coding_plan_ring", None)
         if not ring:
             return
 
-        # 校验当前服务商是否仍有套餐配置（防止获取途中用户切换了服务商）
-        config_id = getattr(self, "_current_provider_name", "")
-        config = self._valid_configs.get(config_id, {})
-        provider_name = config.get("provider_name", "")
-        from app.core.coding_plan_fetcher import get as get_fetcher
-
-        fetcher = get_fetcher(provider_name)
-        if not fetcher:
-            ring.clear()
-            return
-
         if not result:
-            logger.debug("[CodingPlan] 无数据，隐藏圆环（停止定时器）")
+            logger.debug("[CodingPlan] 无数据，隐藏圆环")
             ring.clear()
-            t = getattr(self, "_coding_plan_refresh_timer", None)
-            if t:
-                t.stop()
             return
         rolling = result.get("rolling")
         weekly = result.get("weekly")
         monthly = result.get("monthly")
         if not rolling and not weekly and not monthly:
-            logger.debug("[CodingPlan] 三层均为空，隐藏（停止定时器）")
+            logger.debug("[CodingPlan] 三层均为空，隐藏圆环")
             ring.clear()
-            t = getattr(self, "_coding_plan_refresh_timer", None)
-            if t:
-                t.stop()
             return
         logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(
@@ -5933,13 +6014,7 @@ class OpenAIChatToolWindow(ToolWindow):
             weekly=weekly,
             monthly=monthly,
         )
-        # 60 秒后自动刷新（用单次 timer 防堆积）
-        t = getattr(self, "_coding_plan_refresh_timer", None)
-        if t is None:
-            self._coding_plan_refresh_timer = QTimer(self)
-            self._coding_plan_refresh_timer.setSingleShot(True)
-            self._coding_plan_refresh_timer.timeout.connect(self._refresh_coding_plan)
-        self._coding_plan_refresh_timer.start(60000)
+        # 轮询由 UsageService 单例统一驱动（60s 周期），窗口不再自建定时器
 
     def _open_settings_popup(self):
         """打开设置卡片（委托全局卡片控制器）"""
@@ -7223,6 +7298,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._load_model_configs()
         logger.debug(f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}")
+
+        # ★ 用量聚合（T6）：配置字段（API_KEY/cookie 等）变更后失效用量/余额缓存，
+        # 下次请求强制重拉（幂等，可重复调用）。
+        try:
+            from app.core.usage_service import UsageService
+
+            UsageService.get_instance().invalidate(current_name)
+        except Exception:
+            pass
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
@@ -10770,9 +10854,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     if len(text) > 60:
                         text = text[:60] + "…"
                     questions.append((len(questions), text))
-                if len(text) > 60:
-                    text = text[:60] + "…"
-                questions.append((len(questions), text))
 
         self._history_questions_card_content.set_questions(questions)
         self._card_manager.toggle_card("history_questions", self._window_id)
@@ -14079,7 +14160,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning(f"[DiffStats] 计算差异统计失败: {e}")
 
     def _refresh_balance(self):
-        """刷新余额显示（对话完成后调用）"""
+        """刷新余额显示（对话完成后调用）— 用量聚合 T6：委托 UsageService 单例"""
         logger.debug(f"[Balance] _refresh_balance called, config_id={getattr(self, '_current_provider_name', 'None')}")
         balance_display = getattr(self, "balance_display", None)
         if balance_display:
@@ -14093,7 +14174,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 api_key = config.get("API_KEY", "")
                 logger.debug(f"[Balance] api_key exists: {bool(api_key)}")
                 if api_key:
-                    balance_display.set_provider(provider_name, api_key)
+                    balance_display.set_provider(provider_name, config_id)
+                    # 委托全局单例：缓存命中直接广播，未命中单例后台抓取
+                    from app.core.usage_service import UsageService
+
+                    UsageService.get_instance().request_balance(provider_name, config_id, config)
                     return
             # 如果不支持余额查询，隐藏
             balance_display.setVisible(False)
@@ -14837,7 +14922,8 @@ class OpenAIChatToolWindow(ToolWindow):
         cfg = Settings.get_instance()
         saved = cfg.llm_title_gen_default_model.value
         if saved:
-            resolved = self._resolve_subagent_model_config(saved)
+            # 标题生成是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
+            resolved = self._resolve_subagent_model_config(saved, show_error=False)
             if resolved:
                 llm_config = resolved
             else:
@@ -16468,14 +16554,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     timer.stop()
                 except Exception:
                     pass
-        # 条件性 timer（可能未创建）
-        for timer_attr in ("_coding_plan_refresh_timer",):
-            timer = getattr(self, timer_attr, None)
-            if timer is not None:
-                try:
-                    timer.stop()
-                except Exception:
-                    pass
+
+        # ★ 用量聚合（T6）：注销本窗口 config 的用量轮询注册（active key + 快照）。
+        # 套餐用量轮询已由 UsageService 单例统一驱动（窗口不再自建 60s timer），
+        # 此处仅清理注册，避免已关闭窗口的配置持续触发后台请求。
+        try:
+            _cid = getattr(self, "_current_provider_name", "")
+            if _cid:
+                from app.core.usage_service import UsageService
+
+                UsageService.get_instance().unregister(_cid)
+        except Exception:
+            pass
 
         # ★ 清理像素小狐桌宠（停止所有定时器）
         if getattr(self, "pixel_pet", None) is not None:
@@ -16523,6 +16613,18 @@ class OpenAIChatToolWindow(ToolWindow):
 
             CardManager.get_instance().unregister_window(self._window_id)
             logger.debug(f"[OpenAIChatToolWindow] 注销窗口卡片: {self._window_id}")
+        except Exception:
+            pass
+
+        # ★ 泄漏修复（P0）：注销窗口的 UI 插件状态，释放注册表对窗口的强引用。
+        # 窗口 __init__ 调用 ui_registry.set_main_widget(self) +
+        # set_context_provider(self._build_ui_context, self._window_id)——
+        # provider 闭包、_window_main_widgets、_card_widget_instances 均按
+        # window_id 持有窗口引用，不清理则窗口对象树被全局单例持续持有。
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().unregister_window(self._window_id)
         except Exception:
             pass
 
@@ -16610,6 +16712,19 @@ class OpenAIChatToolWindow(ToolWindow):
             app = QApplication.instance()
             if app is not None:
                 app.aboutToQuit.disconnect(self._auto_save_current_session)
+        except Exception:
+            pass
+
+        # ★ 泄漏修复（P0）：兜底冲刷已排队的 DeferredDelete 事件。
+        # Tab 模式下 _close_window_at 在 close() 之后调用 setParent(None)+
+        # deleteLater()，若此时主线程事件循环未及时进入下一轮（或应用即将退出），
+        # 排队的删除事件可能滞留。此处主动处理本窗口及其子树已排队的延迟删除，
+        # 确保 C++ 对象树即刻回收。仅主线程安全；由 closeEvent 在主线程执行，
+        # 且异常被吞不影响关闭流程。
+        try:
+            from PyQt5.QtCore import QCoreApplication, QEvent
+
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         except Exception:
             pass
 
@@ -16873,6 +16988,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """显示/隐藏 AutoLoop 配置卡（类似记忆卡片，点击切换）"""
         if self._is_auto_loop_running:
             return
+        # 延迟构建（T7）兜底：确保配置卡已创建并注册（800ms 链未跑完时入口先行）
+        self._ensure_auto_loop_config_card()
         self._card_manager.toggle_card("auto_loop_config", self._window_id)
 
     def _on_auto_loop_start(self, config: "AutoLoopConfig"):
@@ -16904,6 +17021,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 隐藏配置卡（通过 CardManager 确保状态同步），显示运行卡
         self._card_manager.hide_card("auto_loop_config", self._window_id)
+        # 延迟构建（T7）兜底：确保运行卡已创建（防止 800ms 链未跑完即 start）
+        self._ensure_auto_loop_running_card()
         self._auto_loop_running_card.show()
         # 确保停止按钮可见（彻底修复完成后重新运行时停止按钮消失的问题）
         self._auto_loop_running_card.show_stop_button()
@@ -17269,16 +17388,12 @@ def _cleanup_global_lru_caches():
 
 
 def _compact_process_heap_after_cleanup():
-    """卡片清理后主动压缩进程堆，归还空闲内存给 OS。"""
+    """卡片清理后触发 gc，回收 Python 对象图（T11：移除失效的 HeapCompact/malloc_trim）。
+
+    T10 实测：Python 3.14 下 ctypes.WinDLL("kernel32").HeapCompact 100% 抛
+    access violation（被 except 吞掉），主线程高频路径（新建/切换/恢复会话、
+    切换项目、undo）上制造无效异常开销；Linux malloc_trim 收益同样有限。
+    故移除两者，保留 gc.collect() —— pymalloc arena 的归还由 CPython
+    内存管理自行处理，gc 收集足够。
+    """
     gc.collect()
-    try:
-        if sys.platform == "win32":
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            heap = kernel32.GetProcessHeap()
-            if heap:
-                kernel32.HeapCompact(heap, 0)
-        elif sys.platform == "linux":
-            libc = ctypes.CDLL("libc.so.6", use_last_error=True)
-            libc.malloc_trim(0)
-    except Exception:
-        pass

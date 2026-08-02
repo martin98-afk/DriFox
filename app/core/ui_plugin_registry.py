@@ -788,6 +788,35 @@ class UIPluginRegistry:
             if widget is not None:
                 self._remove_widget_from_container(window_id, card_id, widget)
 
+    def unregister_window(self, window_id: str) -> None:
+        """窗口关闭时注销该窗口的全部 UI 插件状态，释放窗口引用（泄漏修复 P0）。
+
+        窗口 __init__ 会调用 set_main_widget(self) + set_context_provider(
+        self._build_ui_context, self._window_id)——provider 闭包持有窗口引用，
+        且 _window_main_widgets / _card_widget_instances 也按 window_id 缓存
+        窗口引用。closeEvent 若不清理，这些注册表会持续强引用已关闭的窗口
+        对象树，导致 C++ deleteLater 后 Python 对象无法回收。
+
+        清理项：
+        - _context_providers[window_id]：上下文提供者闭包（持有窗口引用）
+        - _window_main_widgets[window_id]：窗口主 widget 引用
+        - _card_widget_instances[window_id]：该窗口的浮动卡片 widget 实例
+        - _main_widget：单例兼容路径，若指向该窗口则置 None
+
+        Args:
+            window_id: 窗口 ID（OpenAIChatToolWindow._window_id）
+        """
+        self._context_providers.pop(window_id, None)
+        self._window_main_widgets.pop(window_id, None)
+        self._card_widget_instances.pop(window_id, None)
+        if self._main_widget is not None:
+            try:
+                wid = getattr(self._main_widget, "_window_id", None)
+                if wid == window_id:
+                    self._main_widget = None
+            except Exception:
+                pass
+
     def reset(self) -> None:
         """清空所有状态（仅供测试使用）"""
         self._content_renderers.clear()

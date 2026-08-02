@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 余额显示组件 - 支持 DeepSeek 和 SiliconFlow
+
+用量聚合（T6）：余额查询逻辑迁移至 app/core/usage_service.py 进程级单例，
+本组件只负责显示——set_provider 仅更新显示状态，请求/缓存/轮询由
+UsageService 统一驱动，结果经 balance_ready 信号广播回来。
 """
 
 from typing import Optional
 
-import requests
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.utils.design_tokens import scale_font_size
@@ -30,63 +33,8 @@ BALANCE_APIS = {
 SUPPORTED_PROVIDERS = list(BALANCE_APIS.keys())
 
 
-class _BalanceFetchThread(QThread):
-    """后台线程：执行余额查询 HTTP 请求，避免阻塞主线程（最长 10s 冻结 UI）。
-
-    结果通过 result_ready 信号（QueuedConnection）回主线程，Qt 会在
-    BalanceDisplay 析构时自动断开该连接，避免悬空回调。
-    """
-
-    result_ready = pyqtSignal(dict)  # {"balance", "currency", "provider"} | {"hide", "provider", "tooltip"}
-
-    def __init__(self, url: str, api_key: str, balance_key: str, currency: str, provider_name: str):
-        super().__init__()
-        self._url = url
-        self._api_key = api_key
-        self._balance_key = balance_key
-        self._currency = currency
-        self._provider_name = provider_name
-
-    def run(self):
-        try:
-            headers = {"Authorization": f"Bearer {self._api_key}"}
-            resp = requests.get(self._url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if self._balance_key == "total_balance":
-                    balance_infos = data.get("balance_infos", [])
-                    balance_str = balance_infos[0].get("total_balance", "") if balance_infos else ""
-                else:
-                    data_obj = data.get("data", data)
-                    balance_str = data_obj.get(self._balance_key, "")
-                if balance_str:
-                    self.result_ready.emit(
-                        {
-                            "balance": float(balance_str),
-                            "currency": self._currency,
-                            "provider": self._provider_name,
-                        }
-                    )
-                    return
-                self.result_ready.emit({"hide": True, "provider": self._provider_name})
-                return
-            self.result_ready.emit(
-                {
-                    "hide": True,
-                    "provider": self._provider_name,
-                    "tooltip": f"余额查询失败 (HTTP {resp.status_code})",
-                }
-            )
-        except requests.exceptions.Timeout:
-            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": "余额查询超时"})
-        except requests.exceptions.ConnectionError:
-            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": "连接失败"})
-        except Exception as e:
-            self.result_ready.emit({"hide": True, "provider": self._provider_name, "tooltip": f"余额查询异常: {e}"})
-
-
 class BalanceDisplay(QWidget):
-    """余额显示组件"""
+    """余额显示组件（显示层，请求委托 UsageService 全局单例）"""
 
     # 信号：当余额更新时发出
     balance_updated = pyqtSignal(float, str)  # balance, currency
@@ -97,7 +45,7 @@ class BalanceDisplay(QWidget):
         self._currency = "¥"
         self._loading = False
         self._current_provider = ""
-        self._fetch_thread = None  # 后台余额查询线程
+        self._current_config_id = ""  # 当前显示结果对应的 config_id（竞态校验）
 
         # 布局：图标 + 金额
         layout = QHBoxLayout(self)
@@ -131,107 +79,68 @@ class BalanceDisplay(QWidget):
         self.setVisible(False)
         self.setFixedHeight(20)
 
-        # 定时器用于延迟加载
-        self._load_timer = QTimer(self)
-        self._load_timer.setSingleShot(True)
-        self._load_timer.timeout.connect(self._do_fetch_balance)
+        # ★ 用量聚合（T6）：余额结果由进程级单例 UsageService 广播
+        # （缓存命中 / 后台抓取结果均经此信号），本组件只负责消费显示。
+        # UsageService 只存 config 快照不持窗口引用；本连接随组件销毁自动断开。
+        from app.core.usage_service import UsageService
+
+        UsageService.get_instance().balance_ready.connect(self.show_balance_result)
 
         self.setToolTip("余额查询")
 
-    def set_provider(self, provider_name: str, api_key: Optional[str] = None, api_url: Optional[str] = None):
-        """设置当前服务商并加载余额"""
-        # 先停止之前的定时器，避免显示混乱
-        self._load_timer.stop()
+    def set_provider(self, provider_name: str, config_id: str = ""):
+        """设置当前服务商（仅更新显示状态；请求由 UsageService 统一驱动）
 
+        Args:
+            provider_name: 真实服务商名（白名单判断）
+            config_id: 当前配置 ID（UUID，用于结果竞态校验）
+        """
         # 如果不是支持的服务商，隐藏组件
         if provider_name not in SUPPORTED_PROVIDERS:
             self.setVisible(False)
             self._balance = None
             self._current_provider = ""
+            self._current_config_id = ""
             return
 
-        api_key = api_key or ""
-        if not api_key:
-            self.setVisible(False)
-            self._balance = None
-            self._current_provider = ""
-            self.setToolTip("未配置 API Key")
-            return
-
-        # 立即显示加载状态
+        # 立即显示加载状态（具体余额结果由 balance_ready 广播带回）
+        self._current_provider = provider_name
+        self._current_config_id = config_id
         self._balance_label.setText("...")
         self._icon_label.setText("⏳")
         self.setVisible(True)
-
-        # 延迟加载，避免频繁切换时多次请求
-        self._current_provider = provider_name
-        self._provider_name = provider_name
-        self._api_key = api_key
-        self._load_timer.start(200)  # 200ms 延迟
 
     def refresh(self):
-        """手动刷新余额（对话完成后调用）"""
+        """手动刷新余额（对话完成后调用）— 请求由 UsageService 单例统一驱动
+
+        仅恢复加载态显示；实际重新拉取由 main_widget._refresh_balance →
+        UsageService.request_balance 触发（TTL 内命中缓存，过期重拉）。
+        """
         if self._current_provider:
-            # 先停止之前的请求
-            self._load_timer.stop()
-            # 立即显示加载状态
             self._balance_label.setText("...")
             self._icon_label.setText("⏳")
-            self._load_timer.start(100)  # 快速刷新
 
-    def _do_fetch_balance(self):
-        """实际执行余额查询（在后台线程中进行，避免阻塞 UI）"""
-        if not hasattr(self, "_provider_name") or not hasattr(self, "_api_key"):
-            return
+    def show_balance_result(self, provider_name: str, config_id: str, result):
+        """UsageService 广播的余额结果（主线程执行）。
 
-        provider_name = self._provider_name
-        api_key = self._api_key
-
-        config = BALANCE_APIS.get(provider_name)
-        if not config:
-            self.setVisible(False)
-            return
-
-        self._loading = True
-        self._balance_label.setText("...")
-        self._icon_label.setText("⏳")
-        self.setVisible(True)
-
-        # 取消仍在进行中的上一次查询
-        if self._fetch_thread is not None:
-            try:
-                if self._fetch_thread.isRunning():
-                    self._fetch_thread.quit()
-                    self._fetch_thread.wait(200)
-            except RuntimeError:
-                # C++ 对象已被销毁（deleteLater 处理后），忽略
-                self._fetch_thread = None
-
-        thread = _BalanceFetchThread(config["url"], api_key, config["balance_key"], config["currency"], provider_name)
-        thread.result_ready.connect(self._on_balance_result)
-        thread.finished.connect(thread.deleteLater)
-        self._fetch_thread = thread
-        thread.start()
-
-    @pyqtSlot(dict)
-    def _on_balance_result(self, res: dict):
-        """后台线程查询完成后的回调（主线程执行）。"""
+        过期结果（用户已切换服务商/配置）通过 config_id 校验直接忽略。
+        """
         # 过期结果（用户已切换服务商）直接忽略
-        if res.get("provider") != self._current_provider:
+        if config_id != self._current_config_id:
             return
         self._loading = False
         self._icon_label.setText("💰")
 
-        if res.get("hide"):
+        if not result or result.get("hide"):
             self.setVisible(False)
-            if res.get("tooltip"):
-                self.setToolTip(res["tooltip"])
+            if result and result.get("tooltip"):
+                self.setToolTip(result["tooltip"])
             return
 
-        self._balance = res["balance"]
-        self._currency = res["currency"]
+        self._balance = result["balance"]
+        self._currency = result["currency"]
         self._update_display()
-        self.setToolTip(f"{res['provider']} 余额")
+        self.setToolTip(f"{result['provider']} 余额")
         self.balance_updated.emit(self._balance, self._currency)
 
     def _extract_balance(self, data: dict, config: dict) -> Optional[float]:
@@ -299,5 +208,6 @@ class BalanceDisplay(QWidget):
         self._balance = None
         self._balance_label.setText("")
         self._current_provider = ""
+        self._current_config_id = ""
         self.setVisible(False)
         self.setToolTip("余额查询")

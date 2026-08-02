@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -447,6 +448,9 @@ class BackgroundTaskManager:
                     cls._instance._workdir = Path.cwd()
                     cls._instance._get_workdir = None
         if owner_getter:
+            # 泄漏修复（6c）：保持强引用（lambda 无其它持有者，弱引用会立即失效），
+            # 由窗口关闭路径显式调用 clear_workdir_getter() 解除，避免单例
+            # 永久持有最后窗口的 getter → 窗口对象树无法回收。
             cls._instance._get_workdir = owner_getter
         return cls._instance
 
@@ -454,6 +458,17 @@ class BackgroundTaskManager:
     def reset_instance(cls):
         """重置单例（仅用于测试）"""
         cls._instance = None
+
+    @classmethod
+    def clear_workdir_getter(cls):
+        """解除单例对最后窗口 workdir getter 的持有（泄漏修复 6c）。
+
+        窗口关闭时由 TerminalTools.cleanup() 调用：置 None 后 _effective_workdir
+        回退静态缓存 _workdir（由 BuiltinTools.set_workdir 随项目切换更新），
+        功能不中断，且已关闭窗口的 getter 闭包不再被单例强引用。
+        """
+        if cls._instance is not None:
+            cls._instance._get_workdir = None
 
     def set_workdir(self, workdir: Path):
         """设置工作目录"""
@@ -648,6 +663,16 @@ class TerminalTools:
         self._owner = owner
         # 注册动态获取 workdir 的回调给 BackgroundTaskManager
         BackgroundTaskManager(lambda: self.workdir)
+
+    def cleanup(self):
+        """窗口关闭时解除 BackgroundTaskManager 单例对 workdir getter 的持有（泄漏修复 6c）。
+
+        BackgroundTaskManager 是全局单例，__init__ 注册的 lambda 捕获 self
+        （TerminalTools），单例强引用它 → 窗口对象树无法回收。窗口关闭链
+        （backend.cleanup → tool_executor.cleanup）调用本方法后，getter 置空，
+        _effective_workdir 回退静态缓存，功能不中断。
+        """
+        BackgroundTaskManager.clear_workdir_getter()
 
     @property
     def workdir(self) -> Path:

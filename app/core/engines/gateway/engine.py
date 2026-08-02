@@ -121,6 +121,33 @@ class GatewayEngine(QObject, BaseEngine):
         cls._global_instance._global_instance = cls._global_instance
         return instance
 
+    def cleanup(self):
+        """窗口关闭时解除全局单例对窗口组件/回调的持有（泄漏修复 6b）。
+
+        GatewayEngine 是全局单例，由**第一个**窗口的 backend 创建并注入
+        get_model_config / tool_executor / agent_manager / session_store——
+        其中 get_model_config 是窗口 backend 的 bound method，tool_executor /
+        agent_manager 等也是窗口独有组件。若第一个窗口关闭而不清理，
+        单例永久持有这些引用 → 第一个窗口对象树无法回收（T13 引用链 6b）。
+
+        - 停止运行中的 worker（若在流式）
+        - 清空待处理消息队列
+        - 解除对窗口组件的持有（置 None）
+        - 若自身仍是全局单例则置 None，允许下一个窗口重新创建
+        """
+        try:
+            if self._conversation_executor.is_streaming:
+                self._conversation_executor.cancel_streaming()
+        except Exception:
+            pass
+        self._pending_queue.clear()
+        self._get_model_config = None
+        self._tool_executor = None
+        self._agent_manager = None
+        self._session_store = None
+        if GatewayEngine._global_instance is self:
+            GatewayEngine._global_instance = None
+
     # ==================== BaseEngine 接口实现 ====================
 
     def get_current_session(self) -> Optional[ChatSession]:

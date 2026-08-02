@@ -24,6 +24,23 @@ from app.utils.utils import invalidate_skills_cache
 _AUTO_COMPACT_COOLDOWN = 30.0
 
 
+def _callback_holds_backend(callback, backend) -> bool:
+    """判断异步闭包是否捕获了指定 ChatBackend 实例（泄漏修复 6d 辅助）。
+
+    _do_init 中定义的 process_message / send_message 是 async 函数，
+    闭包通过自由变量捕获 self（backend）。检查闭包 cell 是否引用该实例，
+    用于 cleanup 时确认 PlatformManager 单例持有的回调是否指向本 backend。
+    """
+    try:
+        closure = getattr(callback, "__closure__", None) or ()
+        for cell in closure:
+            if cell.cell_contents is backend:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _event_to_tag(event_name: str) -> str:
     """将事件名转换为 Claude Code 兼容的 kebab-case 标签
 
@@ -795,9 +812,19 @@ class ChatBackend(QObject):
     # ========== 插件热更新（watchfiles） ==========
 
     _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+    # ★ 泄漏修复（P1）：watcher 闭包持有首个 backend 实例引用（self._hot_reload_requested /
+    # self.plugin_changed / self._identify_* 全部走实例成员），窗口关闭不停止则实例永不可回收。
+    # 用引用计数 + stop_event 实现"最后一个窗口关闭时停止 watcher"：
+    #   - refcount 在 __init__（_start_plugin_watcher）递增、cleanup 递减
+    #   - 归零时设置 stop_event → watch() 生成器退出 → 线程结束 → 闭包释放 → 实例可回收
+    #   - 新窗口启动时 refcount 从 0 递增会重新启动 watcher（stop_event 复位），热更新不丢失
+    _plugin_watcher_refcount = 0  # 活跃 backend 引用计数
+    _plugin_watcher_stop = None  # threading.Event：设置后 watch() 生成器退出
+    _plugin_watcher_thread = None  # 当前 watcher 线程（cleanup 归零时 join 确保退出）
 
     def _start_plugin_watcher(self):
-        """启动 watchfiles 插件文件变更监听（仅启动一次）"""
+        """启动 watchfiles 插件文件变更监听（引用计数 +1，首个 backend 启动）"""
+        ChatBackend._plugin_watcher_refcount += 1
         if ChatBackend._plugin_watcher_started:
             return
         ChatBackend._plugin_watcher_started = True
@@ -845,7 +872,11 @@ class ChatBackend(QObject):
         # 预计算插件路径 → 插件名映射（用于快速定位变更文件所属插件）
         plugin_prefixes = self._build_plugin_path_index()
 
-        import threading
+        import threading as _threading
+
+        # 上次全部窗口关闭后 stop_event 可能处于 set 状态（watch() 已退出），
+        # 此处重建新事件，支持 watcher 在下一个 backend 上重启（热更新不丢失）。
+        ChatBackend._plugin_watcher_stop = _threading.Event()
 
         # 去重缓存：(plugin_name, component) → 上次重载时间
         _dedup_cache: Dict[tuple, float] = {}
@@ -909,7 +940,11 @@ class ChatBackend(QObject):
             return found
 
         def _watch_loop():
-            """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载"""
+            """后台线程: 监听插件目录文件变更，识别所属插件后请求主线程增量重载
+
+            stop_event 被设置时 watch() 生成器正常退出（cleanup 归零引用后触发），
+            线程随之结束，闭包对 self（ChatBackend 实例）的引用被释放。
+            """
             logger.debug("[ChatBackend] watchfiles 监听线程已启动")
             try:
                 for changes in watch(
@@ -917,6 +952,7 @@ class ChatBackend(QObject):
                     recursive=True,
                     debounce=2000,  # 2秒防抖
                     yield_on_timeout=False,
+                    stop_event=ChatBackend._plugin_watcher_stop,
                 ):
                     # changes: set of (Change, Path)
                     if not changes:
@@ -1061,8 +1097,38 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[ChatBackend] watchfiles 监听异常退出: {e}")
 
-        t = threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
+        import threading as _threading
+
+        t = _threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
+        ChatBackend._plugin_watcher_thread = t
         t.start()
+
+    def _stop_plugin_watcher(self):
+        """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
+
+        泄漏修复（P1）：watcher 闭包持有启动它的第一个 backend 实例引用
+        （self._hot_reload_requested / self.plugin_changed / self._identify_*），
+        若窗口关闭而线程不退出，该实例（及其整棵窗口对象树）永远无法被 GC。
+
+        - refcount > 0：仍有活跃窗口，维持 watcher（热更新继续工作）
+        - refcount == 0：设置 stop_event → watch() 生成器退出 → join 等待线程结束
+          → 闭包释放 → 首个 backend 实例可回收；同时复位标志，允许新窗口
+          重新启动 watcher（stop_event 在 _start_plugin_watcher 中重建），热更新不丢失。
+        """
+        ChatBackend._plugin_watcher_refcount = max(0, ChatBackend._plugin_watcher_refcount - 1)
+        if ChatBackend._plugin_watcher_refcount > 0:
+            return
+        stop = ChatBackend._plugin_watcher_stop
+        if stop is not None:
+            stop.set()
+        t = ChatBackend._plugin_watcher_thread
+        if t is not None and t.is_alive():
+            try:
+                t.join(timeout=2.0)
+            except Exception:
+                pass
+        ChatBackend._plugin_watcher_thread = None
+        ChatBackend._plugin_watcher_started = False
 
     def _build_plugin_path_index(self) -> Dict[str, str]:
         """构建插件路径前缀 → 插件名的映射表
@@ -1933,9 +1999,63 @@ class ChatBackend(QObject):
                 logger.warning(f"[ChatBackend] cleanup chat_engine: {e}")
             self._chat_engine = None
 
+        # 1.5 泄漏修复（6b/6d）：解除两个全局单例对首个 backend 的持有
+        # - GatewayEngine：get_model_config 是本窗口 backend 的 bound method，
+        #   tool_executor/agent_manager/session_store 是窗口独有组件
+        # - PlatformManager：_do_init 的 process_message/send_message 异步闭包
+        #   捕获 self（backend），create_platform_manager 单例永久持有
+        try:
+            ge = getattr(self, "_gateway_engine", None)
+            if ge is not None and hasattr(ge, "cleanup"):
+                ge.cleanup()
+        except Exception as e:
+            logger.warning(f"[ChatBackend] cleanup gateway_engine: {e}")
+        try:
+            from app.gateway.manager import get_platform_manager
+
+            pm = get_platform_manager()
+            if pm is not None:
+                mh = getattr(pm, "_message_handler", None)
+                if mh is not None:
+                    _pc = getattr(mh, "_process_message", None)
+                    _sc = getattr(mh, "_send_message", None)
+                    if (_pc is not None and _callback_holds_backend(_pc, self)) or (
+                        _sc is not None and _callback_holds_backend(_sc, self)
+                    ):
+                        mh._process_message = None
+                        mh._send_message = None
+                        logger.debug("[ChatBackend] PlatformManager 回调已解除（backend 关闭）")
+        except Exception as e:
+            logger.warning(f"[ChatBackend] cleanup platform_manager: {e}")
+
         # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
         if self._tool_executor:
             try:
+                # 泄漏修复（P1）：AutomationTools 构造时注册进类级集合
+                # AutomationTools._stop_listener_instances 后只 add 不 remove，
+                # 窗口关闭前先注销自身，释放类级集合对窗口 BuiltinTools 的强引用
+                # （紧急停止广播自然跳过已关闭实例）。必须在 tool_executor.cleanup()
+                # 之前调用——后者会把 _builtin_tools 置 None。
+                _bt = getattr(self._tool_executor, "_builtin_tools", None)
+                if _bt is not None:
+                    _automation = getattr(_bt, "_automation_tools", None)
+                    if _automation is not None and hasattr(_automation, "cleanup"):
+                        _automation.cleanup()
+                    # 泄漏修复（6c）：解除 BackgroundTaskManager 单例对
+                    # TerminalTools workdir getter 的强引用（lambda 捕获 self）
+                    _terminal = getattr(_bt, "_terminal_tools", None)
+                    if _terminal is not None and hasattr(_terminal, "cleanup"):
+                        _terminal.cleanup()
+            except Exception as e:
+                logger.warning(f"[ChatBackend] cleanup automation_tools: {e}")
+            try:
+                # 泄漏修复（P1）：backend 初始化时把本窗口 ToolExecutor 的
+                # BuiltinTools 赋给全局单例 AgentManager._builtin_tools（后创建
+                # 窗口覆盖先创建者，即"最后活跃窗口"持有）。窗口关闭前必须解除，
+                # 否则单例强引用窗口的 BuiltinTools → 整棵窗口对象树无法回收。
+                am = getattr(self, "_agent_manager", None)
+                if am is not None and getattr(am, "_builtin_tools", None) is self._tool_executor._builtin_tools:
+                    am._builtin_tools = None
                 self._tool_executor.cleanup()
             except Exception as e:
                 logger.warning(f"[ChatBackend] cleanup tool_executor: {e}")
@@ -1960,7 +2080,13 @@ class ChatBackend(QObject):
         # 5. 清除 SessionManager（窗口独有的会话）
         self._session_manager = None
 
-        # 6. 清除 UI 有效性标志
+        # 6. 停止插件 watcher（引用计数归零时停止线程，释放闭包对首个 backend 的引用）
+        try:
+            self._stop_plugin_watcher()
+        except Exception as e:
+            logger.warning(f"[ChatBackend] cleanup plugin_watcher: {e}")
+
+        # 7. 清除 UI 有效性标志
         self._ui_valid = False
 
         logger.info("[ChatBackend] 窗口资源清理完成")
