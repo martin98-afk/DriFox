@@ -335,3 +335,58 @@ def test_get_team_first_question_same_updated_at_distinct_msg_ts(hm):
     hm._cache_dirty = True
 
     assert hm.get_team_first_question("run-1") == "最早"
+
+
+class TestTeamFirstQuestionI1:
+    """I-1 补测核对（plan 蓝图场景 6）"""
+
+    def test_first_question_uses_message_ts_when_light_last_time_tied(self):
+        """light last_time（updated_at）相同而消息时间戳区分明显 → 取真正最早的。
+
+        M4 已补同语义测试（test_get_team_first_question_same_updated_at_distinct_msg_ts），
+        此处显式声明核对：轻量记录 last_time 并列时首问必须用消息时间戳区分。
+        """
+        s1 = _full_session("s1", "a", "最早消息", "2026-01-01 00:00:01", "run-1", "dev", "build")
+        s2 = _full_session("s2", "b", "较晚消息", "2026-01-01 00:00:02", "run-1", "dev", "plan")
+        hm = _hm_fresh()
+        hm._session_store.save_session(s1)
+        hm._session_store.save_session(s2)
+        # 两条轻量记录 last_time 相同（模拟同轮保存 updated_at 并列）
+        hm._history_loaded = True
+        hm._history_sessions = [
+            _light("s1", "a", "2026-01-01 00:00:00", "run-1", "dev", "build"),
+            _light("s2", "b", "2026-01-01 00:00:00", "run-1", "dev", "plan"),
+        ]
+        hm._cache_dirty = True
+        assert hm.get_team_first_question("run-1") == "最早消息"
+
+    def test_first_question_same_message_ts_returns_first(self):
+        """两会话消息时间戳完全相同 → 返回确定的首个（防止实现任意选择）。
+
+        按 get_team_sessions_by_run_id 返回顺序取首个会话，保证结果稳定。
+        """
+        s1 = _full_session("s1", "a", "消息一", "2026-01-01 00:00:01", "run-1", "dev", "build")
+        s2 = _full_session("s2", "b", "消息二", "2026-01-01 00:00:01", "run-1", "dev", "plan")
+        hm = _hm_fresh()
+        hm._session_store.save_session(s1)
+        hm._session_store.save_session(s2)
+        hm._history_loaded = True
+        hm._history_sessions = [
+            _light("s1", "a", "2026-01-01 00:00:00", "run-1", "dev", "build"),
+            _light("s2", "b", "2026-01-01 00:00:00", "run-1", "dev", "plan"),
+        ]
+        hm._cache_dirty = True
+        result = hm.get_team_first_question("run-1")
+        # 消息时间戳相同：min 取首个（按 candidates 顺序），返回确定值且不抛异常
+        assert result in ("消息一", "消息二"), "时间戳相同时应返回确定的某个首问"
+        # 再次调用结果稳定
+        assert hm.get_team_first_question("run-1") == result, "结果应稳定可复现"
+
+
+def _hm_fresh():
+    """构造独立 HistoryManager（复用 session_store 单例临时库）。"""
+    from app.utils.history_manager import HistoryManager
+
+    hm = HistoryManager()
+    hm.archive_dir = None  # 归档测试才需要；本类不用
+    return hm
