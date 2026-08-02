@@ -721,7 +721,8 @@ class HistoryManager:
         - team_run_id 非空的会话按 run_id 聚合为单个合并条目
         - 合并条目字段：team_run_id / team_name / agent_names（成员列表）/
           member_count / team_merged=True / session_id=组内 last_time 最新会话 /
-          last_time=组内最新 / preview=团队首问（get_team_first_question）
+          last_time=组内最新 / preview=团队首问（get_team_first_question）/
+          members=成员轻量记录列表（供 UI 展开成员列表 / 单独进入成员会话）
         - 组内成员会话不再逐条出现；普通会话条目保持不变
         - 整体仍按 last_time 降序排序
         """
@@ -752,6 +753,7 @@ class HistoryManager:
                     "user_edited_title": False,
                     "worktree_path": s.get("worktree_path", "") or "",
                     "agent_name": "",
+                    "members": [],
                 }
                 team_groups[run_id] = group
 
@@ -759,6 +761,8 @@ class HistoryManager:
             if agent and agent not in group["agent_names"]:
                 group["agent_names"].append(agent)
             group["member_count"] = len(group["agent_names"])
+            # 成员轻量记录收集（UI 展开成员列表 / 单独进入成员会话用）
+            group["members"].append(self._to_lightweight_entry(s))
             # 组内 last_time 最新会话 → 同步 session_id / last_time / saved_at / worktree_path
             if (s.get("last_time") or "") >= (group.get("last_time") or ""):
                 group["session_id"] = s.get("session_id", "")

@@ -1378,6 +1378,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
             self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
             self._history_popup_card.teamRestoreRequested.connect(self._on_team_restore_requested)
+            self._history_popup_card.teamArchiveRequested.connect(self._on_team_archive_requested)
+            self._history_popup_card.memberSelected.connect(self._on_team_member_selected)
             self._history_card.set_extra_button_handler(
                 self._history_popup_card.get_import_button_handler(),
                 tooltip="导入会话",
@@ -6550,28 +6552,31 @@ class OpenAIChatToolWindow(ToolWindow):
         current_tab = self._history_card._current_tab if hasattr(self._history_card, "_current_tab") else "history"
 
         if current_tab == "history" or is_archived:
-            # 获取当前项目的历史会话列表
-            history_list = self.history_manager.get_history_list(self._current_project) if self.history_manager else []
+            # 获取当前项目的历史会话列表（M4：merge_team=True 团队会话合并为
+            # 单一条目，与普通会话混排；不再注入顶部团队分组区）
+            history_list = (
+                self.history_manager.get_history_list(self._current_project, merge_team=True)
+                if self.history_manager
+                else []
+            )
             # 在项目过滤后的列表中查找当前会话的位置
             current_idx = None
             if self._current_session_id and self.history_manager:
                 for i, session in enumerate(history_list):
-                    if session.get("session_id") == self._current_session_id:
+                    # 🛡️ 合并条目：当前会话是组内成员之一时命中该合并条目
+                    if session.get("team_merged"):
+                        members = session.get("members") or []
+                        if any(m.get("session_id") == self._current_session_id for m in members):
+                            current_idx = i
+                            break
+                    elif session.get("session_id") == self._current_session_id:
                         current_idx = i
                         break
-            # 🛡️ 团队对话分组（方案 A）：用全量历史构建（不带当前项目过滤），
-            # 避免多项目下同一团队会话分散在各项目，agent_names 聚合不全
-            # （成员胶囊 4→1 的根因之一）。分组是全项目的，与当前项目无关。
-            if self.history_manager:
-                team_groups = self._build_team_groups(self.history_manager.get_history_list())
-            else:
-                team_groups = []
             # 归档操作后需要清理归档会话列表
             if is_archived:
                 self._history_popup_card.set_history(history_list, current_idx, clear_archived=True)
             else:
                 self._history_popup_card.set_history(history_list, current_idx)
-            self._history_popup_card.set_team_groups(team_groups)
         else:
             # 刷新归档会话
             self._refresh_archived_sessions()
@@ -9692,6 +9697,89 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.pixel_pet:
             self.pixel_pet.set_state("idle")
 
+    def _on_team_archive_requested(self, run_id: str):
+        """归档团队会话（合并条目「归档」按钮）
+
+        按 run_id 收集全部成员会话 → archive_sessions_by_run_id 逐条归档
+        （写 JSON + 从内存/SQLite 删除，D4 归档区逐条显示成员会话）。
+        若当前会话属于该团队，归档后自动切换新会话（复用 _archive_history_session
+        的 archived_current 分支语义）。
+        """
+        if not run_id or not self.history_manager:
+            return
+        ## 触发警示动画
+        if self.pixel_pet:
+            self.pixel_pet.set_state("warning")
+
+        try:
+            members = self.history_manager.get_team_sessions_by_run_id(run_id)
+        except Exception:
+            members = []
+        if not members:
+            if self.pixel_pet:
+                self.pixel_pet.set_state("idle")
+            InfoBar.warning(
+                "归档失败",
+                "未找到该团队的会话记录",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        member_ids = {s.get("session_id") for s in members if s.get("session_id")}
+        archived_current = self._current_session_id in member_ids
+
+        # 归档当前会话时需先保存旧会话管理器/引擎引用（归档后切换新会话用）
+        old_session_manager = None
+        old_chat_engine = None
+        if archived_current:
+            old_session_manager = self.session_manager
+            old_chat_engine = self.backend.chat_engine
+            # 清理归档会话的文件操作记录和备份
+            if self.backend.tool_executor and self.backend.file_recorder:
+                for sid in member_ids:
+                    try:
+                        self.backend.file_recorder.clear_session(sid)
+                    except Exception:
+                        pass
+
+        count = self.history_manager.archive_sessions_by_run_id(run_id)
+
+        if archived_current and count > 0:
+            # 复用 create_new_session_state + init_new_session_after_archive
+            new_state = create_new_session_state(old_session_manager, old_chat_engine)
+            init_new_session_after_archive(
+                self,
+                new_state,
+                self.backend,
+                self._clear_chat_area,
+                self._show_initial_welcome,
+            )
+
+        # 刷新历史面板（团队合并条目消失 / 成员卡片移除）
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+
+        if count > 0:
+            InfoBar.success(
+                "团队已归档",
+                f"已归档 {count} 个成员会话",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        else:
+            InfoBar.warning(
+                "归档失败",
+                "没有可归档的成员会话",
+                parent=self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        # 操作完成，恢复正常状态
+        if self.pixel_pet:
+            self.pixel_pet.set_state("idle")
+
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
             return
@@ -9900,7 +9988,20 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_history_session(self, index: int):
         self._load_history_session_from_popup(index)
 
-    def _load_history_session_from_popup(self, index: int):
+    def _load_session_from_record(self, session_record: Dict):
+        """从 session_record 加载历史会话（公共逻辑，供面板 index 与成员直选复用）
+
+        提取自 _load_history_session_from_popup：面板 index 定位 session_record 后
+        的加载逻辑（哨兵、reset、消息加载、create_session、project/worktree 同步、
+        显示刷新）。成员进入会话（_on_team_member_selected）直传 record 调用，
+        不依赖面板 index，规避合并条目 index 漂移。
+        """
+        if not session_record:
+            return
+        session_id = session_record.get("session_id")
+        if not session_id:
+            return
+
         if self._is_streaming:
             self._on_stop_clicked()
 
@@ -9922,18 +10023,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 💡 内存优化：加载历史会话时清理 LRU 缓存
         _cleanup_global_lru_caches()
 
-        # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
-        # 而非重新调用 get_history_list()。原因是：流式对话结束时当前会话被保存
-        # 到历史列表头部，若在此处重新获取列表，保存的 index 会因新会话插入而
-        # 偏移指向错误的会话（点击会话 C 却加载了会话 B）。
-        # 使用面板内缓存的列表保证 index 与渲染时一致，再通过 session_id
-        # 从 history_manager 获取完整数据。
-        session_record = self._history_popup_card.get_history_at_index(index)
-        if not session_record:
-            return
-        session_id = session_record.get("session_id")
-        if not session_id:
-            return
         # 通过 session_id 获取会话消息，确保即使列表顺序变化也能加载正确的会话
         messages = self.history_manager.get_session_messages(session_id)
         if not messages:
@@ -9983,6 +10072,33 @@ class OpenAIChatToolWindow(ToolWindow):
             UIPluginRegistry.get_instance().re_register_all_commands()
         except Exception:
             pass
+
+    def _on_team_member_selected(self, member_record: dict):
+        """团队合并条目成员行被点击 → 直接进入该成员会话（不依赖面板 index）"""
+        if not member_record:
+            return
+        session_id = member_record.get("session_id")
+        if not session_id:
+            return
+        # 补全完整记录（成员轻量记录可能缺 messages 字段）
+        full_record = self.history_manager.get_session_by_session_id(session_id) if self.history_manager else None
+        record = full_record or member_record
+        self._load_session_from_record(record)
+        # 关闭历史会话卡片
+        if self._card_manager:
+            self._card_manager.hide_card("history", self._window_id)
+
+    def _load_history_session_from_popup(self, index: int):
+        # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
+        # 而非重新调用 get_history_list()。原因是：流式对话结束时当前会话被保存
+        # 到历史列表头部，若在此处重新获取列表，保存的 index 会因新会话插入而
+        # 偏移指向错误的会话（点击会话 C 却加载了会话 B）。
+        # 使用面板内缓存的列表保证 index 与渲染时一致，再通过 session_id
+        # 从 history_manager 获取完整数据。
+        session_record = self._history_popup_card.get_history_at_index(index)
+        if not session_record:
+            return
+        self._load_session_from_record(session_record)
 
     def _append_user_message(
         self,
