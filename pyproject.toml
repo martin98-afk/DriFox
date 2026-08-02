@@ -70,6 +70,7 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+    "pympler>=1.1",
 ]
 build = [
     "pyinstaller>=6.16.0",
