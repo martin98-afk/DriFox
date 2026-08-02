@@ -665,9 +665,12 @@ class QuestionFloatingWidget(QWidget):
         self._preview_btn.setFont(get_unified_font(10))
         self._preview_btn.clicked.connect(self._on_preview)
         self._preview_btn.setVisible(False)
+        # 🛠️ 跟随主题：原本硬编码 rgba(255,255,255,...) 在浅色主题（crema 等
+        # realtime_bg 偏浅 + REALTIME_TAG_BG 浅黄）下变成"白字淡黄底"不可读。
+        # 改用 REALTIME_TEXT，深色主题=浅色字，浅色主题=深色字，与卡片整体配色一致。
         self._preview_btn.setStyleSheet(f"""
-            QPushButton {{ color: rgba(255,255,255,0.72); background: {Colors.REALTIME_TAG_BG}; border: none; border-radius: 6px; padding: 0 14px; }}
-            QPushButton:hover {{ color: rgba(255,255,255,0.95); background: {Colors.CARD_BG_SOLID}; }}
+            QPushButton {{ color: {Colors.REALTIME_TEXT}; background: {Colors.REALTIME_TAG_BG}; border: none; border-radius: 6px; padding: 0 14px; }}
+            QPushButton:hover {{ color: {Colors.REALTIME_TEXT}; background: {Colors.CARD_BG_SOLID}; }}
         """)
 
         self._back_btn = QPushButton("返回")

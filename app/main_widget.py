@@ -14456,6 +14456,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态，
+        # 否则 TabPanel 听不到 ai_state_changed 变化、不会在 Tab 边框
+        # 渲染问题动画，用户在多 Tab 场景下分不清"哪个窗口在等权限"。
+        self._set_ai_state("question")
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
