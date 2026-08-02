@@ -38,6 +38,7 @@ class _StubViewer:
         self._schedule_render_calls = 0
         self.js_calls = []
         self._tool_target_id = "content-placeholder"  # 非简洁模式默认值
+        self._tool_compact_mode = False  # 非简洁模式（与真实 viewer 默认一致）
 
     def _schedule_render(self, immediate=False):
         self._schedule_render_calls += 1

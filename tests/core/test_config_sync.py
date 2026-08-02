@@ -131,7 +131,8 @@ class TestCheckRemoteFile:
     def test_returns_none_when_token_empty(self, svc):
         """token 为空 → None"""
         svc._token = ""
-        with patch.object(svc, '_sync_token', return_value=False):
+        # 实现演进：_check_remote_file 改用 _prepare_read_token 载入 token（不刷新）
+        with patch.object(svc, "_prepare_read_token", return_value=False):
             assert svc._check_remote_file("drifox/app.config") is None
 
     def test_returns_none_when_network_error(self, svc):
@@ -379,8 +380,9 @@ class TestDoDownload:
                     mock_write.assert_not_called()  # 没有写入文件
 
     def test_returns_false_on_token_invalid(self, svc):
-        """token 无效 → 返回 False"""
-        with patch.object(svc, "_sync_token", return_value=False):
+        """token 无效（本地无 token）→ 返回 False"""
+        # 实现演进：_do_download 改用 _prepare_read_token 载入 token（不刷新）
+        with patch.object(svc, "_prepare_read_token", return_value=False):
             assert svc._do_download() is False
 
     def test_sets_suppress_window_on_download(self, svc):
@@ -470,13 +472,15 @@ class TestInitialSync:
             assert svc._initial_sync_completed is False
 
     def test_skips_when_token_invalid(self, svc):
-        """token 无效 → skip → 初始同步未完成"""
+        """token 无效（本地无 token）→ skip → 初始同步未完成"""
         svc._token = ""  # token 为空
-        svc._initial_sync()
+        # 实现演进：_initial_sync 改用 _prepare_read_token 载入 token（不刷新）
+        with patch.object(svc, "_prepare_read_token", return_value=False):
+            svc._initial_sync()
         assert svc._initial_sync_completed is False
 
     def test_does_not_set_completed_on_download_failure(self, svc):
-        """远端有配置但下载失败 → 不标记完成"""
+        """远端有配置但下载失败 → 降级本地刷新上传；刷新也失败 → 不标记完成"""
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
@@ -486,7 +490,12 @@ class TestInitialSync:
                 make_httpx_response(500),  # download fails
             ]
 
-            svc._initial_sync()
+            # 下载失败 → 降级 _refresh_local_and_upload（路径 B），本地刷新也失败 → 不标记完成
+            with patch(
+                "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
+                return_value=(None, "network timeout"),
+            ):
+                svc._initial_sync()
             assert svc._initial_sync_completed is False
 
     def test_does_not_set_completed_on_upload_failure(self, svc):
@@ -528,8 +537,11 @@ class TestInitialSync:
 
             before = time.time()
             with patch("pathlib.Path.write_bytes"):
-                svc._initial_sync()
-                # finally 不缩短下载路径的抑制窗口
+                # 下载成功后闭环刷新（_refresh_and_upload_after_download）会把抑制窗口
+                # 覆盖为上传路径的 5s 短抑制；此处 mock 掉闭环，隔离验证 _do_download
+                # 本身设置的 30s 长抑制，且 finally 不缩短下载路径的抑制窗口
+                with patch.object(svc, "_refresh_and_upload_after_download"):
+                    svc._initial_sync()
                 remaining = svc._suppress_until - time.time()
                 assert remaining >= 20.0  # 保留 ~30s 抑制
 
