@@ -737,6 +737,9 @@ _TOOL_ICON_MAP = {
     "lsp": "工具",
     # CodeGraph 代码智能
     "codegraph_explore": "Search",
+    # 团队协作工具
+    "team_send_message": "邮件-发送",
+    "team_list_members": "团队",
     # 上传文件
     "upload_file": "upload-file",
 }
@@ -773,6 +776,8 @@ _TOOL_CN_NAME_MAP = {
     "keyboard": "键盘",
     "lsp": "LSP",
     "codegraph_explore": "代码探索",
+    "team_send_message": "发送邮件",
+    "team_list_members": "团队成员",
     "upload_file": "上传文件",
 }
 
