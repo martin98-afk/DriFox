@@ -1162,6 +1162,34 @@ def _has_unclosed_think(text: str) -> bool:
     return last_close == -1
 
 
+# ── 方案 D：data-order 统一排序 ──────────────────────────────────
+# 根因（Bug B 复发的第三条路径）：JS 直接注入 #tool-content 的工具块
+# （_inject_tool_streaming_html 流式块 / append_tool_result 完成块 /
+# save-restore 恢复块）不在 #content-placeholder 中，reorganizeContent 的
+# getPos 查不到 posMap → 返回 1e9 → 排序时恒沉底 → 折叠框内"所有思考在前、
+# 所有工具在后"，与实际到达顺序不符。
+# 修复：给 JS 注入的工具块设 data-order 属性。data-order = 工具调用锚点之前
+# 的 think/tool 块计数 + 同锚点多工具启动序号细分 —— 与 reorganizeContent 的
+# posMap（blocks 序号，不含 text 块）**同尺度**，保证 JS 注入块与 markdown
+# 渲染块可以混合比较排序而不冲突。
+_THINK_TOOL_TYPES = ("reasoning", "tool_result")
+
+
+def _count_think_tool_prefix(content: Any, up_to: int) -> int:
+    """统计 _content_data[0:up_to] 中 think/tool 块的数量（data-order 基准值）。
+
+    与 reorganizeContent 的 posMap 语义一致：只计可迁移到"工具与思考"区的块
+    （reasoning / tool_result），text 等正文块不计数。
+    """
+    if not isinstance(content, list):
+        return 0
+    count = 0
+    for b in content[:up_to]:
+        if isinstance(b, dict) and b.get("type") in _THINK_TOOL_TYPES:
+            count += 1
+    return count
+
+
 def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
     """注入思考框HTML。
 
@@ -1762,7 +1790,9 @@ _skeleton_cache: Dict[tuple, str] = {}
 # 若进程内仍持有旧版骨架缓存与新代码混合（新代码注入 data-order + 旧骨架
 # 无 data-order 分支 / 反之），JS 行为不一致可能导致消息卡片空白。
 # 递增时机：任何改动 _load_skeleton 生成的 HTML/JS 结构时 +1。
-_SKELETON_CACHE_VERSION = 2
+# v3：reorganizeContent 的 getPos 新增 data-order 优先分支（方案 D），
+# 旧骨架无此分支会导致新代码注入的 data-order 不参与排序。
+_SKELETON_CACHE_VERSION = 3
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -4251,6 +4281,17 @@ class CodeWebViewer(QWebEngineView):
                         // 顺序变了：用 sort 一次性重排（避免多次 appendChild 抖动）
                         var _sortedChildren = Array.prototype.slice.call(toolContent.children).sort(function(a, b) {{
                             function getPos(el) {{
+                                // 🆕 方案 D：data-order 优先——JS 注入的工具块
+                                // （流式块 / save-restore 恢复块 / append_tool_result
+                                // 完成块）不在 #content-placeholder 中，posMap 查不到，
+                                // 无 data-order 会返回 1e9 恒沉底 → 折叠框内
+                                // "所有思考在前、所有工具在后"（Bug B 第三条路径）。
+                                // data-order 与 posMap 同尺度（锚点前 think/tool 块
+                                // 计数 + 同锚点序号细分），可直接混合比较排序。
+                                var od = el.getAttribute('data-order');
+                                if (od !== null) {{
+                                    return parseFloat(od);
+                                }}
                                 var bk = el.getAttribute('data-block-key');
                                 var tid = el.getAttribute('data-tool-call-id');
                                 if (bk && posMap['bk:' + bk] !== undefined) return posMap['bk:' + bk];
@@ -5040,7 +5081,28 @@ class CodeWebViewer(QWebEngineView):
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
             "_bk.setAttribute('data-restored','true');"
+            # 🆕 方案 D：restore 从保存的 outerHTML 重新取回 data-order（显式兜底，
+            # outerHTML 重建通常已含该属性），并按 data-order 插入到正确位置——
+            # 而不是 appendChild 沉底，避免流式块恢复后破坏 reorganizeContent
+            # 已排好的交错顺序（"所有思考在前、所有工具在后"的次生根因）。
+            'var _odMatch=b.html.match(/data-order="([^"]*)"/);'
+            "var _odVal=_odMatch?_odMatch[1]:null;"
+            "if(_odVal){"
+            "_bk.setAttribute('data-order',_odVal);"
+            "var _inserted=false;"
+            "var _kids=_tc.children;"
+            "for(var _ki=0;_ki<_kids.length;_ki++){"
+            "var _kd=_kids[_ki].getAttribute('data-order');"
+            "if(_kd!==null&&parseFloat(_kd)>parseFloat(_odVal)){"
+            "_tc.insertBefore(_bk,_kids[_ki]);"
+            "_inserted=true;"
+            "break;"
+            "}"
+            "}"
+            "if(!_inserted)_tc.appendChild(_bk);"
+            "}else{"
             "_tc.appendChild(_bk);"
+            "}"
             "}}})"
             "}}"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
@@ -5762,7 +5824,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -7906,6 +7968,13 @@ class MessageCard(SimpleCardWidget):
                 diff=diff,
                 echarts=echarts,
             )
+            # 🆕 方案 D：计算完成态工具块的 data-order（与 _inject_tool_streaming_html
+            # 同口径）。无锚点（历史会话等非流式路径）→ 基准取当前末尾位置，与
+            # _content_data.append 兜底行为一致（沉底不早于任何已有块）。
+            _anchor = self._tool_insert_anchors.get(tool_call_id) or 0
+            _order = self._tool_call_order.get(tool_call_id) or 0
+            _base = float(_count_think_tool_prefix(self._content_data, _anchor))
+            _order_value_js = f"{_base + _order * 0.001:.3f}"
             safe_html = json.dumps(block_html).decode("utf-8")
 
             # 提取 inner HTML（去掉外层 <div> 包装），用于原地更新已有 DOM 节点
@@ -7967,10 +8036,19 @@ class MessageCard(SimpleCardWidget):
                     // 对流式态块走 outerHTML 整体替换为完成态折叠框。
                     var _isStreamingBlock = existing.classList.contains('tool-streaming-block');
                     if (_isStreamingBlock) {{
+                        // 🆕 方案 D：替换流式块时继承原 data-order（JS 注入块的排序位置），
+                        // 避免完成态块丢失 data-order 后在 reorganizeContent 中 getPos=1e9
+                        // 沉底，导致"思考在前、工具在后"的顺序错乱。
+                        var _odOld = existing.getAttribute('data-order');
                         var _wrap = document.createElement('div');
                         _wrap.innerHTML = {safe_html};
                         var _newBlock = _wrap.firstElementChild;
                         if (_newBlock && existing.parentNode) {{
+                            if (_odOld) {{
+                                _newBlock.setAttribute('data-order', _odOld);
+                            }} else {{
+                                _newBlock.setAttribute('data-order', {_order_value_js});
+                            }}
                             existing.parentNode.replaceChild(_newBlock, existing);
                         }}
                     }} else {{
@@ -7982,6 +8060,10 @@ class MessageCard(SimpleCardWidget):
                         existing.removeAttribute('data-streaming');
                         existing.removeAttribute('data-tool-injected');
                         existing.setAttribute('style', {safe_outer_style});
+                        // 🆕 方案 D：原地更新保留原 data-order；缺失时注入（兜底）
+                        if (!existing.getAttribute('data-order')) {{
+                            existing.setAttribute('data-order', {_order_value_js});
+                        }}
 
                         if ({_use_incremental}) {{
                             var btn = existing.querySelector('.cm-collapsible__summary');
@@ -8027,7 +8109,12 @@ class MessageCard(SimpleCardWidget):
                 var _wrap = document.createElement('div');
                 _wrap.innerHTML = {safe_html};
                 var _newBlock = _wrap.firstElementChild;
-                if (_newBlock) tc.appendChild(_newBlock);
+                if (_newBlock) {{
+                    // 🆕 方案 D：追加完成块时注入 data-order（与流式注入同口径），
+                    // 保证下次 reorganizeContent 排序能回到正确位置而非恒沉底。
+                    _newBlock.setAttribute('data-order', {_order_value_js});
+                    tc.appendChild(_newBlock);
+                }}
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
@@ -8198,6 +8285,15 @@ class MessageCard(SimpleCardWidget):
             # 编辑类工具流式块始终注入到正文区域
             _stream_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
 
+            # 🆕 方案 D：计算工具块的 data-order（与 reorganizeContent 的 posMap 同尺度），
+            # 使 JS 注入的流式块在下次全量渲染排序时能回到正确位置，而非恒沉底
+            # （"所有思考在前、所有工具在后"的根因）。锚点 = 工具调用时 _content_data
+            # 长度；基准 = 锚点前 think/tool 块计数；同锚点多工具按启动序号细分。
+            _anchor = self._tool_insert_anchors.get(tool_call_id) or 0
+            _order = self._tool_call_order.get(tool_call_id) or 0
+            _base = float(_count_think_tool_prefix(self._content_data, _anchor))
+            _order_value_js = f"{_base + _order * 0.001:.3f}"
+
             safe_html = json.dumps(block_html).decode("utf-8")
             safe_preview = json.dumps(preview_content).decode("utf-8")
             streaming_flag = "true" if not completed else "false"
@@ -8268,7 +8364,13 @@ class MessageCard(SimpleCardWidget):
                     var tmp = document.createElement('div');
                     tmp.innerHTML = {safe_html};
                     var block = tmp.firstElementChild;
-                    if (block) tc.appendChild(block);
+                    if (block) {{
+                        // 🆕 方案 D：注入 data-order，供 reorganizeContent 排序定位
+                        // （JS 注入块不在 #content-placeholder 中，无 posMap 记录，
+                        // 无 data-order 会 getPos=1e9 恒沉底 → 思考/工具不交错）。
+                        block.setAttribute('data-order', {_order_value_js});
+                        tc.appendChild(block);
+                    }}
                     // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
@@ -8400,6 +8502,16 @@ class MessageCard(SimpleCardWidget):
                         // 避免工具调用切换时思考折叠框"消失→重现"的视觉闪烁
                         newBlock.setAttribute('data-restored', 'true');
                         block.parentNode.replaceChild(newBlock, block);
+                        // 🆕 方案 C：若替换后的 think-block 仍在 #content-placeholder
+                        // （未被 reorganizeContent 迁移，如渲染节流/坞态切换），
+                        // 立即迁移到 #tool-content，根治"思考框跑出折叠框"
+                        // （正文区出现孤立思考框、折叠框内思考缺失）。
+                        if (newBlock.parentNode === document.getElementById('content-placeholder')) {{
+                            var _tc = document.getElementById('tool-content');
+                            if (_tc) {{
+                                _tc.appendChild(newBlock);
+                            }}
+                        }}
                     }}
                 }});
 

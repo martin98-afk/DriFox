@@ -55,11 +55,7 @@ def _types(card: MessageCard):
 
 def _tool_ids(card: MessageCard):
     """提取 _content_data 中 tool_result 块的 tool_call_id 序列。"""
-    return [
-        b.get("tool_call_id")
-        for b in card._content_data
-        if isinstance(b, dict) and b.get("type") == "tool_result"
-    ]
+    return [b.get("tool_call_id") for b in card._content_data if isinstance(b, dict) and b.get("type") == "tool_result"]
 
 
 def test_interleaved_think_tool_text_order():
@@ -348,3 +344,78 @@ def test_maybe_finish_thinking_moves_out_of_content_placeholder():
     assert "newBlock.parentNode === " in func_src, "方案 C 必须判断替换后父节点（content-placeholder 兜底迁移）"
     # 必须迁移到 tool-content
     assert "appendChild(newBlock)" in func_src, "方案 C 必须把跑出折叠框的 think-block 迁回 #tool-content"
+
+
+# ──────────────────────────────────────────────
+# 方案 D 行为级回归（不触发 DOM，验证 data-order 与 posMap 同尺度）
+# ──────────────────────────────────────────────
+
+from app.widgets.message_card import _count_think_tool_prefix  # noqa: E402
+
+
+def _data_order(card: MessageCard, tool_call_id: str) -> float:
+    """复刻 message_card.py 内联的 data-order 计算（锚点前缀计数 + 序号细分）。"""
+    anchor = card._tool_insert_anchors.get(tool_call_id) or 0
+    base = float(_count_think_tool_prefix(card._content_data, anchor))
+    order = card._tool_call_order.get(tool_call_id) or 0
+    return base + order * 0.001
+
+
+def test_data_order_matches_think_tool_prefix():
+    """工具块 data-order = 锚点前 think/tool 块计数，与 posMap 同尺度可混合排序。
+
+    真实流式时序：思考1 → 工具1调用(锚点=1) → 工具1结果 → 正文 → 思考2 →
+    工具2调用(锚点=4)。t1 前缀 think/tool = [R1] = 1；t2 前缀 = [R1, T1, R2] = 3。
+    JS 注入块按此 data-order 排序时，能与 markdown 渲染的思考块正确交错，
+    而非无 posMap 时 getPos=1e9 恒沉底（"所有思考在前、所有工具在后"）。
+    """
+    card = _make_card()
+    card.start_new_thinking_block()
+    card.append_reasoning("思考一")
+    card.update_tool_streaming("t1", "search", {"q": "a"})  # 锚点 = 1
+    card.append_tool_result(tool_name="search", result="r1", tool_call_id="t1")
+    card.append_text("正文")
+    card.start_new_thinking_block()
+    card.append_reasoning("思考二")
+    card.update_tool_streaming("t2", "read", {"path": "b"})  # 锚点 = 4
+    card.append_tool_result(tool_name="read", result="r2", tool_call_id="t2")
+
+    assert _data_order(card, "t1") == 1.0, f"t1 前缀应为 1 个 think/tool 块，实际 {_data_order(card, 't1')}"
+    # t2 为全局第 2 个工具（order=1）→ 基准 3.0 + 细分 0.001（跨锚点细分不越过整数位）
+    assert _data_order(card, "t2") == 3.001, (
+        f"t2 前缀应为 3 个 think/tool 块 + 序号细分，实际 {_data_order(card, 't2')}"
+    )
+    # 单调递增：排序后 JS 注入块与 markdown 渲染块交错顺序正确
+    assert _data_order(card, "t1") < _data_order(card, "t2")
+
+
+def test_data_order_same_anchor_subdivided_by_call_order():
+    """同锚点多工具并行：data-order 按启动序号细分（结果乱序到达也不乱序）。"""
+    card = _make_card()
+    card.start_new_thinking_block()
+    card.append_reasoning("思考")
+    card.update_tool_streaming("ta", "search", {"q": "a"})  # 启动序号 0
+    card.update_tool_streaming("tb", "read", {"path": "b"})  # 启动序号 1
+    # 结果乱序到达：B 先到、A 后到
+    card.append_tool_result(tool_name="read", result="rb", tool_call_id="tb")
+    card.append_tool_result(tool_name="search", result="ra", tool_call_id="ta")
+
+    assert _data_order(card, "ta") == 1.0, f"ta 应排在锚点细分首位，实际 {_data_order(card, 'ta')}"
+    assert _data_order(card, "tb") == 1.001, f"tb 应按启动序号细分，实际 {_data_order(card, 'tb')}"
+    assert _data_order(card, "ta") < _data_order(card, "tb")
+
+
+def test_data_order_without_anchor_matches_append_tail():
+    """无锚点（历史会话等非流式路径）→ data-order 兜底取末尾位置，与 append 沉底一致。
+
+    锚点缺失时 data-order 基准 = 当前末尾 think/tool 块计数，保证工具块
+    排序不早于任何已有块，与 _content_data.append 兜底行为吻合。
+    """
+    card = _make_card()
+    card.append_text("正文")
+    card.append_tool_result(tool_name="search", result="r", tool_call_id="hist_1")
+
+    # 无锚点 → anchor 兜底 0 → 前缀计数 0 → data-order 0.0（排在现有 think/tool 块之后）
+    assert _data_order(card, "hist_1") == 0.0, f"无锚点 data-order 应为 0.0，实际 {_data_order(card, 'hist_1')}"
+    # 数据层仍 append 末尾（修复前行为）
+    assert _types(card) == ["text", "tool_result"]
