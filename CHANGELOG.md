@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **侧边栏折叠态 Tab/团队框紧凑化，折叠后不再破版** (`app/widgets/tab_panel.py`): 折叠侧边栏（46px）时 Tab 项与团队分组框不再挤成一团。折叠态下 TabItem 仅保留图标 + 状态指示条（标题/角色胶囊/关闭按钮隐藏，margin 收紧）；团队框 header 仅保留团队 icon（无项目 icon 时用团队名首字 + 主题色占位，tooltip 显示完整团队名）；团队成员在团队模式下用**角色首字符 + 胶囊同色**绘制头像（原本团队模式隐藏项目 icon，折叠后成员可区分）；展开侧边栏逐控件完整还原（含图标数据/可见性/margin 恢复现场，往返无残留）。三入口（手动 toggle / 启动恢复 / 拖拽展开）统一收口；折叠态新建 Tab、加入团队、布局重建均即时应用紧凑态；hover 不再误弹关闭按钮；团队分组框背景对比度折叠态提升（alpha 40→70）。配套测试 `tests/widgets/test_tab_panel_compact.py`（19 用例）
 - **opencode 免费模型实例级刷新去重** (`app/core/models_dev_sync.py`): 新建多标签页时同一实例被重复拉取（每窗口初始化 3s 后各拉一次）。新增模块级 300s 时间窗口缓存 + in-flight 并发合并（同实例并发只发 1 路）+ 失败可重试（仅成功写缓存）+ 缓存键含实例参数 `(config_id, api_url, api_key)`（用户修改 URL/Key 后不命中旧缓存）+ 惰性清理过期条目
 - **新建标签页日志刷屏收敛** (`app/main_widget.py` `_on_coding_plan_result`): 无 fetcher 的 provider 每次 request 同步广播 None 到所有窗口，导致「[CodingPlan] 无数据，隐藏圆环」DEBUG 一秒刷 5~8 次。新增 `_coding_plan_hidden` 状态标志，仅显示→隐藏状态变化时打日志，已隐藏则静默返回。配套 `app/core/agent.py`：`[TeamToolsSchema]` 日志 INFO→DEBUG 降级
 - **save_session 分支清空被挤出内存的团队会话元数据（数据损坏）** (`app/utils/history_manager.py`): `save_session` 的 `team_run_id/team_name/agent_name` 默认值由 `""` 改为 `None`，新增 None→保留现值语义（与 `update_session` 对齐）——会话被 `_history_limit` 挤出内存（`find_index_by_session_id` 返回 None）后走 save 分支（INSERT OR REPLACE）时不再用空串覆盖团队元数据，防止团队会话从历史分组消失（不可逆）；显式传空串仍清空，全新会话回落空串
