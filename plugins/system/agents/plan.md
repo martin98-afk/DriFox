@@ -5,7 +5,6 @@ steps: 50
 permission:
   edit: ask
   multi_edit: ask
-  bash: ask
   write: ask
   "*": allow
 ---
