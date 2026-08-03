@@ -21,7 +21,7 @@ from app.core.model_capabilities import (
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.provider_profile import get_provider_profile
+from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.tools.result import ToolResult
 
@@ -536,6 +536,9 @@ class SubAgentExecutor(QThread):
             }
             if current_reasoning:
                 assistant_msg["reasoning_content"] = current_reasoning
+            elif self._requires_reasoning_content(llm_config):
+                # 上游要求 thinking mode 下 tool_calls assistant 必须带 reasoning_content 字段（可为空串）
+                assistant_msg["reasoning_content"] = ""
             current_messages.append(assistant_msg)
 
             tool_results, hook_messages = self._execute_tools(tool_calls)
@@ -589,6 +592,21 @@ class SubAgentExecutor(QThread):
         if not content:
             return content
         return _THINKING_PATTERN.sub("", content)
+
+    def _requires_reasoning_content(self, llm_config: Dict) -> bool:
+        """thinking 模式下，deepseek 系模型要求 tool-call assistant 保留 reasoning_content 字段。
+
+        与 chat_worker._requires_reasoning_content 保持一致：deepseek 官方及
+        opencode 等中转平台承载的 deepseek 系模型，上游 Console 均要求
+        tool_calls assistant 消息携带 reasoning_content 字段（可为空串）。
+        """
+        if not isinstance(llm_config, dict) or llm_config.get("思考模式") is not True:
+            return False
+        family = detect_provider_family(llm_config)
+        if family == "deepseek":
+            return True
+        model = str(llm_config.get("模型名称", "") or "").lower()
+        return model.startswith("deepseek")
 
     # ========== Hook 集成（让子智能体也能应用所有 hook） ==========
     # 设计目标：与 chat_worker 对齐，让子智能体也能触发/消费以下 hook：

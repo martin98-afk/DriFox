@@ -2507,8 +2507,21 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _requires_reasoning_content(self) -> bool:
-        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。"""
-        return self.llm_config.get("思考模式") is True and detect_provider_family(self.llm_config) == "deepseek"
+        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
+
+        deepseek 系模型（含 opencode.ai 等中转平台承载的 deepseek-v4 系列）在
+        thinking mode 下要求 tool_calls assistant 消息必须携带 reasoning_content
+        字段（可为空串），否则上游 Console 报 400。
+        """
+        if self.llm_config.get("思考模式") is not True:
+            return False
+        family = detect_provider_family(self.llm_config)
+        if family == "deepseek":
+            return True
+        # opencode 等中转平台承载 deepseek 系模型时（模型名以 deepseek 开头），
+        # 上游协议与官方 Console 一致，同样需要 reasoning_content 回传
+        model = str(self.llm_config.get("模型名称", "") or "").lower()
+        return model.startswith("deepseek")
 
     def _is_gemini_model(self) -> bool:
         """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
@@ -2548,7 +2561,7 @@ class OpenAIChatWorker(QThread):
             sanitized = self._api_messages_cache
         else:
             sanitized = messages_to_api(
-                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             if use_cache:
                 self._api_messages_cache = sanitized
