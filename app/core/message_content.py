@@ -702,7 +702,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["tool_calls"] = tool_calls
         # DeepSeek V4 thinking mode: 保留 reasoning_content
         reasoning = message.get("reasoning_content")
-        if reasoning:
+        # 保留显式空值：DeepSeek/Console thinking + tool_calls 协议要求字段存在。
+        if reasoning is not None:
             normalized["reasoning_content"] = str(reasoning)
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
@@ -957,6 +958,7 @@ def to_api_message(
     message: Dict[str, Any],
     supports_vision: bool = True,
     is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
 ) -> Dict[str, Any]:
     """
     将内部消息格式转换为标准API请求格式。
@@ -1017,8 +1019,10 @@ def to_api_message(
             ]
         # DeepSeek V4 thinking mode: 传递 reasoning_content
         reasoning = normalized_message.get("reasoning_content")
-        if reasoning:
+        if reasoning is not None:
             api_msg["reasoning_content"] = reasoning
+        if requires_reasoning_content and tool_calls and "reasoning_content" not in api_msg:
+            api_msg["reasoning_content"] = ""
         # 确保 content 或 tool_calls 存在，避免 API 报 "content or tool_calls must be set"
         if "content" not in api_msg and "tool_calls" not in api_msg:
             api_msg["content"] = ""
@@ -1055,6 +1059,7 @@ def messages_to_api(
     messages: List[Dict[str, Any]],
     supports_vision: bool = True,
     is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
 ) -> List[Dict[str, Any]]:
     """将内部消息列表转换为标准API请求格式列表。
 
@@ -1068,7 +1073,12 @@ def messages_to_api(
     """
     api_messages: List[Dict[str, Any]] = []
     for message in messages:
-        api_message = to_api_message(message, supports_vision=supports_vision, is_gemini=is_gemini)
+        api_message = to_api_message(
+            message,
+            supports_vision=supports_vision,
+            is_gemini=is_gemini,
+            requires_reasoning_content=requires_reasoning_content,
+        )
         if api_message:
             if api_message.get("role") == "user" and not api_message.get("content"):
                 continue

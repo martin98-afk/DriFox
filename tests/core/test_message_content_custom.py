@@ -1,7 +1,49 @@
 # -*- coding: utf-8 -*-
 """message_content custom 块测试"""
 
-from app.core.message_content import ensure_content_blocks, content_to_markdown
+from app.core.message_content import ensure_content_blocks, content_to_markdown, messages_to_api
+
+
+def test_tool_call_reasoning_content_is_preserved_when_explicitly_empty():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+
+    api_message = messages_to_api(messages)[0]
+
+    assert "reasoning_content" in api_message
+    assert api_message["reasoning_content"] == ""
+
+
+def test_tool_call_reasoning_content_can_be_required_for_deepseek_compatibility():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+
+    api_message = messages_to_api(messages, requires_reasoning_content=True)[0]
+
+    assert api_message["reasoning_content"] == ""
 
 
 def test_ensure_content_blocks_recognizes_custom():

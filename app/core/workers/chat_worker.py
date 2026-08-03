@@ -496,7 +496,7 @@ class OpenAIChatWorker(QThread):
 
         # 首次构建：处理所有历史消息
         self._api_messages_cache = messages_to_api(
-            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
         )
         self._api_messages_built = True
         return self._api_messages_cache
@@ -511,13 +511,13 @@ class OpenAIChatWorker(QThread):
         """
         if self._api_messages_cache is None:
             self._api_messages_cache = messages_to_api(
-                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             return
 
         # 只转换新消息并追加
         for msg in new_messages:
-            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model())
+            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content())
             if api_msg:
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
@@ -1498,7 +1498,7 @@ class OpenAIChatWorker(QThread):
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
             self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
@@ -1859,7 +1859,8 @@ class OpenAIChatWorker(QThread):
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
                     self._api_messages_cache = messages_to_api(
-                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                        requires_reasoning_content=self._requires_reasoning_content()
                     )
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
@@ -2350,7 +2351,8 @@ class OpenAIChatWorker(QThread):
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
             self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                requires_reasoning_content=self._requires_reasoning_content()
             )
             self._api_messages_built = True
         except Exception as cache_e:
@@ -2504,6 +2506,10 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _requires_reasoning_content(self) -> bool:
+        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。"""
+        return self.llm_config.get("思考模式") is True and detect_provider_family(self.llm_config) == "deepseek"
+
     def _is_gemini_model(self) -> bool:
         """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
         try:
@@ -2618,7 +2624,7 @@ class OpenAIChatWorker(QThread):
 
                     if was_fixed:
                         fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
                         )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
@@ -2646,7 +2652,8 @@ class OpenAIChatWorker(QThread):
 
                     if fixed_messages is not None:
                         fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                            requires_reasoning_content=self._requires_reasoning_content()
                         )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
