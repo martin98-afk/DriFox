@@ -1,11 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.4.11] - 2026-08-03
 
-自上一发布版本以来的变更 | 提交数：36 · 文件变更：49 · +6712/-1382 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：60 · 文件变更：204 · +14300/-2486 | 贡献者：dingma, mading
 
-> 重点：**团队会话历史合并展示（方案 A 阶段 4-5）** —— 历史面板团队会话合并为单条（按 run_id 聚合、混排于普通会话列表、显示团队首问预览、点击展开成员列表可单独进入成员会话）；团队合并条目新增「归档」按钮（按 run_id 逐条归档，归档区逐条显示不合并）；恢复团队前自动解散现有团队并关闭全部团队窗口（主窗口保留新建空白会话）。
+> 重点：**团队协作重大升级（方案 A 阶段 1-5）** —— 会话团队元数据落库（team_run_id/team_name/agent_name 列）、TeamManager run_id 注入、历史面板按 run_id 分组与一键恢复、合并展示 + 归档按钮；**Leader 智能体** —— 并行-DAG 任务编排、角色描述、多窗口上下文工具 schema；**Tab 视觉分组** —— 同团队标签页用 QFrame 容器圈出，独立 tab 与团队框分层；**侧边栏折叠态紧凑化** —— Tab/团队框折叠态不再破版（图标 + 状态条 + 团队首字符头像）；**opencode 免费模型实例级刷新去重** —— 300s 缓存 + in-flight 合并；**OpenCode 默认服务商配置** —— `OPENCODE_SHARED_API_KEY`；**legacy API key 升级机制**；**perf 工具链** —— pympler 对象跟踪与泄漏回归脚手架；**主题摘要 fallback**。
 
 ### ✨ 新功能 (New Features)
 
