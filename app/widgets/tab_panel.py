@@ -791,7 +791,9 @@ class TabPanel(QWidget):
             f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
         )
         self._brand_version = QLabel(Settings.current_version, self._brand_left)
-        self._brand_version.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}")
+        self._brand_version.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+        )
         brand_left_layout.addWidget(self._brand_title)
         brand_left_layout.addWidget(self._brand_version)
         brand_layout.addWidget(self._brand_left, 1)
@@ -1195,7 +1197,7 @@ class TabPanel(QWidget):
             )
         if hasattr(self, "_brand_version"):
             self._brand_version.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
             )
         if hasattr(self, "_sidebar_toggle_btn"):
             # 按钮样式由 TransparentToolButton 处理，无需额外样式
