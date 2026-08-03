@@ -325,6 +325,9 @@ class SessionStore:
                         {"name": "context_usage", "type": "INTEGER", "default": 0},
                         {"name": "last_api_prompt_tokens", "type": "INTEGER", "default": 0},
                         {"name": "last_api_message_count", "type": "INTEGER", "default": 0},
+                        {"name": "team_run_id", "type": "TEXT", "default": ""},
+                        {"name": "team_name", "type": "TEXT", "default": ""},
+                        {"name": "agent_name", "type": "TEXT", "default": ""},
                     ],
                 )
 
@@ -400,6 +403,7 @@ class SessionStore:
                 self._migrate_add_preview_column()
                 self._migrate_add_context_usage_column()
                 self._migrate_add_api_context_columns()
+                self._migrate_add_team_columns()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -574,6 +578,26 @@ class SessionStore:
             except Exception as e:
                 logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
 
+    def _migrate_add_team_columns(self):
+        """迁移：添加团队元数据列 team_run_id / team_name / agent_name（如果不存在）
+
+        为团队会话一键恢复（方案 A）打基础：标识会话属于哪个团队运行、
+        哪个团队名、由哪个 agent 角色产出。三列均为 TEXT 默认空串，
+        老库 ALTER ADD COLUMN 非破坏性；非团队会话保持空串。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        for col in ("team_run_id", "team_name", "agent_name"):
+            try:
+                columns = self._db.get_table_info(self.TABLE_NAME)
+                col_names = [c.get("name", "") for c in columns]
+                if col not in col_names:
+                    logger.info(f"[SessionStore] 迁移：添加 {col} 列")
+                    self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} TEXT DEFAULT ''")
+                    logger.info(f"[SessionStore] {col} 列迁移完成")
+            except Exception as e:
+                logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
+
     @property
     def is_initialized(self) -> bool:
         return self._initialized and self._db is not None and self._db.is_connected
@@ -608,6 +632,15 @@ class SessionStore:
         """获取会话轻量列表（不含 messages），启动时使用避免加载大量消息数据"""
         if self._session_repo:
             return self._session_repo.get_all_lightweight(limit, offset)
+        return []
+
+    def get_sessions_by_team_run_id(self, run_id: str) -> List[Dict]:
+        """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
+
+        恢复团队会话时使用，绕开 HistoryManager 内存 _history_limit 截断。
+        """
+        if self._session_repo:
+            return self._session_repo.get_by_team_run_id(run_id)
         return []
 
     def delete_session(self, session_id: str) -> bool:

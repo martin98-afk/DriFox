@@ -215,6 +215,11 @@ class UIEngine(BaseEngine):
         if not is_enabled:
             logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}")
             return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
+        # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（跳过模板 deny）
+        # 与子智能体 _check_ui_tool_permission 语义一致："UI 覆盖模板"
+        if controller is not None and controller.is_user_modified(check_name):
+            logger.debug(f"[ToolToggle] tool={tool_name} 用户显式开启，放行（覆盖模板）")
+            return "allow"
         # ========== 工具开关过滤结束 ==========
 
         agent_manager = self._get_agent_manager()
@@ -368,6 +373,9 @@ class UIEngine(BaseEngine):
         _user_content = kwargs.pop("_user_content", None)
         content_to_store = _user_content or user_text
 
+        # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
+        hook_event = kwargs.pop("_hook_event", None)
+
         # ---- 主线程准备 context（无 I/O，纯数据组装） ----
         _window_workdir = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
         if not _window_workdir:
@@ -423,6 +431,7 @@ class UIEngine(BaseEngine):
             window_workdir=_window_workdir,
             agent_manager=self._get_agent_manager(),
             tool_executor=self._tool_executor,
+            hook_event=hook_event,
         )
         worker.start()
 
@@ -554,7 +563,8 @@ class UIEngine(BaseEngine):
         else:
             if self._current_agent:
                 available_tools = self._get_agent_manager().get_agent_tools_schema(
-                    self._current_agent
+                    self._current_agent,
+                    builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
                 )
             else:
                 available_tools = get_builtin_tools_schema(
@@ -845,6 +855,7 @@ class _PreSendWorker(QThread):
         window_workdir: str,
         agent_manager,
         tool_executor,
+        hook_event: str | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -860,6 +871,7 @@ class _PreSendWorker(QThread):
         self._window_workdir = window_workdir
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
+        self._hook_event = hook_event
 
         # 结果
         self._messages: list = []
@@ -917,7 +929,10 @@ class _PreSendWorker(QThread):
 
         # ---- 3. 添加用户消息 ----
         with self._lock:
-            session.add_user_message(content=self._content_to_store)
+            _add_kwargs = {}
+            if self._hook_event:
+                _add_kwargs["_hook_event"] = self._hook_event
+            session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----
         _trigger_and_inject("PostUserMessage", self._post_user_ctx, session)
@@ -931,7 +946,10 @@ class _PreSendWorker(QThread):
 
         # ---- 6. 获取 tool schema ----
         if self._current_agent:
-            self._available_tools = self._agent_manager.get_agent_tools_schema(self._current_agent)
+            self._available_tools = self._agent_manager.get_agent_tools_schema(
+                self._current_agent,
+                builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+            )
         else:
             self._available_tools = get_builtin_tools_schema(
                 self._agent_manager,

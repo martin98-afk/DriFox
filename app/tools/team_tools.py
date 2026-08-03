@@ -39,7 +39,7 @@ class TeamTools:
     # ── 工具方法 ────────────────────────────────────
 
     def team_list_members(self) -> ToolResult:
-        """列出团队中的所有成员，返回 agent_name@window_id 格式的标识符及工作状态"""
+        """列出团队中的所有成员，返回 agent_name@window_id 格式的标识符、工作状态及角色描述"""
         window_id, agent_name = self._get_window_context()
         if not window_id:
             return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
@@ -48,6 +48,19 @@ class TeamTools:
         members = tm.get_members()
         if not members:
             return ToolResult(True, content="当前没有团队成员。使用 /team --join=<agent> 加入团队。")
+
+        # 角色描述映射：来自团队模板上下文（agent_name → description），
+        # 手动加入的成员 / 旧模板无描述 → 不显示（兼容）
+        role_descs = {}
+        try:
+            template = tm.get_template()
+            for item in (template or {}).get("agents") or []:
+                if isinstance(item, dict) and item.get("agent_name"):
+                    desc = str(item.get("description") or "").strip()
+                    if desc:
+                        role_descs[item["agent_name"]] = desc
+        except Exception:
+            role_descs = {}
 
         lines = [f"团队成员 ({len(members)} 人):"]
         for m in members:
@@ -70,7 +83,12 @@ class TeamTools:
                     status_label += f" 「{task_summary}」"
             else:
                 status_label = self._STATUS_LABELS.get("idle", "🟢 空闲")
-            lines.append(f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}")
+            line = f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}"
+            # 角色描述（存在才显示，兼容手动加入成员/旧模板）
+            desc = role_descs.get(m["agent_name"], "")
+            if desc:
+                line += f"\n      角色: {desc}"
+            lines.append(line)
         return ToolResult(True, content="\n".join(lines))
 
     def team_send_message(self, to_agent: str, message: str) -> ToolResult:

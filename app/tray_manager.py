@@ -765,13 +765,16 @@ class TrayManager(QObject):
             top_window = window
 
         try:
+            # 普通最小化窗口仍然是 visible，必须先解除最小化；否则后续
+            # activateWindow/raise_ 只会激活任务栏项，不会把窗口恢复到前台。
+            if top_window.isMinimized():
+                logger.info("[_show_window] 从最小化恢复窗口")
+                top_window.showNormal()
             if top_window.isHidden():
                 logger.info("[_show_window] 显示窗口")
                 top_window.show()
-            if top_window.isMinimized():
-                top_window.showNormal()
-            top_window.activateWindow()
             top_window.raise_()
+            top_window.activateWindow()
         except RuntimeError as e:
             logger.error(f"[_show_window] 窗口操作失败: {e}")
 
@@ -852,11 +855,13 @@ class TrayManager(QObject):
         w = valid_windows[0]
         try:
             logger.info(f"[_show_or_create] 显示窗口: {w.windowTitle()}")
-            w.show()
-            w.activateWindow()
-            w.raise_()
+            # 普通最小化窗口仍然可见，必须先解除最小化，再激活到前台。
             if w.isMinimized():
                 w.showNormal()
+            elif w.isHidden():
+                w.show()
+            w.raise_()
+            w.activateWindow()
         except Exception as e:
             logger.error(f"[_show_or_create] 显示窗口失败: {e}")
 

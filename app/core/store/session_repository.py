@@ -109,6 +109,10 @@ class SessionRepository:
             "context_usage": d.get("context_usage", 0),
             "last_api_prompt_tokens": d.get("last_api_prompt_tokens", 0),
             "last_api_message_count": d.get("last_api_message_count", 0),
+            # 团队元数据（方案 A 团队会话恢复基础，非团队会话为空串）
+            "team_run_id": d.get("team_run_id", "") or "",
+            "team_name": d.get("team_name", "") or "",
+            "agent_name": d.get("agent_name", "") or "",
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time")
@@ -173,6 +177,10 @@ class SessionRepository:
                 "context_usage": session.get("context_usage", 0),
                 "last_api_prompt_tokens": session.get("last_api_prompt_tokens", 0),
                 "last_api_message_count": session.get("last_api_message_count", 0),
+                # 团队元数据透传（方案 A）：非团队会话保持空串
+                "team_run_id": session.get("team_run_id", "") or "",
+                "team_name": session.get("team_name", "") or "",
+                "agent_name": session.get("agent_name", "") or "",
             }
 
             success, result = self._execute(
@@ -182,9 +190,11 @@ class SessionRepository:
                  compaction_state, compaction_cache, message_count, user_edited_title,
                  worktree_path, preview, context_usage,
                  last_api_prompt_tokens, last_api_message_count,
+                 team_run_id, team_name, agent_name,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?, ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             """,
@@ -203,6 +213,9 @@ class SessionRepository:
                     session_data["context_usage"],
                     session_data["last_api_prompt_tokens"],
                     session_data["last_api_message_count"],
+                    session_data["team_run_id"],
+                    session_data["team_name"],
+                    session_data["agent_name"],
                     session_id,  # for coalesce
                     now,  # created_at default
                     now,  # updated_at
@@ -303,7 +316,8 @@ class SessionRepository:
             success, rows = self._execute(
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
-                f"preview, context_usage, created_at, updated_at "
+                f"preview, context_usage, created_at, updated_at, "
+                f"team_run_id, team_name, agent_name "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -346,6 +360,10 @@ class SessionRepository:
             "updated_at": d.get("updated_at", ""),
             "worktree_path": d.get("worktree_path", "") or "",
             "context_usage": d.get("context_usage", 0),
+            # 团队元数据（方案 A 团队会话恢复基础，非团队会话为空串）
+            "team_run_id": d.get("team_run_id", "") or "",
+            "team_name": d.get("team_name", "") or "",
+            "agent_name": d.get("agent_name", "") or "",
             "last_time": d.get("updated_at", ""),
             "saved_at": d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
@@ -365,6 +383,37 @@ class SessionRepository:
             return []
         except Exception as e:
             logger.error(f"[SessionRepository] get_sessions_by_project 异常: {e}")
+            return []
+
+    def get_by_team_run_id(self, run_id: str) -> List[Dict]:
+        """按团队 run_id 获取全部成员会话（轻量，不含 messages）。
+
+        恢复团队会话时使用：直接查 SQLite，绕开 HistoryManager 内存
+        _history_limit=500 的截断——团队会话可能因长期运行被挤出
+        内存前 500 条，导致恢复时按 run_id 收集不到部分成员。
+
+        Returns:
+            按 updated_at 倒序的轻量会话字典列表（含团队元数据字段）
+        """
+        if not self.is_initialized or not run_id:
+            return []
+
+        try:
+            # 与 get_all_lightweight 相同的轻量字段投影，避免反序列化重量级 BLOB
+            success, rows = self._execute(
+                f"SELECT session_id, title, project, system_prompt, "
+                f"message_count, user_edited_title, worktree_path, "
+                f"preview, context_usage, created_at, updated_at, "
+                f"team_run_id, team_name, agent_name "
+                f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "
+                f"ORDER BY updated_at DESC",
+                (run_id,),
+            )
+            if success:
+                return [self._row_to_session_lightweight(row) for row in rows]
+            return []
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_by_team_run_id 异常: {e}")
             return []
 
     def get_projects(self) -> List[str]:

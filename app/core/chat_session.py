@@ -110,6 +110,9 @@ class ChatSession:
         msg = {"role": "user", "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
+        hook_event = kwargs.get("_hook_event")
+        if hook_event:
+            msg["_hook_event"] = hook_event
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self._update_timestamp()

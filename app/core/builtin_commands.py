@@ -789,8 +789,18 @@ def _generate_tool_restriction_text(meta: dict) -> str:
     if permission and isinstance(permission, dict) and not whitelist_active:
         denied = [k for k, v in permission.items() if v == "deny"]
         if denied:
-            mapped_denied = [ToolNameMapper.to_native(d) for d in denied]
-            lines.append(f"[工具限制] 已禁用: {', '.join(mapped_denied)}")
+            if "*" in denied:
+                # 通配符 deny = "除显式 allow 外全部禁用"，转为白名单语义输出
+                # （与 PermissionResolver 通配符兜底语义一致，避免把字面 "*" 当工具名输出）
+                allowed = [k for k, v in permission.items() if v != "deny"]
+                if allowed:
+                    mapped = [ToolNameMapper.to_native(t) for t in allowed]
+                    lines.append(f"[工具限制] 仅允许以下工具: {', '.join(mapped)}")
+                else:
+                    lines.append("[工具限制] 已禁用: 全部工具")
+            else:
+                mapped_denied = [ToolNameMapper.to_native(d) for d in denied]
+                lines.append(f"[工具限制] 已禁用: {', '.join(mapped_denied)}")
 
     # 返回：空时返回空字符串（与 agent.py 保持一致，空字符串拼接不产生多余换行）
     return ("\n".join(lines) + "\n\n") if lines else ""

@@ -126,7 +126,7 @@ def _parse_mmdd(date_str: str) -> datetime:
         if dt > now + timedelta(days=30):
             dt = datetime(now.year - 1, month, day)
         return dt
-    except ValueError, IndexError:
+    except (ValueError, IndexError):
         return datetime.now()
 
 
@@ -326,7 +326,7 @@ class _BarChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 date_str = label
             tt = self._get_tooltip()
             base_fs = self._colors.get("font_size", 14)
@@ -448,7 +448,7 @@ class _BarChartWidget(QWidget):
                         display_label = f"{parts[0]}-{parts[1]}"
                 else:
                     display_label = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 display_label = label
 
             painter.drawText(
@@ -559,7 +559,7 @@ class _LineChartWidget(QWidget):
                     date_str = dt.strftime("%m-%d") + f" ({weekdays[dt.weekday()]})"
                 else:
                     date_str = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 date_str = label
             tt = self._get_tooltip()
             base_fs = self._colors.get("font_size", 14)
@@ -730,7 +730,7 @@ class _LineChartWidget(QWidget):
                         display = label
                 else:
                     display = label
-            except ValueError, IndexError:
+            except (ValueError, IndexError):
                 display = label
 
             x_spacing = chart_w / n if n > 0 else chart_w

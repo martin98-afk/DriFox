@@ -523,7 +523,9 @@ class OpenAIChatWorker(QThread):
                     continue
                 self._api_messages_cache.append(api_msg)
 
-    def _inject_pending_hook_messages(self, session_messages_target: List = None) -> None:
+    def _inject_pending_hook_messages(
+        self, session_messages_target: List = None, include_team_mail: bool = True
+    ) -> None:
         """消费 backend 队列中的 PostToolUse 等 hook 消息并注入到 API 缓存。
 
         在每次 _make_api_call 前调用，确保 LLM 能感知 hook 输出。
@@ -531,13 +533,19 @@ class OpenAIChatWorker(QThread):
         已由 engine.py 直接注入 session.messages，不经过队列。
         不做去重——每条 PostToolUse 对应一次独立的工具调用，都应保留。
 
-        同时主动检查 TeamManager 中的待处理团队邮件并注入。
+        同时主动检查 TeamManager 中的待处理团队邮件并注入（include_team_mail=True）。
         QFileSystemWatcher 信号在流式高频回调下可能被事件循环延迟派发，
         此处不依赖信号，每轮 API 调用前直接读取邮箱目录，确保及时注入。
 
         Args:
             session_messages_target: 若传入则同时追加到此列表，
                 确保 worker 结束时随 current_session_messages 一起持久化。
+            include_team_mail: 是否注入 TeamManager 待处理邮件。
+                ★ 修复 T23：退出前最后一次调用（对话即将结束、不再有下一轮
+                API）必须传 False——此时注入的邮件会成为孤儿（进入消息列表但
+                LLM 永远不会响应），随后被收尾逻辑误标 done 导致丢失。
+                邮件保持 pending，由流结束后的 _check_and_process_pending
+                走非流式 _process_team_task 正常处理。
         """
         try:
             backend = getattr(self.tool_executor, "_backend", None)
@@ -562,6 +570,8 @@ class OpenAIChatWorker(QThread):
                 logger.debug(f"[HookManager] Injected {len(msgs)} hook msgs from queue")
 
             # 🆕 主动检查团队待处理邮件（不依赖 QFileSystemWatcher）
+            if not include_team_mail:
+                return
             window_id = getattr(backend, "_window_id", None)
             if window_id:
                 from app.core.team_manager import TeamManager
@@ -811,7 +821,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except json.JSONDecodeError, ValueError, TypeError:
+            except (json.JSONDecodeError, ValueError, TypeError):
                 pass
 
     @staticmethod
@@ -846,7 +856,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except json.JSONDecodeError, TypeError, ValueError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
 
         # 优先级 4: raw output 兜底
@@ -1571,7 +1581,7 @@ class OpenAIChatWorker(QThread):
                         # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
-                    except ValueError, TypeError, RuntimeError:
+                    except (ValueError, TypeError, RuntimeError):
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
@@ -1676,8 +1686,14 @@ class OpenAIChatWorker(QThread):
                     self._stop_hook_active = False
 
                     # ★ 退出前最后一次消费 _hook_message_queue，确保 SubAgentFinished
-                    # 等 hook 消息不被遗漏（子智能体可能在最后一轮 API 调用期间完成）
-                    self._inject_pending_hook_messages(session_messages_target=current_session_messages)
+                    # 等 hook 消息不被遗漏（子智能体可能在最后一轮 API 调用期间完成）。
+                    # ★ 修复 T23：include_team_mail=False——退出前不再注入 TeamManager
+                    # 待处理邮件。此时注入的邮件进入消息列表后对话即终止（无下一轮 API），
+                    # LLM 永远不会响应 → 收尾会被误判 done 导致永久丢失。邮件保持 pending，
+                    # 由流结束后的 _check_and_process_pending 走非流式路径正常处理。
+                    self._inject_pending_hook_messages(
+                        session_messages_target=current_session_messages, include_team_mail=False
+                    )
 
                     self._emit_with_callback(
                         "finished_with_messages", self.finished_with_messages, current_session_messages
@@ -2236,7 +2252,7 @@ class OpenAIChatWorker(QThread):
                                 d = ast.literal_eval(content)
                                 if isinstance(d, dict):
                                     img_path = d.get("absolute_path") or d.get("path")
-                            except ValueError, SyntaxError:
+                            except (ValueError, SyntaxError):
                                 pass
                         if not img_path:
                             m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2581,7 +2597,7 @@ class OpenAIChatWorker(QThread):
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
                     return self._process_response(response)
-                except httpx.ReadError, httpcore.ReadError:
+                except (httpx.ReadError, httpcore.ReadError):
                     # 用户取消（cancel()关闭HTTP连接），不是真正的错误
                     return False, False
             except BadRequestError as e:
@@ -4114,70 +4130,33 @@ def _extract_tool_args_from_raw(raw_str: str, tool_name: str) -> dict:
 
 def _compact_process_heap():
     """
-    在 cleanup() 后调用。强制压缩进程堆，让 Python 分配器
-    将空闲内存 arena 归还给操作系统，降低 RSS。
+    在 cleanup() 后调用：强制 gc 全量收集，让 Python 分配器将空闲
+    arena 归还给操作系统，降低 RSS。
 
-    跨平台：
-    - Windows: HeapCompact
-    - Linux: malloc_trim(0)
-    - macOS: 无直接等价 API，仅 gc.collect()
-
-    安全说明：HeapCompact 在测试环境可能触发 access violation，
-    使用 _safe_ctypes_call 包装避免进程崩溃。
+    T11：移除 Windows HeapCompact / Linux malloc_trim。
+    T10 实测：Python 3.14 下 HeapCompact 100% 抛 access violation
+    （被 except 吞掉），属无效异常开销；malloc_trim 收益同样有限。
+    保留 gc.collect(2) 全量收集——Python 对象回收后 pymalloc arena
+    的合并/归还由 CPython 内存管理自行处理。函数名/守卫保留
+    （调用方 chat_worker.py:1253 不变）。
     """
     import sys as _sys
 
-    # 检测测试环境：跳过堆压缩避免 access violation
+    # 检测测试环境：跳过全量 gc 收集，避免拖慢测试
     if _sys.argv[0].endswith("pytest") or "PYTEST_CURRENT_TEST" in os.environ:
         return
 
     before = _psutil.Process(os.getpid()).memory_info().rss if _HAS_PSUTIL else 0
 
-    def _call(fn, *args):
-        """安全调用 ctypes 函数，捕获 SEH 异常"""
-        try:
-            return fn(*args)
-        except Exception:
-            return 0
-
-    # ========== 核心修复：先释放 Python 对象，再压缩底层 C 堆 ==========
-    # 如果跳过 gc.collect() 直接调 HeapCompact/malloc_trim，
-    # 堆中充满了 Python 残留对象，压缩后能归还 OS 的内存极少。
-    # 使用 gc.collect(2) 收集三代（全量）——cleanup 是低频操作，
-    # 全量收集对性能影响可忽略，且能释放最多内存。
+    # ========== 核心：全量收集三代 ==========
+    # cleanup 是低频操作，全量收集对性能影响可忽略，且能释放最多内存。
     gc.collect(2)
-
-    try:
-        if _sys.platform == "win32":
-            import ctypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            heap = _call(kernel32.GetProcessHeap)
-            if not heap:
-                return
-            _call(kernel32.HeapCompact, heap, 0)
-            # freed 返回值不稳定，不 try to log it
-
-        elif _sys.platform == "linux":
-            try:
-                import ctypes
-
-                libc = ctypes.CDLL("libc.so.6", use_last_error=True)
-                if _call(libc.malloc_trim, 0) != 0:
-                    logger.info("[MEM-HEAP] Linux malloc_trim(0) 释放了空闲堆内存")
-            except Exception:
-                pass
-
-        elif _sys.platform == "darwin":
-            logger.debug("[MEM-HEAP] macOS:  HeapCompact/malloc_trim 不可达，gc.collect(2) 已在上面调用")
-    except Exception:
-        pass
 
     if _HAS_PSUTIL and before:
         after = _psutil.Process(os.getpid()).memory_info().rss
         saved = before - after
         if saved > 10 * 1024 * 1024:
-            logger.info(f"[MEM-HEAP] 堆压缩后 RSS 下降 {saved / 1024 / 1024:.1f} MB")
+            logger.info(f"[MEM-HEAP] gc 收集后 RSS 下降 {saved / 1024 / 1024:.1f} MB")
 
 
 def _get_log_dir_path(filename: str) -> str:

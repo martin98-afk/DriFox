@@ -274,7 +274,7 @@ class ToolResultPersister:
             try:
                 parsed = orjson.loads(stripped)
                 return orjson.dumps(parsed, option=orjson.OPT_INDENT_2).decode("utf-8")
-            except orjson.JSONDecodeError, TypeError, ValueError:
+            except (orjson.JSONDecodeError, TypeError, ValueError):
                 pass
 
         # 2) 非 JSON 超长单行 -> 强制换行
@@ -341,7 +341,7 @@ class ToolResultPersister:
 
         try:
             parsed = orjson.loads(stripped)
-        except orjson.JSONDecodeError, TypeError, ValueError:
+        except (orjson.JSONDecodeError, TypeError, ValueError):
             return ""
 
         # 收集结构信息

@@ -1,0 +1,298 @@
+# -*- coding: utf-8 -*-
+"""SessionStore 团队元数据列（team_run_id / team_name / agent_name）测试
+
+方案 A 团队会话恢复（阶段 1 数据层）：
+- 新库建表应含 3 个团队列（TEXT DEFAULT ''）
+- 老库（无 3 列）ALTER 迁移后兼容（非破坏性）
+- save / load 往返：写入 team_run_id / team_name / agent_name 后读取一致
+- 轻量列表（get_all_lightweight）同样透传 3 列
+"""
+
+import pytest
+
+TEAM_COLS = ("team_run_id", "team_name", "agent_name")
+
+
+def _fresh_store(tmp_path):
+    """用临时目录构造全新 SessionStore（重置单例，避免污染真实数据库）。"""
+    from app.core.store.session_store import SessionStore
+
+    SessionStore._instance = None
+    store = SessionStore(str(tmp_path))
+    assert store.is_initialized, "SessionStore 应初始化成功"
+    return store
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = _fresh_store(tmp_path)
+    yield s
+    try:
+        s.close()
+    except Exception:
+        pass
+    # 清理单例，避免影响其他测试
+    from app.core.store.session_store import SessionStore
+
+    SessionStore._instance = None
+    from app.utils.db_manager import DatabaseManager
+
+    try:
+        DatabaseManager._instance = None
+    except Exception:
+        pass
+
+
+def test_new_db_has_team_columns(store):
+    """新库建表应包含 3 个团队列（TEXT DEFAULT ''）。"""
+    cols = store._db.get_table_info(store.TABLE_NAME)
+    col_names = [c["name"] for c in cols]
+    for col in TEAM_COLS:
+        assert col in col_names, f"新库 sessions 表缺少列 {col}"
+        info = next(c for c in cols if c["name"] == col)
+        assert info["type"] == "TEXT"
+        # SQLite PRAGMA table_info 的 default_value 对字符串默认值返回带引号形式 "''"
+        assert info["default_value"] in ("", "''"), f"列 {col} 默认值应为空串"
+
+
+def test_migration_adds_team_columns_to_old_db(tmp_path):
+    """老库（无团队列）启动时应自动 ALTER 补齐 3 列，且不丢已有数据。"""
+    import sqlite3
+
+    from app.core.store.session_store import SessionStore
+
+    # 模拟老库：手动建不含团队列的 sessions 表 + 插入一条历史数据
+    db_file = tmp_path / "sessions.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            title TEXT,
+            messages TEXT,
+            system_prompt TEXT,
+            compaction_state TEXT,
+            compaction_cache TEXT,
+            message_count INTEGER DEFAULT 0,
+            project TEXT DEFAULT '默认项目',
+            created_at TEXT,
+            updated_at TEXT,
+            worktree_path TEXT DEFAULT '',
+            context_usage INTEGER DEFAULT 0,
+            last_api_prompt_tokens INTEGER DEFAULT 0,
+            last_api_message_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (session_id, title, project, created_at, updated_at) "
+        "VALUES ('old-1', '历史会话', '默认项目', '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    SessionStore._instance = None
+    store = SessionStore(str(tmp_path))
+    try:
+        assert store.is_initialized
+        cols = store._db.get_table_info(store.TABLE_NAME)
+        col_names = [c["name"] for c in cols]
+        for col in TEAM_COLS:
+            assert col in col_names, f"老库迁移后缺少列 {col}"
+
+        # 老数据保留且团队列默认空串
+        session = store.get_session("old-1")
+        assert session is not None
+        assert session["title"] == "历史会话"
+        assert session["team_run_id"] == ""
+        assert session["team_name"] == ""
+        assert session["agent_name"] == ""
+    finally:
+        store.close()
+        SessionStore._instance = None
+        from app.utils.db_manager import DatabaseManager
+
+        DatabaseManager._instance = None
+
+
+def _sample_session(team=False):
+    session = {
+        "session_id": "t1" if team else "n1",
+        "title": "团队会话" if team else "普通会话",
+        "project": "默认项目",
+        "messages": [{"role": "user", "content": "hello", "timestamp": "2026-01-01 00:00:00"}],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "hello",
+        "context_usage": 0,
+        "last_api_prompt_tokens": 0,
+        "last_api_message_count": 0,
+    }
+    if team:
+        session.update(
+            {
+                "team_run_id": "run-2026-01-01-abc",
+                "team_name": "dev-team",
+                "agent_name": "build",
+            }
+        )
+    return session
+
+
+def test_save_load_roundtrip_team_metadata(store):
+    """写入 team_run_id/team_name/agent_name 后 get 读取一致。"""
+    session = _sample_session(team=True)
+    assert store.save_session(session) is True
+
+    loaded = store.get_session("t1")
+    assert loaded is not None
+    assert loaded["team_run_id"] == "run-2026-01-01-abc"
+    assert loaded["team_name"] == "dev-team"
+    assert loaded["agent_name"] == "build"
+    # 其他字段不受影响
+    assert loaded["title"] == "团队会话"
+    assert loaded["messages"][0]["content"] == "hello"
+
+
+def test_save_load_roundtrip_non_team_empty(store):
+    """非团队会话团队列保持空串（老行为兼容）。"""
+    session = _sample_session(team=False)
+    assert store.save_session(session) is True
+
+    loaded = store.get_session("n1")
+    assert loaded is not None
+    assert loaded["team_run_id"] == ""
+    assert loaded["team_name"] == ""
+    assert loaded["agent_name"] == ""
+
+
+def test_get_all_lightweight_passes_team_columns(store):
+    """轻量列表（get_all_lightweight）同样透传 3 个团队列。"""
+    session = _sample_session(team=True)
+    assert store.save_session(session) is True
+
+    rows = store.session_repo.get_all_lightweight(limit=10)
+    assert rows, "应有至少 1 条轻量记录"
+    row = next(r for r in rows if r["session_id"] == "t1")
+    assert row["team_run_id"] == "run-2026-01-01-abc"
+    assert row["team_name"] == "dev-team"
+    assert row["agent_name"] == "build"
+
+
+def test_get_by_team_run_id_returns_only_that_team(store):
+    """get_by_team_run_id 只返回指定 run_id 的会话（恢复收集权威数据源）。
+
+    回归保护：恢复团队会话时直接查 SQLite 绕开 _history_limit=500 截断；
+    该方法必须按 run_id 精确过滤，且只含该团队、不含其他团队/非团队会话。
+    """
+    # 同团队两个成员 + 另一团队 + 非团队
+    for i, agent in enumerate(("build", "plan")):
+        s = _sample_session(team=True)
+        s["session_id"] = f"t-run1-{agent}"
+        s["agent_name"] = agent
+        s["team_run_id"] = "run-1"
+        s["team_name"] = "dev-team"
+        assert store.save_session(s) is True
+
+    other = _sample_session(team=True)
+    other["session_id"] = "t-run2"
+    other["team_run_id"] = "run-2"
+    other["team_name"] = "qa-team"
+    other["agent_name"] = "build"
+    assert store.save_session(other) is True
+
+    non_team = _sample_session(team=False)
+    non_team["session_id"] = "plain"
+    assert store.save_session(non_team) is True
+
+    rows = store.get_sessions_by_team_run_id("run-1")
+    assert len(rows) == 2, "应只返回 run-1 的两条会话"
+    ids = {r["session_id"] for r in rows}
+    assert ids == {"t-run1-build", "t-run1-plan"}
+    for r in rows:
+        assert r["team_run_id"] == "run-1"
+        assert r["team_name"] == "dev-team"
+        assert r["agent_name"] in ("build", "plan")
+
+
+def test_get_by_team_run_id_empty_for_unknown(store):
+    """不存在的 run_id 返回空列表（不抛异常）。"""
+    assert store.get_sessions_by_team_run_id("no-such-run") == []
+    assert store.get_sessions_by_team_run_id("") == []
+
+
+def test_history_manager_save_session_passes_team_fields(store):
+    """HistoryManager.save_session 的 team 参数透传到 session_record。"""
+    from app.utils.history_manager import HistoryManager
+
+    hm = HistoryManager()
+    try:
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:00"}],
+            title="团队会话",
+            session_id="hm1",
+            team_run_id="run-x",
+            team_name="dev-team",
+            agent_name="plan",
+        )
+        session = hm.get_session_by_session_id("hm1")
+        assert session is not None
+        assert session["team_run_id"] == "run-x"
+        assert session["team_name"] == "dev-team"
+        assert session["agent_name"] == "plan"
+
+        # 轻量列表透传
+        rows = hm.get_history_list()
+        row = next(r for r in rows if r["session_id"] == "hm1")
+        assert row["team_run_id"] == "run-x"
+        assert row["team_name"] == "dev-team"
+        assert row["agent_name"] == "plan"
+    finally:
+        hm.flush()
+
+
+def test_update_session_preserves_team_fields_when_not_passed(store):
+    """update_session 不传 team 参数时保留团队元数据现值（关键防线）
+
+    回归保护：普通编辑更新（追加消息等）不传 team_run_id/team_name/agent_name，
+    此时 update_session 内部应走 None → 保留 existing 值的路径，绝不能把
+    团队会话的元数据覆盖成空串——否则团队会话与 run 的关联会随每次
+    普通编辑而丢失。
+    """
+    from app.utils.history_manager import HistoryManager
+
+    hm = HistoryManager()
+    try:
+        # 1) 保存一个带团队元数据的会话
+        hm.save_session(
+            [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:00"}],
+            title="团队会话",
+            session_id="hm-preserve",
+            team_run_id="run-preserve",
+            team_name="dev-team",
+            agent_name="build",
+        )
+
+        # 2) 普通编辑更新：追加消息，不传 team 参数（模拟 update_session 既有调用方）
+        idx = hm.find_index_by_session_id("hm-preserve")
+        assert idx is not None
+        hm.update_session(
+            idx,
+            [
+                {"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:00"},
+                {"role": "assistant", "content": "world", "timestamp": "2026-01-01 00:00:01"},
+            ],
+        )
+
+        # 3) 团队字段应保留原值（未被覆盖为空）
+        session = hm.get_session_by_session_id("hm-preserve")
+        assert session is not None
+        assert session["team_run_id"] == "run-preserve", "update 不传 team 参数不应清空 run_id"
+        assert session["team_name"] == "dev-team", "update 不传 team 参数不应清空 team_name"
+        assert session["agent_name"] == "build", "update 不传 team 参数不应清空 agent_name"
+    finally:
+        hm.flush()

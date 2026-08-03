@@ -67,6 +67,19 @@ def _qcolor_from_rgba(s: str) -> QColor:
     return QColor(s)
 
 
+def _split_value_entry(entry) -> tuple:
+    """将枚举值条目拆分为 (value, description)
+
+    兼容两种格式：
+    - 纯字符串："gpt-4o" → ("gpt-4o", "")
+    - dict：{"value": "gpt-4o", "description": "..."} → ("gpt-4o", "...")
+    保持向后兼容：旧数据源（纯字符串列表）无需改动即可继续工作。
+    """
+    if isinstance(entry, dict):
+        return str(entry.get("value", "")), str(entry.get("description", "") or "")
+    return str(entry), ""
+
+
 class _DescTooltipBubble(QLabel):
     """悬浮描述气泡：自绘圆角主题实底背景
 
@@ -569,14 +582,17 @@ class ValueItemWidget(QWidget):
 
     与 CommandItemWidget 一致：hover 即选中，leaveEvent 只清 _hovered 保持 _selected。
     比 CommandItemWidget 更简单——无描述/快捷键/类型标签，只显示纯文本值。
+    description 为可选元数据（来自枚举值条目），用于值选择模式下
+    顶部 tooltip 显示当前枚举值的描述（复用 CommandCard 的悬浮气泡系统）。
     """
 
     clicked = pyqtSignal()
     hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
 
-    def __init__(self, value: str, parent=None):
+    def __init__(self, value: str, description: str = "", parent=None):
         super().__init__(parent)
         self._value = value
+        self._description = description or ""
         self._hovered = False
         self._selected = False
         self.setFixedHeight(ITEM_HEIGHT)
@@ -654,6 +670,10 @@ class ValueItemWidget(QWidget):
     @property
     def value(self) -> str:
         return self._value
+
+    @property
+    def description(self) -> str:
+        return self._description
 
 
 class CommandCard(QWidget):
@@ -1076,7 +1096,11 @@ class CommandCard(QWidget):
         lbl = getattr(self, "_desc_tooltip_label", None)
         if lbl is None:
             return
-        # 仅在列表模式下显示 tooltip；detail 模式自带描述区，无需重复
+        # 值选择模式（枚举值列表）：最上方 tooltip 显示当前选中枚举值的描述
+        if self._value_selection_mode:
+            self._update_value_desc_tooltip()
+            return
+        # 其他 detail 模式（参数列表）自带描述区，无需重复 tooltip
         if self._detail_mode:
             lbl.setVisible(False)
             # detail 模式的高度由 _adjust_detail_height 控制，此处不刷新
@@ -1129,6 +1153,35 @@ class CommandCard(QWidget):
         self._has_tooltip_text = True
         # 先定位再显示，避免 tooltip 在错误位置闪现
         # 若卡片尚未布局（width<=0），延迟到 layout 完成后再定位+显示
+        if self.width() <= 0:
+            lbl.setVisible(False)
+            QTimer.singleShot(0, self._update_desc_tooltip)
+            return
+        self._position_desc_tooltip()
+        lbl.setVisible(True)
+
+    def _update_value_desc_tooltip(self):
+        """值选择模式（枚举值列表）：最上方 tooltip 显示当前选中枚举值的描述
+
+        复用列表模式的悬浮气泡系统（_desc_tooltip_label）：气泡独立顶层窗口，
+        浮在卡片上方，不占布局高度；无描述（或空描述）时隐藏，与列表模式一致。
+        """
+        lbl = getattr(self, "_desc_tooltip_label", None)
+        if lbl is None:
+            return
+        desc = ""
+        if 0 <= self._selected_value_index < len(self._value_widgets):
+            w = self._value_widgets[self._selected_value_index]
+            desc = getattr(w, "description", "") or ""
+        desc = (desc or "").strip()
+        if not desc:
+            self._has_tooltip_text = False
+            lbl.setVisible(False)
+            return
+        safe = html.escape(desc)
+        lbl.setText(safe)
+        self._has_tooltip_text = True
+        # 先定位再显示，避免 tooltip 在错误位置闪现；卡片未布局时延迟
         if self.width() <= 0:
             lbl.setVisible(False)
             QTimer.singleShot(0, self._update_desc_tooltip)
@@ -1676,9 +1729,10 @@ class CommandCard(QWidget):
         self._value_widgets.clear()
         self._selected_value_index = -1
 
-        # 构建值列表
-        for val in filtered:
-            item = ValueItemWidget(val)
+        # 构建值列表（条目兼容 str / {"value","description"} 两种格式）
+        for entry in filtered:
+            val, desc = _split_value_entry(entry)
+            item = ValueItemWidget(val, desc)
             item.clicked.connect(self._on_value_clicked)
             item.hovered.connect(self._on_value_hovered)
             self._detail_value_layout.addWidget(item)
@@ -1786,11 +1840,19 @@ class CommandCard(QWidget):
         return text[after_token_end:right].lower()
 
     def _filter_value_options(self, options: list, query: str) -> list:
-        """按子串过滤选项（不区分大小写）；空 query 返回全部"""
+        """按子串过滤选项（不区分大小写）；空 query 返回全部
+
+        条目兼容 str / {"value","description"} 两种格式（按 value 匹配）。
+        """
         if not query:
             return list(options)
         q = query.lower()
-        return [opt for opt in options if q in opt.lower()]
+        result = []
+        for opt in options:
+            val, _ = _split_value_entry(opt)
+            if q in val.lower():
+                result.append(opt)
+        return result
 
     def _refresh_value_list(self, query: str):
         """在不重建模式状态的前提下，仅刷新值列表 widget（用于实时搜索）"""
@@ -1828,8 +1890,9 @@ class CommandCard(QWidget):
                 pass
         self._value_widgets.clear()
 
-        for val in filtered:
-            item = ValueItemWidget(val)
+        for entry in filtered:
+            val, desc = _split_value_entry(entry)
+            item = ValueItemWidget(val, desc)
             item.clicked.connect(self._on_value_clicked)
             item.hovered.connect(self._on_value_hovered)
             self._detail_value_layout.addWidget(item)
@@ -1859,6 +1922,10 @@ class CommandCard(QWidget):
         self._detail_value_scroll.setVisible(False)
         self._detail_params_scroll.setVisible(True)
         self._adjust_detail_height()
+        # 清理残留 tooltip：值选择模式退出后 _value_selection_mode=False，
+        # _update_desc_tooltip 走 detail（参数列表）分支自动隐藏气泡，
+        # 避免刚选中枚举值的描述残留显示到下次切换/关闭。
+        self._update_desc_tooltip()
 
     def _extract_param_filter(self, full_text: str) -> str:
         """从输入文本提取用户当前正在输入的部分参数名
@@ -2024,9 +2091,11 @@ class CommandCard(QWidget):
             self._selected_param_index = new_idx
         self._update_param_selection()
 
-        # 自动检测 --model 前缀：进入/刷新值选择模式（实时搜索）
-        # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配
-        if full_text and any_visible:
+        # 自动检测枚举参数：进入/刷新值选择模式（实时搜索）
+        # 注意：此方法只匹配完整参数名 + =（如 --model=），不做前缀匹配。
+        # 不依赖参数列表可见性：手输参数时，前缀过滤可能暂时隐藏列表项，
+        # 但完整的 value 参数仍应立即触发枚举列表。
+        if full_text:
             self._auto_switch_to_value_selection(full_text, cursor_pos)
 
         # 统一根据值选择模式决定参数/值列表的可见性
@@ -2087,6 +2156,10 @@ class CommandCard(QWidget):
         # 滚动到可见
         if 0 <= self._selected_value_index < len(self._value_widgets):
             self._detail_value_scroll.ensureWidgetVisible(self._value_widgets[self._selected_value_index], 0, 0)
+
+        # 刷新最上方 tooltip：显示当前选中枚举值的描述（_update_desc_tooltip
+        # 内部检测 _value_selection_mode 分支，仅值选择模式更新）
+        self._update_desc_tooltip()
 
     def _reset_detail_mode(self) -> bool:
         """退出 detail 模式，回到列表模式

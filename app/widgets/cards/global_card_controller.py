@@ -61,6 +61,8 @@ class GlobalCardController:
         self._diff_viewer_card = None
         self._file_undo_card = None
         self._sub_agent_session_card = None
+        # Gitee 绑定提醒去重标记：仅 tab 管理器初始化后提示一次，不随每个对话窗口重复弹出
+        self._gitee_reminder_shown = False
 
     # ───────────────────────────────────────────────────────────
     # 窗口辅助
@@ -766,7 +768,13 @@ class GlobalCardController:
     # ───────────────────────────────────────────────────────────
 
     def check_gitee_sync_reminder(self):
-        """启动后检查：未绑定 Gitee 且提醒开启时，弹 InfoBar 引导绑定"""
+        """启动后检查：未绑定 Gitee 且提醒开启时，弹 InfoBar 引导绑定
+
+        全局去重：多个对话窗口都会在初始化后延迟调用本方法，
+        仅首次真正弹出一次，后续窗口调用直接跳过。
+        """
+        if self._gitee_reminder_shown:
+            return
         if self._settings_popup is None:
             return
         if self.cfg.gitee_bound.value:
@@ -806,6 +814,7 @@ class GlobalCardController:
 
         infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
         infobar.show()
+        self._gitee_reminder_shown = True
 
     def _dismiss_gitee_reminder(self, infobar):
         """提醒中点击「不再提醒」：持久化设置并关闭"""

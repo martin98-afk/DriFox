@@ -31,9 +31,11 @@ class TemplateAgent:
 
     字段：
     - agent_name: 引用 plugins/system/agents/ 下的角色名（如 build、review）
+    - description: 角色描述（可选，注入团队上下文时附带；为空则跳过）
     """
 
     agent_name: str
+    description: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TemplateAgent":
@@ -42,10 +44,17 @@ class TemplateAgent:
         name = data.get("agent_name")
         if not isinstance(name, str) or not name.strip():
             raise TemplateError("TemplateAgent.agent_name 必须是非空字符串")
-        return cls(agent_name=name.strip())
+        description = data.get("description", "")
+        if not isinstance(description, str):
+            raise TemplateError("TemplateAgent.description 必须是字符串")
+        return cls(agent_name=name.strip(), description=description.strip())
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"agent_name": self.agent_name}
+        result: Dict[str, Any] = {"agent_name": self.agent_name}
+        # 兼容旧格式：description 为空时不输出，保持旧模板结构简洁
+        if self.description:
+            result["description"] = self.description
+        return result
 
 
 @dataclass

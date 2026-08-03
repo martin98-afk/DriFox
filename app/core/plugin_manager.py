@@ -193,7 +193,7 @@ class PluginManager:
                 if name not in saved_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
-        except ImportError, Exception:
+        except (ImportError, Exception):
             pass
 
     def reset(self):
@@ -439,7 +439,7 @@ class PluginManager:
 
             cfg = Settings.get_instance()
             return set(cfg.enabled_plugins.value or [])
-        except ImportError, Exception:
+        except (ImportError, Exception):
             return set(self._plugins.keys())
 
     def _save_enabled_set(self, enabled: set):
@@ -449,7 +449,7 @@ class PluginManager:
 
             cfg = Settings.get_instance()
             cfg.set(cfg.enabled_plugins, list(enabled), save=True)
-        except ImportError, Exception:
+        except (ImportError, Exception):
             pass
 
     # ============================================================

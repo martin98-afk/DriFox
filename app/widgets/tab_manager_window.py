@@ -104,11 +104,27 @@ def _update_tab_icon(tab_idx: int, project: str):
 
     直接提取缩写+颜色，交给 _TabProjectIcon 用 QPainter 绘制圆角矩形+白字。
     Qt 自动处理 DPI，无需手动创建 QPixmap / round(ceil) 物理像素。
+
+    团队窗口特殊处理：Tab 图标已被团队模式隐藏（项目 icon 移到团队标题处），
+    此处改为刷新团队框 header 的项目 icon；数据源必须为团队级 project
+    （TeamManager.get_team_project，多个成员共享同一 header）——团队级
+    尚未设置时回退本次传入的 project（即正在切换的目标项目，随后
+    _broadcast_team_project 会写入团队级，保证一致）。
     """
     tm = TabManagerWindow.get_instance()
     if tm is None:
         return
     try:
+        # 团队窗口：刷新团队框 header 的项目 icon（团队级数据）
+        if 0 <= tab_idx < len(tm._windows):
+            win = tm._windows[tab_idx]
+            if getattr(win, "_team_agent_name", "") or "":
+                team_id = tm._resolve_tab_team_id(win)
+                if team_id:
+                    initials, color = tm._team_project_icon_data(win, fallback=project)
+                    tm._tab_panel.set_team_project(team_id, initials, color)
+                    return
+
         from app.widgets.cards.settings.project_selector_card import (
             extract_project_initials,
             get_project_color,
@@ -119,6 +135,23 @@ def _update_tab_icon(tab_idx: int, project: str):
         tm._tab_panel.update_tab_project(tab_idx, initials, color_str)
     except Exception:
         pass
+
+
+def _get_window_session_title(win) -> str:
+    """获取窗口当前会话标题（topic_summary or name），失败返回空串。
+
+    用于团队窗口：Tab 标题保持会话标题，角色名只进胶囊。
+    """
+    try:
+        sm = getattr(win, "session_manager", None)
+        if sm is None:
+            return ""
+        session = sm.get_current_session()
+        if session is None:
+            return ""
+        return session.topic_summary or session.name or ""
+    except Exception:
+        return ""
 
 
 class TabManagerWindow(QWidget):
@@ -624,6 +657,7 @@ class TabManagerWindow(QWidget):
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
+        self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
 
     # ── 侧边栏收起/展开 ──
 
@@ -733,22 +767,35 @@ class TabManagerWindow(QWidget):
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
                     return
-                # 更新 Tab 标题
-                t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
-                self._tab_panel.update_tab_title(cur_idx, t)
+                # 团队模式：Tab 标题保持会话标题，角色名只进胶囊
+                team_agent = getattr(_win, "_team_agent_name", "") or ""
+                if team_agent:
+                    # 团队窗口：保持会话标题（不采用窗口标题，避免被角色名覆盖）
+                    t = (
+                        _get_window_session_title(_win)
+                        or _win.windowTitle()
+                        or getattr(_win, "_current_project", None)
+                        or "对话"
+                    )
+                    self._tab_panel.update_tab_title(cur_idx, t)
+                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
+                else:
+                    # 非团队窗口：Tab 标题取窗口标题
+                    t = _win.windowTitle() or getattr(_win, "_current_project", None) or "对话"
+                    self._tab_panel.update_tab_title(cur_idx, t)
+                    self._tab_panel.clear_tab_capsule(cur_idx)
                 # 更新项目图标
                 p = getattr(_win, "_current_project", None) or ""
                 _update_tab_icon(cur_idx, p)
-                # 团队模式：显示角色胶囊
-                team_agent = getattr(_win, "_team_agent_name", "") or ""
-                if team_agent:
-                    self._tab_panel.update_tab_capsule(cur_idx, team_agent)
-                else:
-                    self._tab_panel.clear_tab_capsule(cur_idx)
                 # 如果该窗口是当前选中 Tab，同步宿主窗口标题
                 if self._tab_panel.active_index == cur_idx:
                     self._sync_window_title()
 
+            # ★ 泄漏修复（P0）：保存闭包引用到窗口属性，供 _close_window_at 显式断开。
+            # 闭包通过 __defaults__（_win=window）持有窗口引用，C++ 对象销毁后
+            # Qt 虽自动断开信号，但 PyQt 对 Python slot 的释放滞后，wrapper 残留
+            # 导致窗口对象树无法回收（T5 诊断第⑦条引用链：信号表自环）。
+            window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
             # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
@@ -771,6 +818,7 @@ class TabManagerWindow(QWidget):
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
 
+            window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
 
             # 立即触发一次初始图标更新 + 团队胶囊状态同步
@@ -779,6 +827,25 @@ class TabManagerWindow(QWidget):
             team_agent = getattr(window, "_team_agent_name", "") or ""
             if team_agent:
                 panel.update_tab_capsule(tab_idx, team_agent)
+            # 同步初始团队分组（窗口加入 Tab 时可能已是团队成员）
+            # 分组 key 用团队运行标识（_team_run_id，方案 A：同一次 /team --load
+            # 的所有成员共享同一 run_id），同团队多窗口圈进同一容器；同一模板
+            # 多次加载产生不同 run_id，不再混组。老窗口无 _team_run_id 时回落
+            # 团队名（_team_name，模板名）；非团队窗口传 "" 留在独立区。
+            # 胶囊仍显示角色名（team_agent）。
+            team_id = self._resolve_tab_team_id(window)
+            panel.set_tab_team(tab_idx, team_id)
+            # 同步团队框 header 名称（初次加入 Tab 时即同步）
+            if team_id:
+                panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+                # 团队模式：隐藏 Tab 项目 icon（项目 icon 移到团队标题处）
+                panel.set_tab_team_mode(tab_idx, True)
+                # 团队标题 icon（团队级 project；团队框此时已创建，重新走
+                # _update_tab_icon 团队分支刷新 header）
+                _update_tab_icon(tab_idx, project)
+            else:
+                # 非团队窗口：Tab 保持显示项目 icon（回归不变）
+                panel.set_tab_team_mode(tab_idx, False)
 
             # 隐藏空状态页，切换到新窗口
             stack.widget(0).hide()
@@ -795,27 +862,171 @@ class TabManagerWindow(QWidget):
         self.tabCountChanged.emit(len(self._windows))
         return idx
 
-    def remove_window(self, window):
-        """从 Tab 管理器移除窗口"""
-        idx = self._window_to_index.pop(id(window), -1)
+    def refresh_capsule_for_window(self, window):
+        """主动刷新指定窗口的 Tab 胶囊（基于其 _team_agent_name）。
+
+        用途：窗口加入/离开团队时立即同步胶囊状态，不依赖 windowTitleChanged
+        信号触发（Qt 在标题未变时不发射该信号，导致新建空白窗口加入团队后胶囊不显示）。
+
+        同时同步团队分组（set_tab_team）：胶囊与分组框共同表达团队归属，
+        胶囊显示角色名，分组框圈出同团队多个窗口。
+
+        同时同步团队框 header 名称（set_team_label）：窗口加入团队时把
+        窗口的 _team_name 注入团队框 header，离开团队时清空（set_tab_team
+        移除分组会自然触发 _maybe_remove_empty_group 清理）。
+        """
+        idx = self._window_to_index.get(id(window), -1)
         if idx < 0 or idx >= len(self._windows):
             return
+        team_agent = getattr(window, "_team_agent_name", "") or ""
+        if team_agent:
+            self._tab_panel.update_tab_capsule(idx, team_agent)
+        else:
+            self._tab_panel.clear_tab_capsule(idx)
+        # 同步团队分组：分组 key 用团队运行标识（_team_run_id），同一模板多次
+        # 加载的多个团队（不同 run_id）不再混组；老窗口无 run_id 回落团队名。
+        # 非团队窗口传 "" 留在独立区。胶囊仍显示角色名（team_agent）。
+        team_id = self._resolve_tab_team_id(window)
+        self._tab_panel.set_tab_team(idx, team_id)
+        # 团队模式切换：团队窗口隐藏 Tab 项目 icon（移到团队标题处显示）；
+        # 退出团队时恢复显示（检查点 2：清胶囊与恢复 icon 同时处理，勿漏）
+        self._tab_panel.set_tab_team_mode(idx, bool(team_id))
+        # 同步团队框 header 名称 + 项目 icon（数据源=团队级 project）
+        if team_id:
+            self._tab_panel.set_team_label(team_id, getattr(window, "_team_name", "") or "")
+            project = getattr(window, "_current_project", "") or ""
+            self._tab_panel.set_team_project(team_id, *self._team_project_icon_data(window, fallback=project))
+        else:
+            # 退出团队：恢复 Tab 项目 icon 并刷新内容（团队模式期间 _update_tab_icon
+            # 团队分支只刷 header、直接 return，TabItem 自身 icon 数据停留在加入团队
+            # 时的初值——review #11 问题 2：退出团队后 Tab 图标过时）
+            project = getattr(window, "_current_project", "") or ""
+            _update_tab_icon(idx, project)
 
+    @staticmethod
+    def _resolve_tab_team_id(window) -> str:
+        """计算窗口的 Tab 团队分组 key
+
+        方案 A：分组 key 优先用团队运行标识（_team_run_id）——同一次
+        /team --load 的所有成员共享同一 run_id，同组；同一模板多次加载
+        产生不同 run_id，不再混组。老窗口（无 _team_run_id）回落团队名
+        （_team_name，模板名）兼容；非团队窗口返回 "" 留在独立区。
+        """
+        if not getattr(window, "_team_agent_name", ""):
+            return ""
+        run_id = getattr(window, "_team_run_id", "") or ""
+        if run_id:
+            return run_id
+        return getattr(window, "_team_name", "") or "default"
+
+    @staticmethod
+    def _team_project_icon_data(window, fallback: str = "") -> tuple:
+        """团队框 header 项目 icon 数据（缩写, 颜色）
+
+        数据源**必须为团队级 project**（TeamManager.get_team_project）：
+        多个成员窗口共享同一个团队框 header，读任一窗口自身项目会导致
+        展示不一致（review 检查点 1）。
+
+        团队级 project 为空（团队尚未统一设置项目）时：回退 fallback 参数
+        （调用方传入的"正在切换的目标项目"——广播后团队级即写入，两者一致）；
+        fallback 也为空则返回 ("", "")（header 不显示 icon）。
+        """
+        try:
+            from app.core.team_manager import TeamManager
+
+            project = TeamManager.get_instance().get_team_project()
+            if not project:
+                project = fallback
+            if not project:
+                return ("", "")
+            from app.widgets.cards.settings.project_selector_card import (
+                extract_project_initials,
+                get_project_color,
+            )
+
+            return (extract_project_initials(project), get_project_color(project, alpha=255))
+        except Exception:
+            return ("", "")
+
+    def remove_window(self, window):
+        """从 Tab 管理器移除窗口（外部 API：按 window 对象定位）"""
+        idx = self._window_to_index.get(id(window), -1)
+        if idx < 0 or idx >= len(self._windows):
+            return
+        self._close_window_at(idx)
+
+    def _close_window_at(self, idx: int):
+        """按索引统一关闭窗口：从 _windows 弹出 + removeWidget + remove_tab + close
+
+        被 3 处调用以消除重复清理逻辑：
+        - remove_window（外部按 window 对象定位后调用）
+        - _on_tab_close_requested（标签关闭按钮）
+        - _on_team_close_requested（团队关闭按钮的窗口清理）
+
+        索引越界防御：调用方应保证 idx 有效，此处仍做防御性 return。
+
+        Args:
+            idx: 窗口在 self._windows 中的索引
+        """
+        if not (0 <= idx < len(self._windows)):
+            return
+        window = self._windows[idx]
+        # 先从列表中移除，避免后续操作访问到已销毁的窗口
         self._windows.pop(idx)
+        self._window_to_index.pop(id(window), None)
         # 被移除窗口之后的所有窗口索引减 1
         for j in range(idx, len(self._windows)):
             self._window_to_index[id(self._windows[j])] = j
-
-        # 从 QStackedWidget 移除
-        self._content_area.removeWidget(window)
-
+        # 从 QStackedWidget 移除（异常不影响清理流程）
+        try:
+            self._content_area.removeWidget(window)
+        except Exception:
+            pass
         # 从 Tab 面板移除
-        self._tab_panel.remove_tab(idx)
-
+        try:
+            self._tab_panel.remove_tab(idx)
+        except Exception:
+            pass
+        # ★ 泄漏修复（P0）：显式断开 add_window 连接的信号闭包。
+        # 闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
+        # 自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏。
+        # 须在 close() 之前断开（此时 C++ 对象仍存活，disconnect 安全）。
+        for _slot_attr, _signal in (
+            ("_tab_title_changed_slot", "windowTitleChanged"),
+            ("_tab_ai_state_slot", "ai_state_changed"),
+        ):
+            _slot = getattr(window, _slot_attr, None)
+            if _slot is not None:
+                try:
+                    getattr(window, _signal).disconnect(_slot)
+                except Exception:
+                    pass
+                try:
+                    setattr(window, _slot_attr, None)
+                except Exception:
+                    pass
+        # 调用窗口的关闭逻辑（自动保存会话）
+        try:
+            window.close()
+        except Exception as e:
+            logger.error(f"[TabManager] 关闭窗口失败: {e}")
+        # ★ 内存泄漏修复（P0）：显式断开 Qt parent 链 + 排队删除。
+        # QStackedWidget.removeWidget 不会解除 parent（窗口仍挂在
+        # _content_area 下），close() 仅隐藏不销毁（无 WA_DeleteOnClose）；
+        # 不 deleteLater 则 C++ 对象树存活至 Python GC 回收 wrapper 才析构，
+        # 反复开关 tab 时窗口整树被多根持有（实测 offscreen 每 tab ~11.6MB）。
+        # setParent(None) 断开对象树 + deleteLater 让 Qt 下一轮事件循环即回收。
+        try:
+            window.setParent(None)
+            window.deleteLater()
+        except Exception as e:
+            logger.error(f"[TabManager] 释放窗口对象树失败: {e}")
         # 如果所有窗口都被移除，显示空状态页
         if not self._windows:
-            self._content_area.widget(0).show()
-
+            try:
+                self._content_area.widget(0).show()
+            except Exception:
+                pass
         self.tabCountChanged.emit(len(self._windows))
 
     def get_current_window(self):
@@ -835,7 +1046,12 @@ class TabManagerWindow(QWidget):
         """将标题同步为当前窗口的会话标题（系统标题栏）"""
         win = self.get_current_window()
         if win:
-            t = win.windowTitle()
+            # 团队窗口：宿主窗口标题保持会话标题（角色名只进胶囊），避免被角色名污染
+            team_agent = getattr(win, "_team_agent_name", "") or ""
+            if team_agent:
+                t = _get_window_session_title(win) or win.windowTitle()
+            else:
+                t = win.windowTitle()
             if t:
                 self.setWindowTitle(t)
                 return
@@ -860,28 +1076,61 @@ class TabManagerWindow(QWidget):
                     pass
 
     def _on_tab_close_requested(self, index: int):
-        if 0 <= index < len(self._windows):
-            window = self._windows[index]
-            # 先从列表中移除，避免后续操作访问到已销毁的窗口
-            self._windows.pop(index)
-            del self._window_to_index[id(window)]
-            # 被移除窗口之后的所有窗口索引减 1
-            for j in range(index, len(self._windows)):
-                self._window_to_index[id(self._windows[j])] = j
-            self._content_area.removeWidget(window)
-            self._tab_panel.remove_tab(index)
+        """标签关闭按钮回调：按索引关闭单个窗口"""
+        self._close_window_at(index)
 
-            # 调用窗口的关闭逻辑（自动保存会话）
+    def _on_team_close_requested(self, team_id: str):
+        """团队关闭按钮回调：解散整个团队（匹配 team_id 的所有窗口都退出）
+
+        复用 _handle_team_leave 的 7 步副作用逻辑（silent=True 避免重复弹 InfoBar）：
+        1) 停 watcher 2) tm.leave_team 3) restore_user 工具权限
+        4) 清 _team_* 标记 5) 刷新团队 UI 6) 同步活跃窗口
+        7) 还原默认智能体身份
+
+        索引处理：先收集匹配窗口的索引列表（降序排序），倒序遍历避免 pop 后索引漂移。
+
+        Args:
+            team_id: Tab 分组 key（优先 _team_run_id，回退 _team_name/"default"）
+        """
+        if not team_id:
+            return
+
+        # 收集匹配 team_id 的窗口索引（按 _resolve_tab_team_id 同样优先级）
+        matching_indices = []
+        for idx, win in enumerate(self._windows):
             try:
-                window.close()
+                if self._resolve_tab_team_id(win) == team_id:
+                    matching_indices.append(idx)
+            except Exception:
+                continue
+
+        if not matching_indices:
+            return
+
+        # 倒序遍历：先关高索引再关低索引，避免 pop 后索引漂移
+        for idx in sorted(matching_indices, reverse=True):
+            if idx >= len(self._windows):
+                continue
+            window = self._windows[idx]
+            # 调用窗口的 _handle_team_leave（完整 7 步副作用，silent=True 不弹 InfoBar）；
+            # 不存在时（老窗口/非主窗口）走最小可降级路径：仅调 tm.leave_team
+            try:
+                if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
+                    window._handle_team_leave(silent=True)
+                else:
+                    from app.core.team_manager import TeamManager
+
+                    wid = getattr(window, "_window_id", "")
+                    if wid:
+                        TeamManager.get_instance().leave_team(wid)
             except Exception as e:
-                logger.error(f"[TabManager] 关闭窗口失败: {e}")
+                logger.error(f"[TabManager] 退出团队失败: {e}")
 
-            # 如果所有窗口都被移除，显示空状态页
-            if not self._windows:
-                self._content_area.widget(0).show()
-
-            self.tabCountChanged.emit(len(self._windows))
+            # 关闭窗口（统一走 _close_window_at）
+            try:
+                self._close_window_at(idx)
+            except Exception as e:
+                logger.error(f"[TabManager] 关闭团队窗口失败: {e}")
 
     def _on_tab_branch_requested(self, index: int):
         """分支窗口 — 从指定标签页创建分支"""

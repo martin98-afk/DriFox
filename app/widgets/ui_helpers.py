@@ -675,7 +675,8 @@ def build_node_preview_data(messages: list, content_getter: Optional[Callable] =
             # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
             # 不在时间线显示为节点。与 group_messages_for_display 的
             # _is_hook_message 过滤保持一致，避免节点数与批次映射错位。
-            if msg.get("_hook_event"):
+            # TeamMail 是团队邮件消息（R7 标记），须放行与问题列表 index 对齐。
+            if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
                 continue
             content = content_getter(msg.get("content", ""))[:max_len]
             current_user_msg = content
@@ -1291,8 +1292,9 @@ def _is_hook_message_ui(msg: dict) -> bool:
 
     与 message_content._is_hook_message 保持逻辑一致，
     用于渲染路径的防御性检查（正常情况下 batch 已被 group_messages_for_display 过滤）。
+    TeamMail 标记放行（团队邮件是用户可见消息，非 hook 内部通知）。
     """
-    if msg.get("_hook_event"):
+    if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
         return True
     content = msg.get("content", "")
     if isinstance(content, str) and _HOOK_CONTENT_PATTERN.search(content):

@@ -218,6 +218,17 @@ class AutomationTools:
         except Exception as e:
             logger.warning(f"[Automation] 紧急热键注册失败 (可能缺权限): {e}")
 
+    def cleanup(self):
+        """窗口关闭时从全局实例集合中注销自身（泄漏修复 P1）。
+
+        _register_global_stop 会把实例 add 进类级集合
+        AutomationTools._stop_listener_instances（供 Ctrl+Alt+Esc 紧急停止
+        广播遍历），但历史上只 add 不 remove → 窗口关闭后实例仍被类级集合
+        强引用，整棵窗口对象树无法回收。cleanup 在此移除自身引用，
+        紧急停止广播自然跳过已关闭的实例。
+        """
+        AutomationTools._stop_listener_instances.discard(self)
+
     def _validate_xy(self, x, y) -> Optional[ToolResult]:
         if not (isinstance(x, int) and isinstance(y, int)):
             return ToolResult(False, error=f"x, y must be int, got ({type(x).__name__}, {type(y).__name__})")

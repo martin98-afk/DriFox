@@ -910,7 +910,7 @@ def _is_hook_message(msg: Dict[str, Any]) -> bool:
     Returns:
         True 表示是 hook 消息，应跳过渲染
     """
-    if msg.get("_hook_event"):
+    if msg.get("_hook_event") and msg.get("_hook_event") != "TeamMail":
         return True
     # 兜底：检查内容格式
     content = msg.get("content", "")

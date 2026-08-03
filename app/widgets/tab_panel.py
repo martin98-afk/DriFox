@@ -218,6 +218,7 @@ class TabItem(QFrame):
         self._stream_error = False
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._hovered = False  # 鼠标悬停态
+        self._team_mode = False  # 团队模式：隐藏项目 icon（项目 icon 移到团队标题处）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
         self._cached_rect_key = (-1, -1)
@@ -343,6 +344,19 @@ class TabItem(QFrame):
             }}
         """)
         self._capsule_label.setVisible(True)
+
+    def set_team_mode(self, team_mode: bool):
+        """设置团队模式：隐藏项目 icon（项目 icon 移到团队标题处显示）
+
+        True：TabItem 只显示角色胶囊 + 标题 + 关闭按钮（项目 icon 隐藏）；
+        False：恢复显示项目 icon（非团队模式回归不变）。
+        与胶囊共存：团队模式下胶囊照常显示，二者互不干扰。
+        """
+        if self._team_mode == team_mode:
+            return
+        self._team_mode = team_mode
+        self._icon_widget.setVisible(not team_mode)
+        self.update()
 
     def clear_capsule(self):
         """隐藏团队角色胶囊"""
@@ -624,11 +638,16 @@ class TabPanel(QWidget):
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
+    teamCloseRequested = pyqtSignal(str)  # 关闭整个团队（传 team_id）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: List[TabItem] = []
         self._active_index: int = -1
+        # ── 团队分组：_items 保持扁平索引；_item_team 映射 _items[i] → team_id（"" 表示独立）
+        #    _team_groups 缓存 team_id → QFrame 容器（避免反复创建）
+        self._item_team: Dict[int, str] = {}
+        self._team_groups: Dict[str, "QFrame"] = {}
         self._plugin_infos: list[tuple[str, str, str]] = []
         self._system_plugin_layout: Optional[QVBoxLayout] = None
         self._system_plugin_buttons: list[UIPluginRow] = []
@@ -1114,15 +1133,356 @@ class TabPanel(QWidget):
 
         item.mousePressEvent = _on_tab_click
 
-        # 在 stretch 之前插入
-        self._list_layout.insertWidget(idx, item)
+        # 新 tab 不直接插入布局：扁平索引 insertWidget 在存在团队容器时会
+        # 越界插到 stretch 之后（布局项数 = 独立 tab + 容器数 + 1(stretch)，
+        # 而扁平 idx = 独立 + 团队 tab 数，团队容器含多 tab 时 idx ≥ 布局项数），
+        # 破坏"stretch 恒在最末"假设。统一交给 _rebuild_team_layout 摆放。
         self._items.append(item)
+        self._item_team[idx] = ""
+
+        # 重建视觉布局：新 tab 作为独立项加入（置于团队框下方）。
+        # _rebuild_team_layout 有快照保护，开销小。
+        self._rebuild_team_layout()
 
         # 如果这是第一个 Tab，自动选中
         if len(self._items) == 1:
             self.set_active_index(0)
 
         return idx
+
+    def set_tab_team(self, index: int, team_id: str):
+        """设置指定索引 Tab 的团队归属。
+
+        team_id 为空/None 时移回独立区；否则移入/创建对应 team 容器。
+        _items 保持扁平索引；视觉布局由 _rebuild_team_layout 重建。
+        """
+        if not (0 <= index < len(self._items)):
+            return
+        team_id = team_id or ""
+        old_team = self._item_team.get(index, "")
+        if old_team == team_id:
+            return  # 无变化
+        self._item_team[index] = team_id
+        # 若旧 team 已空，清理容器
+        if old_team and not any(t == old_team for t in self._item_team.values()):
+            self._maybe_remove_empty_group(old_team)
+        # 重建视觉布局（team 容器置顶在上，独立区在下）
+        self._rebuild_team_layout()
+
+    def set_team_label(self, team_id: str, name: str):
+        """设置指定 team 框 header 的团队名称
+
+        Args:
+            team_id: Tab 分组 key（与 set_tab_team 使用的 team_id 一致）
+            name: 团队显示名称（空串兜底为"团队"）
+
+        用法：TabManagerWindow 在 add_window / refresh_capsule_for_window 时
+        调用，传入窗口的 _team_name，确保团队框 header 与实际团队名同步。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return  # 容器尚未创建（窗口未 join team / 未 set_tab_team）
+        label = getattr(grp, "_team_name_label", None)
+        if label is None:
+            return
+        # 空名兜底（与 _get_or_create_team_group 中占位文本一致）
+        label.setText(name.strip() if name and name.strip() else "团队")
+
+    def set_team_project(self, team_id: str, initials: str, color: str):
+        """设置团队框 header 的项目 icon（缩写 + 颜色，复用 _TabProjectIcon）
+
+        Args:
+            team_id: Tab 分组 key（与 set_tab_team 使用的 team_id 一致）
+            initials: 项目缩写（空串表示无团队级项目，隐藏 header icon）
+            color: rgba 颜色字符串（如 'rgba(33,139,255,255)'）
+
+        数据源必须是团队级 project（TeamManager.get_team_project）：多个成员
+        窗口共享同一个团队框 header，读任一窗口自身项目会导致展示不一致。
+        值相等时跳过（避免无效重绘）。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return  # 容器尚未创建
+        icon = getattr(grp, "_team_icon", None)
+        if icon is None:
+            return
+        if not initials:
+            icon.setVisible(False)
+            grp._team_icon_key = None
+            return
+        # 值相等跳过：同一 (initials, color) 不重复重绘（纯 key 缓存判断，
+        # 不依赖 isVisible——父链未显示时 isVisible 恒 False 会误判）
+        key = (initials, color)
+        if grp._team_icon_key == key:
+            return
+        icon.set_project(initials, color)
+        icon.setVisible(True)
+        grp._team_icon_key = key
+
+    def set_tab_team_mode(self, index: int, team_mode: bool):
+        """设置指定 Tab 的团队模式（隐藏/显示项目 icon）"""
+        if 0 <= index < len(self._items):
+            self._items[index].set_team_mode(team_mode)
+
+    def _get_or_create_team_group(self, team_id: str) -> "QFrame":
+        """获取或创建 team 容器
+
+        结构（自上而下嵌套）：
+        - grp (QFrame) 的主布局 = outer (QVBoxLayout)
+          - header (QWidget)：左侧团队名 QLabel + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
+          - inner_widget (QWidget) 的布局 = inner_layout (QVBoxLayout)：成员 TabItem 列表
+
+        header 默认隐藏关闭按钮，鼠标进入 header 区域时显示（参考 TabItem 实现）。
+        关闭按钮 click → teamCloseRequested(team_id)（含防御属性 WA_NoMousePropagation，
+        避免鼠标事件冒泡到下层 TabItem 触发意外点击）。
+
+        访问器：
+        - grp.layout() = outer（grp 主布局）
+        - grp._team_inner_layout = inner_layout（成员层，供 _rebuild_team_layout / 旧测试用）
+        - grp._team_inner_widget = inner_widget
+        - grp._team_header = header
+        - grp._team_name_label / _team_close_btn = header 子控件
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is not None:
+            return grp
+        from PyQt5.QtWidgets import QVBoxLayout as _QVBL
+
+        grp = QFrame(self._list_widget)
+        grp.setObjectName("teamGroup")
+        grp.setProperty("teamId", team_id)
+
+        # ── outer：grp 主布局（嵌套结构：header + inner_widget） ──
+        outer = _QVBL(grp)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(2)
+
+        # ── header：团队名 + 关闭按钮 ──
+        header = QWidget(grp)
+        header.setObjectName("teamGroupHeader")
+        header.setProperty("teamId", team_id)
+        header.setAttribute(Qt.WA_Hover, True)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 2, 0, 4)
+        header_layout.setSpacing(4)
+
+        # 团队标题项目 icon（团队级统一项目，复用 _TabProjectIcon；默认隐藏，
+        # 由 set_team_project 在团队级项目存在时显示）。多个成员窗口共享
+        # 同一 header，数据源必须为团队级 project（TeamManager.get_team_project）。
+        team_icon = _TabProjectIcon(header, size=16)
+        team_icon.setVisible(False)
+        header_layout.addWidget(team_icon)
+
+        from app.widgets.elided_label import _ElidedLabel as _ELLabel
+
+        name_label = _ELLabel("", header)
+        name_label.setObjectName("teamGroupName")
+        name_label.setText("团队")
+        header_layout.addWidget(name_label, 1)
+
+        close_btn = TransparentToolButton(header)
+        close_btn.setObjectName("teamGroupCloseBtn")
+        close_btn.setIcon(FIF.CLOSE)
+        close_btn.setFixedSize(20, 20)
+        close_btn.setVisible(False)
+        close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
+        close_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamCloseRequested.emit(_tid))
+        header_layout.addWidget(close_btn)
+        outer.addWidget(header)
+
+        # ── inner：成员列表（独立 widget + 独立布局，便于访问） ──
+        inner_widget = QWidget(grp)
+        inner_widget.setObjectName("teamGroupInner")
+        inner_widget.setProperty("teamId", team_id)
+        inner_layout = _QVBL(inner_widget)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(2)
+        inner_widget.setLayout(inner_layout)
+        outer.addWidget(inner_widget)
+
+        grp.setLayout(outer)
+        grp.layout().setProperty("teamId", team_id)
+
+        # 访问器
+        grp._team_header = header
+        grp._team_name_label = name_label
+        grp._team_close_btn = close_btn
+        grp._team_icon = team_icon
+        grp._team_icon_key = None  # 值相等跳过缓存（initials, color）
+        grp._team_inner_widget = inner_widget
+        grp._team_inner_layout = inner_layout
+
+        # hover 控制关闭按钮可见性
+        def _enter(_e, _h=header, _btn=close_btn):
+            _btn.setVisible(True)
+
+        def _leave(_e, _h=header, _btn=close_btn):
+            _btn.setVisible(False)
+
+        header.enterEvent = _enter
+        header.leaveEvent = _leave
+
+        self._apply_team_group_style(grp)
+        self._team_groups[team_id] = grp
+        return grp
+
+    def _apply_team_group_style(self, grp: "QFrame"):
+        """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主
+
+        同时刷新 header 子控件（团队名 QLabel + 关闭按钮）的样式，确保
+        主题切换后 header 文字色与边框同步。
+        """
+        Colors.refresh()
+        # 注意：Colors.HOVER_BG = "rgba(255, 255, 255, 0.08)" 不含 {alpha} 占位符，
+        # .format(alpha=N) 是空操作（alpha 始终是字面 0.08），背景会过透明。
+        # 用 CARD_BG（"rgba(33, 33, 38, {alpha})"，含占位符）正确代入 alpha。
+        grp.setStyleSheet(f"""
+            #teamGroup {{
+                background: {Colors.CARD_BG.format(alpha=40)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                margin: 2px 0;
+            }}
+            #teamGroupHeader {{
+                background: transparent;
+                border: none;
+            }}
+            #teamGroupName {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: bold;
+                padding: 0px;
+            }}
+            #teamGroupCloseBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            #teamGroupCloseBtn:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        # header 是独立子控件（在 grp 主布局外），需要单独刷新样式避免主题切换遗漏
+        header = getattr(grp, "_team_header", None)
+        if header is not None:
+            header.setStyleSheet("""
+                QWidget#teamGroupHeader {
+                    background: transparent;
+                    border: none;
+                }
+            """)
+
+    def _maybe_remove_empty_group(self, team_id: str):
+        """若指定 team 容器已无成员，从布局移除并 deleteLater
+
+        新结构：grp 主布局 = 成员层（grp.layout() = inner_layout）。
+        header 是 grp 的独立子控件（不在主布局中），容器 deleteLater 时随父子对象树回收。
+        清空成员层残留 widget 时不动 header（header 在 _team_groups 中通过 grp 引用）。
+        """
+        grp = self._team_groups.get(team_id)
+        if grp is None:
+            return
+        # 若还有成员，不删
+        if any(t == team_id for t in self._item_team.values()):
+            return
+        # 防御：删除容器前把内部成员 widget 脱绑（parent 改回 _list_widget），
+        # 避免容器 deleteLater 时连带销毁仍在 _items 中管理的 tab
+        # （历史布局损坏可能在成员层内残留重复 widget）。
+        inner_layout = getattr(grp, "_team_inner_layout", None)
+        if inner_layout is None:
+            # 兜底：兼容旧结构（grp.layout() 直接是成员层）
+            inner_layout = grp.layout()
+        while inner_layout is not None and inner_layout.count() > 0:
+            child = inner_layout.takeAt(0)
+            w = child.widget() if child is not None else None
+            if w is not None:
+                w.setParent(self._list_widget)
+        self._list_layout.removeWidget(grp)
+        grp.deleteLater()
+        self._team_groups.pop(team_id, None)
+
+    def _rebuild_team_layout(self):
+        """按当前 _item_team 重建视觉布局：
+
+        顺序：所有 team 容器（置顶，按 _items 中首次出现顺序排列；同 team 的
+        TabItem 在容器内按 _items 顺序排列）→ 所有独立 TabItem（无 team 归属）→
+        末尾 stretch 始终在最末。
+
+        实现：将所有现有 widget 从 _list_layout 移除，按规则重新 insert。
+        末尾的 stretch 始终在最末。
+
+        优化：当 _item_team 与上次构建快照一致且 _items 数量未变时直接 return，
+        避免 add_tab/remove_tab 反复触发时的冗余重建。
+        """
+        # 快照对比：_item_team 内容 + _items 数量未变 → 跳过
+        snapshot = (tuple(sorted(self._item_team.items())), len(self._items))
+        if getattr(self, "_layout_snapshot", None) == snapshot:
+            return
+        self._layout_snapshot = snapshot
+
+        # 取出布局中的 stretch（QSpacerItem，widget() is None）：
+        # 不假设"恒在最末"——历史 add_tab 用扁平索引 insertWidget 可能把新 tab
+        # 插到 stretch 之后，破坏末尾假设。扫描全布局找到并 takeAt；
+        # 找不到（历史损坏已丢失 stretch）则标记为 None，重建后 addStretch() 自愈。
+        stretch_item = None
+        for i in range(self._list_layout.count()):
+            child = self._list_layout.itemAt(i)
+            if child is not None and child.widget() is None:
+                stretch_item = self._list_layout.takeAt(i)
+                break
+
+        # 清空布局（移除所有 widget 但不 delete；widget 仍由 _items 持有）。
+        # 注意：真正的 stretch 已在上面取出，此处不再有任何 spacer 被静默丢弃。
+        while self._list_layout.count() > 0:
+            child = self._list_layout.takeAt(0)
+            w = child.widget() if child is not None else None
+            if w is not None:
+                w.setParent(self._list_widget)  # 仅脱绑布局，不销毁
+
+        # 收集每个 team 的成员（按 _items 顺序）
+        team_order: List[str] = []  # 记录 team 容器插入顺序
+        team_members: Dict[str, List[int]] = {}
+        independent_indices: List[int] = []
+        for i, item in enumerate(self._items):
+            t = self._item_team.get(i, "")
+            if t:
+                if t not in team_members:
+                    team_members[t] = []
+                    team_order.append(t)
+                team_members[t].append(i)
+            else:
+                independent_indices.append(i)
+
+        # 1) 先放 team 容器（置顶，按首次出现顺序）
+        for t in team_order:
+            grp = self._get_or_create_team_group(t)
+            # grp.layout() 是嵌套外层（header + inner_widget），成员层通过
+            # _team_inner_layout 访问（向后兼容旧测试）。
+            inner = getattr(grp, "_team_inner_layout", None)
+            if inner is None:
+                inner = grp.layout()
+            # 清空成员层旧 widgets（header 在外层布局中，不在此层）
+            while inner.count() > 0:
+                inner.takeAt(0)
+            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）
+            for i in team_members[t]:
+                inner.addWidget(self._items[i])
+            self._list_layout.addWidget(grp)
+
+        # 2) 再放独立 TabItem（无 team 归属，置于团队框下方）
+        for i in independent_indices:
+            self._list_layout.addWidget(self._items[i])
+
+        # 3) 末尾 stretch：找到的真 stretch（QSpacerItem）放回末尾；
+        #    找不到（历史损坏 stretch 已丢失）则 addStretch() 自愈重建。
+        #    只有 stretch 会被 addItem，杜绝把 widget item 误当 stretch 重复入布局。
+        if stretch_item is not None:
+            self._list_layout.addItem(stretch_item)
+        else:
+            self._list_layout.addStretch()
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""
@@ -1135,6 +1495,20 @@ class TabPanel(QWidget):
                     self._stop_anim_timer()
             self._list_layout.removeWidget(item)
             item.deleteLater()
+
+            # 清理 team 映射：弹出 index，重建后续索引
+            old_team = self._item_team.pop(index, "")
+            new_mapping: Dict[int, str] = {}
+            for i, t in self._item_team.items():
+                new_mapping[i - 1 if i > index else i] = t
+            self._item_team = new_mapping
+            # 若被移除 tab 所在 team 已空，移除 group 容器
+            if old_team:
+                self._maybe_remove_empty_group(old_team)
+
+            # 重建视觉布局：removeWidget 仅脱绑 widget，不重新排序，
+            # 删除前部独立 tab 后剩余独立 tab 会停留在 team 容器之后。
+            self._rebuild_team_layout()
 
             # 更新选中态
             if self._active_index == index:
@@ -1266,6 +1640,9 @@ class TabPanel(QWidget):
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
             item.refresh_style()
+        # 同步刷新团队分组框样式（边框/背景色随主题）
+        for grp in self._team_groups.values():
+            self._apply_team_group_style(grp)
         self.update()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:

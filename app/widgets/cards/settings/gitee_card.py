@@ -933,8 +933,7 @@ class _GiteeMorePopup(QWidget):
             self._account_row._on_bind()
         # 延迟关闭：_on_unbind/_on_bind 中的模态对话框可能已导致
         # Qt 自动关闭 Qt.Popup 并触发 WA_DeleteOnClose 销毁 C++ 对象，
-        # 同步调用 self.close() 会触发 RuntimeError。
-        # 参考 _on_tab_toggled 中的相同处理模式。
+        # 同步调用 self.close() 会触发 RuntimeError，故延迟到下一帧关闭。
         QTimer.singleShot(0, self.close)
 
     def _on_open_settings(self):
@@ -959,21 +958,6 @@ class _GiteeMorePopup(QWidget):
         """桌宠开关切换"""
         self._cfg.pet_enabled.value = checked
         self._cfg.save()
-
-    def _on_tab_toggled(self, checked: bool):
-        """Tab 模式切换：先关闭浮动卡片，再切换模式"""
-        self._cfg.enable_tab_manager.value = checked
-        self._cfg.save()
-        # 延迟关闭浮动卡片：避免在 Signal 处理链（Indicator.mouseReleaseEvent）中
-        # 同步销毁 Indicator 导致 RuntimeError: wrapped C/C++ object deleted
-        QTimer.singleShot(0, self.close)
-        QTimer.singleShot(0, self._do_tab_toggle)
-
-    def _do_tab_toggle(self):
-        """实际执行 Tab 模式切换"""
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        TabManagerWindow.toggle_mode(enable=self._cfg.enable_tab_manager.value)
 
     def _on_topmost_toggled(self, checked: bool):
         """窗口置顶开关切换

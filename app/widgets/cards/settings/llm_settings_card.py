@@ -889,12 +889,6 @@ class LLMSettingsCard(SystemCardFrame):
         if hasattr(self, "llmApiEnabledCard"):
             self.llmApiEnabledCard.setContent(f"http://localhost:{port}/docs")
 
-    def _on_tab_manager_toggled(self, enabled: bool):
-        """Tab 管理器开关切换"""
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        TabManagerWindow.toggle_mode(enable=enabled)
-
     def _on_lock_remote_toggled(self, enabled: bool):
         """锁屏远程开关：开启时保持系统/屏幕唤醒并锁屏，关闭时恢复休眠策略"""
         from qfluentwidgets import InfoBar, InfoBarPosition

@@ -43,9 +43,11 @@ def fresh_tm(monkeypatch, tmp_path):
     """每次返回指向 tmp_path 的全新 TemplateManager 实例。"""
     TemplateManager._instance = None
     tm = TemplateManager.get_instance()
-    # 重定向目录到 tmp_path，避免污染真实 plugins/system/team_templates/
-    tm._templates_dir = tmp_path
-    tm._templates_dir.mkdir(parents=True, exist_ok=True)
+    # 重定向 user 目录到 tmp_path（save/load/delete 实际使用 _get_user_dir），
+    # system 目录指向 tmp_path/system 子目录，避免真实系统模板干扰列表断言
+    monkeypatch.setattr(tm, "_get_user_dir", lambda: tmp_path)
+    monkeypatch.setattr(tm, "_system_dir", tmp_path / "system")
+    (tmp_path / "system").mkdir(parents=True, exist_ok=True)
     return tm
 
 
@@ -82,6 +84,52 @@ class TestTemplateDataclass:
         assert restored.description == original.description
         assert len(restored.agents) == len(original.agents)
         assert [a.agent_name for a in restored.agents] == [a.agent_name for a in original.agents]
+
+    def test_agent_description_roundtrip(self):
+        """角色描述应随 to_dict/from_dict 保留；空描述不输出（兼容旧格式）。"""
+        original = Template(
+            template_name="t1",
+            description="desc",
+            agents=[TemplateAgent("leader", "统筹团队任务拆解/分发/汇总"), TemplateAgent("build")],
+        )
+        d = original.to_dict()
+        # 有描述的条目输出 description，无描述的保持旧格式
+        assert d["agents"][0] == {"agent_name": "leader", "description": "统筹团队任务拆解/分发/汇总"}
+        assert d["agents"][1] == {"agent_name": "build"}
+
+        restored = Template.from_dict(d)
+        assert restored.agents[0].description == "统筹团队任务拆解/分发/汇总"
+        assert restored.agents[1].description == ""
+
+    def test_agent_description_from_dict_accepts_missing(self):
+        """旧模板 agents 条目无 description 时默认为空字符串，不报错。"""
+        t = Template.from_dict(
+            {
+                "template_name": "legacy",
+                "agents": [{"agent_name": "build"}],
+            }
+        )
+        assert t.agents[0].description == ""
+
+    def test_agent_description_non_string_rejected(self):
+        """description 非字符串必须抛 TemplateError。"""
+        with pytest.raises(TemplateError, match="description 必须是字符串"):
+            Template.from_dict(
+                {
+                    "template_name": "x",
+                    "agents": [{"agent_name": "build", "description": 123}],
+                }
+            )
+
+    def test_agent_description_whitespace_stripped(self):
+        """description 首尾空白应被去除。"""
+        t = Template.from_dict(
+            {
+                "template_name": "x",
+                "agents": [{"agent_name": "build", "description": "  负责编码实现  "}],
+            }
+        )
+        assert t.agents[0].description == "负责编码实现"
 
     def test_default_schema_version(self):
         """未指定 schema_version 时默认为 1。"""
@@ -204,6 +252,35 @@ class TestSaveLoad:
         assert loaded.template_name == "basic"
         assert loaded.description == "basic team"
         assert [a.agent_name for a in loaded.agents] == ["build", "review"]
+
+    def test_save_load_with_agent_descriptions(self, fresh_tm):
+        """带角色描述的模板保存/加载应完整保留 description。"""
+        t = Template(
+            template_name="desc-team",
+            description="带角色描述的团队",
+            agents=[
+                TemplateAgent("leader", "统筹团队任务拆解/分发/汇总"),
+                TemplateAgent("build", "负责编码实现与验证"),
+            ],
+        )
+        fresh_tm.save(t)
+        loaded = fresh_tm.load("desc-team")
+        assert [a.agent_name for a in loaded.agents] == ["leader", "build"]
+        assert [a.description for a in loaded.agents] == ["统筹团队任务拆解/分发/汇总", "负责编码实现与验证"]
+
+    def test_save_with_description_omits_empty_in_yaml(self, fresh_tm, tmp_path):
+        """agent 描述为空时 YAML 的 agents 条目不应包含 description 键（保持旧模板简洁）。"""
+        fresh_tm.save(
+            Template(
+                template_name="no-desc",
+                agents=[TemplateAgent("build")],
+            )
+        )
+        text = (tmp_path / "no-desc.yaml").read_text(encoding="utf-8")
+        # agents 条目不应携带空 description 键（顶层 Template.description 允许为空串）
+        agents_block = text.split("agents:", 1)[1]
+        assert "- agent_name: build\n" in agents_block
+        assert "description" not in agents_block
 
     def test_load_missing_raises(self, fresh_tm):
         with pytest.raises(TemplateError, match="模板不存在"):
@@ -463,6 +540,106 @@ class TestJoinTeamPreservesMailbox:
 
 
 # ══════════════════════════════════════════════════════════
+# 9b. 回归：活跃窗口集合未知/为空时，绝不允许清空成员与邮箱
+# ══════════════════════════════════════════════════════════
+
+
+class TestStaleCleanupSafety:
+    """线上故障：所有成员邮箱目录被整体删除，QFileSystemWatcher 报
+    `FindNextChangeNotification failed ... (拒绝访问)`，成员随后无法交互。
+
+    根因：_get_active_windows() 在活跃集合未同步时返回空集，
+    _cleanup_stale_members() 把「空集」当成「没有窗口活着」，
+    于是把全部在册成员判为 stale 并 rmtree 掉它们的邮箱目录。
+    """
+
+    @staticmethod
+    def _fresh_tm(tmp_path, monkeypatch):
+        from app.core import team_manager as tm_mod
+
+        monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
+        tm_mod.TeamManager._instance = None
+        return tm_mod.TeamManager.get_instance()
+
+    def test_never_wipes_when_active_set_unknown(self, tmp_path, monkeypatch):
+        """从未同步过活跃窗口 → 清理必须整体跳过。"""
+        tm = self._fresh_tm(tmp_path, monkeypatch)
+        tm.set_active_window_ids({"win_01"})
+        tm.join_team(window_id="win_01", agent_name="build")
+        mail = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_01") / "mail_x.json"
+        mail.write_text("{}", encoding="utf-8")
+
+        # 模拟单例被重建（进程内 reset / 首次在 worker 线程访问）
+        tm2 = self._fresh_tm(tmp_path, monkeypatch)
+        assert tm2._get_active_windows() is None, "活跃集合未知时必须返回 None 而非空集"
+        assert mail.exists(), "活跃窗口未知时不得删除任何邮箱目录"
+        assert tm2.is_team_member("win_01"), "活跃窗口未知时不得移除成员记录"
+
+    def test_empty_sync_does_not_clear_known_active_set(self, tmp_path, monkeypatch):
+        """空集合同步（窗口 __init__ 时序竞态）不得覆盖已知集合，也不得触发清理。"""
+        tm = self._fresh_tm(tmp_path, monkeypatch)
+        tm.set_active_window_ids({"win_01"})
+        tm.join_team(window_id="win_01", agent_name="build")
+        mail = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_01") / "mail_x.json"
+        mail.write_text("{}", encoding="utf-8")
+
+        tm.set_active_window_ids(set())
+
+        assert tm._get_active_windows() == {"win_01"}
+        assert mail.exists(), "空集合同步不应删除在用邮箱目录"
+        assert tm.is_team_member("win_01")
+
+    def test_read_paths_do_not_trigger_cleanup(self, tmp_path, monkeypatch):
+        """check_team_member 等读取路径（可能在 worker 线程）不得触发删除。"""
+        tm = self._fresh_tm(tmp_path, monkeypatch)
+        tm.set_active_window_ids({"win_01"})
+        tm.join_team(window_id="win_01", agent_name="build")
+        tm.join_team(window_id="win_02", agent_name="review")  # 尚未同步进活跃集
+        mail2 = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_02") / "mail_y.json"
+        mail2.write_text("{}", encoding="utf-8")
+
+        # 大量读取不应产生任何副作用
+        for _ in range(5):
+            tm.is_team_member("win_01")
+            tm.get_members()
+            tm.get_template()
+
+        assert mail2.exists(), "读取路径不得清理成员邮箱"
+        assert tm.is_team_member("win_02")
+
+    def test_orphan_sweep_spares_active_windows(self, tmp_path, monkeypatch):
+        """孤立目录清理必须同时满足『无 member 记录』且『窗口不活跃』。"""
+        tm = self._fresh_tm(tmp_path, monkeypatch)
+        tm.set_active_window_ids({"win_01"})
+        tm.join_team(window_id="win_01", agent_name="build")
+
+        # win_02 已建目录但 member 记录还没落库（join 中间态），且它是活跃窗口
+        live_dir = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_02")
+        live_dir.mkdir(parents=True, exist_ok=True)
+        # win_99 既无记录也不活跃 —— 真正的孤儿
+        dead_dir = tm._mailbox_dir(tm.DEFAULT_TEAM, "win_99")
+        dead_dir.mkdir(parents=True, exist_ok=True)
+
+        tm.set_active_window_ids({"win_01", "win_02"})
+
+        assert live_dir.exists(), "活跃窗口的邮箱目录不得被当作孤儿删除"
+        assert not dead_dir.exists(), "既无记录又不活跃的目录应被清理"
+
+    def test_stale_member_still_cleaned_when_active_known(self, tmp_path, monkeypatch):
+        """正常场景不能被削弱：活跃集合明确时，失效成员仍要清理。"""
+        tm = self._fresh_tm(tmp_path, monkeypatch)
+        tm.set_active_window_ids({"win_01", "win_02"})
+        tm.join_team(window_id="win_01", agent_name="build")
+        tm.join_team(window_id="win_02", agent_name="review")
+
+        tm.set_active_window_ids({"win_01"})
+
+        assert tm.is_team_member("win_01")
+        assert not tm.is_team_member("win_02")
+        assert not tm._mailbox_dir(tm.DEFAULT_TEAM, "win_02").exists()
+
+
+# ══════════════════════════════════════════════════════════
 # 10. 回归：description 计数（修复 review 问题 3）
 # ══════════════════════════════════════════════════════════
 
@@ -594,3 +771,272 @@ class TestTemplateJoinDelayConstant:
 
         # 简单粗暴：函数体源码里不应有 "300," 这种数字字面量
         assert not re.search(r"\b300\b", func_src), "_handle_team_load 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+
+
+# ══════════════════════════════════════════════════════════
+# 13. 角色描述注入：inject_team_context hook（按成员各自注入）
+# ══════════════════════════════════════════════════════════
+
+
+class TestInjectTeamContext:
+    """SessionStart hook 按成员注入模板描述 + 该成员自己的角色描述。"""
+
+    def _load_hook(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "inject_team_context_test",
+            Path(__file__).resolve().parent.parent.parent
+            / "plugins" / "system" / "hooks" / "inject_team_context.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.hook
+
+    def test_non_member_returns_empty(self, tmp_path):
+        hook = self._load_hook()
+        assert hook("SessionStart", {"is_team_member": False}) == ""
+
+    def test_no_template_returns_empty(self, tmp_path, monkeypatch):
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return None
+
+            def get_members(self):
+                return []
+
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
+        hook = self._load_hook()
+        assert hook("SessionStart", {"is_team_member": True}) == ""
+
+    def test_meaningless_description_not_injected(self, tmp_path, monkeypatch):
+        """用户自建模板的自动生成描述（由 N 个活跃窗口保存...）不注入。"""
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return {"name": "t", "description": "由 3 个活跃窗口保存（去重 2 个角色）", "agents": []}
+
+            def get_members(self):
+                return []
+
+        import app.core.team_manager as tm_module
+
+        # 必须用 monkeypatch：直接赋值会永久污染 TeamManager，导致同一 pytest
+        # 会话中后续用例（如 main_widget smoke）拿到 _FakeTM 而报 AttributeError。
+        monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
+        hook = self._load_hook()
+        assert hook("SessionStart", {"is_team_member": True}) == ""
+
+    def test_injects_template_desc_only_for_member_without_role_desc(self, tmp_path, monkeypatch):
+        """成员无角色描述（旧模板）时只注入模板描述，不追加角色段落。"""
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return {
+                    "name": "t",
+                    "description": "经典团队",
+                    "agents": [{"agent_name": "build", "description": ""}],
+                }
+
+            def get_members(self):
+                return [{"window_id": "win_01", "agent_name": "build"}]
+
+        import app.core.team_manager as tm_module
+
+        monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
+        hook = self._load_hook()
+        out = hook("SessionStart", {"is_team_member": True, "window_id": "win_01"})
+        assert "团队「t」协作上下文" in out
+        assert "经典团队" in out
+        assert "你的角色" not in out
+
+    def test_injects_template_desc_plus_own_role_desc(self, tmp_path, monkeypatch):
+        """成员应收到模板描述 + 自己角色的描述（按成员各自注入）。"""
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return {
+                    "name": "t",
+                    "description": "经典团队",
+                    "agents": [
+                        {"agent_name": "leader", "description": "统筹团队任务"},
+                        {"agent_name": "build", "description": "负责编码实现"},
+                    ],
+                }
+
+            def get_members(self):
+                return [
+                    {"window_id": "win_01", "agent_name": "leader"},
+                    {"window_id": "win_02", "agent_name": "build"},
+                ]
+
+        import app.core.team_manager as tm_module
+
+        monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
+        hook = self._load_hook()
+
+        # leader 窗口：只收到自己的角色描述
+        out_leader = hook("SessionStart", {"is_team_member": True, "window_id": "win_01"})
+        assert "团队「t」协作上下文" in out_leader
+        assert "经典团队" in out_leader
+        assert "你的角色「leader」：统筹团队任务" in out_leader
+        assert "负责编码实现" not in out_leader, "不应注入其他成员的角色描述"
+
+        # build 窗口：只收到 build 的角色描述
+        out_build = hook("SessionStart", {"is_team_member": True, "window_id": "win_02"})
+        assert "你的角色「build」：负责编码实现" in out_build
+        assert "统筹团队任务" not in out_build, "不应注入其他成员的角色描述"
+
+    def test_member_not_found_returns_empty(self, tmp_path, monkeypatch):
+        """window_id 在成员列表中找不到时（不应发生）返回空，不崩溃。"""
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return {"name": "t", "description": "经典团队", "agents": []}
+
+            def get_members(self):
+                return [{"window_id": "win_01", "agent_name": "build"}]
+
+        import app.core.team_manager as tm_module
+
+        monkeypatch.setattr(tm_module.TeamManager, "get_instance", staticmethod(lambda: _FakeTM()))
+        hook = self._load_hook()
+        # 描述有实际内容 → 注入模板描述；找不到角色 → 无角色段落
+        out = hook("SessionStart", {"is_team_member": True, "window_id": "win_99"})
+        assert "经典团队" in out
+        assert "你的角色" not in out
+
+    def test_legacy_string_agents_supported(self, tmp_path):
+        """旧模板 agents 为纯字符串列表时兼容：不崩溃、角色描述为空。"""
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def get_template(self):
+                return {
+                    "name": "legacy",
+                    "description": "旧格式团队",
+                    "agents": ["leader", "build"],
+                }
+
+            def get_members(self):
+                return [{"window_id": "win_01", "agent_name": "build"}]
+
+        import app.core.team_manager as tm_module
+
+        tm_module.TeamManager.get_instance = staticmethod(lambda: _FakeTM())
+        hook = self._load_hook()
+        out = hook("SessionStart", {"is_team_member": True, "window_id": "win_01"})
+        assert "旧格式团队" in out
+        assert "你的角色" not in out
+
+
+# ══════════════════════════════════════════════════════════
+# 14. team_list_members 角色描述显示
+# ══════════════════════════════════════════════════════════
+
+
+class TestTeamListMembersRoleDesc:
+    """team_list_members 工具应显示成员的角色描述（来自模板上下文，无描述时兼容省略）。"""
+
+    def _make_builtin_tools(self, window_id="win_01", agent_name="build"):
+        class _FakeBT:
+            _team_window_id = window_id
+            _team_agent_name = agent_name
+
+        return _FakeBT()
+
+    def _make_tm(self, template=None, members=None):
+        from app.core import team_manager as tm_mod
+
+        class _FakeTM:
+            def __init__(self, template, members):
+                self._template = template
+                self._members = members
+
+            def get_template(self):
+                return self._template
+
+            def get_members(self):
+                return self._members
+
+            def get_member_busy_status(self, window_id):
+                return "idle"
+
+            def get_running_tasks(self, window_id):
+                return []
+
+            def get_pending_tasks(self, window_id):
+                return []
+
+        tm_mod.TeamManager.get_instance = staticmethod(lambda: _FakeTM(template, members))
+        return tm_mod.TeamManager.get_instance()
+
+    def test_members_with_role_desc_shown(self, tmp_path):
+        """模板上下文含角色描述时，成员行下方显示角色描述。"""
+        from app.tools.team_tools import TeamTools
+
+        tm = self._make_tm(
+            template={
+                "name": "t",
+                "description": "经典团队",
+                "agents": [
+                    {"agent_name": "leader", "description": "统筹团队任务"},
+                    {"agent_name": "build", "description": "负责编码实现"},
+                ],
+            },
+            members=[
+                {"window_id": "win_01", "agent_name": "leader"},
+                {"window_id": "win_02", "agent_name": "build"},
+            ],
+        )
+        tools = TeamTools(self._make_builtin_tools(window_id="win_01", agent_name="leader"))
+        result = tools.team_list_members()
+        assert result.success
+        content = result.content
+        assert "leader@win_01" in content
+        assert "统筹团队任务" in content
+        assert "build@win_02" in content
+        assert "负责编码实现" in content
+
+    def test_members_without_role_desc_omitted(self, tmp_path):
+        """无角色描述（手动加入成员/旧模板）时不显示角色行，兼容。"""
+        from app.tools.team_tools import TeamTools
+
+        tm = self._make_tm(
+            template={
+                "name": "t",
+                "description": "旧团队",
+                "agents": [{"agent_name": "build", "description": ""}],
+            },
+            members=[{"window_id": "win_01", "agent_name": "build"}],
+        )
+        tools = TeamTools(self._make_builtin_tools())
+        result = tools.team_list_members()
+        assert result.success
+        content = result.content
+        assert "build@win_01" in content
+        assert "角色:" not in content
+
+    def test_no_template_still_lists_members(self, tmp_path):
+        """未加载模板（手动加入团队）时仍能列出成员，不显示角色描述。"""
+        from app.tools.team_tools import TeamTools
+
+        tm = self._make_tm(
+            template=None,
+            members=[
+                {"window_id": "win_01", "agent_name": "build"},
+                {"window_id": "win_02", "agent_name": "plan"},
+            ],
+        )
+        tools = TeamTools(self._make_builtin_tools())
+        result = tools.team_list_members()
+        assert result.success
+        assert "build@win_01" in result.content
+        assert "plan@win_02" in result.content
+        assert "角色:" not in result.content
