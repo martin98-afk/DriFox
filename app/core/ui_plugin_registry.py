@@ -195,9 +195,7 @@ class UIPluginRegistry:
             自动注册对应命令 /{card_id}（用户插件带命名空间前缀）
         """
         if container not in ("top", "bottom", "left", "right", "full"):
-            raise ValueError(
-                f"container must be one of 'top'/'bottom'/'left'/'right'/'full', got {container!r}"
-            )
+            raise ValueError(f"container must be one of 'top'/'bottom'/'left'/'right'/'full', got {container!r}")
         if metadata is None:
             metadata = {}
         info = FloatingCardInfo(
@@ -484,7 +482,14 @@ class UIPluginRegistry:
             if ui_pycache.exists():
                 import shutil as _shutil
 
-                _shutil.rmtree(str(ui_pycache))
+                # Windows 上旧模块对象可能仍持有 .pyc 句柄（热重载循环中上一轮
+                # 实例未 GC），rmtree 会抛 WinError 32。降级：忽略删除失败，
+                # 依赖下方 importlib.invalidate_caches + 重新导入的 mtime 校验；
+                # 不能让 UI 加载因缓存清理失败而中断。
+                try:
+                    _shutil.rmtree(str(ui_pycache))
+                except OSError as e:
+                    logger.warning(f"[UIPluginRegistry] 清理 {ui_pycache} 失败，降级处理（不影响导入）: {e}")
 
             # 通知 import 系统所有缓存已失效
             importlib.invalidate_caches()

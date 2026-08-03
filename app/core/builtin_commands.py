@@ -145,7 +145,7 @@ def _try_load_cache(key: str) -> Optional[dict]:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("cache_key") == key:
             return data
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         pass
     return None
 
@@ -600,6 +600,15 @@ def reload_all_commands():
 
     cmd_mgr = CommandManager.get_instance()
 
+    # 🛡️ 0 条防御（review C4）：源文件为空（如 PluginManager 未初始化、
+    # 插件目录暂不可用）时不清空现有命令，避免注册表被清成空。
+    # 对齐 register_all_commands 的 0 条防御语义。
+    source_files = _collect_all_source_files()
+    if not source_files:
+        logger.warning("[BuiltinCommands] reload_all_commands: 无命令/智能体源文件，跳过重载")
+        _registered = True
+        return
+
     # 清空旧命令
     for name in list(cmd_mgr.get_command_names()):
         cmd_mgr.unregister(name)
@@ -613,7 +622,6 @@ def reload_all_commands():
     logger.info(f"[BuiltinCommands] Reloaded {len(commands)} commands + {len(agents)} agents ({elapsed * 1000:.0f}ms)")
 
     # 重新生成缓存（写回最新解析结果）
-    source_files = _collect_all_source_files()
     cache_key = _compute_cache_key(source_files)
     serialized_commands = []
     for cmd in commands:
@@ -645,7 +653,7 @@ def reload_all_commands():
         from app.core.ui_plugin_registry import UIPluginRegistry
 
         UIPluginRegistry.get_instance().re_register_all_commands()
-    except (ImportError, Exception):
+    except ImportError, Exception:
         pass
 
     _registered = True
@@ -665,7 +673,7 @@ def reload_all_commands():
                 continue
             try:
                 win._register_command_shortcuts()
-            except (RuntimeError, AttributeError):
+            except RuntimeError, AttributeError:
                 pass
     except Exception:
         pass
@@ -870,7 +878,7 @@ def _register_builtin_agents_as_commands(cmd_mgr: CommandManager) -> List[dict]:
                 prompt_text=enhanced_body,
                 parameters=agent_params,
             )
-            logger.info(
+            logger.debug(
                 f"[BuiltinCommands] Registered agent command: /{md_file.stem}"
                 f"{' (with tool restrictions)' if restriction_text else ''}"
             )
