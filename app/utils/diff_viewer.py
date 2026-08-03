@@ -710,7 +710,7 @@ class DiffHtmlGenerator:
             # 破坏后续 HTML/JS 解析（与 _gen_files_meta 的处理保持一致）
             lines_json = json.dumps(fi["lines"]).decode("utf-8").replace("</", "\\u003C/")
             if i < preload_n:
-                blocks_html += cls._file_block(fi, fid)
+                blocks_html += cls._file_block(fi, fid, default_view)
                 blocks_html += f'\n<script type="application/json" id="ld-{fid}">{lines_json}</script>'
             elif lazy_load:
                 blocks_html += (
@@ -758,6 +758,12 @@ class DiffHtmlGenerator:
 <script>
 window._dm={files_meta};window._lf=new Set({list(range(preload_n))});
 window._pc={preload_n};window._cv={dv};window._ae=false;
+
+// 🐛 修复：预加载文件块不走 loadFile → applyView 路径（Python 端已按
+// default_view 控制初始 display），此处再兜底一次：懒加载占位块虽无
+// [data-view] 子元素（applyView 无操作），但保证任何遗漏块都被纠正到
+// 默认视图，杜绝"默认统一直列却显示并排"。
+document.querySelectorAll('.file-block').forEach(function(b){{applyView(b);}});
 
 function esc(s){{var d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}}
 
@@ -870,8 +876,12 @@ function genBlock(fi,lines){{
         as+ds+
         '<button class="fh-open" data-path="'+ep+'" onclick="openFile(decodeURIComponent(this.dataset.path))">打开</button></div>';
     var r=genRows(lines);
-    return h+'<div class="diff-unified" data-view="unified" style="display:none">'+r.u+'</div>'+
-        '<div class="diff-split" data-view="split">'+r.s+'</div>';
+    // 🐛 修复：懒加载块首帧即按当前视图渲染（与 Python 端 _file_block 一致），
+    // 避免先显示 split 再被 applyView 纠正的闪帧。
+    var uDisp=window._cv==='unified'?'':'none';
+    var sDisp=window._cv==='split'?'':'none';
+    return h+'<div class="diff-unified" data-view="unified" style="display:'+uDisp+'">'+r.u+'</div>'+
+        '<div class="diff-split" data-view="split" style="display:'+sDisp+'">'+r.s+'</div>';
 }}
 
 
@@ -1166,7 +1176,7 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
 
     # ---- File block (pre-rendered) ----
     @classmethod
-    def _file_block(cls, fi: Dict, fid: str) -> str:
+    def _file_block(cls, fi: Dict, fid: str, default_view: str = "unified") -> str:
         p = fi["path"]
         adds = fi["additions"]
         dels = fi["deletions"]
@@ -1184,10 +1194,15 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             <button class="fh-open" onclick="openFile('{ep_js}')">打开</button></div>"""
 
         rows = cls._gen_rows(fi)
+        # 🐛 修复：预加载块不走 JS loadFile → applyView 路径，之前 unified 写死
+        # display:none、split 恒显示，导致 default_view="unified" 时进去仍显示并排。
+        # 这里按 default_view 直接控制初始 display，静态 HTML 即为正确视图。
+        unified_disp = "" if default_view == "unified" else "none"
+        split_disp = "" if default_view == "split" else "none"
         return f'''<div class="file-block" id="{fid}" data-lang="{lang}">
             {header}
-            <div class="diff-unified" data-view="unified" style="display:none">{rows["u"]}</div>
-            <div class="diff-split" data-view="split">{rows["s"]}</div></div>'''
+            <div class="diff-unified" data-view="unified" style="display:{unified_disp}">{rows["u"]}</div>
+            <div class="diff-split" data-view="split" style="display:{split_disp}">{rows["s"]}</div></div>'''
 
     # ---- Per-line Pygments highlighting helpers ----
     @classmethod
