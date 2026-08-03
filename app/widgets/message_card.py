@@ -6491,8 +6491,14 @@ class MessageCard(SimpleCardWidget):
         if elapsed is not None and self._footer_elapsed_label:
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
-            self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
-            self._footer_elapsed_label.setVisible(True)
+            try:
+                self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
+                self._footer_elapsed_label.setVisible(True)
+            except RuntimeError:
+                # 🛡️ 防御：footer label 可能已被 C++ 侧销毁（deleteLater 排队中），
+                # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。
+                # 静默忽略（项目既有风格参考 _safe_report_height / L2465 先例）。
+                pass
         # Token
         if token_usage is not None and self._footer_tokens_label:
             total = token_usage.get("total", 0)
@@ -6500,8 +6506,12 @@ class MessageCard(SimpleCardWidget):
                 text = f"{total / 1000:.1f}K tokens"
             else:
                 text = f"{total} tokens"
-            self._footer_tokens_label.setText(text)
-            self._footer_tokens_label.setVisible(True)
+            try:
+                self._footer_tokens_label.setText(text)
+                self._footer_tokens_label.setVisible(True)
+            except RuntimeError:
+                # 🛡️ 同上：token label 可能已被 C++ 侧销毁，静默忽略。
+                pass
         # 刷新分隔点（用自己的状态判断，不依赖 isVisible()）
         self._refresh_footer_separators()
 
@@ -6593,13 +6603,18 @@ class MessageCard(SimpleCardWidget):
 
     def _refresh_footer_separators(self):
         """根据标签文本非空判断分隔点可见性（比 isVisible 更可靠）"""
-        has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
-        has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
-        has_model = bool(self._footer_model_label and self._footer_model_label.text())
-        if self._footer_sep1:
-            self._footer_sep1.setVisible(has_tokens and has_elapsed)
-        if self._footer_sep2:
-            self._footer_sep2.setVisible(has_elapsed and has_model)
+        try:
+            has_tokens = bool(self._footer_tokens_label and self._footer_tokens_label.text())
+            has_elapsed = bool(self._footer_elapsed_label and self._footer_elapsed_label.text())
+            has_model = bool(self._footer_model_label and self._footer_model_label.text())
+            if self._footer_sep1:
+                self._footer_sep1.setVisible(has_tokens and has_elapsed)
+            if self._footer_sep2:
+                self._footer_sep2.setVisible(has_elapsed and has_model)
+        except RuntimeError:
+            # 🛡️ 防御：footer label / separator 可能已被 C++ 侧销毁（deleteLater 排队中），
+            # 访问已删除 QLabel 会抛 wrapped C/C++ object ... has been deleted。静默忽略。
+            pass
 
     def start_elapsed_tracking(self):
         """开始实时计时（流式输出时调用）"""

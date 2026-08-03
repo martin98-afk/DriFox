@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -786,8 +788,7 @@ class TestInjectTeamContext:
 
         spec = importlib.util.spec_from_file_location(
             "inject_team_context_test",
-            Path(__file__).resolve().parent.parent.parent
-            / "plugins" / "system" / "hooks" / "inject_team_context.py",
+            Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "hooks" / "inject_team_context.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -1040,3 +1041,181 @@ class TestTeamListMembersRoleDesc:
         assert "build@win_01" in result.content
         assert "plan@win_02" in result.content
         assert "角色:" not in result.content
+
+
+# ══════════════════════════════════════════════════════════
+# 15. /team --load 缺失角色降级为 prompt_sections 注入
+# ══════════════════════════════════════════════════════════
+
+
+class TestLoadMissingDegradation:
+    """修复说明：原 `_handle_team_load` 缺失分支弹 InfoBar.error 中止，改为降级到
+
+    `prompt_sections` 注入补全流程（与 `--create=` 链路一致）：
+    1. `_handle_team_load` 缺失分支调用 `_degrade_team_load_to_prompt`
+    2. 新方法 select_prompt 读 `<!-- section:load_missing -->` 段，写
+       `session.metadata["_pending_command"]`，置 `_team_load_degraded`
+    3. `_on_send_clicked` 排除 `--load=` 命中 prompt_sections（防劫持）
+    4. `_on_send_clicked` FUNCTION 分支后检查 `_team_load_degraded`
+    5. `plugins/system/commands/team.md` 配套 frontmatter + section + 正文
+    """
+
+    @staticmethod
+    def _main_widget_src() -> tuple[Path, str]:
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        return src_path, src_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _team_md_path() -> Path:
+        return Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "commands" / "team.md"
+
+    @staticmethod
+    def _find_function(tree: ast.Module, name: str):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    def test_handle_team_load_calls_degrade_and_no_infobar(self):
+        """`_handle_team_load` 缺失分支必须走 `_degrade_team_load_to_prompt` 且不再弹 InfoBar。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_handle_team_load")
+        assert target is not None, "未找到 _handle_team_load 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 缺失分支必须调用降级方法（接 name, missing 两个参数）
+        assert "_degrade_team_load_to_prompt" in func_src, (
+            "_handle_team_load 必须包含降级方法调用 `_degrade_team_load_to_prompt`"
+        )
+        assert _re.search(r"_degrade_team_load_to_prompt\s*\(\s*name\s*,\s*missing\s*\)", func_src), (
+            "_degrade_team_load_to_prompt 必须接收 (name, missing) 两个参数"
+        )
+
+        # 不再弹原 InfoBar 报错
+        assert "模板角色缺失" not in func_src, "_handle_team_load 不应再弹 InfoBar.error('模板角色缺失', ...) 报错文案"
+        assert "加载中止" not in func_src, "_handle_team_load 不应再出现「加载中止」报错文案（已降级到 prompt 补全）"
+
+    def test_handle_team_load_keeps_confirm_dialog_for_normal_path(self):
+        """`_handle_team_load` 仍保留 ConfirmDialog 确认（不破坏既有回归）。"""
+        import ast as _ast
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_handle_team_load")
+        assert target is not None, "未找到 _handle_team_load 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        assert "from app.widgets.common_dialogs import ConfirmDialog" in func_src, (
+            "应保留 ConfirmDialog import（正常加载路径不受影响）"
+        )
+        assert "_confirmed" in func_src, "应保留 _confirmed 回调变量"
+        assert ".confirmed.connect(" in func_src, "应保留 confirmed 信号连接"
+        assert "if not _confirmed[0]:" in func_src or "if not _confirmed :" in func_src, (
+            "用户取消时仍应 return（不进入建窗口流程）"
+        )
+
+    def test_degrade_method_calls_select_prompt_pending_command_and_flag(self):
+        """`_degrade_team_load_to_prompt` 必须 select_prompt + 写 _pending_command + 置标记。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_degrade_team_load_to_prompt")
+        assert target is not None, "未找到 _degrade_team_load_to_prompt 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        assert _re.search(r"select_prompt\s*\(", func_src), (
+            "应调用 cmd_mgr.select_prompt 读取 `<!-- section:load_missing -->` 段"
+        )
+        assert "_pending_command" in func_src, (
+            "应写入 session.metadata['_pending_command']，由 inject_command_prompt hook 自动注入"
+        )
+        assert _re.search(r"_team_load_degraded\s*=\s*True", func_src), (
+            "应设置 `self._team_load_degraded = True`，让 _on_send_clicked 继续走 send_message"
+        )
+
+    def test_on_send_clicked_recognizes_degraded_flag(self):
+        """`_on_send_clicked` FUNCTION 分支必须检查 `_team_load_degraded` 标记。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_on_send_clicked")
+        assert target is not None, "未找到 _on_send_clicked 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        assert _re.search(r"_team_load_degraded", func_src), (
+            "_on_send_clicked 必须识别 _team_load_degraded 标记（降级时继续走 send_message）"
+        )
+
+    def test_on_send_clicked_excludes_team_load_from_prompt_matched(self):
+        """`_on_send_clicked` 必须把 `team --load=` 排除出 `_prompt_matched`。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_on_send_clicked")
+        assert target is not None, "未找到 _on_send_clicked 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 防劫持：team --load= 必须强制走 FUNCTION（_handle_team_load 由其决定正常加载 or 降级）
+        # ast.unparse 输出可能用单/双引号，用 regex 同时兼容
+        assert _re.search(r"""cmd_result\.command_name\s*==\s*['"]team['"]""", func_src), (
+            "_on_send_clicked 必须有 `cmd_result.command_name == 'team'` 分支"
+        )
+        assert _re.search(r"""['"]--load=['"]\s+in\s+_active""", func_src), (
+            "_on_send_clicked 必须有 `'--load=' in _active` 子句（防劫持）"
+        )
+        assert _re.search(r"_prompt_matched\s*=\s*False", func_src), "排除分支必须把 _prompt_matched 强制为 False"
+
+    def test_team_md_load_missing_section_and_frontmatter(self):
+        """`plugins/system/commands/team.md` 必须含 load_missing section + frontmatter + 提示流程。"""
+        team_md_path = self._team_md_path()
+        team_md = team_md_path.read_text(encoding="utf-8")
+
+        # frontmatter 含 --load=: "load_missing" 映射
+        assert "--load=:" in team_md and '"load_missing"' in team_md, (
+            'frontmatter prompt_sections 必须含 `--load=: "load_missing"` 映射'
+        )
+        # section 起始标记必须独占一行且唯一
+        section_markers = re.findall(r"^<!-- section:load_missing -->$", team_md, re.MULTILINE)
+        assert len(section_markers) == 1, (
+            f"`<!-- section:load_missing -->` 起始标记必须独占一行且唯一，实际 {len(section_markers)} 次"
+        )
+
+        # section 自成一体：含 question 工具 + 骨架写入 + 重新 /team --load= 提示
+        # 用整行作为 section_start，保证我们的索引对齐真正独立段的开始
+        section_start = re.search(r"^<!-- section:load_missing -->$", team_md, re.MULTILINE).start()
+        section_end = team_md.index("\n<!-- end -->", section_start)
+        section_body = team_md[section_start:section_end]
+        assert "question" in section_body, "load_missing section 应指导 AI 使用 question 工具逐项确认"
+        assert "write" in section_body, "load_missing section 应包含 write 工具写入骨架指令"
+        assert "/team --load=" in section_body, "load_missing section 应提示用户重新执行 `/team --load=<name>` 完成加载"
+        assert "user-custom/agents/" in section_body, (
+            "load_missing section 应说明写到 `~/.drifox/plugins/user-custom/agents/<role>.md`"
+        )
+
+        # 正文"加载团队模板(--load)"小节必须含"子智能体缺失时的补全流程"说明
+        assert "子智能体缺失时的补全流程" in team_md, "正文必须新增「子智能体缺失时的补全流程」4 步说明"

@@ -12,6 +12,7 @@ mutex_groups:
   action: ['--join=', '--leave', '--save=', '--load=', '--delete=', '--create=']
 prompt_sections:
   --create=: "create"
+  --load=: "load_missing"
 ---
 
 ## 用户可见行为
@@ -22,6 +23,17 @@ prompt_sections:
 - 模板 N 个角色 → 全部通过新建窗口承载，已有窗口保持原样
 - 新建窗口走延迟 join team（`_join_new_window_for_template`），确保 backend 初始化完成后立即加入团队
 - 新建窗口标题保持默认/会话标题，**不**被 agent 名覆盖
+
+#### 子智能体缺失时的补全流程
+
+加载模板时若检测到缺失角色，**不再弹 InfoBar 报错**，改走 prompt 注入补全流程（与 `--create=` 链路一致）：
+
+1. `_handle_team_load` 调用 `_degrade_team_load_to_prompt(name, missing)`：从 `<!-- section:load_missing -->` 段拼装补全提示词，写入 `session.metadata["_pending_command"]`，同时置 `self._team_load_degraded = True`
+2. `_on_send_clicked` 在 `_execute_command` 之后检查 `getattr(self, "_team_load_degraded", False)`：为真则清除标记并**继续**走 `engine.send_message`（不让 FUNCTION 分支提前 `return`），让 `inject_command_prompt.py` PreUserMessage hook 把补全提示词注入 LLM 上下文
+3. AI 按补全流程逐个用 `question` 工具询问每个缺失角色的处理方式（新建骨架 / 用已有角色替代 / 跳过 / 改名），详见 `<!-- section:load_missing -->` 段
+4. 所有缺失角色处理完后，AI 输出"补全完成"清单，提示用户重新执行 `/team --load=<name>` 完成加载（watchfile 重载后新建角色立即可用）
+
+> ⚠️ 正常加载路径（**无缺失成员时**）完全不受影响：`_handle_team_load` 跳过 missing 分支后走原 ConfirmDialog → 建窗口 → 延后 join → 排列流程，**不**经过补全提示词注入。
 
 ### Tab 标题与胶囊
 
@@ -245,3 +257,126 @@ agents:
 5. 每个 `agent` 条目的 `description` 角色描述为必填项
 6. 缺失角色的 `.md` 必须先写入（步骤 B-2），再写入 yaml，否则 yaml 引用未存在的角色
 <!-- end -->
+
+<!-- section:load_missing -->
+## 任务：补全 /team --load 缺失的子智能体
+
+用户执行 `/team --load=<name>` 时检测到模板 `<name>` 包含系统中不存在的角色。请逐个用 `question` 工具询问用户对每个缺失角色的处理方式，最后提示用户重新执行 `/team --load=<name>` 完成加载。
+
+### 用户请求
+$ARGUMENTS
+
+- `--load=<name>`：要加载的模板名（与缺失角色来自同一模板）
+- `缺失角色: <role_a>, <role_b>, ...`：从 `template.validate_agent_names(available_names)` 解析出的角色列表
+- 模板名只是上下文回显，**真正关键的是缺失角色名单**，必须严格按 `缺失角色:` 后的逗号分隔列表逐个处理
+
+### 操作流程
+
+#### 1. 解析缺失角色
+从 `$ARGUMENTS` 的 `缺失角色:` 段解析出每个角色名（如 `perf-tester`、`perf-analyzer`），形成有序列表。
+
+#### 2. 逐个用 `question` 工具询问（复用 `<!-- section:create -->` B 流程）
+
+```
+question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
+  选项：
+    1. 新建并写入完整骨架（推荐）
+    2. 用已有角色 <existing_role> 替代
+    3. 跳过，不创建
+    4. 改名（输入新名字后重新比对）
+```
+
+- **选项 1**：用 `write` 工具写入完整骨架（见 `<!-- section:create -->` B-1），记录为 🆕 已创建
+- **选项 2**：从 Available Subagents 中选最相似的 1-2 个作为替换，记录为 ✅ 已有（替代）
+- **选项 3**：记录为 ⏭️ 已跳过，**不写入 yaml / .md**（跳过不是改名，用户接受该角色不在模板中）
+- **选项 4**：用户输入新名 → 回到步骤 2 重新比对 → 重复 B 流程
+
+##### 骨架模板（与 `<!-- section:create -->` 一致）
+
+选项 1 确认后，先 `bash` 工具确保目录存在：
+
+```bash
+mkdir -p ~/.drifox/plugins/user-custom/agents/
+```
+
+然后对每个选项 1 确认的 role，用 `write` 工具写入完整骨架到 `~/.drifox/plugins/user-custom/agents/<role>.md`：
+
+```yaml
+---
+description: <从任务上下文推断的一句话角色定位，30-80 字>
+mode: subagent
+hidden: false
+temperature: 0.3
+steps: 50
+permission:
+  "<按 C 规则填充>"
+---
+```
+
+```markdown
+# Role
+你是一个专业的 <角色中文名>，负责 <一句核心职责>。
+
+# Core Capabilities
+- <能力 1>
+- <能力 2>
+- <能力 3>
+
+# Workflow
+1. <接收输入>
+2. <执行步骤>
+3. <输出交付物>
+
+# Hard Rules
+- <红线 1>
+- <红线 2>
+- <红线 3>
+```
+
+#### C. 权限推导规则（AI 自动判定，无需问用户；独立嵌入本段以保证 `select_prompt` 过滤后能独立运行）
+
+按角色描述中的关键词匹配，4 个模板任选其一：
+
+| 角色关键词（中文/英文） | permission 模板 | 典型场景 |
+|---|---|---|
+| 含 `测试`/`运行`/`部署`/`压测`/`runner`/`tester` | `bash: allow`、其余 `ask` | perf-tester, qa-runner |
+| 含 `审查`/`分析`/`审计`/`只读`/`reviewer`/`analyzer`/`auditor` | `write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | perf-analyzer, security-auditor |
+| 含 `写入`/`修改`/`迁移`/`重构`/`writer`/`migrator`/`refactorer` | `*: allow` | db-migrator, refactorer |
+| 含 `协调`/`统筹`/`PM`/`scrum`/`master`/`coordinator` | `question`/`team_*`: `allow`，`write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | scrum-master, pm-bot |
+
+**不匹配的兜底**（默认）：`write`/`edit`/`multi_edit`/`bash`: `ask`，`*: allow`（与 `plan.md` 模板一致，最保守安全）。
+
+> 🆕 后续维护提示：若 create 段 C 规则有更新，**必须同步本副本**（可借助 `TestLoadMissingDegradation::test_team_md_load_missing_section_and_frontmatter` 等 AST 静态断言防止漂移漂移）。
+
+#### 3. 失败与边界处理
+
+| 场景 | 处理 |
+|---|---|
+| 用户跳过所有缺失角色 | 警告"模板无法加载（关键角色全部缺失）"，提示用户先手动新建后再 `/team --load=<name>` |
+| 角色名与已有冲突 | 用 question 弹窗提供候选改名（如 `<role>-2`、`my-<role>`），用户选其一或手动输入 |
+| `mkdir` 失败 | 弹窗提示手动执行命令，提供复制粘贴命令 |
+| `write` 失败 | 同上，附带失败原因 |
+| `缺失角色:` 段解析失败 | 用 question 反问"请提供缺失角色名清单（逗号分隔）"，最多 2 轮澄清后兜底（提示用户手动检查模板文件） |
+
+#### 4. 补全完成提示
+
+所有缺失角色处理完后，必须追加告知用户：
+
+```markdown
+## 补全完成
+
+| 角色 | 状态 | 路径 |
+|---|---|---|
+| <role_a> | 🆕 已创建 | `~/.drifox/plugins/user-custom/agents/<role_a>.md` |
+| <role_b> | ✅ 已有（替代） | — |
+| <role_c> | ⏭️ 已跳过 | — |
+
+**下一步**：再次执行 `/team --load=<name>` 完成加载（新建的角色已被 watchfile 重载）。
+```
+
+> ⚠️ **关于新建智能体的加载时机**：本次流程仅创建了 `.md` 文件，新角色**不会**自动加入当前会话的 `Available Subagents`。
+> - 下次 `/team --load=<name>` 时若 watchfile 重载已完成，新角色立即可用
+> - 若 watchfile 未触发（罕见），重启 DriFox 后可用
+> - 当前会话内不能用 `subagent_para` 调起新角色
+<!-- end -->
+

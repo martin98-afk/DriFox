@@ -35,6 +35,22 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Set
 
 
+class CommandNeedDegrade(Exception):
+    """handler 抛出此异常表示需要降级到 prompt 层；分发器自动捕获。
+
+    业务降级语义：命令处理器在执行过程中识别到"无法继续正常执行"的状态
+    （如团队模板加载时存在缺失成员），主动抛出本异常，由 `_execute_command`
+    统一捕获并转走 `prompt_sections` 注入流程（select_prompt 按参数匹配段），
+    避免在 UI 层硬编码参数名判断。
+    """
+
+    def __init__(self, command_name: str, remainder: str = "", degrade_section: str = ""):
+        self.command_name = command_name
+        self.remainder = remainder
+        self.degrade_section = degrade_section
+        super().__init__(f"Command {command_name} needs degrade to {degrade_section}")
+
+
 @dataclass
 class CommandParameter:
     """命令参数定义（用于 detail 模式交互式参数列表）"""
