@@ -2401,6 +2401,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 先创建余额/用量/上下文组件（稍后添加到底部工具栏，模型选择右侧）
         self.balance_display = BalanceDisplay(self)
         self.coding_plan_ring = CodingPlanRing(self)
+        # 圆环隐藏状态（ring 初始隐藏）：_on_coding_plan_result 据此判断
+        # 是否打"无数据"日志，避免多标签页下无数据广播刷屏
+        self._coding_plan_hidden = True
         self.context_usage_ring = ContextUsageRing(self)
 
         # 标题栏右侧：分享按钮 + 当前会话历史问题按钮（替代时间线节点）
@@ -5986,6 +5989,7 @@ class OpenAIChatToolWindow(ToolWindow):
         config_id = getattr(self, "_current_provider_name", "")
         if not config_id:
             ring.clear()
+            self._coding_plan_hidden = True
             return
 
         config = self._valid_configs.get(config_id, {})
@@ -5993,6 +5997,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if not provider_name:
             ring.clear()
+            self._coding_plan_hidden = True
             return
 
         from app.core.usage_service import UsageService
@@ -6014,16 +6019,25 @@ class OpenAIChatToolWindow(ToolWindow):
         if not ring:
             return
 
+        # 防刷屏：无数据广播（无 fetcher 的 provider 每次 request 同步 emit None）
+        # 会打到所有窗口。_coding_plan_hidden 记录当前隐藏状态（__init__ 初始化），
+        # 仅当圆环由显示转为隐藏时才打日志，已隐藏则静默返回。
         if not result:
+            if self._coding_plan_hidden:
+                return
             logger.debug("[CodingPlan] 无数据，隐藏圆环")
             ring.clear()
+            self._coding_plan_hidden = True
             return
         rolling = result.get("rolling")
         weekly = result.get("weekly")
         monthly = result.get("monthly")
         if not rolling and not weekly and not monthly:
+            if self._coding_plan_hidden:
+                return
             logger.debug("[CodingPlan] 三层均为空，隐藏圆环")
             ring.clear()
+            self._coding_plan_hidden = True
             return
         logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(
@@ -6031,6 +6045,7 @@ class OpenAIChatToolWindow(ToolWindow):
             weekly=weekly,
             monthly=monthly,
         )
+        self._coding_plan_hidden = False
         # 轮询由 UsageService 单例统一驱动（60s 周期），窗口不再自建定时器
 
     def _open_settings_popup(self):

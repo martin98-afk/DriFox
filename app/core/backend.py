@@ -895,6 +895,9 @@ class ChatBackend(QObject):
         _prefixes_ref = [plugin_prefixes]
         # 保存引用给主线程的 _on_hot_reload_requested，在重载完成后重建索引
         self._watcher_prefixes_ref = _prefixes_ref
+        # 保存 dedup 缓存引用给主线程：插件删除/清理路径需清空对应键，
+        # 防止"删除 → 3s 内重装"被 _is_duplicate 误吞（review B3）
+        self._watcher_dedup_cache = _dedup_cache
 
         def _rebuild_prefixes():
             """重建插件路径索引（在 watch 线程中调用）"""
@@ -1083,7 +1086,18 @@ class ChatBackend(QObject):
                                 f"[ChatBackend] 检测到 {len(new_names)} 个新插件文件变更"
                                 f"「{', '.join(sorted(new_names))}」，逐一请求增量重载..."
                             )
+                            from app.core.plugin_manager import PluginManager as _PM
+
                             for new_name in sorted(new_names):
+                                # 已注册插件（索引未及时重建导致路径识别失败）：
+                                # 不再走 __NEW__ 全量路径，改按组件增量重载，
+                                # 避免 bridge.json 等运行时文件变更反复触发全量加载
+                                if _PM.get_instance().has_plugin(new_name):
+                                    logger.info(
+                                        f"[ChatBackend] 插件 [{new_name}] 已注册（索引未更新），改按已知插件增量重载..."
+                                    )
+                                    self._hot_reload_requested.emit(new_name, "")
+                                    continue
                                 # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
                                 # 的剩余部分以已知插件路径再次触发（ghost trigger）
                                 _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
@@ -1303,18 +1317,29 @@ class ChatBackend(QObject):
         try:
             if plugin_name == self._NEW_PLUGIN_SENTINEL:
                 # 新增插件：只扫描这一个插件目录，增量加载其组件
-                result = self._reload_new_plugin(component)
+                # 兜底：若该插件其实已注册（watch 线程判定后主线程执行期间
+                # 状态变化，或索引重建时序竞态），降级为已知插件增量重载，
+                # 避免对已注册插件走全量 __NEW__ 路径
+                from app.core.plugin_manager import PluginManager
+
+                if PluginManager.get_instance().has_plugin(component):
+                    logger.info(f"[ChatBackend] __NEW__ 兜底：插件 [{component}] 已注册，降级为已知插件增量重载...")
+                    result = self._reload_single_plugin(component, "")
+                else:
+                    result = self._reload_new_plugin(component)
             elif plugin_name:
                 result = self._reload_single_plugin(plugin_name, component)
             else:
                 result = self.reload_plugin_subsystems()
             self.plugin_changed.emit(result)
-
-            # 重载完成后重建 watchfiles 路径索引，确保新注册的插件路径可被后续变更识别
-            # 注意：不能提前重建（在 _watch_loop 的 else 分支），因为那时 pm.rescan() 还没执行
-            self._rebuild_watcher_prefixes()
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+        finally:
+            # 重载完成后重建 watchfiles 路径索引，确保新注册的插件路径可被后续变更识别
+            # 注意：不能提前重建（在 _watch_loop 的 else 分支），因为那时 pm.rescan() 还没执行
+            # finally 保证即使重载/emit 抛异常，索引也必然更新（否则已注册插件会被
+            # 反复识别为"新插件"，触发 bridge.json 自触发循环）
+            self._rebuild_watcher_prefixes()
 
     def _rebuild_watcher_prefixes(self):
         """重建 watchfiles 线程的插件路径索引（主线程调用）"""
@@ -1506,6 +1531,18 @@ class ChatBackend(QObject):
                     f"cleaning up artifacts..."
                 )
 
+                # 清空该插件的 watcher 去重缓存键（review B3）：
+                # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
+                dedup_cache = getattr(self, "_watcher_dedup_cache", None)
+                if dedup_cache is not None:
+                    stale_keys = [k for k in dedup_cache.keys() if k[0] == plugin_name]
+                    for k in stale_keys:
+                        dedup_cache.pop(k, None)
+                    if stale_keys:
+                        logger.debug(
+                            f"[ChatBackend] 插件 [{plugin_name}] 移除，清空 {len(stale_keys)} 个 watcher 去重键"
+                        )
+
                 # 智能体（Agent 清理包含 hooks 清扫）
                 if removed_components.get("agents") and self._agent_manager:
                     self._agent_manager.cleanup_plugin_artifacts(plugin_name)
@@ -1514,7 +1551,9 @@ class ChatBackend(QObject):
                 if removed_components.get("hooks") and not removed_components.get("agents"):
                     if self._hook_manager:
                         self._hook_manager.unregister_skill_hooks(plugin_name)
-                        logger.debug(f"[ChatBackend] Plugin '{plugin_name}' hooks-only cleanup: unregistered skill hooks")
+                        logger.debug(
+                            f"[ChatBackend] Plugin '{plugin_name}' hooks-only cleanup: unregistered skill hooks"
+                        )
 
                 # 命令（agents 发布的命令也需反注册）
                 if removed_components.get("commands") or removed_components.get("agents"):
@@ -1719,6 +1758,18 @@ class ChatBackend(QObject):
             added = diff.get("added", [])
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
+
+            # 清空被移除插件的 watcher 去重缓存键（review B3）：
+            # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
+            if removed:
+                dedup_cache = getattr(self, "_watcher_dedup_cache", None)
+                if dedup_cache is not None:
+                    removed_names = {p.name for p in removed}
+                    stale_keys = [k for k in dedup_cache.keys() if k[0] in removed_names]
+                    for k in stale_keys:
+                        dedup_cache.pop(k, None)
+                    if stale_keys:
+                        logger.debug(f"[ChatBackend] 全量重载移除插件，清空 {len(stale_keys)} 个 watcher 去重键")
 
             # 2. 判断是否为"单一新增"——只有新增一个插件，无移除/变更
             #    watchfiles 检测到新插件目录时，路径索引尚未包含它，

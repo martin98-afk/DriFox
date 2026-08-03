@@ -219,6 +219,9 @@ class TabItem(QFrame):
         self._question = False  # AI 提问等待用户回答（橙黄脉动）
         self._hovered = False  # 鼠标悬停态
         self._team_mode = False  # 团队模式：隐藏项目 icon（项目 icon 移到团队标题处）
+        self._compact = False  # 紧凑模式（侧边栏折叠态）：仅图标 + 状态指示条
+        self._capsule_color = ""  # 胶囊颜色（紧凑态首字符图标用同色）
+        self._compact_saved = None  # 紧凑态恢复现场（展开时逐控件配对还原）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
         # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
         self._cached_rect_key = (-1, -1)
@@ -288,6 +291,9 @@ class TabItem(QFrame):
             self._icon_widget.setFixedSize(self._icon_size, self._icon_size)
             self._apply_project_to_icon()
         self._apply_title_style()
+        # 紧凑态团队模式：字号缩放后幂等重刷首字符图标（补充点 3）
+        if self._compact and self._team_mode:
+            self._apply_compact_icon()
         self.update()
 
     def set_selected(self, selected: bool):
@@ -319,6 +325,9 @@ class TabItem(QFrame):
         self._project_initials = initials
         self._project_color = color_rgba
         self._apply_project_to_icon()
+        # 紧凑态非团队：保持图标显示（项目 icon 为折叠态唯一标识）
+        if self._compact and not self._team_mode:
+            self._icon_widget.setVisible(True)
 
     def set_icon(self, icon):
         """设置通用 icon（QPixmap/QIcon 兜底）"""
@@ -332,6 +341,7 @@ class TabItem(QFrame):
             # 从 agent 名 hash 生成稳定色
             h = abs(hash(text)) % 360
             color = f"hsl({h}, 65%, 50%)"
+        self._capsule_color = color  # 紧凑态首字符图标用同色（矩阵 B4）
         self._capsule_label.setText(text)
         self._capsule_label.setStyleSheet(f"""
             QLabel {{
@@ -344,6 +354,13 @@ class TabItem(QFrame):
             }}
         """)
         self._capsule_label.setVisible(True)
+        # 紧凑态：无条件隐藏胶囊（P1 修复——set_capsule 先于 set_team_mode(True)
+        # 执行时 _team_mode 仍为 False，旧条件会漏隐藏导致折叠态显示胶囊文字）；
+        # 团队模式再幂等重刷首字符图标，非团队模式不刷（无胶囊语义）。
+        if self._compact:
+            if self._team_mode:
+                self._apply_compact_icon()
+            self._capsule_label.setVisible(False)
 
     def set_team_mode(self, team_mode: bool):
         """设置团队模式：隐藏项目 icon（项目 icon 移到团队标题处显示）
@@ -351,11 +368,87 @@ class TabItem(QFrame):
         True：TabItem 只显示角色胶囊 + 标题 + 关闭按钮（项目 icon 隐藏）；
         False：恢复显示项目 icon（非团队模式回归不变）。
         与胶囊共存：团队模式下胶囊照常显示，二者互不干扰。
+        紧凑态（折叠）：仅切换图标内容——团队模式切角色首字符、非团队切项目
+        icon，不改变文字类控件可见性（矩阵 D3）。
         """
         if self._team_mode == team_mode:
             return
         self._team_mode = team_mode
-        self._icon_widget.setVisible(not team_mode)
+        if self._compact:
+            if team_mode:
+                self._apply_compact_icon()
+            else:
+                self._apply_project_to_icon()
+                self._icon_widget.setVisible(True)
+        else:
+            self._icon_widget.setVisible(not team_mode)
+        self.update()
+
+    def _apply_compact_icon(self):
+        """紧凑态团队模式：用角色胶囊首字符 + 胶囊色绘制图标（折叠态成员可区分）
+
+        胶囊为空（异常时序）时回退标题首字，避免裸 "?" 无法区分成员。
+        """
+        text = (self._capsule_label.text() or "").strip()
+        if not text:
+            text = (self._title or "").strip()
+        ch = text[0] if text else "?"
+        color = self._capsule_color or ""
+        if not color and text:
+            h = abs(hash(text)) % 360
+            color = f"hsl({h}, 65%, 50%)"
+        self._icon_widget.set_project(ch, color)
+        self._icon_widget.setVisible(True)
+
+    def set_compact(self, compact: bool):
+        """切换紧凑模式（侧边栏折叠态）：仅保留图标 + 状态指示条
+
+        compact=True：保存恢复现场（标题/胶囊/关闭/图标可见性 + margins），
+            隐藏 title/capsule/close，margin 收紧为 (4,4,4,4)；团队模式用角色
+            首字符图标（矩阵 B4），非团队保留项目 icon。
+        compact=False：按保存的现场逐控件配对恢复（矩阵 D1 对称性），
+            含团队模式 icon 恢复隐藏、margin 还原。
+        幂等：相同状态重复调用直接返回。
+        """
+        if self._compact == compact:
+            return
+        self._compact = compact
+        if compact:
+            # 保存恢复现场（用 isHidden 逆：显式隐藏状态，与父链显示无关）
+            self._compact_saved = {
+                "icon_visible": not self._icon_widget.isHidden(),
+                "title_visible": not self._title_label.isHidden(),
+                "capsule_visible": not self._capsule_label.isHidden(),
+                "close_visible": not self._close_btn.isHidden(),
+                "margins": self.layout().getContentsMargins(),
+            }
+            # 隐藏文字类控件，仅留图标
+            self._title_label.setVisible(False)
+            self._capsule_label.setVisible(False)
+            self._close_btn.setVisible(False)
+            self.layout().setContentsMargins(4, 4, 4, 4)
+            if self._team_mode:
+                self._apply_compact_icon()
+            else:
+                self._icon_widget.setVisible(True)
+        else:
+            saved = self._compact_saved or {}
+            # 团队模式：icon 恢复隐藏；非团队：恢复原可见性
+            if self._team_mode:
+                self._icon_widget.setVisible(False)
+            else:
+                self._icon_widget.setVisible(bool(saved.get("icon_visible", True)))
+            # 还原图标数据（compact 期间可能被 set_project/set_icon 更新）
+            self._apply_project_to_icon()
+            # 展开态按当前语义恢复（非折叠前现场）：折叠期间可能加入团队/设置胶囊，
+            # 旧现场会漏显示——标题恒显、胶囊按团队模式+文本、close 恒隐（hover 再显）
+            self._title_label.setVisible(True)
+            has_capsule_text = bool((self._capsule_label.text() or "").strip())
+            self._capsule_label.setVisible(self._team_mode and has_capsule_text)
+            self._close_btn.setVisible(False)
+            if "margins" in saved:
+                self.layout().setContentsMargins(*saved["margins"])
+            self._compact_saved = None
         self.update()
 
     def clear_capsule(self):
@@ -364,14 +457,16 @@ class TabItem(QFrame):
         self._capsule_label.setText("")
 
     def enterEvent(self, event):
-        self._close_btn.setVisible(True)
+        # 紧凑态守卫：折叠态不弹关闭按钮，避免撑破小容器（矩阵 C3）
+        if not self._compact:
+            self._close_btn.setVisible(True)
         self._hovered = True
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
-        if not self._selected:
+        if not self._selected and not self._compact:
             self._close_btn.setVisible(False)
         self.update()
         super().leaveEvent(event)
@@ -696,7 +791,9 @@ class TabPanel(QWidget):
             f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
         )
         self._brand_version = QLabel(Settings.current_version, self._brand_left)
-        self._brand_version.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}")
+        self._brand_version.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+        )
         brand_left_layout.addWidget(self._brand_title)
         brand_left_layout.addWidget(self._brand_version)
         brand_layout.addWidget(self._brand_left, 1)
@@ -1014,6 +1111,15 @@ class TabPanel(QWidget):
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
+        # ── 紧凑模式统一收口（矩阵 A2/A3）：折叠/展开影响所有 TabItem 与团队框 ──
+        # 三入口（_toggle_sidebar / set_collapsed / resizeEvent 拖拽展开）最终都
+        # 走到这里，确保不依赖 sidebarToggled 信号也能同步紧凑态。
+        compact = self._collapsed
+        for item in self._items:
+            item.set_compact(compact)
+        for grp in self._team_groups.values():
+            self._apply_team_compact(grp, compact)
+
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""
         expanded = not self._custom_plugin_scroll.isVisible()
@@ -1091,7 +1197,7 @@ class TabPanel(QWidget):
             )
         if hasattr(self, "_brand_version"):
             self._brand_version.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
+                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
             )
         if hasattr(self, "_sidebar_toggle_btn"):
             # 按钮样式由 TransparentToolButton 处理，无需额外样式
@@ -1143,6 +1249,10 @@ class TabPanel(QWidget):
         # 重建视觉布局：新 tab 作为独立项加入（置于团队框下方）。
         # _rebuild_team_layout 有快照保护，开销小。
         self._rebuild_team_layout()
+
+        # 折叠态新建 tab：立即紧凑（矩阵 D1/D2）
+        if self._collapsed:
+            item.set_compact(True)
 
         # 如果这是第一个 Tab，自动选中
         if len(self._items) == 1:
@@ -1313,9 +1423,10 @@ class TabPanel(QWidget):
         grp._team_inner_widget = inner_widget
         grp._team_inner_layout = inner_layout
 
-        # hover 控制关闭按钮可见性
+        # hover 控制关闭按钮可见性（紧凑态守卫：折叠态不弹关闭按钮，矩阵 C3）
         def _enter(_e, _h=header, _btn=close_btn):
-            _btn.setVisible(True)
+            if not getattr(grp, "_team_compact", False):
+                _btn.setVisible(True)
 
         def _leave(_e, _h=header, _btn=close_btn):
             _btn.setVisible(False)
@@ -1323,15 +1434,28 @@ class TabPanel(QWidget):
         header.enterEvent = _enter
         header.leaveEvent = _leave
 
+        # 紧凑态字段（_apply_team_compact 使用）
+        grp._team_compact = False
+        grp._team_icon_orig_visible = False
+        grp._team_icon_orig_data = None
+
         self._apply_team_group_style(grp)
         self._team_groups[team_id] = grp
+        # 折叠态新建团队框：header 立即紧凑（规格书 2.2）
+        if self._collapsed:
+            self._apply_team_compact(grp, True)
         return grp
 
-    def _apply_team_group_style(self, grp: "QFrame"):
+    def _apply_team_group_style(self, grp: "QFrame", bg_alpha: int = 40):
         """应用团队分组框样式：细边框 + 卡片背景 + 圆角，视觉清晰但不喧宾夺主
 
         同时刷新 header 子控件（团队名 QLabel + 关闭按钮）的样式，确保
         主题切换后 header 文字色与边框同步。
+
+        Args:
+            bg_alpha: 卡片背景透明度（0-255）。展开态默认 40（保持原视觉），
+                折叠态由 _apply_team_compact 传入 70 增强窄条视觉边界（T4a 根因4），
+                避免全局改色破坏展开态零回归（P2-1 方案 B）。
         """
         Colors.refresh()
         # 注意：Colors.HOVER_BG = "rgba(255, 255, 255, 0.08)" 不含 {alpha} 占位符，
@@ -1339,7 +1463,7 @@ class TabPanel(QWidget):
         # 用 CARD_BG（"rgba(33, 33, 38, {alpha})"，含占位符）正确代入 alpha。
         grp.setStyleSheet(f"""
             #teamGroup {{
-                background: {Colors.CARD_BG.format(alpha=40)};
+                background: {Colors.CARD_BG.format(alpha=bg_alpha)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 margin: 2px 0;
@@ -1374,6 +1498,71 @@ class TabPanel(QWidget):
                     border: none;
                 }
             """)
+
+    def _apply_team_compact(self, grp: "QFrame", compact: bool):
+        """团队框 header 紧凑模式（侧边栏折叠态）：仅保留团队 icon
+
+        compact=True：
+          - 隐藏团队名 label 与关闭按钮；
+          - icon 无内容时用团队名首字 + 主题强调色绘制占位并显示（矩阵 C1）；
+          - header 设置 tooltip=团队名（矩阵 C2）。
+        compact=False：逐控件配对恢复——name 显示、close 恢复 hover 逻辑、
+          icon 恢复原可见性与原数据（矩阵 D1 对称性）、tooltip 清空。
+        幂等：相同状态重复调用直接返回。
+        """
+        header = getattr(grp, "_team_header", None)
+        if header is None:
+            return
+        if getattr(grp, "_team_compact", False) == compact:
+            return
+        grp._team_compact = compact
+        name_label = getattr(grp, "_team_name_label", None)
+        close_btn = getattr(grp, "_team_close_btn", None)
+        team_icon = getattr(grp, "_team_icon", None)
+        team_name = (name_label.text() if name_label else "").strip() or "团队"
+
+        if compact:
+            # 记录恢复现场（icon 可见性 + 数据；用 isHidden 逆，与父链显示无关）
+            grp._team_icon_orig_visible = not (team_icon and team_icon.isHidden())
+            grp._team_icon_orig_data = None
+            if team_icon is not None:
+                grp._team_icon_orig_data = {
+                    "initials": team_icon._initials,
+                    "color": team_icon._color,
+                    "fallback": team_icon._fallback_pixmap,
+                }
+                # 占位：团队名首字 + 主题强调色
+                ch = team_name[0] if team_name else "?"
+                team_icon.set_project(ch, Colors.INFO)
+                team_icon.setVisible(True)
+            if name_label is not None:
+                name_label.setVisible(False)
+            if close_btn is not None:
+                close_btn.setVisible(False)
+            header.setToolTip(team_name)
+            # 折叠态增强窄条视觉边界：背景加深（P2-1 方案 B，仅折叠态）
+            self._apply_team_group_style(grp, bg_alpha=70)
+        else:
+            if name_label is not None:
+                name_label.setVisible(True)
+            if close_btn is not None:
+                close_btn.setVisible(False)
+            if team_icon is not None:
+                # 还原原数据与可见性（HexArgb 保留 alpha，避免 rgba→hex 丢透明度）
+                data = getattr(grp, "_team_icon_orig_data", None) or {}
+                if data.get("fallback") is not None:
+                    team_icon.set_fallback_pixmap(data["fallback"])
+                elif data.get("initials"):
+                    from PyQt5.QtGui import QColor as _QColor
+
+                    team_icon.set_project(data["initials"], data["color"].name(_QColor.HexArgb))
+                else:
+                    team_icon.setVisible(False)
+                team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
+            header.setToolTip("")
+            # 展开态恢复原背景透明度（零回归）
+            self._apply_team_group_style(grp, bg_alpha=40)
+        header.update()
 
     def _maybe_remove_empty_group(self, team_id: str):
         """若指定 team 容器已无成员，从布局移除并 deleteLater
@@ -1483,6 +1672,13 @@ class TabPanel(QWidget):
             self._list_layout.addItem(stretch_item)
         else:
             self._list_layout.addStretch()
+
+        # 折叠态重建后统一应用紧凑（补充点 1：重建不得出现非紧凑新控件）
+        if self._collapsed:
+            for item in self._items:
+                item.set_compact(True)
+            for grp in self._team_groups.values():
+                self._apply_team_compact(grp, True)
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""
@@ -1642,7 +1838,8 @@ class TabPanel(QWidget):
             item.refresh_style()
         # 同步刷新团队分组框样式（边框/背景色随主题）
         for grp in self._team_groups.values():
-            self._apply_team_group_style(grp)
+            # 折叠态保持加深背景（bg_alpha=70），避免主题刷新把 alpha 重置回 40
+            self._apply_team_group_style(grp, bg_alpha=70 if getattr(grp, "_team_compact", False) else 40)
         self.update()
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:

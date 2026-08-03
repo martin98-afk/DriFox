@@ -12,6 +12,7 @@ models.dev 模型元数据同步模块。
 """
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,7 +164,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     try:
         context_limit = int(context_limit)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     if context_limit <= 0:
         return None
@@ -194,7 +195,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
             max_output_tokens = int(max_output_tokens)
             if max_output_tokens <= 0:
                 max_output_tokens = None
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             max_output_tokens = None
 
     result: Dict[str, Any] = {
@@ -319,6 +320,31 @@ def _fetch_opencode_zen_free_models(
 #   - 下面这个按每个服务商实例各自的 API_URL / API_KEY 去拉，目的是刷新
 #     "该实例可用的免费模型列表"（支持 OpenCode Zen #2/#3 等多实例）。
 # 网络 + 解析逻辑放 core 层，线程调度与 UI 刷新由调用方（main_widget）负责。
+#
+# 防重复刷新：新建多个标签页（每个窗口初始化后都会触发一次异步刷新）时，
+# 同一实例会在短时间窗口内被重复拉取。这里做两层去重：
+#   1. 模块级时间窗口缓存：同一实例 N 秒内命中缓存直接返回，不发网络请求；
+#   2. in-flight 去重：同一实例并发请求只发一个，其余等待同一结果。
+# 缓存键 = (config_id, base_url, api_key) 三元组：用户修改实例 API_URL/API_KEY
+# 后不再命中旧缓存；仅成功结果才写入缓存，失败可重试。
+_OPENCODE_FREE_CACHE_LOCK = threading.Lock()
+_OPENCODE_FREE_CACHE: Dict[Tuple[str, str, str], Tuple[float, List[str]]] = {}  # key -> (fetched_at, free_models)
+_OPENCODE_FREE_INFLIGHT: Dict[Tuple[str, str, str], threading.Event] = {}  # key -> 请求完成事件
+_OPENCODE_FREE_CACHE_TTL = 300.0  # 秒，时间窗口内同一实例只拉一次
+
+
+def _opencode_free_cache_key(cid: str, base_url: str, key: str) -> Tuple[str, str, str]:
+    """构造实例级缓存键：config_id + 实例参数（URL/Key）三元组。"""
+    return (cid, base_url, key)
+
+
+def _cleanup_opencode_free_cache(now: float) -> None:
+    """惰性清理过期缓存条目（调用方需持锁）。"""
+    expired = [k for k, (ts, _m) in _OPENCODE_FREE_CACHE.items() if (now - ts) >= _OPENCODE_FREE_CACHE_TTL]
+    for k in expired:
+        _OPENCODE_FREE_CACHE.pop(k, None)
+
+
 def fetch_opencode_free_models_for_providers(
     targets: List[Tuple[str, str, str]],
     timeout: float = 15.0,
@@ -330,6 +356,7 @@ def fetch_opencode_free_models_for_providers(
     返回: {config_id: [free_model_names]}，只含成功获取且非空的实例。
 
     同步执行（配合 threading 调用，不阻塞主线程）。单个实例失败不影响其他。
+    同一实例在 _OPENCODE_FREE_CACHE_TTL 窗口内只发一次网络请求（缓存 + in-flight 去重）。
     """
     from app.constants import OPENCODE_SHARED_API_KEY
 
@@ -346,33 +373,80 @@ def fetch_opencode_free_models_for_providers(
                 continue
             if not key:
                 key = OPENCODE_SHARED_API_KEY
-            try:
-                url = f"{base_url.rstrip('/')}/models"
-                headers = {"Authorization": f"Bearer {key}"}
-                resp = client.get(url, headers=headers)
-                if resp.status_code != 200:
+
+            cache_key = _opencode_free_cache_key(cid, base_url, key)
+
+            # ── 1. 时间窗口缓存：命中直接返回 ──
+            with _OPENCODE_FREE_CACHE_LOCK:
+                _cleanup_opencode_free_cache(time.time())
+                cached = _OPENCODE_FREE_CACHE.get(cache_key)
+                if cached and (time.time() - cached[0]) < _OPENCODE_FREE_CACHE_TTL:
+                    results[cid] = cached[1]
                     continue
-                data = resp.json()
-            except Exception as e:
-                logger.debug(f"[OpenCode] 实例 {cid[:12]}... 获取免费模型失败: {e}")
+
+                # ── 2. in-flight 去重：已有请求在途则等待其结果 ──
+                inflight = _OPENCODE_FREE_INFLIGHT.get(cache_key)
+                if inflight is None:
+                    inflight = threading.Event()
+                    _OPENCODE_FREE_INFLIGHT[cache_key] = inflight
+                    is_owner = True
+                else:
+                    is_owner = False
+
+            if not is_owner:
+                # 有在途请求：等待完成后读缓存（锁外等待，避免阻塞其他实例）
+                inflight.wait(timeout=timeout)
+                with _OPENCODE_FREE_CACHE_LOCK:
+                    cached = _OPENCODE_FREE_CACHE.get(cache_key)
+                    if cached and (time.time() - cached[0]) < _OPENCODE_FREE_CACHE_TTL:
+                        results[cid] = cached[1]
                 continue
 
-            # 解析 OpenAI-compatible 响应
-            raw_ids: List[str] = []
-            if isinstance(data, dict):
-                if "data" in data:
-                    raw_ids = [m.get("id", "") or m.get("name", "") for m in data["data"] if isinstance(m, dict)]
-                elif "models" in data:
-                    raw_ids = [m.get("id", "") or m.get("name", "") for m in data["models"] if isinstance(m, dict)]
-            elif isinstance(data, list):
-                raw_ids = [m if isinstance(m, str) else "" for m in data]
-
-            free_models = [m.strip() for m in raw_ids if m.strip().endswith("-free")]
-            if free_models:
-                results[cid] = free_models
-                logger.info(f"[OpenCode] 实例 {cid[:12]}... 免费模型: {free_models}")
+            # ── 3. 本实例首次请求：真正发起网络拉取（锁外执行） ──
+            free_models: List[str] = []
+            try:
+                free_models = _fetch_instance_free_models(client, base_url, key)
+            finally:
+                # 兜底：无论请求成败/异常，必须清理 in-flight 并唤醒等待者，
+                # 防止事件残留导致后续请求永久等待（P1-2 防御）。
+                with _OPENCODE_FREE_CACHE_LOCK:
+                    _OPENCODE_FREE_INFLIGHT.pop(cache_key, None)
+                    if free_models:
+                        _OPENCODE_FREE_CACHE[cache_key] = (time.time(), free_models)
+                        results[cid] = free_models
+                        logger.info(f"[OpenCode] 实例 {cid[:12]}... 免费模型: {free_models}")
+                    inflight.set()
 
     return results
+
+
+def _fetch_instance_free_models(client, base_url: str, key: str) -> List[str]:
+    """拉取单个服务商实例的免费模型列表（-free 后缀）。
+
+    网络失败/非 200/无免费模型时返回空列表，不抛异常。
+    """
+    try:
+        url = f"{base_url.rstrip('/')}/models"
+        headers = {"Authorization": f"Bearer {key}"}
+        resp = client.get(url, headers=headers)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception as e:
+        logger.debug(f"[OpenCode] 实例 {base_url[:12]}... 获取免费模型失败: {e}")
+        return []
+
+    # 解析 OpenAI-compatible 响应
+    raw_ids: List[str] = []
+    if isinstance(data, dict):
+        if "data" in data:
+            raw_ids = [m.get("id", "") or m.get("name", "") for m in data["data"] if isinstance(m, dict)]
+        elif "models" in data:
+            raw_ids = [m.get("id", "") or m.get("name", "") for m in data["models"] if isinstance(m, dict)]
+    elif isinstance(data, list):
+        raw_ids = [m if isinstance(m, str) else "" for m in data]
+
+    return [m.strip() for m in raw_ids if m.strip().endswith("-free")]
 
 
 def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:

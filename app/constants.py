@@ -3,6 +3,14 @@ MAX_SESSION_CARD_CACHE_SIZE = 10
 # OpenCode 免费公用 API key，用于默认服务商配置，让用户下载后开箱即用
 OPENCODE_SHARED_API_KEY = "sk-nUee6hP1bn3GDn9sPApQD6wBv3v2ZBRXx4DLN44E98HSYm86FmWCCbnJNrVAdVoI"
 
+# 历史上使用过的 OpenCode 共享 key。版本更新换 key 时，把旧 key 追加到这里，
+# 启动时用于把用户配置里的过期内置 key 自动升级为新 key（用户自定义 key 不受影响）。
+OPENCODE_LEGACY_KEYS = frozenset(
+    {
+        "sk-zAIZkBM2o3MMKHzryhxmIWPffHyhxSwrpPjtIlyaxBIaCNbOkH2Qx0QXEOJlIRre",
+    }
+)
+
 # ============================================================
 # 可识别的图片扩展名（统一常量，多处复用）
 # 注意：gateway/base.py 中额外包含 .svg，用途不同，不纳入此集合

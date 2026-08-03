@@ -193,7 +193,7 @@ class PluginManager:
                 if name not in saved_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def reset(self):
@@ -439,7 +439,7 @@ class PluginManager:
 
             cfg = Settings.get_instance()
             return set(cfg.enabled_plugins.value or [])
-        except (ImportError, Exception):
+        except ImportError, Exception:
             return set(self._plugins.keys())
 
     def _save_enabled_set(self, enabled: set):
@@ -449,7 +449,7 @@ class PluginManager:
 
             cfg = Settings.get_instance()
             cfg.set(cfg.enabled_plugins, list(enabled), save=True)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     # ============================================================
@@ -496,6 +496,11 @@ class PluginManager:
                 for comp_name in ("commands", "agents", "skills", "themes"):
                     if (item / comp_name).exists():
                         components[comp_name] = True
+                # 团队模板：检测 team_templates/ 目录（含 .yaml 文件才标记）
+                if (item / "team_templates").exists():
+                    has_yaml = any((item / "team_templates").glob("*.yaml"))
+                    if has_yaml:
+                        components["team_templates"] = True
                 if (item / "hooks").exists() and (item / "hooks" / "hooks.json").exists():
                     components["hooks"] = True
                 if (item / ".mcp.json").exists():
@@ -505,12 +510,10 @@ class PluginManager:
                 # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
                 if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
                     components["ui"] = True
-                if isinstance(manifest.get("components"), dict):
-                    # 以实际目录为准覆盖 manifest 的组件声明
-                    # 目的：取消 plugin.json 对组件加载的门控，物理存在的组件全部生效
-                    manifest["components"].update(components)
-                else:
-                    manifest["components"] = components
+                # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
+                # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
+                # 但无 commands/ 目录）导致热更新触发全量命令重载
+                manifest["components"] = components
 
                 discovered.append(
                     PluginInfo(
@@ -576,12 +579,10 @@ class PluginManager:
             if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
                 detected_components["ui"] = True
 
-            if isinstance(manifest.get("components"), dict):
-                # 以实际目录为准覆盖 manifest 的组件声明
-                # 目的：取消 plugin.json 对组件加载的门控，物理存在的组件全部生效
-                manifest["components"].update(detected_components)
-            else:
-                manifest["components"] = detected_components
+            # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
+            # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
+            # 但无 commands/ 目录）导致热更新触发全量命令重载
+            manifest["components"] = detected_components
 
             info = PluginInfo(
                 name=plugin_name,

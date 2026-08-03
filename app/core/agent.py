@@ -353,7 +353,7 @@ class AgentManager:
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
                         self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def reload_agents(self):
@@ -473,7 +473,7 @@ class AgentManager:
                     if hooks_dir.exists() and hooks_dir.is_dir():
                         self._hook_manager._clear_config_watcher(str(hooks_file))
                         self._hook_manager.unregister_skill_hooks(plugin.name)
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def cleanup_plugin_artifacts(self, plugin_name: str):
@@ -510,7 +510,7 @@ class AgentManager:
                     self._hook_manager.load_hooks_from_directory_flat(
                         hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
-        except (ImportError, Exception):
+        except ImportError, Exception:
             pass
 
     def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
@@ -704,7 +704,7 @@ class AgentManager:
                 except Exception:
                     pass  # 团队管理器未就绪时，不暴露团队工具
 
-        logger.info(
+        logger.debug(
             f"[TeamToolsSchema] agent={agent_name}, is_subagent_call={is_subagent_call}, "
             f"team_window_id={bt_window_id!r}, is_in_team={is_in_team}"
         )

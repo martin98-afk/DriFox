@@ -1,11 +1,11 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.4.11] - 2026-08-03
 
-自上一发布版本以来的变更 | 提交数：36 · 文件变更：49 · +6712/-1382 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：60 · 文件变更：204 · +14300/-2486 | 贡献者：dingma, mading
 
-> 重点：**团队会话历史合并展示（方案 A 阶段 4-5）** —— 历史面板团队会话合并为单条（按 run_id 聚合、混排于普通会话列表、显示团队首问预览、点击展开成员列表可单独进入成员会话）；团队合并条目新增「归档」按钮（按 run_id 逐条归档，归档区逐条显示不合并）；恢复团队前自动解散现有团队并关闭全部团队窗口（主窗口保留新建空白会话）。
+> 重点：**团队协作重大升级（方案 A 阶段 1-5）** —— 会话团队元数据落库（team_run_id/team_name/agent_name 列）、TeamManager run_id 注入、历史面板按 run_id 分组与一键恢复、合并展示 + 归档按钮；**Leader 智能体** —— 并行-DAG 任务编排、角色描述、多窗口上下文工具 schema；**Tab 视觉分组** —— 同团队标签页用 QFrame 容器圈出，独立 tab 与团队框分层；**侧边栏折叠态紧凑化** —— Tab/团队框折叠态不再破版（图标 + 状态条 + 团队首字符头像）；**opencode 免费模型实例级刷新去重** —— 300s 缓存 + in-flight 合并；**OpenCode 默认服务商配置** —— `OPENCODE_SHARED_API_KEY`；**legacy API key 升级机制**；**perf 工具链** —— pympler 对象跟踪与泄漏回归脚手架；**主题摘要 fallback**。
 
 ### ✨ 新功能 (New Features)
 
@@ -15,6 +15,9 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **侧边栏折叠态 Tab/团队框紧凑化，折叠后不再破版** (`app/widgets/tab_panel.py`): 折叠侧边栏（46px）时 Tab 项与团队分组框不再挤成一团。折叠态下 TabItem 仅保留图标 + 状态指示条（标题/角色胶囊/关闭按钮隐藏，margin 收紧）；团队框 header 仅保留团队 icon（无项目 icon 时用团队名首字 + 主题色占位，tooltip 显示完整团队名）；团队成员在团队模式下用**角色首字符 + 胶囊同色**绘制头像（原本团队模式隐藏项目 icon，折叠后成员可区分）；展开侧边栏逐控件完整还原（含图标数据/可见性/margin 恢复现场，往返无残留）。三入口（手动 toggle / 启动恢复 / 拖拽展开）统一收口；折叠态新建 Tab、加入团队、布局重建均即时应用紧凑态；hover 不再误弹关闭按钮；团队分组框背景对比度折叠态提升（alpha 40→70）。配套测试 `tests/widgets/test_tab_panel_compact.py`（19 用例）
+- **opencode 免费模型实例级刷新去重** (`app/core/models_dev_sync.py`): 新建多标签页时同一实例被重复拉取（每窗口初始化 3s 后各拉一次）。新增模块级 300s 时间窗口缓存 + in-flight 并发合并（同实例并发只发 1 路）+ 失败可重试（仅成功写缓存）+ 缓存键含实例参数 `(config_id, api_url, api_key)`（用户修改 URL/Key 后不命中旧缓存）+ 惰性清理过期条目
+- **新建标签页日志刷屏收敛** (`app/main_widget.py` `_on_coding_plan_result`): 无 fetcher 的 provider 每次 request 同步广播 None 到所有窗口，导致「[CodingPlan] 无数据，隐藏圆环」DEBUG 一秒刷 5~8 次。新增 `_coding_plan_hidden` 状态标志，仅显示→隐藏状态变化时打日志，已隐藏则静默返回。配套 `app/core/agent.py`：`[TeamToolsSchema]` 日志 INFO→DEBUG 降级
 - **save_session 分支清空被挤出内存的团队会话元数据（数据损坏）** (`app/utils/history_manager.py`): `save_session` 的 `team_run_id/team_name/agent_name` 默认值由 `""` 改为 `None`，新增 None→保留现值语义（与 `update_session` 对齐）——会话被 `_history_limit` 挤出内存（`find_index_by_session_id` 返回 None）后走 save 分支（INSERT OR REPLACE）时不再用空串覆盖团队元数据，防止团队会话从历史分组消失（不可逆）；显式传空串仍清空，全新会话回落空串
 - **团队首问预览选错成员** (`app/utils/history_manager.py` `get_team_first_question`): 最早会话判断由轻量记录 last_time（=updated_at 保存时刻，同轮保存区分度不足）改为完整记录 `messages[-1].timestamp` 参与 min 比较，确保选到真正最早产出的成员
 - **恢复窗口补全完整初始化** (`app/main_widget.py`): 恢复路径为每个恢复窗口调度 `_join_new_window_for_template`（`_on_agent_changed`/`_apply_agent_command_permissions`/`_refresh_team_ui`/`_start_team_watcher`），恢复后成员窗口可正常收发团队邮件
