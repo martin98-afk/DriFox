@@ -3759,7 +3759,17 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.core.command_manager import CommandManager as _CommandManager
 
             _cmd_mgr = _CommandManager.get_instance()
+            # 🛡️ 兜底：select_prompt 匹配不到对应 section 时（如 --create 无等号、
+            # 空参数、未知参数）返回空字符串，回退到完整 body，避免注入空提示词。
+            # 与 PROMPT/AGENT 分支（`if not selected_text: selected_text = replacement`）一致。
             _selected = _cmd_mgr.select_prompt(_cmd_name, _remainder) or ""
+            if not _selected:
+                # CommandNeedDegrade 均来自 FUNCTION 命令，取 FUNCTION 类型定义回退
+                from app.core.command_manager import CommandType as _CommandType
+
+                _cmd_def = _cmd_mgr._commands.get(_cmd_name, {}).get(_CommandType.FUNCTION)
+                if _cmd_def:
+                    _selected = _cmd_def.prompt_text
             _session = self.session_manager.get_current_session()
             if _session:
                 _session.metadata.pop("_pending_skill", None)
@@ -11880,6 +11890,91 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
 
+    def _show_diff_from_messages_in_round(self, session, round_index: int, call_ids: List[str]) -> bool:
+        """从 round 范围内 tool 消息提取内嵌 diff 并展示（file_recorder call_id 不匹配时的 fallback）
+
+        团队/subagent 场景：主消息 tool_call_id = subagent_para 派发 id，
+        子智能体执行工具（write/edit）时的 call_id 是子智能体自己的工具调用 id，
+        两者不匹配 → file_recorder 按 (session_id, call_id) 精确查询匹配不到 →
+        collect_operations_for_round 返回空 → 卡片差异误报"没有差异"。
+
+        此方法遍历 round 范围内 tool 消息提取内嵌 `diff` 字段（多 call_id 匹配），
+        生成合并 HTML 报告展示。直接工具调用（非 subagent）的 tool 消息也带
+        diff 字段，故普通会话的备份缺失场景同样受益。
+
+        Args:
+            session: 当前会话
+            round_index: 用户回合索引
+            call_ids: 该 round 范围内的 tool_call_id 列表
+
+        Returns:
+            True 找到并展示了内嵌 diff；False 无内嵌 diff
+        """
+        from app.utils.diff_viewer import DiffHtmlGenerator
+
+        start_idx, end_idx = get_round_message_indices(session, round_index)
+        if start_idx is None:
+            return False
+
+        canonical = consolidate_messages(session.messages)
+        call_ids_set = set(call_ids or [])
+        diff_parts: List[str] = []
+
+        for i in range(start_idx, min(end_idx, len(canonical))):
+            msg = canonical[i]
+            if msg.get("role") != "tool":
+                continue
+            # 匹配 round 内任一 call_id（含 content 字符串格式中的 tool_call_id）
+            tid = msg.get("tool_call_id", "")
+            content = msg.get("content", "")
+            matched = False
+            if tid and tid in call_ids_set:
+                matched = True
+            elif isinstance(content, str):
+                for cid in call_ids_set:
+                    if f"tool_call_id: {cid}" in content:
+                        matched = True
+                        break
+            if not matched:
+                continue
+            diff_content = msg.get("diff")
+            if not diff_content:
+                continue
+            # 🆕 review#30-#1：normalize_message（message_content.py L748）把任何
+            # dict/list diff 序列化为 Python repr 字符串
+            # （normalized["diff"] = str(message.get("diff"))），故 canonical 消息的
+            # diff 恒为 str，直接 isinstance(dict/list) 分支不可达（此前实现陷阱）。
+            # 为兼容未来工具/worker 产出 dict/list diff（避免 repr 垃圾串塞进
+            # generate_html_report 产出空白 diff 视图、短路方案 C 会话级真实 diff），
+            # 对 repr 字符串尝试 ast.literal_eval 恢复：解析出 dict 则取其 "diff" 键值、
+            # 解析出 list 则逐项拼接；解析失败（纯字符串 diff，真实现状）保持原样。
+            # literal_eval 只解析字面量（str/dict/list/tuple/数字/None），不执行代码，无注入风险。
+            _candidate = str(diff_content)
+            if _candidate.startswith(("{", "[")):
+                try:
+                    import ast as _ast
+
+                    _parsed = _ast.literal_eval(_candidate)
+                    if isinstance(_parsed, dict) and _parsed.get("diff"):
+                        _candidate = str(_parsed.get("diff"))
+                    elif isinstance(_parsed, list):
+                        _candidate = "\n".join(str(x) for x in _parsed if x)
+                except ValueError, SyntaxError:
+                    pass  # 非字面量 repr，保持原样
+            diff_parts.append(_candidate)
+
+        if not diff_parts:
+            return False
+
+        try:
+            combined = "\n".join(diff_parts)
+            html = DiffHtmlGenerator.generate_html_report(combined, "")
+            show_diff_viewer(self, html)
+            return True
+        except Exception as e:
+            logger.error(f"[LLMChatter] 消息内嵌 diff（round 范围）显示失败: {e}")
+            return False
+
     def _on_subagent_log_requested(self, task_ids_str: str):
         """
         处理子智能体日志查看请求 — 使用紧凑卡片显示任务信息
@@ -12005,10 +12100,39 @@ class OpenAIChatToolWindow(ToolWindow):
             all_operations = collect_operations_for_round(self.backend.file_recorder, session_id, all_call_ids)
 
             if not all_operations:
+                # 🆕 方案 A：file_recorder 按 (session_id, call_id) 精确查询匹配不到
+                # （团队/subagent 场景 call_id 漂移）→ 回退到 round 范围内消息内嵌
+                # diff 字段（subagent_worker 写回的 tool 消息 / 直接工具调用消息都带 diff）。
+                if self._show_diff_from_messages_in_round(session, round_index, all_call_ids):
+                    return
+                # 🆕 方案 C：兜底引导——不再单纯误报"没有差异"。
+                # 展示会话级 diff 汇总（get_all_operations_for_session 按 session 全量查
+                # 不受 call_id 漂移影响），并提示用户可点工具运行框查看单工具差异。
+                session_ops = []
+                try:
+                    session_ops = self.backend.file_recorder.get_all_operations_for_session(session_id)
+                except Exception as _e:
+                    logger.warning(f"[card-diff] 会话级查询失败: {_e}")
+                    session_ops = []
+                if session_ops:
+                    try:
+                        html = generate_multi_file_diff_html(session_ops)
+                        show_diff_viewer(self, html)
+                        InfoBar.info(
+                            "会话级差异",
+                            "卡片级未精确匹配到文件操作，已展示整个会话的差异汇总。\n"
+                            "提示：团队/子智能体场景 call_id 可能不匹配，可点击工具运行框查看单工具差异。",
+                            duration=5000,
+                            parent=self,
+                            position=InfoBarPosition.BOTTOM,
+                        )
+                        return
+                    except Exception as _e2:
+                        logger.error(f"[card-diff] 会话级 diff 展示失败: {_e2}")
                 InfoBar.warning(
                     "无差异信息",
-                    "此对话没有修改任何文件，或备份信息已丢失",
-                    duration=3000,
+                    "此对话没有修改任何文件，或备份信息已丢失。\n提示：可点击工具运行框查看单工具差异。",
+                    duration=4000,
                     parent=self,
                     position=InfoBarPosition.BOTTOM,
                 )

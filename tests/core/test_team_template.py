@@ -1290,8 +1290,45 @@ class TestLoadMissingDegradation:
             "load_missing section 应说明写到 `~/.drifox/plugins/user-custom/agents/<role>.md`"
         )
 
-        # 正文"加载团队模板(--load)"小节必须含"子智能体缺失时的补全流程"说明
-        assert "子智能体缺失时的补全流程" in team_md, "正文必须新增「子智能体缺失时的补全流程」4 步说明"
+        # 🆕 公共规范必须位于 section 之外（create 段之前），供两个 section 共享
+        create_start = team_md.index("<!-- section:create -->")
+        common_part = team_md[:create_start]
+        for kw in ("子智能体创建规范", "权限推导规则", "骨架模板", "mkdir", "文件路径约定", "加载时机"):
+            assert kw in common_part, f"「子智能体创建规范」公共区必须含 {kw}（位于 section 之外）"
+        # 公共区不得包含 section 起始标记（避免 select_prompt 误解析）
+        assert "<!-- section:" not in common_part.split("<!--")[0], "公共区不应出现 section 起始标记"
+
+        # 公共规范不允许在 load_missing section 内重复内嵌（已提取到公共区）
+        assert "### 1. 完整骨架模板" not in section_body, (
+            "load_missing section 不应再内嵌完整骨架模板（已提取到公共区，重复会导致注入膨胀）"
+        )
+        assert "### 3. 权限推导规则" not in section_body, (
+            "load_missing section 不应再内嵌权限推导规则（已提取到公共区，由公共区共享）"
+        )
+
+        # 🆕 select_prompt 过滤后公共规范始终保留（与命令报错回退兜底联动）
+        from app.core.builtin_commands import _load_command_file
+        from app.core.command_manager import CommandManager, CommandType
+
+        _loaded = _load_command_file(team_md_path)
+        _cm = CommandManager.get_instance()
+        _cm.register(
+            name="team",
+            command_type=CommandType.FUNCTION,
+            description="t",
+            prompt_text=_loaded["prompt_text"],
+            parameters=_loaded["parameters"],
+            prompt_sections=_loaded["prompt_sections"],
+        )
+        for _marker, _sec in (("--create=x", "任务：创建 DriFox 团队模板"),
+                              ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体")):
+            _out = _cm.select_prompt("team", _marker) or ""
+            assert "子智能体创建规范" in _out, f"select_prompt({_marker!r}) 必须保留公共规范"
+            assert _sec in _out, f"select_prompt({_marker!r}) 必须包含对应 section"
+        # 无匹配参数时（命令报错回退场景）至少返回公共规范，而非空字符串
+        _fallback = _cm.select_prompt("team", "--unknown") or ""
+        assert _fallback.strip(), "select_prompt 无匹配参数时必须返回公共规范（不能为空字符串）"
+        assert "子智能体创建规范" in _fallback, "无匹配参数时回退内容必须含公共规范"
 
 
 # ══════════════════════════════════════════════════════════

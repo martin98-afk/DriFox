@@ -1755,8 +1755,14 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
 
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
-# 缓存键：(is_light, theme_fingerprint, font_family)
+# 缓存键：(is_light, theme_fingerprint, font_family, ...)
 _skeleton_cache: Dict[tuple, str] = {}
+# 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时必须递增，
+# 强制旧缓存失效。教训：#26 data-order 修复依赖骨架 JS 的 getPos 逻辑，
+# 若进程内仍持有旧版骨架缓存与新代码混合（新代码注入 data-order + 旧骨架
+# 无 data-order 分支 / 反之），JS 行为不一致可能导致消息卡片空白。
+# 递增时机：任何改动 _load_skeleton 生成的 HTML/JS 结构时 +1。
+_SKELETON_CACHE_VERSION = 2
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2551,6 +2557,9 @@ class CodeWebViewer(QWebEngineView):
 
         theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
         cache_key = (
+            # 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时递增，
+            # 防止旧版骨架缓存与新代码混合导致 JS 行为不一致（卡片空白根因之一）。
+            _SKELETON_CACHE_VERSION,
             self._light_skeleton,
             theme_fp,
             font_family,
@@ -3913,11 +3922,19 @@ class CodeWebViewer(QWebEngineView):
                         try {{
                             container.innerHTML = newHtml;
                         }} catch(e) {{
-                            // innerHTML 替换异常时恢复透明度，避免永久半透明残影
+                            // 🆕 方案 C（#33）：innerHTML 替换异常时**不再 throw**——
+                            // 原实现 re-throw 会导致调用方 JS 中断（后续渲染逻辑不执行），
+                            // 消息卡片呈现空白（P0 回归根因候选之一）。
+                            // 回退为 textContent 纯文本兜底：保证正文永远显示（即使 JS
+                            // 异常也不空白），同时恢复透明度避免半透明残影。
+                            console.error('updateContent innerHTML failed, fallback to textContent:', e);
                             container.style.opacity = '1';
                             container.style.transition = '';
-                            console.error('updateContent innerHTML failed:', e);
-                            throw e;
+                            try {{
+                                container.textContent = newHtml;
+                            }} catch(e2) {{
+                                console.error('updateContent textContent fallback also failed:', e2);
+                            }}
                         }}
                         // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);

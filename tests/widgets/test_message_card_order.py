@@ -237,3 +237,114 @@ def test_append_reasoning_no_block_anywhere_creates_new():
     rs = [b for b in card._content_data if isinstance(b, dict) and b.get("type") == "reasoning"]
     assert len(rs) == 1, f"无 reasoning 块时应新建，实际 {len(rs)} 个"
     assert rs[0]["content"] == "新思考"
+
+
+# ──────────────────────────────────────────────
+# 方案 D（统一 data-order 排序）+ 方案 C（折叠框边界兜底）AST 回归
+# ──────────────────────────────────────────────
+
+
+def _extract_src() -> str:
+    p = Path(__file__).resolve().parent.parent.parent / "app" / "widgets" / "message_card.py"
+    return p.read_text(encoding="utf-8")
+
+
+def test_reorganize_content_uses_data_order():
+    """AST：reorganizeContent 的 getPos 必须优先 data-order 排序。
+
+    修复"JS 注入工具块（不在本次 blocks）getPos 无 posMap → 1e9 → 恒排最后"
+    导致的思考/工具不交错问题（方案 D 核心）。
+    """
+    src = _extract_src()
+    # reorganizeContent 函数体内的 getPos 必须读取 data-order 并 parseFloat
+    assert re.search(r"getAttribute\(['\"]data-order['\"]\)", src), (
+        "reorganizeContent 的 getPos 必须读取 data-order 属性"
+    )
+    assert "parseFloat(od)" in src, "getPos 必须 parseFloat(data-order) 后参与排序"
+    # data-order 必须优先于 posMap（在 posMap 兜底之前返回）
+    od_pos = src.find("getAttribute('data-order')")
+    posmap_pos = src.find("posMap['bk:' + bk]")
+    assert od_pos != -1 and posmap_pos != -1 and od_pos < posmap_pos, (
+        "getPos 中 data-order 必须优先于 posMap（data-order 分支在前）"
+    )
+
+
+def test_inject_tool_streaming_html_sets_data_order():
+    """AST：_inject_tool_streaming_html 新建工具块时必须注入 data-order。
+
+    方案 D-1：Python 端按 _tool_insert_anchors / _tool_call_order 计算
+    tool/think 序列位置，JS 新建块时 setAttribute('data-order', ...)。
+    """
+    import ast as _ast
+
+    tree = _ast.parse(_extract_src())
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_inject_tool_streaming_html":
+            target = node
+            break
+    assert target is not None, "未找到 _inject_tool_streaming_html 方法"
+    func_src = textwrap.dedent(ast.unparse(target))
+
+    # 必须从锚点计算 tool/think 序列位置（data-order 值来源）
+    assert "_tool_insert_anchors.get(tool_call_id)" in func_src, (
+        "data-order 计算必须读取 _tool_insert_anchors（工具调用锚点）"
+    )
+    # 必须生成 setAttribute('data-order', ...) JS
+    assert "setAttribute('data-order'" in func_src, "JS 新建工具块时必须 setAttribute('data-order', ...)"
+    # 同锚点多工具按启动序号细分
+    assert "_tool_call_order.get(tool_call_id" in func_src, (
+        "同锚点多工具必须按 _tool_call_order 启动序号细分 data-order"
+    )
+
+
+def test_save_and_restore_preserves_data_order():
+    """AST：_build_save_and_restore_js restore 时必须保留 data-order。
+
+    方案 D-2：restore 用 outerHTML 重建后显式从保存的 html 重新取回 data-order。
+    """
+    src = _extract_src()
+    # 保存端：save 时记录 outerHTML（天然含 data-order）
+    assert "html:el.outerHTML" in src, "save 端必须保存 outerHTML（含 data-order）"
+    # 恢复端：显式从保存的 html 匹配 data-order 并设置
+    assert re.search(r"b\.html\.match\(/data-order", src), (
+        "restore 端必须从保存的 html 匹配 data-order 并重新设置（显式兜底）"
+    )
+
+
+def test_append_tool_result_preserves_data_order():
+    """AST：append_tool_result 替换流式块 / 追加完成块时必须同步 data-order。
+
+    方案 D-3：流式块替换为完成态时继承原 data-order；无已有块追加时注入。
+    """
+    src = _extract_src()
+    # 流式块替换时继承旧 data-order
+    assert "var _odOld = existing.getAttribute('data-order')" in src, (
+        "append_tool_result 替换流式块时必须继承原 data-order"
+    )
+    # 追加完成块时注入 data-order（与流式注入同口径，f-string 占位符带花括号）
+    assert "data-order', {_order_value_js}" in src, "append_tool_result 追加完成块时必须注入 data-order"
+
+
+def test_maybe_finish_thinking_moves_out_of_content_placeholder():
+    """AST：_maybe_finish_thinking_for_tool 替换 think-streaming 后必须迁移出正文区。
+
+    方案 C：若替换后 think-block 仍在 #content-placeholder（未被 reorganizeContent
+    迁移，如渲染节流/坞态切换），立即 moveChild 到 #tool-content，根治
+    "思考框跑出折叠框"。
+    """
+    import ast as _ast
+
+    tree = _ast.parse(_extract_src())
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_maybe_finish_thinking_for_tool":
+            target = node
+            break
+    assert target is not None, "未找到 _maybe_finish_thinking_for_tool 方法"
+    func_src = textwrap.dedent(ast.unparse(target))
+
+    # JS 必须判断父节点是否为 content-placeholder
+    assert "newBlock.parentNode === " in func_src, "方案 C 必须判断替换后父节点（content-placeholder 兜底迁移）"
+    # 必须迁移到 tool-content
+    assert "appendChild(newBlock)" in func_src, "方案 C 必须把跑出折叠框的 think-block 迁回 #tool-content"

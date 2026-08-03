@@ -15,10 +15,94 @@ prompt_sections:
   --load=: "load_missing"
 ---
 
+## 子智能体创建规范（公共，所有 section 共享）
+
+> 以下规范被 `create` 与 `load_missing` 两个 section 共同引用，
+> 置于 section 之外保证 `select_prompt` 过滤后始终保留（所有命令注入时都能看到）。
+
+### 1. 完整骨架模板（写入 `~/.drifox/plugins/user-custom/agents/<role>.md`）
+
+**Frontmatter**（变量替换 `<role>` 为 kebab-case 角色名，`<description>` 为 30-80 字角色定位）：
+
+```yaml
+---
+description: <从用户描述推断的一句话角色定位，30-80 字>
+mode: subagent
+hidden: false
+temperature: 0.3
+steps: 50
+permission:
+  # 见下方「权限推导规则」
+  "<按权限推导规则填充>"
+---
+```
+
+**正文**：
+
+```markdown
+# Role
+你是一个专业的 <角色中文名>，负责 <一句核心职责>。
+
+# Core Capabilities
+- <能力 1>
+- <能力 2>
+- <能力 3>
+
+# Workflow
+1. <接收输入>
+2. <执行步骤>
+3. <输出交付物>
+
+# Hard Rules
+- <红线 1>
+- <红线 2>
+- <红线 3>
+```
+
+### 2. 写文件前置步骤
+
+先用 `bash` 工具确保目录存在：
+
+```bash
+mkdir -p ~/.drifox/plugins/user-custom/agents/
+```
+
+然后对每个确认新建的 role，用 `write` 工具写入完整骨架。
+
+### 3. 权限推导规则（AI 自动判定，无需问用户）
+
+按角色描述中的关键词匹配，4 个模板任选其一：
+
+| 角色关键词（中文/英文） | permission 模板 | 典型场景 |
+|---|---|---|
+| 含 `测试`/`运行`/`部署`/`压测`/`runner`/`tester` | `bash: allow`、其余 `ask` | perf-tester, qa-runner |
+| 含 `审查`/`分析`/`审计`/`只读`/`reviewer`/`analyzer`/`auditor` | `write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | perf-analyzer, security-auditor |
+| 含 `写入`/`修改`/`迁移`/`重构`/`writer`/`migrator`/`refactorer` | `*: allow` | db-migrator, refactorer |
+| 含 `协调`/`统筹`/`PM`/`scrum`/`master`/`coordinator` | `question`/`team_*`: `allow`，`write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | scrum-master, pm-bot |
+
+**不匹配的兜底**（默认）：`write`/`edit`/`multi_edit`/`bash`: `ask`，`*: allow`（与 `plan.md` 模板一致，最保守安全）。
+
+### 4. 文件路径约定
+
+| 类型 | 路径 |
+|---|---|
+| 新建智能体 | `~/.drifox/plugins/user-custom/agents/<role>.md` |
+| 团队模板 yaml | `~/.drifox/plugins/user-custom/team_templates/<name>.yaml` |
+
+`<role>`：kebab-case，2-4 单词（与 Available Subagents 命名风格一致，如 `perf-tester`）。
+`<name>`：kebab-case，2-4 单词，表达团队核心用途（如 `perf-test-team`）。
+
+### 5. 新建智能体的加载时机（必须在写入后告知用户）
+
+> ⚠️ 本次流程仅创建了 `.md` 文件，新角色**不会**自动加入当前会话的 `Available Subagents`。
+> - 下次 `/team --load=<name>` 时若 watchfile 重载已完成，新角色立即可用
+> - 若 watchfile 未触发（罕见），重启 DriFox 后可用
+> - 当前会话内不能用 `subagent_para` 调起新角色
+
 <!-- section:create -->
 ## 任务：创建 DriFox 团队模板
 
-请根据以下描述，创建一个新的团队模板 yaml 文件。如果所需的角色不在 Available Subagents 中，**允许在 user-custom/agents/ 下新建智能体**（详见下方 A-F 规则）。
+请根据以下描述，创建一个新的团队模板 yaml 文件。如果所需的角色不在 Available Subagents 中，**允许在 user-custom/agents/ 下新建智能体**（详见下方 A-F 规则与上方「子智能体创建规范」）。
 
 ### 用户需求描述
 $ARGUMENTS
@@ -46,84 +130,12 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
     4. 改名（输入新名字后重新比对）
 ```
 
-- **选项 1**：用 `write` 工具写入完整骨架（见步骤 B-2），记录为 🆕 已创建
+- **选项 1**：按上方「子智能体创建规范」第 1/2 节，用 `write` 工具写入完整骨架，记录为 🆕 已创建
 - **选项 2**：从 Available Subagents 中选最相似的 1-2 个作为替换，记录为 ✅ 已有（替代）
 - **选项 3**：记录为 ⏭️ 已跳过，**不写入 yaml**
 - **选项 4**：用户输入新名 → 回到步骤 A-2 重新比对 → 重复 B 流程
 
-##### B-1. 完整骨架模板（写入 `~/.drifox/plugins/user-custom/agents/<role>.md`）
-
-**Frontmatter**（变量替换 `<role>` 为 kebab-case 角色名，`<description>` 为 30-80 字角色定位）：
-
-```yaml
----
-description: <从用户描述推断的一句话角色定位，30-80 字>
-mode: subagent
-hidden: false
-temperature: 0.3
-steps: 50
-permission:
-  # 见下方 C 权限推导规则
-  "<按 C 规则填充>"
----
-```
-
-**正文**：
-
-```markdown
-# Role
-你是一个专业的 <角色中文名>，负责 <一句核心职责>。
-
-# Core Capabilities
-- <能力 1>
-- <能力 2>
-- <能力 3>
-
-# Workflow
-1. <接收输入>
-2. <执行步骤>
-3. <输出交付物>
-
-# Hard Rules
-- <红线 1>
-- <红线 2>
-- <红线 3>
-```
-
-##### B-2. 写文件前置步骤
-
-先用 `bash` 工具确保目录存在：
-
-```bash
-mkdir -p ~/.drifox/plugins/user-custom/agents/
-```
-
-然后对每个选项 1 确认的 role，用 `write` 工具写入完整骨架。
-
-#### C. 权限推导规则（AI 自动判定，无需问用户）
-
-按角色描述中的关键词匹配，4 个模板任选其一：
-
-| 角色关键词（中文/英文） | permission 模板 | 典型场景 |
-|---|---|---|
-| 含 `测试`/`运行`/`部署`/`压测`/`runner`/`tester` | `bash: allow`、其余 `ask` | perf-tester, qa-runner |
-| 含 `审查`/`分析`/`审计`/`只读`/`reviewer`/`analyzer`/`auditor` | `write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | perf-analyzer, security-auditor |
-| 含 `写入`/`修改`/`迁移`/`重构`/`writer`/`migrator`/`refactorer` | `*: allow` | db-migrator, refactorer |
-| 含 `协调`/`统筹`/`PM`/`scrum`/`master`/`coordinator` | `question`/`team_*`: `allow`，`write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | scrum-master, pm-bot |
-
-**不匹配的兜底**（默认）：`write`/`edit`/`multi_edit`/`bash`: `ask`，`*: allow`（与 `plan.md` 模板一致，最保守安全）。
-
-#### D. 文件路径约定
-
-| 类型 | 路径 |
-|---|---|
-| 新建智能体 | `~/.drifox/plugins/user-custom/agents/<role>.md` |
-| 团队模板 yaml | `~/.drifox/plugins/user-custom/team_templates/<name>.yaml` |
-
-`<role>`：kebab-case，2-4 单词（与 Available Subagents 命名风格一致，如 `perf-tester`）。
-`<name>`：kebab-case，2-4 单词，表达团队核心用途（如 `perf-test-team`）。
-
-#### E. 失败与边界处理
+#### C. 失败与边界处理
 
 | 场景 | 处理 |
 |---|---|
@@ -133,9 +145,9 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 | `write` 失败 | 同上，附带失败原因 |
 | 用户描述过短无法解析角色 | 用 question 反问"请补充团队核心职责"，最多 2 轮澄清后兜底（按通用 4 角色 `leader`+`plan`+`build`+`code-reviewer` 模板生成 yaml） |
 
-#### F. 聊天内可视化（markdown 表格，仅 LLM 输出，无外部依赖）
+#### D. 聊天内可视化（markdown 表格，仅 LLM 输出，无外部依赖）
 
-**F-1. 检测阶段输出**（步骤 A 完成后立即输出）：
+**D-1. 检测阶段输出**（步骤 A 完成后立即输出）：
 
 ```markdown
 ## 团队成员检测结果
@@ -148,7 +160,7 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 | perf-analyzer | ❌ 缺失 | 将新建 | 压测分析 |
 ```
 
-**F-2. 交付阶段输出**（yaml 写入完成后立即输出）：
+**D-2. 交付阶段输出**（yaml 写入完成后立即输出）：
 
 ```markdown
 ## 交付清单
@@ -166,14 +178,7 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 
 **状态 emoji 对照**：`✅` 已有 / `❌` 缺失（待确认）/ `🆕` 已创建 / `⏭️` 已跳过。
 
-**重要提示**（必须在 F-2 之后追加告知用户）：
-
-```markdown
-> ⚠️ **关于新建智能体的加载时机**：本次流程仅创建了 `.md` 文件，新角色**不会**自动加入当前会话的 `Available Subagents`。
-> - 下次 `/team --load=<name>` 时若 watchfile 重载已完成，新角色立即可用
-> - 若 watchfile 未触发（罕见），重启 DriFox 后可用
-> - 当前会话内不能用 `subagent_para` 调起新角色
-```
+**重要提示**（必须在 D-2 之后追加告知用户，见上方「子智能体创建规范」第 5 节加载时机说明）。
 
 ### 模板格式规范
 
@@ -197,7 +202,7 @@ agents:
 
 `agent_name` 来源**优先**从你的系统提示词中 `## Available Subagents` 节列出的子智能体名称中选取。
 
-**如果某个所需角色不在 Available Subagents 中**，遵循上方步骤 B 流程，在 `~/.drifox/plugins/user-custom/agents/` 创建该角色的智能体定义（仅用户确认后才创建）。
+**如果某个所需角色不在 Available Subagents 中**，遵循上方「子智能体创建规范」在 `~/.drifox/plugins/user-custom/agents/` 创建该角色的智能体定义（仅用户确认后才创建）。
 
 所有 Available Subagents 列出的子智能体 + 本流程新建的角色都可作为团队成员角色。
 
@@ -226,7 +231,7 @@ agents:
 3. `agents` 中角色名不能重复（schema 校验会拒绝重复项，包括与 Available Subagents 已有角色重名）
 4. description 会显示在模板列表界面，请简洁清晰
 5. 每个 `agent` 条目的 `description` 角色描述为必填项
-6. 缺失角色的 `.md` 必须先写入（步骤 B-2），再写入 yaml，否则 yaml 引用未存在的角色
+6. 缺失角色的 `.md` 必须先写入（上方「子智能体创建规范」第 1/2 节），再写入 yaml，否则 yaml 引用未存在的角色
 <!-- end -->
 
 <!-- section:load_missing -->
@@ -257,67 +262,10 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
     4. 改名（输入新名字后重新比对）
 ```
 
-- **选项 1**：用 `write` 工具写入完整骨架，记录为 🆕 已创建
+- **选项 1**：按上方「子智能体创建规范」第 1/2 节，用 `write` 工具写入完整骨架到 `~/.drifox/plugins/user-custom/agents/<role>.md`，记录为 🆕 已创建
 - **选项 2**：从 Available Subagents 中选最相似的 1-2 个作为替换，记录为 ✅ 已有（替代）
 - **选项 3**：记录为 ⏭️ 已跳过，**不写入 yaml / .md**（跳过不是改名，用户接受该角色不在模板中）
-- **选项 4**：用户输入新名 → 回到步骤 2 重新比对 → 重复 B 流程
-
-##### 骨架模板
-
-选项 1 确认后，先 `bash` 工具确保目录存在：
-
-```bash
-mkdir -p ~/.drifox/plugins/user-custom/agents/
-```
-
-然后对每个选项 1 确认的 role，用 `write` 工具写入完整骨架到 `~/.drifox/plugins/user-custom/agents/<role>.md`：
-
-```yaml
----
-description: <从任务上下文推断的一句话角色定位，30-80 字>
-mode: subagent
-hidden: false
-temperature: 0.3
-steps: 50
-permission:
-  "<按 C 规则填充>"
----
-```
-
-```markdown
-# Role
-你是一个专业的 <角色中文名>，负责 <一句核心职责>。
-
-# Core Capabilities
-- <能力 1>
-- <能力 2>
-- <能力 3>
-
-# Workflow
-1. <接收输入>
-2. <执行步骤>
-3. <输出交付物>
-
-# Hard Rules
-- <红线 1>
-- <红线 2>
-- <红线 3>
-```
-
-#### C. 权限推导规则（AI 自动判定，无需问用户；独立嵌入本段以保证 `select_prompt` 过滤后能独立运行）
-
-按角色描述中的关键词匹配，4 个模板任选其一：
-
-| 角色关键词（中文/英文） | permission 模板 | 典型场景 |
-|---|---|---|
-| 含 `测试`/`运行`/`部署`/`压测`/`runner`/`tester` | `bash: allow`、其余 `ask` | perf-tester, qa-runner |
-| 含 `审查`/`分析`/`审计`/`只读`/`reviewer`/`analyzer`/`auditor` | `write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | perf-analyzer, security-auditor |
-| 含 `写入`/`修改`/`迁移`/`重构`/`writer`/`migrator`/`refactorer` | `*: allow` | db-migrator, refactorer |
-| 含 `协调`/`统筹`/`PM`/`scrum`/`master`/`coordinator` | `question`/`team_*`: `allow`，`write`/`edit`/`multi_edit`: `deny`，其余 `*`: allow | scrum-master, pm-bot |
-
-**不匹配的兜底**（默认）：`write`/`edit`/`multi_edit`/`bash`: `ask`，`*: allow`（与 `plan.md` 模板一致，最保守安全）。
-
-> 🆕 后续维护提示：若 create 段 C 规则有更新，**必须同步本副本**（可借助 `TestLoadMissingDegradation::test_team_md_load_missing_section_and_frontmatter` 等 AST 静态断言防止漂移漂移）。
+- **选项 4**：用户输入新名 → 回到步骤 2 重新比对 → 重复本流程
 
 #### 3. 失败与边界处理
 
@@ -345,8 +293,5 @@ permission:
 **下一步**：再次执行 `/team --load=<name>` 完成加载（新建的角色已被 watchfile 重载）。
 ```
 
-> ⚠️ **关于新建智能体的加载时机**：本次流程仅创建了 `.md` 文件，新角色**不会**自动加入当前会话的 `Available Subagents`。
-> - 下次 `/team --load=<name>` 时若 watchfile 重载已完成，新角色立即可用
-> - 若 watchfile 未触发（罕见），重启 DriFox 后可用
-> - 当前会话内不能用 `subagent_para` 调起新角色
+> ⚠️ 新建智能体的加载时机说明见上方「子智能体创建规范」第 5 节。
 <!-- end -->
