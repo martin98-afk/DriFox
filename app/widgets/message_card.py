@@ -1714,7 +1714,7 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
 @lru_cache(maxsize=64)  # 256→64：实际唯一渲染内容通常 < 32 条，64 覆盖 2 个会话绰绰有余
-def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
@@ -1735,22 +1735,22 @@ def _render_markdown_to_html_cached_impl(raw_md: str, reasoning: str, compact: b
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, reasoning: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
     - 保持 LRU 缓存以提高重复内容的性能
-    """
-    # 添加思考块内容
-    if reasoning:
-        raw_md = _render_think_block(reasoning, completed=True) + raw_md
 
+    注：reasoning 已作为 <think> 块按实际顺序嵌入 raw_md（由 _build_incremental_md /
+    content_to_markdown 按 _content_data 顺序生成），此处不再前置拼接——旧的
+    "思考恒顶部" 正是由前置拼接 + append 恒末尾共同造成（Bug B 修复）。
+    """
     # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, reasoning, compact=compact)
+        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact)
 
-    return _render_markdown_to_html_cached_impl(raw_md, reasoning, compact=compact)
+    return _render_markdown_to_html_cached_impl(raw_md, compact=compact)
 
 
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
@@ -4712,7 +4712,6 @@ class CodeWebViewer(QWebEngineView):
             # 非流式模式：直接渲染，所有 <think> 都是已完成的
             html_content = _render_markdown_to_html_cached(
                 raw_md,
-                "",
                 compact=self._tool_compact_mode,
             )
             # 将图片相对路径转为绝对 file:/// 路径
@@ -6183,6 +6182,15 @@ class MessageCard(SimpleCardWidget):
         # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
         # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
         self._tool_args_first_seen_ids: set = set()
+        # 🆕 Bug B（顺序错乱修复）：工具结果插入锚点 + 启动序号。
+        # 同一卡片内"思考/工具/正文"必须按实际流式到达顺序交错，
+        # 而不是思考恒顶部、工具恒底部。锚点 = 工具调用发生时 _content_data 的长度，
+        # append_tool_result 时 insert(锚点) 而非 append，工具结果插回调用发生的位置。
+        self._tool_insert_anchors: Dict[str, int] = {}  # tool_call_id → 工具调用时流末尾位置
+        self._tool_call_order: Dict[str, int] = {}  # tool_call_id → 递增启动序号（同锚点工具按调用序）
+        # 🆕 Bug B：当前活动思考块。append_reasoning 只追加到它（避免合并进已完成的
+        # 旧思考块导致多轮思考堆积）；工具调用/新块开始时置 None / 覆盖。
+        self._active_thinking_block: Optional[dict] = None
         self._pending_content: Optional[str] = None
         self._reasoning_total_len = 0  # reasoning 内容总长度计数器，避免每次遍历
         self._viewer_container = QWidget(self)
@@ -7804,17 +7812,38 @@ class MessageCard(SimpleCardWidget):
         diff: str = None,
         echarts: str = None,
     ):
-        self._content_data.append(
-            make_tool_result_block(
-                tool_name=tool_name,
-                arguments=arguments,
-                result=result,
-                success=success,
-                tool_call_id=tool_call_id,
-                diff=diff,
-                echarts=echarts,
-            )
+        block = make_tool_result_block(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            success=success,
+            tool_call_id=tool_call_id,
+            diff=diff,
+            echarts=echarts,
         )
+        # 🆕 Bug B（顺序错乱修复）：按锚点插入（工具调用发生的位置），而非恒 append 末尾。
+        # 锚点 = 工具调用时 _content_data 的长度（update_tool_streaming 记录），
+        # 使"思考→工具→正文→工具→正文"按实际到达顺序交错，而不是思考恒顶部、
+        # 工具恒底部。同锚点多工具（一轮并行调用）：跳过所有"启动序号更早"的
+        # 已插入工具块插到其后，保证按调用顺序排列（结果晚到也不乱序）。
+        # 乱序兜底：无锚点（历史会话渲染等非流式路径）/ content 非 list / 锚点越界
+        # → append 末尾，与修复前行为一致。
+        anchor = self._tool_insert_anchors.get(tool_call_id)
+        if anchor is not None and isinstance(self._content_data, list) and 0 <= anchor <= len(self._content_data):
+            my_order = self._tool_call_order.get(tool_call_id, 0)
+            insert_at = anchor
+            _n = len(self._content_data)
+            while insert_at < _n:
+                _blk = self._content_data[insert_at]
+                if isinstance(_blk, dict) and _blk.get("type") == "tool_result":
+                    _tid = _blk.get("tool_call_id", "")
+                    if self._tool_call_order.get(_tid, 0) < my_order:
+                        insert_at += 1
+                        continue
+                break
+            self._content_data.insert(insert_at, block)
+        else:
+            self._content_data.append(block)
         # 标记为已完成：后续 streaming 更新直接跳过，避免在完成态工具块上
         # 错误挂载 data-streaming 属性导致样式混乱
         if tool_call_id:
@@ -7834,7 +7863,6 @@ class MessageCard(SimpleCardWidget):
         # [PERF] 預計算並緩存此工具塊的 markdown，後續增量渲染直接拼接
         # 避免 content_to_markdown 遍歷全部 _content_data 做 _sanitize_result + 排序
         if tool_call_id and self.viewer:
-            block = self._content_data[-1]
             single_md = content_to_markdown([block])
             cache = getattr(self.viewer, "_tool_md_cache", None)
             if cache is not None:
@@ -8062,6 +8090,9 @@ class MessageCard(SimpleCardWidget):
         使新块获得独立的 data-streaming 状态。
         """
         self._content_data.append({"type": "reasoning", "content": ""})
+        # 🆕 Bug B：新块成为当前活动思考块。append_reasoning 只追加到它，
+        # 避免后续 reasoning 内容合并进已完成的旧思考块导致多轮思考堆积顶部。
+        self._active_thinking_block = self._content_data[-1]
         # 新一轮思考开始，仅重置 streaming 标志。
         # _thinking_finalized 留在 True（上一轮已完成），直到新 reasoning chunk 到达
         # （append_reasoning 首 chunk）才置为 False，防止在两轮之间的窗口期，
@@ -8272,30 +8303,37 @@ class MessageCard(SimpleCardWidget):
         # 检查 _content_data 中最后一个 reasoning block（允许其后存在空 text block）
         if not self._content_data or not isinstance(self._content_data, list):
             return
-        last_reasoning_idx = -1
-        for i in reversed(range(len(self._content_data))):
-            blk = self._content_data[i]
-            if isinstance(blk, dict) and blk.get("type") == "reasoning":
-                last_reasoning_idx = i
-                break
-            # 遇到非空非 reasoning block 停止向前查找（避免误绑定早期思考）
-            if isinstance(blk, dict):
-                bt = blk.get("type")
-                if bt == "text" and (blk.get("text") or "").strip():
+        # 🆕 Bug B：优先使用当前活动思考块（start_new_thinking_block 创建的新块），
+        # 避免工具调用时误绑定到更早的已完成思考块（多轮思考堆积的根因之一）。
+        last_block = self._active_thinking_block if isinstance(self._active_thinking_block, dict) else None
+        if last_block is None:
+            last_reasoning_idx = -1
+            for i in reversed(range(len(self._content_data))):
+                blk = self._content_data[i]
+                if isinstance(blk, dict) and blk.get("type") == "reasoning":
+                    last_reasoning_idx = i
                     break
-                if bt in ("tool_result", "tool_streaming"):
+                # 遇到非空非 reasoning block 停止向前查找（避免误绑定早期思考）
+                if isinstance(blk, dict):
+                    bt = blk.get("type")
+                    if bt == "text" and (blk.get("text") or "").strip():
+                        break
+                    if bt in ("tool_result", "tool_streaming"):
+                        break
+                if isinstance(blk, str) and blk.strip():
                     break
-            if isinstance(blk, str) and blk.strip():
-                break
-        if last_reasoning_idx < 0:
-            return
-        last_block = self._content_data[last_reasoning_idx]
+            if last_reasoning_idx < 0:
+                return
+            last_block = self._content_data[last_reasoning_idx]
         if not isinstance(last_block, dict):
             return
         raw_content = last_block.get("content") or ""
         if not raw_content.strip():
             # 空 block（start_new_thinking_block 刚创建）跳过 — 等后续 reasoning chunks
             return
+        # 🆕 Bug B：思考完成 → 活动块置空，后续 reasoning 不再追加到此块
+        # （下一轮思考由 start_new_thinking_block 创建新块并重新登记）。
+        self._active_thinking_block = None
         # 保持原始 content 用于 block-key 计算，确保与 _inject_think_cards
         # （通过 _build_incremental_md）产生的 key 一致。
         # 否则每次 _perform_update → reorganizeContent 会因 key 不匹配
@@ -8402,6 +8440,14 @@ class MessageCard(SimpleCardWidget):
         # 已完成参数接收或已追加工具结果的不再更新，防止完成态被退回 streaming 状态
         if tool_call_id in self._finished_streaming_ids:
             return
+        # 🆕 Bug B：首次见 tool_call_id 记录插入锚点 = 工具调用发生时 _content_data 的长度。
+        # append_tool_result 用 insert(锚点) 把结果插回工具调用发生的位置（而非恒末尾），
+        # 保持"思考→工具→正文→工具→正文"交错顺序。同锚点多工具按启动序号保序。
+        if tool_call_id not in self._tool_insert_anchors:
+            self._tool_insert_anchors[tool_call_id] = (
+                len(self._content_data) if isinstance(self._content_data, list) else 0
+            )
+            self._tool_call_order[tool_call_id] = len(self._tool_call_order)
         # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
         # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"
         self._maybe_finish_thinking_for_tool(tool_call_id)
@@ -8504,18 +8550,20 @@ class MessageCard(SimpleCardWidget):
         使其与文本、工具结果按实际发生顺序交错渲染。
         """
         t0 = time.time()
-        # 查找最后一个 reasoning block（不管是否在末尾，避免 content 先到导致新增到末尾）
-        last_reasoning_idx = -1
-        for i in reversed(range(len(self._content_data))):
-            if self._content_data[i].get("type") == "reasoning":
-                last_reasoning_idx = i
-                break
+        # 🆕 Bug B：只追加到当前活动思考块（start_new_thinking_block 创建的新块）。
+        # 兜底：无活动块时查找最后一个 reasoning block（兼容未走 start_new_thinking_block
+        # 的流路径），仍未找到才新建块。活动块是 dict 对象引用，即使中间被工具结果
+        # 锚点 insert 挤动列表位置，引用仍有效。
+        _target_block = self._active_thinking_block if isinstance(self._active_thinking_block, dict) else None
+        if _target_block is None:
+            for i in reversed(range(len(self._content_data))):
+                if self._content_data[i].get("type") == "reasoning":
+                    _target_block = self._content_data[i]
+                    break
 
-        if last_reasoning_idx >= 0:
-            # 找到已有的最后一个 reasoning 块，追加内容
-            self._content_data[last_reasoning_idx]["content"] = (
-                self._content_data[last_reasoning_idx].get("content", "") or ""
-            ) + text
+        if _target_block is not None:
+            # 找到已有的（活动）思考块，追加内容
+            _target_block["content"] = (_target_block.get("content", "") or "") + text
         else:
             # 未找到，新增 reasoning 块
             self._content_data.append({"type": "reasoning", "content": text})

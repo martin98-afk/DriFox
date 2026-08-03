@@ -895,6 +895,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
+        # 🆕 流式结束滚底宽限截止（monotonic 时间戳，0 = 无宽限）：
+        # 流式刚结束 2s 内忽略 _user_intentionally_away_from_bottom 拦截，
+        # 防止用户流式中途上滚导致结束时的兜底滚底被跳过（详见 _ensure_at_bottom）。
+        self._stream_finished_grace_until: float = 0.0
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
@@ -12363,22 +12367,28 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bottom_anchor_timer.start()
         else:
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
-            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=3))
+            # 🆕 retries 3 → 8：延长兜底窗口（8×300ms ≈ 2.4s），覆盖 WebEngine
+            # 全量重渲染异步完成后的最终高度（长消息渲染可能超时）。
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
         # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
         self._suppress_scroll_sync_count = 0
 
-    def _ensure_at_bottom(self, retries: int = 3):
+    def _ensure_at_bottom(self, retries: int = 8):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
         Args:
             retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
+                （默认 8 次 × 300ms 间隔 ≈ 2.4s 兜底窗口，覆盖长消息重渲染延迟）
         """
         # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
         if getattr(self, "_is_destroyed", False):
             return
-        # 如果用户已经主动滚离底部，不再强制拉回
-        if self._user_intentionally_away_from_bottom:
+        # 如果用户已经主动滚离底部，不再强制拉回。
+        # 🆕 例外：流式刚结束的 2s 宽限期内仍强制滚底（防止用户流式中途上滚
+        # 导致结束时的兜底滚底被跳过 —— 用户意图此时通常仍是"看最新回复"，
+        # 2s 后恢复拦截，避免打断用户读取历史）。
+        if self._user_intentionally_away_from_bottom and time.monotonic() >= self._stream_finished_grace_until:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         if scroll_bar.value() < scroll_bar.maximum() - 20:
@@ -14180,6 +14190,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
+        # 🆕 流式结束滚底宽限 2s：此窗口内 _ensure_at_bottom 忽略用户滚离拦截
+        # （防止用户流式中途上滚导致兜底滚底被跳过）。
+        self._stream_finished_grace_until = time.monotonic() + 2.0
+        # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
+        # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
+        # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
+        QTimer.singleShot(500, self._scroll_to_bottom)
+        QTimer.singleShot(1000, self._scroll_to_bottom)
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。

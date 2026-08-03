@@ -154,3 +154,98 @@ class TestIsHookMessageUi:
 
     def test_ui_filters_other_hook(self):
         assert _is_hook_message_ui(_hook()) is True
+
+
+class TestGetUserRoundRangesTeamMail:
+    """子任务 #22：数据 round 范围与 UI 渲染/卡片 round_index 口径统一（TeamMail 独立 round）
+
+    会话 [A(用户), X(TeamMail), B(用户)]：B 卡片 round_index=2（batch 含 X），
+    若 round_ranges 只有 2 个 → 撤回静默失败 + 差异统计 cannot determine valid round_index。
+    修复后 get_user_round_ranges 放行 TeamMail，三者口径一致（TeamMail 撤回/统计双杀修复）。
+    """
+
+    def test_team_mail_forms_independent_round(self):
+        """用户A + 邮件X + 用户B → 3 个 round（TeamMail 独立成 round）。"""
+        from app.core.message_content import get_user_round_ranges
+
+        msgs = [_user("A"), _mail("邮件X"), _user("B")]
+        ranges = get_user_round_ranges(msgs)
+        assert len(ranges) == 3, f"TeamMail 应独立成 round，实际 {len(ranges)} 个：{ranges}"
+        # 各 round 独立：A / X / B
+        assert ranges[0] == (0, 1), "round 0 应为 A"
+        assert ranges[1] == (1, 2), "round 1 应为 TeamMail X"
+        assert ranges[2] == (2, 3), "round 2 应为 B"
+
+    def test_team_mail_round_index_matches_display(self):
+        """B 卡片 round_index=2 必须落在 ranges[2]（UI 渲染 batch 口径一致）。"""
+        from app.core.message_content import get_user_round_ranges
+
+        msgs = [_user("A"), _mail("邮件X"), _user("B")]
+        ranges = get_user_round_ranges(msgs)
+        # 卡片 round_index 由 batch 计数（含 TeamMail）得到：B 是第 3 个 user batch → index=2
+        # 必须 < len(ranges)=3，否则 _on_card_diff_requested 走 cannot determine 分支
+        assert 2 < len(ranges), "round_index=2 必须落在 round_ranges 内（否则差异统计失败）"
+        assert ranges[2][0] <= 2 < ranges[2][1]
+
+    def test_leading_hook_merges_into_team_mail_round(self):
+        """TeamMail 前导 hook 并入 TeamMail round（删除邮件轮次时连同 hook 一起删）。
+
+        注意：用 PreUserMessage hook（非 SessionStart —— SessionStart 是会话级，
+        不并入任何 round）。
+        """
+        from app.core.message_content import get_user_round_ranges
+
+        pre_hook = {"role": "user", "content": "<reminder>pre</reminder>", "_hook_event": "PreUserMessage"}
+        msgs = [_user("A"), pre_hook, _mail("邮件X"), _user("B")]
+        ranges = get_user_round_ranges(msgs)
+        assert len(ranges) == 3, f"前导 hook 并入 TeamMail round，仍 3 个 round：{ranges}"
+        # round 1 向前扩展：起点含前导 hook（idx 1），end 为 B 起点（idx 3）
+        assert ranges[1] == (1, 3), f"TeamMail round 应含前导 hook：{ranges}"
+
+    def test_stop_block_user_still_merged(self):
+        """回归：非 TeamMail 的 hook 合成 user（StopBlock）仍并入前一个真实 round。"""
+        from app.core.message_content import get_user_round_ranges
+
+        stop = {"role": "user", "content": "x", "_hook_event": "StopBlock"}
+        msgs = [_user("A"), stop, _user("B")]
+        ranges = get_user_round_ranges(msgs)
+        assert len(ranges) == 2, f"StopBlock 不应独立成 round：{ranges}"
+
+    def test_plain_session_unchanged(self):
+        """回归：无 TeamMail 的普通会话 round_ranges 不变。"""
+        from app.core.message_content import get_user_round_ranges
+
+        msgs = [_user("A"), _assistant("回复1"), _user("B"), _assistant("回复2")]
+        ranges = get_user_round_ranges(msgs)
+        assert len(ranges) == 2, f"普通会话应 2 个 round：{ranges}"
+
+    def test_ast_round_ranges_allows_team_mail(self):
+        """AST 回归：get_user_round_ranges 的 user_indices 过滤必须放行 TeamMail。
+
+        防止未来被改回 `not msg.get('_hook_event')`（会重新造成 TeamMail 撤回/统计双杀）。
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "message_content.py"
+        tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "get_user_round_ranges":
+                target = node
+                break
+        assert target is not None, "未找到 get_user_round_ranges 方法"
+
+        import textwrap
+
+        func_src = textwrap.dedent(ast.unparse(target))
+        # 过滤条件必须含 TeamMail 放行：or msg.get('_hook_event') == 'TeamMail'
+        assert re.search(
+            r"""not msg\.get\(['"]_hook_event['"]\) or msg\.get\(['"]_hook_event['"]\) == ['"]TeamMail['"]""",
+            func_src,
+        ), (
+            "get_user_round_ranges 的 user_indices 过滤必须放行 TeamMail"
+            "（`not _hook_event or _hook_event == 'TeamMail'`），否则 TeamMail 撤回/统计双杀回归"
+        )

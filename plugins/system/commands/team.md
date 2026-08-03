@@ -15,35 +15,6 @@ prompt_sections:
   --load=: "load_missing"
 ---
 
-## 用户可见行为
-
-### 加载团队模板（`--load=<name>`）
-
-加载模板时**完全新建独立窗口**，已有标签页一律不动（不切换 agent、不改标题、不重新入队）：
-- 模板 N 个角色 → 全部通过新建窗口承载，已有窗口保持原样
-- 新建窗口走延迟 join team（`_join_new_window_for_template`），确保 backend 初始化完成后立即加入团队
-- 新建窗口标题保持默认/会话标题，**不**被 agent 名覆盖
-
-#### 子智能体缺失时的补全流程
-
-加载模板时若检测到缺失角色，**不再弹 InfoBar 报错**，改走 prompt 注入补全流程（与 `--create=` 链路一致）：
-
-1. `_handle_team_load` 调用 `_degrade_team_load_to_prompt(name, missing)`：从 `<!-- section:load_missing -->` 段拼装补全提示词，写入 `session.metadata["_pending_command"]`，同时置 `self._team_load_degraded = True`
-2. `_on_send_clicked` 在 `_execute_command` 之后检查 `getattr(self, "_team_load_degraded", False)`：为真则清除标记并**继续**走 `engine.send_message`（不让 FUNCTION 分支提前 `return`），让 `inject_command_prompt.py` PreUserMessage hook 把补全提示词注入 LLM 上下文
-3. AI 按补全流程逐个用 `question` 工具询问每个缺失角色的处理方式（新建骨架 / 用已有角色替代 / 跳过 / 改名），详见 `<!-- section:load_missing -->` 段
-4. 所有缺失角色处理完后，AI 输出"补全完成"清单，提示用户重新执行 `/team --load=<name>` 完成加载（watchfile 重载后新建角色立即可用）
-
-> ⚠️ 正常加载路径（**无缺失成员时**）完全不受影响：`_handle_team_load` 跳过 missing 分支后走原 ConfirmDialog → 建窗口 → 延后 join → 排列流程，**不**经过补全提示词注入。
-
-### Tab 标题与胶囊
-
-- 团队模式下，Tab 标题**始终保持会话标题**（让 Windows 任务栏能区分各窗口），agent 名不显示在 Tab 标题上
-- Tab 胶囊（角色 pill）单独显示 agent 名，与标题无关
-  - 即使新建窗口的会话标题是默认 "飘狐"，加入团队后也会立即显示胶囊（不依赖标题变化触发）
-  - 退出团队时立即清除胶囊
-- Tab 面板把同团队的所有标签页用分组框（`#teamGroup`）圈出，独立窗口在框外
-  - 加入团队时自动入框、退出团队时自动出框
-
 <!-- section:create -->
 ## 任务：创建 DriFox 团队模板
 
@@ -275,7 +246,7 @@ $ARGUMENTS
 #### 1. 解析缺失角色
 从 `$ARGUMENTS` 的 `缺失角色:` 段解析出每个角色名（如 `perf-tester`、`perf-analyzer`），形成有序列表。
 
-#### 2. 逐个用 `question` 工具询问（复用 `<!-- section:create -->` B 流程）
+#### 2. 逐个用 `question` 工具询问
 
 ```
 question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
@@ -286,12 +257,12 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
     4. 改名（输入新名字后重新比对）
 ```
 
-- **选项 1**：用 `write` 工具写入完整骨架（见 `<!-- section:create -->` B-1），记录为 🆕 已创建
+- **选项 1**：用 `write` 工具写入完整骨架，记录为 🆕 已创建
 - **选项 2**：从 Available Subagents 中选最相似的 1-2 个作为替换，记录为 ✅ 已有（替代）
 - **选项 3**：记录为 ⏭️ 已跳过，**不写入 yaml / .md**（跳过不是改名，用户接受该角色不在模板中）
 - **选项 4**：用户输入新名 → 回到步骤 2 重新比对 → 重复 B 流程
 
-##### 骨架模板（与 `<!-- section:create -->` 一致）
+##### 骨架模板
 
 选项 1 确认后，先 `bash` 工具确保目录存在：
 
@@ -379,4 +350,3 @@ permission:
 > - 若 watchfile 未触发（罕见），重启 DriFox 后可用
 > - 当前会话内不能用 `subagent_para` 调起新角色
 <!-- end -->
-

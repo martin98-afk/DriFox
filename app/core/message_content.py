@@ -829,9 +829,15 @@ def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int
     # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
     # 不作为 round 起点。续命回复纳入前一个真实 user round 范围，
     # 与 build_node_preview_data 的节点过滤保持一致。
+    # 🆕 例外：TeamMail（_hook_event="TeamMail"）视为独立 user round 起点——
+    # 与 UI 渲染 batch（_is_hook_message 放行 TeamMail 独立成卡）和卡片
+    # round_index（_get_user_round_index_for_batch_index 计入 TeamMail）口径一致。
+    # 此前此处排除 TeamMail 导致三者口径漂移：会话 [A, X(TeamMail), B] 时
+    # B 卡片 round_index=2 但 round_ranges 只有 2 个 → 撤回静默失败 +
+    # 差异统计 cannot determine valid round_index（TeamMail 撤回/统计双杀）。
     user_indices = [
         idx for idx, msg in enumerate(canonical_messages)
-        if msg.get("role") == "user" and not msg.get("_hook_event")
+        if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
     ]
 
     # 第一遍：计算每个 round 的 start

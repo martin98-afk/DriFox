@@ -358,6 +358,89 @@ def test_delete_keeps_next_round_hook():
     print("✅ PASS: deleting middle round preserves next round's PreUserMessage hook")
 
 
+def make_team_mail_msg(content: str = "📨 团队任务邮件") -> Dict[str, Any]:
+    """创建 TeamMail 消息（子任务 #22：round_ranges 独立 round）"""
+    return {
+        "role": "user",
+        "content": content,
+        "timestamp": "2025-01-01 00:00:00",
+        "_hook_event": "TeamMail",
+    }
+
+
+def test_team_mail_round_ranges_boundary():
+    """
+    子任务 #22：TeamMail 在 round_ranges 中独立成 round（撤回 + 差异统计双杀修复）
+
+    会话 [A(用户), X(TeamMail), B(用户)]：
+    - UI 渲染 batch：TeamMail 独立成 user batch → 3 个 user batch
+    - 卡片 round_index：B 的 index=2（batch 计数含 TeamMail）
+    - 数据 round_ranges：修复前排除 TeamMail → 只有 2 个 round → B 的 round_index=2
+      out of range → 撤回静默失败 + 差异统计 cannot determine valid round_index
+    - 修复后：TeamMail 独立 round → 3 个 round，三者口径一致
+    """
+    messages = [
+        make_user_msg("A"),
+        make_team_mail_msg("邮件X"),
+        make_user_msg("B"),
+    ]
+    canonical = consolidate_messages(messages)
+    ranges = get_user_round_ranges(canonical)
+    print("\n=== test_team_mail_round_ranges_boundary ===")
+    print(f"canonical: {len(canonical)} msgs")
+    for i, m in enumerate(canonical):
+        print(f"  [{i}] role={m.get('role')}, hook={m.get('_hook_event', 'N/A')}, content={str(m.get('content', ''))[:30]}")
+    print(f"round_ranges: {ranges}")
+
+    assert len(ranges) == 3, f"TeamMail 应独立成 round，期望 3 个，实际 {len(ranges)}：{ranges}"
+
+    # B 卡片 round_index = 2（batch 计数含 TeamMail）必须落在 ranges 内
+    round_index_b = 2
+    assert round_index_b < len(ranges), (
+        f"B 的 round_index={round_index_b} 必须 < len(ranges)={len(ranges)}（否则撤回/差异统计失败）"
+    )
+    s, e = ranges[round_index_b]
+    assert canonical[s].get("content") == "B", f"round_index 2 应指向 B：{canonical[s]}"
+
+    # 删除 TeamMail round（索引 1）只删邮件本身，A 和 B 保留
+    start, end = ranges[1]
+    new_messages = canonical[:start] + canonical[end:]
+    new_canonical = consolidate_messages(new_messages)
+    new_ranges = get_user_round_ranges(new_canonical)
+    assert len(new_canonical) == 2, f"删除 TeamMail 后应剩 A、B 2 条，实际 {len(new_canonical)}"
+    assert len(new_ranges) == 2, f"删除 TeamMail round 后应剩 2 个 round，实际 {new_ranges}"
+
+    print("✅ PASS: TeamMail 独立 round，删除邮件轮次只删邮件本身")
+
+
+def test_team_mail_round_with_leading_hook_merges():
+    """
+    子任务 #22：TeamMail 前导 hook 并入 TeamMail round（删除邮件轮次时连同 hook 一起删）
+    """
+    messages = [
+        make_user_msg("A"),
+        make_hook_msg("PreUserMessage", "ctx: 邮件前导"),
+        make_team_mail_msg("邮件X"),
+        make_user_msg("B"),
+    ]
+    canonical = consolidate_messages(messages)
+    ranges = get_user_round_ranges(canonical)
+    print("\n=== test_team_mail_round_with_leading_hook_merges ===")
+    print(f"round_ranges: {ranges}")
+    assert len(ranges) == 3, f"期望 3 个 round（A / 邮件含前导hook / B），实际 {len(ranges)}：{ranges}"
+
+    # TeamMail round（索引 1）起点应扩展含前导 hook
+    s, e = ranges[1]
+    assert canonical[s].get("_hook_event") == "PreUserMessage", (
+        f"TeamMail round 起点应含前导 hook，实际 [{s}, {e}) 起点={canonical[s]}"
+    )
+    assert canonical[s + 1].get("_hook_event") == "TeamMail", (
+        f"TeamMail round 应包含邮件本体：{canonical[s+1]}"
+    )
+
+    print("✅ PASS: TeamMail 前导 hook 并入邮件 round（删除时连同 hook 一起删）")
+
+
 if __name__ == "__main__":
     test_single_round_hook_cleanup()
     test_multi_round_hook_cleanup()
