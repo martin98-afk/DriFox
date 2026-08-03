@@ -713,6 +713,20 @@ class ChatBackend(QObject):
                 # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示
                 # 使用 QTimer 推迟执行（backend 本身不依赖 Qt，由调用方确保）
                 self._defer_non_critical_plugin_init(pm)
+            else:
+                # ── 窗口重开场景：补启动插件热更新监听 ──
+                # 应用托盘驻留（setQuitOnLastWindowClosed(False)），关闭全部窗口后进程
+                # 仍存活，但 backend.cleanup() 已把 watcher 引用计数归零并停止监听线程
+                # （_stop_plugin_watcher 会复位 _plugin_watcher_started=False）。
+                # 而 PluginManager 单例仍保持已初始化状态，上方首次初始化分支被跳过，
+                # 导致 watcher 永不重启 → 此后新增 agent/命令/技能文件均不触发热重载，
+                # /命令列表看不到新增子智能体。
+                # _start_plugin_watcher 内部有引用计数 + started 标志双重保护：
+                # watcher 存活时调用只 +1 引用计数，不会重复创建线程。
+                try:
+                    self._start_plugin_watcher()
+                except Exception as e:
+                    logger.error(f"[ChatBackend] 窗口重开重启插件监听失败: {e}")
 
             logger.info(
                 f"[ChatBackend] PluginManager 初始化完成，"
