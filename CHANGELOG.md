@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **opencode 免费模型实例级刷新去重** (`app/core/models_dev_sync.py`): 新建多标签页时同一实例被重复拉取（每窗口初始化 3s 后各拉一次）。新增模块级 300s 时间窗口缓存 + in-flight 并发合并（同实例并发只发 1 路）+ 失败可重试（仅成功写缓存）+ 缓存键含实例参数 `(config_id, api_url, api_key)`（用户修改 URL/Key 后不命中旧缓存）+ 惰性清理过期条目
+- **新建标签页日志刷屏收敛** (`app/main_widget.py` `_on_coding_plan_result`): 无 fetcher 的 provider 每次 request 同步广播 None 到所有窗口，导致「[CodingPlan] 无数据，隐藏圆环」DEBUG 一秒刷 5~8 次。新增 `_coding_plan_hidden` 状态标志，仅显示→隐藏状态变化时打日志，已隐藏则静默返回。配套 `app/core/agent.py`：`[TeamToolsSchema]` 日志 INFO→DEBUG 降级
 - **save_session 分支清空被挤出内存的团队会话元数据（数据损坏）** (`app/utils/history_manager.py`): `save_session` 的 `team_run_id/team_name/agent_name` 默认值由 `""` 改为 `None`，新增 None→保留现值语义（与 `update_session` 对齐）——会话被 `_history_limit` 挤出内存（`find_index_by_session_id` 返回 None）后走 save 分支（INSERT OR REPLACE）时不再用空串覆盖团队元数据，防止团队会话从历史分组消失（不可逆）；显式传空串仍清空，全新会话回落空串
 - **团队首问预览选错成员** (`app/utils/history_manager.py` `get_team_first_question`): 最早会话判断由轻量记录 last_time（=updated_at 保存时刻，同轮保存区分度不足）改为完整记录 `messages[-1].timestamp` 参与 min 比较，确保选到真正最早产出的成员
 - **恢复窗口补全完整初始化** (`app/main_widget.py`): 恢复路径为每个恢复窗口调度 `_join_new_window_for_template`（`_on_agent_changed`/`_apply_agent_command_permissions`/`_refresh_team_ui`/`_start_team_watcher`），恢复后成员窗口可正常收发团队邮件
