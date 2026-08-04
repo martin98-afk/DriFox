@@ -842,6 +842,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
         self._bg_finalize_lock = threading.Lock()
         self._bg_finalize_started = False
+        # ★ B4 温和层：WebEngine 并发页上限（本窗口已渲染未卸载卡片数）
+        self._rendered_card_count: int = 0
+        self._max_rendered_cards: int = _MAX_RENDERED_CARDS
+        self._render_tick: float = 0.0
+        self._recycle_lru_call_count: int = 0  # 计数校准（每 20 次重算实际计数）
         # ★ 用量聚合（T6）：套餐用量结果由进程级单例 UsageService 广播
         # （全局缓存 + 单例轮询，N tab × 同 provider 只发 1 路请求），
         # 替代旧的 per-window _coding_plan_result_ready 信号桥接。
@@ -8725,6 +8730,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         new_start = max(0, self._visible_batch_start - self._incremental_visible_batch_count)
         prepend_batches = self._message_batch[new_start : self._visible_batch_start]
+        # 🛡️ B9 防御：回收路径只清 _batch_cards 保留 _message_batch，
+        # 但极端情况（旧数据/切会话竞态）可能残留 None，过滤兜底防崩溃
+        prepend_batches = [b for b in prepend_batches if b is not None]
         if not prepend_batches:
             return
 
@@ -8800,8 +8808,9 @@ class OpenAIChatToolWindow(ToolWindow):
                                 recycled_card_ids.add(id(card))
                                 above_widgets.append(card)
                         recycled_count += 1
+                    # 🛡️ B9 修复：只卸载 UI（_batch_cards=None），
+                    # 保留 _message_batch 数据（上滚回可重建，数据不丢失）
                     self._batch_cards[batch_idx] = None
-                    self._message_batch[batch_idx] = None
 
             # ── 收集下方（未来方向）需要回收的卡片 ──
             below_widgets = []
@@ -8816,8 +8825,8 @@ class OpenAIChatToolWindow(ToolWindow):
                                 recycled_card_ids.add(id(card))
                                 below_widgets.append(card)
                         recycled_count += 1
+                    # 🛡️ B9 修复：只卸载 UI，保留数据
                     self._batch_cards[batch_idx] = None
-                    self._message_batch[batch_idx] = None
 
             # ── 执行回收（从布局移除 + deleteLater）──
             if above_widgets:
@@ -8845,6 +8854,124 @@ class OpenAIChatToolWindow(ToolWindow):
                 if recycled_count > 0:
                     QTimer.singleShot(100, lambda: gc.collect())
 
+        finally:
+            self._is_virtual_recycling = False
+
+    # ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
+
+    def _unload_batch(self, batch_idx: int) -> int:
+        """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
+
+        Args:
+            batch_idx: 批次索引
+
+        Returns:
+            被移除卡片的总高度（用于滚动补偿）
+        """
+        if not (0 <= batch_idx < len(self._batch_cards)):
+            return 0
+        cards = self._batch_cards[batch_idx]
+        if not cards:
+            return 0
+        removed_h = 0
+        alive_cards = []
+        for card in cards:
+            if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                try:
+                    removed_h += card.height()
+                except RuntimeError:
+                    pass
+                alive_cards.append(card)
+        if alive_cards:
+            delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
+        # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
+        self._batch_cards[batch_idx] = None
+        # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
+        rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
+        self._rendered_card_count = max(0, self._rendered_card_count - rendered_in_batch)
+        return removed_h
+
+    def _batch_is_protected(self, batch_idx: int) -> bool:
+        """判断批次是否受保护（不可淘汰）：
+        - 可视区 ±1 批（刚滚出/即将滚入，重建成本高）
+        - 包含当前流式输出助手卡片的批次
+        - 欢迎卡片所在批次
+        """
+        if not (0 <= batch_idx < len(self._batch_cards)):
+            return True
+        cards = self._batch_cards[batch_idx]
+        if not cards:
+            return False
+        # 可视区 ±1
+        if batch_idx >= max(0, self._visible_batch_start - 1) and batch_idx <= self._visible_batch_end + 1:
+            return True
+        # 当前流式卡
+        if self._current_assistant_card is not None and self._current_assistant_card in cards:
+            return True
+        # 欢迎卡
+        for card in cards:
+            if getattr(card, "_is_welcome", False):
+                return True
+        return False
+
+    def _batch_distance(self, batch_idx: int) -> int:
+        """批次到可视区的距离（批次数，0 = 在可视区）。"""
+        if batch_idx < self._visible_batch_start:
+            return self._visible_batch_start - 1 - batch_idx
+        if batch_idx > self._visible_batch_end:
+            return batch_idx - (self._visible_batch_end + 1)
+        return 0
+
+    def _recycle_lru_batches(self):
+        """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
+
+        仅回收超过 _max_rendered_cards 的部分；受保护批次跳过；
+        每卸一批做滚动补偿（setValue(值 - removed_h)）防止视口跳动。
+        """
+        if self._is_virtual_recycling or not self._batch_cards:
+            return
+        # 计数校准（可选增强）：每 20 次调用重算一次实际计数，防漂移
+        self._recycle_lru_call_count += 1
+        if self._recycle_lru_call_count % 20 == 1:
+            # 计数校准：只统计已懒渲染的卡（_batch_cards 可能含已创建未渲染卡）
+            actual = 0
+            for cards in self._batch_cards:
+                if cards:
+                    actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
+            self._rendered_card_count = actual
+
+        if self._rendered_card_count <= self._max_rendered_cards:
+            return
+
+        over = self._rendered_card_count - self._max_rendered_cards
+        # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
+        candidates = []
+        for idx, cards in enumerate(self._batch_cards):
+            if not cards:
+                continue
+            if self._batch_is_protected(idx):
+                continue
+            candidates.append((self._batch_distance(idx), idx))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        self._is_virtual_recycling = True
+        try:
+            scroll_bar = self.chat_scroll_area.verticalScrollBar()
+            removed_total = 0
+            for dist, idx in candidates:
+                if self._rendered_card_count <= self._max_rendered_cards:
+                    break
+                removed_h = self._unload_batch(idx)
+                removed_total += removed_h
+            if removed_total > 0:
+                try:
+                    scroll_bar.setValue(max(0, scroll_bar.value() - removed_total))
+                except RuntimeError:
+                    pass
+                logger.debug(
+                    f"[B4-recycle] 淘汰 {len(candidates)} 候选中的超限批次，"
+                    f"_rendered_card_count={self._rendered_card_count}/{self._max_rendered_cards}"
+                )
         finally:
             self._is_virtual_recycling = False
 
@@ -8965,6 +9092,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_loading_history_batches = False
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
+        # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
+        self._rendered_card_count = 0
         while self.chat_layout.count():
             item = self.chat_layout.takeAt(0)
             if item.widget():
@@ -9604,6 +9733,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 批量渲染所有卡片
         for card in batch:
             card.ensure_rendered()
+
+        # ★ B4 温和层：渲染后统一计数，超限时下一帧触发 LRU 淘汰
+        new_count = sum(1 for c in batch if getattr(c, "_lazy_rendered", False))
+        if new_count > 0:
+            self._rendered_card_count += new_count
+            global _global_rendered_pages
+            _global_rendered_pages += new_count
+            if self._rendered_card_count > self._max_rendered_cards:
+                QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
         # 批次全部渲染完成，统一更新滚动
         if self._loading_session:
@@ -17246,6 +17384,10 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # ★ B4 温和层：窗口关闭时全局观测计数递减（本窗口已渲染卡片数）
+        global _global_rendered_pages
+        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count)
+
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
         if not OpenAIChatToolWindow._instances:
             try:
@@ -17952,6 +18094,14 @@ def _is_sip_deleted(obj) -> bool:
 
 # GC 钩子（T9）：模块级防抖标志，150ms 内多次触发只执行一次。
 _gc_hook_pending = False
+
+
+# ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
+# 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
+# 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
+# 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
+_MAX_RENDERED_CARDS = 18
+_global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
 
 def _run_gc_hook():
