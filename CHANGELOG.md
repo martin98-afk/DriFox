@@ -1,6 +1,39 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.12] - 2026-08-04
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：67 · +4599/-781 | 贡献者：dingma, mading
+
+> 重点：**消息卡片工具/思考折叠框顺序修复收官**（data-order 计算修正 + 简洁模式/流式完成瞬间时序 + 清缓存）；**config-sync 模型/主题跟随修复**（仅未手动选模型的窗口跟随云端、自定义主题不被静默回退、窗口模型选择跟随云端 SelectedModel）；**DeepSeek 思考模式兼容**（reasoning_content 必填处理）；**diff-viewer 默认统一视图**；**SSE 流内 503 自动重试**；**provider 图标系统字号适配**；**团队协作工具与图标**；**插件 watcher 重启修复**。
+
+### ✨ 新功能 (New Features)
+
+- **窗口模型选择跟随云端 SelectedModel** (`app/core/config_sync.py` + `app/main_widget.py`): gitee 同步后窗口模型选择跟随云端 SelectedModel
+- **DeepSeek 思考模式兼容** (`app/core/message_content.py` + `app/core/workers/chat_worker.py` + `app/core/workers/subagent_worker.py`): 实现 reasoning_content 必填要求，thinking 模式下兼容 DeepSeek
+- **团队协作工具与图标** (`app/utils/icon_name_map.py` + `app/widgets/render_helpers.py` + `icons/`): 新增团队消息/成员列表工具及「团队」「邮件-发送」SVG 图标（明暗双主题）
+- **消息卡片渲染与团队模板创建增强** (`app/widgets/message_card.py` + `app/main_widget.py`): skeleton HTML 缓存版本化、innerHTML 替换容错、团队模板子代理创建公共规范抽取
+- **命令执行流程与错误处理增强** (`app/core/command_manager.py` + `app/main_widget.py`): 命令降级为 prompt 注入机制、缺失团队成员时的降级流程
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **流式工具块 data-order 计算修正** (`app/widgets/message_card.py`): 修复流式工具块 data-order 计算，确保思考与工具顺序正确；简洁模式与流式完成瞬间折叠框顺序错乱修复（方案D + 清缓存 + 补齐 data-order）
+- **SSE 流内 503 请求队列已满自动重试** (`app/core/workers/chat_worker.py`): 503 请求队列已满错误加入自动重试
+- **云端主题同步后全量刷新** (`app/core/config_sync.py` + `app/utils/theme_manager.py`): 主题变化时完整刷新所有窗口
+- **仅未手动选模型的窗口同步跟随云端** (`app/main_widget.py`): 手动选过模型的窗口不再被云端覆盖
+- **gitee 同步后自定义主题静默回退时序修复** (`app/core/config_sync.py`): 自定义主题不被同步时序静默回退默认
+- **diff-viewer 默认统一直列视图** (`app/utils/diff_viewer.py`): 默认进入 unified 视图而非并排 split
+- **provider 图标系统字号适配** (`app/widgets/cards/settings/provider_setting_card.py`): 适配系统字号 + 字母回退跳过非字母字符
+- **插件 watcher 重启** (`app/core/backend.py`): 所有窗口关闭后重新打开时重启插件 watcher
+
+### ♻️ 代码重构 (Refactoring)
+
+- **团队加载与会话恢复逻辑重构** (`app/main_widget.py` + `app/core/message_content.py`): `_handle_team_load` 缺失成员改为 CommandNeedDegrade 异常、废弃 `_degrade_team_load_to_prompt`、消息卡片渲染顺序增强
+
+### 🔧 其他 (Chores & Build)
+
+- 版本号升级至 v0.4.12（pyproject / config / installer / README）
+
 ## [v0.4.11] - 2026-08-03
 
 自上一版本以来的变更 | 提交数：60 · 文件变更：204 · +14300/-2486 | 贡献者：dingma, mading
