@@ -8494,7 +8494,23 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
         if self._is_streaming and self.backend.chat_engine:
-            self.backend.stop_streaming()
+            # 🐛 修复（切换项目/新建会话打断对话）：
+            # 1) stop_streaming 返回的中断消息（partial 回复快照）必须应用回 session，
+            #    否则被打断的会话缺最后部分回复（对齐 _on_auto_compact_requested /
+            #    _on_stop_clicked 的成熟写法）。
+            # 2) 主动复位 AI 状态为 idle：stop 后 worker 的 stream_finished 会被
+            #    _on_worker_finished 因 is_streaming=False 忽略，_on_stream_finished
+            #    永不触发 → _set_ai_state("idle") 永不执行 → TabPanel 边框动画
+            #    停留在 streaming（"正在对话"模式不消失）。
+            try:
+                interrupted = self.backend.stop_streaming()
+                if interrupted:
+                    self._apply_interrupted_messages_to_session(interrupted)
+                    # 中断消息已应用到 session，确保后续 _auto_save_current_session 不跳过
+                    self._session_dirty = True
+            except Exception as e:
+                logger.warning(f"[MainWidget] 新建会话停止流式失败: {e}")
+            self._set_ai_state("idle")
 
         # 🛡️ 标记会话切换：stop_streaming 后 worker 仍可能在跨线程事件循环里
         # 投递 _on_messages_updated / _on_stream_finished / _do_post_stream_cleanup
