@@ -1017,3 +1017,86 @@ class TestThemeSyncTiming:
             svc.settingsRestored.disconnect()
 
         assert fired, "settingsRestored 应在云端配置全部写回 ConfigItem 内存后发射"
+
+    # ────────────────────────────────────────────────────────────
+    # bug#6 回归：同步后 qfluentwidgets 主题只刷新一半（图标/资源未全量刷新）
+    # ────────────────────────────────────────────────────────────
+
+    class _FakeSettingsInstance:
+        """实例化替身：get_instance 返回实例（真实 Settings 语义）。
+
+        ui_theme_style 必须是类属性 —— _reload_settings_on_main_thread 遍历
+        dir(cfg.__class__) 匹配 ConfigItem，类属性才能被找到（真实 Settings 中
+        ui_theme_style 就是类属性）。get_instance 返回实例，使 cfg.__class__
+        是本类而非 type，避免遍历内建属性抛异常。
+        """
+
+        # 类属性：被 _reload_settings_on_main_thread 的 dir(cfg.__class__) 匹配
+        ui_theme_style = OptionsConfigItem(
+            "UI",
+            "ThemeStyle",
+            "lumia",
+            OptionsValidator(["lumia"]),
+        )
+
+        def __init__(self):
+            self.file = Path("")
+            # 重置共享类属性状态，避免测试间污染
+            type(self).ui_theme_style.value = "lumia"
+            type(self).ui_theme_style.validator.__init__(["lumia"])
+
+        def get_instance(self):
+            return self
+
+    def _write_theme_config(self, tmp_path: Path, theme: str) -> Path:
+        cfg = tmp_path / "app.config"
+        cfg.write_text(json.dumps({"UI": {"ThemeStyle": theme}}), encoding="utf-8")
+        return cfg
+
+    def _call_reload_with_instance(self, svc, tmp_path, monkeypatch, current_theme: str, cloud_theme: str):
+        """用返回实例的替身调用 _reload_settings_on_main_thread，返回 dispatch_refresh mock"""
+        from app.core import config_sync as cs
+
+        cfg_path = self._write_theme_config(tmp_path, cloud_theme)
+
+        fake = self._FakeSettingsInstance()
+        fake.file = cfg_path
+        fake.ui_theme_style.value = current_theme
+        fake.ui_theme_style.validator.__init__([current_theme, cloud_theme])
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr(
+            "app.utils.theme_manager.ThemeManager.reload",
+            lambda self: None,
+        )
+        monkeypatch.setattr(cs, "Settings", fake)
+
+        dispatch_mock = MagicMock()
+        monkeypatch.setattr(
+            "app.utils.theme_manager.ThemeManager.dispatch_refresh",
+            dispatch_mock,
+        )
+
+        svc._reload_settings_on_main_thread()
+        return dispatch_mock, fake.ui_theme_style
+
+    def test_dispatch_refresh_called_when_cloud_theme_differs(self, svc, tmp_path, monkeypatch):
+        """云端主题与本地不同 → 写回后显式 dispatch_refresh 全量刷新
+
+        回归 bug#6：主题完整刷新链路依赖 LLMSettingsCard 实例（懒构建），同步发生在
+        该卡片构建前时，写回 ui_theme_style.value 无监听者，qfluentwidgets 图标/资源
+        只刷新一半。dispatch_refresh 兜底遍历所有已注册窗口执行完整刷新。
+        """
+        dispatch_mock, theme_item = self._call_reload_with_instance(
+            svc, tmp_path, monkeypatch, current_theme="lumia", cloud_theme="dark"
+        )
+        assert theme_item.value == "dark", "云端主题应已写回内存"
+        dispatch_mock.assert_called_once(), "主题变化时必须显式触发完整刷新"
+
+    def test_dispatch_refresh_skipped_when_cloud_theme_same(self, svc, tmp_path, monkeypatch):
+        """云端主题与本地相同 → 不触发无谓的 dispatch_refresh（幂等保护）"""
+        dispatch_mock, theme_item = self._call_reload_with_instance(
+            svc, tmp_path, monkeypatch, current_theme="lumia", cloud_theme="lumia"
+        )
+        assert theme_item.value == "lumia"
+        dispatch_mock.assert_not_called(), "主题未变化时不应触发全量刷新"

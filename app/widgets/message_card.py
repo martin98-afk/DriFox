@@ -4920,6 +4920,14 @@ class CodeWebViewer(QWebEngineView):
             return
         self._last_theme_version = v
 
+        # 🐛 主题确实变化：失效实例级 markdown HTML 缓存。
+        # 否则 _perform_update 非流式分支的 _cached_streaming_html 复用逻辑
+        # 会返回旧主题渲染的 HTML（旧 pygments 代码高亮 + 旧思考图标路径），
+        # 导致主题切换后代码块颜色/思考图标不更新。
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
 
@@ -6444,12 +6452,15 @@ class MessageCard(SimpleCardWidget):
                 }}
                 """
             )
-        # 刷新富文本视图字体
-        if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
-            self.viewer._refresh_viewer_font()
-        # 刷新用户卡片纯文本视图颜色（PlainTextViewer 没有 _refresh_viewer_font）
+        # 刷新 viewer 主题（注入 CSS 变量 + 失效实例渲染缓存）
+        # ⚠️ 顺序必须在 _refresh_viewer_font() 之前：主题变化时先让
+        # refresh_theme 清掉 _cached_streaming_html 等实例缓存并注入新 CSS
+        # 变量，随后 _refresh_viewer_font 触发的重渲染才会使用新主题 HTML。
         if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "refresh_theme"):
             self.viewer.refresh_theme()
+        # 刷新富文本视图字体并触发重渲染（缓存已在 refresh_theme 中失效）
+        if hasattr(self, "viewer") and self.viewer and hasattr(self.viewer, "_refresh_viewer_font"):
+            self.viewer._refresh_viewer_font()
 
     # ── 卡片背景色覆盖（替代 qfluentwidgets CardWidget 的固定白色覆盖层）──
     # 背景色完全由 _apply_card_style() 通过 CSS 控制，无需动态解析

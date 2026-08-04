@@ -469,12 +469,18 @@ class ConfigSyncService(QObject):
         try:
             cfg = Settings.get_instance()
 
+            # 记录同步前主题值，用于写回后判断「主题是否真的变化」→ 决定是否显式全量刷新。
+            # （修复 bug#6：UI 完整主题刷新链路依赖 LLMSettingsCard 实例存在，而它懒构建。
+            #  若同步发生在该卡片构建前，写回 ui_theme_style.value 无监听者，qfluentwidgets
+            #  图标/样式不会全量刷新，只更新配置值。通过 dispatch_refresh 兜底显式刷新。）
+            _old_theme_id = cfg.ui_theme_style.value
+
             # ── 主题先注册，再恢复配置 ──
             # 下方全量手动同步会把 ui_theme_style 从云端 app.config 写回内存；其 value setter
-            # 会调用 OptionsValidator.correct()：若当前主题不在验证器选项里（自定义主题由本次
+            # 会调用 OptionsValidator.correct()：此时当前主题不在验证器选项里（自定义主题由本次
             # 下载的 user-custom 插件提供，刚解压落地但 theme_manager 尚未重新扫描），correct()
             # 会把值静默改写成 options[0]（默认主题），使自定义主题永久丢失。
-            # 因此先 reload 主题并刷新验证器，确保自定义主题已注册后再写 ui_theme_style。
+            # 因此先 load 主题并刷新验证器，确保自定义主题已注册后再写 ui_theme_style。
             try:
                 from app.utils.theme_manager import theme_manager
                 from app.utils.config import update_theme_options
@@ -507,6 +513,27 @@ class ConfigSyncService(QObject):
                 logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含 Gitee token，云端权威）")
             except Exception as _e:
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
+
+            # ── 主题显式全量刷新（修复 bug#6） ──
+            # 完整主题刷新链路（ui_theme_style.valueChanged → LLMSettingsCard._on_config_changed
+            # → configChanged → 各窗口批量刷新，含 qfluentwidgets setTheme/Colors/图标资源）
+            # 依赖 LLMSettingsCard 实例已构建（懒构建：3500ms 延迟或打开设置面板才建）。
+            # 若同步发生在构建前，写回 ui_theme_style.value 无监听者，界面只更新配置值、
+            # qfluentwidgets 图标/样式不全量刷新（"只刷一半"）。此处用 theme_manager 的
+            # dispatch_refresh 兜底：遍历所有已注册窗口刷新 target（含 setTheme/Colors/图标）。
+            # 仅当主题值确实变化才触发，避免无谓开销；dispatch_refresh 幂等（窗口侧
+            # _last_color_theme_id 保护），与 LLMSettingsCard 链路的 30ms debounce 批量
+            # 刷新不冲突（后者随后执行时颜色块会被幂等跳过）。
+            try:
+                if cfg.ui_theme_style.value != _old_theme_id:
+                    from app.utils.theme_manager import theme_manager as _tm
+
+                    _tm.dispatch_refresh()
+                    logger.info(
+                        f"[ConfigSync] 主题已从 {_old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新"
+                    )
+            except Exception as _te:
+                logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
 
             logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，云端 token 权威）")
         except Exception as e:
