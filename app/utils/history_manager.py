@@ -958,6 +958,36 @@ class HistoryManager:
             return self._archive_session_record(self._history_sessions[index])
         return False
 
+    def remove_session(self, session_id: str, release_messages_only: bool = True) -> bool:
+        """从内存缓存移除会话记录（或仅释放其消息体）。
+
+        内存泄漏修复（P0-1）：HistoryManager 全局单例 _history_sessions 在
+        删除会话/关闭标签时不清理，导致已删除会话的全量消息驻留内存。
+
+        Args:
+            session_id: 目标会话 ID
+            release_messages_only: True 仅置空 messages（保留记录元数据，
+                供历史列表展示；get_session_by_session_id 已有「messages 空
+                → SQLite 懒加载回填」机制，置空不影响恢复）；
+                False 完全移除该记录并标记缓存脏。
+
+        Returns:
+            是否找到并处理了该会话
+        """
+        if not session_id:
+            return False
+        self._ensure_history_loaded()
+        for i, s in enumerate(self._history_sessions):
+            if s.get("session_id") == session_id:
+                if release_messages_only:
+                    if s.get("messages"):
+                        s["messages"] = []
+                else:
+                    self._history_sessions.pop(i)
+                    self._mark_cache_dirty()
+                return True
+        return False
+
     def archive_sessions_by_run_id(self, run_id: str) -> int:
         """按团队 run_id 归档该 run 下全部成员会话。
 

@@ -6954,6 +6954,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
             enriched_list.append(session)
 
+        # 清理已不存在的归档文件缓存键（删除/恢复归档后立即生效，
+        # 防止 _archived_cache 随文件增删无限增长）
+        current_paths = {s["path"] for s in archived_list}
+        for stale_key in [k for k in self._archived_cache if k not in current_paths]:
+            self._archived_cache.pop(stale_key, None)
+
         self._history_popup_card.set_archived_sessions(enriched_list)
 
     def _on_history_tab_changed(self, tab_id: str):
@@ -8935,6 +8941,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.TOP_RIGHT,
             )
 
+    def _schedule_gc_hook(self):
+        """GC 钩子（T9）：防抖合并触发全局缓存清理 + 堆回收。
+
+        150ms singleShot 合并高频路径（清空聊天区/关闭窗口/清空快捷键），
+        只在窗口相关大块内存释放后触发一次，避免每帧同步执行。
+        """
+        global _gc_hook_pending
+        if _gc_hook_pending:
+            return
+        _gc_hook_pending = True
+        QTimer.singleShot(150, _run_gc_hook)
+
     def _clear_chat_area(self, delete_widgets: bool = True):
         self._current_assistant_card = None
         self._displayed_session_id = None
@@ -8953,6 +8971,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清理全局 LRU 渲染缓存
         if delete_widgets:
             clear_global_render_cache()
+        # GC 钩子：防抖触发全局缓存清理 + 堆回收
+        if delete_widgets:
+            self._schedule_gc_hook()
 
     def _take_chat_widgets(self) -> List[QWidget]:
         """从布局中取出所有 widgets，返回列表（不删除，由调用方负责删除）"""
@@ -8994,6 +9015,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 "has_widgets": bool(widgets),
                 "cached_at": time.time(),
             }
+
+        # 缓存淘汰：写入后立即按 MAX_SESSION_CARD_CACHE_SIZE 淘汰过期条目，
+        # 防止 _session_card_cache 随会话切换无限增长（复活 _cleanup_session_card_cache）。
+        try:
+            self._cleanup_session_card_cache()
+        except Exception:
+            pass
 
         # 彻底删除所有卡片及其子资源
         for widget in widgets:
@@ -9857,6 +9885,8 @@ class OpenAIChatToolWindow(ToolWindow):
             get_welcome_func=self._get_or_create_welcome_card,
             add_widget_func=lambda w: QTimer.singleShot(0, lambda: self._add_chat_widget(w)),
         )
+        # GC 钩子：清空聊天区后防抖触发全局缓存清理 + 堆回收
+        self._schedule_gc_hook()
 
     def _add_chat_widget(self, widget: QWidget, insert_index: Optional[int] = None):
         if getattr(self, "_is_destroyed", False):
@@ -10199,6 +10229,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
             os.remove(file_path)
             logger.info(f"[彻底删除] 成功: {file_path}")
+
+            # 清理归档缓存键（防止已删除文件的预览数据驻留 _archived_cache）
+            if hasattr(self, "_archived_cache"):
+                self._archived_cache.pop(file_path, None)
 
             # 刷新归档列表
             self._refresh_archived_sessions()
@@ -17186,6 +17220,37 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # ★ 泄漏修复（P0-1）：关闭窗口时释放 HistoryManager 内存缓存中的
+        # 会话消息驻留（删会话/关标签不清理 → 全局单例 _history_sessions
+        # 持全量消息不回落）。保留记录元数据，重开会话时 SQLite 懒加载回填。
+        try:
+            if hasattr(self, "session_manager") and self.session_manager:
+                for _s in self.session_manager.get_all_sessions():
+                    _sid = getattr(_s, "session_id", None)
+                    if _sid and getattr(self, "history_manager", None):
+                        self.history_manager.remove_session(_sid, release_messages_only=True)
+        except Exception:
+            pass
+
+        # ★ 泄漏修复（T6-B）：closeEvent 清理窗口 UI 缓存强引用
+        # （_welcome_card_cache 持卡片 / _session_card_cache / batch 结构），
+        # 避免已关闭窗口的卡片对象被缓存持续持有。
+        try:
+            self._message_batch = []
+            self._batch_cards = []
+            self._pending_lazy_cards.clear()
+            wc = self._welcome_card_cache.pop(self._window_id, None)
+            if wc is not None:
+                from PyQt5 import sip
+
+                if not sip.isdeleted(wc):
+                    if hasattr(wc, "cleanup"):
+                        wc.cleanup()
+                    wc.deleteLater()
+            self._session_card_cache.clear()
+        except Exception:
+            pass
+
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
         if not OpenAIChatToolWindow._instances:
             try:
@@ -17216,6 +17281,9 @@ class OpenAIChatToolWindow(ToolWindow):
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         except Exception:
             pass
+
+        # GC 钩子：closeEvent 末尾防抖触发全局缓存清理 + 堆回收
+        self._schedule_gc_hook()
 
         super().closeEvent(event)
 
@@ -17843,6 +17911,30 @@ def _is_sip_deleted(obj) -> bool:
         return sip.isdeleted(obj)
     except Exception:
         return False
+
+
+# GC 钩子（T9）：模块级防抖标志，150ms 内多次触发只执行一次。
+_gc_hook_pending = False
+
+
+def _run_gc_hook():
+    """GC 钩子执行体：清理全局渲染缓存 + 回收进程堆。
+
+    由 _schedule_gc_hook 防抖合并后调用（150ms singleShot），
+    全 try/except 吞异常，不影响主流程。
+    """
+    global _gc_hook_pending
+    _gc_hook_pending = False
+    try:
+        from app.widgets.message_card import clear_global_render_cache
+
+        clear_global_render_cache()
+    except Exception:
+        pass
+    try:
+        _compact_process_heap_after_cleanup()
+    except Exception:
+        pass
 
 
 def _cleanup_global_lru_caches():

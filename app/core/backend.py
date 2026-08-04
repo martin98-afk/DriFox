@@ -2565,8 +2565,24 @@ class ChatBackend(QObject):
 
     def delete_session(self, index: int) -> bool:
         """删除会话"""
+        # 内存泄漏修复（P1）：删除前先取 session_id，删除成功后联动
+        # HistoryManager 释放内存缓存中的消息驻留（_history_sessions
+        # 全量消息不再随会话删除而泄漏）。
+        session_id = None
+        try:
+            sessions = self._session_manager.get_all_sessions() if self._session_manager else []
+            if 0 <= index < len(sessions):
+                session_id = sessions[index].session_id
+        except Exception:
+            session_id = None
+
         result = self._session_manager.delete_session(index)
         if result:
+            if session_id and self._history_manager:
+                try:
+                    self._history_manager.remove_session(session_id, release_messages_only=True)
+                except Exception:
+                    pass
             self.session_deleted.emit(index)
         return result
 
