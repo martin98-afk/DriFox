@@ -241,6 +241,9 @@ class TestTeamRestoreLogic:
         win._get_team_manager = MagicMock()
         tm = MagicMock()
         tm.get_template.return_value = {"name": "dev-team"}
+        # 🛡️ Bug1：恢复路径优先复用当前团队已有 run_id（用户期望恢复后新对话
+        # 归属原 run_id 团队会话，历史面板分组不分裂）；仅无 run_id 时才生成。
+        tm.get_team_run_id.return_value = "run-1"
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._create_fresh_window = MagicMock()
@@ -274,9 +277,9 @@ class TestTeamRestoreLogic:
         assert win._create_fresh_window.call_count == 2
         assert fake._branch_session_data is not None
         assert fake._team_agent_name in ("build", "plan")
-        assert fake._team_run_id == "new-run-1"
-        # H1/F3 回归：恢复路径必须 force 生成新 run_id（不沿用历史 run_id）
-        tm.start_team_run.assert_called_once_with(force=True)
+        # Bug1：恢复窗口复用当前团队已有 run_id（不生成新的）
+        assert fake._team_run_id == "run-1"
+        tm.start_team_run.assert_not_called()
         # L4/F2 回归：分支数据必须透传 project（保持会话原项目归属）
         for call_args in win._create_fresh_window.call_args_list:
             _kwargs = call_args.kwargs
@@ -285,6 +288,53 @@ class TestTeamRestoreLogic:
             assert branch["project"] in ("", "dev-team", "qa-team") or branch["project"] is not None
         # join_team 被调用（每个窗口一次）
         assert tm.join_team.call_count == 2
+
+    def test_restore_starts_run_when_team_has_no_run_id(self):
+        """Bug1 fallback：当前团队无 run_id（get_team_run_id 空）→ start_team_run() 生成新值。
+
+        与 test_restore_collects_by_run_id（复用已有 run_id）互补：恢复路径
+        优先复用，仅在团队从未开始运行（无 run_id）时才生成——且不带 force
+        （不再强制刷新，避免已复用场景下历史分组分裂）。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            s for s in _history_samples() if s["team_run_id"] == "run-1"
+        ]
+        win.history_manager.get_session_messages.side_effect = lambda sid: [{"role": "user", "content": sid}]
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = ""  # 无现有 run_id → 走生成分支
+        tm.start_team_run.return_value = "fresh-run-1"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+
+        created = []
+
+        class _FakeWin:
+            _window_id = "w1"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+                created.append(self)
+
+        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        assert len(created) == 2, "应创建 2 个恢复窗口"
+        assert created[0]._team_run_id == "fresh-run-1", "无 run_id 时应使用 start_team_run 生成的新值"
+        tm.start_team_run.assert_called_once_with(), "无 run_id 时生成新值且不带 force"
 
     def test_restore_dedups_by_agent_keeps_latest(self):
         """恢复按 agent_name 去重，每组取 last_time 最新一条（成员 4→1 修复）。
@@ -341,6 +391,8 @@ class TestTeamRestoreLogic:
         )
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        # Bug1：恢复优先复用现有 run_id（当前团队已有 run-9）
+        tm.get_team_run_id.return_value = "run-9"
         tm.start_team_run.return_value = "new-run-9"
         win._get_team_manager.return_value = tm
         win._card_manager = MagicMock()
@@ -401,6 +453,8 @@ class TestTeamRestoreLogic:
         win.history_manager.get_session_messages.side_effect = lambda sid: [{"role": "user", "content": sid}]
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        # Bug1：恢复优先复用现有 run_id（当前团队已有 run-1）
+        tm.get_team_run_id.return_value = "run-1"
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._card_manager = MagicMock()
@@ -541,12 +595,66 @@ class TestTeamRestoreLogic:
             "空 project 应回落 _current_project"
         )
 
+    def test_create_branched_session_marks_dirty_for_team_window(self):
+        """Bug2：恢复窗口（团队窗口 _team_run_id 非空）注入历史消息后必须置脏。
+
+        根因：恢复窗口经 _create_branched_session 注入历史消息但 _session_dirty
+        仍为 False → 关闭时 _auto_save_current_session 的 `if not self._session_dirty:
+        return` 跳过保存 → 未触发成员窗口不落库，历史聚合 _merge_team_lightweight
+        漏掉该成员。修复 = 团队窗口注入后置脏。非团队窗口（复制窗口）不置脏，
+        保持"无变更不保存"原语义。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        def _make_win(team_run_id: str):
+            win = MagicMock()
+            win._is_destroyed = False
+            win._is_streaming = False
+            win._topic_summary_cancelled = False
+            win._team_run_id = team_run_id
+            win._session_dirty = False
+            win.backend = MagicMock()
+            win.backend.chat_engine = MagicMock()
+            win.backend.tool_executor = MagicMock()
+            win._cache_current_session_cards = MagicMock()
+            win._batch_cards = []
+            win._message_batch = []
+            win._clear_chat_area = MagicMock()
+            win._display_current_session = MagicMock()
+            win._load_agent_list = MagicMock()
+            win._virtual_scroll_timer = MagicMock()
+            win._virtual_scroll_timer.stop = MagicMock()
+            win.title_edit = MagicMock()
+            win.node_preview = MagicMock()
+            win.node_preview.clear_nodes = MagicMock()
+            win.input_area = MagicMock()
+            win.input_area.setFixedHeight = MagicMock()
+            win._current_project = "默认项目"
+            win.backend.create_session.return_value = MagicMock()
+            win.backend.create_session.return_value.messages = []
+            win.backend.create_session.return_value.session_id = "new-sid"
+            win.backend.create_session.return_value.metadata = {}
+            return win
+
+        # 团队恢复窗口：注入历史消息 → 置脏（关闭时落库，聚合不再漏成员）
+        team_win = _make_win("run-x")
+        OpenAIChatToolWindow._create_branched_session(team_win, [{"role": "user", "content": "hi"}], "分支")
+        assert team_win._session_dirty is True, f"团队恢复窗口必须置脏，实际 {team_win._session_dirty!r}"
+
+        # 非团队复制窗口：保持不置脏（无变更不保存原语义）
+        plain_win = _make_win("")
+        OpenAIChatToolWindow._create_branched_session(plain_win, [{"role": "user", "content": "hi"}], "分支")
+        assert plain_win._session_dirty is False, "非团队窗口不应置脏"
+
 
 class TestTeamRestoreDisband:
     """M1' 恢复路径重构：解散现有团队 + 完整初始化恢复窗口
 
     覆盖：
-    - 恢复前 _disband_current_team_for_restore 被调用（在 start_team_run 之前）
+    - 恢复前 _disband_current_team_for_restore 被调用（在 run_id 解析之前）
     - 解散逻辑：团队窗口 _stop_team_watcher / leave_team / 团队标记清空，
       主窗口保留并新建空白会话，其他团队窗口 remove_window + close
     - 非团队 / 已销毁窗口被跳过
@@ -556,7 +664,7 @@ class TestTeamRestoreDisband:
     """
 
     def test_restore_calls_disband_before_start_run(self):
-        """恢复时解散逻辑在 start_team_run(force=True) 之前被调用。"""
+        """恢复时解散逻辑在 run_id 解析（get_team_run_id / start_team_run）之前被调用。"""
         _ensure_qapp()
         from unittest.mock import MagicMock, patch
 
@@ -578,11 +686,12 @@ class TestTeamRestoreDisband:
         win.history_manager.get_session_messages.return_value = [{"role": "user", "content": "x"}]
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-1"  # Bug1：复用现有 run_id
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._create_fresh_window = MagicMock(return_value=MagicMock(_window_id="w1"))
         win._card_manager = MagicMock()
-        # 记录解散与 start_team_run 的调用顺序
+        # 记录解散与 run_id 解析的调用顺序
         win._disband_current_team_for_restore = MagicMock()
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
@@ -590,7 +699,7 @@ class TestTeamRestoreDisband:
 
         # 解散逻辑必须被调用
         win._disband_current_team_for_restore.assert_called_once()
-        # 顺序断言：disband 在 _get_team_manager（→start_team_run）之前被调用
+        # 顺序断言：disband 在 _get_team_manager（→get_team_run_id）之前被调用
         _calls = [c[0] for c in win.method_calls]
         assert _calls.index("_disband_current_team_for_restore") < _calls.index("_get_team_manager")
 

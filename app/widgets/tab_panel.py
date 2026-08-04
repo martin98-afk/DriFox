@@ -1341,8 +1341,8 @@ class TabPanel(QWidget):
 
         结构（自上而下嵌套）：
         - grp (QFrame) 的主布局 = outer (QVBoxLayout)
-          - header (QWidget)：左侧团队名 QLabel + "新建任务"按钮 TransparentToolButton(FIF.PLAY)
-            + "快速新建成员"按钮 TransparentToolButton(FIF.ADD) + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
+          - header (QWidget)：左侧团队名 QLabel + "新建任务"按钮 TransparentToolButton(get_icon("新会话"))
+            + "快速新建成员"按钮 TransparentToolButton(get_icon("设置-subagent")) + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
           - inner_widget (QWidget) 的布局 = inner_layout (QVBoxLayout)：成员 TabItem 列表
 
         header 默认隐藏 new_task/add/close 按钮，鼠标进入 header 区域时显示（参考 TabItem 实现）。
@@ -1396,9 +1396,10 @@ class TabPanel(QWidget):
         header_layout.addWidget(name_label, 1)
 
         # 新建任务按钮：hover 显示（与 add/close 联动），点击 → teamNewTaskRequested(team_id)
+        # 🎨 图标：与主界面"新建对话"按钮一致的 新会话.svg（铅笔+加号，语义：全员新建会话）
         new_task_btn = TransparentToolButton(header)
         new_task_btn.setObjectName("teamGroupNewTaskBtn")
-        new_task_btn.setIcon(FIF.PLAY)
+        new_task_btn.setIcon(get_icon("新会话"))
         new_task_btn.setFixedSize(20, 20)
         new_task_btn.setToolTip("新建任务：全员新建会话 + 生成新 run")
         new_task_btn.setVisible(False)
@@ -1408,9 +1409,10 @@ class TabPanel(QWidget):
         header_layout.addWidget(new_task_btn)
 
         # 快速新建成员按钮：hover 显示（与 new_task/close 联动），点击 → teamAddMemberRequested(team_id)
+        # 🎨 图标：与子智能体卡片 title 一致的 设置-subagent.svg
         add_btn = TransparentToolButton(header)
         add_btn.setObjectName("teamGroupAddBtn")
-        add_btn.setIcon(FIF.ADD)
+        add_btn.setIcon(get_icon("设置-subagent"))
         add_btn.setFixedSize(20, 20)
         add_btn.setToolTip("快速新建成员（可重复角色）")
         add_btn.setVisible(False)

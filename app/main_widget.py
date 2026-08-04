@@ -2206,6 +2206,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 复用现有的会话显示逻辑
         self._display_current_session()
 
+        # 🛡️ Bug2（恢复窗口落库）：恢复团队会话经本方法注入历史消息后，窗口
+        # _team_run_id 已在恢复循环同步设置（_create_fresh_window 返回后立即
+        # 赋值，先于本方法执行）。显式置脏，保证窗口关闭时 _auto_save_current_session
+        # 落一条带团队元数据（team_run_id/team_name/agent_name/team_members
+        # 快照）的会话记录——否则未触发成员窗口关闭不置脏被跳过保存，历史聚合
+        # _merge_team_lightweight 漏掉该成员。复制窗口（非团队，_team_run_id 空）
+        # 不受影响，保持原"无变更不保存"语义。
+        if getattr(self, "_team_run_id", ""):
+            self._session_dirty = True
+
     def _refresh_cache_stats(self):
         """刷新缓存统计显示（对话完成后调用）"""
         ring = getattr(self, "context_usage_ring", None)
@@ -6865,6 +6875,21 @@ class OpenAIChatToolWindow(ToolWindow):
         if state != self._ai_state:
             self._ai_state = state
             self.ai_state_changed.emit(state)
+            # 🛡️ 团队实时状态同步：流式/思考/提问 → busy；空闲 → idle
+            # （覆盖所有流式/思考阶段，供 team_list_members 查询路径可见）
+            self._sync_team_member_runtime_status(state)
+
+    def _sync_team_member_runtime_status(self, state: str) -> None:
+        """将 AI 状态同步到团队成员 runtime 状态（仅团队成员生效，非成员静默跳过）"""
+        from app.core.team_manager import TeamManager, check_team_member
+
+        if not check_team_member(self._window_id):
+            return
+        if state in ("thinking", "streaming", "question"):
+            TeamManager.get_instance().set_member_runtime_status(self._window_id, "busy")
+        elif state == "idle":
+            TeamManager.get_instance().set_member_runtime_status(self._window_id, "idle")
+        # error 等其余状态不覆盖（重试期保持 busy，避免闪烁）
 
     def _init_pixel_pet(self) -> None:
         """初始化像素小狐桌宠"""
@@ -7274,8 +7299,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _disband_current_team_for_restore(self):
         """恢复团队会话前解散当前团队 + 关闭所有团队窗口（用户确认语义 D1）。
 
-        语义：恢复是一次全新的团队运行，先清理现有团队状态，避免新旧团队
-        会话/邮箱目录/成员登记互相串扰。
+        语义：恢复操作会重建团队窗口并共享同一 run_id，先清理现有团队
+        状态，避免新旧团队会话/邮箱目录/成员登记互相串扰。
         - 遍历 OpenAIChatToolWindow._instances 快照，跳过已销毁窗口及非团队窗口
         - 每个团队窗口：停 watcher（幂等）→ leave_team（清成员登记+邮箱目录）
           → 清空 _team_agent_name/_team_name/_team_run_id
@@ -7356,8 +7381,9 @@ class OpenAIChatToolWindow(ToolWindow):
         按 run_id 收集该团队全部成员会话（直接查 SQLite，绕开
         _history_limit=500 截断）→ 按 agent_name 去重（每组取最新会话，
         空消息 agent 也建窗口）→ 为每个角色新建全新窗口、加载对应历史
-        会话内容、重新登记为团队成员（join_team）并共享同一新 run_id
-        （start_team_run(force=True) 强制生成），Tab 分组按新 run_id 同组。
+        会话内容、重新登记为团队成员（join_team）并共享同一 run_id
+        （优先复用当前团队已有 run_id——用户期望恢复后新对话归属原 run_id
+        的团队会话；无 run_id 时才生成新值），Tab 分组按 run_id 同组。
 
         恢复语义：内容恢复 + 新 session_id（恢复是一次新的团队运行，
         产生新会话记录，不覆盖原历史记录）。
@@ -7395,11 +7421,12 @@ class OpenAIChatToolWindow(ToolWindow):
         #    仅在收集成功校验通过后调用——失败恢复不白解散。
         self._disband_current_team_for_restore()
 
-        # 3) 开始一次新的团队运行：force 生成新 run_id（恢复是一次新运行，
-        #    新会话记录归属新 run_id，与历史记录区分；force 保证不沿用
-        #    旧 run_id，避免新会话仍挂到历史分组导致串台）
+        # 3) 团队运行标识：优先复用当前 team.json 顶层已有 run_id（用户期望——
+        #    恢复团队会话后新对话归属原 run_id 的团队会话，历史面板分组不分裂）；
+        #    无 run_id（全新团队 / 历史遗留无 run_id）时才生成新值
+        #    （start_team_run 幂等，无 run_id 时生成并落盘）。
         tm_mgr = self._get_team_manager()
-        new_run_id = tm_mgr.start_team_run(force=True)
+        new_run_id = tm_mgr.get_team_run_id() or tm_mgr.start_team_run()
 
         # 4) 按 agent_name 去重：每组取 last_time 最新一条会话，
         #    避免同 agent 多轮会话建重复窗口（恢复成员 4→1 的修复之一）。
@@ -10933,7 +10960,26 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         record_run_id = (session_record.get("team_run_id") or "").strip()
         if record_run_id:
-            self._team_run_id = record_run_id
+            # 🛡️ Bug3 守卫：窗口已是团队成员（is_team_member 判定）且
+            # _team_run_id 非空（处于当前团队运行）→ 保留当前 run_id，
+            # 仅同步 team_name/agent_name——避免恢复窗口(R2)加载旧记录(R1)
+            # 后被记录 run_id 覆盖脱钩当前团队分组，导致后续对话保存丢
+            # 团队元数据（被存为普通会话）。仅非团队窗口才采用记录 run_id
+            # （此时加载团队会话 = 进入该团队上下文，登记为新成员）。
+            try:
+                from app.core.team_manager import TeamManager
+
+                _member_guard = bool(self._window_id) and TeamManager.get_instance().is_team_member(self._window_id)
+            except Exception:
+                _member_guard = False
+            # 读取窗口当前 run_id：git 测试 stub（__new__ 绕过 __init__ 的 PyQt 对象）
+            # 上 getattr 默认值可能因 C++ 对象未初始化抛 RuntimeError，try/except 兜底
+            try:
+                _current_run_id = self._team_run_id
+            except Exception:
+                _current_run_id = ""
+            if not (_member_guard and _current_run_id):
+                self._team_run_id = record_run_id
             self._team_name = (session_record.get("team_name") or "").strip()
             self._team_agent_name = (session_record.get("agent_name") or "").strip()
             # 🆕 恢复团队会话即重新登记成员（否则 leader 的 team_list_members 查不到

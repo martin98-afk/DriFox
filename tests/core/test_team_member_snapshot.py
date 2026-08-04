@@ -283,6 +283,60 @@ class TestMergeTeamMembersSnapshot:
         assert set(merged["agent_names"]) == {"leader", "build", "perf-tester"}
         assert merged["member_count"] == 3, "member_count 应含快照成员"
 
+    def test_restore_partial_dialog_merge_includes_all_members(self, store):
+        """Bug2 回归：恢复后仅部分成员有会话记录（未触发成员无记录）→
+        聚合条目仍含全部成员（含未触发成员，经 team_members 快照补全）。
+
+        场景复刻：#B1 Bug2——恢复团队后只有 leader 触发过对话（落库），
+        build/perf-tester 未触发（无新记录）。若恢复窗口不落库/快照缺失，
+        聚合条目只统计有记录的 agent → 漏成员。此测试验证聚合侧兜底：
+        任一成员会话携带 team_members 快照（含全部成员）即可补全。
+        """
+        from app.utils.history_manager import HistoryManager
+
+        hm = self._hm(store)
+        # 快照 = 全部成员（恢复时 _get_team_members_snapshot_json 落库的值）
+        snap = json.dumps(["leader", "build", "perf-tester"], ensure_ascii=False)
+        # 仅 leader 有会话记录（未触发成员 build/perf-tester 无记录）
+        store.save_session(
+            {
+                "session_id": "s-l",
+                "title": "leader 会话",
+                "messages": [{"role": "user", "content": "任务", "timestamp": "2026-01-01 00:00:01"}],
+                "project": "默认项目",
+                "team_run_id": "run-1",
+                "team_name": "dev",
+                "agent_name": "leader",
+                "team_members": snap,
+                "message_count": 1,
+                "system_prompt": "",
+                "compaction_state": {},
+                "compaction_cache": {},
+                "user_edited_title": False,
+                "worktree_path": "",
+                "preview": "",
+                "context_usage": 0,
+            }
+        )
+        hm._history_loaded = True
+        hm._history_sessions = [
+            {
+                "session_id": "s-l", "saved_at": "2026-01-01 00:00:01", "title": "leader 会话",
+                "project": "默认项目", "last_time": "2026-01-01 00:00:01", "message_count": 1,
+                "preview": "", "user_edited_title": False, "worktree_path": "",
+                "team_run_id": "run-1", "team_name": "dev", "agent_name": "leader",
+                "team_members": snap,
+            },
+        ]
+        hm._cache_dirty = True
+
+        rows = hm.get_history_list(merge_team=True)
+        merged = next(r for r in rows if r.get("team_merged"))
+        assert set(merged["agent_names"]) == {"leader", "build", "perf-tester"}, (
+            f"未触发成员应经快照补全进聚合条目，实际 {merged['agent_names']}"
+        )
+        assert merged["member_count"] == 3, "member_count 应含全部成员（含未触发）"
+
 
 class TestRestoreMemberSetUnion:
     """第 3 层：恢复成员集合 = 会话 ∪ 快照"""

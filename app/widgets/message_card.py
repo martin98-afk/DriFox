@@ -1236,7 +1236,9 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     while i < len(md_text):
         start_idx = md_text.find("<think>", i)
         if start_idx == -1:
-            parts.append(md_text[i:])
+            # 🐛 防御：无 `<think>` 开头的段（历史上被差量切碎的产物 `段2</think>`）
+            # 清理孤立 </think>，避免思考内容以普通正文泄漏（<p>内容</think></p>）。
+            parts.append(md_text[i:].replace("</think>", ""))
             break
         parts.append(md_text[i:start_idx])
 
@@ -2032,9 +2034,12 @@ def _extract_closed_segments(md: str):
                 continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
-        # think 真实标签为 ` thinking` / ` response`（与 _has_reached_clean_boundary
-        # 的判定一致；旧代码误用 <thinking> 恒不触发导致 think 未闭合段被差量切出）
-        if seg.count(" think") > seg.count(" response"):
+        # think 配对守卫必须用真实标签 `<think>` / `</think>`（与 _build_incremental_md
+        # 生成的标签一致）。旧代码误用 ` think` / ` response`：`<think>` 不含子串
+        # ` think`、`</think>` 不含 ` response`，count 恒 0 → 守卫恒不触发 → 多段思考
+        # 内容（含 \n\n）被在中间切碎成 `<think>段1` + `段2</think>`，后者无 `<think>`
+        # 开头 → _inject_think_cards 当普通正文渲染 → 思考内容泄漏到正文（高块闪现）。
+        if seg.count("<think>") > seg.count("</think>"):
             break  # think 未闭合 → 停止（尾部留在稳定区之外）
         if seg.count("<tool>") > seg.count("</tool>"):
             break  # tool 未闭合 → 停止
@@ -4411,6 +4416,10 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 追加格式化 HTML（含 table 包裹等后续处理）
                     container.insertAdjacentHTML('beforeend', newHtml);
+                    // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
+                    // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
+                    // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
+                    if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                     container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
@@ -5443,8 +5452,12 @@ class CodeWebViewer(QWebEngineView):
                 if segs:
                     # 增量渲染闭合段：sanitize→inject→md.convert（主线程小段快速路径）
                     # 差量段很小（单个段落/代码块），同步渲染耗时 <1ms，无需线程池
+                    # 🐛 修复：传 _tool_compact_mode，与全量渲染 _render_markdown_to_html
+                    # 的 compact 对齐——否则差量段硬编码 compact=False 会把思考块渲染成
+                    # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
+                    # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
                     new_html = "".join(
-                        _render_stable_segment(seg) for seg in segs
+                        _render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs
                     )
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
@@ -5455,7 +5468,15 @@ class CodeWebViewer(QWebEngineView):
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
                     self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
                     return
-                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental），跳过
+                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental），跳过。
+                # 🐛 修复（思考块滞留/泄漏）：think 配对守卫 break（未闭合 think 段）
+                # 使差量一个段都产不出时，若 md 已达自然边界（think 闭合 `</think>` /
+                # 段落 `\n\n` 结尾），必须走全量渲染消费——否则安全定时器触发的
+                # _perform_update 也会被此分支拦截，思考块/闭合段永远滞留
+                # （或仅靠流式结束才一次性显示）。
+                if self._has_reached_clean_boundary(self._markdown_text):
+                    self._refresh_viewer_font_css()
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
                 return
 
             # 刷新字体 CSS var

@@ -18,6 +18,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
+
 
 def check_team_member(backend_or_window_id) -> bool:
     """检查窗口是否是团队成员（共用函數，供 ToolExecutor / chat_worker 調用）
@@ -703,12 +705,57 @@ class TeamManager:
         return [m for m in mails if m.get("type") == "task" and m.get("status") == "running"]
 
     def get_member_busy_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:
-        """返回成员的工作状态: 'busy'（有 running/pending 任务）| 'idle'（空闲）"""
+        """返回成员的工作状态: 'busy'（有 running/pending 任务或实时忙碌）| 'idle'（空闲）
+
+        查询合并：邮件派生状态为「空闲」时追加查 runtime 状态（流式输出/思考/提问
+        不落邮件，由 main_widget._set_ai_state 实时同步），保证忙碌成员不被误报为空闲。
+        """
         mails = self.get_mailbox_mails(window_id, team_name)
         for m in mails:
             if m.get("type") == "task" and m.get("status") in ("running", "pending"):
                 return "busy"
-        return "idle"
+        return self.get_member_runtime_status(window_id, team_name)
+
+    # ── 成员实时工作状态（runtime status，流式输出/思考同步）──
+
+    def set_member_runtime_status(self, window_id: str, status: str, team_name: str = DEFAULT_TEAM):
+        """设置成员实时工作状态（busy/idle），写入 team.json members[wid]
+
+        与邮件状态互补：邮件状态反映任务生命周期（pending/running/done），
+        runtime 状态反映流式输出/思考/提问等实时状态（由 main_widget
+        ._set_ai_state 同步，供 team_list_members 查询路径可见）。
+        非团队成员静默跳过（不落盘）；成员被清理时随 members 一并删除。
+        """
+        if status not in ("busy", "idle"):
+            return
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            member = (data.get("members") or {}).get(window_id)
+            if not member:
+                return
+            if member.get("runtime_status") == status:
+                return
+            member["runtime_status"] = status
+            # 🛡️ 落盘失败兜底：runtime 状态由 _set_ai_state 在 UI 线程流式回调
+            # 中同步，磁盘只读/满等写失败不应抛 OSError 中断流式收尾。
+            # 先更新内存态（本行上方已生效），落盘失败仅告警；下次状态
+            # 变化会再次尝试落盘（正常路径行为不变）。
+            try:
+                self._save_team_data(team_name)
+            except OSError as e:
+                logger.warning(
+                    f"[TeamManager] 成员 {window_id} runtime 状态落盘失败"
+                    f" (status={status}, team={team_name}): {e}"
+                )
+
+    def get_member_runtime_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:
+        """读取成员实时工作状态（无记录/非团队成员返回 'idle'）"""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            member = (data.get("members") or {}).get(window_id)
+            if not member:
+                return "idle"
+            return member.get("runtime_status", "idle")
 
     def mark_mail_running(self, mail_id: str, window_id: str, team_name: str = DEFAULT_TEAM):
         self._update_mail_status(mail_id, window_id, "running", team_name)

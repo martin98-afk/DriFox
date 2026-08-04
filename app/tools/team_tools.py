@@ -86,7 +86,8 @@ class TeamTools:
                 if task_summary:
                     status_label += f" 「{task_summary}」"
             else:
-                status_label = self._STATUS_LABELS.get("idle", "🟢 空闲")
+                # 🛡️ 无任务邮件时合并查询实时状态（流式/思考/提问由 _set_ai_state 同步）
+                status_label = self._STATUS_LABELS.get(status, "🟢 空闲")
             line = f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}"
             # 角色描述（存在才显示，兼容手动加入成员/旧模板）
             desc = role_descs.get(m["agent_name"], "")
