@@ -2032,7 +2032,9 @@ def _extract_closed_segments(md: str):
                 continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
-        if seg.count("<thinking>") > seg.count("</thinking>"):
+        # think 真实标签为 ` thinking` / ` response`（与 _has_reached_clean_boundary
+        # 的判定一致；旧代码误用 <thinking> 恒不触发导致 think 未闭合段被差量切出）
+        if seg.count(" think") > seg.count(" response"):
             break  # think 未闭合 → 停止（尾部留在稳定区之外）
         if seg.count("<tool>") > seg.count("</tool>"):
             break  # tool 未闭合 → 停止
