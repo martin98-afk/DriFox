@@ -2047,7 +2047,7 @@ def _extract_closed_segments(md: str):
     return stable_len, segments
 
 
-def _render_stable_segment(md_seg: str) -> str:
+def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
 
     与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert），
@@ -2057,6 +2057,10 @@ def _render_stable_segment(md_seg: str) -> str:
 
     Args:
         md_seg: 单个完整闭合的 markdown 段落
+        compact: 工具/思考区简洁模式开关（与全量渲染 _tool_compact_mode 对齐，
+            避免差量/全量渲染形态分裂——差量段硬编码 compact=False 会把 think
+            渲染成折叠框 think-block，而全量渲染简洁模式下渲染成 think-compact，
+            导致差量段与后续全量段形态不一致）。
 
     Returns:
         该段的 HTML（不含外层容器包裹，供 updateContentAppend 追加）
@@ -2064,8 +2068,8 @@ def _render_stable_segment(md_seg: str) -> str:
     safe_md = _sanitize_incomplete_markdown(md_seg)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
-    processed_md = _inject_think_cards(safe_md, True, compact=False)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=False)
+    processed_md = _inject_think_cards(safe_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     md = get_markdown_instance()
     md.reset()
@@ -8519,15 +8523,21 @@ class MessageCard(SimpleCardWidget):
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
-            if self._streaming:
-                self.viewer._append_text_incremental(text)
             # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
             last_block = self._content_data[-1] if self._content_data else None
             last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
-            if _has_unclosed_think(last_text):
+            _think_unclosed = _has_unclosed_think(last_text)
+            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
+            # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
+            # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
+            # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
+            # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
+            # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
+            if self._streaming and not _think_unclosed:
+                self.viewer._append_text_incremental(text)
+            if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
                     # 首 chunk：立即渲染一次显示"深度思考中..." spinner
                     self.viewer._think_text_streaming_started = True
