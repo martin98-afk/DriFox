@@ -9444,6 +9444,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 获取最近会话和最多消息的会话用于欢迎卡片（按当前项目过滤）
         history_list = self.history_manager.get_history_list(self._current_project)
+        # 🛡️ 过滤团队会话：欢迎卡片展示的是"可继续的独立对话"，团队会话
+        # （team_run_id 非空）由历史面板团队分组/合并条目统一管理，逐条混入
+        # 欢迎卡片会导致成员会话重复展示且点击后团队上下文丢失。与历史面板
+        # get_history_list(merge_team=True) 的语义对齐：团队会话不进入推荐列表。
+        history_list = [s for s in history_list if not (s.get("team_run_id") or "").strip()]
 
         # 最近会话（按时间排序，取前3）
         recent_sessions = []
@@ -10614,70 +10619,18 @@ class OpenAIChatToolWindow(ToolWindow):
     def _load_history_session(self, index: int):
         self._load_history_session_from_popup(index)
 
-    def _load_session_from_record(self, session_record: Dict):
-        """从 session_record 加载历史会话（公共逻辑，供面板 index 与成员直选复用）
+    def _sync_team_markers_from_record(self, session_record: Dict):
+        """从会话记录同步窗口团队标记（F4 公共逻辑，两个加载路径共用）
 
-        提取自 _load_history_session_from_popup：面板 index 定位 session_record 后
-        的加载逻辑（哨兵、reset、消息加载、create_session、project/worktree 同步、
-        显示刷新）。成员进入会话（_on_team_member_selected）直传 record 调用，
-        不依赖面板 index，规避合并条目 index 漂移。
+        - _load_session_from_record：历史面板 index / 成员直选加载
+        - _switch_to_session_by_id：欢迎卡片会话标签 / 跨窗口切换
+
+        判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
+        - 团队会话 → 设置团队上下文（run_id/team_name/agent_name），后续
+          保存（_save_current_session_to_history team_kwargs 守卫）继续保留团队分组
+        - 普通会话 → 清空团队标记，避免团队窗口加载普通会话后 _team_run_id
+          残留，导致保存时普通会话被写入团队字段、混入团队合并条目
         """
-        if not session_record:
-            return
-        session_id = session_record.get("session_id")
-        if not session_id:
-            return
-
-        if self._is_streaming:
-            self._on_stop_clicked()
-
-        try:
-            self._auto_save_current_session()
-        except Exception:
-            logger.exception("Failed to auto-save current session before loading history")
-
-        # 🛡️ 标记会话切换：_on_stop_clicked 采用两阶段停止（cancel + deferred finalize），
-        # old worker 的 finished_with_messages / _on_finalize_complete 等跨线程回调
-        # 仍可能在后续事件循环中到达。若不设置哨兵，这些回调会将会话 A 的（部分）消息
-        # 通过 _on_messages_updated / _on_finalize_complete 写入刚加载的会话 B，
-        # 再被后续 save 错误持久化到会话 B 的记录中，造成"当前会话内容覆盖目标会话"的 bug。
-        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
-        self._session_switched = True
-
-        self.backend.reset_session_state()
-
-        # 💡 内存优化：加载历史会话时清理 LRU 缓存
-        _cleanup_global_lru_caches()
-
-        # 通过 session_id 获取会话消息，确保即使列表顺序变化也能加载正确的会话
-        messages = self.history_manager.get_session_messages(session_id)
-        if not messages:
-            return
-
-        title = session_record.get("title") or session_record.get("name") or "历史对话"
-
-        # 使用辅助函数创建会话
-        restored = create_session_from_record(session_record, messages, title)
-
-        # 使用辅助函数初始化
-        init_after_loading_session(self, restored, session_id, title, self.backend)
-
-        # 如果会话有自己的项目，显示在标题上
-        session_project = session_record.get("project", "默认项目") or "默认项目"
-        self._current_project = session_project
-        self.backend._current_project = session_project
-        self._project_label.setText(session_project)
-        self._refresh_project_branch_style()
-        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
-        if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_current_project(session_project)
-
-        # 🛡️ F4：加载历史会话后同步窗口团队标记，防止普通/团队会话互相污染。
-        # 判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
-        # - 团队会话 → 设置团队上下文（run_id/team_name/agent_name），后续
-        #   保存（_save_current_session_to_history team_kwargs 守卫）继续保留团队分组
-        # - 普通会话 → 清空团队标记，避免团队窗口加载普通会话后 _team_run_id
-        #   残留，导致保存时普通会话被写入团队字段、混入团队合并条目
         record_run_id = (session_record.get("team_run_id") or "").strip()
         if record_run_id:
             self._team_run_id = record_run_id
@@ -10731,6 +10684,86 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._refresh_team_ui(is_team=False)
                 except Exception:
                     pass
+
+    def _load_session_from_record(self, session_record: Dict):
+        """从 session_record 加载历史会话（公共逻辑，供面板 index 与成员直选复用）
+
+        提取自 _load_history_session_from_popup：面板 index 定位 session_record 后
+        的加载逻辑（哨兵、reset、消息加载、create_session、project/worktree 同步、
+        显示刷新）。成员进入会话（_on_team_member_selected）直传 record 调用，
+        不依赖面板 index，规避合并条目 index 漂移。
+        """
+        if not session_record:
+            return
+        session_id = session_record.get("session_id")
+        if not session_id:
+            return
+
+        if self._is_streaming:
+            self._on_stop_clicked()
+            # 🐛 修复（加载历史打断对话 partial 丢失）：_on_stop_clicked 是异步
+            # 两阶段停止（cancel + deferred finalize），deferred finalize 在本方法
+            # 设置 _session_switched 哨兵**之后**才执行，_on_finalize_complete 会
+            # 因哨兵丢弃中断消息 → 最后 partial 回复永久丢失。
+            # 此处同步补齐：立即 finalize_stop 拿中断消息应用回 session（幂等——
+            # _finalize_worker 单次消费，deferred 再跑拿到空列表无害），
+            # 确保下方 _auto_save_current_session 保存的是完整会话。
+            try:
+                interrupted = self.backend.finalize_stop() if self.backend.chat_engine else []
+                if interrupted:
+                    self._apply_interrupted_messages_to_session(interrupted)
+                    self._session_dirty = True
+            except Exception as e:
+                logger.warning(f"[MainWidget] 加载历史前同步 finalize 失败: {e}")
+
+        try:
+            self._auto_save_current_session()
+        except Exception:
+            logger.exception("Failed to auto-save current session before loading history")
+
+        # 🛡️ 标记会话切换：_on_stop_clicked 采用两阶段停止（cancel + deferred finalize），
+        # old worker 的 finished_with_messages / _on_finalize_complete 等跨线程回调
+        # 仍可能在后续事件循环中到达。若不设置哨兵，这些回调会将会话 A 的（部分）消息
+        # 通过 _on_messages_updated / _on_finalize_complete 写入刚加载的会话 B，
+        # 再被后续 save 错误持久化到会话 B 的记录中，造成"当前会话内容覆盖目标会话"的 bug。
+        # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
+        self._session_switched = True
+
+        self.backend.reset_session_state()
+
+        # 💡 内存优化：加载历史会话时清理 LRU 缓存
+        _cleanup_global_lru_caches()
+
+        # 通过 session_id 获取会话消息，确保即使列表顺序变化也能加载正确的会话
+        messages = self.history_manager.get_session_messages(session_id)
+        if not messages:
+            return
+
+        title = session_record.get("title") or session_record.get("name") or "历史对话"
+
+        # 使用辅助函数创建会话
+        restored = create_session_from_record(session_record, messages, title)
+
+        # 使用辅助函数初始化
+        init_after_loading_session(self, restored, session_id, title, self.backend)
+
+        # 如果会话有自己的项目，显示在标题上
+        session_project = session_record.get("project", "默认项目") or "默认项目"
+        self._current_project = session_project
+        self.backend._current_project = session_project
+        self._project_label.setText(session_project)
+        self._refresh_project_branch_style()
+        # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_current_project(session_project)
+
+        # 🛡️ F4：加载历史会话后同步窗口团队标记，防止普通/团队会话互相污染。
+        # 判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
+        # - 团队会话 → 设置团队上下文（run_id/team_name/agent_name），后续
+        #   保存（_save_current_session_to_history team_kwargs 守卫）继续保留团队分组
+        # - 普通会话 → 清空团队标记，避免团队窗口加载普通会话后 _team_run_id
+        #   残留，导致保存时普通会话被写入团队字段、混入团队合并条目
+        self._sync_team_markers_from_record(session_record)
         # Tab 模式：团队标记已变，同步胶囊/分组（对齐 _refresh_team_ui 的
         # refresh_capsule_for_window 调用；无 Tab 管理器时静默跳过）
         try:
@@ -12990,19 +13023,34 @@ class OpenAIChatToolWindow(ToolWindow):
         if not session_id:
             return
 
-        # 🛡️ 切换前保存当前会话：防止流式刚结束时用户立即切换会话，
-        # _do_post_stream_cleanup 的延迟保存尚未触发导致 AI 回复丢失。
-        if self.history_manager:
-            self._save_current_session_to_history()
-            self.history_manager.flush()
-
-        # 切换前先清理当前会话的资源
+        # 🐛 修复（保存顺序）：先停止流式并应用中断消息，再保存当前会话。
+        # 原实现先 _save_current_session_to_history() 再 stop_streaming()——
+        # 保存的是旧消息（缺最后 partial 回复），且 stop 后 _on_finalize_complete
+        # 会被下方 _session_switched 哨兵拦截，中断消息永久丢失。
         if self._is_streaming and self.backend.chat_engine:
-            self.backend.stop_streaming()
+            # 与 _create_new_session / _on_auto_compact_requested 对齐：
+            # 接收 stop_streaming 返回值应用回 session + 复位 AI 状态（否则
+            # TabPanel 边框停留在 streaming 动画，stop 后 _on_worker_finished
+            # 因 is_streaming=False 忽略 stream_finished，idle 永不触发）。
+            self._set_ai_state("idle")
+            try:
+                interrupted = self.backend.stop_streaming()
+                if interrupted:
+                    self._apply_interrupted_messages_to_session(interrupted)
+                    self._session_dirty = True
+            except Exception as e:
+                logger.warning(f"[MainWidget] 切换会话停止流式失败: {e}")
             self._is_streaming = False
             self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         elif self.backend.chat_engine:
             self.backend.cleanup_worker()
+
+        # 🛡️ 切换前保存当前会话：防止流式刚结束时用户立即切换会话，
+        # _do_post_stream_cleanup 的延迟保存尚未触发导致 AI 回复丢失。
+        # （此时已应用中断消息，保存的是完整会话）
+        if self.history_manager:
+            self._save_current_session_to_history()
+            self.history_manager.flush()
 
         # 🛡️ 标记会话切换：stop_streaming 后 old worker 的 finished_with_messages
         # 信号虽已断开再连接，但 Qt 事件队列中可能仍有已投递的旧回调。
@@ -13041,6 +13089,12 @@ class OpenAIChatToolWindow(ToolWindow):
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_current_project(session_project)
             self._refresh_project_branch_style()
+            # 🐛 修复（团队标记同步）：加载团队会话后必须恢复 _team_run_id /
+            # _team_name / _team_agent_name（对齐 _load_session_from_record 的
+            # F4 逻辑）。否则后续 _auto_save_current_session 的 team_kwargs 守卫
+            # （仅 _team_run_id 非空才传团队字段）会把团队会话当成普通会话保存，
+            # 团队元数据被清空 → 会话从团队分组消失 / 恢复时漏成员。
+            self._sync_team_markers_from_record(session_record)
             # 自动切换到该会话关联的 worktree
             # 规则：会话有 worktree_path → 切到该 worktree
             #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）

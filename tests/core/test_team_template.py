@@ -1359,19 +1359,37 @@ class TestHistorySessionRestoreRegistersTeamMember:
         return None
 
     def test_team_branch_calls_join_watcher_sync(self):
-        """AST：`_load_session_from_record` 团队分支必须 join_team + watcher + 活跃同步。
+        """AST：`_sync_team_markers_from_record` 团队分支必须 join_team + watcher + 活跃同步。
 
         回归防护：若有人删掉注册 3 步（例如改回仅 UI 标记），本测试立即失败。
+
+        注：F4 逻辑已于 2026-08-04 提取为公共方法 _sync_team_markers_from_record
+        （_load_session_from_record 与 _switch_to_session_by_id 共用），
+        断言目标随之迁移。
         """
         import textwrap
 
         _src_path, src = self._main_widget_src()
         tree = ast.parse(src)
-        target = self._find_function(tree, "_load_session_from_record")
-        assert target is not None, "未找到 _load_session_from_record 方法"
-        func_src = textwrap.dedent(ast.unparse(target))
 
-        # ① 保留原 3 行 UI 标记（不破坏既有语义）
+        # ① 公共方法必须存在且两个加载路径都调用它
+        sync_fn = self._find_function(tree, "_sync_team_markers_from_record")
+        assert sync_fn is not None, "未找到 _sync_team_markers_from_record 公共方法"
+        load_fn = self._find_function(tree, "_load_session_from_record")
+        switch_fn = self._find_function(tree, "_switch_to_session_by_id")
+        assert load_fn is not None and switch_fn is not None
+        load_src = ast.unparse(load_fn)
+        switch_src = ast.unparse(switch_fn)
+        assert "self._sync_team_markers_from_record(session_record)" in load_src, (
+            "_load_session_from_record 必须调用 _sync_team_markers_from_record"
+        )
+        assert "self._sync_team_markers_from_record(session_record)" in switch_src, (
+            "_switch_to_session_by_id 必须调用 _sync_team_markers_from_record"
+        )
+
+        func_src = textwrap.dedent(ast.unparse(sync_fn))
+
+        # ② 保留原 3 行 UI 标记（不破坏既有语义）
         # 注：ast.unparse 固定输出单引号字符串字面量，正则按单引号匹配
         assert "self._team_run_id = record_run_id" in func_src, "团队分支必须保留 _team_run_id 赋值"
         assert re.search(
@@ -1383,7 +1401,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
             func_src,
         ), "团队分支必须保留 _team_agent_name 赋值"
 
-        # ② 注册三连必须同时出现（leader 可见性修复核心）
+        # ③ 注册三连必须同时出现（leader 可见性修复核心）
         assert re.search(
             r"join_team\s*\(\s*window_id\s*=\s*self\._window_id\s*,\s*agent_name\s*=\s*self\._team_agent_name\s*\)",
             func_src,
@@ -1393,7 +1411,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
             "必须同步活跃窗口（防 _cleanup_stale_members 误清）"
         )
 
-        # ③ join_team 必须出现在 agent_name 赋值之后（同在 record_run_id 团队分支内）
+        # ④ join_team 必须出现在 agent_name 赋值之后（同在 record_run_id 团队分支内）
         agent_assign = re.search(
             r"self\._team_agent_name = \(session_record\.get\('agent_name'\) or ''\)\.strip\(\)",
             func_src,
@@ -1402,7 +1420,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         after_marker = func_src[agent_assign.end() :]
         assert re.search(r"join_team", after_marker), "join_team 必须出现在 agent_name 赋值之后（团队分支内）"
 
-        # ④ 注册受 window_id + agent_name 守卫（普通会话 / 无 agent 时不注册）
+        # ⑤ 注册受 window_id + agent_name 守卫（普通会话 / 无 agent 时不注册）
         assert re.search(r"if\s+self\._window_id\s+and\s+self\._team_agent_name", func_src), (
             "注册必须受 `if self._window_id and self._team_agent_name` 守卫"
         )

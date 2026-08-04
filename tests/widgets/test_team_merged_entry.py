@@ -434,6 +434,14 @@ class TestLoadSessionTeamMarks:
         win._team_run_id = "run-old"
         win._team_name = "dev"
         win._team_agent_name = "build"
+        # 🛡️ F4 逻辑已提取为 _sync_team_markers_from_record 公共方法，
+        # MagicMock 实例不会自动绑定真实方法 → 显式绑定，保证团队标记
+        # 同步逻辑真实执行（与 _load_session_from_record 内联期行为一致）。
+        from types import MethodType
+
+        win._sync_team_markers_from_record = MethodType(
+            OpenAIChatToolWindow._sync_team_markers_from_record, win
+        )
         return win
 
     @staticmethod
