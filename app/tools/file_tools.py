@@ -354,7 +354,7 @@ class FileTools:
         Args:
             path: 文件路径
             startline: 起始行号（从1开始）
-            endline: 结束行号（包含，从1开始）。不传时自动推断为 startline + 499
+            endline: 结束行号（包含，从1开始）。不传时默认从 startline 读取 500 行
             show_line_numbers: 是否显示行号，默认 False（返回原文）
 
         读取时记录文件的修改时间，用于后续编辑时检测文件是否被外部修改
@@ -411,9 +411,13 @@ class FileTools:
 
             start_idx = max(0, startline - 1)
             if endline is not None:
+                # endline 为含尾的 1-based 行号，恰好等于 islice 的 0-based 停止索引
+                # （islice(f, start, stop) 取索引 [start, stop)，含 stop-1 对应的行）
                 read_end = endline
             else:
-                read_end = startline + 500  # 默认读取 500 行
+                # 默认从 startline 起读 500 行：stop 必须是 0-based 偏移
+                # （用 start_idx 而非 startline，避免多读 1 行导致分段行号错位）
+                read_end = start_idx + 500
 
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
                 # 使用 islice 按需读取，避免大文件全量 readlines()

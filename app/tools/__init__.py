@@ -291,7 +291,7 @@ TOOL_SCHEMAS = [
                     },
                     "endline": {
                         "type": "integer",
-                        "description": "结束行号(从1开始)。不传默认 startline+499≈500行",
+                        "description": "结束行号(从1开始,含)。不传默认从 startline 起读 500 行",
                     },
                     "show_line_numbers": {
                         "type": "boolean",

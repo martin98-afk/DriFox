@@ -1794,7 +1794,10 @@ _skeleton_cache: Dict[tuple, str] = {}
 # 旧骨架无此分支会导致新代码注入的 data-order 不参与排序。
 # v4：reorganizeContent 新增"为 markdown 块补齐 data-order"分支（方案 D+），
 # 旧骨架缺此分支会在流式完成时把思考块与工具块交错错位。
-_SKELETON_CACHE_VERSION = 4
+# v5：方案 E：save 阶段把流式块 data-order 暂存到 window.__pendingStreamFloors，
+# reorganizeContent 的 _streamFloors 初始化时合并（修复 save 移除流式块后
+# 补 data-order 缺"排前流式工具数"修正 → restore 沉底 → 坞态归位瞬间错乱）。
+_SKELETON_CACHE_VERSION = 6
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -4261,7 +4264,13 @@ class CodeWebViewer(QWebEngineView):
                     // 未含仍在流式、尚未进入 _content_data 的工具块，需用其 floor(data-order) 修正）。
                     // 此处为缺 data-order 的块补上 = posMap 位置 + 排在其前的流式工具数，使 sort
                     // 与 save/restore 插入共用同一把尺子（与 _count_think_tool_prefix 同尺度）。
-                    var _streamFloors = [];
+                    // 🆕 方案 E：_streamFloors 初始化为 save 阶段暂存的流式块 data-order
+                    // （window.__pendingStreamFloors）——save 会把所有 data-tool-call-id 块
+                    // （含仍在流式的工具块）从 DOM 移除，导致下方从 toolContent.children 收集
+                    // 时恒为空、修正失效；暂存数组补回这条信息，使"排在其前的流式工具数"
+                    // 在坞态归位瞬间也能正确计入（否则思考块补齐的 data-order 偏小 → restore
+                    // 插回的工具块找不到比它大的节点 → 全部 appendChild 沉底）。
+                    var _streamFloors = (window.__pendingStreamFloors || []).slice();
                     var _allKids = Array.prototype.slice.call(toolContent.children);
                     for (var _sf = 0; _sf < _allKids.length; _sf++) {{
                         if (_allKids[_sf].getAttribute('data-streaming') === 'true') {{
@@ -4269,6 +4278,12 @@ class CodeWebViewer(QWebEngineView):
                             if (!isNaN(_sfOd)) _streamFloors.push(Math.floor(_sfOd));
                         }}
                     }}
+                    // 🆕 Bug B 方案 G：标记"是否补齐过 data-order"。save/restore 后
+                    // tool-content 的键序列可能与上次相同（__lastOrder diff 误判"顺序未变"
+                    // → 跳过 sort），但块物理顺序已被 restore/迁移打乱（data-order 与
+                    // 物理顺序不一致）→ 折叠框内"思考在前、工具在后"。凡补齐过
+                    // data-order（说明经历 markdown 重渲染 + save/restore），必须强制 sort。
+                    var _assignedDataOrder = false;
                     for (var _oa = 0; _oa < _allKids.length; _oa++) {{
                         var _oaKid = _allKids[_oa];
                         if (_oaKid.getAttribute('data-order') !== null) continue;
@@ -4285,6 +4300,7 @@ class CodeWebViewer(QWebEngineView):
                             if (_streamFloors[_sf2] <= _oaPos) _oaBefore++;
                         }}
                         _oaKid.setAttribute('data-order', String(_oaPos + _oaBefore));
+                        _assignedDataOrder = true;
                     }}
                     // ── [PERF v2] 顺序哈希 diff：键序列未变时跳过 sort + appendChild ──
                     // 流式期间大部分 updateContent 走"键序列未变"快路径，避免 sort 抖动
@@ -4303,7 +4319,9 @@ class CodeWebViewer(QWebEngineView):
                         }}
                     }}
                     var _lastOrder = toolContent.__lastOrder;
-                    var _orderChanged = !_lastOrder || _lastOrder.length !== _curKeys.length;
+                    // 🆕 Bug B 方案 G：补齐过 data-order（markdown 重渲染 + save/restore 路径）
+                    // → 键序列 diff 不可靠（键相同但物理顺序已被 restore 打乱），强制 sort。
+                    var _orderChanged = _assignedDataOrder || !_lastOrder || _lastOrder.length !== _curKeys.length;
                     if (!_orderChanged) {{
                         for (var _di = 0; _di < _curKeys.length; _di++) {{
                             if (_curKeys[_di] !== _lastOrder[_di]) {{
@@ -5090,6 +5108,15 @@ class CodeWebViewer(QWebEngineView):
         _target_id = self._tool_target_id
         return (
             "(function(){"
+            # 🆕 Bug B 方案 E：save 阶段把流式工具块的 data-order 暂存到 window，
+            # 供 reorganizeContent 补 data-order 时合并（_streamFloors）。根因：save 会
+            # 把所有 data-tool-call-id 块（含仍在流式、尚未进入 _content_data 的工具块）
+            # 从 #tool-content 移除，导致 reorganizeContent 执行时 toolContent.children
+            # 里已无流式块 → _streamFloors 恒为空 → 思考/完成工具块补的 data-order 缺少
+            # "排在其前的流式工具数"修正 → restore 按保存的 data-order 插回时与思考块
+            # 尺度不一致 → 找不到比它大的节点 → appendChild 沉底 → 折叠框内
+            # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
+            "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
             "var _saved=[];"
             # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），并从 DOM 移除。
@@ -5106,6 +5133,16 @@ class CodeWebViewer(QWebEngineView):
             "if(_tc&&_tc.children.length){"
             "Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
+            # 🆕 方案 E：暂存流式块（data-streaming="true"）的 data-order，供
+            # reorganizeContent 补 data-order 时修正"排在其前的流式工具数"。
+            # 这些块即将被 remove()，不在 markdown 中、不会被重新渲染，
+            # 只有 save/restore 保留；若不暂存其 data-order，reorganizeContent
+            # 的 _streamFloors 收集不到它们 → 思考块补的 data-order 缺修正 → restore
+            # 插入循环（只比较带 data-order 的节点）找不到目标 → appendChild 沉底。
+            "if(el.getAttribute('data-streaming')==='true'){"
+            "var _pfo=parseFloat(el.getAttribute('data-order'));"
+            "if(!isNaN(_pfo)){window.__pendingStreamFloors.push(Math.floor(_pfo));}"
+            "}"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
             "streaming:el.getAttribute('data-streaming')||''});"
@@ -6319,6 +6356,11 @@ class MessageCard(SimpleCardWidget):
         # 而不是思考恒顶部、工具恒底部。锚点 = 工具调用发生时 _content_data 的长度，
         # append_tool_result 时 insert(锚点) 而非 append，工具结果插回调用发生的位置。
         self._tool_insert_anchors: Dict[str, int] = {}  # tool_call_id → 工具调用时流末尾位置
+        # 🆕 Bug B 方案 F（数据层稳定锚点）：_tool_insert_anchors 的 int 索引在
+        # 其他工具结果插入 / 思考块追加后**失效**（列表偏移），导致 finish 完整重渲染
+        # 时 _content_data 顺序错乱（"思考在前、工具在后"）。改为记录**块引用**：
+        # 引用在列表增删中保持稳定，index(ref)+1 恒等于"工具调用时刻的逻辑末尾"。
+        self._tool_anchor_refs: Dict[str, Any] = {}  # tool_call_id → 调用时 _content_data[-1] 块引用
         self._tool_call_order: Dict[str, int] = {}  # tool_call_id → 递增启动序号（同锚点工具按调用序）
         # 🆕 Bug B：当前活动思考块。append_reasoning 只追加到它（避免合并进已完成的
         # 旧思考块导致多轮思考堆积）；工具调用/新块开始时置 None / 覆盖。
@@ -7892,7 +7934,18 @@ class MessageCard(SimpleCardWidget):
 
     def append_text(self, text: str):
         if self.role == "assistant":
-            self._content_data = append_text_block(self._content_data, text)
+            # 🆕 Bug B 方案 F：优先**原地**追加文本块（不重建列表）。
+            # append_text_block 在末尾非 text 块时走 ensure_content_blocks 重建整个
+            # 列表 → 所有块 dict 对象被替换 → _tool_anchor_refs 对象引用失效 →
+            # append_tool_result 稳定锚点退化 → finish 完整重渲染时思考/工具顺序错乱。
+            # 流式中 _content_data 已是标准块列表，原地追加/合并保住引用稳定。
+            if isinstance(self._content_data, list) and self._content_data and isinstance(self._content_data[-1], dict) and self._content_data[-1].get("type") == "text":
+                self._content_data[-1]["text"] = str(self._content_data[-1].get("text", "") or "") + str(text or "")
+            elif isinstance(self._content_data, list) and all(isinstance(b, dict) for b in self._content_data):
+                # 直接构造 text 块（避免 make_text_block 未导入），保持原地 append 不重建
+                self._content_data.append({"type": "text", "text": str(text or "")})
+            else:
+                self._content_data = append_text_block(self._content_data, text)
             # 优化：懒渲染模式下直接跳过 markdown 渲染，避免不必要的计算
             if not self._lazy_rendered or not self.viewer:
                 self._pending_content = self._content_data
@@ -7937,6 +7990,25 @@ class MessageCard(SimpleCardWidget):
             self.viewer.append_chunk(str(text or ""))
             self._content_just_loaded = True
 
+    def _tool_anchor_pos(self, tool_call_id: str) -> Optional[int]:
+        """返回工具调用时刻的稳定逻辑位置（append_tool_result 插入位 / data-order 基准）。
+
+        🆕 Bug B 方案 F：优先用块引用锚点——index(ref) + 1 在列表因其他工具结果
+        插入、思考/正文追加而偏移后仍精确指向"工具调用时刻的逻辑末尾"。int 索引锚点
+        （_tool_insert_anchors）在偏移后失效，是 finish 完整重渲染时"思考在前、
+        工具在后"数据层错乱的根因。
+
+        Returns:
+            稳定位置（0..len）；无任何锚点（历史会话等非流式路径）→ None（调用方兜底 append）。
+        """
+        ref = self._tool_anchor_refs.get(tool_call_id)
+        if ref is not None and isinstance(self._content_data, list):
+            # 用对象身份（is）定位，避免内容相同的不同块误匹配
+            for _i, _b in enumerate(self._content_data):
+                if _b is ref:
+                    return _i + 1
+        return self._tool_insert_anchors.get(tool_call_id)
+
     def append_tool_result(
         self,
         tool_name: str,
@@ -7963,7 +8035,10 @@ class MessageCard(SimpleCardWidget):
         # 已插入工具块插到其后，保证按调用顺序排列（结果晚到也不乱序）。
         # 乱序兜底：无锚点（历史会话渲染等非流式路径）/ content 非 list / 锚点越界
         # → append 末尾，与修复前行为一致。
-        anchor = self._tool_insert_anchors.get(tool_call_id)
+        # 🆕 Bug B 方案 F：用**块引用**锚点定位（_tool_anchor_pos），替代 int 索引。
+        # int 索引在"其他工具结果插入 + 思考/正文追加"后偏移，导致工具结果插到
+        # 错误位置 → _content_data 顺序错 → finish 完整重渲染时思考/工具错乱。
+        anchor = self._tool_anchor_pos(tool_call_id) if isinstance(self._content_data, list) else None
         if anchor is not None and isinstance(self._content_data, list) and 0 <= anchor <= len(self._content_data):
             my_order = self._tool_call_order.get(tool_call_id, 0)
             insert_at = anchor
@@ -8027,7 +8102,8 @@ class MessageCard(SimpleCardWidget):
             # 🆕 方案 D：计算完成态工具块的 data-order（与 _inject_tool_streaming_html
             # 同口径）。无锚点（历史会话等非流式路径）→ 基准取当前末尾位置，与
             # _content_data.append 兜底行为一致（沉底不早于任何已有块）。
-            _anchor = self._tool_insert_anchors.get(tool_call_id) or 0
+            # 🆕 Bug B 方案 F：用块引用锚点定位稳定位置（int 索引在列表偏移后失效）。
+            _anchor = self._tool_anchor_pos(tool_call_id)
             _order = self._tool_call_order.get(tool_call_id) or 0
             _base = float(_count_think_tool_prefix(self._content_data, _anchor))
             _order_value_js = f"{_base + _order * 0.001:.3f}"
@@ -8345,7 +8421,8 @@ class MessageCard(SimpleCardWidget):
             # 使 JS 注入的流式块在下次全量渲染排序时能回到正确位置，而非恒沉底
             # （"所有思考在前、所有工具在后"的根因）。锚点 = 工具调用时 _content_data
             # 长度；基准 = 锚点前 think/tool 块计数；同锚点多工具按启动序号细分。
-            _anchor = self._tool_insert_anchors.get(tool_call_id) or 0
+            # 🆕 Bug B 方案 F：用块引用锚点定位稳定位置（int 索引在列表偏移后失效）。
+            _anchor = self._tool_anchor_pos(tool_call_id)
             _order = self._tool_call_order.get(tool_call_id) or 0
             _base = float(_count_think_tool_prefix(self._content_data, _anchor))
             _order_value_js = f"{_base + _order * 0.001:.3f}"
@@ -8628,10 +8705,15 @@ class MessageCard(SimpleCardWidget):
         # 🆕 Bug B：首次见 tool_call_id 记录插入锚点 = 工具调用发生时 _content_data 的长度。
         # append_tool_result 用 insert(锚点) 把结果插回工具调用发生的位置（而非恒末尾），
         # 保持"思考→工具→正文→工具→正文"交错顺序。同锚点多工具按启动序号保序。
+        # 🆕 Bug B 方案 F：同时记录**块引用**锚点。int 索引（len）在后续其他工具结果
+        # 插入 / 思考块追加后失效（列表偏移），引用在列表增删中保持稳定，
+        # index(ref)+1 恒等于"工具调用时刻的逻辑末尾"——这是数据层正确顺序的关键。
         if tool_call_id not in self._tool_insert_anchors:
             self._tool_insert_anchors[tool_call_id] = (
                 len(self._content_data) if isinstance(self._content_data, list) else 0
             )
+            if isinstance(self._content_data, list) and self._content_data:
+                self._tool_anchor_refs[tool_call_id] = self._content_data[-1]
             self._tool_call_order[tool_call_id] = len(self._tool_call_order)
         # 🆕 第一次工具参数到达时，标记当前思考块为完成态（💡）
         # 修复 bug：reasoning 流结束 → tool_call 开始时，思考块 DOM 还显示"思考中"

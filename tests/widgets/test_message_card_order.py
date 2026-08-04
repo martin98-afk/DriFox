@@ -282,9 +282,11 @@ def test_inject_tool_streaming_html_sets_data_order():
     assert target is not None, "未找到 _inject_tool_streaming_html 方法"
     func_src = textwrap.dedent(ast.unparse(target))
 
-    # 必须从锚点计算 tool/think 序列位置（data-order 值来源）
-    assert "_tool_insert_anchors.get(tool_call_id)" in func_src, (
-        "data-order 计算必须读取 _tool_insert_anchors（工具调用锚点）"
+    # 必须从稳定锚点计算 tool/think 序列位置（data-order 值来源）
+    # 🆕 Bug B 方案 F：改用 _tool_anchor_pos（块引用定位）替代 _tool_insert_anchors
+    # （int 索引在其他工具结果插入/思考追加后失效 → finish 重渲染顺序错乱）。
+    assert "_tool_anchor_pos(tool_call_id)" in func_src, (
+        "data-order 计算必须读取稳定锚点 _tool_anchor_pos（块引用定位）"
     )
     # 必须生成 setAttribute('data-order', ...) JS
     assert "setAttribute('data-order'" in func_src, "JS 新建工具块时必须 setAttribute('data-order', ...)"
@@ -477,3 +479,168 @@ def test_skeleton_cache_version_bumped_for_dplus():
     src = _extract_src()
     m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
     assert m and int(m.group(1)) >= 4, f"方案 D+ 改动骨架 JS 后必须 >= 4，实际 {m.group(1) if m else 'None'}"
+
+
+# ──────────────────────────────────────────────
+# 方案 E（坞态归位瞬间"所有思考在前、所有工具在后"复发）修复回归
+# 根因：_build_save_and_restore_js 的 save 阶段把所有 data-tool-call-id 块
+# （含"仍在流式、尚未进入 _content_data"的工具块）从 #tool-content 移除 →
+# reorganizeContent 补 data-order 时 toolContent.children 里已无流式块 →
+# _streamFloors 恒为空 → 思考/完成工具块补齐的 data-order 缺少"排在其前的
+# 流式工具数"修正 → restore 按保存的 data-order 插回时与思考块尺度不一致 →
+# 找不到比它大的节点 → appendChild 沉底 → 折叠框内"所有思考在前、所有工具在后"
+# （简洁模式坞态归位瞬间，即 finish_streaming 触发非流式渲染的那一刻）。
+# 修复：save 阶段把流式块（data-streaming="true"）的 data-order 暂存到
+# window.__pendingStreamFloors；reorganizeContent 的 _streamFloors 初始化时
+# 合并该数组（与 DOM 收集并集），恢复"排在其前的流式工具数"修正。
+# ──────────────────────────────────────────────
+
+
+def test_save_and_restore_stashes_streaming_orders():
+    """AST：_build_save_and_restore_js 的 save 阶段必须暂存流式块 data-order。
+
+    不暂存则 reorganizeContent 的 _streamFloors 收集不到被 save 移除的流式块，
+    补 data-order 缺修正 → restore 沉底（坞态归位瞬间"思考在前、工具在后"）。
+    """
+    src = _extract_src()
+    import ast as _ast
+
+    tree = _ast.parse(src)
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == "_build_save_and_restore_js":
+            target = node
+            break
+    assert target is not None, "未找到 _build_save_and_restore_js 方法"
+    body = textwrap.dedent(ast.unparse(target))
+
+    # IIFE 开头必须重置暂存数组（防止跨渲染残留）
+    assert "window.__pendingStreamFloors=[]" in body, "save/restore IIFE 开头必须重置 __pendingStreamFloors"
+    # save 循环内：仅流式块（data-streaming="true"）暂存其 data-order（floor）
+    assert "getAttribute('data-streaming')==='true'" in body, "save 必须识别流式块"
+    assert "window.__pendingStreamFloors.push(Math.floor(_pfo))" in body, (
+        "save 必须把流式块 data-order 暂存进 __pendingStreamFloors"
+    )
+    assert "parseFloat(el.getAttribute('data-order'))" in body, "暂存前必须解析流式块 data-order"
+
+
+def test_reorganize_content_merges_pending_stream_floors():
+    """AST：reorganizeContent 的 _streamFloors 必须合并 window.__pendingStreamFloors。
+
+    只有 DOM 收集会在 save 移除流式块后失效（恒为空），合并暂存数组才能
+    在坞态归位瞬间恢复"排在其前的流式工具数"修正，统一 sort 与 restore
+    插入的 data-order 尺度。
+    """
+    src = _extract_src()
+    assert "(window.__pendingStreamFloors || []).slice()" in src, (
+        "_streamFloors 必须初始化为 window.__pendingStreamFloors 副本（再合并 DOM 收集）"
+    )
+    # 暂存合并必须位于 DOM 收集之前（_streamFloors 声明处）
+    stash_pos = src.find("window.__pendingStreamFloors || []")
+    dom_collect_pos = src.find("_allKids[_sf].getAttribute('data-streaming')")
+    assert stash_pos != -1 and dom_collect_pos != -1 and stash_pos < dom_collect_pos, (
+        "暂存数组合并必须先于 DOM 流式块收集"
+    )
+
+
+def test_skeleton_cache_version_bumped_for_plan_e():
+    """AST：方案 E 改动了骨架 JS（reorganizeContent 的 _streamFloors 初始化），必须递增版本。"""
+    src = _extract_src()
+    m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
+    assert m and int(m.group(1)) >= 5, f"方案 E 改动骨架 JS 后必须 >= 5，实际 {m.group(1) if m else 'None'}"
+
+
+# ──────────────────────────────────────────────
+# 方案 F（数据层稳定锚点）+ 方案 G（save/restore 后强制 sort）回归
+# 根因：1) append_tool_result 用 int 索引锚点（调用时列表长度），其他工具结果插入/
+#        思考/正文追加后索引偏移 → _content_data 顺序错 → finish 完整重渲染（清缓存
+#        强制 markdown 重建）时思考/工具错乱。修复：块引用锚点 _tool_anchor_refs +
+#        _tool_anchor_pos（index(ref)+1，抗偏移）；append_text 原地追加保引用稳定。
+#      2) save/restore 后 tool-content 键序列与 __lastOrder 相同 → _orderChanged diff
+#        误判跳过 sort，但物理顺序已被 restore/迁移打乱。修复：补齐过 data-order
+#        （_assignedDataOrder）即强制 sort。
+# ──────────────────────────────────────────────
+
+
+def test_append_text_preserves_block_identity():
+    """行为：append_text 必须原地追加文本块（不重建列表），保住工具锚点引用。
+
+    append_text_block 在末尾非 text 块时走 ensure_content_blocks 重建整个列表，
+    所有块 dict 对象被替换 → _tool_anchor_refs 引用失效 → 稳定锚点退化。
+    """
+    card = _make_card()
+    card.start_new_thinking_block()
+    card.append_reasoning("思考一")
+    card.update_tool_streaming("tool_1", "search", {"q": "x"})
+    # 末尾是 reasoning（非 text）→ append_text 不得重建列表
+    card.append_text("正文一")
+    # 工具锚点引用必须仍然存活于列表中（append_text_block 重建列表会失效）
+    ref = card._tool_anchor_refs.get("tool_1")
+    assert ref is not None and any(b is ref for b in card._content_data), (
+        "append_text 后 _tool_anchor_refs 引用必须仍指向列表中的块（原地追加）"
+    )
+
+
+def test_tool_result_inserts_at_stable_anchor():
+    """行为：核心用户场景——思考1→工具1→正文1→思考2→工具2→正文2，
+    工具结果到达后数据层必须交错正确（思考在前工具在后的数据层根因回归）。
+    """
+    card = _make_card()
+    card.start_new_thinking_block()
+    card.append_reasoning("思考一")
+    card.update_tool_streaming("tool_1", "search", {"q": "x"})
+    card.append_text("正文一")
+    card.start_new_thinking_block()
+    card.append_reasoning("思考二")
+    card.update_tool_streaming("tool_2", "read", {"path": "f"})
+    card.append_text("正文二")
+
+    card.append_tool_result(tool_name="search", result="r1", tool_call_id="tool_1")
+    card.append_tool_result(tool_name="read", result="r2", tool_call_id="tool_2")
+
+    # 修复前：['reasoning','tool_result','text','tool_result','reasoning','text']
+    # （tool_2 结果插到思考二前 → finish 完整重渲染时"思考在前、工具在后"）
+    assert _types(card) == [
+        "reasoning", "tool_result", "text", "reasoning", "tool_result", "text",
+    ], f"工具结果必须按调用位置交错，实际 {_types(card)}"
+    assert _tool_ids(card) == ["tool_1", "tool_2"]
+
+
+def test_tool_anchor_pos_uses_ref_not_index():
+    """行为：_tool_anchor_pos 必须返回块引用定位（index(ref)+1），而非失效的 int 索引。"""
+    card = _make_card()
+    card.start_new_thinking_block()
+    card.append_reasoning("思考一")
+    card.update_tool_streaming("tool_1", "search", {"q": "x"})
+    card.append_text("正文一")
+    card.start_new_thinking_block()
+    card.append_reasoning("思考二")
+    card.update_tool_streaming("tool_2", "read", {"path": "f"})
+    card.append_text("正文二")
+    # tool_1 结果先插入 → 列表偏移
+    card.append_tool_result(tool_name="search", result="r1", tool_call_id="tool_1")
+    # tool_2 锚点 = 思考二块之后（引用定位），int 索引（3）此时指向思考二本身
+    assert card._tool_anchor_pos("tool_2") == 4, (
+        f"tool_2 稳定锚点应为 4（思考二块之后），实际 {card._tool_anchor_pos('tool_2')}"
+    )
+
+
+def test_reorganize_content_force_sort_after_data_order_assign():
+    """AST：补齐过 data-order（_assignedDataOrder）必须强制 sort。
+
+    save/restore 后键序列与 __lastOrder 相同 → diff 误判跳过 sort，但物理顺序
+    已被 restore/迁移打乱 → 折叠框内"思考在前、工具在后"（方案 G）。
+    """
+    src = _extract_src()
+    assert "_assignedDataOrder = false" in src, "必须声明 _assignedDataOrder 标志"
+    assert "_assignedDataOrder = true" in src, "补齐 data-order 时必须置位标志"
+    assert "_orderChanged = _assignedDataOrder ||" in src, (
+        "_orderChanged 必须因 _assignedDataOrder 强制为 true（跳过键序列 diff 误判）"
+    )
+
+
+def test_skeleton_cache_version_bumped_for_plan_fg():
+    """AST：方案 F/G 改动了骨架 JS（reorganizeContent），必须递增版本。"""
+    src = _extract_src()
+    m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
+    assert m and int(m.group(1)) >= 6, f"方案 F/G 改动骨架 JS 后必须 >= 6，实际 {m.group(1) if m else 'None'}"
