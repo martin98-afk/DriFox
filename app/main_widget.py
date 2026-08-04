@@ -1696,6 +1696,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 ):
                     new_instance._current_provider_name = self._current_provider_name
                     new_instance._current_model_name = self._current_model_name
+                    # #4 语义：分支/新窗口继承源窗口的"是否手动选过"标志，
+                    # 保持会话状态一致（手动选过的分支窗口同步时同样不被云端覆盖）
+                    new_instance._user_manually_selected_model = getattr(
+                        self, "_user_manually_selected_model", False
+                    )
                     # 性能优化：直接复制 _valid_configs，避免新窗口在 showEvent 中
                     # 重新从磁盘加载全部服务商配置（_load_model_configs 很重）
                     new_instance._valid_configs = dict(self._valid_configs)
@@ -2913,6 +2918,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._current_provider_name = ""
         self._current_model_name = ""
+        # #4 语义：本窗口用户是否手动选过模型（_on_model_selected_from_popup 置位）。
+        # 同步跟随判定：True → 保持自身选择；False（首次加载/默认态）→ 跟随云端 SelectedModel。
+        self._user_manually_selected_model = False
 
         # ===== 工具开关双色分段按钮 =====
         self._tool_toggle_btn = QWidget(toolbar_widget)
@@ -5856,6 +5864,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 关键修复：先转 config_id，避免后续 _valid_configs[display_name] 创建新条目
         display_to_config = getattr(self, "_display_to_config_id", {})
         config_id = display_to_config.get(provider_name, provider_name)
+        # #4 语义：用户在本窗口手动选过模型 → 置位，后续 gitee 同步不再覆盖本窗口选择
+        self._user_manually_selected_model = True
         self._current_provider_name = config_id
         self._current_model_name = model_name
         # 保存到全局配置（作为新窗口的默认值，不影响当前窗口实例）
@@ -8199,13 +8209,20 @@ class OpenAIChatToolWindow(ToolWindow):
         仅在同步恢复路径调用（由 ConfigSyncService.settingsRestored 信号驱动），
         满足"模型选择跟随同步"；不影响多窗口各自的独立切换（正常切换走
         _on_model_selected_from_popup，不改 _current_provider_name 的窗口隔离语义）。
+
+        语义（#4 修正）：仅"本窗口用户从未手动选过模型"的窗口在同步时跟随云端；
+        手动选过模型的窗口保持自身选择，不被覆盖（见 _user_manually_selected_model）。
         """
         if getattr(self, "_is_destroyed", False):
             return
-        # 用云端 SavedProviders 重建 _valid_configs + 选中配置（force_global 跳过
-        # "窗口自身选择优先"，改从云端 llm_selected_model 取默认）。
-        self._load_model_configs(force_global=True)
-        # 云端 SelectedModel 若仍无效（provider 缺失）则由 _load_model_configs 回退到列表第一项
+        if getattr(self, "_user_manually_selected_model", False):
+            # 本窗口用户已手动选过模型 → 保持自身选择：仅重建 _valid_configs
+            #（"窗口自身优先"分支会保留 old_provider），不跟随云端 SelectedModel。
+            self._load_model_configs()
+        else:
+            # 本窗口从未手动选过模型 → 跟随云端：force_global 跳过"窗口自身优先"，
+            # 改从云端 llm_selected_model 取默认（无效则由 _load_model_configs 回退列表第一项）。
+            self._load_model_configs(force_global=True)
         self._update_model_selector_btn()
         self._refresh_context_usage_indicator()
 
