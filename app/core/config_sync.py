@@ -80,6 +80,10 @@ class ConfigSyncService(QObject):
     syncDone = pyqtSignal(bool, str)  # success, message
     _configChanged = pyqtSignal()  # 文件变更通知（watch 线程 → 主线程）
     _reloadSettings = pyqtSignal()  # 请求在主线程重新加载 Settings（后台线程 → 主线程）
+    # 云端配置已在主线程全部写回 ConfigItem 内存后发射（syncDone 之前）。
+    # 供窗口级 UI（如模型选择按钮）按云端值做一次性刷新，避免依赖
+    # valueChanged（llm_selected_model 无监听器）而错过更新。
+    settingsRestored = pyqtSignal()
 
     def __init__(self):
         if ConfigSyncService._instance is not None:
@@ -507,6 +511,13 @@ class ConfigSyncService(QObject):
             logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，云端 token 权威）")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
+
+        # 云端配置已全部写回 ConfigItem 内存 → 通知窗口级 UI 按云端值刷新
+        # （如模型选择按钮：llm_selected_model.valueChanged 无监听器，须显式驱动刷新）
+        try:
+            self.settingsRestored.emit()
+        except Exception as e:
+            logger.warning(f"[ConfigSync] settingsRestored 通知失败: {e}")
 
         # 发射被延迟的 syncDone（_do_download 中设置的 _pending_sync_message）
         if self._pending_sync_message:

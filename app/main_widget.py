@@ -2457,6 +2457,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 监听技能配置变更（启用/禁用），确保多窗口同步
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
+        # gitee 配置同步完成 → 本窗口按云端 llm_selected_model 刷新模型选择。
+        # 不用 valueChanged 监听（llm_selected_model 全项目无监听器，且直接监听会破坏
+        # 多窗口各自选择独立模型），改为同步服务在配置全部写回内存后一次性通知。
+        # 窗口销毁时 PyQt 自动断开连接，不泄漏。
+        try:
+            from app.core.config_sync import ConfigSyncService
+
+            ConfigSyncService.get_instance().settingsRestored.connect(self._apply_synced_model_selection)
+        except Exception:
+            pass
+
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
         # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
         # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
@@ -8182,7 +8193,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
         ThemeRefreshCoordinator.timer_end("total")
 
-    def _load_model_configs(self):
+    def _apply_synced_model_selection(self):
+        """gitee 配置同步完成后：把本窗口模型选择刷新为云端 llm_selected_model。
+
+        仅在同步恢复路径调用（由 ConfigSyncService.settingsRestored 信号驱动），
+        满足"模型选择跟随同步"；不影响多窗口各自的独立切换（正常切换走
+        _on_model_selected_from_popup，不改 _current_provider_name 的窗口隔离语义）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 用云端 SavedProviders 重建 _valid_configs + 选中配置（force_global 跳过
+        # "窗口自身选择优先"，改从云端 llm_selected_model 取默认）。
+        self._load_model_configs(force_global=True)
+        # 云端 SelectedModel 若仍无效（provider 缺失）则由 _load_model_configs 回退到列表第一项
+        self._update_model_selector_btn()
+        self._refresh_context_usage_indicator()
+
+    def _load_model_configs(self, force_global: bool = False):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             return
@@ -8229,7 +8256,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复或设置当前选中的服务商和模型
         # 优先级：窗口自身选择 > 全局默认 > 列表第一个
         # 关键修复：多窗口场景下，不应让全局配置覆盖窗口自己的选择
-        if old_provider and old_provider in self._valid_configs:
+        if old_provider and old_provider in self._valid_configs and not force_global:
             # 优先保持当前窗口已有的选择（多窗口独立）
             self._current_provider_name = old_provider
             self._current_model_name = old_model

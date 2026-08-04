@@ -991,3 +991,29 @@ class TestThemeSyncTiming:
         svc._reload_settings_on_main_thread()
 
         assert fake.ui_theme_style.value == "mytheme", "自定义主题应被保留，而非回退默认"
+
+    def test_reload_settings_emits_settings_restored(self, svc, tmp_path, monkeypatch):
+        """_reload_settings_on_main_thread 全量写回后发射 settingsRestored（驱动模型选择刷新）"""
+        from app.core import config_sync as cs
+
+        cfg_path = self._write_config(tmp_path, "lumia")
+
+        fake = self._FakeSettings
+        fake.file = cfg_path
+        fake.ui_theme_style.validator.__init__(["lumia"])
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr(
+            "app.utils.theme_manager.ThemeManager.reload",
+            lambda self: None,
+        )
+        monkeypatch.setattr(cs, "Settings", fake)
+
+        fired = []
+        svc.settingsRestored.connect(lambda: fired.append(1))
+        try:
+            svc._reload_settings_on_main_thread()
+        finally:
+            svc.settingsRestored.disconnect()
+
+        assert fired, "settingsRestored 应在云端配置全部写回 ConfigItem 内存后发射"
