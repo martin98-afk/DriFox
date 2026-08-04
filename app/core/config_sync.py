@@ -465,7 +465,22 @@ class ConfigSyncService(QObject):
         try:
             cfg = Settings.get_instance()
 
-            # ── 全量手动从文件同步（绕过 @exceptionHandler 的静默吞异常问题） ──
+            # ── 主题先注册，再恢复配置 ──
+            # 下方全量手动同步会把 ui_theme_style 从云端 app.config 写回内存；其 value setter
+            # 会调用 OptionsValidator.correct()：若当前主题不在验证器选项里（自定义主题由本次
+            # 下载的 user-custom 插件提供，刚解压落地但 theme_manager 尚未重新扫描），correct()
+            # 会把值静默改写成 options[0]（默认主题），使自定义主题永久丢失。
+            # 因此先 reload 主题并刷新验证器，确保自定义主题已注册后再写 ui_theme_style。
+            try:
+                from app.utils.theme_manager import theme_manager
+                from app.utils.config import update_theme_options
+
+                theme_manager.reload()
+                update_theme_options()
+            except Exception as _te:
+                logger.warning(f"[ConfigSync] 下载后主题注册失败: {_te}")
+
+            # ── 全量手动从磁盘同步（绕过 @exceptionHandler 的静默吞异常问题） ──
             # Gitee 段一并同步：云端 token 是 single source of truth。
             try:
                 import json as _json
@@ -1078,6 +1093,13 @@ class ConfigSyncService(QObject):
             return False
 
         results: list[bool] = []
+        # 本次下载是否真的拉取了新 app.config（决定下载完成后是否需要触发主题注册 + 配置重载）。
+        # 主题注册时序修复：app.config 里可能引用自定义主题（由 user-custom 插件提供），而
+        # user-custom 是在 app.config 之后才下载解压的。若在 app.config 刚下载完就立即在主线程
+        # 重载 Settings，ui_theme_style.value 写入时主题可能尚未注册，会被
+        # OptionsValidator.correct() 静默重置为默认主题（options[0]），导致自定义主题丢失。
+        # 因此把 Settings 重载延后到下面所有步骤（含 user-custom 解压落地）完成后统一触发。
+        downloaded_config = False
         try:
             # ★ 进入下载立即取消防抖计时，防止之前 watch 事件的残留防抖与下载流程并发
             if self._debounce_timer:
@@ -1095,12 +1117,13 @@ class ConfigSyncService(QObject):
                     results.append(True)
                 else:
                     if self._download_file(REMOTE_PATH, self._config_path, label="app.config"):
-                        logger.info("[ConfigSync] app.config 已下载，安排在主线重载 Settings")
-                        # [PERF] 不在后台线程直接调用 Settings.load()，避免大量
-                        # valueChanged 信号从非主线程发射到主线程队列引发 UI 卡顿。
-                        # 改用信号桥接到主线程执行，load 完成后自动发射 syncDone。
-                        self._pending_sync_message = "配置与用户插件已从云端恢复"
-                        self._reloadSettings.emit()
+                        # [PERF] Settings 不在此处主线程重载，避免大量 valueChanged 信号
+                        # 从非主线程发射到主线程收集队列引起 UI 卡顿；也不在 app.config
+                        # 单一下载完成后立即触发，延后到本次下载全部完成（user-custom 解压
+                        # 落地）后由下方统一 `_reloadSettings.emit()` 桥接到主线程执行。
+                        # 见函数头 downloaded_config 注释：确保主题先注册再恢复，避免回退。
+                        logger.info("[ConfigSync] app.config 已下载，延后到所有下载完成后重载 Settings")
+                        downloaded_config = True
                         results.append(True)
                     else:
                         logger.error("[ConfigSync] app.config 下载失败，中止后续下载")
@@ -1165,7 +1188,15 @@ class ConfigSyncService(QObject):
             self._records_dirty = False
             logger.debug("[ConfigSync] 已清除下载触发的脏标记")
 
-            # 任何一项成功就算部分成功，不因 user-custom 失败而否定 app.config 恢复
+            # 本次拉取了新 app.config → 在所有下载（含 user-custom 解压落地）完成后，
+            # 才在主线程统一重载 Settings + 注册主题。确保自定义主题先注册再恢复，
+            # 避免 _reload_settings_on_main_thread 写 ui_theme_style 时被 OptionsValidator
+            # 因主题未注册而静默重置为默认主题。load 完成后自动发射 syncDone。
+            if downloaded_config:
+                self._pending_sync_message = "配置与用户插件已从云端恢复"
+                self._reloadSettings.emit()
+
+            # 任何一项结果就算部分成功，不因 user-custom 失败而否定 app.config 恢复
             return any(results)
         except Exception as e:
             logger.error(f"[ConfigSync] 下载异常: {e}")
