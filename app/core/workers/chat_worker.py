@@ -2695,8 +2695,19 @@ class OpenAIChatWorker(QThread):
                 is_retryable_timeout = isinstance(e, (httpx.TimeoutException, httpcore.TimeoutException))
                 is_retryable_protocol = isinstance(e, (httpx.ProtocolError, httpcore.ProtocolError))
                 is_rate_limit = isinstance(e, RateLimitError)
+                # 服务端过载/繁忙（如 MiniMax 的 2064、OpenAI 的 503）应重试。
+                # 除标准 "2064"/"overload" 信号外，还兜底识别两类透传消息：
+                # 1) SSE 流内错误事件：openai SDK 将其包装为通用 APIError（无 status_code
+                #    属性），但服务端文本含 5xx 状态码（如 "[503]"）
+                # 2) 队列已满等过载信号（如 MiniMax 的 "The request queue is full"）
+                _err_lower = error_str.lower()
                 is_server_overload = isinstance(e, APIError) and (
-                    "2064" in error_str or "overload" in error_str.lower()
+                    "2064" in error_str
+                    or "overload" in _err_lower
+                    or re.search(r"\b(5\d{2})\b", error_str) is not None
+                    or "request queue is full" in _err_lower
+                    or "queue is full" in _err_lower
+                    or "streaming response failed" in _err_lower
                 )
                 is_conn_error = isinstance(e, APIConnectionError)
                 # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
@@ -4038,6 +4049,19 @@ class OpenAIChatWorker(QThread):
             elif "insufficient_quota" in error_msg:
                 self._emit_with_callback(
                     "error_occurred", self.error_occurred, "[配额不足] API配额已用完，请检查账户余额或更换API Key。"
+                )
+            elif (
+                any(
+                    kw in error_msg.lower()
+                    for kw in ("request queue is full", "queue is full", "streaming response failed")
+                )
+                or re.search(r"\b(5\d{2})\b", error_msg) is not None
+            ):
+                # 服务端过载/繁忙（已自动重试仍失败）：提示稍后重试，避免误以为是请求问题
+                self._emit_with_callback(
+                    "error_occurred",
+                    self.error_occurred,
+                    f"[服务繁忙] API 服务端过载或请求队列已满，已自动重试仍失败。请稍后重试。详情: {error_msg}",
                 )
             else:
                 self._emit_with_callback("error_occurred", self.error_occurred, f"[API错误] {error_msg}")
