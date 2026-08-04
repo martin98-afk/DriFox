@@ -4229,7 +4229,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._spawn_team_members(agents_needed)
 
     def _spawn_team_member_window(self, agent_name: str) -> Optional["OpenAIChatToolWindow"]:
-        """为团队新建一个成员窗口（_handle_team_load 与团队框"新建成员"共用）。
+        """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
         创建链路（与 _handle_team_load 原始循环体一致）：
         1. _create_fresh_window 新建全新空白窗口（不复制任何已有窗口上下文）
@@ -4245,7 +4245,12 @@ class OpenAIChatToolWindow(ToolWindow):
         ⚠️ run_id 关键约束：**复用现有 run_id**（get_team_run_id()），
         禁止 start_team_run(force=True) 生成新 run_id——否则新窗口按
         TabManagerWindow._resolve_tab_team_id 分组进**新团队框**而非当前团队框
-        （T3 坑 1）。仅"开新团队"路径（/team --load）先行 force 生成 run_id。
+        （T3 坑 1）。仅"开新团队"路径（/team --load）与"新建任务"
+        （_handle_team_new_task）先行 force 生成 run_id。
+
+        ⚠️ 角色重复：**允许同 agent_name 多窗口**（F14 快速新建成员可重复角色）。
+        TeamManager.join_team 以 window_id 为 key，同角色多窗口互不冲突；
+        Tab 分组 key 为 run_id，同组多 TabItem 渲染正常。
 
         Args:
             agent_name: 要创建的角色名
@@ -4299,37 +4304,30 @@ class OpenAIChatToolWindow(ToolWindow):
         return len(new_windows)
 
     def _handle_team_add_member(self):
-        """团队框"新建成员"交互：列出模板中未加入角色，选择后创建成员会话。
+        """团队框"快速新建成员"交互：列出可选角色（可重复），选择后创建成员会话。
 
         交互（QMenu 以鼠标位置弹出，样式与 TabPanel contextMenuEvent 一致）：
-        - 模板全部角色列出，已加入团队的置灰（不可选）
-        - 未加入的角色可点击 → 创建该成员会话
-        - 菜单底部"批量补齐全部角色" → 一键创建所有未加入角色
+        - 角色列表 = 模板 agents 全部角色（若有模板）∪ 当前成员 agent_name（去重展示）
+        - **全部可点击、不去重**（F14：允许重复角色，可建多个 build 等）
+        - 点击角色 → 创建该角色成员会话（并入当前 run_id）
 
         兜底：
-        - 无模板（手动 /team --join 团队）→ InfoBar 提示先 /team --load=<模板>
-        - 所有角色均已加入 → InfoBar 提示"团队角色已齐"
+        - 无模板且无成员 → InfoBar 提示先 /team --load=<模板> 或先加入成员
         """
         tm_mgr = self._get_team_manager()
+        # 可选角色：模板 agents ∪ 当前成员角色（去重展示；选择时可重复创建）
+        all_agents: List[str] = []
         template = tm_mgr.get_template()
-        if not template or not template.get("agents"):
+        if template and template.get("agents"):
+            all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
+        member_agents = [m.get("agent_name") for m in tm_mgr.get_members() if m.get("agent_name")]
+        for name in member_agents:
+            if name not in all_agents:
+                all_agents.append(name)
+        if not all_agents:
             InfoBar.warning(
                 "无法新建成员",
-                "当前团队无模板，请先 /team --load=<模板> 加载团队模板",
-                parent=self,
-                duration=4000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        # 已加入角色去重（T3 坑 2）：get_members 的 agent_name 集合
-        joined = {m.get("agent_name") for m in tm_mgr.get_members() if m.get("agent_name")}
-        all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
-        missing = [a for a in all_agents if a not in joined]
-        if not missing:
-            InfoBar.info(
-                "团队角色已齐",
-                "模板中的所有角色均已加入团队，无需新建成员",
+                "当前团队无模板且无成员角色，请先 /team --load=<模板> 或 /team --join=<角色>",
                 parent=self,
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
@@ -4355,30 +4353,13 @@ class OpenAIChatToolWindow(ToolWindow):
             QMenu::item:selected {{
                 background: {Colors.HOVER_BG};
             }}
-            QMenu::item:disabled {{
-                color: {Colors.TEXT_MUTED};
-            }}
             """
         )
         for agent_name in all_agents:
-            action = menu.addAction(agent_name)
-            action.setEnabled(agent_name in missing)  # 已加入角色置灰
-        menu.addSeparator()
-        batch_action = menu.addAction("批量补齐全部角色")
+            menu.addAction(agent_name)  # 可重复选，不置灰不去重（F14）
 
         chosen = menu.exec_(QCursor.pos())
         if chosen is None:
-            return
-        if chosen == batch_action:
-            created = self._spawn_team_members(missing)
-            if created:
-                InfoBar.success(
-                    "已批量创建",
-                    f"已为 {len(missing)} 个角色创建成员会话: {', '.join(missing)}",
-                    parent=self,
-                    duration=4000,
-                    position=InfoBarPosition.BOTTOM,
-                )
             return
         agent_name = chosen.text()
         created = self._spawn_team_members([agent_name])
@@ -4390,6 +4371,82 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _handle_team_new_task(self):
+        """团队框"新建任务"：全员内部新建会话 + 团队级生成新 run_id（F14）。
+
+        一轮任务结束后，一键开启新一轮：所有成员窗口清空当前对话（内部
+        新建会话，保留窗口），团队 run_id 更新为新值——新任务所有成员共享
+        新 run_id，历史独立条目（旧任务归旧 run_id）。
+
+        顺序关键（防历史污染）：
+        1. 先对每个成员窗口 _create_new_session（内部 _auto_save_current_session
+           用**旧** run_id 落库旧任务历史 ✅）
+        2. 再 start_team_run(force=True) 生成新 run_id
+        3. 最后更新所有成员窗口 _team_run_id = 新 run_id（后续会话保存落新 run）
+        4. 刷新 Tab 分组（run_id 变化 → 窗口移入新团队框分组）
+        """
+        tm_mgr = self._get_team_manager()
+        members = tm_mgr.get_members()
+        if not members:
+            InfoBar.warning(
+                "无法新建任务",
+                "当前团队没有成员窗口，无法新建任务",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 收集团队成员窗口实例（按 _window_id 匹配）
+        member_windows: List["OpenAIChatToolWindow"] = []
+        member_ids = {m.get("window_id") for m in members if m.get("window_id")}
+        for inst in list(OpenAIChatToolWindow._instances):
+            wid = getattr(inst, "_window_id", None)
+            if wid in member_ids and not getattr(inst, "_is_destroyed", False):
+                member_windows.append(inst)
+        if not member_windows:
+            InfoBar.warning(
+                "无法新建任务",
+                "未找到团队成员的活跃窗口",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 1) 全员内部新建会话（先保存旧历史到旧 run_id）
+        for win in member_windows:
+            try:
+                win._create_new_session()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[_handle_team_new_task] 成员窗口新建会话失败: {e}")
+
+        # 2) 生成新 run_id（force：每次新建任务都是独立运行）
+        new_run_id = tm_mgr.start_team_run(force=True)
+
+        # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
+        for win in member_windows:
+            win._team_run_id = new_run_id
+
+        # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm_win = TabManagerWindow.get_instance()
+            if tm_win is not None:
+                for win in member_windows:
+                    tm_win.refresh_capsule_for_window(win)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_handle_team_new_task] 刷新 Tab 分组失败: {e}")
+
+        InfoBar.success(
+            "已新建任务",
+            f"已为 {len(member_windows)} 个成员窗口开启新一轮任务\n新 run: {new_run_id[:8]}…",
+            parent=self,
+            duration=4000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _join_new_window_for_template(
         self,

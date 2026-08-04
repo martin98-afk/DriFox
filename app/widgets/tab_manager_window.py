@@ -659,6 +659,7 @@ class TabManagerWindow(QWidget):
         self._tab_panel.sidebarToggled.connect(self._on_sidebar_toggled)
         self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
         self._tab_panel.teamAddMemberRequested.connect(self._on_team_add_member_requested)
+        self._tab_panel.teamNewTaskRequested.connect(self._on_team_new_task_requested)
 
     # ── 侧边栏收起/展开 ──
 
@@ -1134,13 +1135,13 @@ class TabManagerWindow(QWidget):
                 logger.error(f"[TabManager] 关闭团队窗口失败: {e}")
 
     def _on_team_add_member_requested(self, team_id: str):
-        """团队框"新建成员"按钮回调：为当前团队补建成员会话
+        """团队框"快速新建成员"按钮回调：为当前团队新建成员会话（可重复角色，F14）
 
         定位该 team_id 的任一窗口作为参照窗口（读团队上下文），
         委托其 _handle_team_add_member 执行交互与创建：
-        - 菜单列出模板中未加入的角色（已加入置灰），选择后创建成员会话
-        - "批量补齐全部角色"一键创建所有未加入角色
-        - 无模板 / 角色已齐时由 _handle_team_add_member 内弹 InfoBar 提示
+        - 菜单列出模板角色 ∪ 当前成员角色（全部可点、不去重）
+        - 选择后创建该角色成员会话（并入当前 run_id）
+        - 无模板且无成员时由 _handle_team_add_member 内弹 InfoBar 提示
 
         Args:
             team_id: Tab 分组 key（与 _resolve_tab_team_id 同优先级：
@@ -1172,6 +1173,47 @@ class TabManagerWindow(QWidget):
             handler()
         except Exception as e:  # noqa: BLE001
             logger.error(f"[TabManager] 新建成员失败: {e}")
+
+    def _on_team_new_task_requested(self, team_id: str):
+        """团队框"新建任务"按钮回调：全员内部新建会话 + 生成新 run_id（F14）
+
+        定位该 team_id 的任一窗口作为参照窗口（读团队上下文），
+        委托其 _handle_team_new_task 执行：
+        - 收集团队全部成员窗口（TeamManager.get_members）
+        - 每个窗口内部新建会话（保存旧历史到旧 run_id）
+        - start_team_run(force=True) 生成新 run_id 并更新所有成员窗口
+        - 刷新 Tab 分组（窗口移入新 run_id 团队框）
+
+        Args:
+            team_id: Tab 分组 key（与 _resolve_tab_team_id 同优先级：
+                _team_run_id 优先，回落 _team_name/"default"）
+        """
+        if not team_id:
+            return
+
+        # 收集匹配 team_id 的窗口（与 _resolve_tab_team_id 同优先级）
+        ref_win = None
+        for win in self._windows:
+            try:
+                if self._resolve_tab_team_id(win) == team_id:
+                    ref_win = win
+                    break
+            except Exception:
+                continue
+
+        if ref_win is None:
+            logger.warning(f"[TabManager] 新建任务：未找到 team_id={team_id} 的窗口")
+            return
+
+        # 委托窗口的交互方法（main_widget.OpenAIChatToolWindow._handle_team_new_task）
+        handler = getattr(ref_win, "_handle_team_new_task", None)
+        if handler is None or not callable(handler):
+            logger.warning("[TabManager] 新建任务：窗口缺少 _handle_team_new_task 处理器")
+            return
+        try:
+            handler()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[TabManager] 新建任务失败: {e}")
 
     def _on_tab_branch_requested(self, index: int):
         """分支窗口 — 从指定标签页创建分支"""
