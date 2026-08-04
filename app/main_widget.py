@@ -895,6 +895,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
         self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
+        # 🆕 流式结束滚底宽限截止（monotonic 时间戳，0 = 无宽限）：
+        # 流式刚结束 2s 内忽略 _user_intentionally_away_from_bottom 拦截，
+        # 防止用户流式中途上滚导致结束时的兜底滚底被跳过（详见 _ensure_at_bottom）。
+        self._stream_finished_grace_until: float = 0.0
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
@@ -1692,6 +1696,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 ):
                     new_instance._current_provider_name = self._current_provider_name
                     new_instance._current_model_name = self._current_model_name
+                    # #4 语义：分支/新窗口继承源窗口的"是否手动选过"标志，
+                    # 保持会话状态一致（手动选过的分支窗口同步时同样不被云端覆盖）
+                    new_instance._user_manually_selected_model = getattr(
+                        self, "_user_manually_selected_model", False
+                    )
                     # 性能优化：直接复制 _valid_configs，避免新窗口在 showEvent 中
                     # 重新从磁盘加载全部服务商配置（_load_model_configs 很重）
                     new_instance._valid_configs = dict(self._valid_configs)
@@ -2453,6 +2462,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 监听技能配置变更（启用/禁用），确保多窗口同步
         self.cfg.llm_enabled_skills.valueChanged.connect(self._on_skills_config_changed)
 
+        # gitee 配置同步完成 → 本窗口按云端 llm_selected_model 刷新模型选择。
+        # 不用 valueChanged 监听（llm_selected_model 全项目无监听器，且直接监听会破坏
+        # 多窗口各自选择独立模型），改为同步服务在配置全部写回内存后一次性通知。
+        # 窗口销毁时 PyQt 自动断开连接，不泄漏。
+        try:
+            from app.core.config_sync import ConfigSyncService
+
+            ConfigSyncService.get_instance().settingsRestored.connect(self._apply_synced_model_selection)
+        except Exception:
+            pass
+
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
         # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
         # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
@@ -2898,6 +2918,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._current_provider_name = ""
         self._current_model_name = ""
+        # #4 语义：本窗口用户是否手动选过模型（_on_model_selected_from_popup 置位）。
+        # 同步跟随判定：True → 保持自身选择；False（首次加载/默认态）→ 跟随云端 SelectedModel。
+        self._user_manually_selected_model = False
 
         # ===== 工具开关双色分段按钮 =====
         self._tool_toggle_btn = QWidget(toolbar_widget)
@@ -3693,37 +3716,90 @@ class OpenAIChatToolWindow(ToolWindow):
         self.input_area.setFocus()
         self.input_area._on_slash_trigger_check()
 
-    def _execute_command(self, command_name: str, args: str = ""):
+    def _execute_command(self, command_name: str, args: str = "") -> bool:
         """执行内置函数型命令
 
         优先从 FunctionCommandHandlers 获取处理器，回退到内置处理器。
+        处理器执行过程中可抛 `CommandNeedDegrade` 表示需要降级到 prompt 注入
+        （如团队模板加载遇缺失成员 / --create= 无 Python handler / 插件命令
+        无处理器注册）；本方法捕获后调 select_prompt 取 prompt_sections 对应段、
+        写 `_pending_command` 并置 `_team_load_degraded=True`，由 _on_send_clicked
+        继续走 engine.send_message 完成注入。
 
         Args:
             command_name: 命令名（不含 /）
             args: 命令后的参数字符串
+
+        Returns:
+            True: handler 实际执行成功（命令消费了输入语义，调用方可清理输入/附件）
+            False: 降级到 prompt 注入（命令未真正执行，调用方应保留附件等输入，
+                由后续普通发送流程把附件文本拼入 user_text，避免附件静默丢失）
         """
-        # 多窗口隔离：优先使用当前窗口自己的处理器
-        handlers = getattr(self, "_function_command_handlers", {})
-        handler = handlers.get(command_name)
-        if handler:
-            handler(args)
-            return
+        from app.core.command_manager import CommandNeedDegrade
 
-        # 回退到全局注册的处理器（兼容旧代码路径）
-        handler = FunctionCommandHandlers.get(command_name)
-        if handler:
-            handler(args)
-            return
+        try:
+            # 多窗口隔离：优先使用当前窗口自己的处理器
+            handlers = getattr(self, "_function_command_handlers", {})
+            handler = handlers.get(command_name)
+            if handler:
+                handler(args)
+                return True
 
-        # 回退到内置处理器（用于兼容旧命令或未注册的 function 命令）
-        if command_name == "new":
-            self._create_new_session()
-        elif command_name == "new-window":
-            self._duplicate_window(branch=False)
-        elif command_name == "branch":
-            self._duplicate_window(branch=True)
-        elif command_name == "remember":
-            self._remember_to_memory(args)
+            # 回退到全局注册的处理器（兼容旧代码路径）
+            handler = FunctionCommandHandlers.get(command_name)
+            if handler:
+                handler(args)
+                return True
+
+            # 回退到内置处理器（用于兼容旧命令或未注册的 function 命令）
+            if command_name == "new":
+                self._create_new_session()
+                return True
+            elif command_name == "new-window":
+                self._duplicate_window(branch=False)
+                return True
+            elif command_name == "branch":
+                self._duplicate_window(branch=True)
+                return True
+            elif command_name == "remember":
+                self._remember_to_memory(args)
+                return True
+            else:
+                # 无 Python 处理器注册 → 降级到 prompt 注入（缺处理器语义）
+                raise CommandNeedDegrade(command_name, args)
+        except CommandNeedDegrade as exc:
+            # 🆕 业务/故障降级统一入口：handler 抛 CommandNeedDegrade →
+            # select_prompt 按 remainder 中的参数匹配 prompt_sections 对应段
+            # （如 --create= → create 段、--load= → load_missing 段），写
+            # _pending_command 由 inject_command_prompt hook 注入，置
+            # _team_load_degraded=True 让 _on_send_clicked 继续 send_message。
+            _cmd_name = exc.command_name or command_name
+            _remainder = exc.remainder or args
+            from app.core.command_manager import CommandManager as _CommandManager
+
+            _cmd_mgr = _CommandManager.get_instance()
+            # 🛡️ 兜底：select_prompt 匹配不到对应 section 时（如 --create 无等号、
+            # 空参数、未知参数）返回空字符串，回退到完整 body，避免注入空提示词。
+            # 与 PROMPT/AGENT 分支（`if not selected_text: selected_text = replacement`）一致。
+            _selected = _cmd_mgr.select_prompt(_cmd_name, _remainder) or ""
+            if not _selected:
+                # CommandNeedDegrade 均来自 FUNCTION 命令，取 FUNCTION 类型定义回退
+                from app.core.command_manager import CommandType as _CommandType
+
+                _cmd_def = _cmd_mgr._commands.get(_cmd_name, {}).get(_CommandType.FUNCTION)
+                if _cmd_def:
+                    _selected = _cmd_def.prompt_text
+            _session = self.session_manager.get_current_session()
+            if _session:
+                _session.metadata.pop("_pending_skill", None)
+                _session.metadata.pop("_pending_command", None)
+                _session.metadata["_pending_command"] = {
+                    "prompt_text": _selected,
+                    "command_name": _cmd_name,
+                    "remainder": _remainder,
+                }
+            self._team_load_degraded = True
+            return False
 
     def _handle_team_command(self, args: str):
         """处理 /team 命令：团队管理与协作
@@ -3812,8 +3888,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._handle_team_templates()
             return
 
-        # --create=<描述> 不在此处理：参数命中 prompt_sections 时
-        # _on_send_clicked 会自动走 PROMPT 注入流程（纯声明式，无需 Python handler）。
+        # --create=<描述>：无 Python handler → 抛 CommandNeedDegrade 降级到
+        # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
+        # 匹配 `<!-- section:create -->` 段，AI 自动生成团队模板）。
+        if args.startswith("--create"):
+            from app.core.command_manager import CommandNeedDegrade
+
+            raise CommandNeedDegrade("team", args)
 
         InfoBar.warning(
             "未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
@@ -4067,14 +4148,13 @@ class OpenAIChatToolWindow(ToolWindow):
         available_names = [a.name for a in agent_mgr.list_agents(include_hidden=False) if a.mode in ("subagent", "all")]
         missing = template.validate_agent_names(available_names)
         if missing:
-            InfoBar.error(
-                "模板角色缺失",
-                f"以下 agent 在系统中不存在: {', '.join(missing)}\n模板 {name} 加载中止",
-                parent=self,
-                duration=6000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
+            # 🆕 缺失角色不再弹 InfoBar 报错 → 抛 CommandNeedDegrade 降级到
+            # prompt 注入补全流程：由 _execute_command 捕获后 select_prompt 按
+            # --load= 参数匹配 `<!-- section:load_missing -->` 段（详见
+            # `plugins/system/commands/team.md`），AI 走补全流程。
+            from app.core.command_manager import CommandNeedDegrade
+
+            raise CommandNeedDegrade("team", f"--load={name} 缺失角色: {', '.join(missing)}")
 
         agents_needed = [a.agent_name for a in template.agents]
         needed_count = len(agents_needed)
@@ -5784,6 +5864,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 关键修复：先转 config_id，避免后续 _valid_configs[display_name] 创建新条目
         display_to_config = getattr(self, "_display_to_config_id", {})
         config_id = display_to_config.get(provider_name, provider_name)
+        # #4 语义：用户在本窗口手动选过模型 → 置位，后续 gitee 同步不再覆盖本窗口选择
+        self._user_manually_selected_model = True
         self._current_provider_name = config_id
         self._current_model_name = model_name
         # 保存到全局配置（作为新窗口的默认值，不影响当前窗口实例）
@@ -5940,8 +6022,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if api_prompt_tokens and used_for_display < api_prompt_tokens:
             used_for_display = api_prompt_tokens
         # 卡片底部 token 显示与上下文圆环同步（同一 used_tokens）
+        # 🆕 isdeleted 防线：_current_assistant_card 可能已被 deleteLater 排队销毁
+        # （如 send 失败回滚 / 会话切换），C++ 对象已失效时访问 set_meta_info 会抛
+        # RuntimeError: wrapped C/C++ object ... has been deleted。
         card = getattr(self, "_current_assistant_card", None)
-        if card and used_for_display > 0:
+        if card and not _is_sip_deleted(card) and used_for_display > 0:
             card.set_meta_info(token_usage={"total": used_for_display})
         self._last_context_refresh_time = now
 
@@ -8118,7 +8203,30 @@ class OpenAIChatToolWindow(ToolWindow):
 
         ThemeRefreshCoordinator.timer_end("total")
 
-    def _load_model_configs(self):
+    def _apply_synced_model_selection(self):
+        """gitee 配置同步完成后：把本窗口模型选择刷新为云端 llm_selected_model。
+
+        仅在同步恢复路径调用（由 ConfigSyncService.settingsRestored 信号驱动），
+        满足"模型选择跟随同步"；不影响多窗口各自的独立切换（正常切换走
+        _on_model_selected_from_popup，不改 _current_provider_name 的窗口隔离语义）。
+
+        语义（#4 修正）：仅"本窗口用户从未手动选过模型"的窗口在同步时跟随云端；
+        手动选过模型的窗口保持自身选择，不被覆盖（见 _user_manually_selected_model）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if getattr(self, "_user_manually_selected_model", False):
+            # 本窗口用户已手动选过模型 → 保持自身选择：仅重建 _valid_configs
+            #（"窗口自身优先"分支会保留 old_provider），不跟随云端 SelectedModel。
+            self._load_model_configs()
+        else:
+            # 本窗口从未手动选过模型 → 跟随云端：force_global 跳过"窗口自身优先"，
+            # 改从云端 llm_selected_model 取默认（无效则由 _load_model_configs 回退列表第一项）。
+            self._load_model_configs(force_global=True)
+        self._update_model_selector_btn()
+        self._refresh_context_usage_indicator()
+
+    def _load_model_configs(self, force_global: bool = False):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
         if getattr(self, "_is_destroyed", False):
             return
@@ -8165,7 +8273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复或设置当前选中的服务商和模型
         # 优先级：窗口自身选择 > 全局默认 > 列表第一个
         # 关键修复：多窗口场景下，不应让全局配置覆盖窗口自己的选择
-        if old_provider and old_provider in self._valid_configs:
+        if old_provider and old_provider in self._valid_configs and not force_global:
             # 优先保持当前窗口已有的选择（多窗口独立）
             self._current_provider_name = old_provider
             self._current_model_name = old_model
@@ -10233,6 +10341,32 @@ class OpenAIChatToolWindow(ToolWindow):
             self._team_run_id = record_run_id
             self._team_name = (session_record.get("team_name") or "").strip()
             self._team_agent_name = (session_record.get("agent_name") or "").strip()
+            # 🆕 恢复团队会话即重新登记成员（否则 leader 的 team_list_members 查不到
+            # 本窗口，发任务报"未找到目标"）。历史会话恢复原本只设置 UI 标记，
+            # 未调用 join_team → 成员表缺失；此处补注册 + 启动 watcher + 同步活跃
+            # 窗口（防 _cleanup_stale_members 误清）。仅 window_id 与 agent_name
+            # 均非空时执行，不破坏普通会话加载语义。
+            if self._window_id and self._team_agent_name:
+                from app.core.team_manager import TeamManager
+
+                tm = TeamManager.get_instance()
+                # 🆕 review#13-#1：守卫从「未注册」升级为「未注册 OR 已注册但 agent_name 不一致」。
+                # 原 `is_team_member` 守卫的漏洞：窗口已注册（如 build）但本次恢复的会话
+                # agent_name 不同（如 review）时返回 True → join_team 被拦截 → 团队数据里
+                # agent_name 仍是旧值，与 UI 实际 agent 漂移，leader team_list_members 不一致。
+                # join_team 幂等覆盖，仅在需要时触发（已注册且 agent_name 一致则跳过，免写盘）。
+                _existing = None
+                try:
+                    for _m in tm.get_members() or []:
+                        if _m.get("window_id") == self._window_id:
+                            _existing = _m
+                            break
+                except Exception:
+                    _existing = None
+                if _existing is None or _existing.get("agent_name") != self._team_agent_name:
+                    tm.join_team(window_id=self._window_id, agent_name=self._team_agent_name)
+                    self._start_team_watcher()
+                    self._sync_active_windows_to_team_manager()
         else:
             # 🛡️ F4 修复：仅非团队成员窗口清空标记；已登记成员（is_team_member）
             # 保留团队标记，避免"查看普通历史会话"清空成员身份导致后续保存落普通。
@@ -11800,6 +11934,91 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
 
+    def _show_diff_from_messages_in_round(self, session, round_index: int, call_ids: List[str]) -> bool:
+        """从 round 范围内 tool 消息提取内嵌 diff 并展示（file_recorder call_id 不匹配时的 fallback）
+
+        团队/subagent 场景：主消息 tool_call_id = subagent_para 派发 id，
+        子智能体执行工具（write/edit）时的 call_id 是子智能体自己的工具调用 id，
+        两者不匹配 → file_recorder 按 (session_id, call_id) 精确查询匹配不到 →
+        collect_operations_for_round 返回空 → 卡片差异误报"没有差异"。
+
+        此方法遍历 round 范围内 tool 消息提取内嵌 `diff` 字段（多 call_id 匹配），
+        生成合并 HTML 报告展示。直接工具调用（非 subagent）的 tool 消息也带
+        diff 字段，故普通会话的备份缺失场景同样受益。
+
+        Args:
+            session: 当前会话
+            round_index: 用户回合索引
+            call_ids: 该 round 范围内的 tool_call_id 列表
+
+        Returns:
+            True 找到并展示了内嵌 diff；False 无内嵌 diff
+        """
+        from app.utils.diff_viewer import DiffHtmlGenerator
+
+        start_idx, end_idx = get_round_message_indices(session, round_index)
+        if start_idx is None:
+            return False
+
+        canonical = consolidate_messages(session.messages)
+        call_ids_set = set(call_ids or [])
+        diff_parts: List[str] = []
+
+        for i in range(start_idx, min(end_idx, len(canonical))):
+            msg = canonical[i]
+            if msg.get("role") != "tool":
+                continue
+            # 匹配 round 内任一 call_id（含 content 字符串格式中的 tool_call_id）
+            tid = msg.get("tool_call_id", "")
+            content = msg.get("content", "")
+            matched = False
+            if tid and tid in call_ids_set:
+                matched = True
+            elif isinstance(content, str):
+                for cid in call_ids_set:
+                    if f"tool_call_id: {cid}" in content:
+                        matched = True
+                        break
+            if not matched:
+                continue
+            diff_content = msg.get("diff")
+            if not diff_content:
+                continue
+            # 🆕 review#30-#1：normalize_message（message_content.py L748）把任何
+            # dict/list diff 序列化为 Python repr 字符串
+            # （normalized["diff"] = str(message.get("diff"))），故 canonical 消息的
+            # diff 恒为 str，直接 isinstance(dict/list) 分支不可达（此前实现陷阱）。
+            # 为兼容未来工具/worker 产出 dict/list diff（避免 repr 垃圾串塞进
+            # generate_html_report 产出空白 diff 视图、短路方案 C 会话级真实 diff），
+            # 对 repr 字符串尝试 ast.literal_eval 恢复：解析出 dict 则取其 "diff" 键值、
+            # 解析出 list 则逐项拼接；解析失败（纯字符串 diff，真实现状）保持原样。
+            # literal_eval 只解析字面量（str/dict/list/tuple/数字/None），不执行代码，无注入风险。
+            _candidate = str(diff_content)
+            if _candidate.startswith(("{", "[")):
+                try:
+                    import ast as _ast
+
+                    _parsed = _ast.literal_eval(_candidate)
+                    if isinstance(_parsed, dict) and _parsed.get("diff"):
+                        _candidate = str(_parsed.get("diff"))
+                    elif isinstance(_parsed, list):
+                        _candidate = "\n".join(str(x) for x in _parsed if x)
+                except ValueError, SyntaxError:
+                    pass  # 非字面量 repr，保持原样
+            diff_parts.append(_candidate)
+
+        if not diff_parts:
+            return False
+
+        try:
+            combined = "\n".join(diff_parts)
+            html = DiffHtmlGenerator.generate_html_report(combined, "")
+            show_diff_viewer(self, html)
+            return True
+        except Exception as e:
+            logger.error(f"[LLMChatter] 消息内嵌 diff（round 范围）显示失败: {e}")
+            return False
+
     def _on_subagent_log_requested(self, task_ids_str: str):
         """
         处理子智能体日志查看请求 — 使用紧凑卡片显示任务信息
@@ -11925,10 +12144,39 @@ class OpenAIChatToolWindow(ToolWindow):
             all_operations = collect_operations_for_round(self.backend.file_recorder, session_id, all_call_ids)
 
             if not all_operations:
+                # 🆕 方案 A：file_recorder 按 (session_id, call_id) 精确查询匹配不到
+                # （团队/subagent 场景 call_id 漂移）→ 回退到 round 范围内消息内嵌
+                # diff 字段（subagent_worker 写回的 tool 消息 / 直接工具调用消息都带 diff）。
+                if self._show_diff_from_messages_in_round(session, round_index, all_call_ids):
+                    return
+                # 🆕 方案 C：兜底引导——不再单纯误报"没有差异"。
+                # 展示会话级 diff 汇总（get_all_operations_for_session 按 session 全量查
+                # 不受 call_id 漂移影响），并提示用户可点工具运行框查看单工具差异。
+                session_ops = []
+                try:
+                    session_ops = self.backend.file_recorder.get_all_operations_for_session(session_id)
+                except Exception as _e:
+                    logger.warning(f"[card-diff] 会话级查询失败: {_e}")
+                    session_ops = []
+                if session_ops:
+                    try:
+                        html = generate_multi_file_diff_html(session_ops)
+                        show_diff_viewer(self, html)
+                        InfoBar.info(
+                            "会话级差异",
+                            "卡片级未精确匹配到文件操作，已展示整个会话的差异汇总。\n"
+                            "提示：团队/子智能体场景 call_id 可能不匹配，可点击工具运行框查看单工具差异。",
+                            duration=5000,
+                            parent=self,
+                            position=InfoBarPosition.BOTTOM,
+                        )
+                        return
+                    except Exception as _e2:
+                        logger.error(f"[card-diff] 会话级 diff 展示失败: {_e2}")
                 InfoBar.warning(
                     "无差异信息",
-                    "此对话没有修改任何文件，或备份信息已丢失",
-                    duration=3000,
+                    "此对话没有修改任何文件，或备份信息已丢失。\n提示：可点击工具运行框查看单工具差异。",
+                    duration=4000,
                     parent=self,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -12287,22 +12535,28 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bottom_anchor_timer.start()
         else:
             # 即使anchor到期，也再延迟多次检查，防止多批懒渲染卡片撑开高度导致没到底
-            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=3))
+            # 🆕 retries 3 → 8：延长兜底窗口（8×300ms ≈ 2.4s），覆盖 WebEngine
+            # 全量重渲染异步完成后的最终高度（长消息渲染可能超时）。
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
         # 加载完成后抑制滚动同步，避免节点跑到渲染的卡片数量位置
         self._suppress_scroll_sync_count = 0
 
-    def _ensure_at_bottom(self, retries: int = 3):
+    def _ensure_at_bottom(self, retries: int = 8):
         """确保滚动条在底部，用于懒渲染卡片高度变化后的二次修正
 
         Args:
             retries: 剩余重试次数，即使 bottom anchor 过期，也重试几次处理懒加载
+                （默认 8 次 × 300ms 间隔 ≈ 2.4s 兜底窗口，覆盖长消息重渲染延迟）
         """
         # 窗口已销毁时跳过：避免 QTimer.singleShot 回调在 closeEvent 之后
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
         if getattr(self, "_is_destroyed", False):
             return
-        # 如果用户已经主动滚离底部，不再强制拉回
-        if self._user_intentionally_away_from_bottom:
+        # 如果用户已经主动滚离底部，不再强制拉回。
+        # 🆕 例外：流式刚结束的 2s 宽限期内仍强制滚底（防止用户流式中途上滚
+        # 导致结束时的兜底滚底被跳过 —— 用户意图此时通常仍是"看最新回复"，
+        # 2s 后恢复拦截，避免打断用户读取历史）。
+        if self._user_intentionally_away_from_bottom and time.monotonic() >= self._stream_finished_grace_until:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         if scroll_bar.value() < scroll_bar.maximum() - 20:
@@ -12726,43 +12980,30 @@ class OpenAIChatToolWindow(ToolWindow):
         if cmd_result is not None:
             match cmd_result.type:
                 case CommandType.FUNCTION:
-                    # 🆕 参数命中 prompt_sections（如 /team --create=xxx）→ 自动走 PROMPT 注入流程。
-                    # 纯声明式：md 的 prompt_sections 定义即生效，无需为每个带提示词的参数写 Python handler。
-                    _cmd_def = cmd_mgr.get_command(cmd_result.command_name)
-                    _prompt_matched = False
-                    if _cmd_def and _cmd_def.prompt_sections:
-                        _active = cmd_mgr.parse_active_params(cmd_result.remainder)
-                        _prompt_matched = any(
-                            p.name in _active and p.name in _cmd_def.prompt_sections for p in _cmd_def.parameters
-                        )
-                    if _prompt_matched:
-                        # 走 PROMPT 注入：select_prompt 按参数过滤 body 段落，
-                        # _pending_command 由 inject_command_prompt.py PreUserMessage hook 自动格式化注入。
-                        # 用户原始 /cmd --param=xxx 文本保持原样发送给 AI。
-                        _selected = cmd_mgr.select_prompt(cmd_result.command_name, cmd_result.remainder)
-                        _session = self.session_manager.get_current_session()
-                        if _session:
-                            _session.metadata.pop("_pending_skill", None)
-                            _session.metadata["_pending_command"] = {
-                                "prompt_text": _selected,
-                                "command_name": cmd_result.command_name,
-                                "remainder": cmd_result.remainder or "",
-                            }
-                        # 不 return → 继续走 engine.send_message（与 PROMPT 命令一致）
-                    elif not self._has_command_handler(cmd_result.command_name):
-                        # 用户插件 FUNCTION 命令无 Python 处理器注册
-                        # （如插件 .md 文件定义了 type: function + shortcut 但无可执行代码）
-                        # → 不拦截、不清理输入，让命令走正常 prompt 发送流程，
-                        #    /xxx 文本会作为普通用户消息发送给 AI。
-                        cmd_result = None  # 重置标记，走后续 skill / 普通发送流程
-                    else:
-                        # 函数型命令：执行命令，清除输入框内容，**不打断正在进行的对话**
-                        self.input_area.clear()
+                    # 函数型命令：统一走 handler 执行（_execute_command）。
+                    # handler 内部可抛 CommandNeedDegrade 降级到 prompt 注入
+                    # （如 /team --create=xxx 无 handler、/team --load= 遇缺失成员、
+                    # 插件 FUNCTION 命令无处理器注册）——_execute_command 捕获后
+                    # 写 _pending_command 并置 _team_load_degraded=True。
+                    self.input_area.clear()
+                    # ⚠️ review#15-#2：附件仅在 handler 实际执行成功后清除
+                    # （_execute_command 返回 True）。降级到 prompt 注入时命令
+                    # 未真正执行（如插件无 handler 命令 /team --create=），附件
+                    # 保留走后续普通发送流程——_build_user_text_with_attachments
+                    # 把附件文本拼入 user_text 发给 AI，避免附件静默丢失。
+                    # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
+                    if not self._is_streaming:
+                        self.input_area.toggle_send_button(True)
+                    if self._execute_command(cmd_result.command_name, cmd_result.remainder):
                         self._clear_attachments()
-                        # ⚠️ _on_send_click 已把按钮切为 STOP，只在非流式时恢复为 SEND
-                        if not self._is_streaming:
-                            self.input_area.toggle_send_button(True)
-                        self._execute_command(cmd_result.command_name, cmd_result.remainder)
+                    # 🆕 降级到 prompt 注入：_execute_command 捕获 CommandNeedDegrade 后
+                    # 已写 _pending_command 并置 _team_load_degraded=True。清除标记并继续
+                    # 走 engine.send_message，user_text 保留原始 /cmd ... 文本，
+                    # 由 inject_command_prompt hook 注入提示词（与 PROMPT 命令一致）。
+                    if getattr(self, "_team_load_degraded", False):
+                        self._team_load_degraded = False
+                        # 继续走后续流程
+                    else:
                         return
                 case CommandType.SUBAGENT:
                     # 子智能体命令：触发子智能体任务，不替换提示词
@@ -12966,6 +13207,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._is_streaming = False
                 self._toggle_send_stop(False)
                 assistant_card.deleteLater()
+                # 🆕 补清引用：deleteLater 是延迟删除（下一轮事件循环 C++ 对象才销毁），
+                # 若不置 None，期间 _refresh_context_usage_indicator 等仍会取到
+                # _current_assistant_card 并访问已删除 QLabel → RuntimeError。
+                # 与 L13885-13886 规范写法对齐。
+                self._current_assistant_card = None
                 return
 
             # 同步 batch 结构：_message_batch 已包含新 user batch
@@ -14102,7 +14348,7 @@ class OpenAIChatToolWindow(ToolWindow):
             elapsed = time.time() - self._response_start_time
         self._response_start_time = None
 
-        if self._current_assistant_card:
+        if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):
             if elapsed is not None:
                 self._current_assistant_card.set_meta_info(elapsed=elapsed)
             self._current_assistant_card.finish_streaming()
@@ -14112,6 +14358,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
         # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
         self._scroll_to_bottom()
+        # 🆕 流式结束滚底宽限 2s：此窗口内 _ensure_at_bottom 忽略用户滚离拦截
+        # （防止用户流式中途上滚导致兜底滚底被跳过）。
+        self._stream_finished_grace_until = time.monotonic() + 2.0
+        # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
+        # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
+        # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
+        QTimer.singleShot(500, self._scroll_to_bottom)
+        QTimer.singleShot(1000, self._scroll_to_bottom)
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
@@ -14648,7 +14902,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     # 卡片底部 token 显示与上下文圆环同步（同一 last_tc）
                     card = getattr(self, "_current_assistant_card", None)
-                    if card:
+                    if card and not _is_sip_deleted(card):
                         card.set_meta_info(token_usage={"total": last_tc})
                     # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
                     from PyQt5.QtCore import QTimer
@@ -14673,7 +14927,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._toggle_send_stop(False)
 
         # 停止计时器并写入最终耗时到 session 消息（引擎错误路径不走 _on_messages_updated）
-        if self._current_assistant_card and self._response_start_time is not None:
+        if (
+            self._current_assistant_card
+            and not _is_sip_deleted(self._current_assistant_card)
+            and self._response_start_time is not None
+        ):
             elapsed = time.time() - self._response_start_time
             self._current_assistant_card.set_meta_info(elapsed=elapsed)
             # 写入 session 最后一条 assistant 消息以便持久化
@@ -14766,7 +15024,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         # 卡片底部 token 显示与上下文圆环同步（同一 token_count）
         card = getattr(self, "_current_assistant_card", None)
-        if card:
+        if card and not _is_sip_deleted(card):
             card.set_meta_info(token_usage={"total": token_count})
         # 流式期间也调度一次补全各类型占比 breakdown（_refresh_context_usage_indicator
         # 已不再在 _is_streaming 时拦截，0.5s 节流保护）
@@ -16987,7 +17245,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("idle")  # 桌宠：用户手动停止
 
         self._toggle_send_stop(False)
-        if self._current_assistant_card:
+        if self._current_assistant_card and not _is_sip_deleted(self._current_assistant_card):
             # 强制停止计时器（不依赖 set_meta_info）
             self._current_assistant_card._elapsed_timer.stop()
             self._current_assistant_card._elapsed_start_time = None

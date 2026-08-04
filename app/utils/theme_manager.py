@@ -359,6 +359,16 @@ class ThemeManager:
         无需手动清图标缓存。
         """
         self._cached_light_check = (None, None)
+        # 🐛 推进 ThemeRefreshCoordinator 版本号：使消息卡正文 CSS 变量注入
+        # 的幂等短路失效。此前 should_skip / on_theme_changed 从未被调用，
+        # 版本号恒为 0，导致 CodeWebViewer.refresh_theme 只在首次切换注入一次
+        # CSS 变量，之后所有主题切换正文/思考块颜色不刷新。
+        try:
+            from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+            ThemeRefreshCoordinator.should_skip(self.get_current_theme_id())
+        except Exception:
+            pass
 
     def dispatch_refresh(self) -> None:
         """向所有已注册的 widget 分发 refresh_theme() 调用

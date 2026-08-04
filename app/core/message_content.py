@@ -702,7 +702,8 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["tool_calls"] = tool_calls
         # DeepSeek V4 thinking mode: 保留 reasoning_content
         reasoning = message.get("reasoning_content")
-        if reasoning:
+        # 保留显式空值：DeepSeek/Console thinking + tool_calls 协议要求字段存在。
+        if reasoning is not None:
             normalized["reasoning_content"] = str(reasoning)
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
@@ -828,9 +829,15 @@ def get_user_round_ranges(messages: List[Dict[str, Any]]) -> List[tuple[int, int
     # 跳过 hook 合成消息（如 Stop block 续命注入的 user 消息），
     # 不作为 round 起点。续命回复纳入前一个真实 user round 范围，
     # 与 build_node_preview_data 的节点过滤保持一致。
+    # 🆕 例外：TeamMail（_hook_event="TeamMail"）视为独立 user round 起点——
+    # 与 UI 渲染 batch（_is_hook_message 放行 TeamMail 独立成卡）和卡片
+    # round_index（_get_user_round_index_for_batch_index 计入 TeamMail）口径一致。
+    # 此前此处排除 TeamMail 导致三者口径漂移：会话 [A, X(TeamMail), B] 时
+    # B 卡片 round_index=2 但 round_ranges 只有 2 个 → 撤回静默失败 +
+    # 差异统计 cannot determine valid round_index（TeamMail 撤回/统计双杀）。
     user_indices = [
         idx for idx, msg in enumerate(canonical_messages)
-        if msg.get("role") == "user" and not msg.get("_hook_event")
+        if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
     ]
 
     # 第一遍：计算每个 round 的 start
@@ -957,6 +964,7 @@ def to_api_message(
     message: Dict[str, Any],
     supports_vision: bool = True,
     is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
 ) -> Dict[str, Any]:
     """
     将内部消息格式转换为标准API请求格式。
@@ -1017,8 +1025,10 @@ def to_api_message(
             ]
         # DeepSeek V4 thinking mode: 传递 reasoning_content
         reasoning = normalized_message.get("reasoning_content")
-        if reasoning:
+        if reasoning is not None:
             api_msg["reasoning_content"] = reasoning
+        if requires_reasoning_content and tool_calls and "reasoning_content" not in api_msg:
+            api_msg["reasoning_content"] = ""
         # 确保 content 或 tool_calls 存在，避免 API 报 "content or tool_calls must be set"
         if "content" not in api_msg and "tool_calls" not in api_msg:
             api_msg["content"] = ""
@@ -1055,6 +1065,7 @@ def messages_to_api(
     messages: List[Dict[str, Any]],
     supports_vision: bool = True,
     is_gemini: bool = False,
+    requires_reasoning_content: bool = False,
 ) -> List[Dict[str, Any]]:
     """将内部消息列表转换为标准API请求格式列表。
 
@@ -1068,7 +1079,12 @@ def messages_to_api(
     """
     api_messages: List[Dict[str, Any]] = []
     for message in messages:
-        api_message = to_api_message(message, supports_vision=supports_vision, is_gemini=is_gemini)
+        api_message = to_api_message(
+            message,
+            supports_vision=supports_vision,
+            is_gemini=is_gemini,
+            requires_reasoning_content=requires_reasoning_content,
+        )
         if api_message:
             if api_message.get("role") == "user" and not api_message.get("content"):
                 continue

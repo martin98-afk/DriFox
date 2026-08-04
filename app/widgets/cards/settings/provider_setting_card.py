@@ -23,7 +23,7 @@ from qfluentwidgets import (
 from app.constants import (
     PROVIDER_ICONS,
 )
-from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_icon_size
+from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_font_size, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -159,13 +159,20 @@ class ProviderIconWidget(IconWidget):
             icon = get_icon(icon_name)
             if icon:
                 self.setIcon(icon)
+                self._text = ""  # 清空回退文本，避免 paintEvent 在图标模式下走自定义绘制
                 return
+        # 字母回退：取每个有内容 part 的首个字母/汉字字符，
+        # 跳过 #/&/数字 等非字母字符，避免出现 "C#"/"A&" 之类难看的首字母
         letters = ""
         for part in self.provider_name.split():
-            if part and part not in ["(", ")", "（", "）"]:
-                letters += part[0]
-        if len(letters) > 2:
-            letters = letters[:2]
+            if not part or part in ("(", ")", "（", "）"):
+                continue
+            for ch in part:
+                if ch.isalpha():  # 涵盖 ASCII 字母 + 中文/日文/韩文 等 Unicode letter
+                    letters += ch
+                    break
+            if len(letters) >= 2:
+                break
         self._text = letters
 
     def refresh_style(self):
@@ -185,7 +192,10 @@ class ProviderIconWidget(IconWidget):
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(self.rect(), 6, 6)
         painter.setPen(QColor(255, 255, 255))
-        painter.setFont(QFont(get_unified_font().family(), self.width() // 3, QFont.Bold))
+        # 按图标宽度的 0.45 倍计算字号，并跟随系统字号缩放
+        # 之前使用 width // 3 在 20px 图标上只有 6px，几乎不可见且不随系统字号变化
+        font_size = scale_font_size(int(self.width() * 0.45))
+        painter.setFont(QFont(get_unified_font().family(), font_size, QFont.Bold))
         painter.drawText(QRect(0, 0, self.width(), self.height()), Qt.AlignCenter, self._text)
 
     def _get_color(self):

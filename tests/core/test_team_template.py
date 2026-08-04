@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -786,8 +788,7 @@ class TestInjectTeamContext:
 
         spec = importlib.util.spec_from_file_location(
             "inject_team_context_test",
-            Path(__file__).resolve().parent.parent.parent
-            / "plugins" / "system" / "hooks" / "inject_team_context.py",
+            Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "hooks" / "inject_team_context.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -1040,3 +1041,579 @@ class TestTeamListMembersRoleDesc:
         assert "build@win_01" in result.content
         assert "plan@win_02" in result.content
         assert "角色:" not in result.content
+
+
+# ══════════════════════════════════════════════════════════
+# 15. /team --load 缺失角色降级为 prompt_sections 注入
+# ══════════════════════════════════════════════════════════
+
+
+class TestLoadMissingDegradation:
+    """修复说明：原 `_handle_team_load` 缺失分支弹 InfoBar.error 中止，改为降级到
+
+    `prompt_sections` 注入补全流程（极简方案：统一走 `CommandNeedDegrade` 异常）：
+    1. `_handle_team_load` 缺失分支抛 `CommandNeedDegrade("team", ...)`（不再弹 InfoBar）
+    2. `_execute_command` 捕获异常 → select_prompt 按参数匹配 `<!-- section:xxx -->` 段，
+       写 `session.metadata["_pending_command"]`，置 `_team_load_degraded=True`
+    3. `_on_send_clicked` FUNCTION 分支统一走 handler（`_execute_command`），
+       之后检查 `_team_load_degraded` 决定是否继续 send_message
+    4. 已删除 `_prompt_matched` 整段计算（不再硬编码 --load=/--create=）
+    5. `plugins/system/commands/team.md` frontmatter 保持 `prompt_sections` 单字段
+    """
+
+    @staticmethod
+    def _main_widget_src() -> tuple[Path, str]:
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        return src_path, src_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _team_md_path() -> Path:
+        return Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "commands" / "team.md"
+
+    @staticmethod
+    def _find_function(tree: ast.Module, name: str):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    def test_handle_team_load_missing_raises_command_need_degrade(self):
+        """`_handle_team_load` 缺失分支必须抛 `CommandNeedDegrade`，不再弹 InfoBar。
+
+        极简方案回归：缺失成员时不再调 `_degrade_team_load_to_prompt`（方法已删），
+        改为抛 `CommandNeedDegrade("team", "--load=<name> 缺失角色: ...")`，
+        由 `_execute_command` 统一捕获走 prompt 注入。
+        """
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_handle_team_load")
+        assert target is not None, "未找到 _handle_team_load 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 缺失分支必须抛 CommandNeedDegrade（含 command_name="team" + remainder 含 --load=）
+        assert "CommandNeedDegrade" in func_src, "_handle_team_load 必须抛 CommandNeedDegrade 异常"
+        assert _re.search(r"CommandNeedDegrade\s*\(\s*['\"]team['\"]\s*,\s*f?['\"]--load=", func_src), (
+            "必须抛 CommandNeedDegrade('team', '--load=<name> 缺失角色: ...')"
+        )
+        assert "缺失角色" in func_src, "降级 remainder 必须包含缺失角色名单"
+
+        # 不再依赖已删除的 _degrade_team_load_to_prompt 方法
+        assert "_degrade_team_load_to_prompt" not in func_src, (
+            "_handle_team_load 不应再调用已删除的 _degrade_team_load_to_prompt 方法"
+        )
+
+        # 不再弹原 InfoBar 报错
+        assert "模板角色缺失" not in func_src, "_handle_team_load 不应再弹 InfoBar.error('模板角色缺失', ...) 报错文案"
+        assert "加载中止" not in func_src, "_handle_team_load 不应再出现「加载中止」报错文案（已降级到 prompt 补全）"
+
+    def test_command_need_degrade_exception_exists(self):
+        """`app/core/command_manager.py` 必须定义 `CommandNeedDegrade` 异常类。"""
+        import ast as _ast
+
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "core" / "command_manager.py"
+        _tree = _ast.parse(src_path.read_text(encoding="utf-8"))
+
+        found = False
+        for node in _ast.walk(_tree):
+            if isinstance(node, ast.ClassDef) and node.name == "CommandNeedDegrade":
+                # 必须是 Exception 子类
+                bases = [_ast.unparse(b) for b in node.bases]
+                assert any("Exception" in b for b in bases), (
+                    f"CommandNeedDegrade 必须是 Exception 子类，实际 bases={bases}"
+                )
+                # 构造器必须接收 command_name / remainder / degrade_section
+                init = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
+                assert init is not None, "CommandNeedDegrade 必须定义 __init__"
+                init_src = _ast.unparse(init)
+                assert "command_name" in init_src and "remainder" in init_src, (
+                    "CommandNeedDegrade.__init__ 必须接收 command_name 和 remainder"
+                )
+                found = True
+                break
+        assert found, "command_manager.py 必须定义 CommandNeedDegrade 异常类"
+
+    def test_handle_team_load_keeps_confirm_dialog_for_normal_path(self):
+        """`_handle_team_load` 仍保留 ConfirmDialog 确认（不破坏既有回归）。"""
+        import ast as _ast
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_handle_team_load")
+        assert target is not None, "未找到 _handle_team_load 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        assert "from app.widgets.common_dialogs import ConfirmDialog" in func_src, (
+            "应保留 ConfirmDialog import（正常加载路径不受影响）"
+        )
+        assert "_confirmed" in func_src, "应保留 _confirmed 回调变量"
+        assert ".confirmed.connect(" in func_src, "应保留 confirmed 信号连接"
+        assert "if not _confirmed[0]:" in func_src or "if not _confirmed :" in func_src, (
+            "用户取消时仍应 return（不进入建窗口流程）"
+        )
+
+    def test_execute_command_catches_degrade_and_injects_prompt(self):
+        """`_execute_command` 必须捕获 `CommandNeedDegrade` → select_prompt + 写 _pending_command + 置标记。
+
+        极简方案核心：业务/故障降级统一在 `_execute_command` 完成（捕获异常后
+        select_prompt 取 prompt_sections 对应段、写 `_pending_command`、置
+        `_team_load_degraded=True` 供 `_on_send_clicked` 继续 send_message）。
+        """
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_execute_command")
+        assert target is not None, "未找到 _execute_command 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 1) 必须捕获 CommandNeedDegrade 异常
+        assert _re.search(r"except\s+CommandNeedDegrade", func_src), (
+            "_execute_command 必须捕获 CommandNeedDegrade 异常（except 子句）"
+        )
+        assert "CommandNeedDegrade" in func_src, "_execute_command 必须引用 CommandNeedDegrade"
+
+        # 2) 捕获后必须调 select_prompt（按 remainder 匹配 prompt_sections 段）
+        assert _re.search(r"select_prompt\s*\(", func_src), (
+            "_execute_command 降级分支必须调用 cmd_mgr.select_prompt 取提示词段"
+        )
+
+        # 3) 必须写 session.metadata['_pending_command']（供 inject_command_prompt hook 注入）
+        assert "_pending_command" in func_src, "_execute_command 降级分支必须写入 session.metadata['_pending_command']"
+
+        # 4) 必须置 _team_load_degraded = True（供 _on_send_clicked 识别降级）
+        assert _re.search(r"_team_load_degraded\s*=\s*True", func_src), (
+            "_execute_command 降级分支必须置 `self._team_load_degraded = True`"
+        )
+
+    def test_on_send_clicked_recognizes_degraded_flag(self):
+        """`_on_send_clicked` FUNCTION 分支必须检查 `_team_load_degraded` 标记。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_on_send_clicked")
+        assert target is not None, "未找到 _on_send_clicked 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # FUNCTION 分支必须检查 _team_load_degraded（降级时继续 send_message，否则 return）
+        assert _re.search(r"_team_load_degraded", func_src), (
+            "_on_send_clicked 必须识别 _team_load_degraded 标记（降级时继续走 send_message）"
+        )
+
+    def test_prompt_matched_removed_from_on_send_clicked(self):
+        """`_on_send_clicked` 必须不再存在 `_prompt_matched` 计算（硬编码已彻底删除）。"""
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_on_send_clicked")
+        assert target is not None, "未找到 _on_send_clicked 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 极简方案：不再有 _prompt_matched 变量 / any(...) 计算 / 排除分支
+        assert "_prompt_matched" not in func_src, (
+            "_on_send_clicked 不应再存在 _prompt_matched 计算（已由 CommandNeedDegrade 机制替代）"
+        )
+        # 不再有 `'--load=' in _active` 硬编码排除
+        assert not _re.search(r"""['"]--load=['"]\s+in\s+_active""", func_src), (
+            "_on_send_clicked 不应再存在 --load= 硬编码排除分支（已由异常机制替代）"
+        )
+
+    def test_execute_command_path_not_depend_on_prompt_matched(self):
+        """`_execute_command` 路径不依赖 `_prompt_matched`（全链路不再硬编码）。"""
+        import ast as _ast
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_execute_command")
+        assert target is not None, "未找到 _execute_command 方法"
+        func_src = _tw.dedent(_ast.unparse(target))
+        assert "_prompt_matched" not in func_src, "_execute_command 不应依赖 _prompt_matched"
+
+    def test_team_md_load_missing_section_and_frontmatter(self):
+        """`plugins/system/commands/team.md` 必须含 load_missing section + prompt_sections 映射 + 提示流程。
+
+        极简方案：frontmatter 保持 `prompt_sections` 单字段（含 --create= 与 --load=），
+        不拆分 prompt_degrade_sections。
+        """
+        team_md_path = self._team_md_path()
+        team_md = team_md_path.read_text(encoding="utf-8")
+
+        # frontmatter 必须含 --create=: "create" 与 --load=: "load_missing" 映射
+        assert "--create=:" in team_md and '"create"' in team_md, (
+            'frontmatter prompt_sections 必须含 `--create=: "create"` 映射'
+        )
+        assert "--load=:" in team_md and '"load_missing"' in team_md, (
+            'frontmatter prompt_sections 必须含 `--load=: "load_missing"` 映射（不拆分字段）'
+        )
+        # 不应出现 prompt_degrade_sections 拆分字段
+        assert "prompt_degrade_sections" not in team_md, "极简方案下 team.md 不应引入 prompt_degrade_sections 字段"
+
+        # section 起始标记必须独占一行且唯一
+        section_markers = re.findall(r"^<!-- section:load_missing -->$", team_md, re.MULTILINE)
+        assert len(section_markers) == 1, (
+            f"`<!-- section:load_missing -->` 起始标记必须独占一行且唯一，实际 {len(section_markers)} 次"
+        )
+
+        # section 自成一体：含 question 工具 + 骨架写入 + 重新 /team --load= 提示
+        # 用整行作为 section_start，保证我们的索引对齐真正独立段的开始
+        section_start = re.search(r"^<!-- section:load_missing -->$", team_md, re.MULTILINE).start()
+        section_end = team_md.index("\n<!-- end -->", section_start)
+        section_body = team_md[section_start:section_end]
+        assert "question" in section_body, "load_missing section 应指导 AI 使用 question 工具逐项确认"
+        assert "write" in section_body, "load_missing section 应包含 write 工具写入骨架指令"
+        assert "/team --load=" in section_body, "load_missing section 应提示用户重新执行 `/team --load=<name>` 完成加载"
+        assert "user-custom/agents/" in section_body, (
+            "load_missing section 应说明写到 `~/.drifox/plugins/user-custom/agents/<role>.md`"
+        )
+
+        # 🆕 公共规范必须位于 section 之外（create 段之前），供两个 section 共享
+        create_start = team_md.index("<!-- section:create -->")
+        common_part = team_md[:create_start]
+        for kw in ("子智能体创建规范", "权限推导规则", "骨架模板", "mkdir", "文件路径约定", "加载时机"):
+            assert kw in common_part, f"「子智能体创建规范」公共区必须含 {kw}（位于 section 之外）"
+        # 公共区不得包含 section 起始标记（避免 select_prompt 误解析）
+        assert "<!-- section:" not in common_part.split("<!--")[0], "公共区不应出现 section 起始标记"
+
+        # 公共规范不允许在 load_missing section 内重复内嵌（已提取到公共区）
+        assert "### 1. 完整骨架模板" not in section_body, (
+            "load_missing section 不应再内嵌完整骨架模板（已提取到公共区，重复会导致注入膨胀）"
+        )
+        assert "### 3. 权限推导规则" not in section_body, (
+            "load_missing section 不应再内嵌权限推导规则（已提取到公共区，由公共区共享）"
+        )
+
+        # 🆕 select_prompt 过滤后公共规范始终保留（与命令报错回退兜底联动）
+        from app.core.builtin_commands import _load_command_file
+        from app.core.command_manager import CommandManager, CommandType
+
+        _loaded = _load_command_file(team_md_path)
+        _cm = CommandManager.get_instance()
+        _cm.register(
+            name="team",
+            command_type=CommandType.FUNCTION,
+            description="t",
+            prompt_text=_loaded["prompt_text"],
+            parameters=_loaded["parameters"],
+            prompt_sections=_loaded["prompt_sections"],
+        )
+        for _marker, _sec in (("--create=x", "任务：创建 DriFox 团队模板"),
+                              ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体")):
+            _out = _cm.select_prompt("team", _marker) or ""
+            assert "子智能体创建规范" in _out, f"select_prompt({_marker!r}) 必须保留公共规范"
+            assert _sec in _out, f"select_prompt({_marker!r}) 必须包含对应 section"
+        # 无匹配参数时（命令报错回退场景）至少返回公共规范，而非空字符串
+        _fallback = _cm.select_prompt("team", "--unknown") or ""
+        assert _fallback.strip(), "select_prompt 无匹配参数时必须返回公共规范（不能为空字符串）"
+        assert "子智能体创建规范" in _fallback, "无匹配参数时回退内容必须含公共规范"
+
+
+# ══════════════════════════════════════════════════════════
+# 16. 历史会话恢复重新登记团队成员（leader 可见性修复）
+# ══════════════════════════════════════════════════════════
+
+
+class TestHistorySessionRestoreRegistersTeamMember:
+    """修复说明：`_load_session_from_record` 恢复团队会话（team_run_id 非空）时
+    原本只设置 UI 标记（_team_run_id/_team_name/_team_agent_name），未调用
+    `TeamManager.join_team()` 重新登记成员 → 成员表缺失，leader 的
+    `team_list_members` 查不到该窗口，发任务报"未找到目标"。
+
+    修复：record_run_id 分支内补 3 步：join_team + _start_team_watcher +
+    _sync_active_windows_to_team_manager（仅 window_id 与 agent_name 均非空时）。
+    """
+
+    @staticmethod
+    def _main_widget_src() -> tuple[Path, str]:
+        src_path = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        return src_path, src_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _find_function(tree: ast.Module, name: str):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    def test_team_branch_calls_join_watcher_sync(self):
+        """AST：`_load_session_from_record` 团队分支必须 join_team + watcher + 活跃同步。
+
+        回归防护：若有人删掉注册 3 步（例如改回仅 UI 标记），本测试立即失败。
+        """
+        import textwrap
+
+        _src_path, src = self._main_widget_src()
+        tree = ast.parse(src)
+        target = self._find_function(tree, "_load_session_from_record")
+        assert target is not None, "未找到 _load_session_from_record 方法"
+        func_src = textwrap.dedent(ast.unparse(target))
+
+        # ① 保留原 3 行 UI 标记（不破坏既有语义）
+        # 注：ast.unparse 固定输出单引号字符串字面量，正则按单引号匹配
+        assert "self._team_run_id = record_run_id" in func_src, "团队分支必须保留 _team_run_id 赋值"
+        assert re.search(
+            r"self\._team_name = \(session_record\.get\('team_name'\) or ''\)\.strip\(\)",
+            func_src,
+        ), "团队分支必须保留 _team_name 赋值"
+        assert re.search(
+            r"self\._team_agent_name = \(session_record\.get\('agent_name'\) or ''\)\.strip\(\)",
+            func_src,
+        ), "团队分支必须保留 _team_agent_name 赋值"
+
+        # ② 注册三连必须同时出现（leader 可见性修复核心）
+        assert re.search(
+            r"join_team\s*\(\s*window_id\s*=\s*self\._window_id\s*,\s*agent_name\s*=\s*self\._team_agent_name\s*\)",
+            func_src,
+        ), "必须调用 tm.join_team(window_id=..., agent_name=...) 重新登记成员"
+        assert re.search(r"self\._start_team_watcher\s*\(\s*\)", func_src), "必须启动邮箱 watcher"
+        assert re.search(r"self\._sync_active_windows_to_team_manager\s*\(\s*\)", func_src), (
+            "必须同步活跃窗口（防 _cleanup_stale_members 误清）"
+        )
+
+        # ③ join_team 必须出现在 agent_name 赋值之后（同在 record_run_id 团队分支内）
+        agent_assign = re.search(
+            r"self\._team_agent_name = \(session_record\.get\('agent_name'\) or ''\)\.strip\(\)",
+            func_src,
+        )
+        assert agent_assign, "必须存在 _team_agent_name 赋值"
+        after_marker = func_src[agent_assign.end() :]
+        assert re.search(r"join_team", after_marker), "join_team 必须出现在 agent_name 赋值之后（团队分支内）"
+
+        # ④ 注册受 window_id + agent_name 守卫（普通会话 / 无 agent 时不注册）
+        assert re.search(r"if\s+self\._window_id\s+and\s+self\._team_agent_name", func_src), (
+            "注册必须受 `if self._window_id and self._team_agent_name` 守卫"
+        )
+
+    @staticmethod
+    def _make_window_stub():
+        """构造轻量窗口实例（__new__ 绕过 __init__），仅提供 _load_session_from_record 依赖。"""
+        from unittest.mock import MagicMock
+
+        import app.main_widget as mw
+
+        inst = mw.OpenAIChatToolWindow.__new__(mw.OpenAIChatToolWindow)
+        inst._is_streaming = False
+        inst._auto_save_current_session = MagicMock()
+        inst.backend = MagicMock()
+        inst.history_manager = MagicMock()
+        inst.history_manager.get_session_messages.return_value = [{"role": "user", "content": "hi"}]
+        inst._project_label = MagicMock()
+        inst._refresh_project_branch_style = MagicMock()
+        inst.cfg = MagicMock()
+        inst.cfg.enable_tab_manager.value = False
+        inst._get_current_worktree_path = MagicMock(return_value="")
+        inst._display_current_session = MagicMock()
+        inst._release_inactive_session_messages = MagicMock()
+        inst._history_card = None
+        inst._start_team_watcher = MagicMock()
+        inst._sync_active_windows_to_team_manager = MagicMock()
+        return inst
+
+    @staticmethod
+    def _isolate_main_widget_deps(monkeypatch, tmp_path):
+        """隔离 TeamManager 数据目录 + _load_session_from_record 的模块级依赖。"""
+        from unittest.mock import MagicMock
+
+        from app.core import team_manager as tm_mod
+
+        # 🛡️ test_legacy_string_agents_supported 直接赋值污染 TeamManager.get_instance
+        # （非 monkeypatch，同一 pytest 会话内永不恢复）。此处显式恢复真实单例逻辑，
+        # 否则 _load_session_from_record 里 TeamManager.get_instance() 会拿到 _FakeTM
+        # （无 is_team_member / join_team 方法）而 AttributeError。
+        def _real_get_instance(cls):
+            if cls._instance is None:
+                with cls._lock:
+                    if cls._instance is None:
+                        cls._instance = cls()
+            return cls._instance
+
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", classmethod(_real_get_instance))
+        monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
+        tm_mod.TeamManager._instance = None
+
+        import app.main_widget as mw
+
+        monkeypatch.setattr(mw, "_cleanup_global_lru_caches", lambda: None)
+        monkeypatch.setattr(mw, "create_session_from_record", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(mw, "init_after_loading_session", lambda *a, **k: None)
+
+        import app.core.command_manager as cm_mod
+        import app.core.ui_plugin_registry as uipr_mod
+
+        monkeypatch.setattr(cm_mod.CommandManager, "get_instance", staticmethod(lambda: MagicMock()))
+        monkeypatch.setattr(uipr_mod.UIPluginRegistry, "get_instance", staticmethod(lambda: MagicMock()))
+        return mw, tm_mod
+
+    def test_end_to_end_team_session_restore_registers_member(self, tmp_path, monkeypatch):
+        """行为级：恢复团队会话 → 窗口被登记为成员（leader 可见）+ watcher/同步被调用。"""
+        try:
+            import app.main_widget as mw
+        except Exception as _e:  # noqa: BLE001
+            pytest.skip(f"main_widget 导入失败，跳过端到端: {_e!r}")
+
+        mw, tm_mod = self._isolate_main_widget_deps(monkeypatch, tmp_path)
+        inst = self._make_window_stub()
+        inst._window_id = "win_restore_001"
+
+        inst._load_session_from_record(
+            {
+                "session_id": "sess_restore_001",
+                "title": "团队会话",
+                "team_run_id": "team-run-001",
+                "team_name": "default",
+                "agent_name": "build",
+                "project": "默认项目",
+            }
+        )
+
+        tm = tm_mod.TeamManager.get_instance()
+        assert tm.is_team_member("win_restore_001"), "恢复团队会话后窗口必须登记为团队成员（leader 可见）"
+        assert inst._start_team_watcher.called, "必须启动邮箱 watcher"
+        assert inst._sync_active_windows_to_team_manager.called, "必须同步活跃窗口"
+        assert inst._team_run_id == "team-run-001", "UI 标记必须保留"
+        assert inst._team_agent_name == "build", "UI 标记必须保留"
+
+    def test_end_to_end_plain_session_not_registered(self, tmp_path, monkeypatch):
+        """行为级：普通会话（无 team_run_id）加载不触发 join_team（语义不被破坏）。"""
+        try:
+            import app.main_widget as mw
+        except Exception as _e:  # noqa: BLE001
+            pytest.skip(f"main_widget 导入失败，跳过端到端: {_e!r}")
+
+        mw, tm_mod = self._isolate_main_widget_deps(monkeypatch, tmp_path)
+        inst = self._make_window_stub()
+        inst._window_id = "win_plain_001"
+
+        inst._load_session_from_record({"session_id": "sess_plain_001", "title": "普通会话"})
+
+        tm = tm_mod.TeamManager.get_instance()
+        assert not tm.is_team_member("win_plain_001"), "普通会话加载不得登记团队成员"
+        assert not inst._start_team_watcher.called, "普通会话不得启动 watcher"
+        assert not inst._sync_active_windows_to_team_manager.called, "普通会话不得同步活跃窗口"
+        assert inst._team_run_id == "", "普通会话必须清空团队标记"
+
+    def test_record_run_id_with_empty_agent_name_skips_register(self, tmp_path, monkeypatch):
+        """行为级：team_run_id 非空但 agent_name 为空/纯空白 → 守卫跳过，不 join。
+
+        review#13-#2 补充：agent_name 缺失时（异常数据）不得盲目登记，
+        否则 leader 成员表会出现无 agent 的幽灵成员。
+        """
+        try:
+            import app.main_widget as mw
+        except Exception as _e:  # noqa: BLE001
+            pytest.skip(f"main_widget 导入失败，跳过端到端: {_e!r}")
+
+        mw, tm_mod = self._isolate_main_widget_deps(monkeypatch, tmp_path)
+        inst = self._make_window_stub()
+        inst._window_id = "win_empty_agent_001"
+
+        inst._load_session_from_record(
+            {
+                "session_id": "sess_empty_agent_001",
+                "title": "团队会话（无 agent）",
+                "team_run_id": "team-run-002",
+                "team_name": "default",
+                "agent_name": "   ",  # 纯空白 → strip() 后为空，守卫拦截
+                "project": "默认项目",
+            }
+        )
+
+        tm = tm_mod.TeamManager.get_instance()
+        assert not tm.is_team_member("win_empty_agent_001"), "agent_name 为空时不得登记团队成员"
+        assert not inst._start_team_watcher.called, "agent_name 为空时不得启动 watcher"
+        assert not inst._sync_active_windows_to_team_manager.called, "agent_name 为空时不得同步活跃窗口"
+
+    def test_registered_member_with_different_agent_name_triggers_rejoin(self, tmp_path, monkeypatch):
+        """行为级：窗口已注册为 build，恢复会话 agent_name 是 review → rejoin 覆盖（防漂移）。
+
+        review#13-#1 核心场景：`is_team_member` 守卫下 agent_name 漂移（UI 显示 review
+        而成员表仍是 build）。修复后必须触发 join_team 覆盖。
+        """
+        try:
+            import app.main_widget as mw
+        except Exception as _e:  # noqa: BLE001
+            pytest.skip(f"main_widget 导入失败，跳过端到端: {_e!r}")
+
+        mw, tm_mod = self._isolate_main_widget_deps(monkeypatch, tmp_path)
+        tm = tm_mod.TeamManager.get_instance()
+
+        # 预注册：窗口原本是 build
+        tm.join_team(window_id="win_agent_001", agent_name="build")
+
+        inst = self._make_window_stub()
+        inst._window_id = "win_agent_001"
+        inst._load_session_from_record(
+            {
+                "session_id": "sess_agent_001",
+                "title": "团队会话",
+                "team_run_id": "team-run-003",
+                "team_name": "default",
+                "agent_name": "review",  # 恢复的会话 agent 已变
+                "project": "默认项目",
+            }
+        )
+
+        # agent_name 已被覆盖为新值（leader team_list_members 不再漂移）
+        members = {m["window_id"]: m for m in tm.get_members()}
+        assert members["win_agent_001"]["agent_name"] == "review", "agent_name 不一致时必须 rejoin 覆盖"
+        assert inst._start_team_watcher.called, "rejoin 后必须启动 watcher"
+        assert inst._sync_active_windows_to_team_manager.called, "rejoin 后必须同步活跃窗口"
+
+    def test_existing_window_member_skips_redundant_watcher_sync(self, tmp_path, monkeypatch):
+        """行为级：已是成员且 agent_name 一致 → 跳过 join/watcher/同步（避免不必要写盘）。
+
+        review#13-#2 补充：成员身份与 agent 均未变化时三连全跳过，
+        保持「恢复会话」为轻量操作。
+        """
+        try:
+            import app.main_widget as mw
+        except Exception as _e:  # noqa: BLE001
+            pytest.skip(f"main_widget 导入失败，跳过端到端: {_e!r}")
+
+        mw, tm_mod = self._isolate_main_widget_deps(monkeypatch, tmp_path)
+        tm = tm_mod.TeamManager.get_instance()
+
+        # 预注册：window 已是 review（与将恢复的会话 agent 一致）
+        tm.join_team(window_id="win_agent_002", agent_name="review")
+
+        inst = self._make_window_stub()
+        inst._window_id = "win_agent_002"
+        inst._load_session_from_record(
+            {
+                "session_id": "sess_agent_002",
+                "title": "团队会话",
+                "team_run_id": "team-run-004",
+                "team_name": "default",
+                "agent_name": "review",
+                "project": "默认项目",
+            }
+        )
+
+        assert tm.is_team_member("win_agent_002"), "成员身份必须保留"
+        members = {m["window_id"]: m for m in tm.get_members()}
+        assert members["win_agent_002"]["agent_name"] == "review", "agent_name 不得被改写"
+        assert not inst._start_team_watcher.called, "已注册且 agent 一致时不得重复启动 watcher"
+        assert not inst._sync_active_windows_to_team_manager.called, "已注册且 agent 一致时不得重复同步"

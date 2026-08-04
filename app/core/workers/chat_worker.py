@@ -496,7 +496,7 @@ class OpenAIChatWorker(QThread):
 
         # 首次构建：处理所有历史消息
         self._api_messages_cache = messages_to_api(
-            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
         )
         self._api_messages_built = True
         return self._api_messages_cache
@@ -511,13 +511,13 @@ class OpenAIChatWorker(QThread):
         """
         if self._api_messages_cache is None:
             self._api_messages_cache = messages_to_api(
-                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             return
 
         # 只转换新消息并追加
         for msg in new_messages:
-            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model())
+            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content())
             if api_msg:
                 if api_msg.get("role") == "user" and not api_msg.get("content"):
                     continue
@@ -1498,7 +1498,7 @@ class OpenAIChatWorker(QThread):
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
             self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
@@ -1859,7 +1859,8 @@ class OpenAIChatWorker(QThread):
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
                     self._api_messages_cache = messages_to_api(
-                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                        requires_reasoning_content=self._requires_reasoning_content()
                     )
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
@@ -2350,7 +2351,8 @@ class OpenAIChatWorker(QThread):
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
             self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                requires_reasoning_content=self._requires_reasoning_content()
             )
             self._api_messages_built = True
         except Exception as cache_e:
@@ -2504,6 +2506,23 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _requires_reasoning_content(self) -> bool:
+        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
+
+        deepseek 系模型（含 opencode.ai 等中转平台承载的 deepseek-v4 系列）在
+        thinking mode 下要求 tool_calls assistant 消息必须携带 reasoning_content
+        字段（可为空串），否则上游 Console 报 400。
+        """
+        if self.llm_config.get("思考模式") is not True:
+            return False
+        family = detect_provider_family(self.llm_config)
+        if family == "deepseek":
+            return True
+        # opencode 等中转平台承载 deepseek 系模型时（模型名以 deepseek 开头），
+        # 上游协议与官方 Console 一致，同样需要 reasoning_content 回传
+        model = str(self.llm_config.get("模型名称", "") or "").lower()
+        return model.startswith("deepseek")
+
     def _is_gemini_model(self) -> bool:
         """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
         try:
@@ -2542,7 +2561,7 @@ class OpenAIChatWorker(QThread):
             sanitized = self._api_messages_cache
         else:
             sanitized = messages_to_api(
-                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
             )
             if use_cache:
                 self._api_messages_cache = sanitized
@@ -2618,7 +2637,7 @@ class OpenAIChatWorker(QThread):
 
                     if was_fixed:
                         fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
                         )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
@@ -2646,7 +2665,8 @@ class OpenAIChatWorker(QThread):
 
                     if fixed_messages is not None:
                         fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model()
+                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
+                            requires_reasoning_content=self._requires_reasoning_content()
                         )
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
@@ -2675,8 +2695,19 @@ class OpenAIChatWorker(QThread):
                 is_retryable_timeout = isinstance(e, (httpx.TimeoutException, httpcore.TimeoutException))
                 is_retryable_protocol = isinstance(e, (httpx.ProtocolError, httpcore.ProtocolError))
                 is_rate_limit = isinstance(e, RateLimitError)
+                # 服务端过载/繁忙（如 MiniMax 的 2064、OpenAI 的 503）应重试。
+                # 除标准 "2064"/"overload" 信号外，还兜底识别两类透传消息：
+                # 1) SSE 流内错误事件：openai SDK 将其包装为通用 APIError（无 status_code
+                #    属性），但服务端文本含 5xx 状态码（如 "[503]"）
+                # 2) 队列已满等过载信号（如 MiniMax 的 "The request queue is full"）
+                _err_lower = error_str.lower()
                 is_server_overload = isinstance(e, APIError) and (
-                    "2064" in error_str or "overload" in error_str.lower()
+                    "2064" in error_str
+                    or "overload" in _err_lower
+                    or re.search(r"\b(5\d{2})\b", error_str) is not None
+                    or "request queue is full" in _err_lower
+                    or "queue is full" in _err_lower
+                    or "streaming response failed" in _err_lower
                 )
                 is_conn_error = isinstance(e, APIConnectionError)
                 # 通用 5xx：服务端临时故障（如 MiniMax 的 999/1000、OpenAI 500）应重试
@@ -4018,6 +4049,19 @@ class OpenAIChatWorker(QThread):
             elif "insufficient_quota" in error_msg:
                 self._emit_with_callback(
                     "error_occurred", self.error_occurred, "[配额不足] API配额已用完，请检查账户余额或更换API Key。"
+                )
+            elif (
+                any(
+                    kw in error_msg.lower()
+                    for kw in ("request queue is full", "queue is full", "streaming response failed")
+                )
+                or re.search(r"\b(5\d{2})\b", error_msg) is not None
+            ):
+                # 服务端过载/繁忙（已自动重试仍失败）：提示稍后重试，避免误以为是请求问题
+                self._emit_with_callback(
+                    "error_occurred",
+                    self.error_occurred,
+                    f"[服务繁忙] API 服务端过载或请求队列已满，已自动重试仍失败。请稍后重试。详情: {error_msg}",
                 )
             else:
                 self._emit_with_callback("error_occurred", self.error_occurred, f"[API错误] {error_msg}")

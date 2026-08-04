@@ -170,6 +170,22 @@ RATE_LIMIT_PATTERNS = [
     "servicequotaexceededexception",
 ]
 
+# 服务端过载/繁忙模式（503 队列满等，瞬时可重试）
+# 部分服务端（如 MiniMax）在 SSE 流内返回错误事件，无 HTTP 状态码可提取，
+# 但错误文本含"队列已满/流式响应失败"等过载信号，据此分类为 overloaded。
+OVERLOADED_PATTERNS = [
+    "request queue is full",
+    "queue is full",
+    "streaming response failed",
+    "server busy",
+    "service busy",
+    "temporarily unavailable",
+    "server is overloaded",
+    "service overloaded",
+    "服务繁忙",
+    "负载过高",
+]
+
 # 上下文溢出模式
 CONTEXT_OVERFLOW_PATTERNS = [
     "context length",
@@ -837,6 +853,14 @@ class ErrorClassifier:
         if any(p in error_msg for p in TIMEOUT_PATTERNS):
             return result_fn(
                 FailoverReason.timeout,
+                retryable=True,
+                should_compress=False,
+            )
+
+        # 服务端过载（503 队列满等，瞬时可重试）
+        if any(p in error_msg for p in OVERLOADED_PATTERNS):
+            return result_fn(
+                FailoverReason.overloaded,
                 retryable=True,
                 should_compress=False,
             )
