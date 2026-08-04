@@ -1682,12 +1682,18 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
             except Exception as e:
                 logger.warning(f"[DELETE] Widget cleanup failed: {e}")
 
-        # 从 layout 移除
+        # 从 layout 移除：removeWidget + 解除父引用（removeItem/takeAt 仅摘除
+        # 布局 item，widget 仍挂在父控件树下，QWebEngineView 的 renderer 进程
+        # 不会自然退出；removeWidget 结束父引用后 deleteLater 才能释放 renderer）
         layout_removed = False
         for i in range(chat_layout.count()):
             item = chat_layout.itemAt(i)
             if item and item.widget() is widget:
-                chat_layout.removeItem(item)
+                chat_layout.removeWidget(widget)
+                try:
+                    widget.setParent(None)
+                except Exception:
+                    pass
                 layout_removed = True
                 break
 

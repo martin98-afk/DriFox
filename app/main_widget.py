@@ -9220,13 +9220,29 @@ class OpenAIChatToolWindow(ToolWindow):
         self._lazy_batch_timer_active = False
         # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
         self._rendered_card_count = 0
+        # 先收集所有 widget（不能在迭代中修改 layout），再统一处理
+        widgets = []
         while self.chat_layout.count():
             item = self.chat_layout.takeAt(0)
-            if item.widget():
-                if delete_widgets:
-                    item.widget().deleteLater()
-                else:
-                    item.widget().hide()
+            if item and item.widget():
+                widgets.append(item.widget())
+        for widget in widgets:
+            if delete_widgets:
+                # cleanup 释放 WebEngine renderer（viewer.cleanup → setHtml("")）；
+                # removeWidget + 解除父引用后 deleteLater 才能让 renderer 自然退出
+                if hasattr(widget, "cleanup"):
+                    try:
+                        widget.cleanup()
+                    except Exception:
+                        pass
+                self.chat_layout.removeWidget(widget)
+                try:
+                    widget.setParent(None)
+                except Exception:
+                    pass
+                widget.deleteLater()
+            else:
+                widget.hide()
         # 清理全局 LRU 渲染缓存
         if delete_widgets:
             clear_global_render_cache()
@@ -9287,6 +9303,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if isinstance(widget, MessageCard) and self._is_widget_alive(widget):
                 # 调用卡片自己的 cleanup 方法
                 widget.cleanup()
+            # 解除父引用：takeAt 仅摘除布局项，widget 仍挂在父控件树下，
+            # QWebEngineView 的 renderer 进程不会自然退出；setParent(None)
+            # 结束父引用后 deleteLater 才能释放 renderer
+            try:
+                if widget.parent() is not None:
+                    widget.setParent(None)
+            except Exception:
+                pass
             widget.deleteLater()
 
         # 推迟到下一事件循环：清理 Markdown 渲染 LRU 缓存 + 压缩进程堆。
@@ -13111,10 +13135,19 @@ class OpenAIChatToolWindow(ToolWindow):
     def _clear_attachments(self):
         """清空所有附件"""
         self._attachments.clear()
+        # 先收集 widgets 再统一 removeWidget（不能在迭代中修改 layout）
+        chips = []
         while self._attach_layout.count() > 1:
             item = self._attach_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item and item.widget():
+                chips.append(item.widget())
+        for chip in chips:
+            self._attach_layout.removeWidget(chip)
+            try:
+                chip.setParent(None)
+            except Exception:
+                pass
+            chip.deleteLater()
         self._attach_container.hide()
 
     def _build_user_text_with_attachments(self, user_text: str) -> str:
