@@ -1960,6 +1960,110 @@ _SKELETON_CACHE_VERSION = 6
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
 _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
 
+
+# ============================================================
+# B1：差量渲染 — 闭合段提取
+#
+# 流式渲染的另一个 80ms 级开销是"每次自然边界全量 md→HTML"。差量策略：
+# 只把「已经闭合的完整段落/代码块」增量渲染并追加到 DOM（updateContentAppend），
+# 未闭合的尾部（think/tool 未闭合、fence 未闭合、行尾半段）保持增量纯文本状态，
+# 等闭合瞬间的全量渲染（或流式结束）统一处理。
+#
+# 规则（收敛版）：
+# - 空行（\n\n）分隔段落
+# - ```fence 配对后才切割；fence 内不切（fence 状态跨段累计）
+# - think/tool 未闭合不切（尾部留在稳定区之外）
+# - 列表/表格/引用跨空行被拆段属可接受差异（diff 场景不参与差量）
+#
+# 返回 (stable_md_len, segments)：
+# - stable_md_len：最后一个完整闭合段之后的偏移（下次从这继续扫描）
+# - segments：闭合段列表（每段是一段完整 markdown 文本）
+# ============================================================
+def _extract_closed_segments(md: str):
+    """提取 markdown 中已闭合的完整段（供差量增量渲染）。
+
+    Args:
+        md: 待扫描的 markdown 文本（从上次 stable 偏移之后的部分）
+
+    Returns:
+        (stable_md_len, segments)
+        - stable_md_len: 最后一个完整闭合段结束后的字符偏移
+        - segments: 闭合段列表（完整段落/代码块 markdown 原文）
+    """
+    if not md:
+        return 0, []
+
+    segments = []
+    stable_len = 0
+    i = 0
+    n = len(md)
+    fence_open = False  # 是否在 ``` 代码块内（跨段累计）
+
+    while i < n:
+        seg_end = md.find("\n\n", i)
+        if seg_end == -1:
+            break  # 剩余文本无空行分隔：整段未闭合（无稳定边界）→ 停止
+
+        seg = md[i:seg_end]
+        if not seg:
+            # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
+            i = seg_end + 2
+            continue
+        fence_count = seg.count("```")
+
+        if fence_open:
+            # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
+            if fence_count % 2 == 0:
+                i = seg_end + 2
+                continue
+            fence_open = False
+        else:
+            if fence_count % 2 == 1:
+                # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
+                fence_open = True
+                i = seg_end + 2
+                continue
+
+        # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
+        if seg.count("<thinking>") > seg.count("</thinking>"):
+            break  # think 未闭合 → 停止（尾部留在稳定区之外）
+        if seg.count("<tool>") > seg.count("</tool>"):
+            break  # tool 未闭合 → 停止
+
+        # 该段完整闭合：产出
+        segments.append(seg)
+        stable_len = seg_end + 2  # 含空行
+        i = seg_end + 2
+
+    return stable_len, segments
+
+
+def _render_stable_segment(md_seg: str) -> str:
+    """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
+
+    与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert），
+    但不做代码块高亮包装（闭合段通常为纯文本段落；代码块闭合由全量渲染兜底，
+    差量段不含未闭合 fence——见 _extract_closed_segments 的 fence 配对规则）。
+    小段同步渲染耗时 <1ms，无需线程池。
+
+    Args:
+        md_seg: 单个完整闭合的 markdown 段落
+
+    Returns:
+        该段的 HTML（不含外层容器包裹，供 updateContentAppend 追加）
+    """
+    safe_md = _sanitize_incomplete_markdown(md_seg)
+    safe_md = _unwrap_code_blocks_with_context_links(safe_md)
+    safe_md = _inject_context_links(safe_md)
+    processed_md = _inject_think_cards(safe_md, True, compact=False)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=False)
+    processed_md = _inject_hook_blocks(processed_md, True)
+    md = get_markdown_instance()
+    md.reset()
+    html = md.convert(processed_md)
+    html = _resolve_image_src(html)
+    return html
+
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
 # 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
 # 让用户实时看到正在执行的工具/思考；流式结束后归位顶部恢复现状。
@@ -2320,6 +2424,13 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq: int = 0
         self._render_inflight: bool = False
         self._render_pending: Optional[tuple] = None
+        # [B1] 差量渲染状态：
+        # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
+        # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
+        # - _needs_full_render：需要全量渲染（初值/主题/字体/状态切换/流式结束/缓存清理）
+        self._stable_html: str = ""
+        self._stable_md_len: int = 0
+        self._needs_full_render: bool = True
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
         # 每 80ms 合并一次渲染比 50ms 减少 37.5% 的 Chromium 重排版次数，
@@ -4267,6 +4378,63 @@ class CodeWebViewer(QWebEngineView):
                         setTimeout(() => reportHeight(), 50);
                     }}
                 }}
+                // ===== B1 差量渲染：追加闭合段到 DOM（不整块替换） =====
+                // 移除所有 data-incremental="true" 的增量纯文本节点，
+                // 再把新闭合的格式化 HTML 追加到 #content-placeholder 末尾。
+                function updateContentAppend(newHtml) {{
+                    const container = document.getElementById('content-placeholder');
+                    if (!container) return;
+                    // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        el.remove();
+                    }});
+                    // 追加格式化 HTML（含 table 包裹等后续处理）
+                    container.insertAdjacentHTML('beforeend', newHtml);
+                    // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
+                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
+                        var wrapper = document.createElement('div');
+                        wrapper.className = 'table-scroll-wrapper';
+                        table.parentNode.insertBefore(wrapper, table);
+                        wrapper.appendChild(table);
+                    }});
+                    // 恢复展开状态
+                    restoreCollapsibleStates(container);
+                    // 同步滚动到底（流式期间通常期望跟到底部）
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._prevScrollTop = document.body.scrollTop;
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
+                    // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块）
+                    if (window.echarts) {{
+                        container.querySelectorAll('.echarts-container').forEach(function(el) {{
+                            try {{
+                                var jsonB64 = el.getAttribute('data-echarts-json');
+                                if (!jsonB64 || el._echartInited) return;
+                                var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
+                                var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
+                                var chart = echarts.init(el, 'dark');
+                                chart.setOption(option);
+                                el._echartInited = true;
+                                var _ro = new ResizeObserver(function() {{ chart.resize(); }});
+                                _ro.observe(el);
+                            }} catch(e) {{
+                                console.error('ECharts init error:', e);
+                            }}
+                        }});
+                    }}
+                    // 使用延迟报告，确保浏览器布局完成
+                    setTimeout(() => reportHeight(), 30);
+                }}
                 function reportHeight() {{
                     // 用 body.scrollHeight 获取完整内容高度。
                     // getBoundingClientRect 在 html{{overflow:hidden}} 下
@@ -4929,19 +5097,27 @@ class CodeWebViewer(QWebEngineView):
                     // 保持与全量 Markdown 渲染的段落结构一致，避免段落计数偏移）
                     var clean = text.replace(/^[\\n\\r]+/, '');
                     var p = document.createElement('p');
+                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
+                    p.setAttribute('data-incremental', 'true');
                     p.textContent = clean;
                     c.appendChild(p);
                 }} else {{
                     var last = c.lastElementChild;
                     if (last && last.tagName === 'P') {{
+                        // [B1] 若已标记为增量节点则保留标记，追加文本
+                        if (!last.hasAttribute('data-incremental')) {{
+                            last.setAttribute('data-incremental', 'true');
+                        }}
                         last.textContent += text;
                     }} else if (last && last.classList.contains('think-block')) {{
                         // 最后是思考块：追加到思考块之后的新段落
                         var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
                         p.textContent = text;
                         c.appendChild(p);
                     }} else {{
                         var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
                         p.textContent = text;
                         c.appendChild(p);
                     }}
@@ -5081,6 +5257,10 @@ class CodeWebViewer(QWebEngineView):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
         if not hasattr(self, "_viewer_font_family"):
             return
+        # [B1] 字体变化：差量 HTML 缓存失效，强制全量重渲染
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
         self._refresh_viewer_font_css()
         self._schedule_render(immediate=True)
 
@@ -5125,6 +5305,10 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 主题变化：递增渲染序号使在途线程池任务过期（旧主题 HTML 丢弃），
         # 强制后续 _schedule_render 以新主题重新提交渲染。
         self._render_seq += 1
+        # [B1] 主题变化：差量 HTML 缓存失效（旧主题高亮/图标颜色），强制全量重渲染
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
 
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
@@ -5228,6 +5412,28 @@ class CodeWebViewer(QWebEngineView):
             if self._markdown_text == self._last_rendered_markdown:
                 return
 
+            # [B1] 差量渲染快路径：流式且非全量模式时，仅增量渲染已闭合的完整段。
+            # 条件：流式 + 未强制全量 + 无活跃工具 DOM（工具块走 save/restore 全量保护）
+            if self._streaming and not self._needs_full_render and not self._has_active_tool_dom():
+                stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                if segs:
+                    # 增量渲染闭合段：sanitize→inject→md.convert（主线程小段快速路径）
+                    # 差量段很小（单个段落/代码块），同步渲染耗时 <1ms，无需线程池
+                    new_html = "".join(
+                        _render_stable_segment(seg) for seg in segs
+                    )
+                    self._stable_md_len += stable_len
+                    self._stable_html += new_html
+                    # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
+                    # 不能推送累积值（否则旧段重复渲染）。
+                    js = f"updateContentAppend({json.dumps(new_html).decode('utf-8')});"
+                    self.page().runJavaScript(js)
+                    # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
+                    self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
+                    return
+                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental），跳过
+                return
+
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
@@ -5239,6 +5445,22 @@ class CodeWebViewer(QWebEngineView):
 
         except RuntimeError:
             pass
+
+    def _has_active_tool_dom(self) -> bool:
+        """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
+
+        返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
+        且 _tool_md_cache 影响 _inject_tool_blocks 输出——差量段渲染不带该缓存，
+        会导致工具块 HTML 与全量不一致）。
+        """
+        if self._tool_dom_dirty:
+            return True
+        try:
+            if getattr(self, "_restore_finished_ids", None):
+                return True
+        except Exception:
+            pass
+        return False
 
     # ========== B3: 异步渲染（线程池 + 序号校验 + 防抖） ==========
 
@@ -5307,6 +5529,13 @@ class CodeWebViewer(QWebEngineView):
                 return
             self._last_rendered_html = html
             self._height_report_pending = True
+            # [B1] 全量渲染成功应用后：重置差量基线——差量稳定区与全量内容对齐，
+            # 后续流式新段从当前 markdown 末尾继续差量追加（不再重复渲染已全量覆盖的内容）。
+            # ⚠️ 必须用 _last_rendered_markdown（线程池提交时的渲染对象），而非
+            # _markdown_text（回调到达时可能已被新 chunk 追加，造成差量跳过未渲染内容）。
+            self._stable_html = html
+            self._stable_md_len = len(self._last_rendered_markdown)
+            self._needs_full_render = False
             # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
             # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后
             # updateContent 的 height report 到达时 _content_just_loaded 已为 False，
@@ -5480,6 +5709,11 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # [B1] 流式结束：差量缓存失效（尾部未闭合内容需全量渲染收尾），
+        # 清空稳定区避免差量/全量混合导致重复段落。
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
         # [B3] 流式结束：递增渲染序号使在途线程池任务过期（避免旧流式 HTML
         # 晚到覆盖最终非流式渲染结果）；pending 积压清空。
         self._render_seq += 1
@@ -5567,6 +5801,10 @@ class CodeWebViewer(QWebEngineView):
         # [B3] 清空渲染缓存：递增序号使在途线程池任务过期（避免旧内容被应用）
         self._render_seq += 1
         self._render_pending = None
+        # [B1] 清空差量缓存：强制下次全量渲染（流式结束后的最终态）
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
         self._last_rendered_html = None
         self._last_rendered_markdown = ""
         self._markdown_text = ""
@@ -8163,6 +8401,11 @@ class MessageCard(SimpleCardWidget):
 
         if hasattr(self.viewer, "_markdown_text"):
             self.viewer._markdown_text = rendered
+            # [B1] 内容整体替换：使差量渲染缓存失效（_stable_md_len 指向旧内容偏移，
+            # 继续差量会重复渲染旧段），强制下次全量渲染建立新基线。
+            self.viewer._needs_full_render = True
+            self.viewer._stable_html = ""
+            self.viewer._stable_md_len = 0
             self.viewer._schedule_render(immediate=True)
         elif hasattr(self.viewer, "set_text"):
             self.viewer.set_text(rendered)
