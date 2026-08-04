@@ -2402,6 +2402,8 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        # [B4-强回收] renderer 进程 PID（强回收层 kill 离屏进程用；0 = 未就绪/已清理）
+        self._renderer_pid: int = 0
         # [B3] 连接线程池渲染完成信号（worker 线程 emit → 本槽在主线程执行）
         self.renderDone.connect(self._on_render_done_signal)
         self._markdown_text = ""
@@ -2856,6 +2858,11 @@ class CodeWebViewer(QWebEngineView):
         # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
         if self._markdown_text or self._lazy_markdown_cb:
             self._schedule_render(immediate=True)
+        # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
+        try:
+            self._renderer_pid = self.page().renderProcessPid()
+        except Exception:
+            self._renderer_pid = 0
 
     def _load_skeleton(self):
         # 获取系统字体
@@ -6480,6 +6487,9 @@ class CodeWebViewer(QWebEngineView):
         # 清理滚动位置
         self._last_scroll_position = 0
 
+        # [B4-强回收] 防悬挂：清理时清零 renderer PID（进程可能已随页面销毁退出）
+        self._renderer_pid = 0
+
     def deleteLater(self):
         self.cleanup()
         super().deleteLater()
@@ -9564,6 +9574,8 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.cleanup()
             except RuntimeError:
                 pass
+        # [B4-强回收] 防悬挂：MessageCard 清理时同步清零 renderer PID
+        self._renderer_pid = 0
         self.viewer = None  # 释放 viewer 引用，允许 GC
 
         # 清理大数据缓存
