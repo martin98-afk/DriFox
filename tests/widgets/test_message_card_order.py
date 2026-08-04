@@ -419,3 +419,61 @@ def test_data_order_without_anchor_matches_append_tail():
     assert _data_order(card, "hist_1") == 0.0, f"无锚点 data-order 应为 0.0，实际 {_data_order(card, 'hist_1')}"
     # 数据层仍 append 末尾（修复前行为）
     assert _types(card) == ["text", "tool_result"]
+
+
+# ──────────────────────────────────────────────
+# 方案 D+（流式完成时刻顺序错乱）修复回归
+# 根因：_perform_update 非流式分支复用 _cached_streaming_html（流式语义：
+# thinking 渲染为 .think-streaming，无 data-block-key）→ reorganizeContent 查不到
+# posMap → getPos=1e9 沉底；且 save/restore 插入只比较带 data-order 的子节点，
+# 流式完成瞬间"所有思考在前、所有工具在后"（折叠框从底部移到上部的那一刻）。
+# 修复：finish_streaming 清流式缓存强制完成态渲染（think 带稳定 block-key）；
+#       reorganizeContent 为缺 data-order 的 markdown 块补齐（posMap + 排其前流式工具数）。
+# ──────────────────────────────────────────────
+
+
+def test_finish_streaming_clears_streaming_html_cache():
+    """AST：finish_streaming 必须清除流式语义缓存 HTML。
+
+    不清理则 finish 非流式分支复用 _cached_streaming_html（thinking 渲染为
+    .think-streaming 无 data-block-key），在"坞态归位/折叠框从底到顶"的重排中对
+    思考块查不到 posMap → 错序（Bug B 第三条路径的 finish 变体）。
+    """
+    src = _extract_src()
+    import ast as _ast
+
+    tree = _ast.parse(src)
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == "finish_streaming":
+            target = node
+            break
+    assert target is not None, "未找到 finish_streaming 方法"
+    body = textwrap.dedent(ast.unparse(target))
+    assert "_cached_streaming_html = None" in body, (
+        "finish_streaming 必须把 _cached_streaming_html 置 None，强制完成态渲染"
+    )
+
+
+def test_reorganize_content_assigns_data_order_for_markdown_blocks():
+    """AST：reorganizeContent 必须为缺 data-order 的 markdown 块补齐。
+
+    流式完成时 save/restore 插入"仍在流式"的工具块，其插入循环只比较带
+    data-order 的子节点；若 think/完成工具块（markdown 渲染、仅有 block-key/
+    tool-call-id）缺 data-order，插入循环会绕过它们 → 工具块 appendChild 沉底，
+    "思考在前、工具在后"。修复：move 后按 posMap + 排在前流式工具数补齐 data-order。
+    """
+    src = _extract_src()
+    assert "getAttribute('data-streaming')" in src and "setAttribute('data-order'" in src, (
+        "reorganizeContent 必须读取流式标志并补齐 data-order"
+    )
+    assert re.search(r"posMap\['bk:' \+", src), "补齐 data-order 必须用 posMap 的 block-key 定位"
+    assert re.search(r"posMap\['tcid:' \+", src), "补齐 data-order 必须用 posMap 的 tool-call-id 定位"
+    assert "parseFloat(od)" in src
+
+
+def test_skeleton_cache_version_bumped_for_dplus():
+    """AST：方案 D+ 改动了骨架 JS（reorganizeContent），必须递增 _SKELETON_CACHE_VERSION。"""
+    src = _extract_src()
+    m = re.search(r"_SKELETON_CACHE_VERSION = (\d+)", src)
+    assert m and int(m.group(1)) >= 4, f"方案 D+ 改动骨架 JS 后必须 >= 4，实际 {m.group(1) if m else 'None'}"

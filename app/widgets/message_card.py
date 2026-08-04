@@ -1792,7 +1792,9 @@ _skeleton_cache: Dict[tuple, str] = {}
 # 递增时机：任何改动 _load_skeleton 生成的 HTML/JS 结构时 +1。
 # v3：reorganizeContent 的 getPos 新增 data-order 优先分支（方案 D），
 # 旧骨架无此分支会导致新代码注入的 data-order 不参与排序。
-_SKELETON_CACHE_VERSION = 3
+# v4：reorganizeContent 新增"为 markdown 块补齐 data-order"分支（方案 D+），
+# 旧骨架缺此分支会在流式完成时把思考块与工具块交错错位。
+_SKELETON_CACHE_VERSION = 4
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -4251,6 +4253,39 @@ class CodeWebViewer(QWebEngineView):
                             moved = true;
                         }}
                     }}
+                    // ▓▓ Bug B 方案 D+：把 markdown 渲染块的 data-order 补齐，统一排序/插入的尺度 ▓▓
+                    // 根因：flow 结束时 save/restore 会按 data-order 把"仍在流式"的工具块插回，
+                    // 但其插入循环只比较带 data-order 的子节点；而 think 块/完成工具块由 markdown
+                    // 渲染，只有 posMap（btn-key/tool-call-id）没有 data-order → 插入循环找不到
+                    // 目标 → appendChild 沉底 → 折叠框内"所有思考在前、所有工具在后"（容器 posMap
+                    // 未含仍在流式、尚未进入 _content_data 的工具块，需用其 floor(data-order) 修正）。
+                    // 此处为缺 data-order 的块补上 = posMap 位置 + 排在其前的流式工具数，使 sort
+                    // 与 save/restore 插入共用同一把尺子（与 _count_think_tool_prefix 同尺度）。
+                    var _streamFloors = [];
+                    var _allKids = Array.prototype.slice.call(toolContent.children);
+                    for (var _sf = 0; _sf < _allKids.length; _sf++) {{
+                        if (_allKids[_sf].getAttribute('data-streaming') === 'true') {{
+                            var _sfOd = parseFloat(_allKids[_sf].getAttribute('data-order'));
+                            if (!isNaN(_sfOd)) _streamFloors.push(Math.floor(_sfOd));
+                        }}
+                    }}
+                    for (var _oa = 0; _oa < _allKids.length; _oa++) {{
+                        var _oaKid = _allKids[_oa];
+                        if (_oaKid.getAttribute('data-order') !== null) continue;
+                        var _oaBk = _oaKid.getAttribute('data-block-key');
+                        var _oaTid = _oaKid.getAttribute('data-tool-call-id');
+                        var _oaPos = (_oaBk && posMap['bk:' + _oaBk] !== undefined)
+                            ? posMap['bk:' + _oaBk]
+                            : (_oaTid && posMap['tcid:' + _oaTid] !== undefined)
+                                ? posMap['tcid:' + _oaTid]
+                                : null;
+                        if (_oaPos === null) continue;
+                        var _oaBefore = 0;
+                        for (var _sf2 = 0; _sf2 < _streamFloors.length; _sf2++) {{
+                            if (_streamFloors[_sf2] <= _oaPos) _oaBefore++;
+                        }}
+                        _oaKid.setAttribute('data-order', String(_oaPos + _oaBefore));
+                    }}
                     // ── [PERF v2] 顺序哈希 diff：键序列未变时跳过 sort + appendChild ──
                     // 流式期间大部分 updateContent 走"键序列未变"快路径，避免 sort 抖动
                     var _curKeys = [];
@@ -5123,6 +5158,16 @@ class CodeWebViewer(QWebEngineView):
         # 在 reorganizeContent 中因不匹配而被清除或生成重复。
         if hasattr(self, "_tool_md_cache"):
             self._tool_md_cache.clear()
+        # 🆕 Bug B 方案 D+：流式结束必须清除"流式语义缓存"的 HTML。
+        # _cached_streaming_html 是流式渲染产物：thinking 被渲染成 .think-streaming
+        # （无 data-block-key，reorganizeContent 查不到 posMap → getPos=1e9 沉底）。
+        # 若 finish 的非流式分支直接复用它，就会在"坞态归位/折叠框从底部移到上部"的
+        # 最终渲染中，把思考块与 save/restore 插入的工具块错位（"所有思考在前、
+        # 所有工具在后"）。清除后强制以完成态重新渲染（think-compact/think-block
+        # 带稳定 data-block-key），与加载历史会话的排序尺度一致。
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
         # 重置思考文本流式标志，防止下一轮对话误判
         self._think_text_streaming_started = False
         self._reasoning_streaming_started = False
