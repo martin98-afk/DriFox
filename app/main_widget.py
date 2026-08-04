@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -838,6 +839,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._topic_summary_ready.connect(self._on_topic_summary_generated)
         # 线程安全桥接：中断完成后回到主线程保存会话
         self._interrupt_complete.connect(self._on_finalize_complete)
+        # ★ B5：停止/关窗后台 finalize 幂等锁（防止 stop 按钮与 closeEvent 双触发双 finalize）
+        self._bg_finalize_lock = threading.Lock()
+        self._bg_finalize_started = False
         # ★ 用量聚合（T6）：套餐用量结果由进程级单例 UsageService 广播
         # （全局缓存 + 单例轮询，N tab × 同 provider 只发 1 路请求），
         # 替代旧的 per-window _coding_plan_result_ready 信号桥接。
@@ -17163,26 +17167,14 @@ class OpenAIChatToolWindow(ToolWindow):
                 except TypeError, RuntimeError:
                     pass
 
-            # 🛡️ 关键修复：同步收集中断消息并应用到会话
-            #
-            # 背景：`backend.stop_streaming()` 内部是 cancel_worker()+finalize_stop()，
-            # 同步等待 worker.run() 退出。worker.run() 退出前会通过
-            # _cancel_with_stop_hook() emit `finished_with_messages(current_session_messages)`，
-            # 但 PyQt 跨线程信号是 queued，emit 后立即把 slot 调用入主线程事件队列。
-            #
-            # 关闭路径不依赖事件队列处理（事件队列中消息会在 closeEvent 之后才被处理），
-            # 如果不主动应用中断消息就调用 _auto_save_current_session()，保存的是
-            # **没有 partial assistant 消息的旧 session.messages**（内存漏掉）。
-            # UI 卡片有 partial（因为 content_received 是实时 emit 并同步更新卡片）
-            # 但 SQLite 不存 → 重启/切换会话后丢失。
-            #
-            # 修复：直接从 stop_streaming() 返回值拿 interrupted_messages，
-            # 主动同步应用并立即持久化，确保 closeEvent 退出时历史落盘已包含 partial。
-            interrupted_messages = None
+            # 🛡️ B5 异步化：closeEvent 不再同步调用 backend.stop_streaming()
+            # （其内部 finalize 等待 worker 退出，最多阻塞 ~4s）。
+            # 改为 cancel_streaming()（仅置标志，非阻塞）+ 后台 daemon 线程
+            # finalize（见 _launch_background_finalize）：
+            # - 取消 worker（非阻塞，不等待）
             try:
-                interrupted_messages = self.backend.stop_streaming()
+                self.backend.cancel_streaming()
                 self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
-                self.backend.cleanup()
             except Exception:
                 pass
 
@@ -17194,23 +17186,26 @@ class OpenAIChatToolWindow(ToolWindow):
             # 最新一条 assistant 消息的 elapsed 字段永远不存 → 重启/重载后
             # 看不到运行时长 = 用户报告的"累计运行时长无法保存"。
             #
-            # 修复：手动从 _response_start_time 计算 elapsed → 写进 session.messages
-            # → save + flush。必须先于 _persist_stop_elapsed 之前设好 _stop_elapsed，
-            # 否则 _persist_stop_elapsed 早退毫无作用。
+            # 修复：手动从 _response_start_time 计算 elapsed → 由后台 finalize
+            # 线程 _persist_stop_elapsed 写入 → save + flush（见 _launch_background_finalize）。
+            # ⚠️ 必须在 _launch_background_finalize 之前算好 _stop_elapsed，
+            # 否则后台线程 _persist_stop_elapsed 读到 None 早退 → elapsed 丢失。
             if self._response_start_time is not None:
                 self._stop_elapsed = time.time() - self._response_start_time
                 self._response_start_time = None
 
-            if interrupted_messages:
-                try:
-                    self._apply_interrupted_messages_to_session(interrupted_messages)
-                except Exception as e:
-                    logger.warning(f"[ChatWindow] closeEvent 应用中断消息失败: {e}")
-
-            # elapsed 由 _persist_stop_elapsed 写入（不保存）；
-            # 统一一次 save+flush（由 _auto_save_current_session 在 closeEvent 末尾兜底）。
-            # ⚠️ 必须在 _persist_stop_elapsed 之前先应用 partial，否则 elapsed 写到旧 session。
-            self._persist_stop_elapsed()
+            # - 后台 finalize：收集 interrupted_messages + 应用 + 持久化
+            #   （_is_destroyed=True 时后台线程直接处理，主线程回调全 return
+            #   无并发写；停止按钮路径走 emit 回主线程原语义）
+            try:
+                self._launch_background_finalize()
+            except Exception as e:
+                logger.warning(f"[ChatWindow] closeEvent 启动后台 finalize 失败: {e}")
+            # - backend.cleanup() 保留主线程（B6 已让超时转后台，不阻塞）
+            try:
+                self.backend.cleanup()
+            except Exception:
+                pass
 
         # 标记初始化已完成（防止窗口在初始化期间关闭导致竞态条件）
         self._initialization_in_progress = False
@@ -17354,34 +17349,76 @@ class OpenAIChatToolWindow(ToolWindow):
 
         此方法在 _on_stop_clicked() 的 UI 更新完成后执行，
         包含可能会阻塞的 worker.wait() 和 I/O 操作。
+
+        B5 加固：统一委托 _launch_background_finalize（幂等锁 + engine_ref 判空），
+        closeEvent 并发时 backend.chat_engine 可能被置 None。
         """
         if getattr(self, "_is_destroyed", False):
             return
 
         self._stop_deferred_pending = False
 
-        # 🛡️ 在线程中执行阻塞的 finalize_stop，不阻塞 UI 线程
-        if self.backend and self.backend.chat_engine:
-            import threading
-            import traceback
+        # 🛡️ B5：后台 finalize（幂等；daemon 闭包对 engine_ref 判空）
+        self._launch_background_finalize()
 
-            engine_ref = self.backend.chat_engine
+    def _launch_background_finalize(self):
+        """B5：停止/关窗路径后台 finalize（幂等，不阻塞主线程）。
 
-            def _do_finalize():
-                try:
-                    interrupted_messages = engine_ref.finalize_stop() or []
-                except Exception as e:
-                    logger.error(f"[ChatWindow] _do_finalize error: {e}\n{traceback.format_exc()}")
-                    interrupted_messages = []
-                # 使用跨线程信号回到主线程，而非 QTimer.singleShot（daemon 线程无事件循环）
-                if not getattr(self, "_is_destroyed", False):
+        由两处调用：
+        - closeEvent（关窗路径，_is_destroyed=True）：后台线程直接应用中断消息
+          + 持久化（窗口已销毁，主线程回调全 return，无并发写）。
+        - _deferred_stop_handler（停止按钮路径，_is_destroyed=False）：
+          emit _interrupt_complete 回主线程（原 _on_finalize_complete 语义不变）。
+
+        幂等锁：_bg_finalize_started 防止「停止按钮 → 关窗」双触发时启动两个
+        finalize 线程（双 finalize / 重复保存）。
+        """
+        with self._bg_finalize_lock:
+            if self._bg_finalize_started:
+                return
+            self._bg_finalize_started = True
+
+        # 🛡️ engine_ref 提前捕获并判空（closeEvent 并发时 backend.chat_engine 可能被置 None）
+        engine_ref = self.backend.chat_engine if self.backend else None
+        if engine_ref is None:
+            # 无 chat_engine：关窗路径由 _auto_save_current_session 兜底；停止路径更新时间线
+            if not getattr(self, "_is_destroyed", False):
+                self._update_node_preview()
+            return
+
+        import threading
+        import traceback
+
+        def _do_finalize():
+            try:
+                interrupted_messages = engine_ref.finalize_stop() or []
+            except Exception as e:
+                logger.error(f"[ChatWindow] _launch_background_finalize error: {e}\n{traceback.format_exc()}")
+                interrupted_messages = []
+            try:
+                if getattr(self, "_is_destroyed", False):
+                    # 关窗路径：窗口已销毁，后台线程直接应用中断消息 + 持久化。
+                    # 主线程回调（_on_finalize_complete 等）检测 _is_destroyed 全 return，
+                    # 无并发写；SessionStore 每线程独立连接（threading.local），
+                    # flush() 直接 _do_save() 同步落盘不依赖 QTimer。
+                    if interrupted_messages:
+                        self._apply_interrupted_messages_to_session(interrupted_messages)
+                    self._persist_stop_elapsed()
+                    # 🛡️ 主线程 _auto_save_current_session 已清零脏标记，
+                    # 后台链必须重新置脏，否则 _save_current_session_to_history
+                    # 因 not _session_dirty 直接 return → partial/elapsed 丢失。
+                    self._session_dirty = True
+                    if self.history_manager:
+                        self._save_current_session_to_history()
+                        self.history_manager.flush()
+                else:
+                    # 停止按钮路径：跨线程信号回主线程（daemon 线程无事件循环）
                     self._interrupt_complete.emit(interrupted_messages)
+            except Exception as e:
+                logger.error(f"[ChatWindow] _launch_background_finalize 应用/保存失败: {e}\n{traceback.format_exc()}")
 
-            t = threading.Thread(target=_do_finalize, daemon=True)
-            t.start()
-        else:
-            # 无 chat_engine，仍然需要更新时间线
-            self._update_node_preview()
+        t = threading.Thread(target=_do_finalize, daemon=True)
+        t.start()
 
     def _persist_stop_elapsed(self):
         """将手动停止时暂存的耗时写入 session.messages（不保存，不 flush）。
