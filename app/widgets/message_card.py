@@ -2143,6 +2143,11 @@ class CodeWebViewer(QWebEngineView):
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
         self._tool_md_cache: Dict[str, str] = {}
+        # [B2] 工具 DOM 脏标记：MessageCard 层 JS 增量注入工具块（_inject_tool_streaming_html /
+        # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
+        # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
+        # updateContent（省整页 save/restore JS 包装，MB 级 IPC 瘦身）。更新成功后置 False。
+        self._tool_dom_dirty: bool = False
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
         # 每 80ms 合并一次渲染比 50ms 减少 37.5% 的 Chromium 重排版次数，
@@ -5008,7 +5013,20 @@ class CodeWebViewer(QWebEngineView):
                 # 🚀 [PERF] 使用异步 runJavaScript（带 callback）避免主线程阻塞
                 # 等待 WebEngine 处理 DOM。同步版本会卡 30-120ms。
                 # 异步后主线程立即释放，WebEngine 在后台解析 HTML 和替换 DOM。
-                self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
+                # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
+                # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
+                # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
+                _needs_save_restore = self._tool_dom_dirty or bool(
+                    getattr(self, "_restore_finished_ids", set())
+                )
+                if _needs_save_restore:
+                    self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
+                else:
+                    self.page().runJavaScript(
+                        f"updateContent({json.dumps(html_content).decode('utf-8')});",
+                        lambda _result: None,
+                    )
+                self._tool_dom_dirty = False
                 self._last_rendered_html = None
                 return
 
@@ -5066,8 +5084,23 @@ class CodeWebViewer(QWebEngineView):
                 "window._autoScrollTime=performance.now();"
                 "window._suppressScrollEvent=false;"
             )
-            js_code = self._build_save_and_restore_js(html_content).replace("})();", auto_scroll_js + "})();")
+            # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
+            # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装；
+            # 纯文本回复等无工具场景走裸 updateContent（省整页 JS 包装，IPC 载荷大降）。
+            _needs_save_restore = self._tool_dom_dirty or bool(
+                getattr(self, "_restore_finished_ids", set())
+            )
+            if _needs_save_restore:
+                js_code = self._build_save_and_restore_js(html_content).replace(
+                    "})();", auto_scroll_js + "})();"
+                )
+            else:
+                js_code = (
+                    f"updateContent({json.dumps(html_content).decode('utf-8')});"
+                    + auto_scroll_js
+                )
             self.page().runJavaScript(js_code)
+            self._tool_dom_dirty = False
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
 
@@ -5196,6 +5229,10 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # [B2] 流式结束：重置工具 DOM 脏标记。随后 _schedule_render 走非流式分支，
+        # 该分支依据 _tool_dom_dirty/_restore_finished_ids 决定 save/restore 或裸更新；
+        # 显式清零保证完成渲染后不再残留"脏"状态（防误走整页 save/restore 包装）。
+        self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         self._sync_streaming_dock(False)
         # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
@@ -8271,6 +8308,12 @@ class MessageCard(SimpleCardWidget):
                 reportHeight();
             }})();
             """
+            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
+            # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
+            try:
+                self.viewer._tool_dom_dirty = True
+            except Exception:
+                pass
             self.viewer.page().runJavaScript(js_code)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
@@ -8529,6 +8572,12 @@ class MessageCard(SimpleCardWidget):
                 }}
             }})();
             """
+            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
+            # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
+            try:
+                self.viewer._tool_dom_dirty = True
+            except Exception:
+                pass
             self.viewer.page().runJavaScript(js_code)
         except RuntimeError:
             pass
