@@ -526,11 +526,29 @@ class UIPluginRegistry:
         return self.load_plugin(plugin_name, plugin_path)
 
     def unload_plugin(self, plugin_name: str) -> bool:
-        """卸载插件 UI，清理所有该插件的注册"""
+        """卸载插件 UI，清理所有该插件的注册
+
+        支持插件可选卸载回调：若插件模块定义了 ``unload_ui(registry)``，
+        在清理注册表前调用，用于释放子进程/线程/资源（如代理池子进程）。
+        热重载路径（load_plugin → unload_plugin → 重新加载）中，
+        旧模块此时仍在 sys.modules，回调可访问旧模块的单例与子进程句柄。
+        """
         from loguru import logger
 
         if plugin_name not in self._loaded_plugins:
             return False
+        # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
+        try:
+            import sys as _sys
+
+            safe_name = plugin_name.replace("-", "_").replace(":", "_")
+            old_module = _sys.modules.get(f"ui_plugin_{safe_name}")
+            if old_module is not None:
+                unload_ui = getattr(old_module, "unload_ui", None)
+                if callable(unload_ui):
+                    unload_ui(self)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] unload_ui 回调失败 ({plugin_name}): {e}")
         # 清理 content renderers
         self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
