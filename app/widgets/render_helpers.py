@@ -48,6 +48,8 @@ def _get_diff_formatter():
 
 _TEXT_LEXER = TextLexer()
 _DIFF_LEXER_CACHE: dict = {}
+# 防御上限：扩展名种类有限（<64），超限整体清空防膨胀
+_DIFF_LEXER_CACHE_MAX = 64
 
 # 扩展名 → pygments lexer 别名（get_lexer_for_filename 找不到时的兜底）
 _EXT_LEXER_MAP = {
@@ -133,6 +135,8 @@ def _get_diff_lexer(path: str):
                 lex = get_lexer_by_name(alias)
             except Exception:
                 lex = _TEXT_LEXER
+    if len(_DIFF_LEXER_CACHE) >= _DIFF_LEXER_CACHE_MAX:
+        _DIFF_LEXER_CACHE.clear()  # 防御膨胀：超限整体清空
     _DIFF_LEXER_CACHE[key] = lex
     return lex
 

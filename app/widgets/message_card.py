@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.parse
 import weakref
+from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from html import escape, unescape
@@ -152,6 +153,8 @@ _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTAL
 
 # ===== Pygments lexer/formatter 缓存（避免每个代码块每周期重建） =====
 _LEXER_CACHE: dict = {}
+# 防御上限：语言种类有限（<64），超限整体清空防膨胀
+_LEXER_CACHE_MAX = 64
 _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
@@ -186,6 +189,8 @@ def _get_lexer_cached(lang: str):
             lex = get_lexer_by_name(lang, stripall=False)
         except Exception:
             lex = _TEXT_LEXER
+        if len(_LEXER_CACHE) >= _LEXER_CACHE_MAX:
+            _LEXER_CACHE.clear()  # 防御膨胀：语言种类有限，整体清空代价可忽略
         _LEXER_CACHE[lang] = lex
     return lex
 
@@ -1941,7 +1946,9 @@ def _dispatch_render_done(seq: int, fut, wself) -> None:
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
 # 缓存键：(is_light, theme_fingerprint, font_family, ...)
-_skeleton_cache: Dict[tuple, str] = {}
+# OrderedDict LRU：超限时淘汰最久未用条目（骨架 ~54KB/条，48 条 ≈ 2.6MB 上限）
+_skeleton_cache: "OrderedDict[tuple, str]" = OrderedDict()
+_SKELETON_CACHE_MAX = 48
 # 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时必须递增，
 # 强制旧缓存失效。教训：#26 data-order 修复依赖骨架 JS 的 getPos 逻辑，
 # 若进程内仍持有旧版骨架缓存与新代码混合（新代码注入 data-order + 旧骨架
@@ -2895,6 +2902,7 @@ class CodeWebViewer(QWebEngineView):
         )
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
+            _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
             return
 
@@ -4998,6 +5006,9 @@ class CodeWebViewer(QWebEngineView):
         """
         # 存入全局骨架缓存，避免后续卡片重复构造同一 HTML 模板
         _skeleton_cache[cache_key] = html
+        _skeleton_cache.move_to_end(cache_key)
+        if len(_skeleton_cache) > _SKELETON_CACHE_MAX:
+            _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
