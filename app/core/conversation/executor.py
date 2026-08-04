@@ -37,6 +37,10 @@ class ConversationExecutor:
         self._is_streaming = False
         self._finalize_worker: Optional[Any] = None  # 两阶段停止：保存 worker 供 finalize_stop() 使用
         self._stop_lock = threading.Lock()  # 🛡️ 防止 cancel_worker/finalize_stop 多线程并发
+        # B6：清理锁——防止 cleanup()/finalize_stop()/_on_worker_finished() 并发清理同一 worker
+        self._cleanup_lock = threading.Lock()
+        # B6：超时未退出 worker 的延迟清理队列（线程退出后由 finished 信号触发清理）
+        self._pending_cleanup_workers: list = []
 
     @property
     def is_streaming(self) -> bool:
@@ -136,10 +140,79 @@ class ConversationExecutor:
         """
         logger.info(f"[ConversationExecutor] _on_worker_finished called: worker={type(worker).__name__}, current_worker={type(self._current_worker).__name__ if self._current_worker else None}, is_match={worker is self._current_worker}")
         if worker is not self._current_worker:
-            # 旧 worker 的 finished 信号，忽略（新 worker 已创建）
+            # 旧 worker 的 finished 信号上线时已不在 _current_worker（新 worker 已创建或
+            # cancel_worker 已摘除）。线程已结束，仍需走统一收尾释放 QThread 对象
+            # （T6-A：旧 worker 若不 deleteLater 同样残留）。
+            self._finalize_worker_cleanup(worker)
             return
         self._is_streaming = False
         self._current_worker = None
+        # 自然结束路径：worker 线程已结束，执行统一收尾（cleanup + deleteLater）
+        # T6-A：之前该路径从未释放 QThread C++ 对象（executor 全文 0 次 deleteLater），
+        # 每次对话完成残留一个 worker 对象 → 长对话/多标签页内存不回落。
+        self._finalize_worker_cleanup(worker)
+
+    # ========== Worker 统一收尾（T6-A + B6） ==========
+
+    def _finalize_worker_cleanup(self, worker):
+        """Worker 统一收尾：cleanup + deleteLater（线程已退出才安全执行）
+
+        T6-A: PyQt5 的 QThread 对象由 C++ 持有（"To be destroyed by: C/C++"），
+              必须 deleteLater() 排队销毁，否则 Python wrapper 残留。
+        B6: 所有清理路径（finalize_stop/cleanup/_on_worker_finished/延迟清理）
+              统一走此入口；_cleanup_lock 防止并发重复清理；线程仍在运行时
+              转入延迟清理队列，不阻塞调用方。
+
+        Args:
+            worker: 待清理的 worker 实例。
+        """
+        if worker is None:
+            return
+        # 线程必须已退出才安全（避免与 worker 线程访问 _event_bus/消息等数据竞争）
+        if worker.isRunning():
+            logger.debug(f"[ConversationExecutor] worker 仍在运行，转入延迟清理: {type(worker).__name__}")
+            self._schedule_deferred_cleanup(worker)
+            return
+
+        with self._cleanup_lock:
+            # 状态守卫：已清理过的 worker 跳过，防止重复 deleteLater
+            if getattr(worker, "_executor_cleaned", False):
+                return
+            try:
+                worker.cleanup()
+            except Exception as e:
+                logger.warning(f"[ConversationExecutor] Failed to cleanup worker: {e}")
+            # T6-A: deleteLater 释放 QThread C++ 对象（线程已退出，安全排队）
+            try:
+                worker.deleteLater()
+            except Exception as e:
+                logger.debug(f"[ConversationExecutor] deleteLater worker: {e}")
+            worker._executor_cleaned = True
+
+    def _schedule_deferred_cleanup(self, worker):
+        """B6: 将超时未退出的 worker 转入延迟清理（线程退出后由 finished 信号触发收尾）"""
+        if worker is None or worker in self._pending_cleanup_workers:
+            return
+        self._pending_cleanup_workers.append(worker)
+        try:
+            worker.finished.connect(
+                lambda w=worker: self._on_deferred_worker_finished(w)
+            )
+        except (TypeError, RuntimeError):
+            pass
+        # 竞态兜底：连接 finished 时线程恰好已退出（信号已发出不会再触发），
+        # 立即收尾（调用方此时不持有 _cleanup_lock，无重入风险）
+        if not worker.isRunning():
+            self._on_deferred_worker_finished(worker)
+
+    def _on_deferred_worker_finished(self, worker):
+        """B6: worker 线程结束后执行延迟收尾（cleanup + deleteLater）"""
+        try:
+            if worker in self._pending_cleanup_workers:
+                self._pending_cleanup_workers.remove(worker)
+        except ValueError:
+            pass
+        self._finalize_worker_cleanup(worker)
 
     def _make_permission_checker(self) -> Optional[Callable[[str, dict], str]]:
         """根据权限策略生成权限检查器"""
@@ -267,11 +340,9 @@ class ConversationExecutor:
         except Exception as e:
             logger.warning(f"[ConversationExecutor] Failed to get interrupted messages: {e}")
 
-        # 清理 worker 资源
-        try:
-            worker.cleanup()
-        except Exception as e:
-            logger.warning(f"[ConversationExecutor] Failed to cleanup worker: {e}")
+        # B6/T6-A: 统一收尾（cleanup + deleteLater）。若 worker 经 wait(3000)+wait(1000)
+        # 仍超时未退出，_finalize_worker_cleanup 自动转入延迟清理队列，不在此阻塞。
+        self._finalize_worker_cleanup(worker)
 
         return interrupted
 
@@ -320,28 +391,37 @@ class ConversationExecutor:
         return self.finalize_stop()
 
     def cleanup(self):
-        """清理当前 Worker"""
-        if self._current_worker:
+        """清理当前 Worker（B6: 超时转后台延迟清理，不阻塞线程安全收尾）"""
+        with self._stop_lock:
             worker = self._current_worker
-            try:
-                # 断开信号，防止旧 worker 的 finished 信号影响新 worker
-                for signal_name in ("finished",):
-                    try:
-                        signal = getattr(worker, signal_name, None)
-                        if signal is not None:
-                            signal.disconnect()
-                    except (TypeError, RuntimeError):
-                        pass
-                worker.cancel()
-                worker.requestInterruption()
-                if worker.isRunning():
-                    worker.quit()
-                    # 🛡️ 等待 Worker 实际退出后再清理，防止 cleanup() 与 Worker
-                    # 线程同时访问 _event_bus、_http_client、messages 等属性
-                    # 导致线程不安全的数据竞争。
-                    worker.wait(2000)
-                worker.cleanup()
-            except Exception as e:
-                logger.warning(f"[ConversationExecutor] Cleanup error: {e}")
             self._current_worker = None
-        self._is_streaming = False
+            self._is_streaming = False
+
+        if worker is None:
+            return
+
+        try:
+            # ⚠️ 不断开 finished 信号（T6-A 实测结论 + AutoLoop 兼容）：
+            # 1. 实测：disconnect(finished) 后 deleteLater 的 QThread Python wrapper 无法回收
+            #    （PyQt 内部引用表残留空壳）；保留连接则完全回收。
+            # 2. AutoLoopWorker 的 QEventLoop 依赖 worker.finished → loop.quit 退出等待，
+            #    此处 disconnect 会误断该连接导致 wait 挂起（原代码隐患）。
+            # 3. 旧 worker 的 finished 触发 _on_worker_finished 有身份检查
+            #    （worker is not self._current_worker → 走统一收尾），不会干扰新 worker。
+            worker.cancel()
+            worker.requestInterruption()
+            if worker.isRunning():
+                worker.quit()
+                # B6: 等待退出（2000→1500ms）。超时不再同步 cleanup（避免与仍在运行的
+                # worker 线程数据竞争），转入延迟清理队列，线程退出后由 finished 信号收尾。
+                if not worker.wait(1500):
+                    logger.warning(
+                        "[ConversationExecutor] Worker did not stop within 1.5s, "
+                        "deferring cleanup until thread exits"
+                    )
+                    self._schedule_deferred_cleanup(worker)
+                    return
+            # 线程已退出：统一收尾（cleanup + deleteLater，T6-A）
+            self._finalize_worker_cleanup(worker)
+        except Exception as e:
+            logger.warning(f"[ConversationExecutor] Cleanup error: {e}")
