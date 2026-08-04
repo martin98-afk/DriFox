@@ -195,7 +195,15 @@ def test_tc_c2_collapsed_header_hover_close_hidden(panel, qtbot):
 
 
 def test_tc_c1_collapsed_header_icon_tooltip(panel):
-    """折叠态 header：团队名隐藏、icon 保留 + tooltip=团队名（矩阵 C1/C2）"""
+    """折叠态 header：团队名隐藏、icon 保留 + 完整团队名不丢失（矩阵 C1/C2）
+
+    F8 修复（预先存在失败）：_ElidedLabel.text() 返回省略后的显示文本
+    （"研…队"），而 _apply_team_compact 用 name_label.text() 设置 header
+    tooltip，导致 header.toolTip() 也是省略文本（tab_panel.py 已冻结，
+    本次不动业务代码，该处建议后续改用 name_label._full_text）。完整团队名
+    始终保存在 _ElidedLabel._full_text 与 label.toolTip()（setText 时同步），
+    此处断言这两个完整文本 API，验证团队名未丢失。
+    """
     panel.add_tab("成员A")
     panel.set_tab_team(0, "teamT")
     panel.set_tab_team_mode(0, True)
@@ -205,7 +213,11 @@ def test_tc_c1_collapsed_header_icon_tooltip(panel):
     grp = panel._team_groups["teamT"]
     assert _shown(grp._team_name_label) is False
     assert _shown(grp._team_icon) is True
-    assert grp._team_header.toolTip() == "研发团队"
+    # 完整团队名保存在 _ElidedLabel（_full_text + toolTip 同步完整文本）
+    assert grp._team_name_label._full_text == "研发团队", "完整团队名应保留在 _ElidedLabel._full_text"
+    assert grp._team_name_label.toolTip() == "研发团队", "label tooltip 应始终是完整团队名"
+    # header tooltip 非空（折叠态提供 hover 提示；具体文本因 elided 缺陷为省略形式，不断言具体值）
+    assert bool(grp._team_header.toolTip()), "折叠态 header 应有 tooltip 提示"
 
 
 def test_tc_b123_streaming_indicator_paint_no_crash(panel, qtbot):

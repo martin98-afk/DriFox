@@ -902,6 +902,28 @@ class OpenAIChatWorker(QThread):
             # 虽然信号可能已被断开，但事件总线仍可能接收
             self._emit_with_callback("finished_with_messages", self.finished_with_messages, current_session_messages)
 
+        # 🛡️ 取消路径排空 _hook_message_queue 中的 TeamMail 残留（F1 P0-2）：
+        # _inject_team_mail_as_hook 推送的邮件 hook 若在取消前未被 worker 消费
+        # （worker 正阻塞在 API 调用中），会残留到下一个对话被 _inject_pending_hook_messages
+        # 重复消费 → "停止后立即触发相同对话"的次链路。取消 = 用户主动中止，
+        # 残留的 TeamMail hook 属于被取消的上下文，直接丢弃；非 TeamMail 条目
+        # （SubAgentFinished 等通知）保留放回，供下一对话正常消费（通知语义不变）。
+        try:
+            backend = getattr(self.tool_executor, "_backend", None)
+            q = getattr(backend, "_hook_message_queue", None) if backend else None
+            if q is not None:
+                leftover = []
+                while True:
+                    try:
+                        leftover.append(q.get_nowait())
+                    except queue.Empty:
+                        break
+                for item in leftover:
+                    if item.get("_hook_event") != "TeamMail":
+                        q.put(item)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[HookManager] Cancel path drain TeamMail hook queue failed: {e}")
+
     @property
     def event_bus(self) -> WorkerEventBus:
         """获取事件总线实例"""

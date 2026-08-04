@@ -113,6 +113,8 @@ class SessionRepository:
             "team_run_id": d.get("team_run_id", "") or "",
             "team_name": d.get("team_name", "") or "",
             "agent_name": d.get("agent_name", "") or "",
+            # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
+            "team_members": d.get("team_members", "") or "",
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time")
@@ -181,6 +183,8 @@ class SessionRepository:
                 "team_run_id": session.get("team_run_id", "") or "",
                 "team_name": session.get("team_name", "") or "",
                 "agent_name": session.get("agent_name", "") or "",
+                # 团队成员快照透传（F3）：JSON 字符串，非团队会话保持空串
+                "team_members": session.get("team_members", "") or "",
             }
 
             success, result = self._execute(
@@ -190,11 +194,11 @@ class SessionRepository:
                  compaction_state, compaction_cache, message_count, user_edited_title,
                  worktree_path, preview, context_usage,
                  last_api_prompt_tokens, last_api_message_count,
-                 team_run_id, team_name, agent_name,
+                 team_run_id, team_name, agent_name, team_members,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             """,
@@ -216,6 +220,7 @@ class SessionRepository:
                     session_data["team_run_id"],
                     session_data["team_name"],
                     session_data["agent_name"],
+                    session_data["team_members"],
                     session_id,  # for coalesce
                     now,  # created_at default
                     now,  # updated_at
@@ -317,7 +322,7 @@ class SessionRepository:
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name "
+                f"team_run_id, team_name, agent_name, team_members "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -364,6 +369,8 @@ class SessionRepository:
             "team_run_id": d.get("team_run_id", "") or "",
             "team_name": d.get("team_name", "") or "",
             "agent_name": d.get("agent_name", "") or "",
+            # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
+            "team_members": d.get("team_members", "") or "",
             "last_time": d.get("updated_at", ""),
             "saved_at": d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
@@ -404,7 +411,7 @@ class SessionRepository:
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name "
+                f"team_run_id, team_name, agent_name, team_members "
                 f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "
                 f"ORDER BY updated_at DESC",
                 (run_id,),

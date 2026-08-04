@@ -877,6 +877,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_fs_watcher.directoryChanged.connect(self._on_team_mailbox_changed)
         self._team_watch_paths: set = set()
         self._team_processing: bool = False  # 串行处理锁
+        self._known_mail_ids: set = set()  # 已知邮箱邮件 id 快照（区分新邮件 vs 状态写回，F1 P0-1）
+        self._last_stop_time: float = 0.0  # 手动停止时刻（停止后冷却，防止自动重触发，F1 P1-3）
         self._injected_team_mails: list = []  # 流式中 hook 注入的团队邮件（流结束时标记完成）
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
         self._team_name: str = ""  # 团队名（TeamManager 模板名），空=非团队模式；供 Tab 分组使用
@@ -1710,9 +1712,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     new_instance._current_model_name = self._current_model_name
                     # #4 语义：分支/新窗口继承源窗口的"是否手动选过"标志，
                     # 保持会话状态一致（手动选过的分支窗口同步时同样不被云端覆盖）
-                    new_instance._user_manually_selected_model = getattr(
-                        self, "_user_manually_selected_model", False
-                    )
+                    new_instance._user_manually_selected_model = getattr(self, "_user_manually_selected_model", False)
                     # 性能优化：直接复制 _valid_configs，避免新窗口在 showEvent 中
                     # 重新从磁盘加载全部服务商配置（_load_model_configs 很重）
                     new_instance._valid_configs = dict(self._valid_configs)
@@ -3977,7 +3977,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_name = (tm.get_template() or {}).get("name") or "default"
         # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
         # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
-        self._team_run_id = tm.get_team_run_id()
+        # 🛡️ F3 可选收尾（根因 B）：手动加入且团队无 run_id → start_team_run()
+        # 幂等生成，使纯手动团队也获得 run_id、成员会话自动落团队元数据
+        # （_auto_save_current_session 的 _team_run_id 守卫因此生效），
+        # 否则手动成员会话不落团队字段、恢复时无法按 run_id 找回。
+        run_id = tm.get_team_run_id()
+        if not run_id:
+            run_id = tm.start_team_run()
+        self._team_run_id = run_id
         # 应用团队级统一项目（若已设置）：手动加入团队后与团队共享同一项目
         team_project = tm.get_team_project()
         if team_project:
@@ -4213,46 +4220,176 @@ class OpenAIChatToolWindow(ToolWindow):
         # 每次新建团队对话都是独立运行，不复用旧 run_id，与一键恢复路径
         # force=True 语义对齐；本次模板加载的所有新窗口共享同一 run_id，
         # 团队会话自动保存时落库。
-        team_run_id = tm_mgr.start_team_run(force=True)
+        tm_mgr.start_team_run(force=True)
 
-        # 1) 为模板的每个角色新建一个全新空白窗口（不复制任何已有窗口的上下文/会话）
-        new_windows: List["OpenAIChatToolWindow"] = []
-        for agent_name in agents_needed:
-            try:
-                win = self._create_fresh_window()
-                if win is not None:
-                    new_windows.append(win)
-                    # 同步前置 join：_create_fresh_window 返回后立即登记团队成员身份。
-                    # 此时 showEvent 排队的 QTimer(0) → _create_new_session 仍在事件队列中
-                    # 未执行，join 完成后 create_session 触发 SessionStart hook 时
-                    # is_team_member 已为 True，团队 hook（#team_member matcher）才能命中。
-                    # 同时写入团队名/角色名，供 Tab 管理器分组与胶囊使用。
-                    win._team_agent_name = agent_name
-                    win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
-                    win._team_run_id = team_run_id
-                    tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
-                    # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
-                    team_project = tm_mgr.get_team_project()
-                    if team_project:
-                        win._apply_team_project(team_project)
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"[_handle_team_load] 创建窗口失败: {e}")
+        # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
+        # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
+        # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
+        # _spawn_team_member_window 内部 get_team_run_id() 取到的即新 run_id。
+        self._spawn_team_members(agents_needed)
 
-        # 2) 新窗口延后 join（确保 backend.agent_manager 已初始化）
-        for i, win in enumerate(new_windows):
-            if i >= len(agents_needed):
-                break
-            agent_name = agents_needed[i]
+    def _spawn_team_member_window(self, agent_name: str) -> Optional["OpenAIChatToolWindow"]:
+        """为团队新建一个成员窗口（_handle_team_load 与团队框"新建成员"共用）。
+
+        创建链路（与 _handle_team_load 原始循环体一致）：
+        1. _create_fresh_window 新建全新空白窗口（不复制任何已有窗口上下文）
+        2. 同步前置 join：返回后立即登记团队成员身份。此时 showEvent 排队的
+           QTimer(0) → _create_new_session 仍在事件队列中未执行，join 完成后
+           create_session 触发 SessionStart hook 时 is_team_member 已为 True，
+           团队 hook（#team_member matcher）才能命中。同时写入团队名/角色名，
+           供 Tab 管理器分组与胶囊使用。
+        3. 应用团队级统一项目（若已设置）
+        4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
+           就绪），join 完成递减 _pending_arrange_count
+
+        ⚠️ run_id 关键约束：**复用现有 run_id**（get_team_run_id()），
+        禁止 start_team_run(force=True) 生成新 run_id——否则新窗口按
+        TabManagerWindow._resolve_tab_team_id 分组进**新团队框**而非当前团队框
+        （T3 坑 1）。仅"开新团队"路径（/team --load）先行 force 生成 run_id。
+
+        Args:
+            agent_name: 要创建的角色名
+
+        Returns:
+            新建窗口；创建失败返回 None（调用方负责计数与提示）
+        """
+        try:
+            tm_mgr = self._get_team_manager()
+            win = self._create_fresh_window()
+            if win is None:
+                return None
+            win._team_agent_name = agent_name
+            win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+            # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
+            win._team_run_id = tm_mgr.get_team_run_id()
+            tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+            # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
+            team_project = tm_mgr.get_team_project()
+            if team_project:
+                win._apply_team_project(team_project)
+            # 延迟 join（确保 backend.agent_manager 已初始化）
             wid = getattr(win, "_window_id", "?")
             QTimer.singleShot(
                 self._TEMPLATE_JOIN_DELAY_MS,
                 lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
             )
+            return win
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[_spawn_team_member_window] 创建成员窗口失败: {e}")
+            return None
 
-        # 3) 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
+    def _spawn_team_members(self, agent_names: List[str]) -> int:
+        """批量创建团队成员窗口（去重由调用方保证）。
+
+        Args:
+            agent_names: 要创建的角色名列表（不含已存在成员）
+
+        Returns:
+            成功创建的窗口数
+        """
+        new_windows: List["OpenAIChatToolWindow"] = []
+        for agent_name in agent_names:
+            win = self._spawn_team_member_window(agent_name)
+            if win is not None:
+                new_windows.append(win)
+        # 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
         self._pending_arrange_count = len(new_windows)
         if self._pending_arrange_count == 0:
             self._do_team_window_arrange()
+        return len(new_windows)
+
+    def _handle_team_add_member(self):
+        """团队框"新建成员"交互：列出模板中未加入角色，选择后创建成员会话。
+
+        交互（QMenu 以鼠标位置弹出，样式与 TabPanel contextMenuEvent 一致）：
+        - 模板全部角色列出，已加入团队的置灰（不可选）
+        - 未加入的角色可点击 → 创建该成员会话
+        - 菜单底部"批量补齐全部角色" → 一键创建所有未加入角色
+
+        兜底：
+        - 无模板（手动 /team --join 团队）→ InfoBar 提示先 /team --load=<模板>
+        - 所有角色均已加入 → InfoBar 提示"团队角色已齐"
+        """
+        tm_mgr = self._get_team_manager()
+        template = tm_mgr.get_template()
+        if not template or not template.get("agents"):
+            InfoBar.warning(
+                "无法新建成员",
+                "当前团队无模板，请先 /team --load=<模板> 加载团队模板",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        # 已加入角色去重（T3 坑 2）：get_members 的 agent_name 集合
+        joined = {m.get("agent_name") for m in tm_mgr.get_members() if m.get("agent_name")}
+        all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
+        missing = [a for a in all_agents if a not in joined]
+        if not missing:
+            InfoBar.info(
+                "团队角色已齐",
+                "模板中的所有角色均已加入团队，无需新建成员",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
+            return
+
+        from PyQt5.QtGui import QCursor
+        from PyQt5.QtWidgets import QMenu
+
+        menu = QMenu(self.window())
+        menu.setStyleSheet(
+            f"""
+            QMenu {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+            QMenu::item:disabled {{
+                color: {Colors.TEXT_MUTED};
+            }}
+            """
+        )
+        for agent_name in all_agents:
+            action = menu.addAction(agent_name)
+            action.setEnabled(agent_name in missing)  # 已加入角色置灰
+        menu.addSeparator()
+        batch_action = menu.addAction("批量补齐全部角色")
+
+        chosen = menu.exec_(QCursor.pos())
+        if chosen is None:
+            return
+        if chosen == batch_action:
+            created = self._spawn_team_members(missing)
+            if created:
+                InfoBar.success(
+                    "已批量创建",
+                    f"已为 {len(missing)} 个角色创建成员会话: {', '.join(missing)}",
+                    parent=self,
+                    duration=4000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+            return
+        agent_name = chosen.text()
+        created = self._spawn_team_members([agent_name])
+        if created:
+            InfoBar.success(
+                "已创建成员",
+                f"角色 {agent_name} 的成员会话已创建",
+                parent=self,
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _join_new_window_for_template(
         self,
@@ -4439,6 +4576,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """启动邮箱目录的文件系统监听"""
         self._rearm_team_watcher()
 
+        # 🛡️ 启动快照（F1 P0-1）：记录当前已有邮件 id，后续 watcher 事件只对"新 id"响应，
+        # 状态写回（mark_mail_running/pending/done 改写同一文件）不会回流重触发。
+        self._known_mail_ids = self._snapshot_mail_ids()
+
         # 启动时立即处理已有未处理邮件
         self._check_and_process_pending()
 
@@ -4470,8 +4611,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if mailbox_dir not in self._team_fs_watcher.directories():
                 self._team_fs_watcher.addPath(mailbox_dir)
                 self._team_watch_paths.add(mailbox_dir)
-                # 目录曾经消失过，重新挂载后补一次轮询，避免漏掉期间到达的邮件
-                self._check_and_process_pending()
+                # 目录曾经消失过，重新挂载后补一次轮询，避免漏掉期间到达的邮件。
+                # 仅当出现"新邮件 id"才处理：状态写回（running/pending/done 改写
+                # 同一文件）不回流，否则停止回滚的 pending 邮件会被 5s 重挂轮询
+                # 再次拉起 → 自动重触发（F1 P0-1）。
+                current_ids = self._snapshot_mail_ids()
+                if current_ids - self._known_mail_ids:
+                    self._known_mail_ids = current_ids
+                    self._check_and_process_pending()
+                else:
+                    self._known_mail_ids = current_ids
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[TeamWatcher] 重挂邮箱监听失败: {e}")
 
@@ -4490,11 +4639,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
         self._team_watch_paths.clear()
 
+    def _snapshot_mail_ids(self) -> set:
+        """扫描当前邮箱目录的邮件 id 集合（F1 P0-1）。
+
+        用于区分"新邮件到达"与"状态写回"：TeamManager 状态写回
+        （mark_mail_running/pending/done 经 _write_json 改写邮箱目录内
+        mail_*.json）也会触发 directoryChanged（Windows 实测），但状态变化
+        由调用方直接驱动，watcher 回流只会造成"停止后 pending 邮件立即被
+        重新拉起"的自触发循环。id 集合不变 → 纯状态写回；出现新 id → 新邮件。
+        """
+        try:
+            tm = self._get_team_manager()
+            return {m.get("id") for m in tm.get_mailbox_mails(self._window_id) if m.get("id")}
+        except Exception:  # noqa: BLE001
+            return set()
+
     def _on_team_mailbox_changed(self, path: str):
-        """邮箱目录变更 → 检查新邮件，串行处理"""
+        """邮箱目录变更 → 检查新邮件，串行处理（F1 P0-1：只响应新邮件文件）"""
         if getattr(self, "_is_destroyed", False):
             self._stop_team_watcher()
             return
+        current_ids = self._snapshot_mail_ids()
+        if current_ids == self._known_mail_ids:
+            return  # 纯状态写回（running/pending/done），不回流处理
+        self._known_mail_ids = current_ids
         self._check_and_process_pending()
 
     def _check_and_process_pending(self):
@@ -4506,6 +4674,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._team_processing:
             return  # 正在处理中，跳过
+
+        # 🛡️ 停止后冷却（F1 P1-3）：手动停止后 1s 内不自动拉起 pending 邮件。
+        # 停止回滚（mark_mail_pending 写回邮箱 JSON）与 watcher 事件之间的
+        # 竞态窗口内，任何 watcher/rearm 触发的本函数都可能把同一封邮件立即
+        # 重开新对话（用户视角"停止停不掉"）。用户手动发消息不经过本函数
+        # （worker 侧 _inject_pending_hook_messages 注入路径），不受影响。
+        if time.monotonic() - getattr(self, "_last_stop_time", 0.0) < 1.0:
+            logger.debug("[TeamMail] 停止冷却期内，跳过 pending 自动处理")
+            return
 
         tm = self._get_team_manager()
         pending = tm.get_pending_tasks(self._window_id)
@@ -4591,31 +4768,81 @@ class OpenAIChatToolWindow(ToolWindow):
         user_msg = f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n{task_desc}"
         self._on_send_clicked(user_msg, hook_event="TeamMail")
 
+        # 🛡️ 团队邮件锁释放（Bug2）：_on_send_clicked 有 8+ 个 send 前提前 return
+        # 分支（模型无效无 API_KEY / 命令拦截 / 技能切换 / 无文本等），命中任一分支
+        # 都不会进入流式，但 _team_processing 已被 _check_and_process_pending 置 True。
+        # 若不释放：后续所有团队邮件被 _team_processing 拦截，且该邮件永久卡 running
+        # （团队邮件系统死锁）。_on_send_clicked 在 _do_deferred_send（下一 tick）之前
+        # 同步置 _is_streaming=True，因此返回后检查 _is_streaming 可精准区分
+        # "被提前 return 拦截" vs "正常进入流式"。
+        if not self._is_streaming:
+            self._rollback_team_mail_processing()
+            return
+        # 兜底（Bug2 防线 2）：_do_deferred_send 内 send_message_to_engine 失败会
+        # 把 _is_streaming 置回 False（下一 tick 异步发生，同步检查看不到），
+        # 1.5s 后若锁仍持有且未流式 → 复位，杜绝任何漏网路径造成永久死锁。
+        from PyQt5.QtCore import QTimer as _QTimer
+
+        _QTimer.singleShot(1500, self._delayed_team_mail_lock_guard)
+
+    def _rollback_team_mail_processing(self):
+        """团队邮件处理被拦截（未进入流式）时复位锁 + 回滚 pending（Bug2）。
+
+        与 _sync_team_mail_on_stop 的未响应分支一致：mark_mail_pending 回滚，
+        由后续 _check_and_process_pending 重新排队处理（宁可重复处理不丢失）。
+        """
+        tm = self._get_team_manager()
+        ctx = getattr(self, "_current_team_mail", None)
+        if ctx:
+            try:
+                tm.mark_mail_pending(ctx["mail"]["id"], self._window_id)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[TeamMail] 回滚 pending 失败: {e}")
+            self._current_team_mail = None
+        self._team_processing = False
+
+    def _delayed_team_mail_lock_guard(self):
+        """延迟兜底（Bug2 防线 2）：1.5s 后锁仍持有且未进入流式 → 复位。
+
+        覆盖 _do_deferred_send 中 send_message_to_engine 失败（异步把 _is_streaming
+        置回 False）等同步检查不可见的漏网路径，杜绝团队邮件系统永久死锁。
+        """
+        if not getattr(self, "_is_destroyed", False) and getattr(self, "_team_processing", False):
+            if not self._is_streaming:
+                self._rollback_team_mail_processing()
+
+    def _finalize_single_team_mail(self, mail: dict, done_result: str = "") -> bool:
+        """按实际响应状态收尾单封团队邮件（Bug3：复用 _mail_was_responded 判定）。
+
+        有响应 → mark_mail_done（结果取 last_assistant_text 或显式 done_result）；
+        无响应 → mark_mail_pending 回滚（宁可下次重复处理，不误标终态 done 丢失）。
+
+        Returns:
+            True=标 done；False=回滚 pending
+        """
+        tm = self._get_team_manager()
+        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
+        if self._mail_was_responded(session, mail):
+            result = done_result or self._last_non_hook_assistant_text(session)
+            tm.mark_mail_done(mail["id"], self._window_id, result)
+            return True
+        tm.mark_mail_pending(mail["id"], self._window_id)
+        return False
+
     def _on_task_stream_finished(self):
-        """流式完成后标记任务邮件为已完成"""
+        """流式完成后标记任务邮件为已完成（Bug3：按实际响应状态收尾）"""
         ctx = getattr(self, "_current_team_mail", None)
         if not ctx:
             return
         self._current_team_mail = None
 
         mail = ctx["mail"]
-        tm = self._get_team_manager()
-
-        # 获取最后一条 assistant 消息作为结果记录
-        result = ""
-        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
-        if session and session.messages:
-            for msg in reversed(session.messages):
-                if msg.get("role") == "assistant" and not msg.get("_hook_event"):
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        from app.core import content_to_text
-
-                        content = content_to_text(content)
-                    result = content or ""
-                    break
-
-        tm.mark_mail_done(mail["id"], self._window_id, result)
+        # 🛡️ 修复（Bug3）：LLM 流式结束 ≠ 邮件已响应。若流式仅产生工具调用/
+        # 响应被截断/未输出实质内容，无条件 mark_mail_done 会把邮件误标终态
+        # 永久丢失（done 不可回退）。复用 _mail_was_responded 判定：
+        # 有响应 → done（结果取最后一条非 hook assistant 文本）；
+        # 无响应 → mark_mail_pending 回滚，由 _check_and_process_pending 重新排队。
+        self._finalize_single_team_mail(mail)
         self._team_processing = False
         self._check_and_process_pending()
 
@@ -4681,7 +4908,6 @@ class OpenAIChatToolWindow(ToolWindow):
         _check_and_process_pending 重新排队处理。
         """
         tm = self._get_team_manager()
-        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
 
         done = 0
         requeued = 0
@@ -4693,11 +4919,9 @@ class OpenAIChatToolWindow(ToolWindow):
             for ctx in injected:
                 mail = ctx["mail"]
                 tracked_ids.add(mail["id"])
-                if self._mail_was_responded(session, mail):
-                    tm.mark_mail_done(mail["id"], self._window_id, self._last_non_hook_assistant_text(session))
+                if self._finalize_single_team_mail(mail):
                     done += 1
                 else:
-                    tm.mark_mail_pending(mail["id"], self._window_id)
                     requeued += 1
             self._injected_team_mails.clear()
 
@@ -4706,11 +4930,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if mail["id"] in tracked_ids:
                 continue
             tracked_ids.add(mail["id"])
-            if self._mail_was_responded(session, mail):
-                tm.mark_mail_done(mail["id"], self._window_id, self._last_non_hook_assistant_text(session))
+            if self._finalize_single_team_mail(mail):
                 done += 1
             else:
-                tm.mark_mail_pending(mail["id"], self._window_id)
                 requeued += 1
 
         if done or requeued:
@@ -4724,15 +4946,11 @@ class OpenAIChatToolWindow(ToolWindow):
         重新处理，避免误标 done 导致邮件永久丢失。
         """
         tm = self._get_team_manager()
-        session = self.session_manager.get_current_session() if hasattr(self, "session_manager") else None
 
         # 1. 正在处理的团队任务邮件（_process_team_task 路径）
         if getattr(self, "_current_team_mail", None):
             mail = self._current_team_mail["mail"]
-            if self._mail_was_responded(session, mail):
-                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
-            else:
-                tm.mark_mail_pending(mail["id"], self._window_id)
+            self._finalize_single_team_mail(mail, done_result="用户手动停止")
             self._current_team_mail = None
             self._team_processing = False
 
@@ -4743,19 +4961,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for ctx in injected:
                 mail = ctx["mail"]
                 tracked_ids.add(mail["id"])
-                if self._mail_was_responded(session, mail):
-                    tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
-                else:
-                    tm.mark_mail_pending(mail["id"], self._window_id)
+                self._finalize_single_team_mail(mail, done_result="用户手动停止")
             self._injected_team_mails.clear()
 
         for mail in tm.get_running_tasks(self._window_id):
             if mail["id"] in tracked_ids:
                 continue
-            if self._mail_was_responded(session, mail):
-                tm.mark_mail_done(mail["id"], self._window_id, "用户手动停止")
-            else:
-                tm.mark_mail_pending(mail["id"], self._window_id)
+            self._finalize_single_team_mail(mail, done_result="用户手动停止")
 
     def _get_model_config_obj(self) -> dict:
         """获取当前模型配置（兜底）"""
@@ -7145,6 +7357,30 @@ class OpenAIChatToolWindow(ToolWindow):
             if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
                 by_agent[agent_name] = session
 
+        # 🛡️ F3（T2-P3 第 3 层收口）：恢复成员集合 = SQLite 会话 agent 去重
+        # ∪ 任一成员会话的 team_members 快照解析结果。对"快照里有但无会话
+        # 记录"的 agent 也建空窗口（与现有"空消息 agent 也建窗口"语义一致）——
+        # 手动加入但从未产出会话的成员（如 perf-tester）恢复时不再丢失。
+        snapshot_names: List[str] = []
+        for session in member_sessions:
+            snap = (session.get("team_members") or "").strip()
+            if not snap:
+                continue
+            try:
+                import json as _json
+
+                parsed = _json.loads(snap)
+                if isinstance(parsed, list):
+                    for n in parsed:
+                        n = str(n).strip()
+                        if n and n not in snapshot_names:
+                            snapshot_names.append(n)
+            except Exception:
+                continue
+        for n in snapshot_names:
+            if n not in by_agent:
+                by_agent[n] = {}  # 空会话：窗口照常创建（消息为空）
+
         # 4) 为每个 agent 创建窗口并注入恢复数据
         restored_count = 0
         restored_windows = []
@@ -8235,7 +8471,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if getattr(self, "_user_manually_selected_model", False):
             # 本窗口用户已手动选过模型 → 保持自身选择：仅重建 _valid_configs
-            #（"窗口自身优先"分支会保留 old_provider），不跟随云端 SelectedModel。
+            # （"窗口自身优先"分支会保留 old_provider），不跟随云端 SelectedModel。
             self._load_model_configs()
         else:
             # 本窗口从未手动选过模型 → 跟随云端：force_global 跳过"窗口自身优先"，
@@ -9031,7 +9267,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except psutil.TimeoutExpired:
                 p.kill()
             return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except psutil.NoSuchProcess, psutil.AccessDenied:
             return False
         except Exception:
             return False
@@ -9085,7 +9321,7 @@ class OpenAIChatToolWindow(ToolWindow):
         killed = 0
         remaining = []
         kill_set = set()
-        for entry in kill_list[: _KILL_BATCH_MAX]:
+        for entry in kill_list[:_KILL_BATCH_MAX]:
             pid, ts, idx = entry
             kill_set.add(pid)
             if self._kill_renderer(pid):
@@ -9938,10 +10174,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_current_user_round_index(self) -> int:
         """获取当前 user message 应该是第几个 user（从 0 开始）
         基于session消息计算，而非布局中渲染的卡片数量，避免动态加载导致索引错误
+
+        口径（与全仓统一，Bug1）：TeamMail 算作 user round（渲染为卡片），
+        其他 hook（SessionStart 等）不算。
         """
         session = self.session_manager.get_current_session()
         if session:
-            return sum(1 for msg in session.messages if msg.get("role") == "user" and not msg.get("_hook_event"))
+            return sum(
+                1
+                for msg in session.messages
+                if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+            )
         # fallback: 从布局计数
         return count_user_cards_in_layout(self.chat_layout)
 
@@ -17282,6 +17525,22 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
+    def _get_team_members_snapshot_json(self) -> str:
+        """获取团队成员快照 JSON 字符串（供会话落库，F3 第 2 层）。
+
+        仅团队模式有值；非团队窗口返回空串（避免普通会话写入团队字段）。
+        """
+        if not getattr(self, "_team_run_id", ""):
+            return ""
+        try:
+            tm = self._get_team_manager()
+            snapshot = tm.get_team_member_snapshot()
+            import json as _json
+
+            return _json.dumps(snapshot, ensure_ascii=False)
+        except Exception:
+            return ""
+
     def _auto_save_current_session(self):
         session = self.session_manager.get_current_session()
         if not session or not session.messages:
@@ -17350,6 +17609,10 @@ class OpenAIChatToolWindow(ToolWindow):
                         "team_run_id": self._team_run_id,
                         "team_name": self._team_name or "",
                         "agent_name": self._team_agent_name or "",
+                        # 🛡️ F3（T2-P3 第 2 层）：团队成员快照随会话落库——
+                        # 恢复不依赖当前 team.json（历史 run 的 team.json 会被新
+                        # run 覆盖），手动成员在历史 run 中也能找回。
+                        "team_members": self._get_team_members_snapshot_json(),
                     }
                 self.history_manager.update_session(
                     idx,
@@ -17376,6 +17639,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         "team_run_id": self._team_run_id,
                         "team_name": self._team_name or "",
                         "agent_name": self._team_agent_name or "",
+                        # 🛡️ F3：团队成员快照随会话落库（见上方 update 分支注释）
+                        "team_members": self._get_team_members_snapshot_json(),
                     }
                 self.history_manager.save_session(
                     session.messages,
@@ -17403,6 +17668,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 team_run_id=self._team_run_id,
                 team_name=self._team_name or "",
                 agent_name=self._team_agent_name or "",
+                # 🛡️ F3：团队成员快照随会话落库（见上方 update 分支注释）
+                team_members=self._get_team_members_snapshot_json(),
                 **worktree_kwargs,
             )
             self._current_session_id = session.session_id
@@ -17475,6 +17742,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🔧 清理团队邮箱监听器
         if getattr(self, "_team_fs_watcher", None):
+            try:
+                # 🛡️ Bug5：先收尾团队邮件状态再停监听。流式中窗口关闭时，
+                # 正在处理/hook 注入的邮件若不同步，会永久卡 running（done/pending
+                # 收尾只在流式结束/手动停止路径触发，closeEvent 不触发则死锁）。
+                # _sync_team_mail_on_stop 按 _mail_was_responded 收尾：有响应→done，
+                # 无响应→回滚 pending（下次该窗口重建后可重新处理，不丢失）。
+                self._sync_team_mail_on_stop()
+            except Exception:
+                pass
             try:
                 self._stop_team_watcher()
             except Exception:
@@ -17680,6 +17956,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_stop_deferred_pending", False):
             return
         self._stop_deferred_pending = True
+
+        # 🛡️ 记录手动停止时刻（F1 P1-3）：停止后 1s 冷却期内不自动拉起 pending 邮件
+        self._last_stop_time = time.monotonic()
 
         # ===== 第一阶段：非阻塞取消 + 立即更新 UI =====
         # 先取消 worker（仅设置标志 + 断开信号，不阻塞）
@@ -18344,10 +18623,10 @@ _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图） ──
-_MEM_THRESHOLD_TOTAL_MB = 1800   # 总 RSS 阈值触发强回收
-_LRU_RENDERER_KEEP = 8           # 强回收后保留最近活跃 renderer 数
-_KILL_COOLDOWN_S = 60            # kill 冷却（防抖动）
-_KILL_BATCH_MAX = 12             # 每轮最多 kill
+_MEM_THRESHOLD_TOTAL_MB = 1800  # 总 RSS 阈值触发强回收
+_LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
+_KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
+_KILL_BATCH_MAX = 12  # 每轮最多 kill
 _OFFSCREEN_BATCHES_FOR_KILL = 8  # 距可视区 ≥8 批才可 kill（严格离屏护栏）
 
 

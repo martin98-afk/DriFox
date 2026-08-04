@@ -750,7 +750,11 @@ class TestTemplateJoinDelayConstant:
         assert found, "OpenAIChatToolWindow 缺少 _TEMPLATE_JOIN_DELAY_MS 类属性"
 
     def test_handle_team_load_uses_constant_not_magic_number(self):
-        """_handle_team_load 应使用 self._TEMPLATE_JOIN_DELAY_MS，不再出现裸 300。"""
+        """创建链路应使用 self._TEMPLATE_JOIN_DELAY_MS，不再出现裸 300。
+
+        T5 重构：延迟 join 迁至 _spawn_team_member_window（_handle_team_load
+        委托 _spawn_team_members），常量引用随创建链路迁移。
+        """
         import ast
         import textwrap
 
@@ -759,10 +763,10 @@ class TestTemplateJoinDelayConstant:
 
         target_func = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_handle_team_load":
+            if isinstance(node, ast.FunctionDef) and node.name == "_spawn_team_member_window":
                 target_func = node
                 break
-        assert target_func is not None
+        assert target_func is not None, "缺少 _spawn_team_member_window 公共创建方法"
 
         func_src = textwrap.dedent(ast.unparse(target_func))
         # 必须引用类常量
@@ -772,7 +776,7 @@ class TestTemplateJoinDelayConstant:
         import re
 
         # 简单粗暴：函数体源码里不应有 "300," 这种数字字面量
-        assert not re.search(r"\b300\b", func_src), "_handle_team_load 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+        assert not re.search(r"\b300\b", func_src), "_spawn_team_member_window 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
 
 
 # ══════════════════════════════════════════════════════════

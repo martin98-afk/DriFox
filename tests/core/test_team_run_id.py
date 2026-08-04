@@ -127,13 +127,17 @@ class TestTeamRunInjectPoints:
         assert "self._team_run_id" in text, "main_widget 缺少 _team_run_id 窗口属性"
 
     def test_handle_team_load_injects_run_id(self):
-        """_handle_team_load 应调用 start_team_run 并注入新窗口。"""
+        """团队加载路径应 start_team_run 并给新窗口注入 run_id。
+
+        T5 重构：run_id 注入迁至公共创建方法 _spawn_team_member_window
+        （_handle_team_load → _spawn_team_members → _spawn_team_member_window）。
+        """
         src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
         text = src.read_text(encoding="utf-8")
-        # 提取 _handle_team_load 方法体
+
+        # _handle_team_load 仍负责 start_team_run（生成/复用 run_id）
         start = text.find("    def _handle_team_load(")
         assert start >= 0
-        # 找到方法体边界：下一个同缩进 def/class
         body_end = len(text)
         for probe in ("\n    def ", "\n    class "):
             idx = text.find(probe, start + 10)
@@ -141,7 +145,18 @@ class TestTeamRunInjectPoints:
                 body_end = min(body_end, idx)
         body = text[start:body_end]
         assert "start_team_run" in body, "_handle_team_load 未调用 start_team_run"
-        assert "win._team_run_id" in body, "_handle_team_load 未给新窗口注入 _team_run_id"
+
+        # 新窗口 run_id 注入在 _spawn_team_member_window（创建链路语义所在）
+        start = text.find("    def _spawn_team_member_window(")
+        assert start >= 0, "缺少 _spawn_team_member_window 公共创建方法"
+        body_end = len(text)
+        for probe in ("\n    def ", "\n    class "):
+            idx = text.find(probe, start + 10)
+            if idx >= 0:
+                body_end = min(body_end, idx)
+        body = text[start:body_end]
+        assert "win._team_run_id" in body, "_spawn_team_member_window 未给新窗口注入 _team_run_id"
+        assert "get_team_run_id" in body, "_spawn_team_member_window 应复用团队 run_id（禁止 force 新 run_id）"
 
     def test_do_join_team_reads_run_id(self):
         """_do_join_team 应读取团队已有 run_id 赋给窗口。"""

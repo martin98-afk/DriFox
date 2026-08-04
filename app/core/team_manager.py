@@ -103,7 +103,7 @@ class TeamManager:
                     counter = int(self._window_counter_file.read_text().strip())
                 else:
                     counter = 1
-            except (ValueError, FileNotFoundError):
+            except ValueError, FileNotFoundError:
                 counter = 1
 
             window_id = f"win_{counter:02d}"
@@ -152,14 +152,32 @@ class TeamManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             return {}
 
     @staticmethod
     def _write_json(path: Path, data: Any):
+        """原子写入 JSON：先写同目录临时文件，再 os.replace 原子替换。
+
+        🛡️ F5（T4 Bug6）：原实现直接 open(path, "w") 非原子——并发读取方
+        （get_mailbox_mails / get_pending_tasks 在 worker 线程调用）可能在写入
+        中间读到半截/损坏的 JSON（JSONDecodeError → 空 dict → 邮件状态丢失）。
+        临时文件与目标同目录保证 os.replace 原子（同文件系统）；写完立即替换，
+        无 tmp 残留。
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+        finally:
+            # 异常路径清理临时文件，避免残留
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     # ── 成员清理 ─────────────────────────────────────
 
@@ -192,7 +210,7 @@ class TeamManager:
                 data = json.loads(active_file.read_text())
                 if data:
                     return set(data)
-        except (json.JSONDecodeError, FileNotFoundError, OSError, TypeError):
+        except json.JSONDecodeError, FileNotFoundError, OSError, TypeError:
             pass
         return None
 
@@ -252,24 +270,64 @@ class TeamManager:
     # ── 成员管理 ─────────────────────────────────────
 
     def join_team(self, window_id: str, agent_name: str, team_name: str = DEFAULT_TEAM):
-        """窗口加入团队"""
-        data = self._get_team_data(team_name)
-        data.setdefault("members", {})
-        data["members"][window_id] = {
-            "window_id": window_id,
-            "agent_name": agent_name,
-            "joined_at": time.time(),
-        }
-        self._save_team_data(team_name)
+        """窗口加入团队
+
+        🛡️ F5（T4 Bug6）：read-modify-write 全程持 _data_lock，防止多窗口并发
+        join 时成员记录互相覆盖（lost update）。_data_lock 为 RLock，内部
+        _get_team_data → _init_team → _cleanup_stale_members 的重入安全。
+
+        🛡️ F9（能力自动登记）：join 时从 AgentManager 动态解析 agent 能力，
+        写入成员 capability 快照（leader 派单前零手工可见成员能力）。延迟 import
+        AgentManager（agent.py:701 反向引用 team_manager，顶层 import 会循环依赖）。
+
+        ⚠️ F3 注意：后续任务 F3（手动成员快照）会在本方法基础上叠加
+        join_team 写顶层 team_members，改动点即下方 `data["members"][window_id]`
+        赋值处——请保持本方法结构不变，在其上扩展。
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            data.setdefault("members", {})
+            member = {
+                "window_id": window_id,
+                "agent_name": agent_name,
+                "joined_at": time.time(),
+            }
+            # 🛡️ F9：capability 自动登记（动态解析，失败静默降级为无快照——
+            # get_member_capability 会在无快照时重新动态解析，不破坏老数据）
+            try:
+                from app.core.agent import AgentManager  # 延迟 import 防循环依赖
+
+                am = AgentManager.get_instance()
+                agent = am.get_agent(agent_name) if am else None
+                if agent is not None:
+                    member["capability"] = self._derive_capability(agent)
+            except Exception:
+                pass
+            data["members"][window_id] = member
+            # 🛡️ F3（T2-P3 第 1 层）：顶层 team_members 快照——手动 /team --join
+            # 的成员也持久化到 team.json 顶层（不被 _cleanup_stale_members 清理），
+            # 恢复会话时即使成员无历史会话也能找回。dict: agent_name → 来源标记。
+            data.setdefault("team_members", {})
+            existing = data["team_members"].get(agent_name) or {}
+            data["team_members"][agent_name] = {
+                "source": existing.get("source", "manual"),
+                "joined_at": existing.get("joined_at", time.time()),
+            }
+            self._save_team_data(team_name)
         self._mailbox_dir(team_name, window_id).mkdir(parents=True, exist_ok=True)
 
     def leave_team(self, window_id: str, team_name: str = DEFAULT_TEAM):
-        """窗口离开团队（同时清理邮箱目录）"""
-        data = self._get_team_data(team_name)
-        data.setdefault("members", {})
-        if window_id in data["members"]:
-            data["members"].pop(window_id, None)
-            self._save_team_data(team_name)
+        """窗口离开团队（同时清理邮箱目录）
+
+        🛡️ F5（T4 Bug6）：成员移除 + 落盘持 _data_lock，防止与并发 join /
+        _cleanup_stale_members 互相覆盖；邮箱目录 rmtree 放锁外（幂等容错）。
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            data.setdefault("members", {})
+            if window_id in data["members"]:
+                data["members"].pop(window_id, None)
+                self._save_team_data(team_name)
 
         # 清理邮箱目录
         mailbox_dir = self._mailbox_dir(team_name, window_id)
@@ -316,6 +374,148 @@ class TeamManager:
     def is_team_member(self, window_id: str, team_name: str = DEFAULT_TEAM) -> bool:
         data = self._get_team_data(team_name)
         return window_id in data.get("members", {})
+
+    # ── 成员能力（F9：能力自动登记 + 派单前可见）──────────
+
+    # task_tags 关键词推导规则（复用 team.md 权限推导关键词表）：
+    # 编码/实现/builder→implement；规划/plan/只读→plan；审查/review/审计→review；
+    # 诊断/debug/修复→diagnose；探索/explore→explore；统筹/leader→lead；
+    # 默认按 can_write 兜底（可写→implement，否则按 role_desc）。
+    _CAPABILITY_TAG_KEYWORDS = {
+        "implement": ("编码", "实现", "builder", "开发", "写代码", "implement", "落地", "构建"),
+        "plan": ("规划", "方案", "计划", "蓝图", "plan", "只读", "分析路径", "建模"),
+        "review": ("审查", "审计", "review", "评审", "质检", "检查", "reviewer", "audit"),
+        "diagnose": ("诊断", "debug", "修复", "复现", "定位根因", "bug", "回归"),
+        "explore": ("探索", "explore", "理解代码", "调研", "调查", "扫描", "梳理"),
+        "lead": ("统筹", "leader", "协调", "分发", "汇总", "监控进度", "lead"),
+    }
+
+    @staticmethod
+    def _derive_capability(agent) -> Dict[str, Any]:
+        """从 Agent 对象推导能力摘要（join 快照 + 动态解析共用）。
+
+        Args:
+            agent: app.core.agent.Agent 实例（name/description/mode/permission/tools）
+
+        Returns:
+            {
+                "agent_name", "role_desc"(Agent.description), "mode",
+                "permissions"(原始 permission dict),
+                "can_write"(write/edit/multi_edit 是否 allow),
+                "can_bash", "can_team"(question/team_* allow),
+                "task_tags"(关键词推导的标签列表)
+            }
+        """
+        name = str(getattr(agent, "name", "") or "")
+        desc = str(getattr(agent, "description", "") or "")
+        mode = getattr(agent, "mode", None)
+        permission = dict(getattr(agent, "permission", None) or {})
+        tools = dict(getattr(agent, "tools", None) or {})
+
+        def _is_allowed(tool: str) -> bool:
+            """判定工具是否 allow：agent.tools（白名单 dict）优先，permission 其次。"""
+            tool_lower = tool.lower()
+            if tools:
+                # tools 白名单语义：tools 非空时未列出的工具全部拒绝
+                return bool(tools.get(tool_lower, False))
+            val = permission.get(tool_lower)
+            if val is None:
+                val = permission.get("*", "allow")
+            return str(val).lower() == "allow"
+
+        can_write = all(_is_allowed(t) for t in ("write", "edit", "multi_edit"))
+        can_bash = _is_allowed("bash")
+        can_team = all(_is_allowed(t) for t in ("question", "team_send_message", "team_list_members"))
+
+        # task_tags：按关键词表匹配（name + description 全文），无匹配时按 can_write 兜底
+        text = f"{name} {desc}".lower()
+        tags: List[str] = []
+        for tag, keywords in TeamManager._CAPABILITY_TAG_KEYWORDS.items():
+            if any(k.lower() in text for k in keywords):
+                tags.append(tag)
+        if not tags:
+            tags.append("implement" if can_write else "plan")
+
+        return {
+            "agent_name": name,
+            "role_desc": desc,
+            "mode": mode,
+            "permissions": permission,
+            "can_write": can_write,
+            "can_bash": can_bash,
+            "can_team": can_team,
+            "task_tags": tags,
+        }
+
+    def get_member_capability(self, agent_name: str, team_name: str = DEFAULT_TEAM) -> Optional[Dict[str, Any]]:
+        """获取成员能力：动态解析优先（读 AgentManager），join 快照兜底。
+
+        🛡️ F9：老 team.json members 无 capability 字段 / agent 文件被删除时，
+        用 .get() 兜底动态解析，不破坏老数据；动态解析失败返回 None（调用方
+        显示"未知"）。
+        """
+        if not agent_name:
+            return None
+        # 1. 动态解析优先（agent 文件存在时能力最新）
+        try:
+            from app.core.agent import AgentManager  # 延迟 import 防循环依赖
+
+            am = AgentManager.get_instance()
+            agent = am.get_agent(agent_name) if am else None
+            if agent is not None:
+                return self._derive_capability(agent)
+        except Exception:
+            pass
+        # 2. join 快照兜底（agent 文件删除 / 动态解析异常时用登记时的快照）
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            for member in (data.get("members") or {}).values():
+                if member.get("agent_name") == agent_name and member.get("capability"):
+                    return dict(member["capability"])
+        return None
+
+    def match_members(self, task_type: str, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
+        """按任务类型匹配成员：返回 task_tags 含该类型的成员列表（含 capability）。
+
+        供 leader 派单前筛选可用成员。task_type 如 "implement"/"plan"/"review"/
+        "diagnose"/"explore"/"lead"。无匹配返回空列表。
+        """
+        results: List[Dict[str, Any]] = []
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            for member in (data.get("members") or {}).values():
+                cap = member.get("capability") or {}
+                tags = cap.get("task_tags") or []
+                if task_type in tags:
+                    results.append(dict(member))
+        return results
+
+    def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM) -> List[str]:
+        """获取团队成员快照（去重有序）：模板 agents ∪ 手动 join 快照 team_members。
+
+        🛡️ F3（T2-P3 第 1 层）：手动 /team --join 的成员记录在 team.json 顶层
+        team_members 键（不受 _cleanup_stale_members 清理、不依赖当前活跃窗口），
+        恢复会话时用本方法找回"无会话记录但确实加入过"的成员。
+
+        Returns:
+            agent_name 列表（模板 agents 在前，手动快照补充，去重）
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            names: List[str] = []
+            # 1. 模板 agents（模板定义的角色优先）
+            template = data.get("template") or {}
+            for item in template.get("agents") or []:
+                if isinstance(item, dict) and item.get("agent_name"):
+                    name = str(item["agent_name"]).strip()
+                    if name and name not in names:
+                        names.append(name)
+            # 2. 手动 join 快照（补充模板之外的成员）
+            for name in data.get("team_members") or {}:
+                name = str(name).strip()
+                if name and name not in names:
+                    names.append(name)
+            return names
 
     # ── 团队模板上下文 ────────────────────────────────
 
@@ -426,6 +626,7 @@ class TeamManager:
         mail = {
             "id": mail_id,
             "type": "task",
+            "team_name": team_name,  # 🛡️ F5（T4 Bug12）：邮件归属团队，多团队场景可追溯
             "from_window": from_window,
             "from_agent": from_agent,
             "to_window": target["window_id"],
@@ -458,6 +659,7 @@ class TeamManager:
         mail = {
             "id": mail_id,
             "type": "reply",
+            "team_name": team_name,  # 🛡️ F5（T4 Bug12）：邮件归属团队，多团队场景可追溯
             "reply_to": original_mail_id,
             "from_window": from_window,
             "from_agent": from_agent,
@@ -521,15 +723,20 @@ class TeamManager:
         阶段被注入但未被 LLM 实际处理的邮件若被 mark_mail_done 会永久丢失。
         收尾检测到邮件未被响应时调用本方法回滚 pending，由流结束后的
         _check_and_process_pending 重新排队处理。
+
+        🛡️ F5（T4 Bug6）：read-modify-write 持 _data_lock，防止与并发
+        mark_mail_done / mark_mail_running 互相覆盖（lost update 导致
+        T23 回滚失效、邮件永久丢失）。
         """
-        mailbox_dir = self._mailbox_dir(team_name, window_id)
-        mail_file = mailbox_dir / f"{mail_id}.json"
-        if mail_file.exists():
-            mail = self._read_json(mail_file)
-            if mail:
-                mail["status"] = "pending"
-                mail["result"] = ""
-                self._write_json(mail_file, mail)
+        with self._data_lock:
+            mailbox_dir = self._mailbox_dir(team_name, window_id)
+            mail_file = mailbox_dir / f"{mail_id}.json"
+            if mail_file.exists():
+                mail = self._read_json(mail_file)
+                if mail:
+                    mail["status"] = "pending"
+                    mail["result"] = ""
+                    self._write_json(mail_file, mail)
 
     def _update_mail_status(
         self,
@@ -539,12 +746,18 @@ class TeamManager:
         team_name: str = DEFAULT_TEAM,
         result: str = "",
     ):
-        mailbox_dir = self._mailbox_dir(team_name, window_id)
-        mail_file = mailbox_dir / f"{mail_id}.json"
-        if mail_file.exists():
-            mail = self._read_json(mail_file)
-            if mail:
-                mail["status"] = status
-                if result:
-                    mail["result"] = result
-                self._write_json(mail_file, mail)
+        """更新邮件状态（mark_mail_running/done 共用）。
+
+        🛡️ F5（T4 Bug6）：read-modify-write 持 _data_lock，防止多线程
+        （main_widget 主线程 + worker 线程）并发写同一邮件文件互相覆盖。
+        """
+        with self._data_lock:
+            mailbox_dir = self._mailbox_dir(team_name, window_id)
+            mail_file = mailbox_dir / f"{mail_id}.json"
+            if mail_file.exists():
+                mail = self._read_json(mail_file)
+                if mail:
+                    mail["status"] = status
+                    if result:
+                        mail["result"] = result
+                    self._write_json(mail_file, mail)

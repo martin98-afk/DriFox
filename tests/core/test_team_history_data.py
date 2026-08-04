@@ -541,3 +541,227 @@ def test_merge_team_splits_by_project(hm):
     assert set(a["agent_names"]) == {"build", "plan"}, "同项目成员仍合并为一条"
     b = next(r for r in merged if r["project"] == "projB")
     assert b["agent_names"] == ["tester"], "跨项目成员不并入 projA 条目"
+
+
+# ══════════════════════════════════════════════════════════
+# 子任务 F2（P1 轮数统计 + P2 初始问题预览）
+# ══════════════════════════════════════════════════════════
+
+
+def _team_mail_msg(
+    content: str = "📨 来自 [build@win_1] 的任务邮件：\n\n子任务", ts: str = "2026-01-01 00:00:01"
+) -> dict:
+    """构造 TeamMail 消息（_hook_event="TeamMail"，独立成轮）。"""
+    return {"role": "user", "content": content, "_hook_event": "TeamMail", "timestamp": ts}
+
+
+def test_count_conversation_pairs_includes_team_mail(hm):
+    """P1：_count_conversation_pairs 必须把 TeamMail 计入轮数，其他 hook 仍排除。
+
+    [user, TeamMail, assistant] → 2（TeamMail 独立成轮）；
+    [user, SessionStart] → 1（SessionStart 仍是 hook 不计数）。
+    """
+    with_mail = [
+        {"role": "user", "content": "A", "timestamp": "2026-01-01 00:00:00"},
+        _team_mail_msg(),
+        {"role": "assistant", "content": "R", "timestamp": "2026-01-01 00:00:02"},
+    ]
+    assert hm._count_conversation_pairs(with_mail) == 2, "TeamMail 应计入轮数（P1）"
+
+    with_start = [
+        {"role": "user", "content": "A", "timestamp": "2026-01-01 00:00:00"},
+        {
+            "role": "user",
+            "content": "<system-reminder>启动</system-reminder>",
+            "_hook_event": "SessionStart",
+            "timestamp": "2026-01-01 00:00:01",
+        },
+    ]
+    assert hm._count_conversation_pairs(with_start) == 1, "SessionStart 仍是 hook 不计数"
+
+
+def test_merge_team_message_count_sums_team_mail(hm):
+    """P1 合并累加：build 会话含 1 封 TeamMail（message_count=1）、leader 会话 1 条真实
+    user（message_count=1）→ 合并条目 message_count=2（合并累加 L820 逻辑不变）。
+
+    直接构造完整会话（含 TeamMail 消息），经 _seed 注入内存/SQLite，
+    走真实 merge_team 路径验证累加。
+    """
+    build_full = {
+        "session_id": "s-build",
+        "title": "build 会话",
+        "project": "默认项目",
+        "messages": [
+            _team_mail_msg(ts="2026-01-01 00:00:01"),
+            {"role": "assistant", "content": "收到", "timestamp": "2026-01-01 00:00:02"},
+        ],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,  # P1 修复后 TeamMail 计入 → 1
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "📨 邮件",
+        "context_usage": 0,
+        "team_run_id": "run-1",
+        "team_name": "dev",
+        "agent_name": "build",
+    }
+    leader_full = {
+        "session_id": "s-leader",
+        "title": "leader 会话",
+        "project": "默认项目",
+        "messages": [
+            {"role": "user", "content": "初始问题", "timestamp": "2026-01-01 00:00:00"},
+            {"role": "assistant", "content": "好的", "timestamp": "2026-01-01 00:00:30"},
+        ],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,  # 1 条真实 user → 1
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "初始问题",
+        "context_usage": 0,
+        "team_run_id": "run-1",
+        "team_name": "dev",
+        "agent_name": "leader",
+    }
+    # 直接验证数据层：TeamMail 计入 message_count
+    assert hm._count_conversation_pairs(build_full["messages"]) == 1, "build 会话 message_count 应含 TeamMail（P1）"
+
+    hm._session_store.save_session(build_full)
+    hm._session_store.save_session(leader_full)
+    hm._history_loaded = True
+    hm._history_sessions = [
+        {
+            "session_id": "s-build",
+            "saved_at": "2026-01-01 00:00:02",
+            "title": "build 会话",
+            "project": "默认项目",
+            "last_time": "2026-01-01 00:00:02",
+            "message_count": 1,
+            "preview": "",
+            "user_edited_title": False,
+            "worktree_path": "",
+            "team_run_id": "run-1",
+            "team_name": "dev",
+            "agent_name": "build",
+        },
+        {
+            "session_id": "s-leader",
+            "saved_at": "2026-01-01 00:00:30",
+            "title": "leader 会话",
+            "project": "默认项目",
+            "last_time": "2026-01-01 00:00:30",
+            "message_count": 1,
+            "preview": "",
+            "user_edited_title": False,
+            "worktree_path": "",
+            "team_run_id": "run-1",
+            "team_name": "dev",
+            "agent_name": "leader",
+        },
+    ]
+    hm._cache_dirty = True
+
+    rows = hm.get_history_list(merge_team=True)
+    merged = next(r for r in rows if r.get("team_merged"))
+    assert merged["message_count"] == 2, f"合并条目 message_count 应累加为 2，实际 {merged['message_count']}"
+
+
+def test_first_question_when_earliest_session_is_mail_only(hm):
+    """P2：最早结束的成员会话只有 TeamMail/assistant（无真实 user）时，
+    首问必须从其他成员会话取全局最早的真实 user 消息，而非空串。
+
+    旧实现：先选 earliest 会话（build，last ts 00:00:02 最早）→ 首条 TeamMail
+    被 _hook_event 跳过 → 返回空串（bug）。
+    新实现：全局遍历，leader 会话 user(00:00:00) 早于 build 的 TeamMail(00:00:01) → 初始问题。
+    """
+    build_full = {
+        "session_id": "s-build",
+        "title": "b",
+        "project": "默认项目",
+        "messages": [
+            _team_mail_msg(ts="2026-01-01 00:00:01"),
+            {"role": "assistant", "content": "收到", "timestamp": "2026-01-01 00:00:02"},
+        ],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "",
+        "context_usage": 0,
+        "team_run_id": "run-1",
+        "team_name": "dev",
+        "agent_name": "build",
+    }
+    leader_full = {
+        "session_id": "s-leader",
+        "title": "a",
+        "project": "默认项目",
+        "messages": [
+            {"role": "user", "content": "初始问题", "timestamp": "2026-01-01 00:00:00"},
+            {"role": "assistant", "content": "分析中", "timestamp": "2026-01-01 00:00:30"},
+        ],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "",
+        "context_usage": 0,
+        "team_run_id": "run-1",
+        "team_name": "dev",
+        "agent_name": "leader",
+    }
+    hm._session_store.save_session(build_full)
+    hm._session_store.save_session(leader_full)
+    hm._history_loaded = True
+    hm._history_sessions = [
+        _light("s-build", "b", "2026-01-01 00:00:02", "run-1", "dev", "build"),
+        _light("s-leader", "a", "2026-01-01 00:00:30", "run-1", "dev", "leader"),
+    ]
+    hm._cache_dirty = True
+
+    assert hm.get_team_first_question("run-1") == "初始问题", "首问应从全局最早的真实 user 消息取（P2），而非空串"
+
+
+def test_first_question_skips_leader_mail_injection(hm):
+    """P2：leader 会话首条也是 📨 邮件文本（旧数据无 _hook_event 标记）→ 跳过取真实 user。"""
+    leader_full = {
+        "session_id": "s-leader",
+        "title": "a",
+        "project": "默认项目",
+        "messages": [
+            {
+                "role": "user",
+                "content": "📨 **来自 [build@win_2] 的任务邮件：**\n\n子任务",
+                "timestamp": "2026-01-01 00:00:01",
+            },
+            {"role": "user", "content": "真实问题", "timestamp": "2026-01-01 00:00:02"},
+            {"role": "assistant", "content": "好的", "timestamp": "2026-01-01 00:00:03"},
+        ],
+        "system_prompt": "",
+        "compaction_state": {},
+        "compaction_cache": {},
+        "message_count": 1,
+        "user_edited_title": False,
+        "worktree_path": "",
+        "preview": "",
+        "context_usage": 0,
+        "team_run_id": "run-1",
+        "team_name": "dev",
+        "agent_name": "leader",
+    }
+    hm._session_store.save_session(leader_full)
+    hm._history_loaded = True
+    hm._history_sessions = [
+        _light("s-leader", "a", "2026-01-01 00:00:03", "run-1", "dev", "leader"),
+    ]
+    hm._cache_dirty = True
+
+    assert hm.get_team_first_question("run-1") == "真实问题", "应跳过 📨 邮件文本取真实 user（P2）"
