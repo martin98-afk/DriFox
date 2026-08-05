@@ -60,11 +60,11 @@ class TestSubagentsCreateDegradation:
         )
         # 降级分支必须位于无参数兜底分支（sub_agent_mgr 读取）之前，
         # 否则 --create= 仍会落入兜底弹 InfoBar（docstring 中也有"无参数"字样，不能用文本定位）
-        degrade_pos = func_src.index("raise CommandNeedDegrade('subagents', args)")
+        # 用正则匹配 raise 调用，避免未来 ast.unparse 引号风格变化导致 index() ValueError
+        degrade_m = re.search(r"raise\s+CommandNeedDegrade\(\s*['\"]subagents['\"]\s*,", func_src)
+        assert degrade_m is not None, "必须存在 raise CommandNeedDegrade('subagents', ...) 调用"
         fallback_pos = func_src.index("sub_agent_mgr = self.backend.sub_agent_manager")
-        assert degrade_pos < fallback_pos, (
-            "--create 降级分支必须位于无参数兜底分支之前"
-        )
+        assert degrade_m.start() < fallback_pos, "--create 降级分支必须位于无参数兜底分支之前"
 
     def test_subagents_md_defines_create_prompt_section(self):
         """`subagents.md` 必须声明 `--create=` 参数及 prompt_sections 映射（注入侧完备）。"""
