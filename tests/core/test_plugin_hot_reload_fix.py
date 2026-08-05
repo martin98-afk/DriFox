@@ -265,3 +265,72 @@ class TestDedupCacheCleanupOnRemove:
         assert ("gone-a", "") not in dedup
         assert ("gone-b", "ui") not in dedup
         assert ("stay", "") in dedup
+
+
+class TestPluginChangedBroadcast:
+    """T3: 插件热更新 plugin_changed 必须广播到全部活跃 backend。
+
+    根因：watcher 线程是类级单例，只有首个启动 watcher 的 backend 连接了
+    _hot_reload_requested → _on_hot_reload_requested 只 emit 该 backend 的
+    plugin_changed。宿主窗口关闭断开信号后，watcher 线程仍存活（其他窗口
+    refcount>0）、数据照常重载，但 emit 无接收者 → 所有窗口 UI 静默不刷新。
+    修复：广播到 ChatBackend._active_instances 中全部活跃实例。
+    """
+
+    def _make_backend_with_spy(self):
+        """构造 backend 并连接 plugin_changed 记录器"""
+        backend = ChatBackend()
+        received = []
+        backend.plugin_changed.connect(received.append)
+        return backend, received
+
+    def test_broadcast_reaches_all_active_backends(self, monkeypatch):
+        """宿主 backend 重载后，所有活跃 backend 的 plugin_changed 都收到；
+        未注册（已清理）的 backend 收不到。"""
+        a, recv_a = self._make_backend_with_spy()
+        b, recv_b = self._make_backend_with_spy()
+        c, recv_c = self._make_backend_with_spy()
+        try:
+            # 模拟 c 未注册/已关闭（不在 _active_instances 中）
+            ChatBackend._active_instances.discard(c)
+            result = {"ui": True, "agents": 1}
+            monkeypatch.setattr(a, "_reload_single_plugin", lambda name, comp: result)
+            monkeypatch.setattr(a, "_rebuild_watcher_prefixes", lambda: None)
+
+            a._on_hot_reload_requested("some-plugin", "ui")
+
+            assert recv_a == [result], "宿主 backend 必须收到 plugin_changed"
+            assert recv_b == [result], "其他活跃 backend 必须收到广播"
+            assert recv_c == [], "未注册 backend 不得收到广播"
+        finally:
+            a.cleanup()
+            b.cleanup()
+            c.cleanup()
+
+    def test_cleanup_removes_from_active_instances(self):
+        """backend.cleanup() 后从 _active_instances 移除（防泄漏/防幽灵广播）"""
+        a, _ = self._make_backend_with_spy()
+        b, _ = self._make_backend_with_spy()
+        b.cleanup()
+        try:
+            assert a in ChatBackend._active_instances
+            assert b not in ChatBackend._active_instances, "cleanup 后不得留在活跃集合"
+        finally:
+            a.cleanup()
+
+    def test_cleaned_backend_no_longer_receives_broadcast(self, monkeypatch):
+        """cleanup 后的 backend 不再接收 plugin_changed 广播"""
+        a, recv_a = self._make_backend_with_spy()
+        b, recv_b = self._make_backend_with_spy()
+        b.cleanup()  # b 窗口已关闭
+        try:
+            result = {"ui": True}
+            monkeypatch.setattr(a, "_reload_single_plugin", lambda name, comp: result)
+            monkeypatch.setattr(a, "_rebuild_watcher_prefixes", lambda: None)
+
+            a._on_hot_reload_requested("p", "")
+
+            assert recv_a == [result]
+            assert recv_b == [], "已清理 backend 不得收到广播"
+        finally:
+            a.cleanup()

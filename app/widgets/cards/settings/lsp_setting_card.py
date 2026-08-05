@@ -315,6 +315,11 @@ class LspListSettingCard(ExpandSettingCard):
 
     def _on_install_requested(self, server_name: str, install_hint: str):
         """处理安装按钮点击 — 在终端中执行安装命令"""
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
+
         if not install_hint:
             InfoBar.warning(
                 title="安装命令不可用",
@@ -323,7 +328,7 @@ class LspListSettingCard(ExpandSettingCard):
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=5000,
-                parent=self,
+                parent=bar_parent,
             )
             return
 
@@ -391,7 +396,7 @@ class LspListSettingCard(ExpandSettingCard):
                         isClosable=True,
                         position=InfoBarPosition.TOP,
                         duration=8000,
-                        parent=self,
+                        parent=bar_parent,
                     )
                     return
 
@@ -402,7 +407,7 @@ class LspListSettingCard(ExpandSettingCard):
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=5000,
-                parent=self,
+                parent=bar_parent,
             )
         except Exception as e:
             logger.error(f"[LspCard] 安装启动失败: {e}")
@@ -413,7 +418,7 @@ class LspListSettingCard(ExpandSettingCard):
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=8000,
-                parent=self,
+                parent=bar_parent,
             )
 
     def showEvent(self, event):

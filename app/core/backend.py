@@ -282,6 +282,10 @@ class ChatBackend(QObject):
         # Auto-compact 防重复触发时间戳
         self._last_auto_compact_time = 0.0
 
+        # ★ T3 修复：注册为活跃实例（插件热更新 plugin_changed 广播目标）。
+        # cleanup() 中移除，避免已关闭窗口的 backend 被广播（防泄漏）。
+        ChatBackend._active_instances.add(self)
+
     # ========== 属性访问 ==========
 
     @property
@@ -855,6 +859,14 @@ class ChatBackend(QObject):
     # ========== 插件热更新（watchfiles） ==========
 
     _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+    # ★ T3 修复：活跃 backend 实例集合（插件热更新广播目标）
+    # 根因：watcher 线程是类级单例（_plugin_watcher_started），只有首个启动
+    # watcher 的 backend 连接了 _hot_reload_requested → _on_hot_reload_requested
+    # 只 emit 该 backend 的 plugin_changed。宿主窗口关闭断开信号后，watcher
+    # 线程仍存活（其他窗口 refcount>0）、数据照常重载，但 emit 无接收者 →
+    # 所有窗口 UI 静默不刷新（全关重开才恢复）。
+    # 修复：_on_hot_reload_requested 广播到全部活跃 backend 的 plugin_changed。
+    _active_instances: set = set()  # ChatBackend 实例集合（__init__ 注册 / cleanup 移除）
     # ★ 泄漏修复（P1）：watcher 闭包持有首个 backend 实例引用（self._hot_reload_requested /
     # self.plugin_changed / self._identify_* 全部走实例成员），窗口关闭不停止则实例永不可回收。
     # 用引用计数 + stop_event 实现"最后一个窗口关闭时停止 watcher"：
@@ -1375,6 +1387,19 @@ class ChatBackend(QObject):
             else:
                 result = self.reload_plugin_subsystems()
             self.plugin_changed.emit(result)
+            # ★ T3 修复：广播到所有活跃 backend 的 plugin_changed。
+            # watcher 由首个 backend 驱动，_on_hot_reload_requested 只在该实例的
+            # 槽上执行；若仅 emit 宿主实例的信号，宿主窗口关闭（信号断开）后其他
+            # 窗口的 UI 收不到刷新通知（热加载数据成功但列表不刷新）。广播后
+            # 每个活跃窗口的 backend 都通知自己的 UI 刷新。
+            for _b in list(ChatBackend._active_instances):
+                if _b is not self:
+                    # 窗口关闭竞态防护：backend 已 deleteLater 但未 cleanup 时
+                    # emit 可能触发 RuntimeError，跳过该实例不影响正常广播
+                    try:
+                        _b.plugin_changed.emit(result)
+                    except RuntimeError:
+                        pass
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
         finally:
@@ -2179,6 +2204,10 @@ class ChatBackend(QObject):
             self._stop_plugin_watcher()
         except Exception as e:
             logger.warning(f"[ChatBackend] cleanup plugin_watcher: {e}")
+
+        # ★ T3 修复：从活跃实例集合移除，已关闭窗口不再接收 plugin_changed 广播
+        # （类级集合持有多余引用也是泄漏源；broadcast 循环遍历时 discard 安全）。
+        ChatBackend._active_instances.discard(self)
 
         # 7. 清除 UI 有效性标志
         self._ui_valid = False

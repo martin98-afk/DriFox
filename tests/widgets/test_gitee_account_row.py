@@ -246,3 +246,157 @@ def test_unbind_failure_preserves_bound_state(row_factory):
     assert row._settings_btn.isEnabled() is True
     assert row._bound_owner == "martin98-afk"
     show_error.assert_called_once()
+
+
+# ── T8B：GiteeCard._auto_enable_sync 失效链路 ──────────────────────────
+
+
+class _FakeGiteeCardSettings:
+    """GiteeCard 场景的 FakeSettings（含 token/expires 字段 + save）"""
+
+    def __init__(self, *, bound=False, owner="", repo="DriFox_uploads"):
+        self.gitee_bound = _FakeConfigItem(bound)
+        self.gitee_user_owner = _FakeConfigItem(owner)
+        self.gitee_user_repo = _FakeConfigItem(repo)
+        self.gitee_user_token = _FakeConfigItem("token" if bound else "")
+        self.gitee_user_refresh_token = _FakeConfigItem("refresh" if bound else "")
+        self.gitee_token_expires_at = _FakeConfigItem(1234567890.0 if bound else 0.0)
+        self.load = MagicMock()
+        self.save = MagicMock()
+
+
+@pytest.fixture
+def gitee_card_factory(qtbot):
+    created = []
+
+    def _create(*, bound=False, owner="martin98-afk", repo="DriFox_uploads", bound_info=None):
+        cfg = _FakeGiteeCardSettings(bound=bound, owner=owner, repo=repo)
+        sync_service = MagicMock()
+        sync_service._state = "disabled"
+        uploader = MagicMock()
+        backend = MagicMock()
+        # 默认：get_bound_info 返回 None（token 无法刷新场景）；bound_info 参数可覆盖
+        backend.get_bound_info.return_value = bound_info
+        with (
+            patch(
+                "app.widgets.cards.settings.gitee_card.Settings.get_instance",
+                return_value=cfg,
+            ),
+            patch(
+                "app.core.config_sync.ConfigSyncService.get_instance",
+                return_value=sync_service,
+            ),
+            patch(
+                "app.gateway.utils.gitee_uploader.GiteeUploader.get_instance",
+                return_value=uploader,
+            ),
+            patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        ):
+            from app.widgets.cards.settings.gitee_card import GiteeCard
+
+            card = GiteeCard()
+        qtbot.addWidget(card)
+        created.append(card)
+        return card, cfg, sync_service, backend
+
+    return _create
+
+
+def test_auto_enable_sync_bound_info_none_with_bound_true_triggers_invalid(gitee_card_factory):
+    """断点①：曾绑定（bound=True）但 get_bound_info 返回 None → 清绑 + 红标 + 提醒"""
+    card, cfg, sync_service, backend = gitee_card_factory(
+        bound=True, bound_info={"token": "valid-token", "owner": "martin98-afk"}
+    )
+    # 构造时 _refresh_ui 已用有效 token enable 一次，重置计数以便精确断言
+    sync_service.enable.reset_mock()
+    cfg.save.reset_mock()
+    # 模拟 token 之后被吊销：get_bound_info 返回 None
+    backend.get_bound_info.return_value = None
+    row = MagicMock()
+    tm = MagicMock()
+    tm._windows = [MagicMock()]
+    tm._windows[0]._tab_panel._gitee_account_row = row
+    ctrl = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.widgets.tab_manager_window.TabManagerWindow.get_instance",
+            return_value=tm,
+        ),
+        patch(
+            "app.widgets.cards.global_card_controller.get_global_card_controller",
+            return_value=ctrl,
+        ),
+    ):
+        card._auto_enable_sync()
+
+    # sync 未启动（bound_info 无效）→ enable 不被调用
+    sync_service.enable.assert_not_called()
+    # 清绑
+    assert cfg.gitee_bound.value is False
+    assert cfg.gitee_user_token.value == ""
+    cfg.save.assert_called_once()
+    # 账户行红标置位
+    row.set_invalid.assert_called_once_with(True)
+    # 全局失效提醒触发
+    ctrl.check_gitee_token_invalid_reminder.assert_called_once()
+
+
+def test_auto_enable_sync_never_bound_skips_invalid(gitee_card_factory):
+    """从未绑定（bound=False）+ get_bound_info None → 正常跳过不误报"""
+    card, cfg, sync_service, backend = gitee_card_factory(bound=False)
+    backend.get_bound_info.return_value = None
+    ctrl = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.widgets.cards.global_card_controller.get_global_card_controller",
+            return_value=ctrl,
+        ),
+    ):
+        card._auto_enable_sync()
+
+    sync_service.enable.assert_not_called()
+    cfg.save.assert_not_called()
+    ctrl.check_gitee_token_invalid_reminder.assert_not_called()
+
+
+def test_auto_enable_sync_bound_info_valid_starts_sync(gitee_card_factory):
+    """bound_info 有效 → 正常启动同步（不触发失效处理）"""
+    card, cfg, sync_service, backend = gitee_card_factory(
+        bound=True, bound_info={"token": "valid-token", "owner": "martin98-afk"}
+    )
+    sync_service.enable.reset_mock()
+    cfg.save.reset_mock()
+    ctrl = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.widgets.cards.global_card_controller.get_global_card_controller",
+            return_value=ctrl,
+        ),
+    ):
+        card._auto_enable_sync()
+
+    sync_service.enable.assert_called_once_with("valid-token", "martin98-afk")
+    cfg.save.assert_not_called()
+    ctrl.check_gitee_token_invalid_reminder.assert_not_called()
+
+
+def test_account_row_uploader_token_invalid_sets_red_badge(row_factory):
+    """断点②：GiteeAccountRow 收到 tokenInvalid → 失效红标 + 提醒"""
+    row, _, _ = row_factory(bound=True, owner="martin98-afk")
+    ctrl = MagicMock()
+
+    with patch(
+        "app.widgets.cards.global_card_controller.get_global_card_controller",
+        return_value=ctrl,
+    ):
+        row._on_uploader_token_invalid()
+
+    assert row._invalid is True
+    assert row._name_label._full_text == "绑定已失效"
+    ctrl.check_gitee_token_invalid_reminder.assert_called_once()

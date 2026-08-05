@@ -12,7 +12,7 @@ import threading
 import webbrowser
 from loguru import logger
 from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
@@ -79,6 +79,7 @@ class _AvatarCircleWidget(QWidget):
         self._text = text[0].upper() if text else "?"
         self._bg_color = QColor(_color_for_name(text))
         self._size = 28
+        self._invalid = False  # 绑定失效警示（红边 + 红点角标）
         self.setFixedSize(self._size, self._size)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -87,6 +88,13 @@ class _AvatarCircleWidget(QWidget):
         self._text = text[0].upper() if text else "?"
         self._bg_color = QColor(_color_for_name(text))
         self.setToolTip(text)
+        self.update()
+
+    def set_invalid(self, invalid: bool):
+        """设置绑定失效警示样式（红色圆环边框 + 右上角红点角标）"""
+        if self._invalid == invalid:
+            return
+        self._invalid = invalid
         self.update()
 
     def set_size(self, size: int):
@@ -114,6 +122,17 @@ class _AvatarCircleWidget(QWidget):
         font = get_unified_font(int(size * 0.42), bold=True)
         painter.setFont(font)
         painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, self._text)
+
+        # 绑定失效警示：红色圆环边框 + 右上角红点角标
+        if self._invalid:
+            ring_width = max(1.5, size * 0.08)
+            painter.setPen(QPen(QColor("#f85149"), ring_width))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(ellipse_rect)
+            dot_r = max(2.5, size * 0.22)
+            painter.setPen(QPen(QColor("#ffffff"), 1.0))
+            painter.setBrush(QColor("#f85149"))
+            painter.drawEllipse(QRectF(size - 2 * dot_r - 1, 0, 2 * dot_r, 2 * dot_r))
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
@@ -265,12 +284,15 @@ class GiteeAccountRow(QFrame):
         self._bound_owner = ""
         self._bound_repo = ""
         self._compact = False  # 是否紧凑模式（收起时垂直堆叠）
+        self._invalid = False  # 绑定是否已失效（token 失效，需重新绑定）
 
         from app.core.config_sync import ConfigSyncService
 
         self._sync_svc = ConfigSyncService.get_instance()
         self._setup_ui()
         self._connect_config_signals()
+        self._connect_sync_signals()
+        self._connect_uploader_signals()
         self._refresh_ui()
 
     def _setup_ui(self):
@@ -326,7 +348,73 @@ class GiteeAccountRow(QFrame):
             self.cfg.gitee_user_owner,
             self.cfg.gitee_user_repo,
         ):
-            item.valueChanged.connect(self._refresh_ui)
+            item.valueChanged.connect(self._on_config_changed)
+
+    def _on_config_changed(self, _value=None):
+        """配置变化：重新绑定成功（bound+owner）→ 恢复绑定态；否则按现状刷新"""
+        is_bound = bool(self.cfg.gitee_bound.value)
+        owner = str(self.cfg.gitee_user_owner.value or "")
+        if is_bound and owner:
+            # 重新绑定成功 → 清除失效标志，恢复绑定态
+            self._invalid = False
+        self._refresh_ui()
+
+    def _connect_sync_signals(self):
+        """监听 ConfigSyncService.syncDone：token 失效 → 失效标识；成功 → 恢复"""
+        try:
+            self._sync_svc.syncDone.disconnect(self._on_sync_done)
+        except TypeError:
+            pass
+        self._sync_svc.syncDone.connect(self._on_sync_done)
+
+    def _connect_uploader_signals(self):
+        """监听 GiteeUploader.tokenInvalid：上传 401 重试失败 → 失效标识"""
+        try:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            uploader = GiteeUploader.get_instance()
+            try:
+                uploader.tokenInvalid.disconnect(self._on_uploader_token_invalid)
+            except TypeError:
+                pass
+            uploader.tokenInvalid.connect(self._on_uploader_token_invalid)
+        except Exception as e:
+            logger.warning(f"[GiteeAccountRow] 连接上传器失效信号失败: {e}")
+
+    def _on_uploader_token_invalid(self):
+        """上传 401 重试仍失败 → 绑定失效，置红标并触发全局提醒"""
+        self.set_invalid(True)
+        self._notify_token_invalid_reminder()
+
+    def _notify_token_invalid_reminder(self):
+        """触发全局「绑定已失效」提醒（去重/开关守卫在 controller 内）"""
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            ctrl = get_global_card_controller()
+            if ctrl is not None:
+                ctrl.check_gitee_token_invalid_reminder()
+        except Exception as e:
+            logger.warning(f"[GiteeAccountRow] 触发失效提醒失败: {e}")
+
+    def _on_sync_done(self, success: bool, msg: str):
+        """同步完成回调：维护绑定失效状态。
+
+        - msg 含「已失效」→ token 被吊销，绑定已失效；
+        - 同步成功（True）→ 绑定恢复有效；
+        - 网络异常（刷新失败）不算失效，保持现状。
+        """
+        if "已失效" in msg:
+            self.set_invalid(True)
+        elif success:
+            self.set_invalid(False)
+
+    def set_invalid(self, invalid: bool):
+        """设置绑定失效状态：True 显示红色失效标识，False 恢复绑定态"""
+        if self._invalid == invalid:
+            return
+        self._invalid = invalid
+        self._refresh_ui()
 
     def _refresh_ui(self, _value=None):
         is_bound = bool(self.cfg.gitee_bound.value)
@@ -334,11 +422,24 @@ class GiteeAccountRow(QFrame):
         repo = str(self.cfg.gitee_user_repo.value or "")
         avatar_size = scale_font_size(28)
 
-        if is_bound and owner:
+        if self._invalid:
+            # 绑定已失效：红色警示，明显区别于「从未绑定」（失效信号优先于 cfg 绑定态）
+            self._bound_owner = ""
+            self._bound_repo = ""
+            self._avatar.set_avatar(owner or "?")
+            self._avatar.set_size(avatar_size)
+            self._avatar.set_invalid(True)
+            self._avatar.setToolTip("绑定已失效，点击重新绑定")
+            self._name_label.setText("绑定已失效")
+            self._name_label.setToolTip("绑定已失效，点击重新绑定")
+            self._repo_label.setText("点击重新绑定")
+            self._repo_label.setToolTip("点击重新绑定")
+        elif is_bound and owner:
             self._bound_owner = owner
             self._bound_repo = repo
             self._avatar.set_avatar(owner)
             self._avatar.set_size(avatar_size)
+            self._avatar.set_invalid(False)
             self._avatar.setToolTip(f"点击打开仓库 {owner}/{repo}")
             self._name_label.setText(owner)
             self._name_label.setToolTip(owner)
@@ -349,6 +450,7 @@ class GiteeAccountRow(QFrame):
             self._bound_repo = ""
             self._avatar.set_avatar("?")
             self._avatar.set_size(avatar_size)
+            self._avatar.set_invalid(False)
             self._avatar.setToolTip("未绑定")
             self._name_label.setText("Gitee 未绑定")
             self._name_label.setToolTip("Gitee 未绑定")
@@ -419,8 +521,10 @@ class GiteeAccountRow(QFrame):
                 border: none;
             }
         """)
+        # 失效时名称显示红色警示
+        name_color = "#f85149" if self._invalid else Colors.TEXT_PRIMARY
         self._name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
+            f"color: {name_color}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
         )
         self._repo_label.setStyleSheet(
@@ -535,6 +639,7 @@ class GiteeAccountRow(QFrame):
             if self._sync_svc.restore_local():
                 self.cfg.load()
 
+            self._invalid = False  # 主动解绑 → 恢复未绑定态，不再显示失效警示
             self._refresh_ui()
             InfoBar.success(
                 title="已解绑",
@@ -1146,6 +1251,50 @@ class GiteeCard(SettingCard):
         if bound_info and bound_info.get("token") and bound_info.get("owner"):
             logger.info("[GiteeCard] 检测到已绑定，自动启动配置同步")
             self._sync_svc.enable(bound_info["token"], bound_info["owner"])
+        elif bool(self.cfg.gitee_bound.value):
+            # ★ T8B 断点① 修复：get_bound_info 返回 None 但 cfg 仍标记已绑定
+            # （refresh_token 被吊销，_ensure_valid_token 返回 None）→ 之前静默
+            # 跳过导致 ConfigSync 永不启动、syncDone 永不发。此处主动执行失效处理。
+            logger.warning("[GiteeCard] 绑定已失效（token 无法刷新），清除绑定并提示重新绑定")
+            self._handle_binding_invalid()
+
+    def _handle_binding_invalid(self):
+        """绑定失效处理：清绑定 + 账户行失效红标 + 全局失效提醒"""
+        # 1) 清除本地绑定（等效 ConfigSync 清绑逻辑）
+        try:
+            self.cfg.gitee_bound.value = False
+            self.cfg.gitee_user_token.value = ""
+            self.cfg.gitee_user_refresh_token.value = ""
+            self.cfg.gitee_token_expires_at.value = 0.0
+            self.cfg.save()
+        except Exception as e:
+            logger.warning(f"[GiteeCard] 清除绑定失败: {e}")
+
+        # 2) 通知各窗口的 GiteeAccountRow 置失效红标
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                for win in list(getattr(tm, "_windows", []) or []):
+                    panel = getattr(win, "_tab_panel", None)
+                    if panel is None:
+                        continue
+                    row = getattr(panel, "_gitee_account_row", None)
+                    if row is not None:
+                        row.set_invalid(True)
+        except Exception as e:
+            logger.warning(f"[GiteeCard] 通知账户行失效失败: {e}")
+
+        # 3) 全局失效提醒（去重/开关守卫在 controller 内）
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            ctrl = get_global_card_controller()
+            if ctrl is not None:
+                ctrl.check_gitee_token_invalid_reminder()
+        except Exception as e:
+            logger.warning(f"[GiteeCard] 触发失效提醒失败: {e}")
 
     # ── 同步状态指示 ─────────────────────────────────────
 

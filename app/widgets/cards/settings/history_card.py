@@ -1971,13 +1971,16 @@ class HistoryCard(QWidget):
         """后台导入线程完成后的回调（主线程执行）"""
         if error:
             from qfluentwidgets import InfoBar, InfoBarPosition
+            from app.widgets.tab_manager_window import TabManagerWindow
 
+            # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+            bar_parent = TabManagerWindow.get_instance() or self.window()
             InfoBar.error(
                 title="导入失败",
                 content=error,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
-                parent=self,
+                parent=bar_parent,
             )
             return
 

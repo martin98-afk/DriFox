@@ -1469,6 +1469,12 @@ class TabManagerWindow(QWidget):
         """每次显示时恢复位置（标准系统窗口自带阴影/边框/圆角）"""
         super().showEvent(event)
         self._restore_geometry()
+        # ★ T3 修复：窗口重新显示时补刷 UI 插件列表。
+        # 根因：插件热加载发生在窗口隐藏期间时，刷新被可见性门控跳过
+        # （main_widget 仅对可见的 TabManagerWindow 刷新），showEvent 无补刷
+        # → 列表停留在旧状态（全关重开才恢复）。重新显示时补刷一次。
+        if self._tab_panel is not None:
+            self._tab_panel.refresh_ui_plugins()
 
     def moveEvent(self, event):
         super().moveEvent(event)

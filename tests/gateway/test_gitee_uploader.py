@@ -301,6 +301,69 @@ class TestUploadBytes:
             # 文件名应包含 .jpg
             assert ".jpg" in url
 
+    def test_oauth_401_retry_fail_emits_token_invalid(self, uploader, mock_settings_bound):
+        """OAuth 模式 401 且重试仍失败 → tokenInvalid 信号发出"""
+        uploader._oauth_mode = True
+        with (
+            patch.object(uploader, "_ensure_config", side_effect=[True, True]),
+            patch.object(uploader, "_backend") as mock_backend,
+            patch.object(uploader, "tokenInvalid") as mock_signal,
+        ):
+            # 首次 401，重试仍 401
+            mock_backend.upload.side_effect = [False, False]
+            mock_backend.last_error = "[401] Access token is expired"
+
+            url, err = uploader.upload_bytes(b"data", "test.png")
+            assert url is None
+            assert err is not None
+            mock_signal.emit.assert_called_once()
+
+    def test_oauth_401_retry_success_no_token_invalid(self, uploader, mock_settings_bound):
+        """OAuth 模式 401 但刷新重试成功 → 不发出 tokenInvalid"""
+        uploader._oauth_mode = True
+        with (
+            patch.object(uploader, "_ensure_config", side_effect=[True, True]),
+            patch.object(uploader, "_backend") as mock_backend,
+            patch.object(uploader, "tokenInvalid") as mock_signal,
+        ):
+            # 首次 401，重试成功
+            mock_backend.upload.side_effect = [False, True]
+            mock_backend.last_error = "[401] Access token is expired"
+
+            url, err = uploader.upload_bytes(b"data", "test.png")
+            assert url is not None
+            mock_signal.emit.assert_not_called()
+
+    def test_shared_mode_401_no_token_invalid(self, uploader, mock_settings_bound):
+        """共享仓库模式（非 OAuth）401 → 不发出 tokenInvalid（勿误报）"""
+        uploader._oauth_mode = False
+        with (
+            patch.object(uploader, "_ensure_config", side_effect=[True, True]),
+            patch.object(uploader, "_backend") as mock_backend,
+            patch.object(uploader, "tokenInvalid") as mock_signal,
+        ):
+            mock_backend.upload.side_effect = [False, False]
+            mock_backend.last_error = "[401] Access token is expired"
+
+            url, err = uploader.upload_bytes(b"data", "test.png")
+            assert url is None
+            mock_signal.emit.assert_not_called()
+
+    def test_network_error_no_token_invalid(self, uploader, mock_settings_bound):
+        """网络类错误（非 401）→ 不发出 tokenInvalid（勿误报）"""
+        uploader._oauth_mode = True
+        with (
+            patch.object(uploader, "_ensure_config", return_value=True),
+            patch.object(uploader, "_backend") as mock_backend,
+            patch.object(uploader, "tokenInvalid") as mock_signal,
+        ):
+            mock_backend.upload.return_value = False
+            mock_backend.last_error = "[502] Bad Gateway"
+
+            url, err = uploader.upload_bytes(b"data", "test.png")
+            assert url is None
+            mock_signal.emit.assert_not_called()
+
 
 # =============================================================================
 # 6. _parse_error 测试

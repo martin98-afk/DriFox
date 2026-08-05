@@ -823,13 +823,16 @@ class LLMSettingsCard(SystemCardFrame):
                 if os.name != "nt":
                     self.autoStartCard.switchButton.setChecked(False)
                     from qfluentwidgets import InfoBar, InfoBarPosition
+                    from app.widgets.tab_manager_window import TabManagerWindow
 
+                    # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+                    bar_parent = TabManagerWindow.get_instance() or self.window()
                     InfoBar.error(
                         title="开机自启",
                         content="当前平台不支持开机自启配置。",
                         position=InfoBarPosition.BOTTOM,
                         duration=3000,
-                        parent=self,
+                        parent=bar_parent,
                     ).show()
                     return
 
@@ -841,13 +844,16 @@ class LLMSettingsCard(SystemCardFrame):
                 self.autoStartCard.switchButton.setChecked(not enabled)
                 self.cfg.set(self.cfg.auto_start, not enabled, save=True)
                 from qfluentwidgets import InfoBar, InfoBarPosition
+                from app.widgets.tab_manager_window import TabManagerWindow
 
+                # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+                bar_parent = TabManagerWindow.get_instance() or self.window()
                 InfoBar.error(
                     title="开机自启设置失败",
                     content=str(exc),
                     position=InfoBarPosition.BOTTOM,
                     duration=3000,
-                    parent=self,
+                    parent=bar_parent,
                 ).show()
                 return
 
@@ -889,9 +895,12 @@ class LLMSettingsCard(SystemCardFrame):
     def _on_lock_remote_toggled(self, enabled: bool):
         """锁屏远程开关：开启时保持系统/屏幕唤醒并锁屏，关闭时恢复休眠策略"""
         from qfluentwidgets import InfoBar, InfoBarPosition
+        from app.widgets.tab_manager_window import TabManagerWindow
 
         from app.core.system.lock_screen_remote import get_lock_screen_remote_manager
 
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         mgr = get_lock_screen_remote_manager()
         if enabled:
             mgr.enable(lock_now=False, keep_display_on=True)
@@ -900,7 +909,7 @@ class LLMSettingsCard(SystemCardFrame):
                 content="已开启：系统保持唤醒，屏幕常亮。",
                 position=InfoBarPosition.BOTTOM,
                 duration=2500,
-                parent=self,
+                parent=bar_parent,
             ).show()
         else:
             mgr.disable()
@@ -909,7 +918,7 @@ class LLMSettingsCard(SystemCardFrame):
                 content="已关闭，恢复系统正常休眠策略。",
                 position=InfoBarPosition.BOTTOM,
                 duration=2500,
-                parent=self,
+                parent=bar_parent,
             ).show()
 
     def showEvent(self, event):

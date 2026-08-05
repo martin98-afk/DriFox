@@ -63,6 +63,9 @@ class GlobalCardController:
         self._sub_agent_session_card = None
         # Gitee 绑定提醒去重标记：仅 tab 管理器初始化后提示一次，不随每个对话窗口重复弹出
         self._gitee_reminder_shown = False
+        # Gitee token 失效提醒去重标记：与 _gitee_reminder_shown 独立并存，
+        # 失效事件（syncDone 含"已失效"）进程级只弹一次
+        self._gitee_token_invalid_reminder_shown = False
 
     # ───────────────────────────────────────────────────────────
     # 窗口辅助
@@ -820,6 +823,57 @@ class GlobalCardController:
         """提醒中点击「不再提醒」：持久化设置并关闭"""
         self.cfg.set(self.cfg.gitee_sync_remind, False, save=True)
         infobar.close()
+
+    def check_gitee_token_invalid_reminder(self):
+        """Gitee token 真失效（invalid_grant）时弹出「重新绑定」提醒
+
+        触发源：ConfigSyncService.syncDone(False, "Gitee token 已失效，请重新绑定")。
+        该事件仅在曾绑定过（进入过 token 刷新流程）时才会发出——未绑定时
+        ConfigSync 只会发"未绑定 Gitee，跳过同步"，因此"曾绑定过"由事件本身
+        保证，此处无需再检查 gitee_bound（失效时已被 ConfigSync 清为 False）。
+
+        全局去重：多窗口都会收到 syncDone 并调用本方法，仅首次真正弹出。
+        """
+        if self._gitee_token_invalid_reminder_shown:
+            return
+        if self._settings_popup is None:
+            return
+        if not self.cfg.gitee_sync_remind.value:
+            return
+
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QWidget, QHBoxLayout
+        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
+
+        infobar = InfoBar(
+            icon=InfoBarIcon.ERROR,
+            title="Gitee 绑定已失效",
+            content="Gitee token 已失效，请重新绑定以恢复配置同步",
+            orient=Qt.Vertical,
+            isClosable=True,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=self._tab_manager,
+        )
+
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+
+        btn_bind = PrimaryPushButton("重新绑定")
+        btn_bind.setFixedWidth(90)
+        btn_bind.clicked.connect(lambda: self.open_gitee_bind_from_reminder(infobar))
+        btn_layout.addWidget(btn_bind)
+
+        btn_dismiss = PushButton("不再提醒")
+        btn_dismiss.setFixedWidth(90)
+        btn_dismiss.clicked.connect(lambda: self._dismiss_gitee_reminder(infobar))
+        btn_layout.addWidget(btn_dismiss)
+
+        infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
+        infobar.show()
+        self._gitee_token_invalid_reminder_shown = True
 
     def open_gitee_bind_from_reminder(self, infobar):
         """提醒中点击「立即绑定」：关闭提醒，打开设置定位到 Gitee 卡片"""

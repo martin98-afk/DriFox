@@ -562,21 +562,21 @@ class ProviderEditCard(QWidget):
     def _on_fetch_models(self):
         """获取模型列表"""
         from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
 
+        parent = TabManagerWindow.get_instance() or self.window()
         api_url = self.apiUrlCombo.currentText().strip()
         api_key = self.apiKeyEdit.text().strip()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
 
         if not api_url or not api_key:
             InfoBar.warning(
-                "提示", "请先填写 API URL 和 Key", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                "提示", "请先填写 API URL 和 Key", parent=parent, duration=2000, position=InfoBarPosition.BOTTOM
             )
             return
 
         self.fetchBtn.setEnabled(False)
-        InfoBar.info(
-            "获取中", "正在获取模型列表...", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
-        )
+        InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
 
         def do_fetch():
             return fetch_provider_models(api_url, api_key, provider_name)
@@ -608,18 +608,22 @@ class ProviderEditCard(QWidget):
             self.modelCombo.setCurrentIndex(self.modelCombo.findText(current))
         self.modelCombo.blockSignals(False)
         from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
 
+        parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.success(
-            "成功", f"获取到 {len(models)} 个模型", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+            "成功", f"获取到 {len(models)} 个模型", parent=parent, duration=2000, position=InfoBarPosition.BOTTOM
         )
 
     def _on_fetch_failed(self):
         """获取失败（主线程）"""
         self.fetchBtn.setEnabled(True)
         from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
 
+        parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.error(
-            "失败", "获取模型列表失败，请检查配置", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+            "失败", "获取模型列表失败，请检查配置", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM
         )
 
     def _on_manage_models(self):

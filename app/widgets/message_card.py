@@ -1992,6 +1992,22 @@ _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-s
 # - stable_md_len：最后一个完整闭合段之后的偏移（下次从这继续扫描）
 # - segments：闭合段列表（每段是一段完整 markdown 文本）
 # ============================================================
+def _has_unclosed_think_or_tool(md: str) -> bool:
+    """md 中是否存在未闭合的 `<think>` / `<tool>` 块（开标签数 > 闭合标签数）。
+
+    用途：全量渲染应用后决定是否推进差量基线 `_stable_md_len`。
+    首次流式迭代的 `append_reasoning` 首 chunk 会触发全量渲染（显示
+    "深度思考中" spinner），此时 md 是**部分**的思考内容（未闭合 think）。
+    若基线照常推进到该位置（think 块内部），后续差量扫描的切片会以
+    `内容</think>` 开头（无 `<think>` 配对）→ 配对守卫不触发 →
+    残段被当普通正文渲染 → 思考内容泄漏到正文。
+    含未闭合块时返回 True（基线保持旧值，等完整闭合后再推进）。
+    """
+    if not md:
+        return False
+    return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
+
+
 def _extract_closed_segments(md: str):
     """提取 markdown 中已闭合的完整段（供差量增量渲染）。
 
@@ -2004,6 +2020,22 @@ def _extract_closed_segments(md: str):
         - segments: 闭合段列表（完整段落/代码块 markdown 原文）
     """
     if not md:
+        return 0, []
+
+    # 🐛 起点防护：扫描起点可能位于未闭合 `<think>`/`<tool>` 块内部
+    # （历史遗留：首次流式首 chunk 全量渲染把基线推进到 think 中间，
+    # 或上一轮差量在未闭合块的半路上被打断）。此时切片第一个闭合标签
+    # 出现在开标签之前——若直接产出会得到"无 `<think>` 开头的残段"，
+    # _inject_think_cards 会把残段当普通正文渲染 → 思考内容泄漏到正文
+    # （后续全量渲染时才折叠消失）。遇到这种情况整个切片不产出，
+    # 交给全量渲染兜底（_has_reached_clean_boundary → _sequence_render）。
+    _first_open_think = md.find("<think>")
+    _first_close_think = md.find("</think>")
+    if _first_close_think != -1 and (_first_open_think == -1 or _first_close_think < _first_open_think):
+        return 0, []
+    _first_open_tool = md.find("<tool>")
+    _first_close_tool = md.find("</tool>")
+    if _first_close_tool != -1 and (_first_open_tool == -1 or _first_close_tool < _first_open_tool):
         return 0, []
 
     segments = []
@@ -5641,7 +5673,16 @@ class CodeWebViewer(QWebEngineView):
             # ⚠️ 必须用 _last_rendered_markdown（线程池提交时的渲染对象），而非
             # _markdown_text（回调到达时可能已被新 chunk 追加，造成差量跳过未渲染内容）。
             self._stable_html = html
-            self._stable_md_len = len(self._last_rendered_markdown)
+            # 🐛 修复（思考泄漏）：md 含未闭合  thinking/<tool> 块时**不**推进差量基线。
+            # 首次流式迭代的 append_reasoning 首 chunk 会触发全量渲染（显示
+            # "深度思考中" spinner），此时 md 是部分的思考内容（未闭合 think）。
+            # 若照常推进基线，后续差量扫描起点会落在 think 块内部，切片以
+            # `内容 response` 开头（无 ` thinking` 配对）→ 配对守卫不触发 →
+            # 残段被当普通正文渲染 → 思考内容泄漏到正文（后续全量渲染才消失）。
+            # 保持旧基线 → 下一次差量从 think 开头扫描，配对守卫正确 break，
+            # 等思考完整闭合后整体差量/全量渲染（无重复：基线未推进期间不产出段）。
+            if self._streaming and not _has_unclosed_think_or_tool(self._last_rendered_markdown):
+                self._stable_md_len = len(self._last_rendered_markdown)
             self._needs_full_render = False
             # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
             # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后

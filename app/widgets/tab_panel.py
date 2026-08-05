@@ -1020,13 +1020,20 @@ class TabPanel(QWidget):
                 widget.deleteLater()
         self._system_plugin_buttons = []
         for card_id, title, plugin_name in system_infos:
-            row = UIPluginRow(
-                title,
-                self._get_plugin_icon(pm, plugin_name),
-                self._system_plugin_section,
-                plugin_name=plugin_name,
-                card_id=card_id,
-            )
+            # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
+            # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
+            # UI 插件按钮全部不显示）。
+            try:
+                row = UIPluginRow(
+                    title,
+                    self._get_plugin_icon(pm, plugin_name),
+                    self._system_plugin_section,
+                    plugin_name=plugin_name,
+                    card_id=card_id,
+                )
+            except Exception as e:
+                logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
+                continue
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
             row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._system_plugin_layout.addWidget(row)
@@ -1042,13 +1049,18 @@ class TabPanel(QWidget):
                 widget.deleteLater()
         self._custom_plugin_buttons = []
         for card_id, title, plugin_name in custom_infos:
-            row = UIPluginRow(
-                title,
-                self._get_plugin_icon(pm, plugin_name),
-                self._custom_plugin_section,
-                plugin_name=plugin_name,
-                card_id=card_id,
-            )
+            # ★ T3 修复：单行构造异常不中断整体刷新（同系统插件区）。
+            try:
+                row = UIPluginRow(
+                    title,
+                    self._get_plugin_icon(pm, plugin_name),
+                    self._custom_plugin_section,
+                    plugin_name=plugin_name,
+                    card_id=card_id,
+                )
+            except Exception as e:
+                logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
+                continue
             row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
             row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._custom_plugin_layout.addWidget(row)

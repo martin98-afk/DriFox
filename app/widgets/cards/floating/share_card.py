@@ -911,7 +911,9 @@ class ShareCardContent(QWidget):
             self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
 
     def _show_info(self, message: str, level: str = "info"):
-        parent = self.window() or self.parent()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window() or self.parent()
         kwargs = {
             "title": "",
             "content": message,

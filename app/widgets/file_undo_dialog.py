@@ -284,12 +284,17 @@ class FileUndoPreviewDialog(QDialog):
         from loguru import logger
         from qfluentwidgets import InfoBar
 
+        # InfoBar 挂到 tab 管理器顶层窗口（未就绪时兜底对话框本身）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window() or self
+
         op = self.operations[index]
         if not self.file_recorder:
             InfoBar.warning(
                 "无法撤销",
                 "文件记录器未初始化",
-                parent=self
+                parent=bar_parent
             )
             return
 
@@ -301,7 +306,7 @@ class FileUndoPreviewDialog(QDialog):
             InfoBar.success(
                 "撤销成功",
                 f"已成功撤销操作: {Path(op.get('file_path', '未知')).name}",
-                parent=self
+                parent=bar_parent
             )
             logger.info(f"[FileUndo] 单个操作撤销成功: {op.get('file_path')}")
 
@@ -396,6 +401,6 @@ class FileUndoPreviewDialog(QDialog):
             InfoBar.error(
                 "撤销失败",
                 f"撤销操作失败: {result.failed_files}",
-                parent=self
+                parent=bar_parent
             )
             logger.error(f"[FileUndo] 单个操作撤销失败: {result.failed_files}")

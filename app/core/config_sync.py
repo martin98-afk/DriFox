@@ -68,6 +68,16 @@ def _get_records_path() -> Path:
     return get_app_data_dir() / "share" / "records.json"
 
 
+class TokenAuthError(Exception):
+    """远端访问返回 401（access_token 失效/过期）。
+
+    与"网络异常"（_check_remote_file 返回 None）区分：401 意味着 token
+    本身失效，调用方应尝试刷新重试；刷新失败则走"已失效"分支（清绑提示
+    重新绑定），而不是静默当网络异常（T2a/T2b 的"已失效"关键词过滤会
+    拦截提示导致 UI 静默无反馈）。
+    """
+
+
 # ── ConfigSyncService ─────────────────────────────────────
 
 
@@ -809,7 +819,29 @@ class ConfigSyncService(QObject):
         token_valid = self._is_access_token_valid()
         remote_status: bool | None = None
         try:
-            remote_status = self._check_remote()  # 内部不刷新
+            try:
+                remote_status = self._check_remote()  # 内部不刷新
+            except TokenAuthError:
+                # ★ T8A 修复：401 = token 失效（区别于网络异常）→ 先刷新重试。
+                # access_token 过期场景：刷新成功则继续正常同步（不误报失效）；
+                # 刷新失败（TOKEN_REVOKED→清绑 / 网络→保留）→ 走既有失效分支，
+                # 确保 T2a 红标 + T2b 弹窗的"已失效"提示链路生效。
+                logger.warning("[ConfigSync] 远端访问返回 401（token 失效），尝试刷新后重试")
+                if self._sync_token():
+                    # 刷新成功（_ensure_valid_token 已更新 Settings 内存 + 落盘）：
+                    # 用新 token 重试检查远端
+                    try:
+                        remote_status = self._check_remote()
+                    except TokenAuthError:
+                        # 刷新后仍 401（罕见）：按网络异常保守处理，不清绑
+                        logger.warning("[ConfigSync] token 刷新后仍返回 401，按网络异常保守处理")
+                        remote_status = None
+                else:
+                    # 刷新失败：_refresh_local_and_upload 内部区分
+                    # TOKEN_REVOKED（清绑 + syncDone(False,"已失效")）与网络异常（保留绑定）
+                    logger.warning("[ConfigSync] token 刷新失败，转入失效处理")
+                    self._refresh_local_and_upload()
+                    return
             if remote_status is True:
                 if token_valid:
                     # 路径 A：用有效 token 下载云端 RT → 刷新 → 上传（云端权威）
@@ -869,6 +901,9 @@ class ConfigSyncService(QObject):
             True: 文件存在
             False: 文件不存在（404）
             None: 无法确定（网络异常），调用方应保守处理不上传
+
+        Raises:
+            TokenAuthError: 远端返回 401（token 失效），调用方应刷新重试
         """
         return self._check_remote_file(REMOTE_PATH)
 
@@ -879,6 +914,11 @@ class ConfigSyncService(QObject):
             True: 文件存在
             False: 文件不存在（404）
             None: 无法确定（网络异常），调用方应保守处理
+
+        Raises:
+            TokenAuthError: 远端返回 401（access_token 失效/过期）。
+                与 None（网络异常）区分——401 表示 token 本身失效，
+                调用方应刷新重试；刷新失败走"已失效"分支而非静默当网络异常。
         """
         # 准备读取用 token（不刷新，避免旋转云端 refresh_token）
         self._prepare_read_token()
@@ -892,10 +932,27 @@ class ConfigSyncService(QObject):
             if resp.status_code == 404:
                 return False  # 文件确定不存在
             if resp.status_code != 200:
+                # 非 200：区分 401（token 失效）与网络/服务端错误
+                # Gitee 401 响应体含 message: "invalid_token"/"Access token is expired"；
+                # 个别网关可能返回 403/其他状态码但携带同样的失效语义，一并识别。
+                try:
+                    _body = resp.json()
+                    _msg = str(_body.get("message", "")) if isinstance(_body, dict) else ""
+                except Exception:
+                    _msg = resp.text or ""
+                if (
+                    resp.status_code == 401
+                    or "invalid_token" in _msg
+                    or "access token is expired" in _msg.lower()
+                ):
+                    logger.warning(f"[ConfigSync] 远端返回 {resp.status_code}（token 失效）: {_msg[:120]}")
+                    raise TokenAuthError(f"HTTP {resp.status_code}: {_msg[:120]}")
                 logger.warning(f"[ConfigSync] 检查远端文件失败: HTTP {resp.status_code}")
                 return None  # 其他错误 → 不确定状态，保守处理不上传
             body = resp.json()
             return isinstance(body, dict) and "content" in body
+        except TokenAuthError:
+            raise
         except Exception:
             return None
 

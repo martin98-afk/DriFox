@@ -347,10 +347,12 @@ class MCPEditCard(QWidget):
                     parsed = self._parse_mcp_json(parsed)
                     self._apply_json_to_form(parsed)
                 except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                    from app.widgets.tab_manager_window import TabManagerWindow
+
                     InfoBar.warning(
                         "提示",
                         f"JSON 解析失败: {e}，无法切换回表单模式",
-                        parent=self.window(),
+                        parent=TabManagerWindow.get_instance() or self.window(),
                         duration=3000,
                         position=InfoBarPosition.BOTTOM,
                     )
@@ -514,19 +516,22 @@ class MCPEditCard(QWidget):
             self.headersEdit.setSizePolicy(QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred))
 
     def _on_save(self):
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        _parent = TabManagerWindow.get_instance() or self.window()
         if self._json_mode:
             # JSON 模式：支持标准 mcpServers 格式和简化格式
             json_text = self.jsonEdit.toPlainText().strip()
             if not json_text:
                 InfoBar.warning(
-                    "提示", "请输入 JSON 配置", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                    "提示", "请输入 JSON 配置", parent=_parent, duration=2000, position=InfoBarPosition.BOTTOM
                 )
                 return
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as e:
                 InfoBar.warning(
-                    "提示", f"JSON 格式错误: {e}", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+                    "提示", f"JSON 格式错误: {e}", parent=_parent, duration=3000, position=InfoBarPosition.BOTTOM
                 )
                 return
             try:
@@ -536,7 +541,7 @@ class MCPEditCard(QWidget):
                     server_data["_source"] = self._original_name
             except (ValueError, KeyError, TypeError) as e:
                 InfoBar.warning(
-                    "提示", f"配置解析失败: {e}", parent=self.window(), duration=3000, position=InfoBarPosition.BOTTOM
+                    "提示", f"配置解析失败: {e}", parent=_parent, duration=3000, position=InfoBarPosition.BOTTOM
                 )
                 return
             self.saved.emit(server_data)
@@ -545,9 +550,7 @@ class MCPEditCard(QWidget):
         # 表单模式
         name = self.nameEdit.text().strip()
         if not name:
-            InfoBar.warning(
-                "提示", "请输入服务器名称", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
-            )
+            InfoBar.warning("提示", "请输入服务器名称", parent=_parent, duration=2000, position=InfoBarPosition.BOTTOM)
             return
 
         server_type = self.typeCombo.currentText()
@@ -561,7 +564,7 @@ class MCPEditCard(QWidget):
             cmd = self.commandEdit.text().strip()
             if not cmd:
                 InfoBar.warning(
-                    "提示", "请输入 Command", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
+                    "提示", "请输入 Command", parent=_parent, duration=2000, position=InfoBarPosition.BOTTOM
                 )
                 return
             server_data["command"] = cmd
@@ -576,7 +579,7 @@ class MCPEditCard(QWidget):
                     InfoBar.warning(
                         "提示",
                         f"环境变量 JSON 格式错误: {e}",
-                        parent=self.window(),
+                        parent=_parent,
                         duration=3000,
                         position=InfoBarPosition.BOTTOM,
                     )
@@ -584,9 +587,7 @@ class MCPEditCard(QWidget):
         else:
             url = self.urlEdit.text().strip()
             if not url:
-                InfoBar.warning(
-                    "提示", "请输入 URL", parent=self.window(), duration=2000, position=InfoBarPosition.BOTTOM
-                )
+                InfoBar.warning("提示", "请输入 URL", parent=_parent, duration=2000, position=InfoBarPosition.BOTTOM)
                 return
             server_data["url"] = url
             headers_text = self.headersEdit.toPlainText().strip()
@@ -597,7 +598,7 @@ class MCPEditCard(QWidget):
                     InfoBar.warning(
                         "提示",
                         f"Headers JSON 格式错误: {e}",
-                        parent=self.window(),
+                        parent=_parent,
                         duration=3000,
                         position=InfoBarPosition.BOTTOM,
                     )
@@ -869,6 +870,9 @@ class MCPListSettingCard(ExpandSettingCard):
         if success:
             logger.info(f"[MCP] '{name}' 热连接成功")
         else:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            _parent = TabManagerWindow.get_instance() or self.window()
             # 提取友好提示
             hint = error_msg or "未知错误"
             if "请检查配置类型是否正确" in hint:
@@ -880,7 +884,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 InfoBar.error(
                     title=f"MCP 连接失败: {name}",
                     content=f"{display_msg}\n{detail}" if detail else display_msg,
-                    parent=self.window(),
+                    parent=_parent,
                     duration=8000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -889,7 +893,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 InfoBar.error(
                     title=f"MCP 连接失败: {name}",
                     content=hint,
-                    parent=self.window(),
+                    parent=_parent,
                     duration=6000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -898,7 +902,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 InfoBar.error(
                     title="MCP 连接失败",
                     content=f"'{name}' 连接失败，请检查配置是否正确",
-                    parent=self.window(),
+                    parent=_parent,
                     duration=5000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -1236,6 +1240,7 @@ class MCPListSettingCard(ExpandSettingCard):
     def add_server(self, server_data: dict):
         """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
         from app.core.plugin_manager import PluginManager
+        from app.widgets.tab_manager_window import TabManagerWindow
 
         pm = PluginManager.get_instance()
         name = server_data.get("name", "")
@@ -1246,7 +1251,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 content=f"MCP Server '{name}' 已存在",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self.window(),
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             return False
         pm.add_mcp_server(name, server_data)
