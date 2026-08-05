@@ -25,11 +25,12 @@ class CardContainer(QWidget):
     # 停靠区展开后的轴向最小尺寸：
     # 展开动画结束后释放轴向 max 并锁定此最小尺寸，
     # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
-    # 横向停靠区（LEFT/RIGHT）用 240 而非依赖 minimumSizeHint：
-    # Qt 对复杂卡片（QTreeView/图表等）的 minimumSizeHint 常返回远小于
-    # 内容实际需求的宽度（实测 file-tree=206、context=260，实际渲染≈308），
-    # 会导致窗口缩小时卡片被压扁/裁切。固定下限更可靠。
-    _DOCK_MIN_H = 240  # 横向停靠区（LEFT/RIGHT）最小宽
+    # 横向停靠区（LEFT/RIGHT）用 300 而非依赖 minimumSizeHint：
+    # Qt 对复杂卡片的 minimumSizeHint 常返回远小于内容实际需求的宽度
+    # （实测 file-tree=206、context=260），且 file-tree 在 dock 内 sizeHint=300、
+    # context-usage-stats 硬编码 setMinimumWidth(300)，固定下限 300 对齐
+    # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
+    _DOCK_MIN_H = 300  # 横向停靠区（LEFT/RIGHT）最小宽
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
@@ -224,13 +225,22 @@ class CardContainer(QWidget):
         停靠模式展开时用于提升 min 锁：窗口缩小时 QSplitter 优先保证
         卡片内容完整可见的最小尺寸，对话区最后被压缩（可被遮挡）。
         与 _schedule_expand 一致用 not isHidden() 判定可见性。
+
+        同时取 minimumSizeHint() 与 minimumSize() 的轴向最大值：两者是
+        独立属性——硬编码 setMinimumWidth/Height 的卡片（如 context-usage-
+        stats setMinimumWidth(300)、tool_control setMinimumHeight(250)）
+        只有 minimumSize 生效，minimumSizeHint 可能是布局算出的更小值；
+        minimumSizeHint 无布局时返回无效尺寸 (-1,-1)，max() 自然兜底。
         """
         axis_min = 0
         for w in self._cards.values():
             if w.isHidden():
                 continue
             hint = w.minimumSizeHint()
-            value = hint.width() if self._horizontal else hint.height()
+            if self._horizontal:
+                value = max(hint.width(), w.minimumWidth())
+            else:
+                value = max(hint.height(), w.minimumHeight())
             if value > axis_min:
                 axis_min = value
         return axis_min

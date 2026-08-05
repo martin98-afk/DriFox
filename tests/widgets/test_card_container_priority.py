@@ -149,8 +149,8 @@ class TestDockMinLockUpgrade:
         assert c.minimumWidth() >= 240, f"min width={c.minimumWidth()} 未覆盖卡片最小宽"
         assert c._axis_max() >= c._EXPAND_MAX
 
-    def test_dock_min_h_fixed_floor_240(self):
-        """横向 dock 有固定下限 240：即使卡片 minimumSizeHint 很小也不依赖"""
+    def test_dock_min_h_fixed_floor_300(self):
+        """横向 dock 有固定下限 300：即使卡片 minimumSizeHint 很小也不依赖"""
         _app()
         c = CardContainer(ContainerType.LEFT)
         card = _card(min_w=10, min_h=60)  # 卡片自身 min 很小
@@ -160,7 +160,68 @@ class TestDockMinLockUpgrade:
         c.show()
         c._do_expand()
         _pump(300)
-        assert c.minimumWidth() >= 240, f"固定下限未生效: min width={c.minimumWidth()}"
+        assert c.minimumWidth() >= 300, f"固定下限未生效: min width={c.minimumWidth()}"
+
+    def test_min_axis_takes_minimum_size(self):
+        """硬编码 setMinimumWidth 的卡片：minimumSize 与 minimumSizeHint 独立，
+        _visible_cards_min_axis 应取二者更大值（覆盖 context-usage-stats=300）"""
+        _app()
+        c = CardContainer(ContainerType.LEFT)
+        # 硬约束卡片：hint 远小于 minimumSize
+        card = _card(min_w=0, min_h=60)  # hint 无布局返回无效尺寸
+        card.setMinimumWidth(300)
+        c.add_card("card", card)
+        c._cards["card"].show()
+        self._make_dock(c, Qt.Horizontal)
+        card.show()
+        c.show()
+        c._do_expand()
+        _pump(300)
+        assert c.minimumWidth() >= 300, f"硬约束 minimumSize 未计入: min width={c.minimumWidth()}"
+
+    def test_medium_window_three_pane_dock_fits(self):
+        """中等窗口（850/900）三窗格：dock 完整可见（≥ 硬约束 300）、无溢出"""
+        _app()
+        for win_w in (900, 850):
+            left = CardContainer(ContainerType.LEFT)
+            right = CardContainer(ContainerType.RIGHT)
+            content = QWidget()
+            content.setMinimumWidth(320)  # 模拟 chat_scroll_area
+            splitter = QSplitter(Qt.Horizontal)
+            splitter.addWidget(left)
+            splitter.addWidget(content)
+            splitter.addWidget(right)
+            splitter.setStretchFactor(0, 0)
+            splitter.setStretchFactor(1, 1)
+            splitter.setStretchFactor(2, 0)
+            splitter.setChildrenCollapsible(False)
+            splitter.setHandleWidth(6)
+            left.enable_dock_mode(splitter)
+            right.enable_dock_mode(splitter)
+            lc = _card(min_w=300, min_h=60)
+            left.add_card("file", lc)
+            rc = _card(min_w=300, min_h=60)
+            right.add_card("context", rc)
+            splitter.resize(win_w, 600)
+            splitter.show()
+            lc.show()
+            left.show()
+            rc.show()
+            right.show()
+            left._do_expand()
+            right._do_expand()
+            _pump(300)
+            sizes = splitter.sizes()
+            handle_total = splitter.handleWidth() * (splitter.count() - 1)
+            assert sum(sizes) + handle_total <= splitter.width(), (
+                f"窗口 {win_w} splitter 溢出: sizes={sizes} width={splitter.width()}"
+            )
+            assert left.width() >= left.minimumWidth() >= 300, (
+                f"窗口 {win_w} LEFT 被压: w={left.width()} min={left.minimumWidth()}"
+            )
+            assert right.width() >= right.minimumWidth() >= 300, (
+                f"窗口 {win_w} RIGHT 被压: w={right.width()} min={right.minimumWidth()}"
+            )
 
     def test_splitter_overflow_clamps_dock(self):
         """用户拖大 dock 后窗口缩小：溢出兜底把 dock 压回 min，不裁切"""
