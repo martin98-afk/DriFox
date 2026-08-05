@@ -751,6 +751,114 @@ class TestTeamRestoreLogic:
         # 全部窗口重新登记为团队成员（join_team 每窗口一次）
         assert tm.join_team.call_count == 4, "4 个窗口各 join_team 一次"
 
+    def test_restore_same_agent_window_two_rounds_takes_latest(self):
+        """场景6：同 (agent,wid) 多轮取最新——build@win_02 两轮只建 1 窗取最新。
+
+        与 test_restore_duplicate_role_members_with_snapshot（异 wid 各建窗）互补：
+        快照中 build 只有 win_02 一个成员，但会话记录有 build 两轮（同 wid），
+        恢复时窗口数 = 快照计数（1 个 build），会话按 last_time 降序取最新一条。
+        """
+        _ensure_qapp()
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        snap = _json.dumps(
+            [{"agent_name": "build", "window_id": "win_02"}, {"agent_name": "plan", "window_id": "win_01"}],
+            ensure_ascii=False,
+        )
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            {
+                "session_id": "s-build-old",
+                "title": "build 首轮",
+                "last_time": "2026-01-01 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-build-new",
+                "title": "build 次轮",
+                "last_time": "2026-01-02 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-plan",
+                "title": "plan 会话",
+                "last_time": "2026-01-03 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "plan",
+                "team_members": snap,
+            },
+        ]
+        win.history_manager.get_session_messages.side_effect = lambda sid: (
+            [{"role": "user", "content": sid}] if sid else []
+        )
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-9"
+        tm.start_team_run.return_value = "new-run-9"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+
+        created = []
+
+        class _FakeWin:
+            _window_id = "w"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+                created.append(self)
+
+        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        # build 快照仅 1 个成员（win_02）→ 只建 1 个 build 窗口，取最新会话
+        build_wins = [c for c in created if c._team_agent_name == "build"]
+        assert len(build_wins) == 1, f"同 (agent,wid) 两轮应只建 1 窗，实际 {len(build_wins)}"
+        assert build_wins[0]._branch_session_data["name"] == "build 次轮", "应取 last_time 最新会话"
+        # plan 1 窗
+        assert len([c for c in created if c._team_agent_name == "plan"]) == 1
+        assert len(created) == 2, "总窗口数 = build×1 + plan×1"
+
+    def test_restore_empty_run_id_returns_early(self):
+        """场景5：team_run_id 为空 → 恢复守卫直接返回，不建窗、不解散。
+
+        非团队会话（run_id=""）不应触发合并/恢复链路：_on_team_restore_requested
+        首行守卫 `if not run_id: return`，不查询历史、不调用解散逻辑。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win._disband_current_team_for_restore = MagicMock()
+        win._get_team_manager = MagicMock()
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "")
+
+        win.history_manager.get_team_sessions_by_run_id.assert_not_called(), "空 run_id 不应查询会话"
+        win._disband_current_team_for_restore.assert_not_called(), "空 run_id 不应解散团队"
+        win._create_fresh_window.assert_not_called(), "空 run_id 不应创建窗口"
+
 
 class TestTeamRestoreDisband:
     """M1' 恢复路径重构：解散现有团队 + 完整初始化恢复窗口
@@ -1082,8 +1190,23 @@ class TestTeamRestoreDisband:
 class TestTeamMergedCard:
     """M4 UI 层：团队合并条目卡片 + 混排渲染 + 归档链路 + 成员进入会话"""
 
-    def _merged_entry(self, run_id="run-9", preview="首问内容"):
+    def _merged_entry(self, run_id="run-9", preview="首问内容", members=None):
         """构造数据层合并条目（含 members）"""
+        if members is None:
+            members = [
+                {
+                    "session_id": "s1",
+                    "title": "build 会话",
+                    "agent_name": "build",
+                    "last_time": "2026-01-01 10:00:00",
+                },
+                {
+                    "session_id": "s2",
+                    "title": "plan 会话",
+                    "agent_name": "plan",
+                    "last_time": "2026-01-02 10:00:00",
+                },
+            ]
         return {
             "team_run_id": run_id,
             "team_name": "dev",
@@ -1094,10 +1217,7 @@ class TestTeamMergedCard:
             "session_id": "s-latest",
             "last_time": "2026-01-02 10:00:00",
             "preview": preview,
-            "members": [
-                {"session_id": "s1", "title": "build 会话", "agent_name": "build", "last_time": "2026-01-01 10:00:00"},
-                {"session_id": "s2", "title": "plan 会话", "agent_name": "plan", "last_time": "2026-01-02 10:00:00"},
-            ],
+            "members": members,
         }
 
     def test_card_click_toggles_expand_not_restore(self):
@@ -1140,6 +1260,49 @@ class TestTeamMergedCard:
         card._on_member_row_clicked(fake_event, card._members[0], None)
         assert len(selected) == 1, "成员行点击应发 memberSelected"
         assert selected[0]["session_id"] == "s1", "应携带成员 session_record"
+
+    def test_card_expand_shows_window_id_suffix_for_same_role(self):
+        """T3 回归：展开区同角色多成员渲染多行 + window_id 后缀（build·w02）。
+
+        场景7：同角色 build 两个成员（window_id 异）→ 展开区应显示
+        build·w02 / build·w03 两行胶囊，与单角色行区分，避免两行都叫
+        "build" 无法辨认。
+        """
+        _ensure_qapp()
+        from app.widgets.cards.settings.history_card import _TeamGroupCard
+
+        members = [
+            {
+                "session_id": "s1",
+                "title": "build 初版",
+                "agent_name": "build",
+                "window_id": "win_02",
+                "last_time": "2026-01-01 10:00:00",
+            },
+            {
+                "session_id": "s2",
+                "title": "build 二版",
+                "agent_name": "build",
+                "window_id": "win_03",
+                "last_time": "2026-01-02 10:00:00",
+            },
+            {
+                "session_id": "s3",
+                "title": "plan 会话",
+                "agent_name": "plan",
+                "last_time": "2026-01-03 10:00:00",
+            },
+        ]
+        card = _TeamGroupCard(self._merged_entry(members=members))
+        card._toggle_members()
+        texts = [lbl.text() for lbl in card.findChildren(QLabel)]
+        # T3 渲染：window_id 前缀 win_ 简写为 w → build·w02 / build·w03
+        assert "build·w02" in texts, f"展开区应显示 build·w02 后缀胶囊，实际: {texts}"
+        assert "build·w03" in texts, f"展开区应显示 build·w03 后缀胶囊，实际: {texts}"
+        # 无 window_id 的成员保持纯角色名（旧格式兼容）
+        assert "plan" in texts, "无 window_id 成员应保持纯角色名"
+        # 标题仍各自渲染（同角色两行不同标题）
+        assert "build 初版" in texts and "build 二版" in texts, "同角色多行应各带独立标题"
 
     def test_archive_button_emits_archive_requested(self):
         """B-4：归档按钮发 archiveRequested(run_id)。"""
