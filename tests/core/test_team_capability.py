@@ -65,7 +65,11 @@ class TestDeriveCapability:
 
     def test_build_agent_tags_implement(self, tm):
         """build 角色（编码/实现）→ task_tags 含 implement，can_write=True。"""
-        agent = _fake_agent("build", "负责编码实现与验证", permission={"write": "allow", "edit": "allow", "multi_edit": "allow", "bash": "allow"})
+        agent = _fake_agent(
+            "build",
+            "负责编码实现与验证",
+            permission={"write": "allow", "edit": "allow", "multi_edit": "allow", "bash": "allow"},
+        )
         cap = tm._derive_capability(agent)
         assert "implement" in cap["task_tags"], f"build 应推导 implement，实际 {cap['task_tags']}"
         assert cap["can_write"] is True
@@ -75,7 +79,11 @@ class TestDeriveCapability:
 
     def test_plan_agent_tags_plan(self, tm):
         """plan 角色（规划/只读）→ task_tags 含 plan。"""
-        agent = _fake_agent("plan", "面向代码库分析和实现规划的只读智能体", permission={"write": "deny", "edit": "deny", "multi_edit": "deny"})
+        agent = _fake_agent(
+            "plan",
+            "面向代码库分析和实现规划的只读智能体",
+            permission={"write": "deny", "edit": "deny", "multi_edit": "deny"},
+        )
         cap = tm._derive_capability(agent)
         assert "plan" in cap["task_tags"], f"plan 应推导 plan，实际 {cap['task_tags']}"
         assert cap["can_write"] is False
@@ -106,19 +114,41 @@ class TestDeriveCapability:
 
     def test_no_match_falls_back_to_can_write(self, tm):
         """无关键词匹配：可写→implement，只读→plan（can_write 兜底）。"""
-        write_agent = _fake_agent("custom", "自定义角色", permission={"write": "allow", "edit": "allow", "multi_edit": "allow"})
+        write_agent = _fake_agent(
+            "custom", "自定义角色", permission={"write": "allow", "edit": "allow", "multi_edit": "allow"}
+        )
         assert "implement" in tm._derive_capability(write_agent)["task_tags"]
 
         read_agent = _fake_agent("custom", "自定义角色", permission={"write": "deny"})
         assert "plan" in tm._derive_capability(read_agent)["task_tags"]
 
     def test_tools_whitelist_semantics(self, tm):
-        """agent.tools 白名单：未列出工具全部拒绝；列出为 True 才 allow。"""
+        """agent.tools 白名单：未列出工具全部拒绝（can_write/can_bash 按白名单判定）。
+
+        T16：can_team 例外——团队成员恒具团队工具（schema 层按 is_in_team
+        放行，与 tools 白名单无关），即使白名单未列 team 工具也恒 True。
+        """
         agent = _fake_agent("build", "构建", tools={"read": True, "write": True, "edit": True, "multi_edit": True})
         cap = tm._derive_capability(agent)
         assert cap["can_write"] is True
         assert cap["can_bash"] is False, "tools 白名单未列 bash → 拒绝"
-        assert cap["can_team"] is False, "tools 白名单未列 team 工具 → 拒绝"
+        assert cap["can_team"] is True, "T16：团队成员恒具团队工具（与静态白名单无关）"
+
+    def test_review_agent_can_team_true(self, tm):
+        """T16：review 只读角色（write deny、无 team 权限条目）→ can_team 恒 True。
+
+        回归根因：旧逻辑按静态 permission 判定 team_* allow → review 显示
+        团队✗；实际团队工具由 is_in_team 放行，团队成员必然可用。
+        """
+        agent = _fake_agent(
+            "review",
+            "代码审查智能体，系统性审查变更",
+            permission={"write": "deny", "edit": "deny", "multi_edit": "deny", "bash": "deny"},
+        )
+        cap = tm._derive_capability(agent)
+        assert cap["can_team"] is True, "review 团队成员应恒具团队工具能力"
+        assert cap["can_write"] is False, "can_write 仍按静态权限判定"
+        assert cap["can_bash"] is False
 
 
 class TestJoinAutoRegistration:
@@ -254,7 +284,11 @@ class TestTeamToolsCapabilityDisplay:
             "task_tags": ["review"],
         }
         text = TeamTools._format_capability(cap)
-        assert "写✗" in text and "bash✗" in text and "团队✗" in text
+        assert "写✗" in text and "bash✗" in text
+        # T16：团队工具对团队成员恒真 → 显示层恒 团队✓（不再出现团队✗），
+        # 即使传入的 cap.can_team=False（存量老快照防御）
+        assert "团队✓" in text, f"团队成员恒具团队工具，实际 {text}"
+        assert "团队✗" not in text, "团队成员列表不应再出现团队✗"
         assert "review" in text
 
     def test_team_list_members_contains_capability_line(self, tm, monkeypatch):
@@ -270,14 +304,45 @@ class TestTeamToolsCapabilityDisplay:
         bt = SimpleNamespace(_team_window_id="win_01", _team_agent_name="build")
         tool = TeamTools(bt)
         # 需要真实 TeamManager.get_instance 指向我们的实例
-        monkeypatch.setattr(
-            tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm)
-        )
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
         result = tool.team_list_members()
         assert result.success, result.error
         assert "build@win_01" in result.content
         assert "权限:" in result.content, f"应含权限摘要行，实际:\n{result.content}"
         assert "implement" in result.content, f"build 标签应为 implement，实际:\n{result.content}"
+
+    def test_team_list_members_review_shows_team_check(self, tm, monkeypatch):
+        """T16 回归：只读角色 review 成员列表显示 团队✓（不再出现 团队✗）。
+
+        根因复刻：review permission 全 deny（write/edit/bash 全 deny、无
+        team_* 条目）→ 旧逻辑 can_team=False → 显示"团队✗"；修复后成员
+        列表恒显 团队✓（团队成员必具团队工具）。
+        """
+        from app.tools.team_tools import TeamTools
+
+        _patch_agent_manager(
+            monkeypatch,
+            {
+                "review": _fake_agent(
+                    "review",
+                    "代码审查智能体，系统性审查变更",
+                    permission={"write": "deny", "edit": "deny", "multi_edit": "deny", "bash": "deny"},
+                )
+            },
+        )
+        tm.join_team("win_01", "review")
+
+        bt = SimpleNamespace(_team_window_id="win_01", _team_agent_name="review")
+        tool = TeamTools(bt)
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
+
+        result = tool.team_list_members()
+        assert result.success, result.error
+        assert "review@win_01" in result.content
+        assert "权限:" in result.content, f"应含权限摘要行，实际:\n{result.content}"
+        assert "团队✓" in result.content, f"review 成员应显示 团队✓，实际:\n{result.content}"
+        assert "团队✗" not in result.content, "团队成员列表不应再出现 团队✗"
+        assert "写✗" in result.content, "can_write 仍按静态权限判定（写✗ 正常显示）"
 
     def test_team_send_message_attaches_capability_hint(self, tm, monkeypatch):
         """team_send_message 结果附带目标能力提示。"""

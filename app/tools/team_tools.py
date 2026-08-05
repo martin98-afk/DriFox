@@ -109,13 +109,17 @@ class TeamTools:
         """格式化能力摘要：如 `写✓/编✓/bash✓ | 标签: implement`。
 
         can_write 是 write/edit/multi_edit 三合一（全部 allow 才 ✓）；
-        can_bash / can_team 单独标记；task_tags 逗号拼接。
+        can_bash 单独标记；团队工具恒 ✓（T16：团队成员必然具备团队工具能力，
+        由 schema 层按 is_in_team 放行，与静态权限无关——存量老快照
+        can_team=False 也按 ✓ 显示，团队✗ 不再出现在成员列表中）；
+        task_tags 逗号拼接。
         """
         mark = lambda ok: "✓" if ok else "✗"
         parts = [
             f"写{mark(bool(cap.get('can_write')))}",
             f"bash{mark(bool(cap.get('can_bash')))}",
-            f"团队{mark(bool(cap.get('can_team')))}",
+            # T16：团队成员恒具团队工具 → 恒 ✓（不读 can_team，防御老快照）
+            "团队✓",
         ]
         tags = cap.get("task_tags") or []
         if tags:

@@ -407,7 +407,7 @@ class TeamManager:
                 "agent_name", "role_desc"(Agent.description), "mode",
                 "permissions"(原始 permission dict),
                 "can_write"(write/edit/multi_edit 是否 allow),
-                "can_bash", "can_team"(question/team_* allow),
+                "can_bash", "can_team"(团队工具能力，团队成员恒 True——T16),
                 "task_tags"(关键词推导的标签列表)
             }
         """
@@ -430,7 +430,14 @@ class TeamManager:
 
         can_write = all(_is_allowed(t) for t in ("write", "edit", "multi_edit"))
         can_bash = _is_allowed("bash")
-        can_team = all(_is_allowed(t) for t in ("question", "team_send_message", "team_list_members"))
+        # 🛡️ T16：can_team 对团队成员恒真——团队工具（team_send_message /
+        # team_list_members）的实际可用性由 schema 层按 is_in_team 判定
+        # （agent.py get_agent_tools_schema：仅团队成员可见），与 agent 静态
+        # permission/tools 白名单无关。review 等只读角色 permission 不含
+        # team_* 条目 → 旧逻辑按静态权限判定得 False，误显示"团队✗"。
+        # 本函数仅在团队成员上下文调用（join 快照 / get_member_capability
+        # 动态解析），团队成员必然可用团队工具 → 恒 True。
+        can_team = True
 
         # task_tags：按关键词表匹配（name + description 全文），无匹配时按 can_write 兜底
         text = f"{name} {desc}".lower()
