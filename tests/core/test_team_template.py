@@ -372,6 +372,69 @@ class TestListTemplates:
         assert "bad" not in names
 
 
+class TestUserTemplatesWithoutPluginRegistration:
+    """回归：user-custom 插件未注册时，用户模板列表仍应可见。
+
+    修复前 _get_user_dir() 依赖 PluginManager.get_plugin("user-custom")：
+    - user-custom 插件的 manifest（.drifox-plugin/plugin.json）是按需创建的
+      （添加 MCP / 保存快捷键时才生成），用户仅保存过团队模板时插件未注册，
+      get_plugin() 返回 None → 模板列表缺失；
+    - 首次解析若发生在 PluginManager 未初始化时，还会缓存 None 导致
+      后续永远解析失败（缓存毒化）。
+    修复后直接基于应用数据目录解析，不再依赖插件注册状态。
+    """
+
+    def test_user_dir_ignores_plugin_registration(self, tmp_path, monkeypatch):
+        """user-custom 插件未注册时，_get_user_dir 仍应解析出模板目录。
+
+        修复前依赖 PluginManager.get_plugin("user-custom")，未注册时返回 None；
+        修复后直接基于应用数据目录解析，与插件注册状态、初始化时机无关。
+        """
+        import app.utils.utils as utils_mod
+
+        # 重定向应用数据目录到 tmp_path
+        monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: tmp_path)
+
+        TemplateManager._instance = None
+        tm = TemplateManager.get_instance()
+        user_dir = tm.user_dir
+        assert user_dir is not None
+        assert user_dir == tmp_path / "plugins" / "user-custom" / "team_templates"
+        assert user_dir.exists()  # 目录被创建
+
+    def test_list_includes_user_templates_without_registration(self, tmp_path, monkeypatch):
+        """插件未注册时，list_templates 应包含 user-custom 目录中的模板。"""
+        import app.utils.utils as utils_mod
+
+        monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: tmp_path)
+
+        # user-custom 模板目录（先于 PluginManager 扫描存在，如云端恢复场景）
+        user_tpl_dir = tmp_path / "plugins" / "user-custom" / "team_templates"
+        user_tpl_dir.mkdir(parents=True, exist_ok=True)
+        (user_tpl_dir / "cloud-team.yaml").write_text(
+            "schema_version: 1\n"
+            "template_name: cloud-team\n"
+            "description: 云端恢复的模板\n"
+            "agents:\n"
+            "  - agent_name: build\n"
+            "  - agent_name: review\n",
+            encoding="utf-8",
+        )
+
+        TemplateManager._instance = None
+        tm = TemplateManager.get_instance()
+        # 隔离系统/插件来源，只验证 user 来源
+        monkeypatch.setattr(tm, "_get_plugin_template_dirs", lambda: [])
+        monkeypatch.setattr(tm, "_system_dir", tmp_path / "system")
+
+        results = tm.list_templates()
+        names = [r["name"] for r in results]
+        assert "cloud-team" in names
+        cloud = next(r for r in results if r["name"] == "cloud-team")
+        assert cloud["source"] == tm.SOURCE_USER
+        assert cloud["agent_count"] == 2
+
+
 # ══════════════════════════════════════════════════════════
 # 5. TemplateManager.delete
 # ══════════════════════════════════════════════════════════
@@ -776,7 +839,9 @@ class TestTemplateJoinDelayConstant:
         import re
 
         # 简单粗暴：函数体源码里不应有 "300," 这种数字字面量
-        assert not re.search(r"\b300\b", func_src), "_spawn_team_member_window 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+        assert not re.search(r"\b300\b", func_src), (
+            "_spawn_team_member_window 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+        )
 
 
 # ══════════════════════════════════════════════════════════
@@ -1324,8 +1389,10 @@ class TestLoadMissingDegradation:
             parameters=_loaded["parameters"],
             prompt_sections=_loaded["prompt_sections"],
         )
-        for _marker, _sec in (("--create=x", "任务：创建 DriFox 团队模板"),
-                              ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体")):
+        for _marker, _sec in (
+            ("--create=x", "任务：创建 DriFox 团队模板"),
+            ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体"),
+        ):
             _out = _cm.select_prompt("team", _marker) or ""
             assert "子智能体创建规范" in _out, f"select_prompt({_marker!r}) 必须保留公共规范"
             assert _sec in _out, f"select_prompt({_marker!r}) 必须包含对应 section"
