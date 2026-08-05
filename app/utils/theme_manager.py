@@ -375,6 +375,14 @@ class ThemeManager:
 
         由 reload() 或外部触发（配置变更）调用。
         已失效的弱引用会被自动清理。
+
+        🛡️ 可见性过滤（T2-R7）：tab 内非 active 页窗口不执行全量 refresh_theme
+        （N 窗 × M 卡 findChildren + runJavaScript 成本），仅标记
+        _theme_needs_refresh 待刷；切回可见时由窗口自身补刷链路
+        （main_widget._on_tab_selected 检查 _theme_needs_refresh 后调用
+        _apply_runtime_ui_settings，见 main_widget.py:8064-8077 同机制）自动
+        补刷，不丢主题更新。可见窗口行为与原先完全一致（立即 refresh_theme）；
+        无补刷链路的 target 保守不跳过（全量刷新），避免主题更新永久丢失。
         """
         from app.utils.design_tokens import Colors
 
@@ -388,9 +396,50 @@ class ThemeManager:
             if widget is None:
                 continue  # 弱引用已失效，跳过
             alive.append(ref)
+            # 🛡️ 可见性过滤：仅跳过"tab 内非 active 页"窗口——自身隐藏 + 顶层
+            # 窗口可见 + 有 _theme_needs_refresh 补刷链路（main_widget 系窗口），
+            # 标记待刷；切回 tab 时由 _on_tab_selected 检查标志后调
+            # _apply_runtime_ui_settings（见 main_widget.py:8064-8077 同机制）
+            # 自动补刷，不丢主题更新。
+            #
+            # 边界对齐（devil-advocate 审查确认）：
+            # - 不用朴素 isVisible——TabManager 整体隐藏（最小化到托盘）时子窗口
+            #   isVisible 全为 False，朴素跳过无补刷链路导致主题不更新；故要求
+            #   顶层可见才跳过，与 _execute_batched_theme_refresh 的 _tab_active_win
+            #   语义对齐（顶层不可见时仍全量刷新）。
+            # - 无 _theme_needs_refresh 属性的 target（PixelPetWidget 等）保守不跳过
+            #   ——避免隐藏期间主题更新永久丢失（无补刷链路时跳过=不可恢复）。
+            try:
+                if (
+                    hasattr(widget, "isVisible")
+                    and not widget.isVisible()
+                    and hasattr(widget, "_theme_needs_refresh")
+                ):
+                    top_visible = False
+                    try:
+                        top = widget.window()
+                        top_visible = bool(top.isVisible()) if hasattr(top, "isVisible") else False
+                    except Exception:
+                        top_visible = False
+                    if top_visible:
+                        widget._theme_needs_refresh = True
+                        # P5b：dispatch_refresh 语义恒为纯主题变化，记录 scope="theme"
+                        #（切回 tab 补刷时精确只刷颜色，避免漏刷/过度刷新）
+                        widget._theme_needs_refresh_scope = "theme"
+                        logger.debug("[ThemeManager] dispatch_refresh: hidden tab target marked _theme_needs_refresh")
+                        continue
+            except Exception:
+                pass  # isVisible 异常（如已销毁的 C++ 对象）→ 按可见处理走原刷新路径
             try:
                 if hasattr(widget, "refresh_theme"):
                     widget.refresh_theme()
+                    # 刷新后清除待刷标志（与 batched 路径 main_widget.py:8148 对齐，
+                    # 避免残留 True 导致下次切回重复全量刷新）
+                    if hasattr(widget, "_theme_needs_refresh"):
+                        try:
+                            widget._theme_needs_refresh = False
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.warning(f"[ThemeManager] dispatch_refresh error: {e}")
         self._refresh_targets = alive

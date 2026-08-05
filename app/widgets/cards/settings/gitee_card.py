@@ -786,8 +786,6 @@ class _GiteeMorePopup(QWidget):
         )
         layout.addWidget(self._pet_row)
 
-        # Tab 模式开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
-
         # ── 窗口置顶开关 ──
         self._topmost_row = self._make_switch_row(
             "📌  窗口置顶",

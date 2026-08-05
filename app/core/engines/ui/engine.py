@@ -340,9 +340,7 @@ class UIEngine(BaseEngine):
             session.system_prompt = ""
             if hasattr(session, "_system_prompt_agent"):
                 session._system_prompt_agent = ""
-            logger.debug(
-                f"[ChatEngine] Invalidated system_prompt cache for session {session.session_id}"
-            )
+            logger.debug(f"[ChatEngine] Invalidated system_prompt cache for session {session.session_id}")
         except Exception as e:
             logger.warning(f"[ChatEngine] Failed to invalidate system_prompt cache: {e}")
 
@@ -377,7 +375,9 @@ class UIEngine(BaseEngine):
         hook_event = kwargs.pop("_hook_event", None)
 
         # ---- 主线程准备 context（无 I/O，纯数据组装） ----
-        _window_workdir = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        _window_workdir = (
+            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        )
         if not _window_workdir:
             _window_workdir = os.getcwd()
 
@@ -533,10 +533,14 @@ class UIEngine(BaseEngine):
                             extra_context["project_name"] = self._backend.current_project or ""
                     except Exception:
                         pass
-                    system_prompt = am.get_agent_system_prompt(
-                        self._current_agent, is_subagent_call=False,
-                        extra_context=extra_context,
-                    ) or ""
+                    system_prompt = (
+                        am.get_agent_system_prompt(
+                            self._current_agent,
+                            is_subagent_call=False,
+                            extra_context=extra_context,
+                        )
+                        or ""
+                    )
                     # 缓存回 session，与 context_builder.build_messages 行为一致
                     if system_prompt and not getattr(session, "system_prompt", ""):
                         try:
@@ -561,6 +565,7 @@ class UIEngine(BaseEngine):
         # （后者做 deepcopy + MCP/LSP/subagent 动态注入，即使 5 秒 TTL 也常因
         # 工具执行间隔 >5 秒而失效浪费）。
         import time as _time
+
         _cache = self._tools_schema_cache
         _now = _time.monotonic()
         _CACHE_TTL = 30.0
@@ -580,9 +585,7 @@ class UIEngine(BaseEngine):
                 )
             # 更新缓存
             tools_tokens = (
-                int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model))
-                if available_tools
-                else 0
+                int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model)) if available_tools else 0
             )
             _cache["timestamp"] = _now
             _cache["tools"] = available_tools
@@ -597,11 +600,7 @@ class UIEngine(BaseEngine):
         est_total = sum(per_message_tokens(m, model) for m in approx_messages) + tools_tokens
 
         # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
-        system_tokens = (
-            per_message_tokens({"role": "system", "content": system_prompt}, model)
-            if system_prompt
-            else 0
-        )
+        system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model) if system_prompt else 0
 
         # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
@@ -782,7 +781,9 @@ class UIEngine(BaseEngine):
                         break
 
         # 多窗口隔离：使用当前窗口的工作目录
-        project_root = self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        project_root = (
+            self._backend.tool_executor.get_workdir() if self._backend and self._backend.tool_executor else None
+        )
         if not project_root:
             project_root = os.getcwd()
         context = {
@@ -804,6 +805,11 @@ class UIEngine(BaseEngine):
             "PostAssistantMessage",
             context=context,
             current_message=last_user_msg,
+            trigger_async=False,  # 🛡️ F1(W1-C1)：显式同步，恢复改动前语义。
+            # 异步路径（默认 trigger_async=True）会让 command hook 输出经
+            # on_hook_finished → _hook_message_queue → chat_worker 注入 LLM 对话，
+            # 而旧行为是同步执行、输出仅在返回值中（此处不消费）→ 静默丢弃。
+            # 若走异步，每条 assistant 消息后会多出一条注入消息污染上下文。
         )
 
     def _on_error(self, error: str):
@@ -835,6 +841,7 @@ class UIEngine(BaseEngine):
 # ============================================================
 # _PreSendWorker — 后台线程执行 hooks + build_messages
 # ============================================================
+
 
 class _PreSendWorker(QThread):
     """在后台线程执行消息预处理的 Worker。

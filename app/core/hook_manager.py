@@ -167,7 +167,9 @@ class Hook:
     add_output_to_context: bool = True
     skill_root: str = ""
     enabled: bool = True
-    timeout: int = 300
+    timeout: int = (
+        30  # 默认超时 30s（W1：收紧自 300s，避免新建会话同步执行 hook 卡死 UI；hooks.json 显式 timeout 仍可覆盖）
+    )
     retry: int = 0
     conditions: List[HookCondition] = field(default_factory=list)
 
@@ -220,7 +222,7 @@ class Hook:
             add_output_to_context=d.get("add_output_to_context", True),
             skill_root=d.get("skill_root", ""),
             enabled=d.get("enabled", True),
-            timeout=d.get("timeout", 300),
+            timeout=d.get("timeout", 30),
             retry=d.get("retry", 0),
             conditions=conditions,
             url=d.get("url"),
@@ -495,7 +497,7 @@ class HookWorker(QRunnable):
                 enc = preferred
             try:
                 result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
-            except (UnicodeDecodeError, LookupError):
+            except UnicodeDecodeError, LookupError:
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode
@@ -1324,7 +1326,9 @@ class HookManager:
         # Phase 3: 非 PROMPT hook 并行执行
         if parallel_indices:
             parallel_hooks = [all_hooks[i] for i in parallel_indices]
-            parallel_results = self._execute_hooks_parallel(parallel_hooks, context)
+            # 🛡️ W1：trigger_async=True（UI 线程 SessionStart）时，command/非注入型
+            # hook 改走后台异步执行 + 回调回补，主线程不被外部进程/网络阻塞。
+            parallel_results = self._execute_hooks_parallel(parallel_hooks, context, trigger_async=trigger_async)
             for orig_idx, result in zip(parallel_indices, parallel_results):
                 results[orig_idx] = result
 
@@ -1334,11 +1338,46 @@ class HookManager:
                 results[i] = HookExecutionResult(success=False, output="Unknown hook execution error")
         return results  # type: ignore[return-value]
 
-    def _execute_hooks_parallel(self, hooks: List[Hook], context: Dict[str, Any]) -> List[HookExecutionResult]:
+    def _collect_futures(
+        self,
+        future_to_idx: Dict[Future, int],
+        results: List[Optional[HookExecutionResult]],
+    ):
+        """等待 futures 完成并收集结果。
+
+        UI 线程：QEventLoop 保活驱动事件循环（界面不冻结）+ 5 分钟兜底超时。
+        其他线程：直接阻塞等待。
+        末尾统一兜底填充因异常未能赋值的结果 slot。
+        """
+        if _is_ui_thread():
+            self._wait_futures_ui_safe(future_to_idx, results)
+        else:
+            done, _ = futures_wait(future_to_idx)
+            for future in done:
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    logger.error(f"[HookManager] Parallel hook failed: {e}")
+                    results[idx] = HookExecutionResult(success=False, output=str(e))
+        # 兜底：填充因异常未能赋值的结果 slot（正常情况下不触发）
+        for i, r in enumerate(results):
+            if r is None:
+                results[i] = HookExecutionResult(success=False, output="Unknown parallel hook error")
+
+    def _execute_hooks_parallel(
+        self, hooks: List[Hook], context: Dict[str, Any], trigger_async: bool = False
+    ) -> List[HookExecutionResult]:
         """并行执行多个 Hook（非 PROMPT 类型），返回结果列表（顺序与输入一致）
 
         每个 hook 获得独立的 context 浅拷贝，避免并发读写竞争。
         内部通过 ThreadPoolExecutor 调度，所有 hook 完成后统一返回。
+
+        Args:
+            trigger_async: True 时（如 UI 线程触发 SessionStart 预对话事件），
+                command 类型及非注入型 http/python hook 改走后台异步执行
+                （HookWorker + finished 回调回补注入，主线程不等待）；
+                其余注入型 hook 仍线程池执行并等待。
 
         UI 线程安全：若当前在 UI 线程，等待期间会持续处理 Qt 事件循环，
         避免界面冻结。
@@ -1353,8 +1392,21 @@ class HookManager:
         if n == 0:
             return []
         if n == 1:
-            # 单条 hook 不走线程池，减少开销
-            return [self._execute_hook(hooks[0], dict(context), trigger_async=False)]
+            hook = hooks[0]
+            if trigger_async and self._can_async_execute(hook):
+                # 🛡️ W1：单条可后台 hook（如 SessionStart 的 command）：后台异步
+                # 执行，立即返回占位结果，输出由 finished 回调回补，主线程不阻塞。
+                return [self._execute_hook(hook, dict(context), trigger_async=True)]
+            if trigger_async:
+                # 请求异步但该 hook 不可后台（http/python 注入型）：线程池执行 +
+                # UI 线程事件循环保活等待（最长 hook.timeout，界面不冻结）。
+                executor = _get_parallel_executor()
+                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
+                results: List[Optional[HookExecutionResult]] = [None]
+                self._collect_futures({future: 0}, results)
+                return results  # type: ignore[return-value]
+            # 非异步请求：保持历史语义，在调用线程同步执行（减少线程调度开销）
+            return [self._execute_hook(hook, dict(context), trigger_async=False)]
 
         logger.debug(f"[HookManager] Executing {n} hooks in parallel")
         results: List[Optional[HookExecutionResult]] = [None] * n
@@ -1362,25 +1414,18 @@ class HookManager:
         executor = _get_parallel_executor()
         future_to_idx = {}
         for i, hook in enumerate(hooks):
-            # 浅拷贝 context：保证每个 hook 有自己的 context 副本，
-            # _execute_hook 中的 context["skill_root"] = ... 等写入不影响其他 hook
-            future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
-            future_to_idx[future] = i
+            if trigger_async and self._can_async_execute(hook):
+                # 🛡️ W1：可后台 hook（command / 非注入型）直接异步，立即返回占位
+                # 结果，输出由 finished 回调回补；其余 hook 线程池执行并等待。
+                results[i] = self._execute_hook(hook, dict(context), trigger_async=True)
+            else:
+                # 浅拷贝 context：保证每个 hook 有自己的 context 副本，
+                # _execute_hook 中的 context["skill_root"] = ... 等写入不影响其他 hook
+                future = executor.submit(self._execute_hook, hook, dict(context), trigger_async=False)
+                future_to_idx[future] = i
 
-        # 等待全部完成 —— UI 线程安全模式
-        if _is_ui_thread():
-            # ⚡ 在 UI 线程上使用 QEventLoop 驱动事件循环，不阻塞界面渲染
-            self._wait_futures_ui_safe(future_to_idx, results)
-        else:
-            # 工作线程：直接阻塞等待
-            done, _ = futures_wait(future_to_idx)
-            for future in done:
-                idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    logger.error(f"[HookManager] Parallel hook failed: {e}")
-                    results[idx] = HookExecutionResult(success=False, output=str(e))
+        if future_to_idx:
+            self._collect_futures(future_to_idx, results)
 
         # 兜底：填充因异常未能赋值的结果 slot
         for i, r in enumerate(results):
@@ -1435,6 +1480,19 @@ class HookManager:
                     results[idx] = HookExecutionResult(success=False, output=str(e))
             pending -= done
 
+    @staticmethod
+    def _can_async_execute(hook: "Hook") -> bool:
+        """hook 是否可后台异步执行
+
+        - PROMPT 必须同步（输出文本需立即注入 prompt）
+        - COMMAND 始终可异步（输出通过 finished 回调回补注入）
+        - HTTP/PYTHON 仅非消息注入时异步（add_output_to_context=False），
+          避免 PreToolUse 等场景异步丢 BLOCK 决策
+        """
+        return hook.type != HookType.PROMPT.value and (
+            hook.type == HookType.COMMAND.value or not hook.add_output_to_context
+        )
+
     def _execute_hook(self, hook: Hook, context: Dict[str, Any], trigger_async: bool = True) -> HookExecutionResult:
         """执行单个 Hook"""
         # cwd: 智能解析（显式设置 > 从命令脚本路径推导 > 默认项目根目录）
@@ -1458,14 +1516,7 @@ class HookManager:
         # - HTTP/PYTHON 仅在不需要注入消息列表时异步（add_output_to_context=False）
         #   ⚠️ PreToolUse 场景：异步 HTTP/PYTHON hook 若返回 BLOCK 决策，
         #     将不会被同步处理（罕见情况，需确保此类 hook 保留 add_output_to_context=True）
-        can_async = (
-            trigger_async
-            and hook.type != HookType.PROMPT.value
-            and (
-                hook.type == HookType.COMMAND.value  # COMMAND 始终异步
-                or not hook.add_output_to_context  # HTTP/PYTHON：仅非消息注入时异步
-            )
-        )
+        can_async = trigger_async and self._can_async_execute(hook)
         # 提取 status_message 供后续传播
         status_message = hook.statusMessage or ""
 
@@ -1475,7 +1526,20 @@ class HookManager:
 
             # 连接完成回调（携带 status_message）
             if hook.add_output_to_context and self._on_finished_callback:
-                signals.finished.connect(self._on_finished_callback)
+                # 🛡️ W1：异步 worker 完成回调加 __async__ 前缀，backend 据此区分
+                # 同步路径（调用方直接注入 session.messages）与异步路径（需回补注入），
+                # 避免预对话事件（SessionStart 等）输出丢失或 double inject。
+                # 🛡️ F1(W1-R2)：事件名追加触发时的 session_id（若有），
+                # backend 回补注入前校验当前会话一致，防止用户切换会话后
+                # 异步输出注入到错误 session。
+                _async_sid = context.get("session_id", "") or ""
+                if _async_sid:
+                    async_event = f"__async__:{context.get('event_name', '')}:{_async_sid}"
+                else:
+                    async_event = f"__async__:{context.get('event_name', '')}"
+                signals.finished.connect(
+                    lambda _ev, _out, _ok, _st, _ae=async_event: self._on_finished_callback(_ae, _out, _ok, _st)
+                )
 
             # 连接状态回调（异步结束时触发 is_start=False）
             if status_message and self._on_status_callback:

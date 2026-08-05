@@ -95,5 +95,42 @@ def test_event_filter_enter_starts_timer(qtbot):
     assert f._timer.isActive(), "Enter 事件应启动 tooltip 计时"
 
 
+def test_event_filter_hide_to_parent_hides_tooltip(qtbot):
+    """B2 回归：目标随父容器隐藏（HideToParent 事件）→ tooltip 隐藏
+
+    团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
+    隐藏，Qt 发 HideToParent（27）而非 Hide（18）。旧分支只捕
+    Hide/Leave/HoverLeave → tooltip 不隐藏 → 屏幕残留。
+    """
+    from unittest.mock import patch as _patch
+
+    from PyQt5.QtCore import QEvent
+    from PyQt5.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
+
+    from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
+
+    # 真实场景：按钮放入父容器（有 parent 时隐藏才发 HideToParent）
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    btn = QPushButton("btn")
+    layout.addWidget(btn)
+    qtbot.addWidget(container)
+    install_hover_tooltip(btn, "关闭团队")
+    f = _filters.get(id(btn))
+    assert f is not None, "install_hover_tooltip 应注册 filter"
+
+    # 模拟 tooltip 已显示
+    with (
+        _patch.object(f, "_hide") as m_hide,
+        _patch.object(f, "_timer") as m_timer,
+    ):
+        # 父容器隐藏 → 子按钮收到 HideToParent 事件
+        container.hide()
+        # 事件已同步派发；直接补发一次验证 filter 分支（防御容器时序差异）
+        QApplication.sendEvent(btn, QEvent(QEvent.HideToParent))
+    m_hide.assert_called(), "HideToParent 事件应触发 _hide"
+    m_timer.stop.assert_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -39,10 +39,22 @@ _MSG_CAST = None
 if _IS_WINDOWS:
     try:
         import ctypes as _ctypes
+        from ctypes import wintypes as _wintypes
 
-        from app.tool_popup import _WINDOWS_MSG as _WMSG
+        # Windows 原生消息结构（nativeEvent 热路径用）。
+        # 原定义于 app/tool_popup.py（随 ToolPopupDialog 一并下线），
+        # 迁移到本模块避免 tool_popup 模块残留依赖。
+        class _WINDOWS_MSG(_ctypes.Structure):
+            _fields_ = [
+                ("hwnd", _wintypes.HWND),
+                ("message", _wintypes.UINT),
+                ("wParam", _wintypes.WPARAM),
+                ("lParam", _wintypes.LPARAM),
+                ("time", _wintypes.DWORD),
+                ("pt", _wintypes.POINT),
+            ]
 
-        _MSG_STRUCT_PTR = _ctypes.POINTER(_WMSG)
+        _MSG_STRUCT_PTR = _ctypes.POINTER(_WINDOWS_MSG)
 
         def _MSG_CAST(addr, _cast=_ctypes.cast, _ptr=_MSG_STRUCT_PTR):  # noqa: E731
             return _cast(addr, _ptr)
@@ -158,7 +170,6 @@ class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
-    _last_toggle_time: float = 0.0  # 上次模式切换时间戳（time.monotonic），防重入
     # 标题栏拖拽由 Windows 原生管理（HTCAPTION + WS_CAPTION），Python 不干预
     # Windows 原生移动/缩放模态循环消息：拖拽起止的权威信号，
     # 用于替代 moveEvent + 防抖定时器的"猜测式"拖拽检测
@@ -186,8 +197,6 @@ class TabManagerWindow(QWidget):
         TabManagerWindow._instance = self
 
         self._windows: List = []  # List[OpenAIChatToolWindow]
-        self._cached_dialogs: Dict[int, Any] = {}  # id → ToolPopupDialog
-        self._is_transitioning: bool = False
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
         self._geo_save_timer.setSingleShot(True)
@@ -1072,8 +1081,14 @@ class TabManagerWindow(QWidget):
                     win._theme_needs_refresh = False
                     from app.main_widget import OpenAIChatToolWindow
 
-                    # 该窗口未参与 batched refresh，scope 用 None 做全量刷新
-                    win._apply_runtime_ui_settings(scope=None, _skip_global=True)
+                    # P5b（V2 方案 A）：按置位时记录的 scope 精确补刷——
+                    # theme→只刷颜色、font_family→只刷字体、font_size→只刷字号、
+                    # None→全量刷新。scope 取自 _theme_needs_refresh_scope
+                    # （batched 路径记录 final_scope，dispatch_refresh 路径记录
+                    # "theme"），补刷后清空避免残留。
+                    scope = getattr(win, "_theme_needs_refresh_scope", None) or None
+                    win._theme_needs_refresh_scope = None
+                    win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
                 except Exception:
                     pass
 
@@ -1088,6 +1103,17 @@ class TabManagerWindow(QWidget):
         1) 停 watcher 2) tm.leave_team 3) restore_user 工具权限
         4) 清 _team_* 标记 5) 刷新团队 UI 6) 同步活跃窗口
         7) 还原默认智能体身份
+
+        🛡️ W3a（W2 联调审查问题 4）：降级路径（窗口无 _handle_team_leave）同样
+        先停 watcher 再 leave_team（见循环内 else 分支），与主路径行为对齐，
+        消除与 U3/F3 后台 rmtree 的竞态窗口。
+
+        🛡️ U2 批量解散优化：循环内改走 _handle_team_leave 轻量路径
+        （batch_disband=True，跳过每窗全局同步 + 欢迎卡片 QWebEngineView 重建），
+        循环结束后统一执行 1 次 _sync_active_windows_to_team_manager——
+        全局同步由原 2n 次降为 1 次；另以 begin_batch_remove/end_batch_remove
+        包裹（U1 契约，未合入时 hasattr 降级）避免逐窗 O(N²) 布局重建。
+        解散单个窗口（非本方法场景）行为与原先完全一致。
 
         索引处理：先收集匹配窗口的索引列表（降序排序），倒序遍历避免 pop 后索引漂移。
 
@@ -1109,30 +1135,109 @@ class TabManagerWindow(QWidget):
         if not matching_indices:
             return
 
-        # 倒序遍历：先关高索引再关低索引，避免 pop 后索引漂移
-        for idx in sorted(matching_indices, reverse=True):
-            if idx >= len(self._windows):
-                continue
-            window = self._windows[idx]
-            # 调用窗口的 _handle_team_leave（完整 7 步副作用，silent=True 不弹 InfoBar）；
-            # 不存在时（老窗口/非主窗口）走最小可降级路径：仅调 tm.leave_team
-            try:
-                if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
-                    window._handle_team_leave(silent=True)
-                else:
-                    from app.core.team_manager import TeamManager
+        # 🛡️ U2 批量解散：调用 U1 的批量删除接口（契约：
+        # begin_batch_remove/end_batch_remove 成对包裹，期间 remove_tab 跳过
+        # _rebuild_team_layout，end 时统一重建一次，避免逐窗 O(N²) 布局重建）。
+        # U1 尚未合入时 hasattr 守卫自动降级为原逐次重建行为，联调时统一验证。
+        try:
+            if hasattr(self._tab_panel, "begin_batch_remove"):
+                self._tab_panel.begin_batch_remove()
+        except Exception:
+            pass
 
-                    wid = getattr(window, "_window_id", "")
-                    if wid:
-                        TeamManager.get_instance().leave_team(wid)
-            except Exception as e:
-                logger.error(f"[TabManager] 退出团队失败: {e}")
+        try:
+            # 倒序遍历：先关高索引再关低索引，避免 pop 后索引漂移
+            for idx in sorted(matching_indices, reverse=True):
+                if idx >= len(self._windows):
+                    continue
+                window = self._windows[idx]
+                # 调用窗口的 _handle_team_leave（silent=True 不弹 InfoBar；
+                # batch_disband=True 走轻量路径：跳过每窗全局同步与欢迎卡片
+                # 重建，全局同步由循环结束后统一执行 1 次）；
+                # 不存在时（老窗口/非主窗口）走最小可降级路径：仅调 tm.leave_team
+                try:
+                    if hasattr(window, "_handle_team_leave") and callable(window._handle_team_leave):
+                        window._handle_team_leave(silent=True, batch_disband=True)
+                    else:
+                        from app.core.team_manager import TeamManager
 
-            # 关闭窗口（统一走 _close_window_at）
+                        # 🛡️ W3a（W2 联调审查问题 4）：降级路径（无 _handle_team_leave
+                        # 的老窗口/非主窗口）在 leave_team 前必须先停 team watcher——
+                        # 与主路径 _handle_team_leave（main_widget.py:4089 先
+                        # _stop_team_watcher）行为对齐，消除与 U3/F3 后台 rmtree 的
+                        # 竞态窗口（watcher 仍监视邮箱目录时被 rmtree 删除会触发
+                        # FindNextChangeNotification 报错）。hasattr 守卫与现有
+                        # 风格一致（main_widget.py:7486），无该方法时保持原行为。
+                        stop_watcher = getattr(window, "_stop_team_watcher", None)
+                        if callable(stop_watcher):
+                            try:
+                                stop_watcher()
+                            except Exception:
+                                pass
+                        wid = getattr(window, "_window_id", "")
+                        if wid:
+                            # 🛡️ W3b-2：批量解散循环内挂起落盘（save_now=False），
+                            # 由循环后 flush_pending_saves 统一写盘 1 次——
+                            # 与主路径 _handle_team_leave 的批量语义对齐。
+                            TeamManager.get_instance().leave_team(wid, save_now=False)
+                except Exception as e:
+                    logger.error(f"[TabManager] 退出团队失败: {e}")
+
+                # 关闭窗口（统一走 _close_window_at）
+                try:
+                    self._close_window_at(idx)
+                except Exception as e:
+                    logger.error(f"[TabManager] 关闭团队窗口失败: {e}")
+        finally:
             try:
-                self._close_window_at(idx)
-            except Exception as e:
-                logger.error(f"[TabManager] 关闭团队窗口失败: {e}")
+                if hasattr(self._tab_panel, "end_batch_remove"):
+                    self._tab_panel.end_batch_remove()
+            except Exception:
+                pass
+
+        # 🛡️ W3b-2：批量解散循环后统一落盘挂起的团队数据（1 次写盘替代 N 次）。
+        # 主路径 _handle_team_leave / 降级路径 leave_team 在批量模式下均传
+        # save_now=False 挂起（team_manager._save_team_data 仅标记 pending），
+        # 此处 flush 一次原子写盘。flush 是优化项，失败静默不破坏解散流程。
+        try:
+            from app.core.team_manager import TeamManager
+
+            TeamManager.get_instance().flush_pending_saves()
+        except Exception:
+            pass
+
+        # 🛡️ A1-4（P5b 收尾）+ F4 异步化：批量解散循环后统一处理 DeferredDelete
+        # 事件，加速窗口对象树回收（_close_window_at 中对窗口调用的 deleteLater
+        # 在事件循环空闲时才销毁）。
+        # F4：同步排空会把整批窗口树析构拉回主线程阻塞解散路径（perf-analyzer
+        # A2 实测 ~0.23s/3窗，占解散耗时 31%），故改为 QTimer.singleShot(0)
+        # 异步后置——下个事件循环周期执行排空（≈立即，但不在当前调用栈内
+        # 阻塞），保留"加速回收"意图，消除主路径同步等待析构。QTimer 已在
+        # 文件头部导入，此处复用。lambda 经 try/except 包裹，不引用已销毁对象。
+        try:
+            from PyQt5.QtCore import QCoreApplication, QEvent
+
+            QTimer.singleShot(
+                0, lambda: QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            )
+        except Exception:
+            pass
+
+        # 🛡️ U2 批量解散收尾：统一全局同步 1 次（替代原每成员 2 次：
+        # _handle_team_leave 第 4 步 1 次 + 各窗口 closeEvent 1 次）。
+        # 已关闭窗口已从 _instances 移除且 _is_destroyed=True，取任一存活
+        # 窗口实例执行即可覆盖全量活跃集；无存活窗口时无需同步。
+        try:
+            from app.main_widget import OpenAIChatToolWindow
+
+            for inst in list(OpenAIChatToolWindow._instances):
+                if not getattr(inst, "_is_destroyed", False) and callable(
+                    getattr(inst, "_sync_active_windows_to_team_manager", None)
+                ):
+                    inst._sync_active_windows_to_team_manager()
+                    break
+        except Exception as e:
+            logger.error(f"[TabManager] 解散后同步活跃窗口失败: {e}")
 
     def _on_team_add_member_requested(self, team_id: str):
         """团队框"快速新建成员"按钮回调：为当前团队新建成员会话（可重复角色，F14）
@@ -1285,339 +1390,6 @@ class TabManagerWindow(QWidget):
 
         return FakePage()
 
-    # ── 模式切换 ──
-
-    @classmethod
-    def toggle_mode(cls, enable: bool):
-        """切换 Tab 管理器模式的启用/关闭
-
-        防重入守卫：1 秒内重复调用直接忽略，防止信号循环导致
-        _enable_mode/_disable_mode 被反复触发，造成卡顿和日志洪泛。
-        """
-        import time as _time
-
-        now = _time.monotonic()
-        if now - cls._last_toggle_time < 1.0:
-            logger.warning(
-                f"[TabMode] 防重入守卫触发，忽略 toggle_mode({enable})，"
-                f"距上次切换仅 {(now - cls._last_toggle_time) * 1000:.0f}ms"
-            )
-            return
-
-        # 模式状态检查：如果已经在目标模式，跳过（不更新 _last_toggle_time）
-        inst = cls.get_instance()
-        if enable:
-            if inst is not None and inst.isVisible():
-                return
-        else:
-            if inst is None or not inst.isVisible():
-                return
-
-        # 通过所有检查，更新时间戳并执行切换
-        cls._last_toggle_time = now
-
-        from app.tray_manager import TrayManager
-
-        tm = TrayManager.get_instance()
-
-        if enable:
-            cls._enable_mode(tm)
-        else:
-            cls._disable_mode(tm)
-
-    @classmethod
-    def _collect_windows_to_migrate(cls, tray_manager):
-        """收集需要迁入 Tab 管理器的窗口（OpenAIChatToolWindow 实例列表）
-
-        优先从 tray_manager._windows（ToolPopupDialog）中提取 tool_instance，
-        兜底直接从 OpenAIChatToolWindow._instances 收集——防止因注册时序或异常
-        导致 tray_manager._windows 为空时遗漏窗口。
-        """
-        # 方法一：从 TrayManager 已注册的 ToolPopupDialog 提取
-        from app.main_widget import OpenAIChatToolWindow as _OCW
-
-        seen_ids = set()
-        collected = []
-
-        for dialog in list(tray_manager._windows):
-            try:
-                if _sip.isdeleted(dialog):
-                    tray_manager.unregister_window(dialog)
-                    continue
-                tool_instance = getattr(dialog, "tool_instance", None)
-                if tool_instance is None or _sip.isdeleted(tool_instance):
-                    tray_manager.unregister_window(dialog)
-                    continue
-                wid = getattr(tool_instance, "_window_id", id(tool_instance))
-                seen_ids.add(wid)
-                collected.append((dialog, tool_instance))
-            except Exception:
-                continue
-
-        # 方法二（兜底）：直接从 _instances 收集未被上层覆盖的窗口
-        for win in getattr(_OCW, "_instances", []):
-            try:
-                if _sip.isdeleted(win):
-                    continue
-                if getattr(win, "_is_destroyed", False):
-                    continue
-                wid = getattr(win, "_window_id", id(win))
-                if wid in seen_ids:
-                    continue
-                # 这个窗口不在 TrayManager 注册列表中，直接作为 tool_instance 迁入
-                logger.warning(f"[TabMode] 兜底收集未注册窗口: {win}, window_id={wid}")
-                collected.append((None, win))
-                seen_ids.add(wid)
-            except Exception:
-                continue
-
-        return collected
-
-    @classmethod
-    def _force_close_system_cards(cls, tool_instance):
-        """强制关闭指定窗口的所有系统卡片
-
-        模式切换（多窗口→Tab）时，window 内可能开着设置/历史等系统卡片，
-        其 CardManager 状态和 _system_cards_open 标记会残留，导致：
-        - 输入区域持续隐藏（_on_system_card_closed 未触发）
-        - 卡片无法正常交互关闭
-        """
-        try:
-            from app.widgets.cards.card_manager import CardManager as _CM
-
-            window_id = getattr(tool_instance, "_window_id", None)
-            if not window_id:
-                return
-
-            mgr = _CM.get_instance()
-            # 系统卡片 ID 列表（与 OpenAIChatToolWindow._BASE_SYSTEM_CARD_IDS 同步）
-            system_card_ids = (
-                "model_selector",
-                "model_config",
-                "memory",
-                "history",
-                "auto_loop_config",
-                "auto_loop_running",
-                "settings",
-                "provider_edit",
-                "mcp_edit",
-                "hook_edit",
-                "project_selector",
-                "tool_control",
-                "share",
-                "history_questions",
-            )
-            for cid in system_card_ids:
-                if mgr.is_card_visible(cid, window_id):
-                    logger.info(f"[TabMode] 强制关闭系统卡片 [{cid}] window_id={window_id}")
-                    mgr.hide_card(cid, window_id)
-        except Exception as e:
-            logger.warning(f"[TabMode] 强制关闭系统卡片时出错: {e}")
-
-    @classmethod
-    def _enable_mode(cls, tray_manager):
-        """启用 Tab 模式：将所有独立窗口迁入"""
-        tab_mgr = cls.get_instance()
-        if tab_mgr is None:
-            tab_mgr = cls.create_instance()
-
-        if tab_mgr._is_transitioning:
-            return
-        tab_mgr._is_transitioning = True
-
-        # ★ 确保 TrayManager 引用已注册
-        # _disable_mode 会清空 tray_manager._tab_manager_window，而实例可能
-        # 已存在（走 get_instance 不走 __init__），必须在此显式重新注册。
-        tray_manager._tab_manager_window = tab_mgr
-
-        # 清理旧的 Tab 面板和内容区（防止上次 Tab 模式残留）
-        for i in range(tab_mgr._tab_panel.count - 1, -1, -1):
-            tab_mgr._tab_panel.remove_tab(i)
-        while tab_mgr._content_area.count() > 1:
-            w = tab_mgr._content_area.widget(1)
-            tab_mgr._content_area.removeWidget(w)
-        tab_mgr._windows.clear()
-        tab_mgr._window_to_index.clear()
-        tab_mgr._cached_dialogs.clear()
-        tab_mgr._content_area.widget(0).show()  # 显示空状态，迁移后隐藏
-
-        # 收集待迁入窗口
-        pending = cls._collect_windows_to_migrate(tray_manager)
-        logger.info(f"[TabMode] _enable_mode: 待迁入窗口数={len(pending)}")
-        for dialog, tool in pending:
-            logger.info(f"[TabMode]    dialog={dialog}, tool_instance={tool}")
-
-        try:
-            migrated_windows = []
-            for dialog, tool_instance in pending:
-                try:
-                    # 如果有 dialog（ToolPopupDialog 模式），正确解绑
-                    if dialog is not None and not _sip.isdeleted(dialog):
-                        # 从 dialog 布局中移除 tool_instance（实际可能无效，因
-                        # tool_instance 在 ToolPopupDialog 的 _fade_container 内层，
-                        # 但 setParent 会处理真正的解绑）
-                        old_layout = dialog.layout()
-                        if old_layout:
-                            old_layout.removeWidget(tool_instance)
-
-                        # 隐藏 dialog（不 close/delete，避免触发 tool_instance.closeEvent）
-                        dialog.hide()
-                        tray_manager.unregister_window(dialog)
-                    else:
-                        # 无 dialog（兜底直采模式）：tool_instance 直接迁入
-                        pass
-
-                    # 迁移到 Tab 管理器
-                    tool_instance.setParent(tab_mgr)
-                    # 使用 add_window 统一处理（自动添加项、连接信号）
-                    tab_mgr.add_window(tool_instance)
-
-                    # ★ 关键修复：显式恢复窗口可见性
-                    # dialog.hide() 会将 tool_instance 标记为隐藏(setParent 时 Qt
-                    # 不自动恢复），而 QStackedWidget.setCurrentWidget 的内部 show()
-                    # 在父级 QStackedWidget 未显示时可能无法正确设置可见状态。
-                    # 这里显式 show() 确保标记正确，QStackedWidget 显示后会自动管理。
-                    tool_instance.show()
-
-                    migrated_windows.append(tool_instance)
-
-                    # ★ 模式切换后强制关闭该窗口的所有系统卡片
-                    # 多窗口模式下可能打开了设置/历史/记忆等系统卡片，这些卡片
-                    # 的打开标记（CardManager.visible_cards + _system_cards_open）
-                    # 在迁移后仍处于"已打开"状态 → 输入区域被隐藏且无法恢复。
-                    # 这里强制关闭所有系统卡片，让卡片管理器触发 _on_system_card_closed
-                    # 回调，从而恢复输入区域 + 清空系统卡片状态。
-                    cls._force_close_system_cards(tool_instance)
-
-                except Exception as e:
-                    logger.error(f"[TabMode] 迁移窗口失败: {e}")
-                    import traceback
-
-                    logger.error(traceback.format_exc())
-
-            # 更新 UI 状态
-            if migrated_windows:
-                tab_mgr._content_area.widget(0).hide()
-                tab_mgr._tab_panel.set_active_index(0)
-            else:
-                tab_mgr._content_area.widget(0).show()
-
-            # ★ 迁移后重新注册命令快捷键：窗口从 ToolPopupDialog 迁移到
-            # TabManagerWindow 后，原有的 QShortcut 实例因其 parent widget
-            # 的 window() 从 ToolPopupDialog 变为 TabManagerWindow，Qt
-            # 内部 shortcut 上下文匹配可能失效（parentWidget()->window()
-            # 变化后需重新注册才能保证 isActiveWindow() 判断正确）。
-            # 对每个已迁入窗口重新调用 _register_command_shortcuts()，
-            # 确保 QShortcut 与正确的窗口上下文绑定。
-            for w in migrated_windows:
-                try:
-                    w._register_command_shortcuts()
-                except Exception as exc:
-                    logger.warning(f"[TabMode] 重新注册快捷键失败: {exc}")
-
-            # 更新 Tray 菜单
-            tray_manager._rebuild_context_menu()
-
-            # Tab 模式下使用共享 Launcher（单例）
-            tab_mgr._show_shared_launcher()
-
-            # 显示 TabManagerWindow（位置由 showEvent 自动恢复）
-            tab_mgr.show()
-            tab_mgr.activateWindow()
-            tab_mgr.raise_()
-
-            # 应用窗口置顶配置
-            _apply_window_topmost(tab_mgr)
-
-            logger.info(f"[TabMode] 已启用，迁入 {len(migrated_windows)} 个窗口")
-
-        finally:
-            tab_mgr._is_transitioning = False
-
-    @classmethod
-    def _disable_mode(cls, tray_manager):
-        """禁用 Tab 模式：将所有窗口迁出为独立窗口"""
-        from app.tool_popup import ToolPopupDialog
-
-        tab_mgr = cls.get_instance()
-        if tab_mgr is None:
-            return
-
-        if tab_mgr._is_transitioning:
-            return
-        tab_mgr._is_transitioning = True
-
-        try:
-            # 先清空旧状态，再重新迁入所有窗口（add_window 会重建 _window_to_index）
-            windows = list(tab_mgr._windows)
-            tab_mgr._windows.clear()
-            tab_mgr._window_to_index.clear()
-
-            for tool_instance in windows:
-                try:
-                    # 从 content_area 移除
-                    tab_mgr._content_area.removeWidget(tool_instance)
-
-                    # 确保标题栏尚存（_enable_mode 时可能被销毁），否则重新创建
-                    title_bar = tool_instance.get_title_bar()
-                    if title_bar is None or _sip.isdeleted(title_bar):
-                        # 强制重建：先置 None 再调用 _init_title_bar
-                        tool_instance._title_bar = None
-                        tool_instance._init_title_bar()
-                        title_bar = tool_instance.get_title_bar()
-
-                    # 始终创建全新的 ToolPopupDialog（避免复用已关闭 dialog 的布局问题）
-                    dialog = ToolPopupDialog(tool_instance, None)
-
-                    # 确保标题栏可见
-                    if title_bar and not _sip.isdeleted(title_bar):
-                        title_bar.show()
-
-                    # 恢复窗口位置：在屏幕中央显示
-                    screen = QApplication.primaryScreen()
-                    if screen:
-                        rect = screen.availableGeometry()
-                        dialog.setGeometry(
-                            rect.x() + 50,
-                            rect.y() + 50,
-                            min(600, rect.width() - 100),
-                            min(900, rect.height() - 100),
-                        )
-
-                    # 显示 dialog 并注册到 TrayManager
-                    dialog.show()
-                    dialog.activateWindow()
-                    # 应用窗口置顶配置
-                    _apply_window_topmost(dialog)
-                    tray_manager.register_window(dialog)
-
-                    # ★ 迁出后重新注册命令快捷键：窗口从 TabManagerWindow
-                    # 移回独立 ToolPopupDialog，parent widget 的 window()
-                    # 再次变化，需重新注册 QShortcut 以匹配新的窗口上下文。
-                    try:
-                        tool_instance._register_command_shortcuts()
-                    except Exception as exc:
-                        logger.warning(f"[TabMode] 迁出后重新注册快捷键失败: {exc}")
-
-                except Exception as e:
-                    logger.error(f"[TabMode] 恢复窗口失败: {e}")
-                    import traceback
-
-                    logger.error(traceback.format_exc())
-
-            # 清空缓存
-            tab_mgr._cached_dialogs.clear()
-            tab_mgr.hide()
-
-            # 更新 Tray 菜单
-            tray_manager._tab_manager_window = None
-            tray_manager._rebuild_context_menu()
-
-            logger.info(f"[TabMode] 已禁用，{len(windows)} 个窗口恢复为独立模式")
-
-        finally:
-            tab_mgr._is_transitioning = False
-
     # ── 几何持久化（简化版）──
 
     def _save_geometry(self):
@@ -1628,9 +1400,9 @@ class TabManagerWindow(QWidget):
         → 偶发掉帧。循环结束后由 _on_window_drag_end / EXITSIZEMOVE
         分支统一补一次。
         """
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         self._geo_save_timer.start()  # 连续调用时不断重置计时器
 
@@ -1749,10 +1521,10 @@ class TabManagerWindow(QWidget):
                         # 本次模态循环是"缩放"：布局/绘制恢复交给
                         # _on_resize_finished（防抖 100ms 后触发），
                         # 此处仅复位全局拖拽标志，避免双重恢复冲突
-                        from app.tool_popup import ToolPopupDialog
+                        from app.utils.window_drag_state import any_window_dragging
                         from app.utils.drag_stall_profiler import drag_profiler
 
-                        ToolPopupDialog._any_window_dragging = False
+                        any_window_dragging = False
                         # 循环期间几何保存被守卫跳过，此处补一次防抖保存
                         self._save_geometry()
                         drag_profiler.stop_deferred()
@@ -1767,7 +1539,8 @@ class TabManagerWindow(QWidget):
     def _on_window_drag_start(self):
         """窗口拖拽开始：暂停动画定时器 + 通知各组件进入节流模式
 
-        利用 ToolPopupDialog._any_window_dragging 全局标志（多窗口模式原有），
+        利用 any_window_dragging 全局标志（原 ToolPopupDialog._any_window_dragging
+        类变量迁移而来，见 app/utils/window_drag_state.py），
         使 Tab 模式下的嵌入窗口（main_widget/bottom_input_area/card_container）
         跳过耗时的布局重算和高度调整，与多窗口模式享受同等的拖拽性能优化。
 
@@ -1777,10 +1550,10 @@ class TabManagerWindow(QWidget):
         这正是"松手卡一下"的根因。缩放路径仍由 resizeEvent 的 blocking
         机制独立管理（缩放确实需要冻结绘制）。
         """
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
         from app.utils.drag_stall_profiler import drag_profiler
 
-        ToolPopupDialog._any_window_dragging = True
+        any_window_dragging = True
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)  # 暂停动画定时器
         # 诊断：拖拽期间抓取主线程阻塞现场（定位偶发卡顿元凶）
@@ -1791,10 +1564,10 @@ class TabManagerWindow(QWidget):
 
         无 setUpdatesEnabled(True) → 无积压重绘炸弹，松手零代价。
         """
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
         from app.utils.drag_stall_profiler import drag_profiler
 
-        ToolPopupDialog._any_window_dragging = False
+        any_window_dragging = False
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)  # 如有流式则恢复动画
         # 拖拽期间 moveEvent 跳过了几何保存防抖，此处统一补一次（200ms 后落盘）
@@ -1963,5 +1736,4 @@ class TabManagerWindow(QWidget):
                 pass
         self._windows.clear()
         self._window_to_index.clear()
-        self._cached_dialogs.clear()
         self.close()

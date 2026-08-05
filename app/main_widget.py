@@ -6,6 +6,7 @@ import ctypes
 import gc
 import heapq
 import os
+import psutil
 import re
 import shutil
 import subprocess
@@ -50,6 +51,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     FluentIcon,
+    IconWidget,
     InfoBadge,
     InfoBadgePosition,
     InfoBar,
@@ -82,7 +84,6 @@ from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
 from app.core.tool_permission_controller import ToolPermissionController
-from app.tool_popup import ToolWindow
 
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
@@ -676,6 +677,285 @@ def _abort_team_window(win) -> None:
         pass
 
 
+class ToolWindowTitleBar(QWidget):
+    """窗口标题栏（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
+
+    popupRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._custom_buttons = []
+        self._popup_mode_buttons = []
+        self._is_compact = False
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setFixedHeight(28)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 0, 2, 0)
+        layout.setSpacing(4)
+
+        self._icon_widget = IconWidget(self)
+        self._icon_widget.setFixedSize(16, 16)
+
+        self._title_label = QLabel(self)
+        self._title_label.setObjectName("titleLabel")
+
+        layout.addWidget(self._icon_widget)
+        layout.addWidget(self._title_label)
+        layout.addStretch()
+
+        self._action_container = QWidget(self)
+        self._action_container.setObjectName("actionContainer")
+        self._action_layout = QHBoxLayout(self._action_container)
+        self._action_layout.setContentsMargins(0, 0, 0, 0)
+        self._action_layout.setSpacing(3)
+        layout.addWidget(self._action_container)
+
+        # 内存显示标签
+        self._memory_label = QLabel(self)
+        self._memory_label.setObjectName("memoryLabel")
+        self._memory_label.setFixedHeight(20)
+        from app.utils.design_tokens import Colors
+
+        self._memory_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
+            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
+        )
+        self._memory_label.hide()  # 默认隐藏，子类可以控制显示
+        layout.insertWidget(layout.indexOf(self._action_container) - 1, self._memory_label)
+
+        # 内存刷新定时器
+        self._memory_timer = QTimer(self)
+        self._memory_timer.setInterval(5000)  # 5秒刷新
+        self._memory_timer.timeout.connect(self._update_memory_label)
+        self._memory_refreshing = False
+
+        # 设置按钮已移除（移到主窗口内）
+
+        self._min_btn = TransparentToolButton(get_icon("最小化"), self)
+        self._min_btn.setFixedSize(28, 28)
+        self._min_btn.setToolTip("最小化")
+
+        self._popup_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._popup_btn.setFixedSize(28, 28)
+        self._popup_btn.setToolTip("关闭")
+        self._popup_btn.clicked.connect(self._on_popup_clicked)
+
+        layout.addWidget(self._min_btn)
+        layout.addWidget(self._popup_btn)
+
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        # 使用主题颜色
+        from app.utils.design_tokens import Colors
+
+        Colors.refresh()
+        title_color = Colors.TEXT_PRIMARY
+        btn_hover = Colors.HOVER_BG
+        border_color = Colors.BORDER
+
+        self.setStyleSheet(f"""
+            ToolWindowTitleBar {{
+                background-color: {Colors.CONTENT_BG};
+                border-bottom: 1px solid {border_color};
+            }}
+            #titleLabel {{
+                color: {title_color};
+                font-size: {scale_font_size(13)}px;
+                font-weight: bold;
+                font-family: "{font_name}";
+                padding: 0 3px;
+            }}
+            #actionContainer {{
+                background-color: transparent;
+            }}
+            ToolButton {{
+                background-color: transparent;
+                border: none;
+                border-radius: 3px;
+                padding: 1px;
+            }}
+            ToolButton:hover {{
+                background-color: {btn_hover};
+            }}
+            ToolButton:pressed {{
+                background-color: {btn_hover};
+            }}
+        """)
+
+    def set_icon(self, icon):
+        self._icon_widget.setIcon(icon)
+
+    def set_title(self, title):
+        self._title_label.setText(title)
+
+    def set_title_color(self, color: str):
+        """设置标题文字颜色（覆盖默认的 TEXT_PRIMARY）
+
+        传入空字符串 '' 可清除行内颜色样式，恢复默认主题色。
+        """
+        if color:
+            self._title_label.setStyleSheet(f"color: {color};")
+        else:
+            self._title_label.setStyleSheet("")
+
+    def add_button(self, widget, stretch=0):
+        self._action_layout.insertWidget(self._action_layout.count() - 2, widget, stretch=stretch)
+        self._custom_buttons.append(widget)
+
+    def insert_button(self, index, widget, stretch=0):
+        self._action_layout.insertWidget(index, widget, stretch=stretch)
+        self._custom_buttons.append(widget)
+
+    def remove_button(self, widget):
+        self._action_layout.removeWidget(widget)
+        if widget in self._custom_buttons:
+            self._custom_buttons.remove(widget)
+        widget.setParent(None)
+
+    def _on_popup_clicked(self):
+        self.popupRequested.emit()
+
+    def refresh_style(self):
+        """主题/字体变更时刷新标题栏样式"""
+        Colors.refresh()
+        # 重新读取字体
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        title_color = Colors.TEXT_PRIMARY
+        btn_hover = Colors.HOVER_BG
+        border_color = Colors.BORDER
+
+        # 整体标题栏样式
+        self.setStyleSheet(f"""
+            ToolWindowTitleBar {{
+                background-color: {Colors.CONTENT_BG};
+                border-bottom: 1px solid {border_color};
+            }}
+            #titleLabel {{
+                color: {title_color};
+                font-size: {scale_font_size(13)}px;
+                font-weight: bold;
+                font-family: "{font_name}";
+                padding: 0 3px;
+            }}
+            #actionContainer {{
+                background-color: transparent;
+            }}
+            ToolButton {{
+                background-color: transparent;
+                border: none;
+                border-radius: 3px;
+                padding: 1px;
+            }}
+            ToolButton:hover {{
+                background-color: {btn_hover};
+            }}
+            ToolButton:pressed {{
+                background-color: {btn_hover};
+            }}
+        """)
+
+        # 内存标签样式（单独设置，因为其 objectName 与整体样式不冲突）
+        self._memory_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
+            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
+        )
+
+    def show_memory_label(self):
+        """显示内存标签并开始刷新"""
+        self._memory_label.show()
+        # 每次显示都重新启动定时器，确保新窗口独立刷新
+        self._memory_timer.stop()
+        self._memory_refreshing = True
+        self._update_memory_label()
+        self._memory_timer.start()
+
+    def _update_memory_label(self):
+        """更新内存显示"""
+        try:
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            mem_mb = mem_info.rss / (1024 * 1024)
+            self._memory_label.setText(f" {mem_mb:.0f} MB ")
+        except Exception:
+            self._memory_label.setText(" N/A ")
+
+
+class ToolWindow(QWidget):
+    """工具窗口基类（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
+
+    name: str = "Unnamed"
+    icon = None
+
+    def __init__(self, page):
+        super().__init__()
+        self.homepage = page
+        self._title_bar = None
+        self._content_widget = None
+
+        self._init_unified_font()
+        self._init_title_bar()
+        self.setObjectName("OpenAIChatToolWindow")
+
+    def _init_title_bar(self):
+        if self._title_bar:
+            return
+
+        self._title_bar = ToolWindowTitleBar(self)
+        self._title_bar.set_icon(self.icon)
+        self._title_bar.set_title(self.name)
+        self._title_bar.hide()
+        self._setup_title_bar()
+
+    def _setup_title_bar(self):
+        pass
+
+    def register_action_button(self, widget):
+        if self._title_bar:
+            self._title_bar.add_button(widget)
+
+    def get_title_bar(self):
+        return self._title_bar
+
+    def _init_unified_font(self):
+        try:
+            font_name = Settings.get_instance().llm_font_family.value
+        except Exception:
+            try:
+                font_name = Settings.get_instance().canvas_font_selected.value
+            except Exception:
+                font_name = "Microsoft YaHei"
+
+        font = self.font()
+        font.setFamily(font_name)
+        self.setFont(font)
+
+        # 只设置字体，不设置背景（背景由子类的 setup_ui 处理）
+        self.setStyleSheet(f"""
+            ToolWindow {{
+                font-family: "{font_name}";
+            }}
+            QLabel, QPushButton, QLineEdit, QComboBox, QTreeWidget, QTableWidget {{
+                font-family: "{font_name}";
+            }}
+        """)
+
+
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
@@ -757,6 +1037,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _auto_compact_in_progress: bool = False  # 防重入守卫
     # Tab 模式下延迟刷新的标记（主题变更时非可见窗口跳过刷新，激活时补刷）
     _theme_needs_refresh: bool = False
+    # P5b：延迟刷新时记录的待刷 scope（theme/font_family/font_size/None），
+    # 切回 tab 补刷时按此精确执行，避免漏刷字体字号（V2 方案 A）
+    _theme_needs_refresh_scope: str | None = None
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -1050,6 +1333,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
         # 800ms 延迟让首帧绘制完成后再开始填充内容。
         # 卡片内部进一步按 singleShot(0) 链式逐个构建，避免一次冻结 UI。
+        # P2 懒加载：窗口未激活（Tab 模式非当前页）时定时器回调只置待建标记，
+        # 首次激活（showEvent）时由 _maybe_build_deferred_content 补建，
+        # 避免每个后台 tab 都全量构建重型卡片。
+        self._deferred_build_pending = False
+        self._settings_popup_pending = False
+        self._pixel_pet_pending = False
         QTimer.singleShot(800, self._deferred_build_cards)
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
@@ -1408,6 +1697,20 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
+    def _ensure_model_config_popup(self):
+        """确保模型配置卡片内容已构建（幂等）
+
+        与 _ensure_model_selector_card_content 同理：延迟构建链可能尚未执行，
+        用户提前点击模型参数按钮时兜底立即构建，避免
+        _load_model_config_to_card 访问 _model_config_popup 为 None。
+        """
+        if self._model_config_popup is not None:
+            return
+        self._ensure_model_config_card()
+        self._model_config_popup = ModelConfigCard()
+        self._model_config_popup.configApplied.connect(self._on_config_applied)
+        self._model_config_card.content_layout.addWidget(self._model_config_popup)
+
     def _ensure_model_selector_card(self):
         """确保模型选择卡片框架已创建（内容由 _build_deferred_card_model_selector 填充）"""
         if self._model_selector_card is not None:
@@ -1426,6 +1729,35 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
 
+    def _ensure_model_selector_card_content(self):
+        """确保模型选择卡片内容已构建（幂等）
+
+        延迟构建链（_build_deferred_card_model_selector）可能因 800ms 定时器
+        未触发 / P2 懒加载 pending / 构建失败而尚未执行；用户提前点击模型选择
+        按钮时本方法兜底立即构建，避免 _load_model_selector_to_card 访问 None。
+        """
+        if self._model_selector_card_content is not None:
+            return
+        self._ensure_model_selector_card()
+        self._model_selector_card_content = ModelSelectorCardContent()
+        self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
+        self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
+        self._model_selector_card.set_search_handler(
+            "搜索模型...",
+            self._model_selector_card_content.set_search_filter,
+        )
+        self._model_selector_card.add_header_button(
+            FluentIcon.ADD,
+            "添加服务商",
+            self._on_add_provider_from_card,
+        )
+        self._model_selector_card.add_header_button(
+            get_icon("配置管理"),
+            "配置服务商",
+            self._on_configure_providers_from_card,
+        )
+        self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+
     def _deferred_build_cards(self):
         """【性能优化】延迟构建重型卡片内容（分批渐进式）
 
@@ -1435,7 +1767,17 @@ class OpenAIChatToolWindow(ToolWindow):
         性能优化：每个卡片使用独立的 QTimer.singleShot(0) 调度，
         让 Qt 事件循环在卡片创建之间有机会处理绘制事件，
         避免 6 张卡片连续同步创建导致 UI 冻结数秒。
+
+        P2 懒加载：若窗口尚未激活（Tab 模式非当前页，isVisible() 为 False），
+        本回调不构建卡片，仅置 _deferred_build_pending 待建标记；
+        待窗口首次变为可见（showEvent）时由 _maybe_build_deferred_content
+        重新触发本方法补建，避免每个后台 tab 都全量构建 7 张重型卡片。
         """
+        if getattr(self, "_is_destroyed", False):
+            return  # 窗口已销毁：800ms 定时器仍可能触发，直接跳过
+        if not self.isVisible():
+            self._deferred_build_pending = True
+            return
         self._deferred_card_build_step = 0
         self._deferred_card_steps = [
             self._build_deferred_card_history,
@@ -1533,9 +1875,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """── ⑤ 模型配置卡片 ──"""
         try:
             self._ensure_model_config_card()  # P0-1：框架惰性创建
-            self._model_config_popup = ModelConfigCard()
-            self._model_config_popup.configApplied.connect(self._on_config_applied)
-            self._model_config_card.content_layout.addWidget(self._model_config_popup)
+            self._ensure_model_config_popup()
         except Exception:
             logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
         finally:
@@ -1545,24 +1885,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """── ⑥ 模型选择卡片 ──"""
         try:
             self._ensure_model_selector_card()  # P0-1：框架惰性创建
-            self._model_selector_card_content = ModelSelectorCardContent()
-            self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
-            self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
-            self._model_selector_card.set_search_handler(
-                "搜索模型...",
-                self._model_selector_card_content.set_search_filter,
-            )
-            self._model_selector_card.add_header_button(
-                FluentIcon.ADD,
-                "添加服务商",
-                self._on_add_provider_from_card,
-            )
-            self._model_selector_card.add_header_button(
-                get_icon("配置管理"),
-                "配置服务商",
-                self._on_configure_providers_from_card,
-            )
-            self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+            self._ensure_model_selector_card_content()
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
         finally:
@@ -1963,7 +2286,47 @@ class OpenAIChatToolWindow(ToolWindow):
             return []
         return list(session.messages or [])
 
+    def _maybe_build_deferred_content(self):
+        """【P2 懒加载】窗口首次激活（变为可见）时补建延迟的重型内容
+
+        由 showEvent 触发。仅当本窗口此前因未激活而置了待建标记时才补建：
+        - _deferred_build_pending  → 重新触发 _deferred_build_cards（7 张卡片）
+        - _settings_popup_pending  → 重新触发 _build_settings_popup
+        - _pixel_pet_pending       → 重新触发 _init_pixel_pet
+
+        已构建（无 pending）时直接返回，保证"首次激活后与现有行为等价"，
+        不会重复构建、不会改变构建内容与时机。
+
+        销毁守卫：showEvent 是 Qt 事件处理器，其栈内异常会直接 abort（不被
+        pytest-qt 捕获）；窗口已销毁（deleteLater 后）触发的补建一律跳过，
+        补建也经 _safe_timer_call 调度，避免事件循环中访问已删 C++ 对象。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            pass
+        if not self.isVisible():
+            return
+        if getattr(self, "_deferred_build_pending", False):
+            self._deferred_build_pending = False
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._deferred_build_cards))
+        if getattr(self, "_settings_popup_pending", False):
+            self._settings_popup_pending = False
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._build_settings_popup))
+        if getattr(self, "_pixel_pet_pending", False):
+            self._pixel_pet_pending = False
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._init_pixel_pet))
+
     def showEvent(self, event):
+        # P2 懒加载：窗口变为可见（Tab 模式被选中 / 独立窗口显示）时，
+        # 补建此前因未激活而延迟的重型内容（7 张卡片 / settings / 桌宠）。
+        # 已构建的窗口此方法为空操作，不影响现有首次初始化流程。
+        self._maybe_build_deferred_content()
         if getattr(self, "_session_initialized", False):
             super().showEvent(event)
             self._connect_opacity_signal()
@@ -3191,7 +3554,16 @@ class OpenAIChatToolWindow(ToolWindow):
         batch_install_hover_tooltips(self)
 
     def _build_settings_popup(self):
-        """（委托全局卡片控制器 GlobalCardController）"""
+        """（委托全局卡片控制器 GlobalCardController）
+
+        P2 懒加载：窗口未激活时跳过构建，置待建标记，激活时补建
+        （与 _deferred_build_cards 同理，避免后台 tab 全量构建 settings）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return  # 窗口已销毁：3500ms 定时器仍可能触发，直接跳过
+        if not self.isVisible():
+            self._settings_popup_pending = True
+            return
         from app.widgets.cards.global_card_controller import get_global_card_controller
 
         cc = get_global_card_controller()
@@ -4078,19 +4450,34 @@ class OpenAIChatToolWindow(ToolWindow):
             position=InfoBarPosition.BOTTOM,
         )
 
-    def _handle_team_leave(self, silent: bool = False):
+    def _handle_team_leave(self, silent: bool = False, batch_disband: bool = False):
         """离开团队
 
         Args:
             silent: True 时跳过 InfoBar 提示（批量退出场景，如团队关闭按钮
                 对每个成员窗口调用此方法时，避免重复弹"已离开团队"提示）。
+            batch_disband: True 时（团队批量解散循环，TabManager
+                _on_team_close_requested 对每个成员窗口调用）走轻量路径：
+                - 跳过第 4 步全局同步（循环结束后由 TabManager 统一同步 1 次，
+                  替代原每成员 2 次 O(n×m) 全局清理）；
+                - 跳过第 5 步欢迎卡片 QWebEngineView 重建（窗口即将关闭，
+                  重建 100-500ms/窗口纯属浪费）；
+                - 置位 _batch_disband_in_progress，使该窗口 closeEvent 内的
+                  _sync_active_windows_to_team_manager 一并跳过（单窗关闭不受影响）。
         """
+        # 0) 批量解散标志：本窗口 closeEvent 据此跳过全局同步
+        if batch_disband:
+            self._batch_disband_in_progress = True
+
         # 1) 先停 watcher，避免后续 rmtree 触发 watcher 事件重建目录
         self._stop_team_watcher()
 
         # 2) 离开团队（清理邮箱目录）+ 恢复用户工具权限
         tm = self._get_team_manager()
-        tm.leave_team(self._window_id)
+        # 🛡️ W3b-2 1a：批量解散循环内挂起落盘（save_now=False），由 TabManager
+        # 在解散循环结束后统一 flush_pending_saves() 合并写盘（n 次 json.dump
+        # → 1 次）。单窗离开路径 save_now=True 行为不变（立即写盘）。
+        tm.leave_team(self._window_id, save_now=not batch_disband)
         self._tool_permission_controller.restore_user()
 
         # 3) 清除团队标记后刷新 UI
@@ -4100,7 +4487,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._refresh_team_ui(is_team=False)
 
         # 4) 同步活跃窗口列表（触发失效成员清理）
-        self._sync_active_windows_to_team_manager()
+        # 🛡️ 批量解散场景跳过：每个窗口单独同步是 O(n×m) 重复清理，
+        # 由 TabManager 在解散循环结束后统一执行 1 次。
+        if not batch_disband:
+            self._sync_active_windows_to_team_manager()
 
         # 5) 还原智能体身份到系统 hook 设定
         try:
@@ -4108,7 +4498,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if not self.backend.get_agent(default_agent):
                 agents = self.backend.get_primary_agents()
                 default_agent = agents[0].name if agents else "build"
-            self._on_agent_changed(default_agent)
+            # 🛡️ 批量解散场景：窗口即将关闭，跳过 _show_initial_welcome 的
+            # QWebEngineView 重建（_on_agent_changed 其余切换逻辑保留）。
+            self._on_agent_changed(default_agent, skip_welcome=batch_disband)
         except Exception:
             logger.exception("[_handle_team_leave] 切换默认智能体失败")
 
@@ -6089,6 +6481,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_model_selector_to_card(self):
         """加载模型数据到模型选择卡片"""
+        # 兜底：延迟构建未完成（800ms 未到 / P2 懒加载 pending / 构建失败）时
+        # 立即构建内容，避免 _model_selector_card_content 为 None 崩溃
+        self._ensure_model_selector_card_content()
         provider_models_data = []
         merged_provider_models = get_merged_provider_models()
         # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
@@ -6886,9 +7281,9 @@ class OpenAIChatToolWindow(ToolWindow):
         相对窗口的绝对位置——它永远钉死在窗口底部 34px。
         """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         if hasattr(self, "input_area"):
             # 标记系统卡片处于打开状态
@@ -6928,9 +7323,9 @@ class OpenAIChatToolWindow(ToolWindow):
                      跳过系统卡片可见性检查（用于热重载/卡片强制删除后的兜底恢复）。
         """
         # 窗口拖拽中跳过，防止布局重算干扰窗口管理器
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         # 强制恢复模式：跳过系统卡片可见性检查，直接恢复输入区
         # 用于热重载后卡片已被强制删除，回调链可能断裂的场景
@@ -7054,7 +7449,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # error 等其余状态不覆盖（重试期保持 busy，避免闪烁）
 
     def _init_pixel_pet(self) -> None:
-        """初始化像素小狐桌宠"""
+        """初始化像素小狐桌宠
+
+        P2 懒加载：窗口未激活（Tab 模式非当前页）时跳过构建，置待建标记，
+        激活时由 _maybe_build_deferred_content 补建。手动开启路径
+        （_on_pet_enabled_changed）不受影响——用户主动开启时窗口必已激活。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return  # 窗口已销毁：0ms 定时器仍可能触发，直接跳过
+        if not self.isVisible():
+            self._pixel_pet_pending = True
+            return
         try:
             self.pixel_pet = PixelPetWidget(self)
             from app.utils.theme_manager import theme_manager
@@ -7174,6 +7579,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
+        # 兜底：延迟构建未完成时立即构建内容，避免 _model_config_popup 为 None 崩溃
+        self._ensure_model_config_popup()
         current_name = self._current_provider_name if self._current_provider_name else "无"
 
         # 关键修复：从 _valid_configs 读取（已通过 _load_model_configs 合并了 FREE_PROVIDERS 默认参数）
@@ -7491,10 +7898,12 @@ class OpenAIChatToolWindow(ToolWindow):
                         pass
 
                 # 2) 离开团队（清理成员登记 + 邮箱目录）
+                # 🛡️ W3b-2 1c：批量 leave 循环内挂起落盘（save_now=False），
+                # 循环结束后统一 flush 一次写盘，避免 n 次 json.dump+os.replace。
                 wid = getattr(win, "_window_id", "")
                 try:
                     if wid:
-                        tm_mgr.leave_team(wid)
+                        tm_mgr.leave_team(wid, save_now=False)
                 except Exception:
                     pass
 
@@ -7536,6 +7945,14 @@ class OpenAIChatToolWindow(ToolWindow):
                             pass
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[_disband_current_team_for_restore] 处理窗口异常: {e}")
+
+        # 🛡️ W3b-2 1c：批量 leave_team(save_now=False) 循环结束后统一落盘一次
+        # （合并 n 次 json.dump+os.replace → 1 次）。try/except 包裹——flush
+        # 失败静默，不破坏恢复流程（内存态已更新，下次写盘以最新内存态为准）。
+        try:
+            TeamManager.get_instance().flush_pending_saves()
+        except Exception:
+            pass
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -7632,17 +8049,31 @@ class OpenAIChatToolWindow(ToolWindow):
             sessions_by_agent.setdefault(agent_name, []).append(session)
         for lst in sessions_by_agent.values():
             lst.sort(key=lambda s: s.get("last_time") or "", reverse=True)
-        # 窗口计划：快照成员记录逐条（含 wid 的逐条计窗口；无 wid 老格式
-        # 按 agent 去重）；最新快照为空（老数据无快照）→ by_agent 兜底
-        # （每 agent 1 窗口）。
+        # 窗口计划（Bug 3 修复）：快照成员逐条建窗时，模板 agents（无 wid）
+        # 不再与同 agent 的 wid 记录重复建窗——get_team_member_snapshot 合并
+        # 模板 agents（无 wid）与快照成员（有 wid）落库会话快照，若逐条全建，
+        # 恢复窗口数随恢复次数线性膨胀（模板 3+成员 3 → 6→9→12…）。
+        # 语义保持：
+        # - 有 wid 记录：逐条建窗（T3 同角色多成员，如两个 build 各建 1 窗）
+        # - 无 wid 记录（模板 agents / 老格式快照）：仅当该 agent 没有任何 wid
+        #   记录时才兜底建 1 窗（F3 找回语义——模板角色无实际成员也建窗）
+        # - 最新快照为空（老数据无快照）→ by_agent 兜底（每 agent 1 窗口）
         window_plan: List[tuple] = []
-        _plain_seen: set = set()
+        _wid_agents: set = set()
         if snapshot_members:
             for rec in snapshot_members:
                 agent = rec["agent_name"]
                 if rec.get("window_id"):
                     window_plan.append((agent, rec["window_id"]))
-                elif agent not in _plain_seen:
+                    _wid_agents.add(agent)
+            _plain_seen: set = set()
+            for rec in snapshot_members:
+                agent = rec["agent_name"]
+                if rec.get("window_id"):
+                    continue
+                if agent in _wid_agents:
+                    continue
+                if agent not in _plain_seen:
                     _plain_seen.add(agent)
                     window_plan.append((agent, ""))
         else:
@@ -8069,6 +8500,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # Tab 模式下非可见窗口跳过刷新，标记延迟
             if _tab_active_win is not None and win is not _tab_active_win:
                 win._theme_needs_refresh = True
+                # P5b：记录待刷 scope，切回 tab 补刷时精确执行（V2 方案 A）
+                win._theme_needs_refresh_scope = final_scope
                 continue
             try:
                 win._apply_runtime_ui_settings(scope=final_scope, _skip_global=True)
@@ -8924,8 +9357,14 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 btn.setStyleSheet(data["style"])
 
-    def _on_agent_changed(self, agent_name: str):
-        """智能体切换处理"""
+    def _on_agent_changed(self, agent_name: str, skip_welcome: bool = False):
+        """智能体切换处理
+
+        Args:
+            agent_name: 目标智能体名
+            skip_welcome: True 时跳过欢迎卡片重建（批量解散场景：窗口即将
+                关闭，重建 QWebEngineView 100-500ms/窗口纯属浪费）。
+        """
         if getattr(self, "_is_destroyed", False):
             return
         if not agent_name or not self.backend.chat_engine:
@@ -8939,7 +9378,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 失效欢迎卡片缓存：卡片内容依赖 _current_agent（智能体名称/描述）。
         # 切换智能体不影响当前会话消息，但若欢迎卡片正在显示需重建。
         self._invalidate_welcome_card()
-        if self._displayed_session_id is None:
+        if self._displayed_session_id is None and not skip_welcome:
             # 当前正显示欢迎卡片（空会话），立即重建
             self._show_initial_welcome()
 
@@ -11544,6 +11983,15 @@ class OpenAIChatToolWindow(ToolWindow):
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
         if not session:
+            return
+
+        # 🛡️ Bug1 守卫：_save_current_session_to_history 可能由后台 finalize 线程
+        # （_launch_background_finalize）调用——窗口关闭后 node_preview 的 C++
+        # 对象随窗口树销毁，后台线程再访问抛 RuntimeError
+        # （wrapped C/C++ object of type ConversationNodePreview has been deleted）。
+        # 与项目既有 _is_sip_deleted 守卫模式一致：已销毁则跳过 UI 更新
+        # （node_preview 仅是时间线展示，后台持久化路径无需刷新 UI）。
+        if not hasattr(self, "node_preview") or _is_sip_deleted(self.node_preview):
             return
 
         # 使用辅助函数构建 node preview 数据
@@ -18031,6 +18479,34 @@ class OpenAIChatToolWindow(ToolWindow):
         # （wrapped C/C++ object has been deleted）。
         self._disconnect_command_shortcut_cleanup()
 
+        # ★ 泄漏修复（A1-3）：断开引用环——复制/分支窗口持有源窗口引用，
+        # 不清空则已关闭窗口的对象树被源窗口持续持有（wrapper 不回收）。
+        # 必须在 _disconnect_command_shortcut_cleanup 之后（该处可能访问
+        # _source_window），置 None 后窗口对象树即刻可回收。
+        try:
+            self._source_window = None
+        except Exception:
+            pass
+
+        # ★ 泄漏修复（A1-3）：补断 Tab 模式下 add_window 挂接的信号闭包
+        # （windowTitleChanged → _tab_title_changed_slot、ai_state_changed →
+        # _tab_ai_state_slot）。tab_manager_window._close_window_at 已断开
+        # 一次（覆盖 Tab 关闭路径），此处兜底覆盖非 Tab 路径/窗口直接 close
+        # （如 _disband_current_team_for_restore 的批量关闭），防止闭包
+        # __defaults__ 持有窗口引用导致整树泄漏。须在 C++ 对象存活时
+        # disconnect 安全执行。
+        for _slot_attr, _signal in (
+            ("_tab_title_changed_slot", "windowTitleChanged"),
+            ("_tab_ai_state_slot", "ai_state_changed"),
+        ):
+            try:
+                _slot = getattr(self, _slot_attr, None)
+                if _slot is not None:
+                    getattr(self, _signal).disconnect(_slot)
+                    setattr(self, _slot_attr, None)
+            except Exception:
+                pass
+
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
@@ -18116,7 +18592,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 离开团队并同步活跃窗口
         try:
-            self._sync_active_windows_to_team_manager()
+            # 🛡️ 批量解散场景（_handle_team_leave(batch_disband=True) 置位标志）：
+            # 跳过本窗口的全局同步——TabManager 在解散循环结束后统一同步 1 次，
+            # 避免 n 个窗口各同步 1 次（O(n×m)）。单窗关闭路径不受影响。
+            if not getattr(self, "_batch_disband_in_progress", False):
+                self._sync_active_windows_to_team_manager()
         except Exception:
             pass
 
@@ -18229,6 +18709,28 @@ class OpenAIChatToolWindow(ToolWindow):
                         wc.cleanup()
                     wc.deleteLater()
             self._session_card_cache.clear()
+        except Exception:
+            pass
+
+        # ★ 泄漏修复（A1-2）：显式清理窗口树内全部 MessageCard。
+        # findChildren 覆盖未被缓存引用的消息卡片（如批量加载渲染中/虚拟
+        # 滚动窗口外挂起的卡片），stop timer + viewer.cleanup + 断信号后
+        # deleteLater，避免卡片持有的 QWebEngineView/定时器/信号闭包把
+        # 窗口对象树拖住不回收。整体 try/except：清理失败不影响关闭流程。
+        try:
+            from app.widgets.message_card import MessageCard
+
+            for card in self.findChildren(MessageCard):
+                try:
+                    from PyQt5 import sip
+
+                    if sip.isdeleted(card):
+                        continue
+                    if hasattr(card, "cleanup"):
+                        card.cleanup()
+                    card.deleteLater()
+                except Exception:
+                    continue
         except Exception:
             pass
 

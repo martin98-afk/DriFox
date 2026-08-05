@@ -60,6 +60,9 @@ class TeamManager:
         self._active_window_ids: Optional[set] = None
         # 保护 _team_cache / 邮箱目录的读写（check_team_member 会在 worker 线程调用）
         self._data_lock = threading.RLock()
+        # 🛡️ T26（U3）：延迟保存挂起集合（_save_team_data(save_now=False) 标记，
+        # flush_pending_saves() 批量落盘）
+        self._pending_saves: set = set()
         self._init_team(self.DEFAULT_TEAM)
 
     # ── 单例 ─────────────────────────────────────────
@@ -145,9 +148,39 @@ class TeamManager:
             self._init_team(team_name)
         return self._team_cache[team_name]
 
-    def _save_team_data(self, team_name: str):
-        if team_name in self._team_cache:
+    def _save_team_data(self, team_name: str, save_now: bool = True):
+        """保存团队数据。
+
+        🛡️ T26（U3）：新增批量/延迟保存支持——save_now=False 时仅挂起
+        （标记 pending，不落盘），由 flush_pending_saves() 显式批量落盘，
+        供上层合并多次写盘为一次（如解散流程连续 leave_team）。默认
+        save_now=True 行为与旧版完全一致（立即原子写盘），不破坏现有调用。
+        """
+        if team_name not in self._team_cache:
+            return
+        if save_now:
             self._write_json(self._team_file(team_name), self._team_cache[team_name])
+        else:
+            with self._data_lock:
+                self._pending_saves.add(team_name)
+
+    def flush_pending_saves(self):
+        """批量落盘所有挂起的团队数据（合并多次写盘为一次）。
+
+        🛡️ T26（U3）：与 _save_team_data(save_now=False) 配套使用。
+
+        🛡️ W3b-R2（devil-advocate 挑刺）：写盘必须持 _data_lock——原先取
+        快照后锁外读 `_team_cache[team_name]` 写盘，与 join_team 持锁内
+        修改同一 dict + 锁内写盘存在竞态：flush dump 期间 join 修改 dict
+        → flush 用旧/半新状态覆盖 join 的新写（状态丢失）。json.dump+
+        os.replace 为毫秒级，且 join/leave 本来就持锁写盘，持锁语义一致。
+        """
+        with self._data_lock:
+            pending = set(self._pending_saves)
+            self._pending_saves.clear()
+            for team_name in pending:
+                if team_name in self._team_cache:
+                    self._write_json(self._team_file(team_name), self._team_cache[team_name])
 
     @staticmethod
     def _read_json(path: Path) -> Any:
@@ -183,22 +216,31 @@ class TeamManager:
 
     # ── 成员清理 ─────────────────────────────────────
 
-    def set_active_window_ids(self, window_ids: set):
+    def set_active_window_ids(self, window_ids: set, team_name: Optional[str] = None):
         """由主窗口同步当前真实的活跃窗口 ID 集合（跨 OpenAIChatToolWindow._instances 收集）
 
         🛡️ 空集合表示活跃窗口信息不可靠（窗口 __init__ 阶段自身还未注册进
         _instances、创建/销毁时序竞态等），既不覆盖已知的有效集合，也不触发清理。
         否则会把所有成员误判为失效并 rmtree 其邮箱目录 —— 这正是
         QFileSystemWatcher 报 FindNextChangeNotification failed + 成员无法交互的根因。
+
+        🛡️ T26（U3）：新增可选参数 team_name 限缩清理范围——
+        传 None（默认，向后兼容）时遍历清理所有团队，行为与旧版完全一致；
+        传 team_name 时只清理目标团队，跳过其他团队扫描（解散 A 团队时
+        不再扫 B/C 团队，团队越多收益越大——根因 1 补充）。
         """
         ids = set(window_ids or ())
         if not ids:
             return
         with self._data_lock:
             self._active_window_ids = ids
-            # 同步清理所有团队中的失效成员
-            for team_name in list(self._team_cache.keys()):
+            if team_name is not None:
+                # 限缩：只清理目标团队，跳过其他团队扫描
                 self._cleanup_stale_members(team_name)
+            else:
+                # 同步清理所有团队中的失效成员
+                for team_name in list(self._team_cache.keys()):
+                    self._cleanup_stale_members(team_name)
 
     def _get_active_windows(self) -> Optional[set]:
         """获取当前活跃窗口 ID 集合；无法确认时返回 None（调用方应保守跳过清理）"""
@@ -356,11 +398,30 @@ class TeamManager:
             self._save_team_data(team_name)
         self._mailbox_dir(team_name, window_id).mkdir(parents=True, exist_ok=True)
 
-    def leave_team(self, window_id: str, team_name: str = DEFAULT_TEAM):
+    def leave_team(self, window_id: str, team_name: str = DEFAULT_TEAM, save_now: bool = True):
         """窗口离开团队（同时清理邮箱目录）
 
         🛡️ F5（T4 Bug6）：成员移除 + 落盘持 _data_lock，防止与并发 join /
         _cleanup_stale_members 互相覆盖；邮箱目录 rmtree 放锁外（幂等容错）。
+
+        🛡️ T26（U3）：邮箱目录 rmtree 改为后台线程执行——团队运行越久
+        邮件越多，Windows 上逐文件删除 + 杀软扫描可耗时数百毫秒~秒级，
+        原同步删除会阻塞 UI 主线程（解散团队卡顿根因 3）。rmtree 幂等
+        （ignore_errors=True）、下次 join 前 mkdir(parents=True, exist_ok=True)
+        幂等，后台删除安全；内存态成员清理照旧即时完成。
+
+        🛡️ W3b-1（W2 联调审查问题 2 + devil-advocate U3-Y1）：新增 save_now
+        透传——批量解散场景（循环调用 leave_team）可传 save_now=False 挂起
+        落盘，循环结束后统一 flush_pending_saves() 合并为一次写盘（n 次
+        json.dump+os.replace → 1 次）。默认 True 保持向后兼容，所有现有
+        调用点行为完全不变（立即写盘）。save_now=False 时：
+        - 内存态成员/快照清理照旧即时完成（延迟的只是落盘）
+        - 落盘挂起到 _pending_saves（U3 机制），由 flush_pending_saves() 批量落盘
+        - 中途异常也不丢团队状态：内存态已更新（下次 flush/join 前的
+          _get_team_data 读到最新）；flush 时以 _team_cache 为准全量写盘
+          （写的是最新内存态，而非各次 leave 的中间态）
+        ⚠️ 契约：save_now=False 的调用方**必须随后调用 flush_pending_saves()**，
+        否则该团队的解散/成员变更不会落盘（崩溃丢状态）。
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
@@ -376,15 +437,47 @@ class TeamManager:
                 if window_id in tm_snap:
                     tm_snap.pop(window_id, None)
                     data["team_members"] = tm_snap
-                self._save_team_data(team_name)
+                self._save_team_data(team_name, save_now=save_now)
 
-        # 清理邮箱目录
+        # 清理邮箱目录（后台线程，主线程不再同步阻塞在磁盘删除上）
         mailbox_dir = self._mailbox_dir(team_name, window_id)
         if mailbox_dir.exists():
+            self._rmtree_async(mailbox_dir)
+
+    @staticmethod
+    def _rmtree_async(path: Path):
+        """后台线程删除目录树（幂等容错），不阻塞调用线程。
+
+        🛡️ T26（U3）：leave_team 的邮箱目录删除从主线程移到后台——
+        rmtree 是纯磁盘操作，与内存态/_data_lock 无共享状态，放后台
+        线程安全；leave 时 watcher 已停，目录删除不会触发重建。
+
+        🛡️ F3（devil-advocate D1 U3-R1）：消除"leave 后快速 rejoin 同目录"
+        竞态。时序：leave_team → 本方法启动后台 rmtree → 用户立即重新加入
+        同一团队（window_id 复用）→ join 的 mkdir 建新目录 → 若 rmtree 直接
+        删原路径，后到的删除会误删新目录，邮箱功能失效。
+        修复：**先把原目录原子改名为唯一临时名**（同父目录 rename 原子且
+        快，主线程仅此一步、不阻塞），后台线程只删临时目录——join 的
+        mkdir 在原路径创建全新目录，与后台删除的临时名互不干扰，竞态消除。
+        正常路径（leave 后不立即重进）零额外开销；rename 失败（目录被并发
+        删除/权限）时回退直接删原路径（幂等容错，ignore_errors=True）。
+        """
+        parent = path.parent
+        tmp_path = parent / f".{path.name}.rmtree.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        try:
+            path.rename(tmp_path)  # 原子改名：原路径立即释放，后续 mkdir 安全
+        except OSError:
+            # rename 失败（目录可能已被并发删除）：回退直接删原路径（幂等）
+            tmp_path = path
+        target = str(tmp_path)
+
+        def _do_rmtree():
             try:
-                shutil.rmtree(str(mailbox_dir))
+                shutil.rmtree(target, ignore_errors=True)
             except Exception:
                 pass
+
+        threading.Thread(target=_do_rmtree, daemon=True, name=f"team-rmtree-{path.name}").start()
 
     def get_members(self, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
         data = self._get_team_data(team_name)

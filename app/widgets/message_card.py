@@ -1963,7 +1963,11 @@ _SKELETON_CACHE_MAX = 48
 # v5：方案 E：save 阶段把流式块 data-order 暂存到 window.__pendingStreamFloors，
 # reorganizeContent 的 _streamFloors 初始化时合并（修复 save 移除流式块后
 # 补 data-order 缺"排前流式工具数"修正 → restore 沉底 → 坞态归位瞬间错乱）。
-_SKELETON_CACHE_VERSION = 6
+# v6：方案 F/G：块引用锚点 _tool_anchor_pos + save/restore 后强制 sort。
+# v7（F1）：reorganizeContent 的 getPos 对运行中工具块（tool-streaming-block）
+# 强制沉底（返回 1e9，不参与 data-order 比较）——旧骨架无此分支会把运行中块
+# 按调用时刻快照 data-order 排到思考块上方。
+_SKELETON_CACHE_VERSION = 7
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2444,6 +2448,9 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq: int = 0
         self._render_inflight: bool = False
         self._render_pending: Optional[tuple] = None
+        # [V1] 可见性门控：隐藏 tab 期间被门控跳过的渲染请求标记，
+        # 恢复可见时（showEvent）据此补渲，保证流式/工具结果最终完整性。
+        self._render_deferred: bool = False
         # [B1] 差量渲染状态：
         # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
         # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
@@ -2837,6 +2844,23 @@ class CodeWebViewer(QWebEngineView):
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
 
+    def showEvent(self, event):
+        """[V1] 可见性恢复：隐藏 tab 期间被门控的渲染请求在此补渲。
+
+        tab 切回时 Qt 会向子 widget 传播 Show 事件（QStackedWidget 隐藏页
+        isVisible()=False，切回后重新可见触发本事件）。若隐藏期间积压了
+        渲染请求（_render_deferred），恢复可见后按 _schedule_render 现有
+        调度机制补渲，保证流式输出/工具结果的最终完整性。
+        """
+        super().showEvent(event)
+        if getattr(self, "_render_deferred", False):
+            if self._is_js_ready:
+                self._render_deferred = False
+                self._schedule_render(immediate=True)
+            # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
+            # _schedule_render 会因 JS 未就绪直接 return，积压请求被清但永不
+            # 补渲；保留后由 _on_js_ready 统一补渲（可以延迟，不能丢失）。
+
     def _on_js_ready(self):
         self._is_js_ready = True
         # 同步简洁模式标志到 JS
@@ -2857,17 +2881,25 @@ class CodeWebViewer(QWebEngineView):
             # collapsed="true"（历史会话/已完成）→ dock off
             # collapsed="false"（流式会话默认）→ dock on（受 _toolCompactMode 守卫）
             # 此 JS 在上方 collapse 之后执行，保证 data-collapsed 已更新到正确值
+            # 🆕 F2（S2 兜底）：DOM 中存在运行中工具块（data-streaming="true"）
+            # 时强制 dock on——覆盖"JS 就绪晚于工具流式注入"的竞态窗口（_on_js_ready
+            # 执行时 _streaming 可能已 False，但运行中块仍在 DOM 等待结果）。
             self.page().runJavaScript(
                 "var _ts2=document.getElementById('tool-section');"
                 "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
-                "if(typeof _setStreamingDock==='function')_setStreamingDock(!_co);"
+                "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
+                "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
             )
         except RuntimeError:
             pass
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
         # 仅检查 _markdown_text 会遗漏这些内容，导致卡片永久空白。
         # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
-        if self._markdown_text or self._lazy_markdown_cb:
+        # 🛡️ F2：_render_deferred 积压（JS 未就绪期间 / 隐藏期间门控的渲染请求）
+        # 在 JS 就绪时统一补渲——保证 viewer 创建后未显示 + JS 未加载期间的
+        # 积压渲染在恢复后必然补上（可以延迟，不能丢失）。
+        if self._render_deferred or self._markdown_text or self._lazy_markdown_cb:
+            self._render_deferred = False
             self._schedule_render(immediate=True)
         # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
         try:
@@ -4709,8 +4741,20 @@ class CodeWebViewer(QWebEngineView):
                         // 顺序变了：用 sort 一次性重排（避免多次 appendChild 抖动）
                         var _sortedChildren = Array.prototype.slice.call(toolContent.children).sort(function(a, b) {{
                             function getPos(el) {{
+                                // 🆕 F1：运行中工具块（tool-streaming-block）强制沉底——
+                                // 不被调用时刻快照 data-order 排到思考块上方（dock 语义：
+                                // 最新活动最下）。be57674d 方案 D 引入 data-order 排序后，
+                                // 运行中块 data-order 是工具调用时刻锚点前 think/tool 计数
+                                // （固定快照），后续思考块补出更大 data-order → sort 把运行中
+                                // 块排到思考块上方。此处对运行中工具块直接返回 1e9（沉底），
+                                // 与 be57674d~1 回归前行为一致（无 data-order → 1e9 恒沉底）。
+                                // ⚠️ 必须用 class 判定而非 data-streaming 属性——think-streaming
+                                // （思考流式块）同样带 data-streaming="true"，但应保持在上方。
+                                if (el.classList && el.classList.contains('tool-streaming-block')) {{
+                                    return 1e9;
+                                }}
                                 // 🆕 方案 D：data-order 优先——JS 注入的工具块
-                                // （流式块 / save-restore 恢复块 / append_tool_result
+                                // （save-restore 恢复块 / append_tool_result
                                 // 完成块）不在 #content-placeholder 中，posMap 查不到，
                                 // 无 data-order 会返回 1e9 恒沉底 → 折叠框内
                                 // "所有思考在前、所有工具在后"（Bug B 第三条路径）。
@@ -5260,6 +5304,17 @@ class CodeWebViewer(QWebEngineView):
 
     def _schedule_render(self, immediate: bool = False):
         if not self._is_js_ready:
+            # 🛡️ F2：JS 未就绪时的渲染请求标记 deferred（不直接丢弃），
+            # _on_js_ready 时统一补渲。否则 viewer 创建后未显示 + JS 未加载
+            # 完成 + 期间渲染请求（隐藏 tab 积压）→ 请求被清但永不补渲，
+            # 工具区/消息区永久空白且无自愈路径。
+            self._render_deferred = True
+            return
+        # [V1] 可见性门控：隐藏 tab 不启动渲染定时器、不立即渲染，
+        # 仅标记 deferred，恢复可见时（showEvent）按需补渲。
+        # 流式数据由 worker 驱动写入 _markdown_text，门控只跳过 UI 渲染帧，不丢数据。
+        if not self.isVisible():
+            self._render_deferred = True
             return
         if immediate:
             if self._render_timer.isActive():
@@ -5355,6 +5410,13 @@ class CodeWebViewer(QWebEngineView):
     def _perform_update(self):
         try:
             if not self.page():
+                return
+
+            # [V1] 可见性门控（双保险）：直接调用路径（如工具结果到达时
+            # MessageCard 直接调 viewer._perform_update）绕过 _schedule_render，
+            # 隐藏 tab 时不执行 setHtml/runJavaScript，标记 deferred 待恢复补渲。
+            if not self.isVisible():
+                self._render_deferred = True
                 return
 
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
@@ -5719,28 +5781,18 @@ class CodeWebViewer(QWebEngineView):
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
             "_bk.setAttribute('data-restored','true');"
-            # 🆕 方案 D：restore 从保存的 outerHTML 重新取回 data-order（显式兜底，
-            # outerHTML 重建通常已含该属性），并按 data-order 插入到正确位置——
-            # 而不是 appendChild 沉底，避免流式块恢复后破坏 reorganizeContent
-            # 已排好的交错顺序（"所有思考在前、所有工具在后"的次生根因）。
+            # 🆕 F1：restore 恢复的运行中块（data-streaming="true"）直接 appendChild 沉底——
+            # 不再按 data-order 插位。be57674d 方案 D 的按 data-order 插位逻辑本意是
+            # 让"流式块恢复后保持交错顺序"，但运行中块 data-order 是调用时刻快照，
+            # 与后续思考块补出的 data-order 尺度不一致 → 恢复插回时被排到思考块上方。
+            # 运行中块语义为"当前最新活动"，dock 语义下应恒在最下面；data-order 属性
+            # 仍保留（供 append_tool_result 完成态继承归位，不破坏"完成块归位"语义）。
             'var _odMatch=b.html.match(/data-order="([^"]*)"/);'
             "var _odVal=_odMatch?_odMatch[1]:null;"
             "if(_odVal){"
             "_bk.setAttribute('data-order',_odVal);"
-            "var _inserted=false;"
-            "var _kids=_tc.children;"
-            "for(var _ki=0;_ki<_kids.length;_ki++){"
-            "var _kd=_kids[_ki].getAttribute('data-order');"
-            "if(_kd!==null&&parseFloat(_kd)>parseFloat(_odVal)){"
-            "_tc.insertBefore(_bk,_kids[_ki]);"
-            "_inserted=true;"
-            "break;"
             "}"
-            "}"
-            "if(!_inserted)_tc.appendChild(_bk);"
-            "}else{"
             "_tc.appendChild(_bk);"
-            "}"
             "}}})"
             "}}"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
@@ -5752,7 +5804,14 @@ class CodeWebViewer(QWebEngineView):
             "})();"
         )
 
-    def finish_streaming(self):
+    def finish_streaming(self, keep_dock: bool = False):
+        """流式结束收尾。
+
+        Args:
+            keep_dock: True 时保留坞态（简洁模式下工具区仍沉底）——流式文本可能
+                先于工具结果结束（S1：dock 归位早于工具完成），此时不应立即归位，
+                等最后一个工具完成时再由 append_tool_result 兜底归位。
+        """
         self._streaming = False
         # [B1] 流式结束：差量缓存失效（尾部未闭合内容需全量渲染收尾），
         # 清空稳定区避免差量/全量混合导致重复段落。
@@ -5768,7 +5827,11 @@ class CodeWebViewer(QWebEngineView):
         # 显式清零保证完成渲染后不再残留"脏"状态（防误走整页 save/restore 包装）。
         self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
-        self._sync_streaming_dock(False)
+        # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
+        # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
+        # "工具还在运行但工具区已回顶部"的跳动。归位推迟到最后一个工具完成时。
+        if not keep_dock:
+            self._sync_streaming_dock(False)
         # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
         # 后续非流式渲染拿到缺内容的旧 <tool> markdown，造成 tool-block
         # 在 reorganizeContent 中因不匹配而被清除或生成重复。
@@ -6594,7 +6657,13 @@ class PlainTextViewer(QWidget):
             self.text_edit.document().setTextWidth(vp_width)
         self._schedule_update_height()
 
-    def finish_streaming(self):
+    def finish_streaming(self, keep_dock: bool = False):
+        """流式结束收尾。
+
+        🆕 F4：与 CodeWebViewer.finish_streaming 保持相同签名——MessageCard.
+        finish_streaming 统一以 keep_dock=self._has_active_tools() 调用两个 Viewer。
+        PlainTextViewer 无 dock 概念（用户卡片无工具与思考折叠框），忽略该参数。
+        """
         self._schedule_update_height()
 
     def _schedule_update_height(self):
@@ -7405,6 +7474,10 @@ class MessageCard(SimpleCardWidget):
         if self._elapsed_start_time is None:
             self._elapsed_timer.stop()
             return
+        # [V1] 可见性门控：隐藏 tab 跳过 label setText（空转），
+        # elapsed 基于 _elapsed_start_time 绝对时间戳计算，恢复后数值依然准确。
+        if not self.isVisible():
+            return
         elapsed = time.time() - self._elapsed_start_time
         self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
 
@@ -7684,13 +7757,18 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
+        # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
+        # 相位 _pulse_phase 是模 2π 的循环累积，暂停后从原相位继续，无视觉跳变；
+        # 恢复可见后下一拍定时器自动续跑，无需显式重启。
+        if not self.isVisible():
+            return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
         # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
         # 松手后 _any_window_dragging 复位，下一拍定时器自然恢复动画。
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）
@@ -8878,6 +8956,33 @@ class MessageCard(SimpleCardWidget):
             self.viewer.page().runJavaScript(js_code)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
+        # 🆕 F2（S1 归位兜底）：最后一个工具完成时关闭坞态。
+        # 流式文本可能先于工具结果结束（finish_streaming(keep_dock=True) 保留了坞态），
+        # 此处是归位时机：所有已登记工具都完成 → 工具区从坞态沉底回到顶部。
+        # ⚠️ 必须 hasattr 守卫：stub viewer（测试桩）无 _sync_streaming_dock 方法。
+        # 🐛 F3（#R1 P1）：归位判据必须用 MessageCard 层 self._streaming——
+        # 本函数中段「就近恢复 viewer 流式模式」（L8737）在 viewer._streaming=False 时
+        # 无条件置 True，viewer 层状态已被污染，恒 True → 归位兜底永不触发
+        # （会话末轮 dock 永久沉底）。self._streaming 由 start/stop_streaming_anim
+        # 管理（本轮流式结束后 stop_streaming_anim 已置 False；新一轮开始置 True 时
+        # 正确跳过归位），不受 8738 行恢复逻辑影响。
+        # 🐛 F3（次要提示 1）：lambda 捕获动态属性判空——0ms 内 viewer 被 cleanup
+        # 置 None 时避免 AttributeError traceback。
+        try:
+            if (
+                self.viewer is not None
+                and hasattr(self.viewer, "_sync_streaming_dock")
+                and not self._streaming
+                and not self._has_active_tools()
+            ):
+                QTimer.singleShot(
+                    0,
+                    lambda: self.viewer._sync_streaming_dock(False)
+                    if self.viewer is not None
+                    else None,
+                )
+        except Exception:
+            pass
 
     def _copy_user_message(self):
         """用户卡片工具栏「复制」：直接复制全文，不走 actionRequested 信号链
@@ -9543,12 +9648,22 @@ class MessageCard(SimpleCardWidget):
     def finish_streaming(self):
         try:
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
-                self.viewer.finish_streaming()
+                self.viewer.finish_streaming(keep_dock=self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
         except RuntimeError:
             pass
         self.stop_streaming_anim()
+
+    def _has_active_tools(self) -> bool:
+        """是否有仍在执行中的工具（已登记但未完成）。
+
+        dock 状态机的判据：只要还有工具在运行（流式文本已结束但工具结果未全部
+        到达，S1 场景），工具区应保持坞态沉底；全部完成后才归位。
+        """
+        return any(
+            tid not in self._finished_streaming_ids for tid in self._tool_call_order
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -9621,6 +9736,9 @@ class MessageCard(SimpleCardWidget):
         self._pending_content = None  # 待渲染内容
         self._finished_streaming_ids.clear()  # 流式 ID 集合
         self._tool_args_first_seen_ids.clear()
+        # 🐛 F3（次要提示 2）：工具登记集合随卡片销毁清空——否则边缘场景
+        # （cleanup 后 _has_active_tools() 被误调）会因残留登记误判"仍有活跃工具"。
+        self._tool_call_order.clear()
 
         # 清理 markdown_cache 如果存在
         if hasattr(self, "_markdown_cache") and self._markdown_cache:

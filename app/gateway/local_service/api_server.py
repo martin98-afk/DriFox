@@ -353,6 +353,30 @@ def is_service_running() -> bool:
     return _llm_api_service is not None and _llm_api_service._running
 
 
+def _wait_local_port_ready(port: int, timeout: float = 3.0, interval: float = 0.1) -> bool:
+    """等待本地 HTTP 服务端口就绪（替代固定 sleep(1)，就绪即返回）
+
+    Args:
+        port: 本地端口
+        timeout: 总超时（秒），主线程最坏阻塞上限
+        interval: 轮询间隔（秒）
+
+    Returns:
+        True = 端口已就绪；False = 超时（调用方仍打开浏览器，加载时可能已就绪）
+    """
+    import socket
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=interval):
+                return True
+        except OSError:
+            _time.sleep(interval)
+    return False
+
+
 def open_docs():
     """打开 API 文档页面"""
     if _llm_api_service and _llm_api_service._running:
@@ -360,7 +384,9 @@ def open_docs():
         webbrowser.open(f"http://localhost:{_llm_api_service.port}/docs")
     else:
         start_llm_api_service()
-        import time
-        time.sleep(1)
+        # 🛡️ T4-TOP11：固定 sleep(1) → 轮询端口就绪（0.1s 间隔，就绪即打开）。
+        # 服务通常 <1s 就绪，平均等待远小于固定 1s 空等；3s 超时兜底（超时也
+        # 打开浏览器，加载时服务可能已就绪，与原先行为一致）。
+        _wait_local_port_ready(_llm_api_service.port)
         import webbrowser
         webbrowser.open(f"http://localhost:{_llm_api_service.port}/docs")

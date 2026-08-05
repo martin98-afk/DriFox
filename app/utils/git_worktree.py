@@ -45,20 +45,22 @@ def _run_git(args: list, cwd: str) -> subprocess.CompletedProcess:
 @dataclass
 class WorktreeInfo:
     """Worktree 信息"""
-    path: str          # 绝对路径
-    branch: str        # 分支名（如 refs/heads/main → main）
-    is_main: bool      # 是否是主仓库
-    is_current: bool   # 是否当前所在 worktree
+
+    path: str  # 绝对路径
+    branch: str  # 分支名（如 refs/heads/main → main）
+    is_main: bool  # 是否是主仓库
+    is_current: bool  # 是否当前所在 worktree
     is_bare: bool = False  # 是否是 bare 仓库
-    behind_main: int = 0   # 落后主仓库的提交数
-    ahead_main: int = 0    # 超前主仓库的提交数
+    behind_main: int = 0  # 落后主仓库的提交数
+    ahead_main: int = 0  # 超前主仓库的提交数
 
 
 @dataclass
 class GitRepoInfo:
     """Git 仓库信息"""
-    root: str                # git 根目录（含 .git）
-    is_worktree: bool        # 当前目录是否在 worktree 中
+
+    root: str  # git 根目录（含 .git）
+    is_worktree: bool  # 当前目录是否在 worktree 中
     worktrees: List[WorktreeInfo] = field(default_factory=list)
     current_branch: str = ""
 
@@ -88,22 +90,24 @@ def _finish_worktree(
     # git worktree list 第一行是主仓库
     is_current = len(worktrees) == 0
 
-    worktrees.append(WorktreeInfo(
-        path=path,
-        branch=branch,
-        is_main=is_main,
-        is_current=is_current,
-        is_bare=is_prunable,  # 复用 is_bare 表示可清理状态
-    ))
+    worktrees.append(
+        WorktreeInfo(
+            path=path,
+            branch=branch,
+            is_main=is_main,
+            is_current=is_current,
+            is_bare=is_prunable,  # 复用 is_bare 表示可清理状态
+        )
+    )
 
 
 class GitWorktreeDetector:
     """Git/Worktree 检测器（带内存缓存，避免重复调 git 拖慢 UI）"""
 
     _git_available: Optional[bool] = None  # 是否安装了 git
-    _detect_cache: dict = {}               # {path: (result, timestamp)}
-    _info_cache: dict = {}                 # {path: (GitRepoInfo, timestamp)}
-    _CACHE_TTL = 30.0                      # 缓存有效期（秒），避免频繁 git 子进程调用拖慢 UI
+    _detect_cache: dict = {}  # {path: (result, timestamp)}
+    _info_cache: dict = {}  # {path: (GitRepoInfo, timestamp)}
+    _CACHE_TTL = 30.0  # 缓存有效期（秒），避免频繁 git 子进程调用拖慢 UI
 
     @staticmethod
     def _is_git_available() -> bool:
@@ -113,11 +117,12 @@ class GitWorktreeDetector:
         try:
             subprocess.run(
                 ["git", "--version"],
-                capture_output=True, timeout=3,
+                capture_output=True,
+                timeout=3,
                 creationflags=_CREATION_FLAGS,
             )
             GitWorktreeDetector._git_available = True
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError, OSError:
             GitWorktreeDetector._git_available = False
             logger.info("[GitWorktree] git 未安装，跳过 git 检测")
         return GitWorktreeDetector._git_available
@@ -126,6 +131,7 @@ class GitWorktreeDetector:
     def _cache_get(cache: dict, key: str):
         """从缓存获取（检查 TTL）"""
         import time
+
         entry = cache.get(key)
         if entry and time.monotonic() - entry[1] < GitWorktreeDetector._CACHE_TTL:
             return entry[0]
@@ -135,12 +141,13 @@ class GitWorktreeDetector:
     def _cache_set(cache: dict, key: str, value):
         """写入缓存"""
         import time
+
         cache[key] = (value, time.monotonic())
 
     @staticmethod
     def detect_git(path: str) -> Optional[str]:
         """检测路径是否在 git 仓库中（带缓存）
-        
+
         注意：只接受目录路径，文件路径直接跳过（避免以文件为 cwd 执行 git 命令报错）
         """
         if not path or not os.path.isdir(path):
@@ -165,7 +172,7 @@ class GitWorktreeDetector:
     def is_worktree(path: str) -> bool:
         """
         判断路径是否在一个 worktree 中（而非主仓库）
-        
+
         原理：主仓库的 .git 是文件夹，worktree 的 .git 是文件
         """
         if not path:
@@ -202,12 +209,12 @@ class GitWorktreeDetector:
     def list_worktrees(git_root: str) -> List[WorktreeInfo]:
         """
         列出 git 仓库的所有 worktree
-        
+
         使用 --porcelain 格式确保路径含空格时也能正确解析。
-        
+
         Args:
             git_root: git 仓库根目录
-        
+
         Returns:
             List[WorktreeInfo]: worktree 列表
         """
@@ -250,39 +257,49 @@ class GitWorktreeDetector:
             if current:
                 _finish_worktree(worktrees, current)
 
-            # 计算每个 worktree 相对主仓库的落后/超前提交数
+            # 计算每个 worktree 相对主仓库的落后/超前提交数。
+            # [P3] 并行执行 rev-list（只读命令、无锁冲突）：大仓库 + N 个 worktree
+            # 时总耗时从串行 N×T 降为 ≈T，避免 list_worktrees 拖慢调用方
+            # （配合 UI 层把本方法移入后台线程，主线程零阻塞）。
             main_branch = None
             for wt in worktrees:
                 if wt.is_main:
                     main_branch = wt.branch
                     break
             if main_branch and main_branch != "(detached)":
-                for wt in worktrees:
-                    if wt.is_main or wt.branch == "(detached)":
-                        continue
-                    try:
-                        rev_result = _run_git(
-                            ["rev-list", "--left-right", "--count",
-                             f"{main_branch}...{wt.branch}"],
-                            cwd=git_root,
-                        )
-                        if rev_result.returncode == 0:
-                            parts = rev_result.stdout.strip().split("\t")
-                            if len(parts) == 2:
-                                # left=main_branch, right=worktree_branch
-                                # behind = main 有而 worktree 没有
-                                # ahead  = worktree 有而 main 没有
-                                wt.behind_main = int(parts[0])
-                                wt.ahead_main = int(parts[1])
-                    except Exception:
-                        pass
+                targets = [wt for wt in worktrees if not wt.is_main and wt.branch != "(detached)"]
+                if targets:
+                    import concurrent.futures
+
+                    def _fetch_count(wt: WorktreeInfo):
+                        try:
+                            rev_result = _run_git(
+                                ["rev-list", "--left-right", "--count", f"{main_branch}...{wt.branch}"],
+                                cwd=git_root,
+                            )
+                            if rev_result.returncode == 0:
+                                parts = rev_result.stdout.strip().split("\t")
+                                if len(parts) == 2:
+                                    # left=main_branch, right=worktree_branch
+                                    # behind = main 有而 worktree 没有
+                                    # ahead  = worktree 有而 main 没有
+                                    return wt, int(parts[0]), int(parts[1])
+                        except Exception:
+                            pass
+                        return wt, 0, 0
+
+                    # 并发上限 4：既消除串行累积，又不至于打满子进程
+                    workers = min(4, len(targets))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                        for wt, behind, ahead in ex.map(_fetch_count, targets):
+                            wt.behind_main = behind
+                            wt.ahead_main = ahead
 
             return worktrees
 
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.debug(f"[GitWorktree] list_worktrees failed: {e}")
             return []
-
 
     @staticmethod
     def get_repo_info(path: str) -> Optional[GitRepoInfo]:

@@ -1234,6 +1234,28 @@ class TabPanel(QWidget):
         if self._batch_add_depth == 0:
             self._rebuild_team_layout()
 
+    def begin_batch_remove(self):
+        """开始批量删除 tab：期间 remove_tab 跳过 _rebuild_team_layout 与空组清理，
+        end_batch_remove 统一重建。
+
+        连续删除 N 个 Tab（如解散团队全员）时，若每个 remove_tab 都全量重建团队
+        布局，代价为 O(N²)。批量模式下只在外层 end_batch_remove 时重建一次，
+        代价降为 O(N)。支持嵌套调用（内部计数），必须与 end_batch_remove 成对使用。
+        """
+        self._batch_remove_depth = getattr(self, "_batch_remove_depth", 0) + 1
+
+    def end_batch_remove(self):
+        """结束批量删除 tab：统一清理批量期间可能变空的团队容器并重建一次布局
+        （仅在最外层结束时）。"""
+        depth = getattr(self, "_batch_remove_depth", 0)
+        self._batch_remove_depth = max(0, depth - 1)
+        if self._batch_remove_depth == 0:
+            # 统一清理批量期间可能变空的团队容器（内部有成员判定，不空不删）
+            for team_id in getattr(self, "_pending_empty_teams", ()):
+                self._maybe_remove_empty_group(team_id)
+            self._pending_empty_teams = set()
+            self._rebuild_team_layout()
+
     def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
@@ -1792,19 +1814,39 @@ class TabPanel(QWidget):
             self._list_layout.removeWidget(item)
             item.deleteLater()
 
-            # 清理 team 映射：弹出 index，重建后续索引
+            # 清理 team 映射：弹出 index，重建后续索引（仅删除非末尾项时需要，
+            # 末尾项 pop 后键 0..n-2 已连续，无需 O(n) 全量重建）
             old_team = self._item_team.pop(index, "")
-            new_mapping: Dict[int, str] = {}
-            for i, t in self._item_team.items():
-                new_mapping[i - 1 if i > index else i] = t
-            self._item_team = new_mapping
-            # 若被移除 tab 所在 team 已空，移除 group 容器
-            if old_team:
-                self._maybe_remove_empty_group(old_team)
+            if index < len(self._item_team):
+                new_mapping: Dict[int, str] = {}
+                for i, t in self._item_team.items():
+                    new_mapping[i - 1 if i > index else i] = t
+                self._item_team = new_mapping
 
-            # 重建视觉布局：removeWidget 仅脱绑 widget，不重新排序，
-            # 删除前部独立 tab 后剩余独立 tab 会停留在 team 容器之后。
-            self._rebuild_team_layout()
+            # 批量删除模式（begin_batch_remove/end_batch_remove 包围）：空组清理
+            # 与视觉布局重建延迟到 end_batch_remove 统一执行，避免连续删除 N 个
+            # tab 触发 O(N²) 全量重建（与 begin_batch_add 对称）。
+            if getattr(self, "_batch_remove_depth", 0) > 0:
+                # 团队成员 tab 不在 _list_layout（在 team 容器内层），此处显式
+                # 脱绑，否则 deleteLater 后内层布局仍持有 widget 引用（悬空）。
+                if old_team:
+                    grp = self._team_groups.get(old_team)
+                    if grp is not None:
+                        inner = getattr(grp, "_team_inner_layout", None)
+                        if inner is None:
+                            inner = grp.layout()
+                        inner.removeWidget(item)
+                    # 记录可能变空的 team，end 时统一判定清理
+                    if not hasattr(self, "_pending_empty_teams"):
+                        self._pending_empty_teams = set()
+                    self._pending_empty_teams.add(old_team)
+            else:
+                # 若被移除 tab 所在 team 已空，移除 group 容器
+                if old_team:
+                    self._maybe_remove_empty_group(old_team)
+                # 重建视觉布局：removeWidget 仅脱绑 widget，不重新排序，
+                # 删除前部独立 tab 后剩余独立 tab 会停留在 team 容器之后。
+                self._rebuild_team_layout()
 
             # 更新选中态
             if self._active_index == index:
