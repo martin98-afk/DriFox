@@ -1697,6 +1697,20 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._bottom_card_container.add_card("model_config", self._model_config_card)
 
+    def _ensure_model_config_popup(self):
+        """确保模型配置卡片内容已构建（幂等）
+
+        与 _ensure_model_selector_card_content 同理：延迟构建链可能尚未执行，
+        用户提前点击模型参数按钮时兜底立即构建，避免
+        _load_model_config_to_card 访问 _model_config_popup 为 None。
+        """
+        if self._model_config_popup is not None:
+            return
+        self._ensure_model_config_card()
+        self._model_config_popup = ModelConfigCard()
+        self._model_config_popup.configApplied.connect(self._on_config_applied)
+        self._model_config_card.content_layout.addWidget(self._model_config_popup)
+
     def _ensure_model_selector_card(self):
         """确保模型选择卡片框架已创建（内容由 _build_deferred_card_model_selector 填充）"""
         if self._model_selector_card is not None:
@@ -1714,6 +1728,35 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_id, ContainerType.BOTTOM, "model_selector", self._model_selector_card, system_card=True
         )
         self._bottom_card_container.add_card("model_selector", self._model_selector_card)
+
+    def _ensure_model_selector_card_content(self):
+        """确保模型选择卡片内容已构建（幂等）
+
+        延迟构建链（_build_deferred_card_model_selector）可能因 800ms 定时器
+        未触发 / P2 懒加载 pending / 构建失败而尚未执行；用户提前点击模型选择
+        按钮时本方法兜底立即构建，避免 _load_model_selector_to_card 访问 None。
+        """
+        if self._model_selector_card_content is not None:
+            return
+        self._ensure_model_selector_card()
+        self._model_selector_card_content = ModelSelectorCardContent()
+        self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
+        self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
+        self._model_selector_card.set_search_handler(
+            "搜索模型...",
+            self._model_selector_card_content.set_search_filter,
+        )
+        self._model_selector_card.add_header_button(
+            FluentIcon.ADD,
+            "添加服务商",
+            self._on_add_provider_from_card,
+        )
+        self._model_selector_card.add_header_button(
+            get_icon("配置管理"),
+            "配置服务商",
+            self._on_configure_providers_from_card,
+        )
+        self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
 
     def _deferred_build_cards(self):
         """【性能优化】延迟构建重型卡片内容（分批渐进式）
@@ -1832,9 +1875,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """── ⑤ 模型配置卡片 ──"""
         try:
             self._ensure_model_config_card()  # P0-1：框架惰性创建
-            self._model_config_popup = ModelConfigCard()
-            self._model_config_popup.configApplied.connect(self._on_config_applied)
-            self._model_config_card.content_layout.addWidget(self._model_config_popup)
+            self._ensure_model_config_popup()
         except Exception:
             logger.exception("[DeferredBuild] ModelConfigCard 构建失败")
         finally:
@@ -1844,24 +1885,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """── ⑥ 模型选择卡片 ──"""
         try:
             self._ensure_model_selector_card()  # P0-1：框架惰性创建
-            self._model_selector_card_content = ModelSelectorCardContent()
-            self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
-            self._model_selector_card_content.stickyProviderChanged.connect(self._on_sticky_provider_changed)
-            self._model_selector_card.set_search_handler(
-                "搜索模型...",
-                self._model_selector_card_content.set_search_filter,
-            )
-            self._model_selector_card.add_header_button(
-                FluentIcon.ADD,
-                "添加服务商",
-                self._on_add_provider_from_card,
-            )
-            self._model_selector_card.add_header_button(
-                get_icon("配置管理"),
-                "配置服务商",
-                self._on_configure_providers_from_card,
-            )
-            self._model_selector_card.content_layout.addWidget(self._model_selector_card_content)
+            self._ensure_model_selector_card_content()
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
         finally:
@@ -6457,6 +6481,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_model_selector_to_card(self):
         """加载模型数据到模型选择卡片"""
+        # 兜底：延迟构建未完成（800ms 未到 / P2 懒加载 pending / 构建失败）时
+        # 立即构建内容，避免 _model_selector_card_content 为 None 崩溃
+        self._ensure_model_selector_card_content()
         provider_models_data = []
         merged_provider_models = get_merged_provider_models()
         # 维护 display_name → config_id 映射，用于 model_selector 回调时反查
@@ -7552,6 +7579,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_model_config_to_card(self):
         """加载当前模型配置到卡片（仅参数配置，不显示连接信息）"""
+        # 兜底：延迟构建未完成时立即构建内容，避免 _model_config_popup 为 None 崩溃
+        self._ensure_model_config_popup()
         current_name = self._current_provider_name if self._current_provider_name else "无"
 
         # 关键修复：从 _valid_configs 读取（已通过 _load_model_configs 合并了 FREE_PROVIDERS 默认参数）
