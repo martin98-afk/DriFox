@@ -179,6 +179,7 @@ class GiteeUploader(QObject):
     async def upload_file_async(self, local_path: str) -> Tuple[Optional[str], Optional[str]]:
         """上传本地文件到 Gitee 仓库（异步版本，不阻塞事件循环）"""
         import asyncio
+
         return await asyncio.to_thread(self.upload_file, local_path)
 
     def upload_bytes(self, data: bytes, filename: str = "", ext: str = "") -> Tuple[Optional[str], Optional[str]]:
@@ -238,7 +239,22 @@ class GiteeUploader(QObject):
             if "401" in err_msg or "Access token is expired" in err_msg:
                 logger.info("[GiteeUploader] token 过期，尝试刷新后重试")
                 self.reset_config()
-                if self._ensure_config():
+                config_ok = self._ensure_config()
+                if not config_ok:
+                    # ★ 多设备修复：本地 RT 可能被其他设备轮换作废（invalid_grant），
+                    # 先尝试从云端拉取最新 RT 恢复（ConfigSync 云端 single source of truth）
+                    try:
+                        from app.core.config_sync import ConfigSyncService
+
+                        svc = ConfigSyncService.get_instance()
+                        if svc.recover_token_from_cloud():
+                            logger.info("[GiteeUploader] 已通过云端恢复 token，重试上传")
+                            self.reset_config()
+                            config_ok = self._ensure_config()
+                    except Exception as _re:
+                        logger.warning(f"[GiteeUploader] 云端恢复 token 失败: {_re}")
+
+                if config_ok:
                     ok = self._backend.upload(
                         token=self._token,
                         owner=self._owner,

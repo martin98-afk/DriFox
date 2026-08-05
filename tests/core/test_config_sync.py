@@ -616,11 +616,13 @@ class TestInitialSync:
             mock_client.get.return_value = make_httpx_response(401, text="Unauthorized")
 
             # 刷新失败：_sync_token 返回 False，_refresh_local_and_upload 内部
-            # _ensure_valid_token 返回 TOKEN_REVOKED → 清绑分支
+            # _ensure_valid_token 返回 TOKEN_REVOKED → 先尝试云端恢复，恢复失败 → 清绑分支
             with patch.object(svc, "_sync_token", return_value=False), patch(
                 "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
                 return_value=(None, "TOKEN_REVOKED::invalid_grant"),
-            ), patch("app.core.config_sync.Settings.get_instance", return_value=fake_cfg):
+            ), patch.object(svc, "recover_token_from_cloud", return_value=False), patch(
+                "app.core.config_sync.Settings.get_instance", return_value=fake_cfg
+            ):
                 svc._initial_sync()
 
         # 必须发出"已失效"提示（T2a 红标 + T2b 弹窗链路的关键词）

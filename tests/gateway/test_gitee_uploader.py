@@ -261,8 +261,10 @@ class TestUploadBytes:
 
     def test_successful_upload(self, uploader, mock_settings_bound):
         """上传成功应返回 download_url"""
-        with patch.object(uploader, "_ensure_config", return_value=True), \
-             patch.object(uploader, "_backend") as mock_backend:
+        with (
+            patch.object(uploader, "_ensure_config", return_value=True),
+            patch.object(uploader, "_backend") as mock_backend,
+        ):
             mock_backend.upload.return_value = True
 
             url, err = uploader.upload_bytes(b"test_data", "test.png")
@@ -272,8 +274,10 @@ class TestUploadBytes:
 
     def test_upload_fails_return_error(self, uploader, mock_settings_bound):
         """后台上传失败应返回错误"""
-        with patch.object(uploader, "_ensure_config", return_value=True), \
-             patch.object(uploader, "_backend") as mock_backend:
+        with (
+            patch.object(uploader, "_ensure_config", return_value=True),
+            patch.object(uploader, "_backend") as mock_backend,
+        ):
             mock_backend.upload.return_value = False
 
             url, err = uploader.upload_bytes(b"data", "test.png")
@@ -282,8 +286,10 @@ class TestUploadBytes:
 
     def test_upload_http_error(self, uploader, mock_settings_bound):
         """后端异常应返回错误"""
-        with patch.object(uploader, "_ensure_config", return_value=True), \
-             patch.object(uploader, "_backend") as mock_backend:
+        with (
+            patch.object(uploader, "_ensure_config", return_value=True),
+            patch.object(uploader, "_backend") as mock_backend,
+        ):
             mock_backend.upload.side_effect = Exception("API error")
 
             url, err = uploader.upload_bytes(b"data", "test.bad")
@@ -292,8 +298,10 @@ class TestUploadBytes:
 
     def test_filename_inference(self, uploader, mock_settings_bound):
         """不传扩展名时从文件名推断"""
-        with patch.object(uploader, "_ensure_config", return_value=True), \
-             patch.object(uploader, "_backend") as mock_backend:
+        with (
+            patch.object(uploader, "_ensure_config", return_value=True),
+            patch.object(uploader, "_backend") as mock_backend,
+        ):
             mock_backend.upload.return_value = True
 
             url, err = uploader.upload_bytes(b"data", "photo.jpg")
@@ -332,6 +340,27 @@ class TestUploadBytes:
 
             url, err = uploader.upload_bytes(b"data", "test.png")
             assert url is not None
+            mock_signal.emit.assert_not_called()
+
+    def test_oauth_401_config_fail_recovers_from_cloud(self, uploader, mock_settings_bound):
+        """401 后本地刷新失败（RT 被其他设备轮换）→ 云端恢复成功 → 重试上传成功"""
+        uploader._oauth_mode = True
+        fake_svc = mock.Mock()
+        fake_svc.recover_token_from_cloud.return_value = True
+        with (
+            patch.object(uploader, "_ensure_config", side_effect=[True, False, True]),
+            patch.object(uploader, "_backend") as mock_backend,
+            patch.object(uploader, "tokenInvalid") as mock_signal,
+            patch("app.core.config_sync.ConfigSyncService.get_instance", return_value=fake_svc),
+        ):
+            # 首次 401；云端恢复后重试上传成功
+            mock_backend.upload.side_effect = [False, True]
+            mock_backend.last_error = "[401] Access token is expired"
+
+            url, err = uploader.upload_bytes(b"data", "test.png")
+            assert url is not None, f"云端恢复后应重试成功, err={err}"
+            assert err is None
+            fake_svc.recover_token_from_cloud.assert_called_once()
             mock_signal.emit.assert_not_called()
 
     def test_shared_mode_401_no_token_invalid(self, uploader, mock_settings_bound):
