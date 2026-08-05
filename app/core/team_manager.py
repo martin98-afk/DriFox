@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -216,6 +216,31 @@ class TeamManager:
             pass
         return None
 
+    def _cleanup_team_members_snapshot(self, data: dict, active: set) -> bool:
+        """清理顶层 team_members 快照中失效窗口记录（T18 兜底）。
+
+        仅清理新格式记录（key=window_id，value 为含 agent_name 字段的 dict）；
+        老格式记录（key=agent_name，value 无 agent_name 字段）保留——老格式
+        本身按 agent_name 覆盖写不累积、且需兼容读取，不参与 window 维度清理。
+
+        Args:
+            data: 团队数据 dict（原地修改）
+            active: 当前活跃窗口 ID 集合
+
+        Returns:
+            bool: 是否有变更（调用方决定是否落盘）
+        """
+        tm_snap = data.get("team_members") or {}
+        stale_keys = [
+            key for key, val in tm_snap.items() if isinstance(val, dict) and val.get("agent_name") and key not in active
+        ]
+        if not stale_keys:
+            return False
+        for key in stale_keys:
+            tm_snap.pop(key, None)
+        data["team_members"] = tm_snap
+        return True
+
     def _cleanup_stale_members(self, team_name: str = DEFAULT_TEAM):
         """彻底清理失效成员：移除 member 记录 + 删除邮箱目录
 
@@ -223,6 +248,10 @@ class TeamManager:
         历史 bug：窗口创建/销毁时序中 _active_window_ids 可能短暂为空集，
         导致所有成员被误判为失效，邮箱目录（含 QFileSystemWatcher 监视中的）
         被全部删除，成员无法交互。
+
+        🛡️ T18：同步清理顶层 team_members 快照中失效窗口记录（T3 key 改为
+        window_id 后只增不删 → 快照累积 → 恢复窗口数线性膨胀）。members 为
+        空时也执行快照清理（解散团队后残留 wid 会在下次恢复前被清除）。
         """
         active = self._get_active_windows()
         if not active:
@@ -235,6 +264,8 @@ class TeamManager:
                 return
             members = data.get("members", {})
             if not members:
+                if self._cleanup_team_members_snapshot(data, active):
+                    self._save_team_data(team_name)
                 return
 
             stale_ids = [wid for wid in members if wid not in active]
@@ -258,6 +289,10 @@ class TeamManager:
 
             if stale_ids:
                 data["members"] = members
+            # 🛡️ T18：失效窗口的顶层 team_members 快照同步清理（兜底——
+            # 异常关闭未走 leave_team 的窗口 wid 会残留，快照累积膨胀）。
+            tm_changed = self._cleanup_team_members_snapshot(data, active)
+            if stale_ids or tm_changed:
                 self._save_team_data(team_name)
 
     def _remove_mailbox_dir(self, team_name: str, window_id: str):
@@ -332,6 +367,15 @@ class TeamManager:
             data.setdefault("members", {})
             if window_id in data["members"]:
                 data["members"].pop(window_id, None)
+                # 🛡️ T18：同步清理该窗口的顶层 team_members 快照记录。
+                # T3 将快照 key 改为 window_id 后只增不删（leave/_cleanup 只清
+                # members）→ 恢复路径每次 join 新窗口 wid 累积旧记录 → 快照
+                # 计数膨胀 → 恢复窗口数随恢复次数线性膨胀（2→4→6…）。
+                # leave 即该窗口退出团队，快照记录同步删除，恢复窗口数收敛。
+                tm_snap = data.get("team_members") or {}
+                if window_id in tm_snap:
+                    tm_snap.pop(window_id, None)
+                    data["team_members"] = tm_snap
                 self._save_team_data(team_name)
 
         # 清理邮箱目录
@@ -501,6 +545,35 @@ class TeamManager:
                 if task_type in tags:
                     results.append(dict(member))
         return results
+
+    def rebuild_team_members_snapshot(self, entries: List[Tuple[str, str]], team_name: str = DEFAULT_TEAM):
+        """重建顶层 team_members 快照（T18：恢复路径专用，窗口数防膨胀）。
+
+        恢复窗口每次都是全新 window_id，join 只增不删会累积历史 wid →
+        快照计数膨胀 → 下次恢复窗口数随恢复次数线性膨胀（2→4→6…）。
+        重建 = 清空旧记录，仅保留本次实际恢复的 (window_id, agent_name)，
+        多次恢复窗口数恒定（= 成员数）。
+
+        保持 T3 语义：同角色多成员（异 wid）各保留一条；模板 agents 不在
+        team_members 中（get_team_member_snapshot 并集时模板优先）。
+
+        Args:
+            entries: [(window_id, agent_name), ...] 本次恢复的实际窗口集合
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            snapshot = {}
+            for wid, agent in entries:
+                wid = str(wid or "").strip()
+                agent = str(agent or "").strip()
+                if wid and agent:
+                    snapshot[wid] = {
+                        "agent_name": agent,
+                        "source": "restore",
+                        "joined_at": time.time(),
+                    }
+            data["team_members"] = snapshot
+            self._save_team_data(team_name)
 
     def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
         """获取团队成员快照（去重有序）：模板 agents ∪ 手动 join 快照 team_members。

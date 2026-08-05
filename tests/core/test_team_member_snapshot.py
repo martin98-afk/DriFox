@@ -99,15 +99,20 @@ class TestTeamMemberSnapshot:
         assert by_wid == {"win_01": "build", "win_02": "perf-tester"}, "手动快照记录应带 window_id"
 
     def test_cleanup_stale_members_preserves_team_members(self, tm):
-        """_cleanup_stale_members 清理失效成员时保留顶层 team_members。"""
+        """_cleanup_stale_members 清理失效成员时保留顶层 team_members（活跃窗口）。
+
+        F3 语义：手动加入成员的快照不被清理（恢复时找回无会话成员）——
+        指**活跃窗口**的快照永不因 cleanup 丢失。T18 收窄：**失效窗口**
+        的快照必须同步清理（否则恢复 wid 残留累积 → 窗口数膨胀回归）。
+        """
         tm.join_team("win_01", "perf-tester")
         tm.join_team("win_02", "build")
-        # 只有 win_02 活跃 → win_01 被清理
+        # 只有 win_02 活跃 → win_01 被清理（members + team_members 快照同步）
         tm.set_active_window_ids({"win_02"})
         data = tm._get_team_data("default")
         assert "win_01" not in data["members"], "失效成员应从 members 移除"
-        assert "win_01" in data["team_members"], "顶层快照不被清理（F3 关键）"
-        assert "win_02" in data["team_members"], "活跃成员快照保留"
+        assert "win_01" not in data["team_members"], "T18：失效窗口快照应同步清理（防恢复膨胀）"
+        assert "win_02" in data["team_members"], "活跃窗口快照保留（F3 恢复找回语义）"
 
 
 class TestTeamMembersColumnRoundtrip:
@@ -461,8 +466,8 @@ class TestRestoreMemberSetUnion:
         member_sessions = hm.get_team_sessions_by_run_id("run-1")
         assert len(member_sessions) == 1
 
-        # 复刻 _on_team_restore_requested 第 4 步（T3 升级）：by_agent 构建 +
-        # parse_team_members_snapshot + 窗口计数（无 wid 老格式计 1 次）
+        # 复刻 _on_team_restore_requested 第 4 步（T3/T18 升级）：
+        # by_agent 构建 + 最新会话快照解析 + 窗口计划（无 wid 老格式按 agent 去重）
         from app.utils.history_manager import parse_team_members_snapshot
 
         by_agent = {}
@@ -473,25 +478,26 @@ class TestRestoreMemberSetUnion:
             cur = by_agent.get(agent_name)
             if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
                 by_agent[agent_name] = session
+        _latest_session = max(member_sessions, key=lambda s: s.get("last_time") or "", default=None)
         snapshot_members = []
-        for session in member_sessions:
-            for rec in parse_team_members_snapshot((session.get("team_members") or "").strip()):
+        if _latest_session:
+            for rec in parse_team_members_snapshot((_latest_session.get("team_members") or "").strip()):
                 if rec not in snapshot_members:
                     snapshot_members.append(rec)
-        snap_counts = {}
-        for rec in snapshot_members:
-            if rec.get("window_id"):
-                snap_counts[rec["agent_name"]] = snap_counts.get(rec["agent_name"], 0) + 1
-            else:
-                snap_counts.setdefault(rec["agent_name"], 1)
-        window_counts = {agent: max(1, snap_counts.get(agent, 1)) for agent in by_agent}
-        for agent, cnt in snap_counts.items():
-            window_counts.setdefault(agent, max(1, cnt))
+        window_plan = []
+        _plain_seen = set()
+        if snapshot_members:
+            for rec in snapshot_members:
+                if rec.get("window_id"):
+                    window_plan.append(rec["agent_name"])
+                elif rec["agent_name"] not in _plain_seen:
+                    _plain_seen.add(rec["agent_name"])
+                    window_plan.append(rec["agent_name"])
+        else:
+            window_plan = list(by_agent.keys())
 
-        assert set(window_counts.keys()) == {"leader", "perf-tester"}, (
-            f"恢复成员集合 = 会话 ∪ 快照，实际 {set(window_counts.keys())}"
-        )
-        assert window_counts["perf-tester"] == 1, "快照成员无会话记录 → 补 1 个空窗口（语义一致）"
+        assert set(window_plan) == {"leader", "perf-tester"}, f"恢复成员集合 = 会话 ∪ 快照，实际 {set(window_plan)}"
+        assert window_plan.count("perf-tester") == 1, "快照成员无会话记录 → 补 1 个空窗口（语义一致）"
 
     def test_restore_member_set_union_with_window_id(self, store):
         """T3：快照含 window_id 时同角色多成员各建独立窗口，window_id 透传。
@@ -531,7 +537,7 @@ class TestRestoreMemberSetUnion:
         member_sessions = hm.get_team_sessions_by_run_id("run-1")
         assert len(member_sessions) == 1
 
-        # 复刻 _on_team_restore_requested 第 4 步（T3）：新解析 + 窗口计数
+        # 复刻 _on_team_restore_requested 第 4 步（T3/T18）：最新会话快照 → 窗口计划
         from app.utils.history_manager import parse_team_members_snapshot
 
         by_agent = {}
@@ -542,27 +548,29 @@ class TestRestoreMemberSetUnion:
             cur = by_agent.get(agent_name)
             if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
                 by_agent[agent_name] = session
+        _latest_session = max(member_sessions, key=lambda s: s.get("last_time") or "", default=None)
         snapshot_members = []
-        for session in member_sessions:
-            for rec in parse_team_members_snapshot((session.get("team_members") or "").strip()):
+        if _latest_session:
+            for rec in parse_team_members_snapshot((_latest_session.get("team_members") or "").strip()):
                 if rec not in snapshot_members:
                     snapshot_members.append(rec)
         # window_id 透传断言：快照记录保留 wid 字段
         wid_records = [r for r in snapshot_members if r.get("window_id")]
         assert len(wid_records) == 3, "含 wid 快照记录应透传 window_id"
         assert sorted(r["window_id"] for r in wid_records) == ["win_01", "win_02", "win_03"]
-        snap_counts = {}
+        window_plan = []
+        _plain_seen = set()
         for rec in snapshot_members:
             if rec.get("window_id"):
-                snap_counts[rec["agent_name"]] = snap_counts.get(rec["agent_name"], 0) + 1
-            else:
-                snap_counts.setdefault(rec["agent_name"], 1)
-        window_counts = {agent: max(1, snap_counts.get(agent, 1)) for agent in by_agent}
-        for agent, cnt in snap_counts.items():
-            window_counts.setdefault(agent, max(1, cnt))
+                window_plan.append(rec["agent_name"])
+            elif rec["agent_name"] not in _plain_seen:
+                _plain_seen.add(rec["agent_name"])
+                window_plan.append(rec["agent_name"])
 
-        # build 快照 2 次 > by_agent 1 窗口 → 差额 1；plan 快照 1 == by_agent 1
-        assert window_counts == {"build": 2, "plan": 1}, f"同角色多成员各建独立窗口，实际 {window_counts}"
+        # build 快照 2 条（含 wid）→ 2 窗口差额；plan 快照 1 条 → 1 窗口
+        assert window_plan.count("build") == 2, f"同角色多成员各建独立窗口，实际 {window_plan}"
+        assert window_plan.count("plan") == 1
+        assert len(window_plan) == 3, f"窗口计划共 3 个，实际 {window_plan}"
 
     def _hm(self, store):
         from app.utils.history_manager import HistoryManager
@@ -585,3 +593,91 @@ class TestManualJoinStartsRun:
         assert tm.get_team_run_id() == run_id, "幂等：再次读取一致"
         # 幂等：再次调用不生成新值
         assert tm.start_team_run() == run_id, "start_team_run 幂等复用"
+
+
+class TestRestoreWindowNoInflation:
+    """T18 阻断项回归：恢复窗口数不随恢复次数线性膨胀
+
+    根因：T3 将 team_members 快照 key 改为 window_id 后只增不删（leave/
+    _cleanup 只清 members）→ 恢复每次 join 新 wid 累积旧记录 → 快照计数
+    膨胀 → 恢复窗口数 2→4→6…。
+
+    修复三层：leave_team 同步清理 / _cleanup_stale_members 兜底清理 /
+    恢复路径 rebuild_team_members_snapshot 重建。此处覆盖数据层机制。
+    """
+
+    def test_two_restores_window_count_stable(self, tm):
+        """核心回归：两次"恢复"窗口数恒定（= 成员数，不膨胀）。
+
+        模拟恢复链路：join（新 wid）→ rebuild 快照 → 再次恢复
+        （leave 旧窗 + join 新 wid + rebuild）→ 两次恢复快照计数相同。
+        """
+        # 第一次恢复：build + plan 两个成员窗口
+        tm.join_team("win_r1a", "build")
+        tm.join_team("win_r1b", "plan")
+        tm.rebuild_team_members_snapshot([("win_r1a", "build"), ("win_r1b", "plan")])
+        snap1 = tm.get_team_member_snapshot()
+        assert len(snap1) == 2, f"第一次恢复快照应 2 条，实际 {snap1}"
+
+        # 第二次恢复：旧窗口解散（leave_team）+ 新 wid join + rebuild
+        tm.leave_team("win_r1a")
+        tm.leave_team("win_r1b")
+        tm.join_team("win_r2a", "build")
+        tm.join_team("win_r2b", "plan")
+        tm.rebuild_team_members_snapshot([("win_r2a", "build"), ("win_r2b", "plan")])
+        snap2 = tm.get_team_member_snapshot()
+        assert len(snap2) == 2, f"第二次恢复快照应仍 2 条（不膨胀），实际 {snap2}"
+        # 窗口数（恢复侧按 snap_counts 计）两次恒为 2
+        assert {r["window_id"] for r in snap2} == {"win_r2a", "win_r2b"}, "快照应仅含本次恢复窗口"
+
+    def test_leave_team_removes_snapshot_record(self, tm):
+        """leave_team 同步清理该窗口的 team_members 快照记录（T18 主路径）。"""
+        tm.join_team("win_01", "build")
+        assert "win_01" in tm._get_team_data("default")["team_members"]
+        tm.leave_team("win_01")
+        data = tm._get_team_data("default")
+        assert "win_01" not in data["team_members"], "leave 后快照记录应同步删除"
+        assert tm.get_team_member_snapshot() == [], "快照应清空"
+
+    def test_cleanup_stale_members_removes_snapshot(self, tm):
+        """_cleanup_stale_members 兜底清理失效窗口快照（异常关闭路径）。"""
+        tm.join_team("win_01", "build")
+        tm.join_team("win_02", "plan")
+        # 只有 win_02 活跃 → win_01 失效，快照同步清理
+        tm.set_active_window_ids({"win_02"})
+        data = tm._get_team_data("default")
+        assert "win_01" not in data["team_members"], "失效窗口快照应被清理"
+        assert "win_02" in data["team_members"], "活跃窗口快照保留"
+
+    def test_cleanup_preserves_legacy_agent_key(self, tm):
+        """老格式（key=agent_name，value 无 agent_name 字段）不被 window 维度清理误删。"""
+        data = tm._get_team_data("default")
+        # 手工注入老格式快照（T3 前落库数据形态）
+        data["team_members"] = {
+            "perf-tester": {"source": "manual", "joined_at": 1000},
+        }
+        tm._save_team_data("default")
+        tm.join_team("win_01", "build")  # 触发一次保存
+        tm.set_active_window_ids({"win_01"})
+        data = tm._get_team_data("default")
+        assert "perf-tester" in data["team_members"], "老格式 agent key 应保留（兼容读取）"
+        assert "win_01" in data["team_members"], "新格式 wid key 正常"
+
+    def test_cleanup_when_members_empty_still_cleans_snapshot(self, tm):
+        """members 为空时仍清理 team_members 残留（解散团队后场景）。"""
+        tm.join_team("win_01", "build")
+        # 解散：成员记录删除（模拟 leave），但快照残留（异常路径）
+        data = tm._get_team_data("default")
+        data["members"] = {}
+        tm._save_team_data("default")
+        assert "win_01" in data["team_members"], "前置：快照残留"
+        tm.set_active_window_ids({"win_02"})  # 新窗口活跃，旧 wid 失效
+        data = tm._get_team_data("default")
+        assert "win_01" not in data["team_members"], "members 为空也应清理快照残留"
+
+    def test_rebuild_keeps_duplicate_role_members(self, tm):
+        """rebuild 保持 T3 语义：同角色多成员（异 wid）各保留一条。"""
+        tm.rebuild_team_members_snapshot([("win_02", "build"), ("win_03", "build"), ("win_01", "plan")])
+        records = tm.get_team_member_snapshot()
+        assert len(records) == 3, f"同角色多成员应各保留一条，实际 {records}"
+        assert sorted(r["window_id"] for r in records) == ["win_01", "win_02", "win_03"]

@@ -7441,28 +7441,23 @@ class OpenAIChatToolWindow(ToolWindow):
             if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
                 by_agent[agent_name] = session
 
-        # 🛡️ F3/T3（第 3 层收口）：恢复成员集合 = SQLite 会话 ∪ 任一成员会话的
-        # team_members 快照解析结果。T3 快照含 window_id（同角色多成员各一条）：
-        # 统计每个 agent 在快照中的出现次数，超出 by_agent 已有会话窗口数的
-        # 差额记为额外窗口；快照含 window_id 且 agent 完全无会话记录时也按
-        # 快照计数补空窗口（与"空消息 agent 也建窗口"语义一致）。
-        # 无 wid 老格式（纯名字快照）按 agent 计 1 次（无法区分多成员）。
+        # 🛡️ F3/T3/T18（第 3 层收口）：恢复窗口集合 = last_time 最新会话的
+        # team_members 快照（快照 = 最近一次团队状态，含全部活跃成员 wid）。
+        # - T3：快照含 window_id → 同角色多成员各建独立窗口（逐条计）；
+        #   无 wid 老格式（纯名字快照）→ 每 agent 计 1 窗口（无法区分多成员）
+        # - T18：只取最新会话快照，不并集全部会话——每次恢复都会产生携带
+        #   新 wid 快照的新会话，旧会话快照保留历史 wid；并集会随恢复次数
+        #   累积（2→4→6…）导致窗口数线性膨胀。所有成员会话都写全量快照
+        #   （_get_team_members_snapshot_json 取 team.json 全量），最新会话
+        #   快照即最近一次团队状态，天然收敛且不丢成员（F3 找回语义保留）。
         from app.utils.history_manager import parse_team_members_snapshot
 
+        _latest_session = max(member_sessions, key=lambda s: s.get("last_time") or "", default=None)
         snapshot_members: List[Dict] = []
-        for session in member_sessions:
-            snap = (session.get("team_members") or "").strip()
-            if not snap:
-                continue
-            for rec in parse_team_members_snapshot(snap):
+        if _latest_session:
+            for rec in parse_team_members_snapshot((_latest_session.get("team_members") or "").strip()):
                 if rec not in snapshot_members:
                     snapshot_members.append(rec)
-        snap_counts: Dict[str, int] = {}
-        for rec in snapshot_members:
-            if rec.get("window_id"):
-                snap_counts[rec["agent_name"]] = snap_counts.get(rec["agent_name"], 0) + 1
-            else:
-                snap_counts.setdefault(rec["agent_name"], 1)
 
         # 4) 为每个 agent 创建窗口并注入恢复数据。
         # E3（T3）：会话按 agent 分组（last_time 降序），同 agent 多窗口
@@ -7475,14 +7470,21 @@ class OpenAIChatToolWindow(ToolWindow):
             sessions_by_agent.setdefault(agent_name, []).append(session)
         for lst in sessions_by_agent.values():
             lst.sort(key=lambda s: s.get("last_time") or "", reverse=True)
-        # 每 agent 窗口数 = max(by_agent 会话窗口(1), 快照该 agent 出现次数)
-        window_counts: Dict[str, int] = {}
-        for agent_name, _session in by_agent.items():
-            window_counts[agent_name] = max(1, snap_counts.get(agent_name, 1))
-        # 快照含但无会话的 agent：按快照计数补空窗口（同角色多成员逐条补）
-        for agent_name, cnt in snap_counts.items():
-            if agent_name not in window_counts:
-                window_counts[agent_name] = max(1, cnt)
+        # 窗口计划：快照成员记录逐条（含 wid 的逐条计窗口；无 wid 老格式
+        # 按 agent 去重）；最新快照为空（老数据无快照）→ by_agent 兜底
+        # （每 agent 1 窗口）。
+        window_plan: List[tuple] = []
+        _plain_seen: set = set()
+        if snapshot_members:
+            for rec in snapshot_members:
+                agent = rec["agent_name"]
+                if rec.get("window_id"):
+                    window_plan.append((agent, rec["window_id"]))
+                elif agent not in _plain_seen:
+                    _plain_seen.add(agent)
+                    window_plan.append((agent, ""))
+        else:
+            window_plan = [(agent, "") for agent in by_agent]
 
         restored_count = 0
         restored_windows = []
@@ -7494,38 +7496,49 @@ class OpenAIChatToolWindow(ToolWindow):
             (s.get("team_name") for s in member_sessions if (s.get("team_name") or "").strip()),
             "团队对话",
         )
-        for agent_name, window_count in window_counts.items():
+        _agent_window_index: Dict[str, int] = {}
+        for agent_name, _snap_wid in window_plan:
+            idx = _agent_window_index.get(agent_name, 0)
+            _agent_window_index[agent_name] = idx + 1
             agent_sessions = sessions_by_agent.get(agent_name, [])
-            for _idx in range(window_count):
-                session = agent_sessions[_idx] if _idx < len(agent_sessions) else {}
-                session_id = session.get("session_id", "")
-                try:
-                    messages = self.history_manager.get_session_messages(session_id) or []
-                except Exception:
-                    messages = []
-                try:
-                    # 🛡️ 分支数据在 _create_fresh_window 内部 add_window（触发
-                    # showEvent）之前赋值，消除"分支数据赋值太晚"竞态——避免
-                    # showEvent 先走 _create_new_session 导致历史消息无法加载。
-                    # project 透传保持会话原项目归属（历史会话"无法加载"修复）。
-                    win = self._create_fresh_window(
-                        branch_data={
-                            "messages": messages,
-                            "name": session.get("title") or session.get("name") or f"团队对话 {agent_name}",
-                            "project": session.get("project") or "",
-                        }
-                    )
-                    if win is None:
-                        continue
-                    # 团队标记 + 重新登记成员（join_team 幂等）
-                    win._team_agent_name = agent_name
-                    win._team_name = team_display_name
-                    win._team_run_id = new_run_id
-                    tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
-                    restored_windows.append(win)
-                    restored_count += 1
-                except Exception as e:  # noqa: BLE001
-                    logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
+            session = agent_sessions[idx] if idx < len(agent_sessions) else {}
+            session_id = session.get("session_id", "")
+            try:
+                messages = self.history_manager.get_session_messages(session_id) or []
+            except Exception:
+                messages = []
+            try:
+                # 🛡️ 分支数据在 _create_fresh_window 内部 add_window（触发
+                # showEvent）之前赋值，消除"分支数据赋值太晚"竞态——避免
+                # showEvent 先走 _create_new_session 导致历史消息无法加载。
+                # project 透传保持会话原项目归属（历史会话"无法加载"修复）。
+                win = self._create_fresh_window(
+                    branch_data={
+                        "messages": messages,
+                        "name": session.get("title") or session.get("name") or f"团队对话 {agent_name}",
+                        "project": session.get("project") or "",
+                    }
+                )
+                if win is None:
+                    continue
+                # 团队标记 + 重新登记成员（join_team 幂等）
+                win._team_agent_name = agent_name
+                win._team_name = team_display_name
+                win._team_run_id = new_run_id
+                tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+                restored_windows.append(win)
+                restored_count += 1
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
+
+        # 🛡️ T18：重建顶层 team_members 快照——仅保留本次实际恢复的窗口，
+        # 清除历史残留 wid（T3 key=window_id 后快照只增不删，残留会导致
+        # 下次恢复按 snap_counts 计数 → 窗口数随恢复次数线性膨胀 2→4→6…）。
+        # 重建后快照 = 实际窗口集合，多次恢复窗口数恒定（= 成员数）。
+        try:
+            tm_mgr.rebuild_team_members_snapshot([(w._window_id, w._team_agent_name) for w in restored_windows])
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_on_team_restore_requested] 重建成员快照失败: {e}")
 
         # 5) 延后为每个恢复窗口执行完整初始化（切换 agent + 注册成员 +
         #    刷新 UI + 启动 watcher）。与模板加载路径共用
