@@ -322,9 +322,6 @@ class LLMSettingsCard(SystemCardFrame):
         self.lockRemoteCard.checkedChanged.connect(self._on_lock_remote_toggled)
         content_layout.addWidget(self.lockRemoteCard)
 
-        # Tab 管理器开关已下线：多窗口模式暂不开放，应用固定运行于 Tab 模式
-        # （回退方式：恢复此处 SwitchSettingCard 并还原 main.py 的模式分支）
-
         # 开机自启
         self.autoStartCard = SwitchSettingCard(
             get_icon("开机自动启动"),

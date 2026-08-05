@@ -81,8 +81,7 @@ class TestModuleImport:
 
     def test_inherits_from_tool_window(self):
         """OpenAIChatToolWindow 继承自 ToolWindow"""
-        from app.main_widget import OpenAIChatToolWindow
-        from app.tool_popup import ToolWindow
+        from app.main_widget import OpenAIChatToolWindow, ToolWindow
 
         assert issubclass(OpenAIChatToolWindow, ToolWindow)
 

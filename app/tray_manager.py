@@ -213,39 +213,9 @@ class TrayManager(QObject):
             self._tray_menu.addAction(quit_action)
             return
 
-        # ── 独立窗口模式（原有逻辑）──
-        # 过滤有效的窗口
-        valid_windows = [w for w in self._windows if self._is_window_valid(w)]
-
-        if valid_windows:
-            for i, w in enumerate(valid_windows, 1):
-                title = self._get_window_menu_title(w, i)
-                action = QAction(title, self._tray_menu)
-                action.setData(id(w))  # 用对象 id 标识窗口
-                action.triggered.connect(lambda checked, win=w: self._show_window(win))
-                self._tray_menu.addAction(action)
-            self._tray_menu.addSeparator()
-
-        # 底部固定项
-        show_all = QAction("显示所有窗口", self._tray_menu)
-        show_all.triggered.connect(self._show_all_windows)
-        self._tray_menu.addAction(show_all)
-
-        hide_all = QAction("隐藏所有窗口", self._tray_menu)
-        hide_all.triggered.connect(self._hide_all_windows)
-        self._tray_menu.addAction(hide_all)
-
-        self._tray_menu.addSeparator()
-
-        new_win = QAction("新建窗口", self._tray_menu)
-        new_win.triggered.connect(self._new_window)
-        self._tray_menu.addAction(new_win)
-
-        self._tray_menu.addSeparator()
-
-        quit_action = QAction("退出", self._tray_menu)
-        quit_action.triggered.connect(self._quit_application)
-        self._tray_menu.addAction(quit_action)
+        # ── 独立窗口模式分支已下线（M2a-A4）：Tab 模式固定启用后
+        # `_tab_manager_window is not None` 恒为真，else 分支永不执行 ──
+        # （原逻辑：过滤有效窗口、显示/隐藏全部、新建窗口菜单项）
 
     def _get_window_menu_title(self, window, index: int) -> str:
         """获取窗口在托盘菜单中显示的标题"""
@@ -265,12 +235,6 @@ class TrayManager(QObject):
         """添加窗口到选中列表"""
         if window not in self._selected_windows:
             self._selected_windows.append(window)
-            self._update_selection_visuals()
-
-    def _deselect_window(self, window) -> None:
-        """从选中列表移除窗口"""
-        if window in self._selected_windows:
-            self._selected_windows.remove(window)
             self._update_selection_visuals()
 
     def is_window_selected(self, window) -> bool:
@@ -643,12 +607,6 @@ class TrayManager(QObject):
             self._selected_windows = alive
             self._update_selection_visuals()
 
-    def get_arrange_mode(self) -> str:
-        """获取当前排布模式名称（用于 UI 提示）"""
-        if 0 <= self._arrange_mode < len(self._ARRANGE_MODES):
-            return self._ARRANGE_MODES[self._arrange_mode]
-        return self._ARRANGE_MODES[0]
-
     def register_window(self, window) -> None:
         """注册一个窗口到托盘管理器"""
         if window not in self._windows:
@@ -685,65 +643,8 @@ class TrayManager(QObject):
             # 4秒后清理（与 showMessage 的显示时长一致）
             QTimer.singleShot(4500, lambda: self._pending_notification.pop(notification_id, None))
 
-    def _hide_all_windows(self) -> None:
-        """隐藏所有已注册的窗口"""
-        for w in list(self._windows):
-            try:
-                if w.isVisible():
-                    w.hide()
-            except RuntimeError:
-                # 窗口已被 C++ 销毁，清理引用
-                self._windows = [x for x in self._windows if x is not w]
-
-    def _new_window(self) -> None:
-        """从第一个有效窗口创建新窗口"""
-        dialog = self._get_first_valid_window()
-        if dialog is None:
-            logger.warning("[_new_window] 没有有效窗口，无法创建新窗口")
-            return
-
-        # 获取窗口内部的 tool_instance (OpenAIChatToolWindow)
-        tool_instance = getattr(dialog, "tool_instance", None)
-        if tool_instance is None:
-            logger.warning("[_new_window] 窗口无效，无法创建新窗口")
-            return
-
-        # 调用窗口的复制方法（branch=False 表示全新空窗口）
-        try:
-            tool_instance._safe_duplicate_window(branch=False)
-        except Exception as e:
-            logger.error(f"[_new_window] 创建新窗口失败: {e}")
-
-    def _show_all_windows(self) -> None:
-        """显示所有已注册的窗口"""
-        has_visible = False
-        for w in list(self._windows):
-            try:
-                if w.isHidden():
-                    w.show()
-                    w.activateWindow()
-                    if w.isMinimized():
-                        w.showNormal()
-                    w.raise_()
-                    has_visible = True
-                else:
-                    w.activateWindow()
-                    has_visible = True
-            except RuntimeError:
-                # 窗口已被 C++ 销毁，清理引用
-                self._windows = [x for x in self._windows if x is not w]
-
-        if not has_visible and self._windows:
-            # 没有可见窗口，显示第一个
-            w = self._windows[0]
-            try:
-                w.show()
-                w.activateWindow()
-                w.raise_()
-            except RuntimeError:
-                pass
-
     def _get_first_valid_window(self):
+        # D3: dead code — _windows 恒空（Tab 模式），保留作回退兜底
         """获取第一个有效的窗口"""
         for w in self._windows:
             if self._is_window_valid(w):
@@ -751,6 +652,7 @@ class TrayManager(QObject):
         return None
 
     def _show_window(self, window) -> None:
+        # D3: dead code — _windows 恒空（Tab 模式），保留作回退兜底
         """显示指定的窗口（如果已隐藏则显示，如果最小化则还原）
 
         支持传入嵌入式Widget：自动获取其所属的顶层窗口再操作。
