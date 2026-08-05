@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -368,6 +369,10 @@ class HistoryManager:
         # 内存缓存
         self._history_sessions: List[Dict] = []
         self._history_loaded = False  # 懒加载标记：首次访问 _history_sessions 时从 SQLite 加载
+        # 🛡️ H1（T4-TOP8）：保护懒加载"检查-加载"原子性的锁。
+        # 后台预热线程与主线程首次访问可能并发进入 _ensure_history_loaded，
+        # 必须串行化防止双重加载/读到半初始化 _history_sessions。
+        self._history_load_lock = threading.Lock()
 
         # === 轻量列表缓存 ===
         # get_history_list() 的结果缓存，避免每次调用都排序+过滤+重建 dict。
@@ -392,6 +397,11 @@ class HistoryManager:
 
         # 初始化存储
         self._init_storage()
+
+        # 🛡️ H1（T4-TOP8）：后台线程预热历史会话——启动后提前加载 SQLite 历史，
+        # 用户首次打开历史面板时数据已就绪（主线程 0 阻塞）。仅 SQLite 模式生效；
+        # 预热失败静默（主路径 _ensure_history_loaded 兜底重试）。
+        self._prewarm_history()
 
     def _mark_cache_dirty(self):
         """标记轻量列表缓存为脏，下次 get_history_list 时重新构建"""
@@ -726,16 +736,83 @@ class HistoryManager:
         return most_recent
 
     def _ensure_history_loaded(self):
-        """懒加载历史会话数据（首次访问时从 SQLite 加载）"""
-        if self._history_loaded or not self._use_sqlite:
+        """懒加载历史会话数据（首次访问时从 SQLite 加载）
+
+        🛡️ H1（T4-TOP8）：持 _history_load_lock 保护"检查-加载"原子性——
+        后台预热线程（_prewarm_history）与主线程首次访问可能并发进入：
+        - 预热已完成：主线程检查 _history_loaded 直接返回（0 阻塞）
+        - 预热进行中：主线程等待锁（至多=查询耗时，与原同步方案等价，
+          不劣化；预热把耗时从"用户操作时"提前到"启动后台"）
+        - 预热失败：_history_loaded 不置 True，主线程首次访问兜底重试
+          （与原惰性加载行为一致，功能不降级）
+        - 二次检查 + 条件赋值：SQLite 查询完成后再次检查 _history_loaded，
+          且赋值前条件判断（GIL 原子）——查询/检查期间外部（测试注入/
+          主线程抢先）已置 True 或写入 _history_sessions 时以外部为准，
+          不覆盖（消除 H1-R3 极端竞态窗口）
+        """
+        if not self._use_sqlite:
             return
-        self._history_loaded = True
-        try:
-            self._history_sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
-            self._deduplicate_history_sessions()
-            self._migrate_if_needed()
-        except Exception as e:
-            logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
+        with self._history_load_lock:
+            if self._history_loaded:
+                return
+            try:
+                sessions = self._session_store.get_sessions_lightweight(limit=self._history_limit)
+                # 二次检查 + 条件赋值：查询期间外部可能已加载/注入，
+                # 以外部数据为准，不覆盖（GIL 内条件赋值原子）
+                if not self._history_loaded:
+                    self._history_sessions = sessions
+                    self._deduplicate_history_sessions()
+                    self._migrate_if_needed()
+                    self._history_loaded = True
+            except Exception as e:
+                logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
+
+    def _prewarm_history(self):
+        """后台线程预热历史会话（T4-TOP8）：首次历史加载从主线程移到后台
+
+        应用启动后（HistoryManager 构造完成）延迟 1s 启动后台线程执行
+        _ensure_history_loaded，用户首次打开历史面板时数据已就绪，主线程
+        首开历史面板 0 阻塞（预热完成后）。
+
+        🛡️ H1-R2（devil-advocate 挑刺）：延迟 1s 而非构造后立即预热——
+        避免与窗口首帧创建/布局争 IO/CPU（用户不可能在启动后 1s 内打开
+        历史面板，延迟对目标零影响，消除启动首帧争抢）。
+        用 threading.Timer 而非 QTimer.singleShot：回调在 timer 线程执行
+        （真正的后台线程），主线程不阻塞；且不依赖 Qt 事件循环。
+
+        🛡️ H1-R3：延迟 1s 同时消除测试注入竞态——测试构造后立即注入
+        _history_loaded=True 必然早于预热启动，预热查询后二次检查命中
+        直接返回，不覆盖注入数据。
+
+        线程安全论证：
+        - db_manager 读路径线程安全（P4 已确认）：WAL + 读写锁分离 +
+          check_same_thread=False，SELECT 走共享读锁，可与写路径并发
+        - 本线程仅调用 _ensure_history_loaded，由 _history_load_lock 与
+          主线程首次访问串行化（不会双重加载/半初始化）
+        - 预热失败静默：_history_loaded 不置 True，主路径兜底重试（硬约束：
+          预热不能改变"用户访问时数据正确"的保证）
+        - daemon 线程：退出时不等待；被杀时赋值单条原子（无半状态）、
+          _history_loaded 未置 True（主路径兜底）
+        """
+        if not self._use_sqlite:
+            return
+
+        def _do_prewarm():
+            try:
+                self._ensure_history_loaded()
+            except Exception as e:
+                logger.warning(f"[HistoryManager] 历史预热异常: {e}")
+
+        # threading.Timer 不支持 name/daemon 参数：用 Thread 包装实现
+        # 延迟 1s + daemon（应用退出不等待）
+        def _delayed_start():
+            try:
+                time.sleep(1.0)
+                _do_prewarm()
+            except Exception:
+                pass
+
+        threading.Thread(target=_delayed_start, daemon=True, name="history-prewarm").start()
 
     def get_history_list(
         self, project: str = None, with_messages: bool = False, merge_team: bool = False
@@ -1586,9 +1663,28 @@ class HistoryManager:
         """立即持久化所有待保存的会话（同步写入 SQLite）
 
         在应用退出或关键保存点后调用，确保数据不丢失。
+
+        🛡️ P4（T4-TOP6）：db_manager 写路径改为延迟提交后，_do_save 写入的
+        SQL 只是执行未提交；本方法必须穿透到 DatabaseManager.flush() 同步
+        提交挂起事务，否则 flush 语义失效（退出路径丢数据）。调用方
+        （main_widget.py 退出/保存点）行为不变。
         """
         if self._save_timer is not None or self._pending_save_session_id:
             self._do_save()
+        # 穿透到 db 层：同步提交 SQLite 挂起事务（攒批窗口内的写立即落盘）
+        # 🛡️ P4-C1-Y1（devil-advocate 复核）：flush 失败透传 error 日志
+        # （退出链经本方法最终落 db.close()，由 close 的失败保留逻辑兜底）。
+        try:
+            store = self._session_store
+            db = getattr(store, "_db", None) if store is not None else None
+            if db is not None and getattr(db, "is_connected", False):
+                if not db.flush():
+                    logger.error(
+                        f"[HistoryManager] flush 穿透失败：SQLite 挂起事务未落盘 "
+                        f"(pending_save={self._pending_save_session_id})"
+                    )
+        except Exception as e:
+            logger.error(f"[HistoryManager] flush 穿透异常: {e}")
 
     def _extract_last_message_time(self, messages: List[Dict]) -> str:
         for msg in reversed(messages or []):

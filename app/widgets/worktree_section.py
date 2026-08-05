@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 from loguru import logger
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QPaintEvent
 from PyQt5.QtWidgets import (
     QDialog,
@@ -36,15 +36,196 @@ if sys.platform == "win32":
     _CREATION_FLAGS = subprocess.CREATE_NO_WINDOW
 
 
+class _WorktreeTaskSignals(QObject):
+    """后台 git 任务的完成信号（跨线程 emit → 主线程槽）"""
+
+    finished = pyqtSignal(object)  # 任务成功：携带结果
+    failed = pyqtSignal(str)  # 任务失败：携带错误消息
+
+
+class _WorktreeTaskWorker(QRunnable):
+    """后台执行 git 操作的 worker
+
+    [P3] 主线程只发起任务 + 显示进度，git 子进程在后台线程串行执行，
+    完成后经 finished/failed 信号回主线程刷新列表，UI 不冻结。
+    顺序依赖（remove→prune→branch -D）由任务内的串行步骤保证。
+    """
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self.signals = _WorktreeTaskSignals()
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+        except Exception as e:  # noqa: BLE001 - 后台任务兜底，失败信息回主线程
+            self.signals.failed.emit(str(e))
+            return
+        self.signals.finished.emit(result)
+
+
+# worktree 面板专用线程池（单线程串行：保证 git 写操作不并发交叉）
+_WORKTREE_POOL = QThreadPool()
+_WORKTREE_POOL.setMaxThreadCount(1)
+
+
+def _find_git_root_for(wt_path: str) -> str:
+    """后台线程：查找 worktree 所在 git 仓库根目录（rev-parse 移出主线程）"""
+    if os.path.isdir(wt_path):
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                cwd=wt_path,
+                timeout=5,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_CREATION_FLAGS,
+            )
+            if r.returncode == 0:
+                common = r.stdout.strip()
+                if "worktrees" in common:
+                    return os.path.dirname(os.path.dirname(common))
+                if os.path.isdir(common):
+                    return os.path.dirname(common)
+        except Exception:
+            pass
+    return os.path.dirname(wt_path)
+
+
+def _delete_worktree_job(wt_path: str, branch: str) -> bool:
+    """后台线程：串行执行 rev-parse → remove → prune → branch -D（顺序依赖硬约束）
+
+    失败时记录日志但不中断后续步骤（与改造前主线程版本行为一致）。
+    """
+    cwd = _find_git_root_for(wt_path)
+    # 1. 删除 worktree 目录
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "remove", wt_path],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.returncode != 0:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", wt_path],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=10,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_CREATION_FLAGS,
+            )
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_CREATION_FLAGS,
+        )
+    except Exception as e:
+        logger.error(f"[Worktree] delete failed: {e}")
+
+    # 2. 自动删除分支
+    try:
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=10,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_CREATION_FLAGS,
+        )
+    except Exception as e:
+        logger.error(f"[Worktree] delete branch failed: {e}")
+
+    return True
+
+
+def _fetch_repo_info_job(folder: str):
+    """后台线程：获取仓库信息；若存在外部删除目录则先 prune 再重新获取
+
+    返回 (GitRepoInfo | None, missing_paths)：missing_paths 供主线程做
+    DB 清理 / 工作目录恢复收尾（prune 本身已在后台完成）。
+    """
+    info = GitWorktreeDetector.get_repo_info(folder)
+    if info is None:
+        return None, []
+
+    missing_paths = [wt.path for wt in info.worktrees if not os.path.isdir(wt.path)]
+    if missing_paths:
+        logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
+        # 1) prune（后台线程执行，主线程不冻结）
+        try:
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                capture_output=True,
+                text=True,
+                cwd=info.root,
+                timeout=5,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_CREATION_FLAGS,
+            )
+        except Exception:
+            pass
+        # 2) 重新获取（prune 后 git 记录已清理）
+        GitWorktreeDetector._info_cache.pop(folder, None)
+        info = GitWorktreeDetector.get_repo_info(folder)
+    return info, missing_paths
+
+
+def _create_worktree_job(repo_root: str, branch_name: str, worktree_dir: str, base_branch: str) -> str:
+    """后台线程：执行 `git worktree add -b`（创建 worktree）
+
+    返回创建的 worktree 目录；失败抛异常（错误消息回主线程弹窗提示）。
+    """
+    result = subprocess.run(
+        ["git", "worktree", "add", "-b", branch_name, worktree_dir, base_branch or "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        timeout=30,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_CREATION_FLAGS,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"git worktree add 失败 (rc={result.returncode})")
+    return worktree_dir
+
+
 class _WorktreeRow(QWidget):
     """单行 worktree 分支"""
 
-    switched = pyqtSignal(str)   # worktree_path
-    deleted = pyqtSignal(str)    # worktree_path
+    switched = pyqtSignal(str)  # worktree_path
+    deleted = pyqtSignal(str)  # worktree_path
 
-    def __init__(self, branch: str, wt_path: str, is_main: bool,
-                 is_current: bool, is_prunable: bool, parent=None,
-                 behind_main: int = 0, ahead_main: int = 0):
+    def __init__(
+        self,
+        branch: str,
+        wt_path: str,
+        is_main: bool,
+        is_current: bool,
+        is_prunable: bool,
+        parent=None,
+        behind_main: int = 0,
+        ahead_main: int = 0,
+    ):
         super().__init__(parent)
         self._branch = branch
         self._wt_path = wt_path
@@ -56,6 +237,7 @@ class _WorktreeRow(QWidget):
         self._confirming_delete = False
         self._delete_timer: QTimer = None
         self._del_btn: QLabel = None
+        self._delete_worker = None  # [P3] 后台删除任务引用（防 GC）
         self.setFixedHeight(24)
         self._setup_ui()
 
@@ -74,13 +256,9 @@ class _WorktreeRow(QWidget):
         dot = QLabel("", self)
         dot.setFixedSize(8, 8)
         if self._is_current:
-            dot.setStyleSheet(
-                "background-color: #58a6ff; border-radius: 4px;"
-            )
+            dot.setStyleSheet("background-color: #58a6ff; border-radius: 4px;")
         else:
-            dot.setStyleSheet(
-                "background: transparent; border: 1.5px solid #484f58; border-radius: 4px;"
-            )
+            dot.setStyleSheet("background: transparent; border: 1.5px solid #484f58; border-radius: 4px;")
         layout.addWidget(dot)
 
         # 分支名（自动省略超长名称）
@@ -117,10 +295,7 @@ class _WorktreeRow(QWidget):
                 parts.append(f"+{self._ahead_main}")
                 color = "#7ee787"  # 绿色-超前
             diff_label = QLabel(" ".join(parts), self)
-            diff_label.setStyleSheet(
-                f"color: {color}; {get_font_family_css()} {font_size_css(10)}"
-                f"padding: 0 2px;"
-            )
+            diff_label.setStyleSheet(f"color: {color}; {get_font_family_css()} {font_size_css(10)}padding: 0 2px;")
             layout.addWidget(diff_label)
 
         layout.addStretch()
@@ -156,7 +331,7 @@ class _WorktreeRow(QWidget):
 
     def _update_branch_elision(self):
         """根据可用宽度自动省略分支名（右侧截断）"""
-        if not hasattr(self, '_branch_label') or self._branch_label is None:
+        if not hasattr(self, "_branch_label") or self._branch_label is None:
             return
         available = self._branch_label.width()
         if available <= 0:
@@ -172,8 +347,7 @@ class _WorktreeRow(QWidget):
             self._confirming_delete = True
             self._del_btn.setText("确认删除")
             self._del_btn.setStyleSheet(
-                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
-                f"padding: 0 4px;"
+                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}padding: 0 4px;"
             )
             self._del_btn.setToolTip("再次点击确认删除，3秒后自动取消")
             # 3秒后自动恢复
@@ -202,70 +376,64 @@ class _WorktreeRow(QWidget):
             self._del_btn.setToolTip("删除 worktree")
 
     def _do_delete(self):
-        """执行删除 worktree + 自动删除分支"""
+        """执行删除 worktree + 自动删除分支（后台线程串行执行，UI 不冻结）"""
         ## 触发警示动画
         pet = self.window().findChild(PixelPetWidget)
         if pet:
             pet.set_state("warning")
-        cwd = self._find_git_root()
-        # 1. 删除 worktree 目录
-        try:
-            r = subprocess.run(
-                ["git", "worktree", "remove", self._wt_path],
-                capture_output=True, text=True, cwd=cwd,
-                timeout=10, encoding="utf-8", errors="replace",
-            )
-            if r.returncode != 0:
-                subprocess.run(
-                    ["git", "worktree", "remove", "--force", self._wt_path],
-                    capture_output=True, text=True, cwd=cwd,
-                    timeout=10, encoding="utf-8", errors="replace",
-                    creationflags=_CREATION_FLAGS,
-                )
-            subprocess.run(
-                ["git", "worktree", "prune"],
-                capture_output=True, text=True, cwd=cwd,
-                timeout=5, encoding="utf-8", errors="replace",
-                creationflags=_CREATION_FLAGS,
-            )
-        except Exception as e:
-            logger.error(f"[Worktree] delete failed: {e}")
+        # 防重入：删除期间禁用删除按钮并显示执行中，避免用户连点重复触发
+        if self._del_btn:
+            self._del_btn.setEnabled(False)
+            self._del_btn.setText("删除中...")
+            self._del_btn.setToolTip("正在删除，请稍候")
+        worker = _WorktreeTaskWorker(_delete_worktree_job, self._wt_path, self._branch)
+        worker.signals.finished.connect(self._on_delete_finished)
+        worker.signals.failed.connect(self._on_delete_failed)
+        self._delete_worker = worker  # 持有引用，防止任务期间被 GC
+        _WORKTREE_POOL.start(worker)
 
-        # 2. 自动删除分支
-        try:
-            subprocess.run(
-                ["git", "branch", "-D", self._branch],
-                capture_output=True, text=True, cwd=cwd,
-                timeout=10, encoding="utf-8", errors="replace",
-                creationflags=_CREATION_FLAGS,
+    def _on_delete_finished(self, _result):
+        """删除完成（主线程）：恢复 UI 并通知父级刷新"""
+        # 恢复删除按钮
+        self._confirming_delete = False
+        if self._delete_timer:
+            self._delete_timer.stop()
+            self._delete_timer = None
+        if self._del_btn:
+            self._del_btn.setEnabled(True)
+            self._del_btn.setText("✕")
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setStyleSheet(
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
             )
-        except Exception as e:
-            logger.error(f"[Worktree] delete branch failed: {e}")
-
+            self._del_btn.setToolTip("删除 worktree")
         self.deleted.emit(self._wt_path)
         # 操作完成，恢复正常状态
         pet = self.window().findChild(PixelPetWidget)
         if pet:
             pet.set_state("idle")
 
+    def _on_delete_failed(self, msg: str):
+        """删除失败（主线程）：恢复 UI，失败信息已由后台记录日志"""
+        logger.error(f"[Worktree] delete failed: {msg}")
+        self._confirming_delete = False
+        if self._delete_timer:
+            self._delete_timer.stop()
+            self._delete_timer = None
+        if self._del_btn:
+            self._del_btn.setEnabled(True)
+            self._del_btn.setText("✕")
+            self._del_btn.setMinimumWidth(14)
+            self._del_btn.setStyleSheet(
+                f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self._del_btn.setToolTip("删除 worktree")
+        pet = self.window().findChild(PixelPetWidget)
+        if pet:
+            pet.set_state("idle")
+
     def _find_git_root(self) -> str:
-        if os.path.isdir(self._wt_path):
-            try:
-                r = subprocess.run(
-                    ["git", "rev-parse", "--git-common-dir"],
-                    capture_output=True, text=True, cwd=self._wt_path,
-                    timeout=5, encoding="utf-8", errors="replace",
-                    creationflags=_CREATION_FLAGS,
-                )
-                if r.returncode == 0:
-                    common = r.stdout.strip()
-                    if "worktrees" in common:
-                        return os.path.dirname(os.path.dirname(common))
-                    if os.path.isdir(common):
-                        return os.path.dirname(common)
-            except Exception:
-                pass
-        return os.path.dirname(self._wt_path)
+        return _find_git_root_for(self._wt_path)
 
 
 class _AddWorktreeRow(QWidget):
@@ -333,38 +501,43 @@ class WorktreeSectionWidget(QWidget):
     """
 
     worktreeSwitched = pyqtSignal(str, str)  # (original_folder, worktree_path)
-    worktreeDeleted = pyqtSignal(str)         # 仅 UI 操作删除时发射
-    workingDirRestored = pyqtSignal(str)      # 外部删除导致工作目录恢复时发射（无重建）
-    sizeChanged = pyqtSignal(int)             # 高度变化通知
+    worktreeDeleted = pyqtSignal(str)  # 仅 UI 操作删除时发射
+    workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射（无重建）
+    sizeChanged = pyqtSignal(int)  # 高度变化通知
 
     def refresh_style(self):
         """刷新样式（用于系统字体大小切换时重绘）"""
         self._repopulate()
 
-    def __init__(self, repo_info, original_folder: str, parent=None,
-                 current_workdir: str = None, project: str = None):
+    def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None, project: str = None):
         super().__init__(parent)
         self._repo_info = repo_info
         self._original_folder = original_folder
         self._current_workdir = current_workdir
         self._project = project or ""  # 用于 DB 直接清理
-        self._last_check_time = 0.0    # paintEvent 防抖时间戳
+        self._last_check_time = 0.0  # paintEvent 防抖时间戳
+        # [P3] 后台任务引用（防止任务执行期间被 GC）+ 防重入标志
+        self._fetch_worker = None
+        self._create_worker = None
+        self._create_busy = False
+        self._pending_switch_path = None  # 创建完成后待切换的 worktree 路径
         self._setup_ui()
 
     def paintEvent(self, event: QPaintEvent):
         """在每次绘制时检查 worktree 路径是否仍然存在
 
-        为什么用 paintEvent 而非 QTimer：
-        QTimer 在嵌入 QListWidget.setItemWidget 的 widget 中可能无法可靠触发
-       （widget 不是标准层级结构的一部分）。
-        paintEvent 由 Qt 绘制系统保证调用，是检测文件系统变化的最可靠方式。
-        防抖 5s 避免频繁 I/O。
+         为什么用 paintEvent 而非 QTimer：
+         QTimer 在嵌入 QListWidget.setItemWidget 的 widget 中可能无法可靠触发
+        （widget 不是标准层级结构的一部分）。
+         paintEvent 由 Qt 绘制系统保证调用，是检测文件系统变化的最可靠方式。
+         防抖 5s 避免频繁 I/O。
         """
         self._check_paths()
         super().paintEvent(event)
 
     def _check_paths(self):
         import time
+
         now = time.monotonic()
         if now - self._last_check_time < 5.0:
             return
@@ -393,18 +566,55 @@ class WorktreeSectionWidget(QWidget):
         self._populate_rows()
 
     def _repopulate(self):
-        """清除缓存后重新 populate
-        
+        """清除缓存后重新 populate（git 查询移入后台线程，UI 不冻结）
+
         如果重新获取失败（_repo_info 为 None），仍要清空旧行避免残留。
         """
         GitWorktreeDetector._info_cache.pop(self._original_folder, None)
-        fresh = GitWorktreeDetector.get_repo_info(self._original_folder)
-        self._repo_info = fresh
-        if self._repo_info:
-            self._populate_rows()
-        else:
+        worker = _WorktreeTaskWorker(_fetch_repo_info_job, self._original_folder)
+        worker.signals.finished.connect(self._on_repo_info_loaded)
+        worker.signals.failed.connect(self._on_repo_info_load_failed)
+        self._fetch_worker = worker
+        _WORKTREE_POOL.start(worker)
+
+    def _on_repo_info_loaded(self, payload):
+        """后台获取完成（主线程）：应用结果并重建行列表"""
+        info, missing_paths = payload
+        self._repo_info = info
+        if not info:
             # 获取失败（仓库已删除等），清空所有行
+            self._fetch_worker = None
             self._clear_rows()
+            return
+        # 外部删除处理（prune 已在后台完成，这里只做 DB/工作目录收尾）
+        if missing_paths:
+            logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
+            # DB 清理（直接，不走 signal → 不触发 _load_key_documents）
+            for p in missing_paths:
+                self._cleanup_db(p)
+            # 如果当前工作目录就是被删的 path，恢复为原始仓库
+            if self._current_workdir and os.path.normpath(self._current_workdir) in (
+                os.path.normpath(mp) for mp in missing_paths
+            ):
+                logger.info(f"[Worktree] 当前 workdir 已被删除，恢复为原始仓库: {self._original_folder}")
+                self._restore_workdir(self._original_folder)
+        self._fetch_worker = None
+        self._populate_rows()
+        # 创建 worktree 成功后，刷新完成 → 切换到新 worktree
+        if self._pending_switch_path:
+            target = self._pending_switch_path
+            self._pending_switch_path = None
+            norm_target = os.path.normpath(target)
+            for wt in info.worktrees:
+                if os.path.normpath(wt.path) == norm_target:
+                    self._on_switch(wt.path)
+                    break
+
+    def _on_repo_info_load_failed(self, msg: str):
+        """后台获取失败（主线程）：记录日志并清空行避免残留"""
+        logger.error(f"[Worktree] repo info load failed: {msg}")
+        self._fetch_worker = None
+        self._clear_rows()
 
     def _cleanup_db(self, path: str):
         """直接清理 DB 中该路径的记录（不触发父级重建）"""
@@ -412,6 +622,7 @@ class WorktreeSectionWidget(QWidget):
             return
         try:
             from app.core.memory_manager import MemoryManagerCore
+
             mm = MemoryManagerCore.get_instance()
             if mm and mm._key_documents_repo:
                 mm._key_documents_repo.remove_by_path(self._project, path)
@@ -422,6 +633,7 @@ class WorktreeSectionWidget(QWidget):
         """将工作目录恢复为原始 git 仓库根目录（当被删 path 恰是当前 workdir 时）"""
         try:
             from app.core.memory_manager import MemoryManagerCore
+
             mm = MemoryManagerCore.get_instance()
             if mm and self._project:
                 mm.set_working_directory(self._project, original_path)
@@ -439,49 +651,17 @@ class WorktreeSectionWidget(QWidget):
                 item.widget().deleteLater()
 
     def _populate_rows(self):
-        """重新构建 worktree 行列表
+        """重新构建 worktree 行列表（纯渲染，git 查询在后台完成）
 
         处理外部删除的策略（全内部闭环，不触发父级重建）：
-        1. 检测缺失路径
-        2. `git worktree prune` 清理 git 内部记录
-        3. 直接调用 `remove_by_path` 清理 DB
-        4. 若当前 workdir 恰是被删路径 → 恢复为原始仓库
-        5. 跳过缺失行，渲染其余行
+        1. 缺失路径检测 + `git worktree prune` 由后台任务 `_fetch_repo_info_job` 完成
+        2. 主线程这里只做 DB 清理、工作目录恢复收尾（_on_repo_info_loaded）
+        3. 跳过缺失行，渲染其余行
         """
         self._clear_rows()
 
         current_wd = self._current_workdir or self._original_folder
         normalized_wd = os.path.normpath(current_wd)
-
-        # ====== 检测并处理外部删除 ======
-        missing_paths = [wt.path for wt in self._repo_info.worktrees if not os.path.isdir(wt.path)]
-
-        if missing_paths:
-            logger.info(f"[Worktree] 缺失 {len(missing_paths)} 个外部删除目录，内部清理中...")
-            # 1) prune
-            try:
-                subprocess.run(
-                    ["git", "worktree", "prune"],
-                    capture_output=True, text=True, cwd=self._repo_info.root,
-                    timeout=5, encoding="utf-8", errors="replace",
-                    creationflags=_CREATION_FLAGS,
-                )
-            except Exception:
-                pass
-            # 2) 重新获取
-            GitWorktreeDetector._info_cache.pop(self._original_folder, None)
-            fresh = GitWorktreeDetector.get_repo_info(self._original_folder)
-            if fresh:
-                self._repo_info = fresh
-            # 3) DB 清理（直接，不走 signal → 不触发 _load_key_documents）
-            for p in missing_paths:
-                self._cleanup_db(p)
-            # 4) 如果当前工作目录就是被删的 path，恢复为原始仓库
-            if self._current_workdir and os.path.normpath(self._current_workdir) in (
-                os.path.normpath(mp) for mp in missing_paths
-            ):
-                logger.info(f"[Worktree] 当前 workdir 已被删除，恢复为原始仓库: {self._original_folder}")
-                self._restore_workdir(self._original_folder)
 
         # ====== 渲染 ======
         visible_count = 0
@@ -528,62 +708,52 @@ class WorktreeSectionWidget(QWidget):
         self.worktreeDeleted.emit(worktree_path)
 
     def _refresh(self):
-        """刷新 worktree 列表（外部调用，如创建新 worktree 后）"""
+        """刷新 worktree 列表（外部调用，如创建新 worktree 后；后台执行）"""
         # 清除缓存，确保获取最新的 worktree 列表
-        GitWorktreeDetector._info_cache.pop(self._original_folder, None)
-        self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
-        if self._repo_info:
-            self._populate_rows()
+        self._repopulate()
 
     def _on_create(self, branch_name: str, base_branch: str):
         ## 触发警示动画
         pet = self.window().findChild(PixelPetWidget)
         if pet:
             pet.set_state("warning")
+        # 防重入：创建进行中时忽略重复点击
+        if self._create_busy:
+            logger.info("[Worktree] 创建进行中，忽略重复请求")
+            return
+        self._create_busy = True
         repo_root = self._repo_info.root
         worktree_dir = os.path.join(
-            os.path.dirname(repo_root),
-            f"{os.path.basename(repo_root)}-{branch_name.replace('/', '-')}"
+            os.path.dirname(repo_root), f"{os.path.basename(repo_root)}-{branch_name.replace('/', '-')}"
         )
 
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "add", "-b", branch_name,
-                 worktree_dir, base_branch or "HEAD"],
-                capture_output=True, text=True, cwd=repo_root, timeout=30,
-                encoding="utf-8", errors="replace",
-                creationflags=_CREATION_FLAGS,
-            )
-            if result.returncode != 0:
-                self._show_error_dialog(
-                    "创建失败",
-                    f"无法创建 worktree「{branch_name}」：\n\n{result.stderr.strip()}\n\n"
-                    f"💡 如果分支已存在，可先删除旧 worktree 再创建"
-                )
-                return
+        worker = _WorktreeTaskWorker(_create_worktree_job, repo_root, branch_name, worktree_dir, base_branch or "HEAD")
+        worker.signals.finished.connect(lambda _r: self._on_create_finished(branch_name, worktree_dir, pet))
+        worker.signals.failed.connect(lambda msg: self._on_create_failed(branch_name, msg, pet))
+        self._create_worker = worker
+        _WORKTREE_POOL.start(worker)
 
-            # 清除缓存，确保获取最新的 worktree 列表
-            GitWorktreeDetector._info_cache.pop(self._original_folder, None)
-            self._repo_info = GitWorktreeDetector.get_repo_info(self._original_folder)
-            if self._repo_info:
-                # 归一化路径再比较（Windows 下 git 用 /，os.path.join 用 \）
-                norm_new_path = os.path.normpath(worktree_dir)
-                for wt in self._repo_info.worktrees:
-                    if os.path.normpath(wt.path) == norm_new_path:
-                        # 先刷新列表，再切换
-                        self._refresh()
-                        self._on_switch(wt.path)
-                        break
+    def _on_create_finished(self, branch_name: str, worktree_dir: str, pet):
+        """创建成功（主线程）：置位待切换路径并刷新列表"""
+        self._create_busy = False
+        self._create_worker = None
+        self._pending_switch_path = worktree_dir
+        # 清除缓存后刷新（后台），刷新完成时自动切换到新 worktree
+        self._repopulate()
+        # 操作完成，恢复正常状态
+        if pet:
+            pet.set_state("idle")
 
-        except subprocess.TimeoutExpired:
-            self._show_error_dialog("超时", "创建 worktree 超时")
-        except Exception as e:
-            self._show_error_dialog("错误", f"创建失败：{e}")
-        finally:
-            # 操作完成（不论成功或失败），恢复正常状态
-            pet = self.window().findChild(PixelPetWidget)
-            if pet:
-                pet.set_state("idle")
+    def _on_create_failed(self, branch_name: str, msg: str, pet):
+        """创建失败（主线程）：恢复状态并提示"""
+        self._create_busy = False
+        self._create_worker = None
+        if pet:
+            pet.set_state("idle")
+        self._show_error_dialog(
+            "创建失败",
+            f"无法创建 worktree「{branch_name}」：\n\n{msg}\n\n💡 如果分支已存在，可先删除旧 worktree 再创建",
+        )
 
     def _show_error_dialog(self, title: str, message: str):
         dlg = QDialog(self)

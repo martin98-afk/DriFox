@@ -31,6 +31,14 @@ REMOTE_RECORDS_PATH = "drifox/share_records.json"
 SHA_CACHE_FILE = ".sync_shas.json"
 DEBOUNCE_MS = 10000
 
+# 🛡️ T4-TOP10：等待旧 watch 线程退出的 join 超时（秒）。
+# 原 3s 使主线程最坏阻塞 3s（enable/disable 的 UI 事件路径）。
+# watchfiles 的 stop_event 机制通常 <100ms 即退出；停止语义由 stop_event.set()
+# 保证（置位后 watchfiles 不再 yield 新变更），join 仅回收线程资源——
+# 超时后 daemon 线程自然消亡（watchfiles 迭代器 + Event 无外部资源需清理），
+# 不会造成"旧线程还在跑导致重复 watch"（stop_event 已置位）。
+_WATCH_JOIN_TIMEOUT = 1.0
+
 GITEE_FILE_API = "https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{path}"
 GITEE_REPO_API = "https://gitee.com/api/v5/repos/{owner}/{repo}"
 
@@ -327,7 +335,11 @@ class ConfigSyncService(QObject):
         # 等待旧线程真正退出（watchfiles 的 stop_event 机制使其快速响应）
         old_thread = self._watch_thread
         if old_thread and old_thread.is_alive():
-            old_thread.join(timeout=3.0)
+            # 🛡️ T4-TOP10：join 超时 3s → 1s，主线程最坏阻塞上限显著降低。
+            # 停止语义由上方 stop_event.set() 保证（watchfiles 置位后不再产生
+            # 新变更通知，不会重复触发）；join 仅回收线程资源，超时后 daemon
+            # 线程自然消亡（见 _WATCH_JOIN_TIMEOUT 注释）。
+            old_thread.join(timeout=_WATCH_JOIN_TIMEOUT)
         self._watch_stop = None
         self._watch_thread = None
         logger.info("[ConfigSync] 文件监听已停止")
