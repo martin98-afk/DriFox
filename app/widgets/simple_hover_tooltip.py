@@ -25,7 +25,7 @@
 from typing import Optional
 
 from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
+from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
 # ── 泄漏修复（6a）：_filters 缓存改弱值字典 ──
@@ -137,10 +137,31 @@ def _get_tooltip_font() -> QFont:
 # ── 全局注册表（用于主题切换时刷新） ───────────────────
 
 _tooltip_instances: list = []  # weak refs would be better, but simple list for now
+# 🛡️ 泄漏修复（B7）：防御上限——超过则先 prune 死实例再淘汰最旧实例。
+# 用弱引用不可行：tooltip 是顶层 widget（无 parent），_tooltip_instances 是
+# 唯一强引用持有者；弱引用会导致 tooltip 创建后立即被 GC → 崩溃/不可见。
+# 因此保持强引用 List + 自注销（destroyed 信号）+ 防御上限双保险。
+_MAX_TOOLTIP_INSTANCES = 256
+
+
+def _prune_dead_tooltips():
+    """清理注册表中已销毁（sip.isdeleted）的 tooltip 实例。"""
+    from PyQt5 import sip
+
+    alive = []
+    for tt in _tooltip_instances:
+        try:
+            if tt is None or sip.isdeleted(tt):
+                continue
+            alive.append(tt)
+        except RuntimeError:
+            continue
+    _tooltip_instances[:] = alive
 
 
 def refresh_all_tooltips():
     """主题/字体切换时刷新所有已注册 tooltip 的样式。"""
+    _prune_dead_tooltips()
     for tt in _tooltip_instances:
         try:
             tt._refresh_theme()
@@ -177,7 +198,27 @@ class SimpleHoverTooltip(QWidget):
 
         self._refresh_theme()
         if not transient:
+            # 🛡️ 泄漏修复（B7）：注册前先清理死实例，防止注册表只增不减；
+            # 超过防御上限时淘汰最旧实例（deleteLater），保证注册表有界。
+            _prune_dead_tooltips()
+            if len(_tooltip_instances) >= _MAX_TOOLTIP_INSTANCES:
+                try:
+                    oldest = _tooltip_instances.pop(0)
+                    if oldest is not None:
+                        oldest.deleteLater()
+                except RuntimeError, IndexError:
+                    pass
             _tooltip_instances.append(self)
+            # 自注销：destroyed 信号在 deleteLater + sendPostedEvents 后
+            # 可靠触发，实例销毁时自动从全局注册表移除。
+            self.destroyed.connect(lambda *_: self._unregister_from_global())
+
+    def _unregister_from_global(self):
+        """从全局注册表移除自身（destroyed 信号回调）。"""
+        try:
+            _tooltip_instances.remove(self)
+        except ValueError:
+            pass
 
     def _refresh_theme(self):
         """从当前主题刷新颜色。"""
@@ -313,6 +354,17 @@ class _HoverTooltipFilter(QObject):
         return False
 
     def _on_timeout(self):
+        # 🛡️ 问题B 修复：显示气泡前校验鼠标是否仍在目标控件内——
+        # 按钮 visible 切换时序（团队框 hover 显示按钮）或隐藏态几何错位
+        # （DPI 缩放）下，timer 可能已启动但鼠标已不在控件上（或控件已
+        # 隐藏），直接显示会出现"飘着的 tooltip"。校验失败则停表放弃。
+        if not self._parent.isVisible():
+            self._timer.stop()
+            return
+        local = self._parent.mapFromGlobal(QCursor.pos())
+        if not self._parent.rect().contains(local):
+            self._timer.stop()
+            return
         tt = self._get_tooltip()
         tt.set_text(self._text)
         tt.show_above(self._parent)
@@ -336,9 +388,17 @@ class _HoverTooltipFilter(QObject):
             pass
         try:
             self._timer.stop()
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
         self._hide()
+        # 🛡️ 泄漏根因修复（B7）：目标 widget 销毁时 tooltip 同步销毁。
+        # 此前只 _hide() 不 deleteLater() → tooltip 永不销毁 → 全局注册表
+        # _tooltip_instances 只增不减（QWidget 引用驻留）。
+        if self._tooltip is not None:
+            try:
+                self._tooltip.deleteLater()
+            except RuntimeError:
+                pass
 
     def refresh_theme(self):
         if self._tooltip:

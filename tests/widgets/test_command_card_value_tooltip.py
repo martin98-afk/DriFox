@@ -237,3 +237,202 @@ class TestValueDescTooltip:
         card._exit_value_selection()
         assert not card._value_selection_mode
         assert not card._desc_tooltip_label.isVisible(), "退出值选择后气泡应隐藏"
+
+    def test_value_tooltip_resolves_quote_entity(self):
+        """描述含引号时 tooltip 强制 RichText，&quot; 实体解析为真实引号
+
+        回归：html.escape 后 setText，QLabel AutoText 只认字面 < 与 "& "，
+        不认 &quot; 实体 → 判定 PlainText → &quot; 字面显示。
+        修复：setText 前显式 setTextFormat(Qt.RichText)。
+        """
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        w = ValueItemWidget("model-x", '支持 "引号" 与 <尖括号>')
+        card._value_widgets = [w]
+        card._value_selection_mode = True
+        card._value_selection_param = "--model="
+        card._selected_value_index = 0
+        card._last_selected_value_index = -1
+        card._update_value_selection()
+
+        lbl = card._desc_tooltip_label
+        assert lbl is not None
+        # 强制 RichText：实体在渲染时被解析（此前 PlainText 判定会字面显示 &quot;）
+        assert lbl.textFormat() == Qt.RichText, f"tooltip 应强制 RichText，实际 {lbl.textFormat()}"
+        assert "&quot;" in lbl.text(), "存储形式应为实体"
+        assert '"引号"' in html_mod.unescape(lbl.text()), "unescape 后应还原为真实引号"
+        assert "<尖括号>" in html_mod.unescape(lbl.text()), "unescape 后应还原为尖括号原文"
+
+    def test_list_tooltip_resolves_quote_entity(self):
+        """列表模式悬浮气泡描述含引号时同样解析实体（_update_desc_tooltip 主链路）"""
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        card._filtered_items = [{"name": "skill-x", "type": "skill", "description": '含 "引号" 的描述'}]
+        card._selected_index = 0
+        card._detail_mode = False
+        card._value_selection_mode = False
+        card._current_text_query = ""
+        card._update_desc_tooltip()
+
+        lbl = card._desc_tooltip_label
+        assert lbl is not None
+        assert lbl.textFormat() == Qt.RichText
+        assert '"引号"' in html_mod.unescape(lbl.text())
+
+    def test_detail_desc_escapes_html(self):
+        """detail 模式命令描述含 < > 时按纯文本安全显示（不解析为 HTML 标签）"""
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.core.command_manager import CommandManager, CommandType
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        cmd_mgr = CommandManager.get_instance()
+        test_name = "__test_detail_desc__"
+        cmd_mgr.register(test_name, CommandType.FUNCTION, description='含 <b> 与 "引号" 的说明')
+        try:
+            card.show_command_detail(test_name, selected_type="command")
+            # escape + 强制 RichText：text() 存实体形式，渲染时解析回原文
+            assert card._detail_desc_label.textFormat() == Qt.RichText
+            assert "&lt;b&gt;" in card._detail_desc_label.text(), "尖括号应被转义存储"
+            assert "<b>" in html_mod.unescape(card._detail_desc_label.text()), "unescape 后还原为原文"
+        finally:
+            cmd_mgr.unregister(test_name)
+
+
+class TestCursorPastParamValue:
+    """_cursor_past_param_value 光标离开判定回归测试（T1 修复）。
+
+    背景：手打路径（textChanged → _sync_detail_params → _auto_switch_to_value_selection）
+    通过 _cursor_past_param_value 判断「是否已离开该参数」，若把行尾空格误判为
+    「已离开」，手打完整值后枚举列表永不弹出（与 Tab 路径不一致）。
+
+    语义（修复后）：
+    - 行尾空格（空格后无实质内容，刚打完值）→ 不算离开 → 应触发值选择
+    - 空格后已有下一参数且光标越过该空格 → 算离开 → 跳过
+    - 光标 < 0（无光标信息）→ 不算离开
+    - 无空格 → 不算离开
+    """
+
+    @staticmethod
+    def _token_end(text: str, param: str = "--model=") -> int:
+        """定位参数名+等号结束位置（与 _auto_switch_to_value_selection 的正则语义一致）"""
+        idx = text.find(param)
+        assert idx >= 0, f"文本中未找到 {param}: {text!r}"
+        return idx + len(param)
+
+    def _assert_leave(self, text: str, cursor_pos: int, expected_leave: bool):
+        """断言光标离开判定结果（True=已离开/应跳过，False=未离开/应触发）"""
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        card = CommandCard()
+        token_end = self._token_end(text)
+        result = card._cursor_past_param_value(text, token_end, cursor_pos)
+        assert result is expected_leave, (
+            f"text={text!r} cursor={cursor_pos} token_end={token_end} → got {result}, expected {expected_leave}"
+        )
+
+    # ── 触发路径：应返回 False（未离开 → 触发值选择）──
+
+    def test_full_value_no_trailing_space(self):
+        """手打完整值无尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt", 21, False)
+
+    def test_full_value_with_trailing_space(self):
+        """手打完整值+行尾空格 → 未离开（触发）——T1 核心回归"""
+        self._assert_leave("/subagent --model=gpt ", 22, False)
+
+    def test_value_prefix_no_trailing_space(self):
+        """手打值前缀无尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=g", 20, False)
+
+    def test_value_prefix_with_trailing_space(self):
+        """手打值前缀+行尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=g ", 21, False)
+
+    def test_only_param_name_with_equals(self):
+        """仅参数名+=号 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=", 19, False)
+
+    def test_cursor_mid_value_before_trailing_space(self):
+        """值中间光标（尾空格前）→ 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", 20, False)
+
+    def test_cursor_on_trailing_space(self):
+        """光标停在行尾空格上 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", 21, False)
+
+    # ── 退出/跳过路径：应返回 True（已离开 → 跳过/退出）──
+
+    def test_next_param_cursor_past(self):
+        """值+下一参数且光标在其后 → 已离开（跳过，不弹 model 枚举）"""
+        self._assert_leave("/subagent --model=gpt --quick", 26, True)
+
+    def test_next_param_typing(self):
+        """值+下一参数输入中（光标在下一参数内）→ 已离开（跳过）"""
+        self._assert_leave("/subagent --model=gpt --q", 25, True)
+
+    # ── 边界 ──
+
+    def test_cursor_negative(self):
+        """cursor_pos=-1（无光标信息）→ 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", -1, False)
+
+    def test_no_space_after_value(self):
+        """值后无空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt", 30, False)
+
+    def test_multiple_trailing_spaces(self):
+        """行尾多空格（光标在两个空格之间）→ 未离开（触发）
+
+        边界：多个行尾空格时 text.find 只命中第一个空格，若仅凭 cursor > 第一个
+        空格即判定"离开"会误判；修复后的 strip 语义对任意数量的行尾空白都视为
+        "未离开"，与光标落在空格序列中任何位置一致。
+        """
+        self._assert_leave("/subagent --model=gpt  ", 22, False)
+
+    def test_tab_trailing(self):
+        """行尾 tab 尾缀 → 未离开（触发）
+
+        全空白尾缀（tab）与空格等价，不应误判为"已离开"。
+        """
+        self._assert_leave("/subagent --model=gpt\t", 22, False)

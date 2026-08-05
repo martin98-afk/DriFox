@@ -282,3 +282,96 @@ class TestCommandCardDivider:
         assert card.height() < full_natural, f"矮窗口未压缩: card {card.height()} 应 < 自然高度 {full_natural}"
         # 至少仍保留可见项（不为 0）
         assert card.height() >= ITEM_HEIGHT, "矮窗口下至少保留 1 个 item"
+
+    def test_new_item_tag_style_applied_after_show(self):
+        """新建（非复用）item 首次显示后，右侧类型标签的级联 QSS 样式应正确应用
+
+        回归：新建 CommandItemWidget 时 _setup_ui 内 _apply_style 在 widget 尚未
+        挂载到可见布局时调用，Qt QStyleSheetStyle::repolish 对不可见 widget 跳过，
+        级联 QSS（QLabel#tagLabel 颜色/字体）不会应用——过滤变化后新出现项的类型
+        标签/快捷键胶囊显示默认样式，hover 后才恢复。
+        修复：showEvent 补一次 _apply_style，首次显示即保证样式落地。
+        """
+        _ensure_qapp()
+        from PyQt5.QtGui import QColor, QPalette
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+
+        from app.widgets.cards.floating.command_card import CommandCard, _qcolor_from_rgba
+        from app.utils.design_tokens import Colors
+
+        Colors.refresh()
+        parent = QWidget()
+        parent.resize(800, 600)
+        parent.setLayout(QVBoxLayout())
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        items = [
+            {"name": "cmd-x", "type": "command", "subtype": "", "shortcut": "Ctrl+X", "description": "命令X"},
+            {"name": "skill-a", "type": "skill", "description": "技能A"},
+            {"name": "agent-b", "type": "agent", "description": "智能体B"},
+        ]
+        card._all_items_cache = list(items)
+        card._cache_dirty = False
+        card._refresh_data()
+        # 走真实时序：show_card 内部 setVisible(True) 使卡片可见，
+        # 新建 widget 挂到可见布局时立即 show → showEvent 补 _apply_style → 级联 QSS 落地
+        parent.show()
+        card.show_card("")
+        app = QApplication.instance()
+        for _ in range(10):
+            app.processEvents()
+
+        assert len(card._item_widgets) == 3
+        w_skill = card._item_widgets[1]
+        w_agent = card._item_widgets[2]
+        # 首次显示后 palette WindowText 应等于对应类型的标签色（而非默认黑）
+        skill_color = w_skill._tag_label.palette().color(QPalette.WindowText)
+        agent_color = w_agent._tag_label.palette().color(QPalette.WindowText)
+        assert skill_color.name() == _qcolor_from_rgba(Colors.TAG_ACCENT).name(), (
+            f"skill tag 应应用 TAG_ACCENT({Colors.TAG_ACCENT})，实际 {skill_color.name()}"
+        )
+        assert agent_color.name() == _qcolor_from_rgba(Colors.TAG_PURPLE).name(), (
+            f"agent tag 应应用 TAG_PURPLE({Colors.TAG_PURPLE})，实际 {agent_color.name()}"
+        )
+
+    def test_item_name_quote_rendered_as_rich_text(self):
+        """item 名称含引号时 name_label 强制 RichText，&quot; 实体在渲染时解析
+
+        回归：_update_display 对名称 html.escape 后 setText，无高亮分支（不含
+        <span>）会被 QLabel AutoText 判定为 PlainText，&quot;/&amp; 实体字面显示
+        （与 tooltip &quot; 问题同源）。修复：创建 name_label 时一次设置
+        setTextFormat(Qt.RichText)。
+        """
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        items = [
+            {"name": 'quote"skill', "type": "skill", "description": "技能A"},
+            {"name": "cmd-x", "type": "command", "subtype": "", "description": "命令X"},
+        ]
+        card._all_items_cache = list(items)
+        card._cache_dirty = False
+        card._refresh_data()
+        parent.show()
+        card.show_card("")
+        app = QApplication.instance()
+        for _ in range(10):
+            app.processEvents()
+
+        # 排序：command(0) → skill(2)，技能项在 index 1
+        assert len(card._item_widgets) == 2
+        w = card._item_widgets[1]
+        assert w.item_data["type"] == "skill"
+        lbl = w._name_label
+        # 强制 RichText：实体在渲染时被解析（此前 PlainText 判定会字面显示 &quot;）
+        assert lbl.textFormat() == Qt.RichText, f"name_label 应强制 RichText，实际 {lbl.textFormat()}"
+        assert "&quot;" in lbl.text(), "名称应以实体形式存储"
+        assert '"' in html_mod.unescape(lbl.text()), "unescape 后应还原为真实引号"

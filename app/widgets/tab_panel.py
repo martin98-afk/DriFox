@@ -734,6 +734,8 @@ class TabPanel(QWidget):
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
     teamCloseRequested = pyqtSignal(str)  # 关闭整个团队（传 team_id）
+    teamAddMemberRequested = pyqtSignal(str)  # 团队框"快速新建成员"按钮（传 team_id，可重复角色）
+    teamNewTaskRequested = pyqtSignal(str)  # 团队框"新建任务"按钮（传 team_id：全员新会话 + 新 run_id）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1215,6 +1217,23 @@ class TabPanel(QWidget):
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
 
+    def begin_batch_add(self):
+        """开始批量添加 tab：期间 add_tab 跳过 _rebuild_team_layout，end_batch_add 统一重建。
+
+        连续添加 N 个 Tab（如团队恢复/新建任务全员建会话）时，若每个 add_tab
+        都全量重建团队布局，代价为 O(N²)。批量模式下只在外层 end_batch_add
+        时重建一次，代价降为 O(N)。支持嵌套调用（内部计数），必须与
+        end_batch_add 成对使用。
+        """
+        self._batch_add_depth = getattr(self, "_batch_add_depth", 0) + 1
+
+    def end_batch_add(self):
+        """结束批量添加 tab：统一重建一次视觉布局（仅在最外层结束时）。"""
+        depth = getattr(self, "_batch_add_depth", 0)
+        self._batch_add_depth = max(0, depth - 1)
+        if self._batch_add_depth == 0:
+            self._rebuild_team_layout()
+
     def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
@@ -1248,7 +1267,10 @@ class TabPanel(QWidget):
 
         # 重建视觉布局：新 tab 作为独立项加入（置于团队框下方）。
         # _rebuild_team_layout 有快照保护，开销小。
-        self._rebuild_team_layout()
+        # 批量添加期间（begin_batch_add/end_batch_add 包围）跳过重建，
+        # 由 end_batch_add 统一重建一次，避免连续 N 次添加触发 O(N²) 全量重建。
+        if getattr(self, "_batch_add_depth", 0) == 0:
+            self._rebuild_team_layout()
 
         # 折叠态新建 tab：立即紧凑（矩阵 D1/D2）
         if self._collapsed:
@@ -1339,11 +1361,14 @@ class TabPanel(QWidget):
 
         结构（自上而下嵌套）：
         - grp (QFrame) 的主布局 = outer (QVBoxLayout)
-          - header (QWidget)：左侧团队名 QLabel + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
+          - header (QWidget)：左侧团队名 QLabel + "新建任务"按钮 TransparentToolButton(get_icon("新会话"))
+            + "快速新建成员"按钮 TransparentToolButton(get_icon("设置-subagent")) + 右侧关闭按钮 TransparentToolButton(FIF.CLOSE)
           - inner_widget (QWidget) 的布局 = inner_layout (QVBoxLayout)：成员 TabItem 列表
 
-        header 默认隐藏关闭按钮，鼠标进入 header 区域时显示（参考 TabItem 实现）。
-        关闭按钮 click → teamCloseRequested(team_id)（含防御属性 WA_NoMousePropagation，
+        header 默认隐藏 new_task/add/close 按钮，鼠标进入 header 区域时显示（参考 TabItem 实现）。
+        new_task 按钮 click → teamNewTaskRequested(team_id)（全员新建会话 + 新 run_id）；
+        add 按钮 click → teamAddMemberRequested(team_id)（快速新建成员，可重复角色）；
+        close 按钮 click → teamCloseRequested(team_id)（含防御属性 WA_NoMousePropagation，
         避免鼠标事件冒泡到下层 TabItem 触发意外点击）。
 
         访问器：
@@ -1351,7 +1376,7 @@ class TabPanel(QWidget):
         - grp._team_inner_layout = inner_layout（成员层，供 _rebuild_team_layout / 旧测试用）
         - grp._team_inner_widget = inner_widget
         - grp._team_header = header
-        - grp._team_name_label / _team_close_btn = header 子控件
+        - grp._team_name_label / _team_new_task_btn / _team_add_btn / _team_close_btn = header 子控件
         """
         grp = self._team_groups.get(team_id)
         if grp is not None:
@@ -1390,10 +1415,37 @@ class TabPanel(QWidget):
         name_label.setText("团队")
         header_layout.addWidget(name_label, 1)
 
+        # 新建任务按钮：hover 显示（与 add/close 联动），点击 → teamNewTaskRequested(team_id)
+        # 🎨 图标：与主界面"新建对话"按钮一致的 新会话.svg（铅笔+加号，语义：全员新建会话）
+        new_task_btn = TransparentToolButton(header)
+        new_task_btn.setObjectName("teamGroupNewTaskBtn")
+        new_task_btn.setIcon(get_icon("新会话"))
+        new_task_btn.setFixedSize(20, 20)
+        new_task_btn.setToolTip("新建任务：全员新建会话 + 生成新 run")
+        new_task_btn.setVisible(False)
+        new_task_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
+        new_task_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamNewTaskRequested.emit(_tid))
+        header_layout.addWidget(new_task_btn)
+
+        # 快速新建成员按钮：hover 显示（与 new_task/close 联动），点击 → teamAddMemberRequested(team_id)
+        # 🎨 图标：与子智能体卡片 title 一致的 设置-subagent.svg
+        add_btn = TransparentToolButton(header)
+        add_btn.setObjectName("teamGroupAddBtn")
+        add_btn.setIcon(get_icon("设置-subagent"))
+        add_btn.setFixedSize(20, 20)
+        add_btn.setToolTip("快速新建成员（可重复角色）")
+        add_btn.setVisible(False)
+        add_btn.setAttribute(Qt.WA_NoMousePropagation, True)
+        # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
+        add_btn.clicked.connect(lambda *_args, _tid=team_id: self.teamAddMemberRequested.emit(_tid))
+        header_layout.addWidget(add_btn)
+
         close_btn = TransparentToolButton(header)
         close_btn.setObjectName("teamGroupCloseBtn")
         close_btn.setIcon(FIF.CLOSE)
         close_btn.setFixedSize(20, 20)
+        close_btn.setToolTip("关闭团队")
         close_btn.setVisible(False)
         close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
         # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
@@ -1418,18 +1470,38 @@ class TabPanel(QWidget):
         grp._team_header = header
         grp._team_name_label = name_label
         grp._team_close_btn = close_btn
+        grp._team_new_task_btn = new_task_btn
+        grp._team_add_btn = add_btn
         grp._team_icon = team_icon
         grp._team_icon_key = None  # 值相等跳过缓存（initials, color）
         grp._team_inner_widget = inner_widget
         grp._team_inner_layout = inner_layout
 
-        # hover 控制关闭按钮可见性（紧凑态守卫：折叠态不弹关闭按钮，矩阵 C3）
-        def _enter(_e, _h=header, _btn=close_btn):
+        # hover 控制 new_task/add/close 按钮可见性（紧凑态守卫：折叠态不弹按钮，矩阵 C3）
+        def _enter(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
             if not getattr(grp, "_team_compact", False):
+                _task.setVisible(True)
+                _add.setVisible(True)
                 _btn.setVisible(True)
+                # 🛡️ 问题A 修复：三按钮由隐藏→显示时，若鼠标已停在某按钮上方，
+                # Qt 不会为"显示后才在鼠标下"的控件补发 Enter → 该按钮的
+                # _HoverTooltipFilter 收不到 Enter，tooltip 计时不启动（hover
+                # 无提示）。手动查询鼠标所在控件，命中任一按钮则补发
+                # QEnterEvent，让 tooltip 计时正常启动。
+                from PyQt5.QtCore import QPointF as _QPointF
+                from PyQt5.QtGui import QCursor as _QCursor, QEnterEvent as _QEnterEvent
+                from PyQt5.QtWidgets import QApplication as _QApp
 
-        def _leave(_e, _h=header, _btn=close_btn):
+                _w = _QApp.widgetAt(_QCursor.pos())
+                if _w in (_task, _add, _btn):
+                    _lp = _w.mapFromGlobal(_QCursor.pos())
+                    _gp = _QCursor.pos()
+                    _QApp.sendEvent(_w, _QEnterEvent(_QPointF(_lp), _QPointF(_lp), _QPointF(_gp)))
+
+        def _leave(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
             _btn.setVisible(False)
+            _add.setVisible(False)
+            _task.setVisible(False)
 
         header.enterEvent = _enter
         header.leaveEvent = _leave
@@ -1479,6 +1551,24 @@ class TabPanel(QWidget):
                 font-weight: bold;
                 padding: 0px;
             }}
+            #teamGroupNewTaskBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            #teamGroupNewTaskBtn:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+            #teamGroupAddBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            #teamGroupAddBtn:hover {{
+                background: {Colors.HOVER_BG};
+            }}
             #teamGroupCloseBtn {{
                 background: transparent;
                 border: none;
@@ -1503,10 +1593,10 @@ class TabPanel(QWidget):
         """团队框 header 紧凑模式（侧边栏折叠态）：仅保留团队 icon
 
         compact=True：
-          - 隐藏团队名 label 与关闭按钮；
+          - 隐藏团队名 label 与 new_task/add/close 按钮；
           - icon 无内容时用团队名首字 + 主题强调色绘制占位并显示（矩阵 C1）；
           - header 设置 tooltip=团队名（矩阵 C2）。
-        compact=False：逐控件配对恢复——name 显示、close 恢复 hover 逻辑、
+        compact=False：逐控件配对恢复——name 显示、new_task/add/close 恢复 hover 逻辑、
           icon 恢复原可见性与原数据（矩阵 D1 对称性）、tooltip 清空。
         幂等：相同状态重复调用直接返回。
         """
@@ -1518,6 +1608,8 @@ class TabPanel(QWidget):
         grp._team_compact = compact
         name_label = getattr(grp, "_team_name_label", None)
         close_btn = getattr(grp, "_team_close_btn", None)
+        add_btn = getattr(grp, "_team_add_btn", None)
+        new_task_btn = getattr(grp, "_team_new_task_btn", None)
         team_icon = getattr(grp, "_team_icon", None)
         team_name = (name_label.text() if name_label else "").strip() or "团队"
 
@@ -1539,6 +1631,10 @@ class TabPanel(QWidget):
                 name_label.setVisible(False)
             if close_btn is not None:
                 close_btn.setVisible(False)
+            if add_btn is not None:
+                add_btn.setVisible(False)
+            if new_task_btn is not None:
+                new_task_btn.setVisible(False)
             header.setToolTip(team_name)
             # 折叠态增强窄条视觉边界：背景加深（P2-1 方案 B，仅折叠态）
             self._apply_team_group_style(grp, bg_alpha=70)
@@ -1547,6 +1643,10 @@ class TabPanel(QWidget):
                 name_label.setVisible(True)
             if close_btn is not None:
                 close_btn.setVisible(False)
+            if add_btn is not None:
+                add_btn.setVisible(False)
+            if new_task_btn is not None:
+                new_task_btn.setVisible(False)
             if team_icon is not None:
                 # 还原原数据与可见性（HexArgb 保留 alpha，避免 rgba→hex 丢透明度）
                 data = getattr(grp, "_team_icon_orig_data", None) or {}

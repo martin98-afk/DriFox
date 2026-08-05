@@ -320,9 +320,13 @@ class TestTeamProjectInjectPoints:
         assert "_create_new_session" not in calls, "接收方不得触发新建会话"
 
     def test_team_load_applies_team_project(self):
-        """团队加载路径应读取并应用团队级 project。"""
+        """团队加载路径应读取并应用团队级 project。
+
+        T5 重构：创建链路抽到 _spawn_team_member_window（_handle_team_load 委托
+        _spawn_team_members），团队 project 的读取/应用语义随创建链路迁移。
+        """
         text = _MAIN_WIDGET.read_text(encoding="utf-8")
-        for method in ("_handle_team_load", "_join_new_window_for_template"):
+        for method in ("_spawn_team_member_window", "_join_new_window_for_template"):
             body = _method_body(text, method)
             assert "get_team_project" in body, f"{method} 未读取团队 project"
             assert "_apply_team_project" in body, f"{method} 未应用团队 project"

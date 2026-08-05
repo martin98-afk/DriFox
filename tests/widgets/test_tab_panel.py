@@ -45,6 +45,50 @@ class TestTabPanel:
         assert idx1 == 0
         assert idx2 == 1
 
+    def test_batch_add_rebuilds_once(self, panel):
+        """批量添加 N 个 tab 时 _rebuild_team_layout 只调用 1 次（C1 批量布局）"""
+        panel.begin_batch_add()
+        with patch.object(panel, "_rebuild_team_layout", wraps=panel._rebuild_team_layout) as m:
+            for i in range(5):
+                panel.add_tab(f"批量tab-{i}")
+            # 批量期间不触发重建
+            assert m.call_count == 0
+            panel.end_batch_add()
+            # 结束后统一重建一次
+            assert m.call_count == 1
+        # 布局结果正确：5 个 tab 全部入列表布局
+        assert panel.count == 5
+        layout_widgets = [panel._list_layout.itemAt(i).widget() for i in range(panel._list_layout.count())]
+        known = [w for w in layout_widgets if w is not None]
+        assert len(known) == 5
+
+    def test_batch_add_nested_balance(self, panel):
+        """嵌套 begin/end 成对时仅最外层结束统一重建一次（C1）"""
+        panel.begin_batch_add()
+        panel.begin_batch_add()
+        with patch.object(panel, "_rebuild_team_layout", wraps=panel._rebuild_team_layout) as m:
+            panel.add_tab("tab-A")
+            panel.end_batch_add()  # 内层结束：深度仍为 1，不重建
+            assert m.call_count == 0
+            panel.add_tab("tab-B")
+            panel.end_batch_add()  # 外层结束：深度归零，重建一次
+            assert m.call_count == 1
+        assert panel.count == 2
+
+    def test_batch_add_then_team_group_works(self, panel):
+        """批量添加后团队归属仍可正常分组（C1 不破坏团队布局）"""
+        panel.begin_batch_add()
+        for i in range(3):
+            panel.add_tab(f"tab-{i}")
+        panel.end_batch_add()
+        panel.set_tab_team(0, "team-A")
+        panel.set_tab_team(1, "team-A")
+        grp = panel._team_groups.get("team-A")
+        assert grp is not None
+        # 团队容器已进入列表布局
+        layout_widgets = [panel._list_layout.itemAt(i).widget() for i in range(panel._list_layout.count())]
+        assert grp in [w for w in layout_widgets if w is not None]
+
     def test_remove_tab(self, panel):
         panel.add_tab("会话A")
         panel.add_tab("会话B")

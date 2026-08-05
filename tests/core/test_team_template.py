@@ -372,6 +372,69 @@ class TestListTemplates:
         assert "bad" not in names
 
 
+class TestUserTemplatesWithoutPluginRegistration:
+    """回归：user-custom 插件未注册时，用户模板列表仍应可见。
+
+    修复前 _get_user_dir() 依赖 PluginManager.get_plugin("user-custom")：
+    - user-custom 插件的 manifest（.drifox-plugin/plugin.json）是按需创建的
+      （添加 MCP / 保存快捷键时才生成），用户仅保存过团队模板时插件未注册，
+      get_plugin() 返回 None → 模板列表缺失；
+    - 首次解析若发生在 PluginManager 未初始化时，还会缓存 None 导致
+      后续永远解析失败（缓存毒化）。
+    修复后直接基于应用数据目录解析，不再依赖插件注册状态。
+    """
+
+    def test_user_dir_ignores_plugin_registration(self, tmp_path, monkeypatch):
+        """user-custom 插件未注册时，_get_user_dir 仍应解析出模板目录。
+
+        修复前依赖 PluginManager.get_plugin("user-custom")，未注册时返回 None；
+        修复后直接基于应用数据目录解析，与插件注册状态、初始化时机无关。
+        """
+        import app.utils.utils as utils_mod
+
+        # 重定向应用数据目录到 tmp_path
+        monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: tmp_path)
+
+        TemplateManager._instance = None
+        tm = TemplateManager.get_instance()
+        user_dir = tm.user_dir
+        assert user_dir is not None
+        assert user_dir == tmp_path / "plugins" / "user-custom" / "team_templates"
+        assert user_dir.exists()  # 目录被创建
+
+    def test_list_includes_user_templates_without_registration(self, tmp_path, monkeypatch):
+        """插件未注册时，list_templates 应包含 user-custom 目录中的模板。"""
+        import app.utils.utils as utils_mod
+
+        monkeypatch.setattr(utils_mod, "get_app_data_dir", lambda: tmp_path)
+
+        # user-custom 模板目录（先于 PluginManager 扫描存在，如云端恢复场景）
+        user_tpl_dir = tmp_path / "plugins" / "user-custom" / "team_templates"
+        user_tpl_dir.mkdir(parents=True, exist_ok=True)
+        (user_tpl_dir / "cloud-team.yaml").write_text(
+            "schema_version: 1\n"
+            "template_name: cloud-team\n"
+            "description: 云端恢复的模板\n"
+            "agents:\n"
+            "  - agent_name: build\n"
+            "  - agent_name: review\n",
+            encoding="utf-8",
+        )
+
+        TemplateManager._instance = None
+        tm = TemplateManager.get_instance()
+        # 隔离系统/插件来源，只验证 user 来源
+        monkeypatch.setattr(tm, "_get_plugin_template_dirs", lambda: [])
+        monkeypatch.setattr(tm, "_system_dir", tmp_path / "system")
+
+        results = tm.list_templates()
+        names = [r["name"] for r in results]
+        assert "cloud-team" in names
+        cloud = next(r for r in results if r["name"] == "cloud-team")
+        assert cloud["source"] == tm.SOURCE_USER
+        assert cloud["agent_count"] == 2
+
+
 # ══════════════════════════════════════════════════════════
 # 5. TemplateManager.delete
 # ══════════════════════════════════════════════════════════
@@ -750,7 +813,11 @@ class TestTemplateJoinDelayConstant:
         assert found, "OpenAIChatToolWindow 缺少 _TEMPLATE_JOIN_DELAY_MS 类属性"
 
     def test_handle_team_load_uses_constant_not_magic_number(self):
-        """_handle_team_load 应使用 self._TEMPLATE_JOIN_DELAY_MS，不再出现裸 300。"""
+        """创建链路应使用 self._TEMPLATE_JOIN_DELAY_MS，不再出现裸 300。
+
+        T5 重构：延迟 join 迁至 _spawn_team_member_window（_handle_team_load
+        委托 _spawn_team_members），常量引用随创建链路迁移。
+        """
         import ast
         import textwrap
 
@@ -759,10 +826,10 @@ class TestTemplateJoinDelayConstant:
 
         target_func = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_handle_team_load":
+            if isinstance(node, ast.FunctionDef) and node.name == "_spawn_team_member_window":
                 target_func = node
                 break
-        assert target_func is not None
+        assert target_func is not None, "缺少 _spawn_team_member_window 公共创建方法"
 
         func_src = textwrap.dedent(ast.unparse(target_func))
         # 必须引用类常量
@@ -772,7 +839,9 @@ class TestTemplateJoinDelayConstant:
         import re
 
         # 简单粗暴：函数体源码里不应有 "300," 这种数字字面量
-        assert not re.search(r"\b300\b", func_src), "_handle_team_load 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+        assert not re.search(r"\b300\b", func_src), (
+            "_spawn_team_member_window 中应使用 self._TEMPLATE_JOIN_DELAY_MS 替代裸 300"
+        )
 
 
 # ══════════════════════════════════════════════════════════
@@ -1320,8 +1389,10 @@ class TestLoadMissingDegradation:
             parameters=_loaded["parameters"],
             prompt_sections=_loaded["prompt_sections"],
         )
-        for _marker, _sec in (("--create=x", "任务：创建 DriFox 团队模板"),
-                              ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体")):
+        for _marker, _sec in (
+            ("--create=x", "任务：创建 DriFox 团队模板"),
+            ("--load=x 缺失角色: a", "任务：补全 /team --load 缺失的子智能体"),
+        ):
             _out = _cm.select_prompt("team", _marker) or ""
             assert "子智能体创建规范" in _out, f"select_prompt({_marker!r}) 必须保留公共规范"
             assert _sec in _out, f"select_prompt({_marker!r}) 必须包含对应 section"
@@ -1359,19 +1430,37 @@ class TestHistorySessionRestoreRegistersTeamMember:
         return None
 
     def test_team_branch_calls_join_watcher_sync(self):
-        """AST：`_load_session_from_record` 团队分支必须 join_team + watcher + 活跃同步。
+        """AST：`_sync_team_markers_from_record` 团队分支必须 join_team + watcher + 活跃同步。
 
         回归防护：若有人删掉注册 3 步（例如改回仅 UI 标记），本测试立即失败。
+
+        注：F4 逻辑已于 2026-08-04 提取为公共方法 _sync_team_markers_from_record
+        （_load_session_from_record 与 _switch_to_session_by_id 共用），
+        断言目标随之迁移。
         """
         import textwrap
 
         _src_path, src = self._main_widget_src()
         tree = ast.parse(src)
-        target = self._find_function(tree, "_load_session_from_record")
-        assert target is not None, "未找到 _load_session_from_record 方法"
-        func_src = textwrap.dedent(ast.unparse(target))
 
-        # ① 保留原 3 行 UI 标记（不破坏既有语义）
+        # ① 公共方法必须存在且两个加载路径都调用它
+        sync_fn = self._find_function(tree, "_sync_team_markers_from_record")
+        assert sync_fn is not None, "未找到 _sync_team_markers_from_record 公共方法"
+        load_fn = self._find_function(tree, "_load_session_from_record")
+        switch_fn = self._find_function(tree, "_switch_to_session_by_id")
+        assert load_fn is not None and switch_fn is not None
+        load_src = ast.unparse(load_fn)
+        switch_src = ast.unparse(switch_fn)
+        assert "self._sync_team_markers_from_record(session_record)" in load_src, (
+            "_load_session_from_record 必须调用 _sync_team_markers_from_record"
+        )
+        assert "self._sync_team_markers_from_record(session_record)" in switch_src, (
+            "_switch_to_session_by_id 必须调用 _sync_team_markers_from_record"
+        )
+
+        func_src = textwrap.dedent(ast.unparse(sync_fn))
+
+        # ② 保留原 3 行 UI 标记（不破坏既有语义）
         # 注：ast.unparse 固定输出单引号字符串字面量，正则按单引号匹配
         assert "self._team_run_id = record_run_id" in func_src, "团队分支必须保留 _team_run_id 赋值"
         assert re.search(
@@ -1383,7 +1472,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
             func_src,
         ), "团队分支必须保留 _team_agent_name 赋值"
 
-        # ② 注册三连必须同时出现（leader 可见性修复核心）
+        # ③ 注册三连必须同时出现（leader 可见性修复核心）
         assert re.search(
             r"join_team\s*\(\s*window_id\s*=\s*self\._window_id\s*,\s*agent_name\s*=\s*self\._team_agent_name\s*\)",
             func_src,
@@ -1393,7 +1482,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
             "必须同步活跃窗口（防 _cleanup_stale_members 误清）"
         )
 
-        # ③ join_team 必须出现在 agent_name 赋值之后（同在 record_run_id 团队分支内）
+        # ④ join_team 必须出现在 agent_name 赋值之后（同在 record_run_id 团队分支内）
         agent_assign = re.search(
             r"self\._team_agent_name = \(session_record\.get\('agent_name'\) or ''\)\.strip\(\)",
             func_src,
@@ -1402,7 +1491,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         after_marker = func_src[agent_assign.end() :]
         assert re.search(r"join_team", after_marker), "join_team 必须出现在 agent_name 赋值之后（团队分支内）"
 
-        # ④ 注册受 window_id + agent_name 守卫（普通会话 / 无 agent 时不注册）
+        # ⑤ 注册受 window_id + agent_name 守卫（普通会话 / 无 agent 时不注册）
         assert re.search(r"if\s+self\._window_id\s+and\s+self\._team_agent_name", func_src), (
             "注册必须受 `if self._window_id and self._team_agent_name` 守卫"
         )

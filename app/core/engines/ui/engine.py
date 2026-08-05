@@ -440,6 +440,13 @@ class UIEngine(BaseEngine):
         worker.finished.connect(loop.quit)
         loop.exec()  # 处理 UI 事件直到 worker 完成
 
+        # T6-A: 释放 _PreSendWorker 的 QThread C++ 对象（loop.exec 返回时线程已结束）。
+        # 统一放在这里，正常路径与下方 _error 提前 return 分支都覆盖。
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+
         if worker._error:
             logger.error(f"[ChatEngine] PreSendWorker failed: {worker._error}")
             self._emit("error", f"消息预处理失败: {worker._error}")

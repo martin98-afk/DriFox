@@ -328,6 +328,7 @@ class SessionStore:
                         {"name": "team_run_id", "type": "TEXT", "default": ""},
                         {"name": "team_name", "type": "TEXT", "default": ""},
                         {"name": "agent_name", "type": "TEXT", "default": ""},
+                        {"name": "team_members", "type": "TEXT", "default": ""},
                     ],
                 )
 
@@ -393,7 +394,9 @@ class SessionStore:
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
                 # file_operations 表索引（几乎所有查询都按 session_id / call_id 过滤）
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
-                self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)")
+                self._db.execute_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)"
+                )
 
                 # 迁移逻辑
                 self._migrate_add_project_column()
@@ -404,6 +407,7 @@ class SessionStore:
                 self._migrate_add_context_usage_column()
                 self._migrate_add_api_context_columns()
                 self._migrate_add_team_columns()
+                self._migrate_add_team_members_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -572,9 +576,7 @@ class SessionStore:
                 col_names = [c.get("name", "") for c in columns]
                 if col not in col_names:
                     logger.info(f"[SessionStore] 迁移：添加 {col} 列")
-                    self._db.execute_sql(
-                        f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0"
-                    )
+                    self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} INTEGER DEFAULT 0")
             except Exception as e:
                 logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
 
@@ -597,6 +599,25 @@ class SessionStore:
                     logger.info(f"[SessionStore] {col} 列迁移完成")
             except Exception as e:
                 logger.warning(f"[SessionStore] {col} 列迁移失败(可能已存在): {e}")
+
+    def _migrate_add_team_members_column(self):
+        """迁移：添加团队成员快照列 team_members（如果不存在）
+
+        🛡️ F3（T2-P3 第 2 层）：恢复团队会话不依赖当前 team.json（历史 run 的
+        team.json 会被新 run 覆盖），成员快照随会话落库。JSON 字符串（成员
+        agent 列表），老库 ALTER ADD COLUMN 非破坏性；非团队会话保持空串。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "team_members" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 team_members 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN team_members TEXT DEFAULT ''")
+                logger.info("[SessionStore] team_members 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] team_members 列迁移失败(可能已存在): {e}")
 
     @property
     def is_initialized(self) -> bool:

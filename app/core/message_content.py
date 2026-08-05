@@ -28,16 +28,36 @@ _consolidate_cache_local = threading.local()
 
 
 def _msg_role_fingerprint(messages: list) -> int:
-    """O(1) 消息列表角色指纹：首尾消息 role 的 hash，防 id 复用脏命中"""
+    """消息列表缓存指纹：覆盖原地可变元数据字段（Bug9 防脏命中）。
+
+    原实现仅 hash 首尾 role：流式收尾/更新会在**原消息对象上原地补写**
+    model_name/provider_name/config_id/elapsed（_on_stream_finished /
+    _on_messages_updated）而不改变长度与首尾 role → consolidate_messages
+    缓存命中返回缺这些字段的旧列表（脏数据，Bug9）。改为对每条消息的
+    关键字段（role/_hook_event/model_name/provider_name/config_id/elapsed）
+    取特征 hash：字段值变化即指纹变化 → 缓存失效。
+
+    性能：consolidate_messages 本身 O(n)（逐条 normalize），此处仅 hash
+    短字段（非长文本 content/tool_calls），不改变总复杂度，开销可忽略。
+    """
     if not messages:
         return 0
-    first_role = str(messages[0].get("role", "")) if isinstance(messages[0], dict) else ""
-    if len(messages) > 1:
-        last = messages[-1]
-        last_role = str(last.get("role", "")) if isinstance(last, dict) else ""
-    else:
-        last_role = first_role
-    return hash((first_role, last_role))
+    feature = []
+    for msg in messages:
+        if isinstance(msg, dict):
+            feature.append(
+                (
+                    msg.get("role", ""),
+                    msg.get("_hook_event", ""),
+                    msg.get("model_name", ""),
+                    msg.get("provider_name", ""),
+                    msg.get("config_id", ""),
+                    msg.get("elapsed"),
+                )
+            )
+        else:
+            feature.append(None)
+    return hash(tuple(feature))
 
 
 def _get_consolidate_cache() -> dict:
@@ -770,8 +790,12 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if "_hook_event" in message:
         normalized["_hook_event"] = message["_hook_event"]
     else:
-        # 迁移旧数据：为 assistant 和 user 角色的 hook 格式消息补上 _hook_event
-        _fill_hook_event = _check_hook_content(normalized.get("content", ""))
+        # 迁移旧数据：为 user 角色的 hook 格式消息补上 _hook_event。
+        # include_team_mail=True（Bug11）：TeamMail 是 user 角色，历史数据
+        # （内容为 📨 + 任务邮件 但无标记）在此补 _hook_event="TeamMail"，
+        # 使 F2/F4 统一的 round 口径对旧数据生效。assistant 分支（L725 前）
+        # 不启用 TeamMail 识别，避免 AI 回复引用邮件文本被误标。
+        _fill_hook_event = _check_hook_content(normalized.get("content", ""), include_team_mail=True)
         if _fill_hook_event is not None:
             normalized["_hook_event"] = _fill_hook_event
             message["_hook_event"] = _fill_hook_event
@@ -875,7 +899,25 @@ _HOOK_CONTENT_PATTERN = re.compile(
 )
 
 
-def _check_hook_content(content: Any) -> Optional[str]:
+def _is_team_mail_text(text: str) -> bool:
+    """判断文本是否为 TeamMail 消息内容（Bug11 迁移识别特征）。
+
+    新消息注入路径已带 `_hook_event="TeamMail"` 标记（F1 相关），此处仅用于
+    迁移**无标记的历史 TeamMail 消息**（恢复/加载旧数据时），使其 round 口径
+    与 F2/F4 统一（TeamMail 计入 user round）。
+
+    实际消息格式（两种已知变体均以 📨 开头 + 含"任务邮件"）：
+    - main_widget._process_team_task（非流式）：`📨 **来自 [build@win_01] 的任务邮件：**`
+    - main_widget._inject_team_mail_as_hook（流式）：`📨 **来自 [build@win_01] 的任务邮件：**\n...`
+    - 测试/历史变体：`📨 来自 team 的任务邮件`
+
+    取 📨 + "任务邮件" 双特征（避免与普通用户消息误判；assistant 分支不启用
+    该识别，AI 回复引用邮件文本不会误标）。
+    """
+    return "📨" in text and "任务邮件" in text
+
+
+def _check_hook_content(content: Any, include_team_mail: bool = False) -> Optional[str]:
     """检查内容是否为 hook 格式，若是则返回提取的 event_name
 
     用于迁移旧数据：当消息没有 _hook_event 字段但内容匹配 hook 格式时，
@@ -883,9 +925,12 @@ def _check_hook_content(content: Any) -> Optional[str]:
 
     Args:
         content: 消息内容（str 或 list）
+        include_team_mail: True 时额外识别 TeamMail 消息格式（📨 + 任务邮件）。
+            仅 user 角色消息应启用——TeamMail 是 user 角色（Bug11）；assistant
+            回复可能引用邮件文本，若启用会把 assistant 误标 TeamMail。
 
     Returns:
-        event_name 字符串（如 "pre-user-message-hook"），
+        event_name 字符串（如 "pre-user-message-hook" / "TeamMail"），
         或 None（不匹配 hook 格式）
     """
     if isinstance(content, str):
@@ -893,6 +938,8 @@ def _check_hook_content(content: Any) -> Optional[str]:
         if m:
             tag = m.group(1)  # e.g., "pre-user-message-hook"
             return tag
+        if include_team_mail and _is_team_mail_text(content):
+            return "TeamMail"
         return None
     if isinstance(content, list):
         for block in content:
@@ -902,6 +949,8 @@ def _check_hook_content(content: Any) -> Optional[str]:
                 if m:
                     tag = m.group(1)  # e.g., "pre-user-message-hook"
                     return tag
+                if include_team_mail and _is_team_mail_text(text):
+                    return "TeamMail"
         return None
     return None
 

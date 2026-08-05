@@ -17,14 +17,18 @@ MessageCard - 消息卡片组件
 """
 
 import base64
+import concurrent.futures
 import hashlib
 import math
 import os
 import random
 import re
 import sys
+import threading
 import time
 import urllib.parse
+import weakref
+from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from html import escape, unescape
@@ -112,6 +116,19 @@ ACTION_COLOR_MAP = {
 }
 DEFAULT_COLOR = "#888888"
 
+# ======== B3: 渲染线程池（md.convert 等纯计算移出主线程） ========
+# 线程池 worker 只做纯 CPU 渲染（sanitize→inject→md.convert→wrap→resolve），
+# 不触碰任何 Qt 对象；结果通过 Future 回调 + QTimer.singleShot(0) 回主线程应用。
+# 独立 2 worker：与 _SHARED_TOOL_POOL（工具执行）隔离，避免互相饿死。
+_RENDER_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="md_render",
+)
+# 线程局部：每线程私有 Markdown 实例 + formatter。
+# 不得用全局 _md_instance / _FORMATTER_CACHE / set_pygments_style 跨线程
+# （Markdown.reset() 与 HtmlFormatter 均非线程安全）。
+_render_tls = threading.local()
+
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
@@ -136,6 +153,8 @@ _EXTRACT_KEY_VALUE_PATTERN = re.compile(r'"([^"\\]+)"\s*:\s*"([^"]*)"', re.DOTAL
 
 # ===== Pygments lexer/formatter 缓存（避免每个代码块每周期重建） =====
 _LEXER_CACHE: dict = {}
+# 防御上限：语言种类有限（<64），超限整体清空防膨胀
+_LEXER_CACHE_MAX = 64
 _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
@@ -170,6 +189,8 @@ def _get_lexer_cached(lang: str):
             lex = get_lexer_by_name(lang, stripall=False)
         except Exception:
             lex = _TEXT_LEXER
+        if len(_LEXER_CACHE) >= _LEXER_CACHE_MAX:
+            _LEXER_CACHE.clear()  # 防御膨胀：语言种类有限，整体清空代价可忽略
         _LEXER_CACHE[lang] = lex
     return lex
 
@@ -271,9 +292,23 @@ def _strip_code_blocks(text: str) -> str:
 
 
 # ======== 核心逻辑：保留你的原始代码块样式 ========
-def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
-    _icon_prefix = _ICON_PREFIX_CACHE
-    _font_size = _CODE_FONT_SIZE
+def _wrap_code_blocks_with_copy_button_web(
+    html: str,
+    icon_prefix: str = None,
+    font_size: int = None,
+    formatter: object = None,
+) -> str:
+    """包裹代码块为带复制按钮的容器。
+
+    Args:
+        html: markdown 渲染后的 HTML
+        icon_prefix: 图标前缀（None=用全局 _ICON_PREFIX_CACHE，主线程默认）
+        font_size: 代码字号（None=用全局 _CODE_FONT_SIZE，主线程默认）
+        formatter: Pygments formatter（None=用全局缓存 formatter，主线程默认；
+                   B3 线程池 worker 必须传入线程局部 formatter，避免跨线程共享）
+    """
+    _icon_prefix = icon_prefix if icon_prefix is not None else _ICON_PREFIX_CACHE
+    _font_size = font_size if font_size is not None else _CODE_FONT_SIZE
 
     def replacer(match):
         lang = (match.group(1) or "").replace("language-", "").strip()
@@ -309,8 +344,8 @@ def _wrap_code_blocks_with_copy_button_web(html: str) -> str:
         # 高亮代码（获取 <pre> 内部 HTML）
         try:
             lexer = _get_lexer_cached(lang)
-            formatter = _get_formatter_cached()
-            highlighted = highlight(copy_text, lexer, formatter)
+            _fmt = formatter if formatter is not None else _get_formatter_cached()
+            highlighted = highlight(copy_text, lexer, _fmt)
             # 提取 <pre> 内部内容
             pre_match = _PRE_CONTENT_PATTERN.search(highlighted)
             if pre_match:
@@ -1201,7 +1236,9 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     while i < len(md_text):
         start_idx = md_text.find("<think>", i)
         if start_idx == -1:
-            parts.append(md_text[i:])
+            # 🐛 防御：无 `<think>` 开头的段（历史上被差量切碎的产物 `段2</think>`）
+            # 清理孤立 </think>，避免思考内容以普通正文泄漏（<p>内容</think></p>）。
+            parts.append(md_text[i:].replace("</think>", ""))
             break
         parts.append(md_text[i:start_idx])
 
@@ -1781,10 +1818,139 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
     return _render_markdown_to_html_cached_impl(raw_md, compact=compact)
 
 
+# ============================================================
+# B3：渲染移出主线程 — 线程池 worker
+#
+# 职责：把最昂贵的「sanitize→inject→md.convert→代码块高亮→resolve 图片」整条
+# markdown→HTML 管线挪到后台线程池执行，主线程只做快照采集（md 引用、主题参数）
+# 与最终 DOM 应用（runJavaScript），消除 20-80ms 主线程阻塞。
+#
+# 线程安全要点：
+# - _md_instance / set_pygments_style / _FORMATTER_CACHE 均为全局可变状态，
+#   严禁跨线程使用；worker 使用 _render_tls 线程局部 Markdown 实例 + formatter。
+# - 快照 md 只读不复制（>200KB 引用传递），raw_md 不可变字符串并发读安全。
+# - worker 不走 lru_cache（主线程快路径保留），避免跨线程缓存污染。
+# ============================================================
+def _render_markdown_to_html_worker(snapshot: dict) -> str:
+    """线程池 worker：渲染 markdown → HTML（纯 CPU 计算，无 Qt 交互）
+
+    Args:
+        snapshot: 主线程采集的渲染快照，字段：
+            md: str                 markdown 原文（引用传递）
+            streaming: bool         流式标志
+            thinking_finalized: bool 思考块完成标志（流式剥离 </think> 用）
+            compact: bool           简洁模式
+            pygments_style: str     "friendly"/"dracula"
+            icon_prefix: str        代码块图标前缀
+            code_font_size: int     代码字号
+
+    Returns:
+        HTML 字符串（流式模式含字符统计 <div>）
+    """
+    tls = _render_tls
+    # 线程局部 Markdown 实例（非全局 _md_instance，避免 reset() 跨线程竞争）
+    md = getattr(tls, "md", None)
+    if md is None:
+        md = Markdown(
+            extensions=["fenced_code", "nl2br", "tables"],
+            output_format="html5",
+            safe=False,
+        )
+        tls.md = md
+
+    # 线程局部 formatter（style/font_size 变化时重建，非全局 _FORMATTER_CACHE）
+    style = snapshot["pygments_style"]
+    font_size = snapshot["code_font_size"]
+    fmt_key = (style, font_size)
+    if getattr(tls, "formatter_key", None) != fmt_key:
+        pre_color = "#1a1a1a" if style != "dracula" else "#D4D4D4"
+        tls.formatter = HtmlFormatter(
+            style=style,
+            linenos=False,
+            noclasses=True,
+            cssclass="code-block",
+            prestyles=(
+                f"margin:0; padding:0; background:transparent; "
+                f"font-family: Consolas, monospace; font-size:{font_size}px; color:{pre_color};"
+            ),
+        )
+        tls.formatter_key = fmt_key
+    formatter = tls.formatter
+
+    raw_md = snapshot["md"]
+    streaming = snapshot["streaming"]
+    compact = snapshot["compact"]
+    icon_prefix = snapshot["icon_prefix"]
+
+    if not streaming:
+        # 非流式分支（历史加载 / 流式结束调用方已切非流式）
+        safe_md = _sanitize_incomplete_markdown(raw_md)
+        safe_md = _unwrap_code_blocks_with_context_links(safe_md)
+        safe_md = _inject_context_links(safe_md)
+        processed_md = _inject_think_cards(safe_md, True, compact=compact)
+        processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+        processed_md = _inject_hook_blocks(processed_md, True)
+        md.reset()
+        html_content = md.convert(processed_md)
+        html_content = _wrap_code_blocks_with_copy_button_web(
+            html_content,
+            icon_prefix=icon_prefix,
+            font_size=font_size,
+            formatter=formatter,
+        )
+        html_content = _resolve_image_src(html_content)
+        return html_content
+
+    # 流式分支（与 _render_markdown_to_html 流式逻辑一致）
+    streaming_md = raw_md.rstrip()
+    if streaming_md.endswith("</think>") and not snapshot["thinking_finalized"]:
+        # 末尾正好是 reasoning 块的闭合标签，去掉它表示该块尚未完成
+        streaming_md = streaming_md[: -len("</think>")].rstrip()
+
+    safe_md = _sanitize_incomplete_markdown(streaming_md)
+    safe_md = _unwrap_code_blocks_with_context_links(safe_md)
+    safe_md = _inject_context_links(safe_md)
+    processed_md = _inject_think_cards(safe_md, False, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
+    processed_md = _inject_hook_blocks(processed_md, False)
+
+    md.reset()
+    html_content = md.convert(processed_md)
+    html_content = _wrap_code_blocks_with_copy_button_web(
+        html_content,
+        icon_prefix=icon_prefix,
+        font_size=font_size,
+        formatter=formatter,
+    )
+    html_content = _resolve_image_src(html_content)
+    html_content = html_content + _CHAR_COUNT_HTML
+    return html_content
+
+
+def _dispatch_render_done(seq: int, fut, wself) -> None:
+    """Future 完成回调（worker 线程执行）：取结果 → 通过 Qt 信号回主线程
+
+    使用 weakref 而非强引用，避免线程池 Future 永久持有 viewer 导致泄漏。
+    不能在此线程调用 QTimer.singleShot（worker 线程无事件循环，事件不会投递）；
+    改用 CodeWebViewer.renderDone 信号跨线程 emit（自动 QueuedConnection）。
+    """
+    try:
+        html = fut.result()
+    except Exception as _e:
+        html = None
+    viewer = wself()
+    if viewer is None:
+        return  # viewer 已被回收，丢弃结果
+    try:
+        viewer.renderDone.emit(seq, html)
+    except RuntimeError:
+        pass  # viewer C++ 对象已销毁（sip deleted），丢弃
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
 # 缓存键：(is_light, theme_fingerprint, font_family, ...)
-_skeleton_cache: Dict[tuple, str] = {}
+# OrderedDict LRU：超限时淘汰最久未用条目（骨架 ~54KB/条，48 条 ≈ 2.6MB 上限）
+_skeleton_cache: "OrderedDict[tuple, str]" = OrderedDict()
+_SKELETON_CACHE_MAX = 48
 # 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时必须递增，
 # 强制旧缓存失效。教训：#26 data-order 修复依赖骨架 JS 的 getPos 逻辑，
 # 若进程内仍持有旧版骨架缓存与新代码混合（新代码注入 data-order + 旧骨架
@@ -1802,6 +1968,119 @@ _SKELETON_CACHE_VERSION = 6
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
 _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
+
+
+# ============================================================
+# B1：差量渲染 — 闭合段提取
+#
+# 流式渲染的另一个 80ms 级开销是"每次自然边界全量 md→HTML"。差量策略：
+# 只把「已经闭合的完整段落/代码块」增量渲染并追加到 DOM（updateContentAppend），
+# 未闭合的尾部（think/tool 未闭合、fence 未闭合、行尾半段）保持增量纯文本状态，
+# 等闭合瞬间的全量渲染（或流式结束）统一处理。
+#
+# 规则（收敛版）：
+# - 空行（\n\n）分隔段落
+# - ```fence 配对后才切割；fence 内不切（fence 状态跨段累计）
+# - think/tool 未闭合不切（尾部留在稳定区之外）
+# - 列表/表格/引用跨空行被拆段属可接受差异（diff 场景不参与差量）
+#
+# 返回 (stable_md_len, segments)：
+# - stable_md_len：最后一个完整闭合段之后的偏移（下次从这继续扫描）
+# - segments：闭合段列表（每段是一段完整 markdown 文本）
+# ============================================================
+def _extract_closed_segments(md: str):
+    """提取 markdown 中已闭合的完整段（供差量增量渲染）。
+
+    Args:
+        md: 待扫描的 markdown 文本（从上次 stable 偏移之后的部分）
+
+    Returns:
+        (stable_md_len, segments)
+        - stable_md_len: 最后一个完整闭合段结束后的字符偏移
+        - segments: 闭合段列表（完整段落/代码块 markdown 原文）
+    """
+    if not md:
+        return 0, []
+
+    segments = []
+    stable_len = 0
+    i = 0
+    n = len(md)
+    fence_open = False  # 是否在 ``` 代码块内（跨段累计）
+
+    while i < n:
+        seg_end = md.find("\n\n", i)
+        if seg_end == -1:
+            break  # 剩余文本无空行分隔：整段未闭合（无稳定边界）→ 停止
+
+        seg = md[i:seg_end]
+        if not seg:
+            # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
+            i = seg_end + 2
+            continue
+        fence_count = seg.count("```")
+
+        if fence_open:
+            # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
+            if fence_count % 2 == 0:
+                i = seg_end + 2
+                continue
+            fence_open = False
+        else:
+            if fence_count % 2 == 1:
+                # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
+                fence_open = True
+                i = seg_end + 2
+                continue
+
+        # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
+        # think 配对守卫必须用真实标签 `<think>` / `</think>`（与 _build_incremental_md
+        # 生成的标签一致）。旧代码误用 ` think` / ` response`：`<think>` 不含子串
+        # ` think`、`</think>` 不含 ` response`，count 恒 0 → 守卫恒不触发 → 多段思考
+        # 内容（含 \n\n）被在中间切碎成 `<think>段1` + `段2</think>`，后者无 `<think>`
+        # 开头 → _inject_think_cards 当普通正文渲染 → 思考内容泄漏到正文（高块闪现）。
+        if seg.count("<think>") > seg.count("</think>"):
+            break  # think 未闭合 → 停止（尾部留在稳定区之外）
+        if seg.count("<tool>") > seg.count("</tool>"):
+            break  # tool 未闭合 → 停止
+
+        # 该段完整闭合：产出
+        segments.append(seg)
+        stable_len = seg_end + 2  # 含空行
+        i = seg_end + 2
+
+    return stable_len, segments
+
+
+def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
+    """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
+
+    与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert），
+    但不做代码块高亮包装（闭合段通常为纯文本段落；代码块闭合由全量渲染兜底，
+    差量段不含未闭合 fence——见 _extract_closed_segments 的 fence 配对规则）。
+    小段同步渲染耗时 <1ms，无需线程池。
+
+    Args:
+        md_seg: 单个完整闭合的 markdown 段落
+        compact: 工具/思考区简洁模式开关（与全量渲染 _tool_compact_mode 对齐，
+            避免差量/全量渲染形态分裂——差量段硬编码 compact=False 会把 think
+            渲染成折叠框 think-block，而全量渲染简洁模式下渲染成 think-compact，
+            导致差量段与后续全量段形态不一致）。
+
+    Returns:
+        该段的 HTML（不含外层容器包裹，供 updateContentAppend 追加）
+    """
+    safe_md = _sanitize_incomplete_markdown(md_seg)
+    safe_md = _unwrap_code_blocks_with_context_links(safe_md)
+    safe_md = _inject_context_links(safe_md)
+    processed_md = _inject_think_cards(safe_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_hook_blocks(processed_md, True)
+    md = get_markdown_instance()
+    md.reset()
+    html = md.convert(processed_md)
+    html = _resolve_image_src(html)
+    return html
 
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
 # 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
@@ -2119,6 +2398,12 @@ class CodeWebViewer(QWebEngineView):
     contextRestored = pyqtSignal()
     needRecreate = pyqtSignal()  # 需要完全重建控件（恢复失败时）
 
+    # [B3] 线程池渲染完成信号（worker 线程 emit → 主线程槽执行）：
+    # 不能从 worker 线程直接调用 QTimer.singleShot(0, ...)（worker 无事件循环，
+    # 定时器事件不会投递到主线程）；Qt 信号跨线程 emit 是线程安全的，
+    # 自动 QueuedConnection 到主线程执行 _apply_render_result。
+    renderDone = pyqtSignal(int, object)  # (seq, html)
+
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
     # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
@@ -2128,6 +2413,10 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        # [B4-强回收] renderer 进程 PID（强回收层 kill 离屏进程用；0 = 未就绪/已清理）
+        self._renderer_pid: int = 0
+        # [B3] 连接线程池渲染完成信号（worker 线程 emit → 本槽在主线程执行）
+        self.renderDone.connect(self._on_render_done_signal)
         self._markdown_text = ""
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
@@ -2143,6 +2432,25 @@ class CodeWebViewer(QWebEngineView):
         # 已完成的工具块的 markdown 只計算一次，後續增量渲染跳過昂貴的
         # _sanitize_result + sorted() + JSON 序列化，直接拼接緩存結果。
         self._tool_md_cache: Dict[str, str] = {}
+        # [B2] 工具 DOM 脏标记：MessageCard 层 JS 增量注入工具块（_inject_tool_streaming_html /
+        # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
+        # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
+        # updateContent（省整页 save/restore JS 包装，MB 级 IPC 瘦身）。更新成功后置 False。
+        self._tool_dom_dirty: bool = False
+        # [B3] 异步渲染序号与防抖状态（渲染移出主线程）：
+        # - _render_seq：递增序号，回调时校验，过期结果（新渲染已提交）直接丢弃
+        # - _render_inflight：是否有在途线程池渲染任务（防抖：在途时只记 pending）
+        # - _render_pending：在途期间积压的最新 (seq, md, compact) 快照，完成后续派
+        self._render_seq: int = 0
+        self._render_inflight: bool = False
+        self._render_pending: Optional[tuple] = None
+        # [B1] 差量渲染状态：
+        # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
+        # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
+        # - _needs_full_render：需要全量渲染（初值/主题/字体/状态切换/流式结束/缓存清理）
+        self._stable_html: str = ""
+        self._stable_md_len: int = 0
+        self._needs_full_render: bool = True
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
         # 每 80ms 合并一次渲染比 50ms 减少 37.5% 的 Chromium 重排版次数，
@@ -2561,6 +2869,11 @@ class CodeWebViewer(QWebEngineView):
         # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
         if self._markdown_text or self._lazy_markdown_cb:
             self._schedule_render(immediate=True)
+        # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
+        try:
+            self._renderer_pid = self.page().renderProcessPid()
+        except Exception:
+            self._renderer_pid = 0
 
     def _load_skeleton(self):
         # 获取系统字体
@@ -2607,6 +2920,7 @@ class CodeWebViewer(QWebEngineView):
         )
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
+            _skeleton_cache.move_to_end(cache_key)  # LRU：命中提升为最新
             self.setHtml(cached, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
             return
 
@@ -4090,6 +4404,67 @@ class CodeWebViewer(QWebEngineView):
                         setTimeout(() => reportHeight(), 50);
                     }}
                 }}
+                // ===== B1 差量渲染：追加闭合段到 DOM（不整块替换） =====
+                // 移除所有 data-incremental="true" 的增量纯文本节点，
+                // 再把新闭合的格式化 HTML 追加到 #content-placeholder 末尾。
+                function updateContentAppend(newHtml) {{
+                    const container = document.getElementById('content-placeholder');
+                    if (!container) return;
+                    // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        el.remove();
+                    }});
+                    // 追加格式化 HTML（含 table 包裹等后续处理）
+                    container.insertAdjacentHTML('beforeend', newHtml);
+                    // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
+                    // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
+                    // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
+                    if (window._toolCompactMode) reorganizeContent();
+                    // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
+                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
+                        var wrapper = document.createElement('div');
+                        wrapper.className = 'table-scroll-wrapper';
+                        table.parentNode.insertBefore(wrapper, table);
+                        wrapper.appendChild(table);
+                    }});
+                    // 恢复展开状态
+                    restoreCollapsibleStates(container);
+                    // 同步滚动到底（流式期间通常期望跟到底部）
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._prevScrollTop = document.body.scrollTop;
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
+                    // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块）
+                    if (window.echarts) {{
+                        container.querySelectorAll('.echarts-container').forEach(function(el) {{
+                            try {{
+                                var jsonB64 = el.getAttribute('data-echarts-json');
+                                if (!jsonB64 || el._echartInited) return;
+                                var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
+                                var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
+                                var chart = echarts.init(el, 'dark');
+                                chart.setOption(option);
+                                el._echartInited = true;
+                                var _ro = new ResizeObserver(function() {{ chart.resize(); }});
+                                _ro.observe(el);
+                            }} catch(e) {{
+                                console.error('ECharts init error:', e);
+                            }}
+                        }});
+                    }}
+                    // 使用延迟报告，确保浏览器布局完成
+                    setTimeout(() => reportHeight(), 30);
+                }}
                 function reportHeight() {{
                     // 用 body.scrollHeight 获取完整内容高度。
                     // getBoundingClientRect 在 html{{overflow:hidden}} 下
@@ -4653,6 +5028,9 @@ class CodeWebViewer(QWebEngineView):
         """
         # 存入全局骨架缓存，避免后续卡片重复构造同一 HTML 模板
         _skeleton_cache[cache_key] = html
+        _skeleton_cache.move_to_end(cache_key)
+        if len(_skeleton_cache) > _SKELETON_CACHE_MAX:
+            _skeleton_cache.popitem(last=False)  # LRU：淘汰最久未用
         # 以项目根目录为基础 URL，使相对路径图片（如 images/xxx.png）可正确解析
         self.setHtml(html, QUrl.fromLocalFile(_PROJECT_ROOT + "/"))
 
@@ -4752,19 +5130,27 @@ class CodeWebViewer(QWebEngineView):
                     // 保持与全量 Markdown 渲染的段落结构一致，避免段落计数偏移）
                     var clean = text.replace(/^[\\n\\r]+/, '');
                     var p = document.createElement('p');
+                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
+                    p.setAttribute('data-incremental', 'true');
                     p.textContent = clean;
                     c.appendChild(p);
                 }} else {{
                     var last = c.lastElementChild;
                     if (last && last.tagName === 'P') {{
+                        // [B1] 若已标记为增量节点则保留标记，追加文本
+                        if (!last.hasAttribute('data-incremental')) {{
+                            last.setAttribute('data-incremental', 'true');
+                        }}
                         last.textContent += text;
                     }} else if (last && last.classList.contains('think-block')) {{
                         // 最后是思考块：追加到思考块之后的新段落
                         var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
                         p.textContent = text;
                         c.appendChild(p);
                     }} else {{
                         var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
                         p.textContent = text;
                         c.appendChild(p);
                     }}
@@ -4904,6 +5290,10 @@ class CodeWebViewer(QWebEngineView):
         """刷新 viewer 字体样式，响应系统字体设置变化"""
         if not hasattr(self, "_viewer_font_family"):
             return
+        # [B1] 字体变化：差量 HTML 缓存失效，强制全量重渲染
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
         self._refresh_viewer_font_css()
         self._schedule_render(immediate=True)
 
@@ -4945,6 +5335,13 @@ class CodeWebViewer(QWebEngineView):
         self._cached_streaming_html = None
         self._processed_md_hash = 0
         self._cached_raw_md_hash = 0
+        # [B3] 主题变化：递增渲染序号使在途线程池任务过期（旧主题 HTML 丢弃），
+        # 强制后续 _schedule_render 以新主题重新提交渲染。
+        self._render_seq += 1
+        # [B1] 主题变化：差量 HTML 缓存失效（旧主题高亮/图标颜色），强制全量重渲染
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
 
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
@@ -5008,7 +5405,20 @@ class CodeWebViewer(QWebEngineView):
                 # 🚀 [PERF] 使用异步 runJavaScript（带 callback）避免主线程阻塞
                 # 等待 WebEngine 处理 DOM。同步版本会卡 30-120ms。
                 # 异步后主线程立即释放，WebEngine 在后台解析 HTML 和替换 DOM。
-                self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
+                # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
+                # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
+                # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
+                _needs_save_restore = self._tool_dom_dirty or bool(
+                    getattr(self, "_restore_finished_ids", set())
+                )
+                if _needs_save_restore:
+                    self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
+                else:
+                    self.page().runJavaScript(
+                        f"updateContent({json.dumps(html_content).decode('utf-8')});",
+                        lambda _result: None,
+                    )
+                self._tool_dom_dirty = False
                 self._last_rendered_html = None
                 return
 
@@ -5035,13 +5445,142 @@ class CodeWebViewer(QWebEngineView):
             if self._markdown_text == self._last_rendered_markdown:
                 return
 
+            # [B1] 差量渲染快路径：流式且非全量模式时，仅增量渲染已闭合的完整段。
+            # 条件：流式 + 未强制全量 + 无活跃工具 DOM（工具块走 save/restore 全量保护）
+            if self._streaming and not self._needs_full_render and not self._has_active_tool_dom():
+                stable_len, segs = _extract_closed_segments(self._markdown_text[self._stable_md_len :])
+                if segs:
+                    # 增量渲染闭合段：sanitize→inject→md.convert（主线程小段快速路径）
+                    # 差量段很小（单个段落/代码块），同步渲染耗时 <1ms，无需线程池
+                    # 🐛 修复：传 _tool_compact_mode，与全量渲染 _render_markdown_to_html
+                    # 的 compact 对齐——否则差量段硬编码 compact=False 会把思考块渲染成
+                    # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
+                    # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
+                    new_html = "".join(
+                        _render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs
+                    )
+                    self._stable_md_len += stable_len
+                    self._stable_html += new_html
+                    # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
+                    # 不能推送累积值（否则旧段重复渲染）。
+                    js = f"updateContentAppend({json.dumps(new_html).decode('utf-8')});"
+                    self.page().runJavaScript(js)
+                    # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
+                    self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
+                    return
+                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental），跳过。
+                # 🐛 修复（思考块滞留/泄漏）：think 配对守卫 break（未闭合 think 段）
+                # 使差量一个段都产不出时，若 md 已达自然边界（think 闭合 `</think>` /
+                # 段落 `\n\n` 结尾），必须走全量渲染消费——否则安全定时器触发的
+                # _perform_update 也会被此分支拦截，思考块/闭合段永远滞留
+                # （或仅靠流式结束才一次性显示）。
+                if self._has_reached_clean_boundary(self._markdown_text):
+                    self._refresh_viewer_font_css()
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                return
+
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
-            html_content = self._render_markdown_to_html(self._markdown_text)
+            # [B3] 渲染移出主线程：提交线程池渲染，完成回调在主线程应用 DOM。
+            # 主线程不再同步执行 md.convert（20-80ms 阻塞消除），
+            # 渲染参数以快照形式传引用（md 不复制）。
             self._last_rendered_markdown = self._markdown_text
-            self._last_rendered_html = html_content
+            self._sequence_render(self._markdown_text, self._tool_compact_mode)
+
+        except RuntimeError:
+            pass
+
+    def _has_active_tool_dom(self) -> bool:
+        """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
+
+        返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
+        且 _tool_md_cache 影响 _inject_tool_blocks 输出——差量段渲染不带该缓存，
+        会导致工具块 HTML 与全量不一致）。
+        """
+        if self._tool_dom_dirty:
+            return True
+        try:
+            if getattr(self, "_restore_finished_ids", None):
+                return True
+        except Exception:
+            pass
+        return False
+
+    # ========== B3: 异步渲染（线程池 + 序号校验 + 防抖） ==========
+
+    def _collect_render_snapshot(self, md: str, compact: bool) -> dict:
+        """主线程：采集渲染快照（只读全局参数，md 引用传递不复制）"""
+        try:
+            from app.utils.theme_manager import theme_manager
+
+            _style = "friendly" if theme_manager.is_light_theme() else "dracula"
+        except Exception:
+            _style = "dracula"
+        return {
+            "md": md,
+            "streaming": self._streaming,
+            "thinking_finalized": getattr(self, "_thinking_finalized", False),
+            "compact": compact,
+            "pygments_style": _style,
+            "icon_prefix": _ICON_PREFIX_CACHE,
+            "code_font_size": _CODE_FONT_SIZE,
+        }
+
+    def _sequence_render(self, md: str, compact: bool):
+        """B3: 序列化异步渲染——提交线程池，在途时只记 pending（防抖积压最新快照）
+
+        - 序号校验：每次提交 seq+=1，回调时 seq != self._render_seq 视为过期丢弃
+        - 防抖：在途任务未完成时，新请求只覆盖 _render_pending；完成后续派最新
+        """
+        self._render_seq += 1
+        seq = self._render_seq
+        if self._render_inflight:
+            # 在途：只记录最新 pending，完成回调后统一续派
+            self._render_pending = (seq, md, compact)
+            return
+        self._render_inflight = True
+        snapshot = self._collect_render_snapshot(md, compact)
+        try:
+            fut = _RENDER_POOL.submit(_render_markdown_to_html_worker, snapshot)
+        except RuntimeError:
+            # 线程池已关闭（进程退出）：降级为同步渲染
+            self._render_inflight = False
+            self._apply_render_result(seq, self._render_markdown_to_html(md))
+            return
+        wself = weakref.ref(self)
+        fut.add_done_callback(lambda f, s=seq, w=wself: _dispatch_render_done(s, f, w))
+
+    def _on_render_done_signal(self, seq: int, html):
+        """主线程槽：接收 worker 线程池渲染完成信号（renderDone.emit 跨线程投递）"""
+        try:
+            self._apply_render_result(seq, html)
+        except RuntimeError:
+            pass
+
+    def _apply_render_result(self, seq: int, html):
+        """B3: 主线程应用渲染结果（线程池回调经 QTimer.singleShot 转发至此）
+
+        - seq 守卫：过期结果（新渲染已提交）直接丢弃
+        - 成功后检查 pending 续派（在途期间积压的最新快照）
+        """
+        try:
+            if seq != self._render_seq:
+                # 过期结果：丢弃（新渲染已提交或已失效）
+                return
+            if html is None:
+                return
+            if sip.isdeleted(self) or not self.page():
+                return
+            self._last_rendered_html = html
             self._height_report_pending = True
+            # [B1] 全量渲染成功应用后：重置差量基线——差量稳定区与全量内容对齐，
+            # 后续流式新段从当前 markdown 末尾继续差量追加（不再重复渲染已全量覆盖的内容）。
+            # ⚠️ 必须用 _last_rendered_markdown（线程池提交时的渲染对象），而非
+            # _markdown_text（回调到达时可能已被新 chunk 追加，造成差量跳过未渲染内容）。
+            self._stable_html = html
+            self._stable_md_len = len(self._last_rendered_markdown)
+            self._needs_full_render = False
             # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
             # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后
             # updateContent 的 height report 到达时 _content_just_loaded 已为 False，
@@ -5066,13 +5605,32 @@ class CodeWebViewer(QWebEngineView):
                 "window._autoScrollTime=performance.now();"
                 "window._suppressScrollEvent=false;"
             )
-            js_code = self._build_save_and_restore_js(html_content).replace("})();", auto_scroll_js + "})();")
+            # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
+            # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装
+            _needs_save_restore = self._tool_dom_dirty or bool(
+                getattr(self, "_restore_finished_ids", set())
+            )
+            if _needs_save_restore:
+                js_code = self._build_save_and_restore_js(html).replace(
+                    "})();", auto_scroll_js + "})();"
+                )
+            else:
+                js_code = (
+                    f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
+                )
             self.page().runJavaScript(js_code)
+            self._tool_dom_dirty = False
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
-
         except RuntimeError:
             pass
+        finally:
+            # 无论成功/过期，都要释放 in-flight 并续派 pending（若有）
+            self._render_inflight = False
+            if self._render_pending:
+                pseq, pmd, pcompact = self._render_pending
+                self._render_pending = None
+                self._sequence_render(pmd, pcompact)
 
     def _build_save_and_restore_js(self, html_content: str) -> str:
         """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
@@ -5196,6 +5754,19 @@ class CodeWebViewer(QWebEngineView):
 
     def finish_streaming(self):
         self._streaming = False
+        # [B1] 流式结束：差量缓存失效（尾部未闭合内容需全量渲染收尾），
+        # 清空稳定区避免差量/全量混合导致重复段落。
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
+        # [B3] 流式结束：递增渲染序号使在途线程池任务过期（避免旧流式 HTML
+        # 晚到覆盖最终非流式渲染结果）；pending 积压清空。
+        self._render_seq += 1
+        self._render_pending = None
+        # [B2] 流式结束：重置工具 DOM 脏标记。随后 _schedule_render 走非流式分支，
+        # 该分支依据 _tool_dom_dirty/_restore_finished_ids 决定 save/restore 或裸更新；
+        # 显式清零保证完成渲染后不再残留"脏"状态（防误走整页 save/restore 包装）。
+        self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         self._sync_streaming_dock(False)
         # 🐛 FIX: 流式结束时清除 tool_md_cache，防止缓存过期导致
@@ -5272,6 +5843,13 @@ class CodeWebViewer(QWebEngineView):
         🐛 修复：JS 未就绪时不清除 _lazy_markdown_cb，防止流式完成早于
         _on_js_ready 时丢失内容引用，导致卡片永久空白。
         """
+        # [B3] 清空渲染缓存：递增序号使在途线程池任务过期（避免旧内容被应用）
+        self._render_seq += 1
+        self._render_pending = None
+        # [B1] 清空差量缓存：强制下次全量渲染（流式结束后的最终态）
+        self._needs_full_render = True
+        self._stable_html = ""
+        self._stable_md_len = 0
         self._last_rendered_html = None
         self._last_rendered_markdown = ""
         self._markdown_text = ""
@@ -5854,6 +6432,12 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             pass
 
+        # [B3] 视口销毁：递增渲染序号使在途线程池任务过期（weakref 判活兜底下，
+        # 序号守卫提供第二道防线，防止旧任务结果应用到已释放的 DOM）。
+        self._render_seq += 1
+        self._render_pending = None
+        self._render_inflight = False
+
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,
@@ -5929,6 +6513,9 @@ class CodeWebViewer(QWebEngineView):
 
         # 清理滚动位置
         self._last_scroll_position = 0
+
+        # [B4-强回收] 防悬挂：清理时清零 renderer PID（进程可能已随页面销毁退出）
+        self._renderer_pid = 0
 
     def deleteLater(self):
         self.cleanup()
@@ -7862,6 +8449,11 @@ class MessageCard(SimpleCardWidget):
 
         if hasattr(self.viewer, "_markdown_text"):
             self.viewer._markdown_text = rendered
+            # [B1] 内容整体替换：使差量渲染缓存失效（_stable_md_len 指向旧内容偏移，
+            # 继续差量会重复渲染旧段），强制下次全量渲染建立新基线。
+            self.viewer._needs_full_render = True
+            self.viewer._stable_html = ""
+            self.viewer._stable_md_len = 0
             self.viewer._schedule_render(immediate=True)
         elif hasattr(self.viewer, "set_text"):
             self.viewer.set_text(rendered)
@@ -7952,15 +8544,21 @@ class MessageCard(SimpleCardWidget):
                 return
             # [PERF] 增量 markdown 構建：已完成的 tool_result 塊走緩存，只有文本塊即時轉換
             self.viewer._lazy_markdown_cb = self._build_incremental_md
-            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字
-            if self._streaming:
-                self.viewer._append_text_incremental(text)
             # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
             last_block = self._content_data[-1] if self._content_data else None
             last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
-            if _has_unclosed_think(last_text):
+            _think_unclosed = _has_unclosed_think(last_text)
+            # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
+            # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
+            # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
+            # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
+            # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
+            # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
+            if self._streaming and not _think_unclosed:
+                self.viewer._append_text_incremental(text)
+            if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
                     # 首 chunk：立即渲染一次显示"深度思考中..." spinner
                     self.viewer._think_text_streaming_started = True
@@ -8271,6 +8869,12 @@ class MessageCard(SimpleCardWidget):
                 reportHeight();
             }})();
             """
+            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
+            # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
+            try:
+                self.viewer._tool_dom_dirty = True
+            except Exception:
+                pass
             self.viewer.page().runJavaScript(js_code)
         except Exception as e:
             logger.warning(f"增量工具块注入失败: {e}")
@@ -8529,6 +9133,12 @@ class MessageCard(SimpleCardWidget):
                 }}
             }})();
             """
+            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
+            # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
+            try:
+                self.viewer._tool_dom_dirty = True
+            except Exception:
+                pass
             self.viewer.page().runJavaScript(js_code)
         except RuntimeError:
             pass
@@ -8997,6 +9607,8 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.cleanup()
             except RuntimeError:
                 pass
+        # [B4-强回收] 防悬挂：MessageCard 清理时同步清零 renderer PID
+        self._renderer_pid = 0
         self.viewer = None  # 释放 viewer 引用，允许 GC
 
         # 清理大数据缓存

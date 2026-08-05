@@ -241,6 +241,9 @@ class TestTeamRestoreLogic:
         win._get_team_manager = MagicMock()
         tm = MagicMock()
         tm.get_template.return_value = {"name": "dev-team"}
+        # 🛡️ Bug1：恢复路径优先复用当前团队已有 run_id（用户期望恢复后新对话
+        # 归属原 run_id 团队会话，历史面板分组不分裂）；仅无 run_id 时才生成。
+        tm.get_team_run_id.return_value = "run-1"
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._create_fresh_window = MagicMock()
@@ -261,7 +264,7 @@ class TestTeamRestoreLogic:
         # 🛡️ 新实现：_create_fresh_window 内部在 add_window（触发 showEvent）
         # 之前把 branch_data 赋给新窗口；mock 需模拟该语义，否则 fake 的
         # _branch_session_data 不会自动赋值。
-        def _fake_create(branch_data=None):
+        def _fake_create(branch_data=None, **kw):
             fake._branch_session_data = branch_data
             return fake
 
@@ -274,9 +277,9 @@ class TestTeamRestoreLogic:
         assert win._create_fresh_window.call_count == 2
         assert fake._branch_session_data is not None
         assert fake._team_agent_name in ("build", "plan")
-        assert fake._team_run_id == "new-run-1"
-        # H1/F3 回归：恢复路径必须 force 生成新 run_id（不沿用历史 run_id）
-        tm.start_team_run.assert_called_once_with(force=True)
+        # Bug1：恢复窗口复用当前团队已有 run_id（不生成新的）
+        assert fake._team_run_id == "run-1"
+        tm.start_team_run.assert_not_called()
         # L4/F2 回归：分支数据必须透传 project（保持会话原项目归属）
         for call_args in win._create_fresh_window.call_args_list:
             _kwargs = call_args.kwargs
@@ -285,6 +288,53 @@ class TestTeamRestoreLogic:
             assert branch["project"] in ("", "dev-team", "qa-team") or branch["project"] is not None
         # join_team 被调用（每个窗口一次）
         assert tm.join_team.call_count == 2
+
+    def test_restore_starts_run_when_team_has_no_run_id(self):
+        """Bug1 fallback：当前团队无 run_id（get_team_run_id 空）→ start_team_run() 生成新值。
+
+        与 test_restore_collects_by_run_id（复用已有 run_id）互补：恢复路径
+        优先复用，仅在团队从未开始运行（无 run_id）时才生成——且不带 force
+        （不再强制刷新，避免已复用场景下历史分组分裂）。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            s for s in _history_samples() if s["team_run_id"] == "run-1"
+        ]
+        win.history_manager.get_session_messages.side_effect = lambda sid: [{"role": "user", "content": sid}]
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = ""  # 无现有 run_id → 走生成分支
+        tm.start_team_run.return_value = "fresh-run-1"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+
+        created = []
+
+        class _FakeWin:
+            _window_id = "w1"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+                created.append(self)
+
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        assert len(created) == 2, "应创建 2 个恢复窗口"
+        assert created[0]._team_run_id == "fresh-run-1", "无 run_id 时应使用 start_team_run 生成的新值"
+        tm.start_team_run.assert_called_once_with(), "无 run_id 时生成新值且不带 force"
 
     def test_restore_dedups_by_agent_keeps_latest(self):
         """恢复按 agent_name 去重，每组取 last_time 最新一条（成员 4→1 修复）。
@@ -341,6 +391,8 @@ class TestTeamRestoreLogic:
         )
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        # Bug1：恢复优先复用现有 run_id（当前团队已有 run-9）
+        tm.get_team_run_id.return_value = "run-9"
         tm.start_team_run.return_value = "new-run-9"
         win._get_team_manager.return_value = tm
         win._card_manager = MagicMock()
@@ -357,7 +409,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
                 created.append(self)
 
-        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
             OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
@@ -401,6 +453,8 @@ class TestTeamRestoreLogic:
         win.history_manager.get_session_messages.side_effect = lambda sid: [{"role": "user", "content": sid}]
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        # Bug1：恢复优先复用现有 run_id（当前团队已有 run-1）
+        tm.get_team_run_id.return_value = "run-1"
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._card_manager = MagicMock()
@@ -417,7 +471,7 @@ class TestTeamRestoreLogic:
         fake = _FakeWin()
 
         # 模拟新实现：_create_fresh_window 内部赋值 branch_data
-        def _fake_create(branch_data=None):
+        def _fake_create(branch_data=None, **kw):
             fake._branch_session_data = branch_data
             return fake
 
@@ -541,12 +595,276 @@ class TestTeamRestoreLogic:
             "空 project 应回落 _current_project"
         )
 
+    def test_create_branched_session_marks_dirty_for_team_window(self):
+        """Bug2：恢复窗口（团队窗口 _team_run_id 非空）注入历史消息后必须置脏。
+
+        根因：恢复窗口经 _create_branched_session 注入历史消息但 _session_dirty
+        仍为 False → 关闭时 _auto_save_current_session 的 `if not self._session_dirty:
+        return` 跳过保存 → 未触发成员窗口不落库，历史聚合 _merge_team_lightweight
+        漏掉该成员。修复 = 团队窗口注入后置脏。非团队窗口（复制窗口）不置脏，
+        保持"无变更不保存"原语义。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        def _make_win(team_run_id: str):
+            win = MagicMock()
+            win._is_destroyed = False
+            win._is_streaming = False
+            win._topic_summary_cancelled = False
+            win._team_run_id = team_run_id
+            win._session_dirty = False
+            win.backend = MagicMock()
+            win.backend.chat_engine = MagicMock()
+            win.backend.tool_executor = MagicMock()
+            win._cache_current_session_cards = MagicMock()
+            win._batch_cards = []
+            win._message_batch = []
+            win._clear_chat_area = MagicMock()
+            win._display_current_session = MagicMock()
+            win._load_agent_list = MagicMock()
+            win._virtual_scroll_timer = MagicMock()
+            win._virtual_scroll_timer.stop = MagicMock()
+            win.title_edit = MagicMock()
+            win.node_preview = MagicMock()
+            win.node_preview.clear_nodes = MagicMock()
+            win.input_area = MagicMock()
+            win.input_area.setFixedHeight = MagicMock()
+            win._current_project = "默认项目"
+            win.backend.create_session.return_value = MagicMock()
+            win.backend.create_session.return_value.messages = []
+            win.backend.create_session.return_value.session_id = "new-sid"
+            win.backend.create_session.return_value.metadata = {}
+            return win
+
+        # 团队恢复窗口：注入历史消息 → 置脏（关闭时落库，聚合不再漏成员）
+        team_win = _make_win("run-x")
+        OpenAIChatToolWindow._create_branched_session(team_win, [{"role": "user", "content": "hi"}], "分支")
+        assert team_win._session_dirty is True, f"团队恢复窗口必须置脏，实际 {team_win._session_dirty!r}"
+
+        # 非团队复制窗口：保持不置脏（无变更不保存原语义）
+        plain_win = _make_win("")
+        OpenAIChatToolWindow._create_branched_session(plain_win, [{"role": "user", "content": "hi"}], "分支")
+        assert plain_win._session_dirty is False, "非团队窗口不应置脏"
+
+    def test_restore_duplicate_role_members_with_snapshot(self):
+        """T3：同角色多成员（两个 build 异 window_id）恢复时各建独立窗口。
+
+        场景：build@win_02 / build@win_03 各有会话 + plan@win_01 会话；
+        team_members 快照含 wid 记录（build×2 + plan + 无会话的 review）。
+        → 4 个窗口：build×2（会话按 last_time 降序各分配一条）、plan×1、
+        review×1（空窗口仍创建）。
+        """
+        _ensure_qapp()
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        snap = _json.dumps(
+            [
+                {"agent_name": "build", "window_id": "win_02"},
+                {"agent_name": "build", "window_id": "win_03"},
+                {"agent_name": "plan", "window_id": "win_01"},
+                {"agent_name": "review", "window_id": "win_04"},
+            ],
+            ensure_ascii=False,
+        )
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            {
+                "session_id": "s-build-old",
+                "title": "build 旧",
+                "last_time": "2026-01-01 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-build-new",
+                "title": "build 新",
+                "last_time": "2026-01-02 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-plan",
+                "title": "plan 会话",
+                "last_time": "2026-01-03 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "plan",
+                "team_members": snap,
+            },
+        ]
+        # review 无会话（session_id 空）→ 消息返回空列表（空窗口）
+        win.history_manager.get_session_messages.side_effect = lambda sid: (
+            [{"role": "user", "content": sid}] if sid else []
+        )
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-9"
+        tm.start_team_run.return_value = "new-run-9"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+
+        created = []
+
+        class _FakeWin:
+            _window_id = "w"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+                created.append(self)
+
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        # 4 个窗口：build×2（快照 wid 补差额）+ plan×1 + review×1（空窗口）
+        assert len(created) == 4, f"应创建 4 个窗口（2 build + plan + review 空窗口），实际 {len(created)}"
+        # 会话按 wid/窗口依次分配：build 两个窗口分别加载新旧会话（各 1 条）
+        build_wins = sorted(
+            (c for c in created if c._team_agent_name == "build"),
+            key=lambda c: c._branch_session_data["name"],
+        )
+        assert len(build_wins) == 2, "同角色 build 应建 2 个独立窗口"
+        build_names = [c._branch_session_data["name"] for c in build_wins]
+        assert set(build_names) == {"build 旧", "build 新"}, f"build 两窗口应各取一条会话: {build_names}"
+        # plan 窗口
+        plan_win = next(c for c in created if c._team_agent_name == "plan")
+        assert plan_win._branch_session_data["name"] == "plan 会话"
+        # review 无会话记录 → 空窗口仍创建（消息为空）
+        review_win = next(c for c in created if c._team_agent_name == "review")
+        assert review_win._branch_session_data["messages"] == [], "快照成员无会话 → 空窗口"
+        # 全部窗口重新登记为团队成员（join_team 每窗口一次）
+        assert tm.join_team.call_count == 4, "4 个窗口各 join_team 一次"
+
+    def test_restore_same_agent_window_two_rounds_takes_latest(self):
+        """场景6：同 (agent,wid) 多轮取最新——build@win_02 两轮只建 1 窗取最新。
+
+        与 test_restore_duplicate_role_members_with_snapshot（异 wid 各建窗）互补：
+        快照中 build 只有 win_02 一个成员，但会话记录有 build 两轮（同 wid），
+        恢复时窗口数 = 快照计数（1 个 build），会话按 last_time 降序取最新一条。
+        """
+        _ensure_qapp()
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        snap = _json.dumps(
+            [{"agent_name": "build", "window_id": "win_02"}, {"agent_name": "plan", "window_id": "win_01"}],
+            ensure_ascii=False,
+        )
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            {
+                "session_id": "s-build-old",
+                "title": "build 首轮",
+                "last_time": "2026-01-01 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-build-new",
+                "title": "build 次轮",
+                "last_time": "2026-01-02 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "build",
+                "team_members": snap,
+            },
+            {
+                "session_id": "s-plan",
+                "title": "plan 会话",
+                "last_time": "2026-01-03 10:00:00",
+                "team_run_id": "run-1",
+                "team_name": "dev-team",
+                "agent_name": "plan",
+                "team_members": snap,
+            },
+        ]
+        win.history_manager.get_session_messages.side_effect = lambda sid: (
+            [{"role": "user", "content": sid}] if sid else []
+        )
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-9"
+        tm.start_team_run.return_value = "new-run-9"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+
+        created = []
+
+        class _FakeWin:
+            _window_id = "w"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+                created.append(self)
+
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        # build 快照仅 1 个成员（win_02）→ 只建 1 个 build 窗口，取最新会话
+        build_wins = [c for c in created if c._team_agent_name == "build"]
+        assert len(build_wins) == 1, f"同 (agent,wid) 两轮应只建 1 窗，实际 {len(build_wins)}"
+        assert build_wins[0]._branch_session_data["name"] == "build 次轮", "应取 last_time 最新会话"
+        # plan 1 窗
+        assert len([c for c in created if c._team_agent_name == "plan"]) == 1
+        assert len(created) == 2, "总窗口数 = build×1 + plan×1"
+
+    def test_restore_empty_run_id_returns_early(self):
+        """场景5：team_run_id 为空 → 恢复守卫直接返回，不建窗、不解散。
+
+        非团队会话（run_id=""）不应触发合并/恢复链路：_on_team_restore_requested
+        首行守卫 `if not run_id: return`，不查询历史、不调用解散逻辑。
+        """
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win._disband_current_team_for_restore = MagicMock()
+        win._get_team_manager = MagicMock()
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "")
+
+        win.history_manager.get_team_sessions_by_run_id.assert_not_called(), "空 run_id 不应查询会话"
+        win._disband_current_team_for_restore.assert_not_called(), "空 run_id 不应解散团队"
+        win._create_fresh_window.assert_not_called(), "空 run_id 不应创建窗口"
+
 
 class TestTeamRestoreDisband:
     """M1' 恢复路径重构：解散现有团队 + 完整初始化恢复窗口
 
     覆盖：
-    - 恢复前 _disband_current_team_for_restore 被调用（在 start_team_run 之前）
+    - 恢复前 _disband_current_team_for_restore 被调用（在 run_id 解析之前）
     - 解散逻辑：团队窗口 _stop_team_watcher / leave_team / 团队标记清空，
       主窗口保留并新建空白会话，其他团队窗口 remove_window + close
     - 非团队 / 已销毁窗口被跳过
@@ -556,7 +874,7 @@ class TestTeamRestoreDisband:
     """
 
     def test_restore_calls_disband_before_start_run(self):
-        """恢复时解散逻辑在 start_team_run(force=True) 之前被调用。"""
+        """恢复时解散逻辑在 run_id 解析（get_team_run_id / start_team_run）之前被调用。"""
         _ensure_qapp()
         from unittest.mock import MagicMock, patch
 
@@ -578,11 +896,12 @@ class TestTeamRestoreDisband:
         win.history_manager.get_session_messages.return_value = [{"role": "user", "content": "x"}]
         win._get_team_manager = MagicMock()
         tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-1"  # Bug1：复用现有 run_id
         tm.start_team_run.return_value = "new-run-1"
         win._get_team_manager.return_value = tm
         win._create_fresh_window = MagicMock(return_value=MagicMock(_window_id="w1"))
         win._card_manager = MagicMock()
-        # 记录解散与 start_team_run 的调用顺序
+        # 记录解散与 run_id 解析的调用顺序
         win._disband_current_team_for_restore = MagicMock()
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
@@ -590,7 +909,7 @@ class TestTeamRestoreDisband:
 
         # 解散逻辑必须被调用
         win._disband_current_team_for_restore.assert_called_once()
-        # 顺序断言：disband 在 _get_team_manager（→start_team_run）之前被调用
+        # 顺序断言：disband 在 _get_team_manager（→get_team_run_id）之前被调用
         _calls = [c[0] for c in win.method_calls]
         assert _calls.index("_disband_current_team_for_restore") < _calls.index("_get_team_manager")
 
@@ -868,11 +1187,153 @@ class TestTeamRestoreDisband:
         main_win._do_team_window_arrange.assert_called_once()
 
 
+class TestTeamJoinRetryAndCount:
+    """D1/C4/E3：_join_new_window_for_template 就绪轮询 + 计数兜底。
+
+    - D-T1：backend 未就绪 → QTimer 重试（不直接 return、不递减计数），
+      就绪后正常完成
+    - D-T1b：重试耗尽（超过 _TEAM_JOIN_MAX_RETRIES）→ 放弃并递减计数
+    - E-T3a：窗口已销毁 → 直接 return 但递减计数（不垛死排列回调）
+    - E-T3b：异常路径 → 递减计数 + 补刷新胶囊
+    """
+
+    def _make_join_ctx(self, backend_ready: bool = True, destroyed: bool = False):
+        """构造 _join_new_window_for_template 的 win/main_win/tm 上下文"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = destroyed
+        # MagicMock 的 getattr 会自动创建属性 → 显式初始化重试计数
+        win._team_join_retries = 0
+        if backend_ready:
+            win.backend = MagicMock()
+            win.backend.agent_manager = MagicMock()
+        else:
+            win.backend = MagicMock()
+            win.backend.agent_manager = None
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_agent_name = "build"
+        win._team_name = "dev-team"
+        win._team_run_id = "run-9"
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-9"
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 2
+        main_win._do_team_window_arrange = MagicMock()
+        # 类常量在 MagicMock 上不自动存在 → 显式补齐（生产代码走类属性）
+        main_win._TEAM_JOIN_MAX_RETRIES = OpenAIChatToolWindow._TEAM_JOIN_MAX_RETRIES
+        main_win._TEAM_JOIN_RETRY_INTERVAL_MS = OpenAIChatToolWindow._TEAM_JOIN_RETRY_INTERVAL_MS
+        return OpenAIChatToolWindow, win, tm, main_win
+
+    def test_join_retries_when_backend_not_ready(self):
+        """D-T1：backend 未就绪 → 安排 50ms 重试，不递减计数；就绪后完成。"""
+        import app.main_widget as mw
+        from unittest.mock import MagicMock, patch
+
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        with patch.object(mw.QTimer, "singleShot") as m_shot:
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        # 未就绪：安排重试（50ms），不递减计数、不排列
+        m_shot.assert_called_once()
+        assert m_shot.call_args.args[0] == 50
+        assert main_win._pending_arrange_count == 2, "未就绪重试不应递减计数"
+        main_win._do_team_window_arrange.assert_not_called()
+        # 就绪后重入 → 正常完成 + 递减计数
+        win.backend.agent_manager = MagicMock()
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1
+        win._refresh_team_ui.assert_called_once_with("build")
+
+    def test_join_retry_exhausted_decrements(self):
+        """D-T1b/E-T3：重试耗尽 → 放弃并递减计数（不垛死排列回调）。"""
+        from unittest.mock import patch
+
+        import app.main_widget as mw
+
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES  # 已达上限
+        with patch.object(mw.QTimer, "singleShot") as m_shot:
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        m_shot.assert_not_called(), "重试耗尽不应再安排重试"
+        assert main_win._pending_arrange_count == 1, "重试耗尽应递减计数"
+        assert main_win._pending_arrange_count > 0  # 未归零不排列
+        main_win._do_team_window_arrange.assert_not_called()
+
+    def test_join_destroyed_decrements_count(self):
+        """E-T3：窗口已销毁 → 提前 return 但递减计数（避免计数垛死）。"""
+        cls, win, tm, main_win = self._make_join_ctx(destroyed=True)
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1, "销毁窗口也应递减计数"
+
+    def test_join_exception_decrements_and_refreshes(self):
+        """E-T3b：异常路径 → 递减计数 + 补刷新胶囊（C4 兜底）。"""
+        import app.main_widget as mw
+        from unittest.mock import MagicMock, patch
+
+        cls, win, tm, main_win = self._make_join_ctx()
+        win._on_agent_changed.side_effect = RuntimeError("boom")
+        fake_tm_win = MagicMock()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        with patch.object(TabManagerWindow, "get_instance", return_value=fake_tm_win):
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1, "异常也应递减计数"
+        fake_tm_win.refresh_capsule_for_window.assert_called_once_with(win), "异常时补刷新胶囊"
+
+    def test_join_retry_exhausted_starts_watcher(self):
+        """C4a：重试耗尽 → 无条件补 _start_team_watcher（不依赖 backend）+ 计数收口。"""
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES  # 已达上限
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        # watcher 无条件补启动（缺则邮件永不主动触发）
+        win._start_team_watcher.assert_called_once()
+        # 计数收口
+        assert main_win._pending_arrange_count == 1
+        main_win._do_team_window_arrange.assert_not_called()
+
+    def test_join_retry_destroyed_skips_watcher(self):
+        """C4a：重试期间窗口销毁 → 不补 watcher、计数收口、无异常。"""
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False, destroyed=True)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        win._start_team_watcher.assert_not_called(), "销毁窗口不应补 watcher"
+        assert main_win._pending_arrange_count == 1, "销毁窗口计数收口"
+        main_win._do_team_window_arrange.assert_not_called()
+
+
 class TestTeamMergedCard:
     """M4 UI 层：团队合并条目卡片 + 混排渲染 + 归档链路 + 成员进入会话"""
 
-    def _merged_entry(self, run_id="run-9", preview="首问内容"):
+    def _merged_entry(self, run_id="run-9", preview="首问内容", members=None):
         """构造数据层合并条目（含 members）"""
+        if members is None:
+            members = [
+                {
+                    "session_id": "s1",
+                    "title": "build 会话",
+                    "agent_name": "build",
+                    "last_time": "2026-01-01 10:00:00",
+                },
+                {
+                    "session_id": "s2",
+                    "title": "plan 会话",
+                    "agent_name": "plan",
+                    "last_time": "2026-01-02 10:00:00",
+                },
+            ]
         return {
             "team_run_id": run_id,
             "team_name": "dev",
@@ -883,10 +1344,7 @@ class TestTeamMergedCard:
             "session_id": "s-latest",
             "last_time": "2026-01-02 10:00:00",
             "preview": preview,
-            "members": [
-                {"session_id": "s1", "title": "build 会话", "agent_name": "build", "last_time": "2026-01-01 10:00:00"},
-                {"session_id": "s2", "title": "plan 会话", "agent_name": "plan", "last_time": "2026-01-02 10:00:00"},
-            ],
+            "members": members,
         }
 
     def test_card_click_toggles_expand_not_restore(self):
@@ -929,6 +1387,49 @@ class TestTeamMergedCard:
         card._on_member_row_clicked(fake_event, card._members[0], None)
         assert len(selected) == 1, "成员行点击应发 memberSelected"
         assert selected[0]["session_id"] == "s1", "应携带成员 session_record"
+
+    def test_card_expand_shows_window_id_suffix_for_same_role(self):
+        """T3 回归：展开区同角色多成员渲染多行 + window_id 后缀（build·w02）。
+
+        场景7：同角色 build 两个成员（window_id 异）→ 展开区应显示
+        build·w02 / build·w03 两行胶囊，与单角色行区分，避免两行都叫
+        "build" 无法辨认。
+        """
+        _ensure_qapp()
+        from app.widgets.cards.settings.history_card import _TeamGroupCard
+
+        members = [
+            {
+                "session_id": "s1",
+                "title": "build 初版",
+                "agent_name": "build",
+                "window_id": "win_02",
+                "last_time": "2026-01-01 10:00:00",
+            },
+            {
+                "session_id": "s2",
+                "title": "build 二版",
+                "agent_name": "build",
+                "window_id": "win_03",
+                "last_time": "2026-01-02 10:00:00",
+            },
+            {
+                "session_id": "s3",
+                "title": "plan 会话",
+                "agent_name": "plan",
+                "last_time": "2026-01-03 10:00:00",
+            },
+        ]
+        card = _TeamGroupCard(self._merged_entry(members=members))
+        card._toggle_members()
+        texts = [lbl.text() for lbl in card.findChildren(QLabel)]
+        # T3 渲染：window_id 前缀 win_ 简写为 w → build·w02 / build·w03
+        assert "build·w02" in texts, f"展开区应显示 build·w02 后缀胶囊，实际: {texts}"
+        assert "build·w03" in texts, f"展开区应显示 build·w03 后缀胶囊，实际: {texts}"
+        # 无 window_id 的成员保持纯角色名（旧格式兼容）
+        assert "plan" in texts, "无 window_id 成员应保持纯角色名"
+        # 标题仍各自渲染（同角色两行不同标题）
+        assert "build 初版" in texts and "build 二版" in texts, "同角色多行应各带独立标题"
 
     def test_archive_button_emits_archive_requested(self):
         """B-4：归档按钮发 archiveRequested(run_id)。"""

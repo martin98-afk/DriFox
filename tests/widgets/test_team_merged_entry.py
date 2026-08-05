@@ -434,6 +434,14 @@ class TestLoadSessionTeamMarks:
         win._team_run_id = "run-old"
         win._team_name = "dev"
         win._team_agent_name = "build"
+        # 🛡️ F4 逻辑已提取为 _sync_team_markers_from_record 公共方法，
+        # MagicMock 实例不会自动绑定真实方法 → 显式绑定，保证团队标记
+        # 同步逻辑真实执行（与 _load_session_from_record 内联期行为一致）。
+        from types import MethodType
+
+        win._sync_team_markers_from_record = MethodType(
+            OpenAIChatToolWindow._sync_team_markers_from_record, win
+        )
         return win
 
     @staticmethod
@@ -508,6 +516,67 @@ class TestLoadSessionTeamMarks:
         assert win._team_run_id == "run-1", "团队会话应设置 _team_run_id"
         assert win._team_name == "dev"
         assert win._team_agent_name == "build"
+
+    def test_member_window_keeps_current_run_on_old_record(self):
+        """Bug3：恢复窗口（已登记成员 + 处于当前团队运行）加载旧 run 记录 →
+        保留当前 run_id，不脱钩当前团队分组（仅同步 team_name/agent_name）。
+
+        回归守护：修复前 _team_run_id 被记录 run_id 无条件覆盖，恢复窗口
+        加载历史成员会话后新对话被存成别的 run 分组（团队断裂）。
+        """
+        _ensure_qapp()
+        win = self._make_win()
+        # 模拟恢复窗口：已 join_team（is_team_member=True）+ 当前团队运行 run-current
+        win._window_id = "win-restore-1"
+        win._team_run_id = "run-current"
+        win._team_name = "current-team"
+        win._team_agent_name = "build"
+        record = {
+            "session_id": "s-old",
+            "title": "t-old",
+            "project": "proj-x",
+            "team_run_id": "run-old",  # 历史 run 的记录
+            "team_name": "old-team",
+            "agent_name": "build",
+        }
+
+        with self._patch_is_member(True):
+            self._run(win, record)
+
+        assert win._team_run_id == "run-current", (
+            f"成员窗口加载旧记录必须保留当前 run_id（不脱钩），实际 {win._team_run_id!r}"
+        )
+        assert win._team_name == "old-team", "run_id 保留但 team_name 仍同步记录值"
+        assert win._team_agent_name == "build", "agent_name 仍同步记录值"
+
+    def test_non_member_window_takes_record_run(self):
+        """Bug3：非团队窗口（未登记成员）加载团队记录 → 采用记录 run_id（进入该团队上下文）。
+
+        与 test_member_window_keeps_current_run_on_old_record 互补：守卫只对
+        「已是团队成员 + 处于当前团队运行」的窗口生效，普通窗口加载团队会话
+        仍按记录 run_id 登记（历史 F4 语义不破坏）。
+        """
+        _ensure_qapp()
+        win = self._make_win()
+        win._window_id = "win-plain-1"
+        win._team_run_id = ""  # 非团队窗口：初始无团队运行
+        win._team_name = ""
+        win._team_agent_name = ""
+        record = {
+            "session_id": "s2",
+            "title": "t2",
+            "project": "proj-x",
+            "team_run_id": "run-2",
+            "team_name": "dev",
+            "agent_name": "plan",
+        }
+
+        with self._patch_is_member(False):
+            self._run(win, record)
+
+        assert win._team_run_id == "run-2", "非团队窗口加载团队会话应采用记录 run_id"
+        assert win._team_name == "dev"
+        assert win._team_agent_name == "plan"
 
 
 class TestMergedCurrentIndex:

@@ -54,9 +54,6 @@ class TemplateManager:
     def __init__(self):
         self._system_dir = self._resolve_system_templates_dir()
         self._system_dir.mkdir(parents=True, exist_ok=True)
-        # user_dir 延迟解析（lazy），避免 PluginManager 未就绪时访问
-        self._user_dir_cached: Optional[Path] = None
-        self._user_dir_resolved: bool = False
 
     # ── 单例 ─────────────────────────────────────────
 
@@ -82,29 +79,26 @@ class TemplateManager:
         return project_root / "plugins" / "system" / cls._TEMPLATES_SUBDIR
 
     def _get_user_dir(self) -> Optional[Path]:
-        """延迟获取 user-custom 插件下的 team_templates/ 目录。
+        """获取 user-custom 插件下的 team_templates/ 目录（不存在则创建）。
 
-        通过 PluginManager 查找 user-custom 插件路径，在其下创建 team_templates/。
-        首次访问时解析并缓存结果。
+        直接基于应用数据目录解析路径，不依赖 PluginManager 是否注册了
+        user-custom 插件：
+        - user-custom 的 manifest（.drifox-plugin/plugin.json）是按需创建的
+          （添加 MCP 服务器 / ShortcutManager 保存快捷键时才生成），用户仅
+          保存过团队模板时插件未注册，get_plugin() 返回 None；
+        - 若首次解析发生在 PluginManager 未初始化时，缓存 None 会导致后续
+          永远解析失败（缓存毒化），模板列表缺失。
+        因此与 PluginManager.get_command_files / _get_md_files 的
+        "始终包含 user-custom 插件对应子目录（即使插件清单不存在）"约定一致。
         """
-        if self._user_dir_resolved:
-            return self._user_dir_cached
-        self._user_dir_resolved = True
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.utils.utils import get_app_data_dir
 
-            pm = PluginManager.get_instance()
-            if not pm.is_initialized():
-                return None
-            user_custom = pm.get_plugin("user-custom")
-            if user_custom:
-                path = user_custom.path / self._TEMPLATES_SUBDIR
-                path.mkdir(parents=True, exist_ok=True)
-                self._user_dir_cached = path
-                return path
+            path = get_app_data_dir() / "plugins" / "user-custom" / self._TEMPLATES_SUBDIR
+            path.mkdir(parents=True, exist_ok=True)
+            return path
         except Exception:
-            pass
-        return None
+            return None
 
     @classmethod
     def _get_plugin_template_dirs(cls) -> List[Path]:
