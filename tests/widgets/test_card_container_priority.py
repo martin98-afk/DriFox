@@ -136,7 +136,7 @@ class TestDockMinLockUpgrade:
         return splitter
 
     def test_left_container_min_width_covers_card(self):
-        """LEFT 停靠区展开后 min 宽 ≥ 可见卡片最小宽（> _DOCK_MIN_H=140）"""
+        """LEFT 停靠区展开后 min 宽 ≥ 可见卡片最小宽（≥ _DOCK_MIN_H=240）"""
         _app()
         c = CardContainer(ContainerType.LEFT)
         card = _card(min_w=240, min_h=60)
@@ -148,6 +148,49 @@ class TestDockMinLockUpgrade:
         _pump(300)  # 等待展开动画完成
         assert c.minimumWidth() >= 240, f"min width={c.minimumWidth()} 未覆盖卡片最小宽"
         assert c._axis_max() >= c._EXPAND_MAX
+
+    def test_dock_min_h_fixed_floor_240(self):
+        """横向 dock 有固定下限 240：即使卡片 minimumSizeHint 很小也不依赖"""
+        _app()
+        c = CardContainer(ContainerType.LEFT)
+        card = _card(min_w=10, min_h=60)  # 卡片自身 min 很小
+        c.add_card("card", card)
+        self._make_dock(c, Qt.Horizontal)
+        card.show()
+        c.show()
+        c._do_expand()
+        _pump(300)
+        assert c.minimumWidth() >= 240, f"固定下限未生效: min width={c.minimumWidth()}"
+
+    def test_splitter_overflow_clamps_dock(self):
+        """用户拖大 dock 后窗口缩小：溢出兜底把 dock 压回 min，不裁切"""
+        _app()
+        c = CardContainer(ContainerType.LEFT)
+        card = _card(min_w=200, min_h=60)
+        c.add_card("card", card)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(c)
+        content = QWidget()
+        splitter.addWidget(content)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        c.enable_dock_mode(splitter)
+        splitter.resize(900, 600)
+        splitter.show()
+        card.show()
+        c.show()
+        c._do_expand()
+        _pump(300)
+        assert c.minimumWidth() >= 240
+        # 模拟用户把 dock 拖大
+        splitter.setSizes([500, 400])
+        _pump(50)
+        # 缩小窗口到 600：dock 500 + content 无法容纳 → 溢出兜底压 dock 回 min
+        splitter.resize(600, 450)
+        _pump(300)
+        sizes = splitter.sizes()
+        assert sum(sizes) <= splitter.width(), f"splitter 仍溢出: sizes={sizes} width={splitter.width()}"
+        assert c.width() >= c.minimumWidth(), f"dock 被压到 min 以下: w={c.width()} min={c.minimumWidth()}"
 
     def test_bottom_container_min_height_covers_card(self):
         """BOTTOM 停靠区展开后 min 高 ≥ 可见卡片最小高（> _DOCK_MIN_V=80）"""
@@ -273,7 +316,11 @@ class TestChatScrollAreaMinWidth:
         assert "self.chat_scroll_area.setMinimumWidth(320)" in self._main_widget_src()
 
     def test_resize_event_fallback(self):
-        """极小窗口（<700px）时对话区让出横向空间给左右 dock"""
+        """Tab 模式下按窗口总宽 - dock 最小需求让位；无 dock 按自身可用宽"""
         body = self._resize_event_src()
-        assert "self.width() < 700" in body
+        # Tab 模式：dock splitter 存在时按窗口总宽与 dock min 需求判断
+        assert 'findChild(QSplitter, "dockSplitter")' in body
+        assert "win_w - dock_min < 320" in body
+        # 无 dock（多窗口模式）：按自身可用宽 <320 让位
+        assert "self.width() < 320" in body
         assert "setMinimumWidth(target_min_w)" in body

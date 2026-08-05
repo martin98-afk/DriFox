@@ -25,7 +25,11 @@ class CardContainer(QWidget):
     # 停靠区展开后的轴向最小尺寸：
     # 展开动画结束后释放轴向 max 并锁定此最小尺寸，
     # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
-    _DOCK_MIN_H = 140  # 横向停靠区（LEFT/RIGHT）最小宽
+    # 横向停靠区（LEFT/RIGHT）用 240 而非依赖 minimumSizeHint：
+    # Qt 对复杂卡片（QTreeView/图表等）的 minimumSizeHint 常返回远小于
+    # 内容实际需求的宽度（实测 file-tree=206、context=260，实际渲染≈308），
+    # 会导致窗口缩小时卡片被压扁/裁切。固定下限更可靠。
+    _DOCK_MIN_H = 240  # 横向停靠区（LEFT/RIGHT）最小宽
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
@@ -298,6 +302,65 @@ class CardContainer(QWidget):
         if donor >= 0:
             sizes[donor] += freed
         sp.setSizes(sizes)
+
+    def resizeEvent(self, event):
+        """窗口缩小时联动宿主 splitter：溢出则把 dock 压回最小尺寸
+
+        在停靠模式下覆盖：QSplitter 压缩空间时优先压 stretch 大的窗格
+        （对话区），压到 0 后若仍溢出（如用户曾把 dock 拖大），QSplitter
+        会保持 dock 当前尺寸宁可溢出——导致右侧 dock 超出窗口被裁切。
+        此处延迟到 resize 完成后检查溢出，显式把各 dock 压回最小尺寸、
+        对话区让位吸收剩余空间。
+        """
+        super().resizeEvent(event)
+        if self._dock_splitter is not None and not self._overlay_mode:
+            # 延迟到 resize 传播链结束（self 尺寸已更新）再检查，避免重入
+            QTimer.singleShot(0, self._ensure_splitter_fits)
+
+    def _ensure_splitter_fits(self):
+        """splitter 总尺寸溢出可视区时，把 dock 分项压回各自最小尺寸
+
+        只处理展开态/可见 dock。非 dock 窗格（对话区）先压到其轴向最小值
+        （外层已把 minimumWidth 让位为 0），再压 dock 到轴向最小值。
+        QSplitter.sizes() 不包含 handle 宽度，可视区 = width - handle 总宽。
+        """
+        sp = self._dock_splitter
+        if sp is None or sp.width() <= 0:
+            return
+        sizes = sp.sizes()
+        handle_total = sp.handleWidth() * max(0, sp.count() - 1)
+        avail = sp.width() - handle_total
+        total = sum(sizes)
+        if total <= avail:
+            return
+        overflow = total - avail
+
+        horizontal = sp.orientation() == Qt.Horizontal
+        new_sizes = list(sizes)
+
+        # 1) 先压非 dock 窗格（对话区）到其最小轴
+        for i in range(sp.count()):
+            w = sp.widget(i)
+            if w is None or isinstance(w, CardContainer):
+                continue
+            m = w.minimumWidth() if horizontal else w.minimumHeight()
+            cut = min(new_sizes[i] - m, overflow)
+            if cut > 0:
+                new_sizes[i] -= cut
+                overflow -= cut
+        # 2) 再压 dock 窗格到各自轴向最小值（含自身：self 的 resize 传播链
+        #    已完成，setSizes 触发的新 resize 由幂等检查与 singleShot 防抖）
+        for i in range(sp.count()):
+            w = sp.widget(i)
+            if not isinstance(w, CardContainer):
+                continue
+            m = w.minimumWidth() if horizontal else w.minimumHeight()
+            cut = min(new_sizes[i] - m, overflow)
+            if cut > 0:
+                new_sizes[i] -= cut
+                overflow -= cut
+        if new_sizes != sizes:
+            sp.setSizes(new_sizes)
 
     def showEvent(self, event):
         """容器从隐藏变为可见时，如果有可见卡片则重新展开
