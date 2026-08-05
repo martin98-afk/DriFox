@@ -432,6 +432,19 @@ class ChatBackend(QObject):
             if is_prompt_hook:
                 event_name = event_name[len("__prompt__:") :]
 
+            # 🛡️ W1：异步 worker 完成回调标记（command/http 类型 hook 后台执行后
+            # 回补注入用）。同步路径（trigger_async=False）无此前缀。
+            # 🛡️ F1(W1-R2)：异步事件名可能携带触发时的 session_id（格式
+            # `__async__:<event>:<sid>`），回补注入前校验当前会话一致。
+            is_async_hook = event_name.startswith("__async__:")
+            async_session_id = ""
+            if is_async_hook:
+                rest = event_name[len("__async__:") :]
+                if ":" in rest:
+                    event_name, _, async_session_id = rest.partition(":")
+                else:
+                    event_name = rest
+
             # BuildSystemPrompt hook 的输出已在 get_agent_system_prompt() 中直接注入 system prompt，
             # 不需要再通过队列注入到 assistant 消息中，跳过回调避免双重注入。
             if event_name == "BuildSystemPrompt":
@@ -440,7 +453,23 @@ class ChatBackend(QObject):
             # 🛡️ 预对话 hook 的输出由调用方负责直接注入 session.messages；
             # 这里再 emit signal 会和 _session_switched 哨兵冲突，同时还会污染
             # _hook_message_queue（chat_worker 不会消费 SessionStart 等预对话事件）。
+            # 例外（W1）：异步路径（__async__ 前缀，UI 线程 SessionStart 的
+            # command/http hook 后台执行）输出仅此一处回补注入，不注入则丢失。
+            # 🛡️ F1(W1-R2)：回补注入前校验当前会话 == 触发时会话，不一致则丢弃
+            # （用户已切换会话，注入会污染错误 session 的上下文）。
             if event_name in _PRE_DIALOG_EVENTS:
+                if is_async_hook and success and output and output.strip():
+                    session = self.get_current_session()
+                    if session is not None and (not async_session_id or session.session_id == async_session_id):
+                        _inject_hook_to_session(session, event_name, output, status_message)
+                        self._hook_messages_updated.emit()
+                        logger.info(f"[HookManager] Async hook output injected: {event_name}")
+                    else:
+                        logger.info(
+                            f"[HookManager] Async hook output dropped (session switched): "
+                            f"{event_name}, expect_sid={async_session_id!r}, "
+                            f"current_sid={getattr(session, 'session_id', None)!r}"
+                        )
                 return
 
             logger.info(f"[HookManager] Hook callback: event={event_name}, success={success}")
@@ -2506,11 +2535,18 @@ class ChatBackend(QObject):
         if trigger_hook and self._hook_manager:
             context = self._build_session_context("startup")
             context["session_id"] = session.session_id  # Claude Code 兼容字段
+            # 🛡️ W1：UI 线程（新建/分支会话等 GUI 场景）→ trigger_async=True，
+            # command/http 类型 hook 后台执行 + finished 回调回补注入，主线程不被
+            # 外部进程/网络阻塞（PROMPT 类型仍同步顺序注入，语义不变）。
+            # 非 UI 线程（CLI 等无 Qt 事件循环，异步回调无处回补）→ 保持同步。
+            from app.core.hook_manager import _is_ui_thread
+
+            trigger_async = _is_ui_thread()
             results = self._hook_manager.trigger_event(
                 "SessionStart",
                 context=context,
                 current_message="",
-                trigger_async=False,  # 同步执行，收集输出直接注入
+                trigger_async=trigger_async,
             )
             for r in results:
                 if r.success and r.output:
@@ -2534,11 +2570,15 @@ class ChatBackend(QObject):
             ctx["session_id"] = session.session_id  # Claude Code 兼容字段
         if extra_context:
             ctx.update(extra_context)
+        # 🛡️ W1：UI 线程（clear/compact 等 GUI 场景）→ trigger_async=True 走后台
+        # 异步 + 回调回补；非 UI 线程保持同步（与 create_session 同策略）。
+        from app.core.hook_manager import _is_ui_thread
+
         results = self._hook_manager.trigger_event(
             "SessionStart",
             context=ctx,
             current_message="",
-            trigger_async=False,  # 同步执行，收集输出直接注入
+            trigger_async=_is_ui_thread(),
         )
         if session:
             for r in results:
