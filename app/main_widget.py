@@ -8020,17 +8020,31 @@ class OpenAIChatToolWindow(ToolWindow):
             sessions_by_agent.setdefault(agent_name, []).append(session)
         for lst in sessions_by_agent.values():
             lst.sort(key=lambda s: s.get("last_time") or "", reverse=True)
-        # 窗口计划：快照成员记录逐条（含 wid 的逐条计窗口；无 wid 老格式
-        # 按 agent 去重）；最新快照为空（老数据无快照）→ by_agent 兜底
-        # （每 agent 1 窗口）。
+        # 窗口计划（Bug 3 修复）：快照成员逐条建窗时，模板 agents（无 wid）
+        # 不再与同 agent 的 wid 记录重复建窗——get_team_member_snapshot 合并
+        # 模板 agents（无 wid）与快照成员（有 wid）落库会话快照，若逐条全建，
+        # 恢复窗口数随恢复次数线性膨胀（模板 3+成员 3 → 6→9→12…）。
+        # 语义保持：
+        # - 有 wid 记录：逐条建窗（T3 同角色多成员，如两个 build 各建 1 窗）
+        # - 无 wid 记录（模板 agents / 老格式快照）：仅当该 agent 没有任何 wid
+        #   记录时才兜底建 1 窗（F3 找回语义——模板角色无实际成员也建窗）
+        # - 最新快照为空（老数据无快照）→ by_agent 兜底（每 agent 1 窗口）
         window_plan: List[tuple] = []
-        _plain_seen: set = set()
+        _wid_agents: set = set()
         if snapshot_members:
             for rec in snapshot_members:
                 agent = rec["agent_name"]
                 if rec.get("window_id"):
                     window_plan.append((agent, rec["window_id"]))
-                elif agent not in _plain_seen:
+                    _wid_agents.add(agent)
+            _plain_seen: set = set()
+            for rec in snapshot_members:
+                agent = rec["agent_name"]
+                if rec.get("window_id"):
+                    continue
+                if agent in _wid_agents:
+                    continue
+                if agent not in _plain_seen:
                     _plain_seen.add(agent)
                     window_plan.append((agent, ""))
         else:
