@@ -2948,6 +2948,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
+        self._todo_floating_widget.closed.connect(self._on_todo_closed)
 
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
@@ -14939,6 +14940,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("sub_agent_compact", self._window_id)
+
+    def _on_todo_closed(self):
+        """todo 卡片关闭时通知 CardManager
+
+        与 sub_agent 对称：卡片关闭只 setVisible(False) 不会让 CardManager
+        感知（visible_cards 仍为 todo，show_card 会被跳过、容器也不会折叠）。
+        显式 hide_card 使状态同步 + 触发容器折叠释放 A3 min 锁，对话区恢复。
+        """
+        if hasattr(self, "_card_manager"):
+            self._card_manager.hide_card("todo", self._window_id)
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""

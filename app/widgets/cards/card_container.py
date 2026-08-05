@@ -699,18 +699,33 @@ class CardContainer(QWidget):
         self._layout.removeWidget(widget)
         del self._cards[card_id]
 
-        if len(self._cards) == 0:
-            self._set_axis_max(0)
+        # 移除后重算：无可见卡片则折叠（解锁 min 锁），仍有可见卡片则按新内容展开。
+        # 修复：A3 展开后锁 min=natural_h，若移除卡片只锁 max=0 而不触发折叠路径，
+        # min 锁残留 → 容器仍占 natural_h 空间 → 对话区不恢复。
+        self._schedule_expand()
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize and obj in self._cards.values():
-            # 动画运行时，卡片 Resize 是动画自身级联副作用（容器撑大 → 卡片撑大），
-            # 若触发 _schedule_expand → _do_expand 会取消进行中的动画并重启，
-            # 形成"动画→Resize→打断→重启→Resize→..."的自激循环，导致高度抖动。
-            # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
-            if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+        # 先判事件类型再访问 _cards：__new__ 构造的容器（测试/析构中）可能无 _cards
+        if obj in getattr(self, "_cards", {}).values():
+            if event.type() == QEvent.Hide:
+                # 卡片被隐藏（无论经 CardManager 与否，如 todo 关闭按钮/空列表
+                # 直接 setVisible(False)）→ 触发重算：无可见卡片则折叠并释放
+                # A3 min 锁，避免容器仍占 natural_h 空间、对话区不恢复。
+                # 不能仅依赖 _on_card_hidden 回调：调用方可能未连接卡片
+                # closed 信号（todo），CardManager 状态不同步时该回调不触发。
+                # 延迟到下一事件循环执行：hide 事件传播链中同步调用 _schedule_expand
+                # 可能在对象销毁阶段重入崩溃；延迟后由事件循环串行处理，
+                # 且 QTimer 随容器销毁自动失效，不会在析构后回调。
+                QTimer.singleShot(0, self._schedule_expand)
                 return False
-            self._schedule_expand(source="resize")
+            if event.type() == QEvent.Resize:
+                # 动画运行时，卡片 Resize 是动画自身级联副作用（容器撑大 → 卡片撑大），
+                # 若触发 _schedule_expand → _do_expand 会取消进行中的动画并重启，
+                # 形成"动画→Resize→打断→重启→Resize→..."的自激循环，导致高度抖动。
+                # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
+                if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+                    return False
+                self._schedule_expand(source="resize")
         return super().eventFilter(obj, event)
 
 
