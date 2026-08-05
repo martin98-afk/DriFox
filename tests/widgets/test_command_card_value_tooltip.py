@@ -321,6 +321,18 @@ class TestCursorPastParamValue:
         """值后无空格 → 未离开（触发）"""
         self._assert_leave("/subagent --model=gpt", 30, False)
 
-    def test_empty_trailing_then_cursor_before_space(self):
-        """尾空格存在但光标在空格前 → 未离开（触发）"""
-        self._assert_leave("/subagent --model=gpt ", 21, False)
+    def test_multiple_trailing_spaces(self):
+        """行尾多空格（光标在两个空格之间）→ 未离开（触发）
+
+        边界：多个行尾空格时 text.find 只命中第一个空格，若仅凭 cursor > 第一个
+        空格即判定"离开"会误判；修复后的 strip 语义对任意数量的行尾空白都视为
+        "未离开"，与光标落在空格序列中任何位置一致。
+        """
+        self._assert_leave("/subagent --model=gpt  ", 22, False)
+
+    def test_tab_trailing(self):
+        """行尾 tab 尾缀 → 未离开（触发）
+
+        全空白尾缀（tab）与空格等价，不应误判为"已离开"。
+        """
+        self._assert_leave("/subagent --model=gpt\t", 22, False)
