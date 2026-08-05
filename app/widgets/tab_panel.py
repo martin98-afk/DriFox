@@ -1217,6 +1217,23 @@ class TabPanel(QWidget):
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
 
+    def begin_batch_add(self):
+        """开始批量添加 tab：期间 add_tab 跳过 _rebuild_team_layout，end_batch_add 统一重建。
+
+        连续添加 N 个 Tab（如团队恢复/新建任务全员建会话）时，若每个 add_tab
+        都全量重建团队布局，代价为 O(N²)。批量模式下只在外层 end_batch_add
+        时重建一次，代价降为 O(N)。支持嵌套调用（内部计数），必须与
+        end_batch_add 成对使用。
+        """
+        self._batch_add_depth = getattr(self, "_batch_add_depth", 0) + 1
+
+    def end_batch_add(self):
+        """结束批量添加 tab：统一重建一次视觉布局（仅在最外层结束时）。"""
+        depth = getattr(self, "_batch_add_depth", 0)
+        self._batch_add_depth = max(0, depth - 1)
+        if self._batch_add_depth == 0:
+            self._rebuild_team_layout()
+
     def add_tab(self, title: str, icon=None, project_initials: str = "", project_color: str = "") -> int:
         """添加 Tab 项，返回其索引"""
         idx = len(self._items)
@@ -1250,7 +1267,10 @@ class TabPanel(QWidget):
 
         # 重建视觉布局：新 tab 作为独立项加入（置于团队框下方）。
         # _rebuild_team_layout 有快照保护，开销小。
-        self._rebuild_team_layout()
+        # 批量添加期间（begin_batch_add/end_batch_add 包围）跳过重建，
+        # 由 end_batch_add 统一重建一次，避免连续 N 次添加触发 O(N²) 全量重建。
+        if getattr(self, "_batch_add_depth", 0) == 0:
+            self._rebuild_team_layout()
 
         # 折叠态新建 tab：立即紧凑（矩阵 D1/D2）
         if self._collapsed:
@@ -1425,6 +1445,7 @@ class TabPanel(QWidget):
         close_btn.setObjectName("teamGroupCloseBtn")
         close_btn.setIcon(FIF.CLOSE)
         close_btn.setFixedSize(20, 20)
+        close_btn.setToolTip("关闭团队")
         close_btn.setVisible(False)
         close_btn.setAttribute(Qt.WA_NoMousePropagation, True)
         # clicked 信号会带 bool 参数（checked 状态），用 *args 忽略
@@ -1462,6 +1483,20 @@ class TabPanel(QWidget):
                 _task.setVisible(True)
                 _add.setVisible(True)
                 _btn.setVisible(True)
+                # 🛡️ 问题A 修复：三按钮由隐藏→显示时，若鼠标已停在某按钮上方，
+                # Qt 不会为"显示后才在鼠标下"的控件补发 Enter → 该按钮的
+                # _HoverTooltipFilter 收不到 Enter，tooltip 计时不启动（hover
+                # 无提示）。手动查询鼠标所在控件，命中任一按钮则补发
+                # QEnterEvent，让 tooltip 计时正常启动。
+                from PyQt5.QtCore import QPointF as _QPointF
+                from PyQt5.QtGui import QCursor as _QCursor, QEnterEvent as _QEnterEvent
+                from PyQt5.QtWidgets import QApplication as _QApp
+
+                _w = _QApp.widgetAt(_QCursor.pos())
+                if _w in (_task, _add, _btn):
+                    _lp = _w.mapFromGlobal(_QCursor.pos())
+                    _gp = _QCursor.pos()
+                    _QApp.sendEvent(_w, _QEnterEvent(_QPointF(_lp), _QPointF(_lp), _QPointF(_gp)))
 
         def _leave(_e, _h=header, _btn=close_btn, _add=add_btn, _task=new_task_btn):
             _btn.setVisible(False)

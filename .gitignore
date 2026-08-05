@@ -28,7 +28,6 @@ Thumbs.db
 .workbuddy/
 /docs/
 .superpowers/
-/tests/
 # Build artifacts
 dist/
 # 但保留 CI 构建和 ISS 编译所需文件

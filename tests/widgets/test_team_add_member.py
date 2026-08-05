@@ -114,6 +114,20 @@ def test_team_new_task_btn_emits_team_id(qapp):
         panel.deleteLater()
 
 
+def test_team_close_btn_has_tooltip(qapp):
+    """关闭团队按钮必须有 tooltip（hover 提示"关闭团队"）"""
+    from app.widgets.tab_panel import TabPanel
+
+    panel = TabPanel()
+    try:
+        grp = panel._get_or_create_team_group("team-A")
+        tip = grp._team_close_btn.toolTip()
+        assert tip, "close_btn tooltip 不能为空"
+        assert tip == "关闭团队"
+    finally:
+        panel.deleteLater()
+
+
 # ══════════════════════════════════════════════════════════
 # ③ 按钮可见性：默认隐藏 / hover 联动 / 折叠态隐藏
 # ══════════════════════════════════════════════════════════
@@ -159,6 +173,112 @@ def test_buttons_visible_on_header_hover(qapp):
         assert add_calls[-1] is False
         assert close_calls[-1] is False
         assert task_calls[-1] is False
+    finally:
+        panel.deleteLater()
+
+
+def test_team_enter_sends_enter_to_button_under_cursor(qapp):
+    """问题A：_enter 显示按钮后，若鼠标已在某按钮上方则补发 QEnterEvent"""
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtGui import QEnterEvent
+
+    from app.widgets.tab_panel import TabPanel
+
+    panel = TabPanel()
+    try:
+        grp = panel._get_or_create_team_group("team-A")
+        close_btn = grp._team_close_btn
+        header = grp._team_header
+
+        sent = []
+        with (
+            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=close_btn),
+            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+            patch(
+                "PyQt5.QtWidgets.QApplication.sendEvent",
+                side_effect=lambda w, e: sent.append((w, e)) or True,
+            ),
+        ):
+            header.enterEvent(None)
+
+        assert len(sent) == 1, "鼠标已在按钮上方时必须补发 Enter"
+        w, ev = sent[0]
+        assert w is close_btn
+        assert isinstance(ev, QEnterEvent)
+    finally:
+        panel.deleteLater()
+
+
+def test_team_enter_no_send_when_cursor_not_on_button(qapp):
+    """问题A：鼠标不在任一按钮上 → 不补发 QEnterEvent"""
+    from PyQt5.QtCore import QPoint
+
+    from app.widgets.tab_panel import TabPanel
+
+    panel = TabPanel()
+    try:
+        grp = panel._get_or_create_team_group("team-A")
+        header = grp._team_header
+
+        with (
+            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=header),
+            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(5, 5)),
+            patch("PyQt5.QtWidgets.QApplication.sendEvent") as m_send,
+        ):
+            header.enterEvent(None)
+
+        m_send.assert_not_called()
+    finally:
+        panel.deleteLater()
+
+
+def test_team_enter_no_send_in_compact_mode(qapp):
+    """问题A：折叠态（紧凑模式）不显示按钮 → 不补发 QEnterEvent"""
+    from PyQt5.QtCore import QPoint
+
+    from app.widgets.tab_panel import TabPanel
+
+    panel = TabPanel()
+    try:
+        grp = panel._get_or_create_team_group("team-A")
+        panel._apply_team_compact(grp, True)
+        header = grp._team_header
+
+        with (
+            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=grp._team_close_btn),
+            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+            patch("PyQt5.QtWidgets.QApplication.sendEvent") as m_send,
+        ):
+            header.enterEvent(None)
+
+        m_send.assert_not_called()
+    finally:
+        panel.deleteLater()
+
+
+def test_team_replayed_enter_starts_tooltip_timer(qapp):
+    """问题A（行为化）：真实补发 Enter 后 close_btn 的 tooltip filter 计时激活"""
+    from PyQt5.QtCore import QPoint
+
+    from app.widgets import simple_hover_tooltip as sht
+    from app.widgets.tab_panel import TabPanel
+
+    panel = TabPanel()
+    try:
+        grp = panel._get_or_create_team_group("team-A")
+        close_btn = grp._team_close_btn
+        header = grp._team_header
+
+        # 不 mock sendEvent：真实发送，验证 filter 链路（Enter → timer.start）
+        with (
+            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=close_btn),
+            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+        ):
+            header.enterEvent(None)
+
+        f = sht._filters.get(id(close_btn))
+        assert f is not None, "close_btn 应有 tooltip filter（setToolTip 自动安装）"
+        assert f._timer.isActive(), "补发的 Enter 应启动 tooltip 计时"
     finally:
         panel.deleteLater()
 
@@ -390,7 +510,7 @@ def test_spawn_team_member_window_creates_fresh_window(qapp):
     with patch.object(mw.QTimer, "singleShot"):
         inst._spawn_team_member_window("plan")
 
-    inst._create_fresh_window.assert_called_once_with()
+    inst._create_fresh_window.assert_called_once()
 
 
 def test_spawn_team_member_window_none_on_failure(qapp):
@@ -603,9 +723,18 @@ def test_handle_team_new_task_rotates_run_id(qapp):
     with (
         patch("app.widgets.tab_manager_window.TabManagerWindow.get_instance") as m_tm_win,
         patch.object(InfoBar, "success") as m_success,
+        # C3 链式交错：把窗间间隔压为 0，pure processEvents 即可推进全链
+        # （singleShot(0) 不依赖真实时间流逝，避免 sleep 时序边界 flaky）
+        patch.object(OpenAIChatToolWindow, "_TEAM_NEW_TASK_STAGGER_MS", 0),
     ):
         try:
             inst._handle_team_new_task()
+            # 链式调度：step0(win1) 同步 → 0ms → step1(win2) → 0ms → step2(收尾)。
+            # 每轮 processEvents 触发一个已到期 timer，多轮推进完整链。
+            from PyQt5.QtCore import QCoreApplication
+
+            for _ in range(8):
+                QCoreApplication.processEvents()
         finally:
             OpenAIChatToolWindow._instances = orig_instances
 
@@ -659,3 +788,103 @@ def test_handle_team_new_task_no_active_windows_warns(qapp):
 
     m_warn.assert_called_once()
     assert not fake_tm.start_team_run.called
+
+
+# ══════════════════════════════════════════════════════════
+# ⑨ D2 标记前置 + E1/E2 幽灵窗口回收（子任务 #9）
+# ══════════════════════════════════════════════════════════
+
+
+def test_spawn_team_member_window_passes_team_marks_to_create_fresh(qapp):
+    """D-T3：D2 根治——团队标记（agent/team_name/run_id）须作为参数传入
+    _create_fresh_window（add_window 之前写入，Tab 分组直接命中团队框）"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    fake_win = MagicMock()
+    fake_win._window_id = "win-99"
+    fake_tm = MagicMock()
+    fake_tm.get_template.return_value = {"name": "dev-team", "agents": []}
+    fake_tm.get_team_run_id.return_value = "run-D2"
+    fake_tm.get_team_project.return_value = ""
+    inst._create_fresh_window = MagicMock(return_value=fake_win)
+    inst._get_team_manager = MagicMock(return_value=fake_tm)
+    inst._join_new_window_for_template = MagicMock()
+    with patch.object(mw.QTimer, "singleShot"):
+        inst._spawn_team_member_window("build")
+    # 团队三参数必须前置传入 _create_fresh_window
+    _args, kwargs = inst._create_fresh_window.call_args
+    assert kwargs.get("team_agent") == "build"
+    assert kwargs.get("team_name") == "dev-team"
+    assert kwargs.get("team_run_id") == "run-D2"
+
+
+def test_spawn_team_member_window_aborts_on_join_failure(qapp):
+    """E-T1：join_team 抛异常 → 主动回收半建窗口（_abort_team_window）+ 返回 None"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    fake_win = MagicMock()
+    fake_win._window_id = "win-99"
+    fake_tm = MagicMock()
+    fake_tm.get_template.return_value = {"name": "dev-team", "agents": []}
+    fake_tm.get_team_run_id.return_value = "run-E1"
+    fake_tm.get_team_project.return_value = ""
+    fake_tm.join_team.side_effect = RuntimeError("join boom")
+    inst._create_fresh_window = MagicMock(return_value=fake_win)
+    inst._get_team_manager = MagicMock(return_value=fake_tm)
+    with patch.object(mw, "_abort_team_window") as m_abort:
+        result = inst._spawn_team_member_window("build")
+    assert result is None, "join 失败应返回 None"
+    m_abort.assert_called_once_with(fake_win), "半建窗口应调用 _abort_team_window 回收"
+
+
+def test_create_fresh_window_aborts_on_add_window_failure(qapp):
+    """E-T2：add_window 抛异常 → _create_fresh_window 回收已构造窗口并返回 None"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    # ⚠️ __new__ 绕过 __init__ → 未初始化实例访问属性会抛
+    # "super-class __init__() was never called"，需显式补 homepage
+    # 使执行流通过 _create_fresh_window 首行的 sip.isdeleted 检查
+    inst.homepage = MagicMock()
+    fake_win = MagicMock()
+    fake_win._window_id = "win-E2"
+    # 模拟 OpenAIChatToolWindow 构造成功（PyQt 类实例化不走纯 Python __new__，
+    # 需 patch 整个类并设 return_value 冒充构造返回值）
+    with patch.object(mw, "OpenAIChatToolWindow") as m_cls, patch.object(mw, "_abort_team_window") as m_abort:
+        m_cls.return_value = fake_win
+        # 模拟 add_window 抛异常（TabManagerWindow 为 _create_fresh_window 内延迟 import）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        with patch.object(TabManagerWindow, "get_instance") as m_get_tm:
+            fake_tm_win = MagicMock()
+            fake_tm_win.add_window.side_effect = RuntimeError("add_window boom")
+            fake_tm_win.isVisible.return_value = True
+            m_get_tm.return_value = fake_tm_win
+            # homepage 需有效（sip.isdeleted 检查通过）
+            with patch.object(mw.sip, "isdeleted", return_value=False):
+                result = inst._create_fresh_window()
+    assert result is None, "注册失败应返回 None"
+    m_abort.assert_called_once_with(fake_win), "已构造窗口应调用 _abort_team_window 回收"
+
+
+def test_abort_team_window_removes_from_tab_and_closes(qapp):
+    """E1/E2 公共兜底：_abort_team_window 优先 remove_window（Tab 完整清理），
+    未注册时兜底 close"""
+    import app.main_widget as mw
+
+    fake_win = MagicMock()
+    fake_win._window_id = "win-A1"
+    from app.widgets.tab_manager_window import TabManagerWindow
+
+    with patch.object(TabManagerWindow, "get_instance") as m_get_tm:
+        fake_tm_win = MagicMock()
+        m_get_tm.return_value = fake_tm_win
+        mw._abort_team_window(fake_win)
+    fake_tm_win.remove_window.assert_called_once_with(fake_win), "应走 Tab 管理器完整清理"
+    # 未注册（get_instance 返回 None）→ 兜底 close
+    fake_win2 = MagicMock()
+    with patch.object(TabManagerWindow, "get_instance", return_value=None):
+        mw._abort_team_window(fake_win2)
+    fake_win2.close.assert_called_once(), "未注册 Tab 时兜底 close"

@@ -643,6 +643,39 @@ class _ThemedIconLabel(QWidget):
         self._icon.paint(painter, self.rect())
 
 
+def _abort_team_window(win) -> None:
+    """回收建窗成功但注册/join 失败的团队窗口（幽灵窗口兜底，E1/E2 共用）。
+
+    优先级：
+    1. 若窗口已注册进 Tab 管理器 → remove_window（内部完整清理：
+       _windows.pop / removeWidget / remove_tab / 断开闭包 / close /
+       deleteLater；close 自动触发 closeEvent → 从 _instances 移除）
+    2. remove_window 不可用/异常 → 兜底 win.close()（closeEvent 仍会清理）
+    3. 以上全部失败 → 静默（日志已由调用方输出）
+
+    Args:
+        win: 待回收的窗口实例（可能未完整初始化，调用方负责防御 None）。
+    """
+    if win is None:
+        return
+    try:
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.remove_window(win)
+            return
+    except Exception:
+        pass
+    # 兜底：未注册 Tab（_create_fresh_window 中途失败）→ 直接 close
+    try:
+        close_fn = getattr(win, "close", None)
+        if callable(close_fn):
+            close_fn()
+    except Exception:
+        pass
+
+
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
@@ -675,6 +708,13 @@ class OpenAIChatToolWindow(ToolWindow):
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
     _TEMPLATE_JOIN_DELAY_MS: int = 300
+    # 团队 join 就绪轮询：backend 未就绪时的重试上限与间隔（C4）
+    # 30×50ms=1500ms 上限：给 UI 补注册更多机会；重试循环已有
+    # _is_destroyed 守卫 + E3 计数收口，无风险
+    _TEAM_JOIN_MAX_RETRIES: int = 30
+    _TEAM_JOIN_RETRY_INTERVAL_MS: int = 50
+    # 新建任务：相邻成员窗口会话创建的交错间隔（C3，避免 N 窗同步链冻结 UI）
+    _TEAM_NEW_TASK_STAGGER_MS: int = 50
     # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
     _pending_arrange_count: int = 0
 
@@ -1763,7 +1803,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
             _log.error(f"[_duplicate_window] 未预期的异常: {traceback.format_exc()}")
 
-    def _create_fresh_window(self, branch_data: dict = None):
+    def _create_fresh_window(
+        self,
+        branch_data: dict = None,
+        team_agent: str = "",
+        team_name: str = "",
+        team_run_id: str = "",
+    ):
         """创建一个全新的空白会话窗口（不复制任何已有窗口的上下文/会话内容）。
 
         用于团队模板加载等需要纯净新窗口的场景：
@@ -1777,6 +1823,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 _apply_branch_or_create_session 时分支数据已就绪，
                 避免"窗口已显示、分支数据尚未赋值"的竞态导致走了
                 _create_new_session（历史会话无法加载的根因之一）。
+            team_agent: 可选。团队角色名（D2：标记前置——在 add_window
+                **之前**写入窗口，使 Tab 管理器 add_window 时
+                _resolve_tab_team_id 直接命中团队分组，消除"创建与注册
+                分离"竞态窗口期；空串表示非团队窗口）。
+            team_name: 可选。团队显示名（模板名），随 team_agent 一起前置。
+            team_run_id: 可选。团队运行标识（分组 key），随 team_agent 一起前置。
         """
         try:
             from PyQt5 import sip
@@ -1795,6 +1847,13 @@ class OpenAIChatToolWindow(ToolWindow):
             # 消除"分支数据赋值太晚"竞态（见 docstring）。
             if branch_data is not None:
                 new_instance._branch_session_data = branch_data
+            # 🛡️ D2 根治：团队标记在 add_window **之前**写入，add_window 内
+            # _resolve_tab_team_id 直接命中团队分组，不再先落独立区再靠
+            # 300ms 后置 refresh_capsule 补救（成员缺位竞态根因）。
+            if team_agent:
+                new_instance._team_agent_name = team_agent
+                new_instance._team_name = team_name or ""
+                new_instance._team_run_id = team_run_id or ""
 
             # 统一路由到 Tab 管理器：多窗口模式已下线（见 main.py 启动强约束），
             # 一律以 Tab 形式承载，禁止降级为独立 ToolPopupDialog，
@@ -1809,6 +1868,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return new_instance
         except Exception as e:
             logger.error(f"[_create_fresh_window] 创建全新窗口失败: {e}")
+            # 🛡️ E2 回收：窗口已构造但注册（add_window）抛异常 → 主动回收，
+            # 避免窗口残留在 _instances / Tab 容器成为"幽灵窗口"。
+            if "new_instance" in locals() and new_instance is not None:
+                _abort_team_window(new_instance)
             return None
 
     def _request_tool_start_ui_sync(self, tool_call_id: str, tool_name: str, arguments: dict, round_id: str = None):
@@ -4242,7 +4305,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
         创建链路（与 _handle_team_load 原始循环体一致）：
-        1. _create_fresh_window 新建全新空白窗口（不复制任何已有窗口上下文）
+        1. _create_fresh_window 新建全新空白窗口（不复制任何已有窗口上下文），
+           团队标记（_team_agent_name/_team_name/_team_run_id）作为参数**前置**
+           传入，在 add_window 之前写入（D2）——Tab 管理器 add_window 时
+           _resolve_tab_team_id 直接命中团队分组，消除"tab 先落独立区"竞态。
         2. 同步前置 join：返回后立即登记团队成员身份。此时 showEvent 排队的
            QTimer(0) → _create_new_session 仍在事件队列中未执行，join 完成后
            create_session 触发 SessionStart hook 时 is_team_member 已为 True，
@@ -4250,7 +4316,8 @@ class OpenAIChatToolWindow(ToolWindow):
            供 Tab 管理器分组与胶囊使用。
         3. 应用团队级统一项目（若已设置）
         4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
-           就绪），join 完成递减 _pending_arrange_count
+           就绪；C3：该回调退化为纯 UI 补注册，不再重复 join 写盘），
+           join 完成递减 _pending_arrange_count
 
         ⚠️ run_id 关键约束：**复用现有 run_id**（get_team_run_id()），
         禁止 start_team_run(force=True) 生成新 run_id——否则新窗口按
@@ -4270,13 +4337,24 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         try:
             tm_mgr = self._get_team_manager()
-            win = self._create_fresh_window()
+            # 🛡️ D2 根治：团队标记前置传入 _create_fresh_window（add_window
+            # 之前写入），Tab 管理器 add_window 时直接命中团队分组，消除
+            # "tab 先落独立区、依赖 300ms 后置 refresh 补救"的竞态窗口期。
+            team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+            team_run_id = tm_mgr.get_team_run_id()
+            win = self._create_fresh_window(
+                team_agent=agent_name,
+                team_name=team_name,
+                team_run_id=team_run_id,
+            )
             if win is None:
                 return None
+            # 幂等赋值（防御 + 兼容：_create_fresh_window 可能被 mock/子类覆盖，
+            # 此处确保标记一定就位，供 SessionStart hook / Tab 分组使用）
             win._team_agent_name = agent_name
-            win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+            win._team_name = team_name
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
-            win._team_run_id = tm_mgr.get_team_run_id()
+            win._team_run_id = team_run_id
             tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
             # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
             team_project = tm_mgr.get_team_project()
@@ -4291,6 +4369,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return win
         except Exception as e:  # noqa: BLE001
             logger.error(f"[_spawn_team_member_window] 创建成员窗口失败: {e}")
+            # 🛡️ E1 回收：窗口已构造但 join/标记失败 → 主动回收（_instances
+            # 移除 + Tab 注销 + close），避免残留"幽灵窗口"。
+            if "win" in locals() and win is not None:
+                _abort_team_window(win)
             return None
 
     def _spawn_team_members(self, agent_names: List[str]) -> int:
@@ -4303,10 +4385,20 @@ class OpenAIChatToolWindow(ToolWindow):
             成功创建的窗口数
         """
         new_windows: List["OpenAIChatToolWindow"] = []
-        for agent_name in agent_names:
-            win = self._spawn_team_member_window(agent_name)
-            if win is not None:
-                new_windows.append(win)
+        # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        _tmw = TabManagerWindow.get_instance()
+        if _tmw is not None:
+            _tmw._tab_panel.begin_batch_add()
+        try:
+            for agent_name in agent_names:
+                win = self._spawn_team_member_window(agent_name)
+                if win is not None:
+                    new_windows.append(win)
+        finally:
+            if _tmw is not None:
+                _tmw._tab_panel.end_batch_add()
         # 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
         self._pending_arrange_count = len(new_windows)
         if self._pending_arrange_count == 0:
@@ -4425,38 +4517,57 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 1) 全员内部新建会话（先保存旧历史到旧 run_id）
-        for win in member_windows:
+        # 1) 全员内部新建会话（先保存旧历史到旧 run_id）。
+        #    C3 优化：QTimer 链式交错（每窗 _TEAM_NEW_TASK_STAGGER_MS），
+        #    避免 N 个窗口的 auto_save/create_session/UI 清理背靠背占用
+        #    主线程导致 UI 冻结；welcome 渲染已由 _schedule_initial_welcome
+        #    独立交错（C2），此处不重复。
+        #    顺序约束（防历史串台）：全部 _create_new_session 完成（旧 run_id
+        #    落库）→ 才 start_team_run(force) → 更新 _team_run_id → 刷新分组。
+        from PyQt5.QtCore import QTimer as _QTimer
+
+        def _run_new_task_steps(_idx: int):
+            # 🛡️ 窗口销毁守卫：PyQt 实例属性访问可能抛 RuntimeError
+            # （未初始化/已销毁），用 __dict__ 检查避免 getattr 触发
+            # PyQt __getattr__（getattr 默认值只兜 AttributeError）。
+            try:
+                if self.__dict__.get("_is_destroyed", False):
+                    return
+            except Exception:
+                pass
+            if _idx >= len(member_windows):
+                # 2) 生成新 run_id（force：每次新建任务都是独立运行）
+                new_run_id = tm_mgr.start_team_run(force=True)
+                # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
+                for win in member_windows:
+                    win._team_run_id = new_run_id
+                # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
+                try:
+                    from app.widgets.tab_manager_window import TabManagerWindow
+
+                    tm_win = TabManagerWindow.get_instance()
+                    if tm_win is not None:
+                        for win in member_windows:
+                            tm_win.refresh_capsule_for_window(win)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[_handle_team_new_task] 刷新 Tab 分组失败: {e}")
+                InfoBar.success(
+                    "已新建任务",
+                    f"已为 {len(member_windows)} 个成员窗口开启新一轮任务\n新 run: {new_run_id[:8]}…",
+                    parent=self,
+                    duration=4000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+            win = member_windows[_idx]
             try:
                 win._create_new_session()
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[_handle_team_new_task] 成员窗口新建会话失败: {e}")
+            # 下一窗交错执行：期间事件循环可处理绘制/输入/welcome
+            _QTimer.singleShot(self._TEAM_NEW_TASK_STAGGER_MS, lambda: _run_new_task_steps(_idx + 1))
 
-        # 2) 生成新 run_id（force：每次新建任务都是独立运行）
-        new_run_id = tm_mgr.start_team_run(force=True)
-
-        # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
-        for win in member_windows:
-            win._team_run_id = new_run_id
-
-        # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
-        try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm_win = TabManagerWindow.get_instance()
-            if tm_win is not None:
-                for win in member_windows:
-                    tm_win.refresh_capsule_for_window(win)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[_handle_team_new_task] 刷新 Tab 分组失败: {e}")
-
-        InfoBar.success(
-            "已新建任务",
-            f"已为 {len(member_windows)} 个成员窗口开启新一轮任务\n新 run: {new_run_id[:8]}…",
-            parent=self,
-            duration=4000,
-            position=InfoBarPosition.BOTTOM,
-        )
+        _run_new_task_steps(0)
 
     def _join_new_window_for_template(
         self,
@@ -4466,19 +4577,60 @@ class OpenAIChatToolWindow(ToolWindow):
         track_arrange: bool = True,
         keep_team_name: bool = False,
     ):
-        """为模板新建的窗口延后执行 join team（确保 backend 已初始化）。
+        """为模板新建的窗口延后执行团队 UI 补注册（确保 backend 已初始化）。
 
         Args:
             track_arrange: False 时旁路模板专用排列计数（恢复路径自行排列，
                 避免 _pending_arrange_count 被误递减破坏模板加载计数）
             keep_team_name: True 时保留调用方已设置的 _team_name
                 （恢复路径用会话记录里的团队名，不覆盖为模板名）
+
+        语义（C3 写盘合并）：
+        - join_team 已由调用方**同步前置**执行（_spawn_team_member_window /
+          _on_team_restore_requested 各恰好一次），本方法**不再写盘 join**，
+          退化为纯 UI 补注册：agent 切换 + 权限 + 团队项目 + UI 刷新 + watcher。
+        - backend 未就绪 → C4 就绪轮询（_TEAM_JOIN_MAX_RETRIES 次 ×
+          _TEAM_JOIN_RETRY_INTERVAL_MS 间隔）后放弃。
+        - 所有提前 return 路径（窗口销毁 / 重试耗尽 / 异常）统一递减
+          _pending_arrange_count（E3 计数兜底），保证排列回调不垛死。
         """
         try:
             if getattr(win, "_is_destroyed", False):
+                # E3：窗口已销毁 → 计数无人递减，此处统一收口
+                if track_arrange:
+                    self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+                    if self._pending_arrange_count == 0:
+                        self._do_team_window_arrange()
                 return
             if not getattr(win, "backend", None) or not win.backend.agent_manager:
-                logger.warning(f"[_join_new_window_for_template] window {window_id} backend 未就绪，跳过")
+                # C4 就绪轮询：backend 未就绪 → 重试而非直接放弃
+                retries = getattr(win, "_team_join_retries", 0)
+                if retries < self._TEAM_JOIN_MAX_RETRIES:
+                    win._team_join_retries = retries + 1
+                    logger.warning(
+                        f"[_join_new_window_for_template] window {window_id} backend 未就绪，"
+                        f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
+                    )
+                    QTimer.singleShot(
+                        self._TEAM_JOIN_RETRY_INTERVAL_MS,
+                        lambda w=win, a=agent_name, wid=window_id, ta=track_arrange, kn=keep_team_name: (
+                            self._join_new_window_for_template(w, a, wid, ta, kn)
+                        ),
+                    )
+                    return
+                logger.error(f"[_join_new_window_for_template] window {window_id} backend 重试耗尽，放弃")
+                # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
+                # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
+                try:
+                    if not getattr(win, "_is_destroyed", False):
+                        win._start_team_watcher()
+                except Exception:
+                    pass
+                # E3：重试耗尽同样收口计数
+                if track_arrange:
+                    self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+                    if self._pending_arrange_count == 0:
+                        self._do_team_window_arrange()
                 return
             if hasattr(win, "_on_agent_changed"):
                 win._on_agent_changed(agent_name)
@@ -4492,8 +4644,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 # （恢复窗口已设 new_run_id，避免延后期内被中途 start_team_run
                 # 刷新覆盖，导致恢复窗口归入错误 run_id 分组漂移）
                 win._team_run_id = tm_mgr.get_team_run_id()
-            tm_mgr.join_team(window_id=window_id, agent_name=agent_name)
-            # 应用团队级统一项目（若已设置）：延迟 join 后与团队共享同一项目
+            # 🛡️ C3：不再重复 join_team（调用方已同步前置执行，恰好一次写盘）
+            # 应用团队级统一项目（若已设置）：延迟补注册后与团队共享同一项目
             team_project = tm_mgr.get_team_project()
             if team_project:
                 win._apply_team_project(team_project)
@@ -4527,6 +4679,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._do_team_window_arrange()
         except Exception as e:  # noqa: BLE001
             logger.error(f"[_join_new_window_for_template] 失败: {e}")
+            # 🛡️ C4 兜底：异常时窗口可能已建成，至少刷新胶囊使其归入团队分组
+            try:
+                if not getattr(win, "_is_destroyed", False):
+                    from app.widgets.tab_manager_window import TabManagerWindow
+
+                    tm_win = TabManagerWindow.get_instance()
+                    if tm_win is not None:
+                        tm_win.refresh_capsule_for_window(win)
+            except Exception:
+                pass
             if track_arrange:
                 self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
                 if self._pending_arrange_count == 0:
@@ -7497,39 +7659,55 @@ class OpenAIChatToolWindow(ToolWindow):
             "团队对话",
         )
         _agent_window_index: Dict[str, int] = {}
-        for agent_name, _snap_wid in window_plan:
-            idx = _agent_window_index.get(agent_name, 0)
-            _agent_window_index[agent_name] = idx + 1
-            agent_sessions = sessions_by_agent.get(agent_name, [])
-            session = agent_sessions[idx] if idx < len(agent_sessions) else {}
-            session_id = session.get("session_id", "")
-            try:
-                messages = self.history_manager.get_session_messages(session_id) or []
-            except Exception:
-                messages = []
-            try:
-                # 🛡️ 分支数据在 _create_fresh_window 内部 add_window（触发
-                # showEvent）之前赋值，消除"分支数据赋值太晚"竞态——避免
-                # showEvent 先走 _create_new_session 导致历史消息无法加载。
-                # project 透传保持会话原项目归属（历史会话"无法加载"修复）。
-                win = self._create_fresh_window(
-                    branch_data={
-                        "messages": messages,
-                        "name": session.get("title") or session.get("name") or f"团队对话 {agent_name}",
-                        "project": session.get("project") or "",
-                    }
-                )
-                if win is None:
-                    continue
-                # 团队标记 + 重新登记成员（join_team 幂等）
-                win._team_agent_name = agent_name
-                win._team_name = team_display_name
-                win._team_run_id = new_run_id
-                tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
-                restored_windows.append(win)
-                restored_count += 1
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
+        # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
+        from app.widgets.tab_manager_window import TabManagerWindow as _TMW
+
+        _tmw = _TMW.get_instance()
+        if _tmw is not None:
+            _tmw._tab_panel.begin_batch_add()
+        try:
+            for agent_name, _snap_wid in window_plan:
+                idx = _agent_window_index.get(agent_name, 0)
+                _agent_window_index[agent_name] = idx + 1
+                agent_sessions = sessions_by_agent.get(agent_name, [])
+                session = agent_sessions[idx] if idx < len(agent_sessions) else {}
+                session_id = session.get("session_id", "")
+                try:
+                    messages = self.history_manager.get_session_messages(session_id) or []
+                except Exception:
+                    messages = []
+                try:
+                    # 🛡️ 分支数据在 _create_fresh_window 内部 add_window（触发
+                    # showEvent）之前赋值，消除"分支数据赋值太晚"竞态——避免
+                    # showEvent 先走 _create_new_session 导致历史消息无法加载。
+                    # project 透传保持会话原项目归属（历史会话"无法加载"修复）。
+                    # 🛡️ D2：团队标记随调用前置传入（add_window 之前写入），
+                    # 恢复窗口 Tab 直接命中团队分组（同 run_id 团队框）。
+                    win = self._create_fresh_window(
+                        branch_data={
+                            "messages": messages,
+                            "name": session.get("title") or session.get("name") or f"团队对话 {agent_name}",
+                            "project": session.get("project") or "",
+                        },
+                        team_agent=agent_name,
+                        team_name=team_display_name,
+                        team_run_id=new_run_id,
+                    )
+                    if win is None:
+                        continue
+                    # 团队标记 + 重新登记成员（join_team 幂等；标记由 D2 前置赋值，
+                    # 此处幂等重写保持与 _spawn_team_member_window 一致的防御语义）
+                    win._team_agent_name = agent_name
+                    win._team_name = team_display_name
+                    win._team_run_id = new_run_id
+                    tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+                    restored_windows.append(win)
+                    restored_count += 1
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[_on_team_restore_requested] 恢复成员 {agent_name} 失败: {e}")
+        finally:
+            if _tmw is not None:
+                _tmw._tab_panel.end_batch_add()
 
         # 🛡️ T18：重建顶层 team_members 快照——仅保留本次实际恢复的窗口，
         # 清除历史残留 wid（T3 key=window_id 后快照只增不删，残留会导致
@@ -8942,7 +9120,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步对话框窗口标题（新会话默认名称如"对话 07-25 14:19"）
         self._sync_dialog_title()
-        QTimer.singleShot(0, lambda: self._safe_timer_call(self._show_initial_welcome))
+        # 欢迎卡片渲染（QWebEngineView 100-500ms 主线程占用）改为交错时间片调度：
+        # 并发新建 N 个会话时避免 N 个 welcome 在同一事件批次连续渲染卡死 UI（C2）。
+        self._schedule_initial_welcome()
         self._refresh_context_usage_indicator()
 
     def _release_inactive_session_messages(self):
@@ -9013,6 +9193,27 @@ class OpenAIChatToolWindow(ToolWindow):
         welcome_card = self._get_or_create_welcome_card()
         self._displayed_session_id = None
         self._add_chat_widget(welcome_card)
+
+    _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
+    _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
+
+    def _schedule_initial_welcome(self):
+        """QTimer 交错调度欢迎卡片渲染（C2：并发会话创建不卡 UI）
+
+        背景：_get_or_create_welcome_card 缓存未命中时重建 QWebEngineView，
+        每窗占用主线程 100-500ms。团队新建任务/恢复会并发触发 N 个
+        _create_new_session，若全部用 singleShot(0) 会在同一事件循环批次内
+        连续渲染 N 个 welcome，界面卡死数十秒。
+
+        做法：类级计数器分配 0/50/100/.../950ms 槽位（模 20 轮转），让 N 个
+        窗口的渲染请求均匀散开。单窗场景槽位为 0ms（立即，与原来 singleShot(0)
+        无感知差异）；类级而非实例级，确保不同窗口拿到递增槽位。
+        """
+        cls = type(self)
+        slot = getattr(cls, "_welcome_slot", 0) + 1
+        setattr(cls, "_welcome_slot", slot)
+        delay = ((slot - 1) % self._WELCOME_SLOT_COUNT) * self._WELCOME_SLOT_MS
+        QTimer.singleShot(delay, lambda: self._safe_timer_call(self._show_initial_welcome))
 
     def _hide_welcome_cards(self):
         """从布局中移除所有欢迎卡片（widget 不删除，由 _welcome_card_cache 管理）"""

@@ -238,6 +238,106 @@ class TestValueDescTooltip:
         assert not card._value_selection_mode
         assert not card._desc_tooltip_label.isVisible(), "退出值选择后气泡应隐藏"
 
+    def test_value_tooltip_resolves_quote_entity(self):
+        """描述含引号时 tooltip 强制 RichText，&quot; 实体解析为真实引号
+
+        回归：html.escape 后 setText，QLabel AutoText 只认字面 < 与 "& "，
+        不认 &quot; 实体 → 判定 PlainText → &quot; 字面显示。
+        修复：setText 前显式 setTextFormat(Qt.RichText)。
+        """
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        w = ValueItemWidget("model-x", '支持 "引号" 与 <尖括号>')
+        card._value_widgets = [w]
+        card._value_selection_mode = True
+        card._value_selection_param = "--model="
+        card._selected_value_index = 0
+        card._last_selected_value_index = -1
+        card._update_value_selection()
+
+        lbl = card._desc_tooltip_label
+        assert lbl is not None
+        # 强制 RichText：实体在渲染时被解析（此前 PlainText 判定会字面显示 &quot;）
+        assert lbl.textFormat() == Qt.RichText, f"tooltip 应强制 RichText，实际 {lbl.textFormat()}"
+        assert "&quot;" in lbl.text(), "存储形式应为实体"
+        assert '"引号"' in html_mod.unescape(lbl.text()), "unescape 后应还原为真实引号"
+        assert "<尖括号>" in html_mod.unescape(lbl.text()), "unescape 后应还原为尖括号原文"
+
+    def test_list_tooltip_resolves_quote_entity(self):
+        """列表模式悬浮气泡描述含引号时同样解析实体（_update_desc_tooltip 主链路）"""
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        card._filtered_items = [{"name": "skill-x", "type": "skill", "description": '含 "引号" 的描述'}]
+        card._selected_index = 0
+        card._detail_mode = False
+        card._value_selection_mode = False
+        card._current_text_query = ""
+        card._update_desc_tooltip()
+
+        lbl = card._desc_tooltip_label
+        assert lbl is not None
+        assert lbl.textFormat() == Qt.RichText
+        assert '"引号"' in html_mod.unescape(lbl.text())
+
+    def test_detail_desc_escapes_html(self):
+        """detail 模式命令描述含 < > 时按纯文本安全显示（不解析为 HTML 标签）"""
+        _ensure_qapp()
+        import html as html_mod
+
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from app.core.command_manager import CommandManager, CommandType
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        parent = QWidget()
+        parent.setLayout(QVBoxLayout())
+        parent.resize(800, 600)
+        card = CommandCard()
+        parent.layout().addWidget(card)
+        parent.show()
+        app = QApplication.instance()
+        for _ in range(5):
+            app.processEvents()
+
+        cmd_mgr = CommandManager.get_instance()
+        test_name = "__test_detail_desc__"
+        cmd_mgr.register(test_name, CommandType.FUNCTION, description='含 <b> 与 "引号" 的说明')
+        try:
+            card.show_command_detail(test_name, selected_type="command")
+            # escape + 强制 RichText：text() 存实体形式，渲染时解析回原文
+            assert card._detail_desc_label.textFormat() == Qt.RichText
+            assert "&lt;b&gt;" in card._detail_desc_label.text(), "尖括号应被转义存储"
+            assert "<b>" in html_mod.unescape(card._detail_desc_label.text()), "unescape 后还原为原文"
+        finally:
+            cmd_mgr.unregister(test_name)
+
 
 class TestCursorPastParamValue:
     """_cursor_past_param_value 光标离开判定回归测试（T1 修复）。

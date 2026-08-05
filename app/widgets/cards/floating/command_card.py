@@ -147,6 +147,10 @@ class CommandItemWidget(QWidget):
         # 名称标签（不压缩，显示完整名称）
         self._name_label = QLabel()
         self._name_label.setObjectName("nameLabel")
+        # 强制 RichText：_update_display 对名称 html.escape 后 setText，
+        # 无高亮时（不含 <span>）AutoText 会判定 PlainText，&quot;/&amp; 等
+        # 实体字面显示（与 tooltip 的 &quot; 问题同源）；此处一次设置，所有分支生效
+        self._name_label.setTextFormat(Qt.RichText)
         self._name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         layout.addWidget(self._name_label)
@@ -398,6 +402,19 @@ class CommandItemWidget(QWidget):
         # hover 即选中：通知父卡片同步选中索引到此 widget
         self.hovered.emit(self)
         super().enterEvent(event)
+
+    def showEvent(self, event):
+        """widget 首次显示时补一次样式应用
+
+        新建 widget 在 _setup_ui 调用 _apply_style 时尚未挂载到可见布局，
+        Qt 的 QStyleSheetStyle::repolish 对不可见 widget 跳过，级联 QSS
+        （QLabel#tagLabel / #shortcutLabel 等子标签样式）不会应用，导致新项
+        右侧类型标签/快捷键胶囊使用默认样式（黑字、无背景），hover 后才恢复。
+        首次显示（showEvent）时在此补一次 _apply_style，保证级联样式落地；
+        复用路径不经过此处（widget 保持可见），不会重复触发。
+        """
+        super().showEvent(event)
+        self._apply_style()
 
     def leaveEvent(self, event):
         self._hovered = False
@@ -661,6 +678,16 @@ class ValueItemWidget(QWidget):
         # selected 仍可能为 True（hover 即选中），此时背景仍为 REALTIME_TAG_BG
         self._apply_style()
         super().leaveEvent(event)
+
+    def showEvent(self, event):
+        """widget 首次显示时补一次样式应用（同 CommandItemWidget）
+
+        新建 ValueItemWidget 在 _setup_ui 调用 _apply_style 时尚未可见，
+        级联 QSS（ValueItemWidget QLabel#valueLabel）不会应用；首次显示时补一次，
+        保证文字颜色/字体正确。
+        """
+        super().showEvent(event)
+        self._apply_style()
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
@@ -1149,6 +1176,10 @@ class CommandCard(QWidget):
                     if pos < len(safe):
                         parts.append(safe[pos:])
                     safe = "".join(parts)
+        # QLabel AutoText 只认字面 < 与 "& "，不认 &quot; 等 HTML 实体：
+        # escape 后不含 < 的文本会被判定为 PlainText，实体字面显示（&quot; 问题）。
+        # 显式强制 RichText，让实体在渲染时被解析为真实字符。
+        lbl.setTextFormat(Qt.RichText)
         lbl.setText(safe)
         self._has_tooltip_text = True
         # 先定位再显示，避免 tooltip 在错误位置闪现
@@ -1179,6 +1210,9 @@ class CommandCard(QWidget):
             lbl.setVisible(False)
             return
         safe = html.escape(desc)
+        # 同 _update_desc_tooltip：强制 RichText，避免 AutoText 将纯文本实体
+        # （&quot; 等）判定为 PlainText 而字面显示
+        lbl.setTextFormat(Qt.RichText)
         lbl.setText(safe)
         self._has_tooltip_text = True
         # 先定位再显示，避免 tooltip 在错误位置闪现；卡片未布局时延迟
@@ -1474,7 +1508,10 @@ class CommandCard(QWidget):
         max_chars = 200
         if len(desc) > max_chars:
             desc = desc[:max_chars].rstrip() + "…"
-        self._detail_desc_label.setText(desc)
+        # escape 后强制 RichText：纯文本安全显示（< > & " 等字符不被误解析为
+        # HTML 标签/实体，避免描述含尖括号时渲染破坏与潜在注入）
+        self._detail_desc_label.setTextFormat(Qt.RichText)
+        self._detail_desc_label.setText(html.escape(desc))
 
         # 决定显示交互参数列表
         # ── 技能动态生成 --enable/--disable 参数（互斥） ──

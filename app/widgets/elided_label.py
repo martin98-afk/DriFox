@@ -71,6 +71,9 @@ class _ElidedLabel(QLabel):
     def _update_elided(self):
         w = self.width()
         if w <= 0:
+            # 未布局：直接显示原文。无条件强制 PlainText（QLabel 同值设置短路
+            # 零开销），避免原文含 < > 时 AutoText 误判为富文本（标签被吞/渲染错乱）
+            self.setTextFormat(Qt.PlainText)
             if self.text() != self._full_text:
                 super().setText(self._full_text)
             return
@@ -119,11 +122,16 @@ class _ElidedLabel(QLabel):
                 if pos < len(elided):
                     parts.append(html.escape(elided[pos:]))
                 html_text = "".join(parts)
+                # 高亮 HTML 含 <span>，无条件按富文本渲染（span 颜色才生效）
+                self.setTextFormat(Qt.RichText)
                 if self.text() != html_text:
                     super().setText(html_text)
                 return
 
         # 无高亮/未匹配 → 纯文本
+        # 原文可能含 < > 等字符：无条件强制 PlainText 字面显示，避免 AutoText
+        # 误判为富文本（标签被吞/渲染错乱）；省略测量基于原文宽度，与渲染一致
+        self.setTextFormat(Qt.PlainText)
         if self.text() != elided:
             super().setText(elided)
 

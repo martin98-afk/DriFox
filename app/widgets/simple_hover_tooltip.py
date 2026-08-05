@@ -25,7 +25,7 @@
 from typing import Optional
 
 from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
+from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
 # ── 泄漏修复（6a）：_filters 缓存改弱值字典 ──
@@ -206,7 +206,7 @@ class SimpleHoverTooltip(QWidget):
                     oldest = _tooltip_instances.pop(0)
                     if oldest is not None:
                         oldest.deleteLater()
-                except (RuntimeError, IndexError):
+                except RuntimeError, IndexError:
                     pass
             _tooltip_instances.append(self)
             # 自注销：destroyed 信号在 deleteLater + sendPostedEvents 后
@@ -354,6 +354,17 @@ class _HoverTooltipFilter(QObject):
         return False
 
     def _on_timeout(self):
+        # 🛡️ 问题B 修复：显示气泡前校验鼠标是否仍在目标控件内——
+        # 按钮 visible 切换时序（团队框 hover 显示按钮）或隐藏态几何错位
+        # （DPI 缩放）下，timer 可能已启动但鼠标已不在控件上（或控件已
+        # 隐藏），直接显示会出现"飘着的 tooltip"。校验失败则停表放弃。
+        if not self._parent.isVisible():
+            self._timer.stop()
+            return
+        local = self._parent.mapFromGlobal(QCursor.pos())
+        if not self._parent.rect().contains(local):
+            self._timer.stop()
+            return
         tt = self._get_tooltip()
         tt.set_text(self._text)
         tt.show_above(self._parent)
@@ -377,7 +388,7 @@ class _HoverTooltipFilter(QObject):
             pass
         try:
             self._timer.stop()
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
         self._hide()
         # 🛡️ 泄漏根因修复（B7）：目标 widget 销毁时 tooltip 同步销毁。

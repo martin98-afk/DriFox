@@ -264,7 +264,7 @@ class TestTeamRestoreLogic:
         # 🛡️ 新实现：_create_fresh_window 内部在 add_window（触发 showEvent）
         # 之前把 branch_data 赋给新窗口；mock 需模拟该语义，否则 fake 的
         # _branch_session_data 不会自动赋值。
-        def _fake_create(branch_data=None):
+        def _fake_create(branch_data=None, **kw):
             fake._branch_session_data = branch_data
             return fake
 
@@ -327,7 +327,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
                 created.append(self)
 
-        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
             OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
@@ -409,7 +409,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
                 created.append(self)
 
-        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
             OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
@@ -471,7 +471,7 @@ class TestTeamRestoreLogic:
         fake = _FakeWin()
 
         # 模拟新实现：_create_fresh_window 内部赋值 branch_data
-        def _fake_create(branch_data=None):
+        def _fake_create(branch_data=None, **kw):
             fake._branch_session_data = branch_data
             return fake
 
@@ -727,7 +727,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
                 created.append(self)
 
-        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
             OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
@@ -822,7 +822,7 @@ class TestTeamRestoreLogic:
                 self._team_run_id = None
                 created.append(self)
 
-        win._create_fresh_window.side_effect = lambda branch_data=None: _FakeWin(branch_data)
+        win._create_fresh_window.side_effect = lambda branch_data=None, **kw: _FakeWin(branch_data)
 
         with patch("app.main_widget.InfoBar") as _mock_infobar:
             OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
@@ -1185,6 +1185,133 @@ class TestTeamRestoreDisband:
         assert win._team_name == "模板名"
         assert main_win._pending_arrange_count == 0
         main_win._do_team_window_arrange.assert_called_once()
+
+
+class TestTeamJoinRetryAndCount:
+    """D1/C4/E3：_join_new_window_for_template 就绪轮询 + 计数兜底。
+
+    - D-T1：backend 未就绪 → QTimer 重试（不直接 return、不递减计数），
+      就绪后正常完成
+    - D-T1b：重试耗尽（超过 _TEAM_JOIN_MAX_RETRIES）→ 放弃并递减计数
+    - E-T3a：窗口已销毁 → 直接 return 但递减计数（不垛死排列回调）
+    - E-T3b：异常路径 → 递减计数 + 补刷新胶囊
+    """
+
+    def _make_join_ctx(self, backend_ready: bool = True, destroyed: bool = False):
+        """构造 _join_new_window_for_template 的 win/main_win/tm 上下文"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = destroyed
+        # MagicMock 的 getattr 会自动创建属性 → 显式初始化重试计数
+        win._team_join_retries = 0
+        if backend_ready:
+            win.backend = MagicMock()
+            win.backend.agent_manager = MagicMock()
+        else:
+            win.backend = MagicMock()
+            win.backend.agent_manager = None
+        win._on_agent_changed = MagicMock()
+        win._apply_agent_command_permissions = MagicMock()
+        win._refresh_team_ui = MagicMock()
+        win._start_team_watcher = MagicMock()
+        win._team_agent_name = "build"
+        win._team_name = "dev-team"
+        win._team_run_id = "run-9"
+        win._window_id = "w1"
+        win.window = MagicMock(return_value=win)
+
+        tm = MagicMock()
+        tm.get_template.return_value = {"name": "模板名"}
+        tm.get_team_run_id.return_value = "run-9"
+
+        main_win = MagicMock()
+        main_win._get_team_manager = MagicMock(return_value=tm)
+        main_win._sync_active_windows_to_team_manager = MagicMock()
+        main_win._pending_arrange_count = 2
+        main_win._do_team_window_arrange = MagicMock()
+        # 类常量在 MagicMock 上不自动存在 → 显式补齐（生产代码走类属性）
+        main_win._TEAM_JOIN_MAX_RETRIES = OpenAIChatToolWindow._TEAM_JOIN_MAX_RETRIES
+        main_win._TEAM_JOIN_RETRY_INTERVAL_MS = OpenAIChatToolWindow._TEAM_JOIN_RETRY_INTERVAL_MS
+        return OpenAIChatToolWindow, win, tm, main_win
+
+    def test_join_retries_when_backend_not_ready(self):
+        """D-T1：backend 未就绪 → 安排 50ms 重试，不递减计数；就绪后完成。"""
+        import app.main_widget as mw
+        from unittest.mock import MagicMock, patch
+
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        with patch.object(mw.QTimer, "singleShot") as m_shot:
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        # 未就绪：安排重试（50ms），不递减计数、不排列
+        m_shot.assert_called_once()
+        assert m_shot.call_args.args[0] == 50
+        assert main_win._pending_arrange_count == 2, "未就绪重试不应递减计数"
+        main_win._do_team_window_arrange.assert_not_called()
+        # 就绪后重入 → 正常完成 + 递减计数
+        win.backend.agent_manager = MagicMock()
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1
+        win._refresh_team_ui.assert_called_once_with("build")
+
+    def test_join_retry_exhausted_decrements(self):
+        """D-T1b/E-T3：重试耗尽 → 放弃并递减计数（不垛死排列回调）。"""
+        from unittest.mock import patch
+
+        import app.main_widget as mw
+
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES  # 已达上限
+        with patch.object(mw.QTimer, "singleShot") as m_shot:
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        m_shot.assert_not_called(), "重试耗尽不应再安排重试"
+        assert main_win._pending_arrange_count == 1, "重试耗尽应递减计数"
+        assert main_win._pending_arrange_count > 0  # 未归零不排列
+        main_win._do_team_window_arrange.assert_not_called()
+
+    def test_join_destroyed_decrements_count(self):
+        """E-T3：窗口已销毁 → 提前 return 但递减计数（避免计数垛死）。"""
+        cls, win, tm, main_win = self._make_join_ctx(destroyed=True)
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1, "销毁窗口也应递减计数"
+
+    def test_join_exception_decrements_and_refreshes(self):
+        """E-T3b：异常路径 → 递减计数 + 补刷新胶囊（C4 兜底）。"""
+        import app.main_widget as mw
+        from unittest.mock import MagicMock, patch
+
+        cls, win, tm, main_win = self._make_join_ctx()
+        win._on_agent_changed.side_effect = RuntimeError("boom")
+        fake_tm_win = MagicMock()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        with patch.object(TabManagerWindow, "get_instance", return_value=fake_tm_win):
+            cls._join_new_window_for_template(main_win, win, "build", "w1")
+        assert main_win._pending_arrange_count == 1, "异常也应递减计数"
+        fake_tm_win.refresh_capsule_for_window.assert_called_once_with(win), "异常时补刷新胶囊"
+
+    def test_join_retry_exhausted_starts_watcher(self):
+        """C4a：重试耗尽 → 无条件补 _start_team_watcher（不依赖 backend）+ 计数收口。"""
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES  # 已达上限
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        # watcher 无条件补启动（缺则邮件永不主动触发）
+        win._start_team_watcher.assert_called_once()
+        # 计数收口
+        assert main_win._pending_arrange_count == 1
+        main_win._do_team_window_arrange.assert_not_called()
+
+    def test_join_retry_destroyed_skips_watcher(self):
+        """C4a：重试期间窗口销毁 → 不补 watcher、计数收口、无异常。"""
+        cls, win, tm, main_win = self._make_join_ctx(backend_ready=False, destroyed=True)
+        win._team_join_retries = cls._TEAM_JOIN_MAX_RETRIES
+        cls._join_new_window_for_template(main_win, win, "build", "w1")
+        win._start_team_watcher.assert_not_called(), "销毁窗口不应补 watcher"
+        assert main_win._pending_arrange_count == 1, "销毁窗口计数收口"
+        main_win._do_team_window_arrange.assert_not_called()
 
 
 class TestTeamMergedCard:
