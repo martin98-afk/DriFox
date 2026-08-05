@@ -237,3 +237,90 @@ class TestValueDescTooltip:
         card._exit_value_selection()
         assert not card._value_selection_mode
         assert not card._desc_tooltip_label.isVisible(), "退出值选择后气泡应隐藏"
+
+
+class TestCursorPastParamValue:
+    """_cursor_past_param_value 光标离开判定回归测试（T1 修复）。
+
+    背景：手打路径（textChanged → _sync_detail_params → _auto_switch_to_value_selection）
+    通过 _cursor_past_param_value 判断「是否已离开该参数」，若把行尾空格误判为
+    「已离开」，手打完整值后枚举列表永不弹出（与 Tab 路径不一致）。
+
+    语义（修复后）：
+    - 行尾空格（空格后无实质内容，刚打完值）→ 不算离开 → 应触发值选择
+    - 空格后已有下一参数且光标越过该空格 → 算离开 → 跳过
+    - 光标 < 0（无光标信息）→ 不算离开
+    - 无空格 → 不算离开
+    """
+
+    @staticmethod
+    def _token_end(text: str, param: str = "--model=") -> int:
+        """定位参数名+等号结束位置（与 _auto_switch_to_value_selection 的正则语义一致）"""
+        idx = text.find(param)
+        assert idx >= 0, f"文本中未找到 {param}: {text!r}"
+        return idx + len(param)
+
+    def _assert_leave(self, text: str, cursor_pos: int, expected_leave: bool):
+        """断言光标离开判定结果（True=已离开/应跳过，False=未离开/应触发）"""
+        from app.widgets.cards.floating.command_card import CommandCard
+
+        card = CommandCard()
+        token_end = self._token_end(text)
+        result = card._cursor_past_param_value(text, token_end, cursor_pos)
+        assert result is expected_leave, (
+            f"text={text!r} cursor={cursor_pos} token_end={token_end} → got {result}, expected {expected_leave}"
+        )
+
+    # ── 触发路径：应返回 False（未离开 → 触发值选择）──
+
+    def test_full_value_no_trailing_space(self):
+        """手打完整值无尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt", 21, False)
+
+    def test_full_value_with_trailing_space(self):
+        """手打完整值+行尾空格 → 未离开（触发）——T1 核心回归"""
+        self._assert_leave("/subagent --model=gpt ", 22, False)
+
+    def test_value_prefix_no_trailing_space(self):
+        """手打值前缀无尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=g", 20, False)
+
+    def test_value_prefix_with_trailing_space(self):
+        """手打值前缀+行尾空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=g ", 21, False)
+
+    def test_only_param_name_with_equals(self):
+        """仅参数名+=号 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=", 19, False)
+
+    def test_cursor_mid_value_before_trailing_space(self):
+        """值中间光标（尾空格前）→ 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", 20, False)
+
+    def test_cursor_on_trailing_space(self):
+        """光标停在行尾空格上 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", 21, False)
+
+    # ── 退出/跳过路径：应返回 True（已离开 → 跳过/退出）──
+
+    def test_next_param_cursor_past(self):
+        """值+下一参数且光标在其后 → 已离开（跳过，不弹 model 枚举）"""
+        self._assert_leave("/subagent --model=gpt --quick", 26, True)
+
+    def test_next_param_typing(self):
+        """值+下一参数输入中（光标在下一参数内）→ 已离开（跳过）"""
+        self._assert_leave("/subagent --model=gpt --q", 25, True)
+
+    # ── 边界 ──
+
+    def test_cursor_negative(self):
+        """cursor_pos=-1（无光标信息）→ 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", -1, False)
+
+    def test_no_space_after_value(self):
+        """值后无空格 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt", 30, False)
+
+    def test_empty_trailing_then_cursor_before_space(self):
+        """尾空格存在但光标在空格前 → 未离开（触发）"""
+        self._assert_leave("/subagent --model=gpt ", 21, False)

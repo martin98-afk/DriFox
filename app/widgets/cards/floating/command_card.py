@@ -1820,13 +1820,24 @@ class CommandCard(QWidget):
         """判断光标是否已越过参数值后的第一个空格（即离开此参数）
 
         用于决定是否退出或跳过值选择模式。
-        注意：参数值在末尾（无空格）或紧跟另一参数名时，
+        注意：行尾空格（空格后无实质内容，用户刚打完值）**不算已离开**，
+        否则手打 `/subagent --model=gpt ` 会因末尾空格被误判为离开，
+        导致枚举列表永不弹出（与 Tab 选择路径行为不一致）。
+        只有空格后还有其它内容且光标越过该空格时才判定为离开。
+
+        参数值在末尾（无空格）或紧跟另一参数名时，
         cursor_pos 不会 > space_after，不会误判为"已离开"。
         """
         if cursor_pos < 0:
             return False
         space_after = text.find(" ", token_end)
-        return space_after >= 0 and cursor_pos > space_after
+        if space_after < 0:
+            return False
+        # 行尾空格（空格后只剩空白，用户刚打完值）：不算已离开，
+        # 与 Tab 路径（_execute_param_selection → _switch_to_value_selection）对齐
+        if not text[space_after + 1 :].strip():
+            return False
+        return cursor_pos > space_after
 
     def _extract_value_query(self, text: str, after_token_end: int, cursor_pos: int) -> str:
         """提取 value 参数 = 之后到光标前/下一个空格前的子串作为搜索关键字"""
