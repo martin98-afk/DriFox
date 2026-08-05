@@ -335,9 +335,9 @@ class CardContainer(QWidget):
         """
         # 窗口拖拽过程中跳过容器展开/折叠，防止布局级联干扰
         try:
-            from app.tool_popup import ToolPopupDialog
+            from app.utils.window_drag_state import any_window_dragging
 
-            if ToolPopupDialog._any_window_dragging:
+            if any_window_dragging:
                 return
         except ImportError:
             pass

@@ -2444,6 +2444,9 @@ class CodeWebViewer(QWebEngineView):
         self._render_seq: int = 0
         self._render_inflight: bool = False
         self._render_pending: Optional[tuple] = None
+        # [V1] 可见性门控：隐藏 tab 期间被门控跳过的渲染请求标记，
+        # 恢复可见时（showEvent）据此补渲，保证流式/工具结果最终完整性。
+        self._render_deferred: bool = False
         # [B1] 差量渲染状态：
         # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
         # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
@@ -2837,6 +2840,23 @@ class CodeWebViewer(QWebEngineView):
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
 
+    def showEvent(self, event):
+        """[V1] 可见性恢复：隐藏 tab 期间被门控的渲染请求在此补渲。
+
+        tab 切回时 Qt 会向子 widget 传播 Show 事件（QStackedWidget 隐藏页
+        isVisible()=False，切回后重新可见触发本事件）。若隐藏期间积压了
+        渲染请求（_render_deferred），恢复可见后按 _schedule_render 现有
+        调度机制补渲，保证流式输出/工具结果的最终完整性。
+        """
+        super().showEvent(event)
+        if getattr(self, "_render_deferred", False):
+            if self._is_js_ready:
+                self._render_deferred = False
+                self._schedule_render(immediate=True)
+            # 🛡️ F2：JS 未就绪时保留 deferred（不清标志）——先清标志再调
+            # _schedule_render 会因 JS 未就绪直接 return，积压请求被清但永不
+            # 补渲；保留后由 _on_js_ready 统一补渲（可以延迟，不能丢失）。
+
     def _on_js_ready(self):
         self._is_js_ready = True
         # 同步简洁模式标志到 JS
@@ -2867,7 +2887,11 @@ class CodeWebViewer(QWebEngineView):
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
         # 仅检查 _markdown_text 会遗漏这些内容，导致卡片永久空白。
         # 当 _lazy_markdown_cb 存在时也触发渲染，_perform_update 会消费它。
-        if self._markdown_text or self._lazy_markdown_cb:
+        # 🛡️ F2：_render_deferred 积压（JS 未就绪期间 / 隐藏期间门控的渲染请求）
+        # 在 JS 就绪时统一补渲——保证 viewer 创建后未显示 + JS 未加载期间的
+        # 积压渲染在恢复后必然补上（可以延迟，不能丢失）。
+        if self._render_deferred or self._markdown_text or self._lazy_markdown_cb:
+            self._render_deferred = False
             self._schedule_render(immediate=True)
         # [B4-强回收] 记录 renderer 进程 PID（强回收层 kill 离屏进程用）
         try:
@@ -5260,6 +5284,17 @@ class CodeWebViewer(QWebEngineView):
 
     def _schedule_render(self, immediate: bool = False):
         if not self._is_js_ready:
+            # 🛡️ F2：JS 未就绪时的渲染请求标记 deferred（不直接丢弃），
+            # _on_js_ready 时统一补渲。否则 viewer 创建后未显示 + JS 未加载
+            # 完成 + 期间渲染请求（隐藏 tab 积压）→ 请求被清但永不补渲，
+            # 工具区/消息区永久空白且无自愈路径。
+            self._render_deferred = True
+            return
+        # [V1] 可见性门控：隐藏 tab 不启动渲染定时器、不立即渲染，
+        # 仅标记 deferred，恢复可见时（showEvent）按需补渲。
+        # 流式数据由 worker 驱动写入 _markdown_text，门控只跳过 UI 渲染帧，不丢数据。
+        if not self.isVisible():
+            self._render_deferred = True
             return
         if immediate:
             if self._render_timer.isActive():
@@ -5355,6 +5390,13 @@ class CodeWebViewer(QWebEngineView):
     def _perform_update(self):
         try:
             if not self.page():
+                return
+
+            # [V1] 可见性门控（双保险）：直接调用路径（如工具结果到达时
+            # MessageCard 直接调 viewer._perform_update）绕过 _schedule_render，
+            # 隐藏 tab 时不执行 setHtml/runJavaScript，标记 deferred 待恢复补渲。
+            if not self.isVisible():
+                self._render_deferred = True
                 return
 
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
@@ -7405,6 +7447,10 @@ class MessageCard(SimpleCardWidget):
         if self._elapsed_start_time is None:
             self._elapsed_timer.stop()
             return
+        # [V1] 可见性门控：隐藏 tab 跳过 label setText（空转），
+        # elapsed 基于 _elapsed_start_time 绝对时间戳计算，恢复后数值依然准确。
+        if not self.isVisible():
+            return
         elapsed = time.time() - self._elapsed_start_time
         self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
 
@@ -7684,13 +7730,18 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _update_anim(self):
+        # [V1] 可见性门控：隐藏 tab 不执行动画帧（避免隐藏页每 50ms 空转 update()）。
+        # 相位 _pulse_phase 是模 2π 的循环累积，暂停后从原相位继续，无视觉跳变；
+        # 恢复可见后下一拍定时器自动续跑，无需显式重启。
+        if not self.isVisible():
+            return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
         # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
         # 松手后 _any_window_dragging 复位，下一拍定时器自然恢复动画。
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         self._pulse_phase = (self._pulse_phase + 0.035) % (math.pi * 2)
         # 重试状态栏降频更新（每200ms一次，避免和paintEvent双重刷新导致卡顿）

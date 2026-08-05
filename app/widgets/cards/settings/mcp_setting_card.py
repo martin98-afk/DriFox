@@ -969,9 +969,9 @@ class MCPListSettingCard(ExpandSettingCard):
     def _refresh_status_dots(self):
         """刷新所有行的连接状态指示灯"""
         # 拖拽守卫：拖拽期间跳过本轮刷新，避免主线程 UI 更新加剧掉帧
-        from app.tool_popup import ToolPopupDialog
+        from app.utils.window_drag_state import any_window_dragging
 
-        if ToolPopupDialog._any_window_dragging:
+        if any_window_dragging:
             return
         try:
             mgr = self._get_mcp_manager()

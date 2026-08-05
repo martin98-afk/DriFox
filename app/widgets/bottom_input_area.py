@@ -1,8 +1,11 @@
 # 大模型输入框
+import logging
 import math
 import os
 import random
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -38,6 +41,8 @@ from app.widgets.stop_button import SendStopButton
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
+
+logger = logging.getLogger(__name__)
 
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [
@@ -201,6 +206,14 @@ class SendableTextEdit(TextEdit):
         super().__init__(parent)
         self._initializing = True
         self._glow_effect = None
+
+        # 🛡️ R1：粘贴图片异步保存的进行中集合（threading.Event，发送前等待就绪）
+        self._pending_image_saves: list = []
+        self._pending_saves_lock = threading.Lock()
+        # 防重入：嵌套 QEventLoop 等待期间用户再次触发发送（递归进入 wait）
+        self._waiting_image_saves: bool = False
+        # 并发信号量：限制 PNG 编码线程数（大图 64MB 驻留 × N 线程，R1-R2）
+        self._paste_save_semaphore = threading.Semaphore(2)
 
         self._setup_glow_effect()
         self._apply_input_style()
@@ -1133,9 +1146,9 @@ class SendableTextEdit(TextEdit):
 
         # 窗口拖拽过程中跳过高度调整，防止布局重算干扰窗口管理
         try:
-            from app.tool_popup import ToolPopupDialog
+            from app.utils.window_drag_state import any_window_dragging
 
-            if ToolPopupDialog._any_window_dragging:
+            if any_window_dragging:
                 return
         except ImportError:
             pass
@@ -1183,6 +1196,11 @@ class SendableTextEdit(TextEdit):
             # 发送模式 → 发送消息
             if not self.toPlainText().strip():
                 return
+            # 🛡️ R1：发送前等待粘贴图片异步保存完成（附件路径就绪）；
+            # 超时未就绪 → 阻止发送并提示（避免正常环境静默丢图）
+            if not self._wait_pending_image_saves():
+                self._warn_image_save_pending()
+                return
             self.toggle_send_button(False)
             self.sendMessageRequested.emit()
 
@@ -1195,6 +1213,11 @@ class SendableTextEdit(TextEdit):
         - 非命令 + 流式中 → 先停止再发送新消息
         """
         if not self.toPlainText().strip():
+            return
+        # 🛡️ R1：发送前等待粘贴图片异步保存完成（附件路径就绪）；
+        # 超时未就绪 → 阻止发送并提示（避免正常环境静默丢图）
+        if not self._wait_pending_image_saves():
+            self._warn_image_save_pending()
             return
         # 如果当前在发送模式（非流式），切换到停止模式表示正在请求
         if not self.send_btn.is_stop_mode():
@@ -1382,7 +1405,10 @@ class SendableTextEdit(TextEdit):
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     name = f"paste_{uuid.uuid4().hex[:8]}.png"
                     path = str(tmp_dir / name)
-                    img.save(path)
+                    # 🛡️ R1：PNG 编码+写盘移出主线程（大截图同步 save 100-500ms
+                    # 冻结 UI）。UI 立即返回：附件芯片 + [[basename]] 占位符照常
+                    # 插入；发送前 _wait_pending_image_saves 保证文件就绪。
+                    self._save_paste_image_async(img, path)
                     file_paths.append(path)
 
             if file_paths:
@@ -1402,6 +1428,89 @@ class SendableTextEdit(TextEdit):
                 super().insertFromMimeData(source)
             except Exception:
                 pass
+
+    def _save_paste_image_async(self, img: QImage, path: str) -> None:
+        """粘贴图片后台保存（PNG 编码+写盘移出主线程，避免大图粘贴冻结 UI）
+
+        - QImage 隐式共享（implicit sharing）跨线程安全：主线程不再使用 img
+        - 保存失败静默降级并记日志，与原先同步 img.save 失败行为一致
+          （原代码不检查 save 返回值，失败时路径仍加入附件、文件缺失）
+        - 保存完成后 set() 对应 Event，供发送前 _wait_pending_image_saves 等待
+        """
+        ev = threading.Event()
+        with self._pending_saves_lock:
+            self._pending_image_saves.append(ev)
+
+        def _do_save():
+            try:
+                # 并发信号量：限制 PNG 编码线程数（大图内存驻留 × 线程数上限）
+                with self._paste_save_semaphore:
+                    img.save(path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[InputArea] 粘贴图片保存失败: {path}: {e}")
+            finally:
+                ev.set()
+                with self._pending_saves_lock:
+                    try:
+                        self._pending_image_saves.remove(ev)
+                    except ValueError:
+                        pass
+
+        threading.Thread(target=_do_save, daemon=True, name="drifox-paste-image-save").start()
+
+    def _wait_pending_image_saves(self, timeout: float = 5.0) -> bool:
+        """发送前等待粘贴图片保存完成（保证附件路径就绪）
+
+        QEventLoop + QTimer 驱动等待：等待期间 UI 事件循环正常运转（不冻结），
+        用户仍可交互。正常情况（保存早已完成）立即返回 True；极端情况
+        （粘贴后立即发送）最多等待 timeout 秒。
+
+        Returns:
+            True = 全部就绪；False = 超时（附件可能未就绪，调用方应阻止发送）。
+
+        🛡️ 防重入：嵌套 QEventLoop 中用户再次触发发送会递归进入本方法，
+        `_waiting_image_saves` 标志阻止递归（外层 wait 已覆盖同一批附件）。
+        """
+        if getattr(self, "_waiting_image_saves", False):
+            return True
+        with self._pending_saves_lock:
+            pending = [ev for ev in self._pending_image_saves if not ev.is_set()]
+        if not pending:
+            return True
+
+        self._waiting_image_saves = True
+        try:
+            from PyQt5.QtCore import QEventLoop, QTimer as _QTimer
+
+            deadline = time.monotonic() + timeout
+            while True:
+                with self._pending_saves_lock:
+                    pending = [ev for ev in self._pending_image_saves if not ev.is_set()]
+                if not pending:
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                loop = QEventLoop()
+                _QTimer.singleShot(int(min(0.05, remaining) * 1000), loop.quit)
+                loop.exec_()
+        finally:
+            self._waiting_image_saves = False
+
+    def _warn_image_save_pending(self) -> None:
+        """粘贴图片保存超时未就绪 → 阻止发送并提示（R1-C2：避免正常环境静默丢图）"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                "图片仍在保存",
+                "粘贴的大图正在后台保存，请稍候再发送",
+                parent=self.window() if self.window() is not None else self,
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[InputArea] 图片保存等待超时（提示失败，静默跳过发送）")
 
     def _setup_glow_effect(self):
         """设置输入卡片发光效果 — 挂载到父卡片而非输入框自身"""
