@@ -15099,6 +15099,14 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_subagents_param_description()
             return
 
+        # ---- --create=<描述>：无 Python handler → 抛 CommandNeedDegrade 降级到
+        # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
+        # 匹配 `<!-- section:create -->` 段，AI 自动生成子智能体 md 文件）。
+        if args.startswith("--create"):
+            from app.core.command_manager import CommandNeedDegrade
+
+            raise CommandNeedDegrade("subagents", args)
+
         # ---- 无参数：显示紧凑卡片 ----
         sub_agent_mgr = self.backend.sub_agent_manager
         running_tasks = sub_agent_mgr._running_tasks
