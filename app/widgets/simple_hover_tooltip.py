@@ -348,7 +348,11 @@ class _HoverTooltipFilter(QObject):
             if tip:
                 self._text = tip
                 self._timer.start()
-        elif t in (event.Leave, event.HoverLeave, event.Hide):
+        elif t in (event.Leave, event.HoverLeave, event.Hide, event.HideToParent):
+            # 🛡️ B2 修复：目标随父容器隐藏时 Qt 发 HideToParent（27）而非 Hide（18）。
+            # 团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
+            # 隐藏，旧分支只捕 Hide/Leave/HoverLeave → tooltip 不隐藏 → 屏幕残留
+            # "飘着的 tooltip"。补上 HideToParent 使容器隐藏即收掉 tooltip。
             self._timer.stop()
             self._hide()
         return False
