@@ -308,10 +308,13 @@ class TeamManager:
             data["members"][window_id] = member
             # 🛡️ F3（T2-P3 第 1 层）：顶层 team_members 快照——手动 /team --join
             # 的成员也持久化到 team.json 顶层（不被 _cleanup_stale_members 清理），
-            # 恢复会话时即使成员无历史会话也能找回。dict: agent_name → 来源标记。
+            # 恢复会话时即使成员无历史会话也能找回。
+            # T3：key 从 agent_name 改为 window_id——同角色多成员（如两个 build）
+            # 各占一条记录，不再互相覆盖；记录内显式存 agent_name 字段。
             data.setdefault("team_members", {})
-            existing = data["team_members"].get(agent_name) or {}
-            data["team_members"][agent_name] = {
+            existing = data["team_members"].get(window_id) or {}
+            data["team_members"][window_id] = {
+                "agent_name": agent_name,
                 "source": existing.get("source", "manual"),
                 "joined_at": existing.get("joined_at", time.time()),
             }
@@ -492,32 +495,49 @@ class TeamManager:
                     results.append(dict(member))
         return results
 
-    def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM) -> List[str]:
+    def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
         """获取团队成员快照（去重有序）：模板 agents ∪ 手动 join 快照 team_members。
 
         🛡️ F3（T2-P3 第 1 层）：手动 /team --join 的成员记录在 team.json 顶层
         team_members 键（不受 _cleanup_stale_members 清理、不依赖当前活跃窗口），
         恢复会话时用本方法找回"无会话记录但确实加入过"的成员。
 
+        T3：返回成员记录列表（含 window_id），支持同角色多成员（两个 build
+        各占一条记录）。team_members 兼容双形态 key：
+        - 新格式：key = window_id，value 含 agent_name 字段
+        - 老格式：key = agent_name，value 无 agent_name 字段（T3 前落库数据）
+
         Returns:
-            agent_name 列表（模板 agents 在前，手动快照补充，去重）
+            成员记录列表 [{"agent_name": ..., "window_id": ...}]（模板 agents 在前，
+            手动快照补充，按 (agent_name, window_id) 去重）
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
-            names: List[str] = []
-            # 1. 模板 agents（模板定义的角色优先）
+            records: List[Dict[str, Any]] = []
+            seen: set = set()
+
+            def _add(agent_name: str, window_id: str = ""):
+                agent_name = str(agent_name or "").strip()
+                window_id = str(window_id or "").strip()
+                key = (agent_name, window_id)
+                if agent_name and key not in seen:
+                    seen.add(key)
+                    records.append({"agent_name": agent_name, "window_id": window_id})
+
+            # 1. 模板 agents（模板定义的角色优先，无 window_id）
             template = data.get("template") or {}
             for item in template.get("agents") or []:
                 if isinstance(item, dict) and item.get("agent_name"):
-                    name = str(item["agent_name"]).strip()
-                    if name and name not in names:
-                        names.append(name)
-            # 2. 手动 join 快照（补充模板之外的成员）
-            for name in data.get("team_members") or {}:
-                name = str(name).strip()
-                if name and name not in names:
-                    names.append(name)
-            return names
+                    _add(item["agent_name"])
+            # 2. 手动 join 快照（补充模板之外的成员；兼容新老 key 形态）
+            for key, value in (data.get("team_members") or {}).items():
+                if isinstance(value, dict) and value.get("agent_name"):
+                    # 新格式：key = window_id，value 含 agent_name
+                    _add(value["agent_name"], key)
+                else:
+                    # 老格式：key = agent_name，value 无 agent_name 字段
+                    _add(key)
+            return records
 
     # ── 团队模板上下文 ────────────────────────────────
 
@@ -744,8 +764,7 @@ class TeamManager:
                 self._save_team_data(team_name)
             except OSError as e:
                 logger.warning(
-                    f"[TeamManager] 成员 {window_id} runtime 状态落盘失败"
-                    f" (status={status}, team={team_name}): {e}"
+                    f"[TeamManager] 成员 {window_id} runtime 状态落盘失败 (status={status}, team={team_name}): {e}"
                 )
 
     def get_member_runtime_status(self, window_id: str, team_name: str = DEFAULT_TEAM) -> str:

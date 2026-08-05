@@ -500,6 +500,66 @@ def test_merge_members_dedup_by_session_id(hm):
     assert "s2" in member_ids and "s3" in member_ids, "build 最新 + plan 各保留一条"
 
 
+def test_merge_team_duplicate_role_members_with_snapshot(hm):
+    """T3：含 window_id 快照的同角色多成员 → members 各保留一条，member_count 含 wid 维度。
+
+    场景：build 两个会话（不同 wid）+ plan 会话；team_members 快照为 T3 新格式
+    （含 window_id 的记录列表）。合并条目 members 应含两条 build（一条带会话、
+    一条无会话）与一条 plan，member_count == 3（同角色异 wid 各算 1）。
+    """
+    import json as _json
+
+    snap = _json.dumps(
+        [
+            {"agent_name": "build", "window_id": "win_02"},
+            {"agent_name": "build", "window_id": "win_03"},
+            {"agent_name": "plan", "window_id": "win_01"},
+        ],
+        ensure_ascii=False,
+    )
+
+    def _full_with_snap(sid, ts, agent, snap_raw):
+        d = _full_session(sid, "t", f"msg {sid}", ts, "run-1", "dev", agent)
+        d["team_members"] = snap_raw
+        return d
+
+    def _light_with_snap(sid, ts, agent, snap_raw):
+        d = _light(sid, "t", ts, "run-1", "dev", agent)
+        d["team_members"] = snap_raw
+        return d
+
+    _seed(
+        hm,
+        [
+            _full_with_snap("s1", "2026-01-01 00:00:01", "build", snap),
+            _full_with_snap("s2", "2026-01-01 00:00:02", "build", snap),
+            _full_with_snap("s3", "2026-01-01 00:00:03", "plan", snap),
+        ],
+        [
+            _light_with_snap("s1", "2026-01-01 00:00:01", "build", snap),
+            _light_with_snap("s2", "2026-01-01 00:00:02", "build", snap),
+            _light_with_snap("s3", "2026-01-01 00:00:03", "plan", snap),
+        ],
+    )
+
+    rows = hm.get_history_list(merge_team=True)
+    merged = next(r for r in rows if r.get("team_merged"))
+    # members 三条：build×2（各含 window_id）+ plan×1
+    build_members = [m for m in merged["members"] if m.get("agent_name") == "build"]
+    assert len(build_members) == 2, f"同角色多成员应各保留一条，实际 {build_members}"
+    assert sorted(m.get("window_id") for m in build_members) == ["win_02", "win_03"], (
+        "build 两条记录应保留各自 window_id"
+    )
+    # 一条 build 带会话（最新 s2），另一条为快照补充（无会话）
+    assert any(m.get("session_id") == "s2" for m in build_members), "build 应保留最新会话 s2"
+    assert any(not m.get("session_id") for m in build_members), "快照补出的 build 无会话记录"
+    plan_members = [m for m in merged["members"] if m.get("agent_name") == "plan"]
+    assert len(plan_members) == 1
+    assert plan_members[0].get("window_id") == "win_01", "plan 记录应保留 window_id"
+    assert merged["member_count"] == 3, "member_count 应含同角色多成员（build×2 + plan）"
+    assert len(merged["members"]) == merged["member_count"], "members 应与 member_count 对齐"
+
+
 def test_merge_team_splits_by_project(hm):
     """P3：同 run_id 跨 project 的会话 → 按 (run_id, project) 拆分为独立合并条目。
 

@@ -146,12 +146,16 @@ class SessionRepository:
         # 增量内容指纹：消息流式过程中只追加/修改最后一条消息，
         # 用 (len, last_msg_hash) 二元组替代 hash(str(全量)) 避免 O(n) 字符串化。
         # 对于"修改历史消息"的非常规场景（如 compaction），后续 serialize 会覆盖写入。
+        # 🛡️ R5（T3）：元组追加 team_members 指纹——消息未变但快照变了
+        # （如 join 新成员后 _get_team_members_snapshot_json 内容更新）时
+        # hash 不同不跳过，保证新快照落库（否则恢复仍丢新成员）。
         messages = session.get("messages", [])
         if messages:
             last_msg = messages[-1]
             content_key = (len(messages), hash(str(last_msg)))
         else:
             content_key = (0, 0)
+        content_key = content_key + (hash(session.get("team_members") or ""),)
         # 持锁读 cache：判断是否可跳过序列化+写盘。
         # 锁粒度最小（仅 cache 读 / 写），不阻塞后续长时间的 serialize+SQL。
         with self._cache_lock:

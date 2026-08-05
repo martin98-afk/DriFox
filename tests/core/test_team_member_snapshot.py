@@ -54,15 +54,30 @@ class TestTeamMemberSnapshot:
     """第 1 层：join_team 写顶层快照 + 并集读取"""
 
     def test_join_writes_team_members_snapshot(self, tm):
-        """手动 join 后 team.json 顶层 team_members 记录 agent_name。"""
+        """手动 join 后 team.json 顶层 team_members 以 window_id 为 key 记录成员。
+
+        T3：key 从 agent_name 改为 window_id——同角色多成员（两个 build 异 wid）
+        各占一条记录不互相覆盖；agent_name 显式存于记录内。
+        """
         tm.join_team("win_01", "perf-tester")
         data = tm._get_team_data("default")
         assert "team_members" in data, "join 应写顶层 team_members"
-        assert "perf-tester" in data["team_members"], "快照应含手动加入的成员"
-        assert data["team_members"]["perf-tester"]["source"] == "manual"
+        assert "win_01" in data["team_members"], "快照 key 应为 window_id（T3）"
+        assert data["team_members"]["win_01"]["agent_name"] == "perf-tester", "快照记录应含 agent_name"
+        assert data["team_members"]["win_01"]["source"] == "manual"
+
+    def test_join_same_role_different_window_keeps_both(self, tm):
+        """T3：同角色多成员（两个 build 异 window_id）快照各保留一条，不覆盖。"""
+        tm.join_team("win_02", "build")
+        tm.join_team("win_03", "build")
+        data = tm._get_team_data("default")
+        snapshot = data["team_members"]
+        assert "win_02" in snapshot and "win_03" in snapshot, "同角色异 wid 应各占一条快照"
+        assert snapshot["win_02"]["agent_name"] == "build"
+        assert snapshot["win_03"]["agent_name"] == "build"
 
     def test_snapshot_union_template_and_manual(self, tm):
-        """get_team_member_snapshot = 模板 agents ∪ 手动快照（去重）。"""
+        """get_team_member_snapshot = 模板 agents ∪ 手动快照（按 (agent,wid) 去重）。"""
         tm.set_template(
             {
                 "name": "dev",
@@ -72,11 +87,16 @@ class TestTeamMemberSnapshot:
                 ],
             }
         )
-        tm.join_team("win_01", "build")  # 模板已有 build → 不重复
+        tm.join_team("win_01", "build")  # 模板已有 build → 不去重（异 wid 保留）
         tm.join_team("win_02", "perf-tester")  # 手动补充
 
-        names = tm.get_team_member_snapshot()
-        assert names == ["leader", "build", "perf-tester"], f"并集去重，实际 {names}"
+        records = tm.get_team_member_snapshot()
+        # 模板 agents 在前（无 wid），手动快照补充（带 wid）
+        assert [r["agent_name"] for r in records] == ["leader", "build", "build", "perf-tester"], (
+            f"模板∪快照（同角色异 wid 各保留），实际 {records}"
+        )
+        by_wid = {r["window_id"]: r["agent_name"] for r in records if r.get("window_id")}
+        assert by_wid == {"win_01": "build", "win_02": "perf-tester"}, "手动快照记录应带 window_id"
 
     def test_cleanup_stale_members_preserves_team_members(self, tm):
         """_cleanup_stale_members 清理失效成员时保留顶层 team_members。"""
@@ -86,7 +106,8 @@ class TestTeamMemberSnapshot:
         tm.set_active_window_ids({"win_02"})
         data = tm._get_team_data("default")
         assert "win_01" not in data["members"], "失效成员应从 members 移除"
-        assert "perf-tester" in data["team_members"], "顶层快照不被清理（F3 关键）"
+        assert "win_01" in data["team_members"], "顶层快照不被清理（F3 关键）"
+        assert "win_02" in data["team_members"], "活跃成员快照保留"
 
 
 class TestTeamMembersColumnRoundtrip:
@@ -126,6 +147,50 @@ class TestTeamMembersColumnRoundtrip:
         assert loaded["team_members"] == json.dumps(["leader", "build", "perf-tester"], ensure_ascii=False), (
             "team_members 应往返一致"
         )
+
+    def test_team_members_change_triggers_resave(self, store):
+        """R5（T3）：消息未变但 team_members 快照变化 → 内容指纹不同不跳过，新快照落库。
+
+        场景：join 新成员后旧会话快照更新（team_members 内容变化但 messages 未变）。
+        若内容指纹忽略 team_members 会跳过保存 → 恢复仍丢新成员。此处验证
+        _content_hash_cache 指纹含 team_members（session_repository），
+        第二次 save 必须落库新快照。
+        """
+        session = {
+            "session_id": "s-r5",
+            "title": "团队会话",
+            "messages": [{"role": "user", "content": "hi", "timestamp": "2026-01-01 00:00:01"}],
+            "project": "默认项目",
+            "team_run_id": "run-1",
+            "team_name": "dev",
+            "agent_name": "build",
+            "team_members": json.dumps(["leader", "build"], ensure_ascii=False),
+            "message_count": 1,
+            "system_prompt": "",
+            "compaction_state": {},
+            "compaction_cache": {},
+            "user_edited_title": False,
+            "worktree_path": "",
+            "preview": "hi",
+            "context_usage": 0,
+        }
+        # 第一次保存：内容指纹缓存建立（消息 + team_members 指纹）
+        assert store.save_session(session) is True
+        # 消息未变但快照变化（join 新成员后 _get_team_members_snapshot_json 更新）
+        old_snap = session["team_members"]
+        session["team_members"] = json.dumps(["leader", "build", "perf-tester"], ensure_ascii=False)
+        assert store.save_session(session) is True
+        loaded = store.get_session("s-r5")
+        assert loaded["team_members"] == json.dumps(["leader", "build", "perf-tester"], ensure_ascii=False), (
+            "R5：快照变化必须落库（内容指纹含 team_members）"
+        )
+        # 反向：消息与快照均未变（再次同参保存）→ 指纹命中跳过（幂等不覆盖）
+        assert store.save_session(session) is True
+        loaded2 = store.get_session("s-r5")
+        assert loaded2["team_members"] == json.dumps(["leader", "build", "perf-tester"], ensure_ascii=False), (
+            "内容未变跳过保存不应影响已落库数据"
+        )
+        assert old_snap != session["team_members"], "前置：快照确实发生了变化"
 
     def test_lightweight_includes_team_members(self, store):
         """轻量列表透传 team_members（恢复路径数据源）。"""
@@ -172,9 +237,7 @@ class TestTeamMembersColumnRoundtrip:
             "last_api_message_count INTEGER DEFAULT 0, "
             "team_run_id TEXT DEFAULT '', team_name TEXT DEFAULT '', agent_name TEXT DEFAULT '')"
         )
-        conn.execute(
-            "INSERT INTO sessions (session_id, title) VALUES ('old1', '老会话')"
-        )
+        conn.execute("INSERT INTO sessions (session_id, title) VALUES ('old1', '老会话')")
         conn.commit()
         conn.close()
 
@@ -259,17 +322,33 @@ class TestMergeTeamMembersSnapshot:
         hm._history_loaded = True
         hm._history_sessions = [
             {
-                "session_id": "s-l", "saved_at": "2026-01-01 00:00:01", "title": "leader 会话",
-                "project": "默认项目", "last_time": "2026-01-01 00:00:01", "message_count": 1,
-                "preview": "", "user_edited_title": False, "worktree_path": "",
-                "team_run_id": "run-1", "team_name": "dev", "agent_name": "leader",
+                "session_id": "s-l",
+                "saved_at": "2026-01-01 00:00:01",
+                "title": "leader 会话",
+                "project": "默认项目",
+                "last_time": "2026-01-01 00:00:01",
+                "message_count": 1,
+                "preview": "",
+                "user_edited_title": False,
+                "worktree_path": "",
+                "team_run_id": "run-1",
+                "team_name": "dev",
+                "agent_name": "leader",
                 "team_members": snap,
             },
             {
-                "session_id": "s-b", "saved_at": "2026-01-01 00:00:02", "title": "build 会话",
-                "project": "默认项目", "last_time": "2026-01-01 00:00:02", "message_count": 1,
-                "preview": "", "user_edited_title": False, "worktree_path": "",
-                "team_run_id": "run-1", "team_name": "dev", "agent_name": "build",
+                "session_id": "s-b",
+                "saved_at": "2026-01-01 00:00:02",
+                "title": "build 会话",
+                "project": "默认项目",
+                "last_time": "2026-01-01 00:00:02",
+                "message_count": 1,
+                "preview": "",
+                "user_edited_title": False,
+                "worktree_path": "",
+                "team_run_id": "run-1",
+                "team_name": "dev",
+                "agent_name": "build",
                 "team_members": snap,
             },
         ]
@@ -321,10 +400,18 @@ class TestMergeTeamMembersSnapshot:
         hm._history_loaded = True
         hm._history_sessions = [
             {
-                "session_id": "s-l", "saved_at": "2026-01-01 00:00:01", "title": "leader 会话",
-                "project": "默认项目", "last_time": "2026-01-01 00:00:01", "message_count": 1,
-                "preview": "", "user_edited_title": False, "worktree_path": "",
-                "team_run_id": "run-1", "team_name": "dev", "agent_name": "leader",
+                "session_id": "s-l",
+                "saved_at": "2026-01-01 00:00:01",
+                "title": "leader 会话",
+                "project": "默认项目",
+                "last_time": "2026-01-01 00:00:01",
+                "message_count": 1,
+                "preview": "",
+                "user_edited_title": False,
+                "worktree_path": "",
+                "team_run_id": "run-1",
+                "team_name": "dev",
+                "agent_name": "leader",
                 "team_members": snap,
             },
         ]
@@ -342,7 +429,11 @@ class TestRestoreMemberSetUnion:
     """第 3 层：恢复成员集合 = 会话 ∪ 快照"""
 
     def test_restore_member_set_union_snapshot_and_sessions(self, store):
-        """快照含 perf-tester（无会话记录）→ 恢复时也建窗口。"""
+        """快照含 perf-tester（无会话记录）→ 恢复时也建窗口。
+
+        T3 升级：复刻段改用新解析（parse_team_members_snapshot）+ 窗口计数
+        算法（老格式纯名字快照按 agent 计 1 次，语义与修复前一致）。
+        """
         from app.main_widget import OpenAIChatToolWindow
 
         hm = self._hm(store)
@@ -370,7 +461,10 @@ class TestRestoreMemberSetUnion:
         member_sessions = hm.get_team_sessions_by_run_id("run-1")
         assert len(member_sessions) == 1
 
-        # 复刻 _on_team_restore_requested 第 4 步：by_agent 构建 + 快照并集
+        # 复刻 _on_team_restore_requested 第 4 步（T3 升级）：by_agent 构建 +
+        # parse_team_members_snapshot + 窗口计数（无 wid 老格式计 1 次）
+        from app.utils.history_manager import parse_team_members_snapshot
+
         by_agent = {}
         for session in member_sessions:
             agent_name = (session.get("agent_name") or "").strip()
@@ -379,25 +473,96 @@ class TestRestoreMemberSetUnion:
             cur = by_agent.get(agent_name)
             if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
                 by_agent[agent_name] = session
-        snapshot_names = []
+        snapshot_members = []
         for session in member_sessions:
-            snap_raw = (session.get("team_members") or "").strip()
-            if not snap_raw:
-                continue
-            parsed = json.loads(snap_raw)
-            if isinstance(parsed, list):
-                for n in parsed:
-                    n = str(n).strip()
-                    if n and n not in snapshot_names:
-                        snapshot_names.append(n)
-        for n in snapshot_names:
-            if n not in by_agent:
-                by_agent[n] = {}  # 空会话窗口
+            for rec in parse_team_members_snapshot((session.get("team_members") or "").strip()):
+                if rec not in snapshot_members:
+                    snapshot_members.append(rec)
+        snap_counts = {}
+        for rec in snapshot_members:
+            if rec.get("window_id"):
+                snap_counts[rec["agent_name"]] = snap_counts.get(rec["agent_name"], 0) + 1
+            else:
+                snap_counts.setdefault(rec["agent_name"], 1)
+        window_counts = {agent: max(1, snap_counts.get(agent, 1)) for agent in by_agent}
+        for agent, cnt in snap_counts.items():
+            window_counts.setdefault(agent, max(1, cnt))
 
-        assert set(by_agent.keys()) == {"leader", "perf-tester"}, (
-            f"恢复成员集合 = 会话 ∪ 快照，实际 {set(by_agent.keys())}"
+        assert set(window_counts.keys()) == {"leader", "perf-tester"}, (
+            f"恢复成员集合 = 会话 ∪ 快照，实际 {set(window_counts.keys())}"
         )
-        assert by_agent["perf-tester"] == {}, "快照成员无会话记录 → 空窗口（与空消息 agent 语义一致）"
+        assert window_counts["perf-tester"] == 1, "快照成员无会话记录 → 补 1 个空窗口（语义一致）"
+
+    def test_restore_member_set_union_with_window_id(self, store):
+        """T3：快照含 window_id 时同角色多成员各建独立窗口，window_id 透传。
+
+        场景：build@win_02 有会话；快照含 build×2（win_02/win_03）+ plan。
+        → build 窗口数 = max(by_agent 1, 快照 2) = 2；plan = 1（共 3 窗口）。
+        """
+        hm = self._hm(store)
+        snap = json.dumps(
+            [
+                {"agent_name": "build", "window_id": "win_02"},
+                {"agent_name": "build", "window_id": "win_03"},
+                {"agent_name": "plan", "window_id": "win_01"},
+            ],
+            ensure_ascii=False,
+        )
+        store.save_session(
+            {
+                "session_id": "s-b",
+                "title": "build 会话",
+                "messages": [{"role": "user", "content": "任务", "timestamp": "2026-01-01 00:00:01"}],
+                "project": "默认项目",
+                "team_run_id": "run-1",
+                "team_name": "dev",
+                "agent_name": "build",
+                "team_members": snap,
+                "message_count": 1,
+                "system_prompt": "",
+                "compaction_state": {},
+                "compaction_cache": {},
+                "user_edited_title": False,
+                "worktree_path": "",
+                "preview": "",
+                "context_usage": 0,
+            }
+        )
+        member_sessions = hm.get_team_sessions_by_run_id("run-1")
+        assert len(member_sessions) == 1
+
+        # 复刻 _on_team_restore_requested 第 4 步（T3）：新解析 + 窗口计数
+        from app.utils.history_manager import parse_team_members_snapshot
+
+        by_agent = {}
+        for session in member_sessions:
+            agent_name = (session.get("agent_name") or "").strip()
+            if not agent_name:
+                continue
+            cur = by_agent.get(agent_name)
+            if cur is None or (session.get("last_time") or "") > (cur.get("last_time") or ""):
+                by_agent[agent_name] = session
+        snapshot_members = []
+        for session in member_sessions:
+            for rec in parse_team_members_snapshot((session.get("team_members") or "").strip()):
+                if rec not in snapshot_members:
+                    snapshot_members.append(rec)
+        # window_id 透传断言：快照记录保留 wid 字段
+        wid_records = [r for r in snapshot_members if r.get("window_id")]
+        assert len(wid_records) == 3, "含 wid 快照记录应透传 window_id"
+        assert sorted(r["window_id"] for r in wid_records) == ["win_01", "win_02", "win_03"]
+        snap_counts = {}
+        for rec in snapshot_members:
+            if rec.get("window_id"):
+                snap_counts[rec["agent_name"]] = snap_counts.get(rec["agent_name"], 0) + 1
+            else:
+                snap_counts.setdefault(rec["agent_name"], 1)
+        window_counts = {agent: max(1, snap_counts.get(agent, 1)) for agent in by_agent}
+        for agent, cnt in snap_counts.items():
+            window_counts.setdefault(agent, max(1, cnt))
+
+        # build 快照 2 次 > by_agent 1 窗口 → 差额 1；plan 快照 1 == by_agent 1
+        assert window_counts == {"build": 2, "plan": 1}, f"同角色多成员各建独立窗口，实际 {window_counts}"
 
     def _hm(self, store):
         from app.utils.history_manager import HistoryManager

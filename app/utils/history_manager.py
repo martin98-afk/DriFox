@@ -30,6 +30,42 @@ from app.core.token_estimator import count_messages_tokens
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
+def parse_team_members_snapshot(snap_raw: str) -> List[Dict]:
+    """解析团队会话落库的 team_members 快照 JSON → 成员记录列表。
+
+    兼容两种形态（T3 快照升级前后）：
+    - 老格式 `'["build","plan"]'`（str 元素）→ {"agent_name": s, "window_id": ""}
+    - 新格式 `'[{"agent_name":"build","window_id":"win_01"}]'`（dict 元素）→
+      保留 window_id（同角色多成员按 window_id 区分）
+
+    Args:
+        snap_raw: 快照 JSON 字符串（可能为空串 / 非法 JSON / 非 list）
+
+    Returns:
+        去重后的成员记录列表；解析失败返回空列表
+    """
+    if not snap_raw:
+        return []
+    try:
+        parsed = json.loads(snap_raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: List[Dict] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            rec = {
+                "agent_name": str(item.get("agent_name") or "").strip(),
+                "window_id": str(item.get("window_id") or "").strip(),
+            }
+        else:
+            rec = {"agent_name": str(item).strip(), "window_id": ""}
+        if rec["agent_name"] and rec not in out:
+            out.append(rec)
+    return out
+
+
 def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
     """清理消息列表中的孤立 tool_calls（没有对应 tool 结果的 tool_call）
 
@@ -847,33 +883,68 @@ class HistoryManager:
                 group["worktree_path"] = s.get("worktree_path", "") or ""
             group["message_count"] += s.get("message_count", 0) or 0
             # 🛡️ F3（T2-P3 第 1/2 层）：合并条目收集成员会话的 team_members 快照
-            # （JSON 字符串：手动加入但无会话记录的成员），最后并入 agent_names——
+            # （JSON 字符串：手动加入但无会话记录的成员），最后并入成员列表——
             # 手动成员在历史合并条目中可见（不依赖当前 team.json，历史 run 的
             # team.json 会被新 run 覆盖，快照随会话落库根治）。
+            # T3：改用 parse_team_members_snapshot 收集含 window_id 的记录——
+            # 同角色多成员（两个 build 异 wid）各保留一条，不再按 agent 名覆盖。
             snap = (s.get("team_members") or "").strip()
             if snap:
-                group.setdefault("_snapshot_names", [])
-                try:
-                    import json as _json
-
-                    parsed = _json.loads(snap)
-                    if isinstance(parsed, list):
-                        for n in parsed:
-                            n = str(n).strip()
-                            if n:
-                                group["_snapshot_names"].append(n)
-                except Exception:
-                    pass
+                group.setdefault("_snapshot_members", [])
+                for rec in parse_team_members_snapshot(snap):
+                    if rec not in group["_snapshot_members"]:
+                        group["_snapshot_members"].append(rec)
 
         # 为每个团队组填充 preview（团队首问，仍按 run_id 查，跨 project 组共享）
         for (run_id, _project), group in team_groups.items():
             group["preview"] = self.get_team_first_question(run_id)
-            # 🛡️ F3：快照成员并入 agent_names / member_count（去重；仅补快照有、
-            # 会话无的 agent，避免重复计数）
-            for n in group.pop("_snapshot_names", []):
-                if n and n not in group["agent_names"]:
-                    group["agent_names"].append(n)
-            group["member_count"] = len(group["agent_names"])
+            # 🛡️ F3/T3：快照成员并入成员列表。
+            # 1) 有 window_id 的记录（T3 新格式）：同 agent 多成员各保留一条——
+            #    若 members 已有同 agent 无 wid 的会话行则补上 wid；否则追加
+            #    独立成员行（无会话记录 → session_id=""，UI 空窗口语义）。
+            # 2) 无 wid 老格式（纯名字快照）：仍走 agent_names 去重补充（兼容
+            #    老数据）；同时若 members 无同 agent 行则追加成员行，保证
+            #    member_count 与展开区行数一致（F3 手动成员可见）。
+            # member_count 语义 = 成员数：同角色异 wid 各算 1（T3 决策）。
+            snap_members = group.pop("_snapshot_members", [])
+            wid_records = [r for r in snap_members if r.get("window_id")]
+            plain_names = [r["agent_name"] for r in snap_members if not r.get("window_id")]
+            for rec in wid_records:
+                agent = rec["agent_name"]
+                replaced = False
+                for i, existing in enumerate(group["members"]):
+                    if (existing.get("agent_name") or "") == agent and not (existing.get("window_id") or ""):
+                        merged_row = dict(existing)
+                        merged_row["window_id"] = rec["window_id"]
+                        group["members"][i] = merged_row
+                        replaced = True
+                        break
+                if not replaced:
+                    group["members"].append(
+                        {
+                            "agent_name": agent,
+                            "window_id": rec["window_id"],
+                            "session_id": "",
+                            "title": "",
+                            "last_time": "",
+                            "saved_at": "",
+                        }
+                    )
+            for name in plain_names:
+                if name and name not in group["agent_names"]:
+                    group["agent_names"].append(name)
+                if name and not any((m.get("agent_name") or "") == name for m in group["members"]):
+                    group["members"].append(
+                        {
+                            "agent_name": name,
+                            "window_id": "",
+                            "session_id": "",
+                            "title": "",
+                            "last_time": "",
+                            "saved_at": "",
+                        }
+                    )
+            group["member_count"] = len(group["members"])
             result.append(group)
 
         # 整体按 last_time 降序（合并条目参与排序）

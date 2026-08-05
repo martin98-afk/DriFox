@@ -896,7 +896,11 @@ class _TeamGroupCard(CardWidget):
             row_layout.setSpacing(6)
 
             agent = member.get("agent_name") or ""
-            capsule = QLabel(agent or "?", row)
+            # T3：同角色多成员（两个 build 异 window_id）→ 胶囊加 window_id 后缀
+            # 区分（如 build·w01，window_id 前缀 win_ 简写为 w）
+            _wid = member.get("window_id") or ""
+            capsule_text = f"{agent}·{_wid.replace('win_', 'w')}" if _wid else (agent or "?")
+            capsule = QLabel(capsule_text, row)
             capsule.setStyleSheet(f"""
                 QLabel {{
                     color: {_accent};
