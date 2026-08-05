@@ -6657,7 +6657,13 @@ class PlainTextViewer(QWidget):
             self.text_edit.document().setTextWidth(vp_width)
         self._schedule_update_height()
 
-    def finish_streaming(self):
+    def finish_streaming(self, keep_dock: bool = False):
+        """流式结束收尾。
+
+        🆕 F4：与 CodeWebViewer.finish_streaming 保持相同签名——MessageCard.
+        finish_streaming 统一以 keep_dock=self._has_active_tools() 调用两个 Viewer。
+        PlainTextViewer 无 dock 概念（用户卡片无工具与思考折叠框），忽略该参数。
+        """
         self._schedule_update_height()
 
     def _schedule_update_height(self):

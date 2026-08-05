@@ -271,3 +271,42 @@ def test_s1_dock_returns_after_last_tool_result():
         f"最后一个工具完成后 dock 应归位（_sync_streaming_dock(False)），"
         f"实际 dock_calls={card.viewer.dock_calls}"
     )
+
+
+# ──────────────────────────────────────────────
+# F4：PlainTextViewer 无 keep_dock 参数回归（1828e2f7 引入 TypeError）
+# ──────────────────────────────────────────────
+
+
+def test_user_card_finish_streaming_with_plain_text_viewer():
+    """user 角色卡片（PlainTextViewer）调用 finish_streaming 不抛 TypeError。
+
+    #F4 回归（1828e2f7）：MessageCard.finish_streaming 统一以
+    keep_dock=self._has_active_tools() 调用 viewer.finish_streaming，但
+    PlainTextViewer.finish_streaming 无 keep_dock 参数 → 发送用户消息时
+    （main_widget._append_user_message → card.finish_streaming）TypeError 崩溃。
+    修复：PlainTextViewer.finish_streaming 增加 keep_dock 参数（接口对齐，
+    PlainTextViewer 无 dock 概念则忽略）。
+    """
+    from app.widgets.message_card import MessageCard as _MC, PlainTextViewer
+
+    _ensure_qapp()
+    # 用真实 PlainTextViewer（user 角色默认 viewer）
+    card = _MC(role="user")
+    card._lazy_rendered = True
+    card.viewer = PlainTextViewer(card)
+    # 不抛异常即通过（修复前 TypeError: unexpected keyword argument 'keep_dock'）
+    card.finish_streaming()
+    assert card.viewer is not None
+
+
+def test_plain_text_viewer_finish_streaming_accepts_keep_dock():
+    """PlainTextViewer.finish_streaming 必须接受 keep_dock 参数（接口与 CodeWebViewer 对齐）。"""
+    from inspect import signature
+
+    from app.widgets.message_card import PlainTextViewer
+
+    sig = signature(PlainTextViewer.finish_streaming)
+    assert "keep_dock" in sig.parameters, (
+        f"PlainTextViewer.finish_streaming 必须声明 keep_dock 参数，实际签名 {sig}"
+    )
