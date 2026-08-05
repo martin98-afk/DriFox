@@ -214,6 +214,23 @@ class CardContainer(QWidget):
     def _dock_min(self) -> int:
         return self._DOCK_MIN_H if self._horizontal else self._DOCK_MIN_V
 
+    def _visible_cards_min_axis(self) -> int:
+        """当前可见卡片的最小轴向尺寸（横向取宽、纵向取高），至少 0
+
+        停靠模式展开时用于提升 min 锁：窗口缩小时 QSplitter 优先保证
+        卡片内容完整可见的最小尺寸，对话区最后被压缩（可被遮挡）。
+        与 _schedule_expand 一致用 not isHidden() 判定可见性。
+        """
+        axis_min = 0
+        for w in self._cards.values():
+            if w.isHidden():
+                continue
+            hint = w.minimumSizeHint()
+            value = hint.width() if self._horizontal else hint.height()
+            if value > axis_min:
+                axis_min = value
+        return axis_min
+
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
             return -1
@@ -396,7 +413,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -407,8 +424,10 @@ class CardContainer(QWidget):
             # 卡片内容变化：仅恢复一个较小的绝对最小锁，保证不缩成 1px 细条，
             # 同时允许用户把槽位拖小（双向拖拽）。默认占比（30%）由"首次展开
             # 的 setSizes 归位"保证，不在此用 minimum 钳死，否则手柄只能单向拖。
+            # 小窗口优先：锁 max(_dock_min, 可见卡片最小轴)，卡片内容变化后
+            # 锁不降级，窗口缩小时仍优先保证卡片完整可见。
             if self._dock_splitter is not None and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
-                self._set_axis_min(self._dock_min())
+                self._set_axis_min(max(self._dock_min(), self._visible_cards_min_axis()))
                 return
 
             # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
@@ -471,7 +490,9 @@ class CardContainer(QWidget):
                 ratio_floor = int(chat_h * self._DOCK_DEFAULT_RATIO_V) if (not self._horizontal and chat_h > 0) else 0
                 if self._horizontal:
                     target = self._dock_last_size if self._dock_last_size > natural_h else natural_h
-                    min_floor = self._dock_min()
+                    # 小窗口优先：min 锁 = max(停靠最小宽, 可见卡片最小宽)，
+                    # 窗口缩小时 splitter 优先保证卡片内容完整可见，对话区最后被压
+                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
                 else:
                     if self._dock_last_size > 0:
                         target = max(self._dock_last_size, ratio_floor)
@@ -480,7 +501,9 @@ class CardContainer(QWidget):
                     # 持久下限用较小的绝对值（_dock_min），保证不缩成 1px 细条即可；
                     # 默认占比（30%）由 target 经 setSizes 一次性归位保证。若把
                     # minimum 钳到 30%，QSplitter 会禁止把手柄拖回更小，导致"单向拖"。
-                    min_floor = self._dock_min()
+                    # 小窗口优先：min 锁再叠加可见卡片最小高，窗口缩小时卡片内容
+                    # 不被压缩（对话区最后被压矮）。
+                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
 
                 def _release_to_splitter():
                     # minimum 钳制是稳定兜底：splitter 按 sizeHint 分配空间，纵向卡片
@@ -497,6 +520,10 @@ class CardContainer(QWidget):
                 natural_h = target
             else:
                 self._last_expand_target = natural_h
+                # 非停靠（普通布局）展开：完成后锁 min=自然高度，窗口缩小时
+                # 卡片内容不被压缩；下次 _do_expand 开头 _set_axis_min(0) 解锁，
+                # 动态高度变化（heightChanged → _schedule_expand）不会被卡死。
+                on_expand_done = lambda: self._set_axis_min(natural_h)
 
             # 尺寸差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
@@ -546,7 +573,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
 
         anim.setStartValue(start_h)
@@ -561,7 +588,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
             anim.finished.connect(_on_done)
