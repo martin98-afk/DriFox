@@ -2451,11 +2451,13 @@ class _DialogEventFilter(QObject):
     def __init__(self):
         super().__init__()
         self._viewers = set()  # 已注册的 CodeWebViewer 集合（生命周期随 viewer 增删）
+        self._attached = False  # 是否已安装到 QApplication（幂等 attach/detach 标志）
 
     def register(self, viewer):
-        """注册 viewer：首个注册时安装全局过滤器；销毁时自动注销防引用滞留"""
-        if not self._viewers:
-            self._attach_to_application()
+        """注册 viewer：确保全局过滤器已安装（幂等）；销毁时自动注销防引用滞留"""
+        # 每次注册都检查安装：QApplication 尚未创建（服务先行等时序）时
+        # 本次警告跳过，后续 register 会再次尝试，时序问题可自愈
+        self._attach_to_application()
         self._viewers.add(viewer)
         try:
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
@@ -2465,23 +2467,60 @@ class _DialogEventFilter(QObject):
             pass
 
     def unregister(self, viewer):
-        """注销 viewer：从注册表移除并断开销毁监听（幂等，销毁后调用亦安全）"""
+        """注销 viewer：从注册表移除并断开销毁监听（幂等，销毁后调用亦安全）。
+
+        最后一个 viewer 注销后从 QApplication 卸载过滤器（对称清理）。
+        """
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
         except RuntimeError, TypeError:
             pass
+        if not self._viewers:
+            self._detach_from_application()
 
     def _attach_to_application(self):
-        """向 QApplication 安装本过滤器（单实例，仅首次注册时执行一次）"""
+        """向 QApplication 安装本过滤器（幂等：已安装则直接返回）。
+
+        QApplication.instance() 为 None（如服务先行创建）时输出警告，
+        由后续 register 再次尝试补装，时序问题可自愈。
+        """
+        if self._attached:
+            return
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            app = QApplication.instance()
+            if app is None:
+                logger.warning("[MessageCard] 全局事件过滤器未安装：QApplication 尚未创建")
+                return
+            app.installEventFilter(self)
+            self._attached = True
+        except Exception as e:
+            logger.warning(f"[MessageCard] 全局事件过滤器安装异常: {e}")
+
+    def _detach_from_application(self):
+        """从 QApplication 卸载过滤器（最后一个 viewer 注销/销毁时对称清理）"""
+        if not self._attached:
+            return
         try:
             from PyQt5.QtWidgets import QApplication
 
             app = QApplication.instance()
             if app is not None:
-                app.installEventFilter(self)
-        except Exception:
-            pass
+                app.removeEventFilter(self)
+            self._attached = False
+        except Exception as e:
+            logger.warning(f"[MessageCard] 全局事件过滤器卸载异常: {e}")
+
+    @staticmethod
+    def _is_viewer_alive(viewer) -> bool:
+        """判断 viewer 的 C++ 对象是否仍存活（sip 判活，销毁过程中调用安全）"""
+        try:
+            sip.unwrapinstance(viewer)
+            return True
+        except RuntimeError:
+            return False
 
     def _on_viewer_destroyed(self, *_args):
         """任一 viewer 销毁：惰性清理注册表中 C++ 对象已删的条目。
@@ -2490,10 +2529,10 @@ class _DialogEventFilter(QObject):
         新 wrapper（与原对象不等），故不依赖参数匹配，改用 sip 判活清理。
         """
         for v in tuple(self._viewers):
-            try:
-                sip.unwrapinstance(v)
-            except RuntimeError:
+            if not self._is_viewer_alive(v):
                 self._viewers.discard(v)
+        if not self._viewers:
+            self._detach_from_application()
 
     def eventFilter(self, obj, event):
         # 快速短路：非关注事件（鼠标移动/绘制/键盘等高频事件）立即返回，
@@ -2505,9 +2544,14 @@ class _DialogEventFilter(QObject):
         for viewer in tuple(self._viewers):
             try:
                 self._dispatch(viewer, obj, event_type)
-            except RuntimeError:
-                # viewer 的 C++ 对象已销毁而未注销：惰性剔除，防引用滞留
-                self._viewers.discard(viewer)
+            except RuntimeError as e:
+                # 区分「viewer 已销毁」与「父链对象已删等瞬时异常」：
+                # 前者惰性剔除防引用滞留；后者 viewer 仍存活，仅记录日志
+                # 不剔除（误剔除会使 MaskDialog 防穿透静默失效且无法恢复）
+                if self._is_viewer_alive(viewer):
+                    logger.debug(f"[MessageCard] 对话框过滤分派异常（viewer 存活）: {e}")
+                else:
+                    self._viewers.discard(viewer)
         return False
 
     def _dispatch(self, viewer, obj, event_type):
