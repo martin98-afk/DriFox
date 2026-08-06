@@ -972,10 +972,9 @@ class TabPanel(QWidget):
         宽度动画进行中（_animating=True）跳过：动画里宽度会经过
         阈值区间，若在此触发会与动画互相打断。
 
-        注意：展开阈值与折叠阈值必须一致（都取 _auto_collapse_width），
-        否则 46~100 灰色区间内"拖宽展开"刚把 _collapsed 翻成 False，
-        同一连串拖拽 resize 又因宽度 < 100 触发"拖窄折叠"弹回，
-        表现为拉开一半又被收回去。
+        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <100、展开 >=110），
+        否则拖拽途中宽度在阈值附近抖动（如 99→101）会先折叠后展开，
+        表现为"往里拉时又往外回弹"。滞回区（100~109）内保持当前状态不动。
         """
         super().resizeEvent(event)
         # 拖窄自动折叠（展开态 → 收起态）
@@ -991,9 +990,9 @@ class TabPanel(QWidget):
 
             QTimer.singleShot(0, lambda: self.sidebarToggled.emit(True))
             return
-        # 拖宽自动展开（收起态 → 展开态）：阈值与折叠阈值一致，
-        # 消除 46~100 灰色区间的"展开→折叠"震荡（拉开一半又弹回）
-        if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width:
+        # 拖宽自动展开（收起态 → 展开态）：阈值高于折叠阈值 10px 形成滞回区，
+        # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹
+        if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width + 10:
             self._collapsed = False
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
