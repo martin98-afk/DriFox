@@ -10,8 +10,10 @@
 
 import fnmatch
 import os
+import re
+import threading
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt5.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
@@ -35,6 +37,127 @@ MAX_VISIBLE_ITEMS = 8
 # 就可能把目标文件"拉"进可见区。
 # 注：删除/修改此值前请同步更新 _render_incremental 的切片逻辑。
 MAX_RENDERED_ITEMS = 300
+
+
+class _IgnoreRules:
+    """预编译的忽略规则集合（fnmatch 模式 → 正则，消除逐路径段 fnmatch 调用）
+
+    gitignore 条目结构：(negate, full_rxs, name_rxs)
+    - negate: 是否为 ! 取反模式
+    - full_rxs: 匹配完整相对路径的正则列表（fnmatch 语义 + 目录前缀字面匹配）
+    - name_rxs: 匹配文件名的正则列表（无路径分隔符的模式，可命中任意层级）
+
+    规则顺序与语义与原 _is_ignored 完全等价：
+    1. 任一目录段精确命中 _IGNORED_DIRS → 忽略
+    2. 任一目录段命中 _IGNORED_DIR_PATTERNS（通配）→ 忽略
+    3. 文件扩展名命中 _IGNORED_EXT → 忽略
+    4. .gitignore 模式（最后匹配者生效，支持 ! 取反与尾部 / 前缀）
+    """
+
+    __slots__ = ("ignored_dirs", "dir_patterns", "ignored_ext", "gitignore")
+
+    def __init__(
+        self,
+        ignored_dirs: Set[str],
+        dir_patterns: List["re.Pattern"],
+        ignored_ext: Set[str],
+        gitignore: List[Tuple[bool, List["re.Pattern"], List["re.Pattern"]]],
+    ):
+        # 目录名精确匹配集合（已小写），set 查找 O(1)
+        self.ignored_dirs = ignored_dirs
+        # _IGNORED_DIR_PATTERNS 编译的正则（fnmatch.translate + re.I）
+        self.dir_patterns = dir_patterns
+        # 扩展名集合（小写、含点）
+        self.ignored_ext = ignored_ext
+        # gitignore 预编译条目
+        self.gitignore = gitignore
+
+    def is_ignored(self, rel_path: str, is_dir: bool) -> bool:
+        """检查相对路径是否被忽略（纯正则匹配，无逐个 fnmatch 调用）"""
+        path_parts = rel_path.replace("\\", "/").split("/")
+        name = path_parts[-1]
+        name_lower = name.lower()
+
+        # 1+1b. 目录名：精确集合优先（O(1)），未命中再试通配正则
+        for part in path_parts:
+            if part.lower() in self.ignored_dirs:
+                return True
+        for part in path_parts:
+            for rx in self.dir_patterns:
+                if rx.match(part):
+                    return True
+
+        # 2. 扩展名
+        if not is_dir:
+            for ext in self.ignored_ext:
+                if name_lower.endswith(ext):
+                    return True
+
+        # 3. .gitignore 模式（最后匹配生效）
+        if not self.gitignore:
+            return False
+        match_path = rel_path.replace("\\", "/")
+        ignored = False
+        for negate, full_rxs, name_rxs in self.gitignore:
+            hit = False
+            for rx in full_rxs:
+                if rx.match(match_path):
+                    hit = True
+                    break
+            if not hit and name_rxs:
+                for rx in name_rxs:
+                    if rx.match(name):
+                        hit = True
+                        break
+            if hit:
+                ignored = not negate
+        return ignored
+
+
+def _scan_tree(root_dir: str, rules: _IgnoreRules):
+    """递归扫描目录树（纯 Python，供后台线程执行，不触碰任何 Qt 对象）
+
+    返回 (items, snapshots, watched)：
+    - items: 文件缓存条目列表（最多 2000 项）
+    - snapshots: 目录绝对路径 → 文件名集合
+    - watched: 需要注册文件系统监视器的目录集合
+    """
+    items: List[Dict[str, str]] = []
+    snapshots: Dict[str, Set[str]] = {}
+    watched: Set[str] = set()
+    max_items = 2000
+
+    def walk(dirpath: str, rel_prefix: str):
+        dirpath = os.path.normpath(dirpath)
+        watched.add(dirpath)
+        names: Set[str] = set()
+        try:
+            with os.scandir(dirpath) as it:
+                for entry in it:
+                    if len(items) >= max_items:
+                        return
+                    name = entry.name
+                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                    if rules.is_ignored(rel, is_dir):
+                        continue
+                    names.add(name)
+                    items.append(
+                        {
+                            "name": name,
+                            "path": os.path.normpath(entry.path),
+                            "relative_path": rel,
+                            "type": "dir" if is_dir else "file",
+                        }
+                    )
+                    if is_dir:
+                        walk(os.path.normpath(entry.path), rel)
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+        snapshots[dirpath] = names
+
+    walk(root_dir, "")
+    return items, snapshots, watched
 
 
 class FileMentionItemWidget(QWidget):
@@ -308,6 +431,8 @@ class FileMentionCard(QWidget):
 
     fileSelected = pyqtSignal(str)  # file path
     dismissed = pyqtSignal()
+    # 后台扫描完成信号（跨线程发射，队列连接回主线程应用结果）
+    _scanFinished = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -322,14 +447,17 @@ class FileMentionCard(QWidget):
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
         self._gitignore_patterns: List[str] = []  # .gitignore 模式缓存
+        self._ignore_rules: Optional[_IgnoreRules] = None  # 预编译忽略规则缓存
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
+        self._scanning = False  # 扫描进行中标志，防止自身扫描触发目录变化信号
+        self._pending_refresh = False  # 扫描完成后是否需要刷新显示
+        self._scan_thread: Optional[threading.Thread] = None  # 后台扫描线程引用
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
 
         # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
         self._fs_watcher = QFileSystemWatcher(self)
         self._fs_watcher.directoryChanged.connect(self._on_directory_changed)
         self._watched_dirs: Set[str] = set()
-        self._scanning = False  # 扫描进行中标志，防止自身扫描触发目录变化信号
 
         # ---- 目录快照：记录每个目录下的文件名集合，用于增量 diff ----
         self._dir_snapshots: Dict[str, Set[str]] = {}
