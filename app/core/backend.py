@@ -935,7 +935,9 @@ class ChatBackend(QObject):
 
         # 去重缓存：(plugin_name, component) → 上次重载时间
         _dedup_cache: Dict[tuple, float] = {}
-        _DEDUP_INTERVAL = 3.0  # 同一插件+组件 3 秒内重复请求只执行一次
+        # watchfiles 每 ~8s 对每个组件 emit 一次重载（防抖 2s + 触发间隙），
+        # 3s 窗口拦不住 → 放宽到 10s 覆盖组件重载间隔，同插件+组件 10s 内重复请求只执行一次
+        _DEDUP_INTERVAL = 10.0
 
         def _is_duplicate(plugin_name: str, component: str) -> bool:
             now = time.time()
@@ -1150,6 +1152,16 @@ class ChatBackend(QObject):
                                 if _PM.get_instance().has_plugin(new_name):
                                     logger.info(
                                         f"[ChatBackend] 插件 [{new_name}] 已注册（索引未更新），改按已知插件增量重载..."
+                                    )
+                                    self._hot_reload_requested.emit(new_name, "")
+                                    continue
+                                # 未注册：先 rescan_plugin 复查——对目录存在 + plugin.json
+                                # 有效但注册表缺失的插件（如 user-custom），rescan 会直接注册成功，
+                                # 此时应走已知插件增量路径，避免误判为「新插件」触发 __NEW__ 全量加载
+                                _PM.get_instance().rescan_plugin(new_name)
+                                if _PM.get_instance().has_plugin(new_name):
+                                    logger.info(
+                                        f"[ChatBackend] 插件 [{new_name}] rescan 后已注册，改按已知插件增量重载..."
                                     )
                                     self._hot_reload_requested.emit(new_name, "")
                                     continue
@@ -1466,9 +1478,9 @@ class ChatBackend(QObject):
                 result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
                 result["hooks"] = True  # agents 组件包含 hooks 重载
                 try:
-                    from app.core.builtin_commands import reload_all_commands
+                    from app.core.builtin_commands import reload_agent_commands
 
-                    reload_all_commands()
+                    reload_agent_commands()
                     result["commands"] = True
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
@@ -1693,12 +1705,13 @@ class ChatBackend(QObject):
                 result["hooks"] = True  # agents 组件包含 hooks 重载
                 # 智能体变更后同步重载命令注册（agent 文件同时也是 /agent_name 命令源）
                 # 确保 CommandManager 中的 agent 命令同步更新，否则 /silent-failure-hunter 等命令无法识别
+                # 局部重注册：只更新 AGENT 命令，不触发全量 reload_all_commands（避免 2500ms 全量重载）
                 try:
-                    from app.core.builtin_commands import reload_all_commands
+                    from app.core.builtin_commands import reload_agent_commands
 
-                    reload_all_commands()
+                    reload_agent_commands()
                     result["commands"] = True
-                    logger.debug(f"[ChatBackend] Commands reloaded after agent change for plugin: {plugin_name}")
+                    logger.debug(f"[ChatBackend] Agent commands reloaded after agent change for plugin: {plugin_name}")
                 except (ImportError, Exception) as e:
                     logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
 

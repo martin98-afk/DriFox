@@ -18,6 +18,11 @@ from app.core.hook_manager import HookManager
 from app.tools import get_builtin_tools_schema
 from app.tools.tool_name_mapper import ToolNameMapper
 
+# 文件级 mtime 缓存：{插件名/目录: {文件路径: (mtime, Agent)}}
+# 增量重载时未变更文件不重新 parse，直接复用缓存中的 Agent 对象重新登记，
+# 避免「新增 1 个 agent → 插件全量重解析所有 agent 文件」的热重载开销。
+_agent_file_cache: Dict[str, Dict[str, tuple]] = {}
+
 
 @dataclass
 class Agent:
@@ -479,7 +484,7 @@ class AgentManager:
     def cleanup_plugin_artifacts(self, plugin_name: str):
         """插件被删除时，清理该插件在 AgentManager/HookManager 中的残留数据
 
-        包括：智能体、hidden 智能体、插件来源跟踪、hooks 注册。
+        包括：智能体、hidden 智能体、插件来源跟踪、hooks 注册、文件级 mtime 缓存。
         不碰命令和主题（由 backend._reload_single_plugin 统一处理）。
         """
         # 1. 清理智能体
@@ -491,6 +496,9 @@ class AgentManager:
         # 2. 清理 hooks
         if self._hook_manager is not None:
             self._hook_manager.unregister_skill_hooks(plugin_name)
+
+        # 3. 清理文件级 mtime 缓存（防止插件重装时复用已删除插件的旧 Agent 对象）
+        _agent_file_cache.pop(plugin_name, None)
 
         logger.info(f"[AgentManager] Cleaned up artifacts for removed plugin: {plugin_name}")
 
@@ -516,6 +524,9 @@ class AgentManager:
     def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
         """从指定目录加载所有智能体
 
+        带文件级 mtime 缓存：解析前比对文件 mtime，未变更的文件不重新 parse，
+        直接复用缓存中的 Agent 对象重新登记（保证 _plugin_agents / _agents 不丢注册）。
+
         Args:
             agents_dir: 智能体目录路径
             source_plugin: 来源插件名称（用于增量重载跟踪）
@@ -523,9 +534,28 @@ class AgentManager:
         if not agents_dir.exists():
             return
 
+        # 缓存 key：插件名（增量重载）或目录路径（后备目录加载）
+        cache_key = source_plugin or str(agents_dir)
+        file_cache = _agent_file_cache.setdefault(cache_key, {})
+
         for md_file in agents_dir.glob("*.md"):
             try:
-                agent = self._parse_markdown_agent(md_file)
+                fpath = str(md_file)
+                try:
+                    mtime = md_file.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                cached = file_cache.get(fpath)
+                if cached is not None and cached[0] == mtime:
+                    # 文件未变更：复用缓存对象，不重新 parse（不打印 Loaded）
+                    agent = cached[1]
+                else:
+                    agent = self._parse_markdown_agent(md_file)
+                    if agent:
+                        file_cache[fpath] = (mtime, agent)
+                        logger.info(
+                            f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})"
+                        )
                 if agent:
                     # 同名智能体去重：先加载的（系统插件优先）保留，后续的跳过
                     target_dict = self._hidden_agents if agent.is_hidden() else self._agents
@@ -537,13 +567,25 @@ class AgentManager:
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     target_dict[agent.name] = agent
-                    logger.info(f"[AgentManager] Loaded agent: {agent.name} (mode={agent.mode}, hidden={agent.hidden})")
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {md_file}: {e}")
 
         for yaml_file in agents_dir.glob("*.yaml"):
             try:
-                agent = self._parse_yaml_agent(yaml_file)
+                fpath = str(yaml_file)
+                try:
+                    mtime = yaml_file.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                cached = file_cache.get(fpath)
+                if cached is not None and cached[0] == mtime:
+                    # 文件未变更：复用缓存对象，不重新 parse（不打印 Loaded）
+                    agent = cached[1]
+                else:
+                    agent = self._parse_yaml_agent(yaml_file)
+                    if agent:
+                        file_cache[fpath] = (mtime, agent)
+                        logger.info(f"[AgentManager] Loaded agent (yaml): {agent.name}")
                 if agent:
                     target_dict = self._hidden_agents if agent.is_hidden() else self._agents
                     if agent.name in target_dict:
@@ -554,7 +596,6 @@ class AgentManager:
                     if source_plugin:
                         self._plugin_agents.setdefault(source_plugin, set()).add(agent.name)
                     target_dict[agent.name] = agent
-                    logger.info(f"[AgentManager] Loaded agent (yaml): {agent.name}")
             except Exception as e:
                 logger.error(f"[AgentManager] Failed to load {yaml_file}: {e}")
 

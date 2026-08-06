@@ -995,6 +995,14 @@ class OpenAIChatToolWindow(ToolWindow):
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
 
+    # 插件热重载窗口级去重（D 修复）：
+    # plugin_changed 信号广播到全部 backend 实例（多窗口），同一事件
+    # 每个窗口各执行一遍 _on_plugin_hot_reload。类级指纹 + 短窗抑制，
+    # 只让首个窗口执行完整刷新链路，其余窗口直接 return。
+    # 指纹 = result 序列化（同一次广播 result 相同）；10s 短窗内同指纹只执行一次。
+    _last_hot_reload_fingerprint: Optional[str] = None
+    _last_hot_reload_at: float = 0.0
+
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
     _TEMPLATE_JOIN_DELAY_MS: int = 300
@@ -8755,6 +8763,18 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not hasattr(self, "backend") or not self.backend:
             return
+        # 窗口级去重：plugin_changed 广播到全部 backend 实例（多窗口各一个 backend），
+        # 同一事件每个窗口各执行一遍。类级指纹 + 10s 短窗抑制：只让首个窗口
+        # 执行完整刷新链路（其内部遍历 _instances 覆盖所有窗口），其余窗口直接跳过。
+        _fingerprint = repr(sorted(result.items()))
+        _now = time.time()
+        if (
+            _fingerprint == OpenAIChatToolWindow._last_hot_reload_fingerprint
+            and _now - OpenAIChatToolWindow._last_hot_reload_at < 10.0
+        ):
+            return
+        OpenAIChatToolWindow._last_hot_reload_fingerprint = _fingerprint
+        OpenAIChatToolWindow._last_hot_reload_at = _now
         # 不弹 InfoBar，仅日志记录
         logger.debug(
             f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
@@ -8809,9 +8829,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
-        # 技能变更：广播刷新所有窗口的技能列表（settings popup + 卡片 token 估算）
-        # 修复：原代码仅刷新当前窗口 (self._settings_popup)，导致其他窗口看不到新技能，
-        # 必须重建窗口才能看到。改为遍历所有窗口，与 hooks 分支保持一致。
+        # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
+        # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
+        # 遍历窗口时每个窗口都会命中同一实例 → 只处理一次即 break，避免重复刷新。
         if result.get("skills"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8822,12 +8842,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
+                    break
                 except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
-            logger.debug("[HotReload] skills list re-discovered (all windows)")
+            logger.debug("[HotReload] skills list re-discovered")
 
-        # Hooks 变更：广播刷新所有窗口的 hook 设置卡片
+        # Hooks 变更：刷新 hook 设置卡片（settings popup 全局单例 → 只刷一次）
         if result.get("hooks"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8841,13 +8862,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if card._hook_manager:
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
+                    break
                 except (RuntimeError, AttributeError) as e:
                     # 多窗口竞态：窗口已被销毁
                     pass
-            logger.debug("[HotReload] hooks card refreshed (all windows)")
+            logger.debug("[HotReload] hooks card refreshed")
 
-        # 主题变更：广播刷新所有窗口的主题下拉列表
-        # 修复：原代码仅刷新当前窗口，新主题在其他窗口下拉中不出现，必须重建窗口。
+        # 主题变更：刷新主题下拉列表（settings popup 全局单例，只刷一次）
         if result.get("themes"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8856,9 +8877,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
+                    break
                 except RuntimeError, AttributeError:
                     pass
-            logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
+            logger.debug("[HotReload] settings theme dropdown refreshed")
 
         # MCP 配置变更：刷新全局 MCP 服务器列表
         # 注意：settings popup 是全局唯一共享卡片（所有窗口通过 property 访问同一实例），
@@ -8917,9 +8939,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:
                     logger.debug(f"[HotReload] MCP 断开失效连接失败: {e}")
 
-        # LSP 配置变更：广播刷新所有窗口的 LSP 状态列表
-        # 修复：原代码未处理 lsp 字段，导致 LSP 热重载后 settings popup 中
-        # 的 LSP 列表保持旧状态，必须重建窗口才能看到新服务器。
+        # LSP 配置变更：刷新 LSP 状态列表（settings popup 全局单例 → 只刷一次）
         if result.get("lsp"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8932,9 +8952,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
+                    break
                 except RuntimeError, AttributeError:
                     pass
-            logger.debug("[HotReload] LSP server list refreshed (all windows)")
+            logger.debug("[HotReload] LSP server list refreshed")
 
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
