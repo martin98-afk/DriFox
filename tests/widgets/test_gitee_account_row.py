@@ -400,3 +400,71 @@ def test_account_row_uploader_token_invalid_sets_red_badge(row_factory):
     assert row._invalid is True
     assert row._name_label._full_text == "绑定已失效"
     ctrl.check_gitee_token_invalid_reminder.assert_called_once()
+
+
+# ── T8C：GiteeCard 配置变化（外部清绑/自动解绑/其他入口绑定）时按钮同步 ──
+
+
+def test_gitee_card_button_refreshes_on_external_unbind(gitee_card_factory):
+    """外部入口（ConfigSync 自动清绑 / 其他窗口解绑）修改配置 → 卡片按钮同步为「绑定」"""
+    card, cfg, _, _ = gitee_card_factory(bound=True, bound_info={"token": "valid-token", "owner": "martin98-afk"})
+    assert card._bind_btn.text() == "解绑"
+
+    # 模拟 ConfigSyncService 自动清绑 / GiteeAccountRow 解绑改配置（不经 GiteeCard）
+    cfg.gitee_bound.value = False
+    cfg.gitee_user_owner.value = ""
+    cfg.gitee_user_repo.value = ""
+
+    assert card._bind_btn.text() == "绑定"
+    assert card._bound_owner == ""
+    assert card._avatar.toolTip() == "未绑定"
+
+
+def test_gitee_card_button_refreshes_on_external_bind(gitee_card_factory):
+    """外部入口（侧边栏账户行绑定成功）修改配置 → 卡片按钮同步为「解绑」"""
+    card, cfg, sync_service, backend = gitee_card_factory(bound=False)
+    assert card._bind_btn.text() == "绑定"
+
+    # 模拟 GiteeAccountRow 绑定成功后写配置（不经 GiteeCard）
+    backend.get_bound_info.return_value = {"token": "valid-token", "owner": "martin98-afk"}
+    cfg.gitee_bound.value = True
+    cfg.gitee_user_owner.value = "martin98-afk"
+    cfg.gitee_user_repo.value = "DriFox_uploads"
+
+    assert card._bind_btn.text() == "解绑"
+    assert card._bound_owner == "martin98-afk"
+
+
+def test_gitee_card_button_refreshes_on_clear_binding_path(gitee_card_factory):
+    """断点③：GiteeCard._handle_binding_invalid 清绑后自身按钮同步为「绑定」"""
+    card, cfg, sync_service, backend = gitee_card_factory(
+        bound=True, bound_info={"token": "valid-token", "owner": "martin98-afk"}
+    )
+    sync_service.enable.reset_mock()
+    cfg.save.reset_mock()
+    # 之后 token 被吊销：get_bound_info 返回 None → 走失效清绑路径
+    backend.get_bound_info.return_value = None
+    row = MagicMock()
+    tm = MagicMock()
+    tm._windows = [MagicMock()]
+    tm._windows[0]._tab_panel._gitee_account_row = row
+    ctrl = MagicMock()
+
+    with (
+        patch("app.gateway.auth.get_oauth_backend", return_value=backend),
+        patch(
+            "app.widgets.tab_manager_window.TabManagerWindow.get_instance",
+            return_value=tm,
+        ),
+        patch(
+            "app.widgets.cards.global_card_controller.get_global_card_controller",
+            return_value=ctrl,
+        ),
+    ):
+        card._auto_enable_sync()
+
+    # 清绑 + 按钮同步为「绑定」（配置变化 → valueChanged → _refresh_ui）
+    assert cfg.gitee_bound.value is False
+    assert card._bind_btn.text() == "绑定"
+    assert card._bound_owner == ""
+    assert card._avatar.toolTip() == "未绑定"

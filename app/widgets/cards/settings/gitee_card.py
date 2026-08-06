@@ -1140,6 +1140,29 @@ class GiteeCard(SettingCard):
 
         self._setup_right()
         self._setup_sync_indicator()
+        self._connect_config_signals()
+        self._refresh_ui()
+
+    def _connect_config_signals(self):
+        """监听绑定配置变化（外部清绑/自动解绑/其他入口绑定）→ 刷新卡片按钮
+
+        与 GiteeAccountRow 保持一致：绑定状态可能由 ConfigSync 自动清绑、
+        GiteeAccountRow 解绑、GiteeOAuthBackend.unbind 等入口修改，
+        卡片需同步响应，否则按钮停留在「解绑」。
+        """
+        for item in (
+            self.cfg.gitee_bound,
+            self.cfg.gitee_user_owner,
+            self.cfg.gitee_user_repo,
+        ):
+            try:
+                item.valueChanged.disconnect(self._on_config_changed)
+            except TypeError:
+                pass
+            item.valueChanged.connect(self._on_config_changed)
+
+    def _on_config_changed(self, _value=None):
+        """配置变化（gitee 绑定态/owner/repo）→ 刷新卡片 UI"""
         self._refresh_ui()
 
     def _setup_right(self):
