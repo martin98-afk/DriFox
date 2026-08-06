@@ -759,7 +759,8 @@ class TabPanel(QWidget):
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._collapsed: bool = False  # 侧边栏收起状态
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
-        self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开）
+        self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
+        self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -963,14 +964,29 @@ class TabPanel(QWidget):
         layout.addWidget(self._gitee_account_row)
 
     def resizeEvent(self, event):
-        """手动拖拽拉开侧边栏时自动展开
+        """手动拖拽 splitter 把手时自动折叠/展开
 
-        收起状态下面板宽度很窄（~46px），用户拖拽 splitter 把手拉开时
-        宽度会超过阈值，自动切回展开态。
-        宽度动画进行中（_animating=True）跳过：折叠动画里宽度从大变小
-        途中会经过 >阈值 区间，若在此触发会自动展开打断动画。
+        展开态：拖拽把手把面板收窄到 _auto_collapse_width 以下 → 自动折叠
+        为图标条（宽度由 TabManagerWindow 动画平滑收到收起宽度）。
+        收起态：拖拽把手拉开超过阈值 → 自动切回展开态。
+        宽度动画进行中（_animating=True）跳过：动画里宽度会经过
+        阈值区间，若在此触发会与动画互相打断。
         """
         super().resizeEvent(event)
+        # 拖窄自动折叠（展开态 → 收起态）
+        if (
+            not self._collapsed
+            and not self._animating
+            and self.width() < self._auto_collapse_width
+        ):
+            self._collapsed = True
+            self._update_toggle_button()
+            # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda: self.sidebarToggled.emit(True))
+            return
+        # 拖宽自动展开（收起态 → 展开态）
         if self._collapsed and not self._animating and self.width() > self._collapsed_min_width + 10:
             self._collapsed = False
             self._update_toggle_button()

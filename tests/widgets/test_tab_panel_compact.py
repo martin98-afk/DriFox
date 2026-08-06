@@ -133,6 +133,45 @@ def test_tc_a3_resize_auto_expand(panel, qtbot):
     assert _shown(panel._items[0]._title_label) is True
 
 
+def test_tc_a4_resize_auto_collapse(panel, qtbot):
+    """拖窄自动折叠（resizeEvent）：展开态收窄到阈值以下 → 自动折叠（矩阵 A3'）"""
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    panel.add_tab("会话A")
+    panel.set_collapsed(False)
+    assert panel._items[0]._compact is False
+    # 模拟用户先展开到正常宽度（实际 resize 面板，让 width() 生效）
+    panel.resize(200, 600)
+    ev = QResizeEvent(QSize(200, 600), QSize(200, 600))
+    panel.resizeEvent(ev)
+    assert panel._collapsed is False  # 正常宽度不折叠
+    # 模拟用户拖窄到自动折叠阈值(100)以下
+    panel.resize(80, 600)
+    ev = QResizeEvent(QSize(80, 600), QSize(200, 600))
+    panel.resizeEvent(ev)
+    qtbot.wait(50)
+    assert panel._collapsed is True
+    assert panel._items[0]._compact is True
+    assert _shown(panel._items[0]._icon_widget) is True
+
+
+def test_tc_a4_resize_auto_collapse_animation_suppressed(panel, qtbot):
+    """宽度动画进行中收窄不触发自动折叠（_animating 守卫，矩阵 A3' 防打断）"""
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    panel.add_tab("会话A")
+    panel.set_collapsed(False)
+    panel.set_animating(True)  # 模拟折叠动画进行中
+    ev = QResizeEvent(QSize(80, 600), QSize(200, 600))
+    panel.resizeEvent(ev)
+    qtbot.wait(50)
+    # 动画中不自动折叠：状态保持展开、控件保持非紧凑
+    assert panel._collapsed is False
+    assert panel._items[0]._compact is False
+
+
 def test_tc_d1_collapsed_add_tab_immediately_compact(panel):
     """折叠态 add_tab 新会话：新 TabItem 立即紧凑（矩阵 D1/D2）"""
     panel.add_tab("旧会话")
