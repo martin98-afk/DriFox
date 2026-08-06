@@ -118,7 +118,7 @@ class ContextUsageStatsCard(QWidget):
     # ── 界面搭建 ──
 
     def _setup_ui(self):
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(420)
         self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ContextUsageStatsCard { background: transparent; }")
@@ -179,6 +179,7 @@ class ContextUsageStatsCard(QWidget):
         # ── 滚动内容 ──
         self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"

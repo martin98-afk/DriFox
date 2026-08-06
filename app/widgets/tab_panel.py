@@ -759,6 +759,7 @@ class TabPanel(QWidget):
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._collapsed: bool = False  # 侧边栏收起状态
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
+        self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开）
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -966,9 +967,11 @@ class TabPanel(QWidget):
 
         收起状态下面板宽度很窄（~46px），用户拖拽 splitter 把手拉开时
         宽度会超过阈值，自动切回展开态。
+        宽度动画进行中（_animating=True）跳过：折叠动画里宽度从大变小
+        途中会经过 >阈值 区间，若在此触发会自动展开打断动画。
         """
         super().resizeEvent(event)
-        if self._collapsed and self.width() > self._collapsed_min_width + 10:
+        if self._collapsed and not self._animating and self.width() > self._collapsed_min_width + 10:
             self._collapsed = False
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
@@ -1085,10 +1088,30 @@ class TabPanel(QWidget):
 
     # ── 侧边栏收起/展开 ──
 
+    def set_animating(self, animating: bool):
+        """标记侧边栏宽度动画进行中：动画期间抑制 resizeEvent 自动展开
+
+        由 TabManagerWindow 宽度动画开始/结束时调用。
+        """
+        self._animating = animating
+
+    def sync_collapsed_ui(self):
+        """按当前 _collapsed 状态同步紧凑/展开 UI（宽度动画跨阈值时调用）
+
+        switch_ui=True：完整切换按钮图标 + 品牌区 + TabItem/团队紧凑态，
+        供宽度动画在宽度跨过阈值时驱动，避免文字在窄条中被挤压。
+        """
+        self._update_toggle_button(switch_ui=True)
+
     def _toggle_sidebar(self):
-        """切换侧边栏收起/展开状态"""
+        """切换侧边栏收起/展开状态
+
+        仅翻转状态 + 更新按钮图标；紧凑/展开 UI 切换由宽度动画驱动
+        （TabManagerWindow 在宽度跨过阈值时调用 _update_toggle_button），
+        避免展开瞬间文字被挤在窄条里。
+        """
         self._collapsed = not self._collapsed
-        self._update_toggle_button()
+        self._update_toggle_button(switch_ui=False)
         self.sidebarToggled.emit(self._collapsed)
 
     def set_collapsed(self, collapsed: bool):
@@ -1098,11 +1121,27 @@ class TabPanel(QWidget):
         self._collapsed = collapsed
         self._update_toggle_button()
 
-    def _update_toggle_button(self):
-        """更新收起/展开按钮的图标和提示，以及收起态下的可见元素"""
+    def _update_toggle_button(self, switch_ui: bool = True):
+        """更新收起/展开按钮的图标和提示，以及收起态下的可见元素
+
+        Args:
+            switch_ui: True 时同步切换紧凑/展开 UI（默认，按钮点击外的
+                所有路径）；False 时仅更新按钮图标与 tooltip（按钮点击
+                走宽度动画，UI 切换由动画跨阈值时驱动）。
+        """
         if self._collapsed:
             self._sidebar_toggle_btn.setIcon(get_icon("展开侧边栏"))
             self._sidebar_toggle_btn.setToolTip("展开侧边栏")
+        else:
+            self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+            self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+
+        # switch_ui=False（按钮点击走宽度动画）时只更新按钮图标/tooltip，
+        # 紧凑/展开 UI 由动画跨阈值时驱动，避免文字在窄条里被挤压。
+        if not switch_ui:
+            return
+
+        if self._collapsed:
             # 收起时隐藏产品标识
             self._brand_left.setVisible(False)
             # 收起时仅保留新建图标按钮，隐藏分支和文字新建按钮
@@ -1112,8 +1151,6 @@ class TabPanel(QWidget):
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
-            self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
-            self._sidebar_toggle_btn.setToolTip("收起侧边栏")
             # 展开时恢复产品标识
             self._brand_left.setVisible(True)
             # 展开时恢复文字新建按钮，隐藏图标按钮
