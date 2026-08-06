@@ -1433,6 +1433,9 @@ class TabPanel(QWidget):
         if not initials:
             icon.setVisible(False)
             grp._team_icon_key = None
+            # 折叠态清空项目：同步复位恢复现场，避免展开后复活旧项目 icon
+            if getattr(grp, "_team_compact", False):
+                grp._team_icon_orig_data = None
             return
         # 值相等跳过：同一 (initials, color) 不重复重绘（纯 key 缓存判断，
         # 不依赖 isVisible——父链未显示时 isVisible 恒 False 会误判）
@@ -1715,10 +1718,15 @@ class TabPanel(QWidget):
                     "color": team_icon._color,
                     "fallback": team_icon._fallback_pixmap,
                 }
-                # 占位：团队名首字 + 主题强调色
-                ch = team_name[0] if team_name else "?"
-                team_icon.set_project(ch, Colors.INFO)
-                team_icon.setVisible(True)
+                if getattr(grp, "_team_icon_key", None):
+                    # 已有项目数据（set_team_project 写入过）→ 折叠态沿用项目
+                    # icon，不替换为团队名首字母（折叠/展开 icon 统一为项目 icon）
+                    team_icon.setVisible(True)
+                else:
+                    # 无项目数据 → 占位：团队名首字 + 主题强调色
+                    ch = team_name[0] if team_name else "?"
+                    team_icon.set_project(ch, Colors.INFO)
+                    team_icon.setVisible(True)
             if name_label is not None:
                 name_label.setVisible(False)
             if close_btn is not None:
@@ -1740,17 +1748,29 @@ class TabPanel(QWidget):
             if new_task_btn is not None:
                 new_task_btn.setVisible(False)
             if team_icon is not None:
-                # 还原原数据与可见性（HexArgb 保留 alpha，避免 rgba→hex 丢透明度）
-                data = getattr(grp, "_team_icon_orig_data", None) or {}
-                if data.get("fallback") is not None:
-                    team_icon.set_fallback_pixmap(data["fallback"])
-                elif data.get("initials"):
-                    from PyQt5.QtGui import QColor as _QColor
-
-                    team_icon.set_project(data["initials"], data["color"].name(_QColor.HexArgb))
+                # 折叠期间 set_team_project 写入/更新过项目数据（_team_icon_key
+                # 非空）→ 以当前数据为准保留显示，不还原折叠前旧快照
+                # （覆盖"折叠态创建/改项目 → 展开后项目 icon 消失"场景）
+                if getattr(grp, "_team_icon_key", None):
+                    team_icon.setVisible(True)
+                    grp._team_icon_orig_data = None
                 else:
-                    team_icon.setVisible(False)
-                team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
+                    # 折叠期间无项目数据 → 还原原数据与可见性（HexArgb 保留
+                    # alpha，避免 rgba→hex 丢透明度）
+                    data = getattr(grp, "_team_icon_orig_data", None) or {}
+                    if data.get("fallback") is not None:
+                        team_icon.set_fallback_pixmap(data["fallback"])
+                        team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
+                    elif data.get("initials"):
+                        from PyQt5.QtGui import QColor as _QColor
+
+                        team_icon.set_project(data["initials"], data["color"].name(_QColor.HexArgb))
+                        team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
+                    else:
+                        # 折叠前无项目数据 → 恢复隐藏并清空占位符残留
+                        team_icon._initials = ""
+                        team_icon._fallback_pixmap = None
+                        team_icon.setVisible(False)
             header.setToolTip("")
             # 展开态恢复原背景透明度（零回归）
             self._apply_team_group_style(grp, bg_alpha=40)

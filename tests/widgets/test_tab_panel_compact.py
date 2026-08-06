@@ -468,6 +468,121 @@ def test_46px_independent_tab_no_overflow(panel, qtbot):
     hint = item.sizeHint().width()
     available = 46 - 4  # list margins 2+2
     assert hint <= available, f"TabItem 需求 {hint}px 超过可用 {available}px"
+
+
+# ══════════════════════════════════════════════════════════
+# 团队框 header 项目 icon × 折叠/展开一致性（矩阵 C1'）
+# ══════════════════════════════════════════════════════════
+
+
+def _setup_team_with_project(panel, team_id="teamP", initials="AB", color="rgba(33,139,255,255)"):
+    """建团队 + 成员 + 团队级项目 icon（模拟 TabManagerWindow 调用序）"""
+    idx = panel.add_tab("成员A")
+    panel.set_tab_team(idx, team_id)
+    panel.set_tab_team_mode(idx, True)
+    panel.update_tab_capsule(idx, "coder")
+    panel.set_team_label(team_id, "研发团队")
+    panel.set_team_project(team_id, initials, color)
+    grp = panel._team_groups[team_id]
+    return idx, grp, grp._team_icon
+
+
+def test_tc_c1p_expand_then_collapse_keeps_project_icon(panel):
+    """展开态已有项目 icon → 折叠：header icon 沿用项目 icon，不替换为团队名首字
+
+    修复前：_apply_team_compact(True) 无条件把 header icon 换成团队名首字占位，
+    用户可见"展开→折叠后项目 icon 变首字母"。
+    """
+    _, grp, icon = _setup_team_with_project(panel)
+    assert _shown(icon) is True
+    assert icon._initials == "AB", "前置：展开态 header icon 应为项目缩写"
+
+    panel.set_collapsed(True)
+    assert _shown(icon) is True, "折叠态 header icon 应显示"
+    assert icon._initials == "AB", "折叠态应保留项目 icon（而非团队名首字'研'）"
+    assert icon._initials != "研", "不得回退为团队名首字占位"
+
+
+def test_tc_c1p_collapse_expand_roundtrip_keeps_project_icon(panel):
+    """折叠 → 展开 → 再折叠：项目 icon 全程保留（不消失、不变首字）
+
+    修复前：折叠态创建团队后 set_team_project 覆盖占位符显示项目 icon，
+    但展开时恢复现场为空 → 项目 icon 消失；再折叠又变回首字母。
+    """
+    panel.set_collapsed(True)
+    _, grp, icon = _setup_team_with_project(panel, team_id="teamR", initials="CD", color="rgba(1,2,3,255)")
+    assert _shown(icon) is True, "前置：折叠态创建后 header icon 应为项目 icon"
+    assert icon._initials == "CD"
+
+    # 展开：项目 icon 不得消失
+    panel.set_collapsed(False)
+    assert _shown(icon) is True, "展开后项目 icon 不应消失"
+    assert icon._initials == "CD", "展开后项目缩写应保留"
+
+    # 再折叠：仍是项目 icon，不是首字母
+    panel.set_collapsed(True)
+    assert _shown(icon) is True
+    assert icon._initials == "CD", "再折叠应保留项目 icon（而非回退首字母）"
+    assert icon._initials != "研"
+
+
+def test_tc_c1p_project_set_after_collapse_kept_on_expand(panel):
+    """折叠态创建团队时未设项目（首字母占位）→ 折叠期间 set_team_project →
+    展开后项目 icon 保留（修复：折叠期间写入的项目数据不得被空快照覆盖）"""
+    panel.set_collapsed(True)
+    idx = panel.add_tab("成员A")
+    panel.set_tab_team(idx, "teamL")
+    panel.set_tab_team_mode(idx, True)
+    panel.update_tab_capsule(idx, "coder")
+    panel.set_team_label("teamL", "逻辑团队")
+    grp = panel._team_groups["teamL"]
+    icon = grp._team_icon
+    # 组创建于折叠态时 header 尚未注入团队名 → 占位用默认"团队"首字，仅断言非空占位
+    assert icon._initials not in ("", "?"), "前置：无项目时折叠态为占位图标"
+
+    # 折叠期间写入项目数据（模拟 _update_tab_icon 广播时序）
+    panel.set_team_project("teamL", "EF", "rgba(4,5,6,255)")
+    assert icon._initials == "EF", "折叠期间写入项目后 icon 应更新为项目缩写"
+
+    panel.set_collapsed(False)
+    assert _shown(icon) is True, "展开后项目 icon 应保留（不被折叠前空快照覆盖）"
+    assert icon._initials == "EF", "展开后项目缩写应保留"
+
+    panel.set_collapsed(True)
+    assert icon._initials == "EF", "再折叠仍为项目 icon，不回退首字母"
+
+
+def test_tc_c1p_no_project_still_placeholder_and_hides_on_expand(panel):
+    """无项目团队回归：折叠仍显示首字占位，展开恢复隐藏（C1 原行为不破坏）"""
+    idx = panel.add_tab("成员A")
+    panel.set_tab_team(idx, "teamN")
+    panel.set_tab_team_mode(idx, True)
+    panel.update_tab_capsule(idx, "coder")
+    panel.set_team_label("teamN", "无项目队")
+    grp = panel._team_groups["teamN"]
+    icon = grp._team_icon
+    assert icon.isHidden(), "前置：无项目展开态 header icon 隐藏"
+
+    panel.set_collapsed(True)
+    assert _shown(icon) is True, "折叠态应显示占位 icon"
+    assert icon._initials == "无", "无项目时仍用团队名首字占位"
+
+    panel.set_collapsed(False)
+    assert icon.isHidden(), "展开后无项目 icon 恢复隐藏"
+
+
+def test_tc_c1p_project_cleared_while_collapsed_hides_on_expand(panel):
+    """折叠期间清空团队项目（set_team_project 空串）：展开后 icon 隐藏，不复活旧项目"""
+    panel.set_collapsed(True)
+    _, grp, icon = _setup_team_with_project(panel, team_id="teamC", initials="GH", color="rgba(7,8,9,255)")
+    assert icon._initials == "GH"
+
+    # 折叠期间清空项目
+    panel.set_team_project("teamC", "", "")
+    assert icon.isHidden(), "清空项目后折叠态 icon 应隐藏"
+
+    panel.set_collapsed(False)
+    assert icon.isHidden(), "展开后 icon 应保持隐藏（不得复活旧项目快照）"
     # 无横向滚动条
     assert panel._scroll_area.horizontalScrollBar().maximum() == 0
 
