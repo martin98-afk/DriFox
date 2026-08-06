@@ -303,6 +303,18 @@ class TestTeamProjectApply:
         win._apply_team_project("P1")
         win._create_new_session.assert_not_called(), "接收方应用项目不得新建会话"
 
+    def test_apply_syncs_workdir_without_memory_card(self):
+        """Bug 回归：记忆卡片未构建（_memory_card_popup 为 None）时仍须同步 workdir。
+
+        tool_executor.get_workdir() 是 PreUserMessage hook（githook）project_root
+        的数据源；若 _sync_working_directory 挂在卡片惰性构建状态上，接收方窗口
+        切换项目后 hook 仍注入旧项目根目录 + Git 状态（残留）。
+        """
+        win = self._make_target(project="P0")
+        assert win._memory_card_popup is None, "前置条件：记忆卡片尚未惰性构建"
+        win._apply_team_project("P1")
+        win._sync_working_directory.assert_called_once(), "卡片未构建时也必须同步 workdir"
+
 
 class TestTeamProjectInjectPoints:
     """A4/A9 注入点静态校验（读 main_widget.py 源码，对齐 test_team_run_id 风格）"""

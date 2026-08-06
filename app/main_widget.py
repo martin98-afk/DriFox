@@ -768,6 +768,7 @@ class ToolWindowTitleBar(QWidget):
         from app.utils.design_tokens import Colors
 
         Colors.refresh()
+        Colors.refresh()
         title_color = Colors.TEXT_PRIMARY
         btn_hover = Colors.HOVER_BG
         border_color = Colors.BORDER
@@ -17322,7 +17323,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._current_workdir[project] = workdir
         if getattr(self, "_memory_card_popup", None):
             self._memory_card_popup.set_project(project, workdir=workdir)
-            self._sync_working_directory()
+        # 🐛 修复：tool_executor 工作目录同步不能挂在记忆卡片 UI 的惰性构建状态上。
+        # PreUserMessage hook（format_memory_context 的 githook 项目根目录/Git 状态）
+        # 数据源是 tool_executor.get_workdir()，卡片未构建时跳过同步会导致切换项目后
+        # hook 仍注入旧项目的根目录与 Git 状态（残留）。
+        self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
         if getattr(self, "_history_popup_card", None):
@@ -17416,10 +17421,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
             logger.info(f"[MainWidget] Calling set_project({project}) on memory_card_popup")
             self._memory_card_popup.set_project(project, workdir=workdir)
-            # 同步到记忆卡片实例缓存 + tool_executor（已有的 _sync_working_directory
-            # 会再做一次 workdir 读取；因为上面已经把它写进 _current_workdir，
-            # 这次读取走的是缓存，DB 命中只一次）。
-            self._sync_working_directory()
+        # 🐛 修复：workdir 同步移出 _memory_card_popup 惰性判断——卡片未构建时
+        # 也必须更新 tool_executor，否则 PreUserMessage hook 的 project_root
+        # 残留旧项目（githook 显示旧项目根目录 + Git 状态）。
+        # _sync_working_directory 内部已对 _memory_card_popup 判空，可安全无条件调用。
+        self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
         self._history_popup_card.set_current_project(project)
@@ -17502,8 +17508,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新记忆卡片的项目
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
             self._memory_card_popup.set_project(project)
-            # 切换项目时自动同步工作目录
-            self._sync_working_directory()
+        # 🐛 修复：切换项目时无条件同步工作目录（不依赖记忆卡片惰性构建状态），
+        # 否则 tool_executor.get_workdir() 残留旧项目 → PreUserMessage hook 的
+        # githook 显示旧项目根目录。
+        self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
         # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
