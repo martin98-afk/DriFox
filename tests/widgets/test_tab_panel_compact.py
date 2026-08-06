@@ -133,6 +133,37 @@ def test_tc_a3_resize_auto_expand(panel, qtbot):
     assert _shown(panel._items[0]._title_label) is True
 
 
+def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
+    """灰色地带回归：收起态拖宽到 46~100 区间不得触发"展开→又折叠"震荡
+
+    原 bug：展开阈值(>56)与折叠阈值(<100)不一致，收起态拖宽到 56~100
+    之间时先自动展开，同一次拖拽 resize 链里宽度仍 <100 又自动折叠，
+    表现为"拉开一半又弹回去"。修复后展开阈值与折叠阈值对齐(>=100)，
+    灰色区间内保持收起态，不再震荡。
+    """
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    panel.add_tab("会话A")
+    panel.set_collapsed(True)
+    assert panel._items[0]._compact is True
+    # 灰色区间内多次 resize（模拟用户缓慢拖宽）：必须保持收起，不得展开
+    for w in (60, 70, 80, 90, 99):
+        panel.resize(w, 600)
+        ev = QResizeEvent(QSize(w, 600), QSize(panel._collapsed_min_width, 600))
+        panel.resizeEvent(ev)
+        qtbot.wait(10)
+        assert panel._collapsed is True, f"灰色区间 {w}px 不得自动展开"
+        assert panel._items[0]._compact is True, f"灰色区间 {w}px 不得切换紧凑态"
+    # 宽度达到折叠阈值 100 才能自动展开
+    panel.resize(100, 600)
+    ev = QResizeEvent(QSize(100, 600), QSize(panel._collapsed_min_width, 600))
+    panel.resizeEvent(ev)
+    qtbot.wait(50)
+    assert panel._collapsed is False
+    assert panel._items[0]._compact is False
+
+
 def test_tc_a4_resize_auto_collapse(panel, qtbot):
     """拖窄自动折叠（resizeEvent）：展开态收窄到阈值以下 → 自动折叠（矩阵 A3'）"""
     from PyQt5.QtCore import QSize
