@@ -11,6 +11,7 @@
 import logging
 import re
 import weakref
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -134,13 +135,28 @@ class ThemeManager:
                 # 单文件形式：xxx.yaml
                 self._load_yaml(entry, None, is_builtin)
 
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def _parse_yaml_cached(path_str: str, mtime_ns: int) -> dict:
+        """按 (路径, mtime_ns) 缓存 YAML 解析结果（文件变化自动失效）。
+
+        缓存 key 含 mtime：主题文件被编辑保存后 mtime 变化 → 自动重新解析，
+        reload() 无需手动清缓存即可拿到新内容。只缓存纯净的解析结果，
+        元信息（_path/_dir/_is_builtin/_source）由调用方写入拷贝，不污染缓存。
+        """
+        with open(path_str, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
     def _load_yaml(self, yaml_path: Path, theme_dir: Optional[Path], is_builtin: bool):
-        """加载单个主题 YAML"""
+        """加载单个主题 YAML（带 mtime 缓存，同文件未变化不重复解析）"""
         try:
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            if not data or not data.get("id"):
+            mtime_ns = yaml_path.stat().st_mtime_ns
+            parsed = self._parse_yaml_cached(str(yaml_path), mtime_ns)
+            if not parsed or not parsed.get("id"):
                 return
+            # 浅拷贝：下方写入 _path/_dir/_is_builtin/_source 元信息及
+            # _themes 存储均基于拷贝，缓存只保留纯净的 YAML 解析结果
+            data = dict(parsed)
 
             theme_id = data["id"]
 
