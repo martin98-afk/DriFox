@@ -389,3 +389,40 @@ class TestUIPluginRowPositionMenu:
 
         registry.move_floating_card.assert_called_once_with("card_1", "invalid", main_widget=fake_win)
         registry.toggle_floating_card.assert_not_called()
+
+
+class TestRefreshUIPluginsPoisonIsolation:
+    """T3: refresh_ui_plugins 单行构造异常不中断整体刷新（毒条目跳过、正常条目保留）"""
+
+    def test_poison_row_skipped_others_kept(self, panel):
+        """UIPluginRow 构造对特定卡片抛异常 → 该行跳过，其余按钮仍生成，整体不抛异常"""
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        reg.reset()
+        # ⚠️ reset() 会把 _instance 置 None，必须重新获取（否则注册进旧实例，
+        # refresh_ui_plugins 里 get_instance() 拿到的是全新空实例）
+        reg = UIPluginRegistry.get_instance()
+        reg.register_floating_card("good-plugin", "good-card", QWidget, "top", title="Good Card")
+        reg.register_floating_card("poison-plugin", "poison-card", QWidget, "top", title="Poison Card")
+
+        # fake PluginManager：两个插件都视为系统插件（进 system_infos 分组）
+        fake_info = type("Info", (), {"is_system": True})()
+        fake_pm = MagicMock()
+        fake_pm.get_plugin.return_value = fake_info
+
+        real_init = UIPluginRow.__init__
+
+        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id=""):
+            if card_id == "poison-card":
+                raise RuntimeError("poison row construction")
+            real_init(self, title, icon, parent, plugin_name, card_id)
+
+        with patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init), patch(
+            "app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm
+        ):
+            # 修复前：毒条目抛异常中断整个 refresh_ui_plugins → 这里会 propagate
+            panel.refresh_ui_plugins()
+
+        card_ids = [row._card_id for row in panel._system_plugin_buttons]
+        assert card_ids == ["good-card"], f"毒条目应被跳过、正常条目保留: {card_ids}"

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from PyQt5 import sip as _sip
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -30,6 +30,10 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
+
+# ── 对话区最大宽度（px）：窗口过宽时限制对话区宽度并居中，两侧留白 ──
+# 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
+_MAX_CHAT_WIDTH = 1000
 
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
@@ -212,6 +216,11 @@ class TabManagerWindow(QWidget):
         self._window_to_index: Dict[int, int] = {}
         # ── 上次图标缩放值，主题切换时用于判断是否需要重绘图标 ──
         self._last_icon_scale: int = -1
+        # ── 侧边栏展开/折叠宽度动画 ──
+        self._sidebar_anim: Optional[QVariantAnimation] = None
+        # 动画方向（True=收起），供 valueChanged 里判断跨阈值时机
+        self._sidebar_anim_collapsing: bool = False
+        self._sidebar_anim_ui_switched: bool = False  # 动画中是否已跨阈值切换 UI
 
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
@@ -348,10 +357,10 @@ class TabManagerWindow(QWidget):
                 border-radius: 8px;
             }}
             #chatFrame {{
-                background: {Colors.CARD_BG.format(alpha=150)};
+                background: {Colors.CARD_BG_SOLID};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
-                margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle */
+                margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle（矩形边框保持全宽） */
             }}
             #contentArea {{
                 background: transparent;
@@ -596,11 +605,24 @@ class TabManagerWindow(QWidget):
         # 默认显示对话区
         self._content_stack.setCurrentIndex(0)
 
-        # dock_splitter: 左停靠区 | 内容区(含覆盖层) | 右停靠区
+        # ── 对话内容限宽居中：_chat_frame 矩形边框保持全宽填满 splitter，
+        #    仅内容区（_content_stack：消息列表+输入区+覆盖层）限宽居中。
+        #    wrapper 作为 _dock_splitter 的中间窗格与左右 dock 容器并列：
+        #    dock 卡片展开时从 wrapper 借空间、可占满边框全宽；
+        #    wrapper 内部 content_stack 按 _MAX_CHAT_WIDTH 动态居中留白。 ──
+        self._chat_wrapper = QWidget(self._chat_frame)
+        self._chat_wrapper.setObjectName("chatWrapper")
+        self._chat_wrapper_layout = QHBoxLayout(self._chat_wrapper)
+        self._chat_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        self._chat_wrapper_layout.setSpacing(0)
+        self._chat_wrapper_layout.addWidget(self._content_stack, 1)
+        self._chat_wrapper.installEventFilter(self)
+
+        # dock_splitter: 左停靠区 | 内容区(wrapper) | 右停靠区
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
         self._dock_splitter.setObjectName("dockSplitter")
         self._dock_splitter.addWidget(self._global_left_container)
-        self._dock_splitter.addWidget(self._content_stack)
+        self._dock_splitter.addWidget(self._chat_wrapper)
         self._dock_splitter.addWidget(self._global_right_container)
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
@@ -633,6 +655,8 @@ class TabManagerWindow(QWidget):
 
         self._splitter = QSplitter(Qt.Horizontal, content_widget)
         self._splitter.addWidget(self._tab_frame)
+        # 矩形边框（_chat_frame）保持全宽填满 splitter 右侧；
+        # 内部对话内容限宽居中逻辑在 chat_frame 内的 _chat_wrapper 中处理
         self._splitter.addWidget(self._chat_frame)
         self._splitter.setStretchFactor(0, 0)  # 左面板不拉伸
         self._splitter.setStretchFactor(1, 1)  # 右侧内容区拉伸
@@ -670,31 +694,120 @@ class TabManagerWindow(QWidget):
         self._tab_panel.teamAddMemberRequested.connect(self._on_team_add_member_requested)
         self._tab_panel.teamNewTaskRequested.connect(self._on_team_new_task_requested)
 
-    # ── 侧边栏收起/展开 ──
+    # ── 侧边栏收起/展开（宽度平滑动画） ──
 
-    def _on_sidebar_toggled(self, collapsed: bool):
-        """侧边栏收起/展开：通过 splitter 调整面板宽度"""
+    def _on_sidebar_toggled(self, collapsed: bool, animate: bool = True):
+        """侧边栏收起/展开：通过 splitter 平滑动画调整面板宽度
+
+        Args:
+            collapsed: True=收起 False=展开
+            animate: 是否走宽度动画（启动恢复配置时传 False 瞬时切换）
+        """
         sizes = self._splitter.sizes()
         total_w = sum(sizes) if sizes else self.width()
+        cur_w = sizes[0] if sizes else (self._tab_frame.width() if hasattr(self, "_tab_frame") else 250)
 
         if collapsed:
             # 收起前保存当前宽度（供展开时恢复）
             if sizes:
                 self._saved_panel_frame_width = sizes[0]
             # 使用 _tab_panel 的收起最小宽度
-            collapsed_frame_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
-            self._splitter.setSizes([collapsed_frame_w, max(0, total_w - collapsed_frame_w)])
+            target_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
         else:
             # 展开：恢复保存的宽度，若无保存则用 250
             restore_w = getattr(self, "_saved_panel_frame_width", 250)
             # 至少保证宽度不小于展开最小视觉宽度
-            restore_w = max(120, restore_w)
-            self._splitter.setSizes([restore_w, max(0, total_w - restore_w)])
+            target_w = max(120, restore_w)
+            # 拖拽把手拉开的场景（当前宽度已远超收起最小宽度，说明用户
+            # 手动拖到位）：保持用户拖出的宽度，不覆盖为保存值。
+            # 按钮点击展开时 cur_w == 收起宽度(60)，不满足此条件。
+            if cur_w > self._tab_panel._collapsed_min_width + 14 + 10:
+                target_w = cur_w
+            elif cur_w >= target_w - 4:
+                target_w = cur_w
 
         # 持久化收起状态
         Settings.get_instance().tab_panel_collapsed.value = collapsed
-        if not collapsed:
-            # 展开时保存当前宽度（去除 frame 补偿）
+
+        if not animate:
+            # 启动恢复等瞬时路径：直接 setSizes
+            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            if not collapsed:
+                new_sizes = self._splitter.sizes()
+                if new_sizes:
+                    Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
+            return
+
+        # 平滑动画过渡
+        if abs(cur_w - target_w) < 3:
+            # 距离过近（如拖拽已到位）：瞬时落位，省一次空动画
+            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            if hasattr(self, "_tab_panel"):
+                self._tab_panel.sync_collapsed_ui()
+            if not collapsed:
+                Settings.get_instance().tab_panel_width.value = max(120, target_w - 14)
+            return
+
+        # 平滑动画过渡
+        self._start_sidebar_anim(cur_w, target_w, collapsing=collapsed)
+
+    def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
+        """启动侧边栏宽度动画（200ms OutCubic）"""
+        anim = self._sidebar_anim
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.setDuration(200)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(self._on_sidebar_anim_value)
+            anim.finished.connect(self._on_sidebar_anim_finished)
+            self._sidebar_anim = anim
+        # 动画期间抑制 TabPanel resizeEvent 自动展开（折叠途中宽度仍 > 阈值，
+        # 若不抑制会在动画中途误触发"拖拽展开"打断动画）
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_animating(True)
+        self._sidebar_anim_collapsing = collapsing
+        self._sidebar_anim_ui_switched = False
+        anim.stop()
+        anim.setStartValue(float(start_w))
+        anim.setEndValue(float(end_w))
+        anim.start()
+
+    def _on_sidebar_anim_value(self, value):
+        """动画每帧：更新 splitter 宽度；跨阈值时切换 TabPanel 紧凑/展开 UI"""
+        w = int(round(value))
+        sizes = self._splitter.sizes()
+        total_w = sum(sizes) if sizes else self.width()
+        self._splitter.setSizes([w, max(0, total_w - w)])
+
+        # 跨阈值切换 UI：收起时宽度 < 100 切紧凑；展开时宽度 >= 120 切完整。
+        # 阈值取收起最小宽度(46)与展开最小宽度(120) 的中间值，避免展开时
+        # 文字在极窄条中被挤压（先让宽度足够再显示文字）。
+        if not self._sidebar_anim_ui_switched:
+            if self._sidebar_anim_collapsing and w <= 100:
+                self._sidebar_anim_ui_switched = True
+                self._tab_panel.sync_collapsed_ui()
+            elif not self._sidebar_anim_collapsing and w >= 120:
+                self._sidebar_anim_ui_switched = True
+                self._tab_panel.sync_collapsed_ui()
+
+    def _on_sidebar_anim_finished(self):
+        """动画结束：恢复自动展开能力 + 精确落位最终宽度 + 保存配置"""
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_animating(False)
+        # 最终宽度精确落位（插值收尾可能差 1px）
+        sizes = self._splitter.sizes()
+        total_w = sum(sizes) if sizes else self.width()
+        if self._sidebar_anim_collapsing:
+            target_w = self._tab_panel._collapsed_min_width + 14
+        else:
+            target_w = getattr(self, "_saved_panel_frame_width", 250)
+            target_w = max(120, target_w)
+        self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+        # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.sync_collapsed_ui()
+        # 展开时保存当前宽度（去除 frame 补偿）
+        if not self._sidebar_anim_collapsing:
             new_sizes = self._splitter.sizes()
             if new_sizes:
                 Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
@@ -703,7 +816,7 @@ class TabManagerWindow(QWidget):
         """启动时根据配置恢复侧边栏收起状态"""
         collapsed = Settings.get_instance().tab_panel_collapsed.value
         if collapsed:
-            self._on_sidebar_toggled(True)
+            self._on_sidebar_toggled(True, animate=False)
             # 让 TabPanel 内部状态同步（不重复发射信号）
             self._tab_panel.set_collapsed(True)
 
@@ -1217,9 +1330,7 @@ class TabManagerWindow(QWidget):
         try:
             from PyQt5.QtCore import QCoreApplication, QEvent
 
-            QTimer.singleShot(
-                0, lambda: QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-            )
+            QTimer.singleShot(0, lambda: QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete))
         except Exception:
             pass
 
@@ -1469,6 +1580,18 @@ class TabManagerWindow(QWidget):
         """每次显示时恢复位置（标准系统窗口自带阴影/边框/圆角）"""
         super().showEvent(event)
         self._restore_geometry()
+        # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
+        if hasattr(self, "_chat_wrapper"):
+            try:
+                self._sync_chat_wrapper_width()
+            except Exception:
+                pass
+        # ★ T3 修复：窗口重新显示时补刷 UI 插件列表。
+        # 根因：插件热加载发生在窗口隐藏期间时，刷新被可见性门控跳过
+        # （main_widget 仅对可见的 TabManagerWindow 刷新），showEvent 无补刷
+        # → 列表停留在旧状态（全关重开才恢复）。重新显示时补刷一次。
+        if self._tab_panel is not None:
+            self._tab_panel.refresh_ui_plugins()
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -1578,6 +1701,35 @@ class TabManagerWindow(QWidget):
     def changeEvent(self, event):
         """标准系统窗口自带最大化/还原处理，无需自定义逻辑"""
         super().changeEvent(event)
+
+    def eventFilter(self, obj, event):
+        """对话区 wrapper Resize → 动态调整左右 margins 实现限宽居中
+
+        窗口超宽时：wrapper 宽度 > _MAX_CHAT_WIDTH，左右各留
+        (wrapper_w - _MAX_CHAT_WIDTH)/2 的空白，chat_frame 精确居中；
+        窗口不足该宽度时 margins 归零，chat_frame 占满 wrapper。
+        """
+        if obj is self._chat_wrapper and event.type() == QEvent.Resize:
+            try:
+                self._sync_chat_wrapper_width()
+            except Exception:
+                pass
+        return super().eventFilter(obj, event)
+
+    def _sync_chat_wrapper_width(self):
+        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中"""
+        wrapper = self._chat_wrapper
+        w = wrapper.width()
+        if w <= 0:
+            return
+        pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
+        layout = self._chat_wrapper_layout
+        if layout.contentsMargins().left() != pad:
+            layout.setContentsMargins(pad, 0, pad, 0)
+            # 立即重算：resize 节流期间布局事件链可能延迟，主动失效+激活
+            # 确保 chat_frame 几何同步到最新 margins（否则停留在旧宽度）
+            layout.invalidate()
+            layout.activate()
 
     def _on_resize_finished(self):
         """resize 结束后恢复布局 + 绘制 + 强制收拢

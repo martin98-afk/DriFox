@@ -609,10 +609,13 @@ class PlatformEditCard(QWidget):
             config_helper.set_platform_config(platform_enum, config_obj)
 
             name = PLATFORM_DEFS.get(self._platform, {}).get("name", self._platform)
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            parent = TabManagerWindow.get_instance() or self.window()
             InfoBar.success(
                 title="保存成功",
                 content=f"{name} 配置已保存",
-                parent=self.window(),
+                parent=parent,
                 duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -621,7 +624,13 @@ class PlatformEditCard(QWidget):
             self.closed.emit()
 
         except Exception as e:
-            InfoBar.error(title="保存失败", content=str(e), parent=self.window())
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            InfoBar.error(
+                title="保存失败",
+                content=str(e),
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
 
 
 # ═══════════════════════════════════════════════════════════

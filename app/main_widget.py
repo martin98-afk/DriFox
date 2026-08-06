@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -108,6 +109,15 @@ from app.widgets.bottom_input_area import (
     SendableTextEdit,
 )
 from app.widgets.pixel_pet import PixelPetWidget
+
+# TabManagerWindow 延迟导入：133 处 InfoBar parent 统一表达式（get_instance() or self.window()）
+# 需要函数内也可用，模块级导入一次即可。tab_manager_window 顶层仅依赖 app.utils.*，
+# 不反向依赖 main_widget，无循环导入风险；try/except 仅作防御（理论上不可达）。
+try:
+    from app.widgets.tab_manager_window import TabManagerWindow
+except Exception:  # noqa: BLE001
+    logger.warning("[MainWidget] TabManagerWindow 导入失败，InfoBar parent 回退 self.window()")
+
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
@@ -984,6 +994,14 @@ class OpenAIChatToolWindow(ToolWindow):
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
+
+    # 插件热重载窗口级去重（D 修复）：
+    # plugin_changed 信号广播到全部 backend 实例（多窗口），同一事件
+    # 每个窗口各执行一遍 _on_plugin_hot_reload。类级指纹 + 短窗抑制，
+    # 只让首个窗口执行完整刷新链路，其余窗口直接 return。
+    # 指纹 = result 序列化（同一次广播 result 相同）；10s 短窗内同指纹只执行一次。
+    _last_hot_reload_fingerprint: Optional[str] = None
+    _last_hot_reload_at: float = 0.0
 
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
@@ -1973,7 +1991,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.error(
                     "复制失败",
                     "创建窗口时发生异常，请重试",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
             except BaseException:
@@ -1995,7 +2013,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     InfoBar.error(
                         "窗口错误",
                         "主窗口已关闭，无法创建新窗口",
-                        parent=self,
+                        parent=TabManagerWindow.get_instance() or self.window(),
                         position=InfoBarPosition.BOTTOM,
                     )
                     return
@@ -2107,9 +2125,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # ── 统一路由到 Tab 管理器 ──
             # 多窗口模式已下线，禁止降级为独立 ToolPopupDialog（幽灵窗口）。
-            # 若单例未就绪则惰性重建并确保可见。
-            from app.widgets.tab_manager_window import TabManagerWindow
-
+            # 若单例未就绪则惰性重建并确保可见。（TabManagerWindow 为模块级导入）
             tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
             if not tm.isVisible():
                 tm.show()
@@ -2117,7 +2133,12 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[TabMode] 已添加新窗口到 Tab 管理器")
             return
         except Exception as e:
-            InfoBar.error("复制失败", str(e), parent=self, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "复制失败",
+                str(e),
+                parent=TabManagerWindow.get_instance() or self.window(),
+                position=InfoBarPosition.BOTTOM,
+            )
         except BaseException:
             # 极端情况（如 KeyboardInterrupt）也要兜底，防止 pyqt5_err_print → qFatal → abort
             import traceback
@@ -2918,6 +2939,8 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.core.config_sync import ConfigSyncService
 
             ConfigSyncService.get_instance().settingsRestored.connect(self._apply_synced_model_selection)
+            # Gitee token 真失效（syncDone 含"已失效"）→ 触发全局「重新绑定」提醒
+            ConfigSyncService.get_instance().syncDone.connect(self._on_gitee_sync_done)
         except Exception:
             pass
 
@@ -2933,6 +2956,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._todo_floating_widget = TodoFloatingWidget(self)
         self._todo_floating_widget.setVisible(False)
+        self._todo_floating_widget.closed.connect(self._on_todo_closed)
 
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
@@ -2964,7 +2988,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.chat_scroll_area = SingleDirectionScrollArea(self)
         self.chat_scroll_area.setMinimumHeight(0)
-        self.chat_scroll_area.setMinimumWidth(400)
+        self.chat_scroll_area.setMinimumWidth(320)
         self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
         self.chat_scroll_area.setWidgetResizable(True)
@@ -4287,7 +4311,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "  /team --delete=<name>       删除模板（不指定名称时列出可用模板）\n"
                 "  /team --create=<描述>       创建团队模板（AI 自动生成 yaml 文件）\n"
                 "（消息发送请直接在 UI 中操作）",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=6000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4303,7 +4327,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "格式错误",
                     "用法: /team --join=<agent> 或 /team --join",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     duration=3000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -4321,7 +4345,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._handle_team_save(m.group(1))
             else:
                 InfoBar.warning(
-                    "格式错误", "用法: /team --save=<name>", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                    "格式错误",
+                    "用法: /team --save=<name>",
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
                 )
             return
 
@@ -4354,7 +4382,11 @@ class OpenAIChatToolWindow(ToolWindow):
             raise CommandNeedDegrade("team", args)
 
         InfoBar.warning(
-            "未知参数", f"未知的 team 参数: {args}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+            "未知参数",
+            f"未知的 team 参数: {args}",
+            parent=TabManagerWindow.get_instance() or self.window(),
+            duration=3000,
+            position=InfoBarPosition.BOTTOM,
         )
 
     # ── 团队操作 ─────────────────────────────────────
@@ -4363,14 +4395,19 @@ class OpenAIChatToolWindow(ToolWindow):
         """加入团队：--join=<agent> 直接指定，--join 由命令卡片枚举选择"""
         agent_mgr = self.backend.agent_manager
         if not agent_mgr:
-            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "未就绪",
+                "智能体管理器未初始化",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         if not agent_name:
             InfoBar.warning(
                 "未指定角色",
                 "请使用 --join=<agent> 指定子智能体角色",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4385,7 +4422,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "未知智能体",
                 f"未找到: {agent_name}\n可用: {', '.join(available_names)}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4406,7 +4443,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "未知智能体",
                 f"未找到: {agent_name}\n可用: {', '.join(available_names)}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4445,7 +4482,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success(
             "已加入团队",
             f"角色: {agent_name}\n队友可通过 UI 消息界面向你派发任务",
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=4000,
             position=InfoBarPosition.BOTTOM,
         )
@@ -4511,7 +4548,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 "已离开团队",
                 "窗口已恢复独立模式",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4554,7 +4591,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "无法保存",
                 "当前没有任何活跃窗口持有有效 agent。请先 /team --join=<agent>",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4588,14 +4625,26 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "模板已保存",
                 f"  名称: {name}\n  角色: {', '.join(agent_names)}\n  路径: {path}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
         except TemplateError as e:  # noqa: F821 — 由 import 提供
-            InfoBar.error("保存失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "保存失败",
+                str(e),
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
         except Exception as e:  # noqa: BLE001
-            InfoBar.error("保存失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "保存失败",
+                f"未预期错误: {e}",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
 
     def _handle_team_load(self, name: str):
         """应用模板：为模板的每个角色新建一个全新空白窗口并加入团队。
@@ -4621,13 +4670,25 @@ class OpenAIChatToolWindow(ToolWindow):
             tm = TemplateManager.get_instance()
             template = tm.load(name)
         except TemplateError as e:
-            InfoBar.error("加载失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "加载失败",
+                str(e),
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         # 校验 agent_name 在系统中存在
         agent_mgr = self.backend.agent_manager
         if not agent_mgr:
-            InfoBar.error("未就绪", "智能体管理器未初始化", parent=self, duration=3000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "未就绪",
+                "智能体管理器未初始化",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
         available_names = [a.name for a in agent_mgr.list_agents(include_hidden=False) if a.mode in ("subagent", "all")]
         missing = template.validate_agent_names(available_names)
@@ -4822,7 +4883,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "无法新建成员",
                 "当前团队无模板且无成员角色，请先 /team --load=<模板> 或 /team --join=<角色>",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4861,7 +4922,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "已创建成员",
                 f"角色 {agent_name} 的成员会话已创建",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4886,7 +4947,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "无法新建任务",
                 "当前团队没有成员窗口，无法新建任务",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4903,7 +4964,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "无法新建任务",
                 "未找到团队成员的活跃窗口",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -4946,7 +5007,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.success(
                     "已新建任务",
                     f"已为 {len(member_windows)} 个成员窗口开启新一轮任务\n新 run: {new_run_id[:8]}…",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     duration=4000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -5104,7 +5165,11 @@ class OpenAIChatToolWindow(ToolWindow):
             templates = tm.list_templates()
         except Exception as e:  # noqa: BLE001
             InfoBar.error(
-                "列出失败", f"读取模板目录失败: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM
+                "列出失败",
+                f"读取模板目录失败: {e}",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
             )
             return
 
@@ -5114,7 +5179,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 "无模板",
                 f"当前没有模板。\n保存: /team --save=<name>\n保存目录: {dir_hint}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -5146,7 +5211,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.info(
             f"团队模板 ({len(templates)})",
             "\n".join(lines),
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=10000,
             position=InfoBarPosition.BOTTOM,
         )
@@ -5159,15 +5224,31 @@ class OpenAIChatToolWindow(ToolWindow):
             tm = TemplateManager.get_instance()
             deleted = tm.delete(name)
         except TemplateError as e:
-            InfoBar.error("删除失败", str(e), parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "删除失败",
+                str(e),
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
         except Exception as e:  # noqa: BLE001
-            InfoBar.error("删除失败", f"未预期错误: {e}", parent=self, duration=5000, position=InfoBarPosition.BOTTOM)
+            InfoBar.error(
+                "删除失败",
+                f"未预期错误: {e}",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            )
             return
 
         if deleted:
             InfoBar.success(
-                "模板已删除", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                "模板已删除",
+                f"  名称: {name}",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
             )
         else:
             # 检查模板是否存在于其他来源（系统/插件），给出更具体的提示
@@ -5182,13 +5263,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "只读模板",
                     f"模板「{name}」来自 {src_label}，只读不可删除。\n仅用户保存的模板（来源: user）可删除。",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     duration=5000,
                     position=InfoBarPosition.BOTTOM,
                 )
             else:
                 InfoBar.warning(
-                    "模板不存在", f"  名称: {name}", parent=self, duration=3000, position=InfoBarPosition.BOTTOM
+                    "模板不存在",
+                    f"  名称: {name}",
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
                 )
 
     # ── 邮箱监听与任务处理 ───────────────────────────
@@ -5756,7 +5841,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "参数错误",
                 "缺少智能体名称",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -5770,7 +5855,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "未就绪",
                 "智能体管理器未初始化",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -5780,7 +5865,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "未知智能体",
                 f"未找到智能体: {agent_name}，可用: {', '.join(available_agents)[:100]}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -5790,7 +5875,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "未就绪",
                 "子智能体管理器未初始化",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -5875,7 +5960,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     InfoBar.warning(
                         "未知服务商",
                         f"未找到服务商: {provider}",
-                        parent=self,
+                        parent=TabManagerWindow.get_instance() or self.window(),
                         position=InfoBarPosition.BOTTOM,
                     )
                 return None
@@ -5895,7 +5980,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     InfoBar.warning(
                         "模型不存在",
                         f"服务商 {provider} 下未找到以「{model_query}」开头的模型，可用: {', '.join(available)}",
-                        parent=self,
+                        parent=TabManagerWindow.get_instance() or self.window(),
                         position=InfoBarPosition.BOTTOM,
                     )
                 return None
@@ -5922,7 +6007,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "模型不存在",
                     f"未找到以「{model_value}」开头的模型，可用: {', '.join(available)}",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
             return None
@@ -6004,7 +6089,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "无法压缩",
                 "当前会话没有对话内容",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -6014,7 +6099,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "未就绪",
                 "子智能体管理器未初始化",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -6052,7 +6137,7 @@ class OpenAIChatToolWindow(ToolWindow):
             on_error=lambda err: InfoBar.error(
                 "压缩失败",
                 str(err)[:100],
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             ),
             session_id=session.session_id,  # 显式传 session_id，避免回退到 SubAgentManager 内部可能陈旧的值
@@ -6063,7 +6148,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.error(
                 "压缩失败",
                 "无法启动压缩任务，请检查 LLM 配置",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -6231,7 +6316,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "记忆为空",
                 "请在 /remember 后输入要记忆的内容",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -6244,14 +6329,14 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "已记忆",
                 f'"{content[:30]}{"..." if len(content) > 30 else ""}" 已存入长期记忆',
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
         else:
             InfoBar.error(
                 "记忆失败",
                 "无法保存到长期记忆",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -6761,7 +6846,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "未找到服务商",
                 f"未找到服务商「{model_name}」，可能已被移除",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -6996,6 +7081,27 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc.check_gitee_sync_reminder()
+
+    def _on_gitee_sync_done(self, success: bool, message: str):
+        """Gitee 同步完成：token 真失效（含"已失效"）时延迟弹出「重新绑定」提醒
+
+        仅 ConfigSyncService.syncDone(False, "…已失效…") 触发；网络异常
+        （"刷新失败（网络异常）"）等其他失败不算失效，不弹。
+        延迟 5s 确保设置弹窗已构建（与 _check_gitee_sync_reminder 同一节奏）。
+        """
+        if success:
+            return
+        if "已失效" not in message:
+            return  # 网络异常/未授权等其他失败不触发失效提醒
+        QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_token_invalid_reminder))
+
+    def _check_gitee_token_invalid_reminder(self):
+        """（委托全局卡片控制器 GlobalCardController）"""
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        cc = get_global_card_controller()
+        if cc is not None:
+            cc.check_gitee_token_invalid_reminder()
 
     def _open_gitee_bind_from_reminder(self, infobar):
         """（委托全局卡片控制器 GlobalCardController）"""
@@ -7759,7 +7865,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         "已移动",
                         f"会话已移至「{project}」项目",
                         duration=2000,
-                        parent=self,
+                        parent=TabManagerWindow.get_instance() or self.window(),
                         position=InfoBarPosition.BOTTOM,
                     )
 
@@ -7989,7 +8095,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "恢复失败",
                 "未找到该团队的会话记录",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8176,7 +8282,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "团队已恢复",
                 f"已恢复 {restored_count} 个成员会话",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8187,7 +8293,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "团队会话恢复失败",
                 "未创建任何恢复窗口（可能为空会话）\n当前团队已解散，可重新发起恢复",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8196,6 +8302,26 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # 极小窗口时对话区让出横向空间给左右 dock：
+        # 卡片渲染下限 320 由 sync_width(target_width=max(320, ...)) 兜底，
+        # 对话区被压窄/遮挡没关系。判据：
+        # - Tab 模式（宿主窗口有 dockSplitter）：用窗口总宽 - 左右 dock 最小
+        #   需求（含 handle），剩余不足 320 时让位为 0。不能只看 self.width()
+        #   ——溢出时对话区窗格会被 clamp 在 min 320，永远 ≥320 造成死锁。
+        # - 无 dock（多窗口模式）：按自身可用宽判断。
+        if hasattr(self, "chat_scroll_area"):
+            target_min_w = 320
+            host = self.window()
+            sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
+            if sp is not None and sp.count() >= 3:
+                win_w = host.width()
+                dock_min = sp.widget(0).minimumWidth() + sp.widget(2).minimumWidth() + sp.handleWidth() * 2
+                if win_w - dock_min < 320:
+                    target_min_w = 0
+            elif self.width() < 320:
+                target_min_w = 0
+            if self.chat_scroll_area.minimumWidth() != target_min_w:
+                self.chat_scroll_area.setMinimumWidth(target_min_w)
         self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
         self._pending_resize_sync = True
@@ -8574,7 +8700,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 title="技能" + ("已启用" if enable else "已禁用"),
                 content=msg,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8582,7 +8708,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 title="技能" + ("已启用" if enable else "已禁用"),
                 content=msg,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=1500,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8624,7 +8750,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 f"主题: {'✓' if result.get('themes') else '✗'}, "
                 f"技能: {'✓' if result.get('skills') else '✗'}, "
                 f"MCP: {'✓' if result.get('mcp') else '✗'}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -8637,6 +8763,18 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not hasattr(self, "backend") or not self.backend:
             return
+        # 窗口级去重：plugin_changed 广播到全部 backend 实例（多窗口各一个 backend），
+        # 同一事件每个窗口各执行一遍。类级指纹 + 10s 短窗抑制：只让首个窗口
+        # 执行完整刷新链路（其内部遍历 _instances 覆盖所有窗口），其余窗口直接跳过。
+        _fingerprint = repr(sorted(result.items()))
+        _now = time.time()
+        if (
+            _fingerprint == OpenAIChatToolWindow._last_hot_reload_fingerprint
+            and _now - OpenAIChatToolWindow._last_hot_reload_at < 10.0
+        ):
+            return
+        OpenAIChatToolWindow._last_hot_reload_fingerprint = _fingerprint
+        OpenAIChatToolWindow._last_hot_reload_at = _now
         # 不弹 InfoBar，仅日志记录
         logger.debug(
             f"[HotReload] plugin reloaded: agents={result.get('agents', 0)}, "
@@ -8691,9 +8829,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
             logger.debug("[HotReload] command shortcuts re-registered")
 
-        # 技能变更：广播刷新所有窗口的技能列表（settings popup + 卡片 token 估算）
-        # 修复：原代码仅刷新当前窗口 (self._settings_popup)，导致其他窗口看不到新技能，
-        # 必须重建窗口才能看到。改为遍历所有窗口，与 hooks 分支保持一致。
+        # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
+        # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
+        # 遍历窗口时每个窗口都会命中同一实例 → 只处理一次即 break，避免重复刷新。
         if result.get("skills"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8704,12 +8842,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win._settings_popup, "llmSkillsCard"):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
+                    break
                 except RuntimeError, AttributeError:
                     # 多窗口竞态：窗口已被销毁
                     pass
-            logger.debug("[HotReload] skills list re-discovered (all windows)")
+            logger.debug("[HotReload] skills list re-discovered")
 
-        # Hooks 变更：广播刷新所有窗口的 hook 设置卡片
+        # Hooks 变更：刷新 hook 设置卡片（settings popup 全局单例 → 只刷一次）
         if result.get("hooks"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8723,13 +8862,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if card._hook_manager:
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
+                    break
                 except (RuntimeError, AttributeError) as e:
                     # 多窗口竞态：窗口已被销毁
                     pass
-            logger.debug("[HotReload] hooks card refreshed (all windows)")
+            logger.debug("[HotReload] hooks card refreshed")
 
-        # 主题变更：广播刷新所有窗口的主题下拉列表
-        # 修复：原代码仅刷新当前窗口，新主题在其他窗口下拉中不出现，必须重建窗口。
+        # 主题变更：刷新主题下拉列表（settings popup 全局单例，只刷一次）
         if result.get("themes"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8738,9 +8877,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
                         continue
                     win._settings_popup.refresh_theme_options()
+                    break
                 except RuntimeError, AttributeError:
                     pass
-            logger.debug("[HotReload] settings theme dropdown refreshed (all windows)")
+            logger.debug("[HotReload] settings theme dropdown refreshed")
 
         # MCP 配置变更：刷新全局 MCP 服务器列表
         # 注意：settings popup 是全局唯一共享卡片（所有窗口通过 property 访问同一实例），
@@ -8799,9 +8939,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e:
                     logger.debug(f"[HotReload] MCP 断开失效连接失败: {e}")
 
-        # LSP 配置变更：广播刷新所有窗口的 LSP 状态列表
-        # 修复：原代码未处理 lsp 字段，导致 LSP 热重载后 settings popup 中
-        # 的 LSP 列表保持旧状态，必须重建窗口才能看到新服务器。
+        # LSP 配置变更：刷新 LSP 状态列表（settings popup 全局单例 → 只刷一次）
         if result.get("lsp"):
             for win in OpenAIChatToolWindow._instances:
                 if win._is_destroyed:
@@ -8814,9 +8952,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = win._settings_popup.lspListCard
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
+                    break
                 except RuntimeError, AttributeError:
                     pass
-            logger.debug("[HotReload] LSP server list refreshed (all windows)")
+            logger.debug("[HotReload] LSP server list refreshed")
 
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
@@ -8853,7 +8992,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 if _tm is not None and _tm.isVisible():
                     _tm._update_shared_launcher()
             except Exception:
-                pass
+                logger.exception("[HotReload] 刷新共享 Launcher 异常")
             logger.debug("[HotReload] UI 插件列表已刷新")
 
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
@@ -9459,7 +9598,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "AutoLoop",
                 "运行中无法新建会话，请先停止 AutoLoop",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -10120,7 +10259,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "提示",
                     "当前没有活动会话",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
@@ -10130,7 +10269,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "提示",
                     "工具执行器未初始化",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
@@ -10146,7 +10285,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "提示",
                     "当前会话没有文件修改记录",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
@@ -10158,7 +10297,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     "提示",
                     "未找到修改的文件",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.TOP_RIGHT,
                 )
                 return
@@ -10196,7 +10335,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "错误",
                 f"功能加载失败: {str(e)}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.TOP_RIGHT,
             )
         except Exception as e:
@@ -10204,7 +10343,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "错误",
                 f"打开差异查看器失败: {str(e)}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.TOP_RIGHT,
             )
 
@@ -11349,7 +11488,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "归档失败",
                 "未找到该团队的会话记录",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -11392,7 +11531,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "团队已归档",
                 f"已归档 {count} 个成员会话",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -11400,7 +11539,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "归档失败",
                 "没有可归档的成员会话",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -11457,7 +11596,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content=f"已导入会话：{imported_session.get('title', '新对话')}",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             logger.info(f"[导入会话] 成功: {file_path}")
         else:
@@ -11466,7 +11605,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content="无法解析会话文件，请确认文件格式正确",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             logger.warning(f"[导入会话] 失败: {file_path}")
 
@@ -11495,7 +11634,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content=f"已恢复会话：{imported_session.get('title', '新对话')}",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             logger.info(f"[恢复会话] 成功: {file_path}")
         else:
@@ -11504,7 +11643,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content="无法恢复该会话，文件可能已损坏",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
 
     def _on_archived_session_deleted(self, file_path: str):
@@ -11560,7 +11699,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content="归档会话已彻底删除",
                 position=InfoBarPosition.BOTTOM,
                 duration=2000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
         except Exception as e:
             logger.error(f"[彻底删除] 失败: {e}")
@@ -11569,7 +11708,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content=f"无法删除文件：{str(e)}",
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
         finally:
             # 操作完成（不论成功或失败），恢复正常状态
@@ -11605,7 +11744,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content=f"已更名为：{new_title}",
                 position=InfoBarPosition.BOTTOM,
                 duration=2000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
         except Exception as e:
             logger.error(f"[归档会话重命名] 失败: {e}")
@@ -11614,7 +11753,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 content=str(e),
                 position=InfoBarPosition.BOTTOM,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
 
     def _load_history_session(self, index: int):
@@ -13217,7 +13356,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "部分文件回滚失败",
                 f"成功: {result.success_count}, 失败: {result.failed_count}\n{failed_list}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -13225,7 +13364,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "文件已回滚",
                 f"已恢复 {result.success_count} 个文件",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -13288,7 +13427,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "差异显示失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13320,7 +13459,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "无差异信息",
                 "此工具没有修改任何文件，或差异数据已丢失",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -13334,7 +13473,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "差异显示失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13539,7 +13678,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "无差异信息",
                     "此对话没有修改任何文件",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
                 return
@@ -13571,7 +13710,7 @@ class OpenAIChatToolWindow(ToolWindow):
                             "卡片级未精确匹配到文件操作，已展示整个会话的差异汇总。\n"
                             "提示：团队/子智能体场景 call_id 可能不匹配，可点击工具运行框查看单工具差异。",
                             duration=5000,
-                            parent=self,
+                            parent=TabManagerWindow.get_instance() or self.window(),
                             position=InfoBarPosition.BOTTOM,
                         )
                         return
@@ -13581,7 +13720,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "无差异信息",
                     "此对话没有修改任何文件，或备份信息已丢失。\n提示：可点击工具运行框查看单工具差异。",
                     duration=4000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
                 return
@@ -13598,7 +13737,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "差异显示失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13653,7 +13792,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "审查失败",
                 "file_recorder 未初始化",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
             return
@@ -13672,7 +13811,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "无差异信息",
                     "此对话没有可审查的文件修改",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
                 return
@@ -13684,7 +13823,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "无差异信息",
                     "此对话没有可审查的文件修改，或备份信息已丢失",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
                 return
@@ -13775,7 +13914,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "无可审查内容",
                     "本轮所有文件修改均无可对比的差异",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
                 return
@@ -13831,7 +13970,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "Review 已启动",
                 success_msg,
                 duration=2500,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13841,7 +13980,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "Review 失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13874,7 +14013,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "文件已保存",
                 file_path,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
         except Exception as e:
@@ -13883,7 +14022,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "保存失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -13907,7 +14046,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "已复制",
                     "",
                     duration=1500,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     position=InfoBarPosition.BOTTOM,
                 )
         except Exception as e:
@@ -14385,7 +14524,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "AutoLoop",
                 "运行中无法发送消息，请先停止 AutoLoop",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -14527,7 +14666,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 "请先选择模型",
                 "请在设置中选择一个可用的模型后再发送消息",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -14823,6 +14962,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("sub_agent_compact", self._window_id)
 
+    def _on_todo_closed(self):
+        """todo 卡片关闭时通知 CardManager
+
+        与 sub_agent 对称：卡片关闭只 setVisible(False) 不会让 CardManager
+        感知（visible_cards 仍为 todo，show_card 会被跳过、容器也不会折叠）。
+        显式 hide_card 使状态同步 + 触发容器折叠释放 A3 min 锁，对话区恢复。
+        """
+        if hasattr(self, "_card_manager"):
+            self._card_manager.hide_card("todo", self._window_id)
+
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
         if getattr(self, "_is_destroyed", False):
@@ -14854,7 +15003,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.info(
             title="子智能体已中止",
             content=f"已手动中止子智能体「{agent_name}」: {task_description[:40]}{'...' if len(task_description) > 40 else ''}",
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=3000,
             position=InfoBarPosition.BOTTOM,
         )
@@ -14921,7 +15070,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 "暂无待办事项",
                 "",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=1000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -14951,7 +15100,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 title="已重置",
                 content="子智能体默认模型已清空，将使用主智能体模型",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -14967,7 +15116,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     title="参数错误",
                     content="--model= 后需要指定模型名或服务商:模型名",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     duration=3000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -14995,13 +15144,21 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 title="子智能体模型设置",
                 content=f"{info_text}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
             # 更新命令卡参数描述
             self._update_subagents_param_description()
             return
+
+        # ---- --create=<描述>：无 Python handler → 抛 CommandNeedDegrade 降级到
+        # prompt 注入（_execute_command 捕获后 select_prompt 按 --create= 参数
+        # 匹配 `<!-- section:create -->` 段，AI 自动生成子智能体 md 文件）。
+        if args.startswith("--create"):
+            from app.core.command_manager import CommandNeedDegrade
+
+            raise CommandNeedDegrade("subagents", args)
 
         # ---- 无参数：显示紧凑卡片 ----
         sub_agent_mgr = self.backend.sub_agent_manager
@@ -15011,7 +15168,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.warning(
                 title="暂无运行中的子智能体",
                 content="当前没有正在执行的子智能体任务",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -15052,7 +15209,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 title="已重置",
                 content="标题生成默认模型已清空，将使用主模型",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -15067,7 +15224,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 InfoBar.warning(
                     title="参数错误",
                     content="--model= 后需要指定模型名或服务商:模型名",
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                     duration=3000,
                     position=InfoBarPosition.BOTTOM,
                 )
@@ -15092,7 +15249,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 title="标题生成模型设置",
                 content=f"{info_text}",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=2000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -15106,7 +15263,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 title="当前标题生成模型",
                 content=saved,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -15114,7 +15271,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.info(
                 title="当前标题生成模型",
                 content="未设置，将使用主模型",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -16660,7 +16817,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 "预览失败",
                 str(e),
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 position=InfoBarPosition.BOTTOM,
             )
 
@@ -17414,7 +17571,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "归档成功",
                 f"已归档项目「{project_name}」的 {count} 个会话",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -17422,7 +17579,7 @@ class OpenAIChatToolWindow(ToolWindow):
             InfoBar.success(
                 "归档成功",
                 f"已移除项目「{project_name}」（无会话）",
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
@@ -17448,14 +17605,24 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_export_project(self, project_name: str):
         """导出项目为 .drifox_project 压缩包 — 先选方式再导出（后台线程避免 UI 冻结）"""
         if not self.history_manager:
-            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            InfoBar.warning(
+                title="",
+                content="历史管理器不可用",
+                duration=2000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
             return
 
         # 防止重复导出 — 注意 C++ 对象可能已被 deleteLater 销毁
         if hasattr(self, "_export_thread"):
             try:
                 if self._export_thread is not None and self._export_thread.isRunning():
-                    InfoBar.warning(title="", content="导出进行中，请稍候…", duration=2000, parent=self)
+                    InfoBar.warning(
+                        title="",
+                        content="导出进行中，请稍候…",
+                        duration=2000,
+                        parent=TabManagerWindow.get_instance() or self.window(),
+                    )
                     return
             except RuntimeError:
                 # C++ 对象已被 deleteLater 销毁，清理 Python 引用后继续
@@ -17496,7 +17663,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 title="导出失败",
                 content=error,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             return
 
@@ -17534,7 +17701,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 title="",
                 content=f"项目「{project_name}」已导出到: {path}",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             # ── 写入分享记录 ──
             self._insert_project_share_record(project_name, zip_path)
@@ -17548,7 +17715,12 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 打开导出路径失败: {e}")
         except Exception as e:
-            InfoBar.error(title="", content=f"导出本地失败: {e}", duration=3000, parent=self)
+            InfoBar.error(
+                title="",
+                content=f"导出本地失败: {e}",
+                duration=3000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
 
     def _on_export_upload(self, zip_path: str, project_name: str):
         """导出并上传到 Gitee，复制分享链接（异步，不卡 UI）"""
@@ -17561,7 +17733,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 title="",
                 content="Gitee 未配置（缺少 token/owner/repo），文件已保存到本地",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             self._on_export_local(zip_path, project_name)
             return
@@ -17574,7 +17746,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._upload_thread.finished.connect(self._upload_thread.deleteLater)
         self._upload_thread.start()
 
-        InfoBar.info(title="", content="正在上传项目压缩包...（异步上传，不阻塞界面）", duration=8000, parent=self)
+        InfoBar.info(
+            title="",
+            content="正在上传项目压缩包...（异步上传，不阻塞界面）",
+            duration=8000,
+            parent=TabManagerWindow.get_instance() or self.window(),
+        )
 
     def _on_upload_finished(self, url: str, err: str, zip_path: str, project_name: str):
         """上传线程完成后的回调（主线程执行）"""
@@ -17583,7 +17760,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 title="",
                 content=f"上传失败: {err}（文件已保存到本地）",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             self._on_export_local(zip_path, project_name)
             return
@@ -17596,7 +17773,7 @@ class OpenAIChatToolWindow(ToolWindow):
             title="",
             content=f"✅ 上传成功！链接已复制到剪贴板\n{url}",
             duration=5000,
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
         )
         # ── 写入分享记录（含上传链接） ──
         self._insert_project_share_record(project_name, zip_path, url)
@@ -17604,7 +17781,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_import_project(self):
         """从 .drifox_project 压缩包导入项目 — 与 ImportOptionDialog 一致风格"""
         if not self.history_manager:
-            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            InfoBar.warning(
+                title="",
+                content="历史管理器不可用",
+                duration=2000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
             return
 
         dialog = _ProjectImportOptionDialog(parent=self.window())
@@ -17638,7 +17820,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 title="",
                 content=f"成功导入 {success_count} 个项目",
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
 
     def _on_import_project_from_url(self):
@@ -17675,13 +17857,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._url_import_thread.finished.connect(self._url_import_thread.deleteLater)
         self._url_import_thread.start()
 
-        InfoBar.info(title="", content="正在下载项目压缩包...", duration=5000, parent=self)
+        InfoBar.info(
+            title="",
+            content="正在下载项目压缩包...",
+            duration=5000,
+            parent=TabManagerWindow.get_instance() or self.window(),
+        )
 
     @pyqtSlot(str, str)
     def _on_project_url_import_result(self, file_path: str, error: str):
         """后台下载完成后的回调（主线程执行）"""
         if error:
-            InfoBar.error(title="", content=f"下载失败: {error}", duration=3000, parent=self)
+            InfoBar.error(
+                title="",
+                content=f"下载失败: {error}",
+                duration=3000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
             return
 
         if self._do_import_project_archive(file_path):
@@ -17698,7 +17890,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     title="",
                     content=f"项目「{project_name}」导入成功（{result['session_count']} 个会话）",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                 )
 
                 # ── 项目文件恢复 ──
@@ -17747,7 +17939,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                         title="",
                                         content=f"项目文件已恢复到: {restore_path}",
                                         duration=5000,
-                                        parent=self,
+                                        parent=TabManagerWindow.get_instance() or self.window(),
                                     )
                                 else:
                                     logger.info(f"[MainWidget] extract_dir 为空，无文件可恢复: {extract_dir}")
@@ -17757,7 +17949,7 @@ class OpenAIChatToolWindow(ToolWindow):
                             title="",
                             content=f"文件已暂存到: {extract_dir}，可手动复制到项目目录",
                             duration=5000,
-                            parent=self,
+                            parent=TabManagerWindow.get_instance() or self.window(),
                         )
 
                 # 清理临时文件
@@ -17773,12 +17965,17 @@ class OpenAIChatToolWindow(ToolWindow):
                     title="",
                     content="导入失败：压缩包中无有效会话数据",
                     duration=3000,
-                    parent=self,
+                    parent=TabManagerWindow.get_instance() or self.window(),
                 )
                 return False
         except Exception as e:
             logger.error(f"[MainWidget] 导入项目异常: {e}", exc_info=True)
-            InfoBar.error(title="", content=f"导入失败: {e}", duration=3000, parent=self)
+            InfoBar.error(
+                title="",
+                content=f"导入失败: {e}",
+                duration=3000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
             return False
 
     def _resolve_restore_path(self, project_name: str, original_root: Optional[str]) -> Optional[str]:
@@ -17824,7 +18021,12 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_project_file_dropped(self, file_path: str):
         """拖拽 .drifox_project 文件到项目选择卡片的处理"""
         if not self.history_manager:
-            InfoBar.warning(title="", content="历史管理器不可用", duration=2000, parent=self)
+            InfoBar.warning(
+                title="",
+                content="历史管理器不可用",
+                duration=2000,
+                parent=TabManagerWindow.get_instance() or self.window(),
+            )
             return
         if self._do_import_project_archive(file_path):
             self._refresh_project_selector()
@@ -17854,7 +18056,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 orient=Qt.Horizontal,
                 isClosable=True,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
@@ -17906,7 +18108,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 orient=Qt.Horizontal,
                 isClosable=True,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
             return
 
@@ -17957,7 +18159,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 orient=Qt.Horizontal,
                 isClosable=True,
                 duration=3000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
         except Exception as e:
             logger.error(f"[MainWidget] 绑定项目根目录失败: {e}")
@@ -17967,7 +18169,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 orient=Qt.Horizontal,
                 isClosable=True,
                 duration=5000,
-                parent=self,
+                parent=TabManagerWindow.get_instance() or self.window(),
             )
 
     def _on_project_open_folder_btn(self):
@@ -18134,7 +18336,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success(
             "已保存",
             "长期记忆已更新",
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=1500,
             position=InfoBarPosition.BOTTOM,
         )
@@ -18144,7 +18346,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success(
             "已保存",
             "长期记忆已更新",
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=1500,
             position=InfoBarPosition.BOTTOM,
         )
@@ -18830,7 +19032,7 @@ class OpenAIChatToolWindow(ToolWindow):
             isClosable=True,
             position=InfoBarPosition.BOTTOM,
             duration=2000,
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
         )
         self._focus_input_if_active()
 
@@ -19348,7 +19550,7 @@ class OpenAIChatToolWindow(ToolWindow):
         InfoBar.success(
             "AutoLoop",
             message,
-            parent=self,
+            parent=TabManagerWindow.get_instance() or self.window(),
             duration=5000,
             position=InfoBarPosition.BOTTOM,
         )

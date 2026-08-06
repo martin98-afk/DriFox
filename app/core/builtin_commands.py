@@ -687,6 +687,37 @@ def reload_all_commands():
         pass
 
 
+def reload_agent_commands() -> int:
+    """只重新注册 agent 命令（不清空其他命令）
+
+    与 reload_all_commands 的区别：
+    - 不清空 CommandManager 中已有的 function/prompt 等其他类型命令
+    - 只移除并重新注册 AGENT 类型命令（agent 源文件即 /agent_name 命令）
+
+    用于插件 agents 目录变更后的局部重载：保证新增 agent 的 /xxx 命令立即可用，
+    同时不影响其他插件的命令。
+
+    Returns:
+        已注册的 agent 命令数量
+    """
+    cmd_mgr = CommandManager.get_instance()
+
+    # 1. 只移除 AGENT 类型的命令（其余类型原样保留）
+    for name in list(cmd_mgr._commands.keys()):
+        entries = cmd_mgr._commands[name]
+        entries.pop(CommandType.AGENT, None)
+        if not entries:
+            del cmd_mgr._commands[name]
+
+    # 2. 重新注册所有 agent 命令（覆盖/更新，含新增）
+    t0 = time.perf_counter()
+    agents = _register_builtin_agents_as_commands(cmd_mgr)
+    elapsed = time.perf_counter() - t0
+    logger.info(f"[BuiltinCommands] Reloaded {len(agents)} agent commands ({elapsed * 1000:.0f}ms)")
+
+    return len(agents)
+
+
 # ============================================================
 # PluginManager 集成
 # ============================================================

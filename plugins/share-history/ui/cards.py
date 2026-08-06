@@ -780,6 +780,7 @@ class ShareHistoryCard(QWidget):
     # ── 界面搭建 ────────────────────────────────────────
 
     def _setup_ui(self):
+        self.setMinimumWidth(420)
         self.setMinimumHeight(0)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet("ShareHistoryCard { background: transparent; }")
@@ -803,6 +804,7 @@ class ShareHistoryCard(QWidget):
         # ── 滚动内容区 ──
         self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
             "ScrollArea { background: transparent; border: none; }"
             "ScrollArea > QWidget > QWidget { background: transparent; }"

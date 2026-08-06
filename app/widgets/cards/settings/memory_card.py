@@ -1189,10 +1189,14 @@ class MemoryCardContent(QWidget):
         # 验证 URL 基本格式
         if '.' not in url.replace('https://', '').replace('http://', ''):
             from qfluentwidgets import InfoBar
+            # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            bar_parent = TabManagerWindow.get_instance() or self.window()
             InfoBar.warning(
                 title='URL 格式不正确',
                 content='请输入有效的网页链接（如 https://example.com）',
-                parent=self
+                parent=bar_parent
             )
             return
         memory_mgr = self._get_memory_manager()

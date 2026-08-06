@@ -1510,12 +1510,16 @@ class MarketplaceCard(QWidget):
     def _on_install_done(self, name: str, success: bool):
         """安装完成"""
         self._status_label.setText("")
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
             self._update_row_state(name, installed=True)
-            InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=self)
+            InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=bar_parent)
         else:
             self._update_row_state(name, installed=False, error=True)
-            InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=self)
+            InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
 
     def _on_install_error(self, name: str, err: str):
         """安装出错"""
@@ -1531,7 +1535,11 @@ class MarketplaceCard(QWidget):
             msg = m.group(0)[:120]
         elif len(err) > 120:
             msg = err[:120] + "..."
-        InfoBar.error(f"{name} 安装失败", msg, duration=5000, parent=self)
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.error(f"{name} 安装失败", msg, duration=5000, parent=bar_parent)
 
     # ── 异步更新 ────────────────────────────────────────
 
@@ -1558,12 +1566,16 @@ class MarketplaceCard(QWidget):
     def _on_update_done(self, name: str, success: bool):
         """更新完成"""
         self._status_label.setText("")
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
             self._render_plugins(self._plugin_data)
-            InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=self)
+            InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
             self._update_row_state(name, installed=True, error=True)
-            InfoBar.error(f"{name} 更新失败", "请检查网络或插件源", duration=3000, parent=self)
+            InfoBar.error(f"{name} 更新失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
@@ -1578,7 +1590,11 @@ class MarketplaceCard(QWidget):
             msg = m.group(0)[:120]
         elif len(err) > 120:
             msg = err[:120] + "..."
-        InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=self)
+        # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=bar_parent)
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态

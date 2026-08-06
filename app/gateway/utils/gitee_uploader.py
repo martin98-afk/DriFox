@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 
 import requests
 from loguru import logger
+from PyQt5.QtCore import QObject, pyqtSignal
 
 
 class GiteeContentBackend:
@@ -57,7 +58,7 @@ class GiteeContentBackend:
             return resp.text[:200]
 
 
-class GiteeUploader:
+class GiteeUploader(QObject):
     """
     Gitee 图床上传器（单例）
 
@@ -69,16 +70,23 @@ class GiteeUploader:
 
     _instance: Optional["GiteeUploader"] = None
 
+    # OAuth 绑定 token 真失效（上传 401 且刷新重试仍失败）→ UI 据此提示重新绑定
+    tokenInvalid = pyqtSignal()
+
     # 公开下载链接模板（与 Gitee contents API 返回的 download_url 一致）
     DOWNLOAD_URL = "https://gitee.com/{owner}/{repo}/raw/{branch}/{path}"
 
     def __init__(self):
+        super().__init__()
         self._token: str = ""
         self._owner: str = ""
         self._repo: str = ""
         self._path: str = "drifox"
         self._branch: str = "master"
         self._config_loaded: bool = False
+        # 是否为 OAuth 绑定账号模式（区别于共享仓库模式）；仅该模式下
+        # 401 重试失败才判定为"绑定 token 失效"并发出 tokenInvalid
+        self._oauth_mode: bool = False
         # 存储后端（可替换为其他平台实现）
         self._backend = GiteeContentBackend()
 
@@ -107,10 +115,13 @@ class GiteeUploader:
                 self._path = "drifox"
                 self._branch = "master"
                 self._config_loaded = True
+                self._oauth_mode = True
                 return True
+            self._oauth_mode = False
         except Exception as e:
             # OAuth 后端查询失败（未绑定/异常等），回退到共享仓库
             logger.debug(f"[GiteeUploader] OAuth 后端查询异常: {e}")
+            self._oauth_mode = False
 
         # 共享仓库模式：token 固定不变，可用缓存
         if self._config_loaded:
@@ -168,6 +179,7 @@ class GiteeUploader:
     async def upload_file_async(self, local_path: str) -> Tuple[Optional[str], Optional[str]]:
         """上传本地文件到 Gitee 仓库（异步版本，不阻塞事件循环）"""
         import asyncio
+
         return await asyncio.to_thread(self.upload_file, local_path)
 
     def upload_bytes(self, data: bytes, filename: str = "", ext: str = "") -> Tuple[Optional[str], Optional[str]]:
@@ -227,7 +239,22 @@ class GiteeUploader:
             if "401" in err_msg or "Access token is expired" in err_msg:
                 logger.info("[GiteeUploader] token 过期，尝试刷新后重试")
                 self.reset_config()
-                if self._ensure_config():
+                config_ok = self._ensure_config()
+                if not config_ok:
+                    # ★ 多设备修复：本地 RT 可能被其他设备轮换作废（invalid_grant），
+                    # 先尝试从云端拉取最新 RT 恢复（ConfigSync 云端 single source of truth）
+                    try:
+                        from app.core.config_sync import ConfigSyncService
+
+                        svc = ConfigSyncService.get_instance()
+                        if svc.recover_token_from_cloud():
+                            logger.info("[GiteeUploader] 已通过云端恢复 token，重试上传")
+                            self.reset_config()
+                            config_ok = self._ensure_config()
+                    except Exception as _re:
+                        logger.warning(f"[GiteeUploader] 云端恢复 token 失败: {_re}")
+
+                if config_ok:
                     ok = self._backend.upload(
                         token=self._token,
                         owner=self._owner,
@@ -244,6 +271,15 @@ class GiteeUploader:
                         logger.info(f"[GiteeUploader] 刷新后上传成功: {upload_name} → {download_url}")
                         return download_url, None
                     err_msg = getattr(self._backend, "last_error", "") or "重试上传失败"
+
+                # ★ T8B 修复：OAuth 模式 401 重试仍失败 → 绑定 token 已失效，
+                # 发出 tokenInvalid 供 UI 显示失效标识并提示重新绑定
+                if self._oauth_mode and ("401" in err_msg or "Access token is expired" in err_msg):
+                    logger.warning("[GiteeUploader] OAuth token 已失效（401 重试仍失败），发出 tokenInvalid")
+                    try:
+                        self.tokenInvalid.emit()
+                    except Exception as e:
+                        logger.warning(f"[GiteeUploader] tokenInvalid 信号发射失败: {e}")
 
             logger.warning(f"[GiteeUploader] 上传失败: {err_msg}")
             return None, err_msg

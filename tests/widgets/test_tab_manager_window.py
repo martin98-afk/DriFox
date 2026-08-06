@@ -58,3 +58,19 @@ class TestTabManagerWindow:
         qtbot.addWidget(tm)
         assert tm._tab_panel is not None
         assert tm._content_area is not None
+
+
+class TestTabManagerWindowShowEvent:
+    """T3: showEvent 补刷 UI 插件列表（隐藏期间热加载 → 重新显示时刷新）"""
+
+    def test_show_event_refreshes_ui_plugins(self, qtbot):
+        """窗口重新显示时必须调用 _tab_panel.refresh_ui_plugins 补刷"""
+        from unittest.mock import MagicMock
+
+        from PyQt5.QtGui import QShowEvent
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        tm._tab_panel.refresh_ui_plugins = MagicMock()
+        tm.showEvent(QShowEvent())
+        tm._tab_panel.refresh_ui_plugins.assert_called_once()

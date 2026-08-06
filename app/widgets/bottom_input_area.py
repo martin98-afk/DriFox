@@ -1501,11 +1501,12 @@ class SendableTextEdit(TextEdit):
         """粘贴图片保存超时未就绪 → 阻止发送并提示（R1-C2：避免正常环境静默丢图）"""
         try:
             from qfluentwidgets import InfoBar, InfoBarPosition
+            from app.widgets.tab_manager_window import TabManagerWindow
 
             InfoBar.warning(
                 "图片仍在保存",
                 "粘贴的大图正在后台保存，请稍候再发送",
-                parent=self.window() if self.window() is not None else self,
+                parent=TabManagerWindow.get_instance() or self.window() or self,
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )

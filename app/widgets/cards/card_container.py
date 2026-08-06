@@ -25,7 +25,12 @@ class CardContainer(QWidget):
     # 停靠区展开后的轴向最小尺寸：
     # 展开动画结束后释放轴向 max 并锁定此最小尺寸，
     # 使外层 QSplitter 可自由拖拽调整占比，且不会被拖成 1px 细条。
-    _DOCK_MIN_H = 140  # 横向停靠区（LEFT/RIGHT）最小宽
+    # 横向停靠区（LEFT/RIGHT）用 300 而非依赖 minimumSizeHint：
+    # Qt 对复杂卡片的 minimumSizeHint 常返回远小于内容实际需求的宽度
+    # （实测 file-tree=206、context=260），且 file-tree 在 dock 内 sizeHint=300、
+    # context-usage-stats 硬编码 setMinimumWidth(300)，固定下限 300 对齐
+    # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
+    _DOCK_MIN_H = 300  # 横向停靠区（LEFT/RIGHT）最小宽
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
@@ -214,6 +219,32 @@ class CardContainer(QWidget):
     def _dock_min(self) -> int:
         return self._DOCK_MIN_H if self._horizontal else self._DOCK_MIN_V
 
+    def _visible_cards_min_axis(self) -> int:
+        """当前可见卡片的最小轴向尺寸（横向取宽、纵向取高），至少 0
+
+        停靠模式展开时用于提升 min 锁：窗口缩小时 QSplitter 优先保证
+        卡片内容完整可见的最小尺寸，对话区最后被压缩（可被遮挡）。
+        与 _schedule_expand 一致用 not isHidden() 判定可见性。
+
+        同时取 minimumSizeHint() 与 minimumSize() 的轴向最大值：两者是
+        独立属性——硬编码 setMinimumWidth/Height 的卡片（如 context-usage-
+        stats setMinimumWidth(300)、tool_control setMinimumHeight(250)）
+        只有 minimumSize 生效，minimumSizeHint 可能是布局算出的更小值；
+        minimumSizeHint 无布局时返回无效尺寸 (-1,-1)，max() 自然兜底。
+        """
+        axis_min = 0
+        for w in self._cards.values():
+            if w.isHidden():
+                continue
+            hint = w.minimumSizeHint()
+            if self._horizontal:
+                value = max(hint.width(), w.minimumWidth())
+            else:
+                value = max(hint.height(), w.minimumHeight())
+            if value > axis_min:
+                axis_min = value
+        return axis_min
+
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
             return -1
@@ -281,6 +312,65 @@ class CardContainer(QWidget):
         if donor >= 0:
             sizes[donor] += freed
         sp.setSizes(sizes)
+
+    def resizeEvent(self, event):
+        """窗口缩小时联动宿主 splitter：溢出则把 dock 压回最小尺寸
+
+        在停靠模式下覆盖：QSplitter 压缩空间时优先压 stretch 大的窗格
+        （对话区），压到 0 后若仍溢出（如用户曾把 dock 拖大），QSplitter
+        会保持 dock 当前尺寸宁可溢出——导致右侧 dock 超出窗口被裁切。
+        此处延迟到 resize 完成后检查溢出，显式把各 dock 压回最小尺寸、
+        对话区让位吸收剩余空间。
+        """
+        super().resizeEvent(event)
+        if self._dock_splitter is not None and not self._overlay_mode:
+            # 延迟到 resize 传播链结束（self 尺寸已更新）再检查，避免重入
+            QTimer.singleShot(0, self._ensure_splitter_fits)
+
+    def _ensure_splitter_fits(self):
+        """splitter 总尺寸溢出可视区时，把 dock 分项压回各自最小尺寸
+
+        只处理展开态/可见 dock。非 dock 窗格（对话区）先压到其轴向最小值
+        （外层已把 minimumWidth 让位为 0），再压 dock 到轴向最小值。
+        QSplitter.sizes() 不包含 handle 宽度，可视区 = width - handle 总宽。
+        """
+        sp = self._dock_splitter
+        if sp is None or sp.width() <= 0:
+            return
+        sizes = sp.sizes()
+        handle_total = sp.handleWidth() * max(0, sp.count() - 1)
+        avail = sp.width() - handle_total
+        total = sum(sizes)
+        if total <= avail:
+            return
+        overflow = total - avail
+
+        horizontal = sp.orientation() == Qt.Horizontal
+        new_sizes = list(sizes)
+
+        # 1) 先压非 dock 窗格（对话区）到其最小轴
+        for i in range(sp.count()):
+            w = sp.widget(i)
+            if w is None or isinstance(w, CardContainer):
+                continue
+            m = w.minimumWidth() if horizontal else w.minimumHeight()
+            cut = min(new_sizes[i] - m, overflow)
+            if cut > 0:
+                new_sizes[i] -= cut
+                overflow -= cut
+        # 2) 再压 dock 窗格到各自轴向最小值（含自身：self 的 resize 传播链
+        #    已完成，setSizes 触发的新 resize 由幂等检查与 singleShot 防抖）
+        for i in range(sp.count()):
+            w = sp.widget(i)
+            if not isinstance(w, CardContainer):
+                continue
+            m = w.minimumWidth() if horizontal else w.minimumHeight()
+            cut = min(new_sizes[i] - m, overflow)
+            if cut > 0:
+                new_sizes[i] -= cut
+                overflow -= cut
+        if new_sizes != sizes:
+            sp.setSizes(new_sizes)
 
     def showEvent(self, event):
         """容器从隐藏变为可见时，如果有可见卡片则重新展开
@@ -396,7 +486,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -407,8 +497,10 @@ class CardContainer(QWidget):
             # 卡片内容变化：仅恢复一个较小的绝对最小锁，保证不缩成 1px 细条，
             # 同时允许用户把槽位拖小（双向拖拽）。默认占比（30%）由"首次展开
             # 的 setSizes 归位"保证，不在此用 minimum 钳死，否则手柄只能单向拖。
+            # 小窗口优先：锁 max(_dock_min, 可见卡片最小轴)，卡片内容变化后
+            # 锁不降级，窗口缩小时仍优先保证卡片完整可见。
             if self._dock_splitter is not None and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
-                self._set_axis_min(self._dock_min())
+                self._set_axis_min(max(self._dock_min(), self._visible_cards_min_axis()))
                 return
 
             # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
@@ -471,7 +563,9 @@ class CardContainer(QWidget):
                 ratio_floor = int(chat_h * self._DOCK_DEFAULT_RATIO_V) if (not self._horizontal and chat_h > 0) else 0
                 if self._horizontal:
                     target = self._dock_last_size if self._dock_last_size > natural_h else natural_h
-                    min_floor = self._dock_min()
+                    # 小窗口优先：min 锁 = max(停靠最小宽, 可见卡片最小宽)，
+                    # 窗口缩小时 splitter 优先保证卡片内容完整可见，对话区最后被压
+                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
                 else:
                     if self._dock_last_size > 0:
                         target = max(self._dock_last_size, ratio_floor)
@@ -480,7 +574,9 @@ class CardContainer(QWidget):
                     # 持久下限用较小的绝对值（_dock_min），保证不缩成 1px 细条即可；
                     # 默认占比（30%）由 target 经 setSizes 一次性归位保证。若把
                     # minimum 钳到 30%，QSplitter 会禁止把手柄拖回更小，导致"单向拖"。
-                    min_floor = self._dock_min()
+                    # 小窗口优先：min 锁再叠加可见卡片最小高，窗口缩小时卡片内容
+                    # 不被压缩（对话区最后被压矮）。
+                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
 
                 def _release_to_splitter():
                     # minimum 钳制是稳定兜底：splitter 按 sizeHint 分配空间，纵向卡片
@@ -497,6 +593,10 @@ class CardContainer(QWidget):
                 natural_h = target
             else:
                 self._last_expand_target = natural_h
+                # 非停靠（普通布局）展开：完成后锁 min=自然高度，窗口缩小时
+                # 卡片内容不被压缩；下次 _do_expand 开头 _set_axis_min(0) 解锁，
+                # 动态高度变化（heightChanged → _schedule_expand）不会被卡死。
+                on_expand_done = lambda: self._set_axis_min(natural_h)
 
             # 尺寸差异 < 2px 跳过动画，避免列表过滤/模式切换时无谓抖动
             if abs(natural_h - current_h) < 2:
@@ -546,7 +646,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
 
         anim.setStartValue(start_h)
@@ -561,7 +661,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
             anim.finished.connect(_on_done)
@@ -599,18 +699,33 @@ class CardContainer(QWidget):
         self._layout.removeWidget(widget)
         del self._cards[card_id]
 
-        if len(self._cards) == 0:
-            self._set_axis_max(0)
+        # 移除后重算：无可见卡片则折叠（解锁 min 锁），仍有可见卡片则按新内容展开。
+        # 修复：A3 展开后锁 min=natural_h，若移除卡片只锁 max=0 而不触发折叠路径，
+        # min 锁残留 → 容器仍占 natural_h 空间 → 对话区不恢复。
+        self._schedule_expand()
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize and obj in self._cards.values():
-            # 动画运行时，卡片 Resize 是动画自身级联副作用（容器撑大 → 卡片撑大），
-            # 若触发 _schedule_expand → _do_expand 会取消进行中的动画并重启，
-            # 形成"动画→Resize→打断→重启→Resize→..."的自激循环，导致高度抖动。
-            # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
-            if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+        # 先判事件类型再访问 _cards：__new__ 构造的容器（测试/析构中）可能无 _cards
+        if obj in getattr(self, "_cards", {}).values():
+            if event.type() == QEvent.Hide:
+                # 卡片被隐藏（无论经 CardManager 与否，如 todo 关闭按钮/空列表
+                # 直接 setVisible(False)）→ 触发重算：无可见卡片则折叠并释放
+                # A3 min 锁，避免容器仍占 natural_h 空间、对话区不恢复。
+                # 不能仅依赖 _on_card_hidden 回调：调用方可能未连接卡片
+                # closed 信号（todo），CardManager 状态不同步时该回调不触发。
+                # 延迟到下一事件循环执行：hide 事件传播链中同步调用 _schedule_expand
+                # 可能在对象销毁阶段重入崩溃；延迟后由事件循环串行处理，
+                # 且 QTimer 随容器销毁自动失效，不会在析构后回调。
+                QTimer.singleShot(0, self._schedule_expand)
                 return False
-            self._schedule_expand(source="resize")
+            if event.type() == QEvent.Resize:
+                # 动画运行时，卡片 Resize 是动画自身级联副作用（容器撑大 → 卡片撑大），
+                # 若触发 _schedule_expand → _do_expand 会取消进行中的动画并重启，
+                # 形成"动画→Resize→打断→重启→Resize→..."的自激循环，导致高度抖动。
+                # 跳过 Resize，让当前动画完成后再处理最终的尺寸。
+                if self._expand_animation is not None and self._expand_animation.state() == QPropertyAnimation.Running:
+                    return False
+                self._schedule_expand(source="resize")
         return super().eventFilter(obj, event)
 
 

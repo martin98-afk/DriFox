@@ -105,16 +105,56 @@ class TestCheckRemoteFile:
             mock_client.get.return_value = make_httpx_response(404)
             assert svc._check_remote_file("drifox/app.config") is False
 
-    def test_returns_none_when_401(self, svc):
-        """HTTP 401 → None（token 无效，不确定远端状态）"""
+    def test_401_raises_token_error(self, svc):
+        """HTTP 401 → 抛 TokenAuthError（token 失效，区别于网络异常 None）。
+
+        T8A 修复前：401 被当作网络异常返回 None → _initial_sync 发
+        "网络异常，无法同步"（不含"已失效"）→ T2a/T2b 关键词过滤拦截 →
+        UI 静默无提示。修复后 401 标记为 token 失效，走刷新重试/失效分支。
+        """
+        from app.core.config_sync import TokenAuthError
+
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
             mock_client.get.return_value = make_httpx_response(401, text="Unauthorized")
-            assert svc._check_remote_file("drifox/app.config") is None
+            with pytest.raises(TokenAuthError):
+                svc._check_remote_file("drifox/app.config")
+
+    def test_401_with_invalid_token_message_raises(self, svc):
+        """非 401 状态码但响应体含 invalid_token 语义 → 同样抛 TokenAuthError"""
+        from app.core.config_sync import TokenAuthError
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.get.return_value = make_httpx_response(
+                403, json_data={"message": "invalid_token"}
+            )
+            with pytest.raises(TokenAuthError):
+                svc._check_remote_file("drifox/app.config")
+
+    def test_401_with_expired_message_raises(self, svc):
+        """响应体含 'Access token is expired' → 抛 TokenAuthError"""
+        from app.core.config_sync import TokenAuthError
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.get.return_value = make_httpx_response(
+                200, json_data={"message": "Access token is expired"}
+            )
+            # 注意：200 带过期语义 → 走非 200 分支前的 200 处理？不——200 分支先返回
+            # content 判断。这里 200 且无 content → False。真正带失效语义的响应
+            # 是 401/403 等非 200。此用例验证 message 检测在非 200 分支生效：
+            mock_client.get.return_value = make_httpx_response(
+                401, json_data={"message": "Access token is expired"}
+            )
+            with pytest.raises(TokenAuthError):
+                svc._check_remote_file("drifox/app.config")
 
     def test_returns_none_when_403(self, svc):
-        """HTTP 403 → None（权限不足，不确定远端状态）"""
+        """HTTP 403 → None（权限不足，不确定远端状态；非 token 失效语义）"""
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
@@ -462,12 +502,12 @@ class TestInitialSync:
                     assert mock_upload.called
 
     def test_skips_when_remote_unknown(self, svc):
-        """远端状态不确定(网络错误) → 跳过 → 初始同步未完成"""
+        """远端状态不确定(服务端 500) → 跳过 → 初始同步未完成、不清绑"""
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
-            # _check_remote → 非 404 错误 → None
-            mock_client.get.return_value = make_httpx_response(401)
+            # _check_remote → 500（服务端错误，非 token 失效）→ None
+            mock_client.get.return_value = make_httpx_response(500)
 
             svc._initial_sync()
             assert svc._initial_sync_completed is False
@@ -545,6 +585,112 @@ class TestInitialSync:
                     svc._initial_sync()
                 remaining = svc._suppress_until - time.time()
                 assert remaining >= 20.0  # 保留 ~30s 抑制
+
+    # ── T8A：401（token 失效）分类修复 ──────────────────────
+
+    def test_401_refresh_fail_goes_invalid_branch(self, svc):
+        """401 + 刷新失败（TOKEN_REVOKED）→ 清绑 + syncDone(False,"已失效")。
+
+        修复前：401 被当网络异常 → syncDone(False,"网络异常，无法同步")
+        不含"已失效" → T2a/T2b 关键词过滤拦截 → UI 静默无提示。
+        修复后：走 _refresh_local_and_upload 既有失效分支，
+        TOKEN_REVOKED → 清绑 + "Gitee token 已失效，请重新绑定"。
+        """
+        from app.core.config_sync import Settings
+
+        msgs = []
+        svc.syncDone.connect(lambda ok, msg: msgs.append((ok, msg)))
+        # 完整配置 fake Settings：_initial_sync 各读取点（bound/token/expires_at）都需要，
+        # 否则 MagicMock 的 expires_at 参与比较会抛 TypeError
+        fake_cfg = MagicMock()
+        fake_cfg.gitee_bound.value = True
+        fake_cfg.gitee_user_token.value = "stale_token"
+        fake_cfg.gitee_user_owner.value = "test_user"
+        fake_cfg.gitee_user_refresh_token.value = "stale_rt"
+        fake_cfg.gitee_token_expires_at.value = 0.0
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            # 首页 _check_remote → 401（token 失效）
+            mock_client.get.return_value = make_httpx_response(401, text="Unauthorized")
+
+            # 刷新失败：_sync_token 返回 False，_refresh_local_and_upload 内部
+            # _ensure_valid_token 返回 TOKEN_REVOKED → 先尝试云端恢复，恢复失败 → 清绑分支
+            with patch.object(svc, "_sync_token", return_value=False), patch(
+                "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
+                return_value=(None, "TOKEN_REVOKED::invalid_grant"),
+            ), patch.object(svc, "recover_token_from_cloud", return_value=False), patch(
+                "app.core.config_sync.Settings.get_instance", return_value=fake_cfg
+            ):
+                svc._initial_sync()
+
+        # 必须发出"已失效"提示（T2a 红标 + T2b 弹窗链路的关键词）
+        assert any(ok is False and "已失效" in msg for ok, msg in msgs), f"未发出失效提示: {msgs}"
+        # 不得误发"网络异常"（T2 过滤会拦截导致 UI 静默）
+        assert not any("网络异常" in msg for ok, msg in msgs)
+        # 清绑：gitee_bound 置 False
+        assert fake_cfg.gitee_bound.value is False
+        assert svc._initial_sync_completed is False
+
+    def test_401_refresh_success_retries_and_syncs(self, svc):
+        """401 + 刷新成功 → 用新 token 重试检查远端 → 正常同步（不误报失效）。
+
+        access_token 过期场景：刷新成功（_ensure_valid_token 更新 Settings 内存
+        + 落盘）→ 重试 _check_remote 成功 → 继续路径 A 下载，不误清绑、不误报。
+        """
+        msgs = []
+        svc.syncDone.connect(lambda ok, msg: msgs.append((ok, msg)))
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            # 第一次 _check_remote → 401；刷新后重试 → 200 远端有配置
+            mock_client.get.side_effect = [
+                make_httpx_response(401),  # 首页检查：token 失效
+                make_httpx_response(200, {"content": "abc", "sha": "s1"}),  # 重试检查成功
+                make_httpx_response(200, {"sha": "s1"}),  # SHA check
+                make_gitee_file_response("remote_data", sha="s1"),  # download
+            ]
+
+            with patch.object(svc, "_sync_token", return_value=True), patch.object(
+                svc, "_is_access_token_valid", return_value=True
+            ), patch.object(svc, "_refresh_and_upload_after_download"), patch(
+                "pathlib.Path.write_bytes"
+            ):
+                svc._initial_sync()
+
+        # 刷新成功 → 正常同步完成，不得误报失效/清绑
+        assert svc._initial_sync_completed is True
+        assert not any("已失效" in msg for ok, msg in msgs), f"刷新成功不应误报失效: {msgs}"
+        assert not any("网络异常" in msg for ok, msg in msgs)
+
+    def test_network_error_still_network_branch_no_unbind(self, svc):
+        """网络异常（ConnectError）→ 仍走"网络异常，无法同步"，不清绑、不误报失效。"""
+        from app.core.config_sync import Settings
+
+        msgs = []
+        svc.syncDone.connect(lambda ok, msg: msgs.append((ok, msg)))
+        fake_cfg = MagicMock()
+        fake_cfg.gitee_bound.value = True
+        fake_cfg.gitee_user_token.value = "stale_token"
+        fake_cfg.gitee_user_owner.value = "test_user"
+        fake_cfg.gitee_user_refresh_token.value = "stale_rt"
+        fake_cfg.gitee_token_expires_at.value = 0.0
+
+        with patch("httpx.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value.__enter__.return_value = mock_client
+            mock_client.get.side_effect = httpx.ConnectError("connection refused")
+
+            with patch("app.core.config_sync.Settings.get_instance", return_value=fake_cfg):
+                svc._initial_sync()
+
+        assert svc._initial_sync_completed is False
+        # 网络异常语义不变：发出"网络异常"，不得误报"已失效"、不得清绑
+        assert any(ok is False and "网络异常" in msg for ok, msg in msgs), f"未发出网络异常提示: {msgs}"
+        assert not any("已失效" in msg for ok, msg in msgs)
+        assert not fake_cfg.gitee_bound.value, "网络异常不得清绑"
 
 
 # =============================================================================

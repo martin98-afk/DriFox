@@ -68,6 +68,16 @@ def _get_records_path() -> Path:
     return get_app_data_dir() / "share" / "records.json"
 
 
+class TokenAuthError(Exception):
+    """远端访问返回 401（access_token 失效/过期）。
+
+    与"网络异常"（_check_remote_file 返回 None）区分：401 意味着 token
+    本身失效，调用方应尝试刷新重试；刷新失败则走"已失效"分支（清绑提示
+    重新绑定），而不是静默当网络异常（T2a/T2b 的"已失效"关键词过滤会
+    拦截提示导致 UI 静默无反馈）。
+    """
+
+
 # ── ConfigSyncService ─────────────────────────────────────
 
 
@@ -541,9 +551,7 @@ class ConfigSyncService(QObject):
                     from app.utils.theme_manager import theme_manager as _tm
 
                     _tm.dispatch_refresh()
-                    logger.info(
-                        f"[ConfigSync] 主题已从 {_old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新"
-                    )
+                    logger.info(f"[ConfigSync] 主题已从 {_old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新")
             except Exception as _te:
                 logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
 
@@ -679,6 +687,7 @@ class ConfigSyncService(QObject):
         """同步把磁盘文件里的 Gitee token 段读入内存（云端 single source of truth）"""
         try:
             import json as _json
+
             with open(cfg.file, encoding="utf-8") as _f:
                 _data = _json.load(_f)
             _g = _data.get("Gitee", {})
@@ -729,11 +738,119 @@ class ConfigSyncService(QObject):
             return False
         return "TOKEN_REVOKED::" in err
 
+    # ── 多设备 refresh_token rotation 恢复（云端 single source of truth） ──
+
+    def _fetch_cloud_token_pair(self) -> bool:
+        """用当前 access_token 从云端拉取最新 app.config，把 Gitee token 段写回本地。
+
+        多设备场景：其他设备刷新会轮换 refresh_token 并上传新值到云端，
+        本机旧 RT 随即作废。本方法强制直读云端（不走 SHA 缓存、不触发
+        Settings 主线程重载），只更新 Gitee 段，避免干扰其他配置与 UI。
+
+        Returns:
+            True: 云端存在**更新**的 RT 且已写回 cfg + 磁盘
+            False: 云端无 RT / RT 与本地一致 / 读取失败（401、网络等）
+        """
+        import json as _json
+
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        access_token = cfg.gitee_user_token.value
+        owner = cfg.gitee_user_owner.value
+        if not access_token or not owner:
+            return False
+        try:
+            url = GITEE_FILE_API.format(owner=owner, repo=SETTINGS_REPO_NAME, path=REMOTE_PATH)
+            with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+                resp = client.get(url, params={"access_token": access_token})
+            if resp.status_code != 200:
+                logger.warning(f"[ConfigSync] 云端恢复：读取远端配置失败 HTTP {resp.status_code}")
+                return False
+            body = resp.json()
+            content_b64 = body.get("content", "") if isinstance(body, dict) else ""
+            if not content_b64:
+                logger.warning("[ConfigSync] 云端恢复：远端配置无内容")
+                return False
+
+            raw = base64.b64decode(content_b64).decode("utf-8")
+            data = _json.loads(raw)
+            _g = data.get("Gitee", {}) or {}
+            rt = str(_g.get("UserRefreshToken", "") or "")
+            at = str(_g.get("UserToken", "") or "")
+            try:
+                expires_at = float(_g.get("TokenExpiresAt", 0) or 0)
+            except TypeError, ValueError:
+                expires_at = 0.0
+            if not rt:
+                logger.warning("[ConfigSync] 云端恢复：远端配置无 refresh_token")
+                return False
+            # 云端 RT 与本地一致 → 云端没有更新的 RT，恢复无意义（防止无效循环）
+            if rt == cfg.gitee_user_refresh_token.value:
+                logger.info("[ConfigSync] 云端恢复：云端 RT 与本地一致，无更新")
+                return False
+
+            cfg.gitee_user_refresh_token.value = rt
+            if at:
+                cfg.gitee_user_token.value = at
+            if expires_at > 0:
+                cfg.gitee_token_expires_at.value = expires_at
+            self.pause_upload(5.0)
+            cfg.save()
+            # 兜底直接写盘（与 _persist_tokens 双重保险一致）
+            try:
+                cfg.file.parent.mkdir(parents=True, exist_ok=True)
+                with open(cfg.file, "w", encoding="utf-8") as f:
+                    _json.dump(cfg.toDict(), f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            logger.info("[ConfigSync] 已从云端恢复 Gitee token 段")
+            return True
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 云端恢复异常: {e}")
+            return False
+
+    def recover_token_from_cloud(self) -> bool:
+        """多设备场景：本地刷新失败（RT 被其他设备轮换作废）时从云端恢复。
+
+        任何一台设备用 refresh_token 刷新后，Gitee 都会轮换并作废旧 RT；
+        多台设备共享同一份云端 app.config（含 token 段）时，本地旧 RT
+        刷新必失败（invalid_grant）。此时不能直接判定「真失效」清绑——
+        先拉取云端最新 RT 重试刷新；成功则本地落盘并回传云端（收敛到
+        最新权威），失败才表示确实需要重新授权。
+
+        Returns:
+            True: 已用云端最新 RT 刷新成功（本地 cfg/磁盘已更新并回传云端）
+            False: 云端无更新 RT / 读取失败 / 云端 RT 刷新仍失败
+        """
+        from app.gateway.auth.gitee import GiteeOAuthBackend
+
+        backend = GiteeOAuthBackend()
+        if not backend.is_bound():
+            return False
+
+        for _attempt in range(2):
+            # 拉取云端 token 段（强制，不依赖 SHA 缓存）
+            if not self._fetch_cloud_token_pair():
+                return False
+            token, err = backend._ensure_valid_token()
+            if token:
+                # 恢复成功：确保最新 token 回传云端（_ensure_valid_token 已落盘）
+                self._persist_and_upload_token()
+                logger.info("[ConfigSync] 已用云端最新 refresh_token 恢复 token")
+                return True
+            logger.warning(f"[ConfigSync] 云端恢复第 {_attempt + 1} 次刷新失败: {err}")
+            # 网络异常（非 TOKEN_REVOKED）→ 云端 RT 有效但传输失败，重试无意义
+            if not self._token_revoked(err):
+                return False
+        return False
+
     def _refresh_local_and_upload(self):
         """access_token 过期/下载失败时：本地刷新（本地权威）→ 上传。
 
         旋转 refresh_token 使本地成为权威，立即上传云端（绝不回下载覆盖）。
-        - invalid_grant（RT 真被吊销）：清除绑定，提示重新授权；
+        - invalid_grant（RT 真被吊销）：先尝试云端恢复（可能被其他设备轮换），
+          恢复成功则继续同步；恢复失败才清除绑定，提示重新授权；
         - 传输错误（网络）：保留绑定，提示稍后重试，不清绑。
         """
         from app.gateway.auth.gitee import GiteeOAuthBackend
@@ -752,7 +869,15 @@ class ConfigSyncService(QObject):
         # 直接 emit：清除 _pending_sync_message，避免主线程重载时再次 emit 覆盖结果
         self._pending_sync_message = None
         if self._token_revoked(err):
-            logger.error("[ConfigSync] 本地刷新失败：refresh_token 已失效，清除绑定")
+            # ★ 多设备修复：本地 RT 可能被其他设备轮换作废（invalid_grant），
+            # 先尝试从云端拉取最新 RT 重试，成功则不误清绑（云端 single source of truth）
+            logger.warning("[ConfigSync] 本地刷新失败（RT 可能被其他设备轮换），尝试云端恢复")
+            if self.recover_token_from_cloud():
+                self._initial_sync_completed = True
+                self._set_state("idle")
+                self.syncDone.emit(True, "配置已同步（token 已随云端刷新）")
+                return
+            logger.error("[ConfigSync] 本地与云端刷新均失败：refresh_token 已失效，清除绑定")
             try:
                 cfg = Settings.get_instance()
                 cfg.gitee_bound.value = False
@@ -809,7 +934,29 @@ class ConfigSyncService(QObject):
         token_valid = self._is_access_token_valid()
         remote_status: bool | None = None
         try:
-            remote_status = self._check_remote()  # 内部不刷新
+            try:
+                remote_status = self._check_remote()  # 内部不刷新
+            except TokenAuthError:
+                # ★ T8A 修复：401 = token 失效（区别于网络异常）→ 先刷新重试。
+                # access_token 过期场景：刷新成功则继续正常同步（不误报失效）；
+                # 刷新失败（TOKEN_REVOKED→清绑 / 网络→保留）→ 走既有失效分支，
+                # 确保 T2a 红标 + T2b 弹窗的"已失效"提示链路生效。
+                logger.warning("[ConfigSync] 远端访问返回 401（token 失效），尝试刷新后重试")
+                if self._sync_token():
+                    # 刷新成功（_ensure_valid_token 已更新 Settings 内存 + 落盘）：
+                    # 用新 token 重试检查远端
+                    try:
+                        remote_status = self._check_remote()
+                    except TokenAuthError:
+                        # 刷新后仍 401（罕见）：按网络异常保守处理，不清绑
+                        logger.warning("[ConfigSync] token 刷新后仍返回 401，按网络异常保守处理")
+                        remote_status = None
+                else:
+                    # 刷新失败：_refresh_local_and_upload 内部区分
+                    # TOKEN_REVOKED（清绑 + syncDone(False,"已失效")）与网络异常（保留绑定）
+                    logger.warning("[ConfigSync] token 刷新失败，转入失效处理")
+                    self._refresh_local_and_upload()
+                    return
             if remote_status is True:
                 if token_valid:
                     # 路径 A：用有效 token 下载云端 RT → 刷新 → 上传（云端权威）
@@ -869,6 +1016,9 @@ class ConfigSyncService(QObject):
             True: 文件存在
             False: 文件不存在（404）
             None: 无法确定（网络异常），调用方应保守处理不上传
+
+        Raises:
+            TokenAuthError: 远端返回 401（token 失效），调用方应刷新重试
         """
         return self._check_remote_file(REMOTE_PATH)
 
@@ -879,6 +1029,11 @@ class ConfigSyncService(QObject):
             True: 文件存在
             False: 文件不存在（404）
             None: 无法确定（网络异常），调用方应保守处理
+
+        Raises:
+            TokenAuthError: 远端返回 401（access_token 失效/过期）。
+                与 None（网络异常）区分——401 表示 token 本身失效，
+                调用方应刷新重试；刷新失败走"已失效"分支而非静默当网络异常。
         """
         # 准备读取用 token（不刷新，避免旋转云端 refresh_token）
         self._prepare_read_token()
@@ -892,10 +1047,23 @@ class ConfigSyncService(QObject):
             if resp.status_code == 404:
                 return False  # 文件确定不存在
             if resp.status_code != 200:
+                # 非 200：区分 401（token 失效）与网络/服务端错误
+                # Gitee 401 响应体含 message: "invalid_token"/"Access token is expired"；
+                # 个别网关可能返回 403/其他状态码但携带同样的失效语义，一并识别。
+                try:
+                    _body = resp.json()
+                    _msg = str(_body.get("message", "")) if isinstance(_body, dict) else ""
+                except Exception:
+                    _msg = resp.text or ""
+                if resp.status_code == 401 or "invalid_token" in _msg or "access token is expired" in _msg.lower():
+                    logger.warning(f"[ConfigSync] 远端返回 {resp.status_code}（token 失效）: {_msg[:120]}")
+                    raise TokenAuthError(f"HTTP {resp.status_code}: {_msg[:120]}")
                 logger.warning(f"[ConfigSync] 检查远端文件失败: HTTP {resp.status_code}")
                 return None  # 其他错误 → 不确定状态，保守处理不上传
             body = resp.json()
             return isinstance(body, dict) and "content" in body
+        except TokenAuthError:
+            raise
         except Exception:
             return None
 
@@ -1336,7 +1504,7 @@ class ConfigSyncService(QObject):
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
                 shutil.move(str(_tmp_extract), str(self._user_custom_path))
-            except (RuntimeError, zipfile.BadZipFile):
+            except RuntimeError, zipfile.BadZipFile:
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
