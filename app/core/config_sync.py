@@ -30,6 +30,9 @@ USER_CUSTOM_REMOTE_PATH = "drifox/user-custom.zip"
 REMOTE_RECORDS_PATH = "drifox/share_records.json"
 SHA_CACHE_FILE = ".sync_shas.json"
 DEBOUNCE_MS = 10000
+# 初始同步启动延迟（毫秒）：把 enable() 后立即发起的网络链（实测 ~8.8s）
+# 移到启动空闲窗口之后，避免与 tab 创建/首次会话争抢 I/O。
+INITIAL_SYNC_DELAY_MS = 8000
 
 # 🛡️ T4-TOP10：等待旧 watch 线程退出的 join 超时（秒）。
 # 原 3s 使主线程最坏阻塞 3s（enable/disable 的 UI 事件路径）。
@@ -116,6 +119,7 @@ class ConfigSyncService(QObject):
         self._user_custom_backup_path: Path = _get_user_custom_backup_path().resolve()
         self._records_path: Path = _get_records_path().resolve()
         self._debounce_timer: Optional[QTimer] = None
+        self._initial_sync_timer: Optional[QTimer] = None  # 初始同步延迟计时器（enable 时创建）
         self._upload_lock = threading.Lock()
         self._watch_stop: Optional[threading.Event] = None
         self._watch_thread: Optional[threading.Thread] = None
@@ -258,9 +262,15 @@ class ConfigSyncService(QObject):
         self._suppress_until = time.time() + 30.0
         self._start_watching()
 
-        # 异步检查远端并恢复/上传
-        t = threading.Thread(target=self._initial_sync, daemon=True)
-        t.start()
+        # 启动延迟：把初始同步的网络流量移到启动空闲窗口之后（启动阶段 tab 创建/
+        # 首次会话会争抢 I/O，实测 8.8s 网络链拖慢启动）。QTimer 在主线程事件循环
+        # 触发；延迟窗口内 disable 会停止计时器，杜绝解绑后仍发起网络同步。
+        # 初始同步仍在 30s 抑制窗口内执行，与立即启动语义一致。
+        self._initial_sync_timer = QTimer(self)
+        self._initial_sync_timer.setSingleShot(True)
+        self._initial_sync_timer.setInterval(INITIAL_SYNC_DELAY_MS)
+        self._initial_sync_timer.timeout.connect(self._start_initial_sync)
+        self._initial_sync_timer.start()
 
     def disable(self):
         """解绑前调用：停止文件监听和防抖计时器，清除 SHA 缓存"""
@@ -268,6 +278,10 @@ class ConfigSyncService(QObject):
         if self._debounce_timer:
             self._debounce_timer.stop()
             self._debounce_timer = None
+        # 停止延迟启动的初始同步计时器（延迟窗口内解绑不再发起同步）
+        if self._initial_sync_timer:
+            self._initial_sync_timer.stop()
+            self._initial_sync_timer = None
         self._token = ""
         self._owner = ""
         # 清除 SHA 缓存（磁盘 + 内存），防止解绑后重新绑定时误判跳过下载
@@ -903,6 +917,15 @@ class ConfigSyncService(QObject):
 
     # ── 远端同步 ──────────────────────────────────────────
 
+    def _start_initial_sync(self):
+        """延迟窗口结束（主线程回调）：启动初始同步线程"""
+        self._initial_sync_timer = None
+        if self._state == "disabled":
+            logger.debug("[ConfigSync] 启动延迟窗口内已解绑，跳过初始同步")
+            return
+        t = threading.Thread(target=self._initial_sync, daemon=True)
+        t.start()
+
     def _initial_sync(self):
         """绑定后首次同步：云端 single source of truth。
 
@@ -1115,33 +1138,38 @@ class ConfigSyncService(QObject):
             custom_ok = True
             records_ok = True
 
-            # ── 1. 上传 app.config（仅脏时） ──
-            if upload_config:
-                if not self._config_path.exists():
-                    logger.warning("[ConfigSync] 无法上传：配置文件不存在")
-                    config_ok = False
-                else:
-                    config_ok = self._upload_file(
-                        local_path=self._config_path,
-                        remote_path=REMOTE_PATH,
-                        label="app.config",
-                    )
+            # [PERF] 三个文件上传共享同一 httpx.Client（keep-alive 连接池），
+            # 避免每文件独立建连（TCP+TLS 握手 ×3 → ×1）
+            with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
+                # ── 1. 上传 app.config（仅脏时） ──
+                if upload_config:
+                    if not self._config_path.exists():
+                        logger.warning("[ConfigSync] 无法上传：配置文件不存在")
+                        config_ok = False
+                    else:
+                        config_ok = self._upload_file(
+                            local_path=self._config_path,
+                            remote_path=REMOTE_PATH,
+                            label="app.config",
+                            client=client,
+                        )
 
-            # ── 2. 上传 user-custom 插件（仅脏时，压缩后上传） ──
-            if upload_custom and self._user_custom_path.exists():
-                custom_ok = self._upload_user_custom_zip()
+                # ── 2. 上传 user-custom 插件（仅脏时，压缩后上传） ──
+                if upload_custom and self._user_custom_path.exists():
+                    custom_ok = self._upload_user_custom_zip(client=client)
 
-            # ── 3. 上传分享记录（仅脏时） ──
-            if upload_records:
-                if self._records_path.exists():
-                    records_ok = self._upload_file(
-                        local_path=self._records_path,
-                        remote_path=REMOTE_RECORDS_PATH,
-                        label="share_records",
-                    )
-                else:
-                    # 本地无分享记录，跳过（不清除远端）
-                    records_ok = True
+                # ── 3. 上传分享记录（仅脏时） ──
+                if upload_records:
+                    if self._records_path.exists():
+                        records_ok = self._upload_file(
+                            local_path=self._records_path,
+                            remote_path=REMOTE_RECORDS_PATH,
+                            label="share_records",
+                            client=client,
+                        )
+                    else:
+                        # 本地无分享记录，跳过（不清除远端）
+                        records_ok = True
 
             if config_ok and custom_ok and records_ok:
                 self._set_state("idle")
@@ -1164,14 +1192,21 @@ class ConfigSyncService(QObject):
         finally:
             self._upload_lock.release()
 
-    def _upload_file(self, local_path: Path, remote_path: str, label: str = "") -> bool:
+    def _upload_file(
+        self, local_path: Path, remote_path: str, label: str = "", client: Optional[httpx.Client] = None
+    ) -> bool:
         """通用上传：将本地文件 base64 后 PUT/POST 到远端。
 
         Args:
             local_path: 本地文件路径
             remote_path: 远端路径（相对仓库根）
             label: 日志标识
+            client: 可复用的 httpx.Client（_do_upload 批量上传时共享连接池）
         """
+        if client is None:
+            with httpx.Client(timeout=httpx.Timeout(30.0)) as _client:
+                return self._upload_file(local_path, remote_path, label, _client)
+
         tag = label or remote_path
         try:
             data = local_path.read_bytes()
@@ -1184,75 +1219,82 @@ class ConfigSyncService(QObject):
                 "branch": "master",
             }
 
-            with httpx.Client(timeout=httpx.Timeout(30.0)) as client:
-                # 查远端 sha
-                existing_sha = self._get_remote_file_sha(remote_path, client)
-                if existing_sha:
-                    payload["sha"] = existing_sha
-                    resp = client.put(url, data=payload)
-                    method = "PUT"
-                else:
+            # [PERF] 优先用本地缓存的远端 SHA，跳过上传前全量查询远端
+            # （app.config/user-custom/share_records 3 项 = 3 次 GET 往返）。
+            # 缓存过期由 Gitee 服务端 sha 校验兜底：409 冲突走下方重试，
+            # 404（远端文件已被删除）回退 POST 新建，语义与逐次查询等价。
+            existing_sha = self._get_cached_remote_sha(label) or self._get_remote_file_sha(remote_path, client)
+            if existing_sha:
+                payload["sha"] = existing_sha
+                resp = client.put(url, data=payload)
+                method = "PUT"
+                if resp.status_code == 404:
+                    # 缓存 sha 已失效（远端文件不存在）→ 回退为新建
+                    payload.pop("sha", None)
                     resp = client.post(url, data=payload)
                     method = "POST"
+            else:
+                resp = client.post(url, data=payload)
+                method = "POST"
 
-                if resp.status_code in (200, 201):
-                    logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
-                    # 缓存远端 SHA，避免下次下载时重复拉取
-                    try:
-                        resp_data = resp.json()
-                        content_data = resp_data.get("content")
-                        if isinstance(content_data, dict):
-                            sha = content_data.get("sha", "")
-                            if sha:
-                                if label == "app.config":
-                                    self._config_remote_sha = sha
-                                elif label == "user-custom":
-                                    self._custom_remote_sha = sha
-                                elif label == "share_records":
-                                    self._records_remote_sha = sha
-                                self._save_sha_cache()
-                    except Exception:
-                        pass
-                    return True
+            if resp.status_code in (200, 201):
+                logger.info(f"[ConfigSync] {tag} 上传成功 ({method})")
+                # 缓存远端 SHA，避免下次下载时重复拉取
+                try:
+                    resp_data = resp.json()
+                    content_data = resp_data.get("content")
+                    if isinstance(content_data, dict):
+                        sha = content_data.get("sha", "")
+                        if sha:
+                            if label == "app.config":
+                                self._config_remote_sha = sha
+                            elif label == "user-custom":
+                                self._custom_remote_sha = sha
+                            elif label == "share_records":
+                                self._records_remote_sha = sha
+                            self._save_sha_cache()
+                except Exception:
+                    pass
+                return True
 
-                err_msg = self._parse_error(resp)
-                if resp.status_code in (401, 403):
-                    logger.error(f"[ConfigSync] {tag} 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
-                    return False
-
-                # PUT sha 冲突时重试一次
-                if method == "PUT" and "sha" in err_msg.lower():
-                    retry_sha = self._get_remote_file_sha(remote_path, client)
-                    if retry_sha:
-                        payload["sha"] = retry_sha
-                        resp2 = client.put(url, data=payload)
-                        if resp2.status_code in (200, 201):
-                            logger.info(f"[ConfigSync] {tag} 上传成功 (PUT retry)")
-                            # 缓存重试后的 SHA
-                            try:
-                                resp2_data = resp2.json()
-                                content2 = resp2_data.get("content")
-                                if isinstance(content2, dict):
-                                    sha2 = content2.get("sha", "")
-                                    if sha2:
-                                        if label == "app.config":
-                                            self._config_remote_sha = sha2
-                                        elif label == "user-custom":
-                                            self._custom_remote_sha = sha2
-                                        elif label == "share_records":
-                                            self._records_remote_sha = sha2
-                                        self._save_sha_cache()
-                            except Exception:
-                                pass
-                            return True
-
-                logger.error(f"[ConfigSync] {tag} 上传最终失败 [{resp.status_code}]: {err_msg}")
+            err_msg = self._parse_error(resp)
+            if resp.status_code in (401, 403):
+                logger.error(f"[ConfigSync] {tag} 上传失败 (token 无效) [{resp.status_code}]: {err_msg}")
                 return False
+
+            # PUT sha 冲突时重试一次
+            if method == "PUT" and "sha" in err_msg.lower():
+                retry_sha = self._get_remote_file_sha(remote_path, client)
+                if retry_sha:
+                    payload["sha"] = retry_sha
+                    resp2 = client.put(url, data=payload)
+                    if resp2.status_code in (200, 201):
+                        logger.info(f"[ConfigSync] {tag} 上传成功 (PUT retry)")
+                        # 缓存重试后的 SHA
+                        try:
+                            resp2_data = resp2.json()
+                            content2 = resp2_data.get("content")
+                            if isinstance(content2, dict):
+                                sha2 = content2.get("sha", "")
+                                if sha2:
+                                    if label == "app.config":
+                                        self._config_remote_sha = sha2
+                                    elif label == "user-custom":
+                                        self._custom_remote_sha = sha2
+                                    elif label == "share_records":
+                                        self._records_remote_sha = sha2
+                                    self._save_sha_cache()
+                        except Exception:
+                            pass
+                        return True
+
+            logger.error(f"[ConfigSync] {tag} 上传最终失败 [{resp.status_code}]: {err_msg}")
+            return False
         except Exception as e:
             logger.error(f"[ConfigSync] {tag} 上传异常: {e}")
             return False
 
-    def _upload_user_custom_zip(self) -> bool:
+    def _upload_user_custom_zip(self, client: Optional[httpx.Client] = None) -> bool:
         """压缩 user-custom 插件目录并上传到远端"""
         import zipfile
 
@@ -1266,7 +1308,7 @@ class ConfigSyncService(QObject):
                         zf.write(str(f), arcname)
 
             # 上传
-            ok = self._upload_file(zip_path, USER_CUSTOM_REMOTE_PATH, label="user-custom")
+            ok = self._upload_file(zip_path, USER_CUSTOM_REMOTE_PATH, label="user-custom", client=client)
             return ok
         except Exception as e:
             logger.error(f"[ConfigSync] user-custom 压缩上传失败: {e}")
@@ -1278,6 +1320,16 @@ class ConfigSyncService(QObject):
                     zip_path.unlink()
             except Exception:
                 pass
+
+    def _get_cached_remote_sha(self, label: str) -> Optional[str]:
+        """获取本地缓存的远端 SHA（上传时避免每次全量查询远端）"""
+        if label == "app.config":
+            return self._config_remote_sha
+        if label == "user-custom":
+            return self._custom_remote_sha
+        if label == "share_records":
+            return self._records_remote_sha
+        return None
 
     def _get_remote_file_sha(self, remote_path: str, client: Optional[httpx.Client] = None) -> Optional[str]:
         """查询远端特定文件的 sha，不存在返回 None。可复用已打开的 httpx.Client。"""
