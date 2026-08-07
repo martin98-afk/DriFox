@@ -150,6 +150,12 @@ class FileTreeModel(QAbstractItemModel):
         self._clear_children(node, parent_idx)
         self._insert_children(node, parent_idx, entries)
 
+    def refresh_root(self, entries):
+        """外部变更后刷新根目录顶级条目（根目录自身无节点，单独处理）"""
+        self.beginResetModel()
+        self._root_entries = self._build_nodes(entries, None)
+        self.endResetModel()
+
     def rename_node(self, old_path: str, new_name: str) -> Optional[str]:
         """重命名节点，返回新路径；失败返回 None"""
         node = self._find_node(old_path)

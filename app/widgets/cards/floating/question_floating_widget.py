@@ -587,6 +587,12 @@ class QuestionFloatingWidget(QWidget):
         # ── 问题标题（按内容动态高度，上限自适应） ──
         self._question_scroll = QScrollArea()
         self._question_scroll.setWidgetResizable(True)
+        # 🛠️ 问题内容区域高度：手动按内容自适应（不依赖 QScrollArea.sizeHint
+        # —— 样式表/滚动条策略组合会导致 AdjustToContents 失效，sizeHint 退回
+        # 滚动条默认高度 (22,26)，容器 _do_expand 据此算错卡片总高）。
+        # 这里垂直 Fixed + 每帧按内容重设 setFixedHeight，
+        # 内容短 → 高度贴合；内容长 → 上限内滚动（见 _fit_question_scroll_height）。
+        self._question_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._question_scroll.setMaximumHeight(280)
         self._question_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._question_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -775,17 +781,55 @@ class QuestionFloatingWidget(QWidget):
         else:
             self._on_radio_selected(w)
 
+    def _compute_q_max(self) -> int:
+        """计算问题内容区高度上限：窗口 30%，夹紧 [120, 320]
+
+        ⚠️ 不读 self._question_scroll.maximumHeight()：
+        setFixedHeight 会同时改写 maximumHeight，若 fit 依赖该属性，
+        第一次 setFixedHeight 后上限被污染成小值，后续内容再长也撑不开。
+        """
+        win = self.window()
+        win_h = win.height() if win is not None else 800
+        return max(120, min(int(win_h * 0.30), 320))
+
     def _update_dynamic_heights(self):
         """根据窗口高度动态调整问题标题区与选项区的最大高度
 
         短内容自然展开（≤ sizeHint），长内容在窗口比例的合理阈值内滚动，
         避免硬编码值在小窗口溢出 / 大窗口浪费。
         """
-        win = self.window()
-        win_h = win.height() if win is not None else 800
-        # 问题标题：窗口 30%，夹紧 [120, 320]
-        q_max = max(120, min(int(win_h * 0.30), 320))
-        self._question_scroll.setMaximumHeight(q_max)
+        self._question_scroll.setMaximumHeight(self._compute_q_max())
+        self._fit_question_scroll_height()
+
+    def _fit_question_scroll_height(self):
+        """问题内容区高度按内容自适应
+
+        背景：QScrollArea 垂直策略已设为 Fixed，高度完全由 setFixedHeight
+        决定 —— 不再依赖 QScrollArea.sizeHint（样式表/滚动条策略组合会让
+        AdjustToContents 失效、sizeHint 退回滚动条默认值，导致容器 _do_expand
+        height 算错、问题文字被拉伸出现大片空白）。
+
+        规则：
+        - 内容短 → 高度 = 内容所需高度（贴合，无多余空白）
+        - 内容长 → 高度 = 上限（上限内滚动）
+        """
+        vp_w = self._question_scroll.viewport().width()
+        if vp_w <= 0:
+            # 布局未完成，延迟重试
+            QTimer.singleShot(20, self._fit_question_scroll_height)
+            return
+        # QLabel heightForWidth 在 setWordWrap(True) 下返回折行后的精确高度
+        content_h = self._question_label.heightForWidth(vp_w)
+        if content_h <= 0:
+            content_h = self._question_label.sizeHint().height()
+        content_h = max(content_h, self._question_label.minimumHeight())
+        target = min(content_h, self._compute_q_max())
+        if self._question_scroll.height() != target:
+            self._question_scroll.setFixedHeight(target)
+            self.updateGeometry()
+            # ⚠️ 不在此 emit heightChanged：show_question / _on_next / _on_back
+            # 等调用路径末尾已统一 emit；此处再发会造成重复信号（高度抖动回归
+            # 测试要求首次显示 ≤1 次）。容器展开依赖调用方末尾的 emit。
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""
@@ -919,6 +963,8 @@ class QuestionFloatingWidget(QWidget):
         """)
 
         self._question_label.setText(question_text)
+        # 🛠️ 问题文本变化后重新计算内容区高度（延迟到布局宽度可用时）
+        QTimer.singleShot(0, self._fit_question_scroll_height)
 
         self._hint_label.setText(
             "☑ 选择所有适用的选项（可多选）" if multiple and options else "👆 选择一个答案" if options else ""

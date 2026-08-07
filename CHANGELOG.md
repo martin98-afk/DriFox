@@ -1,29 +1,54 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.4.13] - 2026-08-05
+## [v0.4.13] - 2026-08-07
 
-自上一版本以来的变更 | 提交数：29（v0.4.12..HEAD，另有工作树待提交批次）· 文件变更：54+ · +8997/-3360+（含未提交工作树，最终统计以发布时为准） | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：70 · 文件变更：176 · +29244/-6535 | 贡献者：mading, dingma
 
-> 重点：**团队创建性能与可靠性系列**——TabPanel 批量布局（连续 add_tab O(N²)→O(N)）、welcome 渲染交错时间片、新建任务全员会话链式交错、竞态/幽灵窗口根治（D2 标记前置 / E1-E2 回收 / E3 计数兜底 / C3 join 写盘合并 / C4 就绪轮询）；**团队框 hover tooltip 问题①修复**（_enter 补发 Enter + 显示前鼠标校验）；**命令卡片 tooltip 实体与首显样式修复**；**tests 目录纳入版本控制**。
+> 重点：**流式渲染性能大修**（差量化渲染末帧渲染量降 98%、渲染移出主线程、WebEngine renderer 内存强回收、会话历史驻留清理、关闭窗口异步化）；**tab_panel 侧边栏体验系列**（自动折叠/展开、滞回阈值、宽度动画）；**团队协作链路完善**（团队框按钮返工、会话记录支持同角色多成员、模板列表直读 user-custom）；**MCP stdio 命令安全校验**；**文件工具 glob 标准语义修复**。
 
 ### ✨ 新功能 (New Features)
 
-- **TabPanel 批量布局 API** (`app/widgets/tab_panel.py` + `app/main_widget.py`): 新增 `begin_batch_add()/end_batch_add()`（深度计数、嵌套安全），批量期间 `add_tab` 跳过逐次全量 `_rebuild_team_layout`，结束统一重建一次；团队创建（`_spawn_team_members`）与一键恢复（`_on_team_restore_requested`）路径接线——批量建 N 窗由 O(N²) 降为 O(N)
-- **welcome 渲染交错时间片** (`app/main_widget.py` `_schedule_initial_welcome`): 并发新建 N 个会话时 welcome（QWebEngineView 100-500ms/窗）不再同一事件批次连续渲染——类级计数器分配 0/50/…/950ms 槽位（50ms×20 轮转），单窗 0ms 无感知差异
-- **新建任务全员会话链式交错** (`app/main_widget.py` `_handle_team_new_task`): 成员窗口 `_create_new_session` 改 QTimer 链式调度（每窗 `_TEAM_NEW_TASK_STAGGER_MS=50ms`），期间事件循环可响应绘制/输入；严格保持 4 步顺序约束（全员旧 run_id 落库 → `start_team_run(force)` → 更新 `_team_run_id` → 刷新 Tab 分组），防历史串台
+- **Tab 内联关闭确认 + 关闭按钮 tooltip 增强** (`app/widgets/tab_panel.py`): 关闭内联确认（防误关）、关闭按钮 tooltip 与样式调整、品牌标题与版本左对齐
+- **MCP stdio 命令安全校验** (`app/tools/mcp_tools.py`): stdio 命令白名单/黑名单校验，防止任意命令执行
+- **文件提及卡片预编译忽略规则与后台扫描** (`app/widgets/cards/floating/file_mention_card.py`): 忽略规则预编译 + 后台扫描避免阻塞 UI
+- **卡片槽位小窗口优先显示** (`app/widgets/`): 小窗口优先显示 / dock 卡片布局改善
+- **任务中断协议增强与错误处理** (`app/core/`): 中断协议完善、异常处理增强
+- **团队框按钮返工** (`app/main_widget.py`): 新建任务（全员新会话+新 run_id）/ 快速新建成员（可重复角色）按钮
+- **团队协作链路整体完善** (`app/main_widget.py` + `app/widgets/team/`): 邮件状态机修复、round 口径统一、成员按钮、能力可见性
+- **UIPluginRegistry 支持 unload_ui 回调** (`app/core/ui_plugin_registry.py`): 热重载/卸载时释放子进程资源
+- **组件测试补充** (`tests/`): tab_panel 关闭按钮、团队分组头、streaming dock、viewer 等测试
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **团队框关闭按钮 hover 无 tooltip** (`app/widgets/tab_panel.py`): close_btn 补 `setToolTip("关闭团队")`（与 new_task/add 按钮对齐，simple_hover_tooltip monkey-patch 自动接管）
-- **团队框按钮 hover 无提示 / tooltip 飘移（问题① A/B）** (`app/widgets/tab_panel.py` + `app/widgets/simple_hover_tooltip.py`): A——`_enter` 显示三按钮后若鼠标已在按钮上方则补发 `QEnterEvent`（compact 折叠态跳过），tooltip 计时正常启动；B——`_HoverTooltipFilter._on_timeout` 显示气泡前校验 `isVisible()` 且鼠标仍在控件 `rect()` 内，校验失败停表放弃（防御 visible 切换时序 / DPI 几何错位）
-- **团队竞态与幽灵窗口系列（#9）** (`app/main_widget.py`): D2 团队标记前置传入 `_create_fresh_window`（add_window 之前写入，Tab 直接命中团队分组）；E1/E2 建窗失败主动回收 `_abort_team_window`（Tab 注销 + close）；E3 `_join_new_window_for_template` 提前 return 路径统一递减排列计数；C3 延迟 join 退化为纯 UI 补注册（写盘 join 恰好一次）；C4 backend 未就绪就绪轮询（30×50ms）兜底
-- **命令卡片 tooltip 实体字面显示** (`app/widgets/cards/floating/command_card.py`): `&quot;` 等 HTML 实体被 QLabel AutoText 判定 PlainText 字面显示——tooltip 文本与名称标签显式强制 RichText；新建项首次显示时补 `_apply_style`（不可见期 repolish 跳过导致级联 QSS 不落地，hover 后才恢复）
-- **ElidedLabel 富文本误判** (`app/widgets/elided_label.py`): 未布局（宽 ≤0）时强制 PlainText，避免原文含 `<`/`>` 被 AutoText 误判为富文本导致标签被吞/渲染错乱
+- **流式渲染性能修复系列** (`app/widgets/message_card.py` + `app/core/workers/`): 差量化渲染（自然边界闭合段增量追加，末帧渲染量降 98%）、渲染移出主线程（线程池+序号校验）、WebEngine renderer 强回收（LRU+护栏 kill 离屏进程）、虚拟滚动回收保留数据、词法缓存限容、worker QThread 释放与 cleanup 竞态收敛、tooltip 注册表自注销、关闭窗口异步化不阻塞、历史驻留清理、IPC 瘦身
+- **tab_panel 侧栏体验修复** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 自动折叠/展开逻辑与阈值统一（消除灰色区间）、展开阈值滞回区（>=110）、侧边栏宽度动画、品牌标题与版本左对齐 stretch、展开/折叠图标一致性
+- **团队修复** (`app/main_widget.py` + `app/widgets/team/`): 会话记录支持同角色多成员（window_id 维度）、成员能力标签不再显示禁用标记、load 模板列表直接解析 user-custom 目录、恢复路径清理历史窗口快照（窗口数不随恢复膨胀）
+- **config_sync 修复** (`app/core/config_sync.py`): 多设备 refresh_token 轮换导致的误清绑、启动同步延迟到空闲窗口并合并上传往返
+- **widgets 布局修复** (`app/widgets/`): dock 最小宽度对齐硬约束 300、中等窗口卡片被压扁/裁切、卡片关闭/移除后释放 min 锁
+- **消息卡片修复** (`app/widgets/message_card.py`): 全局事件过滤器判活加固与对称卸载、合并为单例注册表、compact 渲染 think/tool 块、问题卡片内容自适应高度
+- **命令/子智能体修复** (`app/core/command_manager.py`): 手打参数行尾空格误判为离开、subagents --create= 降级 prompt 注入、hot_reload 新增插件子智能体触发全量重载
+- **其他修复** (`app/widgets/` + `app/main.py`): tooltip eventFilter 漏捕 HideToParent 残留、后台 finalize 访问已销毁 node_preview 崩溃守卫、streaming dock 状态管理、懒加载兜底 None 崩溃
+
+### ♻️ 代码重构 (Refactoring)
+
+- **移除旧多窗口模式** (`app/widgets/`): ToolPopupDialog 删除、相关符号迁移、死代码清理、注释残留清理
+
+### ⚡ 性能优化 (Performance)
+
+- **主题 YAML 加载缓存** (`app/utils/theme_manager.py`): 主题加载加缓存
+- **config_sync 后台化** (`app/core/config_sync.py`): 启动同步延迟到空闲窗口并合并上传往返
+- **UI 多标签渲染优化** (`app/widgets/`): 隐藏页零空转、卡片懒加载、主题补刷收窄、粘贴图异步、广播过滤
+- **SQLite 批量事务与 IO 异步化** (`app/core/`): SQLite 批量事务、历史预热、配置/服务/worktree IO 异步化
+- **hook SessionStart 异步化** (`app/core/hook_manager.py`): command 异步化与注入顺序修复、timeout 收紧、sid 校验、PostAssistantMessage 语义恢复
+- **团队批量解散优化** (`app/main_widget.py`): 批量删除 O(N²)→O(N)、同步去重、rmtree 异步、写盘合并、watcher 时序、sendPostedEvents 异步化
 
 ### 🔧 其他 (Chores & Build)
 
-- **tests 目录纳入版本控制** (`.gitignore` + `tests/__init__.py` + 测试文件回仓): 移除 `.gitignore` 中误加的 `/tests/` 规则，历史核心/工具/组件测试文件纳入仓库，保证 `pytest tests/` 全量可跑
+- **worker 完成日志降级为 debug** (`app/core/`): 减少噪声日志
+- **subagents 命令测试修正** (`tests/`): ruff format 适配
+- **移除过时参考文档与配置校验工具** (docs/): 删除 CONFIG-REFERENCE、NODE-GUIDE、OUTPUT-FORMAT、PITFALLS、PROMPT-TEMPLATE、sanitize_config.py
+- 版本号升级至 v0.4.13（pyproject / config / installer / README）
 
 ## [v0.4.12] - 2026-08-04
 

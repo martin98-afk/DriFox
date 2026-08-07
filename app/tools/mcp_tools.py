@@ -134,9 +134,157 @@ def _build_stdio_env(env: Optional[dict]) -> dict:
     return merged
 
 
+# ── MCP stdio 子进程安全校验 ─────────────────────────────
+# 参考 AstrBot(AGPL-3.0) core/agent/mcp_client.py 的 validate_mcp_stdio_config
+# 设计移植（MIT 协议下的独立实现）：
+#   1. 命令名白名单 — 只允许可信的运行时（python/node/deno/uv 等）拉起 MCP server
+#   2. 危险命令黑名单 — 禁止用 shell / 网络 / 文件破坏类命令当 launcher
+#   3. Shell 元字符检查 — 防止 command 字段里夹带 `;`/`>`/`$()` 等注入
+#   4. 参数安全 — 禁止 inline 代码标志（python -c / node -e）、拒绝控制字符
+# 校验在任何子进程 spawn 之前执行，失败时连接直接置 FAILED（不启动进程）。
+
+# 允许作为 MCP stdio launcher 的命令（不含扩展名，小写比较）
+_STDIO_ALLOWED_COMMANDS = frozenset(
+    {
+        "python",
+        "python3",
+        "py",
+        "node",
+        "npx",
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "bunx",
+        "deno",
+        "uv",
+        "uvx",
+    }
+)
+
+# 明确禁止的 stdio launcher（shell / 网络 / 危险文件操作 / 提权 / 关机类）
+_STDIO_DENIED_COMMANDS = frozenset(
+    {
+        "bash",
+        "sh",
+        "zsh",
+        "fish",
+        "cmd",
+        "cmd.exe",
+        "powershell",
+        "powershell.exe",
+        "pwsh",
+        "pwsh.exe",
+        "osascript",
+        "open",
+        "curl",
+        "wget",
+        "nc",
+        "netcat",
+        "telnet",
+        "ssh",
+        "scp",
+        "sftp",
+        "rm",
+        "mv",
+        "cp",
+        "dd",
+        "mkfs",
+        "sudo",
+        "su",
+        "chmod",
+        "chown",
+        "kill",
+        "killall",
+        "pkill",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "halt",
+        "docker",
+        "podman",
+    }
+)
+
+# 命令中出现的 shell 元字符：包含这些字符说明 command 本身不可信
+# （注意：stdio MCP 的 command 是"可执行文件"字段，正常情况下不会含这些）
+_STDIO_SHELL_META_RE = re.compile(r"[\r\n\x00;&|<>\`$]")
+
+# python -c / node -e 等 inline 代码标志
+_STDIO_INLINE_PYTHON_FLAGS = frozenset({"-c"})  # 只禁 -c；-m 合法（模块启动）
+_STDIO_INLINE_JS_FLAGS = frozenset({"-e", "--eval", "-p", "--print", "eval"})
+
+
+def _normalize_stdio_command_name(command: str) -> str:
+    """归一化命令名为小写裸名（去路径、去 Windows 扩展名）
+
+    "C:\\Python312\\python.exe" → "python"
+    "uvx" → "uvx"
+    "npx.cmd" → "npx"
+    """
+    name = command.strip().replace("\\", "/")
+    name = name.rsplit("/", 1)[-1]
+    lower = name.lower()
+    for ext in (".exe", ".cmd", ".bat", ".com", ".ps1"):
+        if lower.endswith(ext):
+            lower = lower[: -len(ext)]
+    return lower
+
+
+def _validate_stdio_config(config: dict) -> str:
+    """校验 stdio 型 MCP 配置，返回空串表示通过，否则返回错误原因。
+
+    只对「含 command 字段的配置」做校验（stdio / http_from_stdio 都走子进程）；
+    纯 url 型（sse/streamable http）不涉及本地子进程，直接放行。
+    """
+    command = config.get("command")
+    if not command:
+        return ""  # 无 command → 非 stdio（url 型），放行
+
+    if not isinstance(command, str) or not command.strip():
+        return "MCP stdio server 必须提供非空 command。"
+
+    # 1) shell 元字符检查（command 字段本身不能被当成 shell 脚本执行）
+    if _STDIO_SHELL_META_RE.search(command):
+        return "MCP stdio command 含不安全的 shell 元字符（# 示例: `;` `&` `|` `>` `$()` 等）。"
+
+    cmd_name = _normalize_stdio_command_name(command)
+
+    # 2) 危险命令黑名单
+    if cmd_name in _STDIO_DENIED_COMMANDS:
+        return f"MCP stdio command `{cmd_name}` 被安全策略禁止。"
+
+    # 3) 白名单
+    if cmd_name not in _STDIO_ALLOWED_COMMANDS:
+        allowed = ", ".join(sorted(_STDIO_ALLOWED_COMMANDS))
+        return (
+            f"MCP stdio command `{cmd_name}` 不在允许列表中。"
+            f"允许的命令: {allowed}。建议改用 uvx / npx / python 等方式启动。"
+        )
+
+    # 4) args 校验：控制字符 + inline 代码标志
+    args = config.get("args") or []
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return "MCP stdio args 必须为字符串列表。"
+
+    for arg in args:
+        if "\x00" in arg or "\r" in arg or "\n" in arg:
+            return "MCP stdio args 不能包含控制字符（\\x00 / \\r / \\n）。"
+
+    if cmd_name.startswith("python") or cmd_name == "py":
+        if any(flag in args for flag in _STDIO_INLINE_PYTHON_FLAGS):
+            return "MCP stdio Python server 禁止使用 `-c` inline 代码；应从模块或文件启动。"
+
+    if cmd_name in {"node", "npx", "npm", "pnpm", "yarn", "bun", "bunx", "deno"}:
+        if any(flag in args for flag in _STDIO_INLINE_JS_FLAGS):
+            return "MCP stdio 禁止使用 inline eval 标志启动 server（应使用包或文件入口）。"
+
+    return ""
+
+
 # ── 插件路径占位符兜底解析 ──────────────────────────────
 # PluginManager.get_mcp_servers() 已在读取 .mcp.json 时把 ${CLAUDE_PLUGIN_ROOT} /
-# ${CLAUDE_PLUGIN_DATA} 展开为绝对路径。但以下情况下配置可能以字面量占位符到达
+# ${CLAUDE_PLUGIN_DATA} 占位符展开为绝对路径。但以下情况下配置可能以字面量占位符到达
 # 启动层（导致子进程报 "can't open file '${CLAUDE_PLUGIN_ROOT}/...'"）：
 #   1. 运行中的旧进程（热重载前加载的缓存）尚未失效；
 #   2. 用户通过 UI 直接新增含占位符的服务器（未走 get_mcp_servers）；
@@ -698,6 +846,19 @@ class MCPClientManager:
             existing = self._connections.get(name)
         if existing is not None:
             await self._disconnect_single(name)
+
+        # ── stdio 安全校验：在 spawn 子进程之前拦截危险配置 ──
+        # 只拦截含 command 的 stdio 型配置；url 型（sse/http）直接放行。
+        # 放在断开旧连接之后：若新配置非法，旧连接已释放，登记 FAILED 供 UI 显示。
+        if config.get("command"):
+            reject = _validate_stdio_config(config)
+            if reject:
+                logger.warning(f"[MCP] 拒绝启动服务器 '{name}': {reject}")
+                conn = MCPServerConnection(name, config)
+                conn.set_state(MCPState.FAILED, reject)
+                with self._lock:
+                    self._connections[name] = conn
+                return False, reject
 
         conn = MCPServerConnection(name, config)
         conn._disconnect_event = asyncio.Event()
