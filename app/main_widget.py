@@ -23,6 +23,7 @@ import sip
 from loguru import logger
 from PyQt5.QtCore import (
     QEvent,
+    QEventLoop,
     QFileSystemWatcher,
     QObject,
     QRunnable,
@@ -2228,7 +2229,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🔧 处理等待的信号：确保排在前面的 content_received 信号（文本内容）
         # 在工具执行前被主线程处理并渲染到 DOM，避免文本延迟到工具执行完毕才显示
         # 注意：此处的 processEvents 在主线程运行，不会阻塞后台 worker
-        QApplication.processEvents()
+        # [PERF] 限量版：最多处理 5ms 事件（全量 processEvents 会无界扫描 pending
+        # 事件队列，拖慢主线程；5ms 上限足以 flush content_received 等 posted 信号，
+        # 同时避免鼠标/动画等高频事件长时间占住主线程）。
+        QApplication.processEvents(QEventLoop.AllEvents, 5)
 
     def _get_chat_cards_for_engine(self):
         cards = []
