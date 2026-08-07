@@ -368,16 +368,17 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
         if name_lower in MODEL_CAPABILITIES:
             result = MODEL_CAPABILITIES[name_lower]
 
-    # models.dev 动态数据覆盖硬编码（动态数据更准确，可修正硬编码错误）
+    # models.dev 动态数据覆盖硬编码（动态数据是唯一权威）
     dynamic_caps = _get_dynamic_model_capabilities(name)
     if dynamic_caps is not None:
-        # supports_thinking 取乐观值：硬编码 True 或动态 True → True。
-        # 防止 models.dev 标记 reasoning=False（或数据不全）把硬编码确认的
-        # 思考能力降为 False（如 deepseek-chat 官方 API 实际支持 thinking）。
-        merged_thinking = bool(result.get("supports_thinking")) or bool(dynamic_caps.get("supports_thinking"))
-        # 动态数据覆盖同名 key，硬编码独有字段保留
-        result = {**result, **dynamic_caps}
-        result["supports_thinking"] = merged_thinking
+        # models.dev 完全为准：思考相关字段（supports_thinking / thinking_param /
+        # thinking_enable_value）直接用动态值，不与本地硬编码做 OR 拉回。
+        # 本地硬编码只在"models.dev 查不到该模型"（dynamic_caps is None）时才兜底，
+        # 不能把动态明确的"不支持思考开关"又标回"支持"。
+        # 非思考字段（context_limit / cost 等）动态缺省时保留硬编码补充。
+        thinking_keys = {"supports_thinking", "thinking_param", "thinking_enable_value"}
+        hc_fallback = {k: v for k, v in result.items() if k not in thinking_keys and k not in dynamic_caps}
+        result = {**dynamic_caps, **hc_fallback}
 
     return result
 

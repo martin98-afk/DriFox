@@ -242,10 +242,14 @@ def test_merge_model_caps_cost_field_merge():
 
 
 # ============================================================
-# get_model_capabilities（动态覆盖 OR 合并）
+# get_model_capabilities（动态为准：models.dev 有数据则硬编码不参与思考判定）
 # ============================================================
-def test_get_model_capabilities_thinking_not_downgraded_by_dynamic(monkeypatch):
-    """动态数据 supports_thinking=False 不降级硬编码 True（如 kimi-k2.5 场景）。"""
+def test_get_model_capabilities_dynamic_false_overrides_hardcode(monkeypatch):
+    """动态 supports_thinking=False 时，硬编码 True 不再拉回（models.dev 完全为准）。
+
+    如 MiniMax-M2.7：硬编码标 supports_thinking=True，但 models.dev 无
+    reasoning_options → 动态 False → 最终 False（思考开关不显示）。
+    """
     from app.core import model_capabilities as mc
 
     dynamic = sync.DynamicModelsResult(
@@ -256,8 +260,8 @@ def test_get_model_capabilities_thinking_not_downgraded_by_dynamic(monkeypatch):
     )
     monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
     result = mc.get_model_capabilities("kimi-k2.5")
-    assert result["supports_thinking"] is True  # OR 合并保留 True
-    assert result["context_limit"] == 999  # 其余字段动态优先
+    assert result["supports_thinking"] is False  # 动态为准，硬编码不参与
+    assert result["context_limit"] == 999  # 非思考字段动态优先
 
 
 def test_get_model_capabilities_dynamic_false_when_no_hardcode(monkeypatch):
@@ -274,6 +278,35 @@ def test_get_model_capabilities_dynamic_false_when_no_hardcode(monkeypatch):
     result = mc.get_model_capabilities("brand-new-model")
     assert result["supports_thinking"] is False
     assert result["context_limit"] == 12345
+
+
+def test_get_model_capabilities_dynamic_missing_uses_hardcode(monkeypatch):
+    """models.dev 查不到该模型（动态 None）→ 硬编码兜底生效。"""
+    from app.core import model_capabilities as mc
+
+    dynamic = sync.DynamicModelsResult(provider_models={}, model_capabilities={}, from_cache=False, fetched_at=None)
+    monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
+    result = mc.get_model_capabilities("glm-4-flash")
+    assert result["supports_thinking"] is True  # 硬编码兜底
+    assert result["thinking_param"] == "thinking"
+
+
+def test_get_model_capabilities_dynamic_thinking_fields_replace_hardcode(monkeypatch):
+    """动态有思考字段时，硬编码的 thinking_param 残留不混入（思考字段整体以动态为准）。"""
+    from app.core import model_capabilities as mc
+
+    dynamic = sync.DynamicModelsResult(
+        provider_models={},
+        # 动态只有 supports_thinking=False，无 thinking_param → 硬编码的
+        # thinking_param="thinking" 不应混入结果造成矛盾状态
+        model_capabilities={"minimax-m2.5": {"supports_thinking": False, "context_limit": 512000}},
+        from_cache=False,
+        fetched_at=None,
+    )
+    monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
+    result = mc.get_model_capabilities("minimax-m2.5")
+    assert result["supports_thinking"] is False
+    assert "thinking_param" not in result
 
 
 # ============================================================
