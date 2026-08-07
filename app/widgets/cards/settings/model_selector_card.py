@@ -175,6 +175,23 @@ class ModelItem(QWidget):
                 rows.append(f"{label}: ${_format_cost_number(v)}/M")
         return "\n".join(rows) if rows else ""
 
+    def _model_tooltip(self) -> str:
+        """组装模型名 tooltip：模型名 + 费用 + 能力，单行简要显示。"""
+        parts = [self.model_name]
+        # 费用信息：in/out/cache，无单位
+        cost = self._caps.get("cost") or {}
+        key_labels = (("input", "in"), ("output", "out"), ("cache_read", "cache"))
+        for key, label in key_labels:
+            v = cost.get(key)
+            if v is not None:
+                parts.append(f"{label}: {_format_cost_number(v)}")
+        # 能力信息
+        if self._caps.get("supports_thinking"):
+            parts.append("思考")
+        if self._caps.get("supports_vision"):
+            parts.append("多模态")
+        return "  ".join(parts)
+
     def _make_cap_badge(self, text: str, text_color: str, bg_color: str, tip: str) -> QLabel:
         """构造能力徽章（文字胶囊，替换 emoji）"""
         lbl = QLabel(text, self)
@@ -211,6 +228,10 @@ class ModelItem(QWidget):
         else:
             self.name_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self._apply_name_style()
+        # 给模型名添加 tooltip，显示费用和多模态信息
+        model_tooltip = self._model_tooltip()
+        if model_tooltip and model_tooltip != self.model_name:
+            self.name_label.setToolTip(model_tooltip)
         layout.addWidget(self.name_label, 0)
 
         # 金额（对齐到组内最长模型名之后，跨模型比价）

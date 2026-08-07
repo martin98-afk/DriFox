@@ -1150,6 +1150,26 @@ class ChatBackend(QObject):
                                 # 不再走 __NEW__ 全量路径，改按组件增量重载，
                                 # 避免 bridge.json 等运行时文件变更反复触发全量加载
                                 if _PM.get_instance().has_plugin(new_name):
+                                    # 路径索引过期时，使用插件实际路径识别变更组件，
+                                    # 避免空组件导致 _reload_single_plugin 跳过所有子系统重载
+                                    _identified = self._identify_components_from_changes_fallback(
+                                        new_name, relevant_changes
+                                    )
+                                    if _identified:
+                                        for _comp in _identified:
+                                            if _is_duplicate(new_name, _comp):
+                                                continue
+                                            logger.info(
+                                                f"[ChatBackend] 插件 [{new_name}] ({_comp}) "
+                                                f"文件变更（索引未更新），请求主线程增量重载..."
+                                            )
+                                            self._hot_reload_requested.emit(new_name, _comp)
+                                        continue
+                                    # fallback 未识别到组件变更（仅根目录文件变更）→ 空组件重载（跳过子系统）
+                                    logger.debug(
+                                        f"[ChatBackend] 插件 [{new_name}] fallback 未识别到组件变更 "
+                                        f"({len(relevant_changes)} 处)，按已知插件增量重载（跳过子系统）..."
+                                    )
                                     logger.info(
                                         f"[ChatBackend] 插件 [{new_name}] 已注册（索引未更新），改按已知插件增量重载..."
                                     )
@@ -1160,6 +1180,48 @@ class ChatBackend(QObject):
                                 # 此时应走已知插件增量路径，避免误判为「新插件」触发 __NEW__ 全量加载
                                 _PM.get_instance().rescan_plugin(new_name)
                                 if _PM.get_instance().has_plugin(new_name):
+                                    # 全新安装/重装判定：本批变更含"新增"(Changed.added==1)事件
+                                    # 落在插件根目录或其下（根目录/组件目录被重建），说明插件此前
+                                    # 未注册且组件从未加载 → 走 __NEW__ 全组件加载，避免空组件
+                                    # 跳过导致 new_build 组件永不生效（卸载后重装必触发此分支）。
+                                    # 仅运行时数据文件变更（如 bridge.json 等 Modified/已存在目录）
+                                    # 不算新增，继续走已知插件增量/跳过，避免全量加载。
+                                    _plugin = _PM.get_instance().get_plugin(new_name)
+                                    _root_path = str(_plugin.path.resolve()).lower().rstrip("\\/")
+                                    _is_fresh_install = any(
+                                        ct == 1
+                                        and (cp.lower() == _root_path or cp.lower().startswith(_root_path + os.sep))
+                                        for ct, cp in relevant_changes
+                                    )
+                                    if _is_fresh_install:
+                                        logger.info(
+                                            f"[ChatBackend] 插件 [{new_name}] 检测到新增事件，"
+                                            f"判定为全新安装，请求 __NEW__ 全组件加载..."
+                                        )
+                                        # 预填充 dedup cache，防止路径索引重建后同一批
+                                        # watch 事件的剩余部分以已知插件路径再次触发
+                                        _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
+                                        self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
+                                        continue
+                                    # 非全新安装：使用插件实际路径识别变更组件
+                                    _identified = self._identify_components_from_changes_fallback(
+                                        new_name, relevant_changes
+                                    )
+                                    if _identified:
+                                        for _comp in _identified:
+                                            if _is_duplicate(new_name, _comp):
+                                                continue
+                                            logger.info(
+                                                f"[ChatBackend] 插件 [{new_name}] ({_comp}) "
+                                                f"rescan 后文件变更，请求主线程增量重载..."
+                                            )
+                                            self._hot_reload_requested.emit(new_name, _comp)
+                                        continue
+                                    # fallback 未识别到组件变更 → 空组件重载（跳过子系统）
+                                    logger.debug(
+                                        f"[ChatBackend] 插件 [{new_name}] rescan 后 fallback 未识别到组件变更 "
+                                        f"({len(relevant_changes)} 处)，按已知插件增量重载（跳过子系统）..."
+                                    )
                                     logger.info(
                                         f"[ChatBackend] 插件 [{new_name}] rescan 后已注册，改按已知插件增量重载..."
                                     )
@@ -1371,6 +1433,53 @@ class ChatBackend(QObject):
                     components.add(ROOT_FILE_COMPONENTS[first_seg])
         return components
 
+    def _identify_components_from_changes_fallback(self, plugin_name: str, changes: list) -> list:
+        """从变更文件路径识别涉及的组件（使用插件实际路径，不依赖路径索引）
+
+        当路径索引过期（新安装/更新插件后索引尚未重建）时，
+        _identify_all_components_from_changes 无法找到插件路径，
+        导致返回空 set，最终空组件 emit 使 _reload_single_plugin 跳过所有重载。
+        本方法直接从 pm.get_plugin() 获取插件实际路径，绕过过期索引。
+
+        Args:
+            plugin_name: 已识别出的插件名
+            changes: [(Change, path_str), ...]
+
+        Returns:
+            list[str]: 按优先级排序的组件名列表；空列表表示无组件变更
+        """
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        plugin = pm.get_plugin(plugin_name)
+        if not plugin:
+            return []
+
+        plugin_path = str(plugin.path.resolve()).lower().rstrip("\\/")
+        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
+        ROOT_FILE_COMPONENTS = {
+            ".mcp.json": "mcp",
+            ".lsp.json": "lsp",
+        }
+
+        components: set = set()
+        for _, change_path in changes:
+            cp = change_path.lower()
+            if cp == plugin_path:
+                continue
+            if cp.startswith(plugin_path + os.sep):
+                rel = cp[len(plugin_path) + 1 :]
+                first_seg = rel.split(os.sep)[0] if os.sep in rel else rel
+                if first_seg in KNOWN_COMPONENTS:
+                    components.add(first_seg)
+                    continue
+                if first_seg in ROOT_FILE_COMPONENTS:
+                    components.add(ROOT_FILE_COMPONENTS[first_seg])
+
+        if not components:
+            return []
+        return sorted(components, key=lambda c: self._COMPONENT_ORDER.get(c, 99))
+
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
         """主线程中执行的插件热更新
 
@@ -1383,17 +1492,13 @@ class ChatBackend(QObject):
         """
         try:
             if plugin_name == self._NEW_PLUGIN_SENTINEL:
-                # 新增插件：只扫描这一个插件目录，增量加载其组件
-                # 兜底：若该插件其实已注册（watch 线程判定后主线程执行期间
-                # 状态变化，或索引重建时序竞态），降级为已知插件增量重载，
-                # 避免对已注册插件走全量 __NEW__ 路径
-                from app.core.plugin_manager import PluginManager
-
-                if PluginManager.get_instance().has_plugin(component):
-                    logger.info(f"[ChatBackend] __NEW__ 兜底：插件 [{component}] 已注册，降级为已知插件增量重载...")
-                    result = self._reload_single_plugin(component, "")
-                else:
-                    result = self._reload_new_plugin(component)
+                # 新增插件：只扫描这一个插件目录，增量加载其组件。
+                # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
+                # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
+                # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
+                # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
+                # UI/LSP 先卸载后加载），可直接复用。
+                result = self._reload_new_plugin(component)
             elif plugin_name:
                 result = self._reload_single_plugin(plugin_name, component)
             else:
@@ -1517,12 +1622,14 @@ class ChatBackend(QObject):
             result["skills"] = bool(comps.get("skills"))
             result["mcp"] = bool(comps.get("mcp"))
 
-            # 6. LSP：增量注册，不重启已有服务器
+            # 6. LSP：先移除旧服务再注册新服务（幂等，避免对已注册插件重复加载）
             if comps.get("lsp"):
                 try:
                     from app.core.lsp.lsp_manager import get_lsp_manager
 
                     lsp_mgr = get_lsp_manager()
+                    # 先移除该插件已有的 LSP 服务器（若此前已加载），再注册新配置
+                    lsp_mgr.remove_plugin_servers(plugin_name)
                     lsp_config = pm.get_plugin_lsp_config(plugin_name)
                     if lsp_config:
                         count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
