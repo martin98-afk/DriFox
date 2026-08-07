@@ -299,6 +299,47 @@ def _resolve_path(workdir: Path, path: str) -> Path:
         return workdir
 
 
+def _glob_match(rel_path: str, pattern: str) -> bool:
+    """
+    标准 glob 语义匹配（忽略大小写，跨平台一致）。
+
+    与 fnmatch.translate + re.search 实现的差异修复：
+    - '*' 只匹配单个目录层级，不跨路径分隔符
+    - '**' 匹配零个或多个目录层级
+    - '?' 匹配单个字符，不跨分隔符
+    - 路径分隔符统一按 '/' 处理（Windows 反斜杠同样兼容）
+
+    Args:
+        rel_path: 相对路径（/ 或 \\ 分隔均可）
+        pattern: glob 模式，如 "*.py"、"**/*.py"、"src/**/*.ts"
+
+    Returns:
+        是否匹配
+    """
+    rel_parts = rel_path.replace("\\", "/").split("/")
+    if not pattern or pattern in ("/", "."):
+        return False
+    pat_parts = [p for p in pattern.replace("\\", "/").split("/") if p not in ("", ".")]
+
+    # DP 匹配：dp[i] 表示 rel_parts[:i] 已被模式段消费
+    dp = [False] * (len(rel_parts) + 1)
+    dp[0] = True
+    for pat in pat_parts:
+        ndp = [False] * (len(rel_parts) + 1)
+        if pat == "**":
+            # '**' 可吞掉零个或多个层级
+            first = next((i for i, v in enumerate(dp) if v), None)
+            if first is not None:
+                for k in range(first, len(rel_parts) + 1):
+                    ndp[k] = True
+        else:
+            for i, part in enumerate(rel_parts):
+                if dp[i] and fnmatch.fnmatchcase(part.lower(), pat.lower()):
+                    ndp[i + 1] = True
+        dp = ndp
+    return dp[len(rel_parts)]
+
+
 class FileTools:
     def __init__(self, owner):
         self._owner = owner
@@ -915,21 +956,26 @@ class FileTools:
 
             start_time = time.time()
 
-            # ── 2. 并行 fnmatch ──
-            _compiled_glob = re.compile(fnmatch.translate(pattern), re.IGNORECASE)
-
+            # ── 2. 并行 glob 匹配（标准语义：* 不跨目录，** 跨任意层级） ──
             results: list[str] = []
 
             def _match_single(fp: Path) -> str | None:
                 """单文件 glob 匹配"""
+                # 匹配基准：优先相对搜索起点，其次相对 workdir，兜底绝对路径
                 try:
-                    rel = fp.relative_to(self.workdir)
+                    rel_match = fp.relative_to(search_path).as_posix()
                 except ValueError:
-                    rel = fp
-                rel_str = str(rel)
-                if _compiled_glob.search(rel_str):
-                    return rel_str
-                return None
+                    try:
+                        rel_match = fp.relative_to(self.workdir).as_posix()
+                    except ValueError:
+                        rel_match = str(fp).replace("\\", "/")
+                if not _glob_match(rel_match, pattern):
+                    return None
+                # 输出：相对 workdir（与 read 等工具一致），越界则 fallback 绝对路径
+                try:
+                    return str(fp.relative_to(self.workdir))
+                except ValueError:
+                    return str(fp)
 
             # Path.rglob 在剔除排除目录后没意义了，因为我们自己 walk 了
             # 小规模直接串行，大批量并行
