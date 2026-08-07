@@ -158,7 +158,7 @@ class ModelItem(QWidget):
         if not any(v is not None for v in vals):
             return ""
         parts = [_format_cost_number(v) if v is not None else "-" for v in vals]
-        return f"{'/'.join(parts)} · "
+        return f"{'/'.join(parts)} ·"
 
     def _cost_tooltip(self) -> str:
         """组装成本 tooltip 明细（含 cache_write）。无数据返回空串。"""
