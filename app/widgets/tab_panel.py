@@ -867,6 +867,9 @@ class TabPanel(QWidget):
         )
         brand_left_layout.addWidget(self._brand_title)
         brand_left_layout.addWidget(self._brand_version)
+        # 末尾 stretch 吸收多余空间，保证标题+版本号整体左对齐（QLabel 默认
+        # Preferred 策略会平分多余空间，把版本号挤到中间）
+        brand_left_layout.addStretch(1)
         brand_layout.addWidget(self._brand_left, 1)
 
         # 右侧：侧边栏收起/展开按钮
