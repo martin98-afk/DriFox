@@ -641,30 +641,36 @@ class TabItem(QFrame):
         if self._streaming or self._stream_error:
             # 共用扫描相位：流式彩虹循环 / 报错红色循环
             phase = self._panel._anim_phase if self._panel else 0
+            # 左侧指示条只在选中时显示；未选中的状态仅保留内部流光脉冲
             if self._stream_error:
-                # 报错：红色指示条 + 内部红色流光脉冲
+                # 报错：内部红色流光脉冲（选中时叠加红色指示条）
                 _err_color = _QColor(_CACHED_ERROR_RED)
-                _draw_left_indicator(painter, _err_color)
+                if self._selected:
+                    _draw_left_indicator(painter, _err_color)
                 _draw_shimmer(painter, phase, _SHIMMER_ERROR_COLORS)
             else:
-                # 流式：左侧彩色循环指示条 + 内部彩虹流光（相位驱动颜色循环）
+                # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
-                _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
+                if self._selected:
+                    _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
                 _draw_shimmer(painter, phase, _shimmer_rainbow_colors(idx))
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             phase = self._panel._question_phase if self._panel else 0
-            # resize 期间跳过 sin 计算取固定亮度
-            if self._panel and self._panel._is_resizing:
-                alpha = 150
+            # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
+            if not self._selected:
+                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
             else:
-                # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
-                alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
-            _question_color = _QColor(245, 158, 11)
-            _question_color.setAlpha(max(0, min(255, alpha)))
-            _draw_left_indicator(painter, _question_color)
-            # 提问：橙黄指示条 + 内部橙黄流光脉冲（与流式同款流光动效）
-            _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
+                # resize 期间跳过 sin 计算取固定亮度
+                if self._panel and self._panel._is_resizing:
+                    alpha = 150
+                else:
+                    # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                    alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
+                _question_color = _QColor(245, 158, 11)
+                _question_color.setAlpha(max(0, min(255, alpha)))
+                _draw_left_indicator(painter, _question_color)
+                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
         elif self._selected:
             # 左侧选中指示条（贴合圆角曲线）
             _draw_left_indicator(painter, _CACHED_INFO)
