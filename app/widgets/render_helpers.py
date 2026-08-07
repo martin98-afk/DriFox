@@ -595,17 +595,19 @@ def _render_diff_preview(diff_text: str) -> str:
             # .diff-seg-paired（双列 split-view）：左右对照的配对行
             rows.append('<div class="diff-segment">')
 
-            # ── 单列视图：所有删除行先、所有新增行后（带词级高亮） ──
-            # 先把配对行的词级高亮 HTML 算好缓存到 paired_htmls，
-            # 再分两段输出：先 del 全打，再 add 全打——避免 del/add 交替时
-            # 既要保持 "del→add" 配对又得来回切上下文。
-            # TODO(refactor): 抽出 paired-row 渲染辅助函数与双列分支共用，避免再出"忘了同步"回归
-            rows.append('<div class="diff-seg-col">')
+            # 配对行的词级高亮 HTML 只计算一次，单列/双列两视图共用同一份
+            # 输出（_highlighted_word_diff_html 含 SequenceMatcher + Pygments 着色，
+            # 重复计算代价高；共用也保证两视图字节级一致）。
             paired_htmls = []
             for k in range(pair):
                 od, oa = dels[k], adds[k]
                 old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
                 paired_htmls.append((od, old_html, oa, new_html))
+
+            # ── 单列视图：所有删除行先、所有新增行后（带词级高亮） ──
+            # 再分两段输出：先 del 全打，再 add 全打——避免 del/add 交替时
+            # 既要保持 "del→add" 配对又得来回切上下文。
+            rows.append('<div class="diff-seg-col">')
 
             # 1) 所有删除行
             for k in range(pair):
@@ -627,8 +629,7 @@ def _render_diff_preview(diff_text: str) -> str:
             # ── 双列视图：配对行（旧左新右），带词级高亮 ──
             rows.append('<div class="diff-seg-paired">')
             for k in range(pair):
-                od, oa = dels[k], adds[k]
-                old_html, new_html = _highlighted_word_diff_html(od["text"], oa["text"], od["lexer"])
+                od, old_html, oa, new_html = paired_htmls[k]
                 rows.append('<div class="diff-seg-row">')
                 rows.append(_cell("del", od["old_ln"], "-", old_html))
                 rows.append(_cell("add", oa["new_ln"], "+", new_html))
