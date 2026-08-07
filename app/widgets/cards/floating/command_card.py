@@ -854,6 +854,17 @@ class CommandCard(QWidget):
         Colors.refresh()
         # 1. CommandCard 自身
         self._apply_self_style()
+        # 1.4 主命令列表滚动区（滚动条颜色随主题，保持原始 8px 宽度）
+        if hasattr(self, "_scroll_area") and self._scroll_area is not None:
+            self._scroll_area.setStyleSheet(f"""
+                QScrollArea, QScrollArea * {{
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    margin: 0;
+                }}
+                {get_unified_scrollbar_style(8)}
+            """)
         # 1.5 列表顶部描述 tooltip（主题感知）
         self._apply_desc_tooltip_style()
         # 2. detail 容器内的静态 widget

@@ -2185,6 +2185,50 @@ class TabPanel(QWidget):
             if item._streaming or item._stream_error or item._question:
                 item.update()
 
+    def _reapply_scroll_styles(self):
+        """重新应用侧边两个滚动区的滚动条 QSS（含滚动条颜色跟随主题）。
+
+        滚动条颜色来自 Colors.SCROLLBAR_HANDLE_BG（主题源属性，Colors.refresh()
+        已随主题更新）；滚动区 QSS 在 __init__ 时一次性烘焙，若主题切换后不
+        重建就会停留在旧主题的滚动条颜色。此方法在 refresh_style 中调用，
+        与 model_selector_card / project_selector_card 的统一模式保持一致。
+        """
+        # 自定义 UI 插件滚动区
+        if hasattr(self, "_custom_plugin_scroll"):
+            self._custom_plugin_scroll.setStyleSheet(
+                f"""
+                QScrollArea {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                }}
+                {get_unified_scrollbar_style(4)}
+                """
+            )
+        # 侧边 Tab 列表滚动区
+        if hasattr(self, "_scroll_area"):
+            self._scroll_area.setStyleSheet(
+                f"""
+                QScrollArea {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                }}
+                {get_unified_scrollbar_style(6)}
+                """
+            )
+            # 强制滚动条重新应用样式（水平 + 垂直，确保主题切换后颜色即时生效）
+            for sb in (self._scroll_area.verticalScrollBar(), self._scroll_area.horizontalScrollBar()):
+                if sb is not None:
+                    sb_style = sb.style()
+                    if sb_style is not None:
+                        sb_style.unpolish(sb)
+                        sb_style.polish(sb)
+
     def refresh_style(self):
         """ThemeManager 统一刷新入口：主题/字体变更后调用
 
@@ -2193,6 +2237,8 @@ class TabPanel(QWidget):
         """
         # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
         _invalidate_cached_colors()
+        # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
+        self._reapply_scroll_styles()
         # 先全部调用 update()（异步，Qt 自动合并绘制事件），
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:

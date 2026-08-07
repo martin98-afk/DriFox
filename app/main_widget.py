@@ -2539,18 +2539,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_window_bg_opacity(opacity)
 
     def _update_window_bg_opacity(self, opacity: float):
-        """更新窗口背景透明度（通过 stylesheet 半透明让背景图透出）"""
-        if not hasattr(self, "_window_bg_color"):
-            return
-        import re
+        """更新窗口背景透明度
 
-        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", self._window_bg_color)
-        if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-            final_alpha = max(0, int(base_alpha * opacity))
-            self.setStyleSheet(f"background: rgba({r},{g},{b},{final_alpha / 255});")
-            self.setAutoFillBackground(False)
+        对话框背景已完全透明，由外层容器兜底，故此处直接设为透明。
+        """
+        self.setStyleSheet("background: transparent;")
+        self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -2754,25 +2748,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._top_card_container = TopCardContainer()
         self._bottom_card_container = BottomCardContainer()
 
-        # 设置窗口背景色（非常淡的主题色）
+        # ── 对话框背景完全透明 ──
+        # 不再为 OpenAIChatToolWindow 叠加独立背景层（palette window_bg +
+        # setAutoFillBackground），由外层容器兜底：Tab 内嵌时由
+        # TabManagerWindow 的 #chatFrame 半透明背景（+全局背景图）透出；
+        # 独立弹窗时由承载者背景垫底。保留 _window_bg_color 字段兼容旧引用。
         colors = theme_manager.get_current_colors()
         window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
-
-        # 保存原始颜色供透明度变化时使用
         self._window_bg_color = window_bg
-
-        # 解析颜色（包含 alpha）
-        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
-        if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10  # 保留原始 alpha
-            from PyQt5.QtGui import QColor, QPalette
-
-            color = QColor(r, g, b, alpha)
-            p = QPalette()
-            p.setColor(QPalette.Window, color)
-            self.setPalette(p)
-            self.setAutoFillBackground(True)
+        self.setAutoFillBackground(False)
 
         # 字体样式
         self.setStyleSheet("")
@@ -9091,24 +9075,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception:
                     pass
 
-            colors = theme_manager.get_current_colors()
-
-            # 窗口淡背景
-            window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
-            self._window_bg_color = window_bg
-
-            import re
-
-            m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
-            if m:
-                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-                from PyQt5.QtGui import QColor
-
-                # Tab 模式下 MainWidget 背景改为半透明，让 TabManagerWindow 的
-                # 全局背景图能透出。使用 stylesheet 确保 alpha 正确 blend。
-                self.setStyleSheet(f"background: rgba({r},{g},{b},{alpha / 255});")
-                self.setAutoFillBackground(False)
+            # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
+            self.setStyleSheet("background: transparent;")
+            self.setAutoFillBackground(False)
 
             # 分支标签
             if hasattr(self, "_project_label"):
@@ -9317,6 +9286,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 命令卡片
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
+        # 文件提及卡片（滚动条颜色随主题）
+        if hasattr(self, "_file_mention_card") and self._file_mention_card and hasattr(self._file_mention_card, "refresh_style"):
+            self._file_mention_card.refresh_style()
         # 模型选择卡片
         if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
             self._model_selector_card_content.refresh_style()
