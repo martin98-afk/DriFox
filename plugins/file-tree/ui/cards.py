@@ -65,7 +65,6 @@ from .watcher import _DirWatcher
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
-
 # ── 主题色辅助 ────────────────────────────────────────────
 
 
@@ -302,8 +301,6 @@ class FileTreeCard(QWidget):
         self._title_label = StrongBodyLabel("项目文件树", self._top_bar)
         self._title_label.setObjectName("file-tree-title")
 
-
-
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
         self._refresh_btn.setFixedSize(32, 32)
         self._refresh_btn.setToolTip("刷新文件树")
@@ -430,6 +427,7 @@ class FileTreeCard(QWidget):
         self._colors = _make_colors_from_context(ctx)
         self._project_root = ctx.get("project_root", "")
         self._tree_view.project_root = self._project_root
+        self._watcher.set_root(self._project_root)
 
         tc = _ctx_text_color(ctx)
         border_c = self._colors.get("border", QColor(255, 255, 255, 30))
@@ -474,8 +472,7 @@ class FileTreeCard(QWidget):
         # 占位页主题色
         _ph_color = "rgba(255,255,255,0.4)" if is_dark else "rgba(0,0,0,0.4)"
         self._placeholder.setStyleSheet(
-            f"color: {_ph_color}; background: transparent; "
-            f"font-family: '{font_family}'; font-size: {font_size}px;"
+            f"color: {_ph_color}; background: transparent; font-family: '{font_family}'; font-size: {font_size}px;"
         )
         self._ph_page.setStyleSheet("background: transparent;")
         self._stack.setStyleSheet("background: transparent;")
@@ -614,9 +611,12 @@ class FileTreeCard(QWidget):
 
     def _on_dir_changed_externally(self, dir_path: str):
         logger.debug(f"[FileTree] 外部变更: {dir_path}")
-        node = self._source_model.find_node(dir_path)
-        if node is None or not node.loaded:
-            return
+        # 根目录自身在 model 中无节点（_root_entries 只含根下条目），需单独处理
+        is_root = os.path.normpath(dir_path) == os.path.normpath(self._project_root)
+        if not is_root:
+            node = self._source_model.find_node(dir_path)
+            if node is None or not node.loaded:
+                return
         # 异步重新扫描
         self._current_scan_target = dir_path
         self._cleanup_worker()
@@ -633,7 +633,15 @@ class FileTreeCard(QWidget):
     def _on_watcher_reload(self, entries: List[_DirEntry], dir_path: str):
         self._worker_thread = None
         self._scanner = None
-        self._source_model.refresh_children(dir_path, entries)
+        if os.path.normpath(dir_path) == os.path.normpath(self._project_root):
+            self._source_model.refresh_root(entries)
+            if entries:
+                self._stack.setCurrentIndex(0)
+            else:
+                self._placeholder.setText("项目目录为空")
+                self._stack.setCurrentIndex(1)
+        else:
+            self._source_model.refresh_children(dir_path, entries)
 
     # ── 剪贴板操作 ──
 

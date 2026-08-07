@@ -147,7 +147,7 @@ PLACEHOLDER_TIPS = [
     "/plugin-manager 管理已安装插件，启用/禁用/卸载",
     "/system-cleaner 清理系统缓存和临时文件",
     "/context-usage-stats Token 趋势/消息量图表",
-    "/file-tree 浏览/搜索/实时监听文件变更"
+    "/file-tree 浏览/搜索/实时监听文件变更",
     # ════ Hook 预设 ════
     "系统 Hook 链：会话注入→安全检查→自动压缩→智能增强",
     "安全守卫在写/改文件前自动审查指令安全性",

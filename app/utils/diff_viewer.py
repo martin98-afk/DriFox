@@ -10,6 +10,7 @@ Git Diff 差异对比模块 - Cursor/VS Code 风格差异审查工具
   5. 点击文件路径 → 系统编辑器打开
   6. 行内词级差异高亮
   7. 上下文智能折叠（连续未修改行自动收起）
+  8. 深浅主题自动适配（跟随应用当前主题；generate_html_report 支持 light 参数显式指定）
 """
 
 import difflib
@@ -30,7 +31,12 @@ from PyQt5.QtWidgets import QDialog, QHBoxLayout
 from app.core.webengine_profile import create_transient_web_profile
 
 # Pygments 语法高亮（与 render_helpers 一致，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
-from app.widgets.render_helpers import _highlight_code_line, _highlighted_word_diff_html, _get_diff_lexer
+from app.widgets.render_helpers import (
+    _highlight_code_line,
+    _highlighted_word_diff_html,
+    _get_diff_lexer,
+    set_diff_highlight_style,
+)
 
 try:
     import psutil
@@ -227,33 +233,14 @@ class DiffHunkMerger:
 
 
 # ==========================================================================
-# 2. CSS 主题 — Cursor/VS Code 风格
+# 2. CSS 主题 — Cursor/VS Code 风格（深浅两套，按当前主题自动切换）
 # ==========================================================================
-THEME_CSS = r"""
+# CSS 变量模板：_build_theme_css(light) 依据主题模式填充 :root 变量，
+# 其余规则统一使用 var() 引用，深浅模式仅需替换变量块，无需维护两套 CSS。
+_THEME_CSS_TPL = r"""
 <style>
     :root {
-        --bg: #0d1117;
-        --bg2: #161b22;
-        --bg3: #1c2128;
-        --border: #30363d;
-        --text: #c9d1d9;
-        --text2: #8b949e;
-        --text3: #6e7681;
-        --accent: #58a6ff;
-        --accent-bg: rgba(56,139,253,0.15);
-        --green: #3fb950;
-        --green-bg: rgba(63,185,80,0.12);
-        --green-bg2: rgba(63,185,80,0.18);
-        --red: #f85149;
-        --red-bg: rgba(248,81,73,0.12);
-        --red-bg2: rgba(248,81,73,0.18);
-        --purple: #a371f7;
-        --purple-bg: rgba(163,113,247,0.15);
-        --radius: 6px;
-        --mono: 'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Monaco',monospace;
-        --sans: -apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC',sans-serif;
-        --lh: 22px;
-        --fs: 12.5px;
+__ROOT_VARS__
     }
     * { margin:0; padding:0; box-sizing:border-box; }
     body {
@@ -303,7 +290,7 @@ THEME_CSS = r"""
         color:var(--text); font-size:11px; text-decoration:none;
         transition:background 0.1s;
     }
-    .tree-item:hover { background:rgba(255,255,255,0.03); }
+    .tree-item:hover { background:var(--hover-bg); }
     .tree-item.active { background:var(--accent-bg); border-left-color:var(--accent); }
     .tree-item .icon { margin-right:6px; font-size:13px; opacity:0.7; flex-shrink:0; }
     .tree-item .info { flex:1; min-width:0; }
@@ -342,7 +329,7 @@ THEME_CSS = r"""
     }
     .view-bar .side-btn:hover {
         border-color:var(--accent); color:var(--accent);
-        background:rgba(88,166,255,0.1);
+        background:var(--accent-bg-2);
     }
     .view-tgl {
         display:flex; border:1px solid var(--border); border-radius:4px;
@@ -358,7 +345,7 @@ THEME_CSS = r"""
         background:var(--accent-bg); color:var(--accent); font-weight:500;
     }
     .view-tgl button:hover:not(.active) {
-        background:rgba(255,255,255,0.04); color:var(--text);
+        background:var(--hover-bg2); color:var(--text);
     }
 
     /* ---- Diff scroll area ---- */
@@ -392,11 +379,11 @@ THEME_CSS = r"""
         transition:all 0.15s ease;
     }
     .file-hdr .fh-open:hover {
-        background:rgba(88,166,255,0.1);
+        background:var(--accent-bg-2);
         border-color:var(--accent); color:var(--accent);
     }
     .file-hdr .fh-open:active {
-        background:rgba(88,166,255,0.2);
+        background:var(--accent-bg-hover);
     }
 
     /* ================================================================ */
@@ -426,8 +413,8 @@ THEME_CSS = r"""
     /* Unified: hunk header */
     .du-row.hh {
         background:var(--accent-bg);
-        border-top:1px solid rgba(56,139,253,0.18);
-        border-bottom:1px solid rgba(56,139,253,0.18);
+        border-top:1px solid var(--accent-border);
+        border-bottom:1px solid var(--accent-border);
     }
     .du-row.hh .du-num { color:transparent; }
     .du-row.hh .du-sign { color:var(--accent); }
@@ -436,18 +423,18 @@ THEME_CSS = r"""
     /* Unified: delete block */
     .du-row.del-s { background:var(--red-bg); }
     .du-row.del-m { background:var(--red-bg); }
-    .du-row.del-e { background:var(--red-bg); border-bottom:2px solid rgba(248,81,73,0.3); }
+    .du-row.del-e { background:var(--red-bg); border-bottom:2px solid var(--red-border); }
     .du-row.del-s .du-num, .du-row.del-m .du-num, .du-row.del-e .du-num { color:var(--text3); }
     .du-row.del-s .du-sign, .du-row.del-m .du-sign, .du-row.del-e .du-sign { color:var(--red); }
-    .du-row.del-s .du-code, .du-row.del-m .du-code, .du-row.del-e .du-code { color:#d0d0d0; }
+    .du-row.del-s .du-code, .du-row.del-m .du-code, .du-row.del-e .du-code { color:var(--code-fg); }
 
     /* Unified: add block */
     .du-row.add-s { background:var(--green-bg); }
     .du-row.add-m { background:var(--green-bg); }
-    .du-row.add-e { background:var(--green-bg); border-bottom:2px solid rgba(63,185,80,0.3); }
+    .du-row.add-e { background:var(--green-bg); border-bottom:2px solid var(--green-border); }
     .du-row.add-s .du-num, .du-row.add-m .du-num, .du-row.add-e .du-num { color:var(--text3); }
     .du-row.add-s .du-sign, .du-row.add-m .du-sign, .du-row.add-e .du-sign { color:var(--green); }
-    .du-row.add-s .du-code, .du-row.add-m .du-code, .du-row.add-e .du-code { color:#d0d0d0; }
+    .du-row.add-s .du-code, .du-row.add-m .du-code, .du-row.add-e .du-code { color:var(--code-fg); }
 
     /* Unified: context */
     .du-row.ctx { background:transparent; }
@@ -456,8 +443,8 @@ THEME_CSS = r"""
     .du-row.ctx .du-code { color:var(--text); }
 
     /* Word-diff highlights */
-    .w-add { background:rgba(63,185,80,0.3); border-radius:2px; color:#d0ffd0; }
-    .w-del { background:rgba(248,81,73,0.3); border-radius:2px; color:#ffd0d0; }
+    .w-add { background:var(--word-add-bg); border-radius:2px; color:var(--word-add-fg); }
+    .w-del { background:var(--word-del-bg); border-radius:2px; color:var(--word-del-fg); }
 
     /* ================================================================ */
     /*  SPLIT VIEW — 真正的左右并排                                     */
@@ -489,26 +476,26 @@ THEME_CSS = r"""
 
     /* Split: deleted (left red, right empty) */
     .ds-pair.del .ds-side:first-child { background:var(--red-bg); }
-    .ds-pair.del .ds-side:first-child .ds-code { color:#d0d0d0; }
+    .ds-pair.del .ds-side:first-child .ds-code { color:var(--code-fg); }
     .ds-pair.del .ds-side:first-child .ds-num { color:var(--red); }
-    .ds-pair.del .ds-side:last-child { background:rgba(255,255,255,0.01); }
+    .ds-pair.del .ds-side:last-child { background:var(--empty-bg); }
     .ds-pair.del .ds-side:last-child .ds-code { color:transparent; }
     .ds-pair.del .ds-side:last-child .ds-num { color:transparent; }
 
     /* Split: added (left empty, right green) */
-    .ds-pair.add .ds-side:first-child { background:rgba(255,255,255,0.01); }
+    .ds-pair.add .ds-side:first-child { background:var(--empty-bg); }
     .ds-pair.add .ds-side:first-child .ds-code { color:transparent; }
     .ds-pair.add .ds-side:first-child .ds-num { color:transparent; }
     .ds-pair.add .ds-side:last-child { background:var(--green-bg); }
-    .ds-pair.add .ds-side:last-child .ds-code { color:#d0d0d0; }
+    .ds-pair.add .ds-side:last-child .ds-code { color:var(--code-fg); }
     .ds-pair.add .ds-side:last-child .ds-num { color:var(--green); }
 
     /* Split: modified (both have content) */
     .ds-pair.mod .ds-side:first-child { background:var(--red-bg); }
-    .ds-pair.mod .ds-side:first-child .ds-code { color:#d0d0d0; }
+    .ds-pair.mod .ds-side:first-child .ds-code { color:var(--code-fg); }
     .ds-pair.mod .ds-side:first-child .ds-num { color:var(--red); }
     .ds-pair.mod .ds-side:last-child { background:var(--green-bg); }
-    .ds-pair.mod .ds-side:last-child .ds-code { color:#d0d0d0; }
+    .ds-pair.mod .ds-side:last-child .ds-code { color:var(--code-fg); }
     .ds-pair.mod .ds-side:last-child .ds-num { color:var(--green); }
 
     /* Split: context */
@@ -521,18 +508,18 @@ THEME_CSS = r"""
         display:flex; align-items:center; justify-content:center;
         padding:4px 14px;
         background:var(--accent-bg);
-        border-top:1px solid rgba(56,139,253,0.15);
-        border-bottom:1px solid rgba(56,139,253,0.15);
+        border-top:1px solid var(--accent-border);
+        border-bottom:1px solid var(--accent-border);
         color:var(--accent); cursor:pointer;
         font-size:10px; font-family:var(--sans); gap:6px;
         user-select:none; transition:all 0.15s ease;
     }
     .fold-btn:hover {
-        background:rgba(56,139,253,0.22);
-        color:#79c0ff;
+        background:var(--accent-bg-hover);
+        color:var(--accent-fg-hover);
     }
     .fold-btn:active {
-        background:rgba(56,139,253,0.30);
+        background:var(--accent-bg-active);
     }
 
     /* ---- Empty state ---- */
@@ -545,12 +532,12 @@ THEME_CSS = r"""
     /* ---- Scrollbar ---- */
     ::-webkit-scrollbar { width:6px; height:6px; }
     ::-webkit-scrollbar-track { background:transparent; }
-    ::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:3px; }
-    ::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.22); }
+    ::-webkit-scrollbar-thumb { background:var(--scroll-thumb); border-radius:3px; }
+    ::-webkit-scrollbar-thumb:hover { background:var(--scroll-thumb-hover); }
     /* 代码区域滚动条极细，减少视觉杂乱 */
     .du-code::-webkit-scrollbar, .ds-code::-webkit-scrollbar { height:3px; }
-    .du-code::-webkit-scrollbar-thumb, .ds-code::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.10); }
-    .du-code::-webkit-scrollbar-thumb:hover, .ds-code::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.20); }
+    .du-code::-webkit-scrollbar-thumb, .ds-code::-webkit-scrollbar-thumb { background:var(--scroll-thumb-code); }
+    .du-code::-webkit-scrollbar-thumb:hover, .ds-code::-webkit-scrollbar-thumb:hover { background:var(--scroll-thumb-code-hover); }
 
     /* ---- Initial loading pulse ---- */
     .diff-scroll:empty::after {
@@ -565,6 +552,133 @@ THEME_CSS = r"""
     .file-block[data-placeholder] { min-height:40px; }
 </style>
 """
+
+# 深浅两套 :root 变量块（与 _THEME_CSS_TPL 中的 __ROOT_VARS__ 占位符对应）
+_THEME_VARS_DARK = """        --bg: #0d1117;
+        --bg2: #161b22;
+        --bg3: #1c2128;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --text2: #8b949e;
+        --text3: #6e7681;
+        --accent: #58a6ff;
+        --accent-bg: rgba(56,139,253,0.15);
+        --accent-bg-2: rgba(88,166,255,0.1);
+        --accent-bg-hover: rgba(56,139,253,0.22);
+        --accent-bg-active: rgba(56,139,253,0.30);
+        --accent-fg-hover: #79c0ff;
+        --accent-border: rgba(56,139,253,0.18);
+        --green: #3fb950;
+        --green-bg: rgba(63,185,80,0.12);
+        --green-bg2: rgba(63,185,80,0.18);
+        --green-border: rgba(63,185,80,0.3);
+        --red: #f85149;
+        --red-bg: rgba(248,81,73,0.12);
+        --red-bg2: rgba(248,81,73,0.18);
+        --red-border: rgba(248,81,73,0.3);
+        --purple: #a371f7;
+        --purple-bg: rgba(163,113,247,0.15);
+        --code-fg: #d0d0d0;
+        --hover-bg: rgba(255,255,255,0.03);
+        --hover-bg2: rgba(255,255,255,0.04);
+        --empty-bg: rgba(255,255,255,0.01);
+        --word-add-bg: rgba(63,185,80,0.3);
+        --word-add-fg: #d0ffd0;
+        --word-del-bg: rgba(248,81,73,0.3);
+        --word-del-fg: #ffd0d0;
+        --scroll-thumb: rgba(255,255,255,0.12);
+        --scroll-thumb-hover: rgba(255,255,255,0.22);
+        --scroll-thumb-code: rgba(255,255,255,0.10);
+        --scroll-thumb-code-hover: rgba(255,255,255,0.20);
+        --radius: 6px;
+        --mono: 'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Monaco',monospace;
+        --sans: -apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC',sans-serif;
+        --lh: 22px;
+        --fs: 12.5px;"""
+
+_THEME_VARS_LIGHT = """        --bg: #ffffff;
+        --bg2: #f6f8fa;
+        --bg3: #eaeef2;
+        --border: #d0d7de;
+        --text: #24292f;
+        --text2: #57606a;
+        --text3: #8c959f;
+        --accent: #0969da;
+        --accent-bg: rgba(9,105,218,0.10);
+        --accent-bg-2: rgba(9,105,218,0.08);
+        --accent-bg-hover: rgba(9,105,218,0.18);
+        --accent-bg-active: rgba(9,105,218,0.28);
+        --accent-fg-hover: #0550ae;
+        --accent-border: rgba(9,105,218,0.25);
+        --green: #1a7f37;
+        --green-bg: rgba(26,127,55,0.12);
+        --green-bg2: rgba(26,127,55,0.20);
+        --green-border: rgba(26,127,55,0.30);
+        --red: #cf222e;
+        --red-bg: rgba(207,34,46,0.10);
+        --red-bg2: rgba(207,34,46,0.18);
+        --red-border: rgba(207,34,46,0.30);
+        --purple: #8250df;
+        --purple-bg: rgba(130,80,223,0.12);
+        --code-fg: #1f2328;
+        --hover-bg: rgba(0,0,0,0.04);
+        --hover-bg2: rgba(0,0,0,0.06);
+        --empty-bg: rgba(0,0,0,0.02);
+        --word-add-bg: rgba(26,127,55,0.22);
+        --word-add-fg: #0d5c2d;
+        --word-del-bg: rgba(207,34,46,0.20);
+        --word-del-fg: #9d1c24;
+        --scroll-thumb: rgba(0,0,0,0.15);
+        --scroll-thumb-hover: rgba(0,0,0,0.25);
+        --scroll-thumb-code: rgba(0,0,0,0.12);
+        --scroll-thumb-code-hover: rgba(0,0,0,0.20);
+        --radius: 6px;
+        --mono: 'Cascadia Code','JetBrains Mono','Fira Code','Consolas','Monaco',monospace;
+        --sans: -apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans SC',sans-serif;
+        --lh: 22px;
+        --fs: 12.5px;"""
+
+
+def _build_theme_css(light: bool) -> str:
+    """按深浅模式生成完整 CSS（替换 :root 变量块，规则统一走 var()）"""
+    vars_block = _THEME_VARS_LIGHT if light else _THEME_VARS_DARK
+    return _THEME_CSS_TPL.replace("__ROOT_VARS__", vars_block)
+
+
+def _detect_light_theme() -> bool:
+    """检测当前应用主题是否为浅色模式（失败时回退深色）"""
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        return bool(theme_manager.is_light_theme())
+    except Exception:
+        return False
+
+
+# 客户端语法高亮配色（与 CSS 主题同步；深色用 Dracula 系，浅色用 GitHub Light 系）
+_HL_COLORS_DARK = {
+    "__HL_COM__": "#6272A4",
+    "__HL_STR__": "#F1FA8C",
+    "__HL_NUM__": "#BD93F9",
+    "__HL_KW__": "#FF79C6",
+    "__HL_FN__": "#50FA7B",
+}
+_HL_COLORS_LIGHT = {
+    "__HL_COM__": "#6e7781",
+    "__HL_STR__": "#0a3069",
+    "__HL_NUM__": "#0550ae",
+    "__HL_KW__": "#cf222e",
+    "__HL_FN__": "#8250df",
+}
+
+
+def _build_highlight_js(light: bool) -> str:
+    """替换 JS 高亮配色占位符，返回符合当前主题的客户端高亮脚本"""
+    colors = _HL_COLORS_LIGHT if light else _HL_COLORS_DARK
+    js = DIFF_HIGHLIGHT_JS
+    for k, v in colors.items():
+        js = js.replace(k, v)
+    return js
 
 
 # ==========================================================================
@@ -581,7 +695,7 @@ function hlTok(src, lang){
   if(lang==='other'||lang==='') return esc(src);
   var out='', i=0, n=src.length;
   var lineC = (lang==='py'||lang==='ruby'||lang==='rb'||lang==='sh'||lang==='bash'||lang==='yaml'||lang==='yml'||lang==='toml'||lang==='r'||lang==='sql'||lang==='lua') ? '#' : '//';
-  var C_COM='#6272A4', C_STR='#F1FA8C', C_NUM='#BD93F9', C_KW='#FF79C6', C_FN='#50FA7B';
+  var C_COM='__HL_COM__', C_STR='__HL_STR__', C_NUM='__HL_NUM__', C_KW='__HL_KW__', C_FN='__HL_FN__';
   function span(col, t){ out += '<span style="color:'+col+'">'+esc(t)+'</span>'; }
   while(i<n){
     if(src[i]==='/'&&src[i+1]==='*'){ var j=src.indexOf('*/',i+2); j=(j<0)?n:(j+2); span(C_COM,src.slice(i,j)); i=j; continue; }
@@ -687,10 +801,23 @@ class DiffHtmlGenerator:
 
     @classmethod
     def generate_html_report(
-        cls, diff_output: str, session_id: str = "", lazy_load: bool = True, default_view: str = "unified"
+        cls,
+        diff_output: str,
+        session_id: str = "",
+        lazy_load: bool = True,
+        default_view: str = "unified",
+        light: bool = None,
     ) -> str:
         if diff_output is None:
             diff_output = ""
+
+        # 深浅模式：未显式指定时跟随应用当前主题
+        if light is None:
+            light = _detect_light_theme()
+        # 同步 Pygments 服务端高亮风格（与 message_card 一致：浅色用 friendly，深色用 dracula）
+        set_diff_highlight_style("friendly" if light else "dracula")
+        theme_css = _build_theme_css(light)
+        highlight_js = _build_highlight_js(light)
 
         files = cls._parse_diff(diff_output)
         total_adds = sum(f["additions"] for f in files)
@@ -729,7 +856,7 @@ class DiffHtmlGenerator:
 
         return f"""<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><title>文件差异对比</title>{THEME_CSS}</head>
+<head><meta charset="UTF-8"><title>文件差异对比</title>{theme_css}</head>
 <body>
 <div class="app">
 <div class="sidebar">
@@ -1081,7 +1208,7 @@ requestAnimationFrame(function(){{
         }});
     }};
 }})();
-{DIFF_HIGHLIGHT_JS}
+{highlight_js}
 // 立即对预渲染文件块做高亮（脚本解析完即执行，不依赖 rAF 时序）
 try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlight(b); }}); }}catch(e){{}}
 </script>
@@ -1536,17 +1663,26 @@ class ToolPayloadHtmlGenerator:
         return "\n".join(rows)
 
     @classmethod
-    def generate_html_report(cls, tool_name: str, tool_call_id: str = "", arguments: Dict = None) -> str:
+    def generate_html_report(
+        cls, tool_name: str, tool_call_id: str = "", arguments: Dict = None, light: bool = None
+    ) -> str:
         args = arguments or {}
         pa = cls._safe_json(args)
         ej = DiffHtmlGenerator.escape_html(pa)
         et = DiffHtmlGenerator.escape_html(tool_name or "unknown")
         ec = DiffHtmlGenerator.escape_html(tool_call_id or "")
         fr = cls._field_summary(args)
+        if light is None:
+            light = _detect_light_theme()
+        payload_root_vars = (
+            "--bg:#ffffff;--bg2:#f6f8fa;--bg3:#eaeef2;--border:#d0d7de;--text:#24292f;--text2:#57606a;--link:#0969da;--green:#1a7f37;--yellow:#9a6700;--red:#cf222e;--blue-bg:rgba(9,105,218,0.10);--yel-bg:rgba(154,103,0,0.15);--card-bg:rgba(0,0,0,0.02);--scroll-thumb:rgba(0,0,0,0.15)"
+            if light
+            else "--bg:#0d1117;--bg2:#161b22;--bg3:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--link:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--blue-bg:rgba(31,111,235,0.15);--yel-bg:rgba(187,128,9,0.18);--card-bg:rgba(255,255,255,0.02);--scroll-thumb:rgba(255,255,255,0.12)"
+        )
         return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>工具调用参数预览</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-:root{{--bg:#0d1117;--bg2:#161b22;--bg3:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--link:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--blue-bg:rgba(31,111,235,0.15);--yel-bg:rgba(187,128,9,0.18);--mono:'Consolas',monospace;--sans:-apple-system,sans-serif}}
+:root{{{payload_root_vars};--mono:'Consolas',monospace;--sans:-apple-system,sans-serif}}
 body{{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;font-size:12px}}
 .ra{{display:flex;height:100vh}}
 .sb{{width:320px;min-width:320px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}}
@@ -1556,7 +1692,7 @@ body{{font-family:var(--sans);background:var(--bg);color:var(--text);height:100v
 .call-id{{margin-top:8px;color:var(--text2);font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}}
 .sm{{padding:10px 16px;background:var(--bg3);color:var(--text2);border-bottom:1px solid var(--border)}}
 .fl{{flex:1;overflow-y:auto;padding:10px}}
-.fr{{padding:10px;border:1px solid var(--border);border-radius:6px;background:rgba(255,255,255,0.02);margin-bottom:8px}}
+.fr{{padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);margin-bottom:8px}}
 .ft{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
 .fk{{flex:1;color:var(--text);font-family:var(--mono);overflow-wrap:anywhere}}
 .fb{{padding:1px 6px;border-radius:10px;font-size:11px;flex-shrink:0}}
@@ -1574,7 +1710,7 @@ pre{{padding:16px;font-family:var(--mono);font-size:12px;line-height:1.55;white-
 .copied{{color:var(--green);margin-left:8px;display:none}}
 ::-webkit-scrollbar{{width:6px;height:6px}}
 ::-webkit-scrollbar-track{{background:transparent}}
-::-webkit-scrollbar-thumb{{background:rgba(255,255,255,0.12);border-radius:3px}}
+::-webkit-scrollbar-thumb{{background:var(--scroll-thumb);border-radius:3px}}
 </style></head><body>
 <div class="ra"><aside class="sb"><div class="sb-h"><div class="eyebrow">工具调用请求</div>
 <div class="tool-name">{et}</div><div class="call-id">{ec}</div></div>

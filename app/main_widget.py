@@ -5472,8 +5472,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 像正常对话一样发送任务消息
         # 🔧 hook_event="TeamMail"：给消息打 _hook_event 标记，
         # 使 get_team_first_question 等预览逻辑能识别并跳过邮件内容（R1 源头打标）
+        # 🛡️ preserve_input=True：邮件自动发送不得清空用户正在编辑的输入框/附件
+        # （Bug 修复：此前复用 _on_send_clicked 会无条件 input_area.clear()，
+        # 成员邮件到达时把用户输入框内容抹掉）。
         user_msg = f"📨 **来自 [{sender_id}] 的任务邮件：**\n\n{task_desc}"
-        self._on_send_clicked(user_msg, hook_event="TeamMail")
+        self._on_send_clicked(user_msg, hook_event="TeamMail", preserve_input=True)
 
         # 🛡️ 团队邮件锁释放（Bug2）：_on_send_clicked 有 8+ 个 send 前提前 return
         # 分支（模型无效无 API_KEY / 命令拦截 / 技能切换 / 无文本等），命中任一分支
@@ -14511,7 +14514,12 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return [{"type": "text", "text": user_text}] + image_blocks
 
-    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None):
+    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False):
+        """发送消息（用户主动发送 / 系统自动发送共用）。
+
+        preserve_input=True：系统自动发送（如团队任务邮件 _process_team_task），
+        不清空用户输入框/附件、不记录输入历史——用户正在编辑的内容必须原样保留。
+        """
         if getattr(self, "_is_destroyed", False):
             return
 
@@ -14529,7 +14537,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
-            self.input_area.clear()
+            if not preserve_input:
+                self.input_area.clear()
             return
 
         if not user_text:
@@ -14543,7 +14552,10 @@ class OpenAIChatToolWindow(ToolWindow):
             user_text = ""
 
         # ---- 记录输入到历史（含当前附件路径）----
-        self._record_input_history(user_text, self._attachments.copy())
+        # 🛡️ 系统自动发送（preserve_input）不记录：邮件文本不是用户输入，
+        # 记入历史会污染 ↑ 键回溯（用户会看到莫名其妙的邮件内容）。
+        if not preserve_input:
+            self._record_input_history(user_text, self._attachments.copy())
 
         # ---- 内置命令拦截（优先检查，不打断对话）----
         cmd_mgr = CommandManager.get_instance()
@@ -14559,7 +14571,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     # （如 /team --create=xxx 无 handler、/team --load= 遇缺失成员、
                     # 插件 FUNCTION 命令无处理器注册）——_execute_command 捕获后
                     # 写 _pending_command 并置 _team_load_degraded=True。
-                    self.input_area.clear()
+                    if not preserve_input:
+                        self.input_area.clear()
                     # ⚠️ review#15-#2：附件仅在 handler 实际执行成功后清除
                     # （_execute_command 返回 True）。降级到 prompt 注入时命令
                     # 未真正执行（如插件无 handler 命令 /team --create=），附件
@@ -14683,8 +14696,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 主线程做会让用户在发截图时感知到卡顿。改为只收集路径，编码推迟到
         # _do_deferred_send 闭包内执行（紧挨在 send_message 之前），那时
         # UI 已渲染完成，STOP 按钮已可见，AI 等待状态已显示给用户。
+        # 🛡️ 系统自动发送（preserve_input）：跳过附件拼接，用户挂载的附件
+        # 属于正在编辑的内容，不属于本次自动发送的邮件文本。
+        _preserve_attachments = preserve_input and bool(self._attachments)
         _image_paths: list[str] = []  # 仅收集图片路径，编码推迟
-        if self._attachments:
+        if self._attachments and not _preserve_attachments:
             # 先统一处理附件文本替换（含图片 [[basename]] → 路径）— UI 显示和
             # LLM 看到的文本必须一致，所以这一步仍在主线程做（轻量字符串操作）。
             user_text = self._build_user_text_with_attachments(user_text)
@@ -14717,8 +14733,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._hide_welcome_cards()
 
-        self.input_area.clear()
-        self._clear_attachments()
+        if not preserve_input:
+            self.input_area.clear()
+            self._clear_attachments()
         self._append_user_message(user_text)
 
         assistant_card = self._append_assistant_message(

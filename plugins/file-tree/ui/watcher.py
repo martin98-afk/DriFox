@@ -33,7 +33,12 @@ class _DirWatcher(QObject):
 
         self._watcher = QFileSystemWatcher(self)
         self._debounce_timers: Dict[str, QTimer] = {}
+        self._root_path: str = ""  # 根目录 — 淘汰监听时受保护
         self._watcher.directoryChanged.connect(self._on_dir_changed)
+
+    def set_root(self, path: str):
+        """设置根目录路径（监听超限淘汰时不会被移除）"""
+        self._root_path = os.path.normcase(os.path.normpath(path)) if path else ""
 
     def add_path(self, path: str):
         if not os.path.isdir(path):
@@ -41,9 +46,18 @@ class _DirWatcher(QObject):
         if path in self._watcher.directories():
             return
         if len(self._watcher.directories()) >= _MAX_WATCH_PATHS:
-            oldest = self._watcher.directories()[0]
-            self._watcher.removePath(oldest)
-            logger.debug(f"[DirWatcher] 超出监听上限，移除: {oldest}")
+            # 优先淘汰非根目录（根目录通常最早添加，位于列表首位）
+            victim = None
+            for p in self._watcher.directories():
+                if self._root_path and os.path.normcase(os.path.normpath(p)) == self._root_path:
+                    continue
+                victim = p
+                break
+            if victim is None:
+                logger.debug(f"[DirWatcher] 监听已达上限({_MAX_WATCH_PATHS})且均为受保护路径，跳过")
+                return
+            self._watcher.removePath(victim)
+            logger.debug(f"[DirWatcher] 超出监听上限，移除: {victim}")
 
         self._watcher.addPath(path)
         logger.debug(f"[DirWatcher] 开始监听: {path}")

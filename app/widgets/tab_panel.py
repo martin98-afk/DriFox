@@ -223,6 +223,12 @@ class TabItem(QFrame):
         self._capsule_color = ""  # 胶囊颜色（紧凑态首字符图标用同色）
         self._compact_saved = None  # 紧凑态恢复现场（展开时逐控件配对还原）
         self._panel = panel  # TabPanel 引用，用于读取 _anim_phase
+        # ── 关闭按钮二次确认（内联确认，参照 worktree_section）──
+        self._confirming_close = False  # 关闭确认态（首次点击进入，二次点击真正关闭）
+        self._close_timer = QTimer(self)  # 确认超时自动取消
+        self._close_timer.setSingleShot(True)
+        self._close_timer.setInterval(3000)
+        self._close_timer.timeout.connect(self._cancel_close_confirm)
         # ── paintEvent 缓存：当尺寸未变时复用 QPainterPath ──
         self._cached_rect_key = (-1, -1)
         self._cached_round_rect = None
@@ -257,12 +263,12 @@ class TabItem(QFrame):
         self._apply_title_style()
         layout.addWidget(self._title_label, 1)
 
-        # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE）
+        # 关闭按钮（与主标题栏一致的 FluentIcon.CLOSE，支持内联二次确认）
         self._close_btn = TransparentToolButton(self)
         self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setFixedSize(20, 20)
         self._close_btn.setVisible(False)
-        self._close_btn.clicked.connect(self.closeRequested.emit)
+        self._close_btn.clicked.connect(self._on_close_btn_clicked)
         layout.addWidget(self._close_btn)
 
     def _apply_title_style(self):
@@ -414,6 +420,8 @@ class TabItem(QFrame):
             return
         self._compact = compact
         if compact:
+            # 进入紧凑态：关闭确认态无意义（按钮被隐藏），直接取消恢复
+            self._cancel_close_confirm()
             # 保存恢复现场（用 isHidden 逆：显式隐藏状态，与父链显示无关）
             self._compact_saved = {
                 "icon_visible": not self._icon_widget.isHidden(),
@@ -456,6 +464,53 @@ class TabItem(QFrame):
         self._capsule_label.setVisible(False)
         self._capsule_label.setText("")
 
+    def _on_close_btn_clicked(self):
+        """关闭按钮点击：内联二次确认（参照 worktree_section 删除按钮）。
+
+        仅在存在"进行中状态"（流式对话 _streaming / 提问等待 _question）时启用
+        二次确认，防止误触丢掉正在进行的对话；对话已结束（无状态）直接关闭不打扰。
+
+        确认流程：首次点击 → 按钮变为红色"确认关闭"，3 秒内再次点击才真正
+        emit closeRequested；移出 Tab / 3 秒超时自动取消。
+        """
+        # 对话已结束：直接关闭，不做二次确认
+        if not self._streaming and not self._question:
+            self.closeRequested.emit()
+            return
+
+        if not self._confirming_close:
+            # 首次点击（对话进行中）：进入确认态
+            self._confirming_close = True
+            self._close_btn.setIcon(QIcon())  # 清除图标，文字占位
+            self._close_btn.setText("确认关闭")
+            self._close_btn.setFixedSize(64, 20)
+            self._close_btn.setStyleSheet(
+                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+            )
+            self._close_btn.setToolTip("正在对话，再次点击确认关闭，3秒后自动取消")
+            self._close_timer.start()
+        else:
+            # 二次点击：确认关闭
+            if self._close_timer.isActive():
+                self._close_timer.stop()
+            self._close_btn.setEnabled(False)  # 防重入：确认后禁用，避免连点
+            self._confirming_close = False
+            self.closeRequested.emit()
+
+    def _cancel_close_confirm(self):
+        """取消关闭确认态，恢复普通关闭按钮样式（移出按钮 / 超时触发）"""
+        if not self._confirming_close and not self._close_btn.isEnabled():
+            return
+        self._confirming_close = False
+        if self._close_timer.isActive():
+            self._close_timer.stop()
+        self._close_btn.setEnabled(True)
+        self._close_btn.setIcon(FIF.CLOSE)
+        self._close_btn.setText("")
+        self._close_btn.setFixedSize(20, 20)
+        self._close_btn.setStyleSheet("")
+        self._close_btn.setToolTip("")
+
     def enterEvent(self, event):
         # 紧凑态守卫：折叠态不弹关闭按钮，避免撑破小容器（矩阵 C3）
         if not self._compact:
@@ -466,6 +521,8 @@ class TabItem(QFrame):
 
     def leaveEvent(self, event):
         self._hovered = False
+        # 移出 Tab 时若处于关闭确认态：取消确认（防止悬停残留误删）
+        self._cancel_close_confirm()
         if not self._selected and not self._compact:
             self._close_btn.setVisible(False)
         self.update()
@@ -978,11 +1035,7 @@ class TabPanel(QWidget):
         """
         super().resizeEvent(event)
         # 拖窄自动折叠（展开态 → 收起态）
-        if (
-            not self._collapsed
-            and not self._animating
-            and self.width() < self._auto_collapse_width
-        ):
+        if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
@@ -1950,8 +2003,10 @@ class TabPanel(QWidget):
         """设置选中 Tab"""
         # 取消旧的选中态
         if 0 <= self._active_index < len(self._items):
-            self._items[self._active_index].set_selected(False)
-            self._items[self._active_index]._close_btn.setVisible(False)
+            old_item = self._items[self._active_index]
+            old_item.set_selected(False)
+            old_item._cancel_close_confirm()  # 切换选中时取消旧 tab 的关闭确认态
+            old_item._close_btn.setVisible(False)
 
         self._active_index = index
 
