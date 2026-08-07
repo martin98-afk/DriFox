@@ -11036,21 +11036,26 @@ class OpenAIChatToolWindow(ToolWindow):
         return collect_message_cards_from_layout(self.chat_layout, is_user_or_assistant)
 
     def _process_next_lazy_batch(self):
-        """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
+        """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
 
         批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
-        BATCH_SIZE 默认 3，可通过 self._lazy_batch_size 调整。
+        [PERF] 由固定 BATCH_SIZE 改为时间片预算：单批最多运行 16ms，超时即停，
+        未渲染的卡片放回队首下批继续——避免大量卡片排队时单批无界撑爆主线程
+        （T22 实测 lazy batch 占首切卡顿兜底项）。
         """
-        BATCH_SIZE = getattr(self, "_lazy_batch_size", 3)
+        TIME_SLICE_MS = 16
 
         if not self._pending_lazy_cards:
             self._loading_session = False
             self._lazy_batch_timer_active = False
             return
 
-        # 取出当前批次（最多 BATCH_SIZE 个）
+        # 时间片内取出尽量多有效卡片（单张 ensure_rendered 通常 <1ms）
         batch = []
-        while self._pending_lazy_cards and len(batch) < BATCH_SIZE:
+        deadline = time.monotonic() + TIME_SLICE_MS / 1000.0
+        while self._pending_lazy_cards:
+            if time.monotonic() >= deadline:
+                break
             card = self._pending_lazy_cards.pop(0)
             if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
                 batch.append(card)
@@ -11064,12 +11069,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._lazy_batch_timer_active = False
             return
 
-        # 批量渲染所有卡片
+        # 批量渲染所有卡片（渲染同样受时间片保护：超时未消费的放回队首）
+        consumed = 0
         for card in batch:
+            if time.monotonic() >= deadline:
+                break
             card.ensure_rendered()
+            consumed += 1
+        if consumed < len(batch):
+            self._pending_lazy_cards[:0] = batch[consumed:]
 
         # ★ B4 温和层：渲染后统一计数，超限时下一帧触发 LRU 淘汰
-        new_count = sum(1 for c in batch if getattr(c, "_lazy_rendered", False))
+        # 只统计实际消费渲染的卡片（batch[:consumed]），避免 _rendered_card_count 虚高
+        new_count = sum(1 for c in batch[:consumed] if getattr(c, "_lazy_rendered", False))
         if new_count > 0:
             self._rendered_card_count += new_count
             global _global_rendered_pages
