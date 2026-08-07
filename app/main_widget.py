@@ -10210,8 +10210,33 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return True
 
+    def _web_children_rss_mb(self) -> float:
+        """统计当前进程 WebEngine 相关子进程（qwebengine/QtWebEngineProcess）总 RSS。
+
+        T30 双判据的 WebEngine 侧：renderer/GPU/network 子进程各自数百 MB，
+        累计 RSS 反映 WebEngine 内存压力是否值得强回收（kill 离屏 renderer）。
+        无 psutil 或找不到子进程时返回 0.0（退化：不触发 WebEngine 判据）。
+        """
+        try:
+            import psutil
+
+            self_proc = psutil.Process()
+            total = 0.0
+            for child in self_proc.children(recursive=True):
+                try:
+                    name = (child.name() or "").lower()
+                    if "qwebengine" in name or "webengine" in name or "chrome" in name:
+                        total += child.memory_info().rss / (1024 * 1024)
+                except Exception:
+                    continue
+            return total
+        except Exception:
+            return 0.0
+
     def _over_memory_threshold(self) -> bool:
-        """内存阈值判定：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB → True。
+        """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
+        且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
+        退化单判据）→ True。
 
         无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
@@ -10220,7 +10245,13 @@ class OpenAIChatToolWindow(ToolWindow):
             import psutil
 
             rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-            return rss_mb > _MEM_THRESHOLD_TOTAL_MB
+            if rss_mb <= _MEM_THRESHOLD_TOTAL_MB:
+                return False
+            # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
+            web_mb = self._web_children_rss_mb()
+            if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
+                return False
+            return True
         except Exception:
             # 退化：有已卸载 PID 且存在远距批次 + 并发页仍超限
             if not self._unloaded_pids:
@@ -10261,6 +10292,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._unloaded_pids = remaining
         if killed:
             logger.debug(f"[B4-strong] kill {killed} 个离屏 renderer，队列剩余 {len(self._unloaded_pids)}")
+            # [B4-2] 强回收计数日志：warning 级便于观测；带总阈值/WebEngine 阈值上下文
+            try:
+                web_mb = self._web_children_rss_mb()
+                logger.warning(
+                    f"[B4-2] strong-recycle kill {killed} renderer(s) (queue {len(self._unloaded_pids)}), "
+                    f"web_rss={web_mb:.0f}MB threshold={_WEB_MEM_THRESHOLD_MB}MB"
+                )
+            except Exception:
+                logger.warning(f"[B4-2] strong-recycle kill {killed} renderer(s), queue {len(self._unloaded_pids)}")
         return killed
 
     def _maybe_strong_recycle(self):
@@ -19727,8 +19767,11 @@ _gc_hook_pending = False
 _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
-# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图） ──
-_MEM_THRESHOLD_TOTAL_MB = 1800  # 总 RSS 阈值触发强回收
+# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
+# 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
+# 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
+_MEM_THRESHOLD_TOTAL_MB = 900  # 总 RSS 阈值触发强回收（1800→900：修复 renderer 永不回收）
+_WEB_MEM_THRESHOLD_MB = 300  # WebEngine 子进程 RSS 阈值（待窗口期回填校准）
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill
