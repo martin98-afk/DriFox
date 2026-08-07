@@ -371,12 +371,16 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
     # models.dev 动态数据覆盖硬编码（动态数据是唯一权威）
     dynamic_caps = _get_dynamic_model_capabilities(name)
     if dynamic_caps is not None:
-        # models.dev 完全为准：思考相关字段（supports_thinking / thinking_param /
-        # thinking_enable_value）直接用动态值，不与本地硬编码做 OR 拉回。
+        # models.dev 完全为准：思考相关字段（supports_thinking / thinking_param）
+        # 直接用动态值，不与本地硬编码做 OR 拉回。
         # 本地硬编码只在"models.dev 查不到该模型"（dynamic_caps is None）时才兜底，
         # 不能把动态明确的"不支持思考开关"又标回"支持"。
         # 非思考字段（context_limit / cost 等）动态缺省时保留硬编码补充。
-        thinking_keys = {"supports_thinking", "thinking_param", "thinking_enable_value"}
+        # 例外：thinking_enable_value 是 DriFox 私有扩展字段（models.dev 不提供，
+        # 语义为"thinking.type 的具体取值"，如 MiniMax 系列用 "adaptive"），
+        # 不参与动态剔除，作为硬编码补充保留，否则会回退成默认 "enabled" 导致
+        # MiniMax 等厂商 400（只接受 adaptive/disabled）。
+        thinking_keys = {"supports_thinking", "thinking_param"}
         hc_fallback = {k: v for k, v in result.items() if k not in thinking_keys and k not in dynamic_caps}
         result = {**dynamic_caps, **hc_fallback}
 
