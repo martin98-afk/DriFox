@@ -13,11 +13,11 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.4.12-brightgreen)
+![Version](https://img.shields.io/badge/version-0.4.13-brightgreen)
 
 </div>
 
-<h1 align="center">DriFox 飘狐 v0.4.12 — 轻量化 AI 桌面对话助手</h1>
+<h1 align="center">DriFox 飘狐 v0.4.13 — 轻量化 AI 桌面对话助手</h1>
 
 <p align="center">
   <b>不做大而全的 IDE。</b> 只是一个对话框——随时调出，随意提问，随性分支。
@@ -96,7 +96,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.4.12 架构                       │
+│                    DriFox v0.4.13 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
 │             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │
