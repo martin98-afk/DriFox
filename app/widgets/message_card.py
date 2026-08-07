@@ -4657,13 +4657,21 @@ class CodeWebViewer(QWebEngineView):
                     const h = document.body.scrollHeight;
                     console.log('pywebview_height:' + h);
                 }}
-                // 防抖报告高度：动画期间暂停报告，只在动画结束后报告最终值
+                // 批量报告高度：流式每 chunk 一次 IPC 开销高，改为 3 帧合并
+                // （rAF ×3 后 reportHeight 一次），动画期间仍暂停报告
                 let _heightReportPending = false;
+                let _heightReportFrames = 0;
                 function reportHeightDebounced() {{
                     if (_collapsibleHeightReporting) return;  // 动画期间暂停
                     if (_heightReportPending) return;
                     _heightReportPending = true;
-                    requestAnimationFrame(() => {{
+                    _heightReportFrames = 0;
+                    requestAnimationFrame(function _batchTick() {{
+                        _heightReportFrames++;
+                        if (_heightReportFrames < 3) {{
+                            requestAnimationFrame(_batchTick);
+                            return;
+                        }}
                         reportHeight();
                         _heightReportPending = false;
                     }});
