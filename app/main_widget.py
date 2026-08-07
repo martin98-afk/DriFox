@@ -8402,6 +8402,32 @@ class OpenAIChatToolWindow(ToolWindow):
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
 
+    def _iter_visible_cards_in_viewport(self, buffer: int = 400) -> list:
+        """返回视口附近（含 buffer 缓冲）的 MessageCard 列表。
+
+        resize 链路的统一视口过滤：与 _do_debounced_resize / _sync_visible_cards_on_scroll
+        的 ±buffer 策略一致，离屏卡片延迟到滚动进入视口后再由 _sync_visible_cards_on_scroll
+        同步，避免 resize 完成时全量遍历所有卡片。
+        """
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        if not scroll_area:
+            return []
+        viewport_rect = scroll_area.viewport().rect()
+        viewport_top = scroll_area.verticalScrollBar().value()
+        viewport_bottom = viewport_top + viewport_rect.height()
+
+        visible = []
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
+            card_rect = card.geometry()
+            if card_rect.bottom() < viewport_top - buffer or card_rect.top() > viewport_bottom + buffer:
+                continue
+            visible.append(card)
+        return visible
+
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8411,19 +8437,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：同步所有卡片宽度（轻量，无 GPU 分配）
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageCard):
-                try:
-                    card = item.widget()
-                    if viewport_width > 0:
-                        margin = 20 if card.role != "user" else 180
-                        card.sync_width(force=True, target_width=max(320, viewport_width - margin))
-                    else:
-                        card.sync_width(force=True)
-                except RuntimeError:
-                    pass
+        # 第一步：同步视口附近卡片宽度（轻量，无 GPU 分配；离屏卡片由滚动路径补同步）
+        for card in self._iter_visible_cards_in_viewport(buffer=400):
+            try:
+                if viewport_width > 0:
+                    margin = 20 if card.role != "user" else 180
+                    card.sync_width(force=True, target_width=max(320, viewport_width - margin))
+                else:
+                    card.sync_width(force=True)
+            except RuntimeError:
+                pass
 
         # 第二步：收集卡片，分批退出 preview 模式
         self._restore_queue = []
