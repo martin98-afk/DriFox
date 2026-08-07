@@ -25,6 +25,8 @@ from loguru import logger
 # ============================================================
 MODELS_DEV_API_URL = "https://models.dev/api.json"
 CACHE_TTL_SECONDS = 24 * 3600  # 24 小时
+# 缓存数据结构版本：字段新增（如 cost）时 +1，旧版本缓存视为无效触发重拉
+CACHE_SCHEMA_VERSION = 2
 
 
 def _default_cache_path() -> Path:
@@ -108,8 +110,11 @@ def _save_cache(data: Dict[str, Any], cache_path: Optional[Path] = None) -> None
 
 
 def _is_cache_valid(cache: Optional[Dict[str, Any]]) -> bool:
-    """检查缓存是否存在且未过期。"""
+    """检查缓存是否存在、schema 版本匹配且未过期。"""
     if not cache:
+        return False
+    if cache.get("_schema_version") != CACHE_SCHEMA_VERSION:
+        # schema 升级（如新增 cost 字段）→ 旧缓存视为无效，触发一次重拉
         return False
     timestamp = cache.get("_cached_at")
     if not isinstance(timestamp, (int, float)):
@@ -176,15 +181,15 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     reasoning = bool(model_info.get("reasoning", False))
     reasoning_options = model_info.get("reasoning_options") or []
     reasoning_type = None
-    # reasoning_options 为空 → 模型有思考能力但不可控，不暴露开关
-    has_thinking_controls = bool(
-        reasoning_options and isinstance(reasoning_options, list) and len(reasoning_options) > 0
-    )
-    if reasoning and has_thinking_controls:
+    # reasoning=True 即支持思考；reasoning_options 为空时控制方式未知，
+    # 保守按 DEFAULT_REASONING_PARAM（thinking: enabled/disabled）兜底。
+    if reasoning and isinstance(reasoning_options, list) and reasoning_options:
         first_opt = reasoning_options[0]
         if isinstance(first_opt, dict):
             reasoning_type = first_opt.get("type")
         thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type) or DEFAULT_REASONING_PARAM
+    elif reasoning:
+        thinking_param = DEFAULT_REASONING_PARAM
     else:
         thinking_param = None
 
@@ -198,13 +203,23 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
         except ValueError, TypeError:
             max_output_tokens = None
 
+    # cost（$/M tokens，原样保留不换算；缺失字段为 None）
+    cost = model_info.get("cost") or {}
+    cost_result: Dict[str, Any] = {
+        "input": cost.get("input"),
+        "output": cost.get("output"),
+        "cache_read": cost.get("cache_read"),
+        "cache_write": cost.get("cache_write"),
+    }
+
     result: Dict[str, Any] = {
         "context_limit": context_limit,
         "supports_vision": supports_vision,
-        "supports_thinking": reasoning and has_thinking_controls,
+        "supports_thinking": reasoning,
         "source": "models.dev",
         "note": model_info.get("description", ""),
         "release_date": model_info.get("release_date"),
+        "cost": cost_result,
     }
     if thinking_param:
         result["thinking_param"] = thinking_param
@@ -470,9 +485,37 @@ def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], 
             if transformed is None:
                 continue
             provider_models[dfox_name].append(model_id)
-            model_capabilities[model_id] = transformed
+            existing = model_capabilities.get(model_id)
+            if existing is None:
+                model_capabilities[model_id] = transformed
+            else:
+                # 同名模型跨 provider 出现多次（如 kimi-k2.5 在 moonshotai / opencode-go）：
+                # 取"更支持"的合并结果，防止某 provider 数据不全把能力降级。
+                model_capabilities[model_id] = _merge_model_caps(existing, transformed)
 
     return provider_models, model_capabilities
+
+
+def _merge_model_caps(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """合并同名模型（跨 provider）的能力数据，取"更支持"的值。
+
+    规则：
+    - supports_thinking：两者 OR（任一 True → True）。防止某 provider 的
+      reasoning_options 为空（如 opencode-go 的 kimi-k2.5）把"支持思考"
+      降为"不支持"。
+    - cost：字段级合并——new 非 None 覆盖，None 保留 existing 对应字段。
+    - 其余字段：new 有值取 new，否则保留 existing。
+    """
+    merged = dict(existing)
+    for key, value in new.items():
+        if key == "supports_thinking":
+            merged[key] = bool(existing.get(key)) or bool(value)
+        elif key == "cost" and isinstance(value, dict):
+            old_cost = merged.get("cost") or {}
+            merged[key] = {**old_cost, **{k: v for k, v in value.items() if v is not None}}
+        elif value is not None:
+            merged[key] = value
+    return merged
 
 
 # ============================================================
@@ -530,6 +573,7 @@ def load_dynamic_models(
             cache = {
                 "_cached_at": time.time(),
                 "_url": MODELS_DEV_API_URL,
+                "_schema_version": CACHE_SCHEMA_VERSION,
                 "provider_models": provider_models,
                 "model_capabilities": model_capabilities,
             }

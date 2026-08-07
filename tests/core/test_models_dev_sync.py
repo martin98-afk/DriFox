@@ -60,7 +60,7 @@ def test_transform_model_no_reasoning():
 
 
 def test_transform_model_reasoning_without_options_no_controls():
-    """reasoning=True 但 reasoning_options=[] → 模型不可控，应返回 supports_thinking=False"""
+    """reasoning=True 但 reasoning_options=[] → 仍支持思考，thinking_param 用保守默认。"""
     info = {
         "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {"context": 200000},
@@ -68,8 +68,43 @@ def test_transform_model_reasoning_without_options_no_controls():
         "reasoning_options": [],
     }
     result = sync._transform_model("opencode", "some-reasoning-model", info)
-    assert result["supports_thinking"] is False
-    assert "thinking_param" not in result
+    assert result["supports_thinking"] is True
+    assert result["thinking_param"] == "thinking"
+
+
+def test_transform_model_cost():
+    """cost 四字段完整解析，原样保留不换算。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 128000},
+        "cost": {"input": 0.6, "output": 3, "cache_read": 0.1, "cache_write": 0},
+    }
+    result = sync._transform_model("zhipuai", "glm-test", info)
+    assert result["cost"] == {"input": 0.6, "output": 3, "cache_read": 0.1, "cache_write": 0}
+
+
+def test_transform_model_cost_missing():
+    """models.dev 未提供 cost → 各字段为 None，不报错。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 128000},
+    }
+    result = sync._transform_model("openai", "gpt-test", info)
+    assert result["cost"] == {"input": None, "output": None, "cache_read": None, "cache_write": None}
+
+
+def test_transform_model_cost_partial():
+    """cost 部分字段缺失 → 缺失位为 None。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 128000},
+        "cost": {"input": 1, "output": 3.2},
+    }
+    result = sync._transform_model("openai", "gpt-test", info)
+    assert result["cost"]["input"] == 1
+    assert result["cost"]["output"] == 3.2
+    assert result["cost"]["cache_read"] is None
+    assert result["cost"]["cache_write"] is None
 
 
 def test_transform_model_missing_context():
@@ -123,17 +158,87 @@ def test_parse_models_dev_data_filters_whitelist():
     assert "opencode-test" in provider_models["OpenCode Zen"]
     assert "unknown-provider" not in provider_models
     assert caps["gpt-test"]["thinking_param"] == "reasoning_effort"
-    # opencode-test: reasoning=True 但 reasoning_options=[] → 不可控，无 thinking_param
-    assert "thinking_param" not in caps["opencode-test"]
-    assert caps["opencode-test"]["supports_thinking"] is False
+    # opencode-test: reasoning=True 但 reasoning_options=[] → 仍支持思考，用默认参数
+    assert caps["opencode-test"]["thinking_param"] == "thinking"
+    assert caps["opencode-test"]["supports_thinking"] is True
+
+
+# ============================================================
+# _merge_model_caps（跨 provider 同名合并）
+# ============================================================
+def test_merge_model_caps_thinking_optimistic():
+    """同名模型：后 provider 无思考不降级前 provider 的思考支持。"""
+    existing = {"supports_thinking": True, "thinking_param": "thinking", "context_limit": 262144}
+    new = {"supports_thinking": False, "context_limit": 131072}
+    merged = sync._merge_model_caps(existing, new)
+    assert merged["supports_thinking"] is True
+    # new 无 thinking_param → 保留 existing
+    assert merged["thinking_param"] == "thinking"
+    # new 有 context_limit → 取 new
+    assert merged["context_limit"] == 131072
+
+
+def test_merge_model_caps_reverse_order_still_optimistic():
+    """反向：前 provider 无思考、后 provider 有思考 → 合并后仍支持思考。"""
+    existing = {"supports_thinking": False, "context_limit": 131072}
+    new = {"supports_thinking": True, "thinking_param": "reasoning_effort"}
+    merged = sync._merge_model_caps(existing, new)
+    assert merged["supports_thinking"] is True
+    assert merged["thinking_param"] == "reasoning_effort"
+
+
+def test_merge_model_caps_cost_field_merge():
+    """cost 字段级合并：new 非 None 覆盖，None 保留 existing。"""
+    existing = {"cost": {"input": 0.6, "output": 3, "cache_read": 0.1, "cache_write": None}}
+    new = {"cost": {"input": 0.8, "output": None, "cache_read": None, "cache_write": 0.5}}
+    merged = sync._merge_model_caps(existing, new)
+    assert merged["cost"]["input"] == 0.8
+    assert merged["cost"]["output"] == 3
+    assert merged["cost"]["cache_read"] == 0.1
+    assert merged["cost"]["cache_write"] == 0.5
+
+
+# ============================================================
+# get_model_capabilities（动态覆盖 OR 合并）
+# ============================================================
+def test_get_model_capabilities_thinking_not_downgraded_by_dynamic(monkeypatch):
+    """动态数据 supports_thinking=False 不降级硬编码 True（如 kimi-k2.5 场景）。"""
+    from app.core import model_capabilities as mc
+
+    dynamic = sync.DynamicModelsResult(
+        provider_models={},
+        model_capabilities={"kimi-k2.5": {"supports_thinking": False, "context_limit": 999}},
+        from_cache=False,
+        fetched_at=None,
+    )
+    monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
+    result = mc.get_model_capabilities("kimi-k2.5")
+    assert result["supports_thinking"] is True  # OR 合并保留 True
+    assert result["context_limit"] == 999  # 其余字段动态优先
+
+
+def test_get_model_capabilities_dynamic_false_when_no_hardcode(monkeypatch):
+    """硬编码无记录 + 动态 False → False。"""
+    from app.core import model_capabilities as mc
+
+    dynamic = sync.DynamicModelsResult(
+        provider_models={},
+        model_capabilities={"brand-new-model": {"supports_thinking": False, "context_limit": 12345}},
+        from_cache=False,
+        fetched_at=None,
+    )
+    monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
+    result = mc.get_model_capabilities("brand-new-model")
+    assert result["supports_thinking"] is False
+    assert result["context_limit"] == 12345
 
 
 # ============================================================
 # cache helpers
 # ============================================================
 def test_is_cache_valid(tmp_path: Path):
-    valid = {"_cached_at": time.time()}
-    invalid = {"_cached_at": time.time() - sync.CACHE_TTL_SECONDS - 1}
+    valid = {"_cached_at": time.time(), "_schema_version": sync.CACHE_SCHEMA_VERSION}
+    invalid = {"_cached_at": time.time() - sync.CACHE_TTL_SECONDS - 1, "_schema_version": sync.CACHE_SCHEMA_VERSION}
     missing = {}
     assert sync._is_cache_valid(valid) is True
     assert sync._is_cache_valid(invalid) is False
@@ -141,13 +246,25 @@ def test_is_cache_valid(tmp_path: Path):
     assert sync._is_cache_valid(None) is False
 
 
+def test_is_cache_valid_schema_mismatch(tmp_path: Path):
+    """schema 版本不匹配 → 缓存无效，触发重拉（让旧缓存带上新字段）。"""
+    old = {"_cached_at": time.time(), "_schema_version": 1}
+    assert sync._is_cache_valid(old) is False
+
+
 def test_save_and_load_cache(tmp_path: Path):
     path = tmp_path / "cache.json"
-    data = {"_cached_at": time.time(), "provider_models": {}, "model_capabilities": {}}
+    data = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "provider_models": {},
+        "model_capabilities": {},
+    }
     sync._save_cache(data, path)
     loaded = sync._load_cache(path)
     assert loaded is not None
     assert loaded["_cached_at"] == data["_cached_at"]
+    assert loaded["_schema_version"] == sync.CACHE_SCHEMA_VERSION
 
 
 # ============================================================
@@ -156,6 +273,7 @@ def test_save_and_load_cache(tmp_path: Path):
 def test_load_dynamic_models_uses_cache_when_valid(monkeypatch, tmp_path: Path):
     cache = {
         "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
         "provider_models": {"OpenAI": ["gpt-cached"]},
         "model_capabilities": {"gpt-cached": {"context_limit": 123}},
     }

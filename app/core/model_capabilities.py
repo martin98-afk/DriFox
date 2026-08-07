@@ -371,8 +371,13 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
     # models.dev 动态数据覆盖硬编码（动态数据更准确，可修正硬编码错误）
     dynamic_caps = _get_dynamic_model_capabilities(name)
     if dynamic_caps is not None:
+        # supports_thinking 取乐观值：硬编码 True 或动态 True → True。
+        # 防止 models.dev 标记 reasoning=False（或数据不全）把硬编码确认的
+        # 思考能力降为 False（如 deepseek-chat 官方 API 实际支持 thinking）。
+        merged_thinking = bool(result.get("supports_thinking")) or bool(dynamic_caps.get("supports_thinking"))
         # 动态数据覆盖同名 key，硬编码独有字段保留
         result = {**result, **dynamic_caps}
+        result["supports_thinking"] = merged_thinking
 
     return result
 
@@ -398,7 +403,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     # L2: 模型名查表
@@ -407,7 +412,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
 
     # L3: 服务商默认
@@ -417,14 +422,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if v not in (None, ""):
             try:
                 return max(1, int(v))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 
@@ -448,13 +453,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return max(1, int(default))
 
 

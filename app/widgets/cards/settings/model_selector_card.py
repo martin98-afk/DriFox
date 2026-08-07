@@ -6,6 +6,7 @@
 from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -19,11 +20,42 @@ from PyQt5.QtWidgets import (
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
-from app.widgets.elided_label import _ElidedLabel
 
 # 模型能力 emoji 标记
 _MODEL_TAG_THINKING = "🧠"  # 支持思考控制
 _MODEL_TAG_VISION = "🖼️"  # 支持多模态（图片）
+_MODEL_TAG_COST = "💰"  # 成本展示前缀
+_MODEL_TAG_DESC = "❓"  # 模型描述（悬停显示完整描述）
+
+
+def _format_cost_number(value) -> str:
+    """格式化成本数值：数字用 :g 紧凑显示（3.0 → 3），非数字原样字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value)
+
+
+def _measure_name_width(names) -> int:
+    """按 15px 字体（含 bold）测量模型名最大像素宽度，+12px 余量。
+
+    用于服务商内部 emoji 列对齐：模型名固定为最长名宽度，
+    短名右侧留白，emoji 从同一 x 位置开始。
+
+    ensurePolished() 必须调用：widget 未 polish 时 QSS 字体不生效，
+    fontMetrics 按默认字体测量会偏小 → 固定宽度不足 → 模型名被裁剪遮挡。
+    """
+    probe = QLabel()
+    probe.setStyleSheet(f"{get_font_family_css()} {font_size_css(15)};")
+    probe.ensurePolished()  # 关键：强制应用 QSS 字体后再测量
+    fm = probe.fontMetrics()
+    bold_font = probe.font()
+    bold_font.setBold(True)
+    fm_bold = QFontMetrics(bold_font)
+    widths = [max(fm.horizontalAdvance(n), fm_bold.horizontalAdvance(n)) for n in names]
+    return (max(widths) if widths else 0) + 12
+
 
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度
@@ -84,16 +116,25 @@ class ProviderHeader(QWidget):
 
 
 class ModelItem(QWidget):
-    """单个模型项 - 可点击，模型名同行显示描述副标题和能力标记"""
+    """单个模型项 - 可点击，模型名同行显示能力标记、成本与描述 emoji"""
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    def __init__(self, provider_name: str, model_name: str, is_active: bool = False, note: str = "", parent=None):
+    def __init__(
+        self,
+        provider_name: str,
+        model_name: str,
+        is_active: bool = False,
+        note: str = "",
+        name_width: int = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.provider_name = provider_name
         self.model_name = model_name
         self.is_active = is_active
         self._note = note
+        self._name_width = name_width
         self.setFixedHeight(34)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -116,6 +157,30 @@ class ModelItem(QWidget):
             tags.append(_MODEL_TAG_VISION)
         return " ".join(tags)
 
+    def _cost_text(self) -> str:
+        """组装成本文本：💰{input}/{output}/{cache_read}。三值全无返回空串。"""
+        cost = self._caps.get("cost") or {}
+        vals = [cost.get("input"), cost.get("output"), cost.get("cache_read")]
+        if not any(v is not None for v in vals):
+            return ""
+        parts = [_format_cost_number(v) if v is not None else "-" for v in vals]
+        return f"{_MODEL_TAG_COST}{'/'.join(parts)}"
+
+    def _cost_tooltip(self) -> str:
+        """组装成本 tooltip 明细（含 cache_write）。无数据返回空串。"""
+        cost = self._caps.get("cost") or {}
+        rows = []
+        for label, key in (
+            ("Input", "input"),
+            ("Output", "output"),
+            ("Cache read", "cache_read"),
+            ("Cache write", "cache_write"),
+        ):
+            v = cost.get(key)
+            if v is not None:
+                rows.append(f"{label}: ${_format_cost_number(v)}/M")
+        return "\n".join(rows) if rows else ""
+
     def _setup_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 0, 12, 0)
@@ -131,11 +196,29 @@ class ModelItem(QWidget):
         self.dot.setFixedWidth(14)
         layout.addWidget(self.dot)
 
-        # 模型名（不压缩，保持完整显示）
+        # 模型名（有 emoji 内容的模型固定宽度 = 服务商内最长名，保证 emoji 列对齐；
+        # 无信息模型用 Maximum 策略不被布局拉伸，宽度=文本，避免占满整行的"居中感"）
         self.name_label = QLabel(self.model_name, self)
-        self.name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        has_trailing = bool(self._tag_emoji() or self._cost_text() or self._note)
+        if has_trailing and self._name_width:
+            self.name_label.setFixedWidth(self._name_width)
+            self.name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        else:
+            self.name_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self._apply_name_style()
         layout.addWidget(self.name_label, 0)
+
+        # 成本 emoji + 数字（第一列：input/output/cache_read 紧凑格式，无数据不显示）
+        cost_text = self._cost_text()
+        if cost_text:
+            self.cost_label = QLabel(cost_text, self)
+            self.cost_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+            self.cost_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            # 成本 tooltip 明细（悬停 💰 显示）
+            cost_tooltip = self._cost_tooltip()
+            if cost_tooltip:
+                self.cost_label.setToolTip(cost_tooltip)
+            layout.addWidget(self.cost_label, 0)
 
         # 能力 emoji 标记（思考、多模态）
         tag = self._tag_emoji()
@@ -145,13 +228,17 @@ class ModelItem(QWidget):
             self.tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
             layout.addWidget(self.tag_label, 0)
 
-        # 描述副标题（ElidedLabel 自动省略，参考 CommandItemWidget 模式）
+        # 描述 emoji（❓）：悬停显示完整描述，右对齐（无描述不显示）
         if self._note:
-            self.note_label = _ElidedLabel(self._note)
-            self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            self.note_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-            self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(self.note_label, 1)
+            self.info_label = QLabel(_MODEL_TAG_DESC, self)
+            self.info_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+            self.info_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            self.info_label.setToolTip(self._note)
+            layout.addWidget(self.info_label, 1)
+        else:
+            # 无 ❓ 时补 stretch 吸收剩余空间：否则无 stretch 项时
+            # QHBoxLayout 会把整行内容居中（fixed/Maximum 子项不吸收空间）
+            layout.addStretch(1)
 
     def _apply_name_style(self):
         Colors.refresh()
@@ -316,11 +403,14 @@ class ModelSelectorCardContent(QWidget):
             self.content_layout.addWidget(header)
             self._provider_headers.append((header, provider_name))
 
+            # 该服务商内最长模型名宽度（emoji 列对齐基准：🧠🖼️💰❓ 从同一 x 开始）
+            name_width = _measure_name_width(filtered_models)
+
             # 模型列表
             for model_name in filtered_models:
                 is_active = provider_name == current_provider and model_name == current_model
                 note = (model_notes or {}).get(model_name, "") if model_notes else ""
-                item = ModelItem(provider_name, model_name, is_active, note, self.content_widget)
+                item = ModelItem(provider_name, model_name, is_active, note, name_width, self.content_widget)
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
