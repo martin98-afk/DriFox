@@ -185,6 +185,9 @@ def _next_timer(sec: float, fn):
 
 
 # ── 阶段 1: 启动 ──
+_QUICK_MODE = False  # 由 _run_single_shot 按 args.quick 设置
+
+
 def _phase_startup():
     global tm
     t0 = time.perf_counter()
@@ -203,6 +206,11 @@ def _phase_startup():
         "total_to_ready_s": round(t3 - t0, 4),
     }
     print("阶段1 启动完成:", json.dumps(RESULT["startup"]), flush=True)
+    if _QUICK_MODE:
+        # [--quick] 闸门模式：仅测启动相位，跳过内存曲线/UI 相位直接收尾
+        print("[--quick] 跳过内存/UI 相位，直接收尾", flush=True)
+        _finish()
+        return
     _next_timer(0.8, _phase_mem_round_start)
 
 
@@ -328,6 +336,18 @@ def _finish():
     RESULT["open_tab"] = _aggregate_times(OPEN_TIMES)
     RESULT["open_tab"]["times_s"] = [round(t, 4) for t in OPEN_TIMES]  # 保留原始样本供主控聚合
     RESULT["close_tab"] = _aggregate_times(CLOSE_TIMES)
+    if _QUICK_MODE:
+        # [--quick] 未跑内存/UI 相位：补空结构，保证主控 _aggregate_summary 兼容
+        RESULT.setdefault("memory", {
+            "base_rss_mb": 0.0,
+            "rss_after_open_mb": 0.0,
+            "rss_after_close_mb": 0.0,
+            "delta_close_vs_base_mb": 0.0,
+            "delta_close_vs_peak_mb": 0.0,
+            "leak_verdict": "SKIPPED",
+        })
+        RESULT.setdefault("ui", {"tab_switch_avg_s": 0.0, "approx_fps": None})
+        RESULT.setdefault("usage_fetch", {"total": 0, "by_provider": {}})
     RESULT["meta"] = {
         "tool": "perf_regression",
         "tabs_per_round": N_TABS,
@@ -340,8 +360,9 @@ def _finish():
 
 def _run_single_shot(args: argparse.Namespace) -> int:
     """启动 GUI 事件循环完成一轮测量（独立子进程内调用）"""
-    global app, N_TABS
+    global app, N_TABS, _QUICK_MODE
     N_TABS = args.tabs
+    _QUICK_MODE = args.quick
     app = QApplication(sys.argv)
     from app.utils import icons_light_rc, icons_rc  # noqa: F401
 
@@ -499,8 +520,23 @@ def _aggregate_summary(rounds: list[dict]) -> dict:
         vals = [v[key] for v in vals]
         return round(sum(vals) / len(vals), 2) if vals else 0.0
 
+    # 启动相位跨轮聚合（--quick 闸门的主字段）
+    starts = [r["startup"] for r in rounds]
+    total_ready = [s["total_to_ready_s"] for s in starts]
+    ctor = [s["first_window_ctor_s"] for s in starts]
+
+    def _median(vals: list[float]) -> float:
+        if not vals:
+            return 0.0
+        return round(sorted(vals)[len(vals) // 2], 4)
+
     return {
         "startup_s": rounds[0]["startup"]["total_to_ready_s"],
+        "startup": {
+            "total_to_ready_median_s": _median(total_ready),
+            "first_window_ctor_median_s": _median(ctor),
+            "n_rounds": len(starts),
+        },
         "open_tab": _aggregate_times(open_times_all),
         "memory": {
             "base_rss_mb": avg(mems, "base_rss_mb"),
@@ -536,6 +572,8 @@ def _run_round(args: argparse.Namespace, output_path: str) -> dict:
     cmd = [sys.executable, "-u", os.path.abspath(__file__), "--single-shot", "--tabs", str(args.tabs)]
     if args.keep_heapcompact:
         cmd.append("--keep-heapcompact")
+    if args.quick:
+        cmd.append("--quick")
     cmd += ["-o", output_path]
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, timeout=args.timeout)
     if proc.returncode != 0:
@@ -553,6 +591,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-heapcompact", action="store_true", help="不 patch HeapCompact（默认 patch 规避崩溃）")
     parser.add_argument("--timeout", type=int, default=180, help="单轮测量超时秒数（默认 180）")
     parser.add_argument("--single-shot", action="store_true", help="内部模式：仅跑一轮测量（供主控子进程调用）")
+    parser.add_argument("--quick", action="store_true", help="快速闸门模式：仅跑启动相位（跳过 8-tab 内存/UI 相位），输出 startup 聚合")
     args = parser.parse_args(argv)
 
     # ── 单轮模式（子进程）──
