@@ -706,6 +706,15 @@ class QuestionFloatingWidget(QWidget):
         footer.addWidget(self._next_btn)
 
         main_layout.addWidget(self._footer_widget)
+        # 🛠️ 底部弹性空白吸收器：卡片被外层容器拉伸（如 BottomCardContainer
+        # 展开动画完成后释放 max、宿主布局有多余空间时）时，多余高度全部
+        # 集中在此 stretch，避免把空白扩散到选项区 / footer / hint / 自定义
+        # 输入卡片（f0df402f 将 _question_scroll 改为 Fixed 后，问题区不再
+        # 吸收空白，空白会扩散到整个区域）。
+        # - 拉伸时：stretch 吸收全部多余空间，内容区域保持贴合 sizeHint
+        # - 压缩时：stretch 贡献 0，不参与压缩，不影响动画/布局
+        # - sizeHint 计算不包含 stretch → 容器 _do_expand 的 natural_h 不变
+        main_layout.addStretch(1)
         self._apply_card_style()
         self._setup_shortcuts()
 

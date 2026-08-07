@@ -220,13 +220,19 @@ class ModelItem(QWidget):
                 self.cost_label.setToolTip(cost_tooltip)
             layout.addWidget(self.cost_label, 0)
 
-        # 能力 emoji 标记（思考、多模态）
-        tag = self._tag_emoji()
-        if tag:
-            self.tag_label = QLabel(tag, self)
-            self.tag_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)};")
-            self.tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            layout.addWidget(self.tag_label, 0)
+        # 能力 emoji 标记（各自独立 QLabel，悬停显示能力说明）
+        if self._caps.get("supports_thinking"):
+            self.think_label = QLabel(_MODEL_TAG_THINKING, self)
+            self.think_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)};")
+            self.think_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            self.think_label.setToolTip("支持思考开关")
+            layout.addWidget(self.think_label, 0)
+        if self._caps.get("supports_vision"):
+            self.vision_label = QLabel(_MODEL_TAG_VISION, self)
+            self.vision_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)};")
+            self.vision_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+            self.vision_label.setToolTip("支持多模态输入")
+            layout.addWidget(self.vision_label, 0)
 
         # 描述 emoji（❓）：悬停显示完整描述，右对齐（无描述不显示）
         if self._note:
