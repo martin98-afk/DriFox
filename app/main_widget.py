@@ -2950,10 +2950,9 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
-        # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
-        # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
-        # 下载+UI 刷新（~300ms 主线程工作），避免在窗口刚出现时发生可见的 UI 闪烁。
-        QTimer.singleShot(3500, self._build_settings_popup)
+        # 不再预构建——改为按需构建（首次打开设置时 _build_settings_popup，见
+        # global_card_controller.ensure_settings_popup 兜底），消除 3500ms 定时器在
+        # tab 切换/空闲期的无谓主线程开销（T22 实测 settings 占首切卡顿 29%）。
 
         # ── 全局卡片（settings/provider/hook/mcp）已迁移到 Tab 窗口层 ──
         # 实例由 GlobalCardController 持有，本类通过下方只读 property 兼容旧读取点

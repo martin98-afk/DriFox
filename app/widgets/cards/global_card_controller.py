@@ -779,6 +779,10 @@ class GlobalCardController:
         if self._gitee_reminder_shown:
             return
         if self._settings_popup is None:
+            # 设置弹窗改为按需构建（不再 3500ms 预构建）——此处兜底构建，
+            # 保证 gitee 绑定提醒不被延迟构建策略影响（两处必须同改）。
+            self.ensure_settings_popup()
+        if self._settings_popup is None:
             return
         if self.cfg.gitee_bound.value:
             return
