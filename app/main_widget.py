@@ -8425,32 +8425,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
 
-    def _iter_visible_cards_in_viewport(self, buffer: int = 400) -> list:
-        """返回视口附近（含 buffer 缓冲）的 MessageCard 列表。
-
-        resize 链路的统一视口过滤：与 _do_debounced_resize / _sync_visible_cards_on_scroll
-        的 ±buffer 策略一致，离屏卡片延迟到滚动进入视口后再由 _sync_visible_cards_on_scroll
-        同步，避免 resize 完成时全量遍历所有卡片。
-        """
-        scroll_area = getattr(self, "chat_scroll_area", None)
-        if not scroll_area:
-            return []
-        viewport_rect = scroll_area.viewport().rect()
-        viewport_top = scroll_area.verticalScrollBar().value()
-        viewport_bottom = viewport_top + viewport_rect.height()
-
-        visible = []
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
-                continue
-            card = item.widget()
-            card_rect = card.geometry()
-            if card_rect.bottom() < viewport_top - buffer or card_rect.top() > viewport_bottom + buffer:
-                continue
-            visible.append(card)
-        return visible
-
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8460,8 +8434,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：同步视口附近卡片宽度（轻量，无 GPU 分配；离屏卡片由滚动路径补同步）
-        for card in self._iter_visible_cards_in_viewport(buffer=400):
+        # 第一步：全量同步所有卡片宽度（轻量，仅 setMinimumWidth/setMaximumWidth，无 GPU 分配）
+        # 🐛 修复：不能只同步视口 ±buffer 内卡片——离屏卡片残留旧宽度(尤其窗口被拉宽又缩小后)
+        # 会锁死 chat_container 无法缩小（parent.width()→旧宽度→死锁），滚动补同步也用错 parent 宽。
+        # 宽度同步本身轻量，全量遍历开销可接受；真正昂贵的是第二步 GPU preview 恢复(已分批)。
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
             try:
                 if viewport_width > 0:
                     margin = 20 if card.role != "user" else 180
@@ -8503,6 +8484,23 @@ class OpenAIChatToolWindow(ToolWindow):
             self._restore_queue = []
             self._resize_preview_active = False
 
+    def _sync_single_card_width(self, card, force: bool = True):
+        """按当前滚动区 viewport 宽度同步单张卡片宽度（统一宽度来源）。"""
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        viewport_width = 0
+        if scroll_area:
+            viewport_width = scroll_area.viewport().width()
+            if viewport_width > 0:
+                self._last_chat_viewport_width = viewport_width
+        try:
+            if viewport_width > 0:
+                margin = 20 if card.role != "user" else 180
+                card.sync_width(force=force, target_width=max(320, viewport_width - margin))
+            else:
+                card.sync_width(force=force)
+        except RuntimeError:
+            pass
+
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8527,7 +8525,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if card_bottom < viewport_top - 200 or card_top > viewport_bottom + 200:
                 continue
 
-            card.sync_width()
+            # 🐛 修复：必须用 viewport 宽度直接推算 target，
+            # 不能走 card.sync_width()（内部用 parent.width()）——
+            # chat_container 会被偏大的卡片最小宽撑宽，parent 返回旧大值 → 循环。
+            # 滚动入视口时用 parent 推算会持续覆盖掉 resize 已修正的正确宽度。
+            self._sync_single_card_width(card)
 
     def _on_config_applied(self, new_config: dict):
         if getattr(self, "_is_destroyed", False):
@@ -11458,7 +11460,9 @@ class OpenAIChatToolWindow(ToolWindow):
             widget.heightChanged.connect(self._on_message_card_height_changed)
             if self._resize_preview_active:
                 widget.set_resize_preview_mode(True)
-            widget.sync_width()
+            # 🐛 修复：新增卡片宽度同样用 viewport 直接推算，避免 parent.width()
+            # 被 chat_container 撑大后返回旧大值（与 _sync_visible_cards_on_scroll 一致）。
+            self._sync_single_card_width(widget)
 
         # 🔧 内存修复：添加新卡片后触发虚拟滚动回收，
         # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
