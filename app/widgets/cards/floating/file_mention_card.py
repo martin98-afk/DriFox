@@ -578,7 +578,7 @@ class FileMentionCard(QWidget):
         在主线程上同步扫描大量目录造成 tab 切换尖峰（T22 实测 file_mention
         占首切卡顿 56%）。
         """
-        dirs = self._changed_dirs.copy()
+        dirs = list(self._changed_dirs)  # set → list：可切片（_changed_dirs 为 Set[str]）
         self._changed_dirs.clear()
 
         if not self._root_dir or not os.path.isdir(self._root_dir):
