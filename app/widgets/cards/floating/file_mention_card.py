@@ -465,7 +465,7 @@ class FileMentionCard(QWidget):
         # ---- 增量更新防抖计时器：合并连续文件系统事件 ----
         self._incr_timer = QTimer(self)
         self._incr_timer.setSingleShot(True)
-        self._incr_timer.setInterval(200)  # 200ms 覆盖 IDE 批量创建/删除
+        self._incr_timer.setInterval(500)  # 500ms 覆盖 IDE 批量创建/删除（200→500：合并更多连续事件，降低 tab 切换尖峰）
         self._incr_timer.timeout.connect(self._do_incremental_update)
         self._changed_dirs: Set[str] = set()
 
@@ -571,17 +571,32 @@ class FileMentionCard(QWidget):
         self._incr_timer.start()
 
     def _do_incremental_update(self):
-        """防抖定时器超时后执行增量更新：处理所有累积的变化目录"""
+        """防抖定时器超时后执行增量更新：处理累积的变化目录。
+
+        [PERF] 单轮最多处理 8 个目录，剩余目录留在 _changed_dirs 并重启
+        防抖定时器下轮继续——避免一次文件系统风暴（IDE 批量保存/目录重建）
+        在主线程上同步扫描大量目录造成 tab 切换尖峰（T22 实测 file_mention
+        占首切卡顿 56%）。
+        """
         dirs = self._changed_dirs.copy()
         self._changed_dirs.clear()
 
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
 
+        MAX_DIRS_PER_ROUND = 8
+        processed = dirs[:MAX_DIRS_PER_ROUND]
+        remaining = dirs[MAX_DIRS_PER_ROUND:]
+
         any_change = False
-        for d in dirs:
+        for d in processed:
             if self._incremental_update_one(d):
                 any_change = True
+
+        if remaining:
+            # 剩余目录下轮继续；重启防抖定时器（500ms）避免连续风暴时饿死
+            self._changed_dirs.update(remaining)
+            self._incr_timer.start()
 
         if any_change:
             self._sort_file_cache()
