@@ -25,8 +25,9 @@ from loguru import logger
 # ============================================================
 MODELS_DEV_API_URL = "https://models.dev/api.json"
 CACHE_TTL_SECONDS = 24 * 3600  # 24 小时
-# 缓存数据结构版本：字段新增（如 cost）时 +1，旧版本缓存视为无效触发重拉
-CACHE_SCHEMA_VERSION = 2
+# 缓存数据结构版本：字段新增（如 cost）或语义变更（如 supports_thinking
+# 改为"有明确 reasoning_options 才为 True"）时 +1，旧版本缓存视为无效触发重拉
+CACHE_SCHEMA_VERSION = 3
 
 
 def _default_cache_path() -> Path:
@@ -66,12 +67,6 @@ REASONING_TYPE_TO_THINKING_PARAM = {
     "toggle": "thinking",
     "budget_tokens": "thinking_budget",
 }
-
-# 当 models.dev 标记 reasoning=True 但未给出具体控制方式时，
-# 默认按 toggle（thinking: enabled/disabled）处理。
-# 这是保守推断：用户至少能开关思考；若实际 API 需要其他参数，
-# 应由后续硬编码条目或 provider_profile 覆盖。
-DEFAULT_REASONING_PARAM = "thinking"
 
 
 # ============================================================
@@ -180,18 +175,19 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     reasoning = bool(model_info.get("reasoning", False))
     reasoning_options = model_info.get("reasoning_options") or []
-    reasoning_type = None
-    # reasoning=True 即支持思考；reasoning_options 为空时控制方式未知，
-    # 保守按 DEFAULT_REASONING_PARAM（thinking: enabled/disabled）兜底。
-    if reasoning and isinstance(reasoning_options, list) and reasoning_options:
-        first_opt = reasoning_options[0]
-        if isinstance(first_opt, dict):
-            reasoning_type = first_opt.get("type")
-        thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type) or DEFAULT_REASONING_PARAM
-    elif reasoning:
-        thinking_param = DEFAULT_REASONING_PARAM
-    else:
-        thinking_param = None
+    # 思考开关 ≠ 会思考：只有 models.dev 明确给出可控的 reasoning_options
+    # （toggle / effort / budget_tokens）才算"支持思考开关"。
+    # reasoning=True 但 options 为空 / type 缺失 → 思考不可控或数据未知，
+    # 不显示思考开关（保守原则：未知不误报，宁可少显示不可错显示）。
+    thinking_param = None
+    if reasoning and isinstance(reasoning_options, list):
+        for opt in reasoning_options:
+            if isinstance(opt, dict):
+                reasoning_type = opt.get("type")
+                if reasoning_type:
+                    thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type)
+                    if thinking_param:
+                        break
 
     # 输出上限（可选）
     max_output_tokens = limit.get("output")
@@ -215,7 +211,8 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     result: Dict[str, Any] = {
         "context_limit": context_limit,
         "supports_vision": supports_vision,
-        "supports_thinking": reasoning,
+        # 支持思考开关 = 有明确可控的 reasoning_options（控制方式未知不算）
+        "supports_thinking": thinking_param is not None,
         "source": "models.dev",
         "note": model_info.get("description", ""),
         "release_date": model_info.get("release_date"),
@@ -307,7 +304,8 @@ def _fetch_opencode_zen_free_models(
         if base_caps:
             caps[model_id] = {
                 "context_limit": base_caps.get("context_limit", 200000),
-                "supports_thinking": base_caps.get("supports_thinking", True),
+                # 继承 base 的思考开关能力；未知默认 False（宁可少显示，不可误显示）
+                "supports_thinking": base_caps.get("supports_thinking", False),
                 "thinking_param": base_caps.get("thinking_param", "reasoning_effort"),
                 "supports_vision": base_caps.get("supports_vision", False),
                 "source": "models.dev",

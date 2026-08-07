@@ -60,7 +60,10 @@ def test_transform_model_no_reasoning():
 
 
 def test_transform_model_reasoning_without_options_no_controls():
-    """reasoning=True 但 reasoning_options=[] → 仍支持思考，thinking_param 用保守默认。"""
+    """reasoning=True 但 reasoning_options=[] → 思考不可控，不显示思考开关。
+
+    思考开关 ≠ 会思考：models.dev 未给出控制方式时未知，保守不误报。
+    """
     info = {
         "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {"context": 200000},
@@ -68,8 +71,48 @@ def test_transform_model_reasoning_without_options_no_controls():
         "reasoning_options": [],
     }
     result = sync._transform_model("opencode", "some-reasoning-model", info)
+    assert result["supports_thinking"] is False
+    assert "thinking_param" not in result
+
+
+def test_transform_model_reasoning_options_empty_type_no_controls():
+    """reasoning_options 存在但 type 缺失/为空 → 控制方式未知，不显示思考开关。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+        "reasoning_options": [{"type": ""}],
+    }
+    result = sync._transform_model("opencode", "some-reasoning-model", info)
+    assert result["supports_thinking"] is False
+    assert "thinking_param" not in result
+
+
+def test_transform_model_reasoning_with_toggle_controls():
+    """reasoning_options 明确 type=toggle → 支持思考开关（thinking）。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+        "reasoning_options": [{"type": "toggle"}],
+    }
+    result = sync._transform_model("opencode", "some-reasoning-model", info)
     assert result["supports_thinking"] is True
     assert result["thinking_param"] == "thinking"
+
+
+def test_transform_model_reasoning_effort_budget_controls():
+    """effort / budget_tokens 也算可控思考，标记支持思考开关。"""
+    info_template = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+    }
+    for opt, expected in ({"type": "effort"}, "reasoning_effort"), ({"type": "budget_tokens"}, "thinking_budget"):
+        info = {**info_template, "reasoning_options": [opt]}
+        result = sync._transform_model("opencode", "some-reasoning-model", info)
+        assert result["supports_thinking"] is True
+        assert result["thinking_param"] == expected
 
 
 def test_transform_model_cost():
@@ -158,9 +201,9 @@ def test_parse_models_dev_data_filters_whitelist():
     assert "opencode-test" in provider_models["OpenCode Zen"]
     assert "unknown-provider" not in provider_models
     assert caps["gpt-test"]["thinking_param"] == "reasoning_effort"
-    # opencode-test: reasoning=True 但 reasoning_options=[] → 仍支持思考，用默认参数
-    assert caps["opencode-test"]["thinking_param"] == "thinking"
-    assert caps["opencode-test"]["supports_thinking"] is True
+    # opencode-test: reasoning=True 但 reasoning_options=[] → 无控制方式，不支持思考开关
+    assert caps["opencode-test"]["supports_thinking"] is False
+    assert "thinking_param" not in caps["opencode-test"]
 
 
 # ============================================================
