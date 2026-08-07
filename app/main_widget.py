@@ -155,6 +155,7 @@ from app.widgets.cards.settings.model_config_card import (
 )
 from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
+    _format_cost_number,
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent,
@@ -6900,8 +6901,25 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            note = get_model_capabilities(self._current_model_name).get("note", "")
+            caps = get_model_capabilities(self._current_model_name)
+            note = caps.get("note", "")
+            # 第一行：服务商 · 模型 · 价格(单位在末尾一次) · 多模态/思考
+            cost_parts = []
+            cost = caps.get("cost") or {}
+            for key, label in (("input", "in"), ("output", "out"), ("cache_read", "cache")):
+                v = cost.get(key)
+                if v is not None:
+                    cost_parts.append(f"{label}:{_format_cost_number(v)}")
+            extra_parts = []
+            if cost_parts:
+                extra_parts.append(" ".join(cost_parts) + " $/M")
+            if caps.get("supports_vision"):
+                extra_parts.append("多模态")
+            if caps.get("supports_thinking"):
+                extra_parts.append("开关思考")
             tooltip = f"{display} · {self._current_model_name}"
+            if extra_parts:
+                tooltip += " · " + " ".join(extra_parts)
             if note:
                 tooltip += f"\n{note}"
             self.current_model_btn.setToolTip(tooltip)

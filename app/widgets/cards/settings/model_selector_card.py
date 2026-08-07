@@ -247,7 +247,7 @@ class ModelItem(QWidget):
 
         # 能力徽章（交互：思考 / 多模态），替换 emoji
         if self._caps.get("supports_thinking"):
-            self.think_label = self._make_cap_badge("思考", self._THINK_TEXT, self._THINK_BG, "支持思考开关")
+            self.think_label = self._make_cap_badge("开关思考", self._THINK_TEXT, self._THINK_BG, "支持思考开关")
             layout.addWidget(self.think_label, 0)
         if self._caps.get("supports_vision"):
             self.vision_label = self._make_cap_badge("多模态", self._VISION_TEXT, self._VISION_BG, "支持多模态输入")
