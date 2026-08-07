@@ -268,6 +268,8 @@ class TabItem(QFrame):
         self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setFixedSize(20, 20)
         self._close_btn.setVisible(False)
+        self._close_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._close_btn_orig_ss = self._close_btn.styleSheet()  # 保存 qfluentwidgets 全局样式，确认态恢复时还原
         self._close_btn.clicked.connect(self._on_close_btn_clicked)
         layout.addWidget(self._close_btn)
 
@@ -484,8 +486,14 @@ class TabItem(QFrame):
             self._close_btn.setIcon(QIcon())  # 清除图标，文字占位
             self._close_btn.setText("确认关闭")
             self._close_btn.setFixedSize(64, 20)
+            # ⚠️ 必须显式透明背景 + TextOnly：局部 stylesheet 会覆盖 qfluentwidgets
+            # 全局样式（原背景半透明白），若只设 color 则 Qt 回退默认深色底 → 全黑；
+            # 且 ToolButton 默认 IconOnly 不绘制 setText 文字。
+            self._close_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
             self._close_btn.setStyleSheet(
-                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
+                "QToolButton { background: transparent; border: none; "
+                f"color: #f85149; font-weight: 600; {get_font_family_css()} {font_size_css(11)} "
+                "}"
             )
             self._close_btn.setToolTip("正在对话，再次点击确认关闭，3秒后自动取消")
             self._close_timer.start()
@@ -508,7 +516,9 @@ class TabItem(QFrame):
         self._close_btn.setIcon(FIF.CLOSE)
         self._close_btn.setText("")
         self._close_btn.setFixedSize(20, 20)
-        self._close_btn.setStyleSheet("")
+        # 还原 qfluentwidgets 全局样式（不能 setStyleSheet("")，否则连全局样式一起清掉）
+        self._close_btn.setStyleSheet(getattr(self, "_close_btn_orig_ss", ""))
+        self._close_btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self._close_btn.setToolTip("")
 
     def enterEvent(self, event):

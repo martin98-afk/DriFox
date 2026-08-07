@@ -522,6 +522,21 @@ __ROOT_VARS__
         background:var(--accent-bg-active);
     }
 
+    /* ---- 自绘 tooltip（替代浏览器原生 title 提示，样式对齐全局 tooltip 规范） ---- */
+    .drifox-tip {
+        display:none;
+        position:fixed; z-index:9999;
+        max-width:min(340px, 70vw);
+        background:var(--bg3); color:var(--text);
+        border:1px solid var(--border); border-radius:6px;
+        padding:4px 8px;
+        font-size:11px; line-height:1.45;
+        font-family:var(--sans);
+        box-shadow:0 4px 14px rgba(0,0,0,0.18);
+        pointer-events:none;
+        white-space:pre-wrap; overflow-wrap:anywhere;
+    }
+
     /* ---- Empty state ---- */
     .empty-state {
         text-align:center; padding:80px 20px; color:var(--text2);
@@ -871,7 +886,7 @@ class DiffHtmlGenerator:
 </div>
 <div class="content">
     <div class="view-bar">
-        <button class="side-btn" id="sidebar-toggle" onclick="toggleSidebar()" title="折叠/展开文件列表">&#171;</button>
+        <button class="side-btn" id="sidebar-toggle" onclick="toggleSidebar()" data-tip="折叠/展开文件列表">&#171;</button>
         <div class="view-tgl">
             <button class="{split_on}" id="btn-split" onclick="switchView('split')">并排对比</button>
             <button class="{unified_on}" id="btn-unified" onclick="switchView('unified')">统一直列</button>
@@ -999,7 +1014,7 @@ function genBlock(fi,lines){{
     var ep=encodeURIComponent(fi.path);
     var h='<div class="file-hdr">'+
         '<span class="fh-icon">'+fi.icon+'</span>'+
-        '<a class="fh-path" href="drifox://open-file?path='+ep+'" title="点击打开">'+esc(fi.path)+'</a>'+
+        '<a class="fh-path" href="drifox://open-file?path='+ep+'" data-tip="点击打开">'+esc(fi.path)+'</a>'+
         as+ds+
         '<button class="fh-open" data-path="'+ep+'" onclick="openFile(decodeURIComponent(this.dataset.path))">打开</button></div>';
     var r=genRows(lines);
@@ -1059,6 +1074,48 @@ function autoSidebar(){{
     setSidebar(window.innerWidth<900);
 }}
 window.addEventListener('resize',autoSidebar);
+
+// ---- 自绘 tooltip（样式对齐全局自定义 tooltip：主题色实底、圆角6px、细边框） ----
+var _tipEl=null;
+function _getTip(){{
+    if(!_tipEl){{
+        _tipEl=document.createElement('div');
+        _tipEl.className='drifox-tip';
+        document.body.appendChild(_tipEl);
+    }}
+    return _tipEl;
+}}
+function _showTipFor(el){{
+    var t=el.getAttribute('data-tip');
+    if(!t){{_hideTip();return;}}
+    var tip=_getTip();
+    tip.textContent=t;
+    tip.style.display='block';
+    var r=el.getBoundingClientRect();
+    var tw=tip.offsetWidth,th=tip.offsetHeight;
+    var x=Math.min(Math.max(r.left+r.width/2-tw/2,4),window.innerWidth-tw-4);
+    var y=r.top-th-6;
+    if(y<4)y=r.bottom+6;             // 上方放不下 → 放下方
+    if(y+th>window.innerHeight-4)y=window.innerHeight-th-4;
+    tip.style.left=x+'px';tip.style.top=y+'px';
+}}
+function _hideTip(){{
+    if(_tipEl)_tipEl.style.display='none';
+}}
+document.addEventListener('mouseover',function(e){{
+    var t=e.target;
+    var el=t&&t.closest?t.closest('[data-tip]'):null;
+    if(el&&el!==_lastTipEl){{_lastTipEl=el;_showTipFor(el);}}
+    else if(!el){{_lastTipEl=null;_hideTip();}}
+}});
+document.addEventListener('mouseout',function(e){{
+    var t=e.target;
+    var el=t&&t.closest?t.closest('[data-tip]'):null;
+    if(!el||(e.relatedTarget&&e.relatedTarget.closest&&e.relatedTarget.closest('[data-tip]')!==el)){{
+        _lastTipEl=null;_hideTip();
+    }}
+}});
+var _lastTipEl=null;
 
 // Context folding
 function applyFold(c){{
@@ -1297,7 +1354,7 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             if dels > 0:
                 badges += f'<span class="tree-badge del">-{dels}</span>'
         dir_h = f'<span class="dir">{cls.escape_html(d)}</span>' if d else ""
-        return f'''<a href="#{fid}" class="tree-item" data-target="{fid}" title="{cls.escape_html(p)}">
+        return f'''<a href="#{fid}" class="tree-item" data-target="{fid}" data-tip="{cls.escape_html(p)}">
             <span class="icon">{icon}</span>
             <div class="info"><span class="name">{cls.escape_html(name)}</span>{dir_h}</div>{badges}</a>'''
 
@@ -1316,7 +1373,7 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
 
         header = f"""<div class="file-hdr">
             <span class="fh-icon">{icon}</span>
-            <a class="fh-path" href="drifox://open-file?path={ep}" title="点击打开">{ep}</a>
+            <a class="fh-path" href="drifox://open-file?path={ep}" data-tip="点击打开">{ep}</a>
             {add_s}{del_s}
             <button class="fh-open" onclick="openFile('{ep_js}')">打开</button></div>"""
 
