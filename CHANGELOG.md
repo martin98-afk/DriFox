@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.13] - 2026-08-07
 
-自上一版本以来的变更 | 提交数：70 · 文件变更：176 · +29244/-6535 | 贡献者：mading, dingma
+自上一版本以来的变更 | 提交数：97 · 文件变更：228 · +30941/-6929 | 贡献者：mading, dingma
 
 > 重点：**流式渲染性能大修**（差量化渲染末帧渲染量降 98%、渲染移出主线程、WebEngine renderer 内存强回收、会话历史驻留清理、关闭窗口异步化）；**tab_panel 侧边栏体验系列**（自动折叠/展开、滞回阈值、宽度动画）；**团队协作链路完善**（团队框按钮返工、会话记录支持同角色多成员、模板列表直读 user-custom）；**MCP stdio 命令安全校验**；**文件工具 glob 标准语义修复**。
 
@@ -48,6 +48,50 @@ All notable changes to this project will be documented in this file.
 - **worker 完成日志降级为 debug** (`app/core/`): 减少噪声日志
 - **subagents 命令测试修正** (`tests/`): ruff format 适配
 - **移除过时参考文档与配置校验工具** (docs/): 删除 CONFIG-REFERENCE、NODE-GUIDE、OUTPUT-FORMAT、PITFALLS、PROMPT-TEMPLATE、sanitize_config.py
+
+---
+
+#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 27 个新提交）
+
+> v0.4.13 初次 tag 后追加的优化与修复：性能大修（10 项 perf）、模型选择器体验、tab 状态反馈、scanner 进程清理。
+
+##### ⚡ 性能优化 (Performance, 10)
+
+- **B4 强回收双重阈值** (`app/`): web 子进程 RSS 双重阈值 + kill 统计日志
+- **懒渲染批量时间片预算** (`app/`): 批量渲染时间片预算分配
+- **设置弹窗按需构建** (`app/`): 取消 3.5s 预构建，改为按需构建
+- **file_mention 增量扫描防抖与上限** (`app/widgets/cards/floating/file_mention_card.py`): 减少 tab 切换卡顿
+- **perf_regression --quick 快速启动门禁** (`tools/perf_regression.py`): 快速启动回归门禁模式
+- **流式高度报告批量化** (`app/`): 高度上报 3 帧批量，降低流式期间 IPC 次数
+- **卡片宽度同步仅视口可见** (`app/`): resize 时仅同步视口可见卡片宽度
+- **markdown 渲染缓存收缩** (`app/`): 64→16 收缩 markdown 渲染缓存以降低每轮内存
+- **tool start processEvents 限次** (`app/`): 减少主线程阻塞
+
+##### ✨ 新功能 (New Features, 6)
+
+- **模型名 tooltip 显示成本与能力** (`app/widgets/model_selector.py`): ModelItem 名称 tooltip 展示成本与能力
+- **UI 响应性与主题支持增强** (`app/widgets/`): 跨组件 UI 响应式与主题适配（模型选择器、命令卡片等）
+- **tab 错误/提问状态 shimmer 动效** (`app/widgets/tab_panel.py`): tab item 错误/提问状态 shimmer 效果
+- **tab_panel 布局增强** (`app/widgets/tab_panel.py`): footer stretch + 独立 emoji 标签
+- **模型能力展示与架构版本化** (`app/widgets/model_selector.py`): 成本显示 + schema 版本号
+- **scanner 遗留 QtWebEngine 进程清理** (`app/core/scanner.py`): 主动终止残留 WebEngine 进程以释放内存
+
+##### 🐛 问题修复 (Bug Fixes, 10)
+
+- **模型能力动态处理细化** (`app/`): 准确支持 thinking 特性
+- **tooltip 在鼠标按下/分组删除前隐藏** (`app/widgets/`): 防止 tooltip 残留显示
+- **team load 时项目重置为源 tab 项目** (`app/widgets/team/`): 团队加载时项目重置
+- **cost 显示格式化去尾空格** (`app/`): 移除 cost 末尾空格
+- **shimmer 与左指示器选中态联动** (`app/widgets/tab_panel.py`): 根据选中态更新 shimmer 与左指示器可见性
+- **thinking 开关严格跟随 models.dev** (`app/widgets/model_selector.py`): 不再用硬编码覆盖动态数据
+- **model selector thinking 开关显式控制** (`app/widgets/model_selector.py`): 仅在 models.dev 给出显式 reasoning 控制时显示
+- **file_mention set 切片崩溃修复** (`app/widgets/cards/floating/file_mention_card.py`): 增量扫描 set 切片崩溃修复
+- **图片资源版本更新** (`assets/`): 替换为新版本图标
+- **prompt 规则更新** (`app/`): 强化简洁输出与禁止冗余规则
+
+##### ♻️ 代码重构 (Refactoring, 1)
+
+- **问题滚动高度管理简化** (`app/widgets/`): 移除冗余计算，简化高度管理
 - 版本号升级至 v0.4.13（pyproject / config / installer / README）
 
 ## [v0.4.12] - 2026-08-04

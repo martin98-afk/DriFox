@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import shutil
 import sys
 import traceback
@@ -140,6 +141,84 @@ def _delete_cache(path: Path, dir_mode: bool):
         pass
 
 
+def _kill_qwebengine_processes() -> int:
+    """终止残留的 QtWebEngine(Chromium) 子进程，归还其占用的内存。
+
+    只清理与当前 DriFox 相关的进程，避免误杀其它应用：
+
+    1. 当前进程的全部后代中名称含 qwebengine 的进程
+       （renderer / GPU / network service 等，通常各占数百 MB 内存）；
+    2. 全系统中名称含 qwebengine、但父进程已消失的孤儿进程
+       （DriFox 退出/崩溃后残留的"僵尸" Chromium 进程）。
+
+    先发 terminate 优雅退出，超时未退的再强杀（kill）。
+
+    Returns:
+        成功终止的进程数
+    """
+    try:
+        import psutil
+    except Exception:
+        return 0
+
+    pattern = re.compile(r"qwebengine", re.IGNORECASE)
+    self_pid = os.getpid()
+    procs = []
+    seen = set()
+
+    # ── 1. 当前进程的子孙进程 ──
+    try:
+        for p in psutil.Process(self_pid).children(recursive=True):
+            try:
+                if pattern.search(p.name() or ""):
+                    procs.append(p)
+                    seen.add(p.pid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── 2. 全系统孤儿兜底（父进程已不存在的残留） ──
+    try:
+        for p in psutil.process_iter(["pid", "name", "ppid"]):
+            try:
+                if p.info["pid"] in seen:
+                    continue
+                if not pattern.search(p.info["name"] or ""):
+                    continue
+                ppid = p.info["ppid"]
+                if ppid in (0, 1) or not psutil.pid_exists(ppid):
+                    procs.append(p)
+                    seen.add(p.info["pid"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not procs:
+        return 0
+
+    killed = 0
+    for p in procs:
+        try:
+            p.terminate()
+            killed += 1
+        except Exception:
+            pass
+    # 等待最多 2 秒优雅退出，未退出的强杀
+    try:
+        _gone, alive = psutil.wait_procs(procs, timeout=2)
+    except Exception:
+        alive = []
+    for p in alive:
+        try:
+            p.kill()
+            killed += 1
+        except Exception:
+            pass
+    return killed
+
+
 # ── 内存释放 ──────────────────────────────────────────
 
 
@@ -154,9 +233,10 @@ def _release_memory():
     4. 清理 re 正则编译缓存 + linecache 行缓存
     5. gc.collect(2) 全代回收
     6. 堆压缩 + 激进工作集归还 OS（Windows: SetProcessWorkingSetSize / Linux: malloc_trim）
+    7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存
 
     Returns:
-        (before_rss, after_rss, collected_objects)
+        (before_rss, after_rss, collected_objects, killed_procs)
     """
     import ctypes
     import gc
@@ -225,8 +305,11 @@ def _release_memory():
     except Exception:
         pass
 
+    # ── 7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存 ──
+    killed_procs = _kill_qwebengine_processes()
+
     after = _get_process_memory()
-    return before, after, collected
+    return before, after, collected, killed_procs
 
 
 # ── 扫描工作器 ──────────────────────────────────────────

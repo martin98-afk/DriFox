@@ -23,6 +23,7 @@ import sip
 from loguru import logger
 from PyQt5.QtCore import (
     QEvent,
+    QEventLoop,
     QFileSystemWatcher,
     QObject,
     QRunnable,
@@ -2228,7 +2229,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🔧 处理等待的信号：确保排在前面的 content_received 信号（文本内容）
         # 在工具执行前被主线程处理并渲染到 DOM，避免文本延迟到工具执行完毕才显示
         # 注意：此处的 processEvents 在主线程运行，不会阻塞后台 worker
-        QApplication.processEvents()
+        # [PERF] 限量版：最多处理 5ms 事件（全量 processEvents 会无界扫描 pending
+        # 事件队列，拖慢主线程；5ms 上限足以 flush content_received 等 posted 信号，
+        # 同时避免鼠标/动画等高频事件长时间占住主线程）。
+        QApplication.processEvents(QEventLoop.AllEvents, 5)
 
     def _get_chat_cards_for_engine(self):
         cards = []
@@ -2535,18 +2539,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_window_bg_opacity(opacity)
 
     def _update_window_bg_opacity(self, opacity: float):
-        """更新窗口背景透明度（通过 stylesheet 半透明让背景图透出）"""
-        if not hasattr(self, "_window_bg_color"):
-            return
-        import re
+        """更新窗口背景透明度
 
-        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", self._window_bg_color)
-        if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            base_alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-            final_alpha = max(0, int(base_alpha * opacity))
-            self.setStyleSheet(f"background: rgba({r},{g},{b},{final_alpha / 255});")
-            self.setAutoFillBackground(False)
+        对话框背景已完全透明，由外层容器兜底，故此处直接设为透明。
+        """
+        self.setStyleSheet("background: transparent;")
+        self.setAutoFillBackground(False)
 
     def _apply_branch_or_create_session(self):
         # 检查窗口是否仍然有效，防止在初始化期间窗口被关闭后继续执行
@@ -2750,25 +2748,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._top_card_container = TopCardContainer()
         self._bottom_card_container = BottomCardContainer()
 
-        # 设置窗口背景色（非常淡的主题色）
+        # ── 对话框背景完全透明 ──
+        # 不再为 OpenAIChatToolWindow 叠加独立背景层（palette window_bg +
+        # setAutoFillBackground），由外层容器兜底：Tab 内嵌时由
+        # TabManagerWindow 的 #chatFrame 半透明背景（+全局背景图）透出；
+        # 独立弹窗时由承载者背景垫底。保留 _window_bg_color 字段兼容旧引用。
         colors = theme_manager.get_current_colors()
         window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
-
-        # 保存原始颜色供透明度变化时使用
         self._window_bg_color = window_bg
-
-        # 解析颜色（包含 alpha）
-        m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
-        if m:
-            r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            alpha = int(float(m.group(4)) * 255) if m.group(4) else 10  # 保留原始 alpha
-            from PyQt5.QtGui import QColor, QPalette
-
-            color = QColor(r, g, b, alpha)
-            p = QPalette()
-            p.setColor(QPalette.Window, color)
-            self.setPalette(p)
-            self.setAutoFillBackground(True)
+        self.setAutoFillBackground(False)
 
         # 字体样式
         self.setStyleSheet("")
@@ -2946,10 +2934,9 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         # 性能优化：设置弹窗（含全部服务商/Hook/MCP/Gateway 子卡片）是隐藏的重型构件，
-        # 大幅延迟到窗口可交互之后再构建（3500ms），让窗口外壳先出现 + 用户能先打字。
-        # [PERF] 从 1500ms 增至 3500ms：进一步推迟 GiteeCard 初始化触发的 ConfigSync
-        # 下载+UI 刷新（~300ms 主线程工作），避免在窗口刚出现时发生可见的 UI 闪烁。
-        QTimer.singleShot(3500, self._build_settings_popup)
+        # 不再预构建——改为按需构建（首次打开设置时 _build_settings_popup，见
+        # global_card_controller.ensure_settings_popup 兜底），消除 3500ms 定时器在
+        # tab 切换/空闲期的无谓主线程开销（T22 实测 settings 占首切卡顿 29%）。
 
         # ── 全局卡片（settings/provider/hook/mcp）已迁移到 Tab 窗口层 ──
         # 实例由 GlobalCardController 持有，本类通过下方只读 property 兼容旧读取点
@@ -4749,6 +4736,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 团队会话自动保存时落库。
         tm_mgr.start_team_run(force=True)
 
+        # 🐛 构建团队默认项目继承：团队级项目是持久化的（team.json 顶层，
+        # 任一成员切项目即写入）。若不在此重置，新团队会沿用上次构建残留的
+        # 旧项目，而不是继承「执行本次 /team --load 的那个标签页」的项目。
+        # 修复：开新团队时无条件把团队级项目重置为源标签页当前项目，使本次
+        # 所有新成员窗口（_spawn_team_member_window）在 _apply_team_project
+        # 时共享同一项目。
+        src_project = self.__dict__.get("_current_project") or ""
+        if src_project:
+            tm_mgr.set_team_project(src_project)
+
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
         # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
@@ -4768,7 +4765,7 @@ class OpenAIChatToolWindow(ToolWindow):
            create_session 触发 SessionStart hook 时 is_team_member 已为 True，
            团队 hook（#team_member matcher）才能命中。同时写入团队名/角色名，
            供 Tab 管理器分组与胶囊使用。
-        3. 应用团队级统一项目（若已设置）
+        3. 应用团队级统一项目（若已设置，否则继承执行构建的源窗口项目）
         4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
            就绪；C3：该回调退化为纯 UI 补注册，不再重复 join 写盘），
            join 完成递减 _pending_arrange_count
@@ -4810,8 +4807,20 @@ class OpenAIChatToolWindow(ToolWindow):
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
             tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
-            # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
+            # 应用团队级统一项目：新窗口与团队共享同一项目。
+            # 🐛 构建团队默认项目继承：首次 /team --load / 快速新建成员时
+            # 团队级项目尚未设置（get_team_project 为空串），此前新窗口会回落到
+            # 全局默认项目，而不是继承「执行本次构建的那个标签页」的项目。
+            # 修复：从发起构建的源窗口（self._current_project）复制项目并写入
+            # 团队级，使本次所有新成员窗口与后续恢复路径共享同一项目。
+            # 注：用 __dict__.get 而非 getattr——测试用 __new__ 构造实例时
+            # 访问 Qt 子类实例属性会触发 super().__init__ 检查抛 RuntimeError。
             team_project = tm_mgr.get_team_project()
+            if not team_project:
+                src_project = self.__dict__.get("_current_project") or ""
+                if src_project:
+                    team_project = src_project
+                    tm_mgr.set_team_project(team_project)
             if team_project:
                 win._apply_team_project(team_project)
             # 延迟 join（确保 backend.agent_manager 已初始化）
@@ -8398,6 +8407,32 @@ class OpenAIChatToolWindow(ToolWindow):
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
 
+    def _iter_visible_cards_in_viewport(self, buffer: int = 400) -> list:
+        """返回视口附近（含 buffer 缓冲）的 MessageCard 列表。
+
+        resize 链路的统一视口过滤：与 _do_debounced_resize / _sync_visible_cards_on_scroll
+        的 ±buffer 策略一致，离屏卡片延迟到滚动进入视口后再由 _sync_visible_cards_on_scroll
+        同步，避免 resize 完成时全量遍历所有卡片。
+        """
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        if not scroll_area:
+            return []
+        viewport_rect = scroll_area.viewport().rect()
+        viewport_top = scroll_area.verticalScrollBar().value()
+        viewport_bottom = viewport_top + viewport_rect.height()
+
+        visible = []
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
+            card_rect = card.geometry()
+            if card_rect.bottom() < viewport_top - buffer or card_rect.top() > viewport_bottom + buffer:
+                continue
+            visible.append(card)
+        return visible
+
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8407,19 +8442,16 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：同步所有卡片宽度（轻量，无 GPU 分配）
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageCard):
-                try:
-                    card = item.widget()
-                    if viewport_width > 0:
-                        margin = 20 if card.role != "user" else 180
-                        card.sync_width(force=True, target_width=max(320, viewport_width - margin))
-                    else:
-                        card.sync_width(force=True)
-                except RuntimeError:
-                    pass
+        # 第一步：同步视口附近卡片宽度（轻量，无 GPU 分配；离屏卡片由滚动路径补同步）
+        for card in self._iter_visible_cards_in_viewport(buffer=400):
+            try:
+                if viewport_width > 0:
+                    margin = 20 if card.role != "user" else 180
+                    card.sync_width(force=True, target_width=max(320, viewport_width - margin))
+                else:
+                    card.sync_width(force=True)
+            except RuntimeError:
+                pass
 
         # 第二步：收集卡片，分批退出 preview 模式
         self._restore_queue = []
@@ -9065,24 +9097,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception:
                     pass
 
-            colors = theme_manager.get_current_colors()
-
-            # 窗口淡背景
-            window_bg = colors.get("window_bg", "rgba(102, 198, 255, 0.04)")
-            self._window_bg_color = window_bg
-
-            import re
-
-            m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)", window_bg)
-            if m:
-                r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                alpha = int(float(m.group(4)) * 255) if m.group(4) else 10
-                from PyQt5.QtGui import QColor
-
-                # Tab 模式下 MainWidget 背景改为半透明，让 TabManagerWindow 的
-                # 全局背景图能透出。使用 stylesheet 确保 alpha 正确 blend。
-                self.setStyleSheet(f"background: rgba({r},{g},{b},{alpha / 255});")
-                self.setAutoFillBackground(False)
+            # 对话框背景完全透明，由外层容器兜底，不叠加独立背景层。
+            self.setStyleSheet("background: transparent;")
+            self.setAutoFillBackground(False)
 
             # 分支标签
             if hasattr(self, "_project_label"):
@@ -9291,6 +9308,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 命令卡片
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
+        # 文件提及卡片（滚动条颜色随主题）
+        if hasattr(self, "_file_mention_card") and self._file_mention_card and hasattr(self._file_mention_card, "refresh_style"):
+            self._file_mention_card.refresh_style()
         # 模型选择卡片
         if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
             self._model_selector_card_content.refresh_style()
@@ -10184,8 +10204,33 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return True
 
+    def _web_children_rss_mb(self) -> float:
+        """统计当前进程 WebEngine 相关子进程（qwebengine/QtWebEngineProcess）总 RSS。
+
+        T30 双判据的 WebEngine 侧：renderer/GPU/network 子进程各自数百 MB，
+        累计 RSS 反映 WebEngine 内存压力是否值得强回收（kill 离屏 renderer）。
+        无 psutil 或找不到子进程时返回 0.0（退化：不触发 WebEngine 判据）。
+        """
+        try:
+            import psutil
+
+            self_proc = psutil.Process()
+            total = 0.0
+            for child in self_proc.children(recursive=True):
+                try:
+                    name = (child.name() or "").lower()
+                    if "qwebengine" in name or "webengine" in name or "chrome" in name:
+                        total += child.memory_info().rss / (1024 * 1024)
+                except Exception:
+                    continue
+            return total
+        except Exception:
+            return 0.0
+
     def _over_memory_threshold(self) -> bool:
-        """内存阈值判定：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB → True。
+        """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
+        且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
+        退化单判据）→ True。
 
         无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
@@ -10194,7 +10239,13 @@ class OpenAIChatToolWindow(ToolWindow):
             import psutil
 
             rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-            return rss_mb > _MEM_THRESHOLD_TOTAL_MB
+            if rss_mb <= _MEM_THRESHOLD_TOTAL_MB:
+                return False
+            # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
+            web_mb = self._web_children_rss_mb()
+            if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
+                return False
+            return True
         except Exception:
             # 退化：有已卸载 PID 且存在远距批次 + 并发页仍超限
             if not self._unloaded_pids:
@@ -10235,6 +10286,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._unloaded_pids = remaining
         if killed:
             logger.debug(f"[B4-strong] kill {killed} 个离屏 renderer，队列剩余 {len(self._unloaded_pids)}")
+            # [B4-2] 强回收计数日志：warning 级便于观测；带总阈值/WebEngine 阈值上下文
+            try:
+                web_mb = self._web_children_rss_mb()
+                logger.warning(
+                    f"[B4-2] strong-recycle kill {killed} renderer(s) (queue {len(self._unloaded_pids)}), "
+                    f"web_rss={web_mb:.0f}MB threshold={_WEB_MEM_THRESHOLD_MB}MB"
+                )
+            except Exception:
+                logger.warning(f"[B4-2] strong-recycle kill {killed} renderer(s), queue {len(self._unloaded_pids)}")
         return killed
 
     def _maybe_strong_recycle(self):
@@ -11010,21 +11070,26 @@ class OpenAIChatToolWindow(ToolWindow):
         return collect_message_cards_from_layout(self.chat_layout, is_user_or_assistant)
 
     def _process_next_lazy_batch(self):
-        """批量懒渲染：每次处理 BATCH_SIZE 个卡片，减少 WebEngine 创建开销
+        """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
 
         批量处理期间合并 heightChanged 信号，批次完成后统一触发布局更新和滚底。
-        BATCH_SIZE 默认 3，可通过 self._lazy_batch_size 调整。
+        [PERF] 由固定 BATCH_SIZE 改为时间片预算：单批最多运行 16ms，超时即停，
+        未渲染的卡片放回队首下批继续——避免大量卡片排队时单批无界撑爆主线程
+        （T22 实测 lazy batch 占首切卡顿兜底项）。
         """
-        BATCH_SIZE = getattr(self, "_lazy_batch_size", 3)
+        TIME_SLICE_MS = 16
 
         if not self._pending_lazy_cards:
             self._loading_session = False
             self._lazy_batch_timer_active = False
             return
 
-        # 取出当前批次（最多 BATCH_SIZE 个）
+        # 时间片内取出尽量多有效卡片（单张 ensure_rendered 通常 <1ms）
         batch = []
-        while self._pending_lazy_cards and len(batch) < BATCH_SIZE:
+        deadline = time.monotonic() + TIME_SLICE_MS / 1000.0
+        while self._pending_lazy_cards:
+            if time.monotonic() >= deadline:
+                break
             card = self._pending_lazy_cards.pop(0)
             if self._is_widget_alive(card) and not getattr(card, "_lazy_rendered", False):
                 batch.append(card)
@@ -11038,12 +11103,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._lazy_batch_timer_active = False
             return
 
-        # 批量渲染所有卡片
+        # 批量渲染所有卡片（渲染同样受时间片保护：超时未消费的放回队首）
+        consumed = 0
         for card in batch:
+            if time.monotonic() >= deadline:
+                break
             card.ensure_rendered()
+            consumed += 1
+        if consumed < len(batch):
+            self._pending_lazy_cards[:0] = batch[consumed:]
 
         # ★ B4 温和层：渲染后统一计数，超限时下一帧触发 LRU 淘汰
-        new_count = sum(1 for c in batch if getattr(c, "_lazy_rendered", False))
+        # 只统计实际消费渲染的卡片（batch[:consumed]），避免 _rendered_card_count 虚高
+        new_count = sum(1 for c in batch[:consumed] if getattr(c, "_lazy_rendered", False))
         if new_count > 0:
             self._rendered_card_count += new_count
             global _global_rendered_pages
@@ -19689,8 +19761,11 @@ _gc_hook_pending = False
 _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
-# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图） ──
-_MEM_THRESHOLD_TOTAL_MB = 1800  # 总 RSS 阈值触发强回收
+# ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
+# 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
+# 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
+_MEM_THRESHOLD_TOTAL_MB = 900  # 总 RSS 阈值触发强回收（1800→900：修复 renderer 永不回收）
+_WEB_MEM_THRESHOLD_MB = 300  # WebEngine 子进程 RSS 阈值（待窗口期回填校准）
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill

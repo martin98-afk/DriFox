@@ -465,7 +465,7 @@ class FileMentionCard(QWidget):
         # ---- 增量更新防抖计时器：合并连续文件系统事件 ----
         self._incr_timer = QTimer(self)
         self._incr_timer.setSingleShot(True)
-        self._incr_timer.setInterval(200)  # 200ms 覆盖 IDE 批量创建/删除
+        self._incr_timer.setInterval(500)  # 500ms 覆盖 IDE 批量创建/删除（200→500：合并更多连续事件，降低 tab 切换尖峰）
         self._incr_timer.timeout.connect(self._do_incremental_update)
         self._changed_dirs: Set[str] = set()
 
@@ -539,6 +539,33 @@ class FileMentionCard(QWidget):
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
 
+    def refresh_style(self):
+        """响应主题切换：重建滚动区 QSS（滚动条颜色随主题）
+
+        FileMentionCard 自身背景用 REALTIME_*（非主题源色，恒不变），但
+        滚动条色取自 Colors.SCROLLBAR_HANDLE_BG（主题源属性）；此前只在
+        __init__ 烘焙一次，主题切换后停留旧色。此处随主题刷新重建并强制
+        unpolish/polish 即时生效。
+        """
+        Colors.refresh()
+        if hasattr(self, "_scroll_area") and self._scroll_area is not None:
+            self._scroll_area.setStyleSheet(f"""
+                QScrollArea, QScrollArea * {{
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    margin: 0;
+                }}
+                {get_unified_scrollbar_style(8)}
+            """)
+            self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
+            for sb in (self._scroll_area.verticalScrollBar(), self._scroll_area.horizontalScrollBar()):
+                if sb is not None:
+                    sb_style = sb.style()
+                    if sb_style is not None:
+                        sb_style.unpolish(sb)
+                        sb_style.polish(sb)
+
     def set_root_dir(self, root_dir: str):
         """设置根目录（自动归一化路径，避免 Windows 上混合斜杠）"""
         root_dir = os.path.normpath(root_dir) if root_dir else root_dir
@@ -571,17 +598,32 @@ class FileMentionCard(QWidget):
         self._incr_timer.start()
 
     def _do_incremental_update(self):
-        """防抖定时器超时后执行增量更新：处理所有累积的变化目录"""
-        dirs = self._changed_dirs.copy()
+        """防抖定时器超时后执行增量更新：处理累积的变化目录。
+
+        [PERF] 单轮最多处理 8 个目录，剩余目录留在 _changed_dirs 并重启
+        防抖定时器下轮继续——避免一次文件系统风暴（IDE 批量保存/目录重建）
+        在主线程上同步扫描大量目录造成 tab 切换尖峰（T22 实测 file_mention
+        占首切卡顿 56%）。
+        """
+        dirs = list(self._changed_dirs)  # set → list：可切片（_changed_dirs 为 Set[str]）
         self._changed_dirs.clear()
 
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
 
+        MAX_DIRS_PER_ROUND = 8
+        processed = dirs[:MAX_DIRS_PER_ROUND]
+        remaining = dirs[MAX_DIRS_PER_ROUND:]
+
         any_change = False
-        for d in dirs:
+        for d in processed:
             if self._incremental_update_one(d):
                 any_change = True
+
+        if remaining:
+            # 剩余目录下轮继续；重启防抖定时器（500ms）避免连续风暴时饿死
+            self._changed_dirs.update(remaining)
+            self._incr_timer.start()
 
         if any_change:
             self._sort_file_cache()

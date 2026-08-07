@@ -132,5 +132,68 @@ def test_event_filter_hide_to_parent_hides_tooltip(qtbot):
     m_timer.stop.assert_called()
 
 
+def test_event_filter_mouse_press_hides_tooltip(qtbot):
+    """B3 回归：点击（MouseButtonPress/MouseButtonDblClick）→ tooltip 立即隐藏
+
+    团队关闭按钮 hover 显示 tooltip 后点击关闭团队，若按下时 tooltip 不隐藏，
+    团队组 deleteLater 延迟销毁（DeferredDelete 事件循环空闲才执行）期间
+    tooltip 残留在屏幕上。与 Qt 原生 QToolTip / qfluentwidgets ToolTipFilter
+    在 MouseButtonPress 时 hideToolTip() 的行为对齐。
+    """
+    from unittest.mock import patch as _patch
+
+    from PyQt5.QtCore import QEvent
+    from PyQt5.QtWidgets import QApplication, QPushButton
+
+    from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
+
+    btn = QPushButton("btn")
+    qtbot.addWidget(btn)
+    install_hover_tooltip(btn, "关闭团队")
+    f = _filters.get(id(btn))
+    assert f is not None, "install_hover_tooltip 应注册 filter"
+
+    with (
+        _patch.object(f, "_hide") as m_hide,
+        _patch.object(f, "_timer") as m_timer,
+    ):
+        QApplication.sendEvent(btn, QEvent(QEvent.MouseButtonPress))
+    m_hide.assert_called(), "MouseButtonPress 应触发 _hide（tooltip 收起）"
+    m_timer.stop.assert_called(), "MouseButtonPress 应停止 hover 计时"
+
+    # 双击同样收起
+    with (
+        _patch.object(f, "_hide") as m_hide2,
+        _patch.object(f, "_timer") as m_timer2,
+    ):
+        QApplication.sendEvent(btn, QEvent(QEvent.MouseButtonDblClick))
+    m_hide2.assert_called(), "MouseButtonDblClick 应触发 _hide"
+    m_timer2.stop.assert_called()
+
+
+def test_event_filter_mouse_press_does_not_block_click(qtbot):
+    """B3 回归：MouseButtonPress 仅收起 tooltip，不拦截鼠标事件
+
+    eventFilter 对 MouseButtonPress 必须返回 False（继续传播），否则按钮
+    收不到按下事件，点击（clicked）失效。
+    """
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QPushButton
+
+    from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
+
+    btn = QPushButton("btn")
+    qtbot.addWidget(btn)
+    install_hover_tooltip(btn, "关闭团队")
+    f = _filters.get(id(btn))
+    assert f is not None, "install_hover_tooltip 应注册 filter"
+
+    clicked = []
+    btn.clicked.connect(lambda: clicked.append(True))
+    QTest.mouseClick(btn, Qt.LeftButton)
+    assert clicked, "MouseButtonPress 不应被 filter 拦截，按钮点击应正常触发"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

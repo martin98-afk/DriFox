@@ -357,7 +357,7 @@ class TabManagerWindow(QWidget):
                 border-radius: 8px;
             }}
             #chatFrame {{
-                background: {Colors.CARD_BG_SOLID};
+                background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
                 margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle（矩形边框保持全宽） */

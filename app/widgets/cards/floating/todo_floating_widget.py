@@ -229,6 +229,16 @@ class TodoFloatingWidget(QWidget):
                 border-radius: 10px;
             }}
         """)
+        # 滚动区 QSS（滚动条颜色随主题）——此前只在 __init__ 烘焙一次，主题切换后
+        # 滚动条停留在旧主题色；此处随 _apply_style 重建，确保跟随深浅切换。
+        if hasattr(self, "scroll_area") and self.scroll_area is not None:
+            self.scroll_area.setStyleSheet(_build_scroll_area_style())
+            for sb in (self.scroll_area.verticalScrollBar(), self.scroll_area.horizontalScrollBar()):
+                if sb is not None:
+                    sb_style = sb.style()
+                    if sb_style is not None:
+                        sb_style.unpolish(sb)
+                        sb_style.polish(sb)
 
     def refresh_style(self):
         """响应主题切换"""

@@ -6,6 +6,7 @@
 from typing import List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -15,21 +16,49 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import IconWidget
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
-from app.utils.utils import get_font_family_css
+from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
-from app.widgets.elided_label import _ElidedLabel
 
-# 模型能力 emoji 标记
-_MODEL_TAG_THINKING = "🧠"  # 支持思考控制
-_MODEL_TAG_VISION = "🖼️"  # 支持多模态（图片）
+
+def _format_cost_number(value) -> str:
+    """格式化成本数值：数字用 :g 紧凑显示（3.0 → 3），非数字原样字符串。"""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value)
+
+
+def _measure_name_width(names) -> int:
+    """按 15px 字体（含 bold）测量模型名最大像素宽度，+12px 余量。
+
+    用于服务商内对齐：模型名固定为组内最长名宽度，短名右侧留白，
+    成本列从同一 x 位置开始，使同分组下各模型行纵向对齐比价。
+    """
+    probe = QLabel()
+    probe.setStyleSheet(f"{get_font_family_css()} {font_size_css(15)};")
+    probe.ensurePolished()
+    fm = probe.fontMetrics()
+    bold_font = probe.font()
+    bold_font.setBold(True)
+    fm_bold = QFontMetrics(bold_font)
+    widths = [max(fm.horizontalAdvance(n), fm_bold.horizontalAdvance(n)) for n in names]
+    return (max(widths) if widths else 0) + 12
+
 
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
 _MIN_ITEMS = 3  # 最少显示 item 数
 _MAX_ITEMS = 10  # 最多显示 item 数
+
+# 成本金额：完整显示三项价格（不可裁剪）。等宽字体 + 名称等宽对齐实现起点一致，
+# 金额自身不设窄固定宽（Minimum 自适应），保证 in/out/cache · $/M 全部可见。
+_COST_MONO_FAMILY = "'Consolas', 'Segoe UI Mono', 'monospace'"
+_COST_RIGHT_PAD = 2  # 行内右侧留白
 
 # 滚动区域高度计算
 _MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px
@@ -84,16 +113,31 @@ class ProviderHeader(QWidget):
 
 
 class ModelItem(QWidget):
-    """单个模型项 - 可点击，模型名同行显示描述副标题和能力标记"""
+    """单个模型项 - 可点击，模型名同行显示能力徽章、成本与描述"""
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    def __init__(self, provider_name: str, model_name: str, is_active: bool = False, note: str = "", parent=None):
+    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛）
+    _THINK_TEXT = Colors.TAG_ORANGE_TEXT  # #ffc999
+    _THINK_BG = "rgba(255,179,102,0.18)"
+    _VISION_TEXT = Colors.TAG_ACCENT_TEXT  # #aae0ff
+    _VISION_BG = "rgba(102,198,255,0.18)"
+
+    def __init__(
+        self,
+        provider_name: str,
+        model_name: str,
+        is_active: bool = False,
+        note: str = "",
+        name_width: int = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.provider_name = provider_name
         self.model_name = model_name
         self.is_active = is_active
         self._note = note
+        self._name_width = name_width
         self.setFixedHeight(34)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -107,71 +151,169 @@ class ModelItem(QWidget):
 
         return get_model_capabilities(self.model_name)
 
-    def _tag_emoji(self) -> str:
-        """组装能力 emoji 标签"""
-        tags = []
+    def _cost_text(self) -> str:
+        """组装成本文本：{in}/{out}/{cache_read} · $/M。三值全无返回空串。"""
+        cost = self._caps.get("cost") or {}
+        vals = [cost.get("input"), cost.get("output"), cost.get("cache_read")]
+        if not any(v is not None for v in vals):
+            return ""
+        parts = [_format_cost_number(v) if v is not None else "-" for v in vals]
+        return f"{'/'.join(parts)} ·"
+
+    def _cost_tooltip(self) -> str:
+        """组装成本 tooltip 明细（含 cache_write）。无数据返回空串。"""
+        cost = self._caps.get("cost") or {}
+        rows = []
+        for label, key in (
+            ("输入价格", "input"),
+            ("输出价格", "output"),
+            ("缓存读取价格", "cache_read"),
+            ("缓存写入价格", "cache_write"),
+        ):
+            v = cost.get(key)
+            if v is not None:
+                rows.append(f"{label}: ${_format_cost_number(v)}/M")
+        return "\n".join(rows) if rows else ""
+
+    def _model_tooltip(self) -> str:
+        """组装模型名 tooltip：模型名 + 费用 + 能力，单行简要显示。"""
+        parts = [self.model_name]
+        # 费用信息：in/out/cache，无单位
+        cost = self._caps.get("cost") or {}
+        key_labels = (("input", "in"), ("output", "out"), ("cache_read", "cache"))
+        for key, label in key_labels:
+            v = cost.get(key)
+            if v is not None:
+                parts.append(f"{label}: {_format_cost_number(v)}")
+        # 能力信息
         if self._caps.get("supports_thinking"):
-            tags.append(_MODEL_TAG_THINKING)
+            parts.append("开关思考")
         if self._caps.get("supports_vision"):
-            tags.append(_MODEL_TAG_VISION)
-        return " ".join(tags)
+            parts.append("多模态")
+        return "  ".join(parts)
+
+    def _make_cap_badge(self, text: str, text_color: str, bg_color: str, tip: str) -> QLabel:
+        """构造能力徽章（文字胶囊，替换 emoji）"""
+        lbl = QLabel(text, self)
+        lbl.setStyleSheet(
+            f"color: {text_color};"
+            f"background-color: {bg_color};"
+            f"border-radius: 4px; padding: 0 6px 0 6px;"
+            f"font-weight: 600;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        lbl.setFixedHeight(18)
+        lbl.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        lbl.setToolTip(tip)
+        return lbl
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 0, 12, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 0, 12, 0)
+        layout.setSpacing(6)
 
-        # 选中状态指示点
-        self.dot = QLabel("●", self)
-        self.dot.setStyleSheet(
-            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};"
-            if self.is_active
-            else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
-        )
+        # 选中态小圆点（U+2022，active 显示主题色；非 active 透明占位，保持列对齐）
+        self.dot = QLabel("•", self)
         self.dot.setFixedWidth(14)
         layout.addWidget(self.dot)
 
-        # 模型名（不压缩，保持完整显示）
+        # 模型名（第一位的文本；组内有 trailing 信息时固定宽度 = 组内最长名，成本列对齐）
         self.name_label = QLabel(self.model_name, self)
-        self.name_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+        has_trailing = bool(
+            self._cost_text() or self._caps.get("supports_thinking") or self._caps.get("supports_vision") or self._note
+        )
+        if has_trailing and self._name_width:
+            self.name_label.setFixedWidth(self._name_width)
+            self.name_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        else:
+            self.name_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         self._apply_name_style()
+        # 给模型名添加 tooltip，显示费用和多模态信息
+        model_tooltip = self._model_tooltip()
+        if model_tooltip and model_tooltip != self.model_name:
+            self.name_label.setToolTip(model_tooltip)
         layout.addWidget(self.name_label, 0)
 
-        # 能力 emoji 标记（思考、多模态）
-        tag = self._tag_emoji()
-        if tag:
-            self.tag_label = QLabel(tag, self)
-            self.tag_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)};")
-            self.tag_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
-            layout.addWidget(self.tag_label, 0)
+        # 金额（对齐到组内最长模型名之后，跨模型比价）
+        cost_text = self._cost_text()
+        if cost_text:
+            self.cost_label = QLabel(cost_text, self)
+            self._apply_cost_style(active=self.is_active)
+            self.cost_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            cost_tooltip = self._cost_tooltip()
+            if cost_tooltip:
+                self.cost_label.setToolTip(cost_tooltip)
+            layout.addWidget(self.cost_label, 0)
 
-        # 描述副标题（ElidedLabel 自动省略，参考 CommandItemWidget 模式）
+        # 能力徽章（交互：思考 / 多模态），替换 emoji
+        if self._caps.get("supports_thinking"):
+            self.think_label = self._make_cap_badge("思考", self._THINK_TEXT, self._THINK_BG, "支持思考开关")
+            layout.addWidget(self.think_label, 0)
+        if self._caps.get("supports_vision"):
+            self.vision_label = self._make_cap_badge("多模态", self._VISION_TEXT, self._VISION_BG, "支持多模态输入")
+            layout.addWidget(self.vision_label, 0)
+
+        # 描述 info（SVG question 图标，紧跟内容区，悬停显示完整描述）
         if self._note:
-            self.note_label = _ElidedLabel(self._note)
-            self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            self.note_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-            self.note_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            layout.addWidget(self.note_label, 1)
+            self.info_icon = IconWidget(self)
+            self.info_icon.setIcon(get_icon("question"))
+            self.info_icon.setFixedSize(20, 20)
+            self.info_icon.setToolTip(self._note)
+            layout.addWidget(self.info_icon, 0)
+
+        # 剩余空间推到最后（内容靠左自然排布，无右对齐顶行尾）
+        layout.addStretch(1)
+
+        # 应用选中态样式（dot + 名称，无整行填充）
+        self._apply_dot_style()
+
+    def _apply_cost_style(self, active: bool = None):
+        """成本样式：完整显示三项金额（不得裁剪）。
+
+        - 等宽字体保证各模型行金额起点/末位大致对齐比价
+        - 不设窄 fixedWidth：Minimum 自适应展开，in/out/cache_read · $/M 全部可见
+        active=True 时金额提亮为 TEXT_ACCENT，否则 TEXT_MUTED。
+        建时/切换选中/主题刷新统一经此收敛。
+        """
+        if not hasattr(self, "cost_label"):  # 无成本模型不创建 cost_label，直接返回
+            return
+        Colors.refresh()
+        active = self.is_active if active is None else active
+        color = Colors.TEXT_ACCENT if active else Colors.TEXT_MUTED
+        self.cost_label.setStyleSheet(f"color: {color};font-family: {_COST_MONO_FAMILY};{font_size_css(11)};")
+        # 不设固定宽：让文本按内容自然展开，避免三项金额被裁剪
+        self.cost_label.setMinimumWidth(0)
+        self.cost_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
+
+    def _apply_dot_style(self):
+        Colors.refresh()
+        # 选中行才显示圆点；未选中行透明占位（不显示但不使列位移）
+        color = Colors.TEXT_ACCENT if self.is_active else "transparent"
+        self.dot.setStyleSheet(f"color: {color}; {get_font_family_css()} {font_size_css(18)}; font-weight: bold;")
 
     def _apply_name_style(self):
         Colors.refresh()
         if self.is_active:
             self.name_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; {get_font_family_css()} {font_size_css(15)};"
+                f"color: {Colors.TEXT_ACCENT}; font-weight: bold; {get_font_family_css()} {font_size_css(15)};"
             )
         else:
             self.name_label.setStyleSheet(
                 f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(15)};"
             )
 
+    def refresh_style(self):
+        """主题切换后重刷 dot/名称/金额色（不重建 widget）。"""
+        Colors.refresh()
+        self._apply_dot_style()
+        self._apply_name_style()
+        self._apply_cost_style()
+
     def set_active(self, active: bool):
         self.is_active = active
-        self.dot.setStyleSheet(
-            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(10)};"
-            if active
-            else f"color: transparent; {get_font_family_css()} {font_size_css(10)};"
-        )
+        self._apply_dot_style()
         self._apply_name_style()
+        self._apply_cost_style()
 
     def mousePressEvent(self, event):
         self.clicked.emit(self.provider_name, self.model_name)
@@ -316,11 +458,14 @@ class ModelSelectorCardContent(QWidget):
             self.content_layout.addWidget(header)
             self._provider_headers.append((header, provider_name))
 
+            # 该服务商内最长模型名宽度（模型名固定宽 → 金额列从同一 x 开始对齐比价）
+            name_width = _measure_name_width(filtered_models)
+
             # 模型列表
             for model_name in filtered_models:
                 is_active = provider_name == current_provider and model_name == current_model
                 note = (model_notes or {}).get(model_name, "") if model_notes else ""
-                item = ModelItem(provider_name, model_name, is_active, note, self.content_widget)
+                item = ModelItem(provider_name, model_name, is_active, note, name_width, self.content_widget)
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
@@ -375,6 +520,9 @@ class ModelSelectorCardContent(QWidget):
                 if sb_style is not None:
                     sb_style.unpolish(sb)
                     sb_style.polish(sb)
+        # 重刷每个 ModelItem（选中竖条/徽章/名称色跟随主题）
+        for item in self._model_widgets:
+            item.refresh_style()
         # 重新触发射信号，让标题栏标签更新颜色
         scroll_pos = self.scroll_area.verticalScrollBar().value()
         self._on_scroll(scroll_pos)

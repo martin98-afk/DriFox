@@ -215,6 +215,20 @@ class SystemCardFrame(QFrame):
         # ── 内容区子控件递归刷新（SettingCard 等子卡片） ──
         self._refresh_content_children()
 
+        # ── 滚动区 QSS（滚动条颜色随主题） ──
+        # _scroll_style() 内部经 get_unified_scrollbar_style() 现取
+        # Colors.SCROLLBAR_HANDLE_BG（刷新后为新主题色），需在 Colors.refresh()
+        # 之后重建；setStyleSheet 本身触发样式重评。强制 unpolish/polish
+        # 确保滚动条颜色即时生效。
+        if hasattr(self, "scroll_area") and getattr(self, "scroll_area", None) is not None:
+            self.scroll_area.setStyleSheet(self._scroll_style())
+            for sb in (self.scroll_area.verticalScrollBar(), self.scroll_area.horizontalScrollBar()):
+                if sb is not None:
+                    sb_style = sb.style()
+                    if sb_style is not None:
+                        sb_style.unpolish(sb)
+                        sb_style.polish(sb)
+
     def _refresh_content_children(self):
         """递归刷新内容区子控件的主题样式"""
         for i in range(self._content_layout.count()):

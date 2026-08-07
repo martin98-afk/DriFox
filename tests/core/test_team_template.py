@@ -1229,6 +1229,42 @@ class TestLoadMissingDegradation:
             "用户取消时仍应 return（不进入建窗口流程）"
         )
 
+    def test_handle_team_load_resets_team_project_from_source_tab(self):
+        """🐛 回归：/team --load 构建团队时，团队级项目必须重置为
+        「执行加载的标签页」当前项目。
+
+        背景：团队级项目（team.json 顶层 project）是持久化的，任一成员切项目
+        即写入。若 _handle_team_load 不重置，新团队会沿用上次构建残留的旧项目，
+        而不是继承执行 /team --load 那个标签页的项目（用户报告"没有变化"）。
+
+        修复：start_team_run 之后、_spawn_team_members 之前，无条件
+        set_team_project(源标签页 _current_project)。
+        """
+        import ast as _ast
+        import re as _re
+        import textwrap as _tw
+
+        _src_path, src = self._main_widget_src()
+        _tree = _ast.parse(src)
+
+        target = self._find_function(_tree, "_handle_team_load")
+        assert target is not None, "未找到 _handle_team_load 方法"
+
+        func_src = _tw.dedent(_ast.unparse(target))
+
+        # 必须调用 set_team_project 重置团队级项目
+        assert "set_team_project" in func_src, "_handle_team_load 必须调用 set_team_project"
+        # 顺序：start_team_run 之后、_spawn_team_members 之前
+        _run_idx = func_src.find("start_team_run")
+        _spawn_idx = func_src.find("_spawn_team_members")
+        _set_idx = func_src.find("set_team_project")
+        assert -1 not in (_run_idx, _spawn_idx, _set_idx), "缺少关键调用"
+        assert _run_idx < _set_idx < _spawn_idx, (
+            "set_team_project 必须在 start_team_run 之后、_spawn_team_members 之前"
+        )
+        # 数据源为源标签页当前项目（self._current_project）
+        assert "_current_project" in func_src, "必须读取源标签页 _current_project"
+
     def test_execute_command_catches_degrade_and_injects_prompt(self):
         """`_execute_command` 必须捕获 `CommandNeedDegrade` → select_prompt + 写 _pending_command + 置标记。
 

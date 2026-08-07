@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "### 铁律：只改任务范围文件\n- **只改**任务指定文件 / 新功能需创建的新文件。\n- **禁止**修改/重置/删除未经指定的文件。\n- 非自己范围文件变化 → **跳过**。谁改谁负责。\n- `git diff --stat` 无关变更 → 跳过，不撤销。\n\nuser messages may include <system-reminder> tags.\n  <system-reminder> tags contain useful information and reminders.They are automatically added by the system, and bear no direct relation to the specific  user messages in which they appear.",
+            "prompt": "### 铁律：只改任务范围文件\n- **只改**任务指定文件 / 新功能需创建的新文件。\n- **禁止**修改/重置/删除未经指定的文件。\n- 非自己范围文件变化 → **跳过**。谁改谁负责。\n- `git diff --stat` 无关变更 → 跳过，不撤销。\n\n### 铁律：全程中文输出\n- 思考（thinking）与正文输出**强制使用中文**。\n- 代码、命令、标识符、路径、专有名词等可保留原文。\n- **禁止**用英文撰写思考或正文；中文为主，必要术语可用英文括号备注。\n\n### 铁律：简洁输出（caveman 风）\n- 正文只输出**用户需要看见的**：结论、结果、关键信息、下一步。\n- 删客套、填充词、过程流水账、重复描述。短句、要点化。\n- 技术实质保留：代码、命令、路径、错误原文、数字证据。\n- 模式：`[事情] [动作] [原因]`。禁用 \"Sure! I'd be happy to...\" 式开场。\n- 安全警告、破坏性操作、多步骤关键流程 → 允许完整输出，不牺牲准确性。\n\n### 铁律：禁止车轱辘话（实质推进）\n- 正文每次更新必须包含**实质推进**：新结论、新动作、新状态变化、新证据。\n- **禁止**重复复述已输出过的内容：不重列旧结论、不总结自己刚说过的要点、不换说法再说一遍。\n- 本轮无新信息 → 正文只输出最小确认（如「完成」「已改」「无变更」），不再展开。\n- 收尾阶段不要复述整轮过程，只给最终结果 + 下一步（如有）。\n\n用户消息可能包含 <system-reminder> 标签。\n  <system-reminder> 标签由系统自动注入，包含有用的信息与提醒，与用户消息本身无直接关系。",
             "add_output_to_context": true,
             "statusMessage": "编码契约:",
             "id": "builtin_global_contract"

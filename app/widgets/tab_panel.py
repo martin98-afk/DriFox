@@ -100,17 +100,50 @@ _RAINBOW_N = len(_RAINBOW_COLORS)
 _HOVER_DARK_COLORS = (_QColor(99, 102, 241, 32), _QColor(139, 92, 246, 18))
 _HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
 
-# 流光 shimmer 渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
-_SHIMMER_COLORS = (
+# 错误态红条颜色
+_CACHED_ERROR_RED = _QColor(220, 50, 50)
+
+# 报错红色流光渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
+_SHIMMER_ERROR_COLORS = (
     _QColor(255, 255, 255, 0),
-    _QColor(130, 200, 255, 55),
-    _QColor(180, 220, 255, 100),
-    _QColor(130, 200, 255, 55),
+    _QColor(220, 80, 60, 80),
+    _QColor(235, 110, 80, 140),
+    _QColor(220, 80, 60, 80),
     _QColor(255, 255, 255, 0),
 )
 
-# 错误态红条颜色
-_CACHED_ERROR_RED = _QColor(220, 50, 50)
+# 提问橙黄流光渐层颜色常量（避免 paintEvent 中反复创建 5 个 QColor）
+_SHIMMER_QUESTION_COLORS = (
+    _QColor(255, 255, 255, 0),
+    _QColor(245, 170, 60, 80),
+    _QColor(250, 200, 110, 140),
+    _QColor(245, 170, 60, 80),
+    _QColor(255, 255, 255, 0),
+)
+
+# 彩虹流光渐层缓存：key = 彩虹索引 → 5 段渐层色元组（主体色随相位循环）
+_SHIMMER_RAINBOW_CACHE: dict = {}
+
+
+def _shimmer_rainbow_colors(idx: int):
+    """按彩虹索引生成 5 段流光渐层（透明→彩虹色→亮白→彩虹色→透明），带缓存
+
+    流式流光随 _anim_phase 推进切换彩虹色，形成"彩色循环"的来回流光。
+    """
+    cached = _SHIMMER_RAINBOW_CACHE.get(idx)
+    if cached is not None:
+        return cached
+    base = _RAINBOW_COLORS[idx]
+    r, g, b = base.red(), base.green(), base.blue()
+    colors = (
+        _QColor(255, 255, 255, 0),
+        _QColor(r, g, b, 55),
+        _QColor(min(255, r + 60), min(255, g + 60), min(255, b + 60), 100),
+        _QColor(r, g, b, 55),
+        _QColor(255, 255, 255, 0),
+    )
+    _SHIMMER_RAINBOW_CACHE[idx] = colors
+    return colors
 
 
 class _TabProjectIcon(QWidget):
@@ -580,47 +613,64 @@ class TabItem(QFrame):
             painter_obj.drawPath(_round_rect)
             painter_obj.restore()
 
+        # ── 整条标签内部来回脉冲流光 ──
+        def _draw_shimmer(painter_obj, phase, colors):
+            """sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲
+
+            colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，
+            报错传红色渐层。
+            """
+            if self._panel and self._panel._is_resizing:
+                return  # resize 期间跳过昂贵渐层
+            sweep = _math.sin(_math.radians(phase))
+            sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+            # 光斑中心在标签上从 -20% 扫到 120%
+            shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+            shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
+            shimmer_grad.setColorAt(0.0, colors[0])
+            shimmer_grad.setColorAt(0.3, colors[1])
+            shimmer_grad.setColorAt(0.5, colors[2])
+            shimmer_grad.setColorAt(0.7, colors[3])
+            shimmer_grad.setColorAt(1.0, colors[4])
+            painter_obj.save()
+            painter_obj.setClipPath(_round_rect)
+            painter_obj.fillRect(self.rect(), shimmer_grad)
+            painter_obj.restore()
+
         # ── 流式/错误状态 ──
         if self._streaming or self._stream_error:
+            # 共用扫描相位：流式彩虹循环 / 报错红色循环
+            phase = self._panel._anim_phase if self._panel else 0
+            # 左侧指示条只在选中时显示；未选中的状态仅保留内部流光脉冲
             if self._stream_error:
-                _draw_left_indicator(painter, _CACHED_ERROR_RED)
+                # 报错：内部红色流光脉冲（选中时叠加红色指示条）
+                _err_color = _QColor(_CACHED_ERROR_RED)
+                if self._selected:
+                    _draw_left_indicator(painter, _err_color)
+                _draw_shimmer(painter, phase, _SHIMMER_ERROR_COLORS)
             else:
-                # 左侧彩虹逐帧单色指示条（贴合圆角曲线）
-                phase = self._panel._anim_phase if self._panel else 0
+                # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
-                _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
-
-                # ── 整条标签来回脉冲流光（约束在圆角路径内） ──
-                # ★ resize 期间跳过昂贵渐层，仅保留左侧指示条
-                if self._panel and self._panel._is_resizing:
-                    pass  # 跳过 shimmer 渐层
-                else:
-                    # sin 映射：0→360 相位对应 -1→1→-1，产生来回扫动
-                    sweep = _math.sin(_math.radians(phase))
-                    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-                    # 光斑中心在标签上从 -20% 扫到 120%
-                    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
-
-                    shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
-                    shimmer_grad.setColorAt(0.0, _SHIMMER_COLORS[0])
-                    shimmer_grad.setColorAt(0.3, _SHIMMER_COLORS[1])
-                    shimmer_grad.setColorAt(0.5, _SHIMMER_COLORS[2])
-                    shimmer_grad.setColorAt(0.7, _SHIMMER_COLORS[3])
-                    shimmer_grad.setColorAt(1.0, _SHIMMER_COLORS[4])
-                    painter.save()
-                    painter.setClipPath(_round_rect)
-                    painter.fillRect(self.rect(), shimmer_grad)
-                    painter.restore()
+                if self._selected:
+                    _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
+                _draw_shimmer(painter, phase, _shimmer_rainbow_colors(idx))
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             phase = self._panel._question_phase if self._panel else 0
-            # resize 期间跳过 sin 计算取固定亮度
-            if self._panel and self._panel._is_resizing:
-                alpha = 150
+            # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
+            if not self._selected:
+                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
             else:
-                # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
-                alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
-            _draw_left_indicator(painter, _QColor(245, 158, 11, max(0, min(255, alpha))))
+                # resize 期间跳过 sin 计算取固定亮度
+                if self._panel and self._panel._is_resizing:
+                    alpha = 150
+                else:
+                    # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                    alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
+                _question_color = _QColor(245, 158, 11)
+                _question_color.setAlpha(max(0, min(255, alpha)))
+                _draw_left_indicator(painter, _question_color)
+                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
         elif self._selected:
             # 左侧选中指示条（贴合圆角曲线）
             _draw_left_indicator(painter, _CACHED_INFO)
@@ -822,6 +872,7 @@ class TabPanel(QWidget):
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
         self._anim_timer: Optional[QTimer] = None  # 有 tab 流式/question 时启动
         self._streaming_count: int = 0  # 当前流式 tab 计数
+        self._error_count: int = 0  # 当前报错 tab 计数（报错红流同样需要动画驱动）
         self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._collapsed: bool = False  # 侧边栏收起状态
@@ -1868,6 +1919,11 @@ class TabPanel(QWidget):
             if w is not None:
                 w.setParent(self._list_widget)
         self._list_layout.removeWidget(grp)
+        # 🛡️ tooltip 兜底：先隐藏再 deleteLater。deleteLater 是延迟销毁（DeferredDelete
+        # 事件循环空闲才执行），期间 close_btn 等子控件仍显示在屏幕上——若鼠标恰好
+        # 停在其上方，tooltip 气泡不消失形成"残留"。主动 hide() 触发子控件
+        # HideToParent（27）事件，_HoverTooltipFilter 随即收起 tooltip（B2 分支）。
+        grp.hide()
         grp.deleteLater()
         self._team_groups.pop(team_id, None)
 
@@ -1962,11 +2018,13 @@ class TabPanel(QWidget):
         """移除指定索引的 Tab"""
         if 0 <= index < len(self._items):
             item = self._items.pop(index)
-            # 如果该 tab 正在流式，递减计数
+            # 如果该 tab 正在流式/报错，递减计数
             if item._streaming:
                 self._streaming_count = max(0, self._streaming_count - 1)
-                if self._streaming_count == 0:
-                    self._stop_anim_timer()
+            if item._stream_error:
+                self._error_count = max(0, self._error_count - 1)
+            if self._streaming_count + self._question_count + self._error_count == 0:
+                self._stop_anim_timer()
             self._list_layout.removeWidget(item)
             item.deleteLater()
 
@@ -2056,15 +2114,23 @@ class TabPanel(QWidget):
     def update_tab_streaming(self, index: int, streaming: bool, error: bool = False):
         """更新 Tab 的流式/错误状态"""
         if 0 <= index < len(self._items):
-            old = self._items[index]._streaming
-            self._items[index].set_streaming(streaming, error)
-            if streaming and not old:
+            item = self._items[index]
+            old_streaming = item._streaming
+            old_error = item._stream_error
+            item.set_streaming(streaming, error)
+            if streaming and not old_streaming:
                 self._streaming_count += 1
                 self._ensure_anim_timer()
-            elif not streaming and old:
+            elif not streaming and old_streaming:
                 self._streaming_count = max(0, self._streaming_count - 1)
-                if self._streaming_count + self._question_count == 0:
-                    self._stop_anim_timer()
+            if error and not old_error:
+                # 报错同样驱动动画（红色流光脉冲）
+                self._error_count += 1
+                self._ensure_anim_timer()
+            elif not error and old_error:
+                self._error_count = max(0, self._error_count - 1)
+            if self._streaming_count + self._question_count + self._error_count == 0:
+                self._stop_anim_timer()
 
     def update_tab_question(self, index: int, question: bool):
         """更新 Tab 的 question 状态（AI 提问等待用户回答）"""
@@ -2079,7 +2145,7 @@ class TabPanel(QWidget):
             self._ensure_anim_timer()
         else:
             self._question_count = max(0, self._question_count - 1)
-            if self._streaming_count + self._question_count == 0:
+            if self._streaming_count + self._question_count + self._error_count == 0:
                 self._stop_anim_timer()
 
     def _ensure_anim_timer(self):
@@ -2109,7 +2175,7 @@ class TabPanel(QWidget):
             if self._anim_timer and self._anim_timer.isActive():
                 self._anim_timer.stop()
         else:
-            if self._streaming_count + self._question_count > 0:
+            if self._streaming_count + self._question_count + self._error_count > 0:
                 self._ensure_anim_timer()
 
     def _on_anim_tick(self):
@@ -2121,8 +2187,52 @@ class TabPanel(QWidget):
         self._anim_phase = (self._anim_phase + 12) % 360
         self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
         for item in self._items:
-            if item._streaming or item._question:
+            if item._streaming or item._stream_error or item._question:
                 item.update()
+
+    def _reapply_scroll_styles(self):
+        """重新应用侧边两个滚动区的滚动条 QSS（含滚动条颜色跟随主题）。
+
+        滚动条颜色来自 Colors.SCROLLBAR_HANDLE_BG（主题源属性，Colors.refresh()
+        已随主题更新）；滚动区 QSS 在 __init__ 时一次性烘焙，若主题切换后不
+        重建就会停留在旧主题的滚动条颜色。此方法在 refresh_style 中调用，
+        与 model_selector_card / project_selector_card 的统一模式保持一致。
+        """
+        # 自定义 UI 插件滚动区
+        if hasattr(self, "_custom_plugin_scroll"):
+            self._custom_plugin_scroll.setStyleSheet(
+                f"""
+                QScrollArea {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                }}
+                {get_unified_scrollbar_style(4)}
+                """
+            )
+        # 侧边 Tab 列表滚动区
+        if hasattr(self, "_scroll_area"):
+            self._scroll_area.setStyleSheet(
+                f"""
+                QScrollArea {{
+                    background: transparent;
+                    border: none;
+                }}
+                QScrollArea > QWidget > QWidget {{
+                    background: transparent;
+                }}
+                {get_unified_scrollbar_style(6)}
+                """
+            )
+            # 强制滚动条重新应用样式（水平 + 垂直，确保主题切换后颜色即时生效）
+            for sb in (self._scroll_area.verticalScrollBar(), self._scroll_area.horizontalScrollBar()):
+                if sb is not None:
+                    sb_style = sb.style()
+                    if sb_style is not None:
+                        sb_style.unpolish(sb)
+                        sb_style.polish(sb)
 
     def refresh_style(self):
         """ThemeManager 统一刷新入口：主题/字体变更后调用
@@ -2132,6 +2242,8 @@ class TabPanel(QWidget):
         """
         # 刷新模块级缓存颜色，避免 paintEvent 使用旧主题色值
         _invalidate_cached_colors()
+        # 重新应用侧边两个滚动区的滚动条 QSS（滚动条颜色随主题）
+        self._reapply_scroll_styles()
         # 先全部调用 update()（异步，Qt 自动合并绘制事件），
         # 再对 panel 统一触发一次重绘，避免逐个 repaint() 同步卡顿
         for item in self._items:
