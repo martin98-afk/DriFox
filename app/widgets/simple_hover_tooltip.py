@@ -355,6 +355,16 @@ class _HoverTooltipFilter(QObject):
             # "飘着的 tooltip"。补上 HideToParent 使容器隐藏即收掉 tooltip。
             self._timer.stop()
             self._hide()
+        elif t in (event.MouseButtonPress, event.MouseButtonDblClick):
+            # 🛡️ B3 修复：点击即收起 tooltip（与 Qt 原生 QToolTip / qfluentwidgets
+            # ToolTipFilter 在 MouseButtonPress 时 hideToolTip() 的行为对齐）。
+            # 此前漏捕：点击关闭团队按钮时 tooltip 仍显示，随后团队组
+            # deleteLater 销毁（close_btn 的 destroyed→_cleanup 隐藏 tooltip）
+            # 与用户点击之间存在延迟窗口，若窗口 close 阻塞/事件繁忙/清理
+            # 竞态 → tooltip 残留在屏幕上不消失。按下即隐藏彻底消除该窗口期。
+            # 注意：此处不 return True（不拦截鼠标事件），按钮点击正常响应。
+            self._timer.stop()
+            self._hide()
         return False
 
     def _on_timeout(self):

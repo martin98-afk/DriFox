@@ -1919,6 +1919,11 @@ class TabPanel(QWidget):
             if w is not None:
                 w.setParent(self._list_widget)
         self._list_layout.removeWidget(grp)
+        # 🛡️ tooltip 兜底：先隐藏再 deleteLater。deleteLater 是延迟销毁（DeferredDelete
+        # 事件循环空闲才执行），期间 close_btn 等子控件仍显示在屏幕上——若鼠标恰好
+        # 停在其上方，tooltip 气泡不消失形成"残留"。主动 hide() 触发子控件
+        # HideToParent（27）事件，_HoverTooltipFilter 随即收起 tooltip（B2 分支）。
+        grp.hide()
         grp.deleteLater()
         self._team_groups.pop(team_id, None)
 

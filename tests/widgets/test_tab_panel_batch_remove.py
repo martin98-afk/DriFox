@@ -139,3 +139,36 @@ class TestBatchRemoveEmptyGroup:
         assert panel.count == 2
         # 独立 tab 是原来 tab2/tab3（现在索引 0/1），无团队归属
         assert panel._item_team == {0: "", 1: ""}, f"独立 tab 不应有团队归属: {panel._item_team}"
+
+    def test_batch_remove_hides_group_before_delete(self, panel, monkeypatch):
+        """tooltip 兜底：空组清理时 grp 先隐藏再 deleteLater
+
+        团队关闭时 close_btn 等子控件若仍显示在屏幕上（deleteLater 是延迟
+        销毁），hover 的 tooltip 会残留。_maybe_remove_empty_group 在
+        deleteLater 前主动 hide() → 子控件收 HideToParent（27）→
+        _HoverTooltipFilter 立即收起 tooltip。
+        """
+        for i in range(2):
+            panel.add_tab(f"tab-{i}")
+        panel.set_tab_team(0, "team-A")
+        panel.set_tab_team(1, "team-A")
+        grp = panel._team_groups.get("team-A")
+        assert grp is not None
+
+        # 记录 hide 调用（deleteLater 前应先 hide）
+        hide_calls = []
+        orig_hide = grp.hide
+
+        def _tracked_hide():
+            hide_calls.append(True)
+            return orig_hide()
+
+        monkeypatch.setattr(grp, "hide", _tracked_hide)
+
+        panel.begin_batch_remove()
+        panel.remove_tab(1)
+        panel.remove_tab(0)
+        panel.end_batch_remove()
+
+        assert "team-A" not in panel._team_groups, "空组应被清理"
+        assert hide_calls, "空组清理应先 hide 再 deleteLater（tooltip 兜底）"

@@ -165,10 +165,10 @@ class ModelItem(QWidget):
         cost = self._caps.get("cost") or {}
         rows = []
         for label, key in (
-            ("Input", "input"),
-            ("Output", "output"),
-            ("Cache read", "cache_read"),
-            ("Cache write", "cache_write"),
+            ("输入价格", "input"),
+            ("输出价格", "output"),
+            ("缓存读取价格", "cache_read"),
+            ("缓存写入价格", "cache_write"),
         ):
             v = cost.get(key)
             if v is not None:
@@ -187,7 +187,7 @@ class ModelItem(QWidget):
                 parts.append(f"{label}: {_format_cost_number(v)}")
         # 能力信息
         if self._caps.get("supports_thinking"):
-            parts.append("思考")
+            parts.append("开关思考")
         if self._caps.get("supports_vision"):
             parts.append("多模态")
         return "  ".join(parts)
