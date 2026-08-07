@@ -4736,6 +4736,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 团队会话自动保存时落库。
         tm_mgr.start_team_run(force=True)
 
+        # 🐛 构建团队默认项目继承：团队级项目是持久化的（team.json 顶层，
+        # 任一成员切项目即写入）。若不在此重置，新团队会沿用上次构建残留的
+        # 旧项目，而不是继承「执行本次 /team --load 的那个标签页」的项目。
+        # 修复：开新团队时无条件把团队级项目重置为源标签页当前项目，使本次
+        # 所有新成员窗口（_spawn_team_member_window）在 _apply_team_project
+        # 时共享同一项目。
+        src_project = self.__dict__.get("_current_project") or ""
+        if src_project:
+            tm_mgr.set_team_project(src_project)
+
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
         # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
@@ -4755,7 +4765,7 @@ class OpenAIChatToolWindow(ToolWindow):
            create_session 触发 SessionStart hook 时 is_team_member 已为 True，
            团队 hook（#team_member matcher）才能命中。同时写入团队名/角色名，
            供 Tab 管理器分组与胶囊使用。
-        3. 应用团队级统一项目（若已设置）
+        3. 应用团队级统一项目（若已设置，否则继承执行构建的源窗口项目）
         4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
            就绪；C3：该回调退化为纯 UI 补注册，不再重复 join 写盘），
            join 完成递减 _pending_arrange_count
@@ -4797,8 +4807,20 @@ class OpenAIChatToolWindow(ToolWindow):
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
             tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
-            # 应用团队级统一项目（若已设置）：新窗口与团队共享同一项目
+            # 应用团队级统一项目：新窗口与团队共享同一项目。
+            # 🐛 构建团队默认项目继承：首次 /team --load / 快速新建成员时
+            # 团队级项目尚未设置（get_team_project 为空串），此前新窗口会回落到
+            # 全局默认项目，而不是继承「执行本次构建的那个标签页」的项目。
+            # 修复：从发起构建的源窗口（self._current_project）复制项目并写入
+            # 团队级，使本次所有新成员窗口与后续恢复路径共享同一项目。
+            # 注：用 __dict__.get 而非 getattr——测试用 __new__ 构造实例时
+            # 访问 Qt 子类实例属性会触发 super().__init__ 检查抛 RuntimeError。
             team_project = tm_mgr.get_team_project()
+            if not team_project:
+                src_project = self.__dict__.get("_current_project") or ""
+                if src_project:
+                    team_project = src_project
+                    tm_mgr.set_team_project(team_project)
             if team_project:
                 win._apply_team_project(team_project)
             # 延迟 join（确保 backend.agent_manager 已初始化）
