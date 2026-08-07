@@ -476,7 +476,7 @@ class SystemCleanerCard(QWidget):
         self._mem_release_btn = QPushButton("⚡ 释放内存", mem_bg)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
         btn_fs = max(10, fs - 2)
-        self._mem_release_btn.setFixedSize(max(100, btn_fs * 6 + 20), 32)
+        self._mem_release_btn.setFixedSize(max(160, btn_fs * 6 + 20), 32)
         self._mem_release_btn.setStyleSheet(self._mem_release_btn_style(self._ctx_accent, fs, isDarkTheme()))
         self._mem_release_btn.clicked.connect(self._on_memory_release)
         mem_layout.addWidget(self._mem_release_btn)
@@ -593,21 +593,23 @@ class SystemCleanerCard(QWidget):
         self._is_releasing_mem = True
         self._mem_release_btn.setEnabled(False)
         self._mem_release_btn.setText("⚡ 释放中…")
-        self._set_status("深度清理内存中…")
+        self._set_status("深度清理内存 + WebEngine 进程中…")
 
-        mem_before, mem_after, collected = _release_memory()
+        mem_before, mem_after, collected, killed_procs = _release_memory()
 
         freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         self._last_mem_release_time = now
 
+        parts = []
         if freed_mem is not None and freed_mem > 0:
-            self._mem_release_btn.setText(f"✅ 已释放 {_format_size(freed_mem)} + {collected} 个对象")
-        elif freed_mem is not None:
-            self._mem_release_btn.setText(f"✅ 已回收 {collected} 个对象")
-        else:
-            self._mem_release_btn.setText(f"✅ 已回收 {collected} 个对象")
+            parts.append(f"释放 {_format_size(freed_mem)}")
+        if collected:
+            parts.append(f"回收 {collected} 对象")
+        if killed_procs:
+            parts.append(f"结束 {killed_procs} 个 WebEngine 进程")
+        self._mem_release_btn.setText(f"✅ {' · '.join(parts) if parts else '清理完成'}")
 
         self._refresh_memory()
         self._mem_release_btn.setEnabled(True)
