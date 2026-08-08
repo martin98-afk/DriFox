@@ -1476,23 +1476,22 @@ class MarketplaceCard(QWidget):
         self._filter_bar.addItem("all", "全部", None, None)
         self._filter_bar.addItem("installed", "已安装", None, None)
         self._filter_bar.addItem("uninstalled", "未安装", None, None)
-        self._filter_bar.addItem("updates", "待更新", None, None)
+        self._updates_item = self._filter_bar.addItem("updates", "待更新", None, None)
         self._filter_bar.setCurrentItem("all")
         self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self._filter_bar)
 
         filter_layout.addStretch(1)
 
-        # 待更新角标（橙色，点击切到「待更新」筛选）
-        self._update_badge = QPushButton("0 个可更新", filter_row)
-        self._update_badge.setCursor(Qt.PointingHandCursor)
-        self._update_badge.setStyleSheet(
-            "QPushButton { background: rgba(255,167,38,0.15); color: #FFA726;"
-            " border: 1px solid rgba(255,167,38,0.3); border-radius: 8px; padding: 2px 10px; font-size: 11px; }"
-            "QPushButton:hover { background: rgba(255,167,38,0.3); }"
-        )
-        self._update_badge.clicked.connect(lambda: self._filter_bar.setCurrentItem("updates"))
-        filter_layout.addWidget(self._update_badge)
+        # 待更新 InfoBadge：挂在「待更新」tab 右上角（无更新时隐藏）
+        from qfluentwidgets import InfoBadge, InfoBadgeManager, InfoBadgePosition
+
+        self._updates_badge = InfoBadge.info("0", self._updates_item)
+        self._updates_badge.setVisible(False)
+        try:
+            InfoBadgeManager.make(InfoBadgePosition.TOP_RIGHT, self._updates_item, self._updates_badge)
+        except Exception as e:
+            logger.warning(f"[Marketplace] InfoBadge 挂载失败: {e}")
 
         # 排序下拉
         self._sort_combo = QComboBox(filter_row)
@@ -2182,17 +2181,17 @@ class MarketplaceCard(QWidget):
             self._render_plugins(self._plugin_data)
 
     def _update_update_badge(self):
-        """统计可更新插件数并更新角标"""
+        """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge"""
         n = 0
         for p in self._all_plugins or []:
             if p.get("name") in self._installed_set and self._has_update(p, True):
                 n += 1
         try:
             if n > 0:
-                self._update_badge.setText(f"{n} 个可更新")
-                self._update_badge.show()
+                self._updates_badge.setText(str(n))
+                self._updates_badge.setVisible(True)
             else:
-                self._update_badge.hide()
+                self._updates_badge.setVisible(False)
         except RuntimeError:
             pass
 
