@@ -4592,7 +4592,11 @@ class CodeWebViewer(QWebEngineView):
                 // ===== B1 差量渲染：追加闭合段到 DOM（不整块替换） =====
                 // 移除所有 data-incremental="true" 的增量纯文本节点，
                 // 再把新闭合的格式化 HTML 追加到 #content-placeholder 末尾。
-                function updateContentAppend(newHtml) {{
+                // 🐛 修复（正文尾部丢失）：tailText 参数——移除增量节点时
+                // 会连带删除**未闭合的尾部文本**（尚未到 \\n\\n 的段落后半段），
+                // 且新闭合段 HTML 不含它 → 尾部永久消失（用户可见"正文显示不全"）。
+                // 因此 Python 端把未闭合尾部传进来，移除后重建增量节点保尾。
+                function updateContentAppend(newHtml, tailText) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
                     // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
@@ -4601,6 +4605,13 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 追加格式化 HTML（含 table 包裹等后续处理）
                     container.insertAdjacentHTML('beforeend', newHtml);
+                    // 🐛 修复（正文尾部丢失）：未闭合尾部重建为增量节点
+                    if (tailText) {{
+                        var tailP = document.createElement('p');
+                        tailP.setAttribute('data-incremental', 'true');
+                        tailP.textContent = tailText;
+                        container.appendChild(tailP);
+                    }}
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
                     // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
@@ -5322,7 +5333,7 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
-                var text = {json.dumps(text_clean)};
+                var text = {json.dumps(text_clean).decode('utf-8')};
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 智能段落处理 ──
@@ -5341,12 +5352,20 @@ class CodeWebViewer(QWebEngineView):
                     c.appendChild(p);
                 }} else {{
                     var last = c.lastElementChild;
-                    if (last && last.tagName === 'P') {{
-                        // [B1] 若已标记为增量节点则保留标记，追加文本
-                        if (!last.hasAttribute('data-incremental')) {{
-                            last.setAttribute('data-incremental', 'true');
-                        }}
+                    if (last && last.tagName === 'P' && last.hasAttribute('data-incremental')) {{
+                        // [B1] 增量纯文本节点：同一未闭合段落内直接追加累积
                         last.textContent += text;
+                    }} else if (last && last.tagName === 'P') {{
+                        // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
+                        // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
+                        // updateContentAppend 移除全部 data-incremental 节点时会连带
+                        // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
+                        // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
+                        // 后续文本属新段落，独立 <p> 结构正确。
+                        var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
+                        p.textContent = text;
+                        c.appendChild(p);
                     }} else if (last && last.classList.contains('think-block')) {{
                         // 最后是思考块：追加到思考块之后的新段落
                         var p = document.createElement('p');
@@ -5686,7 +5705,24 @@ class CodeWebViewer(QWebEngineView):
                     self._stable_html += new_html
                     # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
                     # 不能推送累积值（否则旧段重复渲染）。
-                    js = f"updateContentAppend({json.dumps(new_html).decode('utf-8')});"
+                    # 🐛 修复（正文尾部丢失）：_extract_closed_segments 只产出
+                    # 已闭合段；未闭合尾部（stable 之后的剩余 md）若不移交给 JS，
+                    # updateContentAppend 移除 data-incremental 节点时会连带删除
+                    # 该尾部 → 正文尾部永久丢失（用户可见"显示不全"）。
+                    # 将未闭合尾部作为第二参数传入，JS 端重建增量节点保尾。
+                    # ⚠️ 过滤 <think>/</think>：tail 是原始 markdown，未闭合思考块
+                    # 的标签若直接传给 JS textContent 会字面显示（_append_text_incremental
+                    # 一直有过滤，tail 重建必须对齐，否则思考标签闪现）。
+                    _tail = (
+                        self._markdown_text[self._stable_md_len :]
+                        .replace("<think>", "")
+                        .replace("</think>", "")
+                    )
+                    js = (
+                        "updateContentAppend("
+                        f"{json.dumps(new_html).decode('utf-8')},"
+                        f"{json.dumps(_tail).decode('utf-8')});"
+                    )
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
                     self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
