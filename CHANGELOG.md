@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.13] - 2026-08-07
 
-自上一版本以来的变更 | 提交数：97 · 文件变更：228 · +30941/-6929 | 贡献者：mading, dingma
+自上一版本以来的变更 | 提交数：102 · 文件变更：364 · +31837/-7726 | 贡献者：mading, dingma
 
 > 重点：**流式渲染性能大修**（差量化渲染末帧渲染量降 98%、渲染移出主线程、WebEngine renderer 内存强回收、会话历史驻留清理、关闭窗口异步化）；**tab_panel 侧边栏体验系列**（自动折叠/展开、滞回阈值、宽度动画）；**团队协作链路完善**（团队框按钮返工、会话记录支持同角色多成员、模板列表直读 user-custom）；**MCP stdio 命令安全校验**；**文件工具 glob 标准语义修复**。
 
@@ -51,9 +51,15 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 27 个新提交）
+#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 30 个新提交）
 
-> v0.4.13 初次 tag 后追加的优化与修复：性能大修（10 项 perf）、模型选择器体验、tab 状态反馈、scanner 进程清理。
+> v0.4.13 初次 tag 后追加的优化与修复：性能大修（10 项 perf）、模型选择器体验、tab 状态反馈、scanner 进程清理、卡片高度/宽度同步布局修复。
+
+##### 🐛 二次重发补丁 (Bug Fixes, 3)
+
+- **卡片高度上限 80% 窗口高** (`app/`): SystemCardFrame 溢出内容限高防遮挡
+- **卡片宽度同步改用视口直查** (`app/`): 防止布局同步错位
+- **模型 tooltip 增强** (`app/widgets/model_selector.py`): 补充成本详情与能力信息
 
 ##### ⚡ 性能优化 (Performance, 10)
 
