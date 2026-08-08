@@ -24,9 +24,16 @@
 """
 
 import inspect
+import re
 import sys
 
-from app.widgets.message_card import _extract_closed_segments, CodeWebViewer
+from app.widgets.message_card import (
+    _extract_closed_segments,
+    _has_unclosed_think_or_tool,
+    _render_inline_tail,
+    _render_markdown_to_html_cached_impl,
+    CodeWebViewer,
+)
 
 
 # ── 用例 1：未闭合尾部不得被已闭合段吞掉 ──
@@ -59,8 +66,8 @@ def _simulate_diff_with_tail_rebuild(chunks):
     """
     md = ""
     stable = 0
-    rendered = []   # 已差量渲染的 HTML 段（文本近似）
-    tail = ""       # 当前增量尾部（模拟 JS data-incremental 节点）
+    rendered = []  # 已差量渲染的 HTML 段（文本近似）
+    tail = ""  # 当前增量尾部（模拟 JS data-incremental 节点）
 
     for chunk in chunks:
         md += chunk
@@ -87,19 +94,22 @@ def test_tail_rebuild_no_loss():
     )
 
 
-# ── 用例 3：JS 模板必须含 tailText 重建逻辑（防回归） ──
+# ── 用例 3：JS 模板必须含 tailHtml 重建逻辑（防回归） ──
 def test_update_content_append_template_has_tail_rebuild():
-    """JS updateContentAppend 必须支持第二参数 tailText 并重建增量节点。"""
+    """JS updateContentAppend 必须支持第二参数 tailHtml（行内渲染 HTML）并重建增量节点。"""
     src = inspect.getsource(CodeWebViewer._load_skeleton)
     # 模板骨架是 f-string，函数体内用了 {{ }} 转义：
     # "function updateContentAppend(newHtml)" 无括号转义（函数参数区无 {{ }}）
-    assert "function updateContentAppend(newHtml, tailText)" in src, (
-        "updateContentAppend 必须接收 tailText 第二参数"
-    )
-    # 尾部重建：移除全部增量节点后，若 tailText 非空则重新创建 data-incremental <p>
-    assert "tailText" in src
-    # 关键守卫：不能只移除增量而丢掉尾部
+    # 🐛 2026-08-09：tail 参数从纯文本 tailText 升级为行内渲染 HTML tailHtml
+    # （流式期间未闭合尾部即时格式化 markdown 语法，不再字面显示源码）。
+    assert "function updateContentAppend(newHtml, tailHtml)" in src, "updateContentAppend 必须接收 tailHtml 第二参数"
+    # 尾部重建：移除全部增量节点后，若 tailHtml 非空则重新创建 data-incremental <p>
+    assert "tailHtml" in src
+    # 关键守卫：不能只移除增量而丢掉尾部；重建节点必须 innerHTML 注入
     assert "data-incremental" in src
+    assert "tailP.innerHTML = tailHtml" in src
+    # 新增守卫：updateTailHtml（无空行长段落尾部行内渲染）必须存在于模板
+    assert "function updateTailHtml(html)" in src, "必须提供 updateTailHtml 尾部行内渲染函数（长段落流式格式化）"
 
 
 def test_tail_rebuild_error_without_old_bug():
@@ -134,17 +144,11 @@ def test_append_text_incremental_never_marks_formatted_paragraph():
     """
     src = inspect.getsource(CodeWebViewer._append_text_incremental)
     # 追加条件必须要求目标节点已带 data-incremental 标记
-    assert "last.hasAttribute('data-incremental')" in src, (
-        "追加分支必须要求 last 已是增量节点"
-    )
+    assert "last.hasAttribute('data-incremental')" in src, "追加分支必须要求 last 已是增量节点"
     # 禁止旧实现：无条件把非增量 P 打标记（污染格式化段落）
-    assert "last.setAttribute('data-incremental', 'true')" not in src, (
-        "不得给格式化稳定段落打 data-incremental 标记"
-    )
+    assert "last.setAttribute('data-incremental', 'true')" not in src, "不得给格式化稳定段落打 data-incremental 标记"
     # 稳定段落后新建独立增量节点承载新文本
-    assert src.count("p.setAttribute('data-incremental', 'true')") >= 3, (
-        "稳定段落/思考块/兜底分支都应新建增量节点"
-    )
+    assert src.count("p.setAttribute('data-incremental', 'true')") >= 3, "稳定段落/思考块/兜底分支都应新建增量节点"
 
 
 def _simulate_stream_dom(chunks, fixed=True):
@@ -222,3 +226,69 @@ def test_stream_dom_old_behavior_loses_first_paragraph():
     lost = "第一段完整内容。" not in visible
     # 文档记录：旧实现确实丢失第一段
     assert lost or True
+
+
+# ── 用例 5：无空行长段落流式期间尾部行内渲染（"内容与最终不符"回归） ──
+def _strip_tags(html_str: str) -> str:
+    return re.sub(r"<[^>]+>", "", html_str)
+
+
+def test_render_inline_tail_formats_inline_markdown():
+    """未闭合尾部行内渲染：已闭合的行内语法（**加粗**、`code`、[链接]）
+    必须格式化，未闭合语法（**加粗 无闭合）保持字面，与全量渲染文本一致。"""
+    tail = (
+        "这是一个非常长的段落，没有空行分隔。"
+        "包含**加粗**和`行内代码`以及[链接](https://example.com)等内容。"
+        "还有未闭合的**加粗标记"
+    )
+    html = _render_inline_tail(tail, compact=False)
+    assert "<strong>加粗</strong>" in html, f"加粗未渲染: {html!r}"
+    assert "<code>行内代码</code>" in html, f"行内代码未渲染: {html!r}"
+    assert '<a href="https://example.com">链接</a>' in html, f"链接未渲染: {html!r}"
+    # 未闭合的 ** 保持字面（markdown 库行为）
+    assert "**加粗标记" in _strip_tags(html), f"未闭合语法应字面保留: {html!r}"
+    # 与全量渲染可见文本一致（归一化空白）
+    full_html = _render_markdown_to_html_cached_impl(tail, compact=False)
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()
+    assert norm(_strip_tags(html)) == norm(_strip_tags(full_html)), "尾部行内渲染与全量渲染文本不一致"
+
+
+def test_render_inline_tail_filters_think_tool_tags():
+    """含 think/tool 标签的尾部必须整体跳过（思考/工具内容不得泄漏为正文）。"""
+    # 已闭合 think：返回空串（不渲染，交由差量段/全量渲染为思考卡片）
+    html = _render_inline_tail("<think>思考内容不应显示</think>", compact=False)
+    assert html == "", f"think 块不应在尾部渲染: {html!r}"
+    # 未闭合 think：同样跳过（_render_tail_inline 守卫依赖的判定）
+    assert _has_unclosed_think_or_tool("<think>进行中") is True
+    assert _render_inline_tail("<think>进行中", compact=False) == ""
+
+
+def test_stream_long_paragraph_tail_render_aligns_with_full():
+    """模拟流式：无空行分隔的长段落（核心场景）——每个 chunk 后尾部行内渲染，
+    最终 DOM 可见文本与全量渲染一致（markdown 源码不再滞留）。"""
+    md = (
+        "首先感谢您的提问。这个问题涉及到多个方面的考量，我们需要从整体架构、"
+        "实现细节、性能影响以及后续维护等多个角度来全面分析。特别是当数据量"
+        "增大时，**性能表现**会直接影响用户体验，因此`缓存策略`和`异步处理`"
+        "就显得尤为重要。"
+    )
+    # 模拟流式 chunk 注入 + 尾部行内渲染（复刻 _perform_update 无闭合段分支）
+    pos = 0
+    tail_visible = ""
+    while pos < len(md):
+        pos += 7
+        chunk_md = md[:pos]
+        stable_len, segs = _extract_closed_segments(chunk_md[0:])
+        assert segs == [], "无空行长段落不应产出闭合段（核心场景前提）"
+        tail = chunk_md[0:]
+        if tail and not _has_unclosed_think_or_tool(tail):
+            tail_visible = _strip_tags(_render_inline_tail(tail, compact=False))
+    # 流式结束全量渲染
+    full_text = _strip_tags(_render_markdown_to_html_cached_impl(md, compact=False))
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()
+    assert norm(tail_visible) == norm(full_text), (
+        f"流式期间尾部文本与全量不一致:\n tail={tail_visible!r}\n full={full_text!r}"
+    )
+    # 关键断言：流式期间**不出现** markdown 源码（修复前是 **性能表现** 字面）
+    assert "**" not in tail_visible, f"流式期间仍显示 markdown 源码: {tail_visible!r}"
+    assert "`" not in tail_visible, f"流式期间仍显示反引号源码: {tail_visible!r}"
