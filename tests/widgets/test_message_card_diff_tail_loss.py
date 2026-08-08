@@ -107,7 +107,7 @@ def test_update_content_append_template_has_tail_rebuild():
     assert "tailHtml" in src
     # 关键守卫：不能只移除增量而丢掉尾部；重建节点必须 innerHTML 注入
     assert "data-incremental" in src
-    assert "tailP.innerHTML = tailHtml" in src
+    assert "tailDiv.innerHTML = tailHtml" in src
     # 新增守卫：updateTailHtml（无空行长段落尾部行内渲染）必须存在于模板
     assert "function updateTailHtml(html)" in src, "必须提供 updateTailHtml 尾部行内渲染函数（长段落流式格式化）"
 

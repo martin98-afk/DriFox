@@ -1968,7 +1968,11 @@ _SKELETON_CACHE_MAX = 48
 # v7（F1）：reorganizeContent 的 getPos 对运行中工具块（tool-streaming-block）
 # 强制沉底（返回 1e9，不参与 data-order 比较）——旧骨架无此分支会把运行中块
 # 按调用时刻快照 data-order 排到思考块上方。
-_SKELETON_CACHE_VERSION = 7
+# v8（2026-08-09）：updateContentAppend 第二参数升级为 tailHtml（行内渲染 HTML，
+# 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
+# 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
+# data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
+_SKELETON_CACHE_VERSION = 8
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -4659,16 +4663,19 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 追加格式化 HTML（含 table 包裹等后续处理）
                     container.insertAdjacentHTML('beforeend', newHtml);
-                    // 🐛 修复（正文尾部丢失）：未闭合尾部重建为增量渲染节点
+                    // 🐛 修复（正文尾部丢失）：未闭合尾部重建为增量渲染节点。
+                    // ⚠️ 用 <div> 而非 <p> 包裹：tailHtml 是 md.convert 产物
+                    // （含 <p>/<h1>/<ul>/<pre> 等块级元素），<p> 内嵌块级会触发
+                    // HTML 解析器自动闭合/提升，导致 DOM 结构错乱。
                     if (tailHtml) {{
-                        var tailP = document.createElement('p');
-                        tailP.setAttribute('data-incremental', 'true');
+                        var tailDiv = document.createElement('div');
+                        tailDiv.setAttribute('data-incremental', 'true');
                         // [B1] data-rendered 标记：_append_text_incremental 检测到
                         // 该标记时不再 textContent 原地追加（会抹掉已渲染的 HTML），
                         // 改为新建纯文本增量节点。
-                        tailP.setAttribute('data-rendered', 'true');
-                        tailP.innerHTML = tailHtml;
-                        container.appendChild(tailP);
+                        tailDiv.setAttribute('data-rendered', 'true');
+                        tailDiv.innerHTML = tailHtml;
+                        container.appendChild(tailDiv);
                     }}
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
                     // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
@@ -4731,11 +4738,13 @@ class CodeWebViewer(QWebEngineView):
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         el.remove();
                     }});
-                    var tailP = document.createElement('p');
-                    tailP.setAttribute('data-incremental', 'true');
-                    tailP.setAttribute('data-rendered', 'true');
-                    tailP.innerHTML = html;
-                    container.appendChild(tailP);
+                    // ⚠️ 用 <div> 而非 <p> 包裹：html 是 md.convert 产物（块级元素），
+                    // <p> 内嵌块级会触发解析器自动闭合，结构错乱。
+                    var tailDiv = document.createElement('div');
+                    tailDiv.setAttribute('data-incremental', 'true');
+                    tailDiv.setAttribute('data-rendered', 'true');
+                    tailDiv.innerHTML = html;
+                    container.appendChild(tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
                     container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
@@ -5451,7 +5460,7 @@ class CodeWebViewer(QWebEngineView):
                     c.appendChild(p);
                 }} else {{
                     var last = c.lastElementChild;
-                    if (last && last.tagName === 'P' && last.hasAttribute('data-incremental')) {{
+                    if (last && last.hasAttribute('data-incremental')) {{
                         if (last.hasAttribute('data-rendered')) {{
                             // [B1] 🐛 修复：last 是"行内渲染的尾部节点"（updateTailHtml /
                             // updateContentAppend 重建，含 <strong> 等子元素 HTML）。
@@ -5462,9 +5471,15 @@ class CodeWebViewer(QWebEngineView):
                             p.setAttribute('data-incremental', 'true');
                             p.textContent = text;
                             c.appendChild(p);
-                        }} else {{
+                        }} else if (last.tagName === 'P') {{
                             // [B1] 增量纯文本节点：同一未闭合段落内直接追加累积
                             last.textContent += text;
+                        }} else {{
+                            // 其他增量节点（理论不出现）：独立新节点承载
+                            var p = document.createElement('p');
+                            p.setAttribute('data-incremental', 'true');
+                            p.textContent = text;
+                            c.appendChild(p);
                         }}
                     }} else if (last && last.tagName === 'P') {{
                         // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
