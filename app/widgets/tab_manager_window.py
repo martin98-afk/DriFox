@@ -819,6 +819,40 @@ class TabManagerWindow(QWidget):
             self._on_sidebar_toggled(True, animate=False)
             # 让 TabPanel 内部状态同步（不重复发射信号）
             self._tab_panel.set_collapsed(True)
+            return
+        # 非折叠配置：显式恢复保存宽度。
+        # 背景：_setup_ui 里 setSizes 在窗口未显示时调用，show 后首次 relayout
+        # 按 stretch/sizeHint 重新分配，左面板会被压到最小宽度（< _auto_collapse_width，
+        # 实测 46~60px），TabPanel.resizeEvent 误判为"用户拖窄"自动折叠；
+        # 欢迎卡片懒渲染（QWebEngineView 创建）还会引发后续 relayout 再次压缩。
+        # 因此在启动早期多轮补射恢复（时间递增，覆盖 2~3 次 relayout 窗口期，
+        # 直到布局不再弹跳），期间均以保存宽度为准。
+        if not hasattr(self, "_splitter"):
+            return
+        self._apply_restored_panel_width()
+        for delay in (80, 200, 400, 700):
+            QTimer.singleShot(delay, self._apply_restored_panel_width)
+
+    def _apply_restored_panel_width(self):
+        """按保存宽度恢复左面板宽度 + 解除启动误折叠（展开配置的启动兜底）"""
+        if not hasattr(self, "_splitter") or self._splitter.count() == 0:
+            return
+        saved_w = Settings.get_instance().tab_panel_width.value or 250
+        frame_w = max(120, saved_w) + 14
+        sizes = self._splitter.sizes()
+        total = sum(sizes) if sizes else self.width()
+        if total <= frame_w:
+            return
+        # 仅当前宽度明显小于保存宽度时才恢复（避免覆盖用户手动拖宽）
+        if sizes and sizes[0] >= frame_w - 10:
+            return
+        frame_w = min(frame_w, total)
+        self._splitter.setSizes([frame_w, max(0, total - frame_w)])
+        # 启动时 TabPanel 可能已被 relayout 压窄误触发折叠（_collapsed=True），
+        # 这里显式解除，并同步紧凑/展开 UI（不发射信号，避免与动画互打断）
+        if self._tab_panel._collapsed:
+            self._tab_panel.set_collapsed(False)
+        self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──
 
