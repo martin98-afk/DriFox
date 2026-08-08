@@ -2216,14 +2216,15 @@ class MarketplaceCard(QWidget):
             self._tag_bar.setVisible(False)
             return
 
-        tc = getattr(self, "_cached_tcs", "") or _text_color(secondary=True)
+        # 主文字色 + 加粗，确保清晰可读
+        tc = getattr(self, "_cached_tc", "") or _text_color()
 
         # 「更多」放最前：展开全部标签的多选面板，方便快速访问
         more_btn = QPushButton("更多…", self._tag_content)
         more_btn.setCursor(Qt.PointingHandCursor)
         more_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {tc}; border: 1px dashed rgba(128,128,128,0.4);"
-            " border-radius: 6px; padding: 3px 10px; font-size: 11px; }"
+            " border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
             "QPushButton:hover { background: rgba(128,128,128,0.15); }"
         )
         more_btn.clicked.connect(self._on_tag_more)
@@ -2236,10 +2237,10 @@ class MarketplaceCard(QWidget):
             btn.setChecked(tag in self._active_tags)
             btn.setStyleSheet(
                 f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
-                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; }"
+                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
                 "QPushButton:hover { background: rgba(128,128,128,0.2); }"
                 "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
-                " border: 1px solid rgba(98,160,234,0.5); }"
+                " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"
             )
             btn.clicked.connect(lambda checked, t=tag, b=btn: self._on_tag_toggled(t, b))
             self._tag_layout.addWidget(btn)
