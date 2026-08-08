@@ -1722,17 +1722,22 @@ class MarketplaceCard(QWidget):
 
         browse_root.addWidget(filter_row)
 
-        # ── 市场来源过滤栏（横向滚动，数据加载后构建；左侧「来源:」描述）──
+        # ── 市场来源过滤栏（横向滚动，数据加载后构建）──
+        # ── 市场来源过滤行（来源: 标签 + 横向滚动按钮）──
         source_row = QWidget(self._browse_page)
         source_row.setStyleSheet("background: transparent;")
         source_row_layout = QHBoxLayout(source_row)
         source_row_layout.setContentsMargins(12, 0, 12, 0)
         source_row_layout.setSpacing(6)
-        source_lb = QLabel("来源:", source_row)
-        source_lb.setFixedWidth(40)
-        source_lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        source_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
-        source_row_layout.addWidget(source_lb)
+
+        self._source_label = QLabel("来源:", source_row)
+        self._source_label.setFixedWidth(44)
+        self._source_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._source_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;"
+        )
+        source_row_layout.addWidget(self._source_label)
+
         self._source_bar = ScrollArea(source_row)
         self._source_bar.setWidgetResizable(True)
         self._source_bar.setFixedHeight(34)
@@ -1745,25 +1750,28 @@ class MarketplaceCard(QWidget):
         self._source_content = QWidget(self._source_bar)
         self._source_content.setStyleSheet("background: transparent;")
         self._source_layout = QHBoxLayout(self._source_content)
-        self._source_layout.setContentsMargins(2, 0, 12, 2)
+        self._source_layout.setContentsMargins(0, 0, 0, 2)
         self._source_layout.setSpacing(6)
         self._source_bar.setWidget(self._source_content)
         source_row_layout.addWidget(self._source_bar, 1)
         browse_root.addWidget(source_row)
-        self._source_row = source_row
-        self._source_row.setVisible(False)  # 无数据时隐藏整行
+        source_row.setVisible(False)  # 无数据时隐藏
 
-        # ── Tag 过滤栏（横向滚动，数据加载后构建；左侧「类型:」描述）──
+        # ── Tag 过滤行（类型: 标签 + 横向滚动按钮）──
         tag_row = QWidget(self._browse_page)
         tag_row.setStyleSheet("background: transparent;")
         tag_row_layout = QHBoxLayout(tag_row)
         tag_row_layout.setContentsMargins(12, 0, 12, 0)
         tag_row_layout.setSpacing(6)
-        tag_lb = QLabel("类型:", tag_row)
-        tag_lb.setFixedWidth(40)
-        tag_lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        tag_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
-        tag_row_layout.addWidget(tag_lb)
+
+        self._tag_label = QLabel("类型:", tag_row)
+        self._tag_label.setFixedWidth(44)
+        self._tag_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._tag_label.setStyleSheet(
+            f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;"
+        )
+        tag_row_layout.addWidget(self._tag_label)
+
         self._tag_bar = ScrollArea(tag_row)
         self._tag_bar.setWidgetResizable(True)
         self._tag_bar.setFixedHeight(38)
@@ -1776,13 +1784,12 @@ class MarketplaceCard(QWidget):
         self._tag_content = QWidget(self._tag_bar)
         self._tag_content.setStyleSheet("background: transparent;")
         self._tag_layout = QHBoxLayout(self._tag_content)
-        self._tag_layout.setContentsMargins(2, 0, 12, 2)
+        self._tag_layout.setContentsMargins(0, 0, 0, 2)
         self._tag_layout.setSpacing(6)
         self._tag_bar.setWidget(self._tag_content)
         tag_row_layout.addWidget(self._tag_bar, 1)
         browse_root.addWidget(tag_row)
-        self._tag_row = tag_row
-        self._tag_bar.setVisible(False)  # 无 tag 数据时隐藏
+        tag_row.setVisible(False)  # 无 tag 数据时隐藏
 
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
@@ -2673,9 +2680,9 @@ class MarketplaceCard(QWidget):
     # ── Tag 过滤 ──
 
     def _rebuild_tag_bar(self):
-        """从全量数据（远程 + 本地插件）聚合 tag 计数，重建横向标签栏"""
+        """从全量数据聚合 tag 计数，重建横向标签栏（数据变化时调用）"""
         counts: dict = {}
-        for p in list(self._all_plugins or []) + self._build_local_extra_plugins():
+        for p in self._all_plugins or []:
             for t in p.get("_cached_tags", []) or []:
                 if t:
                     counts[t] = counts.get(t, 0) + 1
@@ -2688,7 +2695,8 @@ class MarketplaceCard(QWidget):
                 item.widget().deleteLater()
 
         if not counts:
-            self._tag_row.setVisible(False)
+            self._tag_bar.setVisible(False)
+            self._tag_bar.parent().setVisible(False)
             return
 
         # 主文字色 + 加粗，确保清晰可读
@@ -2722,7 +2730,8 @@ class MarketplaceCard(QWidget):
 
         self._tag_layout.addStretch(1)
 
-        self._tag_row.setVisible(True)
+        self._tag_bar.setVisible(True)
+        self._tag_bar.parent().setVisible(True)
 
     def _rebuild_source_bar(self):
         """从全量数据聚合市场来源，重建来源过滤栏（数据变化时调用）"""
@@ -2742,7 +2751,8 @@ class MarketplaceCard(QWidget):
                 item.widget().deleteLater()
 
         if not sources:
-            self._source_row.setVisible(False)
+            self._source_bar.setVisible(False)
+            self._source_bar.parent().setVisible(False)
             return
 
         tc = getattr(self, "_cached_tc", "") or _text_color()
@@ -2768,7 +2778,8 @@ class MarketplaceCard(QWidget):
             self._source_layout.addWidget(_make_source_btn(f"{src} ({cnt})", src))
 
         self._source_layout.addStretch(1)
-        self._source_row.setVisible(True)
+        self._source_bar.setVisible(True)
+        self._source_bar.parent().setVisible(True)
 
     def _sync_source_buttons(self):
         """同步来源按钮选中状态"""
