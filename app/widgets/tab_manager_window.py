@@ -837,7 +837,7 @@ class TabManagerWindow(QWidget):
         """按保存宽度恢复左面板宽度 + 解除启动误折叠（展开配置的启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
-        saved_w = Settings.get_instance().tab_panel_width.value or 250
+        saved_w = Settings.get_instance().tab_panel_width.value or 280
         frame_w = max(120, saved_w) + 14
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
