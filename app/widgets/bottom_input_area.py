@@ -143,8 +143,7 @@ PLACEHOLDER_TIPS = [
     "UI 插件提供可热加载的组件，支持自定义按钮、面板、卡片等",
     "已安装插件：插件市场 / 文件树 / 系统清理 / Token 统计",
     # ════ 插件与市场 ════
-    "/plugin-market 浏览安装社区插件，即装即用",
-    "/plugin-manager 管理已安装插件，启用/禁用/卸载",
+    "/plugin-market 浏览安装社区插件，即装即用（含启用/禁用/卸载管理）",
     "/system-cleaner 清理系统缓存和临时文件",
     "/context-usage-stats Token 趋势/消息量图表",
     "/file-tree 浏览/搜索/实时监听文件变更",

@@ -32,22 +32,23 @@ def _drifox_dir() -> Path:
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-    if sys.platform == 'darwin':
+    if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
+        return Path(".drifox")
+    if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
             paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
                 NSApplicationSupportDirectory, NSUserDomainMask
             )
             if paths:
-                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-                app_support = Path(app_support_path) / 'Drifox'
+                app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
+                app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / '.drifox'
+                return app_support / ".drifox"
         except Exception:
             pass
-    return Path.home() / '.drifox'
+    return Path.home() / ".drifox"
 
 
 def _resolve_github_url(repo: str) -> str:
@@ -75,10 +76,16 @@ class PluginInstaller:
     def __init__(self):
         drifox = _drifox_dir()
         self._plugins_dir = drifox / "plugins"
+        self._disabled_dir = drifox / "plugins-disabled"
         self._cache_dir = drifox / "cache" / "install_tmp"
+        # 项目根 plugins/ 目录（系统插件）
+        self._system_dir = Path(__file__).resolve().parent.parent.parent.parent / "plugins"
         # 已安装插件状态缓存（{name: version|None}），TTL 防频繁磁盘扫描
         self._inst_map_cache: Optional[dict] = None
         self._inst_map_ts: float = 0.0
+        # 插件状态缓存（{name: "enabled"|"disabled"|"system"}）
+        self._status_map_cache: Optional[dict] = None
+        self._status_map_ts: float = 0.0
 
     # ── 批量状态查询 ──────────────────────────────────────
 
@@ -87,8 +94,9 @@ class PluginInstaller:
     def get_installed_map(self, use_cache: bool = True) -> dict:
         """批量扫描已安装插件，返回 {插件名: 版本号或 None}
 
-        一次 scandir + 批量读 manifest，替代逐插件 is_installed + get_installed_version
-        （后者每次调用都是一次磁盘 IO，插件多时在 UI 线程明显卡顿）。
+        扫描范围：用户启用（.drifox/plugins）+ 用户禁用（.drifox/plugins-disabled）
+        + 系统插件（项目根 plugins/）。系统插件仅当与用户插件不重名时计入，
+        避免覆盖用户同名插件的版本号。
 
         Args:
             use_cache: 是否使用短 TTL 缓存（安装/更新/卸载后应传 False 或调用失效）
@@ -101,10 +109,20 @@ class PluginInstaller:
             return self._inst_map_cache
 
         result: dict = {}
-        if self._plugins_dir.is_dir():
+        for base in (self._plugins_dir, self._disabled_dir):
+            if base.is_dir():
+                try:
+                    for entry in os.scandir(base):
+                        if not entry.is_dir():
+                            continue
+                        result[entry.name] = self._read_version_fast(Path(entry.path))
+                except OSError:
+                    pass
+        # 系统插件（项目根 plugins/）：与用户插件重名时跳过
+        if self._system_dir.is_dir():
             try:
-                for entry in os.scandir(self._plugins_dir):
-                    if not entry.is_dir():
+                for entry in os.scandir(self._system_dir):
+                    if not entry.is_dir() or entry.name in result:
                         continue
                     result[entry.name] = self._read_version_fast(Path(entry.path))
             except OSError:
@@ -112,6 +130,45 @@ class PluginInstaller:
 
         self._inst_map_cache = result
         self._inst_map_ts = now
+        return result
+
+    def get_status_map(self, use_cache: bool = True) -> dict:
+        """批量扫描插件状态，返回 {插件名: "enabled"|"disabled"|"system"}
+
+        与 get_installed_map 的扫描范围一致：
+        - .drifox/plugins → enabled
+        - .drifox/plugins-disabled → disabled
+        - 项目根 plugins/（不重名）→ system
+        """
+        now = time.time()
+        if use_cache and self._status_map_cache is not None and now - self._status_map_ts < self._INST_MAP_TTL:
+            return self._status_map_cache
+
+        result: dict = {}
+        if self._plugins_dir.is_dir():
+            try:
+                for entry in os.scandir(self._plugins_dir):
+                    if entry.is_dir():
+                        result[entry.name] = "enabled"
+            except OSError:
+                pass
+        if self._disabled_dir.is_dir():
+            try:
+                for entry in os.scandir(self._disabled_dir):
+                    if entry.is_dir():
+                        result[entry.name] = "disabled"
+            except OSError:
+                pass
+        if self._system_dir.is_dir():
+            try:
+                for entry in os.scandir(self._system_dir):
+                    if entry.is_dir() and entry.name not in result:
+                        result[entry.name] = "system"
+            except OSError:
+                pass
+
+        self._status_map_cache = result
+        self._status_map_ts = now
         return result
 
     @staticmethod
@@ -131,6 +188,8 @@ class PluginInstaller:
         """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
         self._inst_map_cache = None
         self._inst_map_ts = 0.0
+        self._status_map_cache = None
+        self._status_map_ts = 0.0
 
     # ── 安装 ─────────────────────────────────────────────
 
@@ -249,8 +308,7 @@ class PluginInstaller:
             return False
         return self._download_and_move(name, url, subpath, ref, target)
 
-    def _install_relative(self, name: str, relative_path: str, target: Path,
-                          marketplace_source: dict = None) -> bool:
+    def _install_relative(self, name: str, relative_path: str, target: Path, marketplace_source: dict = None) -> bool:
         """从相对路径安装插件（从市场仓库中提取子目录）
 
         将相对路径转换为 git-subdir 安装：
@@ -350,17 +408,26 @@ class PluginInstaller:
             # 整个仓库：直接浅克隆
             subprocess.run(
                 ["git", "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
-                check=True, capture_output=True, text=True, **kwargs,
+                check=True,
+                capture_output=True,
+                text=True,
+                **kwargs,
             )
         else:
             # 子目录：稀疏克隆
             subprocess.run(
                 ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
-                check=True, capture_output=True, text=True, **kwargs,
+                check=True,
+                capture_output=True,
+                text=True,
+                **kwargs,
             )
             subprocess.run(
                 ["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath],
-                check=True, capture_output=True, text=True, **kwargs,
+                check=True,
+                capture_output=True,
+                text=True,
+                **kwargs,
             )
 
     # ── 卸载 ─────────────────────────────────────────────
@@ -374,17 +441,20 @@ class PluginInstaller:
         Returns:
             True 删除成功或目录不存在
         """
-        target = self._plugins_dir / name
-        if not target.exists():
-            return True
-        try:
-            shutil.rmtree(target)
+        removed = False
+        for base in (self._plugins_dir, self._disabled_dir):
+            target = base / name
+            if target.exists():
+                try:
+                    shutil.rmtree(target)
+                    removed = True
+                    logger.info(f"[Installer] Removed plugin {name}")
+                except Exception as e:
+                    logger.error(f"[Installer] Remove {name} failed: {e}")
+                    return False
+        if removed:
             self.invalidate_installed_cache()
-            logger.info(f"[Installer] Removed plugin {name}")
-            return True
-        except Exception as e:
-            logger.error(f"[Installer] Remove {name} failed: {e}")
-            return False
+        return True
 
     def uninstall(self, name: str) -> bool:
         """卸载插件（删除本地目录）"""
@@ -392,6 +462,41 @@ class PluginInstaller:
             return False
         logger.info(f"[Installer] Uninstalled plugin {name}")
         return True
+
+    # ── 启用 / 禁用 ──────────────────────────────────────
+
+    def disable(self, name: str) -> bool:
+        """禁用已启用的用户插件（移动到 plugins-disabled 目录）
+
+        系统插件（项目根 plugins/）不可禁用。
+        """
+        src = self._plugins_dir / name
+        if not src.exists():
+            return False
+        try:
+            self._disabled_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(self._disabled_dir / name))
+            self.invalidate_installed_cache()
+            logger.info(f"[Installer] Disabled plugin {name}")
+            return True
+        except Exception as e:
+            logger.error(f"[Installer] Disable {name} failed: {e}")
+            return False
+
+    def enable(self, name: str) -> bool:
+        """启用已禁用的插件（从 plugins-disabled 移回 plugins）"""
+        src = self._disabled_dir / name
+        if not src.exists():
+            return False
+        try:
+            self._plugins_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(self._plugins_dir / name))
+            self.invalidate_installed_cache()
+            logger.info(f"[Installer] Enabled plugin {name}")
+            return True
+        except Exception as e:
+            logger.error(f"[Installer] Enable {name} failed: {e}")
+            return False
 
     # ── 状态查询 ─────────────────────────────────────────
 

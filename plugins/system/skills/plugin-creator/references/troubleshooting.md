@@ -39,7 +39,7 @@ description: 插件開發常見問題與解決方案
 
 ## 運行時問題
 
-### ❌ 插件不顯示在 /plugin-manager
+### ❌ 插件不顯示在 /plugin-marketplace
 
 **可能原因**：
 1. `plugin.json` 位置錯誤 → 應為 `<name>/.drifox-plugin/plugin.json`

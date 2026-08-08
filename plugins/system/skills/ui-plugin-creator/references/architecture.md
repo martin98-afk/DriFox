@@ -145,6 +145,5 @@ PluginManager.initialize()
 
 | 插件 | 组件 | 学习要点 |
 |------|------|---------|
-| `plugin-manager` | FloatingCard | 最简浮动卡片骨架、文件操作、QThread 异步 |
-| `plugin-marketplace` | FloatingCard + ContentRenderer | 远程 HTTP 数据、HTML 渲染器、安装流程 |
+| `plugin-marketplace` | FloatingCard + ContentRenderer | 远程 HTTP 数据、HTML 渲染器、安装/启用/禁用/卸载管理 |
 | `context-usage-stats` | FloatingCard | SQLite 数据、自定义图表 QPainter、多图表组合 |

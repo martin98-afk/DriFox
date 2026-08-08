@@ -109,6 +109,37 @@ class _MarketplaceWorker(QObject):
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
+class _MarketFetchWorker(QObject):
+    """逐市场拉取：每拉完一个市场源就 emit 一次，不等待全部完成
+
+    实现「远程拉到一个更新一个」：首个市场数据到达即可渲染，
+    单个市场失败/超时不阻塞后续市场（fetch_marketplace 内部已捕获异常返回 _error）。
+    """
+
+    market_fetched = pyqtSignal(dict)  # 单个市场数据 {"name":..., "plugins":[...]}
+    all_done = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, force: bool = False):
+        super().__init__()
+        self._force = force
+
+    def run(self):
+        from .marketplace_manager import get_marketplace_manager
+
+        mgr = get_marketplace_manager()
+        try:
+            for src in mgr.get_sources():
+                data = mgr.fetch_marketplace(src, force=self._force)
+                if data.get("_error"):
+                    # 单市场失败不阻塞，也不触发无效重建
+                    continue
+                self.market_fetched.emit(data)
+        except Exception as e:
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
+        self.all_done.emit()
+
+
 # ── 路径解析 ──────────────────────────────────────────────
 
 
@@ -677,9 +708,7 @@ class _TagFilterDialog(MaskDialogBase):
         layout.addWidget(title_lb)
 
         hint_lb = QLabel("可勾选多个标签，与搜索、筛选条件叠加", self.widget)
-        hint_lb.setStyleSheet(
-            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
-        )
+        hint_lb.setStyleSheet(f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;")
         layout.addWidget(hint_lb)
         layout.addSpacing(10)
 
@@ -739,6 +768,127 @@ class _TagFilterDialog(MaskDialogBase):
         return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
 
 
+class _ConfirmUninstallDialog(MaskDialogBase):
+    """卸载确认弹窗 — 与 plugin-manager 确认对话框风格一致"""
+
+    def __init__(
+        self,
+        parent,
+        name: str,
+        *,
+        tc: str,
+        tcs: str,
+        ff: str,
+        fs: int,
+        accent_bg: str,
+        card_bg: str,
+        border_c: str,
+    ):
+        super().__init__(parent)
+        self._result = 0
+        self._init_ui(name, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
+
+    def _init_ui(self, name, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("confirmUninstall")
+        self.widget.setStyleSheet(
+            f"""
+            #confirmUninstall {{
+                background-color: {card_bg};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+            }}
+            """
+        )
+
+        ff_qss = f'font-family: "{ff}";' if ff else ""
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(0)
+
+        title_lb = BodyLabel("确认卸载", self.widget)
+        title_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs + 2)}px; font-weight: bold;"
+        )
+        layout.addWidget(title_lb)
+        layout.addSpacing(6)
+
+        content_lb = BodyLabel(
+            f"确定要卸载插件「{name}」吗？\n此操作不可恢复。",
+            self.widget,
+        )
+        content_lb.setWordWrap(True)
+        content_lb.setStyleSheet(
+            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+        )
+        layout.addWidget(content_lb)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        cancel_btn = QPushButton("取消", self.widget)
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {card_bg};
+                color: {tc};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+                padding: 4px 28px;
+                {ff_qss}
+                font-size: {max(8, fs - 1)}px;
+            }}
+            QPushButton:hover {{
+                background: rgba(128,128,128,0.15);
+            }}
+            """
+        )
+        cancel_btn.setDefault(True)
+        cancel_btn.clicked.connect(self._on_cancel)
+
+        confirm_btn = QPushButton("卸载", self.widget)
+        confirm_btn.setCursor(Qt.PointingHandCursor)
+        confirm_btn.setFixedHeight(36)
+        confirm_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {accent_bg};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 28px;
+                {ff_qss}
+                font-size: {max(8, fs - 1)}px;
+                font-weight: bold;
+            }}
+            """
+        )
+        confirm_btn.clicked.connect(self._on_confirm)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(400, 200)
+
+    def _on_confirm(self):
+        self._result = 1
+        self.close()
+
+    def _on_cancel(self):
+        self._result = 0
+        self.close()
+
+
 class _PluginRow(QFrame):
     """单个插件的展示行（简约卡片风格）
 
@@ -755,6 +905,9 @@ class _PluginRow(QFrame):
     viewRequested = pyqtSignal(dict)  # 查看已安装插件的内容列表
     openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
     detailRequested = pyqtSignal(dict)  # 打开插件详情面板
+    enableRequested = pyqtSignal(dict)  # 启用已禁用插件
+    disableRequested = pyqtSignal(dict)  # 禁用已启用插件
+    uninstallRequested = pyqtSignal(dict)  # 卸载插件
 
     def __init__(
         self,
@@ -762,6 +915,7 @@ class _PluginRow(QFrame):
         installed: bool,
         has_update: bool = False,
         local_version: Optional[str] = None,
+        status: str = "",
         parent=None,
         font_size: int = 0,
         search_query: str = "",
@@ -774,6 +928,7 @@ class _PluginRow(QFrame):
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
+        self._status = status  # "enabled" | "disabled" | "system" | ""（未安装）
         self._busy = False
         self._font_size = font_size  # 上下文字体大小（用于头像自适应 + 行内字号派生）
         self._ff = font_family  # 上下文字体家族
@@ -814,6 +969,32 @@ class _PluginRow(QFrame):
             self._mp_label.setStyleSheet(
                 f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
             )
+        if getattr(self, "_status_label", None) is not None:
+            self._status_label.setStyleSheet(
+                f"color: {self._status_color()}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
+
+    # ── 状态标签（启用/禁用/系统） ──────────────────────────
+
+    def _status_text(self) -> str:
+        """按安装状态生成状态标签文本"""
+        if self._status == "disabled":
+            return "⛔ 已禁用"
+        if self._status == "system":
+            return "🔒 系统插件"
+        if self._status == "enabled":
+            return "✅ 已启用"
+        return ""
+
+    def _status_color(self) -> str:
+        """状态标签颜色"""
+        if self._status == "disabled":
+            return "#FF9800"
+        if self._status == "system":
+            return "#2196F3"
+        if self._status == "enabled":
+            return "#4CAF50"
+        return self._tcs
 
     def _setup_ui(self):
         self.setObjectName("pluginRow")
@@ -839,9 +1020,7 @@ class _PluginRow(QFrame):
         self._title_label = QLabel("", self)
         self._title_label.setObjectName("pluginRowTitle")
         ff_qss = f" font-family: '{self._ff}';" if self._ff else ""
-        self._title_label.setStyleSheet(
-            f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;"
-        )
+        self._title_label.setStyleSheet(f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;")
         self._refresh_title()
         info_layout.addWidget(self._title_label)
 
@@ -880,14 +1059,34 @@ class _PluginRow(QFrame):
                 self._tag_labels.append(lbl)
             info_layout.addWidget(tags_widget)
 
-        # 市场来源标签
+        # 元信息行：市场来源 + 状态标签（同一行，减少纵向堆叠）
+        meta_row = QWidget(self)
+        meta_row.setStyleSheet("background: transparent;")
+        meta_layout = QHBoxLayout(meta_row)
+        meta_layout.setContentsMargins(0, 0, 0, 0)
+        meta_layout.setSpacing(10)
+
         marketplace = self._meta.get("_marketplace", "")
+        self._mp_label = None
         if marketplace:
-            self._mp_label = QLabel(f"📦 {marketplace}", self)
+            self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
             self._mp_label.setStyleSheet(
                 f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
             )
-            info_layout.addWidget(self._mp_label)
+            meta_layout.addWidget(self._mp_label)
+
+        # 状态标签（启用/禁用/系统，仅已安装时显示）
+        self._status_label = None
+        if self._installed:
+            self._status_label = QLabel(self._status_text(), meta_row)
+            self._status_label.setStyleSheet(
+                f"color: {self._status_color()}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
+            meta_layout.addWidget(self._status_label)
+
+        if marketplace or self._status_label is not None:
+            meta_layout.addStretch(1)
+            info_layout.addWidget(meta_row)
 
         layout.addLayout(info_layout, 1)
 
@@ -902,9 +1101,9 @@ class _PluginRow(QFrame):
             self._dir_btn.setVisible(self._installed)
             layout.addWidget(self._dir_btn)
 
-        # 官网链接按钮（优先 homepage 字段，回退到 source 仓库地址）
+        # 官网链接按钮（仅未安装时显示；已安装可在详情弹窗查看官网）
         homepage = self._compute_homepage(self._meta)
-        if homepage:
+        if homepage and not self._installed:
             link_btn = TransparentToolButton(FluentIcon.LINK, self)
             link_btn.setFixedSize(28, 28)
             link_btn.setToolTip(f"打开官网 {homepage}")
@@ -918,14 +1117,27 @@ class _PluginRow(QFrame):
         detail_btn.clicked.connect(lambda checked, m=self._meta: self.detailRequested.emit(m))
         layout.addWidget(detail_btn)
 
-        # 操作按钮
+        # 操作列：主按钮在上，管理按钮（启用/禁用/卸载）竖排在下
+        action_col = QVBoxLayout()
+        action_col.setSpacing(4)
+
+        # 管理按钮区（启用/禁用/卸载，已安装用户插件时显示）
+        self._manage_layout = QVBoxLayout()
+        self._manage_layout.setSpacing(4)
+
+        # 操作按钮（查看/安装/更新）
         self._btn = PushButton(self)
-        self._btn.setFixedWidth(100)
+        self._btn.setFixedSize(100, 30)
         # 保存 FluentUI 默认样式，仅追加 font-size 不改其他
         self._original_btn_style = self._btn.styleSheet()
         self._update_btn_text()
         self._btn.clicked.connect(self._on_click)
-        layout.addWidget(self._btn)
+        action_col.addWidget(self._btn)
+
+        action_col.addLayout(self._manage_layout)
+        action_col.addStretch(1)
+
+        layout.addLayout(action_col)
 
     def _update_btn_text(self):
 
@@ -961,6 +1173,50 @@ class _PluginRow(QFrame):
             self._btn.setText("安装")
             self._btn.setEnabled(True)
             self._btn.setStyleSheet(self._original_btn_style)
+        self._update_manage_buttons()
+
+    # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
+
+    def _make_manage_btn(self, text: str, color: str, slot) -> PushButton:
+        """创建紧凑管理按钮（与主按钮同宽同高，竖排对齐）"""
+        btn = PushButton(text, self)
+        btn.setFixedSize(100, 30)
+        btn.setStyleSheet(
+            f"PushButton {{ color: {color}; border: 1px solid {color};"
+            f" border-radius: 4px; padding: 2px 6px; font-size: {max(10, self._btn_font_size - 2)}px;"
+            " background: transparent; }"
+            f"PushButton:hover {{ background: rgba({','.join(str(int(color[i : i + 2], 16)) for i in (1, 3, 5))},0.12); }}"
+        )
+        btn.clicked.connect(slot)
+        return btn
+
+    def _update_manage_buttons(self):
+        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）"""
+        while self._manage_layout.count():
+            item = self._manage_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if self._busy or not self._installed:
+            return
+        if self._status == "system":
+            # 系统插件只读，行内不提供管理操作（详情弹窗同样无）
+            return
+
+        if self._status == "disabled":
+            self._manage_layout.addWidget(self._make_manage_btn("启用", "#4CAF50", self._on_enable))
+        else:
+            self._manage_layout.addWidget(self._make_manage_btn("禁用", "#FF9800", self._on_disable))
+        self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
+
+    def _on_enable(self):
+        self.enableRequested.emit(self._meta)
+
+    def _on_disable(self):
+        self.disableRequested.emit(self._meta)
+
+    def _on_uninstall(self):
+        self.uninstallRequested.emit(self._meta)
 
     def _on_click(self):
         if self._busy:
@@ -976,44 +1232,56 @@ class _PluginRow(QFrame):
             self._update_btn_text()
             self.updateRequested.emit(self._meta)
         else:
-            # 已安装且无新版 → 查看插件内容
-            self.viewRequested.emit(self._meta)
+            # 已安装且无新版 → 打开详情弹窗（查看内容等）
+            self.detailRequested.emit(self._meta)
 
     def set_installed(self, installed: bool):
         """安装/卸载完成后刷新状态（清除更新标记）"""
-        self.apply_state(installed, has_update=False, local_version=None)
+        self.apply_state(installed, has_update=False, local_version=None, status="enabled" if installed else "")
 
     def set_has_update(self, has_update: bool):
         """设置是否有可用更新"""
         self._has_update = has_update
         self._update_btn_text()
 
-    def apply_state(self, installed: bool, has_update: bool, local_version: Optional[str]):
+    def apply_state(self, installed: bool, has_update: bool, local_version: Optional[str], status: str = ""):
         """按最新扫描结果刷新整行状态（版本后缀 + 按钮 + 文件夹按钮）"""
         changed = (
             installed != self._installed
             or has_update != self._has_update
             or local_version != self._local_version
+            or status != self._status
         )
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
+        self._status = status
         self._busy = False
         if changed:
             self._refresh_title()
         # 文件夹按钮仅已安装时可见
         if self._dir_btn is not None:
             self._dir_btn.setVisible(installed)
+        # 状态标签：已安装时显示，未安装/操作中隐藏
+        if self._status_label is not None:
+            if installed and not self._busy:
+                self._status_label.setText(self._status_text())
+                self._status_label.setVisible(True)
+            else:
+                self._status_label.setVisible(False)
         self._update_btn_text()
 
     def set_downloading(self):
         """更新流程：点击后立即标记为「下载中」（未安装态 + 禁用按钮）"""
         self._installed = False
         self._has_update = False
+        self._status = ""
         self._busy = True
         self._busy_text = "下载中…"
         if self._dir_btn is not None:
             self._dir_btn.setVisible(False)
+        if self._status_label is not None:
+            self._status_label.setVisible(False)
         self._update_btn_text()
 
     def _refresh_title(self):
@@ -1034,9 +1302,7 @@ class _PluginRow(QFrame):
         self._version_suffix = ver_html
         title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
         name_html = _highlight_html(self._name_raw, self._search_query)
-        self._title_label.setText(
-            f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}</span>'
-        )
+        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}</span>')
 
     def set_error(self):
         """安装/更新失败后恢复按钮"""
@@ -1215,17 +1481,42 @@ class MarketplaceCard(QWidget):
         self._context_provider = provider
 
     def show_card(self):
-        """卡片显示时：用最新上下文刷新主题色 + 延迟加载数据"""
+        """卡片显示时：用最新上下文刷新主题色 + 延迟加载数据
+
+        策略：
+        1. 先渲染本地已安装插件（不依赖远程，立即可见）
+        2. 再后台逐市场拉取远程，每到一个市场增量刷新
+        """
         self.setVisible(True)
         self._apply_latest_theme()
         self._apply_plugin_icon()
         # 清除旧搜索状态、防抖定时器
         self._search_edit.clear()
         self._search_debounce.stop()
-        # 延迟 50ms 启动后台刷新，避免阻塞 show 过程
+        # 延迟 50ms 启动加载，避免阻塞 show 过程
         from PyQt5.QtCore import QTimer
 
-        QTimer.singleShot(50, self._async_refresh)
+        QTimer.singleShot(50, self._start_load)
+
+    def _start_load(self):
+        """本地已安装先行渲染 + 后台逐市场拉取"""
+        self._render_local_installed()
+        self._async_refresh()
+
+    def _render_local_installed(self):
+        """仅用本地扫描数据渲染「已安装」视图（远程未就绪也可用）
+
+        逻辑：把 _all_plugins 置空，走 _render_plugins 的本地并入分支，
+        「已安装」筛选下 _build_local_extra_plugins() 会产出全部本地插件。
+        """
+        inst = get_installer()
+        inst_map = inst.get_installed_map()
+        self._installed_set = set(inst_map)
+        self._version_map = inst_map
+        self._status_map = inst.get_status_map()
+        self._all_plugins = []
+        self._plugin_data = []
+        self._render_plugins(self._plugin_data)
 
     def _apply_plugin_icon(self):
         """从上下文获取插件图标并更新头部图标"""
@@ -1628,43 +1919,50 @@ class MarketplaceCard(QWidget):
     # ── 异步刷新 ──
 
     def _async_refresh(self, force: bool = False):
-        """在后台线程拉取市场数据
+        """后台逐市场拉取，每到一个市场增量合并渲染
 
         Args:
             force: 是否强制拉取远程（跳过缓存）
         """
         self._set_loading(True)
         self._cleanup_worker()
-        if force:
-            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins(force=True))
-        else:
-            self._worker = _MarketplaceWorker(lambda: get_marketplace().list_plugins())
+        self._worker = _MarketFetchWorker(force=force)
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_refresh_done)
+        self._worker.market_fetched.connect(self._on_market_fetched)
+        self._worker.all_done.connect(self._on_market_all_done)
         self._worker.error.connect(self._on_refresh_error)
-        self._worker.finished.connect(self._worker_thread.quit)
+        # 全部市场拉完（或出错）后才退出线程并清理
+        self._worker.all_done.connect(self._worker_thread.quit)
         self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.all_done.connect(self._worker.deleteLater)
         self._worker.error.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.start()
 
-    def _on_refresh_done(self, plugins: list):
-        """刷新完成"""
-        self._plugin_data = plugins or []
-        self._set_loading(False)
+    def _on_market_fetched(self, market_data: dict):
+        """单个市场拉取完成：合并进全量数据并增量渲染"""
+        market_name = market_data.get("name", "")
+        plugins = market_data.get("plugins", []) or []
+        # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
+        merged = [p for p in self._plugin_data if p.get("_marketplace") != market_name]
+        merged.extend(plugins)
+        self._plugin_data = merged
+        # 非「已安装」视图也保留本地插件并入（远程数据到达后同样生效）
         self._render_plugins(self._plugin_data)
 
-    def _on_refresh_error(self, err: str):
-        """刷新失败"""
+    def _on_market_all_done(self):
+        """全部市场拉取完成"""
         self._set_loading(False)
-        self._status_label.setText("加载失败")
-        self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
-        self._clear_plugin_list()
-        self._empty_label.setText(f"无法加载市场数据：{err[:60]}")
-        self._content_stack.setCurrentIndex(1)
+        # 远程全部失败时，本地已安装视图仍保留（不清空）
+        if not self._plugin_data:
+            self._status_label.setText("远程市场不可用")
+            self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
+
+    def _on_refresh_error(self, err: str):
+        """拉取出错：不打断本地视图，仅记录"""
+        logger.warning(f"[Marketplace] 市场拉取错误: {err[:120]}")
 
     def _set_loading(self, loading: bool):
         """设置加载状态"""
@@ -1700,6 +1998,7 @@ class MarketplaceCard(QWidget):
         inst_map = get_installer().get_installed_map()
         self._installed_set = set(inst_map)
         self._version_map = inst_map
+        self._status_map = get_installer().get_status_map()
 
         # 数据内容变化 → 更新全量数据 + 重建 tag 栏
         data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
@@ -1707,8 +2006,12 @@ class MarketplaceCard(QWidget):
             self._all_plugins = plugins
             self._rebuild_tag_bar()
 
+        # 「已安装」视图：并入市场列表外的本地插件（系统/禁用/手动安装）
+        # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
+        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+
         # 计算匹配列表（搜索 + tag + 筛选）并排序
-        matched = [p for p in self._all_plugins if self._plugin_matches(p, query, filter_mode)]
+        matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
         self._matched = matched
 
@@ -1750,10 +2053,82 @@ class MarketplaceCard(QWidget):
         return compare_versions(local_ver, remote_ver) < 0
 
     def _row_state(self, p: dict) -> tuple:
-        """计算行的 (installed, has_update, local_ver)"""
+        """计算行的 (installed, has_update, local_ver, status)"""
         name = p.get("name", "")
         installed = name in self._installed_set
-        return installed, self._has_update(p, installed), self._version_map.get(name)
+        status = self._status_map.get(name, "")
+        return installed, self._has_update(p, installed), self._version_map.get(name), status
+
+    def _build_local_extra_plugins(self) -> list:
+        """构建市场列表外的本地插件条目（系统/禁用/手动安装）
+
+        把不在市场数据中、但本地已安装的插件补进列表，
+        让用户能查看/启用/禁用/卸载它们（plugin-manager 能力）。
+
+        缓存：以 (installer 状态 map 引用, 市场名集合) 为 key——
+        状态 map TTL 内复用 + 市场数据不变时复用；任一变化自动重建。
+        """
+        sm = get_installer().get_status_map()
+        market_names = frozenset(p.get("name", "") for p in self._all_plugins)
+        cache_key = (sm, market_names)
+        if getattr(self, "_local_extras_key", None) == cache_key:
+            return getattr(self, "_local_extras_cache", [])
+
+        extras = []
+        for name, status in sm.items():
+            if name in market_names:
+                continue
+            meta = self._build_local_meta(name, status)
+            if meta is not None:
+                extras.append(meta)
+        self._local_extras_key = cache_key
+        self._local_extras_cache = extras
+        return extras
+
+    def _build_local_meta(self, name: str, status: str) -> Optional[dict]:
+        """从本地插件目录读取 manifest，构造市场行兼容的 meta dict
+
+        Returns:
+            None 表示本地目录读取失败（跳过该插件）
+        """
+        path = _PluginRow._find_local_plugin_path(name)
+        if path is None:
+            return None
+        meta: dict = {
+            "name": name,
+            "description": "",
+            "version": self._version_map.get(name) or "",
+            "author": "",
+            "license": "",
+            "categories": [],
+            "keywords": [],
+            "homepage": "",
+            "_local_only": True,
+            "_status": status,
+            "_marketplace": "本地",
+        }
+        try:
+            import json as _json
+
+            for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                _mp = path / _meta_dir / "plugin.json"
+                if _mp.exists():
+                    m = _json.loads(_mp.read_text(encoding="utf-8"))
+                    meta["description"] = m.get("description", "")
+                    meta["author"] = (
+                        m.get("author", {}).get("name", "")
+                        if isinstance(m.get("author"), dict)
+                        else m.get("author", "")
+                    )
+                    meta["license"] = m.get("license", "")
+                    meta["categories"] = m.get("categories", []) or []
+                    meta["keywords"] = m.get("keywords", []) or []
+                    meta["homepage"] = m.get("homepage", "")
+                    break
+        except Exception:
+            pass
+        meta["_cached_tags"] = _PluginRow._compute_tags(meta)
+        return meta
 
     def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> bool:
         """检查插件是否匹配当前搜索/tag/筛选（AND 叠加）
@@ -1871,12 +2246,13 @@ class MarketplaceCard(QWidget):
         for i in range(start, end):
             try:
                 p = self._matched[i]
-                installed, has_update, local_ver = self._row_state(p)
+                installed, has_update, local_ver, status = self._row_state(p)
                 row = _PluginRow(
                     p,
                     installed,
                     has_update=has_update,
                     local_version=local_ver,
+                    status=status,
                     parent=self._content,
                     font_size=fs,
                     search_query=query,
@@ -1894,6 +2270,9 @@ class MarketplaceCard(QWidget):
             row.viewRequested.connect(self._on_view_plugin)
             row.openDirRequested.connect(self._on_open_plugin_dir)
             row.detailRequested.connect(self._on_plugin_detail)
+            row.enableRequested.connect(self._async_enable)
+            row.disableRequested.connect(self._async_disable)
+            row.uninstallRequested.connect(self._async_uninstall)
             # 新行插入「加载更多」按钮之前：按钮随新行自然下移，
             # 避免新行跑到 stretch 后面造成按钮卡在中间（不滚动视口）
             btn = getattr(self, "_load_more_btn", None)
@@ -1910,9 +2289,7 @@ class MarketplaceCard(QWidget):
         """匹配为空时显示空态提示"""
         if not self._matched:
             query = self._search_edit.text().strip()
-            self._empty_label.setText(
-                "没有匹配的插件" if (query or self._active_tags) else "暂无可用插件"
-            )
+            self._empty_label.setText("没有匹配的插件" if (query or self._active_tags) else "暂无可用插件")
             self._content_stack.setCurrentIndex(1)
         else:
             self._content_stack.setCurrentIndex(0)
@@ -1923,9 +2300,7 @@ class MarketplaceCard(QWidget):
         if query:
             self._status_label.setText(f"找到 {len(self._matched)} 个匹配结果")
             tcs = getattr(self, "_cached_tcs", "") or _text_color(secondary=True)
-            self._status_label.setStyleSheet(
-                f"color: {tcs}; font-size: 12px; background: transparent;"
-            )
+            self._status_label.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
         else:
             self._status_label.setText("")
 
@@ -2075,6 +2450,128 @@ class MarketplaceCard(QWidget):
         bar_parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=bar_parent)
 
+    # ── 启用 / 禁用 / 卸载 ────────────────────────────────
+
+    def _set_row_manage_busy(self, name: str, busy_text: str):
+        """将指定插件行置为「处理中…」状态（操作期间禁用按钮）"""
+        row = self._row_map.get(name)
+        if row is not None:
+            row._busy = True
+            row._busy_text = busy_text
+            row._update_btn_text()
+
+    def _async_enable(self, plugin_meta: dict):
+        """在后台线程启用已禁用的插件"""
+        name = plugin_meta.get("name", "")
+        self._status_label.setText("启用中…")
+        self._status_label.setStyleSheet("color: #4CAF50; font-size: 12px; background: transparent;")
+        self._set_row_manage_busy(name, "启用中…")
+
+        self._cleanup_worker()
+        self._worker = _MarketplaceWorker(lambda n=name: get_installer().enable(n))
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "启用", bool(ok)))
+        self._worker.error.connect(lambda e: self._on_manage_error(name, "启用", e))
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.error.connect(self._worker_thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.error.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
+
+    def _async_disable(self, plugin_meta: dict):
+        """在后台线程禁用已启用的插件"""
+        name = plugin_meta.get("name", "")
+        self._status_label.setText("禁用中…")
+        self._status_label.setStyleSheet("color: #FF9800; font-size: 12px; background: transparent;")
+        self._set_row_manage_busy(name, "禁用中…")
+
+        self._cleanup_worker()
+        self._worker = _MarketplaceWorker(lambda n=name: get_installer().disable(n))
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "禁用", bool(ok)))
+        self._worker.error.connect(lambda e: self._on_manage_error(name, "禁用", e))
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.error.connect(self._worker_thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.error.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
+
+    def _async_uninstall(self, plugin_meta: dict):
+        """在后台线程卸载插件（确认后）"""
+        name = plugin_meta.get("name", "")
+        if not self._confirm_uninstall(name):
+            return
+        self._status_label.setText("卸载中…")
+        self._status_label.setStyleSheet("color: #F44336; font-size: 12px; background: transparent;")
+        self._set_row_manage_busy(name, "卸载中…")
+
+        self._cleanup_worker()
+        self._worker = _MarketplaceWorker(lambda n=name: get_installer().uninstall(n))
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "卸载", bool(ok)))
+        self._worker.error.connect(lambda e: self._on_manage_error(name, "卸载", e))
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.error.connect(self._worker_thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.error.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
+
+    def _confirm_uninstall(self, name: str) -> bool:
+        """卸载确认弹窗（MaskDialogBase 风格）"""
+        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
+        tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
+        ff = getattr(self, "_cached_font_family", "")
+        fs = getattr(self, "_cached_font_size", 14) or 14
+        theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
+        accent_bg = theme_colors.get("accent", "#62a0ea")
+        card_bg = theme_colors.get("content_bg", "#2a2a2e")
+        border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
+
+        dialog = _ConfirmUninstallDialog(
+            self,
+            name,
+            tc=tc,
+            tcs=tcs,
+            ff=ff,
+            fs=fs,
+            accent_bg=accent_bg,
+            card_bg=card_bg,
+            border_c=border_c,
+        )
+        return dialog.exec_() == 1
+
+    def _on_manage_done(self, name: str, action: str, success: bool):
+        """启用/禁用/卸载完成"""
+        self._status_label.setText("")
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
+        if success:
+            self._refresh_row_states()
+            InfoBar.success(f"{name} {action}成功", "", duration=2000, parent=bar_parent)
+        else:
+            self._refresh_row_states()
+            InfoBar.error(f"{name} {action}失败", "", duration=3000, parent=bar_parent)
+
+    def _on_manage_error(self, name: str, action: str, err: str):
+        """启用/禁用/卸载出错"""
+        self._status_label.setText(f"{action}失败")
+        self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
+        self._refresh_row_states()
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.error(f"{name} {action}失败", str(err)[:120], duration=5000, parent=bar_parent)
+
     def _refresh_row_states(self):
         """安装/更新/卸载后刷新：同步已渲染行状态 + 隐藏不再匹配的行
 
@@ -2086,15 +2583,17 @@ class MarketplaceCard(QWidget):
         inst_map = get_installer().get_installed_map()
         self._installed_set = set(inst_map)
         self._version_map = inst_map
+        self._status_map = get_installer().get_status_map()
 
         # 重算匹配列表（不重建 widget）
-        self._matched = [p for p in self._all_plugins if self._plugin_matches(p, query, filter_mode)]
+        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        self._matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(self._matched)
 
         for name, row in self._row_map.items():
             p = row._meta
-            installed, has_update, local_ver = self._row_state(p)
-            row.apply_state(installed, has_update, local_ver)
+            installed, has_update, local_ver, status = self._row_state(p)
+            row.apply_state(installed, has_update, local_ver, status)
             row.setVisible(self._plugin_matches(p, query, filter_mode))
             row.update_search_highlight(query)
 
@@ -2293,7 +2792,7 @@ class MarketplaceCard(QWidget):
 
     def _on_plugin_detail(self, plugin_meta: dict):
         """打开插件详情面板"""
-        installed, has_update, local_ver = self._row_state(plugin_meta)
+        installed, has_update, local_ver, _status = self._row_state(plugin_meta)
         theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
         dialog = _PluginDetailDialog(
             self,
@@ -2357,9 +2856,7 @@ class MarketplaceCard(QWidget):
             name_text += " (内置)"
         name_label = QLabel(name_text, row)
         name_label.setObjectName("marketRowName")
-        name_label.setStyleSheet(
-            f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;"
-        )
+        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;")
         info.addWidget(name_label)
 
         src = src_def.get("source", {})

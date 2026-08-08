@@ -7390,7 +7390,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def register_system_card(self, card_id: str) -> None:
         """将一个卡片 ID 注册为"系统卡片" — 显示时自动隐藏输入区域
 
-        用于 UI 插件的浮动卡片（plugin-marketplace / plugin-manager 等）。
+        用于 UI 插件的浮动卡片（plugin-marketplace 等）。
         首次调用时同时绑定 on_card_shown/on_card_hidden 回调。
 
         Args:
