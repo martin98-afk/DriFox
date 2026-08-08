@@ -17,7 +17,6 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -27,7 +26,7 @@ from qfluentwidgets import (
     FluentIcon,
     IconWidget,
     StrongBodyLabel,
-    ToolButton,
+    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -430,7 +429,7 @@ class SystemCleanerCard(QWidget):
 
         hly.addStretch(1)
 
-        self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._on_refresh)
         hly.addWidget(self._refresh_btn)
@@ -473,7 +472,7 @@ class SystemCleanerCard(QWidget):
         self._mem_value.setStyleSheet("color: #62a0ea; background: transparent; font-size: 14px; font-weight: 600;")
         mem_layout.addWidget(self._mem_value)
 
-        self._mem_release_btn = QPushButton("⚡ 释放内存", mem_bg)
+        self._mem_release_btn = TransparentPushButton("⚡ 释放内存", mem_bg)
         self._mem_release_btn.setCursor(Qt.PointingHandCursor)
         btn_fs = max(10, fs - 2)
         self._mem_release_btn.setFixedSize(max(160, btn_fs * 6 + 20), 32)
@@ -505,7 +504,7 @@ class SystemCleanerCard(QWidget):
         btn_layout = QHBoxLayout(btn_container)
         btn_layout.setContentsMargins(16, 4, 16, 4)
 
-        self._clean_cache_btn = QPushButton("🗑️ 一键清理选中缓存", btn_container)
+        self._clean_cache_btn = TransparentPushButton("🗑️ 一键清理选中缓存", btn_container)
         self._clean_cache_btn.setCursor(Qt.PointingHandCursor)
         self._clean_cache_btn.setMinimumHeight(42)
         self._clean_cache_btn.setStyleSheet(self._clean_cache_btn_style(self._ctx_accent, fs, isDarkTheme()))

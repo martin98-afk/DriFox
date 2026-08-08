@@ -41,9 +41,9 @@ from qfluentwidgets import (
     InfoBar,
     LineEdit,
     MaskDialogBase,
-    PushButton,
     ScrollArea,
     StrongBodyLabel,
+    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -487,7 +487,7 @@ class _PluginDetailDialog(MaskDialogBase):
         else:
             main_text, main_fn = "安装", self._on_install
 
-        main_btn = QPushButton(main_text, self.widget)
+        main_btn = TransparentPushButton(main_text, self.widget)
         main_btn.setCursor(Qt.PointingHandCursor)
         main_btn.setFixedHeight(36)
         if main_fn is None:
@@ -526,7 +526,7 @@ class _PluginDetailDialog(MaskDialogBase):
             )
             main_btn.clicked.connect(main_fn)
 
-        close_btn = QPushButton("关闭", self.widget)
+        close_btn = TransparentPushButton("关闭", self.widget)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setFixedHeight(36)
         close_btn.setStyleSheet(
@@ -659,7 +659,7 @@ class _TagFilterDialog(MaskDialogBase):
         tags_flow = _FlowLayout(content, spacing=6)
         tags_flow.setContentsMargins(2, 4, 2, 4)
         for tag in sorted(self._tag_counts, key=lambda t: (-self._tag_counts[t], t)):
-            pill = QPushButton(f"{tag} ({self._tag_counts[tag]})", content)
+            pill = TransparentPushButton(f"{tag} ({self._tag_counts[tag]})", content)
             pill.setCheckable(True)
             pill.setCursor(Qt.PointingHandCursor)
             pill.setFixedHeight(26)
@@ -674,7 +674,7 @@ class _TagFilterDialog(MaskDialogBase):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
-        clear_btn = QPushButton("清除", self.widget)
+        clear_btn = TransparentPushButton("清除", self.widget)
         clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.setFixedHeight(32)
         clear_btn.setStyleSheet(
@@ -684,7 +684,7 @@ class _TagFilterDialog(MaskDialogBase):
         )
         clear_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in self._checkboxes.values()])
 
-        ok_btn = QPushButton("确定", self.widget)
+        ok_btn = TransparentPushButton("确定", self.widget)
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setFixedHeight(32)
         ok_btn.setStyleSheet(
@@ -769,7 +769,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        cancel_btn = QPushButton("取消", self.widget)
+        cancel_btn = TransparentPushButton("取消", self.widget)
         cancel_btn.setCursor(Qt.PointingHandCursor)
         cancel_btn.setFixedHeight(36)
         cancel_btn.setStyleSheet(
@@ -791,7 +791,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         cancel_btn.setDefault(True)
         cancel_btn.clicked.connect(self._on_cancel)
 
-        confirm_btn = QPushButton("卸载", self.widget)
+        confirm_btn = TransparentPushButton("卸载", self.widget)
         confirm_btn.setCursor(Qt.PointingHandCursor)
         confirm_btn.setFixedHeight(36)
         confirm_btn.setStyleSheet(
@@ -1056,7 +1056,7 @@ class _PluginRow(QFrame):
         self._manage_layout.setSpacing(4)
 
         # 操作按钮（查看/安装/更新）
-        self._btn = PushButton(self)
+        self._btn = TransparentPushButton(self)
         self._btn.setFixedSize(100, 30)
         # 保存 FluentUI 默认样式，仅追加 font-size 不改其他
         self._original_btn_style = self._btn.styleSheet()
@@ -1103,9 +1103,9 @@ class _PluginRow(QFrame):
 
     # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
 
-    def _make_manage_btn(self, text: str, color: str, slot) -> PushButton:
+    def _make_manage_btn(self, text: str, color: str, slot) -> TransparentPushButton:
         """创建紧凑管理按钮（与主按钮同宽同高，竖排对齐）"""
-        btn = PushButton(text, self)
+        btn = TransparentPushButton(text, self)
         btn.setFixedSize(100, 30)
         btn.setStyleSheet(
             f"PushButton {{ color: {color}; border: 1px solid {color};"
@@ -1838,7 +1838,7 @@ class MarketplaceCard(QWidget):
         self._market_url_edit.setClearButtonEnabled(True)
         add_layout.addWidget(self._market_url_edit)
 
-        add_btn = PushButton("添加", add_row)
+        add_btn = TransparentPushButton("添加", add_row)
         add_btn.setFixedWidth(80)
         add_btn.clicked.connect(self._on_add_marketplace)
         add_layout.addWidget(add_btn)
@@ -2184,7 +2184,7 @@ class MarketplaceCard(QWidget):
         btn = getattr(self, "_load_more_btn", None)
         if btn is None:
             self._remove_load_more_button()
-            btn = PushButton(self._content)
+            btn = TransparentPushButton(self._content)
             btn.setStyleSheet(
                 "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
                 "PushButton:hover { background: rgba(128,128,128,0.2); }"
@@ -2710,7 +2710,7 @@ class MarketplaceCard(QWidget):
         tc = getattr(self, "_cached_tc", "") or _text_color()
 
         # 「更多」放最前：展开全部标签的多选面板，方便快速访问
-        more_btn = QPushButton("更多…", self._tag_content)
+        more_btn = TransparentPushButton("更多…", self._tag_content)
         more_btn.setCursor(Qt.PointingHandCursor)
         more_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {tc}; border: 1px dashed rgba(128,128,128,0.4);"
@@ -2721,7 +2721,7 @@ class MarketplaceCard(QWidget):
         self._tag_layout.addWidget(more_btn)
 
         for tag, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:12]:
-            btn = QPushButton(f"{tag} ({cnt})", self._tag_content)
+            btn = TransparentPushButton(f"{tag} ({cnt})", self._tag_content)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setChecked(tag in self._active_tags)
@@ -2765,7 +2765,7 @@ class MarketplaceCard(QWidget):
         tc = getattr(self, "_cached_tc", "") or _text_color()
 
         def _make_source_btn(text: str, value: str):
-            btn = QPushButton(text, self._source_content)
+            btn = TransparentPushButton(text, self._source_content)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setChecked(value == getattr(self, "_source_filter", ""))
