@@ -23,7 +23,7 @@ def register_ui(registry):
         card_id="shortcut-manager",
         widget_class=ShortcutManagerCard,
         container="right",
-        title="快捷键管理器",
+        title="快捷键管理",
         default_visible=False,
     )
 

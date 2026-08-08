@@ -1716,6 +1716,8 @@ class MarketplaceCard(QWidget):
         self._sort_combo.addItem("名称 Z-A", "name_desc")
         self._sort_combo.addItem("版本最新优先", "version")
         self._sort_combo.setFixedWidth(110)
+        # 与搜索框同高（LineEdit 视觉高度 33px）
+        self._sort_combo.setFixedHeight(33)
         self._style_sort_combo()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
@@ -2637,18 +2639,23 @@ class MarketplaceCard(QWidget):
     # ── 排序 / 角标 ──
 
     def _style_sort_combo(self):
-        """按上下文主题刷新排序下拉样式（避免 QComboBox 默认纯黑弹出层）"""
+        """按上下文主题刷新排序下拉样式（与搜索框一致的圆角/内边距/无边框 + 全局字体）"""
         tc = getattr(self, "_cached_tc", "") or _text_color()
+        ff = getattr(self, "_cached_font_family", "") or ""
+        fs = getattr(self, "_cached_font_size", 14) or 14
         theme = getattr(self, "_cached_theme_colors", {}) or {}
         card_bg = theme.get("content_bg", "#ffffff" if not isDarkTheme() else "#2a2a2e")
         border_c = theme.get("border", "rgba(128,128,128,0.15)")
+        # 全局字体：font-family + font-size（下拉主体与弹出列表都应用）
+        combo_font = f" font-family: '{ff}';" if ff else ""
+        combo_font += f" font-size: {max(11, fs)}px;"
         try:
             self._sort_combo.setStyleSheet(
                 f"QComboBox {{ background: rgba(128,128,128,0.1); color: {tc};"
-                f" border: 1px solid {border_c}; border-radius: 6px; padding: 2px 8px; font-size: 11px; }}"
+                f" border: none; border-radius: 8px; padding: 4px 8px;{combo_font} }}"
                 "QComboBox::drop-down { border: none; width: 18px; }"
                 f"QComboBox QAbstractItemView {{ background: {card_bg}; color: {tc};"
-                f" border: 1px solid {border_c}; border-radius: 6px;"
+                f" border: 1px solid {border_c}; border-radius: 6px;{combo_font}"
                 " selection-background-color: rgba(40,120,220,0.3); outline: none; }"
                 "QComboBox QAbstractItemView::item { padding: 4px 8px; }"
                 "QComboBox QAbstractItemView::item:hover { background: rgba(128,128,128,0.15); }"
@@ -2707,7 +2714,7 @@ class MarketplaceCard(QWidget):
         more_btn.setCursor(Qt.PointingHandCursor)
         more_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {tc}; border: 1px dashed rgba(128,128,128,0.4);"
-            " border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
+            " border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
             "QPushButton:hover { background: rgba(128,128,128,0.15); }"
         )
         more_btn.clicked.connect(self._on_tag_more)
@@ -2720,7 +2727,7 @@ class MarketplaceCard(QWidget):
             btn.setChecked(tag in self._active_tags)
             btn.setStyleSheet(
                 f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
-                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
+                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
                 "QPushButton:hover { background: rgba(128,128,128,0.2); }"
                 "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
                 " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"
@@ -2764,7 +2771,7 @@ class MarketplaceCard(QWidget):
             btn.setChecked(value == getattr(self, "_source_filter", ""))
             btn.setStyleSheet(
                 f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
-                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
+                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
                 "QPushButton:hover { background: rgba(128,128,128,0.2); }"
                 "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
                 " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"

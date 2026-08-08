@@ -253,8 +253,8 @@ MIT License © 2025~2026 Martin98-afk
 
 <a href="https://www.star-history.com/?repos=martin98-afk%2FDriFox&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
  </picture>
 </a>

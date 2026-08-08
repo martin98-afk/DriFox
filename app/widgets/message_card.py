@@ -5944,6 +5944,13 @@ class CodeWebViewer(QWebEngineView):
             # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
+            # 🆕 修复（简洁模式编辑工具框消失）：save 阶段必须同时覆盖正文容器
+            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _EDIT_TOOLS）
+            # 的流式/完成块由 JS 注入到正文（L9328 _stream_target），简洁模式下
+            # _tool_target_id="tool-content"，旧 save 只遍历 _tc → 编辑工具运行框
+            # 不在保存范围 → 全量渲染 updateContent 重建正文时被抹除，直到
+            # append_tool_result 才重新出现（"运行中→完成"中间消失一阵子）。
+            "var _tcBody=document.getElementById('content-placeholder');"
             "var _saved=[];"
             # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），并从 DOM 移除。
             # 【根因】原实现只读取 outerHTML 不移除旧块，导致 reorganizeContent
@@ -5956,8 +5963,11 @@ class CodeWebViewer(QWebEngineView):
             # restore 时只恢复 data-streaming="true" 的流式块（不在 markdown 中），
             # 已完成块由 markdown 重新生成 + reorganizeContent 迁移。
             # [PERF] 快速路径：_tc 无子元素时跳过 save 循环，减少 JS 执行开销
-            "if(_tc&&_tc.children.length){"
-            "Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
+            "var _saveRoots=[_tc];"
+            "if(_tcBody&&_tcBody!==_tc)_saveRoots.push(_tcBody);"
+            "for(var _sr=0;_sr<_saveRoots.length;_sr++){var _root=_saveRoots[_sr];"
+            "if(_root&&_root.children.length){"
+            "Array.prototype.forEach.call(Array.prototype.slice.call(_root.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
             # 🆕 方案 E：暂存流式块（data-streaming="true"）的 data-order，供
             # reorganizeContent 补 data-order 时修正"排在其前的流式工具数"。
@@ -5971,9 +5981,11 @@ class CodeWebViewer(QWebEngineView):
             "}"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
-            "streaming:el.getAttribute('data-streaming')||''});"
+            "streaming:el.getAttribute('data-streaming')||'',"
+            "src:_root.id||''});"
             "el.remove();}"
             "});}"
+            "}"
             "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
             f"updateContent({json.dumps(html_content).decode('utf-8')});"
             # 🐛 修复：只恢复流式进行中的块（data-streaming="true"）。
@@ -5998,7 +6010,8 @@ class CodeWebViewer(QWebEngineView):
             "if(_odVal){"
             "_bk.setAttribute('data-order',_odVal);"
             "}"
-            "_tc.appendChild(_bk);"
+            "var _home=(b.src&&document.getElementById(b.src))||_tc;"
+            "_home.appendChild(_bk);"
             "}}})"
             "}}"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
@@ -6031,7 +6044,13 @@ class CodeWebViewer(QWebEngineView):
         # [B2] 流式结束：重置工具 DOM 脏标记。随后 _schedule_render 走非流式分支，
         # 该分支依据 _tool_dom_dirty/_restore_finished_ids 决定 save/restore 或裸更新；
         # 显式清零保证完成渲染后不再残留"脏"状态（防误走整页 save/restore 包装）。
-        self._tool_dom_dirty = False
+        # 🐛 修复（编辑工具框消失）：keep_dock=True 时仍有活跃工具（S1：文本先于
+        # 工具结果流式结束），此时**不能**清理脏标记——否则 _schedule_render 走
+        # 非流式裸更新重建 #content-placeholder，把 JS 注入的编辑工具运行框抹掉，
+        # 直到 append_tool_result 才重现（"运行中→完成"中间消失一阵子）。保留
+        # dirty 使最终渲染走 save/restore 保护（_saved 为空时零开销）。
+        if not keep_dock:
+            self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
         # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
