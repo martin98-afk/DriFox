@@ -9,6 +9,7 @@
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,61 @@ class PluginInstaller:
         drifox = _drifox_dir()
         self._plugins_dir = drifox / "plugins"
         self._cache_dir = drifox / "cache" / "install_tmp"
+        # 已安装插件状态缓存（{name: version|None}），TTL 防频繁磁盘扫描
+        self._inst_map_cache: Optional[dict] = None
+        self._inst_map_ts: float = 0.0
+
+    # ── 批量状态查询 ──────────────────────────────────────
+
+    _INST_MAP_TTL = 3.0  # 秒：渲染/筛选频繁调用时避免重复扫描磁盘
+
+    def get_installed_map(self, use_cache: bool = True) -> dict:
+        """批量扫描已安装插件，返回 {插件名: 版本号或 None}
+
+        一次 scandir + 批量读 manifest，替代逐插件 is_installed + get_installed_version
+        （后者每次调用都是一次磁盘 IO，插件多时在 UI 线程明显卡顿）。
+
+        Args:
+            use_cache: 是否使用短 TTL 缓存（安装/更新/卸载后应传 False 或调用失效）
+
+        Returns:
+            {name: version_or_None}，version 读取失败为 None
+        """
+        now = time.time()
+        if use_cache and self._inst_map_cache is not None and now - self._inst_map_ts < self._INST_MAP_TTL:
+            return self._inst_map_cache
+
+        result: dict = {}
+        if self._plugins_dir.is_dir():
+            try:
+                for entry in os.scandir(self._plugins_dir):
+                    if not entry.is_dir():
+                        continue
+                    result[entry.name] = self._read_version_fast(Path(entry.path))
+            except OSError:
+                pass
+
+        self._inst_map_cache = result
+        self._inst_map_ts = now
+        return result
+
+    @staticmethod
+    def _read_version_fast(plugin_dir: Path) -> Optional[str]:
+        """快速读取单个插件目录的版本号（只查两个已知 manifest 位置）"""
+        for sub in (".drifox-plugin", ".claude-plugin"):
+            mp = plugin_dir / sub / "plugin.json"
+            if mp.exists():
+                try:
+                    manifest = json.loads(mp.read_text(encoding="utf-8"))
+                    return manifest.get("version")
+                except Exception:
+                    return None
+        return None
+
+    def invalidate_installed_cache(self):
+        """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
+        self._inst_map_cache = None
+        self._inst_map_ts = 0.0
 
     # ── 安装 ─────────────────────────────────────────────
 
@@ -97,10 +153,18 @@ class PluginInstaller:
             logger.info(f"[Installer] Plugin {name} already exists, skipping install")
             return True
 
-        return self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
+        if success:
+            self.invalidate_installed_cache()
+        return success
 
     def update(self, plugin_meta: dict) -> bool:
-        """更新插件 — 删除旧版后重新下载
+        """更新插件 — 立即删除旧版后重新下载
+
+        流程（点击更新即触发）：
+        1. 先删除旧版目录（用户感知为「点了立即删除现有的」）
+        2. 再下载新版安装
+        若下载失败，插件保持未安装状态（可重新点「安装」恢复）。
 
         Args:
             plugin_meta: marketplace.json 中的插件元数据
@@ -116,16 +180,12 @@ class PluginInstaller:
         target = self._plugins_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
-        # 先删除旧版目录
-        if target.exists():
-            try:
-                shutil.rmtree(target)
-                logger.info(f"[Installer] Removed old version of {name} before update")
-            except Exception as e:
-                logger.error(f"[Installer] Failed to remove old {name}: {e}")
-                return False
+        # 第一步：立即删除旧版
+        if not self.remove(name):
+            logger.error(f"[Installer] Failed to remove old {name} before update")
+            return False
 
-        # 重新下载安装
+        # 第二步：重新下载安装
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
@@ -305,27 +365,42 @@ class PluginInstaller:
 
     # ── 卸载 ─────────────────────────────────────────────
 
-    def uninstall(self, name: str) -> bool:
-        """卸载插件（删除本地目录）"""
+    def remove(self, name: str) -> bool:
+        """删除插件目录（更新/卸载共用）
+
+        Args:
+            name: 插件名
+
+        Returns:
+            True 删除成功或目录不存在
+        """
         target = self._plugins_dir / name
         if not target.exists():
-            return False
+            return True
         try:
             shutil.rmtree(target)
-            logger.info(f"[Installer] Uninstalled plugin {name}")
+            self.invalidate_installed_cache()
+            logger.info(f"[Installer] Removed plugin {name}")
             return True
         except Exception as e:
-            logger.error(f"[Installer] Uninstall {name} failed: {e}")
+            logger.error(f"[Installer] Remove {name} failed: {e}")
             return False
+
+    def uninstall(self, name: str) -> bool:
+        """卸载插件（删除本地目录）"""
+        if not self.remove(name):
+            return False
+        logger.info(f"[Installer] Uninstalled plugin {name}")
+        return True
 
     # ── 状态查询 ─────────────────────────────────────────
 
     def is_installed(self, name: str) -> bool:
-        """检查插件是否已安装"""
-        return (self._plugins_dir / name).exists()
+        """检查插件是否已安装（走批量缓存，避免逐次磁盘 IO）"""
+        return name in self.get_installed_map()
 
     def get_installed_version(self, name: str) -> Optional[str]:
-        """读取已安装插件的本地版本号
+        """读取已安装插件的本地版本号（走批量缓存）
 
         Args:
             name: 插件名称
@@ -333,22 +408,7 @@ class PluginInstaller:
         Returns:
             版本号字符串，如 "1.0.0"，如果未安装或读取失败返回 None
         """
-        target = self._plugins_dir / name
-        if not target.exists():
-            return None
-
-        manifest_path = target / ".drifox-plugin" / "plugin.json"
-        if not manifest_path.exists():
-            manifest_path = target / ".claude-plugin" / "plugin.json"
-        if not manifest_path.exists():
-            return None
-
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            return manifest.get("version")
-        except Exception as e:
-            logger.warning(f"[Installer] Failed to read version for {name}: {e}")
-            return None
+        return self.get_installed_map().get(name)
 
     def check_update(self, plugin_meta: dict) -> Tuple[bool, Optional[str], Optional[str]]:
         """检查插件是否有可用更新

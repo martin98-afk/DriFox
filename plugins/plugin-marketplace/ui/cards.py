@@ -23,6 +23,8 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -417,6 +419,326 @@ class _PluginInfoDialog(MaskDialogBase):
         self.widget.setFixedSize(480, 360)
 
 
+class _PluginDetailDialog(MaskDialogBase):
+    """插件详情弹窗：完整信息 + 底部操作按钮
+
+    所有插件（含未安装）可查看：完整描述、作者、license、分类、
+    来源市场、官网。底部主操作按状态给出：安装 / 更新 / 查看内容。
+    """
+
+    installRequested = pyqtSignal(dict)
+    updateRequested = pyqtSignal(dict)
+    viewRequested = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        parent,
+        plugin_meta: dict,
+        installed: bool,
+        has_update: bool,
+        local_version: Optional[str],
+        *,
+        tc: str,
+        tcs: str,
+        ff: str,
+        fs: int,
+        accent_bg: str,
+        card_bg: str,
+        border_c: str,
+    ):
+        super().__init__(parent)
+        self._meta = plugin_meta
+        self._installed = installed
+        self._has_update = has_update
+        self._local_version = local_version
+        self._init_ui(tc, tcs, ff, fs, accent_bg, card_bg, border_c)
+
+    def _init_ui(self, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("marketPluginDetail")
+        self.widget.setStyleSheet(
+            f"""
+            #marketPluginDetail {{
+                background-color: {card_bg};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+            }}
+            """
+        )
+
+        ff_qss = f'font-family: "{ff}";' if ff else ""
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(0)
+
+        # 标题：名称 + 版本徽标
+        name = self._meta.get("name", "未知")
+        remote_ver = self._meta.get("version", "")
+        if self._has_update and self._local_version and remote_ver:
+            ver_html = f'<span style="color:#FFA726;">🔄 v{self._local_version} → v{remote_ver}</span>'
+        elif self._installed and self._local_version:
+            ver_html = f'<span style="color:#4CAF50;">✓ v{self._local_version}</span>'
+        elif remote_ver:
+            ver_html = f'<span style="color:{tcs};">v{remote_ver}</span>'
+        else:
+            ver_html = ""
+        title_lb = QLabel(
+            f'<span style="font-size:{max(8, fs + 2)}px; font-weight:bold; color:{tc};">{name}</span>'
+            f' <span style="font-size:{max(8, fs)}px;">{ver_html}</span>',
+            self.widget,
+        )
+        title_lb.setWordWrap(True)
+        title_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        title_lb.setStyleSheet(f"background: transparent; {ff_qss}")
+        layout.addWidget(title_lb)
+
+        # 完整描述
+        desc = self._meta.get("description", "") or "（暂无描述）"
+        desc_lb = QLabel(desc, self.widget)
+        desc_lb.setWordWrap(True)
+        desc_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        desc_lb.setStyleSheet(
+            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.5;"
+        )
+        layout.addWidget(desc_lb)
+        layout.addSpacing(14)
+
+        # 信息区（滚动，字段多时不撑爆）
+        scroll = ScrollArea(self.widget)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        info_widget = QWidget(scroll)
+        info_widget.setStyleSheet("background: transparent;")
+        info_layout = QVBoxLayout(info_widget)
+        info_layout.setContentsMargins(2, 2, 8, 2)
+        info_layout.setSpacing(8)
+
+        rows = []
+        author = self._meta.get("author", "")
+        if author:
+            rows.append(("👤 作者", author))
+        license_ = self._meta.get("license", "")
+        if license_:
+            rows.append(("📜 License", license_))
+        tags = self._meta.get("_cached_tags", []) or []
+        if tags:
+            rows.append(("🏷 标签", "，".join(tags)))
+        marketplace = self._meta.get("_marketplace", "")
+        if marketplace:
+            rows.append(("📦 来源市场", marketplace))
+        homepage = _PluginRow._compute_homepage(self._meta)
+        if homepage:
+            rows.append(("🔗 官网", f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>'))
+        if not rows:
+            rows.append(("ℹ️ 信息", "该插件未提供更多信息"))
+
+        for label, value in rows:
+            row_lb = QLabel(f"<b>{label}</b>：{value}", info_widget)
+            row_lb.setWordWrap(True)
+            row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row_lb.setOpenExternalLinks(True)
+            row_lb.setStyleSheet(
+                f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+            )
+            info_layout.addWidget(row_lb)
+        info_layout.addStretch()
+        scroll.setWidget(info_widget)
+        layout.addWidget(scroll, 1)
+
+        layout.addSpacing(12)
+
+        # 底部操作按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        # 主操作：按状态给出
+        if self._has_update:
+            main_text, main_fn = "更新", self._on_update
+        elif self._installed:
+            main_text, main_fn = "查看内容", self._on_view
+        else:
+            main_text, main_fn = "安装", self._on_install
+
+        main_btn = QPushButton(main_text, self.widget)
+        main_btn.setCursor(Qt.PointingHandCursor)
+        main_btn.setFixedHeight(36)
+        main_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {accent_bg};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 24px;
+                {ff_qss}
+                font-size: {max(8, fs - 1)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {accent_bg};
+            }}
+            """
+        )
+        main_btn.clicked.connect(main_fn)
+
+        close_btn = QPushButton("关闭", self.widget)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFixedHeight(36)
+        close_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: rgba(128,128,128,0.15);
+                color: {tc};
+                border: none;
+                border-radius: 8px;
+                padding: 4px 24px;
+                {ff_qss}
+                font-size: {max(8, fs - 1)}px;
+            }}
+            QPushButton:hover {{
+                background: rgba(128,128,128,0.25);
+            }}
+            """
+        )
+        close_btn.clicked.connect(self.close)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(main_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(520, 460)
+
+    def _on_install(self):
+        self.installRequested.emit(self._meta)
+        self.close()
+
+    def _on_update(self):
+        self.updateRequested.emit(self._meta)
+        self.close()
+
+    def _on_view(self):
+        self.viewRequested.emit(self._meta)
+        self.close()
+
+
+class _TagFilterDialog(MaskDialogBase):
+    """Tag 多选面板：勾选多个 tag 与搜索/筛选 AND 叠加"""
+
+    def __init__(
+        self,
+        parent,
+        tag_counts: dict,
+        active_tags: set,
+        *,
+        tc: str,
+        tcs: str,
+        ff: str,
+        fs: int,
+        accent_bg: str,
+        card_bg: str,
+        border_c: str,
+    ):
+        super().__init__(parent)
+        self._tag_counts = tag_counts
+        self._checkboxes: dict = {}
+        self._init_ui(active_tags, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
+
+    def _init_ui(self, active_tags, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+
+        self.widget.setObjectName("marketTagFilter")
+        self.widget.setStyleSheet(
+            f"""
+            #marketTagFilter {{
+                background-color: {card_bg};
+                border: 1px solid {border_c};
+                border-radius: 8px;
+            }}
+            """
+        )
+
+        ff_qss = f'font-family: "{ff}";' if ff else ""
+        layout = QVBoxLayout(self.widget)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(0)
+
+        title_lb = QLabel("按标签过滤", self.widget)
+        title_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs + 2)}px; font-weight: bold;"
+        )
+        layout.addWidget(title_lb)
+
+        hint_lb = QLabel("可勾选多个标签，与搜索、筛选条件叠加", self.widget)
+        hint_lb.setStyleSheet(
+            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+        )
+        layout.addWidget(hint_lb)
+        layout.addSpacing(10)
+
+        scroll = ScrollArea(self.widget)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        content = QWidget(scroll)
+        content.setStyleSheet("background: transparent;")
+        c_layout = QVBoxLayout(content)
+        c_layout.setContentsMargins(2, 2, 8, 2)
+        c_layout.setSpacing(4)
+
+        for tag in sorted(self._tag_counts, key=lambda t: (-self._tag_counts[t], t)):
+            cb = QCheckBox(f"{tag} ({self._tag_counts[tag]})", content)
+            cb.setChecked(tag in active_tags)
+            cb.setStyleSheet(
+                f"QCheckBox {{ color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; spacing: 6px; }}"
+            )
+            c_layout.addWidget(cb)
+            self._checkboxes[tag] = cb
+        c_layout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        layout.addSpacing(12)
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        clear_btn = QPushButton("清除", self.widget)
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setFixedHeight(32)
+        clear_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(128,128,128,0.15); color: {tc}; border: none;"
+            f" border-radius: 8px; padding: 2px 18px; {ff_qss} font-size: {max(8, fs - 1)}px; }}"
+            "QPushButton:hover { background: rgba(128,128,128,0.25); }"
+        )
+        clear_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in self._checkboxes.values()])
+
+        ok_btn = QPushButton("确定", self.widget)
+        ok_btn.setCursor(Qt.PointingHandCursor)
+        ok_btn.setFixedHeight(32)
+        ok_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {accent_bg}; color: #ffffff; border: none;"
+            f" border-radius: 8px; padding: 2px 24px; {ff_qss} font-size: {max(8, fs - 1)}px; font-weight: bold; }}"
+        )
+        ok_btn.clicked.connect(self.accept)
+
+        btn_layout.addWidget(clear_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        self.widget.setFixedSize(320, 420)
+
+    def selected_tags(self) -> list:
+        """返回勾选的 tag 列表"""
+        return [t for t, cb in self._checkboxes.items() if cb.isChecked()]
+
+
 class _PluginRow(QFrame):
     """单个插件的展示行（简约卡片风格）
 
@@ -432,6 +754,7 @@ class _PluginRow(QFrame):
     openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
     viewRequested = pyqtSignal(dict)  # 查看已安装插件的内容列表
     openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
+    detailRequested = pyqtSignal(dict)  # 打开插件详情面板
 
     def __init__(
         self,
@@ -442,6 +765,9 @@ class _PluginRow(QFrame):
         parent=None,
         font_size: int = 0,
         search_query: str = "",
+        tc: Optional[str] = None,
+        tcs: Optional[str] = None,
+        font_family: str = "",
     ):
         super().__init__(parent)
         self._meta = plugin_meta
@@ -449,12 +775,45 @@ class _PluginRow(QFrame):
         self._has_update = has_update
         self._local_version = local_version
         self._busy = False
-        self._font_size = font_size  # 上下文字体大小（用于头像自适应）
+        self._font_size = font_size  # 上下文字体大小（用于头像自适应 + 行内字号派生）
+        self._ff = font_family  # 上下文字体家族
         self._btn_font_size = max(13, font_size) if font_size > 0 else 14
         self._avatar = None
         self._search_query = search_query
+        # 上下文主题色（无缓存时回退全局主题），避免依赖事后 _retheme 全树遍历
+        self._tc = tc or _text_color()
+        self._tcs = tcs or _text_color(secondary=True)
         self._tags = self._compute_tags(plugin_meta)
         self._setup_ui()
+
+    # ── 字号派生（与卡片 _PLUGIN_ROW_SIZE_OFFSETS 保持一致） ──
+    # 描述 fs-4、tag fs-5、更新标签 fs-3、市场标签 fs+0；无上下文时回退固定值
+
+    def _derive_size(self, base_px: int, offset: int) -> int:
+        """按上下文字体大小派生行内标签字号（无上下文时用固定 base_px）"""
+        if self._font_size > 0:
+            return max(8, self._font_size + offset)
+        return base_px
+
+    def _font_qss(self, size_px: int) -> str:
+        """生成 font-size + font-family 的 QSS 片段"""
+        qss = f"font-size: {size_px}px;"
+        if self._ff:
+            qss += f" font-family: '{self._ff}';"
+        return qss
+
+    def _apply_child_fonts(self):
+        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）"""
+        if self._desc_label is not None:
+            self._desc_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
+            )
+        for lbl in self._tag_labels:
+            lbl.setStyleSheet(self._tag_stylesheet())
+        if getattr(self, "_mp_label", None) is not None:
+            self._mp_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
 
     def _setup_ui(self):
         self.setObjectName("pluginRow")
@@ -476,30 +835,17 @@ class _PluginRow(QFrame):
         info_layout.setSpacing(2)
 
         name = self._meta.get("name", "未知")
-        remote_ver = self._meta.get("version", "")
-
-        # 标题行：名称 + 版本，搜索词高亮（HTML 内嵌字号，因 QLabel 富文本忽略 QSS font-size）
-        ver_suffix = ""
-        if self._has_update and self._local_version and remote_ver:
-            ver_suffix = f"  v{self._local_version} → v{remote_ver}"
-        elif remote_ver:
-            ver_suffix = f"  v{remote_ver}"
         self._name_raw = name
-        self._version_suffix = ver_suffix
-        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
-        name_html = _highlight_html(name, self._search_query)
-        name_text = f'<span style="font-size:{title_fs}pt;">{name_html}{ver_suffix}</span>'
-        self._title_label = QLabel(name_text, self)
+        self._title_label = QLabel("", self)
         self._title_label.setObjectName("pluginRowTitle")
-        self._title_label.setStyleSheet(f"color: {_text_color()}; font-weight: bold; background: transparent;")
+        ff_qss = f" font-family: '{self._ff}';" if self._ff else ""
+        self._title_label.setStyleSheet(
+            f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;"
+        )
+        self._refresh_title()
         info_layout.addWidget(self._title_label)
 
-        # 版本更新提示小标签（仅在有更新时显示）
-        if self._has_update:
-            self._update_tag = QLabel("🔄 有新版本", self)
-            self._update_tag.setObjectName("pluginRowUpdateTag")
-            self._update_tag.setStyleSheet("color: #FFA726; font-size: 11px; background: transparent;")
-            info_layout.addWidget(self._update_tag)
+        # 版本更新徽标已内嵌在标题（🔄 v1.0 → v2.0），不再单独建标签
 
         desc = self._meta.get("description", "")
         self._desc_label = None
@@ -511,7 +857,7 @@ class _PluginRow(QFrame):
             self._desc_label.setWordWrap(True)
             self._desc_label.setObjectName("pluginRowDesc")
             self._desc_label.setStyleSheet(
-                f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
             )
             info_layout.addWidget(self._desc_label)
 
@@ -537,9 +883,11 @@ class _PluginRow(QFrame):
         # 市场来源标签
         marketplace = self._meta.get("_marketplace", "")
         if marketplace:
-            mp_label = QLabel(f"📦 {marketplace}", self)
-            mp_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 10px; background: transparent;")
-            info_layout.addWidget(mp_label)
+            self._mp_label = QLabel(f"📦 {marketplace}", self)
+            self._mp_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
+            info_layout.addWidget(self._mp_label)
 
         layout.addLayout(info_layout, 1)
 
@@ -563,6 +911,13 @@ class _PluginRow(QFrame):
             link_btn.clicked.connect(lambda checked, u=homepage: self.openUrlRequested.emit(u))
             layout.addWidget(link_btn)
 
+        # 详情按钮（未安装也能查看完整信息）
+        detail_btn = TransparentToolButton(FluentIcon.INFO, self)
+        detail_btn.setFixedSize(28, 28)
+        detail_btn.setToolTip("查看详情")
+        detail_btn.clicked.connect(lambda checked, m=self._meta: self.detailRequested.emit(m))
+        layout.addWidget(detail_btn)
+
         # 操作按钮
         self._btn = PushButton(self)
         self._btn.setFixedWidth(100)
@@ -580,7 +935,7 @@ class _PluginRow(QFrame):
         self._btn.setFont(btn_font)
 
         if self._busy:
-            self._btn.setText("处理中…")
+            self._btn.setText(getattr(self, "_busy_text", "处理中…"))
             self._btn.setEnabled(False)
             self._btn.setStyleSheet(self._original_btn_style)
         elif self._has_update:
@@ -625,19 +980,63 @@ class _PluginRow(QFrame):
             self.viewRequested.emit(self._meta)
 
     def set_installed(self, installed: bool):
-        """安装/更新完成后刷新状态"""
-        self._installed = installed
-        self._has_update = False
-        self._busy = False
-        # 文件夹按钮仅已安装时可见
-        if self._dir_btn is not None:
-            self._dir_btn.setVisible(installed)
-        self._update_btn_text()
+        """安装/卸载完成后刷新状态（清除更新标记）"""
+        self.apply_state(installed, has_update=False, local_version=None)
 
     def set_has_update(self, has_update: bool):
         """设置是否有可用更新"""
         self._has_update = has_update
         self._update_btn_text()
+
+    def apply_state(self, installed: bool, has_update: bool, local_version: Optional[str]):
+        """按最新扫描结果刷新整行状态（版本后缀 + 按钮 + 文件夹按钮）"""
+        changed = (
+            installed != self._installed
+            or has_update != self._has_update
+            or local_version != self._local_version
+        )
+        self._installed = installed
+        self._has_update = has_update
+        self._local_version = local_version
+        self._busy = False
+        if changed:
+            self._refresh_title()
+        # 文件夹按钮仅已安装时可见
+        if self._dir_btn is not None:
+            self._dir_btn.setVisible(installed)
+        self._update_btn_text()
+
+    def set_downloading(self):
+        """更新流程：点击后立即标记为「下载中」（未安装态 + 禁用按钮）"""
+        self._installed = False
+        self._has_update = False
+        self._busy = True
+        self._busy_text = "下载中…"
+        if self._dir_btn is not None:
+            self._dir_btn.setVisible(False)
+        self._update_btn_text()
+
+    def _refresh_title(self):
+        """按当前状态重算标题：名称 + 彩色版本徽标
+
+        - 有更新：🔄 v{local} → v{remote}（橙色）
+        - 已安装且最新：✓ v{local}（绿色）
+        - 未安装：v{remote}（次级色）
+        """
+        remote_ver = self._meta.get("version", "")
+        ver_html = ""
+        if self._has_update and self._local_version and remote_ver:
+            ver_html = f' <span style="color:#FFA726;">🔄 v{self._local_version} → v{remote_ver}</span>'
+        elif self._installed and self._local_version:
+            ver_html = f' <span style="color:#4CAF50;">✓ v{self._local_version}</span>'
+        elif remote_ver:
+            ver_html = f' <span style="color:{self._tcs};">v{remote_ver}</span>'
+        self._version_suffix = ver_html
+        title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
+        name_html = _highlight_html(self._name_raw, self._search_query)
+        self._title_label.setText(
+            f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}</span>'
+        )
 
     def set_error(self):
         """安装/更新失败后恢复按钮"""
@@ -687,10 +1086,14 @@ class _PluginRow(QFrame):
         return None
 
     def set_font_size(self, font_size: int):
-        """根据上下文字体大小动态调整头像尺寸"""
+        """根据上下文字体大小动态调整头像尺寸 + 行内标签字号"""
+        if font_size <= 0:
+            return
         self._font_size = font_size
         if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
             self._avatar.set_font_size(font_size)
+        self._refresh_title()  # 标题 HTML 内嵌字号
+        self._apply_child_fonts()  # 描述/tag/更新标签/市场标签 QSS 字号
 
     # ── Tag 相关 ─────────────────────────────────────────────
 
@@ -746,10 +1149,10 @@ class _PluginRow(QFrame):
         return ""
 
     def _tag_stylesheet(self) -> str:
-        """tag 标签 QSS 样式"""
-        tc = _text_color(secondary=True)
+        """tag 标签 QSS 样式（字号跟随上下文派生）"""
         return (
-            f"background: rgba(128,128,128,0.12); color: {tc}; border-radius: 4px; padding: 1px 6px; font-size: 10px;"
+            f"background: rgba(128,128,128,0.12); color: {self._tcs}; border-radius: 4px; padding: 1px 6px; "
+            f"{self._font_qss(self._derive_size(10, -5))}"
         )
 
     def update_search_highlight(self, query: str):
@@ -792,12 +1195,15 @@ class MarketplaceCard(QWidget):
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
         self._plugin_data: list = []
-        self._matched_plugins: list = []
+        self._matched: list = []
         self._rendered_count: int = 0
         self._row_map: dict = {}  # plugin_name → _PluginRow
         self._all_plugins: list = []
-        self._all_loaded: bool = False  # 是否已全部渲染完
+        self._all_loaded: bool = False  # 匹配列表是否已全部渲染完
         self._current_filter: str = "all"
+        self._active_tags: set = set()  # 激活的 tag 集合（AND 过滤）
+        self._sort_mode: str = "default"
+        self._load_more_btn: Optional[QPushButton] = None
         self._header_icon: Optional[IconWidget] = None
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -841,9 +1247,10 @@ class MarketplaceCard(QWidget):
         """从上下文拉取最新主题色 + 字体并刷新全部子控件样式
 
         策略：
+        - 主题 key（颜色/字体/字号）未变化时跳过 _retheme 全树遍历（打开卡片/切 tab 不卡）
+        - 字号变化仍传播到已渲染行（头像自适应）
         - font-family 通过 self.setFont(QFont(family, 0)) 级联（size=0 不覆盖原有字号）
-        - 颜色：只替换 stylesheet 中的 color 值，保留 font-size/font-weight 等原有属性
-        - 动态创建的子控件创建后应调用 _retheme() 刷新
+        - 动态创建的子控件创建时直接用缓存主题色，无需事后 _retheme
         """
         if self._context_provider is None:
             return
@@ -857,38 +1264,43 @@ class MarketplaceCard(QWidget):
         tc = _ctx_text_color(ctx)
         tcs = _ctx_text_color(ctx, secondary=True)
         border_c = _ctx_border_color(ctx)
+
+        theme_key = (tc, tcs, font_family, font_size)
+        theme_changed = getattr(self, "_last_theme_key", None) != theme_key
+        self._last_theme_key = theme_key
+
         self._cached_tc = tc
         self._cached_tcs = tcs
         self._cached_font_family = font_family
         self._cached_font_size = font_size
         self._cached_theme_colors = ctx.get("colors", {})
 
-        # ── 把 font_size 传播到已存在的行（动态调整头像大小） ──
-        for row in self.findChildren(_PluginRow):
-            row.set_font_size(font_size)
+        # ── 字号变化 → 传播到已存在的行（动态调整头像大小） ──
+        if font_size != getattr(self, "_last_font_size", None):
+            for row in self.findChildren(_PluginRow):
+                row.set_font_size(font_size)
+            self._last_font_size = font_size
 
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
         if font_family:
             self.setFont(QFont(font_family, font_size if font_size else 14))
 
-        # ── 颜色：替换现有 labels 的 color 值，保留其他属性 ──
-        self._retheme()
-
-        # 更新搜索框
-        try:
-            self._search_edit.setStyleSheet(
-                f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {tc};"
-            )
-        except RuntimeError:
-            pass
-
-        # 更新分隔线
-        for sep in self.findChildren(QFrame):
+        # 主题真变化时才全树 re-theme + 更新搜索框/分隔线（日常打开/切换不触发）
+        if theme_changed:
+            self._retheme()
             try:
-                if sep.frameShape() == QFrame.HLine:
-                    sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
+                self._search_edit.setStyleSheet(
+                    f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {tc};"
+                )
             except RuntimeError:
                 pass
+            self._style_sort_combo()
+            for sep in self.findChildren(QFrame):
+                try:
+                    if sep.frameShape() == QFrame.HLine:
+                        sep.setStyleSheet(f"background: {border_c}; max-height: 1px;")
+                except RuntimeError:
+                    pass
 
     # objectName → font-size 偏移（用于插件行的标题/描述/tag）
     # pluginRowTitle: 标题用 font_size - 2（让标题比上下文默认小 2 号）
@@ -1053,15 +1465,66 @@ class MarketplaceCard(QWidget):
         browse_root.setContentsMargins(0, 0, 0, 0)
         browse_root.setSpacing(0)
 
-        # ── 筛选标签（全部/已安装/未安装/待更新）──
-        self._filter_bar = Pivot(self._browse_page)
+        # ── 筛选行：Pivot + 待更新角标 + 排序 ──
+        filter_row = QWidget(self._browse_page)
+        filter_row.setStyleSheet("background: transparent;")
+        filter_layout = QHBoxLayout(filter_row)
+        filter_layout.setContentsMargins(12, 2, 12, 0)
+        filter_layout.setSpacing(8)
+
+        self._filter_bar = Pivot(filter_row)
         self._filter_bar.addItem("all", "全部", None, None)
         self._filter_bar.addItem("installed", "已安装", None, None)
         self._filter_bar.addItem("uninstalled", "未安装", None, None)
         self._filter_bar.addItem("updates", "待更新", None, None)
         self._filter_bar.setCurrentItem("all")
         self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
-        browse_root.addWidget(self._filter_bar)
+        filter_layout.addWidget(self._filter_bar)
+
+        filter_layout.addStretch(1)
+
+        # 待更新角标（橙色，点击切到「待更新」筛选）
+        self._update_badge = QPushButton("0 个可更新", filter_row)
+        self._update_badge.setCursor(Qt.PointingHandCursor)
+        self._update_badge.setStyleSheet(
+            "QPushButton { background: rgba(255,167,38,0.15); color: #FFA726;"
+            " border: 1px solid rgba(255,167,38,0.3); border-radius: 8px; padding: 2px 10px; font-size: 11px; }"
+            "QPushButton:hover { background: rgba(255,167,38,0.3); }"
+        )
+        self._update_badge.clicked.connect(lambda: self._filter_bar.setCurrentItem("updates"))
+        filter_layout.addWidget(self._update_badge)
+
+        # 排序下拉
+        self._sort_combo = QComboBox(filter_row)
+        self._sort_combo.addItem("默认排序", "default")
+        self._sort_combo.addItem("名称 A-Z", "name_asc")
+        self._sort_combo.addItem("名称 Z-A", "name_desc")
+        self._sort_combo.addItem("版本最新优先", "version")
+        self._sort_combo.setFixedWidth(110)
+        self._style_sort_combo()
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        filter_layout.addWidget(self._sort_combo)
+
+        browse_root.addWidget(filter_row)
+
+        # ── Tag 过滤栏（横向滚动，数据加载后构建）──
+        self._tag_bar = ScrollArea(self._browse_page)
+        self._tag_bar.setWidgetResizable(True)
+        self._tag_bar.setFixedHeight(38)
+        self._tag_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._tag_bar.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._tag_bar.setStyleSheet(
+            "ScrollArea { background: transparent; border: none; }"
+            "ScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._tag_content = QWidget(self._tag_bar)
+        self._tag_content.setStyleSheet("background: transparent;")
+        self._tag_layout = QHBoxLayout(self._tag_content)
+        self._tag_layout.setContentsMargins(12, 0, 12, 2)
+        self._tag_layout.setSpacing(6)
+        self._tag_bar.setWidget(self._tag_content)
+        browse_root.addWidget(self._tag_bar)
+        self._tag_bar.setVisible(False)  # 无 tag 数据时隐藏
 
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
@@ -1219,100 +1682,84 @@ class MarketplaceCard(QWidget):
     _RENDER_BATCH = 30
 
     def _render_plugins(self, plugins: list):
-        """渲染插件列表：首屏分批防卡死，全部加载后搜索用 show/hide"""
-        self._render_gen = getattr(self, "_render_gen", 0) + 1
+        """渲染插件列表：匹配才渲染 + 分段加载
+
+        - 条件（搜索 + 激活 tag + 筛选模式 + 排序）变化 → 计算匹配列表
+        - 同步渲染前 _RENDER_BATCH 个匹配行 + 「加载更多」按钮（手动点击分批）
+        - 不匹配的行不创建 widget（插件多时省内存）
+        - 数据内容变化时重建 tag 栏与待更新角标
+        """
         query = self._search_edit.text().strip().lower()
-        installer = get_installer()
         filter_mode = self._current_filter
 
-        # 缓存 tags 到插件 dict（避免重复计算）
+        # 缓存 tags（避免重复计算）
         for p in plugins:
             if "_cached_tags" not in p:
                 p["_cached_tags"] = _PluginRow._compute_tags(p)
 
-        # ── 批量缓存已安装状态和版本号（避免每次逐个磁盘 IO） ──
-        self._installed_set: set = set()
-        self._version_map: dict = {}
-        for p in plugins:
-            name = p.get("name", "")
-            if not name:
-                continue
-            if installer.is_installed(name):
-                self._installed_set.add(name)
-                ver = installer.get_installed_version(name)
-                if ver:
-                    self._version_map[name] = ver
+        # 批量安装状态：一次 scandir + manifest 读取（TTL 缓存）
+        inst_map = get_installer().get_installed_map()
+        self._installed_set = set(inst_map)
+        self._version_map = inst_map
 
-        # 数据变了 → 全量重建
-        data_changed = not self._all_plugins or self._all_plugins is not plugins
+        # 数据内容变化 → 更新全量数据 + 重建 tag 栏
+        data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
         if data_changed:
             self._all_plugins = plugins
-            self._matched_plugins = []
-            for p in plugins:
-                self._matched_plugins.append(self._plugin_matches(p, query, filter_mode))
-            self._clear_plugin_list()
-            self._rendered_count = 0
-            self._all_loaded = False
-            self._render_next_batch(query)
-            self._retheme()
-            return
+            self._rebuild_tag_bar()
 
-        # 全部加载完 → show/hide（零重建，极快）+ 更新高亮
-        if self._all_loaded:
-            any_visible = False
-            for p in plugins:
-                name = p.get("name", "")
-                if name in self._row_map:
-                    row = self._row_map[name]
-                    matches, _, _, _ = self._plugin_matches(p, query, filter_mode)
-                    row.setVisible(matches)
-                    row.update_search_highlight(query)
-                    if matches:
-                        any_visible = True
-            if not any_visible:
-                self._empty_label.setText("没有匹配的插件" if query else "暂无可用插件")
-                self._content_stack.setCurrentIndex(1)
-            else:
-                self._content_stack.setCurrentIndex(0)
-            return
+        # 计算匹配列表（搜索 + tag + 筛选）并排序
+        matched = [p for p in self._all_plugins if self._plugin_matches(p, query, filter_mode)]
+        self._apply_sort(matched)
+        self._matched = matched
 
-        # 还未全部加载但需要刷（筛选标签切换等）
-        self._matched_plugins = []
-        for p in plugins:
-            self._matched_plugins.append(self._plugin_matches(p, query, filter_mode))
+        # 重建渲染：清空 + 渲染首批 + 加载更多按钮
         self._clear_plugin_list()
         self._rendered_count = 0
+        self._all_loaded = False
+        self._update_empty_state()
+        self._update_status()
+        self._update_update_badge()
+        self._render_next_batch()
 
-        if query:
-            # 搜索模式：只渲染匹配的插件，分批显示 + 加载更多按钮
-            self._matching_indices = [i for i, (m, _, _, _) in enumerate(self._matched_plugins) if m]
-            self._rendered_count = 0
-            self._render_search_batch(query)
-            visible_count = len(self._matching_indices)
-            if visible_count == 0:
-                self._empty_label.setText("没有匹配的插件")
-                self._content_stack.setCurrentIndex(1)
-            else:
-                self._status_label.setText(f"找到 {visible_count} 个匹配结果")
-                self._status_label.setStyleSheet(
-                    f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
-                )
-        else:
-            # 非搜索（清空搜索/切换筛选）：全量加载，后续 show/hide 快速路径
-            while self._rendered_count < len(self._matched_plugins):
-                self._render_next_batch(query)
-            self._all_loaded = True
-            self._remove_load_more_button()
-            visible_count = sum(1 for m in self._matched_plugins if m[0])
-            if visible_count == 0:
-                self._empty_label.setText("暂无可用插件")
-                self._content_stack.setCurrentIndex(1)
+    @staticmethod
+    def _plugins_same(old: list, new: list) -> bool:
+        """判断两次拉取的市场数据是否内容相同（name+version 逐项比较）
 
-        self._retheme()
+        拉取总是新建 dict/list（json 反序列化），引用必然不同；
+        内容相同时跳过 tag 栏/角标重建。
+        """
+        if old is new:
+            return True
+        if len(old) != len(new):
+            return False
+        for a, b in zip(old, new):
+            if a.get("name") != b.get("name") or a.get("version") != b.get("version"):
+                return False
+        return True
 
-    def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> tuple:
-        """检查插件是否匹配当前搜索/筛选（使用批量缓存的安装状态）。
-        Returns: (matches: bool, installed: bool, has_update: bool, local_ver: str|None)
+    def _has_update(self, p: dict, installed: bool) -> bool:
+        """判断插件是否有可用更新（本地版本 < 远程版本）"""
+        if not installed:
+            return False
+        local_ver = self._version_map.get(p.get("name", ""))
+        remote_ver = p.get("version", "")
+        if not local_ver or not remote_ver:
+            return False
+        from .data import compare_versions
+
+        return compare_versions(local_ver, remote_ver) < 0
+
+    def _row_state(self, p: dict) -> tuple:
+        """计算行的 (installed, has_update, local_ver)"""
+        name = p.get("name", "")
+        installed = name in self._installed_set
+        return installed, self._has_update(p, installed), self._version_map.get(name)
+
+    def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> bool:
+        """检查插件是否匹配当前搜索/tag/筛选（AND 叠加）
+
+        Returns: bool
         """
         name = p.get("name", "")
 
@@ -1320,48 +1767,112 @@ class MarketplaceCard(QWidget):
             if query not in name.lower() and query not in (p.get("description", "")).lower():
                 tags = p.get("_cached_tags", [])
                 if not any(query in t.lower() for t in tags):
-                    return (False, False, False, None)
+                    return False
+
+        # 激活 tag 过滤（AND）
+        if self._active_tags:
+            tags = set(p.get("_cached_tags", []) or [])
+            if not (tags & self._active_tags):
+                return False
 
         installed = name in self._installed_set
-        has_update = False
-        local_ver = self._version_map.get(name)
-        if installed and local_ver:
-            remote_ver = p.get("version", "")
-            if remote_ver:
-                from .data import compare_versions
-
-                has_update = compare_versions(local_ver, remote_ver) < 0
+        has_update = self._has_update(p, installed)
 
         if filter_mode == "installed" and not installed:
-            return (False, installed, has_update, local_ver)
+            return False
         if filter_mode == "uninstalled" and installed:
-            return (False, installed, has_update, local_ver)
+            return False
         if filter_mode == "updates" and not has_update:
-            return (False, installed, has_update, local_ver)
+            return False
+        return True
 
-        return (True, installed, has_update, local_ver)
+    def _apply_sort(self, matched: list):
+        """按当前排序模式排序匹配列表（就地）"""
+        mode = getattr(self, "_sort_mode", "default")
+        if mode == "name_asc":
+            matched.sort(key=lambda p: (p.get("name", "") or "").lower())
+        elif mode == "name_desc":
+            matched.sort(key=lambda p: (p.get("name", "") or "").lower(), reverse=True)
+        elif mode == "version":
+            from functools import cmp_to_key
 
-    def _render_next_batch(self, query: str):
-        """渲染下一批 30 个插件"""
+            from .data import compare_versions
+
+            matched.sort(
+                key=cmp_to_key(lambda a, b: compare_versions(a.get("version", "0"), b.get("version", "0"))),
+                reverse=True,
+            )
+
+    def _render_next_batch(self):
+        """渲染下一批匹配插件（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
+
+        点击「加载更多」时只推进一批，不自动跑完全部。
+        """
         start = self._rendered_count
-        end = min(start + self._RENDER_BATCH, len(self._matched_plugins))
-        self._render_batch(start, end, query)
-        self._rendered_count = end
-
-        remaining = len(self._matched_plugins) - self._rendered_count
-        if remaining > 0:
-            self._add_load_more_button(remaining)
-        else:
-            self._remove_load_more_button()
+        end = min(start + self._RENDER_BATCH, len(self._matched))
+        if start >= end:
             self._all_loaded = True
+            self._remove_load_more_button()
+            return
+        self._render_batch(start, end)
+        self._rendered_count = end
+        if self._rendered_count < len(self._matched):
+            self._set_load_more_button(len(self._matched) - self._rendered_count)
+        else:
+            self._all_loaded = True
+            self._remove_load_more_button()
 
-    def _render_batch(self, start: int, end: int, query: str):
-        """渲染 [start, end) 范围的插件行"""
-        fs = self._cached_font_size
+    def _set_load_more_button(self, remaining: int):
+        """创建或更新「加载更多」按钮（stretch 之前）"""
+        btn = getattr(self, "_load_more_btn", None)
+        if btn is None:
+            self._remove_load_more_button()
+            btn = PushButton(self._content)
+            btn.setStyleSheet(
+                "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
+                "PushButton:hover { background: rgba(128,128,128,0.2); }"
+            )
+            btn.clicked.connect(self._on_load_more)
+            count = self._content_layout.count()
+            last_item = self._content_layout.itemAt(count - 1) if count > 0 else None
+            if last_item and last_item.widget() is None:
+                self._content_layout.insertWidget(count - 1, btn)
+            else:
+                self._content_layout.addWidget(btn)
+            self._load_more_btn = btn
+        btn.setText(f"加载更多 ({remaining} 个)")
+        btn.show()
+
+    def _remove_load_more_button(self):
+        """移除「加载更多」按钮"""
+        btn = getattr(self, "_load_more_btn", None)
+        if btn is not None:
+            try:
+                self._content_layout.removeWidget(btn)
+                btn.deleteLater()
+            except RuntimeError:
+                pass
+            self._load_more_btn = None
+
+    def _on_load_more(self):
+        """手动加载下一批匹配插件（点一次只加载一批，不自动跑完）
+
+        新行插入按钮之前，按钮随内容自然下移到列表末尾；
+        不滚动视口，滚动位置保持用户原样。
+        """
+        self._render_next_batch()
+
+    def _render_batch(self, start: int, end: int):
+        """渲染 [start, end) 范围的匹配插件行"""
+        fs = getattr(self, "_cached_font_size", 0)
+        tc = getattr(self, "_cached_tc", None)
+        tcs = getattr(self, "_cached_tcs", None)
+        ff = getattr(self, "_cached_font_family", "") or ""
+        query = self._search_edit.text().strip().lower()
         for i in range(start, end):
             try:
-                matches, installed, has_update, local_ver = self._matched_plugins[i]
-                p = self._all_plugins[i]
+                p = self._matched[i]
+                installed, has_update, local_ver = self._row_state(p)
                 row = _PluginRow(
                     p,
                     installed,
@@ -1370,10 +1881,12 @@ class MarketplaceCard(QWidget):
                     parent=self._content,
                     font_size=fs,
                     search_query=query,
+                    tc=tc,
+                    tcs=tcs,
+                    font_family=ff,
                 )
             except Exception as e:
-                # 单行渲染失败（异常市场数据）不中断整个批次，避免部分渲染
-                # 导致后续批次从同一索引重复渲染
+                # 单行渲染失败（异常市场数据）不中断整个批次
                 logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
                 continue
             row.installRequested.connect(self._async_install)
@@ -1381,94 +1894,47 @@ class MarketplaceCard(QWidget):
             row.openUrlRequested.connect(self._open_url)
             row.viewRequested.connect(self._on_view_plugin)
             row.openDirRequested.connect(self._on_open_plugin_dir)
-            row.setVisible(matches)
-            self._content_layout.addWidget(row)
+            row.detailRequested.connect(self._on_plugin_detail)
+            # 新行插入「加载更多」按钮之前：按钮随新行自然下移，
+            # 避免新行跑到 stretch 后面造成按钮卡在中间（不滚动视口）
+            btn = getattr(self, "_load_more_btn", None)
+            if btn is not None:
+                self._content_layout.insertWidget(self._content_layout.indexOf(btn), row)
+            else:
+                self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
         # 首屏批次补 stretch
         if start == 0:
             self._content_layout.addStretch(1)
 
-    def _render_search_batch(self, query: str):
-        """搜索模式：从匹配索引列表中渲染下一批"""
-        start = self._rendered_count
-        end = min(start + self._RENDER_BATCH, len(self._matching_indices))
-        fs = self._cached_font_size
-        for idx in range(start, end):
-            i = self._matching_indices[idx]
-            try:
-                _, installed, has_update, local_ver = self._matched_plugins[i]
-                p = self._all_plugins[i]
-                row = _PluginRow(
-                    p,
-                    installed,
-                    has_update=has_update,
-                    local_version=local_ver,
-                    parent=self._content,
-                    font_size=fs,
-                    search_query=query,
-                )
-            except Exception as e:
-                # 单行渲染失败（异常市场数据）不中断整个批次，避免部分渲染导致重复
-                logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
-                continue
-            row.installRequested.connect(self._async_install)
-            row.updateRequested.connect(self._async_update)
-            row.openUrlRequested.connect(self._open_url)
-            row.viewRequested.connect(self._on_view_plugin)
-            row.openDirRequested.connect(self._on_open_plugin_dir)
-            row.setVisible(True)
-            self._content_layout.addWidget(row)
-            self._row_map[p.get("name", "")] = row
-        self._rendered_count = end
-        remaining = len(self._matching_indices) - self._rendered_count
-        if remaining > 0:
-            self._add_load_more_button(remaining)
+    def _update_empty_state(self):
+        """匹配为空时显示空态提示"""
+        if not self._matched:
+            query = self._search_edit.text().strip()
+            self._empty_label.setText(
+                "没有匹配的插件" if (query or self._active_tags) else "暂无可用插件"
+            )
+            self._content_stack.setCurrentIndex(1)
         else:
-            self._remove_load_more_button()
-            # 搜索全部加载完 → 标记全量，后续 show/hide
-            if not self._all_loaded:
-                self._all_loaded = True
+            self._content_stack.setCurrentIndex(0)
 
-    def _add_load_more_button(self, remaining: int):
-        """在列表底部添加「加载更多」按钮（stretch 之前）"""
-        self._remove_load_more_button()
-        btn = PushButton(f"加载更多 ({remaining} 个)", self._content)
-        btn.setStyleSheet(
-            "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
-            "PushButton:hover { background: rgba(128,128,128,0.2); }"
-        )
-        btn.clicked.connect(self._on_load_more)
-        count = self._content_layout.count()
-        last_item = self._content_layout.itemAt(count - 1) if count > 0 else None
-        if last_item and last_item.widget() is None:
-            self._content_layout.insertWidget(count - 1, btn)
-        else:
-            self._content_layout.addWidget(btn)
-
-    def _remove_load_more_button(self):
-        """移除现有的「加载更多」按钮（删除全部匹配项，防止残留）"""
-        for i in range(self._content_layout.count() - 1, -1, -1):
-            item = self._content_layout.itemAt(i)
-            w = item.widget() if item else None
-            if isinstance(w, PushButton) and "更多" in (w.text() or ""):
-                self._content_layout.takeAt(i)
-                w.deleteLater()
-
-    def _on_load_more(self):
-        """手动加载下一批（搜索模式用 _matching_indices，普通模式用全索引）"""
-        self._remove_load_more_button()
+    def _update_status(self):
+        """更新状态栏：搜索/过滤结果计数"""
         query = self._search_edit.text().strip().lower()
-        # 防御：已全部加载时只移除按钮，不重复渲染
-        if query and hasattr(self, "_matching_indices") and self._rendered_count < len(self._matching_indices):
-            self._render_search_batch(query)
-        elif not query and self._rendered_count < len(self._matched_plugins):
-            self._render_next_batch(query)
-        self._retheme()
+        if query:
+            self._status_label.setText(f"找到 {len(self._matched)} 个匹配结果")
+            tcs = getattr(self, "_cached_tcs", "") or _text_color(secondary=True)
+            self._status_label.setStyleSheet(
+                f"color: {tcs}; font-size: 12px; background: transparent;"
+            )
+        else:
+            self._status_label.setText("")
 
     def _clear_plugin_list(self):
         """清空插件列表"""
         self._row_map.clear()
         self._all_loaded = False
+        self._remove_load_more_button()
         while self._content_layout.count():
             item = self._content_layout.takeAt(0)
             if item.widget():
@@ -1515,7 +1981,7 @@ class MarketplaceCard(QWidget):
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
-            self._update_row_state(name, installed=True)
+            self._refresh_row_states()
             InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=bar_parent)
         else:
             self._update_row_state(name, installed=False, error=True)
@@ -1544,10 +2010,16 @@ class MarketplaceCard(QWidget):
     # ── 异步更新 ────────────────────────────────────────
 
     def _async_update(self, plugin_meta: dict):
-        """在后台线程更新插件"""
+        """更新插件：点击后立即删除旧版并反馈（后台先删旧版再下载新版）
+
+        点击瞬间将该行置为「下载中」（未安装态 + 禁用按钮），
+        后台线程第一步即 rmtree 旧版目录，满足「点了立即删除现有的」。
+        """
         name = plugin_meta.get("name", "")
         self._status_label.setText("更新中…")
         self._status_label.setStyleSheet("color: #FFA726; font-size: 12px; background: transparent;")
+        # 立即反馈：该行变为未安装态 + 「下载中…」
+        self._set_row_downloading(name)
 
         self._cleanup_worker()
         self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))
@@ -1563,6 +2035,12 @@ class MarketplaceCard(QWidget):
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.start()
 
+    def _set_row_downloading(self, name: str):
+        """将该插件行立即置为「下载中」（未安装态，旧版已删/将删）"""
+        row = self._row_map.get(name)
+        if row is not None:
+            row.set_downloading()
+
     def _on_update_done(self, name: str, success: bool):
         """更新完成"""
         self._status_label.setText("")
@@ -1571,17 +2049,19 @@ class MarketplaceCard(QWidget):
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
-            self._render_plugins(self._plugin_data)
+            self._refresh_row_states()
             InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
-            self._update_row_state(name, installed=True, error=True)
-            InfoBar.error(f"{name} 更新失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
+            # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
+            self._update_row_state(name, installed=False, error=True)
+            InfoBar.error(f"{name} 更新失败", "旧版已移除，可点击「安装」重试", duration=3000, parent=bar_parent)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
-        self._update_row_state(name, installed=True, error=True)
+        # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
+        self._update_row_state(name, installed=False, error=True)
         import re as _re
 
         msg = err
@@ -1595,6 +2075,40 @@ class MarketplaceCard(QWidget):
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=bar_parent)
+
+    def _refresh_row_states(self):
+        """安装/更新/卸载后刷新：同步已渲染行状态 + 隐藏不再匹配的行
+
+        不重建列表（保留滚动位置），仅同步状态、可见性与匹配计数。
+        """
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
+        # 最新安装状态（installer 缓存已被安装/更新操作失效）
+        inst_map = get_installer().get_installed_map()
+        self._installed_set = set(inst_map)
+        self._version_map = inst_map
+
+        # 重算匹配列表（不重建 widget）
+        self._matched = [p for p in self._all_plugins if self._plugin_matches(p, query, filter_mode)]
+        self._apply_sort(self._matched)
+
+        for name, row in self._row_map.items():
+            p = row._meta
+            installed, has_update, local_ver = self._row_state(p)
+            row.apply_state(installed, has_update, local_ver)
+            row.setVisible(self._plugin_matches(p, query, filter_mode))
+            row.update_search_highlight(query)
+
+        self._rendered_count = len(self._row_map)
+        if self._rendered_count >= len(self._matched):
+            self._all_loaded = True
+        if self._rendered_count < len(self._matched):
+            self._set_load_more_button(len(self._matched) - self._rendered_count)
+        else:
+            self._remove_load_more_button()
+        self._update_empty_state()
+        self._update_status()
+        self._update_update_badge()
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态
@@ -1616,7 +2130,7 @@ class MarketplaceCard(QWidget):
                     elif error and not installed:
                         row.set_error()
                     elif error and installed:
-                        # 更新失败：恢复按钮（保留更新标记）
+                        # 更新失败但旧版仍在：恢复按钮（保留更新标记）
                         row._busy = False
                         row._update_btn_text()
                     else:
@@ -1639,10 +2153,177 @@ class MarketplaceCard(QWidget):
         if self._plugin_data:
             self._render_plugins(self._plugin_data)
 
+    # ── 排序 / 角标 ──
+
+    def _style_sort_combo(self):
+        """按上下文主题刷新排序下拉样式（避免 QComboBox 默认纯黑弹出层）"""
+        tc = getattr(self, "_cached_tc", "") or _text_color()
+        theme = getattr(self, "_cached_theme_colors", {}) or {}
+        card_bg = theme.get("content_bg", "#ffffff" if not isDarkTheme() else "#2a2a2e")
+        border_c = theme.get("border", "rgba(128,128,128,0.15)")
+        try:
+            self._sort_combo.setStyleSheet(
+                f"QComboBox {{ background: rgba(128,128,128,0.1); color: {tc};"
+                f" border: 1px solid {border_c}; border-radius: 6px; padding: 2px 8px; font-size: 11px; }}"
+                "QComboBox::drop-down { border: none; width: 18px; }"
+                f"QComboBox QAbstractItemView {{ background: {card_bg}; color: {tc};"
+                f" border: 1px solid {border_c}; border-radius: 6px;"
+                " selection-background-color: rgba(40,120,220,0.3); outline: none; }"
+                "QComboBox QAbstractItemView::item { padding: 4px 8px; }"
+                "QComboBox QAbstractItemView::item:hover { background: rgba(128,128,128,0.15); }"
+            )
+        except RuntimeError:
+            pass
+
+    def _on_sort_changed(self, index: int):
+        """排序方式变化"""
+        self._sort_mode = self._sort_combo.itemData(index) if index >= 0 else "default"
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
+
+    def _update_update_badge(self):
+        """统计可更新插件数并更新角标"""
+        n = 0
+        for p in self._all_plugins or []:
+            if p.get("name") in self._installed_set and self._has_update(p, True):
+                n += 1
+        try:
+            if n > 0:
+                self._update_badge.setText(f"{n} 个可更新")
+                self._update_badge.show()
+            else:
+                self._update_badge.hide()
+        except RuntimeError:
+            pass
+
+    # ── Tag 过滤 ──
+
+    def _rebuild_tag_bar(self):
+        """从全量数据聚合 tag 计数，重建横向标签栏（数据变化时调用）"""
+        counts: dict = {}
+        for p in self._all_plugins or []:
+            for t in p.get("_cached_tags", []) or []:
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        self._tag_counts = counts
+
+        # 清空旧按钮
+        while self._tag_layout.count():
+            item = self._tag_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not counts:
+            self._tag_bar.setVisible(False)
+            return
+
+        tc = getattr(self, "_cached_tcs", "") or _text_color(secondary=True)
+
+        # 「更多」放最前：展开全部标签的多选面板，方便快速访问
+        more_btn = QPushButton("更多…", self._tag_content)
+        more_btn.setCursor(Qt.PointingHandCursor)
+        more_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {tc}; border: 1px dashed rgba(128,128,128,0.4);"
+            " border-radius: 6px; padding: 3px 10px; font-size: 11px; }"
+            "QPushButton:hover { background: rgba(128,128,128,0.15); }"
+        )
+        more_btn.clicked.connect(self._on_tag_more)
+        self._tag_layout.addWidget(more_btn)
+
+        for tag, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:12]:
+            btn = QPushButton(f"{tag} ({cnt})", self._tag_content)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setChecked(tag in self._active_tags)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
+                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; }"
+                "QPushButton:hover { background: rgba(128,128,128,0.2); }"
+                "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
+                " border: 1px solid rgba(98,160,234,0.5); }"
+            )
+            btn.clicked.connect(lambda checked, t=tag, b=btn: self._on_tag_toggled(t, b))
+            self._tag_layout.addWidget(btn)
+
+        self._tag_layout.addStretch(1)
+
+        self._tag_bar.setVisible(True)
+
+    def _sync_tag_buttons(self):
+        """同步标签栏按钮的选中状态（「更多」面板选择后调用）"""
+        for i in range(self._tag_layout.count()):
+            item = self._tag_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, QPushButton) and w.isCheckable():
+                w.setChecked(w.text().split(" (")[0] in self._active_tags)
+
+    def _on_tag_toggled(self, tag: str, btn: QPushButton):
+        """横向标签点击：toggle 激活"""
+        if btn.isChecked():
+            self._active_tags.add(tag)
+        else:
+            self._active_tags.discard(tag)
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
+
+    def _on_tag_more(self):
+        """「更多」：全部 tag 多选面板"""
+        counts = getattr(self, "_tag_counts", {})
+        if not counts:
+            return
+        dialog = _TagFilterDialog(
+            self,
+            counts,
+            self._active_tags,
+            tc=getattr(self, "_cached_tc", "") or _text_color(),
+            tcs=getattr(self, "_cached_tcs", "") or _text_color(secondary=True),
+            ff=getattr(self, "_cached_font_family", ""),
+            fs=getattr(self, "_cached_font_size", 14) or 14,
+            accent_bg=(getattr(self, "_cached_theme_colors", {}) or {}).get("accent", "#62a0ea"),
+            card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e"),
+            border_c=(getattr(self, "_cached_theme_colors", {}) or {}).get("border", "rgba(128,128,128,0.15)"),
+        )
+        if dialog.exec_():
+            self._active_tags = set(dialog.selected_tags())
+            self._sync_tag_buttons()
+            if self._plugin_data:
+                self._render_plugins(self._plugin_data)
+
+    # ── 插件详情 ──
+
+    def _on_plugin_detail(self, plugin_meta: dict):
+        """打开插件详情面板"""
+        installed, has_update, local_ver = self._row_state(plugin_meta)
+        theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
+        dialog = _PluginDetailDialog(
+            self,
+            plugin_meta,
+            installed,
+            has_update,
+            local_ver,
+            tc=getattr(self, "_cached_tc", "") or _text_color(),
+            tcs=getattr(self, "_cached_tcs", "") or _text_color(secondary=True),
+            ff=getattr(self, "_cached_font_family", ""),
+            fs=getattr(self, "_cached_font_size", 14) or 14,
+            accent_bg=theme_colors.get("accent", "#62a0ea"),
+            card_bg=theme_colors.get("content_bg", "#2a2a2e"),
+            border_c=theme_colors.get("border", "rgba(128,128,128,0.15)"),
+        )
+        dialog.installRequested.connect(self._async_install)
+        dialog.updateRequested.connect(self._async_update)
+        dialog.viewRequested.connect(self._on_view_plugin)
+        dialog.exec_()
+
     # ── 市场管理 ──
 
-    def _build_markets_page(self):
-        """构建市场管理页面"""
+    def _build_markets_page(self, force: bool = False):
+        """构建市场管理页面（首次构建后缓存，增删市场源时 force 重建）
+
+        之前每次切换到「市场」tab 都全量重建行 + _retheme 全树遍历，
+        是切 tab 卡顿的主因之一。
+        """
+        if getattr(self, "_markets_built", False) and not force:
+            return
         # 清空旧内容
         while self._markets_content_layout.count():
             item = self._markets_content_layout.takeAt(0)
@@ -1655,10 +2336,12 @@ class MarketplaceCard(QWidget):
             self._markets_content_layout.addWidget(row)
 
         self._markets_content_layout.addStretch()
-        self._retheme()
+        self._markets_built = True
 
     def _create_market_row(self, src_def: dict) -> QWidget:
-        """创建单个市场源的行组件"""
+        """创建单个市场源的行组件（直接用缓存主题色，无需事后 re-theme）"""
+        tc = getattr(self, "_cached_tc", None) or _text_color()
+        tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
         row = QWidget(self._markets_content)
         row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
         h = QHBoxLayout(row)
@@ -1675,7 +2358,7 @@ class MarketplaceCard(QWidget):
         name_label = QLabel(name_text, row)
         name_label.setObjectName("marketRowName")
         name_label.setStyleSheet(
-            f"color: {_text_color()}; font-weight: bold; font-size: 18px; background: transparent;"
+            f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;"
         )
         info.addWidget(name_label)
 
@@ -1686,7 +2369,7 @@ class MarketplaceCard(QWidget):
             src_text = src_text[:57] + "..."
         url_label = QLabel(src_text, row)
         url_label.setObjectName("marketRowUrl")
-        url_label.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 14px; background: transparent;")
+        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
@@ -1766,7 +2449,7 @@ class MarketplaceCard(QWidget):
 
         mgr.add_source(market_name, source, auto_update=False)
         self._market_url_edit.clear()
-        self._build_markets_page()
+        self._build_markets_page(force=True)
         self._status_label.setText(f"已添加 {market_name}")
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
@@ -1776,7 +2459,7 @@ class MarketplaceCard(QWidget):
         """移除市场源"""
         mgr = get_marketplace_manager()
         mgr.remove_source(name)
-        self._build_markets_page()
+        self._build_markets_page(force=True)
 
     def _open_url(self, url: str):
         """在浏览器中打开 URL"""
