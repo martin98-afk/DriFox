@@ -23,7 +23,6 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -309,157 +308,16 @@ def _collect_plugin_contents(plugin_dir: Path) -> dict:
     return {k: v for k, v in contents.items() if v}
 
 
-class _PluginInfoDialog(MaskDialogBase):
-    """MaskDialogBase 风格的插件内容详情弹窗（技能/MCP/命令等列表）"""
-
-    def __init__(
-        self,
-        parent,
-        title: str,
-        desc: str,
-        contents: dict,
-        *,
-        tc: str,
-        tcs: str,
-        ff: str,
-        fs: int,
-        accent_bg: str,
-        card_bg: str,
-        border_c: str,
-    ):
-        super().__init__(parent)
-        self._init_ui(title, desc, contents, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
-
-    def _init_ui(self, title, desc, contents, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
-        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
-        self.setClosableOnMaskClicked(True)
-        self.setDraggable(True)
-        self.setMaskColor(QColor(0, 0, 0, 76))
-
-        self.widget.setObjectName("marketPluginInfo")
-        self.widget.setStyleSheet(
-            f"""
-            #marketPluginInfo {{
-                background-color: {card_bg};
-                border: 1px solid {border_c};
-                border-radius: 8px;
-            }}
-            """
-        )
-
-        layout = QVBoxLayout(self.widget)
-        layout.setContentsMargins(28, 24, 28, 20)
-        layout.setSpacing(0)
-
-        # 标题
-        title_lb = BodyLabel(title, self.widget)
-        title_lb.setWordWrap(True)
-        title_lb.setStyleSheet(
-            f"color: {tc}; background: transparent; "
-            f"{f'font-family: "{ff}";' if ff else ''}"
-            f"font-size: {max(8, fs + 2)}px; font-weight: bold;"
-        )
-        layout.addWidget(title_lb)
-
-        # 描述
-        if desc:
-            layout.addSpacing(4)
-            desc_lb = BodyLabel(desc, self.widget)
-            desc_lb.setWordWrap(True)
-            desc_lb.setStyleSheet(
-                f"color: {tcs}; background: transparent; "
-                f"{f'font-family: "{ff}";' if ff else ''}"
-                f"font-size: {max(8, fs - 1)}px; line-height: 1.5;"
-            )
-            layout.addWidget(desc_lb)
-
-        layout.addSpacing(12)
-
-        # 内容区（滚动，组件多时不撑爆弹窗）
-        scroll = ScrollArea(self.widget)
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("background: transparent; border: none;")
-        content_widget = QWidget(scroll)
-        content_widget.setStyleSheet("background: transparent;")
-        c_layout = QVBoxLayout(content_widget)
-        c_layout.setContentsMargins(2, 2, 8, 2)
-        c_layout.setSpacing(6)
-
-        rows = []
-        if contents.get("skills"):
-            rows.append(("🧩 技能", "，".join(contents["skills"])))
-        if contents.get("mcp"):
-            rows.append(("🔌 MCP", "，".join(contents["mcp"])))
-        if contents.get("commands"):
-            rows.append(("📁 命令", "，".join(contents["commands"])))
-        if contents.get("agents"):
-            rows.append(("🤖 Agents", "，".join(contents["agents"])))
-        if contents.get("hooks"):
-            rows.append(("🔗 Hooks", "，".join(contents["hooks"])))
-        if contents.get("themes"):
-            rows.append(("🎨 主题", "，".join(contents["themes"])))
-
-        if not rows:
-            rows.append(("ℹ️ 内容", "该插件未声明可展示的组件"))
-
-        for label, value in rows:
-            row_lb = QLabel(f"<b>{label}</b>：{value}", content_widget)
-            row_lb.setWordWrap(True)
-            row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            row_lb.setStyleSheet(
-                f"color: {tc}; background: transparent; "
-                f"{f'font-family: "{ff}";' if ff else ''}"
-                f"font-size: {max(8, fs - 1)}px; line-height: 1.6;"
-            )
-            c_layout.addWidget(row_lb)
-        c_layout.addStretch()
-        scroll.setWidget(content_widget)
-        layout.addWidget(scroll, 1)
-
-        layout.addSpacing(8)
-
-        # 按钮行
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-        ok_btn = QPushButton("知道了", self.widget)
-        ok_btn.setCursor(Qt.PointingHandCursor)
-        ok_btn.setFixedHeight(36)
-        ok_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {accent_bg};
-                color: #ffffff;
-                border: none;
-                border-radius: 8px;
-                padding: 4px 28px;
-                {f'font-family: "{ff}";' if ff else ""}
-                font-size: {max(8, fs - 1)}px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {accent_bg};
-            }}
-            """
-        )
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.close)
-        btn_layout.addStretch()
-        btn_layout.addWidget(ok_btn)
-        layout.addLayout(btn_layout)
-
-        self.widget.setFixedSize(480, 360)
-
-
 class _PluginDetailDialog(MaskDialogBase):
     """插件详情弹窗：完整信息 + 底部操作按钮
 
     所有插件（含未安装）可查看：完整描述、作者、license、分类、
-    来源市场、官网。底部主操作按状态给出：安装 / 更新 / 查看内容。
+    来源市场、官网；已安装额外展示组件内容清单（技能/智能体/命令等，
+    滚动查看）。底部主操作按状态给出：安装 / 更新 / 已安装（禁用）。
     """
 
     installRequested = pyqtSignal(dict)
     updateRequested = pyqtSignal(dict)
-    viewRequested = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -576,45 +434,97 @@ class _PluginDetailDialog(MaskDialogBase):
                 f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
             )
             info_layout.addWidget(row_lb)
+
+        # 已安装：展示组件内容清单（技能/智能体/命令等，滚动查看）
+        if self._installed:
+            info_layout.addSpacing(4)
+            contents = _collect_plugin_contents(_PluginRow._find_local_plugin_path(name))
+            content_rows = []
+            if contents.get("skills"):
+                content_rows.append(("🧩 技能", "，".join(contents["skills"])))
+            if contents.get("mcp"):
+                content_rows.append(("🔌 MCP", "，".join(contents["mcp"])))
+            if contents.get("commands"):
+                content_rows.append(("📁 命令", "，".join(contents["commands"])))
+            if contents.get("agents"):
+                content_rows.append(("🤖 Agents", "，".join(contents["agents"])))
+            if contents.get("hooks"):
+                content_rows.append(("🔗 Hooks", "，".join(contents["hooks"])))
+            if contents.get("themes"):
+                content_rows.append(("🎨 主题", "，".join(contents["themes"])))
+            if not content_rows:
+                content_rows.append(("ℹ️ 内容", "该插件未声明可展示的组件"))
+
+            sec_lb = QLabel("<b>📦 组件内容</b>", info_widget)
+            sec_lb.setStyleSheet(
+                f"color: {accent_bg}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+            )
+            info_layout.addWidget(sec_lb)
+            for label, value in content_rows:
+                row_lb = QLabel(f"<b>{label}</b>：{value}", info_widget)
+                row_lb.setWordWrap(True)
+                row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                row_lb.setStyleSheet(
+                    f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+                )
+                info_layout.addWidget(row_lb)
+
         info_layout.addStretch()
         scroll.setWidget(info_widget)
         layout.addWidget(scroll, 1)
 
         layout.addSpacing(12)
 
-        # 底部操作按钮
+        # 底部操作按钮（主按钮居中）
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        # 主操作：按状态给出
+        # 主操作：按状态给出（已安装且无更新 → 禁用态「已安装」）
         if self._has_update:
             main_text, main_fn = "更新", self._on_update
         elif self._installed:
-            main_text, main_fn = "查看内容", self._on_view
+            main_text, main_fn = "已安装", None
         else:
             main_text, main_fn = "安装", self._on_install
 
         main_btn = QPushButton(main_text, self.widget)
         main_btn.setCursor(Qt.PointingHandCursor)
         main_btn.setFixedHeight(36)
-        main_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {accent_bg};
-                color: #ffffff;
-                border: none;
-                border-radius: 8px;
-                padding: 4px 24px;
-                {ff_qss}
-                font-size: {max(8, fs - 1)}px;
-                font-weight: bold;
-            }}
-            QPushButton:hover {{
-                background-color: {accent_bg};
-            }}
-            """
-        )
-        main_btn.clicked.connect(main_fn)
+        if main_fn is None:
+            main_btn.setEnabled(False)
+            main_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: rgba(76, 175, 80, 0.12);
+                    color: #4CAF50;
+                    border: 1px solid rgba(76, 175, 80, 0.3);
+                    border-radius: 8px;
+                    padding: 4px 24px;
+                    {ff_qss}
+                    font-size: {max(8, fs - 1)}px;
+                    font-weight: bold;
+                }}
+                """
+            )
+        else:
+            main_btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: {accent_bg};
+                    color: #ffffff;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 4px 24px;
+                    {ff_qss}
+                    font-size: {max(8, fs - 1)}px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: {accent_bg};
+                }}
+                """
+            )
+            main_btn.clicked.connect(main_fn)
 
         close_btn = QPushButton("关闭", self.widget)
         close_btn.setCursor(Qt.PointingHandCursor)
@@ -637,12 +547,13 @@ class _PluginDetailDialog(MaskDialogBase):
         )
         close_btn.clicked.connect(self.close)
 
-        btn_layout.addStretch()
+        btn_layout.addStretch(1)
         btn_layout.addWidget(main_btn)
         btn_layout.addWidget(close_btn)
+        btn_layout.addStretch(1)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(520, 460)
+        self.widget.setFixedSize(600, 540)
 
     def _on_install(self):
         self.installRequested.emit(self._meta)
@@ -652,13 +563,12 @@ class _PluginDetailDialog(MaskDialogBase):
         self.updateRequested.emit(self._meta)
         self.close()
 
-    def _on_view(self):
-        self.viewRequested.emit(self._meta)
-        self.close()
-
 
 class _TagFilterDialog(MaskDialogBase):
-    """Tag 多选面板：勾选多个 tag 与搜索/筛选 AND 叠加"""
+    """Tag 多选面板：toggle pill 胶囊按钮 + 流式换行（hook 编辑卡片风格）
+
+    与搜索/筛选 AND 叠加；选中项用淡主题色高亮。
+    """
 
     def __init__(
         self,
@@ -707,7 +617,7 @@ class _TagFilterDialog(MaskDialogBase):
         )
         layout.addWidget(title_lb)
 
-        hint_lb = QLabel("可勾选多个标签，与搜索、筛选条件叠加", self.widget)
+        hint_lb = QLabel("可点选多个标签，与搜索、筛选条件叠加", self.widget)
         hint_lb.setStyleSheet(f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;")
         layout.addWidget(hint_lb)
         layout.addSpacing(10)
@@ -717,19 +627,46 @@ class _TagFilterDialog(MaskDialogBase):
         scroll.setStyleSheet("background: transparent; border: none;")
         content = QWidget(scroll)
         content.setStyleSheet("background: transparent;")
-        c_layout = QVBoxLayout(content)
-        c_layout.setContentsMargins(2, 2, 8, 2)
-        c_layout.setSpacing(4)
 
+        # toggle pill 样式（参考 hook 编辑卡片的 matcher 勾选框）
+        _accent_rgba = accent_bg
+        if accent_bg.startswith("#") and len(accent_bg) == 7:
+            _r, _g, _b = int(accent_bg[1:3], 16), int(accent_bg[3:5], 16), int(accent_bg[5:7], 16)
+            _accent_rgba = f"rgba({_r}, {_g}, {_b}, 0.15)"
+        _toggle_style = (
+            f"QPushButton {{"
+            f"  background: transparent;"
+            f"  border: 1px solid {border_c};"
+            f"  border-radius: 12px;"
+            f"  padding: 3px 12px;"
+            f"  color: {tcs};"
+            f"  {ff_qss} font-size: {max(8, fs - 1)}px;"
+            f"  text-align: center;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  border-color: {accent_bg};"
+            f"  color: {tc};"
+            f"}}"
+            f"QPushButton:checked {{"
+            f"  background: {_accent_rgba};"
+            f"  border-color: {accent_bg};"
+            f"  color: {accent_bg};"
+            f"  font-weight: bold;"
+            f"}}"
+        )
+
+        # FlowLayout 直接作为 content 布局（不嵌套 QVBoxLayout，避免宽度计算异常）
+        tags_flow = _FlowLayout(content, spacing=6)
+        tags_flow.setContentsMargins(2, 4, 2, 4)
         for tag in sorted(self._tag_counts, key=lambda t: (-self._tag_counts[t], t)):
-            cb = QCheckBox(f"{tag} ({self._tag_counts[tag]})", content)
-            cb.setChecked(tag in active_tags)
-            cb.setStyleSheet(
-                f"QCheckBox {{ color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; spacing: 6px; }}"
-            )
-            c_layout.addWidget(cb)
-            self._checkboxes[tag] = cb
-        c_layout.addStretch()
+            pill = QPushButton(f"{tag} ({self._tag_counts[tag]})", content)
+            pill.setCheckable(True)
+            pill.setCursor(Qt.PointingHandCursor)
+            pill.setFixedHeight(26)
+            pill.setStyleSheet(_toggle_style)
+            pill.setChecked(tag in active_tags)
+            tags_flow.addWidget(pill)
+            self._checkboxes[tag] = pill
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
 
@@ -761,7 +698,7 @@ class _TagFilterDialog(MaskDialogBase):
         btn_layout.addWidget(ok_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(320, 420)
+        self.widget.setFixedSize(560, 600)
 
     def selected_tags(self) -> list:
         """返回勾选的 tag 列表"""
@@ -902,7 +839,6 @@ class _PluginRow(QFrame):
     installRequested = pyqtSignal(dict)  # plugin_meta
     updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
     openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
-    viewRequested = pyqtSignal(dict)  # 查看已安装插件的内容列表
     openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
     detailRequested = pyqtSignal(dict)  # 打开插件详情面板
     enableRequested = pyqtSignal(dict)  # 启用已禁用插件
@@ -968,10 +904,6 @@ class _PluginRow(QFrame):
         if getattr(self, "_mp_label", None) is not None:
             self._mp_label.setStyleSheet(
                 f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
-        if getattr(self, "_status_label", None) is not None:
-            self._status_label.setStyleSheet(
-                f"color: {self._status_color()}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
             )
 
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
@@ -1059,7 +991,7 @@ class _PluginRow(QFrame):
                 self._tag_labels.append(lbl)
             info_layout.addWidget(tags_widget)
 
-        # 元信息行：市场来源 + 状态标签（同一行，减少纵向堆叠）
+        # 元信息行：市场来源（状态标签已并入标题版本号后）
         meta_row = QWidget(self)
         meta_row.setStyleSheet("background: transparent;")
         meta_layout = QHBoxLayout(meta_row)
@@ -1075,20 +1007,15 @@ class _PluginRow(QFrame):
             )
             meta_layout.addWidget(self._mp_label)
 
-        # 状态标签（启用/禁用/系统，仅已安装时显示）
-        self._status_label = None
-        if self._installed:
-            self._status_label = QLabel(self._status_text(), meta_row)
-            self._status_label.setStyleSheet(
-                f"color: {self._status_color()}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
-            meta_layout.addWidget(self._status_label)
-
-        if marketplace or self._status_label is not None:
+        if marketplace:
             meta_layout.addStretch(1)
             info_layout.addWidget(meta_row)
 
         layout.addLayout(info_layout, 1)
+
+        # 图标按钮列（目录/官网/信息）：置顶排列，不垂直居中
+        icon_col = QVBoxLayout()
+        icon_col.setSpacing(4)
 
         # 打开插件所在文件夹按钮（仅已安装时可见，未安装无本地目录）
         self._dir_btn = None
@@ -1099,7 +1026,7 @@ class _PluginRow(QFrame):
             self._dir_btn.setToolTip(f"打开插件所在文件夹 {local_path}")
             self._dir_btn.clicked.connect(lambda checked, p=local_path: self.openDirRequested.emit(str(p)))
             self._dir_btn.setVisible(self._installed)
-            layout.addWidget(self._dir_btn)
+            icon_col.addWidget(self._dir_btn)
 
         # 官网链接按钮（仅未安装时显示；已安装可在详情弹窗查看官网）
         homepage = self._compute_homepage(self._meta)
@@ -1108,14 +1035,17 @@ class _PluginRow(QFrame):
             link_btn.setFixedSize(28, 28)
             link_btn.setToolTip(f"打开官网 {homepage}")
             link_btn.clicked.connect(lambda checked, u=homepage: self.openUrlRequested.emit(u))
-            layout.addWidget(link_btn)
+            icon_col.addWidget(link_btn)
 
         # 详情按钮（未安装也能查看完整信息）
         detail_btn = TransparentToolButton(FluentIcon.INFO, self)
         detail_btn.setFixedSize(28, 28)
         detail_btn.setToolTip("查看详情")
         detail_btn.clicked.connect(lambda checked, m=self._meta: self.detailRequested.emit(m))
-        layout.addWidget(detail_btn)
+        icon_col.addWidget(detail_btn)
+
+        icon_col.addStretch(1)
+        layout.addLayout(icon_col)
 
         # 操作列：主按钮在上，管理按钮（启用/禁用/卸载）竖排在下
         action_col = QVBoxLayout()
@@ -1150,6 +1080,7 @@ class _PluginRow(QFrame):
             self._btn.setText(getattr(self, "_busy_text", "处理中…"))
             self._btn.setEnabled(False)
             self._btn.setStyleSheet(self._original_btn_style)
+            self._btn.setVisible(True)
         elif self._has_update:
             self._btn.setText("更新")
             self._btn.setEnabled(True)
@@ -1159,20 +1090,15 @@ class _PluginRow(QFrame):
                 "border-radius: 4px; }"
                 "PushButton:hover { background: rgba(255, 167, 38, 0.35); }"
             )
+            self._btn.setVisible(True)
         elif self._installed:
-            self._btn.setText("查看")
-            self._btn.setEnabled(True)
-            # 绿色系：与「安装」默认蓝、「更新」橙色区分
-            self._btn.setStyleSheet(
-                "PushButton { background: rgba(76, 175, 80, 0.15); "
-                "color: #4CAF50; border: 1px solid rgba(76, 175, 80, 0.3); "
-                "border-radius: 4px; }"
-                "PushButton:hover { background: rgba(76, 175, 80, 0.3); }"
-            )
+            # 已安装且无更新：主按钮隐藏（左侧详情按钮已可查看完整信息）
+            self._btn.setVisible(False)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
             self._btn.setStyleSheet(self._original_btn_style)
+            self._btn.setVisible(True)
         self._update_manage_buttons()
 
     # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
@@ -1262,13 +1188,6 @@ class _PluginRow(QFrame):
         # 文件夹按钮仅已安装时可见
         if self._dir_btn is not None:
             self._dir_btn.setVisible(installed)
-        # 状态标签：已安装时显示，未安装/操作中隐藏
-        if self._status_label is not None:
-            if installed and not self._busy:
-                self._status_label.setText(self._status_text())
-                self._status_label.setVisible(True)
-            else:
-                self._status_label.setVisible(False)
         self._update_btn_text()
 
     def set_downloading(self):
@@ -1280,16 +1199,15 @@ class _PluginRow(QFrame):
         self._busy_text = "下载中…"
         if self._dir_btn is not None:
             self._dir_btn.setVisible(False)
-        if self._status_label is not None:
-            self._status_label.setVisible(False)
         self._update_btn_text()
 
     def _refresh_title(self):
-        """按当前状态重算标题：名称 + 彩色版本徽标
+        """按当前状态重算标题：名称 + 彩色版本徽标 + 状态标签
 
         - 有更新：🔄 v{local} → v{remote}（橙色）
         - 已安装且最新：✓ v{local}（绿色）
         - 未安装：v{remote}（次级色）
+        - 已安装：追加状态标签（✅ 已启用 / ⛔ 已禁用 / 🔒 系统插件）
         """
         remote_ver = self._meta.get("version", "")
         ver_html = ""
@@ -1299,10 +1217,16 @@ class _PluginRow(QFrame):
             ver_html = f' <span style="color:#4CAF50;">✓ v{self._local_version}</span>'
         elif remote_ver:
             ver_html = f' <span style="color:{self._tcs};">v{remote_ver}</span>'
-        self._version_suffix = ver_html
+        # 状态标签：版本号之后
+        status_html = ""
+        if self._installed and not self._busy:
+            st = self._status_text()
+            if st:
+                status_html = f' <span style="color:{self._status_color()}; font-weight:bold;">{st}</span>'
+        self._version_suffix = ver_html + status_html
         title_fs = max(9, self._font_size - 2) if self._font_size > 0 else 13
         name_html = _highlight_html(self._name_raw, self._search_query)
-        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}</span>')
+        self._title_label.setText(f'<span style="font-size:{title_fs}pt;">{name_html}{ver_html}{status_html}</span>')
 
     def set_error(self):
         """安装/更新失败后恢复按钮"""
@@ -1468,6 +1392,7 @@ class MarketplaceCard(QWidget):
         self._all_loaded: bool = False  # 匹配列表是否已全部渲染完
         self._current_filter: str = "all"
         self._active_tags: set = set()  # 激活的 tag 集合（AND 过滤）
+        self._source_filter: str = ""  # 市场来源过滤（"" = 全部）
         self._sort_mode: str = "default"
         self._load_more_btn: Optional[QPushButton] = None
         self._header_icon: Optional[IconWidget] = None
@@ -1700,23 +1625,6 @@ class MarketplaceCard(QWidget):
 
         header_layout.addStretch(1)
 
-        # ── 搜索框（与 plugin-manager 一致，放在标题栏）──
-        self._search_edit = LineEdit(header)
-        self._search_edit.setPlaceholderText("搜索插件…")
-        self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setFixedWidth(160)
-        self._search_edit.setStyleSheet(
-            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
-        )
-        # 防抖 300ms，避免每敲一个字就全量重建
-        from PyQt5.QtCore import QTimer
-
-        self._search_debounce = QTimer(self)
-        self._search_debounce.setSingleShot(True)
-        self._search_debounce.timeout.connect(self._filter_plugins)
-        self._search_edit.textChanged.connect(self._on_search_text_changed)
-        header_layout.addWidget(self._search_edit)
-
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(
             f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
@@ -1784,6 +1692,23 @@ class MarketplaceCard(QWidget):
         except Exception as e:
             logger.warning(f"[Marketplace] InfoBadge 挂载失败: {e}")
 
+        # 搜索框（排序下拉左侧）
+        self._search_edit = LineEdit(filter_row)
+        self._search_edit.setPlaceholderText("搜索插件…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(160)
+        self._search_edit.setStyleSheet(
+            f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
+        )
+        # 防抖 300ms，避免每敲一个字就全量重建
+        from PyQt5.QtCore import QTimer
+
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.timeout.connect(self._filter_plugins)
+        self._search_edit.textChanged.connect(self._on_search_text_changed)
+        filter_layout.addWidget(self._search_edit)
+
         # 排序下拉
         self._sort_combo = QComboBox(filter_row)
         self._sort_combo.addItem("默认排序", "default")
@@ -1797,8 +1722,49 @@ class MarketplaceCard(QWidget):
 
         browse_root.addWidget(filter_row)
 
-        # ── Tag 过滤栏（横向滚动，数据加载后构建）──
-        self._tag_bar = ScrollArea(self._browse_page)
+        # ── 市场来源过滤栏（横向滚动，数据加载后构建；左侧「来源:」描述）──
+        source_row = QWidget(self._browse_page)
+        source_row.setStyleSheet("background: transparent;")
+        source_row_layout = QHBoxLayout(source_row)
+        source_row_layout.setContentsMargins(12, 0, 12, 0)
+        source_row_layout.setSpacing(6)
+        source_lb = QLabel("来源:", source_row)
+        source_lb.setFixedWidth(40)
+        source_lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        source_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
+        source_row_layout.addWidget(source_lb)
+        self._source_bar = ScrollArea(source_row)
+        self._source_bar.setWidgetResizable(True)
+        self._source_bar.setFixedHeight(34)
+        self._source_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._source_bar.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._source_bar.setStyleSheet(
+            "ScrollArea { background: transparent; border: none; }"
+            "ScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._source_content = QWidget(self._source_bar)
+        self._source_content.setStyleSheet("background: transparent;")
+        self._source_layout = QHBoxLayout(self._source_content)
+        self._source_layout.setContentsMargins(2, 0, 12, 2)
+        self._source_layout.setSpacing(6)
+        self._source_bar.setWidget(self._source_content)
+        source_row_layout.addWidget(self._source_bar, 1)
+        browse_root.addWidget(source_row)
+        self._source_row = source_row
+        self._source_row.setVisible(False)  # 无数据时隐藏整行
+
+        # ── Tag 过滤栏（横向滚动，数据加载后构建；左侧「类型:」描述）──
+        tag_row = QWidget(self._browse_page)
+        tag_row.setStyleSheet("background: transparent;")
+        tag_row_layout = QHBoxLayout(tag_row)
+        tag_row_layout.setContentsMargins(12, 0, 12, 0)
+        tag_row_layout.setSpacing(6)
+        tag_lb = QLabel("类型:", tag_row)
+        tag_lb.setFixedWidth(40)
+        tag_lb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        tag_lb.setStyleSheet(f"color: {_text_color(secondary=True)}; font-size: 11px; background: transparent;")
+        tag_row_layout.addWidget(tag_lb)
+        self._tag_bar = ScrollArea(tag_row)
         self._tag_bar.setWidgetResizable(True)
         self._tag_bar.setFixedHeight(38)
         self._tag_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1810,10 +1776,12 @@ class MarketplaceCard(QWidget):
         self._tag_content = QWidget(self._tag_bar)
         self._tag_content.setStyleSheet("background: transparent;")
         self._tag_layout = QHBoxLayout(self._tag_content)
-        self._tag_layout.setContentsMargins(12, 0, 12, 2)
+        self._tag_layout.setContentsMargins(2, 0, 12, 2)
         self._tag_layout.setSpacing(6)
         self._tag_bar.setWidget(self._tag_content)
-        browse_root.addWidget(self._tag_bar)
+        tag_row_layout.addWidget(self._tag_bar, 1)
+        browse_root.addWidget(tag_row)
+        self._tag_row = tag_row
         self._tag_bar.setVisible(False)  # 无 tag 数据时隐藏
 
         self._content_stack = QStackedWidget(self._browse_page)
@@ -2000,11 +1968,12 @@ class MarketplaceCard(QWidget):
         self._version_map = inst_map
         self._status_map = get_installer().get_status_map()
 
-        # 数据内容变化 → 更新全量数据 + 重建 tag 栏
+        # 数据内容变化 → 更新全量数据 + 重建 tag 栏 / 来源栏
         data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
         if data_changed:
             self._all_plugins = plugins
             self._rebuild_tag_bar()
+            self._rebuild_source_bar()
 
         # 「已安装」视图：并入市场列表外的本地插件（系统/禁用/手动安装）
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
@@ -2149,6 +2118,11 @@ class MarketplaceCard(QWidget):
             if not (tags & self._active_tags):
                 return False
 
+        # 市场来源过滤
+        source_filter = getattr(self, "_source_filter", "")
+        if source_filter and p.get("_marketplace", "") != source_filter:
+            return False
+
         installed = name in self._installed_set
         has_update = self._has_update(p, installed)
 
@@ -2267,7 +2241,6 @@ class MarketplaceCard(QWidget):
             row.installRequested.connect(self._async_install)
             row.updateRequested.connect(self._async_update)
             row.openUrlRequested.connect(self._open_url)
-            row.viewRequested.connect(self._on_view_plugin)
             row.openDirRequested.connect(self._on_open_plugin_dir)
             row.detailRequested.connect(self._on_plugin_detail)
             row.enableRequested.connect(self._async_enable)
@@ -2526,7 +2499,7 @@ class MarketplaceCard(QWidget):
         self._worker_thread.start()
 
     def _confirm_uninstall(self, name: str) -> bool:
-        """卸载确认弹窗（MaskDialogBase 风格）"""
+        """卸载确认弹窗（MaskDialogBase 风格，parent 为 tab 顶层窗口）"""
         tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
         tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
         ff = getattr(self, "_cached_font_family", "")
@@ -2536,8 +2509,11 @@ class MarketplaceCard(QWidget):
         card_bg = theme_colors.get("content_bg", "#2a2a2e")
         border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
 
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         dialog = _ConfirmUninstallDialog(
-            self,
+            bar_parent,
             name,
             tc=tc,
             tcs=tcs,
@@ -2697,9 +2673,9 @@ class MarketplaceCard(QWidget):
     # ── Tag 过滤 ──
 
     def _rebuild_tag_bar(self):
-        """从全量数据聚合 tag 计数，重建横向标签栏（数据变化时调用）"""
+        """从全量数据（远程 + 本地插件）聚合 tag 计数，重建横向标签栏"""
         counts: dict = {}
-        for p in self._all_plugins or []:
+        for p in list(self._all_plugins or []) + self._build_local_extra_plugins():
             for t in p.get("_cached_tags", []) or []:
                 if t:
                     counts[t] = counts.get(t, 0) + 1
@@ -2712,7 +2688,7 @@ class MarketplaceCard(QWidget):
                 item.widget().deleteLater()
 
         if not counts:
-            self._tag_bar.setVisible(False)
+            self._tag_row.setVisible(False)
             return
 
         # 主文字色 + 加粗，确保清晰可读
@@ -2746,7 +2722,71 @@ class MarketplaceCard(QWidget):
 
         self._tag_layout.addStretch(1)
 
-        self._tag_bar.setVisible(True)
+        self._tag_row.setVisible(True)
+
+    def _rebuild_source_bar(self):
+        """从全量数据聚合市场来源，重建来源过滤栏（数据变化时调用）"""
+        # 聚合来源（含本地插件的「本地」）
+        sources = {}
+        for p in self._all_plugins or []:
+            src = p.get("_marketplace", "") or "未知"
+            sources[src] = sources.get(src, 0) + 1
+        for p in self._build_local_extra_plugins():
+            src = p.get("_marketplace", "") or "未知"
+            sources[src] = sources.get(src, 0) + 1
+
+        # 清空旧按钮
+        while self._source_layout.count():
+            item = self._source_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not sources:
+            self._source_row.setVisible(False)
+            return
+
+        tc = getattr(self, "_cached_tc", "") or _text_color()
+
+        def _make_source_btn(text: str, value: str):
+            btn = QPushButton(text, self._source_content)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setChecked(value == getattr(self, "_source_filter", ""))
+            btn.setStyleSheet(
+                f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
+                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"
+                "QPushButton:hover { background: rgba(128,128,128,0.2); }"
+                "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
+                " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"
+            )
+            btn.clicked.connect(lambda checked, v=value, b=btn: self._on_source_toggled(v, b))
+            return btn
+
+        # 「全部」在前
+        self._source_layout.addWidget(_make_source_btn(f"全部 ({len(sources)})", ""))
+        for src, cnt in sorted(sources.items(), key=lambda kv: (-kv[1], kv[0])):
+            self._source_layout.addWidget(_make_source_btn(f"{src} ({cnt})", src))
+
+        self._source_layout.addStretch(1)
+        self._source_row.setVisible(True)
+
+    def _sync_source_buttons(self):
+        """同步来源按钮选中状态"""
+        for i in range(self._source_layout.count()):
+            item = self._source_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, QPushButton) and w.isCheckable():
+                w.setChecked(w.text().split(" (")[0] == getattr(self, "_source_filter", ""))
+
+    def _on_source_toggled(self, source: str, btn: QPushButton):
+        """来源按钮点击：单选过滤（点击同一按钮取消）"""
+        if btn.isChecked():
+            self._source_filter = source
+        else:
+            self._source_filter = ""
+        self._sync_source_buttons()
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
 
     def _sync_tag_buttons(self):
         """同步标签栏按钮的选中状态（「更多」面板选择后调用）"""
@@ -2766,12 +2806,15 @@ class MarketplaceCard(QWidget):
             self._render_plugins(self._plugin_data)
 
     def _on_tag_more(self):
-        """「更多」：全部 tag 多选面板"""
+        """「更多」：全部 tag 多选面板（parent 为 tab 顶层窗口）"""
         counts = getattr(self, "_tag_counts", {})
         if not counts:
             return
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         dialog = _TagFilterDialog(
-            self,
+            bar_parent,
             counts,
             self._active_tags,
             tc=getattr(self, "_cached_tc", "") or _text_color(),
@@ -2791,11 +2834,18 @@ class MarketplaceCard(QWidget):
     # ── 插件详情 ──
 
     def _on_plugin_detail(self, plugin_meta: dict):
-        """打开插件详情面板"""
+        """打开插件详情面板
+
+        parent 用 tab 管理器顶层窗口（遮罩覆盖整个 tab 而非卡片区域），
+        与 InfoBar 挂载策略一致。
+        """
         installed, has_update, local_ver, _status = self._row_state(plugin_meta)
         theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        bar_parent = TabManagerWindow.get_instance() or self.window()
         dialog = _PluginDetailDialog(
-            self,
+            bar_parent,
             plugin_meta,
             installed,
             has_update,
@@ -2810,7 +2860,6 @@ class MarketplaceCard(QWidget):
         )
         dialog.installRequested.connect(self._async_install)
         dialog.updateRequested.connect(self._async_update)
-        dialog.viewRequested.connect(self._on_view_plugin)
         dialog.exec_()
 
     # ── 市场管理 ──
@@ -2975,48 +3024,6 @@ class MarketplaceCard(QWidget):
                 subprocess.Popen(["xdg-open", path])
         except Exception as e:
             logger.warning(f"[Marketplace] 打开插件目录失败: {e}")
-
-    # ── 查看已安装插件内容 ──────────────────────────────────
-
-    def _on_view_plugin(self, plugin_meta: dict):
-        """弹窗展示已安装插件的内容清单（技能/MCP/命令等）"""
-        name = plugin_meta.get("name", "")
-        if not name:
-            return
-        local_path = _PluginRow._find_local_plugin_path(name)
-        if local_path is None:
-            return
-        contents = _collect_plugin_contents(local_path)
-
-        # 主题色（从卡片缓存读取）
-        tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
-        tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
-        ff = getattr(self, "_cached_font_family", "")
-        fs = getattr(self, "_cached_font_size", 14)
-        theme_colors = getattr(self, "_cached_theme_colors", {})
-        accent_bg = theme_colors.get("accent", "") or ("#62a0ea" if isDarkTheme() else "#2878dc")
-        card_bg = theme_colors.get("content_bg", "#2a2a2e" if isDarkTheme() else "#ffffff")
-        border_c = theme_colors.get("border", "rgba(128,128,128,0.15)")
-
-        # 标题：名称 + 版本
-        version = plugin_meta.get("version", "")
-        title = name + (f"  v{version}" if version else "")
-        desc = plugin_meta.get("description", "")
-
-        dialog = _PluginInfoDialog(
-            self,
-            title,
-            desc,
-            contents,
-            tc=tc,
-            tcs=tcs,
-            ff=ff,
-            fs=fs,
-            accent_bg=accent_bg,
-            card_bg=card_bg,
-            border_c=border_c,
-        )
-        dialog.exec_()
 
     # ── 清理 ──
 
