@@ -96,6 +96,9 @@ _RAINBOW_COLORS = [
 ]
 _RAINBOW_N = len(_RAINBOW_COLORS)
 
+# 团队 leader 角色名：团队框内默认置顶
+_LEADER_AGENT = "leader"
+
 # 悬停渐层颜色常量（避免 paintEvent 中反复创建 QColor）
 _HOVER_DARK_COLORS = (_QColor(99, 102, 241, 32), _QColor(139, 92, 246, 18))
 _HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
@@ -1962,8 +1965,13 @@ class TabPanel(QWidget):
         优化：当 _item_team 与上次构建快照一致且 _items 数量未变时直接 return，
         避免 add_tab/remove_tab 反复触发时的冗余重建。
         """
-        # 快照对比：_item_team 内容 + _items 数量未变 → 跳过
-        snapshot = (tuple(sorted(self._item_team.items())), len(self._items))
+        # 快照对比：_item_team 内容 + _items 数量 + leader 成员签名 未变 → 跳过
+        # （leader 签名含胶囊角色文本，update_tab_capsule 后置顶排序才能被感知）
+        snapshot = (
+            tuple(sorted(self._item_team.items())),
+            len(self._items),
+            tuple(i for i, item in enumerate(self._items) if item._capsule_label.text() == _LEADER_AGENT),
+        )
         if getattr(self, "_layout_snapshot", None) == snapshot:
             return
         self._layout_snapshot = snapshot
@@ -2012,8 +2020,12 @@ class TabPanel(QWidget):
             # 清空成员层旧 widgets（header 在外层布局中，不在此层）
             while inner.count() > 0:
                 inner.takeAt(0)
-            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）
-            for i in team_members[t]:
+            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）。
+            # ⭐ leader 置顶：稳定排序——leader 排最前，其余成员保持 _items 原始顺序
+            # （快速新建成员可追加任意角色，leader 加在中间也要自动置顶）。
+            for i in sorted(
+                team_members[t], key=lambda _i: 0 if self._items[_i]._capsule_label.text() == _LEADER_AGENT else 1
+            ):
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
 
@@ -2126,12 +2138,21 @@ class TabPanel(QWidget):
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
         if 0 <= index < len(self._items):
-            self._items[index].set_capsule(text)
+            item = self._items[index]
+            old = item._capsule_label.text()
+            item.set_capsule(text)
+            # ⭐ leader 状态变化（补设/移除胶囊）→ 触发团队内重排置顶。
+            # 非 leader 变化的更新被 _layout_snapshot 快照拦截，开销可忽略。
+            if (old == _LEADER_AGENT) != (text == _LEADER_AGENT):
+                self._rebuild_team_layout()
 
     def clear_tab_capsule(self, index: int):
         """隐藏团队角色胶囊"""
         if 0 <= index < len(self._items):
-            self._items[index].clear_capsule()
+            item = self._items[index]
+            item.clear_capsule()
+            # ⭐ 角色胶囊被移除（leader 退出团队）→ 重排（与 update_tab_capsule 对称）
+            self._rebuild_team_layout()
 
     def update_tab_streaming(self, index: int, streaming: bool, error: bool = False):
         """更新 Tab 的流式/错误状态"""

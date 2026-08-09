@@ -795,6 +795,30 @@ class TeamManager:
             data = self._get_team_data(team_name)
             return data.get("project", "") or ""
 
+    # ── 团队级统一工作目录/工作树（一人改工作目录全员同步）──
+
+    def set_team_workdir(self, workdir: str, team_name: str = DEFAULT_TEAM):
+        """设置团队级统一工作目录/工作树（写入 team.json **顶层**，与 project 平级）
+
+        工作目录/工作树是团队共享状态：任一成员切换工作目录或 git worktree 时
+        写入，供同团队其他成员同步应用与恢复路径读取。
+
+        Args:
+            workdir: 工作目录绝对路径（空串表示清除）
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            if data.get("workdir") == workdir:
+                return
+            data["workdir"] = workdir
+            self._save_team_data(team_name)
+
+    def get_team_workdir(self, team_name: str = DEFAULT_TEAM) -> str:
+        """获取团队级统一工作目录/工作树（未设置 / 老团队无 workdir 时返回空串）"""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            return data.get("workdir", "") or ""
+
     # ── 邮件系统 ─────────────────────────────────────
 
     def _next_mail_id(self) -> str:

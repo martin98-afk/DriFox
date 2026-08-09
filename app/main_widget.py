@@ -2474,9 +2474,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._position_input_glow_underlay()
 
         # 拖拽文件到扩展区域（输入卡空白区 / 附件行 / 消息列表）→ 添加 AttachmentChip
+        # chat_container = 消息列表区：拖到对话区域任意位置都进入附件；
+        # 项目卡片/关键文档卡片等位于独立卡片容器且自带 drop 处理，不在此列。
         if obj in (
             getattr(self, "_input_card", None),
             getattr(self, "_attach_container", None),
+            getattr(self, "chat_container", None),
         ):
             etype = event.type()
             if etype == QEvent.DragEnter:
@@ -4460,6 +4463,10 @@ class OpenAIChatToolWindow(ToolWindow):
         team_project = tm.get_team_project()
         if team_project:
             self._apply_team_project(team_project)
+        # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
+        team_workdir = tm.get_team_workdir()
+        if team_workdir:
+            self._apply_team_workdir(team_workdir)
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -4824,6 +4831,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     tm_mgr.set_team_project(team_project)
             if team_project:
                 win._apply_team_project(team_project)
+            # 应用团队级统一工作目录/工作树（若已设置）：新窗口与团队共享同一工作树
+            team_workdir = tm_mgr.get_team_workdir()
+            if team_workdir:
+                win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
             wid = getattr(win, "_window_id", "?")
             QTimer.singleShot(
@@ -5113,6 +5124,10 @@ class OpenAIChatToolWindow(ToolWindow):
             team_project = tm_mgr.get_team_project()
             if team_project:
                 win._apply_team_project(team_project)
+            # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
+            team_workdir = tm_mgr.get_team_workdir()
+            if team_workdir:
+                win._apply_team_workdir(team_workdir)
             if hasattr(win, "_refresh_team_ui"):
                 try:
                     win._refresh_team_ui(agent_name)
@@ -17501,6 +17516,68 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[TeamProject] 同步项目到窗口失败: {e}")
 
+    def _apply_team_workdir(self, workdir: str):
+        """团队级统一工作目录/工作树接收方：应用同团队其他成员广播的 workdir 切换
+
+        与 _apply_team_project 同语义：只同步「实例缓存 + tool_executor +
+        记忆卡片实例缓存 + 分支标签」，不写 DB（DB 由发送方负责）、不触发
+        新广播（防循环）、值相等直接跳过（幂等）。
+        workdir 为空 = 发送方清除了工作目录，本地回退临时工作目录兜底。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        project = self._current_project
+        if workdir:
+            if self._current_workdir.get(project) == workdir:
+                return
+            self._current_workdir[project] = workdir
+            resolved = workdir
+        else:
+            self._current_workdir.pop(project, None)
+            resolved = self._ensure_temp_workdir(project) or None
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_workdir(resolved or None)
+        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+            self._memory_card_popup._instance_workdir[project] = resolved or ""
+        self._update_branch()
+        logger.info(f"[TeamWorkdir] 窗口 {self._window_id} 已应用团队工作目录: {resolved or 'cleared'}")
+
+    def _broadcast_team_workdir(self, workdir: str):
+        """团队内工作目录/工作树切换广播：写团队级 workdir + 同团队其他成员同步应用
+
+        触发点：_on_working_dir_changed / _switch_to_worktree / _restore_main_repo，
+        任一成员切换工作目录或 git worktree 时全员同步（统一工作树）。
+        防循环：仅遍历其他窗口（不含发送方），接收方 _apply_team_workdir 不广播。
+        按团队过滤：仅 _team_agent_name 非空、is_team_member、且同
+        _team_run_id/_team_name（同一次团队运行）的窗口才应用。
+        """
+        if not getattr(self, "_team_agent_name", ""):
+            return
+        from app.core.team_manager import TeamManager
+
+        tm_mgr = TeamManager.get_instance()
+        # 写团队级统一工作目录/工作树（team.json 顶层，与 project/run_id 平级）
+        tm_mgr.set_team_workdir(workdir or "")
+        # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
+        my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
+        for win in type(self)._instances:
+            if win is self or getattr(win, "_is_destroyed", False):
+                continue
+            if not getattr(win, "_team_agent_name", ""):
+                continue
+            try:
+                if not tm_mgr.is_team_member(win._window_id):
+                    continue
+            except Exception:
+                continue
+            win_key = getattr(win, "_team_run_id", "") or getattr(win, "_team_name", "") or TeamManager.DEFAULT_TEAM
+            if win_key != my_key:
+                continue
+            try:
+                win._apply_team_workdir(workdir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[TeamWorkdir] 同步工作目录到窗口失败: {e}")
+
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -18349,6 +18426,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
         if hasattr(self, "_file_mention_card") and resolved_path:
             self._file_mention_card.ensure_cache(resolved_path)
+        # 团队模式：一人改工作目录全员同步（统一工作树）
+        if resolved_path:
+            self._broadcast_team_workdir(resolved_path)
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
@@ -18578,6 +18658,8 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         logger.info(f"[MainWidget] 已自动切换到 worktree: {worktree_path}（项目: {project}）")
+        # 团队模式：worktree 切换全员同步（统一工作树）
+        self._broadcast_team_workdir(worktree_path)
 
     def _restore_main_repo(self):
         """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
@@ -18620,6 +18702,8 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         logger.info(f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）")
+        # 团队模式：切回主仓库全员同步（统一工作树）
+        self._broadcast_team_workdir(main_repo)
 
     @classmethod
     def _on_app_about_to_quit(cls):
