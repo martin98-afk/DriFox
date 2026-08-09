@@ -1,6 +1,34 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.14] - 2026-08-09
+
+自上一版本以来的变更 | 提交数：15 · 文件变更：54 · +2275/-2418 | 贡献者：dingma
+
+> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、市场管理功能完善、插件详情对话框优化）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
+
+### ✨ 新功能 (New Features)
+
+- **团队工作目录管理与同步** (`app/`): 团队级工作目录集中管理，tab 顺序优先团队负责人并保持成员顺序
+- **tab_panel 自动展开系列** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 挤压态自动展开与按钮样式统一、相对增长条件扩展逻辑、动画时序与用户交互适配、宽度配置优化
+- **插件市场管理增强** (`app/widgets/` + `app/core/`): 插件详情对话框展示已安装组件与更新按钮态、插件管理功能整体增强
+- **筛选栏重构与布局优化** (`app/widgets/`): 来源/标签筛选栏重构，标题与布局优化
+- **UI 组件更新** (`app/widgets/`): 上下文使用统计、快捷键管理器等组件标题与布局调整
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡片流式渲染修复** (`app/widgets/message_card.py` + `app/core/workers/`): 骨架缓存版本号递增 + tail 节点改 div 修复流式期间不渲染、流式期间即时格式化未闭合尾部消除最终内容不符
+- **tab_manager 侧边栏修复** (`app/widgets/tab_manager.py`): 启动时恢复侧边栏宽度，修复欢迎卡片渲染后左面板被挤压误折叠
+
+### 🎨 样式改进 (Style)
+
+- **系统插件样式优化** (`plugins/`): 优化所有系统插件样式
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号同步** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): v0.4.14 版本号升级与同步
+
+
 ## [v0.4.13] - 2026-08-07
 
 自上一版本以来的变更 | 提交数：107 · 文件变更：371 · +33168/-8048 | 贡献者：mading, dingma
