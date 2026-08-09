@@ -722,7 +722,6 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         border_c: str,
     ):
         super().__init__(parent)
-        self._result = 0
         self._init_ui(name, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
 
     def _init_ui(self, name, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
@@ -818,12 +817,11 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         self.widget.setFixedSize(400, 200)
 
     def _on_confirm(self):
-        self._result = 1
-        self.close()
+        """确认卸载：accept() 使 exec_() 返回 1（close() 会被 QDialog 转为 reject）"""
+        self.accept()
 
     def _on_cancel(self):
-        self._result = 0
-        self.close()
+        self.reject()
 
 
 class _PluginRow(QFrame):
