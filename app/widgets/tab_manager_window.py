@@ -40,6 +40,13 @@ _MAX_CHAT_WIDTH = 1000
 # 否则标题文字被压成窄条无法阅读。
 _EXPANDED_MIN_FRAME_WIDTH = 200
 
+# ── 挤压折叠后自动展开的窗口增长阈值（px）──
+# 窗口 resize 挤压折叠后，需比折叠时窗口总宽再宽出该值才自动展开，
+# 避免"折叠刚完成条件恰满足就弹回展开"的抖动（绝对条件在窗口 ~760 时
+# 折叠即满足展开条件，导致折叠态无法保持）。overlay 卡片关闭属布局恢复
+# （窗口总宽未变），不走增长条件。
+_AUTO_EXPAND_GROWTH = 200
+
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
@@ -717,6 +724,9 @@ class TabManagerWindow(QWidget):
         cur_w = sizes[0] if sizes else (self._tab_frame.width() if hasattr(self, "_tab_frame") else 250)
 
         if collapsed:
+            # 记录挤压折叠基准窗口总宽：自动展开需窗口比此刻更宽（相对增长），
+            # 避免"折叠瞬间绝对空间恰满足→立刻弹回"（见 _maybe_auto_expand_after_squeeze）
+            self._squeeze_total_width = total_w
             # 收起前保存当前宽度（供展开时恢复）
             if sizes:
                 cur_frame_w = sizes[0]
@@ -835,15 +845,21 @@ class TabManagerWindow(QWidget):
             # （resize 结束检测在动画中会被 _animating 跳过）。
             self._maybe_auto_expand_after_squeeze()
 
-    def _maybe_auto_expand_after_squeeze(self):
+    def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True):
         """挤压折叠后空间恢复：自动展开回常规宽度
 
         仅对"被外部挤压自动折叠"（_collapsed_by_squeeze=True）生效；
         用户手动折叠/拖拽折叠（标记已清除）不自动展开，尊重手动意图。
 
         触发点：窗口 resize 结束、overlay 卡片关闭、折叠动画结束。
-        空间判定：窗口总宽 - 折叠宽 ≥ 展开目标宽 + 聊天区最小可用宽(400)，
-        不足时保持折叠不强行展开。
+        空间判定（两条件都满足才展开）：
+        1. 相对增长（growth_required=True）：当前窗口总宽 ≥ 折叠时总宽 + 200。
+           防止"折叠刚完成绝对条件恰满足就弹回"——窗口只缩窄到 900 左右折叠
+           时，绝对空间（900-60 ≥ 展开宽+400）仍满足，若只看绝对条件会立刻
+           弹回展开，折叠态无法保持。仅当窗口比折叠时明显更宽（有新增空间）
+           才自动展开，语义即"再有剩余空间时自动展开"。
+        2. 绝对下限：窗口总宽 - 折叠宽 ≥ 展开目标宽 + 聊天区最小可用宽(400)，
+           展开后面板与聊天区都放得下。
         """
         if not hasattr(self, "_tab_panel"):
             return
@@ -852,10 +868,15 @@ class TabManagerWindow(QWidget):
             return
         if panel._animating:
             return  # 动画中，等下次触发
-        # 空间是否足够：总宽 - 折叠宽 >= 展开目标宽 + 聊天区最小宽
         total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
         target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
         chat_min = 400  # 聊天区最小可用宽度
+        # 条件1：相对增长（仅窗口 resize 类触发需要；overlay 布局恢复传 False）
+        if growth_required:
+            base = getattr(self, "_squeeze_total_width", None)
+            if base is not None and total < base + _AUTO_EXPAND_GROWTH:
+                return  # 窗口未比折叠时更宽，不自动展开
+        # 条件2：绝对下限
         if total - (self._tab_panel._collapsed_min_width + 14) < target_w + chat_min:
             return  # 空间不足，保持折叠
         # 空间足够：自动展开（先清标记防重入）
@@ -923,8 +944,10 @@ class TabManagerWindow(QWidget):
             self._content_stack.setCurrentIndex(1)
         else:
             self._content_stack.setCurrentIndex(0)
-            # 卡片关闭 → 布局恢复：延迟到下一事件循环（等 relayout 完成）再检测
-            QTimer.singleShot(0, self._maybe_auto_expand_after_squeeze)
+            # 卡片关闭 → 布局恢复：延迟到下一事件循环（等 relayout 完成）再检测。
+            # growth_required=False：overlay 挤压时窗口总宽未变，不适用相对增长
+            # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
+            QTimer.singleShot(0, lambda: self._maybe_auto_expand_after_squeeze(growth_required=False))
 
     def _on_splitter_manually_moved(self, pos: int, index: int):
         """用户手动拖拽 splitter 把手：清除挤压折叠标记
