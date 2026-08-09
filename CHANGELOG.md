@@ -3,13 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.14] - 2026-08-09
 
-自上一版本以来的变更 | 提交数：15 · 文件变更：54 · +2275/-2418 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma
 
-> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、市场管理功能完善、插件详情对话框优化）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
+> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、插件管理器模块、卸载流程 UI 主线程卸载与锁释放）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
 
 ### ✨ 新功能 (New Features)
 
-- **团队工作目录管理与同步** (`app/`): 团队级工作目录集中管理，tab 顺序优先团队负责人并保持成员顺序
+- **插件管理器模块** (`plugins/plugin-manager/`): 新增插件管理器模块初始实现
+- **插件市场 UI 主线程卸载** (`plugins/plugin-marketplace/ui/`): 后台操作前在主线程卸载插件 UI 组件，规避线程问题
+- **插件卸载锁提前释放** (`plugins/plugin-marketplace/ui/installer.py`): 卸载前释放 UI 插件锁，修复 Windows 文件占用
+- **团队工作目录管理与同步** (`app/`): 团队成员工作目录统一管理，tab 顺序优先团队负责人并保持成员
 - **tab_panel 自动展开系列** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 挤压态自动展开与按钮样式统一、相对增长条件扩展逻辑、动画时序与用户交互适配、宽度配置优化
 - **插件市场管理增强** (`app/widgets/` + `app/core/`): 插件详情对话框展示已安装组件与更新按钮态、插件管理功能整体增强
 - **筛选栏重构与布局优化** (`app/widgets/`): 来源/标签筛选栏重构，标题与布局优化
@@ -19,6 +22,10 @@ All notable changes to this project will be documented in this file.
 
 - **消息卡片流式渲染修复** (`app/widgets/message_card.py` + `app/core/workers/`): 骨架缓存版本号递增 + tail 节点改 div 修复流式期间不渲染、流式期间即时格式化未闭合尾部消除最终内容不符
 - **tab_manager 侧边栏修复** (`app/widgets/tab_manager.py`): 启动时恢复侧边栏宽度，修复欢迎卡片渲染后左面板被挤压误折叠
+
+### ♻️ 代码重构 (Refactoring)
+
+- **卸载确认对话框简化** (`plugins/plugin-marketplace/ui/cards.py`): 确认处理改用 accept/reject 方法简化流程
 
 ### 🎨 样式改进 (Style)
 
