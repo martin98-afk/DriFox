@@ -430,6 +430,57 @@ class PluginInstaller:
                 **kwargs,
             )
 
+    # ── 卸载前释放引用 ──────────────────────────────────
+
+    @staticmethod
+    def _release_ui_plugin_locks(name: str):
+        """卸载/禁用插件前，释放 UI 插件的内存引用与缓存（Windows 文件占用防护）
+
+        UI 插件（含 ui/ 组件的插件）被加载后，其模块（ui_plugin_xxx）会常驻
+        sys.modules，模块对象可能持有 .pyc 句柄；浮动卡片 widget / 命令注册 /
+        渲染回调等引用会让插件文件在 Windows 上无法 rmtree 或 move（WinError 32）。
+        本方法按顺序执行：
+
+        1. UIPluginRegistry.unload_plugin —— 清理注册表、销毁卡片 widget 实例、
+           注销命令（已加载的 UI 插件才有动作，其余静默返回）
+        2. 从 sys.modules 移除 ui_plugin_{name} 及其子模块 —— 解除 .pyc 句柄
+        3. importlib.invalidate_caches() + gc.collect() —— 失效字节码缓存并回收
+           残留循环引用（回调闭包等）
+        4. 删除残留的 ui/__pycache__ —— 兜底清理可能被句柄占用的 .pyc 文件
+
+        任何一步失败都不阻塞删除流程（宁可删除失败后重试，也不因释放失败中断）。
+        """
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().unload_plugin(name)
+        except Exception as e:
+            logger.debug(f"[Installer] unload_plugin({name}) 失败（忽略）: {e}")
+
+        try:
+            import gc
+            import importlib
+            import sys
+
+            safe = name.replace("-", "_").replace(":", "_")
+            head = f"ui_plugin_{safe}"
+            for mod_name in list(sys.modules.keys()):
+                if mod_name == head or mod_name.startswith(head + "."):
+                    del sys.modules[mod_name]
+            importlib.invalidate_caches()
+            gc.collect()
+        except Exception as e:
+            logger.debug(f"[Installer] 清理 sys.modules 失败（忽略）: {e}")
+
+        # 兜底：删除插件可能的 __pycache__ 残留（句柄释放后再删一般能成功）
+        for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
+            pc = base / name / "ui" / "__pycache__"
+            if pc.exists():
+                try:
+                    shutil.rmtree(pc)
+                except OSError:
+                    pass
+
     # ── 卸载 ─────────────────────────────────────────────
 
     def remove(self, name: str) -> bool:
@@ -441,6 +492,8 @@ class PluginInstaller:
         Returns:
             True 删除成功或目录不存在
         """
+        # 先释放 UI 引用/缓存，避免 Windows 下文件被占用导致 rmtree 失败
+        self._release_ui_plugin_locks(name)
         removed = False
         for base in (self._plugins_dir, self._disabled_dir):
             target = base / name
@@ -473,6 +526,8 @@ class PluginInstaller:
         src = self._plugins_dir / name
         if not src.exists():
             return False
+        # 先释放 UI 引用/缓存，避免 Windows 下 move 失败
+        self._release_ui_plugin_locks(name)
         try:
             self._disabled_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(self._disabled_dir / name))
