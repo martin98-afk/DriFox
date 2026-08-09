@@ -35,6 +35,11 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
 
+# ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
+# 挤压折叠后点击展开时，若保存的宽度已被压到折叠阈值以下，展开不得窄于该值，
+# 否则标题文字被压成窄条无法阅读。
+_EXPANDED_MIN_FRAME_WIDTH = 200
+
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
@@ -221,8 +226,6 @@ class TabManagerWindow(QWidget):
         # 动画方向（True=收起），供 valueChanged 里判断跨阈值时机
         self._sidebar_anim_collapsing: bool = False
         self._sidebar_anim_ui_switched: bool = False  # 动画中是否已跨阈值切换 UI
-        # 挤压折叠自动展开轮询计数：0=未监听；>0=轮询中
-        self._auto_expand_retry_count: int = 0
 
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
@@ -719,21 +722,20 @@ class TabManagerWindow(QWidget):
                 cur_frame_w = sizes[0]
                 # 挤压折叠场景：resizeEvent 自动折叠时宽度已被压到折叠阈值
                 # （< _auto_collapse_width=100）以下，此刻保存的"当前宽度"只剩
-                # 90px 左右，点击展开只能恢复 120px 窄条。且历史配置宽度
-                # tab_panel_width 可能残留更窄的值（如 120）——也不可用。
-                # 直接用常规展开宽度（187 ≈ 默认 280 的 2/3，用户偏好），
-                # 保证挤压折叠后点击展开不宽不窄。
+                # 90px 左右，点击展开只能恢复窄条。此时改用常规展开宽度
+                # （历史配置 tab_panel_width，默认 280）作为恢复目标，保证展开
+                # 后宽度可读；用户手动折叠时宽度正常，照常保存实际宽度。
                 if cur_frame_w < self._tab_panel._auto_collapse_width:
-                    cur_frame_w = 187 + 14
+                    saved_w = Settings.get_instance().tab_panel_width.value or 280
+                    cur_frame_w = max(saved_w, _EXPANDED_MIN_FRAME_WIDTH - 14) + 14
                 self._saved_panel_frame_width = cur_frame_w
             # 使用 _tab_panel 的收起最小宽度
             target_w = self._tab_panel._collapsed_min_width + 14  # +12 margins +2 border
         else:
             # 展开：恢复折叠时保存的目标宽度（frame 宽度）。
-            # 折叠端已处理：挤压折叠时 saved 被修正为常规宽度（187+14），
-            # 手动折叠时保留用户实际宽度。展开端不再兜底，避免覆盖
-            # 用户手动调窄的宽度（否则会出现"展开先到默认宽度再回缩"）。
-            target_w = max(120, getattr(self, "_saved_panel_frame_width", 250))
+            # 下限 _EXPANDED_MIN_FRAME_WIDTH：挤压折叠时保存的窄宽度已被折叠端
+            # 修正为常规宽度，此处兜底保证展开后宽度不小于最小可读宽度。
+            target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
             # 拖拽把手拉开的场景（当前宽度已远超收起最小宽度，说明用户
             # 手动拖到位）：保持用户拖出的宽度，不覆盖为保存值。
             # 按钮点击展开时 cur_w == 收起宽度(60)，不满足此条件。
@@ -745,19 +747,13 @@ class TabManagerWindow(QWidget):
         # 持久化收起状态
         Settings.get_instance().tab_panel_collapsed.value = collapsed
 
-        # 挤压折叠：启动自动展开监听（空间恢复时自动展开）；手动展开则取消
-        if collapsed and getattr(self._tab_panel, "_collapsed_by_squeeze", False):
-            self._kick_auto_expand_watch()
-        elif not collapsed:
-            self._stop_auto_expand_watch()
-
         if not animate:
             # 启动恢复等瞬时路径：直接 setSizes
             self._splitter.setSizes([target_w, max(0, total_w - target_w)])
             if not collapsed:
                 new_sizes = self._splitter.sizes()
                 if new_sizes:
-                    Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
+                    Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, new_sizes[0]) - 14
             return
 
         # 平滑动画过渡
@@ -767,7 +763,7 @@ class TabManagerWindow(QWidget):
             if hasattr(self, "_tab_panel"):
                 self._tab_panel.sync_collapsed_ui()
             if not collapsed:
-                Settings.get_instance().tab_panel_width.value = max(120, target_w - 14)
+                Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, target_w) - 14
             return
 
         # 平滑动画过渡
@@ -822,9 +818,8 @@ class TabManagerWindow(QWidget):
         if self._sidebar_anim_collapsing:
             target_w = self._tab_panel._collapsed_min_width + 14
         else:
-            # 与 _on_sidebar_toggled 展开分支同一目标（saved 已由折叠端
-            # 修正：挤压→常规宽度、手动→用户宽度），避免落位跳变
-            target_w = max(120, getattr(self, "_saved_panel_frame_width", 250))
+            target_w = getattr(self, "_saved_panel_frame_width", 250)
+            target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
         self._splitter.setSizes([target_w, max(0, total_w - target_w)])
         # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
         if hasattr(self, "_tab_panel"):
@@ -833,7 +828,41 @@ class TabManagerWindow(QWidget):
         if not self._sidebar_anim_collapsing:
             new_sizes = self._splitter.sizes()
             if new_sizes:
-                Settings.get_instance().tab_panel_width.value = max(120, new_sizes[0] - 14)
+                Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, new_sizes[0]) - 14
+        else:
+            # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
+            # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
+            # （resize 结束检测在动画中会被 _animating 跳过）。
+            self._maybe_auto_expand_after_squeeze()
+
+    def _maybe_auto_expand_after_squeeze(self):
+        """挤压折叠后空间恢复：自动展开回常规宽度
+
+        仅对"被外部挤压自动折叠"（_collapsed_by_squeeze=True）生效；
+        用户手动折叠/拖拽折叠（标记已清除）不自动展开，尊重手动意图。
+
+        触发点：窗口 resize 结束、overlay 卡片关闭、折叠动画结束。
+        空间判定：窗口总宽 - 折叠宽 ≥ 展开目标宽 + 聊天区最小可用宽(400)，
+        不足时保持折叠不强行展开。
+        """
+        if not hasattr(self, "_tab_panel"):
+            return
+        panel = self._tab_panel
+        if not panel._collapsed or not panel._collapsed_by_squeeze:
+            return
+        if panel._animating:
+            return  # 动画中，等下次触发
+        # 空间是否足够：总宽 - 折叠宽 >= 展开目标宽 + 聊天区最小宽
+        total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
+        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        chat_min = 400  # 聊天区最小可用宽度
+        if total - (self._tab_panel._collapsed_min_width + 14) < target_w + chat_min:
+            return  # 空间不足，保持折叠
+        # 空间足够：自动展开（先清标记防重入）
+        panel._collapsed_by_squeeze = False
+        panel.set_collapsed(False)
+        self._saved_panel_frame_width = target_w
+        self._on_sidebar_toggled(False)
 
     def _restore_sidebar_collapsed(self):
         """启动时根据配置恢复侧边栏收起状态"""
@@ -861,7 +890,7 @@ class TabManagerWindow(QWidget):
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
         saved_w = Settings.get_instance().tab_panel_width.value or 280
-        frame_w = max(120, saved_w) + 14
+        frame_w = max(_EXPANDED_MIN_FRAME_WIDTH, saved_w + 14)
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
         if total <= frame_w:
@@ -894,74 +923,19 @@ class TabManagerWindow(QWidget):
             self._content_stack.setCurrentIndex(1)
         else:
             self._content_stack.setCurrentIndex(0)
+            # 卡片关闭 → 布局恢复：延迟到下一事件循环（等 relayout 完成）再检测
+            QTimer.singleShot(0, self._maybe_auto_expand_after_squeeze)
 
     def _on_splitter_manually_moved(self, pos: int, index: int):
         """用户手动拖拽 splitter 把手：清除挤压折叠标记
 
         挤压折叠标记（_collapsed_by_squeeze）仅用于"被外部 relayout 压窄
         自动折叠后自动展开"场景。用户手动拖动把手瘦身到折叠阈值以下，
-        视为手动意图——不自动展开，避免关闭卡片时把用户拖窄的面板再撑开。
+        视为手动意图——不自动展开，避免关闭卡片/窗口拉宽时把用户拖窄的
+        面板再撑开。
         """
         if index == 0 and hasattr(self, "_tab_panel"):
             self._tab_panel._collapsed_by_squeeze = False
-        # 手动拖拽：取消挤压自动展开监听
-        self._stop_auto_expand_watch()
-
-    def _kick_auto_expand_watch(self):
-        """挤压折叠后启动自动展开监听（轮询）
-
-        卡片关闭/布局恢复时机不可靠（overlay 信号、resize 完成时序不一），
-        故在挤压折叠发生时即启动轮询：周期性检查折叠是否已非挤压（手动
-        干预则停）、以及空间是否恢复到位，满足即自动展开回常规宽度。
-
-        注意：必须在折叠动画结束后才开始首检——_on_sidebar_toggled(True)
-        内的折叠动画（200ms）会覆盖同时启动的展开动画，且动画互相打断后
-        轮询可能被误停。延迟 300ms（>动画时长）再检，保证检测时布局稳定。
-        """
-        if self._auto_expand_retry_count:
-            return  # 已有进行中的轮询，不重复启动
-        self._auto_expand_retry_count = 1
-        QTimer.singleShot(300, self._auto_expand_retry)
-
-    def _stop_auto_expand_watch(self):
-        """取消挤压自动展开监听（手动拖拽 / 手动展开时调用）"""
-        self._auto_expand_retry_count = 0
-
-    def _auto_expand_retry(self):
-        """单次自动展开检测；不满足则 300ms 后重试，最多 ~18s
-
-        条件：
-        1. TabPanel 当前为折叠态且是挤压折叠（_collapsed_by_squeeze=True）
-           —— 用户手动折叠/拖拽折叠会清标记，随即停止
-        2. 可用空间足够（窗口宽度能容纳常规展开宽度）——窗口过窄时不强开
-        """
-        if not hasattr(self, "_tab_panel") or self._auto_expand_retry_count <= 0:
-            return
-        panel = self._tab_panel
-        if not panel._collapsed or not panel._collapsed_by_squeeze:
-            # 已展开或已转手动：结束监听
-            self._stop_auto_expand_watch()
-            return
-        if panel._animating:
-            QTimer.singleShot(300, self._auto_expand_retry)
-            return
-        target_w = 187 + 14  # 常规展开宽度（含 frame 补偿）
-        total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
-        if total < target_w + 300:
-            # 空间仍不足：延迟重试
-            if self._auto_expand_retry_count < 60:
-                self._auto_expand_retry_count += 1
-                QTimer.singleShot(300, self._auto_expand_retry)
-            else:
-                self._stop_auto_expand_watch()
-            return
-        # 空间足够：展开。先复位 TabPanel 状态（等效手动点展开按钮：
-        # _toggle_sidebar 会先翻转 _collapsed），否则宽度动画已完成但
-        # _collapsed 仍 True，UI 保持紧凑态、后续状态错乱
-        panel.set_collapsed(False)
-        self._saved_panel_frame_width = target_w
-        self._stop_auto_expand_watch()
-        self._on_sidebar_toggled(False)
 
     # ── 窗口管理 ──
 
@@ -1671,7 +1645,7 @@ class TabManagerWindow(QWidget):
             if not self._tab_panel._collapsed:
                 sizes = self._splitter.sizes()
                 if sizes:
-                    Settings.get_instance().tab_panel_width.value = max(120, sizes[0] - 14)
+                    Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, sizes[0]) - 14
 
     def _restore_geometry(self):
         """恢复窗口位置（屏幕居中），确保不超出屏幕"""
@@ -1936,6 +1910,8 @@ class TabManagerWindow(QWidget):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
             self._content_area.update()
+        # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
+        self._maybe_auto_expand_after_squeeze()
 
     def _force_relayout(self):
         """blocking 结束后强制完整布局收拢
