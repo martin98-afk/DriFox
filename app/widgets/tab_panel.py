@@ -876,6 +876,9 @@ class TabPanel(QWidget):
         self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._collapsed: bool = False  # 侧边栏收起状态
+        # 挤压折叠标记：非用户主动（被覆盖层/布局 relayout 压缩）导致自动折叠。
+        # 用于空间恢复后管理器自动展开（区别于按钮手动折叠——手动折叠不自动展开）。
+        self._collapsed_by_squeeze: bool = False
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
         self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
@@ -1101,6 +1104,10 @@ class TabPanel(QWidget):
         # 拖窄自动折叠（展开态 → 收起态）
         if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
+            # 宽度变化触发的折叠：可能是覆盖层/布局 relayout 挤压（意外），也可能是
+            # 用户拖拽把手主动收窄（有意）。无法从单次 resize 区分，统一标记为
+            # "宽度驱动折叠"，管理器在空间恢复时据此决定是否自动展开。
+            self._collapsed_by_squeeze = True
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
             from PyQt5.QtCore import QTimer
@@ -1111,6 +1118,7 @@ class TabPanel(QWidget):
         # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹
         if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width + 10:
             self._collapsed = False
+            self._collapsed_by_squeeze = False
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
             from PyQt5.QtCore import QTimer
@@ -1249,6 +1257,8 @@ class TabPanel(QWidget):
         避免展开瞬间文字被挤在窄条里。
         """
         self._collapsed = not self._collapsed
+        # 按钮手动折叠/展开：非挤压，清除挤压标记（避免空间恢复时误自动展开）
+        self._collapsed_by_squeeze = False
         self._update_toggle_button(switch_ui=False)
         self.sidebarToggled.emit(self._collapsed)
 

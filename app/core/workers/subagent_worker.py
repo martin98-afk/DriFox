@@ -1241,7 +1241,7 @@ class SubAgentManager(QObject):
         self._current_session_id: str = ""
 
         # ========== 日志活力度 Stall 检测 ==========
-        self._stall_timeout: int = 180  # 日志静默超时秒数（默认 3 分钟）
+        self._stall_timeout: int = 300  # 日志静默超时秒数（默认 5 分钟）
         self._stall_timer = QTimer(self)
         self._stall_timer.setInterval(10000)  # 每 10 秒检查一次
         self._stall_timer.timeout.connect(self._check_stalled_tasks)

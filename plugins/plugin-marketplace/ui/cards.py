@@ -1097,21 +1097,29 @@ class _PluginRow(QFrame):
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
-            self._btn.setStyleSheet(self._original_btn_style)
+            # 与管理按钮（禁用/卸载）统一描边风格，不再用 Fluent 默认透明样式
+            self._btn.setStyleSheet(self._outline_btn_style("#2196F3"))
             self._btn.setVisible(True)
         self._update_manage_buttons()
 
     # ── 管理按钮（启用/禁用/卸载，行内直接操作） ─────────────
+
+    def _outline_btn_style(self, color: str) -> str:
+        """描边按钮样式（安装/启用/禁用/卸载统一）：同色边框+彩色文字，hover 浅色底"""
+        r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
+        return (
+            f"PushButton {{ color: {color}; border: 1px solid {color};"
+            " border-radius: 4px; padding: 2px 6px; background: transparent; }"
+            f"PushButton:hover {{ background: rgba({r},{g},{b},0.12); }}"
+        )
 
     def _make_manage_btn(self, text: str, color: str, slot) -> TransparentPushButton:
         """创建紧凑管理按钮（与主按钮同宽同高，竖排对齐）"""
         btn = TransparentPushButton(text, self)
         btn.setFixedSize(100, 30)
         btn.setStyleSheet(
-            f"PushButton {{ color: {color}; border: 1px solid {color};"
-            f" border-radius: 4px; padding: 2px 6px; font-size: {max(10, self._btn_font_size - 2)}px;"
-            " background: transparent; }"
-            f"PushButton:hover {{ background: rgba({','.join(str(int(color[i : i + 2], 16)) for i in (1, 3, 5))},0.12); }}"
+            self._outline_btn_style(color)
+            + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
         )
         btn.clicked.connect(slot)
         return btn
