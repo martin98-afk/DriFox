@@ -338,7 +338,7 @@ class _FakeMainWidgetWithSystemCard:
 def test_show_floating_card_registers_as_system_card():
     """_show_floating_card 首次显示时应调用 register_system_card，让插件卡片像系统配置卡片一样隐藏输入区
 
-    容器选择：插件卡片可注册在 bottom/full 等位置（如 plugin-marketplace / plugin-manager
+    容器选择：插件卡片可注册在 bottom/full 等位置（如 plugin-marketplace
     已迁移为 container="full"），显示时均触发 register_system_card。
     """
     reg = UIPluginRegistry.get_instance()

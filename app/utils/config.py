@@ -370,7 +370,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.4.13"
+    current_version = "v0.4.14"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -547,7 +547,7 @@ class Settings(QConfig):
 
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", True, BoolValidator())
-    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 250, RangeValidator(120, 500))
+    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 280, RangeValidator(120, 500))
     tab_panel_collapsed = ConfigItem("UI", "TabPanelCollapsed", False, BoolValidator())
     tab_manager_geometry = ConfigItem("UI", "TabManagerGeometry", "")
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())

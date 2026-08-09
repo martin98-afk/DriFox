@@ -155,6 +155,7 @@ from app.widgets.cards.settings.model_config_card import (
 )
 from app.widgets.cards.settings.model_selector_card import (
     ModelSelectorCardContent,
+    _format_cost_number,
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent,
@@ -2473,9 +2474,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._position_input_glow_underlay()
 
         # 拖拽文件到扩展区域（输入卡空白区 / 附件行 / 消息列表）→ 添加 AttachmentChip
+        # chat_container = 消息列表区：拖到对话区域任意位置都进入附件；
+        # 项目卡片/关键文档卡片等位于独立卡片容器且自带 drop 处理，不在此列。
         if obj in (
             getattr(self, "_input_card", None),
             getattr(self, "_attach_container", None),
+            getattr(self, "chat_container", None),
         ):
             etype = event.type()
             if etype == QEvent.DragEnter:
@@ -4459,6 +4463,10 @@ class OpenAIChatToolWindow(ToolWindow):
         team_project = tm.get_team_project()
         if team_project:
             self._apply_team_project(team_project)
+        # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
+        team_workdir = tm.get_team_workdir()
+        if team_workdir:
+            self._apply_team_workdir(team_workdir)
         self._refresh_team_ui(agent_name)
 
         # 同步活跃窗口列表（触发失效成员清理）
@@ -4823,6 +4831,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     tm_mgr.set_team_project(team_project)
             if team_project:
                 win._apply_team_project(team_project)
+            # 应用团队级统一工作目录/工作树（若已设置）：新窗口与团队共享同一工作树
+            team_workdir = tm_mgr.get_team_workdir()
+            if team_workdir:
+                win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
             wid = getattr(win, "_window_id", "?")
             QTimer.singleShot(
@@ -5112,6 +5124,10 @@ class OpenAIChatToolWindow(ToolWindow):
             team_project = tm_mgr.get_team_project()
             if team_project:
                 win._apply_team_project(team_project)
+            # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
+            team_workdir = tm_mgr.get_team_workdir()
+            if team_workdir:
+                win._apply_team_workdir(team_workdir)
             if hasattr(win, "_refresh_team_ui"):
                 try:
                     win._refresh_team_ui(agent_name)
@@ -6900,8 +6916,25 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置文字（用 display_name 给用户看，避免 UUID 显示）
         if self._current_provider_name and self._current_model_name:
             self._model_btn_text.setText(self._current_model_name)
-            note = get_model_capabilities(self._current_model_name).get("note", "")
+            caps = get_model_capabilities(self._current_model_name)
+            note = caps.get("note", "")
+            # 第一行：服务商 · 模型 · 价格(单位在末尾一次) · 多模态/思考
+            cost_parts = []
+            cost = caps.get("cost") or {}
+            for key, label in (("input", "in"), ("output", "out"), ("cache_read", "cache")):
+                v = cost.get(key)
+                if v is not None:
+                    cost_parts.append(f"{label}:{_format_cost_number(v)}")
+            extra_parts = []
+            if cost_parts:
+                extra_parts.append(" ".join(cost_parts) + " $/M")
+            if caps.get("supports_vision"):
+                extra_parts.append("多模态")
+            if caps.get("supports_thinking"):
+                extra_parts.append("开关思考")
             tooltip = f"{display} · {self._current_model_name}"
+            if extra_parts:
+                tooltip += " · " + " ".join(extra_parts)
             if note:
                 tooltip += f"\n{note}"
             self.current_model_btn.setToolTip(tooltip)
@@ -7372,7 +7405,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def register_system_card(self, card_id: str) -> None:
         """将一个卡片 ID 注册为"系统卡片" — 显示时自动隐藏输入区域
 
-        用于 UI 插件的浮动卡片（plugin-marketplace / plugin-manager 等）。
+        用于 UI 插件的浮动卡片（plugin-marketplace 等）。
         首次调用时同时绑定 on_card_shown/on_card_hidden 回调。
 
         Args:
@@ -8407,32 +8440,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 从视口宽度直接推算目标宽度，绕过循环依赖
             card.sync_width(target_width=max(320, viewport_width - margin))
 
-    def _iter_visible_cards_in_viewport(self, buffer: int = 400) -> list:
-        """返回视口附近（含 buffer 缓冲）的 MessageCard 列表。
-
-        resize 链路的统一视口过滤：与 _do_debounced_resize / _sync_visible_cards_on_scroll
-        的 ±buffer 策略一致，离屏卡片延迟到滚动进入视口后再由 _sync_visible_cards_on_scroll
-        同步，避免 resize 完成时全量遍历所有卡片。
-        """
-        scroll_area = getattr(self, "chat_scroll_area", None)
-        if not scroll_area:
-            return []
-        viewport_rect = scroll_area.viewport().rect()
-        viewport_top = scroll_area.verticalScrollBar().value()
-        viewport_bottom = viewport_top + viewport_rect.height()
-
-        visible = []
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
-                continue
-            card = item.widget()
-            card_rect = card.geometry()
-            if card_rect.bottom() < viewport_top - buffer or card_rect.top() > viewport_bottom + buffer:
-                continue
-            visible.append(card)
-        return visible
-
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8442,8 +8449,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：同步视口附近卡片宽度（轻量，无 GPU 分配；离屏卡片由滚动路径补同步）
-        for card in self._iter_visible_cards_in_viewport(buffer=400):
+        # 第一步：全量同步所有卡片宽度（轻量，仅 setMinimumWidth/setMaximumWidth，无 GPU 分配）
+        # 🐛 修复：不能只同步视口 ±buffer 内卡片——离屏卡片残留旧宽度(尤其窗口被拉宽又缩小后)
+        # 会锁死 chat_container 无法缩小（parent.width()→旧宽度→死锁），滚动补同步也用错 parent 宽。
+        # 宽度同步本身轻量，全量遍历开销可接受；真正昂贵的是第二步 GPU preview 恢复(已分批)。
+        for i in range(self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
             try:
                 if viewport_width > 0:
                     margin = 20 if card.role != "user" else 180
@@ -8485,6 +8499,23 @@ class OpenAIChatToolWindow(ToolWindow):
             self._restore_queue = []
             self._resize_preview_active = False
 
+    def _sync_single_card_width(self, card, force: bool = True):
+        """按当前滚动区 viewport 宽度同步单张卡片宽度（统一宽度来源）。"""
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        viewport_width = 0
+        if scroll_area:
+            viewport_width = scroll_area.viewport().width()
+            if viewport_width > 0:
+                self._last_chat_viewport_width = viewport_width
+        try:
+            if viewport_width > 0:
+                margin = 20 if card.role != "user" else 180
+                card.sync_width(force=force, target_width=max(320, viewport_width - margin))
+            else:
+                card.sync_width(force=force)
+        except RuntimeError:
+            pass
+
     def _sync_visible_cards_on_scroll(self):
         """滚动时更新新进入可见区域的卡片"""
         scroll_area = getattr(self, "chat_scroll_area", None)
@@ -8509,7 +8540,11 @@ class OpenAIChatToolWindow(ToolWindow):
             if card_bottom < viewport_top - 200 or card_top > viewport_bottom + 200:
                 continue
 
-            card.sync_width()
+            # 🐛 修复：必须用 viewport 宽度直接推算 target，
+            # 不能走 card.sync_width()（内部用 parent.width()）——
+            # chat_container 会被偏大的卡片最小宽撑宽，parent 返回旧大值 → 循环。
+            # 滚动入视口时用 parent 推算会持续覆盖掉 resize 已修正的正确宽度。
+            self._sync_single_card_width(card)
 
     def _on_config_applied(self, new_config: dict):
         if getattr(self, "_is_destroyed", False):
@@ -11440,7 +11475,9 @@ class OpenAIChatToolWindow(ToolWindow):
             widget.heightChanged.connect(self._on_message_card_height_changed)
             if self._resize_preview_active:
                 widget.set_resize_preview_mode(True)
-            widget.sync_width()
+            # 🐛 修复：新增卡片宽度同样用 viewport 直接推算，避免 parent.width()
+            # 被 chat_container 撑大后返回旧大值（与 _sync_visible_cards_on_scroll 一致）。
+            self._sync_single_card_width(widget)
 
         # 🔧 内存修复：添加新卡片后触发虚拟滚动回收，
         # 否则离屏的旧 MessageCard（含 QWebEngineView）仅在手动滚动时才被回收，
@@ -17479,6 +17516,68 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[TeamProject] 同步项目到窗口失败: {e}")
 
+    def _apply_team_workdir(self, workdir: str):
+        """团队级统一工作目录/工作树接收方：应用同团队其他成员广播的 workdir 切换
+
+        与 _apply_team_project 同语义：只同步「实例缓存 + tool_executor +
+        记忆卡片实例缓存 + 分支标签」，不写 DB（DB 由发送方负责）、不触发
+        新广播（防循环）、值相等直接跳过（幂等）。
+        workdir 为空 = 发送方清除了工作目录，本地回退临时工作目录兜底。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        project = self._current_project
+        if workdir:
+            if self._current_workdir.get(project) == workdir:
+                return
+            self._current_workdir[project] = workdir
+            resolved = workdir
+        else:
+            self._current_workdir.pop(project, None)
+            resolved = self._ensure_temp_workdir(project) or None
+        if self.backend and self.backend.tool_executor:
+            self.backend.tool_executor.set_workdir(resolved or None)
+        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+            self._memory_card_popup._instance_workdir[project] = resolved or ""
+        self._update_branch()
+        logger.info(f"[TeamWorkdir] 窗口 {self._window_id} 已应用团队工作目录: {resolved or 'cleared'}")
+
+    def _broadcast_team_workdir(self, workdir: str):
+        """团队内工作目录/工作树切换广播：写团队级 workdir + 同团队其他成员同步应用
+
+        触发点：_on_working_dir_changed / _switch_to_worktree / _restore_main_repo，
+        任一成员切换工作目录或 git worktree 时全员同步（统一工作树）。
+        防循环：仅遍历其他窗口（不含发送方），接收方 _apply_team_workdir 不广播。
+        按团队过滤：仅 _team_agent_name 非空、is_team_member、且同
+        _team_run_id/_team_name（同一次团队运行）的窗口才应用。
+        """
+        if not getattr(self, "_team_agent_name", ""):
+            return
+        from app.core.team_manager import TeamManager
+
+        tm_mgr = TeamManager.get_instance()
+        # 写团队级统一工作目录/工作树（team.json 顶层，与 project/run_id 平级）
+        tm_mgr.set_team_workdir(workdir or "")
+        # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
+        my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
+        for win in type(self)._instances:
+            if win is self or getattr(win, "_is_destroyed", False):
+                continue
+            if not getattr(win, "_team_agent_name", ""):
+                continue
+            try:
+                if not tm_mgr.is_team_member(win._window_id):
+                    continue
+            except Exception:
+                continue
+            win_key = getattr(win, "_team_run_id", "") or getattr(win, "_team_name", "") or TeamManager.DEFAULT_TEAM
+            if win_key != my_key:
+                continue
+            try:
+                win._apply_team_workdir(workdir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[TeamWorkdir] 同步工作目录到窗口失败: {e}")
+
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -18327,6 +18426,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
         if hasattr(self, "_file_mention_card") and resolved_path:
             self._file_mention_card.ensure_cache(resolved_path)
+        # 团队模式：一人改工作目录全员同步（统一工作树）
+        if resolved_path:
+            self._broadcast_team_workdir(resolved_path)
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
@@ -18556,6 +18658,8 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         logger.info(f"[MainWidget] 已自动切换到 worktree: {worktree_path}（项目: {project}）")
+        # 团队模式：worktree 切换全员同步（统一工作树）
+        self._broadcast_team_workdir(worktree_path)
 
     def _restore_main_repo(self):
         """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
@@ -18598,6 +18702,8 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
         logger.info(f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）")
+        # 团队模式：切回主仓库全员同步（统一工作树）
+        self._broadcast_team_workdir(main_repo)
 
     @classmethod
     def _on_app_about_to_quit(cls):

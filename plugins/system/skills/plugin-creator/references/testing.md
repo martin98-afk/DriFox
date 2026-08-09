@@ -32,7 +32,7 @@ DriFox 使用 **watchfiles** 實現插件熱更新：
    - Skills → 觸發場景讓 AI 匹配
    - Themes → 輸入 /theme <name>
    - UI → 輸入 /<card-id> 或查看消息流
-④ 用 /plugin-manager 查看插件狀態
+④ 用 /plugin-marketplace 查看插件狀態（已安裝/啟用/禁用）
 ```
 
 ---
@@ -88,7 +88,7 @@ python -m py_compile plugins/<name>/hooks/<name>_hook.py
 1. 檢查 `plugin.json` 位置：`<plugin-name>/.drifox-plugin/plugin.json`
 2. 檢查 `name` 字段是否與目錄名一致
 3. 檢查 JSON 語法是否合法
-4. 重啟 DriFox 後用 `/plugin-manager` 查看
+4. 重啟 DriFox 後用 `/plugin-marketplace` 查看
 
 ### 命令不生效
 

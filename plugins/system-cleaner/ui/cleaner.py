@@ -14,11 +14,10 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, MaskDialogBase, isDarkTheme
+from qfluentwidgets import BodyLabel, MaskDialogBase, TransparentPushButton, isDarkTheme
 
 from .scanner import _format_size
 
@@ -245,7 +244,7 @@ class _StyledCleanerDialog(MaskDialogBase):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        cancel_btn = QPushButton(no_text, self.widget)
+        cancel_btn = TransparentPushButton(no_text, self.widget)
         cancel_btn.setCursor(Qt.PointingHandCursor)
         cancel_btn.setFixedHeight(36)
         cancel_btn.setStyleSheet(f"""
@@ -265,7 +264,7 @@ class _StyledCleanerDialog(MaskDialogBase):
         """)
         cancel_btn.clicked.connect(self._on_cancel)
 
-        confirm_btn = QPushButton(yes_text, self.widget)
+        confirm_btn = TransparentPushButton(yes_text, self.widget)
         confirm_btn.setCursor(Qt.PointingHandCursor)
         confirm_btn.setFixedHeight(36)
         confirm_btn.setStyleSheet(f"""
@@ -359,7 +358,7 @@ class _StyledCleanerInfoDialog(MaskDialogBase):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        ok_btn = QPushButton("知道了", self.widget)
+        ok_btn = TransparentPushButton("知道了", self.widget)
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setFixedHeight(36)
         ok_btn.setStyleSheet(f"""

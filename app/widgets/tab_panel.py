@@ -96,6 +96,9 @@ _RAINBOW_COLORS = [
 ]
 _RAINBOW_N = len(_RAINBOW_COLORS)
 
+# 团队 leader 角色名：团队框内默认置顶
+_LEADER_AGENT = "leader"
+
 # 悬停渐层颜色常量（避免 paintEvent 中反复创建 QColor）
 _HOVER_DARK_COLORS = (_QColor(99, 102, 241, 32), _QColor(139, 92, 246, 18))
 _HOVER_LIGHT_COLORS = (_QColor(99, 102, 241, 22), _QColor(139, 92, 246, 12))
@@ -876,6 +879,10 @@ class TabPanel(QWidget):
         self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
         self._collapsed: bool = False  # 侧边栏收起状态
+        # 挤压折叠标记：非用户主动（窗口 resize / 覆盖层 relayout 压缩）导致
+        # 自动折叠。用于空间恢复后管理器自动展开（区别于按钮手动折叠 / 手动
+        # 拖拽把手折叠——手动折叠不自动展开）。
+        self._collapsed_by_squeeze: bool = False
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
         self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
@@ -1101,6 +1108,11 @@ class TabPanel(QWidget):
         # 拖窄自动折叠（展开态 → 收起态）
         if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
+            # 宽度变化触发的折叠：可能是窗口 resize / 覆盖层 relayout 挤压（意外），
+            # 也可能是用户拖拽把手主动收窄（有意）。无法从单次 resize 区分，
+            # 统一标记为"宽度驱动折叠"，管理器在空间恢复时据此决定是否自动展开；
+            # 手动拖拽把手会在 splitterMoved 中清除该标记（尊重手动意图）。
+            self._collapsed_by_squeeze = True
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
             from PyQt5.QtCore import QTimer
@@ -1108,9 +1120,20 @@ class TabPanel(QWidget):
             QTimer.singleShot(0, lambda: self.sidebarToggled.emit(True))
             return
         # 拖宽自动展开（收起态 → 展开态）：阈值高于折叠阈值 10px 形成滞回区，
-        # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹
-        if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width + 10:
+        # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹。
+        # ★ 守卫：仅"被动挤压折叠"（_collapsed_by_squeeze=True）允许布局恢复
+        # 自动展开——如关闭卡片/窗口拉宽后 splitter 把面板拉回原宽。手动折叠
+        # （按钮/拖把手，标记为 False）时布局恢复拉宽不得自动展开（尊重手动
+        # 意图）；手动拖把手拉开由 TabManagerWindow.splitterMoved 显式处理
+        # （splitterMoved 晚于 resizeEvent 触发，避免时序竞态）。
+        if (
+            self._collapsed
+            and not self._animating
+            and self._collapsed_by_squeeze
+            and self.width() >= self._auto_collapse_width + 10
+        ):
             self._collapsed = False
+            self._collapsed_by_squeeze = False
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
             from PyQt5.QtCore import QTimer
@@ -1249,6 +1272,8 @@ class TabPanel(QWidget):
         避免展开瞬间文字被挤在窄条里。
         """
         self._collapsed = not self._collapsed
+        # 按钮手动折叠/展开：非挤压，清除挤压标记（避免空间恢复时误自动展开）
+        self._collapsed_by_squeeze = False
         self._update_toggle_button(switch_ui=False)
         self.sidebarToggled.emit(self._collapsed)
 
@@ -1940,8 +1965,13 @@ class TabPanel(QWidget):
         优化：当 _item_team 与上次构建快照一致且 _items 数量未变时直接 return，
         避免 add_tab/remove_tab 反复触发时的冗余重建。
         """
-        # 快照对比：_item_team 内容 + _items 数量未变 → 跳过
-        snapshot = (tuple(sorted(self._item_team.items())), len(self._items))
+        # 快照对比：_item_team 内容 + _items 数量 + leader 成员签名 未变 → 跳过
+        # （leader 签名含胶囊角色文本，update_tab_capsule 后置顶排序才能被感知）
+        snapshot = (
+            tuple(sorted(self._item_team.items())),
+            len(self._items),
+            tuple(i for i, item in enumerate(self._items) if item._capsule_label.text() == _LEADER_AGENT),
+        )
         if getattr(self, "_layout_snapshot", None) == snapshot:
             return
         self._layout_snapshot = snapshot
@@ -1990,8 +2020,12 @@ class TabPanel(QWidget):
             # 清空成员层旧 widgets（header 在外层布局中，不在此层）
             while inner.count() > 0:
                 inner.takeAt(0)
-            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）
-            for i in team_members[t]:
+            # 成员 tab 加入成员层（header 已在 _get_or_create_team_group 中加入 outer）。
+            # ⭐ leader 置顶：稳定排序——leader 排最前，其余成员保持 _items 原始顺序
+            # （快速新建成员可追加任意角色，leader 加在中间也要自动置顶）。
+            for i in sorted(
+                team_members[t], key=lambda _i: 0 if self._items[_i]._capsule_label.text() == _LEADER_AGENT else 1
+            ):
                 inner.addWidget(self._items[i])
             self._list_layout.addWidget(grp)
 
@@ -2104,12 +2138,21 @@ class TabPanel(QWidget):
     def update_tab_capsule(self, index: int, text: str):
         """显示团队角色胶囊"""
         if 0 <= index < len(self._items):
-            self._items[index].set_capsule(text)
+            item = self._items[index]
+            old = item._capsule_label.text()
+            item.set_capsule(text)
+            # ⭐ leader 状态变化（补设/移除胶囊）→ 触发团队内重排置顶。
+            # 非 leader 变化的更新被 _layout_snapshot 快照拦截，开销可忽略。
+            if (old == _LEADER_AGENT) != (text == _LEADER_AGENT):
+                self._rebuild_team_layout()
 
     def clear_tab_capsule(self, index: int):
         """隐藏团队角色胶囊"""
         if 0 <= index < len(self._items):
-            self._items[index].clear_capsule()
+            item = self._items[index]
+            item.clear_capsule()
+            # ⭐ 角色胶囊被移除（leader 退出团队）→ 重排（与 update_tab_capsule 对称）
+            self._rebuild_team_layout()
 
     def update_tab_streaming(self, index: int, streaming: bool, error: bool = False):
         """更新 Tab 的流式/错误状态"""

@@ -13,11 +13,11 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.4.13-brightgreen)
+![Version](https://img.shields.io/badge/version-0.4.14-brightgreen)
 
 </div>
 
-<h1 align="center">DriFox 飘狐 v0.4.13 — 轻量化 AI 桌面对话助手</h1>
+<h1 align="center">DriFox 飘狐 v0.4.14 — 轻量化 AI 桌面对话助手</h1>
 
 <p align="center">
   <b>不做大而全的 IDE。</b> 只是一个对话框——随时调出，随意提问，随性分支。
@@ -96,7 +96,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.4.13 架构                       │
+│                    DriFox v0.4.14 架构                       │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
 │             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │
@@ -253,8 +253,8 @@ MIT License © 2025~2026 Martin98-afk
 
 <a href="https://www.star-history.com/?repos=martin98-afk%2FDriFox&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Se21DjuSbRR0D9a6EvXrplFATV6QBNk-YU2uGpRZaW_Qf5xJfOsN0A8lprq00EqRCMkNc9hSX83_zJuusGdtXYHRJIUhgR1NNAC157hyXBLe5vpQyMemSCNjB1Dorw7xAWq6374BlNcUVotaj0ItMABro5wictN5Bp8GA2d5oK0o_gzmDUXumfjQfnsp" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&theme=dark&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=martin98-afk/DriFox&type=date&legend=top-left&sealed_token=Mj0svdTPVm6s6qDntASYYQqJLSX5AfawcRyiwnc0DgeiouRtmfVM0ntXBFKOoHCj87QFuUZ68P5R5PsiJysn6K3lQpuStvpIkT09ogKvzsC_7mwNN06FPMDvipYnQ0nJQzYPh6rnlzhnDrhPVuPritcgSRsTZpfbERXnVQorhFjVfy-PUKfSwLGLaOTF" />
  </picture>
 </a>

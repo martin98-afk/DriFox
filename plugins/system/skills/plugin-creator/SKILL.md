@@ -7,7 +7,7 @@ description: "DriFox 插件全生命周期开发技能。涵盖全部 8 类组�
 
 > **從需求到發布，一鍵生成 DriFox 插件。**
 >
-> 本技能取代舊的 `/plugin` 管理命令（已被 plugin-manager/plugin-marketplace UI 取代），
+> 本技能取代舊的 `/plugin` 管理命令（已被 plugin-marketplace UI 取代），
 > 專注於**插件開發**——從零創建、修改、除錯、發布 DriFox 插件。
 
 ---
@@ -199,7 +199,7 @@ your-plugin/
 - **hooks** / **mcp** / **lsp** 修改後可能需要重啟 DriFox
 - **themes** 修改後用 `/theme <name>` 切換查看
 - **ui** 修改後卡片自動重新載入
-- 用 `/plugin-manager` 檢查插件狀態
+- 用 `/plugin-marketplace` 查看已安裝插件狀態（啟/禁/卸）
 
 ### 4.3 版本管理
 
@@ -355,7 +355,7 @@ ui/
 - [docs/architecture.md §ui 組件](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/architecture.md)
 - [plugins/context-usage-stats/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/context-usage-stats)（浮動卡片真實案例）
 - [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（完整 UI 生態入口）
-- [plugins/plugin-manager/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-manager)（啟/禁/卸 UI）
+- [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（瀏覽/安裝/啟禁/卸載 UI）
 
 ---
 
@@ -367,7 +367,7 @@ ui/
 # DriFox watchfiles 熱更新
 # 修改插件文件後等待 1-3 秒自動生效
 
-# 用 /plugin-manager 查看插件加載狀態
+# 用 /plugin-marketplace 查看插件加載狀態（含啟/禁/卸）
 # 用 /theme 測試主題切換
 ```
 

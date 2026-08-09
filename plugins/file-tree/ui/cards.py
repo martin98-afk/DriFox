@@ -33,7 +33,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QPushButton,
     QShortcut,
     QSizePolicy,
     QStackedWidget,
@@ -47,6 +46,7 @@ from qfluentwidgets import (
     MaskDialogBase,
     ScrollArea,
     StrongBodyLabel,
+    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -196,7 +196,7 @@ def _styled_message_box(
             btn_layout.setSpacing(10)
 
             def _make_btn(label_text: str, result_code, is_default: bool, is_primary: bool):
-                btn = QPushButton(label_text, self.widget)
+                btn = TransparentPushButton(label_text, self.widget)
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.setFixedHeight(36)
                 if is_primary:
@@ -451,6 +451,12 @@ class FileTreeCard(QWidget):
 
         tc_hex = self._colors["text"].name()
         accent_hex = self._colors["accent"].name()
+        try:
+            from app.utils.design_tokens import get_unified_scrollbar_style
+
+            scrollbar_style = get_unified_scrollbar_style()
+        except Exception:
+            scrollbar_style = ""
         self._tree_view.setStyleSheet(
             f"#file-tree-widget {{"
             f"  background: transparent; border: none;"
@@ -462,6 +468,7 @@ class FileTreeCard(QWidget):
             f"#file-tree-widget::item:hover {{"
             f"  background: {hover_bg};"
             f"}}"
+            f"{scrollbar_style}"
         )
 
         self._scroll_area.setStyleSheet("#file-tree-scroll { background: transparent; border: none;}")

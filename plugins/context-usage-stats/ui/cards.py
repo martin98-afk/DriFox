@@ -30,7 +30,6 @@ from qfluentwidgets import (
     FluentIcon,
     IconWidget,
     ScrollArea,
-    ToolButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -157,7 +156,7 @@ class ContextUsageStatsCard(QWidget):
         hly.addWidget(self._status_lb)
         hly.addStretch(1)
 
-        self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新数据")
         self._refresh_btn.clicked.connect(self._async_load_data)
         hly.addWidget(self._refresh_btn)

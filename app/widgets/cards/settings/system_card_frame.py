@@ -472,7 +472,9 @@ class SystemCardFrame(QFrame):
 
         'proportional': 窗口高度的 85%（默认）
         'content':      内容自然高度（直接计算 header + 内容区实际高度，
-                        绕过 QScrollArea.sizeHint() 传播问题）
+                        绕过 QScrollArea.sizeHint() 传播问题）。
+                        内容超高时限制为窗口可视高度的 80%，溢出部分
+                        交由 scroll_area 内部滚动（避免卡片撑出可视区）。
 
         CardContainer._do_expand() 读取此值进行展开动画。
 
@@ -496,6 +498,12 @@ class SystemCardFrame(QFrame):
                 if cw.layout():
                     content_h = cw.layout().sizeHint().height()
                     h += content_h + self.scroll_area.frameWidth() * 2
+            # 高度上限：内容超高（如大量历史问题）时限制卡片高度，
+            # 溢出部分由内部 scroll_area 滚动查看，卡片不会超出可视区域。
+            win = self.window()
+            if win and win.height() > 0:
+                cap = max(self.minimumHeight(), int(win.height() * 0.80))
+                h = min(h, cap)
             return QSize(w, max(h, self.minimumHeight()))
         # proportional 模式：按窗口比例缩放
         win = self.window()

@@ -26,13 +26,13 @@ def register_ui(registry):
     from .cards import ContextUsageStatsCard
 
     # 注册浮动卡片（自动注册对应命令 /context-usage-stats）
-    # container="right"：停靠在 Tab 窗口右侧停靠区，作为监控面板不遮挡主对话区
+    # container="full"：完整覆盖对话区（与系统配置卡片一致，走覆盖层）
     registry.register_floating_card(
         plugin_name="context-usage-stats",
         card_id="context-usage-stats",
         widget_class=ContextUsageStatsCard,
-        container="right",
-        title="上下文用量统计",
+        container="full",
+        title="用量统计",
         default_visible=False,
     )
     logger.info("[context-usage-stats] UI components registered")

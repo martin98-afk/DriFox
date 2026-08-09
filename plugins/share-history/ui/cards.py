@@ -42,7 +42,7 @@ from qfluentwidgets import (
     InfoBar,
     ScrollArea,
     StrongBodyLabel,
-    ToolButton,
+    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -263,32 +263,32 @@ class _RecordItem(QFrame):
         has_url = bool(upload_url)
 
         if has_file:
-            self._open_btn = QPushButton("📂 打开")
+            self._open_btn = TransparentPushButton("📂 打开")
             self._open_btn.setFixedHeight(26)
             self._open_btn.setCursor(Qt.PointingHandCursor)
             self._open_btn.clicked.connect(lambda: self._open_file(file_path))
             row3.addWidget(self._open_btn)
         elif has_url:
-            self._download_btn = QPushButton("📥 下载")
+            self._download_btn = TransparentPushButton("📥 下载")
             self._download_btn.setFixedHeight(26)
             self._download_btn.setCursor(Qt.PointingHandCursor)
             self._download_btn.clicked.connect(lambda: self._download_file(upload_url))
             row3.addWidget(self._download_btn)
         else:
-            self._missing_btn = QPushButton("📂 文件缺失")
+            self._missing_btn = TransparentPushButton("📂 文件缺失")
             self._missing_btn.setFixedHeight(26)
             self._missing_btn.setEnabled(False)
             row3.addWidget(self._missing_btn)
 
         if has_url:
-            self._copy_btn = QPushButton("🔗 复制链接")
+            self._copy_btn = TransparentPushButton("🔗 复制链接")
             self._copy_btn.setFixedHeight(26)
             self._copy_btn.setCursor(Qt.PointingHandCursor)
             self._copy_btn.clicked.connect(lambda: self._copy_link(upload_url))
             row3.addWidget(self._copy_btn)
 
         # 删除按钮
-        self._delete_btn = QPushButton("🗑️")
+        self._delete_btn = TransparentPushButton("🗑️")
         self._delete_btn.setFixedHeight(26)
         self._delete_btn.setFixedWidth(32)
         self._delete_btn.setCursor(Qt.PointingHandCursor)
@@ -629,7 +629,7 @@ class ShareHistoryCard(QWidget):
 
         # widget 引用
         self._search_input: Optional[QLineEdit] = None
-        self._clear_btn: Optional[ToolButton] = None
+        self._clear_btn: Optional[TransparentToolButton] = None
 
         self._setup_ui()
 
@@ -855,13 +855,13 @@ class ShareHistoryCard(QWidget):
         hly.addStretch(1)
 
         # 清空按钮
-        self._clear_btn = ToolButton(FluentIcon.DELETE, header)
+        self._clear_btn = TransparentToolButton(FluentIcon.DELETE, header)
         self._clear_btn.setToolTip("清空全部记录")
         self._clear_btn.clicked.connect(self._on_clear_all)
         hly.addWidget(self._clear_btn)
 
         # 刷新按钮
-        self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._load_records)
         hly.addWidget(self._refresh_btn)

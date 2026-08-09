@@ -1,9 +1,37 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.4.14] - 2026-08-09
+
+自上一版本以来的变更 | 提交数：15 · 文件变更：54 · +2275/-2418 | 贡献者：dingma
+
+> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、市场管理功能完善、插件详情对话框优化）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
+
+### ✨ 新功能 (New Features)
+
+- **团队工作目录管理与同步** (`app/`): 团队级工作目录集中管理，tab 顺序优先团队负责人并保持成员顺序
+- **tab_panel 自动展开系列** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 挤压态自动展开与按钮样式统一、相对增长条件扩展逻辑、动画时序与用户交互适配、宽度配置优化
+- **插件市场管理增强** (`app/widgets/` + `app/core/`): 插件详情对话框展示已安装组件与更新按钮态、插件管理功能整体增强
+- **筛选栏重构与布局优化** (`app/widgets/`): 来源/标签筛选栏重构，标题与布局优化
+- **UI 组件更新** (`app/widgets/`): 上下文使用统计、快捷键管理器等组件标题与布局调整
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **消息卡片流式渲染修复** (`app/widgets/message_card.py` + `app/core/workers/`): 骨架缓存版本号递增 + tail 节点改 div 修复流式期间不渲染、流式期间即时格式化未闭合尾部消除最终内容不符
+- **tab_manager 侧边栏修复** (`app/widgets/tab_manager.py`): 启动时恢复侧边栏宽度，修复欢迎卡片渲染后左面板被挤压误折叠
+
+### 🎨 样式改进 (Style)
+
+- **系统插件样式优化** (`plugins/`): 优化所有系统插件样式
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号同步** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): v0.4.14 版本号升级与同步
+
+
 ## [v0.4.13] - 2026-08-07
 
-自上一版本以来的变更 | 提交数：97 · 文件变更：228 · +30941/-6929 | 贡献者：mading, dingma
+自上一版本以来的变更 | 提交数：107 · 文件变更：371 · +33168/-8048 | 贡献者：mading, dingma
 
 > 重点：**流式渲染性能大修**（差量化渲染末帧渲染量降 98%、渲染移出主线程、WebEngine renderer 内存强回收、会话历史驻留清理、关闭窗口异步化）；**tab_panel 侧边栏体验系列**（自动折叠/展开、滞回阈值、宽度动画）；**团队协作链路完善**（团队框按钮返工、会话记录支持同角色多成员、模板列表直读 user-custom）；**MCP stdio 命令安全校验**；**文件工具 glob 标准语义修复**。
 
@@ -51,9 +79,24 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 27 个新提交）
+#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 30 个新提交）
 
-> v0.4.13 初次 tag 后追加的优化与修复：性能大修（10 项 perf）、模型选择器体验、tab 状态反馈、scanner 进程清理。
+#### 📦 附加变更（v0.4.13 重发补丁 | 自初次 tag 之后 34 个新提交）
+
+> v0.4.13 初次 tag 后追加的优化与修复：性能大修（10 项 perf）、模型选择器体验、tab 状态反馈、scanner 进程清理、卡片高度/宽度同步布局修复、插件市场体验优化。
+
+##### 🐛 二次重发补丁 (Bug Fixes, 3)
+
+- **卡片高度上限 80% 窗口高** (`app/`): SystemCardFrame 溢出内容限高防遮挡
+- **卡片宽度同步改用视口直查** (`app/`): 防止布局同步错位
+- **模型 tooltip 增强** (`app/widgets/model_selector.py`): 补充成本详情与能力信息
+
+##### ✨ 三次重发补丁 (New Features & Fixes, 4)
+
+- **增量更新尾文本丢失修复** (`app/`): updateContentAppend 传参 tailText 防止增量更新丢失尾部文本
+- **插件安装与更新流程优化** (`app/widgets/cards/`): 优化插件安装/更新流程
+- **更新徽标替换为 InfoBadge** (`app/widgets/cards/`): MarketplaceCard 徽标可见性提升
+- **插件市场字体大小体验优化** (`app/widgets/cards/`): 市场界面字号适配
 
 ##### ⚡ 性能优化 (Performance, 10)
 

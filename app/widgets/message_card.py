@@ -1968,7 +1968,11 @@ _SKELETON_CACHE_MAX = 48
 # v7（F1）：reorganizeContent 的 getPos 对运行中工具块（tool-streaming-block）
 # 强制沉底（返回 1e9，不参与 data-order 比较）——旧骨架无此分支会把运行中块
 # 按调用时刻快照 data-order 排到思考块上方。
-_SKELETON_CACHE_VERSION = 7
+# v8（2026-08-09）：updateContentAppend 第二参数升级为 tailHtml（行内渲染 HTML，
+# 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
+# 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
+# data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
+_SKELETON_CACHE_VERSION = 8
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2092,9 +2096,9 @@ def _extract_closed_segments(md: str):
 def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     """B1: 渲染单个闭合段为 HTML（差量增量渲染的段落级快速路径）。
 
-    与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert），
-    但不做代码块高亮包装（闭合段通常为纯文本段落；代码块闭合由全量渲染兜底，
-    差量段不含未闭合 fence——见 _extract_closed_segments 的 fence 配对规则）。
+    与 _render_markdown_to_html_worker 管线一致（sanitize→inject→md.convert→
+    代码块高亮包装），差量段与全量渲染产物对齐（含 pygments 高亮 + copy 按钮
+    + 语言标签），避免"流式期间代码块素色、结束后变高亮"的形态跳变。
     小段同步渲染耗时 <1ms，无需线程池。
 
     Args:
@@ -2116,8 +2120,58 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
+    # 🐛 修复（结构错乱）：差量段缺 _wrap_code_blocks_with_copy_button_web，
+    # 代码块在流式期间渲染为素色 <pre>（无 pygments 高亮、无 copy 按钮、
+    # 无语言标签），流式结束全量渲染才补全 → 用户感知"代码块结束后才变样"。
+    # 与全量渲染管线对齐补包装（主线程同步渲染，全局 formatter 缓存安全）。
+    html = _wrap_code_blocks_with_copy_button_web(html)
     html = _resolve_image_src(html)
     return html
+
+
+def _render_inline_tail(md_text: str, compact: bool = False) -> str:
+    """渲染流式未闭合尾部为行内 HTML（差量渲染的即时格式化路径）。
+
+    解决：无空行分隔的长段落（大模型常见输出，尤其中文）在流式期间
+    `_extract_closed_segments` 找不到 `\\n\\n` 闭合边界，尾部只能以纯文本
+    （textContent）显示 → `**加粗**`、`` `code` ``、`[链接](url)` 等 markdown
+    源码字面呈现，直到流式结束全量渲染才格式化（用户感知"内容与最终不符"）。
+
+    与 _render_stable_segment（逐段独立 convert）不同：尾部**整体**一次
+    convert，未闭合的段落/列表/引用/代码块结构在单一 markdown 上下文中
+    保持正确（不拆段）；未闭合的行内语法（如 `**加粗`）由 markdown 库
+    原样输出（字面显示），闭合后由下一次渲染补全。
+
+    含 think/tool 标签的尾部**整体跳过**（返回空串）：思考/工具内容应交由
+    _inject_think_cards / _inject_tool_blocks 渲染为卡片/工具块，此处渲染
+    会导致内容泄漏为正文。调用方 _render_tail_inline 已用
+    _has_unclosed_think_or_tool 拦截未闭合场景。
+
+    Returns:
+        行内渲染的 HTML（不含外层 <p> 包裹的额外处理，供 JS innerHTML 注入；
+        节点带 data-incremental 标记，后续差量/全量渲染会整体替换）
+    """
+    if not md_text or not md_text.strip():
+        return ""
+    # 🐛 防御：tail 含任何 think/tool 标签（已闭合或未闭合）都不在此渲染——
+    # 只删标签会把思考内容泄漏到正文；它们应由差量段/全量渲染
+    # （_inject_think_cards / _inject_tool_blocks）正确处理为思考卡片/工具块。
+    # 调用方 _render_tail_inline 已用 _has_unclosed_think_or_tool 拦截未闭合
+    # 场景，此处双保险（防御历史残段/异常路径）。
+    if "<think>" in md_text or "</think>" in md_text or "<tool>" in md_text or "</tool>" in md_text:
+        return ""
+    safe_md = _sanitize_incomplete_markdown(md_text)
+    safe_md = _unwrap_code_blocks_with_context_links(safe_md)
+    safe_md = _inject_context_links(safe_md)
+    processed_md = _inject_think_cards(safe_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_hook_blocks(processed_md, True)
+    md = get_markdown_instance()
+    md.reset()
+    html = md.convert(processed_md)
+    html = _resolve_image_src(html)
+    return html
+
 
 # ── 流式活动坞（Streaming Dock）骨架资产 ──
 # 简洁模式下流式期间：#tool-section 从卡片顶部沉到底部并限高 ~3-4 行，
@@ -2656,6 +2710,8 @@ class CodeWebViewer(QWebEngineView):
         # - _needs_full_render：需要全量渲染（初值/主题/字体/状态切换/流式结束/缓存清理）
         self._stable_html: str = ""
         self._stable_md_len: int = 0
+        # [B1] 尾部行内渲染哈希缓存：安全定时器重复触发时 tail 未变则跳过渲染
+        self._tail_html_hash: int = 0
         self._needs_full_render: bool = True
         self._light_skeleton = light  # 轻量骨架标志（去掉 echarts CDN 等）
         # [PERF] 最小渲染间隔 80ms：降低 WebEngine setHtml 调用频率
@@ -2766,7 +2822,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except (TypeError, RuntimeError, AttributeError):
+            except TypeError, RuntimeError, AttributeError:
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -4592,7 +4648,13 @@ class CodeWebViewer(QWebEngineView):
                 // ===== B1 差量渲染：追加闭合段到 DOM（不整块替换） =====
                 // 移除所有 data-incremental="true" 的增量纯文本节点，
                 // 再把新闭合的格式化 HTML 追加到 #content-placeholder 末尾。
-                function updateContentAppend(newHtml) {{
+                // 🐛 修复（正文尾部丢失）：tailHtml 参数——移除增量节点时
+                // 会连带删除**未闭合的尾部文本**（尚未到 \\n\\n 的段落后半段），
+                // 且新闭合段 HTML 不含它 → 尾部永久消失（用户可见"正文显示不全"）。
+                // 因此 Python 端把未闭合尾部的**行内渲染 HTML**传进来，
+                // 移除后重建增量节点保尾（innerHTML 注入，流式期间 markdown
+                // 语法即时格式化，不再字面显示源码）。
+                function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
                     // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
@@ -4601,6 +4663,20 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 追加格式化 HTML（含 table 包裹等后续处理）
                     container.insertAdjacentHTML('beforeend', newHtml);
+                    // 🐛 修复（正文尾部丢失）：未闭合尾部重建为增量渲染节点。
+                    // ⚠️ 用 <div> 而非 <p> 包裹：tailHtml 是 md.convert 产物
+                    // （含 <p>/<h1>/<ul>/<pre> 等块级元素），<p> 内嵌块级会触发
+                    // HTML 解析器自动闭合/提升，导致 DOM 结构错乱。
+                    if (tailHtml) {{
+                        var tailDiv = document.createElement('div');
+                        tailDiv.setAttribute('data-incremental', 'true');
+                        // [B1] data-rendered 标记：_append_text_incremental 检测到
+                        // 该标记时不再 textContent 原地追加（会抹掉已渲染的 HTML），
+                        // 改为新建纯文本增量节点。
+                        tailDiv.setAttribute('data-rendered', 'true');
+                        tailDiv.innerHTML = tailHtml;
+                        container.appendChild(tailDiv);
+                    }}
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
                     // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
@@ -4648,6 +4724,49 @@ class CodeWebViewer(QWebEngineView):
                         }});
                     }}
                     // 使用延迟报告，确保浏览器布局完成
+                    setTimeout(() => reportHeight(), 30);
+                }}
+                // ===== B1 差量渲染：未闭合尾部行内渲染（整体替换增量节点） =====
+                // 无空行分隔的长段落（`\\n\\n` 缺失）没有闭合段可差量渲染，
+                // 尾部长时间以纯文本显示 markdown 源码（**加粗**、`code`、[链接]）。
+                // Python 端把尾部整体 convert 成行内 HTML 传入，替换所有增量节点
+                // （纯文本 + 已渲染），DOM 尾部始终是**一个** data-rendered 渲染节点，
+                // 后续 _append_text_incremental 在其后追加纯文本，差量/全量渲染再整体替换。
+                function updateTailHtml(html) {{
+                    const container = document.getElementById('content-placeholder');
+                    if (!container || !html) return;
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        el.remove();
+                    }});
+                    // ⚠️ 用 <div> 而非 <p> 包裹：html 是 md.convert 产物（块级元素），
+                    // <p> 内嵌块级会触发解析器自动闭合，结构错乱。
+                    var tailDiv = document.createElement('div');
+                    tailDiv.setAttribute('data-incremental', 'true');
+                    tailDiv.setAttribute('data-rendered', 'true');
+                    tailDiv.innerHTML = html;
+                    container.appendChild(tailDiv);
+                    // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
+                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
+                        var wrapper = document.createElement('div');
+                        wrapper.className = 'table-scroll-wrapper';
+                        table.parentNode.insertBefore(wrapper, table);
+                        wrapper.appendChild(table);
+                    }});
+                    restoreCollapsibleStates(container);
+                    window._suppressScrollEvent = true;
+                    if (!window._userScrolledWithin) {{
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }} else {{
+                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
+                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
+                            document.body.scrollTop = document.body.scrollHeight;
+                            window._userScrolledWithin = false;
+                        }}
+                    }}
+                    window._prevScrollTop = document.body.scrollTop;
+                    window._autoScrollTime = performance.now();
+                    window._suppressScrollEvent = false;
                     setTimeout(() => reportHeight(), 30);
                 }}
                 function reportHeight() {{
@@ -5322,7 +5441,7 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
-                var text = {json.dumps(text_clean)};
+                var text = {json.dumps(text_clean).decode("utf-8")};
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 智能段落处理 ──
@@ -5341,12 +5460,38 @@ class CodeWebViewer(QWebEngineView):
                     c.appendChild(p);
                 }} else {{
                     var last = c.lastElementChild;
-                    if (last && last.tagName === 'P') {{
-                        // [B1] 若已标记为增量节点则保留标记，追加文本
-                        if (!last.hasAttribute('data-incremental')) {{
-                            last.setAttribute('data-incremental', 'true');
+                    if (last && last.hasAttribute('data-incremental')) {{
+                        if (last.hasAttribute('data-rendered')) {{
+                            // [B1] 🐛 修复：last 是"行内渲染的尾部节点"（updateTailHtml /
+                            // updateContentAppend 重建，含 <strong> 等子元素 HTML）。
+                            // textContent += 会把 innerHTML 整体覆盖为纯文本（已渲染的
+                            // 加粗/行内代码/链接瞬间丢失回 markdown 源码形态）。
+                            // 新建独立纯文本增量节点承载后续文本。
+                            var p = document.createElement('p');
+                            p.setAttribute('data-incremental', 'true');
+                            p.textContent = text;
+                            c.appendChild(p);
+                        }} else if (last.tagName === 'P') {{
+                            // [B1] 增量纯文本节点：同一未闭合段落内直接追加累积
+                            last.textContent += text;
+                        }} else {{
+                            // 其他增量节点（理论不出现）：独立新节点承载
+                            var p = document.createElement('p');
+                            p.setAttribute('data-incremental', 'true');
+                            p.textContent = text;
+                            c.appendChild(p);
                         }}
-                        last.textContent += text;
+                    }} else if (last && last.tagName === 'P') {{
+                        // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
+                        // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
+                        // updateContentAppend 移除全部 data-incremental 节点时会连带
+                        // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
+                        // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
+                        // 后续文本属新段落，独立 <p> 结构正确。
+                        var p = document.createElement('p');
+                        p.setAttribute('data-incremental', 'true');
+                        p.textContent = text;
+                        c.appendChild(p);
                     }} else if (last && last.classList.contains('think-block')) {{
                         // 最后是思考块：追加到思考块之后的新段落
                         var p = document.createElement('p');
@@ -5631,9 +5776,7 @@ class CodeWebViewer(QWebEngineView):
                 # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
                 # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
                 # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
-                _needs_save_restore = self._tool_dom_dirty or bool(
-                    getattr(self, "_restore_finished_ids", set())
-                )
+                _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
                 if _needs_save_restore:
                     self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
                 else:
@@ -5679,19 +5822,34 @@ class CodeWebViewer(QWebEngineView):
                     # 的 compact 对齐——否则差量段硬编码 compact=False 会把思考块渲染成
                     # think-block 折叠框（简洁模式下应为 think-compact），形态分裂
                     # （9c76d04f 只给 _render_stable_segment 加了参数，调用点漏改）。
-                    new_html = "".join(
-                        _render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs
-                    )
+                    new_html = "".join(_render_stable_segment(seg, compact=self._tool_compact_mode) for seg in segs)
                     self._stable_md_len += stable_len
                     self._stable_html += new_html
                     # ⚠️ updateContentAppend 是"追加"语义：只推送本次新增段，
                     # 不能推送累积值（否则旧段重复渲染）。
-                    js = f"updateContentAppend({json.dumps(new_html).decode('utf-8')});"
+                    # 🐛 修复（正文尾部丢失）：_extract_closed_segments 只产出
+                    # 已闭合段；未闭合尾部（stable 之后的剩余 md）若不移交给 JS，
+                    # updateContentAppend 移除 data-incremental 节点时会连带删除
+                    # 该尾部 → 正文尾部永久丢失（用户可见"显示不全"）。
+                    # 将未闭合尾部**行内渲染后的 HTML**作为第二参数传入，JS 端重建
+                    # 增量节点保尾（innerHTML 注入：已闭合的行内语法即时格式化，
+                    # 不再字面显示 markdown 源码）。
+                    # ⚠️ 未闭合 think/tool：tail 含未闭合块时不渲染（静默累积，
+                    # 等闭合后由差量段/全量渲染处理，避免思考内容泄漏到正文）。
+                    _tail = self._markdown_text[self._stable_md_len :]
+                    _tail_html = ""
+                    if _tail and not _has_unclosed_think_or_tool(_tail):
+                        _tail_html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+                    js = (
+                        "updateContentAppend("
+                        f"{json.dumps(new_html).decode('utf-8')},"
+                        f"{json.dumps(_tail_html).decode('utf-8')});"
+                    )
                     self.page().runJavaScript(js)
                     # 已差量消费的 markdown 视为"已渲染"（避免重复全量）
                     self._last_rendered_markdown = self._markdown_text[: self._stable_md_len]
                     return
-                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental），跳过。
+                # 无新闭合段：增量纯文本已在 DOM（_append_text_incremental）。
                 # 🐛 修复（思考块滞留/泄漏）：think 配对守卫 break（未闭合 think 段）
                 # 使差量一个段都产不出时，若 md 已达自然边界（think 闭合 `</think>` /
                 # 段落 `\n\n` 结尾），必须走全量渲染消费——否则安全定时器触发的
@@ -5700,6 +5858,13 @@ class CodeWebViewer(QWebEngineView):
                 if self._has_reached_clean_boundary(self._markdown_text):
                     self._refresh_viewer_font_css()
                     self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                else:
+                    # 🐛 修复（流式显示与最终不符）：无空行分隔的长段落没有闭合段
+                    # 可差量渲染，尾部在流式期间以纯文本显示 markdown 源码
+                    # （**加粗**、`code`、[链接](url)），直到流式结束全量渲染才
+                    # 格式化。将尾部整体行内渲染（单个 convert 保持段落/列表/代码块
+                    # 结构正确），替换 DOM 增量节点；未闭合 think/tool 跳过防泄漏。
+                    self._render_tail_inline()
                 return
 
             # 刷新字体 CSS var
@@ -5714,9 +5879,45 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
+    def _render_tail_inline(self):
+        """把流式未闭合尾部整体行内渲染为 HTML，替换 DOM 增量纯文本节点。
+
+        解决：无空行分隔的长段落（大模型常见输出，尤其中文）在流式期间没有
+        `\\n\\n` 闭合段可差量渲染，尾部长时间以纯文本显示 markdown 源码
+        （**加粗**、`code`、[链接](url)），只有流式结束全量渲染才格式化——
+        用户感知"流式显示内容与最终不符"。
+
+        尾部整体一次 convert（_render_inline_tail）：段落/列表/引用/代码块
+        结构在单一 markdown 上下文中保持正确；未闭合行内语法由 markdown 库
+        字面保留、闭合后由下一次渲染补全。产物为带 data-incremental +
+        data-rendered 标记的节点，后续差量段（updateContentAppend）与全量
+        （updateContent）会整体移除替换，无重复。
+
+        带哈希缓存：尾部文本未变化（安全定时器重复触发）时跳过重复渲染。
+        """
+        _tail = self._markdown_text[self._stable_md_len :]
+        if not _tail or not _tail.strip():
+            return
+        # 🐛 未闭合 think/tool：静默累积，不在此渲染（过滤标签会把思考内容
+        # 当正文泄漏显示），等闭合后由差量段/全量渲染处理。
+        if _has_unclosed_think_or_tool(_tail):
+            return
+        _h = hash(_tail)
+        if _h == self._tail_html_hash:
+            return
+        html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+        # 无论结果是否为空都记录哈希（think/tool 尾部返回空串时避免重复计算）
+        self._tail_html_hash = _h
+        if not html:
+            return
+        try:
+            js = f"updateTailHtml({json.dumps(html).decode('utf-8')});"
+            self.page().runJavaScript(js)
+        except RuntimeError:
+            pass
+
     def _has_active_tool_dom(self) -> bool:
         """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
-
         返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
         且 _tool_md_cache 影响 _inject_tool_blocks 输出——差量段渲染不带该缓存，
         会导致工具块 HTML 与全量不一致）。
@@ -5839,17 +6040,11 @@ class CodeWebViewer(QWebEngineView):
             )
             # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
             # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装
-            _needs_save_restore = self._tool_dom_dirty or bool(
-                getattr(self, "_restore_finished_ids", set())
-            )
+            _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
             if _needs_save_restore:
-                js_code = self._build_save_and_restore_js(html).replace(
-                    "})();", auto_scroll_js + "})();"
-                )
+                js_code = self._build_save_and_restore_js(html).replace("})();", auto_scroll_js + "})();")
             else:
-                js_code = (
-                    f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
-                )
+                js_code = f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
             self.page().runJavaScript(js_code)
             self._tool_dom_dirty = False
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
@@ -5908,6 +6103,13 @@ class CodeWebViewer(QWebEngineView):
             # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
+            # 🆕 修复（简洁模式编辑工具框消失）：save 阶段必须同时覆盖正文容器
+            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _EDIT_TOOLS）
+            # 的流式/完成块由 JS 注入到正文（L9328 _stream_target），简洁模式下
+            # _tool_target_id="tool-content"，旧 save 只遍历 _tc → 编辑工具运行框
+            # 不在保存范围 → 全量渲染 updateContent 重建正文时被抹除，直到
+            # append_tool_result 才重新出现（"运行中→完成"中间消失一阵子）。
+            "var _tcBody=document.getElementById('content-placeholder');"
             "var _saved=[];"
             # 🐛 修复：保存所有 data-tool-call-id 块（含已完成态），并从 DOM 移除。
             # 【根因】原实现只读取 outerHTML 不移除旧块，导致 reorganizeContent
@@ -5920,8 +6122,11 @@ class CodeWebViewer(QWebEngineView):
             # restore 时只恢复 data-streaming="true" 的流式块（不在 markdown 中），
             # 已完成块由 markdown 重新生成 + reorganizeContent 迁移。
             # [PERF] 快速路径：_tc 无子元素时跳过 save 循环，减少 JS 执行开销
-            "if(_tc&&_tc.children.length){"
-            "Array.prototype.forEach.call(Array.prototype.slice.call(_tc.children),function(el,i){"
+            "var _saveRoots=[_tc];"
+            "if(_tcBody&&_tcBody!==_tc)_saveRoots.push(_tcBody);"
+            "for(var _sr=0;_sr<_saveRoots.length;_sr++){var _root=_saveRoots[_sr];"
+            "if(_root&&_root.children.length){"
+            "Array.prototype.forEach.call(Array.prototype.slice.call(_root.children),function(el,i){"
             "if(el.hasAttribute&&el.hasAttribute('data-tool-call-id')){"
             # 🆕 方案 E：暂存流式块（data-streaming="true"）的 data-order，供
             # reorganizeContent 补 data-order 时修正"排在其前的流式工具数"。
@@ -5935,9 +6140,11 @@ class CodeWebViewer(QWebEngineView):
             "}"
             "_saved.push({id:el.getAttribute('data-tool-call-id'),"
             "html:el.outerHTML,kind:'tool',"
-            "streaming:el.getAttribute('data-streaming')||''});"
+            "streaming:el.getAttribute('data-streaming')||'',"
+            "src:_root.id||''});"
             "el.remove();}"
             "});}"
+            "}"
             "document.querySelectorAll('[data-tool-injected]').forEach(function(el){el.remove()});"
             f"updateContent({json.dumps(html_content).decode('utf-8')});"
             # 🐛 修复：只恢复流式进行中的块（data-streaming="true"）。
@@ -5962,7 +6169,8 @@ class CodeWebViewer(QWebEngineView):
             "if(_odVal){"
             "_bk.setAttribute('data-order',_odVal);"
             "}"
-            "_tc.appendChild(_bk);"
+            "var _home=(b.src&&document.getElementById(b.src))||_tc;"
+            "_home.appendChild(_bk);"
             "}}})"
             "}}"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
@@ -5995,7 +6203,13 @@ class CodeWebViewer(QWebEngineView):
         # [B2] 流式结束：重置工具 DOM 脏标记。随后 _schedule_render 走非流式分支，
         # 该分支依据 _tool_dom_dirty/_restore_finished_ids 决定 save/restore 或裸更新；
         # 显式清零保证完成渲染后不再残留"脏"状态（防误走整页 save/restore 包装）。
-        self._tool_dom_dirty = False
+        # 🐛 修复（编辑工具框消失）：keep_dock=True 时仍有活跃工具（S1：文本先于
+        # 工具结果流式结束），此时**不能**清理脏标记——否则 _schedule_render 走
+        # 非流式裸更新重建 #content-placeholder，把 JS 注入的编辑工具运行框抹掉，
+        # 直到 append_tool_result 才重现（"运行中→完成"中间消失一阵子）。保留
+        # dirty 使最终渲染走 save/restore 保护（_saved 为空时零开销）。
+        if not keep_dock:
+            self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
         # 常见时序（工具执行耗时 > 文本流式），此时立即归位会让用户看到
@@ -8774,7 +8988,12 @@ class MessageCard(SimpleCardWidget):
             # 列表 → 所有块 dict 对象被替换 → _tool_anchor_refs 对象引用失效 →
             # append_tool_result 稳定锚点退化 → finish 完整重渲染时思考/工具顺序错乱。
             # 流式中 _content_data 已是标准块列表，原地追加/合并保住引用稳定。
-            if isinstance(self._content_data, list) and self._content_data and isinstance(self._content_data[-1], dict) and self._content_data[-1].get("type") == "text":
+            if (
+                isinstance(self._content_data, list)
+                and self._content_data
+                and isinstance(self._content_data[-1], dict)
+                and self._content_data[-1].get("type") == "text"
+            ):
                 self._content_data[-1]["text"] = str(self._content_data[-1].get("text", "") or "") + str(text or "")
             elif isinstance(self._content_data, list) and all(isinstance(b, dict) for b in self._content_data):
                 # 直接构造 text 块（避免 make_text_block 未导入），保持原地 append 不重建
@@ -9142,9 +9361,7 @@ class MessageCard(SimpleCardWidget):
             ):
                 QTimer.singleShot(
                     0,
-                    lambda: self.viewer._sync_streaming_dock(False)
-                    if self.viewer is not None
-                    else None,
+                    lambda: self.viewer._sync_streaming_dock(False) if self.viewer is not None else None,
                 )
         except Exception:
             pass
@@ -9826,9 +10043,7 @@ class MessageCard(SimpleCardWidget):
         dock 状态机的判据：只要还有工具在运行（流式文本已结束但工具结果未全部
         到达，S1 场景），工具区应保持坞态沉底；全部完成后才归位。
         """
-        return any(
-            tid not in self._finished_streaming_ids for tid in self._tool_call_order
-        )
+        return any(tid not in self._finished_streaming_ids for tid in self._tool_call_order)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -9855,7 +10070,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):

@@ -243,6 +243,72 @@ class TestTeamGroupLayout:
         assert len(inner_widgets) == 1
 
 
+def _team_inner_agents(panel, team_id: str) -> list:
+    """团队框内成员胶囊角色名列表（按视觉顺序）"""
+    grp = panel._team_groups[team_id]
+    inner = grp._team_inner_layout
+    agents = []
+    for i in range(inner.count()):
+        w = inner.itemAt(i).widget()
+        if w is not None:
+            agents.append((w._capsule_label.text() or "").strip())
+    return agents
+
+
+class TestTeamLeaderFirst:
+    """团队框内 leader 默认排第一个（其余成员保持添加顺序）"""
+
+    def test_leader_is_first_when_added_last(self, panel):
+        """leader 后加入也要置顶，其余成员顺序不变"""
+        for agent in ("build", "plan", "leader"):
+            idx = panel.add_tab(agent)
+            panel.update_tab_capsule(idx, agent)
+            panel.set_tab_team(idx, "teamL")
+
+        assert _team_inner_agents(panel, "teamL") == ["leader", "build", "plan"]
+
+    def test_leader_is_first_when_added_first(self, panel):
+        """leader 先加入也置顶（结果一致）"""
+        for agent in ("leader", "build", "review"):
+            idx = panel.add_tab(agent)
+            panel.update_tab_capsule(idx, agent)
+            panel.set_tab_team(idx, "teamL")
+
+        assert _team_inner_agents(panel, "teamL") == ["leader", "build", "review"]
+
+    def test_no_leader_keeps_add_order(self, panel):
+        """团队无 leader → 顺序保持添加顺序"""
+        for agent in ("build", "plan", "review"):
+            idx = panel.add_tab(agent)
+            panel.update_tab_capsule(idx, agent)
+            panel.set_tab_team(idx, "teamL")
+
+        assert _team_inner_agents(panel, "teamL") == ["build", "plan", "review"]
+
+    def test_multiple_leaders_all_top_keep_relative_order(self, panel):
+        """多个 leader：全部置顶，leader 之间保持添加顺序，非 leader 顺序不变"""
+        for agent in ("build", "leader", "plan", "leader", "review"):
+            idx = panel.add_tab(agent)
+            panel.update_tab_capsule(idx, agent)
+            panel.set_tab_team(idx, "teamL")
+
+        assert _team_inner_agents(panel, "teamL") == ["leader", "leader", "build", "plan", "review"]
+
+    def test_leader_capsule_set_after_team_join_still_top(self, panel):
+        """胶囊是在加入团队后才补设的常见时序：加入时无胶囊 → 设置胶囊即置顶"""
+        # 先添加成员 + 设胶囊 + 归档团队
+        for agent in ("build", "plan"):
+            idx = panel.add_tab(agent)
+            panel.update_tab_capsule(idx, agent)
+            panel.set_tab_team(idx, "teamL")
+        # 后加入 leader 再补胶囊（触发 rebuild 置顶）
+        idx = panel.add_tab("leader")
+        panel.update_tab_capsule(idx, "leader")
+        panel.set_tab_team(idx, "teamL")
+
+        assert _team_inner_agents(panel, "teamL") == ["leader", "build", "plan"]
+
+
 class TestUIPluginRowPositionMenu:
     """UIPluginRow 右键插入方位菜单"""
 
@@ -418,8 +484,9 @@ class TestRefreshUIPluginsPoisonIsolation:
                 raise RuntimeError("poison row construction")
             real_init(self, title, icon, parent, plugin_name, card_id)
 
-        with patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init), patch(
-            "app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm
+        with (
+            patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init),
+            patch("app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
         ):
             # 修复前：毒条目抛异常中断整个 refresh_ui_plugins → 这里会 propagate
             panel.refresh_ui_plugins()

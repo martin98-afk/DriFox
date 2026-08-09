@@ -24,7 +24,6 @@ from qfluentwidgets import (
     IconWidget,
     ScrollArea,
     StrongBodyLabel,
-    ToolButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -428,7 +427,7 @@ class _CommandRow(QFrame):
         self._shortcut_lb = shortcut_lb
 
         # 编辑按钮
-        self.edit_btn = ToolButton(FluentIcon.EDIT, self)
+        self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
         self.edit_btn.setToolTip("设置自定义快捷键")
         self.edit_btn.setFixedSize(28, 28)
         self.edit_btn.clicked.connect(lambda: self.edit_clicked.emit(self._cmd_name))
@@ -436,7 +435,7 @@ class _CommandRow(QFrame):
 
         # 恢复按钮
         if self._is_customized:
-            self.restore_btn = ToolButton(FluentIcon.RETURN, self)
+            self.restore_btn = TransparentToolButton(FluentIcon.RETURN, self)
             self.restore_btn.setToolTip("恢复系统配置")
             self.restore_btn.setFixedSize(28, 28)
             self.restore_btn.clicked.connect(lambda: self.restore_clicked.emit(self._cmd_name))
@@ -630,7 +629,7 @@ class ShortcutManagerCard(QWidget):
         self._search.textChanged.connect(self._on_search)
         hly.addWidget(self._search)
 
-        self._refresh_btn = ToolButton(FluentIcon.SYNC, header)
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, header)
         self._refresh_btn.setToolTip("刷新")
         self._refresh_btn.clicked.connect(self._refresh)
         hly.addWidget(self._refresh_btn)
