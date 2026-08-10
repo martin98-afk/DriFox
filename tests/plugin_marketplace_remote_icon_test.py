@@ -114,8 +114,8 @@ def test_resolve_remote_icon_urls_non_github_returns_none():
     assert resolve_remote_icon_urls(meta) is None
 
 
-def test_resolve_remote_icon_urls_no_icon_field_returns_none():
-    """无 icon 字段 → None（无可用图标）"""
+def test_resolve_remote_icon_urls_no_icon_field_returns_candidates():
+    """无 icon 字段 → 返回 assets/ 候选列表（claudecode 约定）"""
     from ui._squircle_avatar import resolve_remote_icon_urls
 
     meta = {
@@ -127,7 +127,10 @@ def test_resolve_remote_icon_urls_no_icon_field_returns_none():
             "path": "plugins/x",
         },
     }
-    assert resolve_remote_icon_urls(meta) is None
+    urls = resolve_remote_icon_urls(meta)
+    assert urls is not None, "无 icon 字段时也应返回候选列表"
+    assert isinstance(urls["light"], list), "候选列表应为 list"
+    assert urls["light"][0] == ("https://raw.githubusercontent.com/foo/bar/main/plugins/x/assets/icon.svg")
 
 
 def test_resolve_remote_icon_urls_no_source_returns_none():
@@ -323,3 +326,138 @@ def test_plugin_icon_widget_avatar_size_matches_svg_size(tmp_path):
 
     # 两者尺寸必须完全一致
     assert w1._avatar.size() == w2._svg_widget.size(), "占位符与 SVG 尺寸不一致"
+
+
+# ── claudecode 兼容测试 ──────────────────────────────────
+
+
+def test_resolve_remote_icon_urls_claude_github_source():
+    """claudecode source: {source: github, repo} → raw URL 可构造"""
+    from ui._squircle_avatar import resolve_remote_icon_urls
+
+    meta = {
+        "name": "airtable",
+        "icon": "assets/icon.svg",
+        "source": {"source": "github", "repo": "Airtable/skills", "ref": "main"},
+    }
+    urls = resolve_remote_icon_urls(meta)
+    assert urls == {
+        "light": "https://raw.githubusercontent.com/Airtable/skills/main/assets/icon.svg",
+        "dark": "https://raw.githubusercontent.com/Airtable/skills/main/assets/icon.svg",
+    }
+
+
+def test_resolve_remote_icon_urls_claude_url_source():
+    """claudecode source: {source: url, url: git 仓库} → raw URL 可构造"""
+    from ui._squircle_avatar import resolve_remote_icon_urls
+
+    meta = {
+        "name": "endorlabs",
+        "icon": "assets/logo.png",
+        "source": {"source": "url", "url": "https://github.com/endorlabs/ai-plugins.git"},
+    }
+    urls = resolve_remote_icon_urls(meta)
+    assert urls == {
+        "light": "https://raw.githubusercontent.com/endorlabs/ai-plugins/main/assets/logo.png",
+        "dark": "https://raw.githubusercontent.com/endorlabs/ai-plugins/main/assets/logo.png",
+    }
+
+
+def test_resolve_remote_icon_urls_claude_relative_source_with_marketplace():
+    """claudecode 相对路径 source（./plugins/xxx）+ 市场源 github → 仓库可反推"""
+    from ui._squircle_avatar import resolve_remote_icon_urls
+
+    meta = {
+        "name": "claude-md-manager",
+        "source": "./plugins/claude-md-manager",
+        "_marketplace_source": {
+            "source": "github",
+            "repo": "wshobson/agents",
+            "ref": "main",
+        },
+    }
+    urls = resolve_remote_icon_urls(meta)
+    assert urls is not None
+    assert urls["light"][0] == (
+        "https://raw.githubusercontent.com/wshobson/agents/main/plugins/claude-md-manager/assets/icon.svg"
+    )
+
+
+def test_resolve_remote_icon_urls_non_github_still_none():
+    """无 GitHub 仓库信息时仍返回 None（避免乱拼 URL）"""
+    from ui._squircle_avatar import resolve_remote_icon_urls
+
+    meta = {
+        "name": "x",
+        "source": {
+            "source": "url",
+            "url": "https://gitlab.com/foo/bar.git",
+        },
+    }
+    assert resolve_remote_icon_urls(meta) is None
+
+
+def test_plugin_icon_widget_remote_urls_candidates_format():
+    """remote_urls 支持候选列表格式（{theme: [url...]}）"""
+    from ui._squircle_avatar import PluginIconWidget
+
+    w = PluginIconWidget(
+        manifest={"name": "cand"},
+        remote_urls={
+            "light": [
+                "https://raw.githubusercontent.com/foo/bar/main/assets/icon.svg",
+                "https://raw.githubusercontent.com/foo/bar/main/assets/logo.png",
+            ],
+            "dark": "https://raw.githubusercontent.com/foo/bar/main/assets/icon_dark.svg",
+        },
+    )
+    # str 值归一化为单元素列表
+    assert w._remote_urls["light"] == [
+        "https://raw.githubusercontent.com/foo/bar/main/assets/icon.svg",
+        "https://raw.githubusercontent.com/foo/bar/main/assets/logo.png",
+    ]
+    assert w._remote_urls["dark"] == ["https://raw.githubusercontent.com/foo/bar/main/assets/icon_dark.svg"]
+
+
+def test_plugin_icon_widget_cache_hit_png(tmp_path):
+    """位图缓存命中 → 渲染 bitmap label（assets/logo.png 场景）"""
+    from ui import _squircle_avatar
+
+    name = "png-plugin"
+    cache = _squircle_avatar._icon_cache_dir() / f"{name}__light.png"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    # 最小合法 1x1 透明 PNG
+    import base64
+
+    cache.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        )
+    )
+    w = _squircle_avatar.PluginIconWidget(
+        manifest={"name": name},
+        remote_urls={
+            "light": "https://raw.githubusercontent.com/foo/bar/main/assets/icon.svg",
+        },
+        icon_size=36,
+    )
+    # 本地无 svg 缓存但按候选扩展名查 png 缓存 → 命中位图
+    assert w._svg_widget is None, "命中 png 缓存不应渲染 svg widget"
+    assert w._bitmap_label is not None, "命中 png 缓存应渲染 bitmap label"
+    assert w._inflight == {}, "缓存命中时不应发起网络请求"
+
+
+def test_plugin_icon_widget_local_assets_resolution(tmp_path):
+    """已安装 claudecode 插件：本地 assets/icon.svg（无 manifest.icon）→ 直接渲染"""
+    from ui._squircle_avatar import PluginIconWidget
+
+    plugin_dir = tmp_path / "airtable"
+    (plugin_dir / "assets").mkdir(parents=True)
+    (plugin_dir / "assets" / "icon.svg").write_text("<svg/>")
+
+    w = PluginIconWidget(
+        plugin_dir=plugin_dir,
+        manifest={"name": "airtable"},  # claudecode plugin.json 无 icon 字段
+    )
+    assert w._svg_widget is not None, "本地 assets/icon.svg 必须被加载"
+    assert w._avatar is None, "有本地图标时不应显示 avatar 兜底"

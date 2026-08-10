@@ -22,10 +22,10 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from PyQt5.QtCore import Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PyQt5.QtSvg import QSvgWidget
-from PyQt5.QtWidgets import QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import isDarkTheme
 
 
@@ -324,45 +324,146 @@ def _icon_cache_dir() -> Path:
     return _drifox_dir() / "cache" / "plugin_icons"
 
 
-def resolve_remote_icon_urls(meta: dict) -> Optional[dict[str, str]]:
-    """从 marketplace 元数据构造 GitHub raw 图标 URL
+# ── 远程 icon 候选命名（兼容 claudecode 插件仓库 assets/ 约定）──
 
-    仅识别 ``source.type == "git-subdir"`` 且 ``source.url`` 指向 github.com
-    的来源（覆盖 DriFox 官方及遵循同一规范的市场）。其他来源（如纯 url
-    指向 CDN）暂不处理。
+# claudecode 插件市场未强制 icon 字段，社区插件普遍把图标放在仓库
+# assets/ 目录下（如 assets/icon.svg、assets/logo.png）。列表按常见度
+# 排序，逐个尝试下载，404 则尝试下一个。
+_ASSETS_ICON_CANDIDATES = (
+    "assets/icon.svg",
+    "assets/icon.png",
+    "assets/logo.svg",
+    "assets/logo.png",
+    "assets/icon_dark.svg",
+    "assets/icon_dark.png",
+)
 
-    注意：从 ``meta["source"]`` 读插件源（git-subdir），而非
-    ``meta["_marketplace_source"]``（后者是市场源 = marketplace.json URL，
-    不是插件仓库）。
 
-    Args:
-        meta: marketplace 插件元数据（含 ``icon`` 与 ``source``）
+def _normalize_github_url(url: str) -> Optional[str]:
+    """把各种 GitHub 地址归一化为 owner/repo（去掉协议、.git、子路径）
 
-    Returns:
-        ``{"light": "...", "dark": "..."}`` 或 None（无法识别）
+    支持：
+    - https://github.com/foo/bar
+    - https://github.com/foo/bar.git
+    - git@github.com:foo/bar.git（ssh 简写，少见）
     """
-    src = meta.get("source") or {}
-    if src.get("type") != "git-subdir":
+    if not url:
         return None
-    url = src.get("url", "")
-    if "github.com" not in urlparse(url).netloc:
+    stripped = url.rstrip("/")
+    # ssh: git@github.com:foo/bar.git
+    if stripped.startswith("git@"):
+        stripped = stripped.split("@", 1)[-1].replace(":", "/")
+    p = urlparse(stripped)
+    if p.netloc and "github.com" not in p.netloc:
         return None
-    ref = src.get("ref", "main")
-    subpath = src.get("path", "")
-    # https://github.com/owner/repo(.git) → owner/repo
-    parts = urlparse(url).path.strip("/").split("/")
+    parts = p.path.strip("/").split("/")
+    netloc = p.netloc or (stripped.split("/")[0] + "/" if False else "")
     if len(parts) < 2:
         return None
-    owner_repo = "/".join(parts[:2]).removesuffix(".git")
-    base = f"https://raw.githubusercontent.com/{owner_repo}/{ref}/{subpath}"
+    return "/".join(parts[:2]).removesuffix(".git")
+
+
+def _resolve_plugin_repo(meta: dict) -> Optional[str]:
+    """解析插件元数据对应的 GitHub 仓库（owner/repo）
+
+    兼容三种 source 结构：
+    1. DriFox git-subdir：{"type"/"source": "git-subdir", "url": "...", "path": "..."}
+    2. claudecode github：{"source": "github", "repo": "owner/repo"}
+    3. claudecode url：{"source": "url", "url": "https://github.com/foo/bar.git"}
+    4. 相对路径字符串（如 "./plugins/xxx"）：需从 meta["_marketplace_source"] 反推仓库
+    """
+    src = meta.get("source")
+    if isinstance(src, str):
+        # 相对路径（claudecode marketplace 内部插件）：仓库来自市场源
+        if not src.startswith("./"):
+            return None
+        mkt = meta.get("_marketplace_source") or {}
+        mkt_type = mkt.get("source") or mkt.get("type", "")
+        if mkt_type == "github":
+            repo = mkt.get("repo", "")
+            return _normalize_github_url(repo) or (repo if "/" in repo and "." not in repo.split("/")[0] else None)
+        if mkt_type == "url":
+            return _normalize_github_url(mkt.get("url", ""))
+        return None
+
+    if not isinstance(src, dict):
+        return None
+
+    src_type = src.get("source") or src.get("type", "")
+    if src_type == "git-subdir":
+        return _normalize_github_url(src.get("url", ""))
+    if src_type == "github":
+        return _normalize_github_url(src.get("repo", ""))
+    if src_type == "url":
+        return _normalize_github_url(src.get("url", ""))
+    return None
+
+
+def _resolve_plugin_subpath(meta: dict) -> str:
+    """解析插件在仓库内的子路径（git-subdir 有 path；其余在仓库根）"""
+    src = meta.get("source")
+    if isinstance(src, dict):
+        src_type = src.get("source") or src.get("type", "")
+        if src_type == "git-subdir":
+            return src.get("path", "").strip("/")
+        if src_type in ("github", "url"):
+            return ""
+    elif isinstance(src, str) and src.startswith("./"):
+        return src[2:].strip("/")
+    return ""
+
+
+def _resolve_plugin_ref(meta: dict) -> str:
+    """解析插件引用的分支/标签（默认 main）
+
+    claudecode 市场条目用 ``sha`` 锁定精确 commit（比 ref 更稳定，
+    适用于 market 断言的一致性），优先取 sha；其次显式 ref。
+    """
+    src = meta.get("source")
+    if isinstance(src, dict):
+        sha = src.get("sha")
+        if sha:
+            return sha
+        ref = src.get("ref")
+        if ref:
+            return ref
+    return "main"
+
+
+def resolve_remote_icon_urls(meta: dict) -> Optional[dict]:
+    """从 marketplace 元数据构造 GitHub raw 图标 URL 或候选列表
+
+    兼容 DriFox 与 claudecode 两套规范：
+    - DriFox git-subdir：path 指向插件子目录，icon 字段指向插件内相对路径
+    - claudecode github/url/相对路径：插件在仓库（子目录），图标在 assets/ 下
+      （无 icon 字段时返回候选列表，由下载端逐项尝试）
+
+    Returns:
+        有 icon 字段：``{"light": "单 URL", "dark": "单 URL"}``（保持旧格式兼容）
+        无 icon 字段但仓库可识别：``{"light": [候选URL...], "dark": [...]}``
+        无法识别：None
+    """
+    repo = _resolve_plugin_repo(meta)
+    if not repo:
+        return None
+    ref = _resolve_plugin_ref(meta)
+    subpath = _resolve_plugin_subpath(meta)
+    base = f"https://raw.githubusercontent.com/{repo}/{ref}"
+    if subpath:
+        base = f"{base}/{subpath}"
 
     icon_value = meta.get("icon")
     if not icon_value:
-        return None
+        # 无 icon 字段 → 候选列表（claudecode assets/ 约定 + 兼容 DriFox 根目录约定）
+        candidates = _ASSETS_ICON_CANDIDATES + ("icon.svg", "icon_dark.svg", "icon.png")
+        light = [f"{base}/{c}" for c in candidates]
+        # dark 主题同样尝试候选列表（先试 icon_dark.*，再回退通用图）
+        return {"light": light, "dark": list(light)}
+
     if isinstance(icon_value, str):
         return {"light": f"{base}/{icon_value}", "dark": f"{base}/{icon_value}"}
     if isinstance(icon_value, dict):
-        out: dict[str, str] = {}
+        out: dict = {}
         for theme in ("light", "dark"):
             p = icon_value.get(theme) or icon_value.get("light", "")
             if p:
@@ -373,11 +474,18 @@ def resolve_remote_icon_urls(meta: dict) -> Optional[dict[str, str]]:
 
 # ── 远程 icon 缓存命中检测 ──────────────────────────────────
 
+# 支持的缓存扩展名（含位图：claudecode assets/ 下 logo.png 等）
+_ICON_CACHE_EXTS = (".svg", ".png", ".jpg", ".jpeg", ".webp")
+
 
 def _cache_hit(name: str, theme: str) -> Optional[Path]:
     """检查插件指定主题的 icon 缓存是否存在（存在即返回路径）"""
-    cache = _icon_cache_dir() / f"{name}__{theme}.svg"
-    return cache if cache.is_file() else None
+    cache_dir = _icon_cache_dir()
+    for ext in _ICON_CACHE_EXTS:
+        cache = cache_dir / f"{name}__{theme}{ext}"
+        if cache.is_file():
+            return cache
+    return None
 
 
 # ── PluginIconWidget 扩展：远程 URL 支持 ──────────────────────────────────
@@ -413,23 +521,56 @@ class PluginIconWidget(QWidget):
         self._plugin_dir = plugin_dir
         self._manifest = manifest or {}
         self._font_size = font_size
-        self._remote_urls = remote_urls or {}
+        # 兼容两种格式：{"light": "url"}（单 URL）或 {"light": ["url1", "url2"]}（候选列表）
+        self._remote_urls = self._normalize_remote_urls(remote_urls or {})
         self._icon_size_override = icon_size  # 0 = 用 font_size 推导
         self._svg_widget: Optional["QSvgWidget"] = None
+        # 位图渲染（claudecode assets/logo.png 等非 SVG 图标）
+        self._bitmap_label: Optional["QLabel"] = None
         self._avatar: Optional[SquircleAvatar] = None
         # 异步下载相关
         self._inflight: dict[str, QNetworkReply] = {}
+        # 每主题候选下载进度（theme → 当前候选索引，失败推进）
+        self._pending_idx: dict[str, int] = {}
         self._setup_ui()
 
+    @staticmethod
+    def _normalize_remote_urls(urls: dict) -> dict[str, list[str]]:
+        """把 remote_urls 统一为 {theme: [url, ...]}（str → 单元素列表）"""
+        out: dict[str, list[str]] = {}
+        for theme, value in urls.items():
+            if isinstance(value, str):
+                out[theme] = [value]
+            elif isinstance(value, (list, tuple)):
+                out[theme] = [u for u in value if u]
+        return out
+
     def _resolve_local_icon(self) -> Optional[Path]:
-        """解析本地 icon 路径（plugin_dir 已存在时调用）"""
+        """解析本地 icon 路径（plugin_dir 已存在时调用）
+
+        优先级：
+        1. manifest.icon 显式路径（相对 plugin_dir）
+        2. plugin_dir/icon.svg（DriFox 约定）
+        3. plugin_dir/assets/ 下常见图标（claudecode 插件仓库约定，
+           assets/icon.svg → logo.png 等，与远程候选保持一致）
+        """
         if self._plugin_dir is None:
             return None
         raw = self._manifest.get("icon")
+        theme = "dark" if isDarkTheme() else "light"
         if not raw:
+            # 主题化：dark 优先 assets/icon_dark.*，light 反之（存在才用）
+            themed_order = ("icon_dark.svg", "icon_dark.png") if theme == "dark" else ("icon.svg", "icon.png")
+            for rel in themed_order:
+                p = self._plugin_dir / rel
+                if p.exists():
+                    return p
+            for rel in _ASSETS_ICON_CANDIDATES:
+                p = self._plugin_dir / rel
+                if p.exists():
+                    return p
             default = self._plugin_dir / "icon.svg"
             return default if default.exists() else None
-        theme = "dark" if isDarkTheme() else "light"
         if isinstance(raw, str):
             p = self._plugin_dir / raw
             return p if p.exists() else None
@@ -441,11 +582,24 @@ class PluginIconWidget(QWidget):
         return None
 
     def _resolve_cached_remote(self) -> Optional[Path]:
-        """解析远程 icon 缓存命中（plugin_dir 不存在但 remote_urls 提供时）"""
+        """解析远程 icon 缓存命中（plugin_dir 不存在但 remote_urls 提供时）
+
+        按候选列表顺序逐项检查缓存（优先命中第一个存在的候选扩展名）。
+        """
         if not self._remote_urls or not self._manifest:
             return None
         theme = "dark" if isDarkTheme() else "light"
         name = self._manifest.get("name", "?")
+        candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
+        # 按候选 URL 的扩展名查缓存：icon.svg → name__light.svg
+        for url in candidates:
+            ext = Path(urlparse(url).path).suffix or ".svg"
+            if ext not in _ICON_CACHE_EXTS:
+                ext = ".svg"
+            cache = _icon_cache_dir() / f"{name}__{theme}{ext}"
+            if cache.is_file():
+                return cache
+        # 兜底：任意扩展名命中（兼容旧缓存无扩展名信息）
         return _cache_hit(name, theme)
 
     def _icon_size(self) -> int:
@@ -456,12 +610,16 @@ class PluginIconWidget(QWidget):
         return size
 
     def _show_svg(self, svg_path: Path):
-        """在容器中渲染 SVG（尽可能复用现有 widget 以减少 layout 重算）
+        """在容器中渲染图片（SVG 用 QSvgWidget，位图用 QLabel+QPixmap）
 
         性能说明：原实现每次都 clear + 重建 widget，会触发父 layout 重算。
-        现在优先复用现有 _svg_widget：仅当尺寸变化或首次创建时才重建。
+        现在优先复用现有 widget：仅当尺寸变化或首次创建时才重建。
         """
         size = self._icon_size()
+        # ── 位图（png/jpg 等，claudecode assets/ 下 logo.png 场景）──
+        if svg_path.suffix.lower() not in (".svg",):
+            self._show_bitmap(svg_path)
+            return
         if self._svg_widget is None:
             self._clear_children()
             self._svg_widget = QSvgWidget(str(svg_path), self)
@@ -472,10 +630,39 @@ class PluginIconWidget(QWidget):
         if self._svg_widget.size().width() != size or self._svg_widget.size().height() != size:
             self._svg_widget.setFixedSize(size, size)
         self._svg_widget.load(str(svg_path))
-        # 若之前显示的是 avatar，重新显示 SVG
+        # 若之前显示的是 avatar 或位图，重新显示 SVG
         if self._avatar is not None:
             self._avatar.hide()
-            self._svg_widget.show()
+        if self._bitmap_label is not None:
+            self._bitmap_label.hide()
+        self._svg_widget.show()
+
+    def _show_bitmap(self, img_path: Path):
+        """渲染位图图标（PNG/JPG，claudecode assets/ 下 logo.png 等）
+
+        保持与 SVG 一致的尺寸表现：按 icon_size 等比缩放，居中显示。
+        """
+        from PyQt5.QtCore import Qt as _Qt
+
+        size = self._icon_size()
+        pixmap = QPixmap(str(img_path))
+        if pixmap.isNull():
+            # 无效图片 → 回退 avatar
+            self._show_avatar()
+            return
+        if self._bitmap_label is None:
+            self._clear_children()
+            self._bitmap_label = QLabel(self)
+            self._bitmap_label.setAlignment(_Qt.AlignCenter)
+            self.layout().addWidget(self._bitmap_label)
+        scaled = pixmap.scaled(size, size, _Qt.KeepAspectRatio, _Qt.SmoothTransformation)
+        self._bitmap_label.setPixmap(scaled)
+        self._bitmap_label.setFixedSize(size, size)
+        if self._avatar is not None:
+            self._avatar.hide()
+        if self._svg_widget is not None:
+            self._svg_widget.hide()
+        self._bitmap_label.show()
 
     def _show_avatar(self):
         """在容器中渲染缩写头像（兜底）
@@ -499,6 +686,7 @@ class PluginIconWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._svg_widget = None
+        self._bitmap_label = None
         self._avatar = None
 
     def _setup_ui(self):
@@ -522,13 +710,21 @@ class PluginIconWidget(QWidget):
         self._kick_off_remote_download()
 
     def _kick_off_remote_download(self):
-        """按当前主题发起一次远程下载（去重：同 theme 已有 in-flight 则跳过）"""
+        """按当前主题发起一次远程下载（候选列表逐项尝试）
+
+        去重：同 theme 已有 in-flight 则跳过。失败项由
+        ``_on_download_finished`` 决定是否尝试下一个候选。
+        """
         if not self._remote_urls:
             return
         theme = "dark" if isDarkTheme() else "light"
-        url = self._remote_urls.get(theme) or self._remote_urls.get("light", "")
-        if not url:
+        candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
+        if not candidates:
             return
+        idx = self._pending_idx.get(theme, 0)
+        if idx >= len(candidates):
+            return  # 候选已穷尽
+        url = candidates[idx]
         if theme in self._inflight:
             return  # 已在下载中
         nam = _get_icon_nam()
@@ -540,7 +736,7 @@ class PluginIconWidget(QWidget):
         reply.finished.connect(lambda r=reply, t=theme: self._on_download_finished(r, t))
 
     def _on_download_finished(self, reply: "QNetworkReply", theme: str):
-        """下载完成回调（成功 → 缓存并刷新 UI；失败 → 静默兜底）
+        """下载完成回调（成功 → 缓存并刷新 UI；失败 → 尝试下一候选）
 
         widget 可能已被销毁（异步回调触发时），需用 try/except 兜底
         避免污染 Qt 事件循环。
@@ -553,16 +749,21 @@ class PluginIconWidget(QWidget):
             if reply.error() != QNetworkReply.NoError:
                 err = reply.errorString()
                 reply.deleteLater()
-                self.iconFailed.emit(theme, err)
+                # 失败 → 尝试下一个候选（如 assets/icon.svg → assets/logo.png）
+                self._try_next_candidate(theme, err)
                 return
             data = bytes(reply.readAll())
             reply.deleteLater()
             if not data:
-                self.iconFailed.emit(theme, "empty response")
+                self._try_next_candidate(theme, "empty response")
                 return
-            # 写缓存
+            # 写缓存（按候选 URL 的扩展名命名，兼容 svg/png）
             name = self._manifest.get("name", "?")
-            cache = _icon_cache_dir() / f"{name}__{theme}.svg"
+            url = self._candidate_url(theme)
+            ext = Path(urlparse(url).path).suffix.lower() if url else ".svg"
+            if ext not in _ICON_CACHE_EXTS:
+                ext = ".svg"
+            cache = _icon_cache_dir() / f"{name}__{theme}{ext}"
             try:
                 cache.parent.mkdir(parents=True, exist_ok=True)
                 cache.write_bytes(data)
@@ -581,6 +782,23 @@ class PluginIconWidget(QWidget):
             import logging
 
             logging.getLogger(__name__).debug(f"[IconWidget] download callback error: {e}")
+
+    def _candidate_url(self, theme: str) -> str:
+        """当前主题正在尝试的候选 URL（供缓存扩展名推断）"""
+        candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
+        idx = self._pending_idx.get(theme, 0)
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+        return ""
+
+    def _try_next_candidate(self, theme: str, err: str):
+        """下载失败 → 推进候选索引并重新发起（无下一个则发失败信号）"""
+        self._pending_idx[theme] = self._pending_idx.get(theme, 0) + 1
+        candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
+        if pending[theme] < len(candidates):
+            self._kick_off_remote_download()
+            return
+        self.iconFailed.emit(theme, err)
 
     def _apply_loaded_svg(self, cache_path: Path):
         """应用已下载的 SVG 到 UI

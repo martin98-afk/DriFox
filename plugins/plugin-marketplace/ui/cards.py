@@ -920,6 +920,26 @@ class _PluginRow(QFrame):
             return max(8, self._font_size + offset)
         return base_px
 
+    def sizeHint(self):
+        """行 sizeHint：已布局时按当前宽度用 heightForWidth 计算
+
+        修复「加载更多」按钮下大段空白：QLabel(wordWrap) 的默认 sizeHint
+        按理想宽度（未约束）计算换行高度，比实际布局高度大（实测 75 vs
+        67，行多时累积成 stretch 空白区）。已布局（width>0）时返回
+        heightForWidth(当前宽度)，与 QVBoxLayout 布局行时使用的高度一致；
+        未布局（width=0）时回退默认（该状态行处于隐藏、不参与布局
+        sizeHint 累加，无影响）。
+        """
+        from PyQt5.QtCore import QSize
+
+        base = super().sizeHint()
+        lay = self.layout()
+        if lay is not None and self.width() > 0:
+            h = lay.heightForWidth(self.width())
+            if h > 0:
+                return QSize(base.width(), h)
+        return base
+
     def _font_qss(self, size_px: int) -> str:
         """生成 font-size + font-family 的 QSS 片段"""
         qss = f"font-size: {size_px}px;"
@@ -1486,6 +1506,28 @@ class _PluginRow(QFrame):
 # ── 市场主卡片 ──────────────────────────────────────────────
 
 
+class _MarketListContent(QWidget):
+    """列表内容容器（QScrollArea 的 widget）
+
+    覆盖 sizeHint()：已布局时直接返回当前几何高度（由 _reveal_rows 按
+    实际行高维护），绕开 QWidget::sizeHint()/QVBoxLayout::sizeHint 的
+    totalSizeHint 缓存（可能被冻结为异常值：QLabel(wordWrap) 未布局时
+    按理想宽度计算、行 sizeHint 与实际布局高度偏差，QScrollArea 用该
+    值撑开内容 → 列表底部大段空白）。
+    """
+
+    def sizeHint(self):
+        from PyQt5.QtCore import QSize
+
+        base = super().sizeHint()
+        if self.height() > 0:
+            return QSize(base.width(), self.height())
+        lay = self.layout()
+        if lay is not None:
+            return lay.sizeHint()
+        return base
+
+
 class MarketplaceCard(QWidget):
     """插件市场浮动卡片"""
 
@@ -1516,6 +1558,7 @@ class MarketplaceCard(QWidget):
         self._market_status_labels: dict = {}  # 市场名 → 状态徽标 QLabel（「市场」页）
         self._initial_render_timer: Optional["QTimer"] = None  # 首屏 300ms 合并窗口
         self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
+        self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
         self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
@@ -1966,10 +2009,14 @@ class MarketplaceCard(QWidget):
         self._content_stack.setStyleSheet("background: transparent;")
 
         self._scroll = QScrollArea(self._browse_page)
-        self._scroll.setWidgetResizable(True)
+        # widgetResizable=False：QScrollArea 按 sizeHint 自动管理内容高度，
+        # 但 QLabel(wordWrap) 的 sizeHint 与实际布局高度有系统性偏差且
+        # C++ 侧无法被 Python override 修正 → 内容被撑高 → 按钮下空白。
+        # 改为手动管理 content 尺寸（_sync_content_size）。
+        self._scroll.setWidgetResizable(False)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(_scroll_area_qss())
-        self._content = QWidget(self._scroll)
+        self._content = _MarketListContent(self._scroll)
         self._content.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
@@ -2060,6 +2107,8 @@ class MarketplaceCard(QWidget):
         from PyQt5.QtCore import QEvent
 
         if obj is self.window() and event.type() == QEvent.Resize:
+            # widgetResizable=False：窗口尺寸变化后手动同步内容宽度（跟随视口）
+            self._sync_content_size()
             self.updateGeometry()
         return super().eventFilter(obj, event)
 
@@ -2120,8 +2169,10 @@ class MarketplaceCard(QWidget):
         self._merge_market_data(market_data)
 
     def _schedule_render(self):
-        """合并同帧多次市场到达为一次渲染（_render_pending 防重复排队）
+        """合并短时间窗口内多次市场到达为一次渲染（_render_pending 防重复排队）
 
+        80ms 合并窗口：刷新时逐市场拉取，间隔 <80ms 的市场数据合并为一次
+        全量重建，避免每个市场到达都清空+重建列表（列表闪 N 次）。
         用 self 子对象 QTimer（销毁自动取消）：避免无父临时 timer 在卡片
         销毁后仍触发回调，触碰已删除 Qt 控件（原生崩溃 0xC0000409）。
         """
@@ -2134,7 +2185,7 @@ class MarketplaceCard(QWidget):
             self._flush_timer = QTimer(self)
             self._flush_timer.setSingleShot(True)
             self._flush_timer.timeout.connect(self._flush_render)
-        self._flush_timer.start(0)
+        self._flush_timer.start(80)
 
     def _flush_render(self):
         """执行挂起的渲染：首屏未渲染时交给 _render_initial_view 统一完成"""
@@ -2498,23 +2549,125 @@ class MarketplaceCard(QWidget):
         return row
 
     def _render_batch(self, start: int, end: int):
-        """渲染 [start, end) 范围的匹配插件行"""
+        """渲染 [start, end) 范围的匹配插件行
+
+        压缩帧防护：新行创建后先隐藏，渲染完成由 _reveal_rows 延迟一帧统一显示。
+
+        原因：QScrollArea(widgetResizable) 的内容 widget 高度更新滞后于行创建
+        （QVBoxLayout 的 sizeHint 缓存惰性刷新），若行立即可见，首帧会按
+        「视口高度 / 行数」被压缩成几 px 高的窄条堆在左上角，随后才展开到
+        正常高度（表现为刷新列表时内容先从左上角出现再展开）。隐藏行不参与
+        布局几何分配（sizeHint 仍计入，滚动范围正确），统一显示时直接以正确
+        高度出现，跳过压缩帧。
+        """
         for i in range(start, end):
             p = self._matched[i]
             row = self._create_row(p)
             if row is None:
                 continue
+            row.hide()  # 防 QScrollArea 未扩展前的压缩帧
             # 新行插入「加载更多」按钮之前：按钮随新行自然下移，
             # 避免新行跑到 stretch 后面造成按钮卡在中间（不滚动视口）
             btn = getattr(self, "_load_more_btn", None)
             if btn is not None:
                 self._content_layout.insertWidget(self._content_layout.indexOf(btn), row)
             else:
-                self._content_layout.addWidget(row)
+                # 无按钮（全部渲染完，如搜索过滤后补行）：新行必须插到
+                # stretch 之前。否则 addWidget 会追加到 stretch 后面 →
+                # stretch 被夹在行中间吃满剩余空间 → 中间大段空白、
+                # 新行被推到最底部。
+                count = self._content_layout.count()
+                last = self._content_layout.itemAt(count - 1) if count > 0 else None
+                if last is not None and last.widget() is None and last.spacerItem() is not None:
+                    self._content_layout.insertWidget(count - 1, row)
+                else:
+                    self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
         # 首屏批次补 stretch
         if start == 0:
             self._content_layout.addStretch(1)
+        self._schedule_reveal()
+
+    def _schedule_reveal(self):
+        """渲染完成后延迟显示新行（等 QScrollArea 内容扩展稳定后一次到位）
+
+        50ms 窗口：QScrollArea 的内容 widget 高度扩展依赖布局 sizeHint 缓存
+        刷新（需多轮事件循环），过早 show 会让行在未扩展的受限高度下布局
+        （重新出现压缩帧）。50ms 后人眼无感，且保证 show 时行直接以正确
+        高度出现。
+        用 self 子 QTimer（销毁自动取消），避免无父临时 timer 在卡片
+        销毁后触发回调触碰已删除控件（原生崩溃 0xC0000409）。
+        """
+        if self._reveal_timer is None:
+            from PyQt5.QtCore import QTimer
+
+            self._reveal_timer = QTimer(self)
+            self._reveal_timer.setSingleShot(True)
+            self._reveal_timer.timeout.connect(self._reveal_rows)
+        self._reveal_timer.start(50)
+
+    def _reveal_rows(self):
+        """显示渲染期间隐藏的插件行（_alive 防护）
+
+        QScrollArea(widgetResizable) 的内容高度扩展依赖 widget sizeHint
+        缓存刷新（滞后于行创建），若只 show 行，行会在旧高度（视口高）下
+        被压缩布局一帧再展开。因此 show 后立即按最新 sizeHint 手动同步
+        resize _content：QVBoxLayout 随即在正确高度下重布局，行一次到位，
+        无压缩帧（QScrollArea 后续按相同 sizeHint 覆盖，结果一致）。
+        """
+        if not self._alive():
+            return  # 卡片已销毁，放弃显示
+        for row in self._row_map.values():
+            try:
+                row.show()
+            except RuntimeError:
+                pass  # 行已被销毁（并发清理），忽略
+        try:
+            self._content_layout.activate()
+            # widgetResizable=False：手动同步 content 尺寸到实际内容高度，
+            # 不依赖 layout.sizeHint()（QLabel wordWrap 的 sizeHint 与实际
+            # 布局高度有每行 ~8px 偏差，行多时累积成 stretch 空白区）
+            self._sync_content_size()
+            # 刷新 QWidget::sizeHint 缓存：布局激活后缓存可能被冻结为
+            # 旧值/异常值，不清除会让 QScrollArea 在窗口 resize 等时机
+            # 用错误高度撑开 content → 列表底部大段空白
+            self._content.updateGeometry()
+        except RuntimeError:
+            pass  # 卡片已销毁
+
+    def _content_height(self) -> int:
+        """按布局内可见行理想高度累加内容高度（不依赖 C++ sizeHint 缓存）
+
+        用 Python 侧 w.sizeHint()（_PluginRow override：已布局时返回
+        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免：
+        1. C++ QWidgetItem::sizeHint（QLabel wordWrap 放大值）
+        2. 行在受限 content 高度下被压缩后的实际几何高度
+        """
+        lay = self._content_layout
+        spacing = lay.spacing()
+        mg = lay.contentsMargins()
+        total = 0
+        vis = 0
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None and w.isVisible():
+                total += w.sizeHint().height()
+                vis += 1
+        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
+
+    def _sync_content_size(self):
+        """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
+
+        宽度 = 视口宽；高度 = max(可见行实际高度和, 视口高)（行少时
+        保持视口高，stretch 填满底部，不出现空白）。
+        """
+        try:
+            vp = self._scroll.viewport()
+            h = self._content_height()
+            self._content.resize(vp.width(), max(h, vp.height()))
+        except RuntimeError:
+            pass  # 卡片已销毁
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示"""
@@ -2543,8 +2696,20 @@ class MarketplaceCard(QWidget):
         while self._content_layout.count():
             item = self._content_layout.takeAt(0)
             if item.widget():
+                # 立即隐藏：takeAt 移出布局后 widget 无几何管理，deleteLater 前
+                # 会残留原位置造成闪帧（与压缩帧同源）
+                item.widget().hide()
                 item.widget().deleteLater()
             item = None  # 释放 QLayoutItem 引用
+        # 同步收缩内容高度 + 刷新 sizeHint 缓存：QScrollArea 的收缩依赖
+        # LayoutRequest（滞后多轮事件循环），残留旧高度会让滚动范围保留旧值，
+        # 在下一批行 reveal 之前用户可滚到大段空白区（加载更多/刷新竞态场景）
+        try:
+            vp = self._scroll.viewport()
+            self._content.resize(vp.width(), vp.height())
+            self._content.updateGeometry()
+        except RuntimeError:
+            pass  # 卡片已销毁
 
     def _on_search_text_changed(self):
         """搜索文本变化 → 防抖后触发过滤"""
