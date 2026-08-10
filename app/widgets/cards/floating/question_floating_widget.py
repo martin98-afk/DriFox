@@ -685,11 +685,6 @@ class QuestionFloatingWidget(QWidget):
         self._options_layout.setSpacing(6)
         main_layout.addWidget(self._options_container)
 
-        # 弹性吸收剩余空间：当容器分配高度 > 内容 sizeHint（dock 拖拽 / 窗口 resize）时，
-        # 多余空间全部进入 stretch，避免 QVBoxLayout 将剩余空间均分到各子项
-        # （scroll/hint/footer 被强行拉高 → 卡片内部错乱）
-        main_layout.addStretch(1)
-
         # ── 底栏 ──
         self._footer_widget = QWidget()
         self._footer_widget.setStyleSheet("background: transparent;")
@@ -747,6 +742,13 @@ class QuestionFloatingWidget(QWidget):
         footer.addWidget(self._next_btn)
 
         main_layout.addWidget(self._footer_widget)
+
+        # 弹性吸收剩余空间：当容器分配高度 > 内容 sizeHint（BottomCardContainer 为
+        # dock 模式，高度由 QSplitter 拖拽控制、不随内容收缩）时，多余空间全部进入
+        # stretch → 内容（含底栏）紧凑贴顶、空白留在卡片底部，而不是被 QVBoxLayout
+        # 均分到各子项或挤在自定义输入与底栏之间。
+        main_layout.addStretch(1)
+
         self._apply_card_style()
         self._setup_shortcuts()
 
