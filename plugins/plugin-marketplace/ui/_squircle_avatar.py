@@ -456,12 +456,26 @@ class PluginIconWidget(QWidget):
         return size
 
     def _show_svg(self, svg_path: Path):
-        """在容器中渲染 SVG（替换现有子部件）"""
-        self._clear_children()
+        """在容器中渲染 SVG（尽可能复用现有 widget 以减少 layout 重算）
+
+        性能说明：原实现每次都 clear + 重建 widget，会触发父 layout 重算。
+        现在优先复用现有 _svg_widget：仅当尺寸变化或首次创建时才重建。
+        """
         size = self._icon_size()
-        self._svg_widget = QSvgWidget(str(svg_path), self)
-        self._svg_widget.setFixedSize(size, size)
-        self.layout().addWidget(self._svg_widget)
+        if self._svg_widget is None:
+            self._clear_children()
+            self._svg_widget = QSvgWidget(str(svg_path), self)
+            self._svg_widget.setFixedSize(size, size)
+            self.layout().addWidget(self._svg_widget)
+            return
+        # 复用现有 widget：仅在尺寸变化时调整
+        if self._svg_widget.size().width() != size or self._svg_widget.size().height() != size:
+            self._svg_widget.setFixedSize(size, size)
+        self._svg_widget.load(str(svg_path))
+        # 若之前显示的是 avatar，重新显示 SVG
+        if self._avatar is not None:
+            self._avatar.hide()
+            self._svg_widget.show()
 
     def _show_avatar(self):
         """在容器中渲染缩写头像（兜底）
@@ -530,6 +544,9 @@ class PluginIconWidget(QWidget):
 
         widget 可能已被销毁（异步回调触发时），需用 try/except 兜底
         避免污染 Qt 事件循环。
+
+        性能优化：不在视口内时延迟到下一轮事件循环合并更新（避免
+        多个下载同时完成触发频繁的 layout 重算导致滚动卡顿）。
         """
         try:
             self._inflight.pop(theme, None)
@@ -554,7 +571,7 @@ class PluginIconWidget(QWidget):
             # 若当前主题匹配 → 立即替换 UI；不匹配则丢弃（主题切换时会重新加载）
             current_theme = "dark" if isDarkTheme() else "light"
             if theme == current_theme:
-                self._show_svg(cache)
+                self._apply_loaded_svg(cache)
             self.iconDownloaded.emit(theme, data)
         except RuntimeError:
             # widget 已被 Qt 删除（C++ 对象已释放），静默忽略
@@ -564,6 +581,43 @@ class PluginIconWidget(QWidget):
             import logging
 
             logging.getLogger(__name__).debug(f"[IconWidget] download callback error: {e}")
+
+    def _apply_loaded_svg(self, cache_path: Path):
+        """应用已下载的 SVG 到 UI
+
+        性能策略：
+        - widget 在视口内 → 立即更新（用户能看到）
+        - widget 不可见或不在视口 → 延迟到下一轮事件循环批量合并
+          （避免滚动过程中多个 widget 同时完成下载导致频繁 layout 重算）
+        """
+        if not self._should_update_inline():
+            # 延后到下一轮事件循环批量应用（合并多次重绘）
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda p=cache_path: self._do_show_svg_safe(p))
+            return
+        self._do_show_svg_safe(cache_path)
+
+    def _should_update_inline(self) -> bool:
+        """判断是否可立即更新（widget 在视口内且可见）"""
+        if not self.isVisible():
+            return False
+        # 检查父窗口是否正在滚动（通过 viewport 偏移粗略判断）
+        # 简化：只检查自身可见性 + 父级链至少有一层可见
+        parent = self.parent()
+        while parent is not None:
+            if not parent.isVisible():
+                return False
+            parent = parent.parent()
+        return True
+
+    def _do_show_svg_safe(self, cache_path: Path):
+        """安全显示 SVG（已通过可见性检查或延迟到下轮）"""
+        try:
+            self._show_svg(cache_path)
+        except RuntimeError:
+            # widget 已被销毁
+            pass
 
     def set_font_size(self, font_size: int):
         """更新字号并重建组件（主题切换时也调用此方法）

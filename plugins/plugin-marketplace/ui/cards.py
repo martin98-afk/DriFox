@@ -898,17 +898,26 @@ class _PluginRow(QFrame):
         return qss
 
     def _apply_child_fonts(self):
-        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）"""
+        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）
+
+        优化：缓存已设置的 QSS 字符串，无变化时跳过 setStyleSheet 调用
+        （QSS 解析 + 触发布局重算在 30+ 行时是滚动卡顿主因之一）。
+        """
         if self._desc_label is not None:
-            self._desc_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
-            )
-        for lbl in self._tag_labels:
-            lbl.setStyleSheet(self._tag_stylesheet())
+            new_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
+            if getattr(self, "_desc_qss_cached", None) != new_qss:
+                self._desc_qss_cached = new_qss
+                self._desc_label.setStyleSheet(new_qss)
+        new_tag_qss = self._tag_stylesheet()
+        if getattr(self, "_tag_qss_cached", None) != new_tag_qss:
+            self._tag_qss_cached = new_tag_qss
+            for lbl in self._tag_labels:
+                lbl.setStyleSheet(new_tag_qss)
         if getattr(self, "_mp_label", None) is not None:
-            self._mp_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
+            new_mp_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            if getattr(self, "_mp_qss_cached", None) != new_mp_qss:
+                self._mp_qss_cached = new_mp_qss
+                self._mp_label.setStyleSheet(new_mp_qss)
 
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
