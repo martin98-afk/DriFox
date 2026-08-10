@@ -39,6 +39,10 @@ _MAX_CHAT_WIDTH = 1000
 # 否则标题文字被压成窄条无法阅读。
 _EXPANDED_MIN_FRAME_WIDTH = 200
 
+# ── 侧边栏固定默认宽度（px，内容宽）──
+# 打开时固定默认宽度（不记忆），约原 280 的 2/3。
+_DEFAULT_PANEL_WIDTH = 187
+
 # ── 挤压折叠后自动展开的窗口增长阈值（px）──
 # 窗口 resize 挤压折叠后，需比折叠时窗口总宽再宽出该值才自动展开，
 # 避免"折叠刚完成条件恰满足就弹回展开"的抖动（绝对条件在窗口 ~760 时
@@ -683,8 +687,8 @@ class TabManagerWindow(QWidget):
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
 
-        # 固定默认面板宽度（280 + 14px 补偿 #tabFrame margins/border），不记忆
-        frame_w = 280 + 14
+        # 固定默认面板宽度（_DEFAULT_PANEL_WIDTH + 14px 补偿 #tabFrame margins/border），不记忆
+        frame_w = _DEFAULT_PANEL_WIDTH + 14
         self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
         # 恢复侧边栏收起状态（必须在 splitter sizes 设置之后执行）
@@ -730,10 +734,10 @@ class TabManagerWindow(QWidget):
                 # 挤压折叠场景：resizeEvent 自动折叠时宽度已被压到折叠阈值
                 # （< _auto_collapse_width=100）以下，此刻保存的"当前宽度"只剩
                 # 90px 左右，点击展开只能恢复窄条。此时改用常规展开宽度
-                # （固定默认 280）作为恢复目标，保证展开后宽度可读；
+                # （固定默认 _DEFAULT_PANEL_WIDTH）作为恢复目标，保证展开后宽度可读；
                 # 用户手动折叠时宽度正常，照常保存实际宽度。
                 if cur_frame_w < self._tab_panel._auto_collapse_width:
-                    saved_w = 280
+                    saved_w = _DEFAULT_PANEL_WIDTH
                     cur_frame_w = max(saved_w, _EXPANDED_MIN_FRAME_WIDTH - 14) + 14
                 self._saved_panel_frame_width = cur_frame_w
             # 使用 _tab_panel 的收起最小宽度
@@ -896,10 +900,10 @@ class TabManagerWindow(QWidget):
             QTimer.singleShot(delay, self._apply_restored_panel_width)
 
     def _apply_restored_panel_width(self):
-        """按默认宽度 280 恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
+        """按默认宽度恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
-        saved_w = 280
+        saved_w = _DEFAULT_PANEL_WIDTH
         frame_w = max(_EXPANDED_MIN_FRAME_WIDTH, saved_w + 14)
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
