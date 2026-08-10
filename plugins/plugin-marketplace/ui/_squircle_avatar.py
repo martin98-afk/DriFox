@@ -136,11 +136,12 @@ class SquircleAvatar(QWidget):
         super().__init__(parent)
         self._text = text if text else "?"
         self._color = self._parse_rgba(color)
-        # font_size 优先于 size
-        if font_size > 0:
-            self._size = _compute_avatar_size(font_size)
-        elif size > 0:
+        # size 优先级提升：显式 size > 0 时直接用（让 PluginIconWidget 等容器
+        # 可以强制覆盖，避免与 SVG 图标尺寸不一致）
+        if size > 0:
             self._size = size
+        elif font_size > 0:
+            self._size = _compute_avatar_size(font_size)
         else:
             self._size = _AVATAR_MIN_SIZE
         self._font_size = font_size if font_size > 0 else 0
@@ -185,6 +186,18 @@ class SquircleAvatar(QWidget):
             self._size = new_size
             self.setFixedSize(new_size, new_size)
             self.update()
+
+    def set_size(self, size: int):
+        """直接覆盖头像尺寸（用于与 SVG 图标尺寸对齐）
+
+        注意：调用此方法后，set_font_size() 不再按 font_size 自动调整。
+        若需恢复字号联动，请重新构造 SquircleAvatar。
+        """
+        if size <= 0 or size == self._size:
+            return
+        self._size = size
+        self.setFixedSize(size, size)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -259,16 +272,17 @@ class PluginIconWidget(QWidget):
 
         icon_path = self._resolve_icon_path()
         if icon_path is not None:
-            size = max(20, int(self._font_size * 1.7)) if self._font_size > 0 else 24
             self._svg_widget = QSvgWidget(str(icon_path), self)
-            self._svg_widget.setFixedSize(size, size)
+            self._svg_widget.setFixedSize(self._icon_size(), self._icon_size())
             layout.addWidget(self._svg_widget)
         else:
             plugin_name = self._manifest.get("name", "?")
+            # 把 icon_size 传给 SquircleAvatar，确保兜底头像与 SVG 图标尺寸一致
             self._avatar = SquircleAvatar(
                 extract_initials(plugin_name),
                 name_color(plugin_name),
                 self,
+                size=self._icon_size_override,
                 font_size=self._font_size,
             )
             layout.addWidget(self._avatar)
@@ -393,12 +407,14 @@ class PluginIconWidget(QWidget):
         font_size: int = 0,
         parent=None,
         remote_urls: Optional[dict] = None,
+        icon_size: int = 0,
     ):
         super().__init__(parent)
         self._plugin_dir = plugin_dir
         self._manifest = manifest or {}
         self._font_size = font_size
         self._remote_urls = remote_urls or {}
+        self._icon_size_override = icon_size  # 0 = 用 font_size 推导
         self._svg_widget: Optional["QSvgWidget"] = None
         self._avatar: Optional[SquircleAvatar] = None
         # 异步下载相关
@@ -433,6 +449,9 @@ class PluginIconWidget(QWidget):
         return _cache_hit(name, theme)
 
     def _icon_size(self) -> int:
+        # icon_size_override > 0 时直接用（如卡片行内需要放大图标）
+        if self._icon_size_override > 0:
+            return self._icon_size_override
         size = max(20, int(self._font_size * 1.7)) if self._font_size > 0 else 24
         return size
 
@@ -445,13 +464,17 @@ class PluginIconWidget(QWidget):
         self.layout().addWidget(self._svg_widget)
 
     def _show_avatar(self):
-        """在容器中渲染缩写头像（兜底）"""
+        """在容器中渲染缩写头像（兜底）
+
+        把 icon_size 传给 SquircleAvatar，保证有/无真实 SVG 时占位符与图标尺寸一致。
+        """
         self._clear_children()
         plugin_name = self._manifest.get("name", "?")
         self._avatar = SquircleAvatar(
             extract_initials(plugin_name),
             name_color(plugin_name),
             self,
+            size=self._icon_size_override,
             font_size=self._font_size,
         )
         self.layout().addWidget(self._avatar)
@@ -503,36 +526,57 @@ class PluginIconWidget(QWidget):
         reply.finished.connect(lambda r=reply, t=theme: self._on_download_finished(r, t))
 
     def _on_download_finished(self, reply: "QNetworkReply", theme: str):
-        """下载完成回调（成功 → 缓存并刷新 UI；失败 → 静默兜底）"""
-        # 清理 in-flight 表
-        self._inflight.pop(theme, None)
-        if reply.error() != QNetworkReply.NoError:
-            err = reply.errorString()
-            reply.deleteLater()
-            self.iconFailed.emit(theme, err)
-            return
-        data = bytes(reply.readAll())
-        reply.deleteLater()
-        if not data:
-            self.iconFailed.emit(theme, "empty response")
-            return
-        # 写缓存
-        name = self._manifest.get("name", "?")
-        cache = _icon_cache_dir() / f"{name}__{theme}.svg"
+        """下载完成回调（成功 → 缓存并刷新 UI；失败 → 静默兜底）
+
+        widget 可能已被销毁（异步回调触发时），需用 try/except 兜底
+        避免污染 Qt 事件循环。
+        """
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_bytes(data)
-        except OSError:
+            self._inflight.pop(theme, None)
+            if reply.error() != QNetworkReply.NoError:
+                err = reply.errorString()
+                reply.deleteLater()
+                self.iconFailed.emit(theme, err)
+                return
+            data = bytes(reply.readAll())
+            reply.deleteLater()
+            if not data:
+                self.iconFailed.emit(theme, "empty response")
+                return
+            # 写缓存
+            name = self._manifest.get("name", "?")
+            cache = _icon_cache_dir() / f"{name}__{theme}.svg"
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_bytes(data)
+            except OSError:
+                pass
+            # 若当前主题匹配 → 立即替换 UI；不匹配则丢弃（主题切换时会重新加载）
+            current_theme = "dark" if isDarkTheme() else "light"
+            if theme == current_theme:
+                self._show_svg(cache)
+            self.iconDownloaded.emit(theme, data)
+        except RuntimeError:
+            # widget 已被 Qt 删除（C++ 对象已释放），静默忽略
             pass
-        # 若当前主题匹配 → 立即替换 UI；不匹配则丢弃（主题切换时会重新加载）
-        current_theme = "dark" if isDarkTheme() else "light"
-        if theme == current_theme:
-            self._show_svg(cache)
-        self.iconDownloaded.emit(theme, data)
+        except Exception as e:
+            # 其他未知错误，避免污染 Qt 事件循环（回调异常会向上冒泡到 Qt 主循环）
+            import logging
+
+            logging.getLogger(__name__).debug(f"[IconWidget] download callback error: {e}")
 
     def set_font_size(self, font_size: int):
-        """更新字号并重建组件（主题切换时也调用此方法）"""
+        """更新字号并重建组件（主题切换时也调用此方法）
+
+        若父级调用方传入了 icon_size 覆盖，应改用 set_icon_size()，否则
+        这里会把覆盖值丢失。仅在父级未传覆盖值时使用本方法。
+        """
         self._font_size = font_size
+        self._setup_ui()
+
+    def set_icon_size(self, icon_size: int):
+        """直接覆盖图标尺寸（用于卡片行内放大等场景）"""
+        self._icon_size_override = icon_size
         self._setup_ui()
 
     def reload_icon(self):

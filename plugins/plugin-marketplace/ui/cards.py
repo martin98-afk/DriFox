@@ -1254,10 +1254,16 @@ class _PluginRow(QFrame):
         优先级：
         1. 本地已安装插件的 SVG（plugin_dir 下存在）
         2. marketplace 元数据中的 icon 字段 + GitHub raw URL（未安装，但
-           manifest.icon + _marketplace_source 指向 git-subdir GitHub 源）
+           manifest.icon + source 指向 git-subdir GitHub 源）
         3. SquircleAvatar 缩写头像（兜底）
+
+        卡片行内图标按 font_size * 2.4 放大（最小 36px），让图标在列表中
+        更醒目。当前 font_size=14 → 36px（之前 23px）。
         """
         plugin_name = self._meta.get("name", "?")
+        # 卡片行内放大：font_size > 0 时按 2.4 倍率放大，下限 36px
+        icon_size = max(36, int(self._font_size * 2.4)) if self._font_size > 0 else 36
+
         local_path = self._find_local_plugin_path(plugin_name)
         if local_path:
             import json as _json
@@ -1272,6 +1278,7 @@ class _PluginRow(QFrame):
                             manifest=_m,
                             font_size=self._font_size,
                             parent=self,
+                            icon_size=icon_size,
                         )
                     except Exception:
                         pass
@@ -1290,6 +1297,7 @@ class _PluginRow(QFrame):
                 font_size=self._font_size,
                 parent=self,
                 remote_urls=remote_urls,
+                icon_size=icon_size,
             )
 
         # Fallback to initials avatar
@@ -1297,6 +1305,7 @@ class _PluginRow(QFrame):
             extract_initials(plugin_name),
             name_color(plugin_name),
             self,
+            size=icon_size,
             font_size=self._font_size,
         )
 
@@ -1318,8 +1327,15 @@ class _PluginRow(QFrame):
         if font_size <= 0:
             return
         self._font_size = font_size
-        if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
-            self._avatar.set_font_size(font_size)
+        if self._avatar is not None:
+            # 卡片行内图标按字号 2.4 倍放大（最小 36px），与 _create_icon_widget 保持一致
+            icon_size = max(36, int(font_size * 2.4))
+            if hasattr(self._avatar, "set_icon_size"):
+                self._avatar.set_icon_size(icon_size)
+            elif hasattr(self._avatar, "set_size"):
+                self._avatar.set_size(icon_size)
+            elif hasattr(self._avatar, "set_font_size"):
+                self._avatar.set_font_size(font_size)
         self._refresh_title()  # 标题 HTML 内嵌字号
         self._apply_child_fonts()  # 描述/tag/更新标签/市场标签 QSS 字号
 

@@ -256,3 +256,70 @@ def test_resolve_remote_icon_urls_with_real_drifox_cache():
     assert "icon.svg" in urls["light"]
     assert "icon_dark.svg" in urls["dark"]
     assert urls["light"].startswith("https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/")
+
+
+# ── icon_size 覆盖测试 ──────────────────────────────────
+
+
+def test_plugin_icon_widget_icon_size_override():
+    """icon_size 参数直接覆盖默认算法"""
+    from ui._squircle_avatar import PluginIconWidget
+
+    w = PluginIconWidget(manifest={"name": "x"}, icon_size=48)
+    assert w._icon_size() == 48, "icon_size 覆盖值必须生效"
+
+    w2 = PluginIconWidget(manifest={"name": "x"}, font_size=14)
+    assert w2._icon_size() == 23, "无覆盖时仍走默认算法 (14*1.7=23)"
+
+    w3 = PluginIconWidget(manifest={"name": "x"}, font_size=14, icon_size=36)
+    assert w3._icon_size() == 36, "覆盖值优先于默认算法"
+
+
+def test_plugin_icon_widget_set_icon_size_runtime():
+    """set_icon_size() 运行时更新"""
+    from ui._squircle_avatar import PluginIconWidget
+
+    w = PluginIconWidget(manifest={"name": "x"}, icon_size=36)
+    assert w._icon_size() == 36
+    w.set_icon_size(48)
+    assert w._icon_size() == 48, "set_icon_size 必须生效"
+
+
+def test_plugin_icon_widget_avatar_size_matches_svg_size(tmp_path):
+    """占位符 avatar 与 SVG 图标尺寸必须一致（视觉对齐）
+
+    场景：未安装、meta 无 icon 字段 → 显示 avatar → 尺寸应等于 icon_size
+    场景：未安装、有 remote_urls 且缓存命中 → 显示 SVG → 尺寸 = icon_size
+    两者必须相等，避免同一列表内行高不一致。
+    """
+    from ui._squircle_avatar import PluginIconWidget
+
+    # 场景 1：纯占位符（无任何 icon 源）
+    w1 = PluginIconWidget(manifest={"name": "x"}, icon_size=42)
+    assert w1._svg_widget is None
+    assert w1._avatar is not None
+    assert w1._avatar.size().width() == 42
+    assert w1._avatar.size().height() == 42
+
+    # 场景 2：缓存命中显示 SVG
+    from ui import _squircle_avatar as _sa_mod
+
+    name = "consistency-test"
+    cache = _sa_mod._icon_cache_dir() / f"{name}__light.svg"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("<svg/>")
+
+    w2 = PluginIconWidget(
+        manifest={"name": name, "icon": {"light": "icon.svg", "dark": "icon_dark.svg"}},
+        remote_urls={
+            "light": "https://raw.githubusercontent.com/foo/bar/main/x/icon.svg",
+            "dark": "https://raw.githubusercontent.com/foo/bar/main/x/icon_dark.svg",
+        },
+        icon_size=42,
+    )
+    assert w2._svg_widget is not None
+    assert w2._svg_widget.size().width() == 42
+    assert w2._svg_widget.size().height() == 42
+
+    # 两者尺寸必须完全一致
+    assert w1._avatar.size() == w2._svg_widget.size(), "占位符与 SVG 尺寸不一致"
