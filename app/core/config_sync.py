@@ -494,9 +494,8 @@ class ConfigSyncService(QObject):
         由 _reloadSettings（后台线程发射）桥接到主线程执行，
         避免大量 valueChanged 信号从非主线程发射导致 UI 卡顿。
 
-        云端 single source of truth：下载后完全信任云端 app.config（含 Gitee
-        token 段），不再用本地内存 token 覆盖，避免多端 refresh_token rotation
-        互踩导致"本地新、磁盘旧"的失效。
+        云端 single source of truth：下载后信任云端 app.config（含 Gitee 业务段），
+        token 三字段为设备本地独立凭证，不会被云端覆盖（见 _download_file 合并）。
 
         本方法不使用 cfg.load() —— QConfig.load() 被 @exceptionHandler() 装饰，
         任何一个 ConfigItem 反序列化异常都会导致整个 load 静默失败、所有值保持原样。
@@ -527,7 +526,9 @@ class ConfigSyncService(QObject):
                 logger.warning(f"[ConfigSync] 下载后主题注册失败: {_te}")
 
             # ── 全量手动从磁盘同步（绕过 @exceptionHandler 的静默吞异常问题） ──
-            # Gitee 段一并同步：云端 token 是 single source of truth。
+            # Gitee 业务段（Bound/UserOwner/UserRepo）随云端同步；token 三字段为
+            # 设备本地独立凭证（云端不含，上传剔除/下载合并保留本地），此处写回
+            # 内存的是本地 token 值，不被云端覆盖。
             try:
                 import json as _json
                 from qfluentwidgets.common.config import ConfigItem as _CI
@@ -546,7 +547,7 @@ class ConfigSyncService(QObject):
                         if _matched:
                             getattr(cfg, _matched).value = _value
 
-                logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含 Gitee token，云端权威）")
+                logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含本地 Gitee token）")
             except Exception as _e:
                 logger.warning(f"[ConfigSync] 从文件同步配置项失败: {_e}")
 
@@ -569,7 +570,7 @@ class ConfigSyncService(QObject):
             except Exception as _te:
                 logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
 
-            logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，云端 token 权威）")
+            logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，token 本地独立）")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
@@ -636,69 +637,27 @@ class ConfigSyncService(QObject):
             self._token = ""
             return False
 
-    # ── 下载后 token 闭环刷新（云端 single source of truth） ──
+    # ── 下载后 token 本地恢复 ──
 
     def _refresh_and_upload_after_download(self):
-        """下载云端配置后闭环：用云端 token 刷新 Gitee，成功则立即上传。
+        """下载云端配置后：从本地磁盘恢复 Gitee token 段到内存。
 
-        解决多端 refresh_token rotation 互踩：所有机器以云端 app.config 中的
-        refresh_token 为唯一权威。流程：
-          1. 先拉云端（_do_download 已完成）并信任云端 token；
-          2. 用云端 refresh_token 刷新；成功则立即落盘 + 上传，让云端成为最新；
-          3. 刷新失败（可能被其他机器旋转作废）→ 重拉云端再刷，最多重试 2 次；
-          4. 彻底失败 → 清除绑定并提示重新授权。
+        历史版本用云端 token 刷新并回传（云端 single source of truth），多设备
+        共享同一份 refresh_token 导致 rotation 互踩、误清绑。现改为 token 为
+        设备本地独立凭证：云端 app.config 不含 token 段（上传剔除 / 下载合并
+        保留本地），下载后只需确保内存 token 与本地磁盘一致（防御内存被异常
+        清空的边缘场景），不再触碰云端 token。
         """
-        from app.gateway.auth.gitee import GiteeOAuthBackend
         from app.utils.config import Settings
 
-        backend = GiteeOAuthBackend()
         cfg = Settings.get_instance()
-        if not backend.is_bound():
+        if not cfg.gitee_bound.value:
             return
-
-        # 确保内存 token = 云端（刚下载的文件）值，避免用本地旧 token 刷新
+        # 内存 token = 本地磁盘值（本地独立凭证，非云端）
         self._load_gitee_token_from_disk(cfg)
 
-        # 第 1 次：用云端 token 刷新
-        token, err = backend._ensure_valid_token()
-        if token:
-            self._persist_and_upload_token()
-            return
-
-        # 刷新失败（可能被其他机器旋转/作废）→ 闭环重试：重新拉云端再刷
-        logger.warning(f"[ConfigSync] 下载后首次刷新失败，进入闭环重试: {err}")
-        for _attempt in range(2):
-            if not self._do_download():
-                logger.warning("[ConfigSync] 闭环重试：重新下载云端配置失败")
-                break
-            self._load_gitee_token_from_disk(cfg)
-            token, err = backend._ensure_valid_token()
-            if token:
-                self._persist_and_upload_token()
-                return
-
-        # 彻底失败：区分 refresh_token 真被吊销 与 网络异常
-        logger.error(f"[ConfigSync] 闭环重试后仍无法刷新 token: {err}")
-        # 直接 emit：清除 _pending_sync_message，避免主线程重载时再次 emit 覆盖结果
-        self._pending_sync_message = None
-        if self._token_revoked(err):
-            # 真被吊销（invalid_grant）：云端 RT 已作废，只能重新授权
-            try:
-                cfg.gitee_bound.value = False
-                cfg.gitee_user_token.value = ""
-                cfg.gitee_user_refresh_token.value = ""
-                cfg.gitee_token_expires_at.value = 0.0
-                cfg.save()
-            except Exception as _e:
-                logger.warning(f"[ConfigSync] 清除绑定失败: {_e}")
-            self.syncDone.emit(False, "Gitee token 已失效，请重新绑定")
-        else:
-            # 传输层错误（超时/5xx）：保留绑定，提示稍后重试，不清绑
-            self._set_state("error")
-            self.syncDone.emit(False, "Gitee token 刷新失败（网络异常），请稍后重试")
-
     def _load_gitee_token_from_disk(self, cfg):
-        """同步把磁盘文件里的 Gitee token 段读入内存（云端 single source of truth）"""
+        """同步把磁盘文件里的 Gitee token 段读入内存（token 为设备本地独立凭证）"""
         try:
             import json as _json
 
@@ -719,7 +678,7 @@ class ConfigSyncService(QObject):
     def _prepare_read_token(self) -> bool:
         """仅把当前 access_token / owner 载入 self._token（**不刷新**）。
 
-        下载/检查远端只需读权限，刷新会旋转 refresh_token 使云端 RT 失效，
+        下载/检查远端只需读权限，刷新会旋转 refresh_token 使本地旧 RT 作废，
         因此读取路径严禁调用 _sync_token()。返回是否有可用 token。
         """
         from app.utils.config import Settings
@@ -752,119 +711,42 @@ class ConfigSyncService(QObject):
             return False
         return "TOKEN_REVOKED::" in err
 
-    # ── 多设备 refresh_token rotation 恢复（云端 single source of truth） ──
-
-    def _fetch_cloud_token_pair(self) -> bool:
-        """用当前 access_token 从云端拉取最新 app.config，把 Gitee token 段写回本地。
-
-        多设备场景：其他设备刷新会轮换 refresh_token 并上传新值到云端，
-        本机旧 RT 随即作废。本方法强制直读云端（不走 SHA 缓存、不触发
-        Settings 主线程重载），只更新 Gitee 段，避免干扰其他配置与 UI。
-
-        Returns:
-            True: 云端存在**更新**的 RT 且已写回 cfg + 磁盘
-            False: 云端无 RT / RT 与本地一致 / 读取失败（401、网络等）
-        """
-        import json as _json
-
-        from app.utils.config import Settings
-
-        cfg = Settings.get_instance()
-        access_token = cfg.gitee_user_token.value
-        owner = cfg.gitee_user_owner.value
-        if not access_token or not owner:
-            return False
-        try:
-            url = GITEE_FILE_API.format(owner=owner, repo=SETTINGS_REPO_NAME, path=REMOTE_PATH)
-            with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
-                resp = client.get(url, params={"access_token": access_token})
-            if resp.status_code != 200:
-                logger.warning(f"[ConfigSync] 云端恢复：读取远端配置失败 HTTP {resp.status_code}")
-                return False
-            body = resp.json()
-            content_b64 = body.get("content", "") if isinstance(body, dict) else ""
-            if not content_b64:
-                logger.warning("[ConfigSync] 云端恢复：远端配置无内容")
-                return False
-
-            raw = base64.b64decode(content_b64).decode("utf-8")
-            data = _json.loads(raw)
-            _g = data.get("Gitee", {}) or {}
-            rt = str(_g.get("UserRefreshToken", "") or "")
-            at = str(_g.get("UserToken", "") or "")
-            try:
-                expires_at = float(_g.get("TokenExpiresAt", 0) or 0)
-            except TypeError, ValueError:
-                expires_at = 0.0
-            if not rt:
-                logger.warning("[ConfigSync] 云端恢复：远端配置无 refresh_token")
-                return False
-            # 云端 RT 与本地一致 → 云端没有更新的 RT，恢复无意义（防止无效循环）
-            if rt == cfg.gitee_user_refresh_token.value:
-                logger.info("[ConfigSync] 云端恢复：云端 RT 与本地一致，无更新")
-                return False
-
-            cfg.gitee_user_refresh_token.value = rt
-            if at:
-                cfg.gitee_user_token.value = at
-            if expires_at > 0:
-                cfg.gitee_token_expires_at.value = expires_at
-            self.pause_upload(5.0)
-            cfg.save()
-            # 兜底直接写盘（与 _persist_tokens 双重保险一致）
-            try:
-                cfg.file.parent.mkdir(parents=True, exist_ok=True)
-                with open(cfg.file, "w", encoding="utf-8") as f:
-                    _json.dump(cfg.toDict(), f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            logger.info("[ConfigSync] 已从云端恢复 Gitee token 段")
-            return True
-        except Exception as e:
-            logger.warning(f"[ConfigSync] 云端恢复异常: {e}")
-            return False
+    # ── token 本地恢复（兼容旧调用方） ──
 
     def recover_token_from_cloud(self) -> bool:
-        """多设备场景：本地刷新失败（RT 被其他设备轮换作废）时从云端恢复。
+        """本地刷新失败时从本地磁盘重载 token 并重试刷新（兼容旧调用方）。
 
-        任何一台设备用 refresh_token 刷新后，Gitee 都会轮换并作废旧 RT；
-        多台设备共享同一份云端 app.config（含 token 段）时，本地旧 RT
-        刷新必失败（invalid_grant）。此时不能直接判定「真失效」清绑——
-        先拉取云端最新 RT 重试刷新；成功则本地落盘并回传云端（收敛到
-        最新权威），失败才表示确实需要重新授权。
+        历史版本：从云端拉取最新 refresh_token 恢复（多设备共享 RT 互踩的
+        补救）。现 token 为设备本地独立凭证，云端不再存储 token 段，不存在
+        跨设备轮换互踩；本地 RT 失效只可能因用户在 Gitee 官网撤销授权，
+        重载本地 token 重试一次后仍失败即返回 False（调用方据此提示重新绑定）。
 
         Returns:
-            True: 已用云端最新 RT 刷新成功（本地 cfg/磁盘已更新并回传云端）
-            False: 云端无更新 RT / 读取失败 / 云端 RT 刷新仍失败
+            True: 已从本地重载 token 并刷新成功
+            False: 未绑定 / 重载后刷新仍失败
         """
         from app.gateway.auth.gitee import GiteeOAuthBackend
+        from app.utils.config import Settings
 
         backend = GiteeOAuthBackend()
         if not backend.is_bound():
             return False
 
-        for _attempt in range(2):
-            # 拉取云端 token 段（强制，不依赖 SHA 缓存）
-            if not self._fetch_cloud_token_pair():
-                return False
-            token, err = backend._ensure_valid_token()
-            if token:
-                # 恢复成功：确保最新 token 回传云端（_ensure_valid_token 已落盘）
-                self._persist_and_upload_token()
-                logger.info("[ConfigSync] 已用云端最新 refresh_token 恢复 token")
-                return True
-            logger.warning(f"[ConfigSync] 云端恢复第 {_attempt + 1} 次刷新失败: {err}")
-            # 网络异常（非 TOKEN_REVOKED）→ 云端 RT 有效但传输失败，重试无意义
-            if not self._token_revoked(err):
-                return False
+        # 从本地磁盘重载 token 段（防御内存异常丢失/漂移）
+        self._load_gitee_token_from_disk(Settings.get_instance())
+        token, err = backend._ensure_valid_token()
+        if token:
+            logger.info("[ConfigSync] 已从本地恢复 token")
+            return True
+        logger.warning(f"[ConfigSync] 本地恢复 token 失败: {err}")
         return False
 
     def _refresh_local_and_upload(self):
-        """access_token 过期/下载失败时：本地刷新（本地权威）→ 上传。
+        """access_token 过期/下载失败时：本地刷新 → 上传。
 
-        旋转 refresh_token 使本地成为权威，立即上传云端（绝不回下载覆盖）。
-        - invalid_grant（RT 真被吊销）：先尝试云端恢复（可能被其他设备轮换），
-          恢复成功则继续同步；恢复失败才清除绑定，提示重新授权；
+        token 为设备本地独立凭证：刷新旋转的是本地 RT（单设备自刷，不影响
+        其他设备）。
+        - invalid_grant（RT 真被吊销）：本地重载重试，仍失败才清除绑定；
         - 传输错误（网络）：保留绑定，提示稍后重试，不清绑。
         """
         from app.gateway.auth.gitee import GiteeOAuthBackend
@@ -883,15 +765,15 @@ class ConfigSyncService(QObject):
         # 直接 emit：清除 _pending_sync_message，避免主线程重载时再次 emit 覆盖结果
         self._pending_sync_message = None
         if self._token_revoked(err):
-            # ★ 多设备修复：本地 RT 可能被其他设备轮换作废（invalid_grant），
-            # 先尝试从云端拉取最新 RT 重试，成功则不误清绑（云端 single source of truth）
-            logger.warning("[ConfigSync] 本地刷新失败（RT 可能被其他设备轮换），尝试云端恢复")
+            # token 为设备本地独立凭证，云端不再存储 RT；本地 RT 失效只可能
+            # 因用户在 Gitee 官网撤销授权。重载本地 token 重试一次，仍失败才清绑。
+            logger.warning("[ConfigSync] 本地刷新失败（RT 已失效），尝试本地重载恢复")
             if self.recover_token_from_cloud():
                 self._initial_sync_completed = True
                 self._set_state("idle")
-                self.syncDone.emit(True, "配置已同步（token 已随云端刷新）")
+                self.syncDone.emit(True, "配置已同步（token 已随本地恢复刷新）")
                 return
-            logger.error("[ConfigSync] 本地与云端刷新均失败：refresh_token 已失效，清除绑定")
+            logger.error("[ConfigSync] 本地重载后刷新仍失败：refresh_token 已失效，清除绑定")
             try:
                 cfg = Settings.get_instance()
                 cfg.gitee_bound.value = False
@@ -908,7 +790,7 @@ class ConfigSyncService(QObject):
             self.syncDone.emit(False, "Gitee token 刷新失败（网络异常），请稍后重试")
 
     def _persist_and_upload_token(self):
-        """刷新成功后：解除上传抑制并强制上传，让云端成为最新 token 的权威"""
+        """刷新成功后：解除上传抑制并强制上传业务配置（token 留在本地）"""
         # _ensure_valid_token 内部已经 _persist_tokens 落盘，这里只需触发上传
         self._config_dirty = True
         # 解除 pause_upload / 下载设定的抑制窗口，确保立即上传
@@ -927,14 +809,13 @@ class ConfigSyncService(QObject):
         t.start()
 
     def _initial_sync(self):
-        """绑定后首次同步：云端 single source of truth。
+        """绑定后首次同步：业务配置云端同步，token 设备本地独立。
 
-        关键约束（根治"误清绑"）：下载/读取路径**严禁刷新** refresh_token——
-        刷新会旋转 RT 并使云端那一份旧 RT 立即作废，导致随后用云端 RT 刷新时
-        必失败并误清绑。旋转 RT 只发生在两个显式有序位置：
-          (A) 下载云端 RT 之后刷新并立即上传（云端权威）；
-          (B) access_token 过期无法读取时，本地刷新使本地权威并上传
-              （绝不回下载覆盖，避免把刚旋转作废的云端 RT 拉回来）。
+        关键约束（根治"误清绑"）：token 三字段为设备本地独立凭证，云端
+        app.config 不含 token（上传剔除 / 下载合并保留本地）。下载/读取
+        路径**严禁刷新** refresh_token——刷新会旋转 RT 使本地旧 RT 作废，
+        但每台设备持有独立 RT，互不影响。旋转 RT 只发生在显式刷新入口
+        _ensure_valid_token（access_token 过期时）。
         """
         from app.utils.config import Settings
 
@@ -947,7 +828,7 @@ class ConfigSyncService(QObject):
             self.syncDone.emit(True, "未绑定 Gitee，跳过同步")
             return
 
-        # 读取用 token（不刷新，避免旋转云端 RT）
+        # 读取用 token（不刷新，避免旋转本地 RT）
         if not self._prepare_read_token():
             logger.warning("[ConfigSync] 本地无 token，无法同步")
             self._set_state("error")
@@ -982,13 +863,14 @@ class ConfigSyncService(QObject):
                     return
             if remote_status is True:
                 if token_valid:
-                    # 路径 A：用有效 token 下载云端 RT → 刷新 → 上传（云端权威）
+                    # 路径 A：下载云端业务配置（token 本地保留）
                     logger.info("[ConfigSync] 远端有配置，开始恢复…")
                     ok = self._do_download()  # 内部不刷新
                     if ok:
                         self._initial_sync_completed = True
-                        # 云端 single source of truth：下载后用云端 token 刷新并回传云端，
-                        # 消除多端 refresh_token rotation 互踩导致的"refresh token 失效"
+                        # token 为设备本地独立凭证，云端 app.config 不含 token 段，
+                        # 下载不会覆盖本地 token（_download_file 已合并保留）。
+                        # 无需再用云端 token 刷新回传——多端 refresh_token 互踩已根治。
                         self._refresh_and_upload_after_download()
                         if self._pending_sync_message:
                             # Settings 重载已延迟到主线程执行，syncDone 会在
@@ -1002,7 +884,7 @@ class ConfigSyncService(QObject):
                         logger.warning("[ConfigSync] 下载失败，降级为本地刷新并上传")
                         self._refresh_local_and_upload()
                 else:
-                    # access_token 过期：无法读取云端 → 本地刷新使本地权威 → 上传
+                    # access_token 过期：无法读取云端 → 本地刷新并上传
                     logger.info("[ConfigSync] access_token 过期，本地刷新并上传（本地权威）")
                     self._refresh_local_and_upload()
             elif remote_status is False:
@@ -1058,7 +940,7 @@ class ConfigSyncService(QObject):
                 与 None（网络异常）区分——401 表示 token 本身失效，
                 调用方应刷新重试；刷新失败走"已失效"分支而非静默当网络异常。
         """
-        # 准备读取用 token（不刷新，避免旋转云端 refresh_token）
+        # 准备读取用 token（不刷新，避免旋转本地 RT）
         self._prepare_read_token()
 
         if not self._token or not self._owner:
@@ -1192,6 +1074,71 @@ class ConfigSyncService(QObject):
         finally:
             self._upload_lock.release()
 
+    @staticmethod
+    def _strip_gitee_token(local_path: Path) -> str:
+        """读取 app.config 并剔除 Gitee token 段，返回 base64 内容。
+
+        token 三字段（UserToken/UserRefreshToken/TokenExpiresAt）为设备本地
+        独立凭证，严禁上传云端——多设备共享同一份 refresh_token 会因 Gitee
+        轮换机制（用一次即作废）互相踩踏导致误清绑。Bound/UserOwner/UserRepo
+        等业务字段正常同步。
+        """
+        import json as _json
+
+        try:
+            with open(local_path, encoding="utf-8") as _f:
+                _data = _json.load(_f)
+            if isinstance(_data, dict):
+                _g = _data.get("Gitee", {})
+                if isinstance(_g, dict):
+                    _g.pop("UserToken", None)
+                    _g.pop("UserRefreshToken", None)
+                    _g.pop("TokenExpiresAt", None)
+            _raw = _json.dumps(_data, ensure_ascii=False, indent=2).encode("utf-8")
+            return base64.b64encode(_raw).decode("utf-8")
+        except Exception as _e:
+            # 解析失败：退化为原样上传（与旧行为一致，不阻塞同步）
+            logger.warning(f"[ConfigSync] 剔除 Gitee token 失败，按原样上传: {_e}")
+            return base64.b64encode(local_path.read_bytes()).decode("utf-8")
+
+    @staticmethod
+    def _merge_local_gitee_token(local_path: Path, remote_raw: bytes) -> bytes:
+        """下载 app.config 时合并保留本地 Gitee token 段。
+
+        云端配置不含 token（上传时已剔除）；若直接用云端内容覆盖本地，会清掉
+        本地 token 导致绑定失效。此处从本地旧文件取出 token 三字段，合入云端
+        内容后再写盘。
+        """
+        import json as _json
+
+        try:
+            remote_data = _json.loads(remote_raw.decode("utf-8"))
+            if not isinstance(remote_data, dict):
+                return remote_raw
+            local_tokens = {}
+            if local_path.exists():
+                try:
+                    with open(local_path, encoding="utf-8") as _f:
+                        _ld = _json.load(_f)
+                    _lg = _ld.get("Gitee", {}) if isinstance(_ld, dict) else {}
+                    for _k in ("UserToken", "UserRefreshToken", "TokenExpiresAt"):
+                        if _k in _lg:
+                            local_tokens[_k] = _lg[_k]
+                except Exception:
+                    pass
+            _g = remote_data.get("Gitee", {})
+            if not isinstance(_g, dict):
+                _g = {}
+                remote_data["Gitee"] = _g
+            # 云端残留 token（旧版本云端数据）一律剔除，本地 token 合入
+            for _k in ("UserToken", "UserRefreshToken", "TokenExpiresAt"):
+                _g.pop(_k, None)
+            _g.update(local_tokens)
+            return _json.dumps(remote_data, ensure_ascii=False, indent=2).encode("utf-8")
+        except Exception as _e:
+            logger.warning(f"[ConfigSync] 合并本地 Gitee token 失败，按云端原样写入: {_e}")
+            return remote_raw
+
     def _upload_file(
         self, local_path: Path, remote_path: str, label: str = "", client: Optional[httpx.Client] = None
     ) -> bool:
@@ -1209,8 +1156,13 @@ class ConfigSyncService(QObject):
 
         tag = label or remote_path
         try:
-            data = local_path.read_bytes()
-            content_b64 = base64.b64encode(data).decode("utf-8")
+            if label == "app.config":
+                # token 为设备本地独立凭证：上传前剔除 Gitee token 段，
+                # 云端 app.config 永不包含 token，杜绝多设备 refresh_token 互踩。
+                content_b64 = self._strip_gitee_token(local_path)
+            else:
+                data = local_path.read_bytes()
+                content_b64 = base64.b64encode(data).decode("utf-8")
             url = GITEE_FILE_API.format(owner=self._owner, repo=SETTINGS_REPO_NAME, path=remote_path)
             payload = {
                 "access_token": self._token,
@@ -1354,7 +1306,7 @@ class ConfigSyncService(QObject):
 
     def _do_download(self) -> bool:
         """从远端下载配置和 user-custom 插件，覆盖本地（SHA 未变则跳过）"""
-        # 准备读取用 token（不刷新，避免旋转云端 refresh_token）
+        # 准备读取用 token（不刷新，避免旋转本地 RT）
         if not self._prepare_read_token():
             logger.warning("[ConfigSync] 无法下载：本地无 token")
             return False
@@ -1494,6 +1446,10 @@ class ConfigSyncService(QObject):
                 return False
 
             decoded = base64.b64decode(content_b64)
+            if label == "app.config":
+                # token 为设备本地独立凭证：合并保留本地 Gitee token 段，
+                # 云端 app.config 不含 token，下载覆盖不得清掉本地 token。
+                decoded = self._merge_local_gitee_token(local_path, decoded)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_bytes(decoded)
             logger.info(f"[ConfigSync] {tag} 已下载到本地")
