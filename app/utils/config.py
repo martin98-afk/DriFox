@@ -547,9 +547,8 @@ class Settings(QConfig):
 
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", True, BoolValidator())
-    tab_panel_width = RangeConfigItem("UI", "TabPanelWidth", 280, RangeValidator(120, 500))
-    tab_panel_collapsed = ConfigItem("UI", "TabPanelCollapsed", False, BoolValidator())
-    tab_manager_geometry = ConfigItem("UI", "TabManagerGeometry", "")
+    # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
+    # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
 
 

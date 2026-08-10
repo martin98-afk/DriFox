@@ -6,7 +6,6 @@ TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 使用标准系统标题栏，Windows 自动提供 Aero Snap / 摇动 / 任务栏预览等。
 """
 
-import json
 import platform
 from typing import Any, Dict, List, Optional
 
@@ -226,6 +225,8 @@ class TabManagerWindow(QWidget):
         self._suppress_drag_detection: bool = False
         # ── window → index O(1) 映射（替代 _windows.index() O(n) 查找） ──
         self._window_to_index: Dict[int, int] = {}
+        # 首次显示已应用默认几何（固定默认大小/位置，运行中不重置）
+        self._geometry_applied: bool = False
         # ── 上次图标缩放值，主题切换时用于判断是否需要重绘图标 ──
         self._last_icon_scale: int = -1
         # ── 侧边栏展开/折叠宽度动画 ──
@@ -682,13 +683,9 @@ class TabManagerWindow(QWidget):
         content_widget.setLayout(content_layout)
         main_layout.addWidget(content_widget, 1)
 
-        # 恢复面板宽度
-        saved_w = Settings.get_instance().tab_panel_width.value
-        if saved_w:
-            # 补偿新增 #tabFrame 的 layout margins(12) + border(2) = 14px，
-            # 保证 panel 的视觉宽度与改造前一致，避免用户配置缩水
-            frame_w = saved_w + 14
-            self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
+        # 固定默认面板宽度（280 + 14px 补偿 #tabFrame margins/border），不记忆
+        frame_w = 280 + 14
+        self._splitter.setSizes([frame_w, max(0, self.width() - frame_w)])
 
         # 恢复侧边栏收起状态（必须在 splitter sizes 设置之后执行）
         QTimer.singleShot(0, self._restore_sidebar_collapsed)
@@ -733,10 +730,10 @@ class TabManagerWindow(QWidget):
                 # 挤压折叠场景：resizeEvent 自动折叠时宽度已被压到折叠阈值
                 # （< _auto_collapse_width=100）以下，此刻保存的"当前宽度"只剩
                 # 90px 左右，点击展开只能恢复窄条。此时改用常规展开宽度
-                # （历史配置 tab_panel_width，默认 280）作为恢复目标，保证展开
-                # 后宽度可读；用户手动折叠时宽度正常，照常保存实际宽度。
+                # （固定默认 280）作为恢复目标，保证展开后宽度可读；
+                # 用户手动折叠时宽度正常，照常保存实际宽度。
                 if cur_frame_w < self._tab_panel._auto_collapse_width:
-                    saved_w = Settings.get_instance().tab_panel_width.value or 280
+                    saved_w = 280
                     cur_frame_w = max(saved_w, _EXPANDED_MIN_FRAME_WIDTH - 14) + 14
                 self._saved_panel_frame_width = cur_frame_w
             # 使用 _tab_panel 的收起最小宽度
@@ -754,16 +751,10 @@ class TabManagerWindow(QWidget):
             elif cur_w >= target_w - 4:
                 target_w = cur_w
 
-        # 持久化收起状态
-        Settings.get_instance().tab_panel_collapsed.value = collapsed
-
+        # 持久化收起状态已移除：不做记忆，侧边栏收起/展开只在本次会话内生效
         if not animate:
             # 启动恢复等瞬时路径：直接 setSizes
             self._splitter.setSizes([target_w, max(0, total_w - target_w)])
-            if not collapsed:
-                new_sizes = self._splitter.sizes()
-                if new_sizes:
-                    Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, new_sizes[0]) - 14
             return
 
         # 平滑动画过渡
@@ -772,8 +763,6 @@ class TabManagerWindow(QWidget):
             self._splitter.setSizes([target_w, max(0, total_w - target_w)])
             if hasattr(self, "_tab_panel"):
                 self._tab_panel.sync_collapsed_ui()
-            if not collapsed:
-                Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, target_w) - 14
             return
 
         # 平滑动画过渡
@@ -834,15 +823,10 @@ class TabManagerWindow(QWidget):
         # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
         if hasattr(self, "_tab_panel"):
             self._tab_panel.sync_collapsed_ui()
-        # 展开时保存当前宽度（去除 frame 补偿）
-        if not self._sidebar_anim_collapsing:
-            new_sizes = self._splitter.sizes()
-            if new_sizes:
-                Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, new_sizes[0]) - 14
-        else:
-            # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
-            # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
-            # （resize 结束检测在动画中会被 _animating 跳过）。
+        # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
+        # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
+        # （resize 结束检测在动画中会被 _animating 跳过）。
+        if self._sidebar_anim_collapsing:
             self._maybe_auto_expand_after_squeeze()
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
@@ -898,37 +882,30 @@ class TabManagerWindow(QWidget):
         self._on_sidebar_toggled(False)
 
     def _restore_sidebar_collapsed(self):
-        """启动时根据配置恢复侧边栏收起状态"""
-        collapsed = Settings.get_instance().tab_panel_collapsed.value
-        if collapsed:
-            self._on_sidebar_toggled(True, animate=False)
-            # 让 TabPanel 内部状态同步（不重复发射信号）
-            self._tab_panel.set_collapsed(True)
-            return
-        # 非折叠配置：显式恢复保存宽度。
-        # 背景：_setup_ui 里 setSizes 在窗口未显示时调用，show 后首次 relayout
-        # 按 stretch/sizeHint 重新分配，左面板会被压到最小宽度（< _auto_collapse_width，
-        # 实测 46~60px），TabPanel.resizeEvent 误判为"用户拖窄"自动折叠；
-        # 欢迎卡片懒渲染（QWebEngineView 创建）还会引发后续 relayout 再次压缩。
-        # 因此在启动早期多轮补射恢复（时间递增，覆盖 2~3 次 relayout 窗口期，
-        # 直到布局不再弹跳），期间均以保存宽度为准。
+        """启动时固定侧边栏为展开态 + 默认宽度（不恢复配置记忆）"""
         if not hasattr(self, "_splitter"):
             return
+        # 始终展开 + 默认宽度。背景：_setup_ui 里 setSizes 在窗口未显示时调用，
+        # show 后首次 relayout 按 stretch/sizeHint 重新分配，左面板会被压到
+        # 最小宽度（< _auto_collapse_width，实测 46~60px），TabPanel.resizeEvent
+        # 误判为"用户拖窄"自动折叠；欢迎卡片懒渲染（QWebEngineView 创建）还会
+        # 引发后续 relayout 再次压缩。因此在启动早期多轮补射恢复（时间递增，
+        # 覆盖 2~3 次 relayout 窗口期，直到布局不再弹跳），期间均以默认宽度为准。
         self._apply_restored_panel_width()
         for delay in (80, 200, 400, 700):
             QTimer.singleShot(delay, self._apply_restored_panel_width)
 
     def _apply_restored_panel_width(self):
-        """按保存宽度恢复左面板宽度 + 解除启动误折叠（展开配置的启动兜底）"""
+        """按默认宽度 280 恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
-        saved_w = Settings.get_instance().tab_panel_width.value or 280
+        saved_w = 280
         frame_w = max(_EXPANDED_MIN_FRAME_WIDTH, saved_w + 14)
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
         if total <= frame_w:
             return
-        # 仅当前宽度明显小于保存宽度时才恢复（避免覆盖用户手动拖宽）
+        # 仅当前宽度明显小于默认宽度时才恢复（避免覆盖用户手动拖宽）
         if sizes and sizes[0] >= frame_w - 10:
             return
         frame_w = min(frame_w, total)
@@ -1657,12 +1634,11 @@ class TabManagerWindow(QWidget):
     # ── 几何持久化（简化版）──
 
     def _save_geometry(self):
-        """防抖：记录位置/尺寸，等拖拽/缩放结束后 200ms 再写盘
+        """几何保存防抖（现为 no-op 链路）
 
-        ★ 拖拽/缩放模态循环期间直接跳过：否则鼠标中途停顿 >200ms 时
-        _do_save_geometry 会在拖拽帧里触发（遍历 splitter + 写配置项）
-        → 偶发掉帧。循环结束后由 _on_window_drag_end / EXITSIZEMOVE
-        分支统一补一次。
+        原实现：拖拽/缩放结束后 200ms 将窗口几何写入配置（记忆功能）。
+        已按需求移除记忆，保留此调用点 + timer 空转，避免改动
+        moveEvent/resizeEvent 等大量调用点。
         """
         from app.utils.window_drag_state import any_window_dragging
 
@@ -1671,33 +1647,15 @@ class TabManagerWindow(QWidget):
         self._geo_save_timer.start()  # 连续调用时不断重置计时器
 
     def _do_save_geometry(self):
-        """实际写入配置（防抖回调，拖拽/缩放结束后执行一次）
+        """固定默认几何策略：不再把窗口位置/大小/面板宽度写入配置。
 
-        ★ 必须使用 geometry() 而不是 x()/y()：
-        对于顶层窗口，x()/y() 返回 FRAME 在屏幕上的位置（含标题栏），
-        而 setGeometry(x, y, w, h) 把 (x, y) 当作 CLIENT 区域位置。
-        若保存 frame 位置再用 setGeometry 还原，每次恢复窗口会向上偏移
-        title bar 高度（约 65px）—— 这就是 tab 模式最小化恢复后窗口
-        「往上跑」的根因。
+        用户要求打开时固定默认大小、位置与 panel 宽度（屏幕居中），
+        不做任何记忆。保留空实现以维持 moveEvent/resizeEvent 等
+        调用点的防抖链路不变（timer 照常触发，只是不再写盘）。
         """
-        g = self.geometry()
-        geo = {
-            "x": g.x(),
-            "y": g.y(),
-            "w": g.width(),
-            "h": g.height(),
-        }
-        Settings.get_instance().tab_manager_geometry.value = json.dumps(geo)
-        # 保存面板宽度（去除新增 #tabFrame 的 layout margins + border 14px）
-        # 收起状态下不覆盖已保存的正常宽度
-        if hasattr(self, "_splitter") and hasattr(self, "_tab_panel"):
-            if not self._tab_panel._collapsed:
-                sizes = self._splitter.sizes()
-                if sizes:
-                    Settings.get_instance().tab_panel_width.value = max(_EXPANDED_MIN_FRAME_WIDTH, sizes[0]) - 14
 
     def _restore_geometry(self):
-        """恢复窗口位置（屏幕居中），确保不超出屏幕"""
+        """固定默认窗口几何：960x640，屏幕居中，确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
         if not screen_rect:
@@ -1705,21 +1663,6 @@ class TabManagerWindow(QWidget):
             return
 
         w, h = 960, 640
-        try:
-            geo_str = Settings.get_instance().tab_manager_geometry.value
-            if geo_str:
-                g = json.loads(geo_str)
-                x = max(screen_rect.x(), min(g["x"], screen_rect.right() - 100))
-                y = max(screen_rect.y(), min(g["y"], screen_rect.bottom() - 50))
-                self._suppress_drag_detection = True
-                self.setGeometry(x, y, g["w"], g["h"])
-                return
-        except Exception:
-            pass
-        finally:
-            self._suppress_drag_detection = False
-
-        # 首次：居中
         self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
@@ -1730,9 +1673,14 @@ class TabManagerWindow(QWidget):
         self._suppress_drag_detection = False
 
     def showEvent(self, event):
-        """每次显示时恢复位置（标准系统窗口自带阴影/边框/圆角）"""
+        """仅首次显示时固定默认几何（标准系统窗口自带阴影/边框/圆角）
+
+        运行中用户可自由拖动/缩放窗口，不再重置；重启后恢复默认居中。
+        """
         super().showEvent(event)
-        self._restore_geometry()
+        if not self._geometry_applied:
+            self._geometry_applied = True
+            self._restore_geometry()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
         if hasattr(self, "_chat_wrapper"):
             try:
