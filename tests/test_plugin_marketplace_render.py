@@ -199,3 +199,88 @@ def test_load_more_no_blank_tail(monkeypatch):
     scroll_max3 = card._scroll.verticalScrollBar().maximum()
     assert size_h3 <= content_h3 * 1.5 + 50, f"重建后 sizeHint 异常: sizeHint={size_h3} content={content_h3}"
     assert scroll_max3 <= content_h3 - vp_h2 + 1, f"重建后滚动范围超出内容: scrollMax={scroll_max3}"
+
+
+def _stretch_gap(card) -> int:
+    """按钮（或最后可见行）底部与 content 底部的空隙（stretch 区）"""
+    btn = card._load_more_btn
+    rows = [r for r in card._row_map.values() if r.isVisible()]
+    if btn is not None:
+        anchor = btn.y() + btn.height()
+    elif rows:
+        anchor = rows[-1].y() + rows[-1].height()
+    else:
+        return 0
+    return card._content.height() - anchor
+
+
+def test_filter_and_resize_no_blank(monkeypatch):
+    """搜索过滤（行收缩）与卡片尺寸变化后不得出现底部空白
+
+    覆盖：_reconcile_rows 只显隐行（不重建），widgetResizable=False 下
+    content 高度需手动收缩；卡片 resize → 视口变化 → 行重排 → 高度同步。
+    """
+    from PyQt5.QtWidgets import QMainWindow
+
+    card = _new_card(monkeypatch)
+    win = QMainWindow()
+    win.resize(800, 600)
+    win.show()
+    card.setParent(win)
+    card.resize(800, 600)
+    card.show()
+    card.show_card()
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+    _pump(0.3)
+
+    # 加载更多到全部渲染
+    card._on_load_more()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        _pump(0.05)
+        rows = list(card._row_map.values())
+        if rows and all(r.isVisible() for r in rows):
+            break
+    assert all(r.isVisible() for r in card._row_map.values())
+    gap0 = _stretch_gap(card)
+    print(f"  初始: content={card._content.height()} gap={gap0}")
+    assert gap0 <= 40, f"初始即有空白: gap={gap0}"
+
+    # 搜索过滤：行收缩 → content 必须收缩（gap 不放大）
+    card._search_edit.setText("plugin-m1-")
+    card._filter_plugins()
+    _pump(0.5)
+    rows_vis = [r for r in card._row_map.values() if r.isVisible()]
+    gap1 = _stretch_gap(card)
+    print(
+        f"  搜索后: rows_vis={len(rows_vis)} content={card._content.height()} vp={card._scroll.viewport().height()} gap={gap1}"
+    )
+    assert len(rows_vis) < len(card._row_map), "搜索未过滤"
+    assert gap1 <= 60, f"搜索后出现空白: gap={gap1}（content 未收缩）"
+
+    # 卡片尺寸变化：content 宽度跟随视口 + 高度同步（gap 不放大）
+    card.resize(500, 500)
+    _pump(0.5)
+    vp_w = card._scroll.viewport().width()
+    content_w = card._content.width()
+    gap2 = _stretch_gap(card)
+    print(
+        f"  resize后: vp={vp_w}x{card._scroll.viewport().height()} "
+        f"content={content_w}x{card._content.height()} gap={gap2}"
+    )
+    assert abs(content_w - vp_w) <= 2, f"content 宽度未跟随视口: content={content_w} vp={vp_w}"
+    assert gap2 <= 60, f"尺寸变化后出现空白: gap={gap2}"
+
+    # 清空搜索恢复
+    card._search_edit.setText("")
+    card._filter_plugins()
+    _pump(0.5)
+    gap3 = _stretch_gap(card)
+    print(f"  清空搜索: content={card._content.height()} gap={gap3}")
+    assert gap3 <= 60, f"清空搜索后出现空白: gap={gap3}"
