@@ -121,6 +121,9 @@ class PluginInstaller:
         # 插件状态缓存（{name: "enabled"|"disabled"|"system"}）
         self._status_map_cache: Optional[dict] = None
         self._status_map_ts: float = 0.0
+        # manifest 缓存（{name: manifest dict}，get_installed_map 扫描时填充，
+        # 供 UI 图标/详情复用，避免重复读盘）
+        self._manifest_cache: dict = {}
 
     # ── 批量状态查询 ──────────────────────────────────────
 
@@ -144,13 +147,16 @@ class PluginInstaller:
             return self._inst_map_cache
 
         result: dict = {}
+        manifest_cache: dict = {}
         for base in (self._plugins_dir, self._disabled_dir):
             if base.is_dir():
                 try:
                     for entry in os.scandir(base):
                         if not entry.is_dir():
                             continue
-                        result[entry.name] = self._read_version_fast(Path(entry.path))
+                        version, manifest = self._read_version_full(Path(entry.path))
+                        result[entry.name] = version
+                        manifest_cache[entry.name] = manifest
                 except OSError:
                     pass
         # 系统插件（项目根 plugins/）：与用户插件重名时跳过
@@ -159,10 +165,13 @@ class PluginInstaller:
                 for entry in os.scandir(self._system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
-                    result[entry.name] = self._read_version_fast(Path(entry.path))
+                    version, manifest = self._read_version_full(Path(entry.path))
+                    result[entry.name] = version
+                    manifest_cache[entry.name] = manifest
             except OSError:
                 pass
 
+        self._manifest_cache = manifest_cache
         self._inst_map_cache = result
         self._inst_map_ts = now
         return result
@@ -207,17 +216,17 @@ class PluginInstaller:
         return result
 
     @staticmethod
-    def _read_version_fast(plugin_dir: Path) -> Optional[str]:
-        """快速读取单个插件目录的版本号（只查两个已知 manifest 位置）"""
+    def _read_version_full(plugin_dir: Path) -> Tuple[Optional[str], Optional[dict]]:
+        """读取版本号 + manifest（一次 IO，供版本与图标/详情复用）"""
         for sub in (".drifox-plugin", ".claude-plugin"):
             mp = plugin_dir / sub / "plugin.json"
             if mp.exists():
                 try:
                     manifest = json.loads(mp.read_text(encoding="utf-8"))
-                    return manifest.get("version")
+                    return manifest.get("version"), manifest
                 except Exception:
-                    return None
-        return None
+                    return None, None
+        return None, None
 
     def invalidate_installed_cache(self):
         """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
@@ -225,6 +234,7 @@ class PluginInstaller:
         self._inst_map_ts = 0.0
         self._status_map_cache = None
         self._status_map_ts = 0.0
+        self._manifest_cache = {}
 
     # ── 安装 ─────────────────────────────────────────────
 

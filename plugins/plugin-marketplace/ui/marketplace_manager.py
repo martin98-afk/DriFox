@@ -73,6 +73,9 @@ class MarketplaceSourceManager:
         # 拉取的市场数据缓存仍放 cache 目录
         self._cache_dir = drifox / "cache" / "marketplaces"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        # 各市场源最近一次拉取状态（持久化，跨会话可见）
+        self._status_file = self._cache_dir / "status.json"
+        self._fetch_status: Dict[str, Dict[str, Any]] = self._load_status()
 
         # 迁移旧版 cache 中的市场源配置（仅首次迁移）
         self._migrate_legacy_sources()
@@ -106,6 +109,61 @@ class MarketplaceSourceManager:
             json.dumps(_DEFAULT_SOURCES, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    # ── 拉取状态 ──
+
+    def _load_status(self) -> Dict[str, Dict[str, Any]]:
+        """加载持久化的拉取状态（损坏/缺失 → 空）"""
+        try:
+            return json.loads(self._status_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_status(self):
+        """持久化拉取状态（失败仅告警，不影响主流程）"""
+        try:
+            self._status_file.write_text(
+                json.dumps(self._fetch_status, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"[Marketplace] 拉取状态保存失败: {e}")
+
+    def _record_status(
+        self,
+        name: str,
+        *,
+        ok: bool,
+        error: str = "",
+        from_cache: bool = False,
+        plugins: int = 0,
+    ):
+        """记录某市场源最近一次拉取结果
+
+        ok=True: 拉到数据（网络成功或缓存命中）
+        ok=False: 拉取失败（含失败后回退缓存的情况，error 保留原因）
+        """
+        self._fetch_status[name] = {
+            "ok": ok,
+            "error": error,
+            "from_cache": from_cache,
+            "plugins": plugins,
+            "time": time.time(),
+        }
+        self._save_status()
+
+    def get_source_status(self, name: str) -> Optional[Dict[str, Any]]:
+        """获取某市场源最近一次拉取状态，无记录返回 None"""
+        return self._fetch_status.get(name)
+
+    def get_all_status(self) -> Dict[str, Dict[str, Any]]:
+        """获取全部市场源拉取状态"""
+        return dict(self._fetch_status)
+
+    def clear_status(self, name: str):
+        """清除某市场源的拉取状态（源被移除时调用）"""
+        self._fetch_status.pop(name, None)
+        self._save_status()
 
     # ── 源管理 ──
 
@@ -161,10 +219,23 @@ class MarketplaceSourceManager:
         if len(new_sources) == len(sources):
             return False
         self._save_sources(new_sources)
+        self.clear_status(name)
         logger.info(f"[Marketplace] 移除市场源: {name}")
         return True
 
     # ── 拉取市场数据 ──
+
+    @staticmethod
+    def _tag_cached_plugins(market_data: Dict[str, Any], name: str, src: Dict[str, Any]):
+        """为插件补来源标记（旧缓存可能缺 _marketplace/_marketplace_source 字段）
+
+        setdefault 不覆盖已存在字段，幂等。
+        """
+        for plugin in market_data.get("plugins", []) or []:
+            if not isinstance(plugin, dict):
+                continue
+            plugin.setdefault("_marketplace", name)
+            plugin.setdefault("_marketplace_source", src)
 
     def fetch_marketplace(self, source_def: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         """拉取单个市场的 marketplace.json 数据
@@ -185,7 +256,15 @@ class MarketplaceSourceManager:
             age = time.time() - cache_file.stat().st_mtime
             if age < 3600:  # 1 小时 TTL
                 try:
-                    return json.loads(cache_file.read_text(encoding="utf-8"))
+                    data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    self._tag_cached_plugins(data, name, src)
+                    self._record_status(
+                        name,
+                        ok=True,
+                        from_cache=True,
+                        plugins=len(data.get("plugins", []) or []),
+                    )
+                    return data
                 except Exception:
                     pass
 
@@ -207,6 +286,7 @@ class MarketplaceSourceManager:
                 market_data = resp.json()
             else:
                 logger.warning(f"[Marketplace] 不支持的市场源类型: {src_type}")
+                self._record_status(name, ok=False, error=f"Unsupported source: {src_type}")
                 return {
                     "name": name,
                     "description": "",
@@ -220,9 +300,20 @@ class MarketplaceSourceManager:
                 logger.error(f"[Marketplace] 拉取市场 {name} 失败: {e}")
             if cache_file.exists():
                 try:
-                    return json.loads(cache_file.read_text(encoding="utf-8"))
+                    data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    self._tag_cached_plugins(data, name, src)
+                    # 失败回退缓存：状态记失败（error 保留原因），数据仍可用
+                    self._record_status(
+                        name,
+                        ok=False,
+                        error=str(e),
+                        from_cache=True,
+                        plugins=len(data.get("plugins", []) or []),
+                    )
+                    return data
                 except Exception:
                     pass
+            self._record_status(name, ok=False, error=str(e))
             return {"name": name, "description": "", "plugins": [], "_error": str(e)}
 
         # 确保 plugins 字段存在
@@ -230,14 +321,19 @@ class MarketplaceSourceManager:
             market_data["plugins"] = []
 
         # 为每个插件标记来源市场
-        for plugin in market_data.get("plugins", []):
-            plugin["_marketplace"] = name
-            plugin["_marketplace_source"] = src
+        self._tag_cached_plugins(market_data, name, src)
 
         # 缓存
         cache_file.write_text(
             json.dumps(market_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
+        )
+
+        self._record_status(
+            name,
+            ok=True,
+            from_cache=False,
+            plugins=len(market_data.get("plugins", []) or []),
         )
 
         return market_data
