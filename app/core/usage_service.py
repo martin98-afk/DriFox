@@ -104,11 +104,17 @@ class UsageService(QObject):
 
         hit = self._plan_cache.get(key)
         if hit and time.monotonic() - hit[0] < self.PLAN_TTL_S:
+            # 缓存命中：key 有抓取资格，恢复/保持 active 注册，确保 singleShot
+            # 轮询 timer 存活（unregister 后新窗口命中缓存也要继续轮询）
+            self._active_plan_keys.add(key)
             self.coding_plan_ready.emit(provider_name, config_id, hit[1])
+            self._ensure_poll_timer()
             return
 
         if key in self._in_flight:
-            return  # 并发去重：同一 key 已有一路在抓取
+            # 并发去重：同一 key 已有一路在抓取，保持轮询 timer 存活等下一轮
+            self._ensure_poll_timer()
+            return  # 抓取完成会自行广播
 
         self._in_flight.add(key)
 
@@ -257,3 +263,7 @@ class UsageService(QObject):
                 self._active_plan_keys.discard(key)
                 continue
             self.request_coding_plan(provider_name, config_id, config)
+        # 兜底：tick 内所有路径（命中/in_flight/无 fetcher）都会 return 不重启
+        # timer，这里保证只要还有 active key，轮询就继续下一轮
+        if self._active_plan_keys:
+            self._ensure_poll_timer()
