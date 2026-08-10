@@ -2693,7 +2693,18 @@ class CodeWebViewer(QWebEngineView):
         # append_tool_result）时置 True，_perform_update 则必须走 save/restore 保护（否则
         # updateContent 整块替换会被 JS 注入的运行框/完成框抹掉）；无工具 DOM 注入时走裸
         # updateContent（省整页 save/restore JS 包装，MB 级 IPC 瘦身）。更新成功后置 False。
+        # 🐛 修复（编辑工具框运行中消失）：清除时机延后到 JS 渲染回调执行完成后（runJavaScript
+        # 异步），并带双重守卫——_injected_pending_tools 非空（仍有 JS 注入未完成的工具块在
+        # DOM）或代际变化（_tool_dom_dirty_gen 递增，期间有新注入）时**不清除**，避免下一次
+        # 全量渲染误判"无工具 DOM 需保护"→ 裸 updateContent 抹掉运行框。
         self._tool_dom_dirty: bool = False
+        # [B2] 工具 DOM 脏标记代际：每次置 True 时递增，JS 回调清除时与捕获值比较，
+        # 防止"旧渲染回调误清新注入的 dirty"（新注入已递增代际 → 旧回调放弃清除）。
+        self._tool_dom_dirty_gen: int = 0
+        # [B2] JS 注入但尚未完成（结果未 append_tool_result）的工具 id 集合。
+        # 这些工具的运行框/预览块只存在于 DOM、不在 markdown 中，全量渲染必须
+        # save/restore 保护；集合非空时禁止清除 _tool_dom_dirty。
+        self._injected_pending_tools: set = set()
         # [B3] 异步渲染序号与防抖状态（渲染移出主线程）：
         # - _render_seq：递增序号，回调时校验，过期结果（新渲染已提交）直接丢弃
         # - _render_inflight：是否有在途线程池渲染任务（防抖：在途时只记 pending）
@@ -5778,13 +5789,21 @@ class CodeWebViewer(QWebEngineView):
                 # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
                 _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
                 if _needs_save_restore:
-                    self.page().runJavaScript(self._build_save_and_restore_js(html_content), lambda _result: None)
+                    _gen = self._tool_dom_dirty_gen
+                    self.page().runJavaScript(
+                        self._build_save_and_restore_js(html_content, getattr(self, "_restore_finished_ids", set())),
+                        lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g),
+                    )
                 else:
                     self.page().runJavaScript(
                         f"updateContent({json.dumps(html_content).decode('utf-8')});",
                         lambda _result: None,
                     )
-                self._tool_dom_dirty = False
+                # 🐛 修复（编辑工具框运行中消失）：不再同步清除 _tool_dom_dirty——
+                # runJavaScript 异步，JS 未执行完时 DOM 中运行框仍在；若立即清 dirty，
+                # 紧随其后的渲染（正文流式/兜底/finish_streaming）判定 _needs_save_restore=False
+                # → 裸 updateContent 重建 content-placeholder → 抹掉 JS 注入的运行框。
+                # 清除交由 JS 回调 _clear_tool_dom_dirty_guarded（pending + 代际守卫）。
                 self._last_rendered_html = None
                 return
 
@@ -5916,6 +5935,28 @@ class CodeWebViewer(QWebEngineView):
         except RuntimeError:
             pass
 
+    def _clear_tool_dom_dirty_guarded(self, gen: int):
+        """JS 渲染回调：带守卫地清除 _tool_dom_dirty。
+
+        🐛 修复（编辑工具框运行中消失）的双重守卫：
+        - pending 守卫：_injected_pending_tools 非空（仍有 JS 注入未完成的工具块在
+          DOM，如运行框/完成态预览框）→ 不清除。这些块不在 markdown 中，若清 dirty，
+          下一次全量渲染会裸 updateContent 抹掉它们（直到 append_tool_result 才重现）。
+        - 代际守卫：_tool_dom_dirty_gen 与捕获值一致才清除。若期间有新注入
+          （append_tool_result / update_tool_streaming 递增了代际），本回调放弃清除，
+          避免"旧渲染回调误清新 dirty"导致运行框失去保护。
+
+        仅在"渲染 JS 真正执行完成"后由 runJavaScript 回调调用（同步清除的旧逻辑
+        在 JS 异步未执行时就把 dirty 清掉，是"运行中→完成中间消失"的根因）。
+        """
+        try:
+            if getattr(self, "_injected_pending_tools", None):
+                return
+            if getattr(self, "_tool_dom_dirty_gen", 0) == gen:
+                self._tool_dom_dirty = False
+        except Exception:
+            pass
+
     def _has_active_tool_dom(self) -> bool:
         """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
         返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
@@ -5926,6 +5967,11 @@ class CodeWebViewer(QWebEngineView):
             return True
         try:
             if getattr(self, "_restore_finished_ids", None):
+                return True
+            # pending 集合非空 = 仍有 JS 注入未完成的工具块在 DOM（运行框/预览框），
+            # 差量渲染同样必须让位全量渲染（save/restore 保护）。防御：dirty 清除
+            # 回调理论上已受 pending 守卫，此处再兜底一次防其他路径直接改 dirty。
+            if getattr(self, "_injected_pending_tools", None):
                 return True
         except Exception:
             pass
@@ -6042,11 +6088,16 @@ class CodeWebViewer(QWebEngineView):
             # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装
             _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
             if _needs_save_restore:
-                js_code = self._build_save_and_restore_js(html).replace("})();", auto_scroll_js + "})();")
+                js_code = self._build_save_and_restore_js(html, getattr(self, "_restore_finished_ids", set())).replace(
+                    "})();", auto_scroll_js + "})();"
+                )
             else:
                 js_code = f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
-            self.page().runJavaScript(js_code)
-            self._tool_dom_dirty = False
+            # 🐛 修复（编辑工具框运行中消失）：dirty 清除延后到 JS 回调（pending + 代际守卫），
+            # 原理同 _perform_update 非流式分支——避免异步 JS 未执行期间被下一次渲染
+            # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。
+            _gen = self._tool_dom_dirty_gen
+            self.page().runJavaScript(js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
         except RuntimeError:
@@ -6059,7 +6110,7 @@ class CodeWebViewer(QWebEngineView):
                 self._render_pending = None
                 self._sequence_render(pmd, pcompact)
 
-    def _build_save_and_restore_js(self, html_content: str) -> str:
+    def _build_save_and_restore_js(self, html_content: str, finished_ids: set = None) -> str:
         """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
 
         为什么需要这个三步流程？
@@ -6071,6 +6122,13 @@ class CodeWebViewer(QWebEngineView):
           "应被保留"，从而产生一闪而没或重复出现的"闪灭"现象。
         - 解决：保存 #tool-content 内所有 data-tool-call-id 块 → updateContent → 按原 idx
           位置还原。已完成块会被"复活"为静态折叠框（移除 data-streaming、标记 data-expanded=false）。
+
+        Args:
+            html_content: 全量渲染的 HTML
+            finished_ids: 已完成（结果已 append_tool_result）的工具 id 集合。
+                restore 时这些 id 的块**不恢复**（markdown 已含其结果，updateContent
+                会重新生成）；未完成的块（运行中 / finish_tool_streaming 完成态预览）
+                必须恢复——它们不在 markdown 中，save 后若不恢复会被抹掉。
 
         调用方：流式分支需要在末尾额外追加 auto-scroll 逻辑；非流式分支直接 runJavaScript。
 
@@ -6091,6 +6149,7 @@ class CodeWebViewer(QWebEngineView):
           markdown 渲染 + reorganizeContent 处理）。
         """
         _target_id = self._tool_target_id
+        _finished_js = json.dumps(list(finished_ids or set())).decode("utf-8")
         return (
             "(function(){"
             # 🆕 Bug B 方案 E：save 阶段把流式工具块的 data-order 暂存到 window，
@@ -6151,9 +6210,18 @@ class CodeWebViewer(QWebEngineView):
             # 已完成块已由 markdown 重新生成 + reorganizeContent 迁移到 #tool-content。
             # 恢复流式块时检查同 ID 是否已存在（避免与 reorganizeContent 迁移的块重复）。
             # [PERF] _saved 为空时跳过 restore，这是最常见场景（无活跃工具块）
+            f"var _finishedSet={_finished_js};"
             f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
-            "if(b.streaming==='true'&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+            # 🐛 修复（编辑工具框"运行中→完成"中间消失）：restore 条件从
+            # `b.streaming==='true'` 放宽为 `streaming 或未完成`——finish_tool_streaming
+            # 注入的完成态预览块（data-streaming="false"）在 append_tool_result 之前
+            # **不在 markdown 中**（_content_data 尚无结果块），若只恢复 streaming=true，
+            # 该预览块 save 后不 restore → 全量渲染后被抹掉，直到 append_tool_result
+            # 才重现。已完成（结果已 append_tool_result）的块才由 markdown 重新生成，
+            # 无需 restore（且恢复会与 markdown 生成的块重复）。
+            "var _isFinished=(_finishedSet.indexOf(b.id)!==-1);"
+            "if(!_isFinished&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
@@ -6208,7 +6276,7 @@ class CodeWebViewer(QWebEngineView):
         # 非流式裸更新重建 #content-placeholder，把 JS 注入的编辑工具运行框抹掉，
         # 直到 append_tool_result 才重现（"运行中→完成"中间消失一阵子）。保留
         # dirty 使最终渲染走 save/restore 保护（_saved 为空时零开销）。
-        if not keep_dock:
+        if not keep_dock and not getattr(self, "_injected_pending_tools", None):
             self._tool_dom_dirty = False
         # 流式结束：坞态归位（简洁模式下工具区从底部回到顶部）
         # 🆕 F2（S1）：keep_dock=True 时保留坞态——流式文本先于工具结果结束是
@@ -9333,8 +9401,15 @@ class MessageCard(SimpleCardWidget):
             """
             # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
             # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
+            # 代际递增：使在途渲染回调放弃清除（防止旧回调误清新 dirty）。
+            # 结果块已注入 → 该工具从 pending 移除：markdown 已含结果块，后续全量
+            # 渲染可由 markdown 重新生成，不再依赖 save/restore 保护。
             try:
                 self.viewer._tool_dom_dirty = True
+                self.viewer._tool_dom_dirty_gen = getattr(self.viewer, "_tool_dom_dirty_gen", 0) + 1
+                pending = getattr(self.viewer, "_injected_pending_tools", None)
+                if pending is not None:
+                    pending.discard(tool_call_id)
             except Exception:
                 pass
             self.viewer.page().runJavaScript(js_code)
@@ -9482,10 +9557,37 @@ class MessageCard(SimpleCardWidget):
         _cache_key = (tool_call_id, completed)
         _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
         if _last.get(_cache_key) == preview_content:
+            # 🐛 修复（编辑工具框运行中消失）：preview 相同不重新注入，但 DOM 中
+            # 运行框仍在 → 仍需 dirty 保护标记。否则 dirty 被某次渲染回调清除后，
+            # 该工具框永远失去 save/restore 保护，下一次全量渲染裸 updateContent
+            # 抹掉它，直到 append_tool_result 才重现（"运行中→完成"中间消失）。
+            # 代际递增防止"在途渲染回调误清本标记"。
+            try:
+                self.viewer._tool_dom_dirty = True
+                self.viewer._tool_dom_dirty_gen = getattr(self.viewer, "_tool_dom_dirty_gen", 0) + 1
+            except Exception:
+                pass
             return
         if not hasattr(self, "_tool_streaming_preview_cache"):
             self._tool_streaming_preview_cache = {}
         self._tool_streaming_preview_cache[_cache_key] = preview_content
+
+        # 🐛 修复（编辑工具框运行中消失）：dirty 标记必须**先于** _schedule_render
+        # 设置。completed=True 时 _schedule_render(immediate=True) 会立即执行
+        # _perform_update，若此时 dirty 还是旧值（False），该渲染判定
+        # _needs_save_restore=False → 裸 updateContent 抹掉旧运行框（新完成态块
+        # 尚未注入），产生"运行框闪灭"。
+        # pending 集合：该工具结果未 append_tool_result → 运行框/预览框只在 DOM，
+        # 不在 markdown → 全量渲染必须 save/restore 保护（_clear_tool_dom_dirty_guarded
+        # 据此阻止 dirty 清除）。
+        try:
+            self.viewer._tool_dom_dirty = True
+            self.viewer._tool_dom_dirty_gen = getattr(self.viewer, "_tool_dom_dirty_gen", 0) + 1
+            self.viewer._injected_pending_tools = getattr(self.viewer, "_injected_pending_tools", set())
+            if not completed or tool_call_id not in getattr(self, "_finished_streaming_ids", set()):
+                self.viewer._injected_pending_tools.add(tool_call_id)
+        except Exception:
+            pass
 
         # ── 停掉全量渲染定时器：流式更新期间不跑全量重渲染 ──
         # 同时重调度一个"静默后渲染"兜底，确保流式结束后最终状态同步
@@ -9620,12 +9722,8 @@ class MessageCard(SimpleCardWidget):
                 }}
             }})();
             """
-            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏，下一次 _perform_update 必须走
-            # save/restore 保护（否则 updateContent 整块替换会抹掉 JS 注入的工具块）。
-            try:
-                self.viewer._tool_dom_dirty = True
-            except Exception:
-                pass
+            # [B2] 工具 DOM 已被 JS 增量注入 → 标记脏（已在函数开头 _schedule_render
+            # 之前统一设置并维护 pending，此处不再重复设置——避免与开头逻辑分叉）。
             self.viewer.page().runJavaScript(js_code)
         except RuntimeError:
             pass
@@ -9895,6 +9993,13 @@ class MessageCard(SimpleCardWidget):
         """移除工具流式块 — 工具执行完成后清理"""
         if not hasattr(self, "viewer") or not self.viewer:
             return
+        # 块从 DOM 移除 → 该工具不再需要 save/restore 保护（pending 移除）
+        try:
+            pending = getattr(self.viewer, "_injected_pending_tools", None)
+            if pending is not None:
+                pending.discard(tool_call_id)
+        except Exception:
+            pass
         try:
             js_code = f"""
             (function() {{
