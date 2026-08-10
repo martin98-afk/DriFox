@@ -14,11 +14,14 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
 from loguru import logger
+
+from PyQt5 import sip
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
@@ -29,6 +32,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLayout,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -42,6 +46,7 @@ from qfluentwidgets import (
     LineEdit,
     MaskDialogBase,
     ScrollArea,
+    SingleDirectionScrollArea,
     StrongBodyLabel,
     TransparentPushButton,
     TransparentToolButton,
@@ -51,9 +56,33 @@ from qfluentwidgets import (
 from .data import get_marketplace
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
-from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
+from ._squircle_avatar import (
+    SquircleAvatar,
+    PluginIconWidget,
+    extract_initials,
+    name_color,
+    resolve_remote_icon_urls,
+)
+
+# 模块级孤儿线程容器：跨卡片生命周期持有已 quit 的线程
+# （防止 running 线程随卡片析构被连带销毁 → Qt abort 0xC0000409）
+_orphan_threads: list = []
 
 # ── 主题色辅助 ──────────────────────────────────────────────
+
+
+def _scroll_area_qss() -> str:
+    """滚动容器统一 QSS：透明背景 + 主程序统一滚动条样式
+
+    与 app.utils.design_tokens 约定一致（tab_panel/message_card 同款），
+    滚动条宽度 6px 薄样式，视觉随主程序主题。
+    """
+    from app.utils.design_tokens import get_unified_scrollbar_style
+
+    return (
+        "QScrollArea { background: transparent; border: none; }"
+        "QScrollArea > QWidget > QWidget { background: transparent; }" + get_unified_scrollbar_style(6)
+    )
 
 
 def _text_color(secondary: bool = False) -> str:
@@ -110,33 +139,38 @@ class _MarketplaceWorker(QObject):
 
 class _MarketFetchWorker(QObject):
     """逐市场拉取：每拉完一个市场源就 emit 一次，不等待全部完成
-
     实现「远程拉到一个更新一个」：首个市场数据到达即可渲染，
     单个市场失败/超时不阻塞后续市场（fetch_marketplace 内部已捕获异常返回 _error）。
     """
 
-    market_fetched = pyqtSignal(dict)  # 单个市场数据 {"name":..., "plugins":[...]}
-    all_done = pyqtSignal()
-    error = pyqtSignal(str)
+    market_fetched = pyqtSignal(dict, int)  # (市场数据, gen) 单个市场数据 {"name":..., "plugins":[...]}
+    market_failed = pyqtSignal(list, int)  # (失败源名列表, gen) 拉取失败的源名列表（仅标记，不进列表）
+    all_done = pyqtSignal(int)  # gen
+    error = pyqtSignal(str, int)  # (错误信息, gen)
 
-    def __init__(self, force: bool = False):
+    def __init__(self, force: bool = False, gen: int = 0):
         super().__init__()
         self._force = force
+        self._gen = gen
 
     def run(self):
         from .marketplace_manager import get_marketplace_manager
 
         mgr = get_marketplace_manager()
+        failed: list = []
         try:
             for src in mgr.get_sources():
                 data = mgr.fetch_marketplace(src, force=self._force)
                 if data.get("_error"):
-                    # 单市场失败不阻塞，也不触发无效重建
+                    # 失败源：绝不进入插件列表，仅收集名称供 UI 做失败标记
+                    failed.append(src["name"])
                     continue
-                self.market_fetched.emit(data)
+                self.market_fetched.emit(data, self._gen)
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
-        self.all_done.emit()
+            self.error.emit(f"{e}\n{traceback.format_exc()}", self._gen)
+        if failed:
+            self.market_failed.emit(failed, self._gen)
+        self.all_done.emit(self._gen)
 
 
 # ── 路径解析 ──────────────────────────────────────────────
@@ -873,6 +907,8 @@ class _PluginRow(QFrame):
         self._tc = tc or _text_color()
         self._tcs = tcs or _text_color(secondary=True)
         self._tags = self._compute_tags(plugin_meta)
+        # 本地路径单次解析并缓存：图标/目录按钮复用（避免每行多轮磁盘扫描）
+        self._local_path = self._resolve_local_path()
         self._setup_ui()
 
     # ── 字号派生（与卡片 _PLUGIN_ROW_SIZE_OFFSETS 保持一致） ──
@@ -884,6 +920,26 @@ class _PluginRow(QFrame):
             return max(8, self._font_size + offset)
         return base_px
 
+    def sizeHint(self):
+        """行 sizeHint：已布局时按当前宽度用 heightForWidth 计算
+
+        修复「加载更多」按钮下大段空白：QLabel(wordWrap) 的默认 sizeHint
+        按理想宽度（未约束）计算换行高度，比实际布局高度大（实测 75 vs
+        67，行多时累积成 stretch 空白区）。已布局（width>0）时返回
+        heightForWidth(当前宽度)，与 QVBoxLayout 布局行时使用的高度一致；
+        未布局（width=0）时回退默认（该状态行处于隐藏、不参与布局
+        sizeHint 累加，无影响）。
+        """
+        from PyQt5.QtCore import QSize
+
+        base = super().sizeHint()
+        lay = self.layout()
+        if lay is not None and self.width() > 0:
+            h = lay.heightForWidth(self.width())
+            if h > 0:
+                return QSize(base.width(), h)
+        return base
+
     def _font_qss(self, size_px: int) -> str:
         """生成 font-size + font-family 的 QSS 片段"""
         qss = f"font-size: {size_px}px;"
@@ -892,17 +948,26 @@ class _PluginRow(QFrame):
         return qss
 
     def _apply_child_fonts(self):
-        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）"""
+        """字号/字体变化时更新行内各标签（替代原 _retheme 全树遍历）
+
+        优化：缓存已设置的 QSS 字符串，无变化时跳过 setStyleSheet 调用
+        （QSS 解析 + 触发布局重算在 30+ 行时是滚动卡顿主因之一）。
+        """
         if self._desc_label is not None:
-            self._desc_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
-            )
-        for lbl in self._tag_labels:
-            lbl.setStyleSheet(self._tag_stylesheet())
+            new_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(12, -4))} background: transparent;"
+            if getattr(self, "_desc_qss_cached", None) != new_qss:
+                self._desc_qss_cached = new_qss
+                self._desc_label.setStyleSheet(new_qss)
+        new_tag_qss = self._tag_stylesheet()
+        if getattr(self, "_tag_qss_cached", None) != new_tag_qss:
+            self._tag_qss_cached = new_tag_qss
+            for lbl in self._tag_labels:
+                lbl.setStyleSheet(new_tag_qss)
         if getattr(self, "_mp_label", None) is not None:
-            self._mp_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
+            new_mp_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            if getattr(self, "_mp_qss_cached", None) != new_mp_qss:
+                self._mp_qss_cached = new_mp_qss
+                self._mp_label.setStyleSheet(new_mp_qss)
 
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
@@ -1017,7 +1082,7 @@ class _PluginRow(QFrame):
 
         # 打开插件所在文件夹按钮（仅已安装时可见，未安装无本地目录）
         self._dir_btn = None
-        local_path = self._find_local_plugin_path(self._meta.get("name", ""))
+        local_path = self._local_path
         if local_path:
             self._dir_btn = TransparentToolButton(FluentIcon.FOLDER, self)
             self._dir_btn.setFixedSize(28, 28)
@@ -1116,8 +1181,7 @@ class _PluginRow(QFrame):
         btn = TransparentPushButton(text, self)
         btn.setFixedSize(100, 30)
         btn.setStyleSheet(
-            self._outline_btn_style(color)
-            + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
+            self._outline_btn_style(color) + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
         )
         btn.clicked.connect(slot)
         return btn
@@ -1244,33 +1308,84 @@ class _PluginRow(QFrame):
         self._update_btn_text()
 
     def _create_icon_widget(self) -> QWidget:
-        """创建插件图标组件：优先检查本地已安装的 SVG 图标"""
-        plugin_name = self._meta.get("name", "?")
-        local_path = self._find_local_plugin_path(plugin_name)
-        if local_path:
-            import json as _json
+        """创建插件图标组件
 
-            for _meta_dir in (".drifox-plugin", ".claude-plugin"):
-                _mp = local_path / _meta_dir / "plugin.json"
-                if _mp.exists():
-                    try:
-                        _m = _json.loads(_mp.read_text(encoding="utf-8"))
-                        return PluginIconWidget(
-                            plugin_dir=local_path,
-                            manifest=_m,
-                            font_size=self._font_size,
-                            parent=self,
-                        )
-                    except Exception:
-                        pass
-                    break
+        优先级：
+        1. 本地已安装插件的 SVG（plugin_dir 下存在）
+        2. marketplace 元数据中的 icon 字段 + GitHub raw URL（未安装，但
+           manifest.icon + source 指向 git-subdir GitHub 源）
+        3. SquircleAvatar 缩写头像（兜底）
+
+        卡片行内图标按 font_size * 2.4 放大（最小 36px），让图标在列表中
+        更醒目。当前 font_size=14 → 36px（之前 23px）。
+        """
+        plugin_name = self._meta.get("name", "?")
+        # 卡片行内放大：font_size > 0 时按 2.4 倍率放大，下限 36px
+        icon_size = max(36, int(self._font_size * 2.4)) if self._font_size > 0 else 36
+
+        local_path = self._local_path
+        if local_path:
+            # 优先复用 installer 扫描缓存中的 manifest（一次 IO），未命中兜底直读
+            manifest = get_installer()._manifest_cache.get(plugin_name)
+            if manifest is None:
+                import json as _json
+
+                for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                    _mp = local_path / _meta_dir / "plugin.json"
+                    if _mp.exists():
+                        try:
+                            manifest = _json.loads(_mp.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                        break
+            if manifest:
+                return PluginIconWidget(
+                    plugin_dir=local_path,
+                    manifest=manifest,
+                    font_size=self._font_size,
+                    parent=self,
+                    icon_size=icon_size,
+                )
+
+        # 未安装：尝试从 marketplace 元数据构造远程 icon URL
+        remote_urls = resolve_remote_icon_urls(self._meta)
+        if remote_urls:
+            # 用插件自身的 meta 作为 manifest（至少含 name + icon 字段）
+            manifest = {
+                "name": plugin_name,
+                "icon": self._meta.get("icon"),
+            }
+            return PluginIconWidget(
+                manifest=manifest,
+                font_size=self._font_size,
+                parent=self,
+                remote_urls=remote_urls,
+                icon_size=icon_size,
+            )
+
         # Fallback to initials avatar
         return SquircleAvatar(
             extract_initials(plugin_name),
             name_color(plugin_name),
             self,
+            size=icon_size,
             font_size=self._font_size,
         )
+
+    def _resolve_local_path(self) -> Optional[Path]:
+        """解析本地插件路径并缓存到行实例（B3：避免每行多轮磁盘扫描）
+
+        已安装插件优先直拼用户启用目录（一次 stat 命中即返回）；
+        未命中（如禁用/系统目录）回退全目录扫描，保证功能不回退。
+        """
+        name = self._meta.get("name", "")
+        if not name:
+            return None
+        if self._installed:
+            p = _drifox_dir() / "plugins" / name
+            if p.is_dir():
+                return p
+        return self._find_local_plugin_path(name)
 
     @staticmethod
     def _find_local_plugin_path(name: str) -> Optional[Path]:
@@ -1290,8 +1405,15 @@ class _PluginRow(QFrame):
         if font_size <= 0:
             return
         self._font_size = font_size
-        if self._avatar is not None and hasattr(self._avatar, "set_font_size"):
-            self._avatar.set_font_size(font_size)
+        if self._avatar is not None:
+            # 卡片行内图标按字号 2.4 倍放大（最小 36px），与 _create_icon_widget 保持一致
+            icon_size = max(36, int(font_size * 2.4))
+            if hasattr(self._avatar, "set_icon_size"):
+                self._avatar.set_icon_size(icon_size)
+            elif hasattr(self._avatar, "set_size"):
+                self._avatar.set_size(icon_size)
+            elif hasattr(self._avatar, "set_font_size"):
+                self._avatar.set_font_size(font_size)
         self._refresh_title()  # 标题 HTML 内嵌字号
         self._apply_child_fonts()  # 描述/tag/更新标签/市场标签 QSS 字号
 
@@ -1384,6 +1506,28 @@ class _PluginRow(QFrame):
 # ── 市场主卡片 ──────────────────────────────────────────────
 
 
+class _MarketListContent(QWidget):
+    """列表内容容器（QScrollArea 的 widget）
+
+    覆盖 sizeHint()：已布局时直接返回当前几何高度（由 _reveal_rows 按
+    实际行高维护），绕开 QWidget::sizeHint()/QVBoxLayout::sizeHint 的
+    totalSizeHint 缓存（可能被冻结为异常值：QLabel(wordWrap) 未布局时
+    按理想宽度计算、行 sizeHint 与实际布局高度偏差，QScrollArea 用该
+    值撑开内容 → 列表底部大段空白）。
+    """
+
+    def sizeHint(self):
+        from PyQt5.QtCore import QSize
+
+        base = super().sizeHint()
+        if self.height() > 0:
+            return QSize(base.width(), self.height())
+        lay = self.layout()
+        if lay is not None:
+            return lay.sizeHint()
+        return base
+
+
 class MarketplaceCard(QWidget):
     """插件市场浮动卡片"""
 
@@ -1406,6 +1550,16 @@ class MarketplaceCard(QWidget):
         self._sort_mode: str = "default"
         self._load_more_btn: Optional[QPushButton] = None
         self._header_icon: Optional[IconWidget] = None
+        # ── 渲染合并与线程清理状态（B2/B4） ──
+        self._render_pending = False  # 市场数据已合并待渲染（同帧合并标志）
+        self._initial_view_done = False  # 首屏是否已渲染（本地/合并）
+        self._failed_sources: set = set()  # 拉取失败的源名（仅用于 UI 标记，不进列表）
+        self._worker_gen: int = 0  # worker 代次标记：递增，旧 worker 迟到信号按 gen 丢弃
+        self._market_status_labels: dict = {}  # 市场名 → 状态徽标 QLabel（「市场」页）
+        self._initial_render_timer: Optional["QTimer"] = None  # 首屏 300ms 合并窗口
+        self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
+        self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
+        self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
         self._setup_ui()
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
@@ -1428,15 +1582,46 @@ class MarketplaceCard(QWidget):
         # 清除旧搜索状态、防抖定时器
         self._search_edit.clear()
         self._search_debounce.stop()
-        # 延迟 50ms 启动加载，避免阻塞 show 过程
-        from PyQt5.QtCore import QTimer
+        # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
+        if self._load_timer is None:
+            from PyQt5.QtCore import QTimer
 
-        QTimer.singleShot(50, self._start_load)
+            self._load_timer = QTimer(self)
+            self._load_timer.setSingleShot(True)
+            self._load_timer.timeout.connect(self._start_load)
+        self._load_timer.start(50)
+        # 兜底：已有合并数据但上次因不可见未渲染 → 立即补渲染
+        if self._plugin_data and self._initial_view_done and not self._render_pending:
+            self._schedule_render()
 
     def _start_load(self):
-        """本地已安装先行渲染 + 后台逐市场拉取"""
-        self._render_local_installed()
+        """本地已安装先行渲染 + 后台逐市场拉取（首屏合并窗口 300ms）
+
+        本地视图延迟 300ms 渲染：若首个市场在此窗口内到达（缓存命中/快速源），
+        直接渲染合并数据，跳过本地独立渲染（避免两次全量重建）。
+        """
+        if not self._alive():
+            return  # 卡片已销毁
         self._async_refresh()
+        if self._initial_render_timer is None:
+            from PyQt5.QtCore import QTimer
+
+            self._initial_render_timer = QTimer(self)
+            self._initial_render_timer.setSingleShot(True)
+            self._initial_render_timer.timeout.connect(self._render_initial_view)
+        self._initial_render_timer.start(300)
+
+    def _render_initial_view(self):
+        """首屏渲染（仅首次执行一次）：有市场数据渲染合并结果，否则渲染本地"""
+        if not self._alive():
+            return  # 卡片已销毁，放弃首屏渲染
+        if self._initial_view_done:
+            return
+        self._initial_view_done = True
+        if self._plugin_data:
+            self._render_plugins(self._plugin_data)
+        else:
+            self._render_local_installed()
 
     def _render_local_installed(self):
         """仅用本地扫描数据渲染「已安装」视图（远程未就绪也可用）
@@ -1557,6 +1742,8 @@ class MarketplaceCard(QWidget):
         fs = getattr(self, "_cached_font_size", 14)
 
         for child in self.findChildren(QLabel):
+            if child.objectName() == "updatesBadge":
+                continue  # 亮黄 badge 固定黑字，不跟随主题文字色
             try:
                 # 标题/描述应用 font_size 偏移
                 offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
@@ -1692,13 +1879,28 @@ class MarketplaceCard(QWidget):
 
         filter_layout.addStretch(1)
 
-        # 待更新 InfoBadge：挂在「待更新」tab 右上角（无更新时隐藏）
-        from qfluentwidgets import InfoBadge, InfoBadgeManager, InfoBadgePosition
+        # 待更新 InfoBadge：亮黄色、挂在「待更新」tab 右侧垂直居中（无更新时隐藏）
+        # 注意 parent 必须与 target 同级（filter_row），否则坐标参考系错乱导致 badge 落在 tab 左侧
+        from qfluentwidgets import InfoBadge, InfoBadgePosition
 
-        self._updates_badge = InfoBadge.info("0", self._updates_item)
-        self._updates_badge.setVisible(False)
+        self._updates_badge = None
         try:
-            InfoBadgeManager.make(InfoBadgePosition.TOP_RIGHT, self._updates_item, self._updates_badge)
+            # custom 亮黄背景（浅色 #FFC107 / 深色 #FFD54F）+ 固定黑字保证对比度
+            self._updates_badge = InfoBadge.custom(
+                "0",
+                QColor(255, 193, 7),
+                QColor(255, 213, 79),
+                parent=filter_row,
+                target=self._updates_item,
+                position=InfoBadgePosition.RIGHT,
+            )
+            self._updates_badge.setObjectName("updatesBadge")
+            # 注销主题自动重放 + 固定黑字：亮黄背景配白字不可读，主题切换时也不能被改回
+            from qfluentwidgets.common.style_sheet import styleSheetManager
+
+            styleSheetManager.deregister(self._updates_badge)
+            self._updates_badge.setStyleSheet("InfoBadge { color: #1a1a1a; padding: 1px 3px 1px 3px; }")
+            self._updates_badge.setVisible(False)
         except Exception as e:
             logger.warning(f"[Marketplace] InfoBadge 挂载失败: {e}")
 
@@ -1750,7 +1952,7 @@ class MarketplaceCard(QWidget):
         )
         source_row_layout.addWidget(self._source_label)
 
-        self._source_bar = ScrollArea(source_row)
+        self._source_bar = SingleDirectionScrollArea(source_row, Qt.Horizontal)
         self._source_bar.setWidgetResizable(True)
         self._source_bar.setFixedHeight(34)
         self._source_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1784,7 +1986,7 @@ class MarketplaceCard(QWidget):
         )
         tag_row_layout.addWidget(self._tag_label)
 
-        self._tag_bar = ScrollArea(tag_row)
+        self._tag_bar = SingleDirectionScrollArea(tag_row, Qt.Horizontal)
         self._tag_bar.setWidgetResizable(True)
         self._tag_bar.setFixedHeight(38)
         self._tag_bar.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1806,14 +2008,15 @@ class MarketplaceCard(QWidget):
         self._content_stack = QStackedWidget(self._browse_page)
         self._content_stack.setStyleSheet("background: transparent;")
 
-        self._scroll = ScrollArea(self._browse_page)
-        self._scroll.setWidgetResizable(True)
+        self._scroll = QScrollArea(self._browse_page)
+        # widgetResizable=False：QScrollArea 按 sizeHint 自动管理内容高度，
+        # 但 QLabel(wordWrap) 的 sizeHint 与实际布局高度有系统性偏差且
+        # C++ 侧无法被 Python override 修正 → 内容被撑高 → 按钮下空白。
+        # 改为手动管理 content 尺寸（_sync_content_size）。
+        self._scroll.setWidgetResizable(False)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(
-            "ScrollArea { background: transparent; border: none; }"
-            "ScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        self._content = QWidget(self._scroll)
+        self._scroll.setStyleSheet(_scroll_area_qss())
+        self._content = _MarketListContent(self._scroll)
         self._content.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
@@ -1890,17 +2093,38 @@ class MarketplaceCard(QWidget):
     def showEvent(self, event):
         """显示时安装窗口 resize 事件过滤器，窗口缩放时通知容器重新展开"""
         super().showEvent(event)
-        win = self.window()
-        if win:
-            win.installEventFilter(self)
-            self.updateGeometry()
+        try:
+            win = self.window()
+            if win:
+                win.removeEventFilter(self)  # 先移除再安装：防止重复安装导致 resize 重复回调
+                win.installEventFilter(self)
+                self.updateGeometry()
+            # 监听视口 resize（widgetResizable=False 手动管理尺寸）：
+            # 滚动条出现/消失、容器展开动画等都会改变视口尺寸 → 行重排
+            # （wordWrap 换行数变化）→ 行高变化 → content 高度需重新同步，
+            # 否则底部出现空白
+            vp = self._scroll.viewport()
+            vp.removeEventFilter(self)
+            vp.installEventFilter(self)
+            self._sync_content_size()
+        except RuntimeError:
+            pass  # 窗口/卡片已销毁
 
     def eventFilter(self, obj, event):
-        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        """监听窗口/视口 resize，同步 content 尺寸（widgetResizable=False）"""
         from PyQt5.QtCore import QEvent
 
-        if obj is self.window() and event.type() == QEvent.Resize:
-            self.updateGeometry()
+        if event.type() == QEvent.Resize:
+            if obj is self.window():
+                # 窗口尺寸变化：容器重算高度 + 同步内容尺寸
+                self._sync_content_size()
+                self.updateGeometry()
+            elif obj is self._scroll.viewport():
+                # 视口尺寸变化（滚动条出现/消失、容器动画）：同步内容尺寸。
+                # 第一次同步改变 content 宽度 → 行重排（wordWrap 换行数
+                # 变化）→ 行高变化，第二次同步校正高度
+                self._sync_content_size()
+                self._sync_content_size()
         return super().eventFilter(obj, event)
 
     # ── 异步刷新 ──
@@ -1912,12 +2136,15 @@ class MarketplaceCard(QWidget):
             force: 是否强制拉取远程（跳过缓存）
         """
         self._set_loading(True)
+        self._failed_sources = set()  # 每轮刷新重置失败标记（重新收集）
         self._cleanup_worker()
-        self._worker = _MarketFetchWorker(force=force)
+        self._worker_gen += 1
+        self._worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.market_fetched.connect(self._on_market_fetched)
+        self._worker.market_failed.connect(self._on_market_failed)
         self._worker.all_done.connect(self._on_market_all_done)
         self._worker.error.connect(self._on_refresh_error)
         # 全部市场拉完（或出错）后才退出线程并清理
@@ -1928,26 +2155,93 @@ class MarketplaceCard(QWidget):
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.start()
 
-    def _on_market_fetched(self, market_data: dict):
-        """单个市场拉取完成：合并进全量数据并增量渲染"""
+    def _merge_market_data(self, market_data: dict):
+        """合并单个市场数据到 _plugin_data 并触发渲染（worker 回调复用）
+
+        校验按钮/浏览刷新共用：数据合并 + 状态徽标刷新 + 渲染调度。
+        """
         market_name = market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
         merged = [p for p in self._plugin_data if p.get("_marketplace") != market_name]
         merged.extend(plugins)
-        self._plugin_data = merged
-        # 非「已安装」视图也保留本地插件并入（远程数据到达后同样生效）
+        self._plugin_data = merged  # 数据始终合并，不因不可见丢失
+        # 同步刷新「市场」页该源状态徽标
+        self._refresh_market_status_label(market_name)
+        if not self.isVisible():
+            return  # 仅跳过本次渲染（数据已在 _plugin_data）
+        self._schedule_render()
+
+    def _on_market_fetched(self, market_data: dict, gen: int):
+        """单个市场拉取完成：合并进全量数据并标记待渲染（同帧合并一次）
+
+        数据合并无条件前置（不可见时也合并不丢弃）；isVisible 只控制渲染。
+        """
+        if not self._alive():
+            return  # 卡片已销毁，丢弃迟到数据
+        if gen != self._worker_gen:
+            return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
+        self._merge_market_data(market_data)
+
+    def _schedule_render(self):
+        """合并短时间窗口内多次市场到达为一次渲染（_render_pending 防重复排队）
+
+        80ms 合并窗口：刷新时逐市场拉取，间隔 <80ms 的市场数据合并为一次
+        全量重建，避免每个市场到达都清空+重建列表（列表闪 N 次）。
+        用 self 子对象 QTimer（销毁自动取消）：避免无父临时 timer 在卡片
+        销毁后仍触发回调，触碰已删除 Qt 控件（原生崩溃 0xC0000409）。
+        """
+        if self._render_pending:
+            return
+        self._render_pending = True
+        if self._flush_timer is None:
+            from PyQt5.QtCore import QTimer
+
+            self._flush_timer = QTimer(self)
+            self._flush_timer.setSingleShot(True)
+            self._flush_timer.timeout.connect(self._flush_render)
+        self._flush_timer.start(80)
+
+    def _flush_render(self):
+        """执行挂起的渲染：首屏未渲染时交给 _render_initial_view 统一完成"""
+        if not self._alive():
+            return  # 卡片已销毁，放弃渲染
+        self._render_pending = False
+        if not self.isVisible():
+            return  # 不可见仅合并不渲染（数据已入 _plugin_data，下次显示自动渲染）
+        if not self._initial_view_done:
+            return  # 首屏由 _render_initial_view 渲染（合并本地/远程窗口）
         self._render_plugins(self._plugin_data)
 
-    def _on_market_all_done(self):
+    def _on_market_failed(self, failed: list, gen: int):
+        """部分市场源拉取失败：仅更新源标记（绝不触碰 _plugin_data/_row_map）"""
+        if not self._alive():
+            return  # 卡片已销毁
+        if gen != self._worker_gen:
+            return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
+        self._failed_sources = set(failed)
+        # 市场管理页已构建 → 轻量刷新状态徽标（失败信息已持久化在 manager）
+        if getattr(self, "_markets_built", False):
+            self._refresh_all_market_status()
+
+    def _on_market_all_done(self, gen: int):
         """全部市场拉取完成"""
+        if not self._alive():
+            return  # 卡片已销毁
+        if gen != self._worker_gen:
+            return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
+        # 兜底：有合并数据且首屏已渲染 → 必 flush（flush 内部清 pending 防重）
+        if self._plugin_data and self._initial_view_done:
+            self._flush_render()
         self._set_loading(False)
+        # 全部拉取完成后刷新市场页状态徽标（覆盖缓存命中/失败回退场景）
+        self._refresh_all_market_status()
         # 远程全部失败时，本地已安装视图仍保留（不清空）
         if not self._plugin_data:
             self._status_label.setText("远程市场不可用")
             self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
 
-    def _on_refresh_error(self, err: str):
+    def _on_refresh_error(self, err: str, gen: int):
         """拉取出错：不打断本地视图，仅记录"""
         logger.warning(f"[Marketplace] 市场拉取错误: {err[:120]}")
 
@@ -2229,53 +2523,192 @@ class MarketplaceCard(QWidget):
         """
         self._render_next_batch()
 
+    def _create_row(self, p: dict) -> Optional[_PluginRow]:
+        """创建插件行 widget 并连接全部信号
+
+        行创建 + 信号连接抽成单方法，供 _render_batch 与行补齐场景共用；
+        单行渲染失败不中断整个批次。
+        """
+        try:
+            fs = getattr(self, "_cached_font_size", 0)
+            tc = getattr(self, "_cached_tc", None)
+            tcs = getattr(self, "_cached_tcs", None)
+            ff = getattr(self, "_cached_font_family", "") or ""
+            query = self._search_edit.text().strip().lower()
+            installed, has_update, local_ver, status = self._row_state(p)
+            row = _PluginRow(
+                p,
+                installed,
+                has_update=has_update,
+                local_version=local_ver,
+                status=status,
+                parent=self._content,
+                font_size=fs,
+                search_query=query,
+                tc=tc,
+                tcs=tcs,
+                font_family=ff,
+            )
+        except Exception as e:
+            # 单行渲染失败（异常市场数据）不中断整个批次
+            logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
+            return None
+        row.installRequested.connect(self._async_install)
+        row.updateRequested.connect(self._async_update)
+        row.openUrlRequested.connect(self._open_url)
+        row.openDirRequested.connect(self._on_open_plugin_dir)
+        row.detailRequested.connect(self._on_plugin_detail)
+        row.enableRequested.connect(self._async_enable)
+        row.disableRequested.connect(self._async_disable)
+        row.uninstallRequested.connect(self._async_uninstall)
+        return row
+
     def _render_batch(self, start: int, end: int):
-        """渲染 [start, end) 范围的匹配插件行"""
-        fs = getattr(self, "_cached_font_size", 0)
-        tc = getattr(self, "_cached_tc", None)
-        tcs = getattr(self, "_cached_tcs", None)
-        ff = getattr(self, "_cached_font_family", "") or ""
-        query = self._search_edit.text().strip().lower()
+        """渲染 [start, end) 范围的匹配插件行
+
+        压缩帧防护：新行创建后先隐藏，渲染完成由 _reveal_rows 延迟一帧统一显示。
+
+        原因：QScrollArea(widgetResizable) 的内容 widget 高度更新滞后于行创建
+        （QVBoxLayout 的 sizeHint 缓存惰性刷新），若行立即可见，首帧会按
+        「视口高度 / 行数」被压缩成几 px 高的窄条堆在左上角，随后才展开到
+        正常高度（表现为刷新列表时内容先从左上角出现再展开）。隐藏行不参与
+        布局几何分配（sizeHint 仍计入，滚动范围正确），统一显示时直接以正确
+        高度出现，跳过压缩帧。
+        """
         for i in range(start, end):
-            try:
-                p = self._matched[i]
-                installed, has_update, local_ver, status = self._row_state(p)
-                row = _PluginRow(
-                    p,
-                    installed,
-                    has_update=has_update,
-                    local_version=local_ver,
-                    status=status,
-                    parent=self._content,
-                    font_size=fs,
-                    search_query=query,
-                    tc=tc,
-                    tcs=tcs,
-                    font_family=ff,
-                )
-            except Exception as e:
-                # 单行渲染失败（异常市场数据）不中断整个批次
-                logger.warning(f"[Marketplace] 插件行渲染失败: {e}")
+            p = self._matched[i]
+            row = self._create_row(p)
+            if row is None:
                 continue
-            row.installRequested.connect(self._async_install)
-            row.updateRequested.connect(self._async_update)
-            row.openUrlRequested.connect(self._open_url)
-            row.openDirRequested.connect(self._on_open_plugin_dir)
-            row.detailRequested.connect(self._on_plugin_detail)
-            row.enableRequested.connect(self._async_enable)
-            row.disableRequested.connect(self._async_disable)
-            row.uninstallRequested.connect(self._async_uninstall)
+            row.hide()  # 防 QScrollArea 未扩展前的压缩帧
             # 新行插入「加载更多」按钮之前：按钮随新行自然下移，
             # 避免新行跑到 stretch 后面造成按钮卡在中间（不滚动视口）
             btn = getattr(self, "_load_more_btn", None)
             if btn is not None:
                 self._content_layout.insertWidget(self._content_layout.indexOf(btn), row)
             else:
-                self._content_layout.addWidget(row)
+                # 无按钮（全部渲染完，如搜索过滤后补行）：新行必须插到
+                # stretch 之前。否则 addWidget 会追加到 stretch 后面 →
+                # stretch 被夹在行中间吃满剩余空间 → 中间大段空白、
+                # 新行被推到最底部。
+                count = self._content_layout.count()
+                last = self._content_layout.itemAt(count - 1) if count > 0 else None
+                if last is not None and last.widget() is None and last.spacerItem() is not None:
+                    self._content_layout.insertWidget(count - 1, row)
+                else:
+                    self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
         # 首屏批次补 stretch
         if start == 0:
             self._content_layout.addStretch(1)
+        self._schedule_reveal()
+
+    def _schedule_reveal(self):
+        """渲染完成后延迟显示新行（等 QScrollArea 内容扩展稳定后一次到位）
+
+        50ms 窗口：QScrollArea 的内容 widget 高度扩展依赖布局 sizeHint 缓存
+        刷新（需多轮事件循环），过早 show 会让行在未扩展的受限高度下布局
+        （重新出现压缩帧）。50ms 后人眼无感，且保证 show 时行直接以正确
+        高度出现。
+        用 self 子 QTimer（销毁自动取消），避免无父临时 timer 在卡片
+        销毁后触发回调触碰已删除控件（原生崩溃 0xC0000409）。
+        """
+        if self._reveal_timer is None:
+            from PyQt5.QtCore import QTimer
+
+            self._reveal_timer = QTimer(self)
+            self._reveal_timer.setSingleShot(True)
+            self._reveal_timer.timeout.connect(self._reveal_rows)
+        self._reveal_timer.start(50)
+
+    def _reveal_rows(self):
+        """显示渲染期间隐藏的插件行（_alive 防护）
+
+        QScrollArea(widgetResizable) 的内容高度扩展依赖 widget sizeHint
+        缓存刷新（滞后于行创建），若只 show 行，行会在旧高度（视口高）下
+        被压缩布局一帧再展开。因此 show 后立即按最新 sizeHint 手动同步
+        resize _content：QVBoxLayout 随即在正确高度下重布局，行一次到位，
+        无压缩帧（QScrollArea 后续按相同 sizeHint 覆盖，结果一致）。
+        """
+        if not self._alive():
+            return  # 卡片已销毁，放弃显示
+        for row in self._row_map.values():
+            try:
+                row.show()
+            except RuntimeError:
+                pass  # 行已被销毁（并发清理），忽略
+        try:
+            self._content_layout.activate()
+            # widgetResizable=False：手动同步 content 尺寸到实际内容高度，
+            # 不依赖 layout.sizeHint()（QLabel wordWrap 的 sizeHint 与实际
+            # 布局高度有每行 ~8px 偏差，行多时累积成 stretch 空白区）
+            self._sync_content_size()
+            # 同步后 content 宽度/高度变化 → 行按新宽度重排（wordWrap
+            # 换行数可能变化）→ 行高变化 → 二次同步确保高度准确
+            self._sync_content_size()
+            # 刷新 QWidget::sizeHint 缓存：布局激活后缓存可能被冻结为
+            # 旧值/异常值，不清除会让 QScrollArea 在窗口 resize 等时机
+            # 用错误高度撑开 content → 列表底部大段空白
+            self._content.updateGeometry()
+        except RuntimeError:
+            pass  # 卡片已销毁
+
+    def _content_height(self) -> int:
+        """按布局内可见行理想高度累加内容高度（不依赖 C++ sizeHint 缓存）
+
+        用 Python 侧 w.sizeHint()（_PluginRow override：已布局时返回
+        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免：
+        1. C++ QWidgetItem::sizeHint（QLabel wordWrap 放大值）
+        2. 行在受限 content 高度下被压缩后的实际几何高度
+        """
+        lay = self._content_layout
+        spacing = lay.spacing()
+        mg = lay.contentsMargins()
+        total = 0
+        vis = 0
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None and w.isVisible():
+                total += w.sizeHint().height()
+                vis += 1
+        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
+
+    def _sync_content_size(self):
+        """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
+
+        两阶段：先用行 sizeHint（heightForWidth）初算撑开 content 高度
+        （行此时可能未按新宽度重排，sizeHint 与实际布局有偏差），resize
+        触发行重排后，再按行实际几何高度累加校正——保证 content 高度与
+        布局实际一致（底部无 stretch 空白区）。宽度 = 视口宽；行少时
+        高度保持视口高，stretch 填满底部不出现空白。
+        """
+        try:
+            vp = self._scroll.viewport()
+            h1 = self._content_height()
+            self._content.resize(vp.width(), max(h1, vp.height()))
+            # resize 后行按新宽度重排 → 用实际几何高度校正
+            self._content_layout.activate()
+            h2 = self._content_height_real()
+            if abs(h2 - h1) > 4:
+                self._content.resize(vp.width(), max(h2, vp.height()))
+        except RuntimeError:
+            pass  # 卡片已销毁
+
+    def _content_height_real(self) -> int:
+        """按布局内可见行实际几何高度累加内容高度（布局稳定后调用）"""
+        lay = self._content_layout
+        spacing = lay.spacing()
+        mg = lay.contentsMargins()
+        total = 0
+        vis = 0
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None and w.isVisible():
+                total += w.height()
+                vis += 1
+        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示"""
@@ -2304,16 +2737,67 @@ class MarketplaceCard(QWidget):
         while self._content_layout.count():
             item = self._content_layout.takeAt(0)
             if item.widget():
+                # 立即隐藏：takeAt 移出布局后 widget 无几何管理，deleteLater 前
+                # 会残留原位置造成闪帧（与压缩帧同源）
+                item.widget().hide()
                 item.widget().deleteLater()
             item = None  # 释放 QLayoutItem 引用
+        # 同步收缩内容高度 + 刷新 sizeHint 缓存：QScrollArea 的收缩依赖
+        # LayoutRequest（滞后多轮事件循环），残留旧高度会让滚动范围保留旧值，
+        # 在下一批行 reveal 之前用户可滚到大段空白区（加载更多/刷新竞态场景）
+        try:
+            vp = self._scroll.viewport()
+            self._content.resize(vp.width(), vp.height())
+            self._content.updateGeometry()
+        except RuntimeError:
+            pass  # 卡片已销毁
 
     def _on_search_text_changed(self):
         """搜索文本变化 → 防抖后触发过滤"""
         self._search_debounce.start(300)
 
     def _filter_plugins(self):
-        """搜索过滤（复用已有数据）"""
-        self._render_plugins(self._plugin_data)
+        """搜索过滤（复用已有行，不重建 widget）"""
+        self._reconcile_rows()
+
+    def _reconcile_rows(self):
+        """按当前匹配列表协调已渲染行：显隐 + 高亮 + 补行（不重建已有行）
+
+        与 _refresh_row_states 同范式；匹配顺序保持行创建顺序（暂不重排，
+        排序轻微不一致可接受）。原实现走 _render_plugins 全量重建，
+        行数多时每次搜索都销毁/重建首屏。
+        """
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
+
+        # 刷新安装状态（TTL 3s 缓存，成本低）
+        inst_map = get_installer().get_installed_map()
+        self._installed_set = set(inst_map)
+        self._version_map = inst_map
+        self._status_map = get_installer().get_status_map()
+
+        # 重算匹配列表（不重建 widget）
+        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        self._matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
+        self._apply_sort(self._matched)
+
+        # 复用行：可见性 + 搜索高亮（行按匹配顺序创建，布局顺序与匹配一致）
+        for name, row in list(self._row_map.items()):
+            row.setVisible(self._plugin_matches(row._meta, query, filter_mode))
+            row.update_search_highlight(query)
+
+        # 不足补齐（_render_next_batch 内部维护按钮/计数）/ 已足则收尾
+        if len(self._row_map) < len(self._matched):
+            self._render_next_batch()
+        else:
+            self._all_loaded = True
+            self._remove_load_more_button()
+        # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
+        # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
+        self._sync_content_size()
+        self._update_empty_state()
+        self._update_status()
+        self._update_update_badge()
 
     # ── 异步安装 ──
 
@@ -2341,6 +2825,8 @@ class MarketplaceCard(QWidget):
 
     def _on_install_done(self, name: str, success: bool):
         """安装完成"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText("")
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -2355,6 +2841,8 @@ class MarketplaceCard(QWidget):
 
     def _on_install_error(self, name: str, err: str):
         """安装出错"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText("安装失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._update_row_state(name, installed=False, error=True)
@@ -2411,6 +2899,8 @@ class MarketplaceCard(QWidget):
 
     def _on_update_done(self, name: str, success: bool):
         """更新完成"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText("")
         # InfoBar 统一挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -2426,6 +2916,8 @@ class MarketplaceCard(QWidget):
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
@@ -2571,6 +3063,8 @@ class MarketplaceCard(QWidget):
 
     def _on_manage_done(self, name: str, action: str, success: bool):
         """启用/禁用/卸载完成"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText("")
         from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -2584,6 +3078,8 @@ class MarketplaceCard(QWidget):
 
     def _on_manage_error(self, name: str, action: str, err: str):
         """启用/禁用/卸载出错"""
+        if not self._alive():
+            return  # 卡片已销毁
         self._status_label.setText(f"{action}失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
         self._refresh_row_states()
@@ -2624,6 +3120,8 @@ class MarketplaceCard(QWidget):
             self._set_load_more_button(len(self._matched) - self._rendered_count)
         else:
             self._remove_load_more_button()
+        # 行显隐/按钮变化 → 内容高度变化 → 手动同步（widgetResizable=False）
+        self._sync_content_size()
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
@@ -2637,23 +3135,20 @@ class MarketplaceCard(QWidget):
             error: 操作是否出错
             updated: 是否刚完成更新（需刷新版本显示）
         """
-        for i in range(self._content_layout.count()):
-            item = self._content_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), _PluginRow):
-                row: _PluginRow = item.widget()
-                if row._meta.get("name") == name:
-                    if updated:
-                        # 更新成功后：设为已安装，清除更新标记
-                        row.set_installed(True)
-                    elif error and not installed:
-                        row.set_error()
-                    elif error and installed:
-                        # 更新失败但旧版仍在：恢复按钮（保留更新标记）
-                        row._busy = False
-                        row._update_btn_text()
-                    else:
-                        row.set_installed(installed)
-                    break
+        row = self._row_map.get(name)
+        if row is None:
+            return
+        if updated:
+            # 更新成功后：设为已安装，清除更新标记
+            row.set_installed(True)
+        elif error and not installed:
+            row.set_error()
+        elif error and installed:
+            # 更新失败但旧版仍在：恢复按钮（保留更新标记）
+            row._busy = False
+            row._update_btn_text()
+        else:
+            row.set_installed(installed)
 
     # ── 标签切换 ──
 
@@ -2694,6 +3189,13 @@ class MarketplaceCard(QWidget):
                 " selection-background-color: rgba(40,120,220,0.3); outline: none; }"
                 "QComboBox QAbstractItemView::item { padding: 4px 8px; }"
                 "QComboBox QAbstractItemView::item:hover { background: rgba(128,128,128,0.15); }"
+                # 下拉列表滚动条：对齐主程序 ComboBoxStyles.dark_combo_dropdown 规范
+                f"QComboBox QAbstractItemView QScrollBar:vertical {{ background: {card_bg};"
+                " border: none; width: 14px; margin: 4px 2px 4px 2px; }"
+                "QComboBox QAbstractItemView QScrollBar::add-line:vertical,"
+                " QComboBox QAbstractItemView QScrollBar::sub-line:vertical { height: 0px; }"
+                "QComboBox QAbstractItemView QScrollBar::add-page:vertical,"
+                " QComboBox QAbstractItemView QScrollBar::sub-page:vertical { background: none; }"
             )
         except RuntimeError:
             pass
@@ -2706,6 +3208,8 @@ class MarketplaceCard(QWidget):
 
     def _update_update_badge(self):
         """统计可更新插件数，更新「待更新」tab 右上角 InfoBadge"""
+        if self._updates_badge is None:
+            return
         n = 0
         for p in self._all_plugins or []:
             if p.get("name") in self._installed_set and self._has_update(p, True):
@@ -2924,12 +3428,15 @@ class MarketplaceCard(QWidget):
         是切 tab 卡顿的主因之一。
         """
         if getattr(self, "_markets_built", False) and not force:
+            # 缓存命中：仅刷新状态徽标（拉取可能已完成/失败）
+            self._refresh_all_market_status()
             return
         # 清空旧内容
         while self._markets_content_layout.count():
             item = self._markets_content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._market_status_labels.clear()
 
         mgr = get_marketplace_manager()
         for src in mgr.get_sources():
@@ -2938,9 +3445,16 @@ class MarketplaceCard(QWidget):
 
         self._markets_content_layout.addStretch()
         self._markets_built = True
+        # 构建后立即刷新状态徽标（读 manager 持久化状态）
+        self._refresh_all_market_status()
 
     def _create_market_row(self, src_def: dict) -> QWidget:
-        """创建单个市场源的行组件（直接用缓存主题色，无需事后 re-theme）"""
+        """创建单个市场源的行组件（直接用缓存主题色，无需事后 re-theme）
+
+        行内显示拉取状态徽标：● 拉取成功（绿）/ ● 拉取失败（红，tooltip 原因）
+        / ● 未拉取（灰）；失败时额外显示 ⚠ 提示。右侧提供「校验」按钮
+        可单独强制重拉该源。
+        """
         tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
         row = QWidget(self._markets_content)
@@ -2956,10 +3470,28 @@ class MarketplaceCard(QWidget):
         name_text = src_def["name"]
         if src_def.get("builtin"):
             name_text += " (内置)"
-        name_label = QLabel(name_text, row)
+
+        # 名称行：名称 + 状态徽标（横向）
+        name_row = QWidget(row)
+        name_row.setStyleSheet("background: transparent;")
+        name_row_layout = QHBoxLayout(name_row)
+        name_row_layout.setContentsMargins(0, 0, 0, 0)
+        name_row_layout.setSpacing(6)
+
+        name_label = QLabel(name_text, name_row)
         name_label.setObjectName("marketRowName")
         name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;")
-        info.addWidget(name_label)
+        name_row_layout.addWidget(name_label)
+
+        # 拉取状态徽标（读 manager 持久化状态；无记录 → 未拉取）
+        status_lb = QLabel("", name_row)
+        status_lb.setStyleSheet("background: transparent;")
+        name_row_layout.addWidget(status_lb)
+        self._market_status_labels[src_def["name"]] = status_lb
+        self._refresh_market_status_label(src_def["name"])
+
+        name_row_layout.addStretch(1)
+        info.addWidget(name_row)
 
         src = src_def.get("source", {})
         src_type = src.get("source", "url")
@@ -2972,6 +3504,13 @@ class MarketplaceCard(QWidget):
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
+
+        # 校验按钮：单独强制重拉该源
+        check_btn = TransparentToolButton(FluentIcon.SYNC, row)
+        check_btn.setFixedSize(28, 28)
+        check_btn.setToolTip(f"重新拉取 {src_def['name']}")
+        check_btn.clicked.connect(lambda checked, n=src_def["name"]: self._check_source(n))
+        h.addWidget(check_btn)
 
         # 打开网页按钮
         link_url = ""
@@ -3003,6 +3542,96 @@ class MarketplaceCard(QWidget):
             h.addWidget(del_btn)
 
         return row
+
+    def _refresh_market_status_label(self, name: str):
+        """刷新单个市场源的状态徽标（● 成功绿 / ● 失败红 / ● 未拉取灰）
+
+        失败时 tooltip 展示错误原因；成功时展示插件数与时间。
+        """
+        label = self._market_status_labels.get(name)
+        if label is None:
+            return
+        status = get_marketplace_manager().get_source_status(name)
+        tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        if status is None:
+            label.setText(f'<span style="color:{tcs};">● 未拉取</span>')
+            label.setToolTip("尚未拉取过该市场源")
+            return
+        plugins = status.get("plugins", 0)
+        when = time.strftime("%m-%d %H:%M", time.localtime(status.get("time", 0))) if status.get("time") else "—"
+        if status.get("ok"):
+            if status.get("from_cache"):
+                label.setText('<span style="color:#66bb6a;">● 缓存</span>')
+                label.setToolTip(f"缓存数据可用 · {plugins} 个插件 · {when}")
+            else:
+                label.setText('<span style="color:#4caf50;">● 拉取成功</span>')
+                label.setToolTip(f"拉取成功 · {plugins} 个插件 · {when}")
+        else:
+            label.setText('<span style="color:#ef5350;">● 拉取失败</span>')
+            err = (status.get("error") or "未知错误").strip()
+            if len(err) > 120:
+                err = err[:117] + "..."
+            label.setToolTip(f"{err}\n{when}")
+
+    def _refresh_all_market_status(self):
+        """刷新「市场」页所有源的状态徽标"""
+        for name in list(self._market_status_labels.keys()):
+            self._refresh_market_status_label(name)
+
+    def _check_source(self, name: str):
+        """单独强制拉取某个市场源（校验按钮）
+
+        独立 worker，不干扰浏览页正在进行的刷新/安装任务。
+        """
+        mgr = get_marketplace_manager()
+        src_def = next((s for s in mgr.get_sources() if s["name"] == name), None)
+        if src_def is None:
+            return
+        label = self._market_status_labels.get(name)
+        if label is not None:
+            tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+            label.setText(f'<span style="color:{tcs};">● 校验中…</span>')
+            label.setToolTip("正在重新拉取该市场源…")
+
+        self._cleanup_check_worker()
+        self._check_worker = _MarketplaceWorker(lambda d=src_def: mgr.fetch_marketplace(d, force=True))
+        self._check_thread = QThread(self)
+        self._check_worker.moveToThread(self._check_thread)
+        self._check_thread.started.connect(self._check_worker.run)
+        self._check_worker.finished.connect(lambda r: self._on_check_source_done(name, r))
+        self._check_worker.error.connect(lambda e: self._on_check_source_done(name, None, err=e))
+        self._check_worker.finished.connect(self._check_thread.quit)
+        self._check_worker.error.connect(self._check_thread.quit)
+        self._check_worker.finished.connect(self._check_worker.deleteLater)
+        self._check_worker.error.connect(self._check_worker.deleteLater)
+        self._check_thread.finished.connect(self._check_thread.deleteLater)
+        self._check_thread.start()
+
+    def _on_check_source_done(self, name: str, result, err: str = ""):
+        """单源校验完成：刷新徽标；成功则把数据合并进插件列表
+
+        校验（强制拉取）返回的市场数据与浏览页刷新同样处理——
+        合并进 _plugin_data 并触发渲染，否则会出现「状态显示成功但
+        插件列表无数据」的不一致。
+        """
+        if not self._alive():
+            return  # 卡片已销毁，丢弃迟到结果
+        self._refresh_market_status_label(name)
+        if err:
+            return
+        if isinstance(result, dict) and not result.get("_error"):
+            self._merge_market_data(result)
+
+    def _cleanup_check_worker(self):
+        """安全清理市场校验 worker/thread"""
+        if getattr(self, "_check_thread", None) is not None:
+            try:
+                self._check_thread.quit()
+                self._check_thread.wait(500)
+            except RuntimeError:
+                pass
+            self._check_thread = None
+        self._check_worker = None
 
     def _on_add_marketplace(self):
         """添加市场源"""
@@ -3090,17 +3719,86 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("刷新中…")
         self._async_refresh(force=True)
 
+    def _alive(self) -> bool:
+        """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
+        try:
+            return not sip.isdeleted(self)
+        except RuntimeError, TypeError:
+            return False
+
     def _cleanup_worker(self):
-        """安全清理旧的 worker/thread"""
-        if self._worker_thread is not None:
+        """安全清理旧的 worker/thread（不阻塞主线程）
+
+        - 判活：旧线程 C++ 对象可能已被上一轮 finished→deleteLater 链销毁
+          （删 wait 后事件循环会立即处理 deleteLater），若属性仍持悬垂 wrapper，
+          再次 quit()/connect 会抛 RuntimeError（可升级原生崩溃 0xC0000409）
+        - 存活线程：quit 后剥离父子（防卡片析构连带销毁 running 线程）+
+          孤儿列表强引用持有（防 GC），finished → _release_orphan 自清理
+        - 迟到信号由回调 sender/判活检查丢弃
+        """
+        thread = self._worker_thread
+        self._worker_thread = None
+        self._worker = None
+        if thread is None:
+            return
+        try:
+            if sip.isdeleted(thread):
+                # C++ 对象已被前轮 finished→deleteLater 销毁：仅清理悬垂引用
+                try:
+                    if thread in _orphan_threads:
+                        _orphan_threads.remove(thread)
+                except RuntimeError:
+                    pass
+                return
+        except RuntimeError:
+            return
+        try:
+            thread.quit()
+            thread.setParent(None)
+            _orphan_threads.append(thread)
             try:
-                self._worker_thread.quit()
-                self._worker_thread.wait(500)
+                thread.finished.connect(lambda t=thread: self._release_orphan(t))
+            except RuntimeError:
+                pass  # 竞态：前一轮 finished 已排队，无需再连
+        except RuntimeError:
+            # 竞态：quit/setParent 期间对象被销毁；清理悬垂引用
+            try:
+                if thread in _orphan_threads:
+                    _orphan_threads.remove(thread)
             except RuntimeError:
                 pass
-            self._worker_thread = None
-        self._worker = None
+
+    def _release_orphan(self, thread):
+        """孤儿线程 finished 后从模块级列表移除（deleteLater 由原连接负责）"""
+        try:
+            if thread in _orphan_threads:
+                _orphan_threads.remove(thread)
+        except RuntimeError:
+            pass
+
+    def __del__(self):
+        """GC 析构钩子：先剥离活跃线程再销毁卡片
+
+        卡片可能因 Python 引用消失被 GC 直接销毁（非 deleteLater 路径），
+        此时若不先剥离 running 的 worker 线程，线程随卡片析构会被 Qt abort。
+        """
+        try:
+            self._cleanup_worker()
+        except Exception:
+            pass
+        try:
+            self._cleanup_check_worker()
+        except Exception:
+            pass
 
     def deleteLater(self):
         self._cleanup_worker()
+        self._cleanup_check_worker()
+        # 销毁前移除挂在顶层窗口上的事件过滤器（win 非 None 且非 self）
+        try:
+            win = self.window()
+            if win is not None and win is not self:
+                win.removeEventFilter(self)
+        except RuntimeError:
+            pass
         super().deleteLater()

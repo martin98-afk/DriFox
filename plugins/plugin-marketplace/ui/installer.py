@@ -11,6 +11,7 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,40 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from .data import compare_versions
+
+
+# ── 删除辅助 ──────────────────────────────────────────────
+
+
+def _rmtree_readonly(path: Path) -> bool:
+    """强制删除目录树（含只读文件）
+
+    git clone 生成的 ``.git/objects/pack/*.idx|pack|rev`` 默认带只读属性，
+    ``shutil.rmtree`` 不会清除该属性，在 Windows 上调用 ``os.unlink`` 会
+    抛出 ``WinError 5 拒绝访问``。本方法在 ``onexc`` 回调里先 chmod 清除
+    只读属性，再重试删除。
+
+    Args:
+        path: 要删除的目录
+
+    Returns:
+        True 删除成功；False 失败（保留原始异常日志）
+    """
+
+    def _onerror(func, failed_path, excinfo):
+        try:
+            os.chmod(failed_path, stat.S_IWRITE)
+            func(failed_path)
+        except OSError:
+            pass
+
+    try:
+        # Python 3.12+ 新 API；项目要求 3.14+
+        shutil.rmtree(path, onexc=_onerror)
+        return True
+    except Exception as e:
+        logger.error(f"[Installer] rmtree {path} failed: {e}")
+        return False
 
 
 # ── 环境检测 ──────────────────────────────────────────────
@@ -86,6 +121,9 @@ class PluginInstaller:
         # 插件状态缓存（{name: "enabled"|"disabled"|"system"}）
         self._status_map_cache: Optional[dict] = None
         self._status_map_ts: float = 0.0
+        # manifest 缓存（{name: manifest dict}，get_installed_map 扫描时填充，
+        # 供 UI 图标/详情复用，避免重复读盘）
+        self._manifest_cache: dict = {}
 
     # ── 批量状态查询 ──────────────────────────────────────
 
@@ -109,13 +147,16 @@ class PluginInstaller:
             return self._inst_map_cache
 
         result: dict = {}
+        manifest_cache: dict = {}
         for base in (self._plugins_dir, self._disabled_dir):
             if base.is_dir():
                 try:
                     for entry in os.scandir(base):
                         if not entry.is_dir():
                             continue
-                        result[entry.name] = self._read_version_fast(Path(entry.path))
+                        version, manifest = self._read_version_full(Path(entry.path))
+                        result[entry.name] = version
+                        manifest_cache[entry.name] = manifest
                 except OSError:
                     pass
         # 系统插件（项目根 plugins/）：与用户插件重名时跳过
@@ -124,10 +165,13 @@ class PluginInstaller:
                 for entry in os.scandir(self._system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
-                    result[entry.name] = self._read_version_fast(Path(entry.path))
+                    version, manifest = self._read_version_full(Path(entry.path))
+                    result[entry.name] = version
+                    manifest_cache[entry.name] = manifest
             except OSError:
                 pass
 
+        self._manifest_cache = manifest_cache
         self._inst_map_cache = result
         self._inst_map_ts = now
         return result
@@ -172,17 +216,17 @@ class PluginInstaller:
         return result
 
     @staticmethod
-    def _read_version_fast(plugin_dir: Path) -> Optional[str]:
-        """快速读取单个插件目录的版本号（只查两个已知 manifest 位置）"""
+    def _read_version_full(plugin_dir: Path) -> Tuple[Optional[str], Optional[dict]]:
+        """读取版本号 + manifest（一次 IO，供版本与图标/详情复用）"""
         for sub in (".drifox-plugin", ".claude-plugin"):
             mp = plugin_dir / sub / "plugin.json"
             if mp.exists():
                 try:
                     manifest = json.loads(mp.read_text(encoding="utf-8"))
-                    return manifest.get("version")
+                    return manifest.get("version"), manifest
                 except Exception:
-                    return None
-        return None
+                    return None, None
+        return None, None
 
     def invalidate_installed_cache(self):
         """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
@@ -190,6 +234,7 @@ class PluginInstaller:
         self._inst_map_ts = 0.0
         self._status_map_cache = None
         self._status_map_ts = 0.0
+        self._manifest_cache = {}
 
     # ── 安装 ─────────────────────────────────────────────
 
@@ -471,10 +516,7 @@ class PluginInstaller:
         for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
             pc = base / name / "ui" / "__pycache__"
             if pc.exists():
-                try:
-                    shutil.rmtree(pc)
-                except OSError:
-                    pass
+                _rmtree_readonly(pc)
 
     # ── 卸载 ─────────────────────────────────────────────
 
@@ -493,12 +535,10 @@ class PluginInstaller:
         for base in (self._plugins_dir, self._disabled_dir):
             target = base / name
             if target.exists():
-                try:
-                    shutil.rmtree(target)
+                if _rmtree_readonly(target):
                     removed = True
                     logger.info(f"[Installer] Removed plugin {name}")
-                except Exception as e:
-                    logger.error(f"[Installer] Remove {name} failed: {e}")
+                else:
                     return False
         if removed:
             self.invalidate_installed_cache()
