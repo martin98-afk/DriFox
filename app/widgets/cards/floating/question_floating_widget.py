@@ -44,6 +44,11 @@ class _AutoHeightScrollArea(QScrollArea):
         # 垂直改为 Preferred：布局尊重 sizeHint，不再把滚动区拉伸占满剩余空间
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+    def minimumSizeHint(self):
+        # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
+        # 会把短内容强行垫高。内容高度完全由 sizeHint 决定即可。
+        return QSize(0, 0)
+
     def sizeHint(self):
         base = super().sizeHint()
         w = self.widget()
@@ -679,6 +684,11 @@ class QuestionFloatingWidget(QWidget):
         self._options_layout.setContentsMargins(0, 0, 0, 0)
         self._options_layout.setSpacing(6)
         main_layout.addWidget(self._options_container)
+
+        # 弹性吸收剩余空间：当容器分配高度 > 内容 sizeHint（dock 拖拽 / 窗口 resize）时，
+        # 多余空间全部进入 stretch，避免 QVBoxLayout 将剩余空间均分到各子项
+        # （scroll/hint/footer 被强行拉高 → 卡片内部错乱）
+        main_layout.addStretch(1)
 
         # ── 底栏 ──
         self._footer_widget = QWidget()
