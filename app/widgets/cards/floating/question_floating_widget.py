@@ -87,6 +87,22 @@ class _OptionRadioCard(QWidget):
         self.setMinimumHeight(44)
         self._setup_ui()
 
+    def sizeHint(self):
+        """高度跟随当前宽度下的真实换行高度
+
+        wordWrap QLabel 的 C++ sizeHint() 用固定宽度估算换行（窄宽度），
+        在卡片实际较宽时严重高估（如 desc 单行却按 2-3 行算），逐级传递到
+        提问卡片 sizeHint → CardContainer 锁高 → 「下一步」按钮下方大段空白。
+        布局的 heightForWidth(当前宽度) 才是真实换行高度。
+        """
+        base = super().sizeHint()
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            w = self.width()
+            if w > 0:
+                return QSize(base.width(), lay.heightForWidth(w))
+        return base
+
     def _setup_ui(self):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -193,6 +209,16 @@ class _OptionCheckCard(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(44)
         self._setup_ui()
+
+    def sizeHint(self):
+        """高度跟随当前宽度下的真实换行高度（同 _OptionRadioCard）"""
+        base = super().sizeHint()
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            w = self.width()
+            if w > 0:
+                return QSize(base.width(), lay.heightForWidth(w))
+        return base
 
     def _setup_ui(self):
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -315,6 +341,16 @@ class _CustomInputCard(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(44)
         self._setup_ui()
+
+    def sizeHint(self):
+        """高度跟随当前宽度下的真实换行高度（同 _OptionRadioCard）"""
+        base = super().sizeHint()
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            w = self.width()
+            if w > 0:
+                return QSize(base.width(), lay.heightForWidth(w))
+        return base
 
     def showEvent(self, event):
         """控件变为可见时自动聚焦到文本输入框（如果处于激活态）"""
@@ -806,6 +842,34 @@ class QuestionFloatingWidget(QWidget):
             self._toggle_collapse()
             return True
         return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        """卡片自身宽度变化 → 通知容器重算高度
+
+        选项描述（wordWrap）在宽度变化后换行数改变 → 卡片真实高度改变，
+        但布局 sizeHint 缓存不会自动失效、也没有信号通知 CardContainer。
+        不处理会导致容器锁在旧高度：变宽后底部留白 / 变窄后内容被压。
+        仅宽度变化时触发（高度变化由 heightChanged 其它路径处理，避免
+        容器动画与自身 resize 互相干扰）。
+        """
+        super().resizeEvent(event)
+        new_w = event.size().width()
+        if new_w != getattr(self, "_last_layout_width", -1):
+            self._last_layout_width = new_w
+            self.updateGeometry()
+            QTimer.singleShot(0, self.heightChanged.emit)
+
+    def heightForWidth(self, w):
+        """按宽度 w 计算真实内容高度
+
+        CardContainer 在 follow_content 分支显式调用此方法（而非布局 sizeHint）
+        来锁定容器高度：C++ 布局 sizeHint 受 wordWrap QLabel 高估影响，
+        heightForWidth 按真实宽度换行，返回准确高度。
+        """
+        lay = self.layout()
+        if lay is not None:
+            return lay.heightForWidth(w)
+        return super().heightForWidth(w)
 
     def keyPressEvent(self, event):
         """键盘快捷键：Enter/数字键选选项（不在文本输入框时生效）"""
