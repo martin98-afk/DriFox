@@ -44,6 +44,13 @@ class CardContainer(QWidget):
     # 声明后，容器高度会直接 snap 到目标值，不再走 QPropertyAnimation。
     NO_ANIMATION_PROP = "noContainerAnimation"
 
+    # 卡片可通过 setProperty(FOLLOW_CONTENT_PROP, True) 声明"高度必须严格跟随内容"：
+    # 即使容器处于停靠（dock）模式（高度由 QSplitter 分配、默认不随内容收缩，
+    # 且首次展开套 30% 对话区下限 / 二次展开恢复记忆高度），也会锁定容器高度 =
+    # 卡片 sizeHint，杜绝"容器比内容高 → 卡片内部/底部出现空白"。
+    # 适用场景：Question 等短时模态卡片——用户关注内容本身，容器不应被撑大。
+    FOLLOW_CONTENT_PROP = "followContent"
+
     # ── 覆盖层模式信号 ──
     # 当容器处于覆盖层模式（overlay_mode）且卡片显隐状态变化时发射，
     # 携带 bool 参数：True=有可见卡片（需展示覆盖层），False=无可见卡片（需隐藏覆盖层）
@@ -244,6 +251,15 @@ class CardContainer(QWidget):
             if value > axis_min:
                 axis_min = value
         return axis_min
+
+    def _visible_cards_follow_content(self) -> bool:
+        """当前可见卡片是否声明了"高度严格跟随内容"（FOLLOW_CONTENT_PROP）
+
+        有可见卡片且全部声明时返回 True：dock 模式下容器也按 sizeHint 收缩，
+        不套 30% 下限 / 记忆高度 / 展开后早退，避免内容与容器高度不匹配产生空白。
+        """
+        visible = [w for w in self._cards.values() if not w.isHidden()]
+        return bool(visible) and all(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
 
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
@@ -461,6 +477,8 @@ class CardContainer(QWidget):
         """
         has_visible = any(not w.isHidden() for w in self._cards.values())
         skip_anim = self._should_skip_animation()
+        # 可见卡片是否要求高度严格跟随内容（dock 模式下按 sizeHint 收缩）
+        follow_content = self._visible_cards_follow_content()
 
         # ── 覆盖层模式：不操作 splitter，直接 show/hide + 发射信号 ──
         if self._overlay_mode:
@@ -499,7 +517,14 @@ class CardContainer(QWidget):
             # 的 setSizes 归位"保证，不在此用 minimum 钳死，否则手柄只能单向拖。
             # 小窗口优先：锁 max(_dock_min, 可见卡片最小轴)，卡片内容变化后
             # 锁不降级，窗口缩小时仍优先保证卡片完整可见。
-            if self._dock_splitter is not None and self._axis_max() >= self._EXPAND_MAX and self._axis_current() > 0:
+            # follow_content 卡片例外：不早退，继续走 sizeHint 收缩路径，
+            # 让容器高度严格跟随内容（消除 dock 模式下的高度不匹配空白）。
+            if (
+                self._dock_splitter is not None
+                and not follow_content
+                and self._axis_max() >= self._EXPAND_MAX
+                and self._axis_current() > 0
+            ):
                 self._set_axis_min(max(self._dock_min(), self._visible_cards_min_axis()))
                 return
 
@@ -552,7 +577,7 @@ class CardContainer(QWidget):
 
             # 停靠模式：计算展开目标 + 最小占比下限（首次/二次都生效）
             on_expand_done = None
-            if self._dock_splitter is not None:
+            if self._dock_splitter is not None and not follow_content:
                 # 纵向停靠区（TOP/BOTTOM）强制至少占对话区 _DOCK_DEFAULT_RATIO_V：
                 # ① 首次展开，卡片天然尺寸过小（内容未测量/空卡片/异步加载）会被压成细条；
                 # ② 更关键：二次及以后，用户拖拽/折叠时记忆的占比 _dock_last_size 也
@@ -591,6 +616,21 @@ class CardContainer(QWidget):
                 # 记录本次展开目标（已含最小占比），供 _restore_dock_size 精确 setSizes
                 self._last_expand_target = target
                 natural_h = target
+            elif self._dock_splitter is not None:
+                # follow_content（如 Question）：容器高度严格 = 卡片 sizeHint。
+                # 不套 30% 下限 / 记忆高度，且不释放轴向 max（保持动画终点值
+                # natural_h），QSplitter 尊重 maximumSize → 容器不会被拉高，
+                # 卡片内容与容器高度始终一致，无空白。
+                self._last_expand_target = natural_h
+                # min/max 同时钳到 natural_h：min 保证 splitter 至少给到内容高度
+                # （而非 minimumSizeHint 的偏小值），max 防止被拉高 → 精确相等
+                min_floor = max(natural_h, self._dock_min())
+
+                def _lock_to_content():
+                    self._set_axis_min(min_floor)
+                    # max 保持 natural_h（动画已设置），不释放给 splitter
+
+                on_expand_done = _lock_to_content
             else:
                 self._last_expand_target = natural_h
                 # 非停靠（普通布局）展开：完成后锁 min=自然高度，窗口缩小时

@@ -571,6 +571,10 @@ class QuestionFloatingWidget(QWidget):
         self._show_custom_input = True
         self._preview_payload = None
         self._collapsed = False
+        # 高度严格跟随内容：即使容器处于 dock 模式（高度由 QSplitter 分配、
+        # 默认不随内容收缩），也锁定容器高度 = 卡片 sizeHint，
+        # 避免"容器比内容高 → 卡片内部/底部出现空白"。
+        self.setProperty("followContent", True)
         self._setup_ui()
 
     def showEvent(self, event):
