@@ -19,9 +19,11 @@ import re
 import zlib
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PyQt5.QtSvg import QSvgWidget
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import isDarkTheme
@@ -278,6 +280,259 @@ class PluginIconWidget(QWidget):
             item = self.layout().takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._setup_ui()
+
+    def reload_icon(self):
+        """主题变化后刷新图标（深浅切换）"""
+        self.set_font_size(self._font_size)
+
+
+# ── 远程 icon 解析 ──────────────────────────────────
+
+
+# 共享 QNetworkAccessManager（Qt 推荐单例，避免每实例一连接池）
+_icon_nam: Optional[QNetworkAccessManager] = None
+
+
+def _get_icon_nam() -> QNetworkAccessManager:
+    """获取/创建共享的 QNetworkAccessManager（用于异步下载 plugin icon）"""
+    global _icon_nam
+    if _icon_nam is None:
+        _icon_nam = QNetworkAccessManager()
+        # 跟随 Qt 事件循环自动清理（不显式 delete）
+    return _icon_nam
+
+
+def _icon_cache_dir() -> Path:
+    """插件 icon 本地缓存目录（.drifox/cache/plugin_icons/）"""
+    from .installer import _drifox_dir
+
+    return _drifox_dir() / "cache" / "plugin_icons"
+
+
+def resolve_remote_icon_urls(meta: dict) -> Optional[dict[str, str]]:
+    """从 marketplace 元数据构造 GitHub raw 图标 URL
+
+    仅识别 ``source.type == "git-subdir"`` 且 ``source.url`` 指向 github.com
+    的来源（覆盖 DriFox 官方及遵循同一规范的市场）。其他来源（如纯 url
+    指向 CDN）暂不处理。
+
+    注意：从 ``meta["source"]`` 读插件源（git-subdir），而非
+    ``meta["_marketplace_source"]``（后者是市场源 = marketplace.json URL，
+    不是插件仓库）。
+
+    Args:
+        meta: marketplace 插件元数据（含 ``icon`` 与 ``source``）
+
+    Returns:
+        ``{"light": "...", "dark": "..."}`` 或 None（无法识别）
+    """
+    src = meta.get("source") or {}
+    if src.get("type") != "git-subdir":
+        return None
+    url = src.get("url", "")
+    if "github.com" not in urlparse(url).netloc:
+        return None
+    ref = src.get("ref", "main")
+    subpath = src.get("path", "")
+    # https://github.com/owner/repo(.git) → owner/repo
+    parts = urlparse(url).path.strip("/").split("/")
+    if len(parts) < 2:
+        return None
+    owner_repo = "/".join(parts[:2]).removesuffix(".git")
+    base = f"https://raw.githubusercontent.com/{owner_repo}/{ref}/{subpath}"
+
+    icon_value = meta.get("icon")
+    if not icon_value:
+        return None
+    if isinstance(icon_value, str):
+        return {"light": f"{base}/{icon_value}", "dark": f"{base}/{icon_value}"}
+    if isinstance(icon_value, dict):
+        out: dict[str, str] = {}
+        for theme in ("light", "dark"):
+            p = icon_value.get(theme) or icon_value.get("light", "")
+            if p:
+                out[theme] = f"{base}/{p}"
+        return out or None
+    return None
+
+
+# ── 远程 icon 缓存命中检测 ──────────────────────────────────
+
+
+def _cache_hit(name: str, theme: str) -> Optional[Path]:
+    """检查插件指定主题的 icon 缓存是否存在（存在即返回路径）"""
+    cache = _icon_cache_dir() / f"{name}__{theme}.svg"
+    return cache if cache.is_file() else None
+
+
+# ── PluginIconWidget 扩展：远程 URL 支持 ──────────────────────────────────
+
+
+class PluginIconWidget(QWidget):
+    """插件图标组件：本地 SVG → 远程 SVG → SquircleAvatar fallback
+
+    优先级：
+    1. 本地 ``plugin_dir/icon.svg``（已安装插件走这条）
+    2. 远程 URL + 本地缓存命中（未安装但 manifest 有 icon）
+    3. 远程 URL 异步拉取（拉取完成后通过 signal 渲染）
+    4. SquircleAvatar 缩写头像（兜底）
+
+    尺寸自适应：font_size * 1.7，最低 20px。
+    """
+
+    # 下载完成 signal：theme, svg_bytes（bytes，外部可写盘/读字节流）
+    iconDownloaded = pyqtSignal(str, bytes)
+    # 下载失败 signal：theme, error_str
+    iconFailed = pyqtSignal(str, str)
+
+    def __init__(
+        self,
+        plugin_dir: Optional[Path] = None,
+        manifest: Optional[dict] = None,
+        font_size: int = 0,
+        parent=None,
+        remote_urls: Optional[dict] = None,
+    ):
+        super().__init__(parent)
+        self._plugin_dir = plugin_dir
+        self._manifest = manifest or {}
+        self._font_size = font_size
+        self._remote_urls = remote_urls or {}
+        self._svg_widget: Optional["QSvgWidget"] = None
+        self._avatar: Optional[SquircleAvatar] = None
+        # 异步下载相关
+        self._inflight: dict[str, QNetworkReply] = {}
+        self._setup_ui()
+
+    def _resolve_local_icon(self) -> Optional[Path]:
+        """解析本地 icon 路径（plugin_dir 已存在时调用）"""
+        if self._plugin_dir is None:
+            return None
+        raw = self._manifest.get("icon")
+        if not raw:
+            default = self._plugin_dir / "icon.svg"
+            return default if default.exists() else None
+        theme = "dark" if isDarkTheme() else "light"
+        if isinstance(raw, str):
+            p = self._plugin_dir / raw
+            return p if p.exists() else None
+        if isinstance(raw, dict):
+            path_str = raw.get(theme) or raw.get("light", "")
+            if path_str:
+                p = (self._plugin_dir / path_str).resolve()
+                return p if p.exists() else None
+        return None
+
+    def _resolve_cached_remote(self) -> Optional[Path]:
+        """解析远程 icon 缓存命中（plugin_dir 不存在但 remote_urls 提供时）"""
+        if not self._remote_urls or not self._manifest:
+            return None
+        theme = "dark" if isDarkTheme() else "light"
+        name = self._manifest.get("name", "?")
+        return _cache_hit(name, theme)
+
+    def _icon_size(self) -> int:
+        size = max(20, int(self._font_size * 1.7)) if self._font_size > 0 else 24
+        return size
+
+    def _show_svg(self, svg_path: Path):
+        """在容器中渲染 SVG（替换现有子部件）"""
+        self._clear_children()
+        size = self._icon_size()
+        self._svg_widget = QSvgWidget(str(svg_path), self)
+        self._svg_widget.setFixedSize(size, size)
+        self.layout().addWidget(self._svg_widget)
+
+    def _show_avatar(self):
+        """在容器中渲染缩写头像（兜底）"""
+        self._clear_children()
+        plugin_name = self._manifest.get("name", "?")
+        self._avatar = SquircleAvatar(
+            extract_initials(plugin_name),
+            name_color(plugin_name),
+            self,
+            font_size=self._font_size,
+        )
+        self.layout().addWidget(self._avatar)
+
+    def _clear_children(self):
+        while self.layout().count():
+            item = self.layout().takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._svg_widget = None
+        self._avatar = None
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 优先级 1：本地 SVG
+        local = self._resolve_local_icon()
+        if local is not None:
+            self._show_svg(local)
+            return
+
+        # 优先级 2：远程缓存命中
+        cached = self._resolve_cached_remote()
+        if cached is not None:
+            self._show_svg(cached)
+            return
+
+        # 优先级 3：远程但缓存未命中 → 先显示 avatar，启动异步下载
+        self._show_avatar()
+        self._kick_off_remote_download()
+
+    def _kick_off_remote_download(self):
+        """按当前主题发起一次远程下载（去重：同 theme 已有 in-flight 则跳过）"""
+        if not self._remote_urls:
+            return
+        theme = "dark" if isDarkTheme() else "light"
+        url = self._remote_urls.get(theme) or self._remote_urls.get("light", "")
+        if not url:
+            return
+        if theme in self._inflight:
+            return  # 已在下载中
+        nam = _get_icon_nam()
+        req = QNetworkRequest(QUrl(url))
+        req.setRawHeader(b"User-Agent", b"DriFox-PluginMarketplace/1.0")
+        reply = nam.get(req)
+        self._inflight[theme] = reply
+        # finished 是 Qt 内置多态信号；reply 销毁时自动断连
+        reply.finished.connect(lambda r=reply, t=theme: self._on_download_finished(r, t))
+
+    def _on_download_finished(self, reply: "QNetworkReply", theme: str):
+        """下载完成回调（成功 → 缓存并刷新 UI；失败 → 静默兜底）"""
+        # 清理 in-flight 表
+        self._inflight.pop(theme, None)
+        if reply.error() != QNetworkReply.NoError:
+            err = reply.errorString()
+            reply.deleteLater()
+            self.iconFailed.emit(theme, err)
+            return
+        data = bytes(reply.readAll())
+        reply.deleteLater()
+        if not data:
+            self.iconFailed.emit(theme, "empty response")
+            return
+        # 写缓存
+        name = self._manifest.get("name", "?")
+        cache = _icon_cache_dir() / f"{name}__{theme}.svg"
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(data)
+        except OSError:
+            pass
+        # 若当前主题匹配 → 立即替换 UI；不匹配则丢弃（主题切换时会重新加载）
+        current_theme = "dark" if isDarkTheme() else "light"
+        if theme == current_theme:
+            self._show_svg(cache)
+        self.iconDownloaded.emit(theme, data)
+
+    def set_font_size(self, font_size: int):
+        """更新字号并重建组件（主题切换时也调用此方法）"""
+        self._font_size = font_size
         self._setup_ui()
 
     def reload_icon(self):

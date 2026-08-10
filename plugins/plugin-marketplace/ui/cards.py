@@ -51,7 +51,13 @@ from qfluentwidgets import (
 from .data import get_marketplace
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
-from ._squircle_avatar import SquircleAvatar, PluginIconWidget, extract_initials, name_color
+from ._squircle_avatar import (
+    SquircleAvatar,
+    PluginIconWidget,
+    extract_initials,
+    name_color,
+    resolve_remote_icon_urls,
+)
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -1116,8 +1122,7 @@ class _PluginRow(QFrame):
         btn = TransparentPushButton(text, self)
         btn.setFixedSize(100, 30)
         btn.setStyleSheet(
-            self._outline_btn_style(color)
-            + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
+            self._outline_btn_style(color) + f" PushButton {{ font-size: {max(10, self._btn_font_size - 2)}px; }}"
         )
         btn.clicked.connect(slot)
         return btn
@@ -1244,7 +1249,14 @@ class _PluginRow(QFrame):
         self._update_btn_text()
 
     def _create_icon_widget(self) -> QWidget:
-        """创建插件图标组件：优先检查本地已安装的 SVG 图标"""
+        """创建插件图标组件
+
+        优先级：
+        1. 本地已安装插件的 SVG（plugin_dir 下存在）
+        2. marketplace 元数据中的 icon 字段 + GitHub raw URL（未安装，但
+           manifest.icon + _marketplace_source 指向 git-subdir GitHub 源）
+        3. SquircleAvatar 缩写头像（兜底）
+        """
         plugin_name = self._meta.get("name", "?")
         local_path = self._find_local_plugin_path(plugin_name)
         if local_path:
@@ -1264,6 +1276,22 @@ class _PluginRow(QFrame):
                     except Exception:
                         pass
                     break
+
+        # 未安装：尝试从 marketplace 元数据构造远程 icon URL
+        remote_urls = resolve_remote_icon_urls(self._meta)
+        if remote_urls:
+            # 用插件自身的 meta 作为 manifest（至少含 name + icon 字段）
+            manifest = {
+                "name": plugin_name,
+                "icon": self._meta.get("icon"),
+            }
+            return PluginIconWidget(
+                manifest=manifest,
+                font_size=self._font_size,
+                parent=self,
+                remote_urls=remote_urls,
+            )
+
         # Fallback to initials avatar
         return SquircleAvatar(
             extract_initials(plugin_name),

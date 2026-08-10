@@ -617,18 +617,27 @@ class CardContainer(QWidget):
                 self._last_expand_target = target
                 natural_h = target
             elif self._dock_splitter is not None:
-                # follow_content（如 Question）：容器高度严格 = 卡片 sizeHint。
-                # 不套 30% 下限 / 记忆高度，且不释放轴向 max（保持动画终点值
-                # natural_h），QSplitter 尊重 maximumSize → 容器不会被拉高，
-                # 卡片内容与容器高度始终一致，无空白。
+                # follow_content（如 Question）：容器高度严格 = 卡片 sizeHint，
+                # 不套 30% 下限 / 记忆高度。关键三连——全部命中才能消除
+                # 「下一步下方空白」：
+                # 1. max 锁到 natural_h：splitter 无法把容器撑高，否则容器内部
+                #    余量会被 stretch/布局吃掉（导致内容错位 / 底栏下出现空白）；
+                # 2. min 锁到 natural_h：splitter 给不到内容高度时强制撑开，保证
+                #    首次展开 / 内容变大时容器不被压缩成细条；
+                # 3. _restore_dock_size(natural_h)：显式叫 splitter 把当前分给
+                #    该容器的尺寸同步为 natural_h，避开 splitter 缓存旧大尺寸
+                #    （如下方曾装 SubAgent 等高卡片）把本容器撑大、
+                #    addStretch 吞掉空白的 bug。三者缺一不可，仅锁 max/min 但
+                #    不重分配 splitter 仍会留下槽位外空白。
                 self._last_expand_target = natural_h
-                # min/max 同时钳到 natural_h：min 保证 splitter 至少给到内容高度
-                # （而非 minimumSizeHint 的偏小值），max 防止被拉高 → 精确相等
                 min_floor = max(natural_h, self._dock_min())
 
                 def _lock_to_content():
-                    self._set_axis_min(min_floor)
-                    # max 保持 natural_h（动画已设置），不释放给 splitter
+                    self._set_axis_max(natural_h)  # 显式锁 max，覆盖小差异路径
+                    self._set_axis_min(min_floor)  # splitter 给不到时强制撑开
+                    self._restore_dock_size(natural_h)  # splitter 实际分配同步
+                    # 注意：max 留给 splitter 看（这是 natural_h），释放给 splitter
+                    # 会导致内容再次被撑高。配合"卡片预期高度"语义使用。
 
                 on_expand_done = _lock_to_content
             else:

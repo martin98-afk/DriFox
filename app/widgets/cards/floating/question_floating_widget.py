@@ -747,11 +747,13 @@ class QuestionFloatingWidget(QWidget):
 
         main_layout.addWidget(self._footer_widget)
 
-        # 弹性吸收剩余空间：当容器分配高度 > 内容 sizeHint（BottomCardContainer 为
-        # dock 模式，高度由 QSplitter 拖拽控制、不随内容收缩）时，多余空间全部进入
-        # stretch → 内容（含底栏）紧凑贴顶、空白留在卡片底部，而不是被 QVBoxLayout
-        # 均分到各子项或挤在自定义输入与底栏之间。
-        main_layout.addStretch(1)
+        # 尾部占位（stretch 因子 = 0，不吸收剩余空间）：
+        # 与 follow_content 协议协同保证容器高度 = 卡片 sizeHint → 不再产生
+        # 「下一步」按钮下方的空白。CardContainer 在 follow_content 分支同时锁
+        # min/max 到 natural_h 并显式 _restore_dock_size 让 splitter 实际分配
+        # 也匹配；这里不再用 addStretch(1) 兜底，避免锁定失败时拉伸内容样式错乱
+        # 被掩盖。占位仅作为视觉收尾，sizeHint 仍 = 内容累加（不含此 stretch）。
+        main_layout.addStretch(0)
 
         self._apply_card_style()
         self._setup_shortcuts()

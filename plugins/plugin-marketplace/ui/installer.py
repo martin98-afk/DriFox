@@ -11,6 +11,7 @@
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,40 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from .data import compare_versions
+
+
+# ── 删除辅助 ──────────────────────────────────────────────
+
+
+def _rmtree_readonly(path: Path) -> bool:
+    """强制删除目录树（含只读文件）
+
+    git clone 生成的 ``.git/objects/pack/*.idx|pack|rev`` 默认带只读属性，
+    ``shutil.rmtree`` 不会清除该属性，在 Windows 上调用 ``os.unlink`` 会
+    抛出 ``WinError 5 拒绝访问``。本方法在 ``onexc`` 回调里先 chmod 清除
+    只读属性，再重试删除。
+
+    Args:
+        path: 要删除的目录
+
+    Returns:
+        True 删除成功；False 失败（保留原始异常日志）
+    """
+
+    def _onerror(func, failed_path, excinfo):
+        try:
+            os.chmod(failed_path, stat.S_IWRITE)
+            func(failed_path)
+        except OSError:
+            pass
+
+    try:
+        # Python 3.12+ 新 API；项目要求 3.14+
+        shutil.rmtree(path, onexc=_onerror)
+        return True
+    except Exception as e:
+        logger.error(f"[Installer] rmtree {path} failed: {e}")
+        return False
 
 
 # ── 环境检测 ──────────────────────────────────────────────
@@ -471,10 +506,7 @@ class PluginInstaller:
         for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
             pc = base / name / "ui" / "__pycache__"
             if pc.exists():
-                try:
-                    shutil.rmtree(pc)
-                except OSError:
-                    pass
+                _rmtree_readonly(pc)
 
     # ── 卸载 ─────────────────────────────────────────────
 
@@ -493,12 +525,10 @@ class PluginInstaller:
         for base in (self._plugins_dir, self._disabled_dir):
             target = base / name
             if target.exists():
-                try:
-                    shutil.rmtree(target)
+                if _rmtree_readonly(target):
                     removed = True
                     logger.info(f"[Installer] Removed plugin {name}")
-                except Exception as e:
-                    logger.error(f"[Installer] Remove {name} failed: {e}")
+                else:
                     return False
         if removed:
             self.invalidate_installed_cache()
