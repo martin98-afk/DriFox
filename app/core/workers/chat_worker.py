@@ -2639,8 +2639,23 @@ class OpenAIChatWorker(QThread):
                 try:
                     return self._process_response(response)
                 except (httpx.ReadError, httpcore.ReadError):
-                    # 用户取消（cancel()关闭HTTP连接），不是真正的错误
-                    return False, False
+                    # ⚠️ ReadError 不一定是用户取消：
+                    # - cancel() 关闭 HTTP 连接 → 抛 ReadError（用户取消，静默返回）
+                    # - 真实网络断流（服务端/代理断开、网络抖动）→ 同样抛 ReadError
+                    # 修复前把所有 ReadError 都当用户取消静默返回 (False, False)，
+                    # 主循环 `if not tool_calls_found:` 会误走「正常完成」路径，
+                    # 工具迭代静默中断且无报错弹窗、无重试。
+                    if self._is_cancelled:
+                        return False, False
+                    # 真实网络错误：备份已接收内容并清除中间状态，
+                    # 交给外层通用网络重试逻辑（is_retryable_network=True）接管。
+                    # 不清除的话，重试成功后 _response_chunks 会累积两段内容（重复文本）。
+                    self._partial_content_backup = {
+                        "content_blocks": list(getattr(self, "_response_content_blocks", []) or []),
+                        "response_chunks": list(getattr(self, "_response_chunks", []) or []),
+                    }
+                    self._clear_pending_response_state()
+                    raise
             except BadRequestError as e:
                 error_str = str(e)
                 # 检测 tool call result 错误码 2013

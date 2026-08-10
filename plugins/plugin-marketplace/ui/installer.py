@@ -430,6 +430,52 @@ class PluginInstaller:
                 **kwargs,
             )
 
+    # ── 卸载前释放引用 ──────────────────────────────────
+
+    @staticmethod
+    def _purge_plugin_module_cache(name: str):
+        """删除/移动插件目录前，清理该插件的模块缓存（线程安全，无 GUI 操作）
+
+        UI 插件（含 ui/ 组件的插件）被加载后，其模块（ui_plugin_xxx）会常驻
+        sys.modules，模块对象可能持有 .pyc 句柄，导致插件目录在 Windows 上
+        无法 rmtree 或 move（WinError 32）。
+
+        注意：本方法只做纯数据清理，不触碰任何 Qt 控件 —— UI 插件注册表
+        的卸载（含显示中卡片的自动关闭、widget 销毁）必须在主线程完成，
+        由调用方（marketplace 卡片）在启动后台线程前先执行
+        UIPluginRegistry.unload_plugin(name)。
+
+        本方法执行：
+        1. 从 sys.modules 移除 ui_plugin_{name} 及其子模块 —— 解除 .pyc 句柄
+        2. importlib.invalidate_caches() + gc.collect() —— 失效字节码缓存并回收残留引用
+        3. 删除残留的 ui/__pycache__ —— 兜底清理可能被句柄占用的 .pyc 文件
+
+        任何一步失败都不阻塞删除流程（宁可删除失败后重试，也不因清理失败中断）。
+        """
+        try:
+            import gc
+            import importlib
+            import sys
+
+            safe = name.replace("-", "_").replace(":", "_")
+            head = f"ui_plugin_{safe}"
+            for mod_name in list(sys.modules.keys()):
+                if mod_name == head or mod_name.startswith(head + "."):
+                    del sys.modules[mod_name]
+            importlib.invalidate_caches()
+            gc.collect()
+        except Exception as e:
+            logger.debug(f"[Installer] 清理 sys.modules 失败（忽略）: {e}")
+
+        # 兜底：删除插件可能的 __pycache__ 残留（句柄释放后再删一般能成功）
+        for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
+            pc = base / name / "ui" / "__pycache__"
+            if pc.exists():
+                try:
+                    shutil.rmtree(pc)
+                except OSError:
+                    pass
+
     # ── 卸载 ─────────────────────────────────────────────
 
     def remove(self, name: str) -> bool:
@@ -441,6 +487,8 @@ class PluginInstaller:
         Returns:
             True 删除成功或目录不存在
         """
+        # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
+        self._purge_plugin_module_cache(name)
         removed = False
         for base in (self._plugins_dir, self._disabled_dir):
             target = base / name
@@ -473,6 +521,8 @@ class PluginInstaller:
         src = self._plugins_dir / name
         if not src.exists():
             return False
+        # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
+        self._purge_plugin_module_cache(name)
         try:
             self._disabled_dir.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(self._disabled_dir / name))

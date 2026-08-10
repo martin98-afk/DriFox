@@ -64,6 +64,8 @@ class UsageService(QObject):
         self._configs: Dict[str, dict] = {}
         # 正在轮询的 plan key（有数据后注册，供 _on_poll_tick 重发）
         self._active_plan_keys: set = set()
+        # 正在轮询的 balance key（与 plan 同源 timer 统一驱动，60s 抓一次）
+        self._active_balance_keys: set = set()
         # 并发去重：正在抓取的 key
         self._in_flight: set = set()
         self._poll_timer: Optional[QTimer] = None
@@ -104,11 +106,17 @@ class UsageService(QObject):
 
         hit = self._plan_cache.get(key)
         if hit and time.monotonic() - hit[0] < self.PLAN_TTL_S:
+            # 缓存命中：key 有抓取资格，恢复/保持 active 注册，确保 singleShot
+            # 轮询 timer 存活（unregister 后新窗口命中缓存也要继续轮询）
+            self._active_plan_keys.add(key)
             self.coding_plan_ready.emit(provider_name, config_id, hit[1])
+            self._ensure_poll_timer()
             return
 
         if key in self._in_flight:
-            return  # 并发去重：同一 key 已有一路在抓取
+            # 并发去重：同一 key 已有一路在抓取，保持轮询 timer 存活等下一轮
+            self._ensure_poll_timer()
+            return  # 抓取完成会自行广播
 
         self._in_flight.add(key)
 
@@ -134,6 +142,8 @@ class UsageService(QObject):
         """请求余额：缓存命中→广播缓存；in_flight→跳过；否则后台抓取后广播。
 
         非白名单服务商同步 emit None（窗口隐藏余额组件）。
+        抓到有效结果（含 hide）即注册 active key，由单例 _poll_timer 统一
+        60s 轮询，与套餐用量共用同一 timer，UI 自动刷新。
         """
         key = (provider_name, config_id)
         if config_id:
@@ -145,13 +155,19 @@ class UsageService(QObject):
 
         hit = self._balance_cache.get(key)
         if hit and time.monotonic() - hit[0] < self.BALANCE_TTL_S:
+            # 缓存命中：注册 active key 保证轮询 timer 存活（与 plan 同步）
+            self._active_balance_keys.add(key)
             self.balance_ready.emit(provider_name, config_id, hit[1])
+            self._ensure_poll_timer()
             return
 
         if key in self._in_flight:
-            return  # 并发去重
+            # 并发去重：保持 timer 存活等抓取完成
+            self._ensure_poll_timer()
+            return
 
         self._in_flight.add(key)
+        self._ensure_poll_timer()
 
         def _run():
             try:
@@ -160,8 +176,12 @@ class UsageService(QObject):
                 logger.warning(f"[UsageService] balance fetch error: {e}")
                 result = None
             if result is not None:
+                # 后台线程只读写内存态（GIL 原子）；QTimer 保活统一由主线程
+                # request_balance 路径 / tick 兜底负责，禁止跨线程操作 QTimer。
                 self._balance_cache[key] = (time.monotonic(), result)
+                self._active_balance_keys.add(key)
             self._in_flight.discard(key)
+            # 跨线程信号：接收者（窗口槽）在主线程 → Qt 自动 queued 投递
             self.balance_ready.emit(provider_name, config_id, result)
 
         threading.Thread(target=_run, daemon=True, name="usage-balance-fetch").start()
@@ -221,6 +241,9 @@ class UsageService(QObject):
         for cache in (self._plan_cache, self._balance_cache):
             for key in [k for k in cache if k[1] == config_id]:
                 cache.pop(key, None)
+        for active in (self._active_plan_keys, self._active_balance_keys):
+            for key in [k for k in active if k[1] == config_id]:
+                active.discard(key)
         self._configs.pop(config_id, None)
 
     def unregister(self, config_id: str) -> None:
@@ -231,8 +254,9 @@ class UsageService(QObject):
         """
         if not config_id:
             return
-        for key in [k for k in self._active_plan_keys if k[1] == config_id]:
-            self._active_plan_keys.discard(key)
+        for active in (self._active_plan_keys, self._active_balance_keys):
+            for key in [k for k in active if k[1] == config_id]:
+                active.discard(key)
         self._configs.pop(config_id, None)
 
     # ========== 轮询 ==========
@@ -247,7 +271,12 @@ class UsageService(QObject):
             self._poll_timer.start(self.POLL_INTERVAL_MS)
 
     def _on_poll_tick(self) -> None:
-        """轮询 tick：遍历 active keys 重发请求（缓存 TTL 过期则后台重拉）。"""
+        """轮询 tick：遍历 active keys 重发请求（缓存 TTL 过期则后台重拉）。
+
+        同源 timer 驱动 plan + balance 两类 active keys，N tab × 同 provider
+        只发 1 路请求。balance 与 plan 各自的 request_* 内部会在命中 / 抓取
+        完成后调用 _ensure_poll_timer() 重启 timer。
+        """
         keys = list(self._active_plan_keys)
         for key in keys:
             provider_name, config_id = key
@@ -257,3 +286,18 @@ class UsageService(QObject):
                 self._active_plan_keys.discard(key)
                 continue
             self.request_coding_plan(provider_name, config_id, config)
+
+        balance_keys = list(self._active_balance_keys)
+        for key in balance_keys:
+            provider_name, config_id = key
+            config = self._configs.get(config_id)
+            if config is None:
+                # 窗口已 unregister，清理残留 key
+                self._active_balance_keys.discard(key)
+                continue
+            self.request_balance(provider_name, config_id, config)
+
+        # 兜底：tick 内所有路径（命中/in_flight/无 fetcher）都会 return 不重启
+        # timer，这里保证只要还有 active key，轮询就继续下一轮
+        if self._active_plan_keys or self._active_balance_keys:
+            self._ensure_poll_timer()

@@ -8,9 +8,9 @@ from PyQt5.QtCore import QEventLoop, Qt, pyqtSignal
 from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import PrimaryPushButton, PushButton, ToolButton, TransparentToolButton, isDarkTheme
 
-from app.utils.design_tokens import scale_font_size
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.diff_viewer import DiffHtmlGenerator
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 
@@ -52,9 +52,20 @@ class FileUndoCard(BaseSettingsCard):
         return self._selected_ops
 
     def _build(self):
-        self.content_layout.addWidget(QLabel("确认撤销以下文件操作？"))
-        self.content_layout.addWidget(QLabel("点击「还原所选文件」将恢复这些文件到操作前的状态。"))
+        title_label = QLabel("确认撤销以下文件操作？")
+        title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)}; background: transparent;"
+        )
+        self.content_layout.addWidget(title_label)
+
+        desc_label = QLabel("点击「还原所选文件」将恢复这些文件到操作前的状态。")
+        desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent;"
+        )
+        self.content_layout.addWidget(desc_label)
+
         self.select_all = QCheckBox("全选")
+        self.select_all.setFont(get_unified_font(12))
         self.select_all.setChecked(True)
         self.select_all.stateChanged.connect(self._select_all)
         self.content_layout.addWidget(self.select_all)
@@ -64,8 +75,11 @@ class FileUndoCard(BaseSettingsCard):
         row = QHBoxLayout()
         row.addStretch()
         cancel = PushButton("取消撤销")
+        cancel.setFont(get_unified_font(12))
         keep = PushButton("不还原更改")
+        keep.setFont(get_unified_font(12))
         restore = PrimaryPushButton("还原所选文件")
+        restore.setFont(get_unified_font(12, bold=True))
         cancel.clicked.connect(lambda: self.finished.emit(self.CANCEL, []))
         keep.clicked.connect(lambda: self.finished.emit(self.KEEP_CARD, []))
         restore.clicked.connect(self._restore)
@@ -79,8 +93,16 @@ class FileUndoCard(BaseSettingsCard):
             w = QWidget(); row = QHBoxLayout(w); row.setContentsMargins(8, 4, 8, 4)
             cb = QCheckBox(); cb.setChecked(i in self._selected_set); cb.stateChanged.connect(lambda state, n=i: self._checked(n, state))
             row.addWidget(cb)
-            row.addWidget(QLabel(Path(op.get("file_path", "未知")).name))
-            path = QLabel(op.get("file_path", "")); path.setStyleSheet(f"color:#8c99ad; {get_font_family_css()} font-size:{scale_font_size(12)}px;"); row.addWidget(path, 1)
+            name_label = QLabel(Path(op.get("file_path", "未知")).name)
+            name_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; background: transparent;"
+            )
+            row.addWidget(name_label)
+            path = QLabel(op.get("file_path", ""))
+            path.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(12)}; background: transparent;"
+            )
+            row.addWidget(path, 1)
             diff = TransparentToolButton(get_icon("差异对比")); diff.clicked.connect(lambda _, n=i: self._show_diff(n)); row.addWidget(diff)
             undo = ToolButton(get_icon("撤销")); undo.clicked.connect(lambda _, n=i: self._undo_one(n)); row.addWidget(undo)
             item.setSizeHint(w.sizeHint()); self.list.setItemWidget(item, w)

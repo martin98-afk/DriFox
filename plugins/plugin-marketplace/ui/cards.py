@@ -722,7 +722,6 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         border_c: str,
     ):
         super().__init__(parent)
-        self._result = 0
         self._init_ui(name, tc, tcs, ff, fs, accent_bg, card_bg, border_c)
 
     def _init_ui(self, name, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
@@ -818,12 +817,11 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         self.widget.setFixedSize(400, 200)
 
     def _on_confirm(self):
-        self._result = 1
-        self.close()
+        """确认卸载：accept() 使 exec_() 返回 1（close() 会被 QDialog 转为 reject）"""
+        self.accept()
 
     def _on_cancel(self):
-        self._result = 0
-        self.close()
+        self.reject()
 
 
 class _PluginRow(QFrame):
@@ -1158,11 +1156,13 @@ class _PluginRow(QFrame):
         if not self._installed:
             # 未安装 → 安装
             self._busy = True
+            self._busy_text = "安装中…"
             self._update_btn_text()
             self.installRequested.emit(self._meta)
         elif self._has_update:
             # 已安装且有新版 → 更新
             self._busy = True
+            self._busy_text = "更新中…"
             self._update_btn_text()
             self.updateRequested.emit(self._meta)
         else:
@@ -1191,6 +1191,7 @@ class _PluginRow(QFrame):
         self._local_version = local_version
         self._status = status
         self._busy = False
+        self._busy_text = ""  # 清除操作中的残留文案（如「卸载中…」），避免下次点击误显示
         if changed:
             self._refresh_title()
         # 文件夹按钮仅已安装时可见
@@ -1239,6 +1240,7 @@ class _PluginRow(QFrame):
     def set_error(self):
         """安装/更新失败后恢复按钮"""
         self._busy = False
+        self._busy_text = ""  # 清除操作中残留文案
         self._update_btn_text()
 
     def _create_icon_widget(self) -> QWidget:
@@ -2384,6 +2386,8 @@ class MarketplaceCard(QWidget):
         self._status_label.setStyleSheet("color: #FFA726; font-size: 12px; background: transparent;")
         # 立即反馈：该行变为未安装态 + 「下载中…」
         self._set_row_downloading(name)
+        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭），后台线程首步 rmtree 旧目录
+        self._unload_plugin_ui_on_gui(name)
 
         self._cleanup_worker()
         self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))
@@ -2442,6 +2446,25 @@ class MarketplaceCard(QWidget):
 
     # ── 启用 / 禁用 / 卸载 ────────────────────────────────
 
+    def _unload_plugin_ui_on_gui(self, name: str):
+        """主线程：卸载插件 UI 组件（含显示中卡片的自动关闭）
+
+        必须在主线程执行（QThread worker 中操作 Qt 控件会闪退）：
+        UI 插件加载后其浮动卡片 widget / 命令 / 渲染回调引用 plugin ui 模块与
+        控件；若卡片处于显示状态，直接后台删目录会因引用/句柄失败甚至崩溃。
+        本方法先调用 UIPluginRegistry.unload_plugin —— 内部会遍历检测该插件
+        所有已创建卡片实例，显示中的自动关闭（hide + 容器移除 + deleteLater），
+        随后清理注册表项与命令。
+
+        调用方保证：在启动删除目录的后台线程之前调用本方法。
+        """
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().unload_plugin(name)
+        except Exception as e:
+            logger.debug(f"[Marketplace] unload_plugin UI({name}) 失败（忽略）: {e}")
+
     def _set_row_manage_busy(self, name: str, busy_text: str):
         """将指定插件行置为「处理中…」状态（操作期间禁用按钮）"""
         row = self._row_map.get(name)
@@ -2477,6 +2500,8 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("禁用中…")
         self._status_label.setStyleSheet("color: #FF9800; font-size: 12px; background: transparent;")
         self._set_row_manage_busy(name, "禁用中…")
+        # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台 move 目录
+        self._unload_plugin_ui_on_gui(name)
 
         self._cleanup_worker()
         self._worker = _MarketplaceWorker(lambda n=name: get_installer().disable(n))
@@ -2500,6 +2525,8 @@ class MarketplaceCard(QWidget):
         self._status_label.setText("卸载中…")
         self._status_label.setStyleSheet("color: #F44336; font-size: 12px; background: transparent;")
         self._set_row_manage_busy(name, "卸载中…")
+        # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台删目录
+        self._unload_plugin_ui_on_gui(name)
 
         self._cleanup_worker()
         self._worker = _MarketplaceWorker(lambda n=name: get_installer().uninstall(n))

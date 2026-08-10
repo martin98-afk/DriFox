@@ -27,6 +27,47 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 # ═══════════════════════════════════════════════════════════
+# 自适应高度滚动区
+# ═══════════════════════════════════════════════════════════
+
+
+class _AutoHeightScrollArea(QScrollArea):
+    """高度跟随内容的自适应滚动区
+
+    短内容 → 高度 = 内容高度（不产生空白）；
+    长内容 → 高度 = maximumHeight，内部滚动。
+    解决普通 QScrollArea sizeHint 固定（~192px）导致短文本也占大片空白的问题。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 垂直改为 Preferred：布局尊重 sizeHint，不再把滚动区拉伸占满剩余空间
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def minimumSizeHint(self):
+        # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
+        # 会把短内容强行垫高。内容高度完全由 sizeHint 决定即可。
+        return QSize(0, 0)
+
+    def sizeHint(self):
+        base = super().sizeHint()
+        w = self.widget()
+        if w is None:
+            return base
+        frame = 2 * self.frameWidth()
+        # 用当前视口宽度估算换行后内容高度（QLabel wordWrap 时 heightForWidth 最准）
+        vw = self.viewport().width()
+        if vw <= 0:
+            vw = max(1, base.width() - frame)
+        if w.hasHeightForWidth():
+            content_h = w.heightForWidth(vw)
+        else:
+            content_h = w.sizeHint().height()
+        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
+        return QSize(base.width(), h)
+
+
+# ═══════════════════════════════════════════════════════════
 # 单选选项卡片
 # ═══════════════════════════════════════════════════════════
 
@@ -530,6 +571,10 @@ class QuestionFloatingWidget(QWidget):
         self._show_custom_input = True
         self._preview_payload = None
         self._collapsed = False
+        # 高度严格跟随内容：即使容器处于 dock 模式（高度由 QSplitter 分配、
+        # 默认不随内容收缩），也锁定容器高度 = 卡片 sizeHint，
+        # 避免"容器比内容高 → 卡片内部/底部出现空白"。
+        self.setProperty("followContent", True)
         self._setup_ui()
 
     def showEvent(self, event):
@@ -585,7 +630,7 @@ class QuestionFloatingWidget(QWidget):
         main_layout.addWidget(self._header_widget)
 
         # ── 问题标题（按内容动态高度，上限自适应） ──
-        self._question_scroll = QScrollArea()
+        self._question_scroll = _AutoHeightScrollArea()
         self._question_scroll.setWidgetResizable(True)
         self._question_scroll.setMaximumHeight(280)
         self._question_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -625,6 +670,7 @@ class QuestionFloatingWidget(QWidget):
         self._question_label.setWordWrap(True)
         self._question_label.setMinimumHeight(24)
         self._question_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._question_label.installEventFilter(self)  # 内容/宽度变化 → 重算自适应高度
         self._question_scroll.setWidget(self._question_label)
         main_layout.addWidget(self._question_scroll)
 
@@ -700,6 +746,13 @@ class QuestionFloatingWidget(QWidget):
         footer.addWidget(self._next_btn)
 
         main_layout.addWidget(self._footer_widget)
+
+        # 弹性吸收剩余空间：当容器分配高度 > 内容 sizeHint（BottomCardContainer 为
+        # dock 模式，高度由 QSplitter 拖拽控制、不随内容收缩）时，多余空间全部进入
+        # stretch → 内容（含底栏）紧凑贴顶、空白留在卡片底部，而不是被 QVBoxLayout
+        # 均分到各子项或挤在自定义输入与底栏之间。
+        main_layout.addStretch(1)
+
         self._apply_card_style()
         self._setup_shortcuts()
 
@@ -739,6 +792,14 @@ class QuestionFloatingWidget(QWidget):
         if event.type() == QEvent.Resize and obj is self.window() and obj is not None:
             self._update_dynamic_heights()
             return False
+        # 问题文本内容 / 宽度变化 → 重算滚动区自适应高度，通知容器重排
+        # （getattr 防御：eventFilter 安装早于 _question_label 创建）
+        if getattr(self, "_question_label", None) is obj and event.type() in (
+            QEvent.Resize,
+            QEvent.LayoutRequest,
+        ):
+            self._sync_question_area()
+            return False
         if obj is self._header_widget and event.type() == QEvent.MouseButtonPress:
             self._toggle_collapse()
             return True
@@ -776,16 +837,28 @@ class QuestionFloatingWidget(QWidget):
             self._on_radio_selected(w)
 
     def _update_dynamic_heights(self):
-        """根据窗口高度动态调整问题标题区与选项区的最大高度
+        """根据窗口高度动态调整问题标题区的最大高度
 
         短内容自然展开（≤ sizeHint），长内容在窗口比例的合理阈值内滚动，
         避免硬编码值在小窗口溢出 / 大窗口浪费。
         """
         win = self.window()
         win_h = win.height() if win is not None else 800
-        # 问题标题：窗口 30%，夹紧 [120, 320]
-        q_max = max(120, min(int(win_h * 0.30), 320))
+        # 问题标题：窗口 30%，夹紧 [40, 320]
+        q_max = max(40, min(int(win_h * 0.30), 320))
         self._question_scroll.setMaximumHeight(q_max)
+
+    def _sync_question_area(self):
+        """问题区高度跟随内容：短内容收缩、长内容限高滚动
+
+        仅在期望高度（sizeHint）与实际高度不一致时触发重排，
+        避免 QLabel Resize 级联 → 容器 _do_expand → 再 Resize 的无限循环。
+        """
+        sc = self._question_scroll
+        want_h = sc.sizeHint().height()
+        if want_h != sc.height():
+            sc.updateGeometry()
+            QTimer.singleShot(0, self.heightChanged.emit)
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""

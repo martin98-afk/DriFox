@@ -3,13 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.4.14] - 2026-08-09
 
-自上一版本以来的变更 | 提交数：15 · 文件变更：54 · +2275/-2418 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma
 
-> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、市场管理功能完善、插件详情对话框优化）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
+> 重点：**团队工作目录管理**（团队级工作目录同步与成员牵引）；**tab_panel 自动展开体验系列**（挤压态自动展开、动画时序与用户交互处理、宽度管理）；**插件市场管理增强**（安装组件展示与按钮态更新、插件管理器模块、卸载流程 UI 主线程卸载与锁释放）；**消息卡片流式渲染修复**（骨架缓存、未闭合尾部即时格式化）。
 
 ### ✨ 新功能 (New Features)
 
-- **团队工作目录管理与同步** (`app/`): 团队级工作目录集中管理，tab 顺序优先团队负责人并保持成员顺序
+- **插件管理器模块** (`plugins/plugin-manager/`): 新增插件管理器模块初始实现
+- **插件市场 UI 主线程卸载** (`plugins/plugin-marketplace/ui/`): 后台操作前在主线程卸载插件 UI 组件，规避线程问题
+- **插件卸载锁提前释放** (`plugins/plugin-marketplace/ui/installer.py`): 卸载前释放 UI 插件锁，修复 Windows 文件占用
+- **团队工作目录管理与同步** (`app/`): 团队成员工作目录统一管理，tab 顺序优先团队负责人并保持成员
 - **tab_panel 自动展开系列** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 挤压态自动展开与按钮样式统一、相对增长条件扩展逻辑、动画时序与用户交互适配、宽度配置优化
 - **插件市场管理增强** (`app/widgets/` + `app/core/`): 插件详情对话框展示已安装组件与更新按钮态、插件管理功能整体增强
 - **筛选栏重构与布局优化** (`app/widgets/`): 来源/标签筛选栏重构，标题与布局优化
@@ -19,6 +22,10 @@ All notable changes to this project will be documented in this file.
 
 - **消息卡片流式渲染修复** (`app/widgets/message_card.py` + `app/core/workers/`): 骨架缓存版本号递增 + tail 节点改 div 修复流式期间不渲染、流式期间即时格式化未闭合尾部消除最终内容不符
 - **tab_manager 侧边栏修复** (`app/widgets/tab_manager.py`): 启动时恢复侧边栏宽度，修复欢迎卡片渲染后左面板被挤压误折叠
+
+### ♻️ 代码重构 (Refactoring)
+
+- **卸载确认对话框简化** (`plugins/plugin-marketplace/ui/cards.py`): 确认处理改用 accept/reject 方法简化流程
 
 ### 🎨 样式改进 (Style)
 
@@ -37,6 +44,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **模型选择卡片成本展示与思考字段一致性修复** (`app/widgets/cards/settings/model_selector_card.py` + `app/core/models_dev_sync.py` + `app/core/model_capabilities.py`): 解析 models.dev 的 cost 字段（$/M tokens），卡片行内显示 💰input/output/cache_read 紧凑格式、悬停显示 Input/Output/Cache read/write 明细；修复三处思考字段不一致——`reasoning=True` 但 `reasoning_options=[]` 的模型（deepseek-reasoner、MiniMax-M2.7 等）不再被误判为不支持思考、跨 provider 同名模型合并取"更支持"、动态数据不再把硬编码的 supports_thinking=True 降为 False；缓存 schema v2 强制重拉一次带上新字段。模型选择卡片服务商内部 🧠🖼️ emoji 列按最长模型名对齐，🧠/🖼️ 各自悬停显示能力说明（支持思考开关/支持多模态输入），模型描述改为 ❓ emoji 悬停显示完整描述
 - **Tab 内联关闭确认 + 关闭按钮 tooltip 增强** (`app/widgets/tab_panel.py`): 关闭内联确认（防误关）、关闭按钮 tooltip 与样式调整、品牌标题与版本左对齐
 - **MCP stdio 命令安全校验** (`app/tools/mcp_tools.py`): stdio 命令白名单/黑名单校验，防止任意命令执行
 - **文件提及卡片预编译忽略规则与后台扫描** (`app/widgets/cards/floating/file_mention_card.py`): 忽略规则预编译 + 后台扫描避免阻塞 UI
@@ -57,6 +65,9 @@ All notable changes to this project will be documented in this file.
 - **消息卡片修复** (`app/widgets/message_card.py`): 全局事件过滤器判活加固与对称卸载、合并为单例注册表、compact 渲染 think/tool 块、问题卡片内容自适应高度
 - **命令/子智能体修复** (`app/core/command_manager.py`): 手打参数行尾空格误判为离开、subagents --create= 降级 prompt 注入、hot_reload 新增插件子智能体触发全量重载
 - **其他修复** (`app/widgets/` + `app/main.py`): tooltip eventFilter 漏捕 HideToParent 残留、后台 finalize 访问已销毁 node_preview 崩溃守卫、streaming dock 状态管理、懒加载兜底 None 崩溃
+- **右侧对话区恢复半透明背景** (`app/widgets/tab_manager_window.py`): `#chatFrame` 背景由 `CARD_BG_SOLID`（实色）改回 `CARD_BG.format(alpha=150)`，与左侧 `#tabFrame` 对称，恢复窗口背景图在右侧对话区透出
+- **对话框内容区背景完全透明** (`app/main_widget.py`): `OpenAIChatToolWindow` 移除自身 `QPalette window_bg` + `setAutoFillBackground(True)` 背景层及主题刷新/透明度更新的半透明背景设置，改为 `background: transparent`——对话框内容不再叠加独立背景，直接透出外层 `#chatFrame` 半透明背景与全局背景图；仅保留 `_window_bg_color` 字段兼容旧引用
+- **套餐用量圆环轮询失效修复** (`app/core/usage_service.py` + `tests/core/test_usage_service_poll.py`): 轮询 QTimer 为 singleShot，`request_coding_plan` 的缓存命中/in_flight 路径不重启 timer，导致 tick 触发一次后轮询永久死亡——用量圆环只在新建标签页重新请求时才刷新一次。修复：缓存命中/并发去重路径保持 timer 存活，`_on_poll_tick` 尾部兜底重启；新增 4 条轮询回归测试
 
 ### ♻️ 代码重构 (Refactoring)
 
