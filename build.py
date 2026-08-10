@@ -85,7 +85,6 @@ to_remove_windows = [
     "PyQt5/Qt5/bin/Qt5QuickParticles.dll",
     "PyQt5/Qt5/bin/Qt5QuickControls2.dll",
     "PyQt5/Qt5/bin/Qt5Bluetooth.dll",
-    "PyQt5/Qt5/bin/libcrypto-1_1-x64.dll",
     "PyQt5/Qt5/bin/Qt5Location.dll",
     "PyQt5/Qt5/qml/QtQuick",
     "PyQt5/Qt5/qml/QtQuick3D",
