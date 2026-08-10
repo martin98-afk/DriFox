@@ -98,6 +98,8 @@ def report(label, container, fake_sp, q):
 
 
 def main():
+    from PyQt5.QtCore import QTimer
+
     app = QApplication(sys.argv)
 
     SHORT_Q = [
@@ -122,34 +124,49 @@ def main():
         }
     ]
 
+    def _flush(ms=300):
+        """让 Qt 事件循环跑够时间，确保动画 on_finished 回调已触发"""
+        from PyQt5.QtCore import QEventLoop
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec_()
+
     print("\n========== 场景 A：splitter 缓存分配 500px（远大于 natural_h ~397）==========")
     container, q, sp = make_container_and_question([500, 500], SHORT_Q)
     q.setVisible(True)
     container._do_expand()
+    _flush()
     report("A.1 首次 _do_expand", container, sp, q)
     container._do_expand()
+    _flush()
     report("A.2 再次 _do_expand", container, sp, q)
 
     print("\n========== 场景 B：连续三次 _do_expand（diff<2px 边界）==========")
     container2, q2, sp2 = make_container_and_question([400, 600], SHORT_Q)
     q2.setVisible(True)
     container2._do_expand()
+    _flush()
     report("B.1 首次", container2, sp2, q2)
     container2._do_expand()
+    _flush()
     report("B.2 连续二次", container2, sp2, q2)
     container2._do_expand()
+    _flush()
     report("B.3 连续三次", container2, sp2, q2)
 
     print("\n========== 场景 C：问题内容变化（短 → 长 → 短）==========")
     container3, q3, sp3 = make_container_and_question([300, 700], SHORT_Q)
     q3.setVisible(True)
     container3._do_expand()
+    _flush()
     report("C.1 短问题（首展）", container3, sp3, q3)
     q3.show_question(LONG_Q)
     container3._do_expand()
+    _flush()
     report("C.2 切到长问题", container3, sp3, q3)
     q3.show_question(SHORT_Q)
     container3._do_expand()
+    _flush()
     report("C.3 切回短问题", container3, sp3, q3)
 
 
