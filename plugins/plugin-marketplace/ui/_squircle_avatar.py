@@ -508,6 +508,11 @@ class PluginIconWidget(QWidget):
     # 下载失败 signal：theme, error_str
     iconFailed = pyqtSignal(str, str)
 
+    # 单次下载传输超时（ms）：raw.githubusercontent 偶发挂起，避免 icon 永久停在缩写头像
+    _ICON_TIMEOUT_MS = 15000
+    # 候选列表穷尽后的整轮重试上限（网络抖动恢复窗口）
+    _MAX_ICON_RETRIES = 3
+
     def __init__(
         self,
         plugin_dir: Optional[Path] = None,
@@ -532,6 +537,10 @@ class PluginIconWidget(QWidget):
         self._inflight: dict[str, QNetworkReply] = {}
         # 每主题候选下载进度（theme → 当前候选索引，失败推进）
         self._pending_idx: dict[str, int] = {}
+        # 每主题整轮重试次数（theme → 已重试轮数）
+        self._retry_count: dict[str, int] = {}
+        # 每主题实际发起请求的 URL（theme → url，缓存扩展名推断用，不受重建重置影响）
+        self._inflight_url: dict[str, str] = {}
         self._setup_ui()
 
     @staticmethod
@@ -692,6 +701,9 @@ class PluginIconWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        # 重建 = 新一轮会话：重置下载进度/重试计数（避免旧状态耗尽重试机会）
+        self._pending_idx = {}
+        self._retry_count = {}
 
         # 优先级 1：本地 SVG
         local = self._resolve_local_icon()
@@ -730,8 +742,11 @@ class PluginIconWidget(QWidget):
         nam = _get_icon_nam()
         req = QNetworkRequest(QUrl(url))
         req.setRawHeader(b"User-Agent", b"DriFox-PluginMarketplace/1.0")
+        # 传输超时：连接挂起（raw.githubusercontent 偶发）时自动失败 → 走候选推进/重试
+        req.setTransferTimeout(self._ICON_TIMEOUT_MS)
         reply = nam.get(req)
         self._inflight[theme] = reply
+        self._inflight_url[theme] = url
         # finished 是 Qt 内置多态信号；reply 销毁时自动断连
         reply.finished.connect(lambda r=reply, t=theme: self._on_download_finished(r, t))
 
@@ -757,9 +772,10 @@ class PluginIconWidget(QWidget):
             if not data:
                 self._try_next_candidate(theme, "empty response")
                 return
-            # 写缓存（按候选 URL 的扩展名命名，兼容 svg/png）
+            # 写缓存（按实际请求 URL 的扩展名命名，兼容 svg/png）
             name = self._manifest.get("name", "?")
-            url = self._candidate_url(theme)
+            url = self._inflight_url.get(theme, "")
+            self._inflight_url.pop(theme, None)
             ext = Path(urlparse(url).path).suffix.lower() if url else ".svg"
             if ext not in _ICON_CACHE_EXTS:
                 ext = ".svg"
@@ -773,6 +789,8 @@ class PluginIconWidget(QWidget):
             current_theme = "dark" if isDarkTheme() else "light"
             if theme == current_theme:
                 self._apply_loaded_svg(cache)
+            # 下载成功 → 重置该主题重试计数（下次失败从新窗口计）
+            self._retry_count.pop(theme, None)
             self.iconDownloaded.emit(theme, data)
         except RuntimeError:
             # widget 已被 Qt 删除（C++ 对象已释放），静默忽略
@@ -783,22 +801,39 @@ class PluginIconWidget(QWidget):
 
             logging.getLogger(__name__).debug(f"[IconWidget] download callback error: {e}")
 
-    def _candidate_url(self, theme: str) -> str:
-        """当前主题正在尝试的候选 URL（供缓存扩展名推断）"""
-        candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
-        idx = self._pending_idx.get(theme, 0)
-        if 0 <= idx < len(candidates):
-            return candidates[idx]
-        return ""
-
     def _try_next_candidate(self, theme: str, err: str):
-        """下载失败 → 推进候选索引并重新发起（无下一个则发失败信号）"""
+        """下载失败 → 推进候选索引并重新发起（无下一个则整轮延迟重试）
+
+        候选列表逐项尝试（如 assets/icon.svg → assets/logo.png）；
+        全部候选失败后，若未超过重试上限则延迟整轮重试（网络抖动恢复），
+        重试间隔递增（2s → 4s → 8s）；彻底失败才发 iconFailed 信号。
+        """
         self._pending_idx[theme] = self._pending_idx.get(theme, 0) + 1
         candidates = self._remote_urls.get(theme) or self._remote_urls.get("light", [])
-        if pending[theme] < len(candidates):
+        if self._pending_idx[theme] < len(candidates):
             self._kick_off_remote_download()
             return
+        # 候选已穷尽 → 整轮延迟重试（若未超上限）
+        retries = self._retry_count.get(theme, 0)
+        if retries < self._MAX_ICON_RETRIES:
+            self._retry_count[theme] = retries + 1
+            self._pending_idx[theme] = 0
+            delay_ms = 2000 * (2 ** retries)  # 2s → 4s → 8s
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(delay_ms, lambda t=theme: self._retry_download(t))
+            return
         self.iconFailed.emit(theme, err)
+
+    def _retry_download(self, theme: str):
+        """延迟重试下载（widget 可能已销毁，静默兜底）"""
+        try:
+            self._kick_off_remote_download()
+        except RuntimeError:
+            # widget 已被 Qt 删除
+            pass
+        except Exception:
+            pass
 
     def _apply_loaded_svg(self, cache_path: Path):
         """应用已下载的 SVG 到 UI

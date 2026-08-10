@@ -2160,7 +2160,11 @@ class MarketplaceCard(QWidget):
 
         校验按钮/浏览刷新共用：数据合并 + 状态徽标刷新 + 渲染调度。
         """
-        market_name = market_data.get("name", "")
+        # 源名优先：marketplace.json 自带 name 可能与源名不一致
+        # （如 claude-plugins-community 数据 name 是 "claude-community"），
+        # 而插件 _marketplace 标记统一用源名；用错 name 会导致旧数据
+        # 不移除、数据翻倍 + 状态徽标查不到。
+        market_name = market_data.get("_marketplace") or market_data.get("name", "")
         plugins = market_data.get("plugins", []) or []
         # 合并：移除该市场旧数据，追加新数据（同名插件按市场覆盖）
         merged = [p for p in self._plugin_data if p.get("_marketplace") != market_name]
@@ -3156,6 +3160,12 @@ class MarketplaceCard(QWidget):
         """标签切换"""
         if key == "browse":
             self._page_stack.setCurrentIndex(0)
+            # 浏览页可能在校验/后台刷新期间以「不可见」状态完成渲染：
+            # _reveal_rows 在浏览页隐藏时执行，行宽度未布局 → content 高度
+            # 被压成视口高 → 行压缩堆叠（压缩帧）。切回浏览页后 QStackedWidget
+            # 切页不改变视口尺寸，不会触发 viewport resize 事件过滤器重新
+            # 同步 → 行保持压缩。这里强制重新 reveal + sync 一次修正高度。
+            self._schedule_reveal()
         elif key == "markets":
             self._build_markets_page()
             self._page_stack.setCurrentIndex(1)
