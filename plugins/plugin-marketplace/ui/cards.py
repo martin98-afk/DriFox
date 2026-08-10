@@ -2099,17 +2099,32 @@ class MarketplaceCard(QWidget):
                 win.removeEventFilter(self)  # 先移除再安装：防止重复安装导致 resize 重复回调
                 win.installEventFilter(self)
                 self.updateGeometry()
+            # 监听视口 resize（widgetResizable=False 手动管理尺寸）：
+            # 滚动条出现/消失、容器展开动画等都会改变视口尺寸 → 行重排
+            # （wordWrap 换行数变化）→ 行高变化 → content 高度需重新同步，
+            # 否则底部出现空白
+            vp = self._scroll.viewport()
+            vp.removeEventFilter(self)
+            vp.installEventFilter(self)
+            self._sync_content_size()
         except RuntimeError:
             pass  # 窗口/卡片已销毁
 
     def eventFilter(self, obj, event):
-        """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
+        """监听窗口/视口 resize，同步 content 尺寸（widgetResizable=False）"""
         from PyQt5.QtCore import QEvent
 
-        if obj is self.window() and event.type() == QEvent.Resize:
-            # widgetResizable=False：窗口尺寸变化后手动同步内容宽度（跟随视口）
-            self._sync_content_size()
-            self.updateGeometry()
+        if event.type() == QEvent.Resize:
+            if obj is self.window():
+                # 窗口尺寸变化：容器重算高度 + 同步内容尺寸
+                self._sync_content_size()
+                self.updateGeometry()
+            elif obj is self._scroll.viewport():
+                # 视口尺寸变化（滚动条出现/消失、容器动画）：同步内容尺寸。
+                # 第一次同步改变 content 宽度 → 行重排（wordWrap 换行数
+                # 变化）→ 行高变化，第二次同步校正高度
+                self._sync_content_size()
+                self._sync_content_size()
         return super().eventFilter(obj, event)
 
     # ── 异步刷新 ──
@@ -2628,6 +2643,9 @@ class MarketplaceCard(QWidget):
             # 不依赖 layout.sizeHint()（QLabel wordWrap 的 sizeHint 与实际
             # 布局高度有每行 ~8px 偏差，行多时累积成 stretch 空白区）
             self._sync_content_size()
+            # 同步后 content 宽度/高度变化 → 行按新宽度重排（wordWrap
+            # 换行数可能变化）→ 行高变化 → 二次同步确保高度准确
+            self._sync_content_size()
             # 刷新 QWidget::sizeHint 缓存：布局激活后缓存可能被冻结为
             # 旧值/异常值，不清除会让 QScrollArea 在窗口 resize 等时机
             # 用错误高度撑开 content → 列表底部大段空白
@@ -2659,15 +2677,38 @@ class MarketplaceCard(QWidget):
     def _sync_content_size(self):
         """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
 
-        宽度 = 视口宽；高度 = max(可见行实际高度和, 视口高)（行少时
-        保持视口高，stretch 填满底部，不出现空白）。
+        两阶段：先用行 sizeHint（heightForWidth）初算撑开 content 高度
+        （行此时可能未按新宽度重排，sizeHint 与实际布局有偏差），resize
+        触发行重排后，再按行实际几何高度累加校正——保证 content 高度与
+        布局实际一致（底部无 stretch 空白区）。宽度 = 视口宽；行少时
+        高度保持视口高，stretch 填满底部不出现空白。
         """
         try:
             vp = self._scroll.viewport()
-            h = self._content_height()
-            self._content.resize(vp.width(), max(h, vp.height()))
+            h1 = self._content_height()
+            self._content.resize(vp.width(), max(h1, vp.height()))
+            # resize 后行按新宽度重排 → 用实际几何高度校正
+            self._content_layout.activate()
+            h2 = self._content_height_real()
+            if abs(h2 - h1) > 4:
+                self._content.resize(vp.width(), max(h2, vp.height()))
         except RuntimeError:
             pass  # 卡片已销毁
+
+    def _content_height_real(self) -> int:
+        """按布局内可见行实际几何高度累加内容高度（布局稳定后调用）"""
+        lay = self._content_layout
+        spacing = lay.spacing()
+        mg = lay.contentsMargins()
+        total = 0
+        vis = 0
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None and w.isVisible():
+                total += w.height()
+                vis += 1
+        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示"""
@@ -2751,6 +2792,9 @@ class MarketplaceCard(QWidget):
         else:
             self._all_loaded = True
             self._remove_load_more_button()
+        # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
+        # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
+        self._sync_content_size()
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
@@ -3076,6 +3120,8 @@ class MarketplaceCard(QWidget):
             self._set_load_more_button(len(self._matched) - self._rendered_count)
         else:
             self._remove_load_more_button()
+        # 行显隐/按钮变化 → 内容高度变化 → 手动同步（widgetResizable=False）
+        self._sync_content_size()
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
