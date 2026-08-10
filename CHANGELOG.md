@@ -36,6 +36,29 @@ All notable changes to this project will be documented in this file.
 - **版本号同步** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): v0.4.14 版本号升级与同步
 
 
+#### 📦 附加变更（v0.4.14 重发补丁 | 自初次 tag 之后 9 个新提交）
+
+> v0.4.14 初次 tag 后追加的 bug 修复与体验优化：插件市场卡片布局/渲染稳定性、问题卡片布局、图标尺寸一致性、市场列表滚动性能、回归测试覆盖。贡献者：mading
+
+##### 🐛 问题修复 (Bug Fixes, 5)
+
+- **插件市场卡片渲染稳定性** (`plugins/plugin-marketplace/`): 修复渲染稳定性，避免压缩帧
+- **内容尺寸同步** (`app/widgets/`): 视口与窗口 resize 时同步内容尺寸，消除布局不一致
+- **市场获取 worker 信号增强** (`plugins/plugin-marketplace/`): 信号包含 generation 跟踪，提升数据一致性
+- **卡片容器布局处理** (`app/widgets/`): 增强卡片容器与问题部件的布局处理，避免多余空白
+- **图标尺寸处理增强** (`app/widgets/`): `PluginIconWidget` 与 `SquircleAvatar` 图标尺寸处理增强，视觉一致性提升
+
+##### ⚡ 性能优化 (Performance, 1)
+
+- **插件市场列表滚动优化** (`plugins/plugin-marketplace/`): 优化列表滚动流畅度
+
+##### 🔄 其他变更 (Other, 3)
+
+- **插件市场体验优化** (`plugins/plugin-marketplace/`): 整体使用体验优化
+- **MarketplaceCard 过滤与 resize 测试** (`tests/`): 新增过滤与 resize 测试，防止空白间隙
+- **问题卡片布局测试** (`tests/`): 布局诊断中 pump 事件循环以保证 headless 检查可靠
+
+
 ## [v0.4.13] - 2026-08-07
 
 自上一版本以来的变更 | 提交数：107 · 文件变更：371 · +33168/-8048 | 贡献者：mading, dingma
