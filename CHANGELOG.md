@@ -36,17 +36,18 @@ All notable changes to this project will be documented in this file.
 - **版本号同步** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): v0.4.14 版本号升级与同步
 
 
-#### 📦 附加变更（v0.4.14 重发补丁 | 自初次 tag 之后 9 个新提交）
+#### 📦 附加变更（v0.4.14 重发补丁 | 自初次 tag 之后 10 个新提交）
 
-> v0.4.14 初次 tag 后追加的 bug 修复与体验优化：插件市场卡片布局/渲染稳定性、问题卡片布局、图标尺寸一致性、市场列表滚动性能、回归测试覆盖。贡献者：mading
+> v0.4.14 初次 tag 后追加的 bug 修复与体验优化：插件市场卡片布局/渲染稳定性、问题卡片布局、图标尺寸一致性、市场列表滚动性能、回归测试覆盖、Windows 构建清理冗余 libcrypto DLL。贡献者：mading
 
-##### 🐛 问题修复 (Bug Fixes, 5)
+##### 🐛 问题修复 (Bug Fixes, 6)
 
 - **插件市场卡片渲染稳定性** (`plugins/plugin-marketplace/`): 修复渲染稳定性，避免压缩帧
 - **内容尺寸同步** (`app/widgets/`): 视口与窗口 resize 时同步内容尺寸，消除布局不一致
 - **市场获取 worker 信号增强** (`plugins/plugin-marketplace/`): 信号包含 generation 跟踪，提升数据一致性
 - **卡片容器布局处理** (`app/widgets/`): 增强卡片容器与问题部件的布局处理，避免多余空白
 - **图标尺寸处理增强** (`app/widgets/`): `PluginIconWidget` 与 `SquircleAvatar` 图标尺寸处理增强，视觉一致性提升
+- **Windows 构建移除冗余 libcrypto DLL** (`build.py` 或 `dist/`): 从 Windows 构建配置中移除不必要的 libcrypto DLL
 
 ##### ⚡ 性能优化 (Performance, 1)
 
