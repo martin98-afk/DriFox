@@ -143,14 +143,15 @@ class _MarketFetchWorker(QObject):
     单个市场失败/超时不阻塞后续市场（fetch_marketplace 内部已捕获异常返回 _error）。
     """
 
-    market_fetched = pyqtSignal(dict)  # 单个市场数据 {"name":..., "plugins":[...]}
-    market_failed = pyqtSignal(list)  # 拉取失败的源名列表（仅标记，不进列表）
-    all_done = pyqtSignal()
-    error = pyqtSignal(str)
+    market_fetched = pyqtSignal(dict, int)  # (市场数据, gen) 单个市场数据 {"name":..., "plugins":[...]}
+    market_failed = pyqtSignal(list, int)  # (失败源名列表, gen) 拉取失败的源名列表（仅标记，不进列表）
+    all_done = pyqtSignal(int)  # gen
+    error = pyqtSignal(str, int)  # (错误信息, gen)
 
-    def __init__(self, force: bool = False):
+    def __init__(self, force: bool = False, gen: int = 0):
         super().__init__()
         self._force = force
+        self._gen = gen
 
     def run(self):
         from .marketplace_manager import get_marketplace_manager
@@ -164,12 +165,12 @@ class _MarketFetchWorker(QObject):
                     # 失败源：绝不进入插件列表，仅收集名称供 UI 做失败标记
                     failed.append(src["name"])
                     continue
-                self.market_fetched.emit(data)
+                self.market_fetched.emit(data, self._gen)
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
+            self.error.emit(f"{e}\n{traceback.format_exc()}", self._gen)
         if failed:
-            self.market_failed.emit(failed)
-        self.all_done.emit()
+            self.market_failed.emit(failed, self._gen)
+        self.all_done.emit(self._gen)
 
 
 # ── 路径解析 ──────────────────────────────────────────────
@@ -1511,6 +1512,7 @@ class MarketplaceCard(QWidget):
         self._render_pending = False  # 市场数据已合并待渲染（同帧合并标志）
         self._initial_view_done = False  # 首屏是否已渲染（本地/合并）
         self._failed_sources: set = set()  # 拉取失败的源名（仅用于 UI 标记，不进列表）
+        self._worker_gen: int = 0  # worker 代次标记：递增，旧 worker 迟到信号按 gen 丢弃
         self._market_status_labels: dict = {}  # 市场名 → 状态徽标 QLabel（「市场」页）
         self._initial_render_timer: Optional["QTimer"] = None  # 首屏 300ms 合并窗口
         self._flush_timer: Optional["QTimer"] = None  # 市场渲染合并 timer（self 子对象，销毁自动取消）
@@ -1697,6 +1699,8 @@ class MarketplaceCard(QWidget):
         fs = getattr(self, "_cached_font_size", 14)
 
         for child in self.findChildren(QLabel):
+            if child.objectName() == "updatesBadge":
+                continue  # 亮黄 badge 固定黑字，不跟随主题文字色
             try:
                 # 标题/描述应用 font_size 偏移
                 offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
@@ -1832,15 +1836,27 @@ class MarketplaceCard(QWidget):
 
         filter_layout.addStretch(1)
 
-        # 待更新 InfoBadge：黄色 warning 样式，挂在「待更新」tab 右上角（无更新时隐藏）
+        # 待更新 InfoBadge：亮黄色、挂在「待更新」tab 右侧垂直居中（无更新时隐藏）
         # 注意 parent 必须与 target 同级（filter_row），否则坐标参考系错乱导致 badge 落在 tab 左侧
         from qfluentwidgets import InfoBadge, InfoBadgePosition
 
         self._updates_badge = None
         try:
-            self._updates_badge = InfoBadge.warning(
-                "0", parent=filter_row, target=self._updates_item, position=InfoBadgePosition.TOP_RIGHT
+            # custom 亮黄背景（浅色 #FFC107 / 深色 #FFD54F）+ 固定黑字保证对比度
+            self._updates_badge = InfoBadge.custom(
+                "0",
+                QColor(255, 193, 7),
+                QColor(255, 213, 79),
+                parent=filter_row,
+                target=self._updates_item,
+                position=InfoBadgePosition.RIGHT,
             )
+            self._updates_badge.setObjectName("updatesBadge")
+            # 注销主题自动重放 + 固定黑字：亮黄背景配白字不可读，主题切换时也不能被改回
+            from qfluentwidgets.common.style_sheet import styleSheetManager
+
+            styleSheetManager.deregister(self._updates_badge)
+            self._updates_badge.setStyleSheet("InfoBadge { color: #1a1a1a; padding: 1px 3px 1px 3px; }")
             self._updates_badge.setVisible(False)
         except Exception as e:
             logger.warning(f"[Marketplace] InfoBadge 挂载失败: {e}")
@@ -2058,7 +2074,8 @@ class MarketplaceCard(QWidget):
         self._set_loading(True)
         self._failed_sources = set()  # 每轮刷新重置失败标记（重新收集）
         self._cleanup_worker()
-        self._worker = _MarketFetchWorker(force=force)
+        self._worker_gen += 1
+        self._worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
@@ -2091,14 +2108,14 @@ class MarketplaceCard(QWidget):
             return  # 仅跳过本次渲染（数据已在 _plugin_data）
         self._schedule_render()
 
-    def _on_market_fetched(self, market_data: dict):
+    def _on_market_fetched(self, market_data: dict, gen: int):
         """单个市场拉取完成：合并进全量数据并标记待渲染（同帧合并一次）
 
         数据合并无条件前置（不可见时也合并不丢弃）；isVisible 只控制渲染。
         """
         if not self._alive():
             return  # 卡片已销毁，丢弃迟到数据
-        if self.sender() is not self._worker:
+        if gen != self._worker_gen:
             return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
         self._merge_market_data(market_data)
 
@@ -2130,22 +2147,22 @@ class MarketplaceCard(QWidget):
             return  # 首屏由 _render_initial_view 渲染（合并本地/远程窗口）
         self._render_plugins(self._plugin_data)
 
-    def _on_market_failed(self, failed: list):
+    def _on_market_failed(self, failed: list, gen: int):
         """部分市场源拉取失败：仅更新源标记（绝不触碰 _plugin_data/_row_map）"""
         if not self._alive():
             return  # 卡片已销毁
-        if self.sender() is not self._worker:
+        if gen != self._worker_gen:
             return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
         self._failed_sources = set(failed)
         # 市场管理页已构建 → 轻量刷新状态徽标（失败信息已持久化在 manager）
         if getattr(self, "_markets_built", False):
             self._refresh_all_market_status()
 
-    def _on_market_all_done(self):
+    def _on_market_all_done(self, gen: int):
         """全部市场拉取完成"""
         if not self._alive():
             return  # 卡片已销毁
-        if self.sender() is not self._worker:
+        if gen != self._worker_gen:
             return  # 旧 worker 迟到信号，丢弃（防幽灵渲染）
         # 兜底：有合并数据且首屏已渲染 → 必 flush（flush 内部清 pending 防重）
         if self._plugin_data and self._initial_view_done:
@@ -2158,7 +2175,7 @@ class MarketplaceCard(QWidget):
             self._status_label.setText("远程市场不可用")
             self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
 
-    def _on_refresh_error(self, err: str):
+    def _on_refresh_error(self, err: str, gen: int):
         """拉取出错：不打断本地视图，仅记录"""
         logger.warning(f"[Marketplace] 市场拉取错误: {err[:120]}")
 
