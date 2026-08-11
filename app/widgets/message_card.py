@@ -2715,6 +2715,8 @@ class CodeWebViewer(QWebEngineView):
         # [V1] 可见性门控：隐藏 tab 期间被门控跳过的渲染请求标记，
         # 恢复可见时（showEvent）据此补渲，保证流式/工具结果最终完整性。
         self._render_deferred: bool = False
+        # [PERF] 主题刷新期间不可见 → 跳过 JS 注入，恢复可见时补注入标记
+        self._theme_css_pending: bool = False
         # [B1] 差量渲染状态：
         # - _stable_html：已追加到 DOM 的稳定格式化 HTML 累积
         # - _stable_md_len：已差量消费的 markdown 偏移（后续 _extract_closed_segments 从这扫描）
@@ -3073,6 +3075,22 @@ class CodeWebViewer(QWebEngineView):
         调度机制补渲，保证流式输出/工具结果的最终完整性。
         """
         super().showEvent(event)
+        # [PERF] 主题刷新期间不可见 → 跳过 JS 注入，恢复可见时补注入
+        # CSS 变量（updateContent 不重载骨架，旧主题色会残留）
+        if getattr(self, "_theme_css_pending", False):
+            self._theme_css_pending = False
+            try:
+                from app.utils.theme_manager import theme_manager as _tm
+
+                _is_light = _tm.is_light_theme()
+                _theme = current_theme()
+                from app.utils.theme_refresh import ThemeRefreshCoordinator
+
+                _js = ThemeRefreshCoordinator.get_or_build_js(_theme, _is_light)
+                if self.page():
+                    self.page().runJavaScript(_js)
+            except Exception:
+                pass
         if getattr(self, "_render_deferred", False):
             if self._is_js_ready:
                 self._render_deferred = False
@@ -5718,9 +5736,17 @@ class CodeWebViewer(QWebEngineView):
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
 
+        # [PERF] 仅对可见 viewer 注入 CSS 变量：隐藏卡（不可见 tab / 未渲染）
+        # 跳过 runJavaScript（WebEngine IPC 开销大，200 卡 ≈ 100ms）。
+        # 跳过时置 _theme_css_pending 标记，恢复可见（showEvent）补注入，
+        # 避免 updateContent 复用旧骨架 CSS 变量导致主题色残留。
         try:
             if self.page():
-                self.page().runJavaScript(js_code)
+                if self.isVisible():
+                    self.page().runJavaScript(js_code)
+                    self._theme_css_pending = False
+                else:
+                    self._theme_css_pending = True
         except RuntimeError:
             pass
 
