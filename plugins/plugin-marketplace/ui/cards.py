@@ -48,6 +48,7 @@ from qfluentwidgets import (
     ScrollArea,
     SingleDirectionScrollArea,
     StrongBodyLabel,
+    SwitchButton,
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
@@ -1851,6 +1852,7 @@ class MarketplaceCard(QWidget):
         self._tab_bar = Pivot(header)
         self._tab_bar.addItem("browse", "浏览", None, None)
         self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.addItem("proxy", "加速", None, None)
         self._tab_bar.setCurrentItem("browse")
         self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
         header_layout.addWidget(self._tab_bar)
@@ -2110,6 +2112,13 @@ class MarketplaceCard(QWidget):
         markets_root.addWidget(self._markets_scroll, 1)
 
         self._page_stack.addWidget(self._markets_page)
+
+        # ===== 加速配置页 =====
+        self._proxy_page = QWidget(self._page_stack)
+        proxy_root = QVBoxLayout(self._proxy_page)
+        proxy_root.setContentsMargins(16, 12, 16, 12)
+        proxy_root.setSpacing(10)
+        self._page_stack.addWidget(self._proxy_page)
 
         self._page_stack.setCurrentIndex(0)
         root.addWidget(self._page_stack, 1)
@@ -3296,6 +3305,236 @@ class MarketplaceCard(QWidget):
         else:
             row.set_installed(installed)
 
+    # ── 加速配置 ──
+
+    def _build_proxy_page(self):
+        """构建「加速」tab（分组卡片式：启用 / 配置 / 帮助）
+
+        首次构建后缓存；配置保存/加载后仅更新控件值，不重建。
+        """
+        if getattr(self, "_proxy_built", False):
+            self._load_proxy_form()
+            return
+        tc = getattr(self, "_cached_tc", None) or _text_color()
+        tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e")
+        border_c = getattr(self, "_cached_theme_colors", {}).get("border", "rgba(128,128,128,0.15)")
+        accent = getattr(self, "_cached_theme_colors", {}).get("accent", "#62a0ea")
+
+        root = self._proxy_page.layout()
+
+        # ── 卡片1：启用 ──
+        enable_card = QWidget(self._proxy_page)
+        enable_card.setStyleSheet(
+            f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
+        )
+        enable_layout = QHBoxLayout(enable_card)
+        enable_layout.setContentsMargins(14, 10, 14, 10)
+        title_lb = QLabel("⚡ 启用", enable_card)
+        title_lb.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        enable_layout.addWidget(title_lb)
+        enable_layout.addStretch(1)
+        self._proxy_switch = SwitchButton(enable_card)
+        self._proxy_switch.setChecked(False)
+        enable_layout.addWidget(self._proxy_switch)
+        root.addWidget(enable_card)
+
+        # ── 卡片2：配置 ──
+        config_card = QWidget(self._proxy_page)
+        config_card.setStyleSheet(
+            f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
+        )
+        config_layout = QVBoxLayout(config_card)
+        config_layout.setContentsMargins(14, 10, 14, 10)
+        config_layout.setSpacing(8)
+
+        cfg_title = QLabel("⚙ 配置", config_card)
+        cfg_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        config_layout.addWidget(cfg_title)
+
+        self._proxy_mode_combo = QComboBox(config_card)
+        self._proxy_mode_combo.addItem("前缀加速站", "prefix")
+        self._proxy_mode_combo.addItem("自建代理服务", "selfhost")
+        self._proxy_mode_combo.addItem("HTTP 正向代理", "http")
+        self._style_sort_combo()  # 复用排序下拉的 QSS
+        self._proxy_mode_combo.setFixedHeight(33)
+        self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
+        config_layout.addWidget(self._proxy_mode_combo)
+
+        self._proxy_addr_edit = LineEdit(config_card)
+        self._proxy_addr_edit.setPlaceholderText("https://ghfast.top/")
+        self._proxy_addr_edit.setClearButtonEnabled(True)
+        config_layout.addWidget(self._proxy_addr_edit)
+
+        btn_row = QWidget(config_card)
+        btn_row.setStyleSheet("background: transparent;")
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        test_btn = TransparentPushButton("测试连接", btn_row)
+        test_btn.setFixedWidth(96)
+        test_btn.clicked.connect(self._on_proxy_test)
+        btn_layout.addWidget(test_btn)
+        save_btn = TransparentPushButton("保存", btn_row)
+        save_btn.setFixedWidth(80)
+        save_btn.clicked.connect(self._on_proxy_save)
+        btn_layout.addWidget(save_btn)
+        btn_layout.addStretch(1)
+        config_layout.addWidget(btn_row)
+
+        self._proxy_status_label = QLabel("", config_card)
+        self._proxy_status_label.setObjectName("proxyStatus")
+        self._proxy_status_label.setStyleSheet(
+            f"color: {accent}; font-size: 12px; background: transparent;"
+        )
+        self._proxy_status_label.setWordWrap(True)
+        config_layout.addWidget(self._proxy_status_label)
+
+        root.addWidget(config_card)
+
+        # ── 卡片3：帮助 ──
+        help_card = QWidget(self._proxy_page)
+        help_card.setStyleSheet(
+            f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
+        )
+        help_layout = QVBoxLayout(help_card)
+        help_layout.setContentsMargins(14, 10, 14, 10)
+        help_layout.setSpacing(4)
+        help_title = QLabel("💡 帮助", help_card)
+        help_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        help_layout.addWidget(help_title)
+        self._proxy_help_label = QLabel("", help_card)
+        self._proxy_help_label.setObjectName("proxyHelp")
+        self._proxy_help_label.setStyleSheet(
+            f"color: {tcs}; font-size: 12px; background: transparent;"
+        )
+        self._proxy_help_label.setWordWrap(True)
+        help_layout.addWidget(self._proxy_help_label)
+        root.addWidget(help_card)
+
+        root.addStretch(1)
+        self._proxy_built = True
+        self._load_proxy_form()
+
+    def _load_proxy_form(self):
+        """把当前配置填充到表单"""
+        proxy = get_proxy_config()
+        self._proxy_switch.setChecked(proxy.enabled)
+        idx = self._proxy_mode_combo.findData(proxy.mode)
+        if idx >= 0:
+            self._proxy_mode_combo.setCurrentIndex(idx)
+        self._proxy_addr_edit.setText(proxy.address)
+        self._update_proxy_help(proxy.mode)
+        if proxy.enabled:
+            self._proxy_status_label.setText("已启用 · 上次保存后未改动")
+        else:
+            self._proxy_status_label.setText("")
+
+    def _on_proxy_mode_changed(self, index: int):
+        mode = self._proxy_mode_combo.itemData(index)
+        self._update_proxy_help(mode)
+
+    def _update_proxy_help(self, mode: str):
+        texts = {
+            "prefix": "前缀加速站：填公共加速站地址，如 https://ghfast.top/。\n请求会自动拼接为 加速站地址 + 原 GitHub 链接。",
+            "selfhost": "自建代理服务：填你自己部署的代理地址，如 https://my-proxy.deno.dev/。\n适合官方/公共加速站不可用的网络环境。",
+            "http": "HTTP 正向代理：填代理工具地址（含端口），如 http://127.0.0.1:7890。\n需先启动 Clash 等代理工具。",
+        }
+        placeholders = {
+            "prefix": "https://ghfast.top/",
+            "selfhost": "https://my-proxy.deno.dev/",
+            "http": "http://127.0.0.1:7890",
+        }
+        self._proxy_help_label.setText(texts.get(mode, ""))
+        self._proxy_addr_edit.setPlaceholderText(placeholders.get(mode, ""))
+
+    def _on_proxy_test(self):
+        """用当前表单值测试连通性（后台线程，不落盘）"""
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        self._proxy_status_label.setText("测试中…")
+        self._proxy_status_label.repaint()
+        from .proxy import get_proxy_config
+
+        proxy = get_proxy_config()
+
+        def _run():
+            return proxy.test_connection(mode, address)
+
+        self._cleanup_proxy_worker()
+        self._proxy_worker = _MarketplaceWorker(_run)
+        self._proxy_thread = QThread(self)
+        self._proxy_worker.moveToThread(self._proxy_thread)
+        self._proxy_thread.started.connect(self._proxy_worker.run)
+        self._proxy_worker.finished.connect(self._on_proxy_test_done)
+        self._proxy_worker.error.connect(lambda e: self._on_proxy_test_done(("✗ 失败", e)))
+        self._proxy_worker.finished.connect(self._proxy_thread.quit)
+        self._proxy_worker.error.connect(self._proxy_thread.quit)
+        self._proxy_worker.finished.connect(self._proxy_worker.deleteLater)
+        self._proxy_worker.error.connect(self._proxy_worker.deleteLater)
+        self._proxy_thread.finished.connect(self._proxy_thread.deleteLater)
+        self._proxy_thread.start()
+
+    def _on_proxy_test_done(self, result):
+        if not self._alive():
+            return
+        if isinstance(result, tuple) and len(result) == 2:
+            ok, msg = result
+        else:
+            ok, msg = False, str(result)
+        color = "#4caf50" if ok else "#ef5350"
+        self._proxy_status_label.setStyleSheet(
+            f"color: {color}; font-size: 12px; background: transparent;"
+        )
+        self._proxy_status_label.setText(msg)
+
+    def _cleanup_proxy_worker(self):
+        if getattr(self, "_proxy_thread", None) is not None:
+            try:
+                self._proxy_thread.quit()
+                self._proxy_thread.wait(500)
+            except RuntimeError:
+                pass
+            self._proxy_thread = None
+        self._proxy_worker = None
+
+    def _on_proxy_save(self):
+        """保存配置；非法地址 InfoBar 提示不保存"""
+        enabled = self._proxy_switch.isChecked()
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        from .proxy import get_proxy_config
+
+        ok, msg = get_proxy_config().validate(mode, address)
+        if not ok:
+            self._proxy_status_label.setStyleSheet(
+                "color: #ef5350; font-size: 12px; background: transparent;"
+            )
+            self._proxy_status_label.setText(msg)
+            self._show_proxy_info(msg, error=True)
+            return
+        if get_proxy_config().save(enabled, mode, address):
+            self._proxy_status_label.setStyleSheet(
+                "color: #4caf50; font-size: 12px; background: transparent;"
+            )
+            self._proxy_status_label.setText(f"已保存 {time.strftime('%H:%M:%S')}")
+            self._show_proxy_info("代理配置已保存")
+        else:
+            self._show_proxy_info("保存失败", error=True)
+
+    def _show_proxy_info(self, text: str, error: bool = False):
+        """InfoBar 统一挂到 tab 管理器顶层窗口（与市场其它提示一致）"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            parent = TabManagerWindow.get_instance() or self.window()
+            if error:
+                InfoBar.error(text, "", duration=3000, parent=parent)
+            else:
+                InfoBar.success(text, "", duration=2000, parent=parent)
+        except Exception:
+            pass
+
     # ── 标签切换 ──
 
     def _on_tab_changed(self, key: str):
@@ -3311,6 +3550,9 @@ class MarketplaceCard(QWidget):
         elif key == "markets":
             self._build_markets_page()
             self._page_stack.setCurrentIndex(1)
+        elif key == "proxy":
+            self._build_proxy_page()
+            self._page_stack.setCurrentIndex(2)
 
     def _on_filter_changed(self, key: str):
         """筛选标签切换"""
