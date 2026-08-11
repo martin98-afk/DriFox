@@ -3311,10 +3311,10 @@ class MarketplaceCard(QWidget):
     def _build_proxy_page(self):
         """构建「加速」tab（分组卡片式：启用 / 配置 / 帮助）
 
-        首次构建后缓存；配置保存/加载后仅更新控件值，不重建。
+        首次构建后缓存；再次切换不重载表单（保留用户未保存的
+        开关/地址状态，避免切走再切回时被磁盘旧值覆盖）。
         """
         if getattr(self, "_proxy_built", False):
-            self._load_proxy_form()
             return
         tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
@@ -3326,6 +3326,7 @@ class MarketplaceCard(QWidget):
 
         # ── 卡片1：启用 ──
         enable_card = QWidget(self._proxy_page)
+        enable_card.setAttribute(Qt.WA_StyledBackground, True)
         enable_card.setStyleSheet(
             f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
         )
@@ -3342,6 +3343,7 @@ class MarketplaceCard(QWidget):
 
         # ── 卡片2：配置 ──
         config_card = QWidget(self._proxy_page)
+        config_card.setAttribute(Qt.WA_StyledBackground, True)
         config_card.setStyleSheet(
             f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
         )
@@ -3395,6 +3397,7 @@ class MarketplaceCard(QWidget):
 
         # ── 卡片3：帮助 ──
         help_card = QWidget(self._proxy_page)
+        help_card.setAttribute(Qt.WA_StyledBackground, True)
         help_card.setStyleSheet(
             f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
         )

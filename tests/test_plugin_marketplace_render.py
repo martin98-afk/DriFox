@@ -223,6 +223,47 @@ def test_proxy_tab_switches_without_error(monkeypatch):
     assert card._page_stack.currentIndex() == 0
 
 
+def test_proxy_tab_keeps_unsaved_switch_state(monkeypatch):
+    """切走再切回：开关保留用户未保存的状态（不被磁盘旧值覆盖）"""
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 用户点开开关（未保存）
+    card._proxy_switch.setChecked(True)
+    # 切走再切回
+    card._on_tab_changed("browse")
+    _pump(0.05)
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    assert card._proxy_switch.isChecked(), "切回后应保留用户未保存的开关状态"
+
+
+def test_proxy_card_has_styled_background(monkeypatch):
+    """加速页卡片必须设置 WA_StyledBackground（否则 QWidget QSS background 不渲染 → 透明）"""
+    from PyQt5.QtCore import Qt as _Qt
+    from PyQt5.QtWidgets import QWidget as _QWidget
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 三张卡片：QWidget + WA_StyledBackground + 非 transparent 背景
+    widgets = [w for w in card._proxy_page.findChildren(type(card._proxy_page)) if w is not card._proxy_page]
+    bg_cards = [
+        w
+        for w in widgets
+        if isinstance(w, _QWidget)
+        and w.testAttribute(_Qt.WA_StyledBackground)
+        and "transparent" not in w.styleSheet()
+        and "background" in w.styleSheet()
+    ]
+    assert len(bg_cards) >= 3, f"应有 3 张带背景的卡片，实际 {len(bg_cards)}"
+
+
 def _stretch_gap(card) -> int:
     """按钮（或最后可见行）底部与 content 底部的空隙（stretch 区）"""
     btn = card._load_more_btn
