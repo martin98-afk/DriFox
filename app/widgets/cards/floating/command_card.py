@@ -7,6 +7,7 @@
 交互方式：↑/↓ 导航，Enter 选中，Esc 关闭
 """
 
+import bisect
 import html
 import math
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,12 @@ from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36  # 每个 item 高度
 MAX_VISIBLE_ITEMS = 8  # 最多同时显示 item 数
+
+# ── 虚拟化渲染参数 ──
+# 列表只渲染可见窗口内的 widget（可见项 + 上下缓冲），滚动时复用池绑定数据，
+# 避免命令/技能总数多时（100+ 项）每次敲键全量创建数百个 widget 导致卡顿。
+VIRTUAL_BUFFER_SLOTS = 2  # 可见窗口上下各多渲染的缓冲槽数（滚动提前量）
+VIRTUAL_POOL_SIZE = MAX_VISIBLE_ITEMS + VIRTUAL_BUFFER_SLOTS * 2  # item widget 池上限
 
 # ── 矮窗口自适应参数 ──
 # 命令卡片高度本身不受窗口约束（tooltip + 至多 MAX_VISIBLE_ITEMS 项）。
@@ -720,8 +727,25 @@ class CommandCard(QWidget):
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._last_selected_index = -1  # 上次选中索引，用于增量更新
-        self._item_widgets: List[CommandItemWidget] = []
-        self._dividers: List[QFrame] = []  # 分区间的分隔线列表
+
+        # ── 虚拟化渲染状态 ──
+        # 列表采用虚拟化：_scroll_content 高度设为虚拟总高度，只创建/绑定
+        # 可见窗口（含缓冲）内的 widget 池，滚动时复用池 widget 移动定位，
+        # 不随匹配项总数增长（内容再多也只渲染十几个 widget）。
+        # 复用循环只操作 _free_item_widgets（绑定弹池 / 解绑回池）；
+        # _item_pool 仅记录「曾创建过的所有 widget」（调试/统计用），
+        # 溢出保护新建时受 VIRTUAL_POOL_SIZE 上限约束。
+        self._item_pool: List[CommandItemWidget] = []  # 曾创建过的所有 widget（非复用池）
+        self._free_item_widgets: List[CommandItemWidget] = []  # 未绑定槽的空闲池
+        self._divider_pool: List[QFrame] = []  # 分隔线池（数量极少，复用免重建）
+        self._slot_widgets: Dict[int, QWidget] = {}  # 虚拟槽索引 → 已绑定 widget
+        self._virtual_slots: List[tuple] = []  # (kind, item_idx/None, y)：kind ∈ {"item","divider"}
+        self._virtual_slot_ys: List[int] = []  # 每个槽的 y 偏移（bisect 快速定位可见范围）
+        self._virtual_total_height: int = 0  # 虚拟内容总高度（含分隔线）
+        self._divider_count: int = 0  # 分区分隔线数量
+        self._last_render_keys: Optional[List[tuple]] = None  # 上次渲染的 (name,type,subtype) 列表
+        self._dummy_item: Dict[str, str] = {"name": "", "description": "", "type": "command"}
+        self._bound_content_width: int = -1  # 上次同步给池 widget 的内容宽度（宽度变化时全量同步）
         self._visible = False
         self._current_query = ""
         self._current_text_query = ""  # 去除类别过滤器后的纯文本 query，用于 widget 高亮
@@ -791,14 +815,26 @@ class CommandCard(QWidget):
 
         self._scroll_content = QWidget()
         self._scroll_content.setStyleSheet("background: transparent; border: none;")
-        self._scroll_layout = QVBoxLayout(self._scroll_content)
-        self._scroll_layout.setContentsMargins(0, 0, 0, 0)
-        self._scroll_layout.setSpacing(0)
+        # 注意：content 不挂 QVBoxLayout —— 虚拟化列表用 move 绝对定位池 widget，
+        # 由 _scroll_content.setFixedHeight(虚拟总高度) 撑起滚动范围。
 
         self._scroll_area.setWidget(self._scroll_content)
         # 确保 viewport 没有多余的边距/内边距（这是导致顶部空白的根本原因）
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
         layout.addWidget(self._scroll_area)
+
+        # 虚拟化：滚动时按需绑定/解绑可见窗口内的池 widget
+        self._scroll_area.verticalScrollBar().valueChanged.connect(self._sync_visible_slots)
+        # 内容宽度跟随 viewport 变化时，同步池 widget 宽度（仅绑定一次，防重复闭包）
+        if not getattr(self._scroll_content, "_resize_hooked", False):
+            _orig_content_resize = self._scroll_content.resizeEvent
+
+            def _on_content_resize(event):
+                _orig_content_resize(event)
+                self._sync_visible_slots()
+
+            self._scroll_content.resizeEvent = _on_content_resize
+            self._scroll_content._resize_hooked = True
 
         # 不在此处调用 _refresh_data() —— 命令尚未注册，会导致缓存空数据
         # show_card() 会在首次显示时自动加载
@@ -876,8 +912,10 @@ class CommandCard(QWidget):
             self._apply_scroll_area_styles(self._detail_params_scroll)
         if hasattr(self, "_detail_value_scroll") and self._detail_value_scroll is not None:
             self._apply_scroll_area_styles(self._detail_value_scroll)
-        # 4. 命令列表 widget（hover/selected 背景）
-        for w in list(self._item_widgets):
+        # 4. 命令列表 widget（hover/selected 背景）—— 虚拟化：遍历已绑定槽
+        for w in list(self._slot_widgets.values()):
+            if not isinstance(w, CommandItemWidget):
+                continue
             try:
                 w._apply_style()
             except RuntimeError:
@@ -894,10 +932,12 @@ class CommandCard(QWidget):
                 w.set_selected(i == self._selected_value_index)
             except RuntimeError:
                 continue
-        # 7. 分隔线列表
-        for div in list(self._dividers):
+        # 7. 分隔线列表（虚拟化：遍历已绑定槽中的 QFrame）
+        for w in list(self._slot_widgets.values()):
+            if not isinstance(w, QFrame):
+                continue
             try:
-                div.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+                w.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
             except RuntimeError:
                 pass
 
@@ -1245,8 +1285,9 @@ class CommandCard(QWidget):
         完整可用空间。矮窗口自适应仅压缩列表可见项数量（剩余项在滚动区滚动）。
         detail 模式由 _adjust_detail_height 控制高度，此处不干预。
         """
-        item_count = len(self._item_widgets)
-        divider_count = len(self._dividers)
+        # 虚拟化后 _item_widgets 是固定大小的池，改用数据源计数
+        item_count = len(self._filtered_items)
+        divider_count = self._divider_count
         total_items = item_count + divider_count
         if total_items == 0:
             self.setFixedHeight(0)
@@ -1262,6 +1303,7 @@ class CommandCard(QWidget):
             # 正常/高窗口：完整展示至多 MAX_VISIBLE_ITEMS 项
             self.setFixedHeight(natural)
             self._sync_desc_tooltip_position()
+            self._sync_visible_slots()
             return
 
         # ── 矮窗口自适应压缩：仅压缩可见项数量 ──
@@ -1271,6 +1313,7 @@ class CommandCard(QWidget):
         )
         self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
         self._sync_desc_tooltip_position()
+        self._sync_visible_slots()
 
     def _sync_desc_tooltip_position(self):
         """卡片几何变化（高度/位置）后，将悬浮气泡重新锚定到卡片上方
@@ -2241,6 +2284,8 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(False)
         self._scroll_area.setVisible(True)
+        # 列表模式恢复：按当前滚动位置重新绑定可见槽（detail 期间 viewport 尺寸变化可能已解绑）
+        self._sync_visible_slots()
         # 回到列表模式后重新激活顶部描述 tooltip
         # （_update_desc_tooltip 内部会检测 _detail_mode 并显示）
         self._update_desc_tooltip()
@@ -2478,94 +2523,72 @@ class CommandCard(QWidget):
             self._update_selection()
 
     def _render(self, incremental: bool = False):
-        """渲染当前筛选结果
+        """渲染当前筛选结果（虚拟化：只创建可见窗口内的池 widget）
 
         Args:
-            incremental: 是否增量更新（保留匹配项，重用已有 widget）
+            incremental: 是否增量更新（保留匹配项，复用 widget）
 
-        快速路径：新旧 items 完全相同（names+types 一致）时跳过全量重建，
-        仅刷新 widget 高亮，避免快速敲键时反复重排布局。
+        虚拟化策略：无论匹配项多少，只维护 VIRTUAL_POOL_SIZE 个池 widget，
+        按滚动位置绑定到可见槽（含上下缓冲），滚动时仅移动/显隐 widget，
+        不随内容总数增长，彻底消除内容多时全量重建卡顿。
+
+        快速路径：新旧 items 完全相同（name+type+subtype 一致）时跳过
+        虚拟布局重建，仅刷新已绑定 widget 的 query 高亮。
         """
         new_items = self._filtered_items
-        old_widgets = list(self._item_widgets)  # 复制一份
+        cur_keys = [
+            (it["name"], it["type"], it.get("subtype", "")) for it in new_items
+        ]
 
-        # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
-        if len(old_widgets) == len(new_items):
-            same = all(
-                old_widgets[i].item_data.get("name") == new_items[i]["name"]
-                and old_widgets[i].item_data.get("type") == new_items[i]["type"]
-                and old_widgets[i].item_data.get("subtype") == new_items[i].get("subtype")
-                for i in range(len(new_items))
-            )
-            if same:
-                for w, item in zip(old_widgets, new_items):
-                    w.reuse(item, self._current_text_query)
-                # 快速路径仍需重新设置固定高度：
-                # _reset_detail_mode() 会清除卡片的 minH/maxH 约束，
-                # 如果不重新 setFixedHeight，layout 会算出很小的 natural_h
-                # 导致容器无法展开到正常高度（见插件卡片关闭后命令卡片高度异常 bug）
-                self._apply_list_height()
-                # 快速路径 selected_index 不会变，仍需刷新 tooltip（描述可能因 query 高亮而变）
-                if not self._detail_mode:
-                    self._update_desc_tooltip()
-                return
+        # ---- 快速路径：新旧 items 完全一致，仅更新已绑定 widget 高亮 ----
+        if cur_keys == self._last_render_keys:
+            for slot, w in list(self._slot_widgets.items()):
+                if not isinstance(w, CommandItemWidget):
+                    continue
+                kind, item_idx, _y = self._virtual_slots[slot]
+                if kind == "item":
+                    try:
+                        w.reuse(new_items[item_idx], self._current_text_query)
+                    except RuntimeError:
+                        continue
+            # 快速路径仍需重新设置固定高度：
+            # _reset_detail_mode() 会清除卡片的 minH/maxH 约束，
+            # 如果不重新 setFixedHeight，layout 会算出很小的 natural_h
+            # 导致容器无法展开到正常高度（见插件卡片关闭后命令卡片高度异常 bug）
+            self._apply_list_height()
+            # 快速路径 selected_index 不会变，仍需刷新 tooltip（描述可能因 query 高亮而变）
+            if not self._detail_mode:
+                self._update_desc_tooltip()
+            return
 
-        # 构建旧 widget 的 key 映射
-        old_by_key = {}
-        for w in old_widgets:
-            try:
-                _ = w.isVisible()
-                d = w.item_data
-                key = (d["name"], d["type"])
-                if key not in old_by_key:
-                    old_by_key[key] = w
-            except RuntimeError:
-                continue
-
-        # 重建 _item_widgets：根据新顺序匹配或创建 widget
-        new_widgets: List[CommandItemWidget] = []
-        old_by_key_copy = dict(old_by_key)  # 副本，用于消耗
-        seen_keys = set()
-
-        for item in new_items:
-            key = (item["name"], item["type"])
-            # 优先复用未用过的旧 widget
-            if key in old_by_key_copy and key not in seen_keys:
-                w = old_by_key_copy.pop(key)  # 消耗掉这个 key
-                seen_keys.add(key)
-                w.reuse(item, self._current_text_query)
-                new_widgets.append(w)
+        # ---- 全量路径：解绑全部池 widget，重建虚拟布局 ----
+        for slot, w in list(self._slot_widgets.items()):
+            if isinstance(w, CommandItemWidget):
+                self._free_item_widgets.append(w)
             else:
-                # 创建新 widget
-                w = CommandItemWidget(item, self._current_text_query, self._scroll_content)
-                w.clicked.connect(self._on_item_clicked)
-                w.hovered.connect(self._on_item_hovered)
-                new_widgets.append(w)
+                self._divider_pool.append(w)
+            w.hide()
+        self._slot_widgets.clear()
 
-        self._item_widgets = new_widgets
+        self._build_virtual_layout()
+        self._sync_visible_slots()
+        self._last_render_keys = cur_keys
 
-        # 删除不再需要的旧 widget（未被复用的）
-        for w in old_by_key_copy.values():
-            try:
-                self._scroll_layout.removeWidget(w)
-                w.deleteLater()
-            except RuntimeError:
-                continue
+        # 计算卡片高度（列表部分 + 顶部描述 tooltip）
+        self._apply_list_height()
+        # 重新渲染后 selected_index 可能已被重置为 0，更新 tooltip
+        if not self._detail_mode:
+            self._update_desc_tooltip()
 
-        # 删除旧分隔线（保证 _dividers 与 scroll_layout 状态一致）
-        for div in self._dividers:
-            try:
-                self._scroll_layout.removeWidget(div)
-                div.deleteLater()
-            except RuntimeError:
-                pass
-        self._dividers.clear()
+    # ── 虚拟化渲染辅助 ──
 
-        # 清空 layout，重新按正确顺序添加 widget
-        while self._scroll_layout.count():
-            child = self._scroll_layout.takeAt(0)
-            if child.widget():
-                pass  # 仅移除，不删除（widget 在 _item_widgets 中）
+    def _build_virtual_layout(self):
+        """构建虚拟布局：items + 分隔线 → 槽列表（kind, item_idx, y）
+
+        分隔线算作独立槽（1px 高），与 item 槽统一按 y 偏移排列，
+        供 _sync_visible_slots 按滚动位置二分定位可见范围。
+        """
+        items = self._filtered_items
 
         # 计算每个 item 所属的分区编号
         # 0=内置命令, 1=UI 插件, 2=技能, 3=智能体/提示词
@@ -2581,38 +2604,153 @@ class CommandCard(QWidget):
 
         # 计算需要在索引 i 前插入分隔线的位置列表
         divider_positions = []
-        for i in range(1, len(new_items)):
-            if _section(new_items[i]) != _section(new_items[i - 1]):
+        for i in range(1, len(items)):
+            if _section(items[i]) != _section(items[i - 1]):
                 divider_positions.append(i)
 
-        # 添加 widget 和分隔线，按顺序
+        slots: List[tuple] = []
+        ys: List[int] = []
+        y = 0
         next_div_idx = 0
-        for i, widget in enumerate(self._item_widgets):
+        for i in range(len(items)):
             if next_div_idx < len(divider_positions) and i == divider_positions[next_div_idx]:
-                divider = QFrame()
-                divider.setFrameShape(QFrame.HLine)
-                divider.setFixedHeight(1)
-                divider.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
-                divider.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                self._scroll_layout.addWidget(divider)
-                self._dividers.append(divider)
+                slots.append(("divider", None, y))
+                ys.append(y)
+                y += 1
                 next_div_idx += 1
-            self._scroll_layout.addWidget(widget)
+            slots.append(("item", i, y))
+            ys.append(y)
+            y += ITEM_HEIGHT
 
-        # 计算卡片高度（列表部分 + 顶部描述 tooltip）
-        self._apply_list_height()
-        # 重新渲染后 selected_index 可能已被重置为 0，更新 tooltip
-        if not self._detail_mode:
-            self._update_desc_tooltip()
+        self._virtual_slots = slots
+        self._virtual_slot_ys = ys
+        self._virtual_total_height = y
+        self._divider_count = len(divider_positions)
+        # 内容高度即虚拟总高度（QScrollArea 负责滚动）；空列表置 1 防 0 高度异常
+        self._scroll_content.setFixedHeight(max(1, y))
+
+    def _sync_visible_slots(self):
+        """按当前滚动位置绑定/解绑可见窗口（含缓冲）内的池 widget
+
+        绑定槽的 item 数据在虚拟布局构建时已固定，滚动只改变可见范围，
+        因此此处仅做 widget 的移动/显隐，不更新文本，开销极小。
+        """
+        slots = self._virtual_slots
+        if not slots:
+            return
+        sb = self._scroll_area.verticalScrollBar()
+        view_h = max(1, self._scroll_area.viewport().height())
+        y0 = sb.value()
+        y1 = y0 + view_h
+        ys = self._virtual_slot_ys
+        # 二分定位可见槽范围，上下各留缓冲（滚动提前量）
+        first = bisect.bisect_left(ys, y0) - VIRTUAL_BUFFER_SLOTS
+        last = bisect.bisect_right(ys, y1) + VIRTUAL_BUFFER_SLOTS - 1
+        first = max(0, first)
+        last = min(len(slots) - 1, last)
+
+        # 宽度同步：content 宽度变化时全量更新已绑定 widget 宽度。
+        # 首次渲染发生在卡片布局完成前（viewport 高度 0 → 只绑定顶部几槽），
+        # 此时 content 宽度尚未确定，绑定的 widget 会被 setFixedWidth(0) 挤压
+        # （内部标签全部挤到左边，表现为 tag 显示在左侧）；布局完成后 content
+        # 变宽，若不同步则已绑定 widget 保持错误宽度直到滚动重绑。
+        content_w = self._scroll_content.width()
+        if content_w != self._bound_content_width:
+            self._bound_content_width = content_w
+            for w in list(self._slot_widgets.values()):
+                try:
+                    w.setFixedWidth(content_w)
+                except RuntimeError:
+                    continue
+
+        # 解绑离开可见范围的槽（widget 回池 + 隐藏）
+        for slot in list(self._slot_widgets):
+            if slot < first or slot > last:
+                w = self._slot_widgets.pop(slot)
+                if isinstance(w, CommandItemWidget):
+                    self._free_item_widgets.append(w)
+                else:
+                    self._divider_pool.append(w)
+                w.hide()
+
+        # 绑定新进入可见范围的槽（content_w 已在上方宽度同步处取得）
+        for slot in range(first, last + 1):
+            if slot in self._slot_widgets:
+                continue
+            kind, item_idx, y = slots[slot]
+            if kind == "divider":
+                if self._divider_pool:
+                    div = self._divider_pool.pop()
+                else:
+                    div = QFrame(self._scroll_content)
+                    div.setFrameShape(QFrame.HLine)
+                    div.setFixedHeight(1)
+                    div.setStyleSheet(f"background: {Colors.DIVIDER_COLOR}; border: none;")
+                    div.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                div._virtual_slot = slot
+                div.move(0, y)
+                div.setFixedWidth(content_w)
+                self._slot_widgets[slot] = div
+                div.show()
+            else:
+                if self._free_item_widgets:
+                    w = self._free_item_widgets.pop()
+                else:
+                    # 池耗尽（理论上缓冲保证不会）：新建并记录到 _item_pool
+                    # （调试/统计用，正常路径下数量恒 ≤ VIRTUAL_POOL_SIZE）
+                    w = CommandItemWidget(self._dummy_item, self._current_text_query, self._scroll_content)
+                    w.clicked.connect(self._on_item_clicked)
+                    w.hovered.connect(self._on_item_hovered)
+                    self._item_pool.append(w)
+                w._virtual_slot = slot
+                w.move(0, y)
+                w.setFixedWidth(content_w)
+                self._slot_widgets[slot] = w
+                try:
+                    w.reuse(self._filtered_items[item_idx], self._current_text_query)
+                except RuntimeError:
+                    continue
+                w.show()
+
+    def _scroll_to_item(self, item_idx: int):
+        """滚动列表使指定 item 最小可见（对齐 ensureWidgetVisible(0,0) 语义）
+
+        完全可见则不滚动；否则滚动最小量让目标 item 进入视口。
+        """
+        if item_idx < 0 or item_idx >= len(self._filtered_items):
+            return
+        target_y = None
+        for kind, idx, y in self._virtual_slots:
+            if kind == "item" and idx == item_idx:
+                target_y = y
+                break
+        if target_y is None:
+            return
+        sb = self._scroll_area.verticalScrollBar()
+        cur = sb.value()
+        view_h = max(1, self._scroll_area.viewport().height())
+        if target_y < cur:
+            sb.setValue(target_y)
+        elif target_y + ITEM_HEIGHT > cur + view_h:
+            sb.setValue(target_y + ITEM_HEIGHT - view_h)
 
     def _on_item_clicked(self):
         """item 被鼠标点击"""
         sender = self.sender()
-        if sender in self._item_widgets:
-            idx = self._item_widgets.index(sender)
-            self._selected_index = idx
+        item_idx = self._slot_to_item_index(sender)
+        if item_idx is not None:
+            self._selected_index = item_idx
             self._update_selection()
             self.select_current()
+
+    def _slot_to_item_index(self, widget) -> Optional[int]:
+        """从池 widget 反查其绑定的 filtered_items 索引（虚拟化映射）"""
+        slot = getattr(widget, "_virtual_slot", -1)
+        if 0 <= slot < len(self._virtual_slots):
+            kind, item_idx, _y = self._virtual_slots[slot]
+            if kind == "item":
+                return item_idx
+        return None
 
     def _on_item_hovered(self, widget):
         """鼠标悬停到 item → 同步选中索引
@@ -2622,14 +2760,13 @@ class CommandCard(QWidget):
         """
         if self._detail_mode:
             return  # detail 模式不处理列表 hover
-        try:
-            idx = self._item_widgets.index(widget)
-        except ValueError:
+        item_idx = self._slot_to_item_index(widget)
+        if item_idx is None:
             return
         # 索引相同则跳过，避免不必要的重绘
-        if idx == self._selected_index:
+        if item_idx == self._selected_index:
             return
-        self._selected_index = idx
+        self._selected_index = item_idx
         self._update_selection()
 
     def _on_param_hovered(self, widget):
@@ -2673,28 +2810,25 @@ class CommandCard(QWidget):
         self.dismiss()
 
     def _update_selection(self):
-        """更新选中高亮，并记录当前选中项类型供 detail 模式使用"""
-        safe_widgets = []
-        for widget in self._item_widgets:
-            try:
-                _ = widget.isVisible()
-                safe_widgets.append(widget)
-            except RuntimeError:
-                continue
-        self._item_widgets = safe_widgets
+        """更新选中高亮，并记录当前选中项类型供 detail 模式使用
 
+        虚拟化下池 widget 与槽绑定：遍历已绑定槽，按槽对应的 item 索引
+        统一设置选中状态（选中项仅一个，其余全部取消，幂等安全）。
+        """
         old_idx = self._last_selected_index
         new_idx = self._selected_index
 
-        # 只更新变化的 widget（旧选中取消 + 新选中激活）
-        if old_idx != new_idx:
-            if 0 <= old_idx < len(self._item_widgets):
-                self._item_widgets[old_idx].set_selected(False)
-            if 0 <= new_idx < len(self._item_widgets):
-                self._item_widgets[new_idx].set_selected(True)
-        elif 0 <= new_idx < len(self._item_widgets):
-            # 索引相同但需要刷新（如首次选中）
-            self._item_widgets[new_idx].set_selected(True)
+        # 遍历已绑定的 item 槽：命中选中索引的激活，其余取消
+        for slot, w in list(self._slot_widgets.items()):
+            if not isinstance(w, CommandItemWidget):
+                continue
+            try:
+                _ = w.isVisible()
+            except RuntimeError:
+                continue
+            kind, item_idx, _y = self._virtual_slots[slot]
+            if kind == "item":
+                w.set_selected(item_idx == new_idx)
 
         self._last_selected_index = new_idx
 
@@ -2708,9 +2842,9 @@ class CommandCard(QWidget):
         if not self._detail_mode:
             self._update_desc_tooltip()
 
-        # 滚动到可见区域
-        if 0 <= self._selected_index < len(self._item_widgets):
-            self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
+        # 滚动到可见区域（虚拟化：按 item 的 y 偏移滚动，等效 ensureWidgetVisible）
+        if old_idx != new_idx:
+            self._scroll_to_item(new_idx)
 
     def select_next(self) -> bool:
         """选择下一项。返回 True 表示已处理，False 表示未处理（让按键透传）。"""
@@ -2736,7 +2870,7 @@ class CommandCard(QWidget):
         if self._detail_mode:
             return False
         # 列表模式
-        if self._item_widgets and self._selected_index < len(self._item_widgets) - 1:
+        if self._filtered_items and self._selected_index < len(self._filtered_items) - 1:
             self._selected_index += 1
             self._update_selection()
         return True
@@ -2763,7 +2897,7 @@ class CommandCard(QWidget):
         if self._detail_mode:
             return False
         # 列表模式
-        if self._item_widgets and self._selected_index > 0:
+        if self._filtered_items and self._selected_index > 0:
             self._selected_index -= 1
             self._update_selection()
         return True
