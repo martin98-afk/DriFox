@@ -3337,7 +3337,11 @@ class MarketplaceCard(QWidget):
         enable_layout.addWidget(title_lb)
         enable_layout.addStretch(1)
         self._proxy_switch = SwitchButton(enable_card)
+        # 初始 setChecked 不应触发 toggled 自动保存（后续控件尚未创建）
+        self._proxy_switch.blockSignals(True)
         self._proxy_switch.setChecked(False)
+        self._proxy_switch.blockSignals(False)
+        self._proxy_switch.checkedChanged.connect(self._on_proxy_switch_toggled)
         enable_layout.addWidget(self._proxy_switch)
         root.addWidget(enable_card)
 
@@ -3423,7 +3427,10 @@ class MarketplaceCard(QWidget):
     def _load_proxy_form(self):
         """把当前配置填充到表单"""
         proxy = get_proxy_config()
+        # blockSignals：加载磁盘值不应触发 _on_proxy_switch_toggled 的自动保存
+        self._proxy_switch.blockSignals(True)
         self._proxy_switch.setChecked(proxy.enabled)
+        self._proxy_switch.blockSignals(False)
         idx = self._proxy_mode_combo.findData(proxy.mode)
         if idx >= 0:
             self._proxy_mode_combo.setCurrentIndex(idx)
@@ -3433,6 +3440,30 @@ class MarketplaceCard(QWidget):
             self._proxy_status_label.setText("已启用 · 上次保存后未改动")
         else:
             self._proxy_status_label.setText("")
+
+    def _on_proxy_switch_toggled(self, checked: bool):
+        """开关切换即保存 enabled 状态（地址非法时回弹，避免开启一个无效配置）"""
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        ok, msg = get_proxy_config().validate(mode, address)
+        if not ok:
+            # 非法地址：回弹开关并提示先填地址
+            self._proxy_switch.blockSignals(True)
+            self._proxy_switch.setChecked(False)
+            self._proxy_switch.blockSignals(False)
+            self._proxy_status_label.setStyleSheet(
+                "color: #ef5350; font-size: 12px; background: transparent;"
+            )
+            self._proxy_status_label.setText(f"请先填写有效地址: {msg}")
+            return
+        if get_proxy_config().save(checked, mode, address):
+            color = "#4caf50" if checked else "rgba(255,255,255,0.5)"
+            self._proxy_status_label.setStyleSheet(
+                f"color: {color}; font-size: 12px; background: transparent;"
+            )
+            self._proxy_status_label.setText(
+                f"已启用 {time.strftime('%H:%M:%S')}" if checked else f"已停用 {time.strftime('%H:%M:%S')}"
+            )
 
     def _on_proxy_mode_changed(self, index: int):
         mode = self._proxy_mode_combo.itemData(index)
