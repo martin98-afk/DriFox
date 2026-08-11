@@ -101,4 +101,4 @@ def test_refresh_force_also_loads(monkeypatch):
     ok = _wait_until(lambda: len(card._plugin_data) >= 2)
     assert ok, "手动刷新后线上插件数据丢失"
 
-    card._worker_thread.quit()
+    card._cleanup_fetch_worker()

@@ -1564,8 +1564,15 @@ class MarketplaceCard(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
+        # 安装/更新/启用/禁用/卸载：串行任务队列（一次只跑一个 worker 线程，
+        # 避免并发 git 进程互抢 cache/目标目录；完成自动启动下一个任务）
+        self._task_queue: list = []  # [{kind,name,fn,busy_text,status_text,status_color}]
+        self._task_active: bool = False
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
+        # 市场拉取 worker：与任务 worker 分离，刷新市场不打断正在安装的任务
+        self._fetch_thread: Optional[QThread] = None
+        self._fetch_worker: Optional[_MarketFetchWorker] = None
         self._plugin_data: list = []
         self._matched: list = []
         self._rendered_count: int = 0
@@ -2166,23 +2173,23 @@ class MarketplaceCard(QWidget):
         """
         self._set_loading(True)
         self._failed_sources = set()  # 每轮刷新重置失败标记（重新收集）
-        self._cleanup_worker()
+        self._cleanup_fetch_worker()
         self._worker_gen += 1
-        self._worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.market_fetched.connect(self._on_market_fetched)
-        self._worker.market_failed.connect(self._on_market_failed)
-        self._worker.all_done.connect(self._on_market_all_done)
-        self._worker.error.connect(self._on_refresh_error)
+        self._fetch_worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
+        self._fetch_thread = QThread(self)
+        self._fetch_worker.moveToThread(self._fetch_thread)
+        self._fetch_thread.started.connect(self._fetch_worker.run)
+        self._fetch_worker.market_fetched.connect(self._on_market_fetched)
+        self._fetch_worker.market_failed.connect(self._on_market_failed)
+        self._fetch_worker.all_done.connect(self._on_market_all_done)
+        self._fetch_worker.error.connect(self._on_refresh_error)
         # 全部市场拉完（或出错）后才退出线程并清理
-        self._worker.all_done.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.all_done.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._fetch_worker.all_done.connect(self._fetch_thread.quit)
+        self._fetch_worker.error.connect(self._fetch_thread.quit)
+        self._fetch_worker.all_done.connect(self._fetch_worker.deleteLater)
+        self._fetch_worker.error.connect(self._fetch_worker.deleteLater)
+        self._fetch_thread.finished.connect(self._fetch_thread.deleteLater)
+        self._fetch_thread.start()
 
     def _merge_market_data(self, market_data: dict):
         """合并单个市场数据到 _plugin_data 并触发渲染（worker 回调复用）
@@ -2834,29 +2841,144 @@ class MarketplaceCard(QWidget):
         self._update_status()
         self._update_update_badge()
 
-    # ── 异步安装 ──
+    # ── 异步任务队列（安装/更新/启用/禁用/卸载 串行执行） ──
 
-    def _async_install(self, plugin_meta: dict):
-        """在后台线程安装插件"""
-        self._status_label.setText("安装中…")
-        self._status_label.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+    def _submit_task(
+        self,
+        *,
+        kind: str,
+        name: str,
+        fn: Callable[[], bool],
+        busy_text: str,
+        status_text: str,
+        status_color: str,
+    ):
+        """提交后台任务到串行队列
+
+        队列保证同一时刻只有一个任务线程在跑，避免多个 git 进程并发
+        互抢 cache/目标目录（此前多任务共用单个 worker 槽位，新任务
+        会 quit 旧线程导致进行中的安装静默终止）。任务完成自动启动
+        下一个；行在任务期间保持 busy（按钮禁用，防重复提交）。
+
+        Args:
+            kind: "install" | "update" | "enable" | "disable" | "uninstall"
+            name: 插件名
+            fn: 后台线程执行的阻塞函数，返回 bool
+            busy_text: 行按钮 busy 文案（如「安装中…」）
+            status_text: 头部状态栏文案
+            status_color: 状态栏文字颜色
+        """
+        self._task_queue.append(
+            {
+                "kind": kind,
+                "name": name,
+                "fn": fn,
+                "busy_text": busy_text,
+                "status_text": status_text,
+                "status_color": status_color,
+            }
         )
-        name = plugin_meta.get("name", "")
+        # 行立即置 busy（行可能未渲染/已隐藏，忽略）
+        self._set_row_busy(name, busy_text)
+        if not self._task_active:
+            self._run_next_task()
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().install(m))
+    def _run_next_task(self):
+        """从队列取出下一个任务并启动 worker 线程（无任务则停）"""
+        if not self._task_queue:
+            self._task_active = False
+            self._worker_thread = None
+            self._worker = None
+            return
+        self._task_active = True
+        task = self._task_queue.pop(0)
+        name = task["name"]
+        self._status_label.setText(task["status_text"])
+        self._status_label.setStyleSheet(f"color: {task['status_color']}; font-size: 12px; background: transparent;")
+        # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
+        self._set_row_busy(name, task["busy_text"])
+
+        self._worker = _MarketplaceWorker(task["fn"])
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_install_done(name, bool(ok)))
-        self._worker.error.connect(lambda e: self._on_install_error(name, e))
+        self._worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
+        self._worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.error.connect(self._worker_thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.start()
+
+    def _on_task_done(self, task: dict, success: bool):
+        """任务完成：分发到对应类型的完成处理 + 启动下一个任务"""
+        if not self._alive():
+            return
+        kind, name = task["kind"], task["name"]
+        # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
+        # 其他排队任务的行保持 busy（_refresh_row_states 跳过逻辑保护）
+        self._release_row_busy(name)
+        if kind == "install":
+            self._on_install_done(name, success)
+        elif kind == "update":
+            self._on_update_done(name, success)
+        else:
+            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
+            self._on_manage_done(name, action, success)
+        self._run_next_task()
+
+    def _on_task_error(self, task: dict, err: str):
+        """任务出错：分发到对应类型的错误处理 + 启动下一个任务"""
+        if not self._alive():
+            return
+        kind, name = task["kind"], task["name"]
+        self._release_row_busy(name)
+        if kind == "install":
+            self._on_install_error(name, err)
+        elif kind == "update":
+            self._on_update_error(name, err)
+        else:
+            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
+            self._on_manage_error(name, action, err)
+        self._run_next_task()
+
+    def _release_row_busy(self, name: str):
+        """解除指定插件行的 busy（仅任务自身行；行不存在/未 busy 忽略）"""
+        row = self._row_map.get(name)
+        if row is not None and row._busy:
+            row._busy = False
+            row._busy_text = ""
+            row._update_btn_text()
+
+    def _set_row_busy(self, name: str, busy_text: str):
+        """将指定插件行置为 busy（任务入队/开始时调用，行不存在则忽略）
+
+        行已 busy 时仅刷新文案不重复禁用（避免覆盖更精确的状态）。
+        """
+        row = self._row_map.get(name)
+        if row is not None:
+            if not row._busy:
+                row._busy = True
+                row._busy_text = busy_text
+                row._update_btn_text()
+            elif row._busy_text != busy_text:
+                row._busy_text = busy_text
+                row._update_btn_text()
+
+    # ── 异步安装 ──
+
+    def _async_install(self, plugin_meta: dict):
+        """安装插件（入串行队列，后台线程执行）"""
+        name = plugin_meta.get("name", "")
+        self._submit_task(
+            kind="install",
+            name=name,
+            fn=lambda m=plugin_meta: get_installer().install(m),
+            busy_text="安装中…",
+            status_text="安装中…",
+            status_color=_text_color(secondary=True),
+        )
 
     def _on_install_done(self, name: str, success: bool):
         """安装完成"""
@@ -2899,32 +3021,25 @@ class MarketplaceCard(QWidget):
     # ── 异步更新 ────────────────────────────────────────
 
     def _async_update(self, plugin_meta: dict):
-        """更新插件：点击后立即删除旧版并反馈（后台先删旧版再下载新版）
+        """更新插件：点击后立即删除旧版并反馈（入串行队列）
 
         点击瞬间将该行置为「下载中」（未安装态 + 禁用按钮），
         后台线程第一步即 rmtree 旧版目录，满足「点了立即删除现有的」。
         """
         name = plugin_meta.get("name", "")
-        self._status_label.setText("更新中…")
-        self._status_label.setStyleSheet("color: #FFA726; font-size: 12px; background: transparent;")
         # 立即反馈：该行变为未安装态 + 「下载中…」
         self._set_row_downloading(name)
         # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭），后台线程首步 rmtree 旧目录
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_update_done(name, bool(ok)))
-        self._worker.error.connect(lambda e: self._on_update_error(name, e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="update",
+            name=name,
+            fn=lambda m=plugin_meta: get_installer().update(m),
+            busy_text="下载中…",
+            status_text="更新中…",
+            status_color="#FFA726",
+        )
 
     def _set_row_downloading(self, name: str):
         """将该插件行立即置为「下载中」（未安装态，旧版已删/将删）"""
@@ -2992,82 +3107,49 @@ class MarketplaceCard(QWidget):
         except Exception as e:
             logger.debug(f"[Marketplace] unload_plugin UI({name}) 失败（忽略）: {e}")
 
-    def _set_row_manage_busy(self, name: str, busy_text: str):
-        """将指定插件行置为「处理中…」状态（操作期间禁用按钮）"""
-        row = self._row_map.get(name)
-        if row is not None:
-            row._busy = True
-            row._busy_text = busy_text
-            row._update_btn_text()
-
     def _async_enable(self, plugin_meta: dict):
-        """在后台线程启用已禁用的插件"""
+        """启用已禁用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        self._status_label.setText("启用中…")
-        self._status_label.setStyleSheet("color: #4CAF50; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "启用中…")
-
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().enable(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "启用", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "启用", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="enable",
+            name=name,
+            fn=lambda n=name: get_installer().enable(n),
+            busy_text="启用中…",
+            status_text="启用中…",
+            status_color="#4CAF50",
+        )
 
     def _async_disable(self, plugin_meta: dict):
-        """在后台线程禁用已启用的插件"""
+        """禁用已启用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        self._status_label.setText("禁用中…")
-        self._status_label.setStyleSheet("color: #FF9800; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "禁用中…")
         # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台 move 目录
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().disable(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "禁用", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "禁用", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="disable",
+            name=name,
+            fn=lambda n=name: get_installer().disable(n),
+            busy_text="禁用中…",
+            status_text="禁用中…",
+            status_color="#FF9800",
+        )
 
     def _async_uninstall(self, plugin_meta: dict):
-        """在后台线程卸载插件（确认后）"""
+        """卸载插件（入串行队列，确认后）"""
         name = plugin_meta.get("name", "")
         if not self._confirm_uninstall(name):
             return
-        self._status_label.setText("卸载中…")
-        self._status_label.setStyleSheet("color: #F44336; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "卸载中…")
         # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台删目录
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().uninstall(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "卸载", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "卸载", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="uninstall",
+            name=name,
+            fn=lambda n=name: get_installer().uninstall(n),
+            busy_text="卸载中…",
+            status_text="卸载中…",
+            status_color="#F44336",
+        )
 
     def _confirm_uninstall(self, name: str) -> bool:
         """卸载确认弹窗（MaskDialogBase 风格，parent 为 tab 顶层窗口）"""
@@ -3142,6 +3224,11 @@ class MarketplaceCard(QWidget):
         self._apply_sort(self._matched)
 
         for name, row in self._row_map.items():
+            if row._busy:
+                # 任务进行中/排队中的行保持 busy（按钮禁用），
+                # 不被其他任务完成回调重置为「安装」——并发安装时
+                # 一个装完不能把其他待安装的按钮恢复
+                continue
             p = row._meta
             installed, has_update, local_ver, status = self._row_state(p)
             row.apply_state(installed, has_update, local_ver, status)
@@ -3767,8 +3854,8 @@ class MarketplaceCard(QWidget):
         except RuntimeError, TypeError:
             return False
 
-    def _cleanup_worker(self):
-        """安全清理旧的 worker/thread（不阻塞主线程）
+    def _orphan_worker_thread(self, thread):
+        """安全剥离 worker 线程为孤儿（不阻塞主线程）
 
         - 判活：旧线程 C++ 对象可能已被上一轮 finished→deleteLater 链销毁
           （删 wait 后事件循环会立即处理 deleteLater），若属性仍持悬垂 wrapper，
@@ -3777,9 +3864,6 @@ class MarketplaceCard(QWidget):
           孤儿列表强引用持有（防 GC），finished → _release_orphan 自清理
         - 迟到信号由回调 sender/判活检查丢弃
         """
-        thread = self._worker_thread
-        self._worker_thread = None
-        self._worker = None
         if thread is None:
             return
         try:
@@ -3809,6 +3893,20 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass
 
+    def _cleanup_worker(self):
+        """安全清理任务 worker/thread（安装/更新/启用/禁用/卸载）"""
+        thread = self._worker_thread
+        self._worker_thread = None
+        self._worker = None
+        self._orphan_worker_thread(thread)
+
+    def _cleanup_fetch_worker(self):
+        """安全清理市场拉取 worker/thread（与任务 worker 相互独立）"""
+        thread = self._fetch_thread
+        self._fetch_thread = None
+        self._fetch_worker = None
+        self._orphan_worker_thread(thread)
+
     def _release_orphan(self, thread):
         """孤儿线程 finished 后从模块级列表移除（deleteLater 由原连接负责）"""
         try:
@@ -3828,12 +3926,17 @@ class MarketplaceCard(QWidget):
         except Exception:
             pass
         try:
+            self._cleanup_fetch_worker()
+        except Exception:
+            pass
+        try:
             self._cleanup_check_worker()
         except Exception:
             pass
 
     def deleteLater(self):
         self._cleanup_worker()
+        self._cleanup_fetch_worker()
         self._cleanup_check_worker()
         # 销毁前移除挂在顶层窗口上的事件过滤器（win 非 None 且非 self）
         try:
