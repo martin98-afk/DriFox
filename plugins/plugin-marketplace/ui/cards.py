@@ -1761,6 +1761,9 @@ class MarketplaceCard(QWidget):
         "pluginRowUpdateTag": -3,
         "marketRowName": -1,  # 市场行名称 18px → fs-1
         "marketRowUrl": -2,  # 市场行 URL   14px → fs-2
+        "proxySectionTitle": -1,  # 加速页段标题（启用/配置/帮助）
+        "proxyStatus": -2,  # 加速页状态行
+        "proxyHelp": -2,  # 加速页帮助正文
     }
 
     def _retheme(self):
@@ -3321,6 +3324,10 @@ class MarketplaceCard(QWidget):
         card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e")
         border_c = getattr(self, "_cached_theme_colors", {}).get("border", "rgba(128,128,128,0.15)")
         accent = getattr(self, "_cached_theme_colors", {}).get("accent", "#62a0ea")
+        # 字号跟随 UI 上下文（fs 为基础字号，段标题 fs-1，正文/状态 fs-2）
+        fs = getattr(self, "_cached_font_size", 0) or 14
+        fs_title = max(10, fs - 1)
+        fs_body = max(9, fs - 2)
 
         root = self._proxy_page.layout()
 
@@ -3340,7 +3347,8 @@ class MarketplaceCard(QWidget):
         enable_layout = QHBoxLayout(enable_row)
         enable_layout.setContentsMargins(0, 8, 0, 8)
         title_lb = QLabel("⚡ 启用", enable_row)
-        title_lb.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        title_lb.setObjectName("proxySectionTitle")
+        title_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;")
         enable_layout.addWidget(title_lb)
         enable_layout.addStretch(1)
         self._proxy_switch = SwitchButton(enable_row)
@@ -3366,15 +3374,21 @@ class MarketplaceCard(QWidget):
         config_layout.setSpacing(8)
 
         cfg_title = QLabel("⚙ 配置", config_widget)
-        cfg_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        cfg_title.setObjectName("proxySectionTitle")
+        cfg_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;")
         config_layout.addWidget(cfg_title)
 
         self._proxy_mode_combo = QComboBox(config_widget)
         self._proxy_mode_combo.addItem("前缀加速站", "prefix")
         self._proxy_mode_combo.addItem("自建代理服务", "selfhost")
         self._proxy_mode_combo.addItem("HTTP 正向代理", "http")
-        self._style_sort_combo()  # 复用排序下拉的 QSS
-        self._proxy_mode_combo.setFixedHeight(33)
+        # 统一下拉样式（与主程序设置卡一致，含下拉列表 + 主题感知）
+        try:
+            from app.utils.design_tokens import ComboBoxStyles
+
+            ComboBoxStyles.apply(self._proxy_mode_combo)
+        except Exception as e:
+            logger.warning(f"[Marketplace] ComboBoxStyles.apply 失败（回退无样式）: {e}")
         self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
         config_layout.addWidget(self._proxy_mode_combo)
 
@@ -3402,7 +3416,7 @@ class MarketplaceCard(QWidget):
         self._proxy_status_label = QLabel("", config_widget)
         self._proxy_status_label.setObjectName("proxyStatus")
         self._proxy_status_label.setStyleSheet(
-            f"color: {accent}; font-size: 12px; background: transparent;"
+            f"color: {accent}; font-size: {fs_body}px; background: transparent;"
         )
         self._proxy_status_label.setWordWrap(True)
         config_layout.addWidget(self._proxy_status_label)
@@ -3422,12 +3436,13 @@ class MarketplaceCard(QWidget):
         help_layout.setContentsMargins(0, 10, 0, 8)
         help_layout.setSpacing(4)
         help_title = QLabel("💡 帮助", help_widget)
-        help_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
+        help_title.setObjectName("proxySectionTitle")
+        help_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;")
         help_layout.addWidget(help_title)
         self._proxy_help_label = QLabel("", help_widget)
         self._proxy_help_label.setObjectName("proxyHelp")
         self._proxy_help_label.setStyleSheet(
-            f"color: {tcs}; font-size: 12px; background: transparent;"
+            f"color: {tcs}; font-size: {fs_body}px; background: transparent;"
         )
         self._proxy_help_label.setWordWrap(True)
         help_layout.addWidget(self._proxy_help_label)
@@ -3465,16 +3480,12 @@ class MarketplaceCard(QWidget):
             self._proxy_switch.blockSignals(True)
             self._proxy_switch.setChecked(False)
             self._proxy_switch.blockSignals(False)
-            self._proxy_status_label.setStyleSheet(
-                "color: #ef5350; font-size: 12px; background: transparent;"
-            )
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))
             self._proxy_status_label.setText(f"请先填写有效地址: {msg}")
             return
         if get_proxy_config().save(checked, mode, address):
             color = "#4caf50" if checked else "rgba(255,255,255,0.5)"
-            self._proxy_status_label.setStyleSheet(
-                f"color: {color}; font-size: 12px; background: transparent;"
-            )
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style(color))
             self._proxy_status_label.setText(
                 f"已启用 {time.strftime('%H:%M:%S')}" if checked else f"已停用 {time.strftime('%H:%M:%S')}"
             )
@@ -3530,9 +3541,7 @@ class MarketplaceCard(QWidget):
         else:
             ok, msg = False, str(result)
         color = "#4caf50" if ok else "#ef5350"
-        self._proxy_status_label.setStyleSheet(
-            f"color: {color}; font-size: 12px; background: transparent;"
-        )
+        self._proxy_status_label.setStyleSheet(self._proxy_status_style(color))
         self._proxy_status_label.setText(msg)
 
     def _cleanup_proxy_worker(self):
@@ -3552,20 +3561,21 @@ class MarketplaceCard(QWidget):
         address = self._proxy_addr_edit.text().strip()
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
-            self._proxy_status_label.setStyleSheet(
-                "color: #ef5350; font-size: 12px; background: transparent;"
-            )
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))
             self._proxy_status_label.setText(msg)
             self._show_proxy_info(msg, error=True)
             return
         if get_proxy_config().save(enabled, mode, address):
-            self._proxy_status_label.setStyleSheet(
-                "color: #4caf50; font-size: 12px; background: transparent;"
-            )
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#4caf50"))
             self._proxy_status_label.setText(f"已保存 {time.strftime('%H:%M:%S')}")
             self._show_proxy_info("代理配置已保存")
         else:
             self._show_proxy_info("保存失败", error=True)
+
+    def _proxy_status_style(self, color: str) -> str:
+        """状态行 QSS：字号跟随 UI 上下文（fs-2），仅替换颜色"""
+        fs = getattr(self, "_cached_font_size", 0) or 14
+        return f"color: {color}; font-size: {max(9, fs - 2)}px; background: transparent;"
 
     def _show_proxy_info(self, text: str, error: bool = False):
         """InfoBar 统一挂到 tab 管理器顶层窗口（与市场其它提示一致）"""
