@@ -453,6 +453,10 @@ class _PluginDetailDialog(MaskDialogBase):
         marketplace = self._meta.get("_marketplace", "")
         if marketplace:
             rows.append(("📦 来源市场", marketplace))
+        # 下载量：紧跟来源市场之后展示，突出数字（0 或缺失不显示）
+        downloads = self._meta.get("downloads", 0)
+        if downloads:
+            rows.append(("下载量", f"{downloads:,}"))
         homepage = _PluginRow._compute_homepage(self._meta)
         if homepage:
             rows.append(("🔗 官网", f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>'))
@@ -460,7 +464,16 @@ class _PluginDetailDialog(MaskDialogBase):
             rows.append(("ℹ️ 信息", "该插件未提供更多信息"))
 
         for label, value in rows:
-            row_lb = QLabel(f"<b>{label}</b>：{value}", info_widget)
+            if label == "下载量":
+                # 下载量行特殊样式：加粗强调数字
+                html = (
+                    f'<b style="color:{accent_bg};">下载量</b>：'
+                    f'<span style="color:{accent_bg}; font-weight:bold; '
+                    f'font-size:{max(10, fs + 1)}px;">{value}</span> 次安装'
+                )
+            else:
+                html = f"<b>{label}</b>：{value}"
+            row_lb = QLabel(html, info_widget)
             row_lb.setWordWrap(True)
             row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row_lb.setOpenExternalLinks(True)
@@ -968,6 +981,11 @@ class _PluginRow(QFrame):
             if getattr(self, "_mp_qss_cached", None) != new_mp_qss:
                 self._mp_qss_cached = new_mp_qss
                 self._mp_label.setStyleSheet(new_mp_qss)
+        if getattr(self, "_dl_label", None) is not None:
+            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            if getattr(self, "_dl_qss_cached", None) != new_dl_qss:
+                self._dl_qss_cached = new_dl_qss
+                self._dl_label.setStyleSheet(new_dl_qss)
 
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
@@ -1062,15 +1080,26 @@ class _PluginRow(QFrame):
         meta_layout.setSpacing(10)
 
         marketplace = self._meta.get("_marketplace", "")
+        downloads = self._meta.get("downloads", 0)
         self._mp_label = None
-        if marketplace:
-            self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
-            self._mp_label.setStyleSheet(
-                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-            )
-            meta_layout.addWidget(self._mp_label)
-
-        if marketplace:
+        self._dl_label = None
+        if marketplace or downloads:
+            if marketplace:
+                self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
+                self._mp_label.setStyleSheet(
+                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+                )
+                meta_layout.addWidget(self._mp_label)
+            # 下载量：来源标签之后展示，数字橙色加粗强调（0 或缺失不显示）
+            if downloads:
+                self._dl_label = QLabel(
+                    f'下载 <span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
+                    meta_row,
+                )
+                self._dl_label.setStyleSheet(
+                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+                )
+                meta_layout.addWidget(self._dl_label)
             meta_layout.addStretch(1)
             info_layout.addWidget(meta_row)
 
@@ -1290,7 +1319,6 @@ class _PluginRow(QFrame):
             ver_html = f' <span style="color:#4CAF50;">✓ v{self._local_version}</span>'
         elif remote_ver:
             ver_html = f' <span style="color:{self._tcs};">v{remote_ver}</span>'
-        # 状态标签：版本号之后
         status_html = ""
         if self._installed and not self._busy:
             st = self._status_text()
@@ -1924,10 +1952,11 @@ class MarketplaceCard(QWidget):
         # 排序下拉
         self._sort_combo = QComboBox(filter_row)
         self._sort_combo.addItem("默认排序", "default")
+        self._sort_combo.addItem("下载量最多优先", "downloads")
         self._sort_combo.addItem("名称 A-Z", "name_asc")
         self._sort_combo.addItem("名称 Z-A", "name_desc")
         self._sort_combo.addItem("版本最新优先", "version")
-        self._sort_combo.setFixedWidth(110)
+        self._sort_combo.setFixedWidth(120)
         # 与搜索框同高（LineEdit 视觉高度 33px）
         self._sort_combo.setFixedHeight(33)
         self._style_sort_combo()
@@ -2458,6 +2487,8 @@ class MarketplaceCard(QWidget):
             matched.sort(key=lambda p: (p.get("name", "") or "").lower())
         elif mode == "name_desc":
             matched.sort(key=lambda p: (p.get("name", "") or "").lower(), reverse=True)
+        elif mode == "downloads":
+            matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
         elif mode == "version":
             from functools import cmp_to_key
 

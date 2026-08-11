@@ -14,13 +14,46 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple
 
 from loguru import logger
 
 from .data import compare_versions
+
+
+# ── 下载量统计上报 ──────────────────────────────────────────
+# 安装/更新成功后向计数服务上报 +1（尽力而为，失败不影响安装结果）。
+# 计数服务与 key 命名必须与市场端 tools/downloads_stats.py 保持一致：
+#   COUNT_API_BASE + /hit/drifox-plugins-{插件名}
+# 服务说明：经典 countapi.xyz 已不稳定，使用其开源替代 CountAPI
+# （countapi.mileshilliard.com，免注册）。如需换服务，同步改市场端常量。
+
+_COUNT_API_BASE = "https://countapi.mileshilliard.com/api/v1"
+_COUNT_KEY_PREFIX = "drifox-plugins-"
+_COUNT_UA = "DriFox/0.5 (+https://github.com/martin98-afk/drifox-plugins)"
+
+
+def report_plugin_install(plugin_name: str):
+    """异步上报插件安装/更新计数（后台线程，绝不阻塞/影响安装流程）"""
+
+    def _do():
+        key = f"{_COUNT_KEY_PREFIX}{plugin_name}"
+        req = urllib.request.Request(
+            f"{_COUNT_API_BASE}/hit/{key}",
+            headers={"User-Agent": _COUNT_UA},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+            logger.debug(f"[Installer] 上报下载量成功: {plugin_name}")
+        except Exception as e:
+            logger.warning(f"[Installer] 上报下载量失败（不影响安装）: {plugin_name}: {e}")
+
+    threading.Thread(target=_do, daemon=True, name=f"dl-report-{plugin_name}").start()
 
 
 # ── 删除辅助 ──────────────────────────────────────────────
@@ -434,6 +467,8 @@ class PluginInstaller:
             shutil.rmtree(cache_tmp, ignore_errors=True)
 
             logger.info(f"[Installer] Installed plugin {name} -> {target}")
+            # 安装/更新成功 → 上报下载量（后台线程，失败不影响安装结果）
+            report_plugin_install(name)
             return True
 
         except Exception as e:
