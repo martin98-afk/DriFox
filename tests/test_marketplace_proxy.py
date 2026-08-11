@@ -152,3 +152,40 @@ def test_fetch_marketplace_proxy_fallback_direct(monkeypatch, tmp_path):
     assert calls[1] == "https://raw.githubusercontent.com/x/y/main/marketplace.json"
     # 失败状态已记录
     assert mgr._fetch_status["drifox-official"]["ok"] is True
+
+
+def test_installer_proxy_fallback_direct(monkeypatch, tmp_path):
+    """git clone 代理失败时回退直连重跑一次"""
+    from ui import installer as inst
+
+    proxy = ProxyConfig(file=tmp_path / "proxy.json")
+    assert proxy.save(True, "prefix", "https://127.0.0.1:1/")
+    monkeypatch.setattr(inst, "get_proxy_config", lambda: proxy)
+    # 上报下载量是后台网络请求，测试中禁用
+    monkeypatch.setattr(inst, "report_plugin_install", lambda name: None)
+
+    calls = []
+
+    def fake_sparse(self, url, subpath, ref, cache_dir, extra_args=None):
+        calls.append((url, extra_args))
+        if url.startswith("https://127.0.0.1:1/"):
+            raise RuntimeError("proxy unreachable")
+        # 模拟 clone 产物：在 cache_dir 下生成文件（后续 move 到 target）
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "__init__.py").write_text("# demo", encoding="utf-8")
+
+    monkeypatch.setattr(inst.PluginInstaller, "_sparse_clone", fake_sparse)
+
+    p = inst.PluginInstaller.__new__(inst.PluginInstaller)
+    p._plugins_dir = tmp_path / "plugins"
+    p._cache_dir = tmp_path / "cache"
+
+    target = tmp_path / "plugins" / "demo"
+
+    ok = p._download_and_move("demo", "https://github.com/x/demo.git", ".", "main", target)
+    assert ok
+    assert len(calls) == 2
+    assert calls[0][0].startswith("https://127.0.0.1:1/")
+    assert calls[1][0] == "https://github.com/x/demo.git"
+    assert calls[1][1] is None  # 直连无额外参数
+    assert (target / "__init__.py").exists()

@@ -23,6 +23,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from .data import compare_versions
+from .proxy import get_proxy_config
 
 
 # ── 下载量统计上报 ──────────────────────────────────────────
@@ -446,7 +447,19 @@ class PluginInstaller:
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
             cache_tmp.mkdir(parents=True, exist_ok=True)
             try:
-                self._sparse_clone(url, subpath, ref, cache_tmp)
+                proxy = get_proxy_config()
+                git_url, git_extra = proxy.git_clone_args(url)
+                try:
+                    self._sparse_clone(git_url, subpath, ref, cache_tmp, extra_args=git_extra)
+                except Exception:
+                    # 代理失败回退直连：清空缓存目录后原 URL 重跑一次
+                    if git_url != url or git_extra:
+                        logger.warning(f"[Installer] proxy failed, fallback to direct: {url}")
+                        shutil.rmtree(cache_tmp, ignore_errors=True)
+                        cache_tmp.mkdir(parents=True, exist_ok=True)
+                        self._sparse_clone(url, subpath, ref, cache_tmp)
+                    else:
+                        raise
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
@@ -475,19 +488,22 @@ class PluginInstaller:
             logger.error(f"[Installer] Download {name} failed: {e}")
             return False
 
-    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path):
+    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
         """克隆仓库指定子目录到 cache_dir
 
         对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
+        extra_args: git 前置参数（如 ['-c', 'http.proxy=...']），
+        插在 git 与子命令之间。
         """
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        extra = list(extra_args or [])
 
         if subpath in (".", ""):
             # 整个仓库：直接浅克隆
             subprocess.run(
-                ["git", "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
+                ["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -496,7 +512,7 @@ class PluginInstaller:
         else:
             # 子目录：稀疏克隆
             subprocess.run(
-                ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
+                ["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
