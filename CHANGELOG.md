@@ -36,7 +36,7 @@ All notable changes to this project will be documented in this file.
 - **版本号同步** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): v0.4.14 版本号升级与同步
 
 
-#### 📦 附加变更（v0.4.14 重发补丁 | 自初次 tag 之后 10 个新提交）
+#### 📦 附加变更（v0.4.14 一次重发补丁 | 自初次 tag 之后 10 个新提交）
 
 > v0.4.14 初次 tag 后追加的 bug 修复与体验优化：插件市场卡片布局/渲染稳定性、问题卡片布局、图标尺寸一致性、市场列表滚动性能、回归测试覆盖、Windows 构建清理冗余 libcrypto DLL。贡献者：mading
 
@@ -58,6 +58,36 @@ All notable changes to this project will be documented in this file.
 - **插件市场体验优化** (`plugins/plugin-marketplace/`): 整体使用体验优化
 - **MarketplaceCard 过滤与 resize 测试** (`tests/`): 新增过滤与 resize 测试，防止空白间隙
 - **问题卡片布局测试** (`tests/`): 布局诊断中 pump 事件循环以保证 headless 检查可靠
+
+
+#### 📦 附加变更（v0.4.14 二次重发补丁 | 自初次 tag 之后 7 个新提交）
+
+> v0.4.14 初次 tag 后再追加的优化：models.dev 动态数据后台刷新与线程安全 UI 更新、问题卡片动态高度、config-sync token 本地独立性、tab-manager 面板宽度常量、流截断 finish_reason 检测、tab 面板宽度持久化移除、PluginIconWidget 下载超时重试。贡献者：mading, dingma
+
+##### ✨ 新功能 (New Features, 3)
+
+- **models.dev 动态数据后台刷新** (`app/core/models_dev_sync.py` + 相关): 实现后台刷新与线程安全的 UI 更新，避免阻塞主线程
+- **问题卡片动态高度计算** (`app/widgets/cards/question_card.py`): 改进动态高度计算以解决换行布局问题
+- **PluginIconWidget 下载超时与重试** (`app/widgets/plugin_icon_widget.py`): 增加图标下载超时控制与重试逻辑，提升稳定性
+
+##### 🐛 问题修复 (Bug Fixes, 2)
+
+- **tab-manager 默认面板宽度** (`app/widgets/tab_manager.py`): 默认面板宽度改用常量统一管理
+- **chat-worker 流截断检测** (`app/core/workers/chat_worker.py`): 通过 finish_reason 检测流式截断，避免静默中途停止
+
+##### ♻️ 代码重构 (Refactoring, 2)
+
+- **config-sync token 本地独立性** (`app/core/config_sync.py`): 更新 token 处理以保证本地独立，防止多设备冲突
+- **tab 面板宽度持久化移除** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 移除 tab 面板宽度与折叠状态持久化，改为固定默认几何
+
+
+#### 📦 附加变更（v0.4.14 三次重发补丁 | 自初次 tag 之后 1 个新提交）
+
+> v0.4.14 初次 tag 后追加：插件安装/更新下载量统计上报。贡献者：mading
+
+##### ✨ 新功能 (New Features, 1)
+
+- **插件下载量统计上报** (`plugins/plugin-marketplace/ui/installer.py` + `cards.py`): 安装/更新成功后向 CountAPI 异步上报 +1（countapi.mileshilliard.com），详情对话框与插件行展示下载量徽标，失败不影响安装流程
 
 
 ## [v0.4.13] - 2026-08-07

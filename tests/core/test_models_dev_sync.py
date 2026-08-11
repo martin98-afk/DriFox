@@ -665,3 +665,118 @@ def test_fetch_opencode_free_models_exception_cleans_inflight(monkeypatch):
     with sync._OPENCODE_FREE_CACHE_LOCK:
         assert cache_key not in sync._OPENCODE_FREE_INFLIGHT
         assert cache_key not in sync._OPENCODE_FREE_CACHE
+
+
+# ============================================================
+# get_dynamic_models（主线程安全：永不发网络）+ refresh_dynamic_models_async
+# ============================================================
+@pytest.fixture(autouse=True)
+def _clean_memory_cache():
+    """清理模块级内存缓存与 in-flight 标记，避免测试间互相污染。"""
+    sync.clear_memory_cache()
+    with sync._REFRESH_LOCK:
+        sync._REFRESH_INFLIGHT = None
+    yield
+    sync.clear_memory_cache()
+    with sync._REFRESH_LOCK:
+        sync._REFRESH_INFLIGHT = None
+
+
+def test_get_dynamic_models_never_fetches_network(monkeypatch, tmp_path: Path):
+    """get_dynamic_models 在缓存缺失/过期时也绝不发网络请求（主线程安全）。"""
+    fetch_called = []
+
+    def _fake_fetch():
+        fetch_called.append(True)
+        raise AssertionError("get_dynamic_models 不应发起网络")
+
+    monkeypatch.setattr(sync, "_fetch_remote", _fake_fetch)
+    # 无缓存文件 + 内存缓存为空 → get_dynamic_models 应返回空而非触发网络
+    monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "none.json")
+    result = sync.get_dynamic_models()
+    assert fetch_called == []
+    assert result.provider_models == {}
+    assert result.model_capabilities == {}
+
+
+def test_get_dynamic_models_reads_valid_file_cache(monkeypatch, tmp_path: Path):
+    """内存缓存为空但文件缓存有效时，get_dynamic_models 读文件并填充内存缓存。"""
+    cache = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "provider_models": {"OpenAI": ["gpt-file-cached"]},
+        "model_capabilities": {"gpt-file-cached": {"context_limit": 123}},
+    }
+    path = tmp_path / "cache.json"
+    sync._save_cache(cache, path)
+    monkeypatch.setattr(sync, "_get_cache_path", lambda: path)
+    monkeypatch.setattr(sync, "_fetch_remote", lambda: (_ for _ in ()).throw(AssertionError("不应网络")))
+
+    result = sync.get_dynamic_models()
+    assert result.provider_models["OpenAI"] == ["gpt-file-cached"]
+    # 第二次调用命中内存缓存，不再读文件
+    monkeypatch.setattr(sync, "_load_cache", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应读文件")))
+    result2 = sync.get_dynamic_models()
+    assert result2.provider_models["OpenAI"] == ["gpt-file-cached"]
+
+
+def test_refresh_dynamic_models_async_fills_memory_cache(monkeypatch, tmp_path: Path):
+    """后台刷新成功后自动填充 get_dynamic_models 的内存缓存（至少有一次成功结果）。"""
+    remote_data = {
+        "openai": {
+            "models": {
+                "gpt-refreshed": {
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                    "limit": {"context": 128000},
+                    "reasoning": False,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
+    monkeypatch.setattr(sync, "_fetch_opencode_zen_free_models", lambda **kw: ([], {}))
+    monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")
+
+    done = threading.Event()
+    seen = {}
+
+    def _on_done(result):
+        seen["result"] = result
+        done.set()
+
+    started = sync.refresh_dynamic_models_async(on_done=_on_done)
+    assert started is True
+    assert done.wait(timeout=5), "后台刷新未在 5s 内完成"
+    # on_done 收到成功结果
+    assert "gpt-refreshed" in seen["result"].provider_models["OpenAI"]
+    # 内存缓存已填充：后续 get_dynamic_models 直接命中
+    assert "gpt-refreshed" in sync.get_dynamic_models().provider_models["OpenAI"]
+
+
+def test_refresh_dynamic_models_async_singleton_dedup(monkeypatch, tmp_path: Path):
+    """并发触发多次后台刷新只发一路网络请求（单飞去重）。"""
+    call_count = []
+
+    def _slow_fetch():
+        call_count.append(True)
+        time.sleep(0.3)
+        return {}
+
+    monkeypatch.setattr(sync, "_fetch_remote", _slow_fetch)
+    monkeypatch.setattr(sync, "_fetch_opencode_zen_free_models", lambda **kw: ([], {}))
+    monkeypatch.setattr(sync, "_get_cache_path", lambda: tmp_path / "cache.json")
+
+    started1 = sync.refresh_dynamic_models_async()
+    started2 = sync.refresh_dynamic_models_async()  # in-flight 期间 → 忽略
+    assert started1 is True
+    assert started2 is False
+    # 等第一个完成，确认只发了一路网络
+    time.sleep(0.8)
+    assert len(call_count) == 1
+    with sync._REFRESH_LOCK:
+        assert sync._REFRESH_INFLIGHT is None  # in-flight 已清理
+    # 完成后可再次触发
+    started3 = sync.refresh_dynamic_models_async()
+    assert started3 is True
+    # 等第三次完成，避免后台线程在 teardown 清理状态时仍在运行
+    time.sleep(0.8)

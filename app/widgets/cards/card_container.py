@@ -261,6 +261,46 @@ class CardContainer(QWidget):
         visible = [w for w in self._cards.values() if not w.isHidden()]
         return bool(visible) and all(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
 
+    def _follow_content_natural_h(self) -> int:
+        """followContent 卡片：用卡片 heightForWidth(容器宽) 计算真实内容高度
+
+        不能直接用布局 sizeHint：QVBoxLayout::sizeHint()（C++）内部遍历
+        QWidgetItem 时**不会**调用 Python 覆写的 sizeHint()，而 wordWrap QLabel
+        的 C++ sizeHint() 用固定（较窄）宽度估算换行高度——卡片实际越宽，
+        高估越明显（如 desc 单行却按 2-3 行算），逐级放大到卡片 sizeHint →
+        容器锁高 → 卡片底部大段空白。
+        heightForWidth() 按真实宽度换行，是 Qt 原生正确实现，从 Python 侧
+        显式调用可拿到真实内容高度。
+        """
+        w = self.width()
+        if w <= 0:
+            # 容器宽度未分配（如首次展开时容器尚在折叠态）：
+            # 用可见卡片的布局理想宽度兜底，避免 fallback 到受 wordWrap
+            # 高估影响的布局 sizeHint。
+            for card in self._cards.values():
+                if not card.isHidden():
+                    cl = card.layout()
+                    iw = cl.sizeHint().width() if cl is not None else 0
+                    if iw > 0:
+                        w = max(w, iw)
+            if w <= 0:
+                return self._axis_natural()
+        for card in self._cards.values():
+            if not card.isHidden() and card.hasHeightForWidth():
+                # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
+                # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
+                cw = card.width()
+                if cw <= 0:
+                    cl = card.layout()
+                    cw = cl.sizeHint().width() if cl is not None else 0
+                if cw > 0:
+                    w = max(w, cw)
+                h = card.heightForWidth(w)
+                if h > 0:
+                    m = self._layout.contentsMargins()
+                    return h + m.top() + m.bottom()
+        return self._axis_natural()
+
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
             return -1
@@ -538,6 +578,11 @@ class CardContainer(QWidget):
             self._layout.activate()
 
             natural_h = self._axis_natural()
+            # followContent 卡片（如 Question）：用卡片 heightForWidth 计算
+            # 真实内容高度，替代布局 sizeHint（受 wordWrap QLabel C++ sizeHint
+            # 高估影响，见 _follow_content_natural_h 注释）。
+            if follow_content:
+                natural_h = self._follow_content_natural_h()
             if natural_h <= 0:
                 # 兜底：layout 没算出高度，尝试强制子控件 adjustSize + 父级布局激活后重测
                 for w in self._cards.values():

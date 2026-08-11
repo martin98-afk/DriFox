@@ -1075,6 +1075,8 @@ class OpenAIChatToolWindow(ToolWindow):
     ai_state_changed = pyqtSignal(str)
     # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
     _opencode_models_ready = pyqtSignal(object)
+    # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
+    _models_dev_ready = pyqtSignal(object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1202,6 +1204,8 @@ class OpenAIChatToolWindow(ToolWindow):
         UsageService.get_instance().coding_plan_ready.connect(self._on_coding_plan_result)
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
+        # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
+        self._models_dev_ready.connect(self._on_models_dev_ready)
         # 线程安全桥接：后台 git 分支检测结果回主线程
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
@@ -2403,6 +2407,9 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
             QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
+        # models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级单飞去重；
+        # 早于 1500ms _load_model_configs 的首次主线程读取，UI 路径零阻塞）
+        QTimer.singleShot(1000, lambda: self._safe_timer_call(self._start_models_dev_sync))
 
     @classmethod
     def _on_class_cleanup_timer(cls):
@@ -6664,6 +6671,46 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_model_selector_header()
 
     # ──────────────────────────────────────────────
+    # models.dev 动态数据后台预热
+    # ──────────────────────────────────────────────
+    def _start_models_dev_sync(self):
+        """后台预热 models.dev 动态模型数据（内存缓存未填充时）。
+
+        主线程只读内存/文件缓存（毫秒级），零阻塞；仅当本进程尚未加载过
+        动态数据且本地缓存不可用时，才经 refresh_dynamic_models_async 在
+        后台线程发起网络拉取（30s + 15s 超时全部落在后台），完成后经
+        _models_dev_ready 信号回主线程刷新 UI。
+        """
+        from app.core.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
+
+        # 已加载过动态数据（多窗口/多标签复用模块级内存缓存）→ 无需重复刷新
+        cached = get_dynamic_models()
+        if cached.provider_models or cached.model_capabilities:
+            return
+
+        # 后台线程拉取；模块级单飞去重保证多窗口只发一路网络请求
+        refresh_dynamic_models_async(on_done=lambda _r: self._models_dev_ready.emit(_r))
+
+    @pyqtSlot(object)
+    def _on_models_dev_ready(self, _result):
+        """models.dev 动态数据后台刷新完成（主线程）：刷新依赖动态数据的 UI。"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 模型选择按钮 tooltip（价格/多模态/思考开关）依赖动态能力数据
+        self._update_model_selector_btn()
+        # 模型选择卡片可见则刷新内容（模型列表可能新增动态模型）
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible("model_selector", self._window_id):
+            self._load_model_selector_to_card()
+        # 设置弹窗可见则刷新服务商卡片（模型下拉可能新增动态模型）
+        if (
+            hasattr(self, "_card_manager")
+            and self._card_manager.is_card_visible("settings", self._window_id)
+            and hasattr(self, "_settings_popup")
+            and hasattr(self._settings_popup, "llmProviderCard")
+        ):
+            self._settings_popup.llmProviderCard._refresh_items()
+
+    # ──────────────────────────────────────────────
     # OpenCode Zen 免费模型异步刷新
     # ──────────────────────────────────────────────
     def _async_refresh_opencode_models(self):
@@ -9096,23 +9143,45 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             self._last_color_theme_id = current_theme_id
 
+        # ── 幂等短路：无任何块需要执行（theme 且主题未变）→ 直接返回 ──
+        # scope="theme" 且主题未变时 is_color/is_font 全 False，
+        # findChildren 全树扫描 + 公共块 setStyleSheet 均为无意义开销（实测 ~110ms）。
+        if not is_color and not is_font:
+            ThemeRefreshCoordinator.timer_end("total")
+            return
+
         # Colors.refresh() 在 preamble 中无条件执行，
         # 保证后续公共块中所有 Colors.* 引用使用最新值。
         # 批处理模式下跳过（已由协调器执行）。
         if not _skip_global:
             Colors.refresh()
 
-        # ── 0. 单次批量扫描 widget 树，按类型缓存 ──
-        # 避免后续 scope 分支中重复 findChildren 遍历全树
+        # ── 0. 按需扫描 widget 树，按类型缓存 ──
+        # [PERF] 单次 findChildren(QWidget) 全树遍历 + isinstance 分类，
+        # 替代多次独立类型 findChildren（每次都是完整树遍历，实测 5 次 ≈ 80ms）。
+        # SystemCardFrame 单独扫：_settings_popup 由 GlobalCardController 持有，
+        # 不在 self 的 widget 树内。
         ThemeRefreshCoordinator.timer_start("findChildren")
-        _message_cards = self.findChildren(MessageCard)
-        _base_settings = self.findChildren(BaseSettingsCard)
+        from PyQt5.QtWidgets import QWidget as _QWidget
+
+        _all_widgets = self.findChildren(_QWidget) if (is_color or is_font) else []
+        if is_color or is_font_family:
+            _message_cards = [w for w in _all_widgets if isinstance(w, MessageCard)]
+        else:
+            _message_cards = []
+        _base_settings = [w for w in _all_widgets if isinstance(w, BaseSettingsCard)]
         from qfluentwidgets import SettingCard
 
-        _setting_cards = self.findChildren(SettingCard)
+        if is_font_size:
+            _setting_cards = [w for w in _all_widgets if isinstance(w, SettingCard)]
+        else:
+            _setting_cards = []
         from app.widgets.worktree_section import WorktreeSectionWidget
 
-        _worktree_widgets = self.findChildren(WorktreeSectionWidget)
+        if is_font:
+            _worktree_widgets = [w for w in _all_widgets if isinstance(w, WorktreeSectionWidget)]
+        else:
+            _worktree_widgets = []
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
         ThemeRefreshCoordinator.timer_end("findChildren")
 
@@ -9245,118 +9314,138 @@ class OpenAIChatToolWindow(ToolWindow):
                 if viewer and hasattr(viewer, "_schedule_render"):
                     viewer._schedule_render(immediate=True)
 
-        # ── 5. 总是执行的公共块（轻量，样式表用缓存值） ──
-        # 窗口标题栏
-        title_bar = self.get_title_bar()
-        if hasattr(title_bar, "refresh_style"):
-            title_bar.refresh_style()
-        # 输入卡片 + 底部工具栏条背景
-        if hasattr(self, "_input_card"):
-            self._apply_bottom_input_stack_style()
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._apply_bottom_input_stack_style()
-        # 模型按钮容器
-        if hasattr(self, "_model_btn_container"):
-            self._model_btn_container.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
-                border: none;
-                border-radius: 8px;
-            """)
+        # ── 5. 公共块 ──
+        # [PERF] 拆分颜色/字体：字体变化时（is_color=False）跳过纯颜色刷新，
+        # 避免数百次 setStyleSheet 重复设置相同颜色样式（实测 ~30ms 纯浪费）。
+        if is_color:
+            # ── 5a. 颜色相关公共块（仅主题/深浅变化时执行） ──
+            # 窗口标题栏
+            title_bar = self.get_title_bar()
+            if hasattr(title_bar, "refresh_style"):
+                title_bar.refresh_style()
+            # 输入卡片 + 底部工具栏条背景
+            if hasattr(self, "_input_card"):
+                self._apply_bottom_input_stack_style()
+            if hasattr(self, "_bottom_toolbar_strip"):
+                self._apply_bottom_input_stack_style()
+            # 模型按钮容器
+            if hasattr(self, "_model_btn_container"):
+                self._model_btn_container.setStyleSheet(f"""
+                    background: {Colors.TOOLBAR_BG};
+                    border: none;
+                    border-radius: 8px;
+                """)
+            if hasattr(self, "_toolbar_capsule"):
+                self._toolbar_capsule.setStyleSheet(f"""
+                    background: {Colors.TOOLBAR_BG};
+                    border: none;
+                    border-radius: 8px;
+                """)
+            # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
+            if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
+                self.input_area.refresh_style()
+            # 发送按钮
+            if hasattr(self, "input_area") and hasattr(self.input_area, "_apply_send_btn_style"):
+                self.input_area._apply_send_btn_style()
+            # 智能体切换按钮
+            if hasattr(self, "_agent_switch_widget"):
+                self._agent_switch_widget.setStyleSheet(f"""
+                    background: {Colors.TOOLBAR_BG};
+                    border: none;
+                    border-radius: 8px;
+                """)
+            # 设置弹窗 — 子卡片主题样式
+            if self._settings_popup:
+                for frame in _popup_frames:
+                    if hasattr(frame, "refresh_style"):
+                        frame.refresh_style()
+                # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
+                for card_name in (
+                    "uiFontSizeCard",
+                    "uiLightModeCard",
+                    "uiThemeStyleCard",
+                    "llmFontCard",
+                    "llmSkillsCard",
+                    "llmProviderCard",
+                    "mcpListCard",
+                    "lspListCard",
+                ):
+                    card = getattr(self._settings_popup, card_name, None)
+                    if card is not None and hasattr(card, "refresh_style"):
+                        card.refresh_style()
+                # 刷新设置弹窗分隔标签
+                if hasattr(self._settings_popup, "_refresh_sep_labels"):
+                    self._settings_popup._refresh_sep_labels()
+            # 设置卡片（全窗口递归）
+            for card in _base_settings:
+                if hasattr(card, "refresh_style"):
+                    card.refresh_style()
+            if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
+                self._settings_popup.refresh_style()
+            # AutoLoop 卡片
+            if self._auto_loop_config_card and hasattr(self._auto_loop_config_card, "_refresh_theme_style"):
+                self._auto_loop_config_card._refresh_theme_style()
+            if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, "_refresh_theme_style"):
+                self._auto_loop_running_card._refresh_theme_style()
+            # 浮动卡片
+            for card in (
+                self._todo_floating_widget,
+                self._question_floating_widget,
+                self._sub_agent_compact_widget,
+                self._share_card_content,
+                self._history_questions_card_content,
+                self._undo_delete_card,
+            ):
+                if card and hasattr(card, "refresh_style"):
+                    card.refresh_style()
+            # 卡片容器
+            if (
+                hasattr(self, "_top_card_container")
+                and self._top_card_container
+                and hasattr(self._top_card_container, "refresh_style")
+            ):
+                self._top_card_container.refresh_style()
+            if (
+                hasattr(self, "_bottom_card_container")
+                and self._bottom_card_container
+                and hasattr(self._bottom_card_container, "refresh_style")
+            ):
+                self._bottom_card_container.refresh_style()
+            # 命令卡片
+            if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
+                self._command_card.refresh_style()
+            # 文件提及卡片（滚动条颜色随主题）
+            if (
+                hasattr(self, "_file_mention_card")
+                and self._file_mention_card
+                and hasattr(self._file_mention_card, "refresh_style")
+            ):
+                self._file_mention_card.refresh_style()
+            # 模型选择卡片
+            if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
+                self._model_selector_card_content.refresh_style()
+            # 🛡️ 懒创建框架下 _model_selector_card 可能仍为 None（deferred 链未执行），
+            # 必须判 None 而非 hasattr（属性恒存在，值为 None 时 hasattr 返回 True）
+            if getattr(self, "_model_selector_card", None) is not None:
+                self._model_selector_card.refresh_style()
+                self._update_model_selector_header()
+            # 项目选择卡片
+            if hasattr(self, "_project_selector_card_content"):
+                self._project_selector_card_content.refresh_style()
+            if hasattr(self, "_project_selector_card"):
+                self._project_selector_card.refresh_style()
+            # 记忆卡片
+            if hasattr(self, "_memory_card_popup") and hasattr(self._memory_card_popup, "refresh_style"):
+                self._memory_card_popup.refresh_style()
+            # 工具控制卡片
+            if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
+                self._tool_control_card.refresh_style()
+
+        # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
+        # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
-        if hasattr(self, "_toolbar_capsule"):
-            self._toolbar_capsule.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
-                border: none;
-                border-radius: 8px;
-            """)
-        # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
-        if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
-            self.input_area.refresh_style()
-        # 发送按钮
-        if hasattr(self, "input_area") and hasattr(self.input_area, "_apply_send_btn_style"):
-            self.input_area._apply_send_btn_style()
-        # 智能体切换按钮
-        if hasattr(self, "_agent_switch_widget"):
-            self._agent_switch_widget.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
-                border: none;
-                border-radius: 8px;
-            """)
-        # 设置弹窗 — 子卡片主题样式
-        if self._settings_popup:
-            for frame in _popup_frames:
-                if hasattr(frame, "refresh_style"):
-                    frame.refresh_style()
-            # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
-            for card_name in (
-                "uiFontSizeCard",
-                "uiLightModeCard",
-                "uiThemeStyleCard",
-                "llmFontCard",
-                "llmSkillsCard",
-                "llmProviderCard",
-                "mcpListCard",
-                "lspListCard",
-            ):
-                card = getattr(self._settings_popup, card_name, None)
-                if card is not None and hasattr(card, "refresh_style"):
-                    card.refresh_style()
-            # 刷新设置弹窗分隔标签
-            if hasattr(self._settings_popup, "_refresh_sep_labels"):
-                self._settings_popup._refresh_sep_labels()
-        # 设置卡片（全窗口递归）
-        for card in _base_settings:
-            if hasattr(card, "refresh_style"):
-                card.refresh_style()
-        if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
-            self._settings_popup.refresh_style()
-        # AutoLoop 卡片
-        if self._auto_loop_config_card and hasattr(self._auto_loop_config_card, "_refresh_theme_style"):
-            self._auto_loop_config_card._refresh_theme_style()
-        if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, "_refresh_theme_style"):
-            self._auto_loop_running_card._refresh_theme_style()
-        # 浮动卡片
-        for card in (
-            self._todo_floating_widget,
-            self._question_floating_widget,
-            self._sub_agent_compact_widget,
-            self._share_card_content,
-            self._history_questions_card_content,
-            self._undo_delete_card,
-        ):
-            if card and hasattr(card, "refresh_style"):
-                card.refresh_style()
-        # 卡片容器
-        if (
-            hasattr(self, "_top_card_container")
-            and self._top_card_container
-            and hasattr(self._top_card_container, "refresh_style")
-        ):
-            self._top_card_container.refresh_style()
-        if (
-            hasattr(self, "_bottom_card_container")
-            and self._bottom_card_container
-            and hasattr(self._bottom_card_container, "refresh_style")
-        ):
-            self._bottom_card_container.refresh_style()
-        # 命令卡片
-        if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
-            self._command_card.refresh_style()
-        # 文件提及卡片（滚动条颜色随主题）
-        if hasattr(self, "_file_mention_card") and self._file_mention_card and hasattr(self._file_mention_card, "refresh_style"):
-            self._file_mention_card.refresh_style()
-        # 模型选择卡片
-        if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
-            self._model_selector_card_content.refresh_style()
-        if hasattr(self, "_model_selector_card"):
-            self._model_selector_card.refresh_style()
-            self._update_model_selector_header()
-        # 项目选择卡片
-        if hasattr(self, "_project_selector_card_content"):
-            self._project_selector_card_content.refresh_style()
-        if hasattr(self, "_project_selector_card"):
-            self._project_selector_card.refresh_style()
+        # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
                 QLineEdit {{
@@ -9375,12 +9464,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     color: {Colors.INPUT_PLACEHOLDER};
                 }}
             """)
-        # 记忆卡片
-        if hasattr(self, "_memory_card_popup") and hasattr(self._memory_card_popup, "refresh_style"):
-            self._memory_card_popup.refresh_style()
-        # 工具控制卡片
-        if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
-            self._tool_control_card.refresh_style()
 
         ThemeRefreshCoordinator.timer_end("total")
 

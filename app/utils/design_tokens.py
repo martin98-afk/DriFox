@@ -133,10 +133,16 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     for child in widget.findChildren(QWidget):
         # setFont 覆盖递归字体
-        child_font = child.font()
-        child_font.setPixelSize(scaled)
-        child_font.setFamily(font_family)
-        child.setFont(child_font)
+        # [PERF] 仅当像素大小/字族与目标不一致时才 setFont：
+        # 全树可达数千控件（长会话消息卡），无变化时 setFont 仍触发
+        # Qt 内部样式重算（实测 5786 次 ≈ 200ms），跳过可大幅提速。
+        cf = child.font()
+        if cf.pixelSize() == scaled and cf.family() == font_family:
+            pass
+        else:
+            cf.setPixelSize(scaled)
+            cf.setFamily(font_family)
+            child.setFont(cf)
 
         # 分类：后续 stylesheet 覆盖仅对特定类型执行
         if isinstance(child, SettingCard):

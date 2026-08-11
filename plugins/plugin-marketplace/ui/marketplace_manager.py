@@ -230,7 +230,12 @@ class MarketplaceSourceManager:
         """为插件补来源标记（旧缓存可能缺 _marketplace/_marketplace_source 字段）
 
         setdefault 不覆盖已存在字段，幂等。
+        同时给市场数据顶层补 _marketplace = 源名：marketplace.json 自带 name
+        可能与源名不一致（如 claude-plugins-community 数据 name 是
+        "claude-community"），而插件 _marketplace 统一用源名；合并/状态
+        徽标按源名匹配，避免「旧数据不移除导致列表翻倍」。
         """
+        market_data.setdefault("_marketplace", name)
         for plugin in market_data.get("plugins", []) or []:
             if not isinstance(plugin, dict):
                 continue

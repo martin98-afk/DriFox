@@ -62,6 +62,17 @@ _SHARED_TOOL_POOL = concurrent.futures.ThreadPoolExecutor(
 _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
+class StreamInterruptedError(RuntimeError):
+    """流式响应被服务端提前截断/过滤/异常空响应。
+
+    用于区分「正常完成」与「服务端截断」：
+    - finish_reason='length'：max_tokens 截断，回复不完整
+    - finish_reason='content_filter'：内容被安全过滤
+    - 收到 chunk 但无任何输出内容（无 content/reasoning/tool_calls）
+    抛出后由 _handle_error 给出明确提示，避免静默当正常完成。
+    """
+
+
 def _check_team_member(backend) -> bool:
     """检查当前窗口是否是团队成员（委托给共用函数）"""
     from app.core.team_manager import check_team_member
@@ -2905,6 +2916,11 @@ class OpenAIChatWorker(QThread):
         _content_batch_time = time.time()  # 上次发射 content 的时间
         chunk_count = 0  # chunk 计数器，用于定期 yield 主线程
         self._mem_total_chunks_logged = 0  # 累计流式 chunk 计数
+        # 🛡️ 流式结束校验：跟踪最后一个 chunk 的 finish_reason，识别服务端截断/过滤
+        # 修复前从不检查 finish_reason：max_tokens 截断（length）/内容过滤（content_filter）
+        # 被静默当「正常完成」→ 回复到一半无报错停止（工具调用迭代最易触达截断）
+        last_finish_reason = None
+        saw_any_chunk = False  # 是否收到过任意 chunk（区分空迭代 vs 仅 usage/空 choices）
         # 流式开始时记录 RSS 基线（用于自适应 GC）
         self._streaming_rss_base = 0.0
         if _HAS_PSUTIL:
@@ -2913,6 +2929,7 @@ class OpenAIChatWorker(QThread):
             except Exception:
                 pass
         for chunk in response:
+            saw_any_chunk = True
             if self._is_cancelled:
                 # 🛡️ 取消前刷新待处理的 content/reasoning 批次，避免丢失最后一批内容
                 if _reasoning_batch:
@@ -2941,6 +2958,11 @@ class OpenAIChatWorker(QThread):
                 continue
 
             delta = chunk.choices[0].delta
+            # 🛡️ 记录最后一个 chunk 的 finish_reason（截断检测用）
+            # 流式最后一个 chunk 通常携带非 None finish_reason
+            _fr = getattr(chunk.choices[0], "finish_reason", None)
+            if _fr:
+                last_finish_reason = _fr
             content = getattr(delta, "content", None)
 
             tool_calls = getattr(delta, "tool_calls", None)
@@ -3377,6 +3399,34 @@ class OpenAIChatWorker(QThread):
         # 🛡️ 清除当前响应引用（已完成，不需要被 cancel 关闭）
         if self._current_response is not None:
             self._current_response = None
+
+        # ========== 流式结束校验：识别服务端截断/过滤/异常空响应 ==========
+        # 修复前：不检查 finish_reason，服务端截断被静默当「正常完成」，
+        # 用户看到回复到一半无报错停止（工具调用迭代最易触达 max_tokens 截断）。
+        # 注意：取消路径（_is_cancelled 分支 return (False, False)）不会走到这里；
+        # 空迭代（无任何 chunk）保持原有行为（兼容测试 FakeEmptyResp），不误报。
+        if not self._is_cancelled:
+            if last_finish_reason == "length":
+                # max_tokens 截断：回复不完整，明确提示（保留已接收 partial）
+                raise StreamInterruptedError(
+                    "[输出截断] 模型回复被 max_tokens 上限截断（finish_reason=length），"
+                    "回复内容不完整。请调大「最大Token」设置，或让模型分步输出。"
+                )
+            if last_finish_reason == "content_filter":
+                raise StreamInterruptedError(
+                    "[内容过滤] 模型回复被内容安全过滤器拦截（finish_reason=content_filter），"
+                    "已接收内容保留。请调整提问或回复内容后重试。"
+                )
+            if saw_any_chunk and last_finish_reason in (None, "stop") and not tool_calls_found:
+                # 收到了 chunk 但没有任何输出内容（无 content、无 reasoning、无 tool_calls）：
+                # 可能是服务端异常提前结束（如过载/代理断开但 HTTP 层正常结束）
+                has_text = bool(self._response_chunks or self._response_content_blocks)
+                has_reasoning = bool(self._get_reasoning_content())
+                if not has_text and not has_reasoning:
+                    raise StreamInterruptedError(
+                        "[空响应] 模型返回了空响应（未生成任何内容），"
+                        "可能是服务端过载或网络异常。请稍后重试。"
+                    )
 
         # 🔧 修复：流式结束后立即回收临时对象（ChatCompletionChunk/Choice/Delta 链）
         # httpx+OpenAI 客户端在处理 900+ chunk 时创建大量临时 Python 对象，
@@ -3989,6 +4039,11 @@ class OpenAIChatWorker(QThread):
         )
 
         error_msg = str(error)
+
+        # 🛡️ 流式截断/过滤/空响应：已带完整中文提示，直接透传
+        if isinstance(error, StreamInterruptedError):
+            self._emit_with_callback("error_occurred", self.error_occurred, str(error))
+            return
 
         if "peer closed connection" in error_msg.lower() or "incomplete chunked read" in error_msg.lower():
             self._emit_with_callback(

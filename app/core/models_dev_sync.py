@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -532,61 +532,67 @@ class DynamicModelsResult:
 def load_dynamic_models(
     force: bool = False,
     cache_path: Optional[Path] = None,
+    allow_network: bool = True,
 ) -> DynamicModelsResult:
     """加载 models.dev 动态模型配置（含 OpenCode Zen 免费模型同步）。
 
     逻辑：
-      1. 若 force=True 或缓存不存在/过期，尝试远程拉取。
+      1. 若 force=True 或缓存不存在/过期，尝试远程拉取（allow_network=False
+         时跳过网络，直接走步骤 4/5，保证调用线程零阻塞）。
       2. 远程拉取成功：解析 models.dev 数据，再叠加 OpenCode Zen 免费模型，
          合入缓存后返回。
       3. 远程拉取失败：若缓存存在（即使过期），用缓存；否则返回空结果。
       4. 若 force=False 且缓存有效：直接读取缓存。
+      5. 无网络且缓存无效：返回空结果。
 
-    该函数尽量轻量；网络失败不会抛异常，而是回退到缓存/空数据。
+    allow_network=False 用于主线程安全读取（只读文件缓存，毫秒级）；
+    真正的网络刷新应通过 refresh_dynamic_models_async() 在后台线程执行。
+    网络失败不会抛异常，而是回退到缓存/空数据。
     """
     path = cache_path or _get_cache_path()
     cache = _load_cache(path)
 
-    if force or not _is_cache_valid(cache):
-        logger.info("[models.dev] 尝试同步最新模型元数据...")
-        remote_data = _fetch_remote()
-        if remote_data is not None:
-            provider_models, model_capabilities = _parse_models_dev_data(remote_data)
+    if (not allow_network) or (force or not _is_cache_valid(cache)):
+        if allow_network:
+            logger.info("[models.dev] 尝试同步最新模型元数据...")
+            remote_data = _fetch_remote()
+            if remote_data is not None:
+                provider_models, model_capabilities = _parse_models_dev_data(remote_data)
 
-            # ── 叠加 OpenCode Zen 免费模型 ──
-            opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models(
-                models_dev_caps=model_capabilities,
-            )
-            if opencode_free_models:
-                if "OpenCode Zen" not in provider_models:
-                    provider_models["OpenCode Zen"] = []
-                seen = {m.strip().lower() for m in provider_models["OpenCode Zen"]}
-                for model in opencode_free_models:
-                    key = model.strip().lower()
-                    if key and key not in seen:
-                        provider_models["OpenCode Zen"].append(model)
-                        seen.add(key)
-                model_capabilities.update(opencode_free_caps)
+                # ── 叠加 OpenCode Zen 免费模型 ──
+                opencode_free_models, opencode_free_caps = _fetch_opencode_zen_free_models(
+                    models_dev_caps=model_capabilities,
+                )
+                if opencode_free_models:
+                    if "OpenCode Zen" not in provider_models:
+                        provider_models["OpenCode Zen"] = []
+                    seen = {m.strip().lower() for m in provider_models["OpenCode Zen"]}
+                    for model in opencode_free_models:
+                        key = model.strip().lower()
+                        if key and key not in seen:
+                            provider_models["OpenCode Zen"].append(model)
+                            seen.add(key)
+                    model_capabilities.update(opencode_free_caps)
 
-            cache = {
-                "_cached_at": time.time(),
-                "_url": MODELS_DEV_API_URL,
-                "_schema_version": CACHE_SCHEMA_VERSION,
-                "provider_models": provider_models,
-                "model_capabilities": model_capabilities,
-            }
-            _save_cache(cache, path)
-            return DynamicModelsResult(
-                provider_models=provider_models,
-                model_capabilities=model_capabilities,
-                from_cache=False,
-                fetched_at=cache["_cached_at"],
-            )
-        # 远程失败：回退到缓存（即使过期）
-        if cache is not None:
-            logger.info("[models.dev] 远程拉取失败，使用过期缓存")
-        else:
-            logger.warning("[models.dev] 远程拉取失败且无缓存，返回空动态数据")
+                cache = {
+                    "_cached_at": time.time(),
+                    "_url": MODELS_DEV_API_URL,
+                    "_schema_version": CACHE_SCHEMA_VERSION,
+                    "provider_models": provider_models,
+                    "model_capabilities": model_capabilities,
+                }
+                _save_cache(cache, path)
+                return DynamicModelsResult(
+                    provider_models=provider_models,
+                    model_capabilities=model_capabilities,
+                    from_cache=False,
+                    fetched_at=cache["_cached_at"],
+                )
+            # 远程失败：回退到缓存（即使过期）
+            if cache is not None:
+                logger.info("[models.dev] 远程拉取失败，使用过期缓存")
+            else:
+                logger.warning("[models.dev] 远程拉取失败且无缓存，返回空动态数据")
 
     if cache is not None:
         return DynamicModelsResult(
@@ -600,18 +606,81 @@ def load_dynamic_models(
 
 
 # 模块级缓存，避免同一次运行中重复加载
+# 锁保护：get_dynamic_models（主线程/任意线程）与 refresh_dynamic_models_async
+# （后台线程）可能并发读写该缓存。
+_CACHE_LOCK = threading.Lock()
 _dynamic_models_cache: Optional[DynamicModelsResult] = None
 
 
 def get_dynamic_models(force: bool = False) -> DynamicModelsResult:
-    """带模块级内存缓存的 load_dynamic_models。"""
+    """带模块级内存缓存的 load_dynamic_models。
+
+    线程安全（UI 主线程可安全调用）。**本函数永不发起网络请求**：
+    只读内存缓存/本地文件缓存，缓存无效时返回空结果（调用方回退硬编码），
+    不会阻塞。网络刷新由 refresh_dynamic_models_async() 在后台线程完成，
+    完成后自动填充本缓存，UI 侧经回调/信号刷新即可看到最新数据。
+    """
     global _dynamic_models_cache
-    if _dynamic_models_cache is None or force:
-        _dynamic_models_cache = load_dynamic_models(force=force)
-    return _dynamic_models_cache
+    with _CACHE_LOCK:
+        if _dynamic_models_cache is None or force:
+            _dynamic_models_cache = load_dynamic_models(force=force, allow_network=False)
+        return _dynamic_models_cache
+
+
+# ----------------------------
+# 后台异步刷新（单飞去重）
+# ----------------------------
+_REFRESH_LOCK = threading.Lock()
+# in-flight 标记：None=无在途刷新；Event 对象=已有刷新在途（忽略新请求）
+_REFRESH_INFLIGHT: Optional[threading.Event] = None
+
+
+def refresh_dynamic_models_async(
+    force: bool = False,
+    on_done: Optional[Callable[[Optional[DynamicModelsResult]], None]] = None,
+) -> bool:
+    """后台线程刷新 models.dev 动态数据，完成后回调。
+
+    - force=False（默认）：本地文件缓存有效则直接复用（无网络请求），
+      无效/过期才网络拉取——适合启动预热，冷启动不浪费一次网络。
+    - force=True：总是向 models.dev 网络拉取——适合手动"立即刷新"。
+    - 单飞去重：已有刷新在途时忽略新请求（多窗口/多触发点安全，只发一路网络）。
+    - on_done 在后台线程回调；UI 调用方需自行转回主线程（如 Qt 跨线程信号）。
+    - 刷新成功后自动填充 get_dynamic_models 的内存缓存。
+    - 网络失败不外抛：按 load_dynamic_models 语义回退到过期缓存/空数据。
+
+    返回 True 表示本次实际启动了刷新线程，False 表示已有在途刷新被忽略。
+    """
+    global _REFRESH_INFLIGHT
+    with _REFRESH_LOCK:
+        if _REFRESH_INFLIGHT is not None:
+            return False
+        _REFRESH_INFLIGHT = threading.Event()
+
+    def _worker() -> None:
+        global _dynamic_models_cache, _REFRESH_INFLIGHT
+        result: Optional[DynamicModelsResult] = None
+        try:
+            result = load_dynamic_models(force=force, allow_network=True)
+            with _CACHE_LOCK:
+                _dynamic_models_cache = result
+        except Exception:
+            logger.exception("[models.dev] 后台刷新异常")
+        finally:
+            with _REFRESH_LOCK:
+                _REFRESH_INFLIGHT = None
+        if on_done is not None:
+            try:
+                on_done(result)
+            except Exception:
+                logger.exception("[models.dev] 刷新完成回调异常")
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return True
 
 
 def clear_memory_cache() -> None:
-    """清空模块级内存缓存，下次调用 get_dynamic_models 时重新加载。"""
+    """清空模块级内存缓存，下次调用 get_dynamic_models 时从文件重新加载。"""
     global _dynamic_models_cache
-    _dynamic_models_cache = None
+    with _CACHE_LOCK:
+        _dynamic_models_cache = None
