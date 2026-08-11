@@ -293,26 +293,6 @@ class _FlowLayout(QLayout):
         return y + line_height - rect.y()
 
 
-class _FlowContainer(QWidget):
-    """承载 FlowLayout 的容器：转发 heightForWidth，父布局按换行后总高算行高
-
-    背景：裸 QWidget 的 hasHeightForWidth() 默认 False，父 QVBoxLayout 对 tag 行
-    回退用 sizeHint（= 单行 tag 高），换行后的总高度不计入 → 多行 tag 被压扁
-    截断，且不同 tag 数量的行高趋同。
-    """
-
-    def __init__(self, parent=None, spacing: int = 4):
-        super().__init__(parent)
-        self._flow_layout = _FlowLayout(self, spacing=spacing)
-        self._flow_layout.setContentsMargins(0, 2, 0, 0)
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, width):
-        return self._flow_layout.heightForWidth(width)
-
-
 # ── 单行插件卡片 ────────────────────────────────────────────
 
 
@@ -963,83 +943,6 @@ class _PluginRow(QFrame):
             return max(8, self._font_size + offset)
         return base_px
 
-    def hasHeightForWidth(self):
-        """支持 heightForWidth：布局按实际分配宽度计算行高
-
-        否则 QVBoxLayout 布局行时用 sizeHint()，而 sizeHint 依赖
-        self.width()（布局时未就绪 → 0 → 回退 super().sizeHint()，
-        QLabel wordWrap 按理想宽度算 → 换行少 → 行高被低估 → 内容遮挡）。
-        """
-        return True
-
-    def heightForWidth(self, width):
-        """按指定宽度计算行高（手动扣除固定列，绕开 QHBoxLayout 宽度误传）"""
-        h = self._row_height_for_width(width)
-        if h > 0:
-            return h
-        return super().heightForWidth(width)
-
-    def resizeEvent(self, event):
-        """宽度变化时按内容实际需要固定行高
-
-        PyQt 下 QWidget::heightForWidth 的 Python override 不会被 Qt 布局
-        调用（QWidgetItem 走 C++ 虚函数，返回 QHBoxLayout::heightForWidth
-        ——把完整宽度传给 info 列，行高被低估 → 内容遮挡）。因此宽度确定
-        后显式 setFixedHeight，让布局按正确高度分配。
-        """
-        super().resizeEvent(event)
-        try:
-            w = self.width()
-            if w <= 0:
-                return
-            h = self._row_height_for_width(w)
-            if h > 0 and abs(h - self.height()) > 2:
-                self.setFixedHeight(h)
-        except RuntimeError:
-            pass  # 行已销毁
-
-    def _row_height_for_width(self, width: int) -> int:
-        """按行宽手动计算行高
-
-        QHBoxLayout::heightForWidth(w) 会把完整宽度 w 传给子 info
-        QVBoxLayout，而实际布局 info 只占 w - 固定列（头像 + 图标列 +
-        操作列 + spacing）→ 按过宽宽度计算 → desc/tag 换行少 → 行高
-        被低估 → 内容遮挡。这里手动扣除固定列后对 info 算 heightForWidth。
-        """
-        lay = self.layout()
-        if lay is None:
-            return 0
-        mg = lay.contentsMargins()
-        sp = lay.spacing()
-        info_idx = getattr(self, "_info_index", 1)
-        fixed = 0
-        cols = 0
-        for i in range(lay.count()):
-            item = lay.itemAt(i)
-            if item is None:
-                continue
-            if i == info_idx:
-                continue
-            cols += 1
-            if item.widget() is not None:
-                # 用 minimumWidth：布局前 sizeHint 可能未初始化（如 avatar=-1）
-                fixed += max(item.widget().minimumWidth(), item.widget().sizeHint().width())
-            elif item.layout() is not None:
-                sub = item.layout()
-                fixed += max(sub.minimumSize().width(), sub.sizeHint().width())
-        info_w = max(width - mg.left() - mg.right() - fixed - sp * cols, 1)
-        info = lay.itemAt(info_idx).layout() if info_idx < lay.count() else None
-        h = info.heightForWidth(info_w) if info is not None else 0
-        # 其它列（头像/图标列/操作列）可能更高，取 max
-        for i in range(lay.count()):
-            item = lay.itemAt(i)
-            if item is None:
-                continue
-            w = item.widget()
-            if w is not None:
-                h = max(h, w.sizeHint().height())
-        return h + mg.top() + mg.bottom()
-
     def sizeHint(self):
         """行 sizeHint：已布局时按当前宽度用 heightForWidth 计算
 
@@ -1053,8 +956,9 @@ class _PluginRow(QFrame):
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
-        if self.width() > 0:
-            h = self._row_height_for_width(self.width())
+        lay = self.layout()
+        if lay is not None and self.width() > 0:
+            h = lay.heightForWidth(self.width())
             if h > 0:
                 return QSize(base.width(), h)
         return base
@@ -1188,8 +1092,9 @@ class _PluginRow(QFrame):
         # Tag 标签行（FlowLayout 自动换行，不撑大卡片宽度）
         self._tag_labels: list = []
         if self._tags:
-            tags_widget = _FlowContainer(self)
-            tags_layout = tags_widget._flow_layout
+            tags_widget = QWidget(self)
+            tags_layout = _FlowLayout(tags_widget, spacing=4)
+            tags_layout.setContentsMargins(0, 2, 0, 0)
             for tag in self._tags:
                 tag_text = (
                     _highlight_html(tag, self._search_query)
