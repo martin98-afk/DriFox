@@ -112,3 +112,43 @@ def test_save_invalid_address_rejected(tmp_path):
     p = _mk(tmp_path, enabled=False)
     assert not p.save(True, "prefix", "not-a-url")
     assert not p.enabled  # 未落盘生效
+
+
+def test_fetch_marketplace_proxy_fallback_direct(monkeypatch, tmp_path):
+    """代理请求失败时回退直连拉取市场数据"""
+    import json as _json
+
+    from ui import marketplace_manager as mm
+
+    # 注入临时代理配置（前缀模式，指向不可达地址 → 必失败）
+    proxy = ProxyConfig(file=tmp_path / "proxy.json")
+    assert proxy.save(True, "prefix", "https://127.0.0.1:1/")
+    monkeypatch.setattr(mm, "get_proxy_config", lambda: proxy)
+
+    # 直连成功返回假市场数据
+    fake_data = {"name": "drifox-official", "plugins": [{"name": "demo"}]}
+    calls = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if url.startswith("https://127.0.0.1:1/"):
+            raise RuntimeError("proxy unreachable")
+        resp = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: fake_data})()
+        return resp
+
+    monkeypatch.setattr(mm.httpx, "get", fake_get)
+
+    src = {"name": "drifox-official", "source": {"source": "url", "url": "https://raw.githubusercontent.com/x/y/main/marketplace.json"}}
+    mgr = mm.MarketplaceSourceManager.__new__(mm.MarketplaceSourceManager)
+    mgr._cache_dir = tmp_path
+    mgr._status_file = tmp_path / "status.json"
+    mgr._fetch_status = {}
+    data = mgr.fetch_marketplace(src, force=True)
+
+    assert data["plugins"][0]["name"] == "demo"
+    # 先代理后直连：两次请求
+    assert len(calls) == 2
+    assert calls[0].startswith("https://127.0.0.1:1/")
+    assert calls[1] == "https://raw.githubusercontent.com/x/y/main/marketplace.json"
+    # 失败状态已记录
+    assert mgr._fetch_status["drifox-official"]["ok"] is True
