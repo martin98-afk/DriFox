@@ -212,9 +212,17 @@ class DatabaseManager:
                 cursor.execute(sql, params)
                 if not is_read:
                     if is_deferrable_write:
+                        # 🐛 修复：必须在 RELEASE 前捕获 rowcount。RELEASE SAVEPOINT
+                        # 是 DML 之外的语句，执行后会重置 cursor.rowcount 为 -1，
+                        # 导致 DML 实际影响行数丢失（如 UPDATE 0 行变成 -1），
+                        # 依赖 rowcount==0 做兜底判断的调用方（如
+                        # KeyDocumentsRepository.set_working_directory 的自动插入）
+                        # 永不触发 → 新项目默认工作目录从未写入 key_documents，
+                        # 关键文档列表为空。
+                        affected = int(cursor.rowcount)
                         cursor.execute("RELEASE sp_exec")
                         self._schedule_commit()
-                        return True, int(cursor.rowcount)
+                        return True, affected
                     # DDL / VACUUM 等：立即提交（部分语句不能留在事务中）
                     self._conn.commit()
                     return True, int(cursor.rowcount)
