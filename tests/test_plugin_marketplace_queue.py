@@ -162,3 +162,58 @@ def test_completion_does_not_reset_queued_rows(monkeypatch):
     assert not rows["p0"]._busy
 
     card._cleanup_worker()
+
+
+def test_task_fn_prewarms_state_cache(monkeypatch):
+    """任务函数包装：执行后后台线程预热 installed/status 缓存
+
+    回归：安装完成回调 _refresh_row_states 主线程全量扫描磁盘（缓存已被
+    install invalidate）导致卡顿。修复后状态扫描挪到任务线程（预热），
+    主线程回调命中 TTL 缓存不再阻塞。
+    """
+    import ui.cards as cards_mod
+    from ui.installer import PluginInstaller
+
+    calls = {"inst": 0, "status": 0}
+
+    def fake_inst(self, use_cache=True):
+        calls["inst"] += 1
+        return {}
+
+    def fake_status(self, use_cache=True):
+        calls["status"] += 1
+        return {}
+
+    monkeypatch.setattr(PluginInstaller, "get_installed_map", fake_inst)
+    monkeypatch.setattr(PluginInstaller, "get_status_map", fake_status)
+
+    inner_called = []
+
+    def inner():
+        inner_called.append(1)
+        return True
+
+    wrapped = cards_mod.MarketplaceCard._wrapped_task_fn(inner)
+    assert wrapped() is True, "包装函数必须透传任务结果"
+    assert inner_called == [1], "任务函数必须被调用"
+    # 预热：任务返回前 installed + status 缓存各扫一次（后台线程，不卡 UI）
+    assert calls["inst"] == 1, f"未预热 installed 缓存: {calls}"
+    assert calls["status"] == 1, f"未预热 status 缓存: {calls}"
+
+
+def test_task_fn_prewarm_failure_tolerated(monkeypatch):
+    """预热失败不影响任务结果（异常吞掉，主线程回调自行兜底扫描）"""
+    import ui.cards as cards_mod
+    from ui.installer import PluginInstaller
+
+    def boom(self, use_cache=True):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(PluginInstaller, "get_installed_map", boom)
+    monkeypatch.setattr(PluginInstaller, "get_status_map", boom)
+
+    def inner():
+        return True
+
+    wrapped = cards_mod.MarketplaceCard._wrapped_task_fn(inner)
+    assert wrapped() is True, "预热异常不得影响任务结果"

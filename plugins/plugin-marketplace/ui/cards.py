@@ -2843,6 +2843,30 @@ class MarketplaceCard(QWidget):
 
     # ── 异步任务队列（安装/更新/启用/禁用/卸载 串行执行） ──
 
+    @staticmethod
+    def _wrapped_task_fn(fn: Callable[[], bool]) -> Callable[[], bool]:
+        """包装任务函数：执行后在后台线程预热插件状态缓存
+
+        安装/更新/启用/禁用/卸载都会 invalidate installed/status 缓存。
+        若等主线程完成回调（_refresh_row_states）再全量扫描磁盘（数十个
+        插件逐个读 manifest）会卡 UI。这里在任务线程内先扫一次填充 TTL
+        缓存，主线程完成回调命中缓存（3s TTL）不再阻塞。
+
+        GIL 保护 dict/float 赋值，跨线程共享 TTL 缓存安全（与安装线程
+        调 invalidate_installed_cache 同理）。
+        """
+
+        def _run():
+            ok = fn()
+            try:
+                get_installer().get_installed_map()
+                get_installer().get_status_map()
+            except Exception:
+                pass  # 预热失败不影响结果（主线程回调自行扫描兜底）
+            return ok
+
+        return _run
+
     def _submit_task(
         self,
         *,
@@ -2872,7 +2896,7 @@ class MarketplaceCard(QWidget):
             {
                 "kind": kind,
                 "name": name,
-                "fn": fn,
+                "fn": self._wrapped_task_fn(fn),
                 "busy_text": busy_text,
                 "status_text": status_text,
                 "status_color": status_color,
