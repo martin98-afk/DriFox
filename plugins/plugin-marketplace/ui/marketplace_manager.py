@@ -381,7 +381,21 @@ class MarketplaceSourceManager:
             marketplaces.append(data)
             for plugin in data.get("plugins", []):
                 name = plugin.get("name", "")
-                if name and name not in all_plugins:
+                if not name:
+                    continue
+                try:
+                    dl = int(plugin.get("downloads", 0) or 0)
+                except (TypeError, ValueError):
+                    dl = 0
+                if name in all_plugins:
+                    # 同名插件：downloads 求和（缺失/异常值按 0 兜底）
+                    existing = all_plugins[name]
+                    try:
+                        cur = int(existing.get("downloads", 0) or 0)
+                    except (TypeError, ValueError):
+                        cur = 0
+                    existing["downloads"] = cur + dl
+                else:
                     all_plugins[name] = plugin
 
         return list(all_plugins.values()), marketplaces, errors
