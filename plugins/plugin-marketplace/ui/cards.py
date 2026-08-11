@@ -57,6 +57,7 @@ from qfluentwidgets import (
 from .data import get_marketplace
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
+from .proxy import get_proxy_config
 from ._squircle_avatar import (
     SquircleAvatar,
     PluginIconWidget,
@@ -3454,8 +3455,6 @@ class MarketplaceCard(QWidget):
         address = self._proxy_addr_edit.text().strip()
         self._proxy_status_label.setText("测试中…")
         self._proxy_status_label.repaint()
-        from .proxy import get_proxy_config
-
         proxy = get_proxy_config()
 
         def _run():
@@ -3503,8 +3502,6 @@ class MarketplaceCard(QWidget):
         enabled = self._proxy_switch.isChecked()
         mode = self._proxy_mode_combo.currentData()
         address = self._proxy_addr_edit.text().strip()
-        from .proxy import get_proxy_config
-
         ok, msg = get_proxy_config().validate(mode, address)
         if not ok:
             self._proxy_status_label.setStyleSheet(

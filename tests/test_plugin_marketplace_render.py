@@ -201,6 +201,28 @@ def test_load_more_no_blank_tail(monkeypatch):
     assert scroll_max3 <= content_h3 - vp_h2 + 1, f"重建后滚动范围超出内容: scrollMax={scroll_max3}"
 
 
+def test_proxy_tab_switches_without_error(monkeypatch):
+    """「加速」tab 切换不抛异常且页面正确切换（回归：get_proxy_config 未导入导致 NameError 被 Qt 吞）"""
+    card = _new_card(monkeypatch)
+    card.show()
+
+    # 直接触发 tab 切换（等价于点击 Pivot）
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    assert card._page_stack.currentIndex() == 2
+    assert getattr(card, "_proxy_built", False) is True
+    # 页面确实有内容（三张卡片 + 控件）
+    from PyQt5.QtWidgets import QLabel
+
+    assert card._proxy_page.findChildren(QLabel), "加速页应有 QLabel 控件"
+
+    # 切回浏览正常
+    card._on_tab_changed("browse")
+    _pump(0.05)
+    assert card._page_stack.currentIndex() == 0
+
+
 def _stretch_gap(card) -> int:
     """按钮（或最后可见行）底部与 content 底部的空隙（stretch 区）"""
     btn = card._load_more_btn
