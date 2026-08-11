@@ -3309,7 +3309,7 @@ class MarketplaceCard(QWidget):
     # ── 加速配置 ──
 
     def _build_proxy_page(self):
-        """构建「加速」tab（分组卡片式：启用 / 配置 / 帮助）
+        """构建「加速」tab（单一外框：启用 / 配置 / 帮助三段，分隔线隔开）
 
         首次构建后缓存；再次切换不重载表单（保留用户未保存的
         开关/地址状态，避免切走再切回时被磁盘旧值覆盖）。
@@ -3324,42 +3324,52 @@ class MarketplaceCard(QWidget):
 
         root = self._proxy_page.layout()
 
-        # ── 卡片1：启用 ──
-        enable_card = QWidget(self._proxy_page)
-        enable_card.setAttribute(Qt.WA_StyledBackground, True)
-        enable_card.setStyleSheet(
+        # ── 外部单一容器框（唯一带边框/背景的卡片）──
+        outer = QWidget(self._proxy_page)
+        outer.setAttribute(Qt.WA_StyledBackground, True)
+        outer.setStyleSheet(
             f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
         )
-        enable_layout = QHBoxLayout(enable_card)
-        enable_layout.setContentsMargins(14, 10, 14, 10)
-        title_lb = QLabel("⚡ 启用", enable_card)
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(14, 4, 14, 4)
+        outer_layout.setSpacing(0)
+
+        # ── 段1：启用 ──
+        enable_row = QWidget(outer)
+        enable_row.setStyleSheet("background: transparent;")
+        enable_layout = QHBoxLayout(enable_row)
+        enable_layout.setContentsMargins(0, 8, 0, 8)
+        title_lb = QLabel("⚡ 启用", enable_row)
         title_lb.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
         enable_layout.addWidget(title_lb)
         enable_layout.addStretch(1)
-        self._proxy_switch = SwitchButton(enable_card)
+        self._proxy_switch = SwitchButton(enable_row)
         # 初始 setChecked 不应触发 toggled 自动保存（后续控件尚未创建）
         self._proxy_switch.blockSignals(True)
         self._proxy_switch.setChecked(False)
         self._proxy_switch.blockSignals(False)
         self._proxy_switch.checkedChanged.connect(self._on_proxy_switch_toggled)
         enable_layout.addWidget(self._proxy_switch)
-        root.addWidget(enable_card)
+        outer_layout.addWidget(enable_row)
 
-        # ── 卡片2：配置 ──
-        config_card = QWidget(self._proxy_page)
-        config_card.setAttribute(Qt.WA_StyledBackground, True)
-        config_card.setStyleSheet(
-            f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
-        )
-        config_layout = QVBoxLayout(config_card)
-        config_layout.setContentsMargins(14, 10, 14, 10)
+        # ── 分隔线1 ──
+        sep1 = QFrame(outer)
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setStyleSheet(f"background: {border_c}; max-height: 1px; border: none;")
+        outer_layout.addWidget(sep1)
+
+        # ── 段2：配置 ──
+        config_widget = QWidget(outer)
+        config_widget.setStyleSheet("background: transparent;")
+        config_layout = QVBoxLayout(config_widget)
+        config_layout.setContentsMargins(0, 10, 0, 8)
         config_layout.setSpacing(8)
 
-        cfg_title = QLabel("⚙ 配置", config_card)
+        cfg_title = QLabel("⚙ 配置", config_widget)
         cfg_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
         config_layout.addWidget(cfg_title)
 
-        self._proxy_mode_combo = QComboBox(config_card)
+        self._proxy_mode_combo = QComboBox(config_widget)
         self._proxy_mode_combo.addItem("前缀加速站", "prefix")
         self._proxy_mode_combo.addItem("自建代理服务", "selfhost")
         self._proxy_mode_combo.addItem("HTTP 正向代理", "http")
@@ -3368,12 +3378,12 @@ class MarketplaceCard(QWidget):
         self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
         config_layout.addWidget(self._proxy_mode_combo)
 
-        self._proxy_addr_edit = LineEdit(config_card)
+        self._proxy_addr_edit = LineEdit(config_widget)
         self._proxy_addr_edit.setPlaceholderText("https://ghfast.top/")
         self._proxy_addr_edit.setClearButtonEnabled(True)
         config_layout.addWidget(self._proxy_addr_edit)
 
-        btn_row = QWidget(config_card)
+        btn_row = QWidget(config_widget)
         btn_row.setStyleSheet("background: transparent;")
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
@@ -3389,7 +3399,7 @@ class MarketplaceCard(QWidget):
         btn_layout.addStretch(1)
         config_layout.addWidget(btn_row)
 
-        self._proxy_status_label = QLabel("", config_card)
+        self._proxy_status_label = QLabel("", config_widget)
         self._proxy_status_label.setObjectName("proxyStatus")
         self._proxy_status_label.setStyleSheet(
             f"color: {accent}; font-size: 12px; background: transparent;"
@@ -3397,29 +3407,33 @@ class MarketplaceCard(QWidget):
         self._proxy_status_label.setWordWrap(True)
         config_layout.addWidget(self._proxy_status_label)
 
-        root.addWidget(config_card)
+        outer_layout.addWidget(config_widget)
 
-        # ── 卡片3：帮助 ──
-        help_card = QWidget(self._proxy_page)
-        help_card.setAttribute(Qt.WA_StyledBackground, True)
-        help_card.setStyleSheet(
-            f"background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px;"
-        )
-        help_layout = QVBoxLayout(help_card)
-        help_layout.setContentsMargins(14, 10, 14, 10)
+        # ── 分隔线2 ──
+        sep2 = QFrame(outer)
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet(f"background: {border_c}; max-height: 1px; border: none;")
+        outer_layout.addWidget(sep2)
+
+        # ── 段3：帮助 ──
+        help_widget = QWidget(outer)
+        help_widget.setStyleSheet("background: transparent;")
+        help_layout = QVBoxLayout(help_widget)
+        help_layout.setContentsMargins(0, 10, 0, 8)
         help_layout.setSpacing(4)
-        help_title = QLabel("💡 帮助", help_card)
+        help_title = QLabel("💡 帮助", help_widget)
         help_title.setStyleSheet(f"color: {tcs}; font-size: 12px; background: transparent;")
         help_layout.addWidget(help_title)
-        self._proxy_help_label = QLabel("", help_card)
+        self._proxy_help_label = QLabel("", help_widget)
         self._proxy_help_label.setObjectName("proxyHelp")
         self._proxy_help_label.setStyleSheet(
             f"color: {tcs}; font-size: 12px; background: transparent;"
         )
         self._proxy_help_label.setWordWrap(True)
         help_layout.addWidget(self._proxy_help_label)
-        root.addWidget(help_card)
+        outer_layout.addWidget(help_widget)
 
+        root.addWidget(outer)
         root.addStretch(1)
         self._proxy_built = True
         self._load_proxy_form()

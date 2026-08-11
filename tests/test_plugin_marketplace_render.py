@@ -302,7 +302,7 @@ def test_proxy_switch_bounces_on_invalid_address(monkeypatch, tmp_path):
 
 
 def test_proxy_card_has_styled_background(monkeypatch):
-    """加速页卡片必须设置 WA_StyledBackground（否则 QWidget QSS background 不渲染 → 透明）"""
+    """加速页只有一个带边框背景的外层容器（WA_StyledBackground，否则 QSS background 不渲染 → 透明）"""
     from PyQt5.QtCore import Qt as _Qt
     from PyQt5.QtWidgets import QWidget as _QWidget
 
@@ -311,17 +311,54 @@ def test_proxy_card_has_styled_background(monkeypatch):
     card._on_tab_changed("proxy")
     _pump(0.05)
 
-    # 三张卡片：QWidget + WA_StyledBackground + 非 transparent 背景
-    widgets = [w for w in card._proxy_page.findChildren(type(card._proxy_page)) if w is not card._proxy_page]
+    # 外层容器：_proxy_page 的直接子级、带边框背景
     bg_cards = [
         w
-        for w in widgets
-        if isinstance(w, _QWidget)
+        for w in card._proxy_page.findChildren(_QWidget)
+        if w.parent() is card._proxy_page
         and w.testAttribute(_Qt.WA_StyledBackground)
-        and "transparent" not in w.styleSheet()
+        and "border" in w.styleSheet()
         and "background" in w.styleSheet()
     ]
-    assert len(bg_cards) >= 3, f"应有 3 张带背景的卡片，实际 {len(bg_cards)}"
+    assert len(bg_cards) == 1, f"应只有 1 个外层容器带边框，实际 {len(bg_cards)}"
+
+
+def test_proxy_inner_sections_have_no_border(monkeypatch):
+    """加速页内部段落（启用/配置/帮助）不得有边框"""
+    from PyQt5.QtCore import Qt as _Qt
+    from PyQt5.QtWidgets import QWidget as _QWidget
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 找到外层容器
+    outer = None
+    for w in card._proxy_page.findChildren(_QWidget):
+        if (
+            w.parent() is card._proxy_page
+            and w.testAttribute(_Qt.WA_StyledBackground)
+            and "border" in w.styleSheet()
+        ):
+            outer = w
+            break
+    assert outer is not None, "未找到外层容器"
+
+    # 外层内的直接子段：启用行/配置段/帮助段/分隔线 → 均不得有可见边框
+    for i in range(outer.layout().count()):
+        item = outer.layout().itemAt(i)
+        w = item.widget() if item else None
+        if w is None:
+            continue
+        ss = w.styleSheet()
+        if not ss:
+            continue
+        # border: none 视为无边框；只拦截设置了实际 border 的
+        if "border:" in ss and "border: none" not in ss:
+            raise AssertionError(f"内部段不应有边框: {ss[:80]}")
+
+
 
 
 def _stretch_gap(card) -> int:
