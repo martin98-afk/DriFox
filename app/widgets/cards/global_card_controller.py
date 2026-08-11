@@ -52,6 +52,10 @@ class GlobalCardController:
 
         # ── 懒构建的全局卡片实例 ──
         self._settings_popup = None
+        # 构建中标志：LLMSettingsCard 构造链（GiteeCard/Hook/MCP 子卡刷新）含
+        # QCoreApplication.processEvents()，事件重入可能再次进入 ensure_settings_popup。
+        # 若不加保护，会在 _settings_popup 赋值前递归构建多张设置卡（P024：重叠显示）。
+        self._settings_popup_building = False
         self._provider_edit_card = None
         self._hook_edit_card = None
         self._mcp_edit_card = None
@@ -102,46 +106,58 @@ class GlobalCardController:
     # ───────────────────────────────────────────────────────────
 
     def ensure_settings_popup(self):
-        """性能优化：懒构建设置弹窗（重型，隐藏构件），仅构建一次"""
+        """性能优化：懒构建设置弹窗（重型，隐藏构件），仅构建一次
+
+        重入保护：LLMSettingsCard 构造链（子卡 _refresh 含 QCoreApplication.processEvents）
+        可能事件重入再次进入本方法；若 `_settings_popup` 尚未赋值（先构造后赋值），
+        会递归构建多张设置卡 → 容器内多卡重叠（P024）。构建中标志直接短路重入调用。
+        """
         if self._settings_popup is not None:
             return
-        from app.core.hook_manager import HookManager
-        from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
-
-        self._settings_popup = LLMSettingsCard(self._tab_manager)
-        self._settings_popup.setVisible(False)
-        self._settings_popup.configChanged.connect(self.on_settings_config_changed)
-        self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID))
-
-        # 全局 Hook 列表：HookManager 使用类级共享状态，单例即可跨窗口共用
+        if self._settings_popup_building:
+            # 事件重入：正在构建中，直接返回（外层构建完成后 _settings_popup 已赋值）
+            return
+        self._settings_popup_building = True
         try:
-            self._settings_popup.hookListCard._hook_manager = HookManager()
-            # 重新加载一次（构建时 manager 可能为 None 导致列表为空）
-            self._settings_popup.hookListCard._refresh(reload=True)
-        except Exception as e:
-            logger.warning(f"[GlobalCard] 设置 HookManager 注入失败: {e}")
+            from app.core.hook_manager import HookManager
+            from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
-        # 连接服务商添加/编辑信号
-        self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
-        self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
-        # 连接 Hook 添加/编辑信号
-        self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
-        self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
-        self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
-        self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
-        # 连接 MCP 添加/编辑信号
-        self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
-        self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
-        # 注意：MCP 服务器开关/增删改均在各操作点（MCPListSettingCard）内自行完成 UI
-        # 更新（开关=行级更新，增删改=局部 _refresh），此处不再把 serversChanged 接到
-        # _on_mcp_servers_toggled 做全量重建，否则开关 MCP 时整卡闪烁/列表重建。
-        # 跨窗口同步由 .mcp.json 热重载广播负责（见 main_widget HotReload 的 mcp 分支）。
-        self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
+            self._settings_popup = LLMSettingsCard(self._tab_manager)
+            self._settings_popup.setVisible(False)
+            self._settings_popup.configChanged.connect(self.on_settings_config_changed)
+            self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID))
 
-        # 注册到 CardManager 与全局容器（system_card=True 仅做全局互斥，不隐藏输入区）
-        mgr = self._card_manager
-        mgr.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "settings", self._settings_popup, system_card=True)
-        self._global_card_container.add_card("settings", self._settings_popup)
+            # 全局 Hook 列表：HookManager 使用类级共享状态，单例即可跨窗口共用
+            try:
+                self._settings_popup.hookListCard._hook_manager = HookManager()
+                # 重新加载一次（构建时 manager 可能为 None 导致列表为空）
+                self._settings_popup.hookListCard._refresh(reload=True)
+            except Exception as e:
+                logger.warning(f"[GlobalCard] 设置 HookManager 注入失败: {e}")
+
+            # 连接服务商添加/编辑信号
+            self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
+            self._settings_popup.llmProviderCard.showEditProviderCard.connect(self._show_provider_edit_card)
+            # 连接 Hook 添加/编辑信号
+            self._settings_popup.hookListCard.showAddHookCard.connect(self._show_hook_add_card)
+            self._settings_popup.hookListCard.showEditHookCard.connect(self._show_hook_edit_card)
+            self._settings_popup.hookListCard.hooksChanged.connect(self._on_hook_toggled)
+            self._settings_popup.hookListCard.hookToggled.connect(self._on_hook_toggled_light)
+            # 连接 MCP 添加/编辑信号
+            self._settings_popup.mcpListCard.showAddCard.connect(self._show_mcp_add_card)
+            self._settings_popup.mcpListCard.showEditCard.connect(self._show_mcp_edit_card)
+            # 注意：MCP 服务器开关/增删改均在各操作点（MCPListSettingCard）内自行完成 UI
+            # 更新（开关=行级更新，增删改=局部 _refresh），此处不再把 serversChanged 接到
+            # _on_mcp_servers_toggled 做全量重建，否则开关 MCP 时整卡闪烁/列表重建。
+            # 跨窗口同步由 .mcp.json 热重载广播负责（见 main_widget HotReload 的 mcp 分支）。
+            self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
+
+            # 注册到 CardManager 与全局容器（system_card=True 仅做全局互斥，不隐藏输入区）
+            mgr = self._card_manager
+            mgr.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "settings", self._settings_popup, system_card=True)
+            self._global_card_container.add_card("settings", self._settings_popup)
+        finally:
+            self._settings_popup_building = False
 
     # ───────────────────────────────────────────────────────────
     # 显示入口
@@ -617,15 +633,20 @@ class GlobalCardController:
     def show_file_undo(self, operations, file_recorder, on_finished):
         """显示文件撤销卡片；差异关闭后返回此卡片。"""
         from app.widgets.cards.settings.file_undo_card import FileUndoCard
+
         if self._file_undo_card is not None:
             self._card_manager.hide_card("file_undo", GLOBAL_WINDOW_ID)
             self._global_card_container.remove_card("file_undo")
             self._file_undo_card.deleteLater()
         self._file_undo_card = FileUndoCard(operations, file_recorder, self._tab_manager)
-        self._file_undo_card.finished.connect(lambda result, selected: self._finish_file_undo(on_finished, result, selected))
+        self._file_undo_card.finished.connect(
+            lambda result, selected: self._finish_file_undo(on_finished, result, selected)
+        )
         self._file_undo_card.diffRequested.connect(self._show_file_undo_diff)
         self._file_undo_card.closed.connect(lambda: self._finish_file_undo(on_finished, FileUndoCard.CANCEL, []))
-        self._card_manager.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "file_undo", self._file_undo_card, system_card=True)
+        self._card_manager.register_card(
+            GLOBAL_WINDOW_ID, ContainerType.TOP, "file_undo", self._file_undo_card, system_card=True
+        )
         self._global_card_container.add_card("file_undo", self._file_undo_card)
         self._card_manager.show_card("file_undo", GLOBAL_WINDOW_ID)
 
