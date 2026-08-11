@@ -6,6 +6,7 @@
 - DownloadsFetcher 缓存命中/失败防抖/TTL 过期/批量查询
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -175,3 +176,97 @@ def test_fetch_missing_ttl_expiry_refetches(monkeypatch):
     fetcher._cache["p1"] = (fetcher._cache["p1"][0], fetcher._cache["p1"][1] - TTL - 1)
     fetcher.fetch_missing(["p1"])
     assert calls == ["p1", "p1"]
+
+
+# ── Task 3: UI 集成（渲染触发查询 + 回填重渲染）────────────
+
+
+def _mk_card(monkeypatch, plugins):
+    """构造卡片 + 返回插件数据"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from ui.cards import MarketplaceCard
+    from ui.marketplace_manager import MarketplaceSourceManager
+
+    monkeypatch.setattr(
+        MarketplaceSourceManager,
+        "get_sources",
+        lambda self: [{"name": "fake", "source": {"source": "url", "url": "x"}}],
+    )
+    monkeypatch.setattr(
+        MarketplaceSourceManager,
+        "fetch_marketplace",
+        lambda self, src, force=False: {"name": "fake", "plugins": plugins},
+    )
+    card = MarketplaceCard()
+    card.show()
+    return card
+
+
+def _pump(seconds=0.2):
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    import time as _t
+
+    deadline = _t.time() + seconds
+    while _t.time() < deadline:
+        if app is not None:
+            app.processEvents()
+        _t.sleep(0.01)
+
+
+def test_render_no_fetch_when_live_query_disabled(monkeypatch, tmp_path):
+    """实时查询关闭（_DOWNLOADS_LIVE_QUERY_ENABLED=False）→ 不查询、不回填
+
+    2026-08 决策：官方源 downloads 靠 market.json 自带字段，社区源关闭
+    CountAPI 实时查询（key 不存在大量 404 + 服务无批量接口）。
+    恢复实时查询时：置开关 True 并把本测试改回「查询 → 回填」断言。
+    """
+    from ui import cards as cards_mod
+
+    assert cards_mod._DOWNLOADS_LIVE_QUERY_ENABLED is False, "实时查询开关应为关闭状态"
+
+    fetched = []
+
+    def fake_fetch_missing(names):
+        fetched.extend(names)
+        return {}
+
+    monkeypatch.setattr(
+        cards_mod,
+        "get_downloads_fetcher",
+        lambda: type("F", (), {"fetch_missing": fake_fetch_missing})(),
+    )
+
+    plugins = [{"name": "community-p1", "version": "1.0", "_marketplace": "community"}]
+    card = _mk_card(monkeypatch, plugins)
+    card.show_card()
+    _pump(0.5)
+
+    # 重新触发渲染（若查询开启，此处会发起查询）
+    card._render_plugins(plugins)
+    _pump(0.5)
+
+    assert fetched == [], "实时查询关闭时不应发起查询"
+    assert plugins[0].get("downloads") is None, "不应回填 downloads"
+
+
+def test_render_no_fetch_when_all_have_downloads(monkeypatch):
+    """所有插件都有 downloads → 不触发查询"""
+    from ui import cards as cards_mod
+
+    plugins = [{"name": "official-p1", "version": "1.0", "downloads": 99, "_marketplace": "official"}]
+    card = _mk_card(monkeypatch, plugins)
+
+    fetched = []
+
+    def fake_fetch_missing(names):
+        fetched.extend(names)
+        return {}
+
+    monkeypatch.setattr(cards_mod, "get_downloads_fetcher", lambda: type("F", (), {"fetch_missing": fake_fetch_missing})())
+    card.show_card()
+    card._render_plugins(plugins)
+    _pump(0.3)
+
+    assert fetched == [], "全部有 downloads 时不应发起查询"

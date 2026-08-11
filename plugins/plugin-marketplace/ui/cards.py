@@ -57,6 +57,7 @@ from qfluentwidgets import (
 )
 
 from .data import get_marketplace
+from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
 from .proxy import get_proxy_config
@@ -71,6 +72,11 @@ from ._squircle_avatar import (
 # 模块级孤儿线程容器：跨卡片生命周期持有已 quit 的线程
 # （防止 running 线程随卡片析构被连带销毁 → Qt abort 0xC0000409）
 _orphan_threads: list = []
+
+# 下载量实时查询开关（False = 暂时关闭，2026-08 决策）
+# 官方源 downloads 靠 market.json 自带字段；社区源 key 在 CountAPI 上不存在
+# （大量 404）且服务无批量接口 → 逐个查询开销大。恢复时置 True。
+_DOWNLOADS_LIVE_QUERY_ENABLED = False
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -285,6 +291,26 @@ class _FlowLayout(QLayout):
             x = next_x + self._spacing
             line_height = max(line_height, hint.height())
         return y + line_height - rect.y()
+
+
+class _FlowContainer(QWidget):
+    """承载 FlowLayout 的容器：转发 heightForWidth，父布局按换行后总高算行高
+
+    背景：裸 QWidget 的 hasHeightForWidth() 默认 False，父 QVBoxLayout 对 tag 行
+    回退用 sizeHint（= 单行 tag 高），换行后的总高度不计入 → 多行 tag 被压扁
+    截断，且不同 tag 数量的行高趋同。
+    """
+
+    def __init__(self, parent=None, spacing: int = 4):
+        super().__init__(parent)
+        self._flow_layout = _FlowLayout(self, spacing=spacing)
+        self._flow_layout.setContentsMargins(0, 2, 0, 0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._flow_layout.heightForWidth(width)
 
 
 # ── 单行插件卡片 ────────────────────────────────────────────
@@ -937,6 +963,83 @@ class _PluginRow(QFrame):
             return max(8, self._font_size + offset)
         return base_px
 
+    def hasHeightForWidth(self):
+        """支持 heightForWidth：布局按实际分配宽度计算行高
+
+        否则 QVBoxLayout 布局行时用 sizeHint()，而 sizeHint 依赖
+        self.width()（布局时未就绪 → 0 → 回退 super().sizeHint()，
+        QLabel wordWrap 按理想宽度算 → 换行少 → 行高被低估 → 内容遮挡）。
+        """
+        return True
+
+    def heightForWidth(self, width):
+        """按指定宽度计算行高（手动扣除固定列，绕开 QHBoxLayout 宽度误传）"""
+        h = self._row_height_for_width(width)
+        if h > 0:
+            return h
+        return super().heightForWidth(width)
+
+    def resizeEvent(self, event):
+        """宽度变化时按内容实际需要固定行高
+
+        PyQt 下 QWidget::heightForWidth 的 Python override 不会被 Qt 布局
+        调用（QWidgetItem 走 C++ 虚函数，返回 QHBoxLayout::heightForWidth
+        ——把完整宽度传给 info 列，行高被低估 → 内容遮挡）。因此宽度确定
+        后显式 setFixedHeight，让布局按正确高度分配。
+        """
+        super().resizeEvent(event)
+        try:
+            w = self.width()
+            if w <= 0:
+                return
+            h = self._row_height_for_width(w)
+            if h > 0 and abs(h - self.height()) > 2:
+                self.setFixedHeight(h)
+        except RuntimeError:
+            pass  # 行已销毁
+
+    def _row_height_for_width(self, width: int) -> int:
+        """按行宽手动计算行高
+
+        QHBoxLayout::heightForWidth(w) 会把完整宽度 w 传给子 info
+        QVBoxLayout，而实际布局 info 只占 w - 固定列（头像 + 图标列 +
+        操作列 + spacing）→ 按过宽宽度计算 → desc/tag 换行少 → 行高
+        被低估 → 内容遮挡。这里手动扣除固定列后对 info 算 heightForWidth。
+        """
+        lay = self.layout()
+        if lay is None:
+            return 0
+        mg = lay.contentsMargins()
+        sp = lay.spacing()
+        info_idx = getattr(self, "_info_index", 1)
+        fixed = 0
+        cols = 0
+        for i in range(lay.count()):
+            item = lay.itemAt(i)
+            if item is None:
+                continue
+            if i == info_idx:
+                continue
+            cols += 1
+            if item.widget() is not None:
+                # 用 minimumWidth：布局前 sizeHint 可能未初始化（如 avatar=-1）
+                fixed += max(item.widget().minimumWidth(), item.widget().sizeHint().width())
+            elif item.layout() is not None:
+                sub = item.layout()
+                fixed += max(sub.minimumSize().width(), sub.sizeHint().width())
+        info_w = max(width - mg.left() - mg.right() - fixed - sp * cols, 1)
+        info = lay.itemAt(info_idx).layout() if info_idx < lay.count() else None
+        h = info.heightForWidth(info_w) if info is not None else 0
+        # 其它列（头像/图标列/操作列）可能更高，取 max
+        for i in range(lay.count()):
+            item = lay.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                h = max(h, w.sizeHint().height())
+        return h + mg.top() + mg.bottom()
+
     def sizeHint(self):
         """行 sizeHint：已布局时按当前宽度用 heightForWidth 计算
 
@@ -950,9 +1053,8 @@ class _PluginRow(QFrame):
         from PyQt5.QtCore import QSize
 
         base = super().sizeHint()
-        lay = self.layout()
-        if lay is not None and self.width() > 0:
-            h = lay.heightForWidth(self.width())
+        if self.width() > 0:
+            h = self._row_height_for_width(self.width())
             if h > 0:
                 return QSize(base.width(), h)
         return base
@@ -986,7 +1088,7 @@ class _PluginRow(QFrame):
                 self._mp_qss_cached = new_mp_qss
                 self._mp_label.setStyleSheet(new_mp_qss)
         if getattr(self, "_dl_label", None) is not None:
-            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
             if getattr(self, "_dl_qss_cached", None) != new_dl_qss:
                 self._dl_qss_cached = new_dl_qss
                 self._dl_label.setStyleSheet(new_dl_qss)
@@ -1031,15 +1133,41 @@ class _PluginRow(QFrame):
         # 信息区
         info_layout = QVBoxLayout()
         info_layout.setSpacing(2)
+        self._info_layout = info_layout
+        # info 在行布局中的固定 index（heightForWidth 手动计算用）
+        self._info_index = 1
 
         name = self._meta.get("name", "未知")
         self._name_raw = name
-        self._title_label = QLabel("", self)
+        # 标题行：插件名靠左，下载量靠右（卡片右上角，醒目）
+        title_row = QWidget(self)
+        title_row.setStyleSheet("background: transparent;")
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(8)
+        self._title_label = QLabel("", title_row)
         self._title_label.setObjectName("pluginRowTitle")
         ff_qss = f" font-family: '{self._ff}';" if self._ff else ""
         self._title_label.setStyleSheet(f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;")
         self._refresh_title()
-        info_layout.addWidget(self._title_label)
+        title_layout.addWidget(self._title_label)
+        # 下载量：右上角醒目展示，下载 icon + 橙色加粗数字（0 或缺失不显示）
+        downloads = self._meta.get("downloads", 0)
+        self._dl_label = None
+        if downloads:
+            title_layout.addStretch(1)
+            dl_icon = IconWidget(FluentIcon.DOWNLOAD, title_row)
+            dl_icon.setFixedSize(14, 14)
+            title_layout.addWidget(dl_icon)
+            self._dl_label = QLabel(
+                f'<span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
+                title_row,
+            )
+            self._dl_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
+            )
+            title_layout.addWidget(self._dl_label)
+        info_layout.addWidget(title_row)
 
         # 版本更新徽标已内嵌在标题（🔄 v1.0 → v2.0），不再单独建标签
 
@@ -1060,9 +1188,8 @@ class _PluginRow(QFrame):
         # Tag 标签行（FlowLayout 自动换行，不撑大卡片宽度）
         self._tag_labels: list = []
         if self._tags:
-            tags_widget = QWidget(self)
-            tags_layout = _FlowLayout(tags_widget, spacing=4)
-            tags_layout.setContentsMargins(0, 2, 0, 0)
+            tags_widget = _FlowContainer(self)
+            tags_layout = tags_widget._flow_layout
             for tag in self._tags:
                 tag_text = (
                     _highlight_html(tag, self._search_query)
@@ -1076,36 +1203,22 @@ class _PluginRow(QFrame):
                 self._tag_labels.append(lbl)
             info_layout.addWidget(tags_widget)
 
-        # 元信息行：市场来源（状态标签已并入标题版本号后）
+        # 元信息行：市场来源（状态标签已并入标题版本号后，下载量已移至右上角）
         meta_row = QWidget(self)
         meta_row.setStyleSheet("background: transparent;")
         meta_layout = QHBoxLayout(meta_row)
         meta_layout.setContentsMargins(0, 0, 0, 0)
-        meta_layout.setSpacing(10)
+        meta_layout.setSpacing(8)
 
         marketplace = self._meta.get("_marketplace", "")
-        downloads = self._meta.get("downloads", 0)
         self._mp_label = None
-        self._dl_label = None
-        if marketplace or downloads:
-            if marketplace:
-                self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
-                self._mp_label.setStyleSheet(
-                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-                )
-                meta_layout.addWidget(self._mp_label)
-            # 下载量：来源标签之后展示，数字橙色加粗强调（0 或缺失不显示）
-            if downloads:
-                self._dl_label = QLabel(
-                    f'下载 <span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
-                    meta_row,
-                )
-                self._dl_label.setStyleSheet(
-                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-                )
-                meta_layout.addWidget(self._dl_label)
-            meta_layout.addStretch(1)
-            info_layout.addWidget(meta_row)
+        if marketplace:
+            self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
+            self._mp_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
+            meta_layout.addWidget(self._mp_label)
+        info_layout.addWidget(meta_row)
 
         layout.addLayout(info_layout, 1)
 
@@ -2347,6 +2460,9 @@ class MarketplaceCard(QWidget):
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
         view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
 
+        # 社区插件（无 downloads 字段）→ 后台实时查询下载量（缓存 + 防抖）
+        self._schedule_downloads_fetch(view_plugins)
+
         # 计算匹配列表（搜索 + tag + 筛选）并排序
         matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
@@ -2376,6 +2492,89 @@ class MarketplaceCard(QWidget):
             if a.get("name") != b.get("name") or a.get("version") != b.get("version"):
                 return False
         return True
+
+    # ── 社区插件下载量实时查询 ──
+
+    def _schedule_downloads_fetch(self, plugins: list):
+        """聚合缺 downloads 的插件 → 后台查询 → 回填 → 数据变化则重渲染
+
+        - 只查可见列表（view_plugins），避免查全量隐藏插件
+        - 后台线程执行，回填后若 downloads 有新增才触发一次重渲染
+        - 重渲染后 downloads 已有值 → 不再进查询分支（无死循环）
+        - 防重入：查询进行中时，新请求合并到同一批（不重复起线程）
+        - 当前暂时关闭（_DOWNLOADS_LIVE_QUERY_ENABLED=False）：下载量纯靠
+          market.json 自带字段，不向 CountAPI 实时查询
+        """
+        if not _DOWNLOADS_LIVE_QUERY_ENABLED:
+            return
+        missing = [p for p in plugins if not p.get("downloads")]
+        if not missing:
+            return
+        names = [p["name"] for p in missing if p.get("name")]
+
+        # 已有 in-flight 查询：合并名字后返回（查询完成后统一回填）
+        if getattr(self, "_dl_fetch_thread", None) is not None:
+            pending = getattr(self, "_dl_fetch_pending", [])
+            self._dl_fetch_pending = list(dict.fromkeys(pending + names))
+            return
+
+        fetcher = get_downloads_fetcher()
+        self._dl_fetch_pending = list(names)
+
+        def _run():
+            # 批量查询（缓存命中 + 失败防抖由 fetcher 内部处理）
+            return fetcher.fetch_missing(list(self._dl_fetch_pending))
+
+        self._cleanup_dl_fetch_worker()
+        self._dl_worker = _MarketplaceWorker(_run)
+        self._dl_fetch_thread = QThread(self)
+        self._dl_worker.moveToThread(self._dl_fetch_thread)
+        self._dl_fetch_thread.started.connect(self._dl_worker.run)
+        self._dl_worker.finished.connect(self._on_downloads_fetched)
+        self._dl_worker.error.connect(lambda e: self._on_downloads_fetched(None))
+        self._dl_worker.finished.connect(self._dl_fetch_thread.quit)
+        self._dl_worker.error.connect(self._dl_fetch_thread.quit)
+        self._dl_worker.finished.connect(self._dl_worker.deleteLater)
+        self._dl_worker.error.connect(self._dl_worker.deleteLater)
+        self._dl_fetch_thread.finished.connect(self._dl_fetch_thread.deleteLater)
+        self._dl_fetch_thread.start()
+
+    def _on_downloads_fetched(self, result):
+        """查询完成：回填 downloads；有新增值则重渲染"""
+        if not self._alive():
+            return
+        # 处理 in-flight 期间合并进来的新名字
+        names = getattr(self, "_dl_fetch_pending", []) or []
+        self._dl_fetch_pending = []
+        if not result:
+            # 新合并的名字未被本次查询覆盖 → 再调度一次
+            if names:
+                plugins = getattr(self, "_all_plugins", []) or []
+                self._schedule_downloads_fetch(plugins)
+            return
+
+        changed = False
+        plugin_by_name = {}
+        for p in getattr(self, "_all_plugins", []) or []:
+            plugin_by_name[p.get("name", "")] = p
+        for name, count in result.items():
+            p = plugin_by_name.get(name)
+            if p is not None and not p.get("downloads") and count:
+                p["downloads"] = count
+                changed = True
+        if changed:
+            self._render_plugins(getattr(self, "_all_plugins", []) or [])
+
+    def _cleanup_dl_fetch_worker(self):
+        """安全清理下载量查询 worker/thread"""
+        if getattr(self, "_dl_fetch_thread", None) is not None:
+            try:
+                self._dl_fetch_thread.quit()
+                self._dl_fetch_thread.wait(500)
+            except RuntimeError:
+                pass
+            self._dl_fetch_thread = None
+        self._dl_worker = None
 
     def _has_update(self, p: dict, installed: bool) -> bool:
         """判断插件是否有可用更新（本地版本 < 远程版本）"""
@@ -2522,18 +2721,21 @@ class MarketplaceCard(QWidget):
             )
 
     def _render_next_batch(self):
-        """渲染下一批匹配插件（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
+        """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
 
-        点击「加载更多」时只推进一批，不自动跑完全部。
+        不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
+        与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
+        计数」续渲染 _matched[start:end]，匹配列表前部新出现的插件会永远
+        缺行 → 搜索不全。改为按 _matched 顺序补齐「尚无 widget 的插件」。
         """
-        start = self._rendered_count
-        end = min(start + self._RENDER_BATCH, len(self._matched))
-        if start >= end:
+        missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
+        if not missing:
             self._all_loaded = True
             self._remove_load_more_button()
             return
-        self._render_batch(start, end)
-        self._rendered_count = end
+        batch = missing[: self._RENDER_BATCH]
+        self._render_rows(batch)
+        self._rendered_count = len(self._row_map)
         if self._rendered_count < len(self._matched):
             self._set_load_more_button(len(self._matched) - self._rendered_count)
         else:
@@ -2620,8 +2822,8 @@ class MarketplaceCard(QWidget):
         row.uninstallRequested.connect(self._async_uninstall)
         return row
 
-    def _render_batch(self, start: int, end: int):
-        """渲染 [start, end) 范围的匹配插件行
+    def _render_rows(self, rows: list):
+        """创建并插入插件行（压缩帧防护同旧 _render_batch）
 
         压缩帧防护：新行创建后先隐藏，渲染完成由 _reveal_rows 延迟一帧统一显示。
 
@@ -2632,8 +2834,7 @@ class MarketplaceCard(QWidget):
         布局几何分配（sizeHint 仍计入，滚动范围正确），统一显示时直接以正确
         高度出现，跳过压缩帧。
         """
-        for i in range(start, end):
-            p = self._matched[i]
+        for p in rows:
             row = self._create_row(p)
             if row is None:
                 continue
@@ -2655,10 +2856,18 @@ class MarketplaceCard(QWidget):
                 else:
                     self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
-        # 首屏批次补 stretch
-        if start == 0:
+        # 布局无 stretch（全量重建清空后首批）→ 补 stretch
+        if rows and not self._layout_has_stretch():
             self._content_layout.addStretch(1)
-        self._schedule_reveal()
+        if rows:
+            self._schedule_reveal()
+
+    def _layout_has_stretch(self) -> bool:
+        """布局是否已含 stretch（全量重建清空后无；复用行路径已有）"""
+        for i in range(self._content_layout.count()):
+            if self._content_layout.itemAt(i).spacerItem() is not None:
+                return True
+        return False
 
     def _schedule_reveal(self):
         """渲染完成后延迟显示新行（等 QScrollArea 内容扩展稳定后一次到位）
@@ -2843,12 +3052,9 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(row._meta, query, filter_mode))
             row.update_search_highlight(query)
 
-        # 不足补齐（_render_next_batch 内部维护按钮/计数）/ 已足则收尾
-        if len(self._row_map) < len(self._matched):
-            self._render_next_batch()
-        else:
-            self._all_loaded = True
-            self._remove_load_more_button()
+        # 补齐缺失行（无条件调用：_render_next_batch 按 _matched 顺序补
+        # 尚无 widget 的插件 + 维护按钮/计数；匹配为空时内部收尾）
+        self._render_next_batch()
         # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
         # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
         self._sync_content_size()
@@ -3274,13 +3480,9 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(p, query, filter_mode))
             row.update_search_highlight(query)
 
-        self._rendered_count = len(self._row_map)
-        if self._rendered_count >= len(self._matched):
-            self._all_loaded = True
-        if self._rendered_count < len(self._matched):
-            self._set_load_more_button(len(self._matched) - self._rendered_count)
-        else:
-            self._remove_load_more_button()
+        # 补齐缺失行 + 更新按钮/计数（无条件调用：安装/卸载后匹配列表
+        # 可能新增行，按 _matched 顺序补尚无 widget 的插件）
+        self._render_next_batch()
         # 行显隐/按钮变化 → 内容高度变化 → 手动同步（widgetResizable=False）
         self._sync_content_size()
         self._update_empty_state()
@@ -3357,6 +3559,14 @@ class MarketplaceCard(QWidget):
         title_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
         enable_layout.addWidget(title_lb)
         enable_layout.addStretch(1)
+        # 连接状态行（原测试连接按钮下方）移到这里：开关左侧显示
+        self._proxy_status_label = QLabel("", enable_row)
+        self._proxy_status_label.setObjectName("proxyStatus")
+        self._proxy_status_label.setStyleSheet(
+            f"color: {accent}; font-size: {fs_body}px; background: transparent;{ff_qss}"
+        )
+        self._proxy_status_label.setWordWrap(True)
+        enable_layout.addWidget(self._proxy_status_label)
         self._proxy_switch = SwitchButton(enable_row)
         # 初始 setChecked 不应触发 toggled 自动保存（后续控件尚未创建）
         self._proxy_switch.blockSignals(True)
@@ -3409,14 +3619,6 @@ class MarketplaceCard(QWidget):
         btn_layout.addWidget(save_btn)
         config_layout.addWidget(btn_row)
 
-        self._proxy_status_label = QLabel("", config_widget)
-        self._proxy_status_label.setObjectName("proxyStatus")
-        self._proxy_status_label.setStyleSheet(
-            f"color: {accent}; font-size: {fs_body}px; background: transparent;{ff_qss}"
-        )
-        self._proxy_status_label.setWordWrap(True)
-        config_layout.addWidget(self._proxy_status_label)
-
         outer_layout.addWidget(config_widget)
 
         # ── 分隔线2 ──
@@ -3436,9 +3638,7 @@ class MarketplaceCard(QWidget):
         help_layout.addWidget(help_title)
         self._proxy_help_label = QLabel("", help_widget)
         self._proxy_help_label.setObjectName("proxyHelp")
-        self._proxy_help_label.setStyleSheet(
-            f"color: {tcs}; font-size: {fs_body}px; background: transparent;{ff_qss}"
-        )
+        self._proxy_help_label.setStyleSheet(f"color: {tcs}; font-size: {fs_body}px; background: transparent;{ff_qss}")
         self._proxy_help_label.setWordWrap(True)
         help_layout.addWidget(self._proxy_help_label)
         outer_layout.addWidget(help_widget)
