@@ -81,6 +81,15 @@ All notable changes to this project will be documented in this file.
 - **tab 面板宽度持久化移除** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager.py`): 移除 tab 面板宽度与折叠状态持久化，改为固定默认几何
 
 
+#### 📦 附加变更（v0.4.14 三次重发补丁 | 自初次 tag 之后 1 个新提交）
+
+> v0.4.14 初次 tag 后追加：插件安装/更新下载量统计上报。贡献者：mading
+
+##### ✨ 新功能 (New Features, 1)
+
+- **插件下载量统计上报** (`plugins/plugin-marketplace/ui/installer.py` + `cards.py`): 安装/更新成功后向 CountAPI 异步上报 +1（countapi.mileshilliard.com），详情对话框与插件行展示下载量徽标，失败不影响安装流程
+
+
 ## [v0.4.13] - 2026-08-07
 
 自上一版本以来的变更 | 提交数：107 · 文件变更：371 · +33168/-8048 | 贡献者：mading, dingma
