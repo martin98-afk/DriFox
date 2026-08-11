@@ -1075,6 +1075,8 @@ class OpenAIChatToolWindow(ToolWindow):
     ai_state_changed = pyqtSignal(str)
     # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
     _opencode_models_ready = pyqtSignal(object)
+    # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
+    _models_dev_ready = pyqtSignal(object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1202,6 +1204,8 @@ class OpenAIChatToolWindow(ToolWindow):
         UsageService.get_instance().coding_plan_ready.connect(self._on_coding_plan_result)
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
+        # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
+        self._models_dev_ready.connect(self._on_models_dev_ready)
         # 线程安全桥接：后台 git 分支检测结果回主线程
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
@@ -2403,6 +2407,9 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
             QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
+        # models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级单飞去重；
+        # 早于 1500ms _load_model_configs 的首次主线程读取，UI 路径零阻塞）
+        QTimer.singleShot(1000, lambda: self._safe_timer_call(self._start_models_dev_sync))
 
     @classmethod
     def _on_class_cleanup_timer(cls):
@@ -6664,6 +6671,46 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_model_selector_header()
 
     # ──────────────────────────────────────────────
+    # models.dev 动态数据后台预热
+    # ──────────────────────────────────────────────
+    def _start_models_dev_sync(self):
+        """后台预热 models.dev 动态模型数据（内存缓存未填充时）。
+
+        主线程只读内存/文件缓存（毫秒级），零阻塞；仅当本进程尚未加载过
+        动态数据且本地缓存不可用时，才经 refresh_dynamic_models_async 在
+        后台线程发起网络拉取（30s + 15s 超时全部落在后台），完成后经
+        _models_dev_ready 信号回主线程刷新 UI。
+        """
+        from app.core.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
+
+        # 已加载过动态数据（多窗口/多标签复用模块级内存缓存）→ 无需重复刷新
+        cached = get_dynamic_models()
+        if cached.provider_models or cached.model_capabilities:
+            return
+
+        # 后台线程拉取；模块级单飞去重保证多窗口只发一路网络请求
+        refresh_dynamic_models_async(on_done=lambda _r: self._models_dev_ready.emit(_r))
+
+    @pyqtSlot(object)
+    def _on_models_dev_ready(self, _result):
+        """models.dev 动态数据后台刷新完成（主线程）：刷新依赖动态数据的 UI。"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 模型选择按钮 tooltip（价格/多模态/思考开关）依赖动态能力数据
+        self._update_model_selector_btn()
+        # 模型选择卡片可见则刷新内容（模型列表可能新增动态模型）
+        if hasattr(self, "_card_manager") and self._card_manager.is_card_visible("model_selector", self._window_id):
+            self._load_model_selector_to_card()
+        # 设置弹窗可见则刷新服务商卡片（模型下拉可能新增动态模型）
+        if (
+            hasattr(self, "_card_manager")
+            and self._card_manager.is_card_visible("settings", self._window_id)
+            and hasattr(self, "_settings_popup")
+            and hasattr(self._settings_popup, "llmProviderCard")
+        ):
+            self._settings_popup.llmProviderCard._refresh_items()
+
+    # ──────────────────────────────────────────────
     # OpenCode Zen 免费模型异步刷新
     # ──────────────────────────────────────────────
     def _async_refresh_opencode_models(self):
@@ -9344,7 +9391,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
             self._command_card.refresh_style()
         # 文件提及卡片（滚动条颜色随主题）
-        if hasattr(self, "_file_mention_card") and self._file_mention_card and hasattr(self._file_mention_card, "refresh_style"):
+        if (
+            hasattr(self, "_file_mention_card")
+            and self._file_mention_card
+            and hasattr(self._file_mention_card, "refresh_style")
+        ):
             self._file_mention_card.refresh_style()
         # 模型选择卡片
         if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
