@@ -97,3 +97,81 @@ def test_fetch_all_bad_downloads_value(tmp_path):
     )
     plugins, _, _ = mgr.fetch_all()
     assert plugins[0]["downloads"] == 5
+
+
+# ── Task 2: DownloadsFetcher ──────────────────────────────
+
+
+def _mk_fetcher(monkeypatch, responses: dict):
+    """构造 fetcher：mock _get_one 返回给定 {name: count}，None 表示失败"""
+    from ui.downloads import DownloadsFetcher
+
+    fetcher = DownloadsFetcher()
+
+    def fake_get_one(name):
+        return responses.get(name)
+
+    monkeypatch.setattr(fetcher, "_get_one", fake_get_one)
+    return fetcher
+
+
+def test_fetch_missing_returns_counts(monkeypatch):
+    fetcher = _mk_fetcher(monkeypatch, {"p1": 10, "p2": 3})
+    result = fetcher.fetch_missing(["p1", "p2", "p3"])
+    assert result == {"p1": 10, "p2": 3}  # p3 失败（None）→ 不入结果
+
+
+def test_fetch_missing_cache_hit_no_second_call(monkeypatch):
+    fetcher = _mk_fetcher(monkeypatch, {"p1": 10})
+    calls = []
+
+    orig_get_one = fetcher._get_one
+
+    def counting_get_one(name):
+        calls.append(name)
+        return orig_get_one(name)
+
+    monkeypatch.setattr(fetcher, "_get_one", counting_get_one)
+    # 第一次：查
+    r1 = fetcher.fetch_missing(["p1"])
+    assert r1 == {"p1": 10}
+    # 第二次：缓存命中，不重查
+    r2 = fetcher.fetch_missing(["p1"])
+    assert r2 == {"p1": 10}
+    assert calls == ["p1"]
+
+
+def test_fetch_missing_fail_dedupe_within_fail_ttl(monkeypatch):
+    fetcher = _mk_fetcher(monkeypatch, {})  # 全部失败
+    calls = []
+
+    orig_get_one = fetcher._get_one
+
+    def counting_get_one(name):
+        calls.append(name)
+        return orig_get_one(name)
+
+    monkeypatch.setattr(fetcher, "_get_one", counting_get_one)
+    fetcher.fetch_missing(["p1"])
+    fetcher.fetch_missing(["p1"])  # 失败防抖内：不重试
+    assert calls == ["p1"]
+
+
+def test_fetch_missing_ttl_expiry_refetches(monkeypatch):
+    from ui.downloads import TTL
+
+    fetcher = _mk_fetcher(monkeypatch, {"p1": 10})
+    calls = []
+
+    orig_get_one = fetcher._get_one
+
+    def counting_get_one(name):
+        calls.append(name)
+        return orig_get_one(name)
+
+    monkeypatch.setattr(fetcher, "_get_one", counting_get_one)
+    fetcher.fetch_missing(["p1"])
+    # 推进时间超过 TTL
+    fetcher._cache["p1"] = (fetcher._cache["p1"][0], fetcher._cache["p1"][1] - TTL - 1)
+    fetcher.fetch_missing(["p1"])
+    assert calls == ["p1", "p1"]
