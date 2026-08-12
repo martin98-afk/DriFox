@@ -11,7 +11,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from app.constants import FREE_PROVIDERS, OPENCODE_SHARED_API_KEY
+from app.constants import FREE_PROVIDERS
 from app.utils.config import Settings
 
 
@@ -62,7 +62,7 @@ def test_inject_when_empty():
     assert info["provider_name"] == "OpenCode Zen"
     assert info["API_URL"] == "https://opencode.ai/zen/v1"
     assert info["模型名称"] == "deepseek-v4-flash-free"
-    assert info["API_KEY"] == OPENCODE_SHARED_API_KEY
+    assert info["API_KEY"] == "", "默认配置应为免 key（空 API_KEY，走剥离 Authorization 头调用）"
     # 模型列表字段被故意省略（由异步刷新回填，见上方说明）
     assert "模型列表" not in info, f"info 应不含「模型列表」键，实际为 {list(info.get('模型列表', []))!r}"
     assert "config_id" in info
@@ -92,7 +92,7 @@ def test_skip_when_same_name_exists():
 
 def test_create_when_same_url_key_but_different_name():
     """已存在同 (URL, key) 但不同 name 的配置时，仍会创建默认配置。"""
-    key = OPENCODE_SHARED_API_KEY
+    key = "some-other-key"
     saved = {"abc123": {"provider_name": "OpenCode Zen", "API_URL": "https://opencode.ai/zen/v1", "API_KEY": key}}
     instance = _FakeInstance(saved_providers=saved, injected=False)
     Settings._ensure_default_opencode_provider(instance)

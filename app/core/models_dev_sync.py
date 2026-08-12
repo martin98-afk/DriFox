@@ -245,17 +245,9 @@ def _fetch_opencode_zen_free_models(
     返回 (free_model_names, model_capabilities)。
     网络失败或 API 异常时返回空，不影响主流程。
     """
-    if not api_key:
-        try:
-            from app.constants import OPENCODE_SHARED_API_KEY
-
-            api_key = OPENCODE_SHARED_API_KEY
-        except Exception:
-            logger.warning("[models.dev] 无法获取 OpenCode 共享 API Key，跳过免费模型同步")
-            return [], {}
-
     url = "https://opencode.ai/zen/v1/models"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    # 免 key 匿名调用：空 key 时不发送 Authorization 头
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     try:
         import httpx
@@ -371,8 +363,6 @@ def fetch_opencode_free_models_for_providers(
     同步执行（配合 threading 调用，不阻塞主线程）。单个实例失败不影响其他。
     同一实例在 _OPENCODE_FREE_CACHE_TTL 窗口内只发一次网络请求（缓存 + in-flight 去重）。
     """
-    from app.constants import OPENCODE_SHARED_API_KEY
-
     results: Dict[str, List[str]] = {}
     try:
         import httpx
@@ -384,8 +374,7 @@ def fetch_opencode_free_models_for_providers(
         for cid, base_url, key in targets:
             if not base_url:
                 continue
-            if not key:
-                key = OPENCODE_SHARED_API_KEY
+            # 免 key 匿名调用：空 key 时不发送 Authorization 头
 
             cache_key = _opencode_free_cache_key(cid, base_url, key)
 
@@ -440,7 +429,8 @@ def _fetch_instance_free_models(client, base_url: str, key: str) -> List[str]:
     """
     try:
         url = f"{base_url.rstrip('/')}/models"
-        headers = {"Authorization": f"Bearer {key}"}
+        # 免 key 匿名调用：空 key 时不发送 Authorization 头
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
         resp = client.get(url, headers=headers)
         if resp.status_code != 200:
             return []
