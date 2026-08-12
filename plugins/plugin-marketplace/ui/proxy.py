@@ -127,14 +127,49 @@ class ProxyConfig:
         """返回 (改写后 URL, git 额外参数)
 
         http 模式：URL 不变，参数 ['-c', 'http.proxy={address}']
-        prefix/selfhost：URL 改写，无额外参数
+        prefix/selfhost：URL 改写；github.com 仓库自动补 .git 后缀
         未启用：原样返回，无参数（零开销）
         """
         if not self._enabled:
             return url, []
         if self._mode == "http":
             return url, ["-c", f"http.proxy={self._address}"]
-        return self.rewrite_url(url), []
+        return self._ensure_git_suffix(self.rewrite_url(url)), []
+
+    @staticmethod
+    def _ensure_git_suffix(url: str) -> str:
+        """给 github.com 仓库 URL 自动补 .git 后缀
+
+        marketplace.json 里 source.url 通常写 ``https://github.com/owner/repo``
+        （不带 .git），某些加速站 + git 组合下 git 探测会失败（exit 12），
+        加 .git 后探测更稳。带 .git 已有的、查询串、空 URL、ssh / git 协议
+        不动。加速站后跟随的 github.com 路径同样处理（如
+        ``https://ghfast.top/https://github.com/owner/repo``）。
+        """
+        if not url or url.endswith(".git"):
+            return url
+        # 拆 query / fragment，只对 path 部分加 .git
+        suffix = ""
+        for sep in ("?", "#"):
+            if sep in url:
+                idx = url.find(sep)
+                suffix = url[idx:]
+                url = url[:idx]
+                break
+        marker = "/github.com/"
+        lower = url.lower()
+        if marker not in lower:
+            return url + suffix
+        # 取 marker 之后的部分：owner/repo[/sub/...]
+        idx = lower.find(marker)
+        head = url[: idx + len(marker)]
+        rest = url[idx + len(marker):]
+        parts = rest.split("/", 2)
+        # 只在 path 是 owner/repo（仓库根）时补 .git，已有 subdir 不补
+        if len(parts) != 2 or not parts[0] or not parts[1] or "/" in parts[1]:
+            return url + suffix
+        parts[1] = parts[1] + ".git"
+        return head + "/".join(parts) + suffix
 
     # ── 校验与连通性 ──
 
@@ -158,11 +193,24 @@ class ProxyConfig:
         return True, ""
 
     def test_connection(self, mode: str, address: str, url: Optional[str] = None) -> Tuple[bool, str]:
-        """用给定配置（不落盘）发起一次真实请求，返回 (是否通过, 提示)"""
+        """用给定配置（不落盘）发起一次真实请求，返回 (是否通过, 提示)
+
+        默认探测点：git smart-HTTP 的 info/refs 端点（模拟 git clone 首请求），
+        不是 raw.githubusercontent.com 上的 marketplace.json。某些加速站只代理
+        raw 静态文件，不代理 github.com 的 git 协议请求，导致测试通过但实际
+        git clone 失败 —— 用 info/refs 才能真实反映下载能力。
+
+        GitHub info/refs 返回 200 + flush-packet（响应首4字节以 "00" 开头），
+        如：``001e# service=git-upload-pack\\n0000``。除了 200 还验证响应
+        真的是 git 协议，避免加速站把请求重定向到自家错误页（也返回 200）。
+        """
         ok, msg = self.validate(mode, address)
         if not ok:
             return False, msg
-        target = url or "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/marketplace.json"
+        target = url or (
+            "https://github.com/martin98-afk/drifox-plugins"
+            "/info/refs?service=git-upload-pack"
+        )
         tmp = ProxyConfig.__new__(ProxyConfig)
         tmp._file = self._file
         tmp._enabled = True
@@ -174,9 +222,17 @@ class ProxyConfig:
                 tmp.rewrite_url(target),
                 timeout=8,
                 follow_redirects=True,
+                headers={"User-Agent": "git/2.43.0", "Accept": "*/*"},
                 **tmp.httpx_kwargs(),
             )
             resp.raise_for_status()
+            # 验证响应是真正的 git 协议响应：flush-packet 首4字节以 "00" 开头
+            preview = resp.content[:4]
+            if not preview.startswith(b"00"):
+                return False, (
+                    f"✗ 失败: 返回非 git 协议响应（前4字节 {preview!r}），"
+                    "加速站可能未代理 github.com"
+                )
             ms = int((time.time() - start) * 1000)
             return True, f"✓ 通过（{ms} ms）"
         except Exception as e:

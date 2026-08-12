@@ -187,6 +187,7 @@ from app.widgets.message_card import (
     MessageCard,
     clear_global_render_cache,
     create_welcome_card,
+    resolve_initial_welcome_mode,
 )
 from app.widgets.simple_hover_tooltip import install_hover_tooltip, batch_install_hover_tooltips
 from app.widgets.ui_helpers import *
@@ -10791,11 +10792,50 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
-        welcome_card = create_welcome_card(self, agent_name, agent_desc, recent_sessions, top_by_count)
+        # 模式：sessions（默认）/ changelog / 插件注册 tab
+        from app.utils.config import Settings
+
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        cfg = Settings.get_instance()
+        welcome_mode = resolve_initial_welcome_mode(
+            cfg.welcome_mode.value,
+            cfg.welcome_plugin_tab.value,
+            UIPluginRegistry.get_instance().get_welcome_tabs(),
+        )
+
+        welcome_card = create_welcome_card(
+            self, agent_name, agent_desc, recent_sessions, top_by_count,
+            mode=welcome_mode,
+        )
         welcome_card._is_welcome = True
         welcome_card.contextActionRequested.connect(self.handle_recommended_question)
+        # PyQt 层模式切换 → 持久化到 app.config（不重建卡片，避免 QWebEngine 重建开销）
+        welcome_card.welcomeModeChanged.connect(self._on_welcome_mode_changed)
         self._welcome_card_cache[self._window_id] = welcome_card
         return welcome_card
+
+    def _on_welcome_mode_changed(self, new_mode: str):
+        """欢迎卡片右上角 segmented tabs 切换回调：写 QSettings"""
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        if new_mode in ("sessions", "projects", "changelog"):
+            # 内置 mode：写 welcome_mode 并清空插件 tab 记忆
+            if cfg.welcome_plugin_tab.value:
+                cfg.welcome_plugin_tab.value = ""
+            if cfg.welcome_mode.value == new_mode:
+                return
+            cfg.welcome_mode.value = new_mode
+        else:
+            # 插件注册的 welcome tab：welcome_mode 的 OptionsValidator.correct
+            # 会把非法值纠正回 sessions，插件 tab 存独立字段。重启后仅当该 tab
+            # 仍注册时恢复（见 resolve_initial_welcome_mode），插件卸载/停用则
+            # 回退内置 mode，不影响正常启动。
+            if cfg.welcome_plugin_tab.value == new_mode:
+                return
+            cfg.welcome_plugin_tab.value = new_mode
+        cfg.save()
 
     def _sanitize_user_message_for_display(self, content: str) -> str:
         """清理用户消息用于显示（保留向后兼容）"""
@@ -14381,6 +14421,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        # 注：mode 切换由 MessageCard.welcomeModeChanged（PyQt 层）触发，不走 contextActionRequested
 
     def _switch_to_session_by_id(self, session_id: str):
         """根据 session_id 切换到对应会话（始终从最新源加载，保证跨窗口数据一致）"""
@@ -14867,8 +14908,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 技能替换结束 ----
 
         # ---- 检查模型配置（用于后续判断图片支持）----
+        # 仅拦截"完全无模型配置"；有配置但无 API key 直接放行：
+        # - 本地免认证端点（auth=none，如 Ollama）无需 key
+        # - 云端端点无 key 时请求发出后服务端返回 401，走现有错误处理
         llm_config = self._get_current_model_config()
-        if not llm_config or not llm_config.get("API_KEY"):
+        if not llm_config:
             InfoBar.warning(
                 "请先选择模型",
                 "请在设置中选择一个可用的模型后再发送消息",

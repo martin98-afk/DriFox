@@ -158,6 +158,8 @@ class PluginInstaller:
         # manifest 缓存（{name: manifest dict}，get_installed_map 扫描时填充，
         # 供 UI 图标/详情复用，避免重复读盘）
         self._manifest_cache: dict = {}
+        # 最近一次安装/更新失败原因（供 UI 记录区展示；成功/未执行时为空）
+        self.last_error: str = ""
 
     # 缓存字段组锁：worker 线程写（invalidate/预填充）、GUI 主线程读
     # （get_installed_map/get_status_map）。多字段（_inst_map_cache /
@@ -327,7 +329,11 @@ class PluginInstaller:
 
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
+            self.last_error = ""
             self.invalidate_installed_cache()
+        else:
+            if not self.last_error:
+                self.last_error = f"Install {name} failed"
         return success
 
     def update(self, plugin_meta: dict) -> bool:
@@ -358,7 +364,11 @@ class PluginInstaller:
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
+            self.last_error = ""
             self.invalidate_installed_cache()
+        else:
+            if not self.last_error:
+                self.last_error = f"Update {name} failed"
         return success
 
     # ── Source 类型分发 ──────────────────────────────────
@@ -481,17 +491,23 @@ class PluginInstaller:
             try:
                 proxy = get_proxy_config()
                 git_url, git_extra = proxy.git_clone_args(url)
-                try:
-                    self._sparse_clone(git_url, subpath, ref, cache_tmp, extra_args=git_extra)
-                except Exception:
-                    # 代理失败回退直连：清空缓存目录后原 URL 重跑一次
-                    if git_url != url or git_extra:
-                        logger.warning(f"[Installer] proxy failed, fallback to direct: {url}")
-                        shutil.rmtree(cache_tmp, ignore_errors=True)
-                        cache_tmp.mkdir(parents=True, exist_ok=True)
-                        self._sparse_clone(url, subpath, ref, cache_tmp)
-                    else:
-                        raise
+                candidates = self._build_clone_candidates(url, git_url, git_extra, proxy)
+                last_err: Optional[Exception] = None
+                for i, (cu, ce) in enumerate(candidates):
+                    if i > 0:
+                        logger.info(f"[Installer] retry #{i}: {cu}")
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+                    cache_tmp.mkdir(parents=True, exist_ok=True)
+                    try:
+                        self._sparse_clone(cu, subpath, ref, cache_tmp, extra_args=ce)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
+                if last_err is not None:
+                    # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
+                    raise last_err
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
@@ -540,7 +556,8 @@ class PluginInstaller:
             return True
 
         except Exception as e:
-            logger.error(f"[Installer] Download {name} failed: {e}")
+            self.last_error = self._format_git_err(e)
+            logger.error(f"[Installer] Download {name} failed: {self.last_error}")
             return False
 
     def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
@@ -549,37 +566,88 @@ class PluginInstaller:
         对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
         extra_args: git 前置参数（如 ['-c', 'http.proxy=...']），
         插在 git 与子命令之间。
+
+        失败时把 git 的 stderr 一起抛（不要直接 ``check=True`` —— 那样
+        ``CalledProcessError.stderr`` 是 ``None``，外层日志看不到真实错误）。
         """
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         extra = list(extra_args or [])
 
+        def _run(cmd):
+            result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    result.args,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                )
+
         if subpath in (".", ""):
             # 整个仓库：直接浅克隆
-            subprocess.run(
-                ["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
-                check=True,
-                capture_output=True,
-                text=True,
-                **kwargs,
-            )
+            _run(["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)])
         else:
             # 子目录：稀疏克隆
-            subprocess.run(
-                ["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
-                check=True,
-                capture_output=True,
-                text=True,
-                **kwargs,
-            )
-            subprocess.run(
-                ["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath],
-                check=True,
-                capture_output=True,
-                text=True,
-                **kwargs,
-            )
+            _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)])
+            _run(["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath])
+
+    @staticmethod
+    def _format_git_err(e: Exception) -> str:
+        """从 git 异常里抽出 stderr/returncode 拼成一行可读消息"""
+        if isinstance(e, subprocess.CalledProcessError):
+            stderr = (e.stderr or "").strip()
+            if stderr:
+                # stderr 可能多行，只保留最后几行（关键错误通常在末尾）
+                lines = stderr.splitlines()[-5:]
+                return f"exit={e.returncode} stderr={'; '.join(lines)}"
+            return f"exit={e.returncode} (no stderr)"
+        return f"{type(e).__name__}: {e}"
+
+    @staticmethod
+    def _toggle_git_suffix(url: str) -> str:
+        """URL 带 .git 末尾则去掉，不带则补上（仅作用于 path，保留 query/fragment）"""
+        if not url:
+            return url
+        suffix = ""
+        path = url
+        for sep in ("?", "#"):
+            if sep in path:
+                idx = path.find(sep)
+                suffix = path[idx:]
+                path = path[:idx]
+                break
+        if path.endswith(".git"):
+            return path[:-4] + suffix
+        return path + ".git" + suffix
+
+    def _build_clone_candidates(self, orig_url: str, proxy_url: str, proxy_extra: list, proxy) -> list:
+        """构造按优先级排列的 clone 候选列表（URL, extra_args）。
+
+        顺序：
+        1. 用户配置的代理 URL（git_clone_args 已自动补 .git）
+        2. 代理 URL 但去掉 .git（部分加速站对无 .git 友好，反向试一次）
+        3. 裸直连 + .git（最后保底，国内通常失败）
+        4. 裸直连原 URL（兜底）
+        """
+        candidates: list = [(proxy_url, list(proxy_extra))]
+        toggled = self._toggle_git_suffix(proxy_url)
+        if toggled != proxy_url:
+            candidates.append((toggled, list(proxy_extra)))
+        direct_with_git = self._toggle_git_suffix(orig_url)
+        if orig_url != direct_with_git:
+            candidates.append((direct_with_git, []))
+        candidates.append((orig_url, []))
+        # 去重保序
+        seen, out = set(), []
+        for u, e in candidates:
+            key = (u, tuple(e))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((u, e))
+        return out
 
     # ── 卸载前释放引用 ──────────────────────────────────
 

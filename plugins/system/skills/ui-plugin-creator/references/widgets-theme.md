@@ -6,6 +6,30 @@
 
 ---
 
+## 📑 目录
+
+> 行号对应本文件当前版本，编辑后请更新。
+
+- **一、问题背景** — L33–L47
+- **二、上下文 → QColor 字典** — L48–L128
+  - 2.1 `_make_chart_colors_from_context(ctx: dict) -> dict` — L50–L101
+  - 2.2 关键设计点 — L102–L111
+  - 2.3 返回字典的键约定 — L112–L128
+- **三、默认 fallback 配色** — L129–L181
+  - 3.1 `_default_chart_colors()` — L134–L166
+  - 3.2 `_default_card_colors()`（`_StatCard` 专用，更简单） — L167–L181
+- **四、父卡片：拉取并缓存 ctx** — L182–L242
+  - 4.1 标准 `_apply_latest_theme` 模式 — L184–L212
+  - 4.2 主题色应用到所有子组件 — L213–L229
+  - 4.3 何时调用 — L230–L242
+- **五、子 widget：set_colors 标准接口** — L243–L284
+  - 5.1 `_StatCard.set_colors` — L245–L269
+  - 5.2 图表 widget.set_colors — L270–L284
+- **六、常见陷阱** — L285–L330
+  - 6.1 ctx 字段缺失的防御写法 — L297–L314
+  - 6.2 主题切换的响应 — L315–L330
+- **七、与主程序 ctx 结构的约定** — L331–L354
+- **八、为什么不直接用 qfluentwidgets.isDarkTheme()** — L355–L364
 ## 一、问题背景
 
 UI 插件运行在浮动卡片里，卡片背景可能很暗（半透明黑），而主程序的主题色是给"普通界面"用的。如果直接用 `isDarkTheme()` 或主程序的 `text_primary`，会出现：

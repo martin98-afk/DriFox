@@ -22,6 +22,7 @@ import hashlib
 import math
 import os
 import random
+import time
 import re
 import sys
 import threading
@@ -45,6 +46,7 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QObject,
     QPointF,
+    QThread,
     Qt,
     QTimer,
     QTimerEvent,
@@ -75,6 +77,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    SegmentedWidget,
     TransparentToolButton,
 )
 from qfluentwidgets.components.widgets.card_widget import (
@@ -1972,7 +1975,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 8
+_SKELETON_CACHE_VERSION = 9
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2389,6 +2392,19 @@ class ConsoleMonitorPage(QWebEnginePage):
             super().__init__(profile, parent)
         else:
             super().__init__(parent)
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        """拦截 file:// 链接点击：用系统默认程序打开（不导航）。
+
+        用 PyQt 原生 navigation 钩子（不写 JS 拦截），符合"浏览器自带"语义。
+        """
+        from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtWebEngineWidgets import QWebEnginePage
+
+        if url.scheme() == "file" and nav_type == QWebEnginePage.NavigationTypeLinkClicked:
+            QDesktopServices.openUrl(url)
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
         msg = message.strip()
@@ -3201,11 +3217,10 @@ class CodeWebViewer(QWebEngineView):
             )
             tag_css.append(f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}')
 
-        if self._light_skeleton:
-            cdn_libs = ""
-        else:
-            # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN
-            cdn_libs = _get_vendor_script_tags()
+        # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN。
+        # light 骨架（欢迎卡片）也加载 echarts：欢迎 tab 插件（如 context-stats）
+        # 通过 ```echarts 代码块渲染图表，依赖 window.echarts 存在。
+        cdn_libs = _get_vendor_script_tags()
 
         # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
@@ -3494,13 +3509,13 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 {"".join(tag_css)}
 
-                /* session 历史会话标签样式 */
+                /* session 历史会话标签样式（胶囊按内容宽度自然展开） */
                 .session-tag {{
                     background: rgba(100, 198, 255, 0.12);
                     border-color: rgba(100, 198, 255, 0.5);
                     color: #66c6ff;
-                    margin: 4px 4px;
-                    min-width: 120px;
+                    margin: 4px 6px 4px 0;
+                    max-width: 100%;
                 }}
                 .session-tag:hover {{
                     background: rgba(100, 198, 255, 0.25);
@@ -3516,31 +3531,81 @@ class CodeWebViewer(QWebEngineView):
                     color: #88d4ff;
                 }}
 
-                /* Markdown 表格样式 */
-                .session-table {{
-                    border-collapse: collapse;
-                    width: 100%;
-                    margin: 8px 0;
+                /* 欢迎卡片历史会话：每段一个小标题 + 胶囊流（自适应换行） */
+                .session-section {{
+                    margin: 10px 0 6px;
                 }}
-                .session-table th, .session-table td {{
-                    border: 1px solid rgba(100, 198, 255, 0.3);
-                    padding: 8px 12px;
-                    text-align: left;
-                    font-family: '{font_family}', sans-serif;
-                    font-size: {body_font_size}px;
-                }}
-                .session-table th {{
-                    background: rgba(100, 198, 255, 0.06);
-                    color: #66c6ff;
+                .session-section .section-title {{
+                    font-size: {tag_font_size}px;
                     font-weight: 600;
+                    color: #66c6ff;
+                    margin-bottom: 4px;
+                    opacity: 0.85;
                 }}
-                .session-table td {{
-                    background: transparent;
-                    vertical-align: middle;
+                .session-tags {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 4px 6px;
+                    align-items: flex-start;
                 }}
-                .session-table tr:hover td {{
-                    background: rgba(100, 198, 255, 0.04);
+                .welcome-empty {{
+                    opacity: 0.55;
+                    font-size: {tag_font_size}px;
+                    padding: 8px 0;
                 }}
+
+                /* changelog 模式：左列版本列表 + 右列描述 */
+                .changelog-shell {{
+                    display: flex;
+                    gap: 12px;
+                    margin-top: 6px;
+                    min-height: 200px;
+                }}
+                .changelog-versions {{
+                    list-style: none;
+                    padding: 0;
+                    margin: 0;
+                    min-width: 130px;
+                    max-width: 160px;
+                    border-right: 1px solid rgba(100, 198, 255, 0.2);
+                    overflow-y: auto;
+                    max-height: 360px;
+                }}
+                .changelog-version {{
+                    padding: 6px 10px;
+                    cursor: pointer;
+                    border-radius: 6px;
+                    margin-bottom: 2px;
+                    transition: 0.15s ease;
+                }}
+                .changelog-version:hover {{
+                    background: rgba(100, 198, 255, 0.1);
+                }}
+                .changelog-version.active {{
+                    background: rgba(100, 198, 255, 0.22);
+                }}
+                .changelog-version .ver-tag {{
+                    font-weight: 600;
+                    color: #66c6ff;
+                    font-size: {tag_font_size}px;
+                }}
+                .changelog-version .ver-date {{
+                    font-size: {tiny_font_size}px;
+                    opacity: 0.6;
+                    margin-top: 2px;
+                }}
+                .changelog-detail {{
+                    flex: 1;
+                    min-width: 0;
+                    overflow-y: auto;
+                    max-height: 360px;
+                    padding-right: 4px;
+                }}
+                .changelog-body h1, .changelog-body h2, .changelog-body h3 {{
+                    color: #66c6ff;
+                    margin-top: 0;
+                }}
+                .changelog-body img {{ max-width: 100%; }}
 
                 /* 代码块通用样式 */
                 .code-table {{ width: 100%; border-collapse: collapse; }}
@@ -4170,10 +4235,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
-                {
-            ""
-            if self._light_skeleton
-            else '''
+                '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     width: 100%;
@@ -4185,7 +4247,6 @@ class CodeWebViewer(QWebEngineView):
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
                 '''
-        }
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
@@ -5138,6 +5199,21 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         return;
                     }}
+                    const verItem = e.target.closest('.changelog-version');
+                    if (verItem) {{
+                        e.stopPropagation();
+                        e.preventDefault();
+                        var vIdx = verItem.getAttribute('data-idx');
+                        var vShell = verItem.closest('.changelog-shell');
+                        if (vShell) {{
+                            vShell.querySelectorAll('.changelog-version').forEach(function(el){{ el.classList.remove('active'); }});
+                            vShell.querySelectorAll('.changelog-body').forEach(function(el){{ el.style.display = 'none'; }});
+                            verItem.classList.add('active');
+                            var vBody = vShell.querySelector('.changelog-body[data-idx="' + vIdx + '"]');
+                            if (vBody) vBody.style.display = 'block';
+                        }}
+                        return;
+                    }}
                     const tag = e.target.closest('.context-tag');
                     if (tag) {{
                         var tagType = tag.getAttribute('data-type') || tag.getAttribute('data-action') || '';
@@ -5158,9 +5234,13 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     const link = e.target.closest('a');
                     if (link) {{
+                        // file:// 链接：交给 QWebEnginePage.acceptNavigationRequest 处理（系统打开）
+                        if (link.href && link.href.startsWith('file://')) {{
+                            return;  // 不拦截，触发默认 navigation
+                        }}
                         console.log('pywebview_action:link_found:' + link.href);
                     }}
-                    if (link && link.href) {{
+                    if (link && link.href && !link.href.startsWith('file://')) {{
                         e.preventDefault();
                         console.log('pywebview_action:open_url:' + link.href);
                     }}
@@ -7387,6 +7467,7 @@ class MessageCard(SimpleCardWidget):
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
+    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
 
     def __init__(
         self,
@@ -7477,6 +7558,15 @@ class MessageCard(SimpleCardWidget):
         # 标记：内容刚加载到viewer，首次heightChanged后滚动并清除
         self._content_just_loaded = False
         self._finished_streaming_ids: set = set()  # 防止 streaming 状态回退
+        # 欢迎卡片模式数据（set_welcome_content 时填充；切换 mode 不重建 QWebEngineView）
+        self._welcome_mode: str = ""
+        self._welcome_recent: list = []
+        self._welcome_top: list = []
+        self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
+        self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
+        # changelog 异步加载：单实例持有 fetcher + 已加载 releases
+        self._changelog_fetcher: Optional["_ChangelogFetcher"] = None
+        self._changelog_releases: list = []
         # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
         # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
         self._tool_args_first_seen_ids: set = set()
@@ -7969,6 +8059,138 @@ class MessageCard(SimpleCardWidget):
             }}
         """
 
+    # ========== 欢迎卡片 mode 切换（PyQt segmented tabs）==========
+    _WELCOME_MODE_ITEMS = [
+        ("sessions", "💬 会话"),
+        ("changelog", "📜 更新"),
+    ]
+
+    def _build_welcome_mode_tabs(self, top_layout):
+        """在卡片标题栏右上角构建 segmented tabs（welcome 角色专属）"""
+        seg = SegmentedWidget(self)
+        for i, (key, label) in enumerate(self._WELCOME_MODE_ITEMS):
+            seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
+        # 插件注册的欢迎 tab 动态追加（系统项之后）
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
+                seg.addItem(
+                    key,
+                    info.label,
+                    onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k),
+                )
+        except Exception:
+            pass
+        self._welcome_mode_tabs = seg
+        top_layout.addWidget(seg)
+        top_layout.addStretch()
+
+    def _on_welcome_mode_tab_clicked(self, mode: str):
+        """PyQt tabs 点击：切换 mode + 重新渲染 body（不重建 QWebEngineView）"""
+        if mode == self._welcome_mode:
+            return
+        self.set_welcome_mode(mode)
+        self.welcomeModeChanged.emit(mode)
+
+    def set_welcome_mode(self, mode: str):
+        """切换欢迎卡片模式（同步 active tab + 重渲染 body）"""
+        self._welcome_mode = mode
+        if self._welcome_mode_tabs is not None:
+            try:
+                self._welcome_mode_tabs.setCurrentItem(mode)
+            except Exception:
+                pass
+        if mode == "changelog":
+            self._render_welcome_with_body(_render_changelog_body(loading=True))
+            self._start_changelog_fetcher()
+            return
+        # sessions 走 markdown 渲染
+        body_html = _render_welcome_body(mode, self._welcome_recent, self._welcome_top)
+        self._render_welcome_with_body(body_html)
+
+    def _render_welcome_with_body(self, body_html: str):
+        """统一的 body 渲染入口：拼接 greeting + 写入 viewer（markdown 路径）"""
+        greeting = get_random_greeting()
+        welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
+        if self.viewer is not None and self._lazy_rendered:
+            self.set_content(welcome_md)
+        else:
+            self._pending_welcome_md = welcome_md
+
+    def _start_changelog_fetcher(self):
+        """启动 changelog 后台拉取（幂等：缓存有效直接渲染；fetcher 在跑则跳过）"""
+        cache = _changelog_cache
+        if cache and (time.time() - cache.get("fetched_at", 0)) < _CHANGELOG_CACHE_TTL:
+            self._apply_changelog_releases(cache["releases"])
+            return
+        if self._changelog_fetcher is not None and self._changelog_fetcher.isRunning():
+            return
+        self._changelog_fetcher = _ChangelogFetcher(etag=cache.get("etag", ""))
+        self._changelog_fetcher.finished.connect(self._on_changelog_finished)
+        self._changelog_fetcher.error.connect(self._on_changelog_error)
+        self._changelog_fetcher.start()
+
+    def _apply_changelog_releases(self, releases: list):
+        """用 release 数据渲染 changelog body"""
+        self._changelog_releases = list(releases or [])
+        body_html = _render_changelog_body(releases=self._changelog_releases)
+        self._render_welcome_with_body(body_html)
+
+    def _on_changelog_finished(self, payload):
+        """_ChangelogFetcher.finished 回调：payload 是 list（304 → []，否则 [{releases, etag}]）"""
+        try:
+            if isinstance(payload, list) and payload and isinstance(payload[0], dict) and "releases" in payload[0]:
+                data = payload[0]
+                new_releases = data["releases"]
+                # 增量判断：拉回的 tag 列表与缓存前 N 个完全一致 → 无更新，跳过渲染
+                old_tags = [r.get("tag_name", "") for r in _changelog_cache.get("releases", [])]
+                new_tags = [r.get("tag_name", "") for r in new_releases]
+                if old_tags and old_tags == new_tags:
+                    # tag 列表未变（即使 etag 不同也可能是 GitHub 临时重生成）→ 不重渲染
+                    _changelog_cache["etag"] = data.get("etag", _changelog_cache.get("etag", ""))
+                    _changelog_cache["fetched_at"] = time.time()
+                    return
+                _changelog_cache["releases"] = new_releases
+                _changelog_cache["etag"] = data.get("etag", "")
+                _changelog_cache["fetched_at"] = time.time()
+                self._apply_changelog_releases(new_releases)
+            # 304：缓存仍新鲜（fetched_at 已存在），无需重渲染
+        except Exception as e:
+            logger.warning(f"[WelcomeChangelog] 处理 fetcher 结果失败：{e}")
+        finally:
+            self._changelog_fetcher = None
+
+    def _on_changelog_error(self, msg: str):
+        """_ChangelogFetcher.error 回调：渲染错误占位"""
+        self._render_welcome_with_body(_render_changelog_body(error_msg=msg))
+        self._changelog_fetcher = None
+
+    def set_welcome_content(
+        self,
+        recent_sessions: list,
+        top_by_count: list,
+        mode: str = "sessions",
+    ):
+        """一次性设置欢迎卡片数据 + 初始 mode（被 create_welcome_card 调用）"""
+        self._welcome_recent = list(recent_sessions or [])
+        self._welcome_top = list(top_by_count or [])
+        self._welcome_mode = mode
+        if self._welcome_mode_tabs is not None:
+            try:
+                self._welcome_mode_tabs.setCurrentItem(mode)
+            except Exception:
+                pass
+        if mode == "changelog":
+            # changelog 走异步：先存 loading 占位；viewer 就绪后会调 fetcher
+            self._pending_welcome_md = (
+                f"### 👋 {get_random_greeting()}\n\n{_render_changelog_body(loading=True)}\n"
+            )
+            return
+        body_html = _render_welcome_body(mode, self._welcome_recent, self._welcome_top)
+        greeting = get_random_greeting()
+        self._pending_welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
+
     def _setup_ui(self):
         main = QVBoxLayout(self)
         main.setContentsMargins(4, 4, 4, 4)
@@ -8013,28 +8235,32 @@ class MessageCard(SimpleCardWidget):
 
         top.addWidget(av)
         top.addWidget(title_wrap)
-        # 用户卡片显示时间戳，助手卡片显示模型名称
-        if self.role == "assistant" and self.model_name:
-            label_text = self.model_name
+        # 欢迎卡片：右上角 mode 切换 segmented tabs（PyQt 层）
+        if self.role == "welcome":
+            self._build_welcome_mode_tabs(top)
         else:
-            label_text = self.timestamp
-        ts = QLabel(label_text, self)
-        self._ts_label = ts
-        ts.setVisible(bool(label_text))
-        ts.setStyleSheet(
-            f"""
-            QLabel {{
-                {get_font_family_css()} font-size: {scale_font_size(11)}px;
-                color: {self._theme["muted"]};
-                background: rgba(255,255,255,0.03);
-                border: 1px solid rgba(255,255,255,0.06);
-                border-radius: 9px;
-                padding: 2px 8px;
-            }}
-            """
-        )
-        top.addWidget(ts)
-        top.addStretch()
+            # 用户卡片显示时间戳，助手卡片显示模型名称
+            if self.role == "assistant" and self.model_name:
+                label_text = self.model_name
+            else:
+                label_text = self.timestamp
+            ts = QLabel(label_text, self)
+            self._ts_label = ts
+            ts.setVisible(bool(label_text))
+            ts.setStyleSheet(
+                f"""
+                QLabel {{
+                    {get_font_family_css()} font-size: {scale_font_size(11)}px;
+                    color: {self._theme["muted"]};
+                    background: rgba(255,255,255,0.03);
+                    border: 1px solid rgba(255,255,255,0.06);
+                    border-radius: 9px;
+                    padding: 2px 8px;
+                }}
+                """
+            )
+            top.addWidget(ts)
+            top.addStretch()
 
         # 顶部操作按钮
         btns = QWidget(self)
@@ -8966,6 +9192,13 @@ class MessageCard(SimpleCardWidget):
             if self._pending_content is not None:
                 self.set_content(self._pending_content)
                 self._pending_content = None
+            elif self._pending_welcome_md is not None:
+                # 欢迎卡片懒渲染：set_welcome_content 在 viewer 创建前存的内容
+                self.set_content(self._pending_welcome_md)
+                self._pending_welcome_md = None
+                # 欢迎卡片 viewer 就绪后，changelog 模式启动后台拉取
+                if self._welcome_mode == "changelog":
+                    self._start_changelog_fetcher()
 
             # 通知懒渲染完成，让父组件可以修正滚动位置
             self.lazyRenderCompleted.emit()
@@ -10261,12 +10494,24 @@ class MessageCard(SimpleCardWidget):
         super().closeEvent(e)
 
 
+def resolve_initial_welcome_mode(saved_mode: str, saved_plugin_tab: str, registered_tabs: dict) -> str:
+    """解析欢迎卡片初始 mode：上次选中的插件 tab 仍注册时优先，否则回退内置 mode
+
+    - saved_plugin_tab: 配置里记忆的插件 mode_key（插件可能被卸载/停用）
+    - registered_tabs: 当前 UIPluginRegistry 已注册的插件 tabs（dict，key 为 mode_key）
+    """
+    if saved_plugin_tab and saved_plugin_tab in registered_tabs:
+        return saved_plugin_tab
+    return saved_mode
+
+
 def create_welcome_card(
     parent=None,
     agent_name: str = "",
     agent_description: str = "",
     recent_sessions: list = None,
     top_by_count: list = None,
+    mode: str = "sessions",
 ) -> MessageCard:
     """创建欢迎卡片
 
@@ -10276,63 +10521,181 @@ def create_welcome_card(
         agent_description: 智能体描述
         recent_sessions: 最近的历史会话列表，每项包含 title, last_time, session_id, message_count
         top_by_count: 消息最多的会话列表，每项包含 title, last_time, session_id, message_count
+        mode: 欢迎卡片模式（sessions / changelog）
     """
-    agent_tendency = ""
-    if agent_name:
-        agent_tendency = f"""
----
-
-### 🤖 当前智能体：{agent_name}
-
-{agent_description}
-
-"""
-
-    # 随机选择欢迎语
-    greeting = get_random_greeting()
-
-    # 构建历史会话链接（两列表格：最近会话 | 最多消息）
-    history_section = ""
-    if recent_sessions or top_by_count:
-        # 生成表格 HTML（使用纯 HTML 确保胶囊样式正确显示）
-        table_rows = ""
-        for i in range(3):
-            # 左边：最近会话
-            recent = recent_sessions[i] if recent_sessions and i < len(recent_sessions) else None
-            # 右边：消息最多
-            top = top_by_count[i] if top_by_count and i < len(top_by_count) else None
-
-            if recent:
-                title = escape(recent.get("title", "未命名会话"))
-                session_id = escape(recent.get("session_id", ""))
-                last_time = escape(recent.get("last_time") or "")
-                left_cell = f'<span class="context-tag session-tag" data-type="session" data-session-id="{session_id}" data-action="session">{title}<span class="session-time">{last_time}</span></span>'
-            else:
-                left_cell = "-"
-
-            if top:
-                title = escape(top.get("title", "未命名会话"))
-                session_id = escape(top.get("session_id", ""))
-                msg_count = top.get("message_count", 0)
-                right_cell = f'<span class="context-tag session-tag" data-type="session" data-session-id="{session_id}" data-action="session">{title}<span class="session-time">{msg_count}条消息</span></span>'
-            else:
-                right_cell = "-"
-
-            table_rows += f"<tr><td>{left_cell}</td><td>{right_cell}</td></tr>"
-
-        history_section = f"""
-<table class="session-table">
-<tr><th>最近会话</th><th>最活跃会话</th></tr>
-{table_rows}
-</table>
-"""
-
-    welcome_md = f"""### 👋 {greeting}
-
-{history_section}
-"""
-
     card = MessageCard(role="welcome", timestamp="就绪", parent=parent)
-    card.update_content(welcome_md)
-    card.finish_streaming()
+    # 一次性把数据 + 模式交给卡片：tabs 在 PyQt 层；body 由卡片内部渲染
+    card.set_welcome_content(
+        recent_sessions=recent_sessions,
+        top_by_count=top_by_count,
+        mode=mode,
+    )
     return card
+
+
+def _render_welcome_body(
+    mode: str,
+    recent_sessions: list,
+    top_by_count: list,
+) -> str:
+    """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发"""
+    if mode == "changelog":
+        return _render_changelog_body()
+    # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
+    try:
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        tab = UIPluginRegistry.get_instance().get_welcome_tabs().get(mode)
+        if tab is not None:
+            # 注入主题上下文：插件 HTML 拿不到 Qt 主题，必须由主程序传入。
+            # prefers-color-scheme 跟随 OS 而非 Qt 主题（theme_manager），
+            # 单独依赖它会导致 Qt 暗色 + OS 亮色时不生效。
+            try:
+                from app.utils.theme_manager import theme_manager
+
+                is_dark = not theme_manager.is_light_theme()
+            except Exception:
+                is_dark = False
+            return tab.render_func({"is_dark": is_dark}) or ""
+    except Exception:
+        pass
+    return _render_sessions_body(recent_sessions, top_by_count)
+
+
+def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
+    """渲染会话导览 body：最近 / 最活跃两段胶囊流"""
+
+    def _render_section(title: str, items: list, count_mode: bool = False) -> str:
+        """渲染单个分类 section；items 为空则返回空串"""
+        if not items:
+            return ""
+        tag_html = []
+        for s in items[:3]:
+            t = escape(s.get("title", "未命名会话"))
+            sid = escape(s.get("session_id", ""))
+            if count_mode:
+                mc = s.get("message_count", 0)
+                meta = f"{mc}条消息"
+            else:
+                meta = escape(s.get("last_time") or "")
+            tag_html.append(
+                f'<span class="context-tag session-tag" data-type="session" '
+                f'data-session-id="{sid}" data-action="session">'
+                f'{t}<span class="session-time">{meta}</span></span>'
+            )
+        return (
+            f'<div class="session-section">'
+            f'<div class="section-title">{title}</div>'
+            f'<div class="session-tags">{"".join(tag_html)}</div>'
+            f"</div>"
+        )
+
+    recent_block = _render_section("📅 最近会话", recent_sessions, count_mode=False)
+    top_block = _render_section("🔥 最活跃会话", top_by_count, count_mode=True)
+    if not (recent_block or top_block):
+        return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
+    return recent_block + top_block
+
+
+def _render_changelog_body(releases: list = None, loading: bool = False, error_msg: str = "") -> str:
+    """渲染 changelog body：左列版本列表 + 右列描述（SPA，JS 切换不调 Python）
+
+    Args:
+        releases: 已加载的 release 列表（每项 {tag_name, name, body_html, published_at, html_url}）
+        loading: True 时显示 loading 占位
+        error_msg: 错误信息（网络失败等）
+    """
+    if error_msg:
+        return f'<div class="welcome-empty">⚠️ 加载更新日志失败：{escape(error_msg)}<br><span style="opacity:0.7">检查网络后切换 mode 重试</span></div>'
+
+    if loading or not releases:
+        return '<div class="welcome-empty">📜 正在从 GitHub Releases 拉取更新日志...</div>'
+
+    # 左列版本列表 + 右列描述（首条默认显示）
+    items = []
+    bodies = []
+    for i, r in enumerate(releases[:20]):
+        tag = escape(r.get("tag_name") or r.get("name") or f"v{i+1}")
+        date = escape((r.get("published_at") or "")[:10])
+        body_html = r.get("body_html") or "<em>无更新说明</em>"
+        active = "active" if i == 0 else ""
+        # body 用 data-attr 存（HTML 字符串），切换时直接读 attr 替换右列
+        items.append(
+            f'<li class="changelog-version {active}" data-idx="{i}">'
+            f'<div class="ver-tag">{tag}</div>'
+            f'<div class="ver-date">{date}</div></li>'
+        )
+        bodies.append(f'<div class="changelog-body" data-idx="{i}" style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>')
+
+    return (
+        '<div class="changelog-shell">'
+        f'<ul class="changelog-versions">{"".join(items)}</ul>'
+        f'<div class="changelog-detail">{"".join(bodies)}</div>'
+        '</div>'
+    )
+
+
+# ───── 欢迎卡片 changelog 异步加载 ─────
+_CHANGELOG_REPO = "martin98-afk/DriFox"
+_CHANGELOG_CACHE_TTL = 3600  # 1h
+_changelog_cache: dict = {}  # in-memory: {releases: [...], fetched_at: float, etag: str}
+
+
+class _ChangelogFetcher(QThread):
+    """后台拉 GitHub Releases；走完 emit finished(list) 或 error(str)"""
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, etag: str = "", parent=None):
+        super().__init__(parent)
+        self._etag = etag
+
+    def run(self):
+        try:
+            import httpx
+        except ImportError:
+            self.error.emit("缺少 httpx 依赖")
+            return
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self._etag:
+            headers["If-None-Match"] = self._etag
+        url = f"https://api.github.com/repos/{_CHANGELOG_REPO}/releases?per_page=5"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(8.0)) as client:
+                resp = client.get(url, headers=headers)
+        except Exception as e:
+            self.error.emit(f"网络错误：{e}")
+            return
+        if resp.status_code == 304:
+            # 缓存仍新鲜（带 etag 才可能命中；用 fetched_at 判断也兜底）
+            self.finished.emit([])
+            return
+        if resp.status_code != 200:
+            self.error.emit(f"GitHub API {resp.status_code}：{resp.text[:120]}")
+            return
+        try:
+            data = resp.json()
+        except Exception as e:
+            self.error.emit(f"解析失败：{e}")
+            return
+        new_etag = resp.headers.get("ETag", "")
+        releases = []
+        md = get_markdown_instance()
+        for item in data:
+            body_md = item.get("body") or ""
+            try:
+                body_html = md.convert(body_md)
+            except Exception:
+                body_html = escape(body_md).replace("\n", "<br>")
+            md.reset()
+            releases.append({
+                "tag_name": item.get("tag_name", ""),
+                "name": item.get("name", ""),
+                "body_html": body_html,
+                "published_at": item.get("published_at", ""),
+                "html_url": item.get("html_url", ""),
+            })
+        self.finished.emit([{"releases": releases, "etag": new_etag}])

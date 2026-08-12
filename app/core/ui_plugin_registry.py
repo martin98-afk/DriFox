@@ -32,6 +32,27 @@ class ContentRendererInfo:
 
 
 @dataclass(frozen=True)
+class WelcomeTabInfo:
+    """欢迎卡片插件 tab 注册信息
+
+    Attributes:
+        plugin_name: 所属插件名
+        mode_key: tab 唯一标识（同时用作 welcome mode 值）
+        label: tab 显示文本
+        render_func: 渲染函数，签名 (context: dict) -> str(HTML 片段)
+        priority: 优先级（同 mode_key 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    mode_key: str
+    label: str
+    render_func: Callable[[Dict[str, Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MessageFactoryInfo:
     """消息元素工厂
 
@@ -85,6 +106,7 @@ class UIPluginRegistry:
         self._content_renderers: Dict[str, ContentRendererInfo] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
+        self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
@@ -137,6 +159,47 @@ class UIPluginRegistry:
             # 低优先级注册被忽略
             return
         self._content_renderers[type_name] = info
+
+    def register_welcome_tab(
+        self,
+        plugin_name: str,
+        mode_key: str,
+        label: str,
+        render_func: Callable[[Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册欢迎卡片插件 tab
+
+        Args:
+            plugin_name: 所属插件名
+            mode_key: tab 唯一标识（同时用作 welcome mode 值，需避免与
+                      系统内置 mode 冲突：sessions / projects / changelog）
+            label: tab 显示文本（SegmentedWidget 上展示）
+            render_func: 渲染函数，签名 (context: dict) -> str(HTML 片段)，
+                         片段会拼进欢迎卡片 body 的 markdown 管线渲染
+            priority: 优先级（同 mode_key 时高者覆盖低者）
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        info = WelcomeTabInfo(
+            plugin_name=plugin_name,
+            mode_key=mode_key,
+            label=label,
+            render_func=render_func,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._welcome_tabs.get(mode_key)
+        if existing is not None and existing.priority > priority:
+            # 低优先级注册被忽略
+            return
+        self._welcome_tabs[mode_key] = info
+
+    def get_welcome_tabs(self) -> Dict[str, WelcomeTabInfo]:
+        """获取所有已注册的欢迎卡片插件 tab（插入序）"""
+        return dict(self._welcome_tabs)
 
     def register_message_factory(
         self,
@@ -513,9 +576,16 @@ class UIPluginRegistry:
                     f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function"
                 )
                 return False
+            # 仅当该插件注册了欢迎卡片 tab 时才刷新欢迎卡片；
+            # 普通 UI 插件（渲染器/悬浮卡/命令）不触碰欢迎卡片缓存，
+            # 避免每次加载/刷新 UI 插件都重建欢迎卡片。
+            before_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             register_func(self)
             self._loaded_plugins.add(plugin_name)
             logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
+            after_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
+            if before_tabs != after_tabs:
+                self._refresh_welcome_cards()
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
@@ -553,6 +623,10 @@ class UIPluginRegistry:
         self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
         self._message_factories = [f for f in self._message_factories if f.plugin_name != plugin_name]
+        # 记录该插件是否注册过欢迎卡片 tab（决定卸载后是否刷新欢迎卡片）
+        had_welcome_tabs = any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
+        # 清理 welcome tabs
+        self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -565,7 +639,33 @@ class UIPluginRegistry:
                     self._remove_widget_from_container(win_id, cid, widget)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
+        if had_welcome_tabs:
+            self._refresh_welcome_cards()
         return True
+
+    def _refresh_welcome_cards(self) -> None:
+        """插件 UI 加载/卸载后刷新所有窗口的欢迎卡片
+
+        欢迎卡片的 tabs 在卡片创建时从 registry 一次性构建（
+        MessageCard._build_welcome_mode_tabs）；若卡片先于插件 UI 加载
+        创建（插件热重载 / 启用 / 加载顺序变化），tabs 不会自动更新。
+        此处对已缓存卡片的窗口：失效缓存（下次显示重建），当前正显示
+        欢迎卡片的窗口立即重建。尚无缓存卡片的窗口（正常启动路径：
+        卡片在插件加载后才创建）无需处理。
+        """
+        for mw in list(self._window_main_widgets.values()):
+            try:
+                if not hasattr(mw, "_invalidate_welcome_card"):
+                    continue
+                window_id = getattr(mw, "_window_id", None)
+                if window_id is None or window_id not in getattr(mw, "_welcome_card_cache", {}):
+                    continue  # 尚无缓存卡片，正常启动路径无需刷新
+                mw._invalidate_welcome_card()
+                if getattr(mw, "_displayed_session_id", None) is None:
+                    # 当前正显示欢迎卡片（无会话上下文）→ 立即重建，避免空白
+                    mw._show_initial_welcome()
+            except Exception:
+                pass
 
     def _remove_widget_from_container(self, window_id: str, card_id: str, widget) -> None:
         """从容器布局和 CardManager 中移除指定 widget（不触发删除，仅 UI 清理）
@@ -681,6 +781,18 @@ class UIPluginRegistry:
 
     def set_main_widget(self, widget: Any) -> None:
         self._main_widget = widget
+        # 注册到窗口映射（_refresh_welcome_cards 等遍历依赖）。_window_main_widgets
+        # 语义为"所有窗口"（unregister_window 按 window_id 清理，见其 docstring），
+        # 但历史上唯一注册点是 _show_floating_card——仅显示过浮动卡片的窗口在册，
+        # 导致 Tab 子窗口 / 未显示浮动卡片的窗口在插件 UI 加载/卸载时欢迎卡片不刷新。
+        # 窗口 __init__ 即注册（main_widget L3166 调用点），生命周期仍由
+        # unregister_window（closeEvent）清理。
+        try:
+            wid = getattr(widget, "_window_id", None)
+            if wid:
+                self._window_main_widgets[wid] = widget
+        except Exception:
+            pass
 
     def set_context_provider(self, provider: Callable[[], Dict[str, Any]], window_id: str = None) -> None:
         """设置上下文提供者（多窗口隔离：按 window_id 存储）
@@ -845,6 +957,7 @@ class UIPluginRegistry:
         self._content_renderers.clear()
         self._message_factories.clear()
         self._floating_cards.clear()
+        self._welcome_tabs.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
         self._ui_command_names.clear()

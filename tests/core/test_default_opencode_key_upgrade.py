@@ -1,23 +1,28 @@
 # -*- coding: utf-8 -*-
-"""内置 OpenCode 免费 key 自动升级回归测试
+"""内置 OpenCode 共享 key 迁移为免 key 配置的回归测试
+
+背景：
+- 旧版本注入内置共享 key（OPENCODE_SHARED_API_KEY）作为默认"opencode免费模型"配置；
+  实测该共享 key 已被上游吊销（401），且 OpenCode Zen 支持免 key 匿名调用
+  （空 key 时剥离 Authorization 头）。
+- 新逻辑：默认配置不再带任何 key（API_KEY=""），启动时把历史内置 key 配置
+  迁移为免 key 配置（config_id 重算，已选模型映射迁移）。
 
 覆盖：
-- 旧内置 key → 自动升级为新 key，config_id 重算，已选模型映射迁移
-- 当前 key / 用户自定义 key → 保持不动
-- 无同名配置 → 正常注入
-- 新 config_id 与其他配置冲突 → 跳过升级，不覆盖用户数据
+- 历史内置 key（含 legacy key）→ 迁移为免 key，config_id 重算，已选模型映射迁移
+- 用户自定义 key → 保持不动
+- 无同名配置 → 注入免 key 配置
+- 新 config_id 与其他配置冲突 → 跳过迁移，不覆盖用户数据
 """
 
 from types import SimpleNamespace
 
-from app.constants import OPENCODE_LEGACY_KEYS, OPENCODE_SHARED_API_KEY
 from app.core.provider_profile import compute_provider_config_id
-from app.utils.config import Settings
+from app.utils.config import Settings, _LEGACY_OPENCODE_BUILTIN_KEYS
 
 CONFIG_NAME = "opencode免费模型"
 API_URL = "https://opencode.ai/zen/v1"
-OLD_KEY = next(iter(OPENCODE_LEGACY_KEYS))
-NEW_KEY = OPENCODE_SHARED_API_KEY
+OLD_KEY = next(iter(_LEGACY_OPENCODE_BUILTIN_KEYS))
 
 
 class FakeSettings:
@@ -49,11 +54,11 @@ def _make_default_entry(api_key: str) -> dict:
     return info
 
 
-class TestLegacyKeyUpgrade:
-    """旧内置 key 自动升级"""
+class TestLegacyKeyMigration:
+    """历史内置共享 key 自动迁移为免 key"""
 
-    def test_legacy_key_upgraded_and_selected_migrated(self):
-        """旧 key → 新 key；config_id 重算；llm_selected_model 同步迁移"""
+    def test_legacy_key_migrated_and_selected_updated(self):
+        """内置 key → 空 key；config_id 重算；llm_selected_model 同步迁移"""
         old_entry = _make_default_entry(OLD_KEY)
         old_cid = old_entry["config_id"]
         fake = FakeSettings({old_cid: old_entry}, selected=old_cid)
@@ -62,19 +67,19 @@ class TestLegacyKeyUpgrade:
 
         saved = fake.llm_saved_providers.value
         assert old_cid not in saved, "旧条目应被移除"
-        assert fake.save_called, "升级后应触发保存"
+        assert fake.save_called, "迁移后应触发保存"
 
-        new_cid = compute_provider_config_id({**old_entry, "API_KEY": NEW_KEY})
-        assert new_cid in saved, "新 key 条目应存在"
-        assert saved[new_cid]["API_KEY"] == NEW_KEY
+        new_cid = compute_provider_config_id({**old_entry, "API_KEY": ""})
+        assert new_cid in saved, "免 key 条目应存在"
+        assert saved[new_cid]["API_KEY"] == ""
         assert saved[new_cid]["name"] == CONFIG_NAME
         # 其他用户字段保留
         assert saved[new_cid]["模型名称"] == "deepseek-v4-flash-free"
         # 已选模型迁移
         assert fake.llm_selected_model.value == new_cid
 
-    def test_upgrade_keeps_user_customized_fields(self):
-        """升级只换 key，保留用户改过的模型名称"""
+    def test_migration_keeps_user_customized_fields(self):
+        """迁移只清空 key，保留用户改过的模型名称"""
         old_entry = _make_default_entry(OLD_KEY)
         old_entry["模型名称"] = "my-custom-model"
         old_cid = old_entry["config_id"]
@@ -83,17 +88,17 @@ class TestLegacyKeyUpgrade:
         Settings._ensure_default_opencode_provider(fake)
 
         saved = fake.llm_saved_providers.value
-        new_cid = compute_provider_config_id({**old_entry, "API_KEY": NEW_KEY})
+        new_cid = compute_provider_config_id({**old_entry, "API_KEY": ""})
         assert saved[new_cid]["模型名称"] == "my-custom-model"
-        assert saved[new_cid]["API_KEY"] == NEW_KEY
+        assert saved[new_cid]["API_KEY"] == ""
 
 
-class TestNoUpgrade:
-    """不该升级的场景"""
+class TestNoMigration:
+    """不该迁移的场景"""
 
-    def test_current_key_untouched(self):
-        """key 已是当前常量 → 不动（config_id 不变）"""
-        entry = _make_default_entry(NEW_KEY)
+    def test_empty_key_untouched(self):
+        """已是免 key 配置 → 不动（config_id 不变，不触发保存）"""
+        entry = _make_default_entry("")
         cid = entry["config_id"]
         fake = FakeSettings({cid: entry}, selected=cid)
 
@@ -101,12 +106,12 @@ class TestNoUpgrade:
 
         saved = fake.llm_saved_providers.value
         assert cid in saved and len(saved) == 1
-        assert saved[cid]["API_KEY"] == NEW_KEY
+        assert saved[cid]["API_KEY"] == ""
         assert fake.llm_selected_model.value == cid
         assert not fake.save_called, "无变化不应触发保存"
 
     def test_user_custom_key_untouched(self):
-        """用户自定义 key（非内置历史 key）→ 不动"""
+        """用户自定义 key（非历史内置 key）→ 不动"""
         custom_key = "user-custom-key-abc123"
         entry = _make_default_entry(custom_key)
         cid = entry["config_id"]
@@ -118,13 +123,13 @@ class TestNoUpgrade:
         assert saved[cid]["API_KEY"] == custom_key
         assert not fake.save_called
 
-    def test_conflict_skips_upgrade(self):
-        """新 config_id 撞到已有条目 → 跳过升级，保留旧条目"""
+    def test_conflict_skips_migration(self):
+        """新 config_id 撞到已有条目 → 跳过迁移，保留旧条目"""
         old_entry = _make_default_entry(OLD_KEY)
         old_cid = old_entry["config_id"]
-        new_entry = _make_default_entry(NEW_KEY)
+        new_entry = _make_default_entry("")
         new_cid = new_entry["config_id"]
-        # 用户已手动添加过新 key 的条目
+        # 用户已手动添加过免 key 条目
         fake = FakeSettings({old_cid: old_entry, new_cid: new_entry}, selected=old_cid)
 
         Settings._ensure_default_opencode_provider(fake)
@@ -140,7 +145,7 @@ class TestInject:
     """首次注入"""
 
     def test_inject_when_missing(self):
-        """无同名配置 → 用当前常量注入新配置"""
+        """无同名配置 → 注入免 key 配置"""
         fake = FakeSettings({})
 
         Settings._ensure_default_opencode_provider(fake)
@@ -149,7 +154,7 @@ class TestInject:
         assert len(saved) == 1
         cid = next(iter(saved))
         assert saved[cid]["name"] == CONFIG_NAME
-        assert saved[cid]["API_KEY"] == NEW_KEY
+        assert saved[cid]["API_KEY"] == ""
         assert fake.llm_default_opencode_injected.value is True
         assert fake.save_called
 

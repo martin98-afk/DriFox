@@ -206,7 +206,7 @@ class TestWelcomeCardBehavior:
         # stub create_welcome_card 捕获传入的 recent_sessions
         captured = {}
 
-        def _fake_create_welcome_card(parent, agent_name, agent_desc, recent, top):
+        def _fake_create_welcome_card(parent, agent_name, agent_desc, recent, top, **kwargs):
             captured["recent"] = recent
             captured["top"] = top
             card = MagicMock()

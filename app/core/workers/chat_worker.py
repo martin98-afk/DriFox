@@ -31,7 +31,6 @@ from openai import (
     APIError,
     BadRequestError,
     InternalServerError,
-    OpenAI,
     RateLimitError,
 )
 from PyQt5.QtCore import QBuffer, QIODevice, QThread, QByteArray, pyqtSignal
@@ -1323,8 +1322,14 @@ class OpenAIChatWorker(QThread):
         避免每次 API 调用都创建新的客户端。
         """
         if self._http_client is None:
-            self._http_client = OpenAI(
-                api_key=self.llm_config.get("API_KEY", "").strip(),
+            # 无 API key 时剥离 Authorization 头（免 key 匿名调用）：
+            # - 本地免认证端点（auth=none，如 Ollama）服务端不校验 key
+            # - OpenCode 免费模型支持匿名调用，传占位 key 反而 401
+            # - 云端认证端点无 key 时服务端返回 401，走现有错误处理
+            from app.utils.http_client import build_openai_client
+
+            self._http_client = build_openai_client(
+                api_key=self.llm_config.get("API_KEY", ""),
                 base_url=self.llm_config.get("API_URL"),
                 timeout=httpx.Timeout(600.0, connect=60.0),
             )

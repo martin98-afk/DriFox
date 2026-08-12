@@ -5,6 +5,52 @@
 
 ---
 
+## 📑 目录
+
+> 行号对应本文件当前版本，编辑后请更新。
+
+- **1. 基础验证（每个 UI 插件必查）** — L52–L97
+  - 1.1 代码质量 — L54–L58
+  - 1.2 插件清单 — L59–L64
+  - 1.3 注册入口 — L65–L70
+  - 1.4 浮动卡片（如果用了 `register_floating_card`） — L71–L80
+  - 1.5 插件闭包 — L81–L86
+  - 1.6 异步操作（如果用了 worker） — L87–L97
+- **2. 主题色验证** — L98–L165
+  - 2.1 上下文注入 — L100–L106
+  - 2.2 浮动卡片背景适配 — L107–L112
+  - 2.3 字体注入（重要 — 最容易出 bug 的地方 ⚠️） — L113–L142
+    - 三层策略验证 — L115–L124
+    - 常见陷阱 — L125–L131
+    - 验证方法 — L132–L142
+  - 2.4 按钮样式工厂模式 — L143–L151
+  - 2.5 常见场景 — L152–L165
+- **3. 外部依赖验证（如果用了 `_vendor/`）** — L166–L193
+  - 3.1 目录与文件 — L168–L174
+  - 3.2 register_ui 配置 — L175–L181
+  - 3.3 热重载兼容性 — L182–L185
+  - 3.4 打包测试 — L186–L193
+- **4. 可复用 widgets 验证（如果用了 widgets）** — L194–L202
+- **5. SQLite 验证（如果读了数据库）** — L203–L217
+- **6. 数据展示验证** — L218–L229
+- **7. UI/UX 验证** — L230–L254
+  - 7.1 布局 — L232–L238
+  - 7.2 加载状态 — L239–L246
+  - 7.3 关闭流程 — L247–L254
+- **8. 性能验证** — L255–L276
+  - 8.1 UI 线程不卡 — L257–L263
+  - 8.2 内存不泄漏 — L264–L269
+  - 8.3 启动不慢 — L270–L276
+- **9. 跨环境验证** — L277–L286
+- **10. 提交前最终检查** — L287–L308
+- **11. 故障排查速查** — L309–L327
+- **12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）** — L330–L388
+  - 12.1 注册与渲染 — L332–L338
+  - 12.2 HTML 注入约束（核心 ⚠️） — L339–L347
+  - 12.3 主题适配（核心 ⚠️） — L348–L357
+  - 12.4 echarts 图表验证（如果用了 ` ```echarts ` 代码块） — L358–L366
+  - 12.5 功能验证 — L367–L380
+  - 12.4 功能验证 — L356–L368
 ## 1. 基础验证（每个 UI 插件必查）
 
 ### 1.1 代码质量
@@ -276,3 +322,59 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 | 打包后 ImportError | `_vendor/` 没配置 / sys.modules 缓存 | §3 |
 | 标签被裁剪 | 没算 `top_margin` / `label_y < margin_top` 没处理 | §7.1 |
 | 内存泄漏 | widget 没 `deleteLater` / worker 没清理 | §8.2 |
+| welcome tab 无交互 | onclick 内联 JS 引号冲突 / 用了 `<script>` | §12.2 |
+| welcome tab 明暗不跟 | 没写 `prefers-color-scheme` 媒体查询 | §12.3 |
+
+---
+
+## 12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）
+
+### 12.1 注册与渲染
+
+- [ ] `mode_key` 避开系统内置 mode（`sessions` / `projects` / `changelog`）
+- [ ] `render_func` 返回 **markdown 片段**（含内联 `<style>`，或 ` ```echarts ` 代码块），不依赖外部 CSS/JS 文件
+- [ ] `render_func` 是同步函数，无网络/大文件读取（主线程调用）；数据查询做了模块级缓存（db mtime + 日期作 key）
+- [ ] 热重载兼容：清理了 `sys.modules` 中 `ui_plugin_<safe_name>.` 前缀子模块
+
+### 12.2 HTML 注入约束（核心 ⚠️）
+
+- [ ] **没有 `<script>` 标签**（innerHTML 注入的 script 不执行）
+- [ ] 内容由 **Python 预渲染**（日期网格/列表等在 render_func 里拼 HTML）
+- [ ] 交互用 **onclick 内联立即执行函数**：`onclick="(function(b,dl){...})(this,1)"`
+- [ ] onclick 内 JS 用 `{{ }}` 双花括号转义（Python f-string 中）
+- [ ] 动态值用**占位符 `.replace()` 注入**（如 `TODAY_Y` / `DELTA`），不直接拼数字
+- [ ] JS 内生成 DOM 用 `createElement` + `textContent`（避免引号冲突）
+
+### 12.3 主题适配（核心 ⚠️）
+
+- [ ] `render_func` 签名**接收 ctx**（`lambda ctx: ...`），不丢主程序注入的主题
+- [ ] 明暗优先用 `ctx["is_dark"]`（跟随 Qt 主题，theme_manager 控制）
+- [ ] 判断用 `ctx.get("is_dark")` 原值，**不用 `bool()` 包裹**（`bool(None)`=False 会误判浅色）
+- [ ] ctx 缺失时回退 `@media (prefers-color-scheme: dark)`（仅兜底，OS 亮色 + Qt 暗色不生效）
+- [ ] 必要文字颜色加 `!important`（防骨架 CSS 覆盖）
+
+> ⚠️ `prefers-color-scheme` 跟随 OS 而非 Qt 主题，**不能单独依赖**。
+
+### 12.4 echarts 图表验证（如果用了 ` ```echarts ` 代码块）
+
+- [ ] 图表渲染出来（`window.echarts` 存在 → DriFox ≥ 0.4.15 / `_SKELETON_CACHE_VERSION >= 9`）
+- [ ] JSON 中**无 JS 函数**（`formatter` 用字符串模板 `"{value}M"`；数据 Python 侧预缩放）
+- [ ] 图表明暗适配：色板随 `ctx["is_dark"]` 切换（重启 Qt 主题验证）
+- [ ] 宽度自适应：卡片缩放时图表 resize（ResizeObserver）
+- [ ] 无数据时返回纯 markdown 提示行，不输出 echarts 代码块
+- [ ] 多个图表纵向堆叠正常（每个代码块独立渲染，height 固定 400px）
+
+### 12.5 功能验证
+
+```
+启动程序 → 欢迎卡片出现新 tab
+1. tab 标签文字显示正确？           → label 参数
+2. 内容渲染正确（无 JS 报错）？      → 控制台无错误
+3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
+4. 明暗主题切换颜色跟随？           → ctx["is_dark"] 注入生效（重点：Qt 暗色 + OS 亮色也生效）
+5. echarts 图表渲染 + 明暗 + 宽度自适应？ → §12.4
+6. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
+7. 插件热重载无异常？               → sys.modules 前缀清理
+```
+
+> 完整模板与踩坑见 `templates.md §八`。
