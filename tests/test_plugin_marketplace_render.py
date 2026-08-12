@@ -201,6 +201,166 @@ def test_load_more_no_blank_tail(monkeypatch):
     assert scroll_max3 <= content_h3 - vp_h2 + 1, f"重建后滚动范围超出内容: scrollMax={scroll_max3}"
 
 
+def test_proxy_tab_switches_without_error(monkeypatch):
+    """「加速」tab 切换不抛异常且页面正确切换（回归：get_proxy_config 未导入导致 NameError 被 Qt 吞）"""
+    card = _new_card(monkeypatch)
+    card.show()
+
+    # 直接触发 tab 切换（等价于点击 Pivot）
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    assert card._page_stack.currentIndex() == 2
+    assert getattr(card, "_proxy_built", False) is True
+    # 页面确实有内容（三张卡片 + 控件）
+    from PyQt5.QtWidgets import QLabel
+
+    assert card._proxy_page.findChildren(QLabel), "加速页应有 QLabel 控件"
+
+    # 切回浏览正常
+    card._on_tab_changed("browse")
+    _pump(0.05)
+    assert card._page_stack.currentIndex() == 0
+
+
+def test_proxy_tab_keeps_unsaved_switch_state(monkeypatch):
+    """切走再切回：开关保留用户未保存的状态（不被磁盘旧值覆盖）"""
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 用户点开开关（未保存）
+    card._proxy_switch.setChecked(True)
+    # 切走再切回
+    card._on_tab_changed("browse")
+    _pump(0.05)
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    assert card._proxy_switch.isChecked(), "切回后应保留用户未保存的开关状态"
+
+
+def test_proxy_switch_toggled_saves_enabled(monkeypatch, tmp_path):
+    """开关切换即自动落盘 enabled（无需再点保存）"""
+    import json
+
+    from ui.proxy import ProxyConfig
+
+    fake = ProxyConfig(file=tmp_path / "proxy.json")
+    from ui import cards as cards_mod
+
+    monkeypatch.setattr(cards_mod, "get_proxy_config", lambda: fake)
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 填有效地址后开开关 → 应自动保存 enabled=true
+    card._proxy_addr_edit.setText("http://127.0.0.1:7890")
+    idx = card._proxy_mode_combo.findData("http")
+    card._proxy_mode_combo.setCurrentIndex(idx)
+    card._proxy_switch.setChecked(True)
+    _pump(0.05)
+
+    data = json.loads((tmp_path / "proxy.json").read_text(encoding="utf-8"))
+    assert data["enabled"] is True
+    assert data["mode"] == "http"
+    assert data["address"] == "http://127.0.0.1:7890"
+
+    # 关开关 → 自动落盘 enabled=false
+    card._proxy_switch.setChecked(False)
+    _pump(0.05)
+    data = json.loads((tmp_path / "proxy.json").read_text(encoding="utf-8"))
+    assert data["enabled"] is False
+
+
+def test_proxy_switch_bounces_on_invalid_address(monkeypatch, tmp_path):
+    """地址非法时开开关应回弹（不落盘 enabled）"""
+    import json
+
+    from ui.proxy import ProxyConfig
+
+    fake = ProxyConfig(file=tmp_path / "proxy.json")
+    from ui import cards as cards_mod
+
+    monkeypatch.setattr(cards_mod, "get_proxy_config", lambda: fake)
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 空地址开开关 → 回弹为 False
+    card._proxy_switch.setChecked(True)
+    _pump(0.05)
+    assert card._proxy_switch.isChecked() is False
+    if (tmp_path / "proxy.json").exists():
+        data = json.loads((tmp_path / "proxy.json").read_text(encoding="utf-8"))
+        assert data["enabled"] is False
+
+
+def test_proxy_card_has_styled_background(monkeypatch):
+    """加速页只有一个带边框背景的外层容器（WA_StyledBackground，否则 QSS background 不渲染 → 透明）"""
+    from PyQt5.QtCore import Qt as _Qt
+    from PyQt5.QtWidgets import QWidget as _QWidget
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 外层容器：_proxy_page 的直接子级、带边框背景
+    bg_cards = [
+        w
+        for w in card._proxy_page.findChildren(_QWidget)
+        if w.parent() is card._proxy_page
+        and w.testAttribute(_Qt.WA_StyledBackground)
+        and "border" in w.styleSheet()
+        and "background" in w.styleSheet()
+    ]
+    assert len(bg_cards) == 1, f"应只有 1 个外层容器带边框，实际 {len(bg_cards)}"
+
+
+def test_proxy_inner_sections_have_no_border(monkeypatch):
+    """加速页内部段落（启用/配置/帮助）不得有边框"""
+    from PyQt5.QtCore import Qt as _Qt
+    from PyQt5.QtWidgets import QWidget as _QWidget
+
+    card = _new_card(monkeypatch)
+    card.show()
+    card._on_tab_changed("proxy")
+    _pump(0.05)
+
+    # 找到外层容器
+    outer = None
+    for w in card._proxy_page.findChildren(_QWidget):
+        if (
+            w.parent() is card._proxy_page
+            and w.testAttribute(_Qt.WA_StyledBackground)
+            and "border" in w.styleSheet()
+        ):
+            outer = w
+            break
+    assert outer is not None, "未找到外层容器"
+
+    # 外层内的直接子段：启用行/配置段/帮助段/分隔线 → 均不得有可见边框
+    for i in range(outer.layout().count()):
+        item = outer.layout().itemAt(i)
+        w = item.widget() if item else None
+        if w is None:
+            continue
+        ss = w.styleSheet()
+        if not ss:
+            continue
+        # border: none 视为无边框；只拦截设置了实际 border 的
+        if "border:" in ss and "border: none" not in ss:
+            raise AssertionError(f"内部段不应有边框: {ss[:80]}")
+
+
+
+
 def _stretch_gap(card) -> int:
     """按钮（或最后可见行）底部与 content 底部的空隙（stretch 区）"""
     btn = card._load_more_btn

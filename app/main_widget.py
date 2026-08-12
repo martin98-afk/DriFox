@@ -17756,12 +17756,16 @@ class OpenAIChatToolWindow(ToolWindow):
         self._project_selector_card_content.set_filter("")
         self._on_new_project_created(name)
 
-    def _on_new_project_created(self, project: str, suppress_memory_card: bool = False):
+    def _on_new_project_created(self, project: str, suppress_memory_card: bool = False, root_dir: str = ""):
         """新建项目后
 
         Args:
             suppress_memory_card: 为 True 时不自动弹出关键文档卡片
                                   （拖拽/选择文件夹设了根目录时使用）
+            root_dir: 指定的项目根目录（拖拽/选择文件夹建项目时传入）。
+                      传入时直接绑定该目录为工作目录，不再创建默认项目文件夹
+                      （~/.drifox/workspaces/<project>/），AGENTS.md 等文件
+                      写入指定路径而非默认路径。
         """
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
         prev_project = self._current_project
@@ -17782,6 +17786,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🐛 修复：切换项目时无条件同步工作目录（不依赖记忆卡片惰性构建状态），
         # 否则 tool_executor.get_workdir() 残留旧项目 → PreUserMessage hook 的
         # githook 显示旧项目根目录。
+        # 指定了项目根目录：先预置实例缓存 + 写 DB，_sync_working_directory 直接
+        # 使用该路径，不再走 _ensure_temp_workdir 创建默认项目文件夹；
+        # 同时确保团队广播时其他窗口从 DB 也能读到正确路径（不会回退默认目录）。
+        if root_dir:
+            self._current_workdir[project] = root_dir
+            if self.backend and self.backend.memory_manager:
+                self.backend.memory_manager.add_key_document(project, root_dir, added_by="manual")
+                self.backend.memory_manager.set_working_directory(project, root_dir)
         self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
@@ -18392,7 +18404,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # ── 创建项目（已设根目录，跳过关键文档卡片弹出） ──
-        self._on_new_project_created(project_name, suppress_memory_card=True)
+        # 传入 root_dir=folder_path：直接绑定指定文件夹为工作目录，
+        # 不再创建默认项目文件夹（~/.drifox/workspaces/<project>/），
+        # AGENTS.md 等文件写入指定路径而非默认路径。
+        self._on_new_project_created(project_name, suppress_memory_card=True, root_dir=folder_path)
 
         # ── 将拖入文件夹加入关键文档并设为工作目录（根目录） ──
         try:

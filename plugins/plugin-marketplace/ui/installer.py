@@ -23,6 +23,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from .data import compare_versions
+from .proxy import get_proxy_config
 
 
 # ── 下载量统计上报 ──────────────────────────────────────────
@@ -158,6 +159,13 @@ class PluginInstaller:
         # 供 UI 图标/详情复用，避免重复读盘）
         self._manifest_cache: dict = {}
 
+    # 缓存字段组锁：worker 线程写（invalidate/预填充）、GUI 主线程读
+    # （get_installed_map/get_status_map）。多字段（_inst_map_cache /
+    # _inst_map_ts / _manifest_cache / _status_map_cache / _status_map_ts）
+    # 非原子更新，锁保证读方看不到"半写"中间态。类级默认：兼容测试用
+    # PluginInstaller.__new__ 手赋属性的构造方式（不执行 __init__）。
+    _cache_lock = threading.Lock()
+
     # ── 批量状态查询 ──────────────────────────────────────
 
     _INST_MAP_TTL = 3.0  # 秒：渲染/筛选频繁调用时避免重复扫描磁盘
@@ -176,8 +184,9 @@ class PluginInstaller:
             {name: version_or_None}，version 读取失败为 None
         """
         now = time.time()
-        if use_cache and self._inst_map_cache is not None and now - self._inst_map_ts < self._INST_MAP_TTL:
-            return self._inst_map_cache
+        with self._cache_lock:
+            if use_cache and self._inst_map_cache is not None and now - self._inst_map_ts < self._INST_MAP_TTL:
+                return self._inst_map_cache
 
         result: dict = {}
         manifest_cache: dict = {}
@@ -192,10 +201,12 @@ class PluginInstaller:
                         manifest_cache[entry.name] = manifest
                 except OSError:
                     pass
-        # 系统插件（项目根 plugins/）：与用户插件重名时跳过
-        if self._system_dir.is_dir():
+        # 系统插件（项目根 plugins/）：与用户插件重名时跳过。
+        # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _system_dir 时跳过）。
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and system_dir.is_dir():
             try:
-                for entry in os.scandir(self._system_dir):
+                for entry in os.scandir(system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
                     version, manifest = self._read_version_full(Path(entry.path))
@@ -204,9 +215,10 @@ class PluginInstaller:
             except OSError:
                 pass
 
-        self._manifest_cache = manifest_cache
-        self._inst_map_cache = result
-        self._inst_map_ts = now
+        with self._cache_lock:
+            self._manifest_cache = manifest_cache
+            self._inst_map_cache = result
+            self._inst_map_ts = now
         return result
 
     def get_status_map(self, use_cache: bool = True) -> dict:
@@ -218,8 +230,9 @@ class PluginInstaller:
         - 项目根 plugins/（不重名）→ system
         """
         now = time.time()
-        if use_cache and self._status_map_cache is not None and now - self._status_map_ts < self._INST_MAP_TTL:
-            return self._status_map_cache
+        with self._cache_lock:
+            if use_cache and self._status_map_cache is not None and now - self._status_map_ts < self._INST_MAP_TTL:
+                return self._status_map_cache
 
         result: dict = {}
         if self._plugins_dir.is_dir():
@@ -236,16 +249,19 @@ class PluginInstaller:
                         result[entry.name] = "disabled"
             except OSError:
                 pass
-        if self._system_dir.is_dir():
+        # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _system_dir 时跳过）。
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and system_dir.is_dir():
             try:
-                for entry in os.scandir(self._system_dir):
+                for entry in os.scandir(system_dir):
                     if entry.is_dir() and entry.name not in result:
                         result[entry.name] = "system"
             except OSError:
                 pass
 
-        self._status_map_cache = result
-        self._status_map_ts = now
+        with self._cache_lock:
+            self._status_map_cache = result
+            self._status_map_ts = now
         return result
 
     @staticmethod
@@ -262,12 +278,31 @@ class PluginInstaller:
         return None, None
 
     def invalidate_installed_cache(self):
-        """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
-        self._inst_map_cache = None
-        self._inst_map_ts = 0.0
-        self._status_map_cache = None
-        self._status_map_ts = 0.0
-        self._manifest_cache = {}
+        """使缓存失效（清空后立即在调用线程重填，语义=清后立即重填）
+
+        调用方均为后台安装/更新/卸载 worker 线程（install/update/remove/
+        disable/enable 成功路径）。清空后立刻在本线程触发一次全量扫描填充
+        TTL 缓存：主线程完成回调（_on_install_done → _refresh_row_states）
+        在 3s TTL 窗口内命中缓存，跳过全量磁盘扫描（消灭安装/卸载后
+        主线程 os.scandir + 逐插件读 manifest 的卡顿根因）。
+
+        若未来有主线程调用本方法，重填扫描会在主线程同步执行——
+        调用方需保证本方法只从后台线程进入。
+        """
+        with self._cache_lock:
+            self._inst_map_cache = None
+            self._inst_map_ts = 0.0
+            self._status_map_cache = None
+            self._status_map_ts = 0.0
+            self._manifest_cache = {}
+        # 清空后立即重填（仍在后台线程）：get_installed_map 填充 inst+manifest
+        # 缓存，get_status_map 填充 status 缓存。任一失败不阻塞（主线程回调
+        # 有 TTL miss 兜底自行扫描）。
+        try:
+            self.get_installed_map(use_cache=False)
+            self.get_status_map(use_cache=False)
+        except Exception as e:
+            logger.warning(f"[Installer] 缓存预填充失败（主线程回调将兜底扫描）: {e}")
 
     # ── 安装 ─────────────────────────────────────────────
 
@@ -296,12 +331,13 @@ class PluginInstaller:
         return success
 
     def update(self, plugin_meta: dict) -> bool:
-        """更新插件 — 立即删除旧版后重新下载
+        """更新插件 — 先下载新版，下载成功后再替换旧版（失败保留旧版）
 
         流程（点击更新即触发）：
-        1. 先删除旧版目录（用户感知为「点了立即删除现有的」）
-        2. 再下载新版安装
-        若下载失败，插件保持未安装状态（可重新点「安装」恢复）。
+        1. 下载新版到 cache 目录（不触碰旧版；网络失败时旧版完好可用）
+        2. 下载成功 → 旧版备份移入 cache → 新版移入目标目录 → 删除备份
+        替换环节失败 → 回滚旧版，插件保持可用状态（不出现
+        「旧版已删、新版未装」的未安装窗口）。
 
         Args:
             plugin_meta: marketplace.json 中的插件元数据
@@ -317,15 +353,12 @@ class PluginInstaller:
         target = self._plugins_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
-        # 第一步：立即删除旧版
-        if not self.remove(name):
-            logger.error(f"[Installer] Failed to remove old {name} before update")
-            return False
-
-        # 第二步：重新下载安装
+        # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
+        # 不存在（更新前被手动删除）→ 等同安装。
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
+            self.invalidate_installed_cache()
         return success
 
     # ── Source 类型分发 ──────────────────────────────────
@@ -446,7 +479,19 @@ class PluginInstaller:
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
             cache_tmp.mkdir(parents=True, exist_ok=True)
             try:
-                self._sparse_clone(url, subpath, ref, cache_tmp)
+                proxy = get_proxy_config()
+                git_url, git_extra = proxy.git_clone_args(url)
+                try:
+                    self._sparse_clone(git_url, subpath, ref, cache_tmp, extra_args=git_extra)
+                except Exception:
+                    # 代理失败回退直连：清空缓存目录后原 URL 重跑一次
+                    if git_url != url or git_extra:
+                        logger.warning(f"[Installer] proxy failed, fallback to direct: {url}")
+                        shutil.rmtree(cache_tmp, ignore_errors=True)
+                        cache_tmp.mkdir(parents=True, exist_ok=True)
+                        self._sparse_clone(url, subpath, ref, cache_tmp)
+                    else:
+                        raise
             except Exception:
                 shutil.rmtree(cache_tmp, ignore_errors=True)
                 raise
@@ -461,7 +506,30 @@ class PluginInstaller:
                 raise RuntimeError(f"Subpath {subpath} not found in clone")
 
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(sub_src), str(target))
+            if target.exists():
+                # 更新场景：旧版已在 → 先备份到 cache，新版落位成功后再删
+                # 旧版；替换失败回滚旧版（下载已完成，失败只可能来自本地
+                # IO/句柄，回滚保证插件不落入「旧版已删、新版未装」状态）。
+                # 备份在 cache 目录（.drifox/cache），不触发插件目录监听。
+                backup = self._cache_dir / f"{name}_old_{int(time.time())}"
+                # 释放旧目录的模块/字节码句柄（Windows 下 move 可能失败）
+                self._purge_plugin_module_cache(name)
+                shutil.move(str(target), str(backup))
+                try:
+                    shutil.move(str(sub_src), str(target))
+                except Exception:
+                    # 替换失败 → 回滚旧版
+                    try:
+                        if backup.exists() and not target.exists():
+                            shutil.move(str(backup), str(target))
+                    except Exception as rb_e:
+                        logger.error(f"[Installer] 回滚旧版失败: {name}: {rb_e}")
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+                    raise
+                if not _rmtree_readonly(backup):
+                    logger.warning(f"[Installer] 旧版备份清理失败（残留 cache）: {backup}")
+            else:
+                shutil.move(str(sub_src), str(target))
 
             # === 3. 清理 cache ===
             shutil.rmtree(cache_tmp, ignore_errors=True)
@@ -475,19 +543,22 @@ class PluginInstaller:
             logger.error(f"[Installer] Download {name} failed: {e}")
             return False
 
-    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path):
+    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
         """克隆仓库指定子目录到 cache_dir
 
         对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
+        extra_args: git 前置参数（如 ['-c', 'http.proxy=...']），
+        插在 git 与子命令之间。
         """
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        extra = list(extra_args or [])
 
         if subpath in (".", ""):
             # 整个仓库：直接浅克隆
             subprocess.run(
-                ["git", "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
+                ["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -496,7 +567,7 @@ class PluginInstaller:
         else:
             # 子目录：稀疏克隆
             subprocess.run(
-                ["git", "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
+                ["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)],
                 check=True,
                 capture_output=True,
                 text=True,

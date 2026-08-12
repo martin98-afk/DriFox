@@ -52,6 +52,15 @@ def _make_card(items=None):
 _REF_HOLDER = []  # 防止局部 parent 被 GC 回收
 
 
+def _widget_for_item(card, item_idx):
+    """从虚拟化池中取出绑定到指定 item 索引的 widget（无则返回 None）"""
+    for slot, w in card._slot_widgets.items():
+        kind, idx, _y = card._virtual_slots[slot]
+        if kind == "item" and idx == item_idx:
+            return w
+    return None
+
+
 def _card_with_tooltip():
     """创建 CommandCard，让 tooltip 可见（选中第一个有描述的 item）"""
     from PyQt5.QtWidgets import QWidget, QVBoxLayout
@@ -111,8 +120,8 @@ class TestCommandCardDivider:
         assert card._desc_tooltip_label.height() > 0, "悬浮气泡应有高度"
 
         # 卡片自身高度只等于列表高度（含分隔线），不含气泡
-        total = len(card._item_widgets) + len(card._dividers)
-        list_h = min(total, MAX_VISIBLE_ITEMS) * ITEM_HEIGHT + len(card._dividers)
+        total = len(card._filtered_items) + card._divider_count
+        list_h = min(total, MAX_VISIBLE_ITEMS) * ITEM_HEIGHT + card._divider_count
         assert card.height() == list_h, f"card h {card.height()} 应 == 列表高度 {list_h}（气泡为独立悬浮窗口，不计入）"
 
     def test_incremental_false_full_render(self):
@@ -127,12 +136,12 @@ class TestCommandCardDivider:
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=False)
 
-        assert len(card._dividers) == 3, f"期望 3 个 dividers, 实际 {len(card._dividers)}"
-        total = len(card._item_widgets) + len(card._dividers)
+        assert card._divider_count == 3, f"期望 3 个 dividers, 实际 {card._divider_count}"
+        total = len(card._filtered_items) + card._divider_count
         visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + len(card._dividers)
+        expected_h = visible * ITEM_HEIGHT + card._divider_count
         assert card.height() == expected_h, f"高度不匹配: {card.height()} != {expected_h}"
-        assert card._scroll_layout.count() == total, "scroll_layout 元素数与 widgets+dividers 不一致"
+        assert len(card._virtual_slots) == total, "虚拟槽数应与 items+dividers 一致"
 
     def test_incremental_true_fresh(self):
         """incremental=True 首次渲染（不经 False）应有正确 dividers"""
@@ -146,10 +155,10 @@ class TestCommandCardDivider:
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=True)
 
-        assert len(card._dividers) == 3, f"incremental=True 首次: 期望 3 dividers, 实际 {len(card._dividers)}"
-        total = len(card._item_widgets) + len(card._dividers)
+        assert card._divider_count == 3, f"incremental=True 首次: 期望 3 dividers, 实际 {card._divider_count}"
+        total = len(card._filtered_items) + card._divider_count
         visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + len(card._dividers)
+        expected_h = visible * ITEM_HEIGHT + card._divider_count
         assert card.height() == expected_h, f"高度不匹配: {card.height()} != {expected_h}"
 
     def test_incremental_true_same_items(self):
@@ -172,11 +181,11 @@ class TestCommandCardDivider:
         _REF_HOLDER.append(_parent)
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=False)
-        pre_div = len(card._dividers)
+        pre_div = card._divider_count
         pre_h = card.height()
 
         card._render(incremental=True)
-        assert len(card._dividers) == pre_div, f"快速路径 dividers 不应变: {pre_div} -> {len(card._dividers)}"
+        assert card._divider_count == pre_div, f"快速路径 dividers 不应变: {pre_div} -> {card._divider_count}"
         # 快速路径会调用 _apply_list_height() 重新计算高度，
         # 在有父窗口时预算充足，高度应保持不变
         assert card.height() == pre_h, f"快速路径高度不应变: {pre_h} -> {card.height()}"
@@ -198,24 +207,24 @@ class TestCommandCardDivider:
         _REF_HOLDER.append(_parent)
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=False)
-        assert len(card._dividers) == 3
+        assert card._divider_count == 3
 
         # 过滤为子集
         card._filtered_items = list(_SUBSET_NO_DESC)
         card._render(incremental=True)
-        assert len(card._dividers) == 1, f"子集应有 1 个 divider, 实际 {len(card._dividers)}"
-        total = len(card._item_widgets) + len(card._dividers)
+        assert card._divider_count == 1, f"子集应有 1 个 divider, 实际 {card._divider_count}"
+        total = len(card._filtered_items) + card._divider_count
         visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + len(card._dividers)
+        expected_h = visible * ITEM_HEIGHT + card._divider_count
         assert card.height() == expected_h, f"子集高度 {card.height()} != {expected_h}"
 
         # 恢复全集
         card._filtered_items = list(_ITEMS_NO_DESC)
         card._render(incremental=True)
-        assert len(card._dividers) == 3, f"全集恢复后应有 3 个 dividers, 实际 {len(card._dividers)}"
-        total = len(card._item_widgets) + len(card._dividers)
+        assert card._divider_count == 3, f"全集恢复后应有 3 个 dividers, 实际 {card._divider_count}"
+        total = len(card._filtered_items) + card._divider_count
         visible = min(total, MAX_VISIBLE_ITEMS)
-        expected_h = visible * ITEM_HEIGHT + len(card._dividers)
+        expected_h = visible * ITEM_HEIGHT + card._divider_count
         assert card.height() == expected_h, f"全集高度 {card.height()} != {expected_h}"
 
     def test_apply_list_height_sync(self):
@@ -227,9 +236,9 @@ class TestCommandCardDivider:
         )
 
         card = _make_card()
-        # 手动设模拟数据
-        card._item_widgets = [object() for _ in range(7)]
-        card._dividers = [object(), object()]  # 2 dividers
+        # 手动设模拟数据（虚拟化后计数源为 _filtered_items + _divider_count）
+        card._filtered_items = [{} for _ in range(7)]
+        card._divider_count = 2  # 2 dividers
 
         card._apply_list_height()
         total = 7 + 2
@@ -246,8 +255,8 @@ class TestCommandCardDivider:
         )
 
         card = _make_card()
-        card._item_widgets = [object() for _ in range(50)]
-        card._dividers = [object() for _ in range(3)]
+        card._filtered_items = [{} for _ in range(50)]
+        card._divider_count = 3
 
         card._apply_list_height()
         expected = MAX_VISIBLE_ITEMS * ITEM_HEIGHT + 3
@@ -278,7 +287,7 @@ class TestCommandCardDivider:
         assert card._desc_tooltip_label.isVisible(), "矮窗口下悬浮气泡仍应可见"
 
         # 卡片（列表）高度应远小于"完整 8 项"的自然高度（被预算压缩）
-        full_natural = MAX_VISIBLE_ITEMS * ITEM_HEIGHT + len(card._dividers)
+        full_natural = MAX_VISIBLE_ITEMS * ITEM_HEIGHT + card._divider_count
         assert card.height() < full_natural, f"矮窗口未压缩: card {card.height()} 应 < 自然高度 {full_natural}"
         # 至少仍保留可见项（不为 0）
         assert card.height() >= ITEM_HEIGHT, "矮窗口下至少保留 1 个 item"
@@ -321,9 +330,10 @@ class TestCommandCardDivider:
         for _ in range(10):
             app.processEvents()
 
-        assert len(card._item_widgets) == 3
-        w_skill = card._item_widgets[1]
-        w_agent = card._item_widgets[2]
+        assert len(card._filtered_items) == 3
+        w_skill = _widget_for_item(card, 1)
+        w_agent = _widget_for_item(card, 2)
+        assert w_skill is not None and w_agent is not None, "可见 item 应已绑定池 widget"
         # 首次显示后 palette WindowText 应等于对应类型的标签色（而非默认黑）
         skill_color = w_skill._tag_label.palette().color(QPalette.WindowText)
         agent_color = w_agent._tag_label.palette().color(QPalette.WindowText)
@@ -367,8 +377,9 @@ class TestCommandCardDivider:
             app.processEvents()
 
         # 排序：command(0) → skill(2)，技能项在 index 1
-        assert len(card._item_widgets) == 2
-        w = card._item_widgets[1]
+        assert len(card._filtered_items) == 2
+        w = _widget_for_item(card, 1)
+        assert w is not None, "可见 item 应已绑定池 widget"
         assert w.item_data["type"] == "skill"
         lbl = w._name_label
         # 强制 RichText：实体在渲染时被解析（此前 PlainText 判定会字面显示 &quot;）

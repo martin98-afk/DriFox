@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 from loguru import logger
 
+from .proxy import get_proxy_config
+
 
 # ── 环境检测 ──────────────────────────────────────────────
 
@@ -242,6 +244,27 @@ class MarketplaceSourceManager:
             plugin.setdefault("_marketplace", name)
             plugin.setdefault("_marketplace_source", src)
 
+    def _http_get(self, url: str, **kwargs) -> "httpx.Response":
+        """应用代理发起 GET；代理失败回退直连
+
+        - 未启用代理：直接请求原 URL（零开销）
+        - 启用代理：先请求改写 URL（或带 proxy 参数），失败后
+          换原 URL 直连重试一次，日志记录回退原因。
+        """
+        proxy = get_proxy_config()
+        proxied_url = proxy.rewrite_url(url)
+        try:
+            resp = httpx.get(proxied_url, **kwargs, **proxy.httpx_kwargs())
+            resp.raise_for_status()
+            return resp
+        except Exception:
+            if proxied_url != url:
+                logger.warning(f"[Marketplace] proxy failed, fallback to direct: {url}")
+                resp = httpx.get(url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            raise
+
     def fetch_marketplace(self, source_def: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         """拉取单个市场的 marketplace.json 数据
 
@@ -279,15 +302,13 @@ class MarketplaceSourceManager:
         try:
             if src_type == "url":
                 url = src["url"]
-                resp = httpx.get(url, timeout=15, follow_redirects=True)
-                resp.raise_for_status()
+                resp = self._http_get(url, timeout=15, follow_redirects=True)
                 market_data = resp.json()
             elif src_type == "github":
                 repo = src["repo"]
                 ref = src.get("ref", "main")
                 url = f"https://raw.githubusercontent.com/{repo}/{ref}/.claude-plugin/marketplace.json"
-                resp = httpx.get(url, timeout=15, follow_redirects=True)
-                resp.raise_for_status()
+                resp = self._http_get(url, timeout=15, follow_redirects=True)
                 market_data = resp.json()
             else:
                 logger.warning(f"[Marketplace] 不支持的市场源类型: {src_type}")
@@ -360,7 +381,21 @@ class MarketplaceSourceManager:
             marketplaces.append(data)
             for plugin in data.get("plugins", []):
                 name = plugin.get("name", "")
-                if name and name not in all_plugins:
+                if not name:
+                    continue
+                try:
+                    dl = int(plugin.get("downloads", 0) or 0)
+                except (TypeError, ValueError):
+                    dl = 0
+                if name in all_plugins:
+                    # 同名插件：downloads 求和（缺失/异常值按 0 兜底）
+                    existing = all_plugins[name]
+                    try:
+                        cur = int(existing.get("downloads", 0) or 0)
+                    except (TypeError, ValueError):
+                        cur = 0
+                    existing["downloads"] = cur + dl
+                else:
                     all_plugins[name] = plugin
 
         return list(all_plugins.values()), marketplaces, errors

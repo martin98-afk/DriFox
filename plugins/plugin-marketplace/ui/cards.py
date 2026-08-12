@@ -39,23 +39,28 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     FluentIcon,
     FluentLabelBase,
     IconWidget,
     InfoBar,
     LineEdit,
     MaskDialogBase,
+    PushButton,
     ScrollArea,
     SingleDirectionScrollArea,
     StrongBodyLabel,
+    SwitchButton,
     TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
 
 from .data import get_marketplace
+from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
+from .proxy import get_proxy_config
 from ._squircle_avatar import (
     SquircleAvatar,
     PluginIconWidget,
@@ -67,6 +72,11 @@ from ._squircle_avatar import (
 # 模块级孤儿线程容器：跨卡片生命周期持有已 quit 的线程
 # （防止 running 线程随卡片析构被连带销毁 → Qt abort 0xC0000409）
 _orphan_threads: list = []
+
+# 下载量实时查询开关（False = 暂时关闭，2026-08 决策）
+# 官方源 downloads 靠 market.json 自带字段；社区源 key 在 CountAPI 上不存在
+# （大量 404）且服务无批量接口 → 逐个查询开销大。恢复时置 True。
+_DOWNLOADS_LIVE_QUERY_ENABLED = False
 
 # ── 主题色辅助 ──────────────────────────────────────────────
 
@@ -982,7 +992,7 @@ class _PluginRow(QFrame):
                 self._mp_qss_cached = new_mp_qss
                 self._mp_label.setStyleSheet(new_mp_qss)
         if getattr(self, "_dl_label", None) is not None:
-            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            new_dl_qss = f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
             if getattr(self, "_dl_qss_cached", None) != new_dl_qss:
                 self._dl_qss_cached = new_dl_qss
                 self._dl_label.setStyleSheet(new_dl_qss)
@@ -1027,15 +1037,41 @@ class _PluginRow(QFrame):
         # 信息区
         info_layout = QVBoxLayout()
         info_layout.setSpacing(2)
+        self._info_layout = info_layout
+        # info 在行布局中的固定 index（heightForWidth 手动计算用）
+        self._info_index = 1
 
         name = self._meta.get("name", "未知")
         self._name_raw = name
-        self._title_label = QLabel("", self)
+        # 标题行：插件名靠左，下载量靠右（卡片右上角，醒目）
+        title_row = QWidget(self)
+        title_row.setStyleSheet("background: transparent;")
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(8)
+        self._title_label = QLabel("", title_row)
         self._title_label.setObjectName("pluginRowTitle")
         ff_qss = f" font-family: '{self._ff}';" if self._ff else ""
         self._title_label.setStyleSheet(f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;")
         self._refresh_title()
-        info_layout.addWidget(self._title_label)
+        title_layout.addWidget(self._title_label)
+        # 下载量：右上角醒目展示，下载 icon + 橙色加粗数字（0 或缺失不显示）
+        downloads = self._meta.get("downloads", 0)
+        self._dl_label = None
+        if downloads:
+            title_layout.addStretch(1)
+            dl_icon = IconWidget(FluentIcon.DOWNLOAD, title_row)
+            dl_icon.setFixedSize(14, 14)
+            title_layout.addWidget(dl_icon)
+            self._dl_label = QLabel(
+                f'<span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
+                title_row,
+            )
+            self._dl_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(11, 0))} background: transparent;"
+            )
+            title_layout.addWidget(self._dl_label)
+        info_layout.addWidget(title_row)
 
         # 版本更新徽标已内嵌在标题（🔄 v1.0 → v2.0），不再单独建标签
 
@@ -1072,36 +1108,22 @@ class _PluginRow(QFrame):
                 self._tag_labels.append(lbl)
             info_layout.addWidget(tags_widget)
 
-        # 元信息行：市场来源（状态标签已并入标题版本号后）
+        # 元信息行：市场来源（状态标签已并入标题版本号后，下载量已移至右上角）
         meta_row = QWidget(self)
         meta_row.setStyleSheet("background: transparent;")
         meta_layout = QHBoxLayout(meta_row)
         meta_layout.setContentsMargins(0, 0, 0, 0)
-        meta_layout.setSpacing(10)
+        meta_layout.setSpacing(8)
 
         marketplace = self._meta.get("_marketplace", "")
-        downloads = self._meta.get("downloads", 0)
         self._mp_label = None
-        self._dl_label = None
-        if marketplace or downloads:
-            if marketplace:
-                self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
-                self._mp_label.setStyleSheet(
-                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-                )
-                meta_layout.addWidget(self._mp_label)
-            # 下载量：来源标签之后展示，数字橙色加粗强调（0 或缺失不显示）
-            if downloads:
-                self._dl_label = QLabel(
-                    f'下载 <span style="color:#FFA726; font-weight:bold;">{downloads:,}</span>',
-                    meta_row,
-                )
-                self._dl_label.setStyleSheet(
-                    f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
-                )
-                meta_layout.addWidget(self._dl_label)
-            meta_layout.addStretch(1)
-            info_layout.addWidget(meta_row)
+        if marketplace:
+            self._mp_label = QLabel(f"📦 {marketplace}", meta_row)
+            self._mp_label.setStyleSheet(
+                f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
+            )
+            meta_layout.addWidget(self._mp_label)
+        info_layout.addWidget(meta_row)
 
         layout.addLayout(info_layout, 1)
 
@@ -1293,14 +1315,14 @@ class _PluginRow(QFrame):
         self._update_btn_text()
 
     def set_downloading(self):
-        """更新流程：点击后立即标记为「下载中」（未安装态 + 禁用按钮）"""
-        self._installed = False
-        self._has_update = False
-        self._status = ""
+        """更新流程：点击后立即标记为「下载中」（保留已安装态，仅禁用按钮）
+
+        更新策略为「下载成功后再替换旧版」，旧版在下载期间仍可用，
+        故行保持已安装显示（版本徽标/文件夹按钮不动），仅按钮变
+        「更新中…」禁用。
+        """
         self._busy = True
         self._busy_text = "下载中…"
-        if self._dir_btn is not None:
-            self._dir_btn.setVisible(False)
         self._update_btn_text()
 
     def _refresh_title(self):
@@ -1564,8 +1586,15 @@ class MarketplaceCard(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
+        # 安装/更新/启用/禁用/卸载：串行任务队列（一次只跑一个 worker 线程，
+        # 避免并发 git 进程互抢 cache/目标目录；完成自动启动下一个任务）
+        self._task_queue: list = []  # [{kind,name,fn,busy_text,status_text,status_color}]
+        self._task_active: bool = False
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
+        # 市场拉取 worker：与任务 worker 分离，刷新市场不打断正在安装的任务
+        self._fetch_thread: Optional[QThread] = None
+        self._fetch_worker: Optional[_MarketFetchWorker] = None
         self._plugin_data: list = []
         self._matched: list = []
         self._rendered_count: int = 0
@@ -1752,6 +1781,9 @@ class MarketplaceCard(QWidget):
         "pluginRowUpdateTag": -3,
         "marketRowName": -1,  # 市场行名称 18px → fs-1
         "marketRowUrl": -2,  # 市场行 URL   14px → fs-2
+        "proxySectionTitle": -1,  # 加速页段标题（启用/配置/帮助）
+        "proxyStatus": -2,  # 加速页状态行
+        "proxyHelp": -2,  # 加速页帮助正文
     }
 
     def _retheme(self):
@@ -1844,6 +1876,7 @@ class MarketplaceCard(QWidget):
         self._tab_bar = Pivot(header)
         self._tab_bar.addItem("browse", "浏览", None, None)
         self._tab_bar.addItem("markets", "市场", None, None)
+        self._tab_bar.addItem("proxy", "代理", None, None)
         self._tab_bar.setCurrentItem("browse")
         self._tab_bar.currentItemChanged.connect(self._on_tab_changed)
         header_layout.addWidget(self._tab_bar)
@@ -2104,6 +2137,13 @@ class MarketplaceCard(QWidget):
 
         self._page_stack.addWidget(self._markets_page)
 
+        # ===== 加速配置页 =====
+        self._proxy_page = QWidget(self._page_stack)
+        proxy_root = QVBoxLayout(self._proxy_page)
+        proxy_root.setContentsMargins(16, 12, 16, 12)
+        proxy_root.setSpacing(10)
+        self._page_stack.addWidget(self._proxy_page)
+
         self._page_stack.setCurrentIndex(0)
         root.addWidget(self._page_stack, 1)
 
@@ -2166,23 +2206,23 @@ class MarketplaceCard(QWidget):
         """
         self._set_loading(True)
         self._failed_sources = set()  # 每轮刷新重置失败标记（重新收集）
-        self._cleanup_worker()
+        self._cleanup_fetch_worker()
         self._worker_gen += 1
-        self._worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.market_fetched.connect(self._on_market_fetched)
-        self._worker.market_failed.connect(self._on_market_failed)
-        self._worker.all_done.connect(self._on_market_all_done)
-        self._worker.error.connect(self._on_refresh_error)
+        self._fetch_worker = _MarketFetchWorker(force=force, gen=self._worker_gen)
+        self._fetch_thread = QThread(self)
+        self._fetch_worker.moveToThread(self._fetch_thread)
+        self._fetch_thread.started.connect(self._fetch_worker.run)
+        self._fetch_worker.market_fetched.connect(self._on_market_fetched)
+        self._fetch_worker.market_failed.connect(self._on_market_failed)
+        self._fetch_worker.all_done.connect(self._on_market_all_done)
+        self._fetch_worker.error.connect(self._on_refresh_error)
         # 全部市场拉完（或出错）后才退出线程并清理
-        self._worker.all_done.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.all_done.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._fetch_worker.all_done.connect(self._fetch_thread.quit)
+        self._fetch_worker.error.connect(self._fetch_thread.quit)
+        self._fetch_worker.all_done.connect(self._fetch_worker.deleteLater)
+        self._fetch_worker.error.connect(self._fetch_worker.deleteLater)
+        self._fetch_thread.finished.connect(self._fetch_thread.deleteLater)
+        self._fetch_thread.start()
 
     def _merge_market_data(self, market_data: dict):
         """合并单个市场数据到 _plugin_data 并触发渲染（worker 回调复用）
@@ -2325,6 +2365,9 @@ class MarketplaceCard(QWidget):
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
         view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
 
+        # 社区插件（无 downloads 字段）→ 后台实时查询下载量（缓存 + 防抖）
+        self._schedule_downloads_fetch(view_plugins)
+
         # 计算匹配列表（搜索 + tag + 筛选）并排序
         matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
@@ -2354,6 +2397,89 @@ class MarketplaceCard(QWidget):
             if a.get("name") != b.get("name") or a.get("version") != b.get("version"):
                 return False
         return True
+
+    # ── 社区插件下载量实时查询 ──
+
+    def _schedule_downloads_fetch(self, plugins: list):
+        """聚合缺 downloads 的插件 → 后台查询 → 回填 → 数据变化则重渲染
+
+        - 只查可见列表（view_plugins），避免查全量隐藏插件
+        - 后台线程执行，回填后若 downloads 有新增才触发一次重渲染
+        - 重渲染后 downloads 已有值 → 不再进查询分支（无死循环）
+        - 防重入：查询进行中时，新请求合并到同一批（不重复起线程）
+        - 当前暂时关闭（_DOWNLOADS_LIVE_QUERY_ENABLED=False）：下载量纯靠
+          market.json 自带字段，不向 CountAPI 实时查询
+        """
+        if not _DOWNLOADS_LIVE_QUERY_ENABLED:
+            return
+        missing = [p for p in plugins if not p.get("downloads")]
+        if not missing:
+            return
+        names = [p["name"] for p in missing if p.get("name")]
+
+        # 已有 in-flight 查询：合并名字后返回（查询完成后统一回填）
+        if getattr(self, "_dl_fetch_thread", None) is not None:
+            pending = getattr(self, "_dl_fetch_pending", [])
+            self._dl_fetch_pending = list(dict.fromkeys(pending + names))
+            return
+
+        fetcher = get_downloads_fetcher()
+        self._dl_fetch_pending = list(names)
+
+        def _run():
+            # 批量查询（缓存命中 + 失败防抖由 fetcher 内部处理）
+            return fetcher.fetch_missing(list(self._dl_fetch_pending))
+
+        self._cleanup_dl_fetch_worker()
+        self._dl_worker = _MarketplaceWorker(_run)
+        self._dl_fetch_thread = QThread(self)
+        self._dl_worker.moveToThread(self._dl_fetch_thread)
+        self._dl_fetch_thread.started.connect(self._dl_worker.run)
+        self._dl_worker.finished.connect(self._on_downloads_fetched)
+        self._dl_worker.error.connect(lambda e: self._on_downloads_fetched(None))
+        self._dl_worker.finished.connect(self._dl_fetch_thread.quit)
+        self._dl_worker.error.connect(self._dl_fetch_thread.quit)
+        self._dl_worker.finished.connect(self._dl_worker.deleteLater)
+        self._dl_worker.error.connect(self._dl_worker.deleteLater)
+        self._dl_fetch_thread.finished.connect(self._dl_fetch_thread.deleteLater)
+        self._dl_fetch_thread.start()
+
+    def _on_downloads_fetched(self, result):
+        """查询完成：回填 downloads；有新增值则重渲染"""
+        if not self._alive():
+            return
+        # 处理 in-flight 期间合并进来的新名字
+        names = getattr(self, "_dl_fetch_pending", []) or []
+        self._dl_fetch_pending = []
+        if not result:
+            # 新合并的名字未被本次查询覆盖 → 再调度一次
+            if names:
+                plugins = getattr(self, "_all_plugins", []) or []
+                self._schedule_downloads_fetch(plugins)
+            return
+
+        changed = False
+        plugin_by_name = {}
+        for p in getattr(self, "_all_plugins", []) or []:
+            plugin_by_name[p.get("name", "")] = p
+        for name, count in result.items():
+            p = plugin_by_name.get(name)
+            if p is not None and not p.get("downloads") and count:
+                p["downloads"] = count
+                changed = True
+        if changed:
+            self._render_plugins(getattr(self, "_all_plugins", []) or [])
+
+    def _cleanup_dl_fetch_worker(self):
+        """安全清理下载量查询 worker/thread（复用 _orphan_worker_thread 剥离模式）
+
+        与任务/market 拉取 worker 对齐：quit + setParent(None) + 孤儿列表强引用，
+        不阻塞主线程（原 wait(500) 在扫描>500ms 且卡片析构时留崩溃窗口）。
+        """
+        thread = getattr(self, "_dl_fetch_thread", None)
+        self._dl_fetch_thread = None
+        self._dl_worker = None
+        self._orphan_worker_thread(thread)
 
     def _has_update(self, p: dict, installed: bool) -> bool:
         """判断插件是否有可用更新（本地版本 < 远程版本）"""
@@ -2445,6 +2571,72 @@ class MarketplaceCard(QWidget):
         meta["_cached_tags"] = _PluginRow._compute_tags(meta)
         return meta
 
+    def _build_local_meta_bg(self, name: str, status: str, version_map: dict) -> Optional[dict]:
+        """纯函数版 _build_local_meta：后台线程读取 manifest（不触碰 Qt/self 状态）
+
+        与 _build_local_meta 的差异：version 从参数 version_map 取（不读
+        self._version_map），其余逻辑一致。staticmethod 化不可行（内部
+        需要类上下文），保持实例方法但仅依赖传入参数 + 类静态辅助。
+        """
+        path = _PluginRow._find_local_plugin_path(name)
+        if path is None:
+            return None
+        meta: dict = {
+            "name": name,
+            "description": "",
+            "version": version_map.get(name) or "",
+            "author": "",
+            "license": "",
+            "categories": [],
+            "keywords": [],
+            "homepage": "",
+            "_local_only": True,
+            "_status": status,
+            "_marketplace": "本地",
+        }
+        try:
+            import json as _json
+
+            for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                _mp = path / _meta_dir / "plugin.json"
+                if _mp.exists():
+                    m = _json.loads(_mp.read_text(encoding="utf-8"))
+                    meta["description"] = m.get("description", "")
+                    meta["author"] = (
+                        m.get("author", {}).get("name", "")
+                        if isinstance(m.get("author"), dict)
+                        else m.get("author", "")
+                    )
+                    meta["license"] = m.get("license", "")
+                    meta["categories"] = m.get("categories", []) or []
+                    meta["keywords"] = m.get("keywords", []) or []
+                    meta["homepage"] = m.get("homepage", "")
+                    break
+        except Exception:
+            pass
+        meta["_cached_tags"] = _PluginRow._compute_tags(meta)
+        return meta
+
+    def _build_local_extra_plugins_bg(self, status_map: dict, market_names: frozenset, version_map: dict) -> list:
+        """纯函数版 _build_local_extra_plugins：后台线程构建本地 extra 条目
+
+        Args:
+            status_map: installer.get_status_map() 结果（后台已取好）
+            market_names: 市场插件名集合快照（主线程 _all_plugins 派生）
+            version_map: installer.get_installed_map() 结果（版本来源）
+
+        Returns:
+            extras 列表（纯数据，无 Qt widget，供主线程回回调渲染）
+        """
+        extras = []
+        for name, status in status_map.items():
+            if name in market_names:
+                continue
+            meta = self._build_local_meta_bg(name, status, version_map)
+            if meta is not None:
+                extras.append(meta)
+        return extras
+
     def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> bool:
         """检查插件是否匹配当前搜索/tag/筛选（AND 叠加）
 
@@ -2500,18 +2692,21 @@ class MarketplaceCard(QWidget):
             )
 
     def _render_next_batch(self):
-        """渲染下一批匹配插件（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
+        """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
 
-        点击「加载更多」时只推进一批，不自动跑完全部。
+        不依赖 _rendered_count 连续索引：搜索/筛选复用行后，_row_map 的行集合
+        与 _matched 前部可能不一致（旧行 ≠ 新匹配列表前 N 个）。若按「已渲染
+        计数」续渲染 _matched[start:end]，匹配列表前部新出现的插件会永远
+        缺行 → 搜索不全。改为按 _matched 顺序补齐「尚无 widget 的插件」。
         """
-        start = self._rendered_count
-        end = min(start + self._RENDER_BATCH, len(self._matched))
-        if start >= end:
+        missing = [p for p in self._matched if p.get("name", "") not in self._row_map]
+        if not missing:
             self._all_loaded = True
             self._remove_load_more_button()
             return
-        self._render_batch(start, end)
-        self._rendered_count = end
+        batch = missing[: self._RENDER_BATCH]
+        self._render_rows(batch)
+        self._rendered_count = len(self._row_map)
         if self._rendered_count < len(self._matched):
             self._set_load_more_button(len(self._matched) - self._rendered_count)
         else:
@@ -2598,8 +2793,8 @@ class MarketplaceCard(QWidget):
         row.uninstallRequested.connect(self._async_uninstall)
         return row
 
-    def _render_batch(self, start: int, end: int):
-        """渲染 [start, end) 范围的匹配插件行
+    def _render_rows(self, rows: list):
+        """创建并插入插件行（压缩帧防护同旧 _render_batch）
 
         压缩帧防护：新行创建后先隐藏，渲染完成由 _reveal_rows 延迟一帧统一显示。
 
@@ -2610,8 +2805,7 @@ class MarketplaceCard(QWidget):
         布局几何分配（sizeHint 仍计入，滚动范围正确），统一显示时直接以正确
         高度出现，跳过压缩帧。
         """
-        for i in range(start, end):
-            p = self._matched[i]
+        for p in rows:
             row = self._create_row(p)
             if row is None:
                 continue
@@ -2633,10 +2827,18 @@ class MarketplaceCard(QWidget):
                 else:
                     self._content_layout.addWidget(row)
             self._row_map[p.get("name", "")] = row
-        # 首屏批次补 stretch
-        if start == 0:
+        # 布局无 stretch（全量重建清空后首批）→ 补 stretch
+        if rows and not self._layout_has_stretch():
             self._content_layout.addStretch(1)
-        self._schedule_reveal()
+        if rows:
+            self._schedule_reveal()
+
+    def _layout_has_stretch(self) -> bool:
+        """布局是否已含 stretch（全量重建清空后无；复用行路径已有）"""
+        for i in range(self._content_layout.count()):
+            if self._content_layout.itemAt(i).spacerItem() is not None:
+                return True
+        return False
 
     def _schedule_reveal(self):
         """渲染完成后延迟显示新行（等 QScrollArea 内容扩展稳定后一次到位）
@@ -2667,9 +2869,17 @@ class MarketplaceCard(QWidget):
         """
         if not self._alive():
             return  # 卡片已销毁，放弃显示
+        # 只显示仍匹配当前搜索/筛选的行：reveal timer 可能与搜索过滤
+        # 防抖交错（补行会重启 reveal → 晚于 _reconcile_rows 执行），
+        # 无差别 show() 会把已被 setVisible(False) 过滤掉的行重新显示
+        # （搜索白过滤，表现为「输入后列表没有正确过滤」）。
+        # 首屏/刷新（query 空）时全部行匹配 → 行为不变。
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
         for row in self._row_map.values():
             try:
-                row.show()
+                if self._plugin_matches(row._meta, query, filter_mode):
+                    row.show()
             except RuntimeError:
                 pass  # 行已被销毁（并发清理），忽略
         try:
@@ -2821,12 +3031,9 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(row._meta, query, filter_mode))
             row.update_search_highlight(query)
 
-        # 不足补齐（_render_next_batch 内部维护按钮/计数）/ 已足则收尾
-        if len(self._row_map) < len(self._matched):
-            self._render_next_batch()
-        else:
-            self._all_loaded = True
-            self._remove_load_more_button()
+        # 补齐缺失行（无条件调用：_render_next_batch 按 _matched 顺序补
+        # 尚无 widget 的插件 + 维护按钮/计数；匹配为空时内部收尾）
+        self._render_next_batch()
         # 行显隐变化 → 内容高度变化 → 手动同步（widgetResizable=False 下
         # QScrollArea 不再自动收缩；不同步会残留旧高度 → 底部大段空白）
         self._sync_content_size()
@@ -2834,29 +3041,168 @@ class MarketplaceCard(QWidget):
         self._update_status()
         self._update_update_badge()
 
-    # ── 异步安装 ──
+    # ── 异步任务队列（安装/更新/启用/禁用/卸载 串行执行） ──
 
-    def _async_install(self, plugin_meta: dict):
-        """在后台线程安装插件"""
-        self._status_label.setText("安装中…")
-        self._status_label.setStyleSheet(
-            f"color: {_text_color(secondary=True)}; font-size: 12px; background: transparent;"
+    @staticmethod
+    def _wrapped_task_fn(fn: Callable[[], bool]) -> Callable[[], bool]:
+        """包装任务函数：执行后在后台线程预热插件状态缓存
+
+        安装/更新/启用/禁用/卸载都会 invalidate installed/status 缓存。
+        若等主线程完成回调（_refresh_row_states）再全量扫描磁盘（数十个
+        插件逐个读 manifest）会卡 UI。这里在任务线程内先扫一次填充 TTL
+        缓存，主线程完成回调命中缓存（3s TTL）不再阻塞。
+
+        GIL 保护 dict/float 赋值，跨线程共享 TTL 缓存安全（与安装线程
+        调 invalidate_installed_cache 同理）。
+        """
+
+        def _run():
+            ok = fn()
+            try:
+                get_installer().get_installed_map()
+                get_installer().get_status_map()
+            except Exception:
+                pass  # 预热失败不影响结果（主线程回调自行扫描兜底）
+            return ok
+
+        return _run
+
+    def _submit_task(
+        self,
+        *,
+        kind: str,
+        name: str,
+        fn: Callable[[], bool],
+        busy_text: str,
+        status_text: str,
+        status_color: str,
+    ):
+        """提交后台任务到串行队列
+
+        队列保证同一时刻只有一个任务线程在跑，避免多个 git 进程并发
+        互抢 cache/目标目录（此前多任务共用单个 worker 槽位，新任务
+        会 quit 旧线程导致进行中的安装静默终止）。任务完成自动启动
+        下一个；行在任务期间保持 busy（按钮禁用，防重复提交）。
+
+        Args:
+            kind: "install" | "update" | "enable" | "disable" | "uninstall"
+            name: 插件名
+            fn: 后台线程执行的阻塞函数，返回 bool
+            busy_text: 行按钮 busy 文案（如「安装中…」）
+            status_text: 头部状态栏文案
+            status_color: 状态栏文字颜色
+        """
+        self._task_queue.append(
+            {
+                "kind": kind,
+                "name": name,
+                "fn": self._wrapped_task_fn(fn),
+                "busy_text": busy_text,
+                "status_text": status_text,
+                "status_color": status_color,
+            }
         )
-        name = plugin_meta.get("name", "")
+        # 行立即置 busy（行可能未渲染/已隐藏，忽略）
+        self._set_row_busy(name, busy_text)
+        if not self._task_active:
+            self._run_next_task()
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().install(m))
+    def _run_next_task(self):
+        """从队列取出下一个任务并启动 worker 线程（无任务则停）"""
+        if not self._task_queue:
+            self._task_active = False
+            self._worker_thread = None
+            self._worker = None
+            return
+        self._task_active = True
+        task = self._task_queue.pop(0)
+        name = task["name"]
+        self._status_label.setText(task["status_text"])
+        self._status_label.setStyleSheet(f"color: {task['status_color']}; font-size: 12px; background: transparent;")
+        # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
+        self._set_row_busy(name, task["busy_text"])
+
+        self._worker = _MarketplaceWorker(task["fn"])
         self._worker_thread = QThread(self)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_install_done(name, bool(ok)))
-        self._worker.error.connect(lambda e: self._on_install_error(name, e))
+        self._worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
+        self._worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.error.connect(self._worker_thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.error.connect(self._worker.deleteLater)
         self._worker_thread.finished.connect(self._worker_thread.deleteLater)
         self._worker_thread.start()
+
+    def _on_task_done(self, task: dict, success: bool):
+        """任务完成：分发到对应类型的完成处理 + 启动下一个任务"""
+        if not self._alive():
+            return
+        kind, name = task["kind"], task["name"]
+        # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
+        # 其他排队任务的行保持 busy（_refresh_row_states 跳过逻辑保护）
+        self._release_row_busy(name)
+        if kind == "install":
+            self._on_install_done(name, success)
+        elif kind == "update":
+            self._on_update_done(name, success)
+        else:
+            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
+            self._on_manage_done(name, action, success)
+        self._run_next_task()
+
+    def _on_task_error(self, task: dict, err: str):
+        """任务出错：分发到对应类型的错误处理 + 启动下一个任务"""
+        if not self._alive():
+            return
+        kind, name = task["kind"], task["name"]
+        self._release_row_busy(name)
+        if kind == "install":
+            self._on_install_error(name, err)
+        elif kind == "update":
+            self._on_update_error(name, err)
+        else:
+            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
+            self._on_manage_error(name, action, err)
+        self._run_next_task()
+
+    def _release_row_busy(self, name: str):
+        """解除指定插件行的 busy（仅任务自身行；行不存在/未 busy 忽略）"""
+        row = self._row_map.get(name)
+        if row is not None and row._busy:
+            row._busy = False
+            row._busy_text = ""
+            row._update_btn_text()
+
+    def _set_row_busy(self, name: str, busy_text: str):
+        """将指定插件行置为 busy（任务入队/开始时调用，行不存在则忽略）
+
+        行已 busy 时仅刷新文案不重复禁用（避免覆盖更精确的状态）。
+        """
+        row = self._row_map.get(name)
+        if row is not None:
+            if not row._busy:
+                row._busy = True
+                row._busy_text = busy_text
+                row._update_btn_text()
+            elif row._busy_text != busy_text:
+                row._busy_text = busy_text
+                row._update_btn_text()
+
+    # ── 异步安装 ──
+
+    def _async_install(self, plugin_meta: dict):
+        """安装插件（入串行队列，后台线程执行）"""
+        name = plugin_meta.get("name", "")
+        self._submit_task(
+            kind="install",
+            name=name,
+            fn=lambda m=plugin_meta: get_installer().install(m),
+            busy_text="安装中…",
+            status_text="安装中…",
+            status_color=_text_color(secondary=True),
+        )
 
     def _on_install_done(self, name: str, success: bool):
         """安装完成"""
@@ -2899,35 +3245,29 @@ class MarketplaceCard(QWidget):
     # ── 异步更新 ────────────────────────────────────────
 
     def _async_update(self, plugin_meta: dict):
-        """更新插件：点击后立即删除旧版并反馈（后台先删旧版再下载新版）
+        """更新插件：先下载新版，下载成功后再替换旧版（入串行队列）
 
-        点击瞬间将该行置为「下载中」（未安装态 + 禁用按钮），
-        后台线程第一步即 rmtree 旧版目录，满足「点了立即删除现有的」。
+        点击后该行置为「下载中…」（保持已安装态，旧版未删）；
+        下载成功才备份旧版并替换，失败保留旧版插件可用。
         """
         name = plugin_meta.get("name", "")
-        self._status_label.setText("更新中…")
-        self._status_label.setStyleSheet("color: #FFA726; font-size: 12px; background: transparent;")
-        # 立即反馈：该行变为未安装态 + 「下载中…」
+        # 立即反馈：该行置为「下载中…」（旧版仍可用，仅按钮禁用）
         self._set_row_downloading(name)
-        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭），后台线程首步 rmtree 旧目录
+        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭）；下载成功替换前
+        # installer 内还会 purge 模块缓存释放文件句柄
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda m=plugin_meta: get_installer().update(m))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_update_done(name, bool(ok)))
-        self._worker.error.connect(lambda e: self._on_update_error(name, e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="update",
+            name=name,
+            fn=lambda m=plugin_meta: get_installer().update(m),
+            busy_text="下载中…",
+            status_text="更新中…",
+            status_color="#FFA726",
+        )
 
     def _set_row_downloading(self, name: str):
-        """将该插件行立即置为「下载中」（未安装态，旧版已删/将删）"""
+        """将该插件行立即置为「下载中…」（保留已安装态，旧版未删）"""
         row = self._row_map.get(name)
         if row is not None:
             row.set_downloading()
@@ -2945,9 +3285,9 @@ class MarketplaceCard(QWidget):
             self._refresh_row_states()
             InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
-            # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
-            self._update_row_state(name, installed=False, error=True)
-            InfoBar.error(f"{name} 更新失败", "旧版已移除，可点击「安装」重试", duration=3000, parent=bar_parent)
+            # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试
+            self._update_row_state(name, installed=True, error=True)
+            InfoBar.error(f"{name} 更新失败", "已保留旧版，可稍后重试", duration=3000, parent=bar_parent)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
@@ -2955,8 +3295,8 @@ class MarketplaceCard(QWidget):
             return  # 卡片已销毁
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
-        # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
-        self._update_row_state(name, installed=False, error=True)
+        # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试
+        self._update_row_state(name, installed=True, error=True)
         import re as _re
 
         msg = err
@@ -2992,82 +3332,49 @@ class MarketplaceCard(QWidget):
         except Exception as e:
             logger.debug(f"[Marketplace] unload_plugin UI({name}) 失败（忽略）: {e}")
 
-    def _set_row_manage_busy(self, name: str, busy_text: str):
-        """将指定插件行置为「处理中…」状态（操作期间禁用按钮）"""
-        row = self._row_map.get(name)
-        if row is not None:
-            row._busy = True
-            row._busy_text = busy_text
-            row._update_btn_text()
-
     def _async_enable(self, plugin_meta: dict):
-        """在后台线程启用已禁用的插件"""
+        """启用已禁用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        self._status_label.setText("启用中…")
-        self._status_label.setStyleSheet("color: #4CAF50; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "启用中…")
-
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().enable(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "启用", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "启用", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="enable",
+            name=name,
+            fn=lambda n=name: get_installer().enable(n),
+            busy_text="启用中…",
+            status_text="启用中…",
+            status_color="#4CAF50",
+        )
 
     def _async_disable(self, plugin_meta: dict):
-        """在后台线程禁用已启用的插件"""
+        """禁用已启用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
-        self._status_label.setText("禁用中…")
-        self._status_label.setStyleSheet("color: #FF9800; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "禁用中…")
         # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台 move 目录
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().disable(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "禁用", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "禁用", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="disable",
+            name=name,
+            fn=lambda n=name: get_installer().disable(n),
+            busy_text="禁用中…",
+            status_text="禁用中…",
+            status_color="#FF9800",
+        )
 
     def _async_uninstall(self, plugin_meta: dict):
-        """在后台线程卸载插件（确认后）"""
+        """卸载插件（入串行队列，确认后）"""
         name = plugin_meta.get("name", "")
         if not self._confirm_uninstall(name):
             return
-        self._status_label.setText("卸载中…")
-        self._status_label.setStyleSheet("color: #F44336; font-size: 12px; background: transparent;")
-        self._set_row_manage_busy(name, "卸载中…")
         # 主线程先卸载 UI 组件（显示中卡片自动关闭），再后台删目录
         self._unload_plugin_ui_on_gui(name)
 
-        self._cleanup_worker()
-        self._worker = _MarketplaceWorker(lambda n=name: get_installer().uninstall(n))
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok: self._on_manage_done(name, "卸载", bool(ok)))
-        self._worker.error.connect(lambda e: self._on_manage_error(name, "卸载", e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        self._submit_task(
+            kind="uninstall",
+            name=name,
+            fn=lambda n=name: get_installer().uninstall(n),
+            busy_text="卸载中…",
+            status_text="卸载中…",
+            status_color="#F44336",
+        )
 
     def _confirm_uninstall(self, name: str) -> bool:
         """卸载确认弹窗（MaskDialogBase 风格，parent 为 tab 顶层窗口）"""
@@ -3124,42 +3431,113 @@ class MarketplaceCard(QWidget):
         InfoBar.error(f"{name} {action}失败", str(err)[:120], duration=5000, parent=bar_parent)
 
     def _refresh_row_states(self):
-        """安装/更新/卸载后刷新：同步已渲染行状态 + 隐藏不再匹配的行
+        """安装/更新/卸载后刷新：扫描段后台执行，主线程回调只做 UI 段
 
         不重建列表（保留滚动位置），仅同步状态、可见性与匹配计数。
+
+        扫描段（get_installed_map/get_status_map/本地 extras manifest 读取）
+        移到后台 worker（复用 _MarketplaceWorker + QThread），完成后回主线程
+        只做 UI 段（行状态同步/可见性/补行/计数）——根治主线程磁盘扫描
+        （TTL miss 兜底 + _build_local_extra_plugins 读 manifest）卡顿。
         """
-        query = self._search_edit.text().strip().lower()
-        filter_mode = self._current_filter
-        # 最新安装状态（installer 缓存已被安装/更新操作失效）
-        inst_map = get_installer().get_installed_map()
+        # in-flight 合并：已有扫描 worker 在跑 → 记 pending，完成后自动补扫
+        if getattr(self, "_rs_fetch_thread", None) is not None:
+            self._rs_fetch_pending = True
+            return
+
+        # 快照主线程状态（worker 线程只读快照，不碰 self 可变 UI 态）
+        all_plugins = list(self._all_plugins)
+        market_names = frozenset(p.get("name", "") for p in all_plugins)
+
+        def _run():
+            try:
+                inst_map = get_installer().get_installed_map()
+                status_map = get_installer().get_status_map()
+                extras = self._build_local_extra_plugins_bg(status_map, market_names, inst_map)
+                return inst_map, status_map, extras
+            except Exception as e:
+                logger.warning(f"[Marketplace] 行状态扫描失败: {e}")
+                return None
+
+        self._cleanup_rs_worker()
+        self._rs_fetch_pending = False
+        self._rs_worker = _MarketplaceWorker(_run)
+        self._rs_fetch_thread = QThread(self)
+        self._rs_worker.moveToThread(self._rs_fetch_thread)
+        self._rs_fetch_thread.started.connect(self._rs_worker.run)
+        self._rs_worker.finished.connect(self._on_row_states_scanned)
+        self._rs_worker.error.connect(lambda e: self._on_row_states_scanned(None))
+        self._rs_worker.finished.connect(self._rs_fetch_thread.quit)
+        self._rs_worker.error.connect(self._rs_fetch_thread.quit)
+        self._rs_worker.finished.connect(self._rs_worker.deleteLater)
+        self._rs_worker.error.connect(self._rs_worker.deleteLater)
+        self._rs_fetch_thread.finished.connect(self._rs_fetch_thread.deleteLater)
+        self._rs_fetch_thread.start()
+
+    def _on_row_states_scanned(self, result):
+        """后台扫描完成：更新状态字段 + 只做 UI 段（主线程）"""
+        if not self._alive():
+            return
+        # 本轮 worker 已结束：释放引用（deleteLater 链由 connect 处理）
+        self._rs_fetch_thread = None
+        self._rs_worker = None
+        # in-flight 期间又有新请求 → 用最新状态补扫一次（不重复做 UI 段）
+        if getattr(self, "_rs_fetch_pending", False):
+            self._rs_fetch_pending = False
+            self._refresh_row_states()
+            return
+        if result is None:
+            return
+        inst_map, status_map, extras = result
         self._installed_set = set(inst_map)
         self._version_map = inst_map
-        self._status_map = get_installer().get_status_map()
+        self._status_map = status_map
+        # 同步 extras 缓存（与 _build_local_extra_plugins 的 key 语义一致，
+        # 供 _reconcile_rows 等主线程路径复用，避免重复扫描）
+        market_names = frozenset(p.get("name", "") for p in self._all_plugins)
+        self._local_extras_key = (status_map, market_names)
+        self._local_extras_cache = extras
 
+        # ── UI 段（原 _refresh_row_states 后半）──
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
         # 重算匹配列表（不重建 widget）
-        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        view_plugins = list(self._all_plugins) + extras
         self._matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(self._matched)
 
         for name, row in self._row_map.items():
+            if row._busy:
+                # 任务进行中/排队中的行保持 busy（按钮禁用），
+                # 不被其他任务完成回调重置为「安装」——并发安装时
+                # 一个装完不能把其他待安装的按钮恢复
+                continue
             p = row._meta
             installed, has_update, local_ver, status = self._row_state(p)
             row.apply_state(installed, has_update, local_ver, status)
             row.setVisible(self._plugin_matches(p, query, filter_mode))
             row.update_search_highlight(query)
 
-        self._rendered_count = len(self._row_map)
-        if self._rendered_count >= len(self._matched):
-            self._all_loaded = True
-        if self._rendered_count < len(self._matched):
-            self._set_load_more_button(len(self._matched) - self._rendered_count)
-        else:
-            self._remove_load_more_button()
+        # 补齐缺失行 + 更新按钮/计数（无条件调用：安装/卸载后匹配列表
+        # 可能新增行，按 _matched 顺序补尚无 widget 的插件）
+        self._render_next_batch()
         # 行显隐/按钮变化 → 内容高度变化 → 手动同步（widgetResizable=False）
         self._sync_content_size()
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
+
+    def _cleanup_rs_worker(self):
+        """安全清理行状态扫描 worker/thread（复用 _orphan_worker_thread 剥离模式）
+
+        与任务/market 拉取 worker 对齐：quit + setParent(None) + 孤儿列表强引用，
+        不阻塞主线程；若线程仍 running 且卡片析构，剥离父子防止随卡片销毁
+        （"QThread: Destroyed while thread is still running" 崩溃窗口）。
+        """
+        thread = getattr(self, "_rs_fetch_thread", None)
+        self._rs_fetch_thread = None
+        self._rs_worker = None
+        self._orphan_worker_thread(thread)
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态
@@ -3185,6 +3563,280 @@ class MarketplaceCard(QWidget):
         else:
             row.set_installed(installed)
 
+    # ── 加速配置 ──
+
+    def _build_proxy_page(self):
+        """构建「加速」tab（单一外框：启用 / 配置 / 帮助三段，分隔线隔开）
+
+        首次构建后缓存；再次切换不重载表单（保留用户未保存的
+        开关/地址状态，避免切走再切回时被磁盘旧值覆盖）。
+        """
+        if getattr(self, "_proxy_built", False):
+            return
+        tc = getattr(self, "_cached_tc", None) or _text_color()
+        tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e")
+        border_c = getattr(self, "_cached_theme_colors", {}).get("border", "rgba(128,128,128,0.15)")
+        accent = getattr(self, "_cached_theme_colors", {}).get("accent", "#62a0ea")
+        # 字号/字体跟随 UI 上下文（fs 为基础字号，段标题 fs-1，正文/状态 fs-2）
+        fs = getattr(self, "_cached_font_size", 0) or 14
+        ff = getattr(self, "_cached_font_family", "") or ""
+        fs_title = max(10, fs - 1)
+        fs_body = max(9, fs - 2)
+        ff_qss = f" font-family: '{ff}';" if ff else ""
+
+        root = self._proxy_page.layout()
+
+        # ── 外部单一容器框（唯一带边框/背景的卡片）──
+        # 关键：QSS 必须用 ID 选择器限定自身，否则 border/background 会级联
+        # 应用到所有子控件（QLabel/SwitchButton 全部带边框）。
+        outer = QWidget(self._proxy_page)
+        outer.setObjectName("proxyOuter")
+        outer.setAttribute(Qt.WA_StyledBackground, True)
+        outer.setStyleSheet(
+            f"#proxyOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px; }}"
+        )
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(14, 4, 14, 4)
+        outer_layout.setSpacing(0)
+
+        # ── 段1：启用 ──
+        enable_row = QWidget(outer)
+        enable_layout = QHBoxLayout(enable_row)
+        enable_layout.setContentsMargins(0, 8, 0, 8)
+        title_lb = QLabel("⚡ 启用", enable_row)
+        title_lb.setObjectName("proxySectionTitle")
+        title_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        enable_layout.addWidget(title_lb)
+        enable_layout.addStretch(1)
+        # 连接状态行（原测试连接按钮下方）移到这里：开关左侧显示
+        self._proxy_status_label = QLabel("", enable_row)
+        self._proxy_status_label.setObjectName("proxyStatus")
+        self._proxy_status_label.setStyleSheet(
+            f"color: {accent}; font-size: {fs_body}px; background: transparent;{ff_qss}"
+        )
+        self._proxy_status_label.setWordWrap(True)
+        enable_layout.addWidget(self._proxy_status_label)
+        self._proxy_switch = SwitchButton(enable_row)
+        # 初始 setChecked 不应触发 toggled 自动保存（后续控件尚未创建）
+        self._proxy_switch.blockSignals(True)
+        self._proxy_switch.setChecked(False)
+        self._proxy_switch.blockSignals(False)
+        self._proxy_switch.checkedChanged.connect(self._on_proxy_switch_toggled)
+        enable_layout.addWidget(self._proxy_switch)
+        outer_layout.addWidget(enable_row)
+
+        # ── 分隔线1 ──
+        sep1 = QFrame(outer)
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setStyleSheet(f"background: {border_c}; max-height: 1px; border: none;")
+        outer_layout.addWidget(sep1)
+
+        # ── 段2：配置 ──
+        config_widget = QWidget(outer)
+        config_layout = QVBoxLayout(config_widget)
+        config_layout.setContentsMargins(0, 10, 0, 8)
+        config_layout.setSpacing(8)
+
+        cfg_title = QLabel("⚙ 配置", config_widget)
+        cfg_title.setObjectName("proxySectionTitle")
+        cfg_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        config_layout.addWidget(cfg_title)
+
+        self._proxy_mode_combo = ComboBox(config_widget)
+        self._proxy_mode_combo.addItem("前缀加速站", userData="prefix")
+        self._proxy_mode_combo.addItem("自建代理服务", userData="selfhost")
+        self._proxy_mode_combo.addItem("HTTP 正向代理", userData="http")
+        self._proxy_mode_combo.setCurrentIndex(0)
+        self._proxy_mode_combo.currentIndexChanged.connect(self._on_proxy_mode_changed)
+        config_layout.addWidget(self._proxy_mode_combo)
+
+        self._proxy_addr_edit = LineEdit(config_widget)
+        self._proxy_addr_edit.setPlaceholderText("https://ghfast.top/")
+        self._proxy_addr_edit.setClearButtonEnabled(True)
+        config_layout.addWidget(self._proxy_addr_edit)
+
+        btn_row = QWidget(config_widget)
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        btn_layout.addStretch(1)  # 右对齐：按钮组靠右
+        test_btn = PushButton("测试连接", btn_row, FluentIcon.CAFE)
+        test_btn.clicked.connect(self._on_proxy_test)
+        btn_layout.addWidget(test_btn)
+        save_btn = PushButton("保存", btn_row, FluentIcon.SAVE)
+        save_btn.clicked.connect(self._on_proxy_save)
+        btn_layout.addWidget(save_btn)
+        config_layout.addWidget(btn_row)
+
+        outer_layout.addWidget(config_widget)
+
+        # ── 分隔线2 ──
+        sep2 = QFrame(outer)
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setStyleSheet(f"background: {border_c}; max-height: 1px; border: none;")
+        outer_layout.addWidget(sep2)
+
+        # ── 段3：帮助 ──
+        help_widget = QWidget(outer)
+        help_layout = QVBoxLayout(help_widget)
+        help_layout.setContentsMargins(0, 10, 0, 8)
+        help_layout.setSpacing(4)
+        help_title = QLabel("💡 帮助", help_widget)
+        help_title.setObjectName("proxySectionTitle")
+        help_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        help_layout.addWidget(help_title)
+        self._proxy_help_label = QLabel("", help_widget)
+        self._proxy_help_label.setObjectName("proxyHelp")
+        self._proxy_help_label.setStyleSheet(f"color: {tcs}; font-size: {fs_body}px; background: transparent;{ff_qss}")
+        self._proxy_help_label.setWordWrap(True)
+        help_layout.addWidget(self._proxy_help_label)
+        outer_layout.addWidget(help_widget)
+
+        root.addWidget(outer)
+        root.addStretch(1)
+        self._proxy_built = True
+        self._load_proxy_form()
+
+    def _load_proxy_form(self):
+        """把当前配置填充到表单"""
+        proxy = get_proxy_config()
+        # blockSignals：加载磁盘值不应触发 _on_proxy_switch_toggled 的自动保存
+        self._proxy_switch.blockSignals(True)
+        self._proxy_switch.setChecked(proxy.enabled)
+        self._proxy_switch.blockSignals(False)
+        idx = self._proxy_mode_combo.findData(proxy.mode)
+        if idx >= 0:
+            self._proxy_mode_combo.setCurrentIndex(idx)
+        self._proxy_addr_edit.setText(proxy.address)
+        self._update_proxy_help(proxy.mode)
+        if proxy.enabled:
+            self._proxy_status_label.setText("已启用 · 上次保存后未改动")
+        else:
+            self._proxy_status_label.setText("")
+
+    def _on_proxy_switch_toggled(self, checked: bool):
+        """开关切换即保存 enabled 状态（地址非法时回弹，避免开启一个无效配置）"""
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        ok, msg = get_proxy_config().validate(mode, address)
+        if not ok:
+            # 非法地址：回弹开关并提示先填地址
+            self._proxy_switch.blockSignals(True)
+            self._proxy_switch.setChecked(False)
+            self._proxy_switch.blockSignals(False)
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))
+            self._proxy_status_label.setText(f"请先填写有效地址: {msg}")
+            return
+        if get_proxy_config().save(checked, mode, address):
+            color = "#4caf50" if checked else "rgba(255,255,255,0.5)"
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style(color))
+            self._proxy_status_label.setText(
+                f"已启用 {time.strftime('%H:%M:%S')}" if checked else f"已停用 {time.strftime('%H:%M:%S')}"
+            )
+
+    def _on_proxy_mode_changed(self, index: int):
+        mode = self._proxy_mode_combo.itemData(index)
+        self._update_proxy_help(mode)
+
+    def _update_proxy_help(self, mode: str):
+        texts = {
+            "prefix": "前缀加速站：填公共加速站地址，如 https://ghfast.top/。\n请求会自动拼接为 加速站地址 + 原 GitHub 链接。",
+            "selfhost": "自建代理服务：填你自己部署的代理地址，如 https://my-proxy.deno.dev/。\n适合官方/公共加速站不可用的网络环境。",
+            "http": "HTTP 正向代理：填代理工具地址（含端口），如 http://127.0.0.1:7890。\n需先启动 Clash 等代理工具。",
+        }
+        placeholders = {
+            "prefix": "https://ghfast.top/",
+            "selfhost": "https://my-proxy.deno.dev/",
+            "http": "http://127.0.0.1:7890",
+        }
+        self._proxy_help_label.setText(texts.get(mode, ""))
+        self._proxy_addr_edit.setPlaceholderText(placeholders.get(mode, ""))
+
+    def _on_proxy_test(self):
+        """用当前表单值测试连通性（后台线程，不落盘）"""
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        self._proxy_status_label.setText("测试中…")
+        self._proxy_status_label.repaint()
+        proxy = get_proxy_config()
+
+        def _run():
+            return proxy.test_connection(mode, address)
+
+        self._cleanup_proxy_worker()
+        self._proxy_worker = _MarketplaceWorker(_run)
+        self._proxy_thread = QThread(self)
+        self._proxy_worker.moveToThread(self._proxy_thread)
+        self._proxy_thread.started.connect(self._proxy_worker.run)
+        self._proxy_worker.finished.connect(self._on_proxy_test_done)
+        self._proxy_worker.error.connect(lambda e: self._on_proxy_test_done(("✗ 失败", e)))
+        self._proxy_worker.finished.connect(self._proxy_thread.quit)
+        self._proxy_worker.error.connect(self._proxy_thread.quit)
+        self._proxy_worker.finished.connect(self._proxy_worker.deleteLater)
+        self._proxy_worker.error.connect(self._proxy_worker.deleteLater)
+        self._proxy_thread.finished.connect(self._proxy_thread.deleteLater)
+        self._proxy_thread.start()
+
+    def _on_proxy_test_done(self, result):
+        if not self._alive():
+            return
+        if isinstance(result, tuple) and len(result) == 2:
+            ok, msg = result
+        else:
+            ok, msg = False, str(result)
+        color = "#4caf50" if ok else "#ef5350"
+        self._proxy_status_label.setStyleSheet(self._proxy_status_style(color))
+        self._proxy_status_label.setText(msg)
+
+    def _cleanup_proxy_worker(self):
+        if getattr(self, "_proxy_thread", None) is not None:
+            try:
+                self._proxy_thread.quit()
+                self._proxy_thread.wait(500)
+            except RuntimeError:
+                pass
+            self._proxy_thread = None
+        self._proxy_worker = None
+
+    def _on_proxy_save(self):
+        """保存配置；非法地址 InfoBar 提示不保存"""
+        enabled = self._proxy_switch.isChecked()
+        mode = self._proxy_mode_combo.currentData()
+        address = self._proxy_addr_edit.text().strip()
+        ok, msg = get_proxy_config().validate(mode, address)
+        if not ok:
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#ef5350"))
+            self._proxy_status_label.setText(msg)
+            self._show_proxy_info(msg, error=True)
+            return
+        if get_proxy_config().save(enabled, mode, address):
+            self._proxy_status_label.setStyleSheet(self._proxy_status_style("#4caf50"))
+            self._proxy_status_label.setText(f"已保存 {time.strftime('%H:%M:%S')}")
+            self._show_proxy_info("代理配置已保存")
+        else:
+            self._show_proxy_info("保存失败", error=True)
+
+    def _proxy_status_style(self, color: str) -> str:
+        """状态行 QSS：字号/字体跟随 UI 上下文（fs-2），仅替换颜色"""
+        fs = getattr(self, "_cached_font_size", 0) or 14
+        ff = getattr(self, "_cached_font_family", "") or ""
+        ff_qss = f" font-family: '{ff}';" if ff else ""
+        return f"color: {color}; font-size: {max(9, fs - 2)}px; background: transparent;{ff_qss}"
+
+    def _show_proxy_info(self, text: str, error: bool = False):
+        """InfoBar 统一挂到 tab 管理器顶层窗口（与市场其它提示一致）"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            parent = TabManagerWindow.get_instance() or self.window()
+            if error:
+                InfoBar.error(text, "", duration=3000, parent=parent)
+            else:
+                InfoBar.success(text, "", duration=2000, parent=parent)
+        except Exception:
+            pass
+
     # ── 标签切换 ──
 
     def _on_tab_changed(self, key: str):
@@ -3200,6 +3852,9 @@ class MarketplaceCard(QWidget):
         elif key == "markets":
             self._build_markets_page()
             self._page_stack.setCurrentIndex(1)
+        elif key == "proxy":
+            self._build_proxy_page()
+            self._page_stack.setCurrentIndex(2)
 
     def _on_filter_changed(self, key: str):
         """筛选标签切换"""
@@ -3767,8 +4422,8 @@ class MarketplaceCard(QWidget):
         except RuntimeError, TypeError:
             return False
 
-    def _cleanup_worker(self):
-        """安全清理旧的 worker/thread（不阻塞主线程）
+    def _orphan_worker_thread(self, thread):
+        """安全剥离 worker 线程为孤儿（不阻塞主线程）
 
         - 判活：旧线程 C++ 对象可能已被上一轮 finished→deleteLater 链销毁
           （删 wait 后事件循环会立即处理 deleteLater），若属性仍持悬垂 wrapper，
@@ -3777,9 +4432,6 @@ class MarketplaceCard(QWidget):
           孤儿列表强引用持有（防 GC），finished → _release_orphan 自清理
         - 迟到信号由回调 sender/判活检查丢弃
         """
-        thread = self._worker_thread
-        self._worker_thread = None
-        self._worker = None
         if thread is None:
             return
         try:
@@ -3809,6 +4461,20 @@ class MarketplaceCard(QWidget):
             except RuntimeError:
                 pass
 
+    def _cleanup_worker(self):
+        """安全清理任务 worker/thread（安装/更新/启用/禁用/卸载）"""
+        thread = self._worker_thread
+        self._worker_thread = None
+        self._worker = None
+        self._orphan_worker_thread(thread)
+
+    def _cleanup_fetch_worker(self):
+        """安全清理市场拉取 worker/thread（与任务 worker 相互独立）"""
+        thread = self._fetch_thread
+        self._fetch_thread = None
+        self._fetch_worker = None
+        self._orphan_worker_thread(thread)
+
     def _release_orphan(self, thread):
         """孤儿线程 finished 后从模块级列表移除（deleteLater 由原连接负责）"""
         try:
@@ -3828,13 +4494,28 @@ class MarketplaceCard(QWidget):
         except Exception:
             pass
         try:
+            self._cleanup_fetch_worker()
+        except Exception:
+            pass
+        try:
             self._cleanup_check_worker()
+        except Exception:
+            pass
+        try:
+            self._cleanup_dl_fetch_worker()
+        except Exception:
+            pass
+        try:
+            self._cleanup_rs_worker()
         except Exception:
             pass
 
     def deleteLater(self):
         self._cleanup_worker()
+        self._cleanup_fetch_worker()
         self._cleanup_check_worker()
+        self._cleanup_dl_fetch_worker()
+        self._cleanup_rs_worker()
         # 销毁前移除挂在顶层窗口上的事件过滤器（win 非 None 且非 self）
         try:
             win = self.window()

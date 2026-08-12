@@ -1742,8 +1742,13 @@ class ChatBackend(QObject):
                             f"[ChatBackend] Plugin '{plugin_name}' hooks-only cleanup: unregistered skill hooks"
                         )
 
-                # 命令（agents 发布的命令也需反注册）
-                if removed_components.get("commands") or removed_components.get("agents"):
+                # 命令（agents 发布的命令也需反注册）——commands 优先分派：
+                # 1) 含 commands 组件 → 命令+快捷键必须全量重建（避免残留命令条目与快捷键）；
+                # 2) 纯 agents 插件 → AGENT 命令注册时不绑 shortcut（_register_builtin_agents_
+                #    as_commands 的 register 调用无 shortcut 参数），局部重载即可，消灭卸载后
+                #    主线程 ~2500ms 全量命令重解析的卡顿根因；result["commands"]=True 保持，
+                #    走 plugin_changed 广播 → 窗口侧 _on_plugin_hot_reload 重建快捷键（双保险）。
+                if removed_components.get("commands"):
                     try:
                         from app.core.builtin_commands import reload_all_commands
 
@@ -1751,6 +1756,14 @@ class ChatBackend(QObject):
                         result["commands"] = True
                     except (ImportError, Exception) as e:
                         logger.error(f"[ChatBackend] Failed to reload commands after plugin removal: {e}")
+                elif removed_components.get("agents"):
+                    try:
+                        from app.core.builtin_commands import reload_agent_commands
+
+                        reload_agent_commands()
+                        result["commands"] = True
+                    except (ImportError, Exception) as e:
+                        logger.error(f"[ChatBackend] Failed to reload agent commands after plugin removal: {e}")
 
                 # 主题
                 if removed_components.get("themes"):
