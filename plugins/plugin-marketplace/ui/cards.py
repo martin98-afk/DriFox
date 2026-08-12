@@ -2803,9 +2803,17 @@ class MarketplaceCard(QWidget):
         """
         if not self._alive():
             return  # 卡片已销毁，放弃显示
+        # 只显示仍匹配当前搜索/筛选的行：reveal timer 可能与搜索过滤
+        # 防抖交错（补行会重启 reveal → 晚于 _reconcile_rows 执行），
+        # 无差别 show() 会把已被 setVisible(False) 过滤掉的行重新显示
+        # （搜索白过滤，表现为「输入后列表没有正确过滤」）。
+        # 首屏/刷新（query 空）时全部行匹配 → 行为不变。
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
         for row in self._row_map.values():
             try:
-                row.show()
+                if self._plugin_matches(row._meta, query, filter_mode):
+                    row.show()
             except RuntimeError:
                 pass  # 行已被销毁（并发清理），忽略
         try:

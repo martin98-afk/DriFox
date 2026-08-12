@@ -153,3 +153,44 @@ def test_search_no_match_shows_empty_state(monkeypatch):
     assert card._load_more_btn is None, "无命中时不应有「加载更多」按钮"
     assert card._content_stack.currentIndex() == 1, "无命中时应显示空态页"
     assert "没有匹配" in card._empty_label.text(), f"空态文案不符: {card._empty_label.text()}"
+
+
+def _all_rows(card):
+    """遍历布局中全部 _PluginRow（含被 _row_map 覆盖登记的同名行）"""
+    from ui.cards import _PluginRow
+
+    rows = []
+    for i in range(card._content_layout.count()):
+        w = card._content_layout.itemAt(i).widget()
+        if isinstance(w, _PluginRow):
+            rows.append(w)
+    return rows
+
+
+def test_search_after_rebuild_not_overridden_by_reveal(monkeypatch):
+    """回归：重建后立即搜索，reveal 不得覆盖过滤结果（搜索白过滤）
+
+    复现背景：数据刷新（_render_plugins 全量重建）创建的行先 hide()，
+    _schedule_reveal 排期 50ms 后统一 show()。若用户在期间输入搜索词，
+    防抖 _reconcile_rows 已把不匹配行 setVisible(False)，但其补行路径
+    会重启 reveal timer → _reveal_rows 晚于过滤执行 → 无差别 show()
+    把已过滤的行重新显示 → 搜索失效（输入后列表未正确过滤）。
+    用户表现为「重输一遍又好了」（此时无待 reveal 新行，过滤生效）。
+
+    修复：_reveal_rows 按当前搜索/筛选判定，只 show 仍匹配的行。
+    """
+    card = _new_card(monkeypatch)
+    card.show()
+    card._render_plugins(_make_plugins(40))
+    _wait_rows(card, 30)
+
+    # 重建（行 hide + reveal 排期）→ 立即搜索 → 防抖过滤 → 等 reveal 执行
+    card._render_plugins(_make_plugins(40))
+    card._search_edit.setText("3")
+    card._filter_plugins()
+    _pump(0.2)
+
+    expected = sorted({"p03", "p13", "p23"} | {f"p{i:02d}" for i in range(30, 40)})
+    visible = sorted(r._meta["name"] for r in _all_rows(card) if r.isVisible())
+    assert visible == expected, f"reveal 覆盖了过滤结果: {visible} != {expected}"
+    assert len(visible) == len(expected), f"可见行数不符: {len(visible)} vs {len(expected)}"
