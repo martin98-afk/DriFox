@@ -1975,7 +1975,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 8
+_SKELETON_CACHE_VERSION = 9
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -3217,11 +3217,10 @@ class CodeWebViewer(QWebEngineView):
             )
             tag_css.append(f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}')
 
-        if self._light_skeleton:
-            cdn_libs = ""
-        else:
-            # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN
-            cdn_libs = _get_vendor_script_tags()
+        # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN。
+        # light 骨架（欢迎卡片）也加载 echarts：欢迎 tab 插件（如 context-stats）
+        # 通过 ```echarts 代码块渲染图表，依赖 window.echarts 存在。
+        cdn_libs = _get_vendor_script_tags()
 
         # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
@@ -4236,10 +4235,7 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
-                {
-            ""
-            if self._light_skeleton
-            else '''
+                '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     width: 100%;
@@ -4251,7 +4247,6 @@ class CodeWebViewer(QWebEngineView):
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
                 '''
-        }
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
