@@ -10791,11 +10791,33 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
-        welcome_card = create_welcome_card(self, agent_name, agent_desc, recent_sessions, top_by_count)
+        # 模式：sessions（默认）/ changelog
+        from app.utils.config import Settings
+
+        welcome_mode = Settings.get_instance().welcome_mode.value
+
+        welcome_card = create_welcome_card(
+            self, agent_name, agent_desc, recent_sessions, top_by_count,
+            mode=welcome_mode,
+        )
         welcome_card._is_welcome = True
         welcome_card.contextActionRequested.connect(self.handle_recommended_question)
+        # PyQt 层模式切换 → 持久化到 app.config（不重建卡片，避免 QWebEngine 重建开销）
+        welcome_card.welcomeModeChanged.connect(self._on_welcome_mode_changed)
         self._welcome_card_cache[self._window_id] = welcome_card
         return welcome_card
+
+    def _on_welcome_mode_changed(self, new_mode: str):
+        """欢迎卡片右上角 segmented tabs 切换回调：写 QSettings"""
+        if new_mode not in ("sessions", "projects", "changelog"):
+            return
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        if cfg.welcome_mode.value == new_mode:
+            return
+        cfg.welcome_mode.value = new_mode
+        cfg.save()
 
     def _sanitize_user_message_for_display(self, content: str) -> str:
         """清理用户消息用于显示（保留向后兼容）"""
@@ -14381,6 +14403,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        # 注：mode 切换由 MessageCard.welcomeModeChanged（PyQt 层）触发，不走 contextActionRequested
 
     def _switch_to_session_by_id(self, session_id: str):
         """根据 session_id 切换到对应会话（始终从最新源加载，保证跨窗口数据一致）"""

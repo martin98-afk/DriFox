@@ -447,6 +447,11 @@ class Settings(QConfig):
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")
 
+    # ========== 欢迎卡片模式（sessions / changelog）==========
+    welcome_mode = OptionsConfigItem(
+        "UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"])
+    )
+
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
