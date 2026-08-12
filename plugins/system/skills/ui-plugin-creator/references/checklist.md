@@ -44,10 +44,12 @@
 - **9. 跨环境验证** — L277–L286
 - **10. 提交前最终检查** — L287–L308
 - **11. 故障排查速查** — L309–L327
-- **12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）** — L328–L368
-  - 12.1 注册与渲染 — L330–L336
-  - 12.2 HTML 注入约束（核心 ⚠️） — L337–L345
-  - 12.3 主题适配（核心 ⚠️） — L346–L355
+- **12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）** — L330–L388
+  - 12.1 注册与渲染 — L332–L338
+  - 12.2 HTML 注入约束（核心 ⚠️） — L339–L347
+  - 12.3 主题适配（核心 ⚠️） — L348–L357
+  - 12.4 echarts 图表验证（如果用了 ` ```echarts ` 代码块） — L358–L366
+  - 12.5 功能验证 — L367–L380
   - 12.4 功能验证 — L356–L368
 ## 1. 基础验证（每个 UI 插件必查）
 
@@ -330,8 +332,8 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 ### 12.1 注册与渲染
 
 - [ ] `mode_key` 避开系统内置 mode（`sessions` / `projects` / `changelog`）
-- [ ] `render_func` 返回**独立 HTML 片段**（含内联 `<style>`），不依赖外部 CSS/JS 文件
-- [ ] `render_func` 是同步函数，无网络/大文件读取（主线程调用）
+- [ ] `render_func` 返回 **markdown 片段**（含内联 `<style>`，或 ` ```echarts ` 代码块），不依赖外部 CSS/JS 文件
+- [ ] `render_func` 是同步函数，无网络/大文件读取（主线程调用）；数据查询做了模块级缓存（db mtime + 日期作 key）
 - [ ] 热重载兼容：清理了 `sys.modules` 中 `ui_plugin_<safe_name>.` 前缀子模块
 
 ### 12.2 HTML 注入约束（核心 ⚠️）
@@ -353,7 +355,16 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 
 > ⚠️ `prefers-color-scheme` 跟随 OS 而非 Qt 主题，**不能单独依赖**。
 
-### 12.4 功能验证
+### 12.4 echarts 图表验证（如果用了 ` ```echarts ` 代码块）
+
+- [ ] 图表渲染出来（`window.echarts` 存在 → DriFox ≥ 0.4.15 / `_SKELETON_CACHE_VERSION >= 9`）
+- [ ] JSON 中**无 JS 函数**（`formatter` 用字符串模板 `"{value}M"`；数据 Python 侧预缩放）
+- [ ] 图表明暗适配：色板随 `ctx["is_dark"]` 切换（重启 Qt 主题验证）
+- [ ] 宽度自适应：卡片缩放时图表 resize（ResizeObserver）
+- [ ] 无数据时返回纯 markdown 提示行，不输出 echarts 代码块
+- [ ] 多个图表纵向堆叠正常（每个代码块独立渲染，height 固定 400px）
+
+### 12.5 功能验证
 
 ```
 启动程序 → 欢迎卡片出现新 tab
@@ -361,8 +372,9 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 2. 内容渲染正确（无 JS 报错）？      → 控制台无错误
 3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
 4. 明暗主题切换颜色跟随？           → ctx["is_dark"] 注入生效（重点：Qt 暗色 + OS 亮色也生效）
-5. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
-6. 插件热重载无异常？               → sys.modules 前缀清理
+5. echarts 图表渲染 + 明暗 + 宽度自适应？ → §12.4
+6. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
+7. 插件热重载无异常？               → sys.modules 前缀清理
 ```
 
 > 完整模板与踩坑见 `templates.md §八`。

@@ -73,6 +73,7 @@ Step 6  按 checklist.md 验证
 | "主题色跟着变""跟随系统颜色""深浅色适配" | **主题色映射** | `widgets-theme.md` |
 | "在聊天里显示HTML""渲染自定义内容""做个消息卡片样式" | **内容块渲染器**（ContentRenderer） | `templates.md` §二 |
 | "欢迎卡片加个 tab""会话初始卡片""HTML 注入初始卡片" | **欢迎卡片插件 tab**（WelcomeTab） | `templates.md` §八 |
+| "欢迎卡片加 echarts 图表/统计趋势 tab" | **欢迎卡片插件 tab + echarts**（WelcomeTab） | `templates.md` §八 §8.5 |
 | "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
 | "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
 | "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
@@ -96,7 +97,7 @@ plugins/system/skills/ui-plugin-creator/
    ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/welcome tab/register_ui）
    ├─ widgets.md           可复用控件库索引（设计原则 + 整合示例 + 陷阱速查）
    ├─ widgets-statcard.md  _StatCard（多层级统计卡片）
-   ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget
+   ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget（QPainter 自绘，浮动卡片用）
    ├─ widgets-utils.md     工具函数（format / token 估算 / 日期）
    ├─ widgets-sqlite.md    SQLite 读取模式（路径兜底 / N 天窗口 / fallback）
    ├─ widgets-theme.md     主题色映射（ctx → QColor 字典）
@@ -128,6 +129,10 @@ brainstorming → frontend-design → ui-plugin-creator
 1. 读 `widgets.md` 索引
 2. 复制 `widgets-statcard.md` 或 `widgets-charts.md`
 3. 配合 `widgets-theme.md` 适配主题色
+
+> 💡 欢迎卡片 tab 里的图表**不要**用 `widgets-charts.md`（QPainter 自绘）——
+> 用 ` ```echarts ` 代码块走主程序骨架渲染（`templates.md §8.5`），
+> 交互/明暗/缩放全部由 echarts 承担，参考 `context-stats` 插件。
 
 ### 3.3 想读 SQLite
 
