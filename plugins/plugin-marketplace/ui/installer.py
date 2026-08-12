@@ -159,6 +159,13 @@ class PluginInstaller:
         # 供 UI 图标/详情复用，避免重复读盘）
         self._manifest_cache: dict = {}
 
+    # 缓存字段组锁：worker 线程写（invalidate/预填充）、GUI 主线程读
+    # （get_installed_map/get_status_map）。多字段（_inst_map_cache /
+    # _inst_map_ts / _manifest_cache / _status_map_cache / _status_map_ts）
+    # 非原子更新，锁保证读方看不到"半写"中间态。类级默认：兼容测试用
+    # PluginInstaller.__new__ 手赋属性的构造方式（不执行 __init__）。
+    _cache_lock = threading.Lock()
+
     # ── 批量状态查询 ──────────────────────────────────────
 
     _INST_MAP_TTL = 3.0  # 秒：渲染/筛选频繁调用时避免重复扫描磁盘
@@ -177,8 +184,9 @@ class PluginInstaller:
             {name: version_or_None}，version 读取失败为 None
         """
         now = time.time()
-        if use_cache and self._inst_map_cache is not None and now - self._inst_map_ts < self._INST_MAP_TTL:
-            return self._inst_map_cache
+        with self._cache_lock:
+            if use_cache and self._inst_map_cache is not None and now - self._inst_map_ts < self._INST_MAP_TTL:
+                return self._inst_map_cache
 
         result: dict = {}
         manifest_cache: dict = {}
@@ -193,10 +201,12 @@ class PluginInstaller:
                         manifest_cache[entry.name] = manifest
                 except OSError:
                     pass
-        # 系统插件（项目根 plugins/）：与用户插件重名时跳过
-        if self._system_dir.is_dir():
+        # 系统插件（项目根 plugins/）：与用户插件重名时跳过。
+        # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _system_dir 时跳过）。
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and system_dir.is_dir():
             try:
-                for entry in os.scandir(self._system_dir):
+                for entry in os.scandir(system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
                     version, manifest = self._read_version_full(Path(entry.path))
@@ -205,9 +215,10 @@ class PluginInstaller:
             except OSError:
                 pass
 
-        self._manifest_cache = manifest_cache
-        self._inst_map_cache = result
-        self._inst_map_ts = now
+        with self._cache_lock:
+            self._manifest_cache = manifest_cache
+            self._inst_map_cache = result
+            self._inst_map_ts = now
         return result
 
     def get_status_map(self, use_cache: bool = True) -> dict:
@@ -219,8 +230,9 @@ class PluginInstaller:
         - 项目根 plugins/（不重名）→ system
         """
         now = time.time()
-        if use_cache and self._status_map_cache is not None and now - self._status_map_ts < self._INST_MAP_TTL:
-            return self._status_map_cache
+        with self._cache_lock:
+            if use_cache and self._status_map_cache is not None and now - self._status_map_ts < self._INST_MAP_TTL:
+                return self._status_map_cache
 
         result: dict = {}
         if self._plugins_dir.is_dir():
@@ -237,16 +249,19 @@ class PluginInstaller:
                         result[entry.name] = "disabled"
             except OSError:
                 pass
-        if self._system_dir.is_dir():
+        # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _system_dir 时跳过）。
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and system_dir.is_dir():
             try:
-                for entry in os.scandir(self._system_dir):
+                for entry in os.scandir(system_dir):
                     if entry.is_dir() and entry.name not in result:
                         result[entry.name] = "system"
             except OSError:
                 pass
 
-        self._status_map_cache = result
-        self._status_map_ts = now
+        with self._cache_lock:
+            self._status_map_cache = result
+            self._status_map_ts = now
         return result
 
     @staticmethod
@@ -263,12 +278,31 @@ class PluginInstaller:
         return None, None
 
     def invalidate_installed_cache(self):
-        """安装/更新/卸载后使缓存失效，保证下次查询拿到最新状态"""
-        self._inst_map_cache = None
-        self._inst_map_ts = 0.0
-        self._status_map_cache = None
-        self._status_map_ts = 0.0
-        self._manifest_cache = {}
+        """使缓存失效（清空后立即在调用线程重填，语义=清后立即重填）
+
+        调用方均为后台安装/更新/卸载 worker 线程（install/update/remove/
+        disable/enable 成功路径）。清空后立刻在本线程触发一次全量扫描填充
+        TTL 缓存：主线程完成回调（_on_install_done → _refresh_row_states）
+        在 3s TTL 窗口内命中缓存，跳过全量磁盘扫描（消灭安装/卸载后
+        主线程 os.scandir + 逐插件读 manifest 的卡顿根因）。
+
+        若未来有主线程调用本方法，重填扫描会在主线程同步执行——
+        调用方需保证本方法只从后台线程进入。
+        """
+        with self._cache_lock:
+            self._inst_map_cache = None
+            self._inst_map_ts = 0.0
+            self._status_map_cache = None
+            self._status_map_ts = 0.0
+            self._manifest_cache = {}
+        # 清空后立即重填（仍在后台线程）：get_installed_map 填充 inst+manifest
+        # 缓存，get_status_map 填充 status 缓存。任一失败不阻塞（主线程回调
+        # 有 TTL miss 兜底自行扫描）。
+        try:
+            self.get_installed_map(use_cache=False)
+            self.get_status_map(use_cache=False)
+        except Exception as e:
+            logger.warning(f"[Installer] 缓存预填充失败（主线程回调将兜底扫描）: {e}")
 
     # ── 安装 ─────────────────────────────────────────────
 

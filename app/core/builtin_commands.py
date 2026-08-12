@@ -662,6 +662,16 @@ def reload_all_commands():
     # reload 会重新注册命令定义（含 shortcut），但 Qt 的 QShortcut 绑定未自动更新。
     # 旧 QShortcut 仍绑定旧按键序列，新按键序列无对应 QShortcut 创建。
     # 此处遍历所有窗口实例，重新注册快捷键绑定，与 _on_plugin_hot_reload 一致。
+    _rebind_command_shortcuts()
+
+
+def _rebind_command_shortcuts():
+    """命令重载后重建全部窗口快捷键绑定 + 全局热键
+
+    抽自 reload_all_commands 尾部，供全量/局部命令重载共用：
+    - reload_all_commands（命令定义含 shortcut 变更时）
+    - reload_agent_commands（agent 命令删除/更新后，保证移除残留快捷键绑定）
+    """
     try:
         from app.main_widget import OpenAIChatToolWindow
 
@@ -714,6 +724,9 @@ def reload_agent_commands() -> int:
     agents = _register_builtin_agents_as_commands(cmd_mgr)
     elapsed = time.perf_counter() - t0
     logger.info(f"[BuiltinCommands] Reloaded {len(agents)} agent commands ({elapsed * 1000:.0f}ms)")
+
+    # 3. 重建快捷键绑定（agent 命令删除后旧 QShortcut 需移除；无 agent 时无副作用）
+    _rebind_command_shortcuts()
 
     return len(agents)
 

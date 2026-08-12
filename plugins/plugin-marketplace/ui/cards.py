@@ -2471,15 +2471,15 @@ class MarketplaceCard(QWidget):
             self._render_plugins(getattr(self, "_all_plugins", []) or [])
 
     def _cleanup_dl_fetch_worker(self):
-        """安全清理下载量查询 worker/thread"""
-        if getattr(self, "_dl_fetch_thread", None) is not None:
-            try:
-                self._dl_fetch_thread.quit()
-                self._dl_fetch_thread.wait(500)
-            except RuntimeError:
-                pass
-            self._dl_fetch_thread = None
+        """安全清理下载量查询 worker/thread（复用 _orphan_worker_thread 剥离模式）
+
+        与任务/market 拉取 worker 对齐：quit + setParent(None) + 孤儿列表强引用，
+        不阻塞主线程（原 wait(500) 在扫描>500ms 且卡片析构时留崩溃窗口）。
+        """
+        thread = getattr(self, "_dl_fetch_thread", None)
+        self._dl_fetch_thread = None
         self._dl_worker = None
+        self._orphan_worker_thread(thread)
 
     def _has_update(self, p: dict, installed: bool) -> bool:
         """判断插件是否有可用更新（本地版本 < 远程版本）"""
@@ -2570,6 +2570,72 @@ class MarketplaceCard(QWidget):
             pass
         meta["_cached_tags"] = _PluginRow._compute_tags(meta)
         return meta
+
+    def _build_local_meta_bg(self, name: str, status: str, version_map: dict) -> Optional[dict]:
+        """纯函数版 _build_local_meta：后台线程读取 manifest（不触碰 Qt/self 状态）
+
+        与 _build_local_meta 的差异：version 从参数 version_map 取（不读
+        self._version_map），其余逻辑一致。staticmethod 化不可行（内部
+        需要类上下文），保持实例方法但仅依赖传入参数 + 类静态辅助。
+        """
+        path = _PluginRow._find_local_plugin_path(name)
+        if path is None:
+            return None
+        meta: dict = {
+            "name": name,
+            "description": "",
+            "version": version_map.get(name) or "",
+            "author": "",
+            "license": "",
+            "categories": [],
+            "keywords": [],
+            "homepage": "",
+            "_local_only": True,
+            "_status": status,
+            "_marketplace": "本地",
+        }
+        try:
+            import json as _json
+
+            for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                _mp = path / _meta_dir / "plugin.json"
+                if _mp.exists():
+                    m = _json.loads(_mp.read_text(encoding="utf-8"))
+                    meta["description"] = m.get("description", "")
+                    meta["author"] = (
+                        m.get("author", {}).get("name", "")
+                        if isinstance(m.get("author"), dict)
+                        else m.get("author", "")
+                    )
+                    meta["license"] = m.get("license", "")
+                    meta["categories"] = m.get("categories", []) or []
+                    meta["keywords"] = m.get("keywords", []) or []
+                    meta["homepage"] = m.get("homepage", "")
+                    break
+        except Exception:
+            pass
+        meta["_cached_tags"] = _PluginRow._compute_tags(meta)
+        return meta
+
+    def _build_local_extra_plugins_bg(self, status_map: dict, market_names: frozenset, version_map: dict) -> list:
+        """纯函数版 _build_local_extra_plugins：后台线程构建本地 extra 条目
+
+        Args:
+            status_map: installer.get_status_map() 结果（后台已取好）
+            market_names: 市场插件名集合快照（主线程 _all_plugins 派生）
+            version_map: installer.get_installed_map() 结果（版本来源）
+
+        Returns:
+            extras 列表（纯数据，无 Qt widget，供主线程回回调渲染）
+        """
+        extras = []
+        for name, status in status_map.items():
+            if name in market_names:
+                continue
+            meta = self._build_local_meta_bg(name, status, version_map)
+            if meta is not None:
+                extras.append(meta)
+        return extras
 
     def _plugin_matches(self, p: dict, query: str, filter_mode: str) -> bool:
         """检查插件是否匹配当前搜索/tag/筛选（AND 叠加）
@@ -3365,20 +3431,78 @@ class MarketplaceCard(QWidget):
         InfoBar.error(f"{name} {action}失败", str(err)[:120], duration=5000, parent=bar_parent)
 
     def _refresh_row_states(self):
-        """安装/更新/卸载后刷新：同步已渲染行状态 + 隐藏不再匹配的行
+        """安装/更新/卸载后刷新：扫描段后台执行，主线程回调只做 UI 段
 
         不重建列表（保留滚动位置），仅同步状态、可见性与匹配计数。
+
+        扫描段（get_installed_map/get_status_map/本地 extras manifest 读取）
+        移到后台 worker（复用 _MarketplaceWorker + QThread），完成后回主线程
+        只做 UI 段（行状态同步/可见性/补行/计数）——根治主线程磁盘扫描
+        （TTL miss 兜底 + _build_local_extra_plugins 读 manifest）卡顿。
         """
-        query = self._search_edit.text().strip().lower()
-        filter_mode = self._current_filter
-        # 最新安装状态（installer 缓存已被安装/更新操作失效）
-        inst_map = get_installer().get_installed_map()
+        # in-flight 合并：已有扫描 worker 在跑 → 记 pending，完成后自动补扫
+        if getattr(self, "_rs_fetch_thread", None) is not None:
+            self._rs_fetch_pending = True
+            return
+
+        # 快照主线程状态（worker 线程只读快照，不碰 self 可变 UI 态）
+        all_plugins = list(self._all_plugins)
+        market_names = frozenset(p.get("name", "") for p in all_plugins)
+
+        def _run():
+            try:
+                inst_map = get_installer().get_installed_map()
+                status_map = get_installer().get_status_map()
+                extras = self._build_local_extra_plugins_bg(status_map, market_names, inst_map)
+                return inst_map, status_map, extras
+            except Exception as e:
+                logger.warning(f"[Marketplace] 行状态扫描失败: {e}")
+                return None
+
+        self._cleanup_rs_worker()
+        self._rs_fetch_pending = False
+        self._rs_worker = _MarketplaceWorker(_run)
+        self._rs_fetch_thread = QThread(self)
+        self._rs_worker.moveToThread(self._rs_fetch_thread)
+        self._rs_fetch_thread.started.connect(self._rs_worker.run)
+        self._rs_worker.finished.connect(self._on_row_states_scanned)
+        self._rs_worker.error.connect(lambda e: self._on_row_states_scanned(None))
+        self._rs_worker.finished.connect(self._rs_fetch_thread.quit)
+        self._rs_worker.error.connect(self._rs_fetch_thread.quit)
+        self._rs_worker.finished.connect(self._rs_worker.deleteLater)
+        self._rs_worker.error.connect(self._rs_worker.deleteLater)
+        self._rs_fetch_thread.finished.connect(self._rs_fetch_thread.deleteLater)
+        self._rs_fetch_thread.start()
+
+    def _on_row_states_scanned(self, result):
+        """后台扫描完成：更新状态字段 + 只做 UI 段（主线程）"""
+        if not self._alive():
+            return
+        # 本轮 worker 已结束：释放引用（deleteLater 链由 connect 处理）
+        self._rs_fetch_thread = None
+        self._rs_worker = None
+        # in-flight 期间又有新请求 → 用最新状态补扫一次（不重复做 UI 段）
+        if getattr(self, "_rs_fetch_pending", False):
+            self._rs_fetch_pending = False
+            self._refresh_row_states()
+            return
+        if result is None:
+            return
+        inst_map, status_map, extras = result
         self._installed_set = set(inst_map)
         self._version_map = inst_map
-        self._status_map = get_installer().get_status_map()
+        self._status_map = status_map
+        # 同步 extras 缓存（与 _build_local_extra_plugins 的 key 语义一致，
+        # 供 _reconcile_rows 等主线程路径复用，避免重复扫描）
+        market_names = frozenset(p.get("name", "") for p in self._all_plugins)
+        self._local_extras_key = (status_map, market_names)
+        self._local_extras_cache = extras
 
+        # ── UI 段（原 _refresh_row_states 后半）──
+        query = self._search_edit.text().strip().lower()
+        filter_mode = self._current_filter
         # 重算匹配列表（不重建 widget）
-        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        view_plugins = list(self._all_plugins) + extras
         self._matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(self._matched)
 
@@ -3402,6 +3526,18 @@ class MarketplaceCard(QWidget):
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
+
+    def _cleanup_rs_worker(self):
+        """安全清理行状态扫描 worker/thread（复用 _orphan_worker_thread 剥离模式）
+
+        与任务/market 拉取 worker 对齐：quit + setParent(None) + 孤儿列表强引用，
+        不阻塞主线程；若线程仍 running 且卡片析构，剥离父子防止随卡片销毁
+        （"QThread: Destroyed while thread is still running" 崩溃窗口）。
+        """
+        thread = getattr(self, "_rs_fetch_thread", None)
+        self._rs_fetch_thread = None
+        self._rs_worker = None
+        self._orphan_worker_thread(thread)
 
     def _update_row_state(self, name: str, installed: bool, error: bool = False, updated: bool = False):
         """更新某插件行的状态
@@ -4365,11 +4501,21 @@ class MarketplaceCard(QWidget):
             self._cleanup_check_worker()
         except Exception:
             pass
+        try:
+            self._cleanup_dl_fetch_worker()
+        except Exception:
+            pass
+        try:
+            self._cleanup_rs_worker()
+        except Exception:
+            pass
 
     def deleteLater(self):
         self._cleanup_worker()
         self._cleanup_fetch_worker()
         self._cleanup_check_worker()
+        self._cleanup_dl_fetch_worker()
+        self._cleanup_rs_worker()
         # 销毁前移除挂在顶层窗口上的事件过滤器（win 非 None 且非 self）
         try:
             win = self.window()
