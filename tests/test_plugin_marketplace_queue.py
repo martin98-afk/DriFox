@@ -59,6 +59,9 @@ class FakeRow:
     def setVisible(self, visible):
         pass
 
+    def show(self):
+        pass
+
     def update_search_highlight(self, query):
         pass
 

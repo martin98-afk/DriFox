@@ -1315,14 +1315,14 @@ class _PluginRow(QFrame):
         self._update_btn_text()
 
     def set_downloading(self):
-        """更新流程：点击后立即标记为「下载中」（未安装态 + 禁用按钮）"""
-        self._installed = False
-        self._has_update = False
-        self._status = ""
+        """更新流程：点击后立即标记为「下载中」（保留已安装态，仅禁用按钮）
+
+        更新策略为「下载成功后再替换旧版」，旧版在下载期间仍可用，
+        故行保持已安装显示（版本徽标/文件夹按钮不动），仅按钮变
+        「更新中…」禁用。
+        """
         self._busy = True
         self._busy_text = "下载中…"
-        if self._dir_btn is not None:
-            self._dir_btn.setVisible(False)
         self._update_btn_text()
 
     def _refresh_title(self):
@@ -3179,15 +3179,16 @@ class MarketplaceCard(QWidget):
     # ── 异步更新 ────────────────────────────────────────
 
     def _async_update(self, plugin_meta: dict):
-        """更新插件：点击后立即删除旧版并反馈（入串行队列）
+        """更新插件：先下载新版，下载成功后再替换旧版（入串行队列）
 
-        点击瞬间将该行置为「下载中」（未安装态 + 禁用按钮），
-        后台线程第一步即 rmtree 旧版目录，满足「点了立即删除现有的」。
+        点击后该行置为「下载中…」（保持已安装态，旧版未删）；
+        下载成功才备份旧版并替换，失败保留旧版插件可用。
         """
         name = plugin_meta.get("name", "")
-        # 立即反馈：该行变为未安装态 + 「下载中…」
+        # 立即反馈：该行置为「下载中…」（旧版仍可用，仅按钮禁用）
         self._set_row_downloading(name)
-        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭），后台线程首步 rmtree 旧目录
+        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭）；下载成功替换前
+        # installer 内还会 purge 模块缓存释放文件句柄
         self._unload_plugin_ui_on_gui(name)
 
         self._submit_task(
@@ -3200,7 +3201,7 @@ class MarketplaceCard(QWidget):
         )
 
     def _set_row_downloading(self, name: str):
-        """将该插件行立即置为「下载中」（未安装态，旧版已删/将删）"""
+        """将该插件行立即置为「下载中…」（保留已安装态，旧版未删）"""
         row = self._row_map.get(name)
         if row is not None:
             row.set_downloading()
@@ -3218,9 +3219,9 @@ class MarketplaceCard(QWidget):
             self._refresh_row_states()
             InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
-            # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
-            self._update_row_state(name, installed=False, error=True)
-            InfoBar.error(f"{name} 更新失败", "旧版已移除，可点击「安装」重试", duration=3000, parent=bar_parent)
+            # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试
+            self._update_row_state(name, installed=True, error=True)
+            InfoBar.error(f"{name} 更新失败", "已保留旧版，可稍后重试", duration=3000, parent=bar_parent)
 
     def _on_update_error(self, name: str, err: str):
         """更新出错"""
@@ -3228,8 +3229,8 @@ class MarketplaceCard(QWidget):
             return  # 卡片已销毁
         self._status_label.setText("更新失败")
         self._status_label.setStyleSheet("color: rgba(255,80,80,0.7); font-size: 12px; background: transparent;")
-        # 旧版已删、新版下载失败 → 行恢复「安装」按钮（可重新安装）
-        self._update_row_state(name, installed=False, error=True)
+        # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试
+        self._update_row_state(name, installed=True, error=True)
         import re as _re
 
         msg = err

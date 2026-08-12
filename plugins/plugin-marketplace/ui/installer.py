@@ -297,12 +297,13 @@ class PluginInstaller:
         return success
 
     def update(self, plugin_meta: dict) -> bool:
-        """更新插件 — 立即删除旧版后重新下载
+        """更新插件 — 先下载新版，下载成功后再替换旧版（失败保留旧版）
 
         流程（点击更新即触发）：
-        1. 先删除旧版目录（用户感知为「点了立即删除现有的」）
-        2. 再下载新版安装
-        若下载失败，插件保持未安装状态（可重新点「安装」恢复）。
+        1. 下载新版到 cache 目录（不触碰旧版；网络失败时旧版完好可用）
+        2. 下载成功 → 旧版备份移入 cache → 新版移入目标目录 → 删除备份
+        替换环节失败 → 回滚旧版，插件保持可用状态（不出现
+        「旧版已删、新版未装」的未安装窗口）。
 
         Args:
             plugin_meta: marketplace.json 中的插件元数据
@@ -318,15 +319,12 @@ class PluginInstaller:
         target = self._plugins_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
-        # 第一步：立即删除旧版
-        if not self.remove(name):
-            logger.error(f"[Installer] Failed to remove old {name} before update")
-            return False
-
-        # 第二步：重新下载安装
+        # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
+        # 不存在（更新前被手动删除）→ 等同安装。
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
+            self.invalidate_installed_cache()
         return success
 
     # ── Source 类型分发 ──────────────────────────────────
@@ -474,7 +472,30 @@ class PluginInstaller:
                 raise RuntimeError(f"Subpath {subpath} not found in clone")
 
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(sub_src), str(target))
+            if target.exists():
+                # 更新场景：旧版已在 → 先备份到 cache，新版落位成功后再删
+                # 旧版；替换失败回滚旧版（下载已完成，失败只可能来自本地
+                # IO/句柄，回滚保证插件不落入「旧版已删、新版未装」状态）。
+                # 备份在 cache 目录（.drifox/cache），不触发插件目录监听。
+                backup = self._cache_dir / f"{name}_old_{int(time.time())}"
+                # 释放旧目录的模块/字节码句柄（Windows 下 move 可能失败）
+                self._purge_plugin_module_cache(name)
+                shutil.move(str(target), str(backup))
+                try:
+                    shutil.move(str(sub_src), str(target))
+                except Exception:
+                    # 替换失败 → 回滚旧版
+                    try:
+                        if backup.exists() and not target.exists():
+                            shutil.move(str(backup), str(target))
+                    except Exception as rb_e:
+                        logger.error(f"[Installer] 回滚旧版失败: {name}: {rb_e}")
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+                    raise
+                if not _rmtree_readonly(backup):
+                    logger.warning(f"[Installer] 旧版备份清理失败（残留 cache）: {backup}")
+            else:
+                shutil.move(str(sub_src), str(target))
 
             # === 3. 清理 cache ===
             shutil.rmtree(cache_tmp, ignore_errors=True)
