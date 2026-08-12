@@ -62,6 +62,9 @@ def _make_plugins(n, market="m"):
 class FakeRow:
     """轻量行桩：模拟 _PluginRow 的 busy 状态机"""
 
+    _busy: bool
+    _busy_text: str
+
     def __init__(self, name: str):
         self._meta = {"name": name, "version": "1.0.0"}
         self._name = name
@@ -86,7 +89,7 @@ class FakeRow:
         pass
 
 
-def test_restore_only_active_and_queued(monkeypatch):
+def test_restore_only_active_and_queued():
     """行重建后：只恢复运行中/排队中任务的行 busy，已完成任务的行不恢复"""
     from ui.cards import MarketplaceCard
 
@@ -129,6 +132,42 @@ def test_restore_only_active_and_queued(monkeypatch):
     card._cleanup_worker()
 
 
+def test_restore_after_late_row_creation():
+    """分批加载场景：重建后行尚未渲染（_row_map 无行）→ 补行后 busy 恢复
+
+    全量重建时行分批渲染（_render_next_batch 每批 _RENDER_BATCH 个）：
+    任务行可能在首批之外，_restore_task_busy 时无行可恢复（no-op）；
+    后续「加载更多」补行 → _render_rows 再次调用 _restore_task_busy →
+    该行出现后必须恢复 busy。
+    """
+    from ui.cards import MarketplaceCard
+
+    card = MarketplaceCard()
+    card._row_map = {}  # 模拟重建后首批渲染完成，任务行尚未创建
+    card._active_task = {
+        "kind": "install",
+        "name": "p-late",
+        "busy_text": "下载中…",
+        "status_text": "下载中…",
+        "status_color": "gray",
+    }
+
+    # 行未渲染：no-op，不抛异常
+    card._restore_task_busy()
+
+    # 后续补行创建后：恢复 busy
+    row = FakeRow("p-late")
+    card._row_map["p-late"] = row
+    card._restore_task_busy()
+    assert row._busy and row._busy_text == "下载中…", "补行后未恢复任务行 busy"
+
+    # 缺 name 的任务：跳过不抛异常
+    card._task_queue.append({"kind": "install", "name": "", "busy_text": "安装中…"})
+    card._restore_task_busy()  # 不应抛 KeyError
+
+    card._cleanup_worker()
+
+
 def test_rebuild_preserves_task_busy(monkeypatch):
     """真实渲染路径：提交任务后全量重建（切 tab 回来）→ 下载中状态保持
 
@@ -162,10 +201,15 @@ def test_rebuild_preserves_task_busy(monkeypatch):
     _pump(0.3)
 
     name = next(iter(card._row_map))
+    # Event 控制任务完成时机：断言「重建后 busy 保持」期间任务必须仍在跑
+    # （sleep 定长会引入竞态：缩短后可能在 _pump 期间完成导致 busy 被解除）
+    import threading
+
+    task_done_evt = threading.Event()
     card._submit_task(
         kind="install",
         name=name,
-        fn=lambda: (time.sleep(0.6), True)[1],
+        fn=lambda: (task_done_evt.wait(5), True)[1],
         busy_text="下载中…",
         status_text="下载中…",
         status_color="gray",
@@ -179,7 +223,8 @@ def test_rebuild_preserves_task_busy(monkeypatch):
     assert card._row_map[name]._busy, "重建后「下载中」状态被刷新没（bug 回归）"
     assert card._row_map[name]._busy_text == "下载中…", "重建后 busy 文案丢失"
 
-    # 任务完成 → busy 解除（不误恢复）
+    # 放行任务完成 → busy 解除（不误恢复）
+    task_done_evt.set()
     assert _wait_until(lambda: not card._task_active), "任务未完成"
     _pump(0.3)
     assert not card._row_map[name]._busy, "任务完成后行仍 busy（误恢复）"

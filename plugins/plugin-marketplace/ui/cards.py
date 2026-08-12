@@ -3148,7 +3148,10 @@ class MarketplaceCard(QWidget):
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
-        # 当前任务已结束（_active_task 清空，防行重建恢复 busy 时误置已完成任务）
+        # 当前任务已结束（_active_task 清空，防行重建恢复 busy 时误置已完成任务）。
+        # 用 is 比较而非无条件清空：每个任务入队都是独立 dict 对象，闭包
+        # t=task 捕获的引用与 _active_task 指向一致；is 可防止异常时序下
+        # 误清下一个任务的 active 状态。
         if self._active_task is task:
             self._active_task = None
         # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
@@ -3216,7 +3219,10 @@ class MarketplaceCard(QWidget):
         if self._active_task is not None:
             tasks.insert(0, self._active_task)
         for task in tasks:
-            self._set_row_busy(task["name"], task["busy_text"])
+            name = task.get("name")
+            if not name:
+                continue  # 插件数据缺 name：无行可恢复，跳过
+            self._set_row_busy(name, task.get("busy_text", ""))
 
     # ── 异步安装 ──
 
