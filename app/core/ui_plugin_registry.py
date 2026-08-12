@@ -576,10 +576,16 @@ class UIPluginRegistry:
                     f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function"
                 )
                 return False
+            # 仅当该插件注册了欢迎卡片 tab 时才刷新欢迎卡片；
+            # 普通 UI 插件（渲染器/悬浮卡/命令）不触碰欢迎卡片缓存，
+            # 避免每次加载/刷新 UI 插件都重建欢迎卡片。
+            before_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             register_func(self)
             self._loaded_plugins.add(plugin_name)
             logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
-            self._refresh_welcome_cards()
+            after_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
+            if before_tabs != after_tabs:
+                self._refresh_welcome_cards()
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
@@ -617,6 +623,8 @@ class UIPluginRegistry:
         self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
         self._message_factories = [f for f in self._message_factories if f.plugin_name != plugin_name]
+        # 记录该插件是否注册过欢迎卡片 tab（决定卸载后是否刷新欢迎卡片）
+        had_welcome_tabs = any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
         # 清理 welcome tabs
         self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
         # 清理 floating cards + 对应命令
@@ -631,7 +639,8 @@ class UIPluginRegistry:
                     self._remove_widget_from_container(win_id, cid, widget)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
-        self._refresh_welcome_cards()
+        if had_welcome_tabs:
+            self._refresh_welcome_cards()
         return True
 
     def _refresh_welcome_cards(self) -> None:

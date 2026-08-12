@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **插件市场下载/更新记录** (`plugins/plugin-marketplace/ui/records.py` + `cards.py` + `installer.py`): 「代理」页新增「下载 / 更新记录」区块，持久化记录安装/更新的成功/失败事件（上限 100 条，跨会话可见），失败记录保留插件元数据并支持一键重试原动作（安装失败→重新安装，更新失败→重新更新），记录区占满代理页剩余空间
+
 ## [v0.4.14] - 2026-08-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma

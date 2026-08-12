@@ -61,6 +61,7 @@ from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
 from .proxy import get_proxy_config
+from .records import get_records
 from ._squircle_avatar import (
     SquircleAvatar,
     PluginIconWidget,
@@ -1787,6 +1788,9 @@ class MarketplaceCard(QWidget):
         "proxySectionTitle": -1,  # 加速页段标题（启用/配置/帮助）
         "proxyStatus": -2,  # 加速页状态行
         "proxyHelp": -2,  # 加速页帮助正文
+        "proxyRecordTitle": -1,  # 记录区段标题
+        "proxyRecordRow": -2,  # 记录行正文（动作/插件名/原因）
+        "proxyRecordTime": -3,  # 记录行时间
     }
 
     def _retheme(self):
@@ -2383,6 +2387,7 @@ class MarketplaceCard(QWidget):
         self._update_empty_state()
         self._update_status()
         self._update_update_badge()
+        self._refresh_filter_counts()
         self._render_next_batch()
 
     @staticmethod
@@ -3082,6 +3087,7 @@ class MarketplaceCard(QWidget):
         busy_text: str,
         status_text: str,
         status_color: str,
+        meta: Optional[dict] = None,
     ):
         """提交后台任务到串行队列
 
@@ -3097,6 +3103,7 @@ class MarketplaceCard(QWidget):
             busy_text: 行按钮 busy 文案（如「安装中…」）
             status_text: 头部状态栏文案
             status_color: 状态栏文字颜色
+            meta: 插件元数据（install/update 时传入，用于失败记录一键重试）
         """
         self._task_queue.append(
             {
@@ -3106,6 +3113,7 @@ class MarketplaceCard(QWidget):
                 "busy_text": busy_text,
                 "status_text": status_text,
                 "status_color": status_color,
+                "meta": meta,
             }
         )
         # 行立即置 busy（行可能未渲染/已隐藏，忽略）
@@ -3157,6 +3165,8 @@ class MarketplaceCard(QWidget):
         # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
         # 其他排队任务的行保持 busy（_refresh_row_states 跳过逻辑保护）
         self._release_row_busy(name)
+        # 记录安装/更新结果（成功/失败 + 失败原因），供代理页「下载/更新记录」展示
+        self._record_task_result(task, success)
         if kind == "install":
             self._on_install_done(name, success)
         elif kind == "update":
@@ -3174,6 +3184,8 @@ class MarketplaceCard(QWidget):
         if self._active_task is task:
             self._active_task = None
         self._release_row_busy(name)
+        # 记录安装/更新失败（异常路径，err 为完整错误信息）
+        self._record_task_result(task, False, err)
         if kind == "install":
             self._on_install_error(name, err)
         elif kind == "update":
@@ -3182,6 +3194,28 @@ class MarketplaceCard(QWidget):
             action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
             self._on_manage_error(name, action, err)
         self._run_next_task()
+
+    def _record_task_result(self, task: dict, success: bool, err: str = ""):
+        """记录安装/更新结果到持久化记录（代理页「下载/更新记录」展示 + 失败重试）
+
+        仅记录 install/update 动作（enable/disable/uninstall 不记录）。
+        失败原因：异常路径用 err；installer 内部返回 False 时取
+        installer.last_error（_download_and_move 已格式化 stderr）。
+        """
+        kind = task.get("kind")
+        if kind not in ("install", "update"):
+            return
+        name = task.get("name", "")
+        if not name:
+            return
+        error = ""
+        if not success:
+            error = (err or get_installer().last_error or "操作失败")[:500]
+        try:
+            get_records().add(kind, name, success, error=error, meta=task.get("meta"))
+        except Exception as e:
+            logger.warning(f"[Marketplace] 记录下载/更新结果失败: {e}")
+        self._refresh_records_ui()
 
     def _release_row_busy(self, name: str):
         """解除指定插件行的 busy（仅任务自身行；行不存在/未 busy 忽略）"""
@@ -3236,6 +3270,7 @@ class MarketplaceCard(QWidget):
             busy_text="安装中…",
             status_text="安装中…",
             status_color=_text_color(secondary=True),
+            meta=plugin_meta,
         )
 
     def _on_install_done(self, name: str, success: bool):
@@ -3298,6 +3333,7 @@ class MarketplaceCard(QWidget):
             busy_text="下载中…",
             status_text="更新中…",
             status_color="#FFA726",
+            meta=plugin_meta,
         )
 
     def _set_row_downloading(self, name: str):
@@ -3728,9 +3764,188 @@ class MarketplaceCard(QWidget):
         outer_layout.addWidget(help_widget)
 
         root.addWidget(outer)
-        root.addStretch(1)
+
+        # ── 段4：下载 / 更新记录 ──
+        # 独立外框（与代理配置框平级）：标题行 + 清空 + 固定高滚动列表
+        records_outer = QWidget(self._proxy_page)
+        records_outer.setObjectName("proxyRecordsOuter")
+        records_outer.setAttribute(Qt.WA_StyledBackground, True)
+        records_outer.setStyleSheet(
+            f"#proxyRecordsOuter {{ background: {card_bg}; border: 1px solid {border_c}; border-radius: 8px; }}"
+        )
+        records_layout = QVBoxLayout(records_outer)
+        records_layout.setContentsMargins(14, 4, 14, 8)
+        records_layout.setSpacing(4)
+
+        # 标题行：标题 + 清空按钮（右对齐）
+        rec_title_row = QWidget(records_outer)
+        rec_title_layout = QHBoxLayout(rec_title_row)
+        rec_title_layout.setContentsMargins(0, 8, 0, 4)
+        rec_title = QLabel("📜 下载 / 更新记录", rec_title_row)
+        rec_title.setObjectName("proxyRecordTitle")
+        rec_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
+        rec_title_layout.addWidget(rec_title)
+        rec_title_layout.addStretch(1)
+        clear_btn = QPushButton("清空", rec_title_row)
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setFixedHeight(22)
+        clear_btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(128,128,128,0.12); color: {tcs};"
+            f" border: none; border-radius: 5px; padding: 0 10px;{ff_qss}"
+            f" font-size: {max(8, fs - 2)}px; }}"
+            "QPushButton:hover { background: rgba(128,128,128,0.22); }"
+        )
+        clear_btn.clicked.connect(self._on_clear_records)
+        rec_title_layout.addWidget(clear_btn)
+        records_layout.addWidget(rec_title_row)
+
+        # 记录滚动列表（占满代理页剩余空间，行多时滚动）
+        rec_scroll = QScrollArea(records_outer)
+        rec_scroll.setWidgetResizable(True)
+        rec_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        rec_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self._records_container = QWidget(rec_scroll)
+        self._records_container.setStyleSheet("background: transparent;")
+        self._records_layout = QVBoxLayout(self._records_container)
+        self._records_layout.setContentsMargins(0, 0, 4, 0)
+        self._records_layout.setSpacing(2)
+        rec_scroll.setWidget(self._records_container)
+        records_layout.addWidget(rec_scroll, 1)
+
+        root.addWidget(records_outer, 1)
         self._proxy_built = True
         self._load_proxy_form()
+        self._refresh_records_ui()
+
+    # ── 下载 / 更新记录 ─────────────────────────────────
+
+    def _refresh_records_ui(self):
+        """重建代理页「下载/更新记录」列表（代理页未构建时跳过）
+
+        记录在任务完成回调（_record_task_result）与首次构建代理页时
+        触发；行太多时靠外层固定高度滚动区浏览。
+        """
+        container = getattr(self, "_records_container", None)
+        if container is None:
+            return
+        layout = self._records_layout
+        # 清空旧行
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        tc = getattr(self, "_cached_tc", None) or _text_color()
+        tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        fs = getattr(self, "_cached_font_size", 0) or 14
+        ff = getattr(self, "_cached_font_family", "") or ""
+        ff_qss = f" font-family: '{ff}';" if ff else ""
+        fs_row = max(8, fs - 2)
+        fs_time = max(7, fs - 3)
+
+        records = get_records().get(limit=50)
+        if not records:
+            empty = QLabel("暂无安装 / 更新记录", container)
+            empty.setObjectName("proxyRecordRow")
+            empty.setStyleSheet(f"color: {tcs}; font-size: {fs_row}px; background: transparent;{ff_qss}")
+            empty.setAlignment(Qt.AlignCenter)
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+
+        for rec in records:
+            layout.addWidget(self._build_record_row(rec, tc, tcs, ff, ff_qss, fs_row, fs_time))
+        layout.addStretch(1)
+
+    def _build_record_row(
+        self, rec: dict, tc: str, tcs: str, ff: str, ff_qss: str, fs_row: int, fs_time: int
+    ) -> QWidget:
+        """构建一条记录行：状态点 + 动作 + 插件名 + 失败原因 + 时间 +（失败时）重试按钮"""
+        row = QWidget(self._records_container)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 3, 0, 3)
+        lay.setSpacing(8)
+
+        success = bool(rec.get("success"))
+        color = "#4caf50" if success else "#ef5350"
+        dot = QLabel("✓" if success else "✗", row)
+        dot.setObjectName("proxyRecordRow")
+        dot.setStyleSheet(f"color: {color}; font-size: {fs_row}px; background: transparent;{ff_qss}")
+        lay.addWidget(dot)
+
+        action = "安装" if rec.get("action") == "install" else "更新"
+        act_lb = QLabel(action, row)
+        act_lb.setObjectName("proxyRecordRow")
+        act_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_row}px; background: transparent;{ff_qss}")
+        lay.addWidget(act_lb)
+
+        name = rec.get("name", "")
+        name_lb = QLabel(name, row)
+        name_lb.setObjectName("proxyRecordRow")
+        name_lb.setStyleSheet(f"color: {tc}; font-size: {fs_row}px; background: transparent;{ff_qss}")
+        name_lb.setMaximumWidth(160)
+        name_lb.setToolTip(name)
+        lay.addWidget(name_lb)
+
+        error = rec.get("error", "")
+        if error:
+            err_lb = QLabel(error, row)
+            err_lb.setObjectName("proxyRecordRow")
+            err_lb.setStyleSheet(f"color: #ef5350; font-size: {fs_row}px; background: transparent;{ff_qss}")
+            err_lb.setMaximumWidth(180)
+            err_lb.setToolTip(error)
+            lay.addWidget(err_lb)
+
+        lay.addStretch(1)
+
+        ts = rec.get("time", 0)
+        time_lb = QLabel(time.strftime("%m-%d %H:%M", time.localtime(ts)), row)
+        time_lb.setObjectName("proxyRecordTime")
+        time_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_time}px; background: transparent;{ff_qss}")
+        lay.addWidget(time_lb)
+
+        if not success:
+            retry_btn = QPushButton("重试", row)
+            retry_btn.setCursor(Qt.PointingHandCursor)
+            retry_btn.setFixedHeight(22)
+            retry_btn.setStyleSheet(
+                f"QPushButton {{ background: rgba(64,158,255,0.18); color: #62a0ea;"
+                f" border: none; border-radius: 5px; padding: 0 12px;{ff_qss}"
+                f" font-size: {fs_row}px; }}"
+                "QPushButton:hover { background: rgba(64,158,255,0.32); }"
+            )
+            if rec.get("meta"):
+                retry_btn.clicked.connect(lambda checked=False, r=rec: self._retry_record(r))
+            else:
+                retry_btn.setEnabled(False)
+                retry_btn.setToolTip("缺少插件元数据，无法重试")
+            lay.addWidget(retry_btn)
+
+        return row
+
+    def _retry_record(self, rec: dict):
+        """失败记录一键重试：重试原动作（安装→重新安装，更新→重新更新）"""
+        meta = rec.get("meta")
+        if not meta:
+            self._show_proxy_info("缺少插件元数据，无法重试", error=True)
+            return
+        if rec.get("action") == "install":
+            self._async_install(meta)
+        else:
+            self._async_update(meta)
+
+    def _on_clear_records(self):
+        """清空下载/更新记录"""
+        try:
+            get_records().clear()
+        except Exception as e:
+            logger.warning(f"[Marketplace] 清空记录失败: {e}")
+        self._refresh_records_ui()
+        self._show_proxy_info("已清空记录")
 
     def _load_proxy_form(self):
         """把当前配置填充到表单"""
@@ -4048,14 +4263,74 @@ class MarketplaceCard(QWidget):
             btn.clicked.connect(lambda checked, v=value, b=btn: self._on_source_toggled(v, b))
             return btn
 
-        # 「全部」在前
-        self._source_layout.addWidget(_make_source_btn(f"全部 ({len(sources)})", ""))
+        # 「全部」在前：显示当前 tab 插件总数（而非来源市场数）
+        total = len(self._all_plugins or []) + len(self._build_local_extra_plugins())
+        self._source_layout.addWidget(_make_source_btn(f"全部 ({total})", ""))
         for src, cnt in sorted(sources.items(), key=lambda kv: (-kv[1], kv[0])):
             self._source_layout.addWidget(_make_source_btn(f"{src} ({cnt})", src))
 
         self._source_layout.addStretch(1)
         self._source_bar.setVisible(True)
         self._source_bar.parent().setVisible(True)
+
+    def _refresh_filter_counts(self):
+        """按当前 tab（filter_mode）刷新来源栏 / tag 栏计数（不重建按钮）
+
+        切 tab 只走 _render_plugins 不重建 tag/source 栏（仅数据内容变化时
+        重建），计数会停留在全量数据上。这里按当前 filter_mode 重新统计
+        并更新按钮文本，保持「全部」= 当前 tab 插件总数。
+        """
+        if not self._all_plugins:
+            return
+        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        fm = self._current_filter
+
+        def _in_tab(p: dict) -> bool:
+            name = p.get("name", "")
+            installed = name in self._installed_set
+            if fm == "installed":
+                return installed
+            if fm == "uninstalled":
+                return not installed
+            if fm == "updates":
+                return installed and self._has_update(p, installed)
+            return True
+
+        tab_plugins = [p for p in view_plugins if _in_tab(p)]
+
+        # 来源计数（当前 tab 维度）
+        sources = {}
+        for p in tab_plugins:
+            src = p.get("_marketplace", "") or "未知"
+            sources[src] = sources.get(src, 0) + 1
+        for i in range(self._source_layout.count()):
+            item = self._source_layout.itemAt(i)
+            w = item.widget() if item else None
+            if not isinstance(w, QPushButton) or not w.isCheckable():
+                continue
+            text = w.text()
+            name = text.split(" (")[0]
+            if name == "全部":
+                w.setText(f"全部 ({len(tab_plugins)})")
+            else:
+                w.setText(f"{name} ({sources.get(name, 0)})")
+
+        # tag 计数（当前 tab 维度）
+        tag_counts = {}
+        for p in tab_plugins:
+            for t in p.get("_cached_tags", []) or []:
+                if t:
+                    tag_counts[t] = tag_counts.get(t, 0) + 1
+        for i in range(self._tag_layout.count()):
+            item = self._tag_layout.itemAt(i)
+            w = item.widget() if item else None
+            if not isinstance(w, QPushButton) or not w.isCheckable():
+                continue
+            text = w.text()
+            if text == "更多…":
+                continue
+            name = text.split(" (")[0]
+            w.setText(f"{name} ({tag_counts.get(name, 0)})")
 
     def _sync_source_buttons(self):
         """同步来源按钮选中状态"""

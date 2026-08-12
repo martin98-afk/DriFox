@@ -636,15 +636,12 @@ def greet() -> str:
 
     # 关键断言：模块对象已被替换（旧对象被清除后重新创建）
     assert old_cards_mod is not new_cards_mod, (
-        f"重载后 cards 模块对象应被替换。"
-        f"旧对象 id={id(old_cards_mod)}，新对象 id={id(new_cards_mod)}"
+        f"重载后 cards 模块对象应被替换。旧对象 id={id(old_cards_mod)}，新对象 id={id(new_cards_mod)}"
     )
 
     # ── 7. 验证新代码已生效 ──
     #    关键断言：新模块的 VERSION 是 "v2" 而不是 "v1"
-    assert new_cards_mod.VERSION == "v2", (
-        f"热重载后 cards 模块的 VERSION 应为 'v2'，实际为 '{new_cards_mod.VERSION}'"
-    )
+    assert new_cards_mod.VERSION == "v2", f"热重载后 cards 模块的 VERSION 应为 'v2'，实际为 '{new_cards_mod.VERSION}'"
     assert new_cards_mod.greet() == "Hello from v2"
 
     # renderer 应反映新代码
@@ -752,6 +749,76 @@ def test_reload_plugin_handles_non_ui_plugins_gracefully(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 欢迎卡片刷新时机（仅注册/清除 welcome tab 的插件才刷新）
+# ═══════════════════════════════════════════════════════════════
+
+
+def test_load_plugin_only_refreshes_welcome_cards_for_welcome_tab_plugins(tmp_path, monkeypatch):
+    """普通 UI 插件（无 welcome tab）加载不应触发欢迎卡片刷新；注册了 welcome tab 的插件才触发
+
+    回归修复：load_plugin / unload_plugin 原先无条件调用 _refresh_welcome_cards，
+    导致任何 UI 插件刷新（如插件市场刷新）都会重建欢迎卡片。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+
+    # 统计 _refresh_welcome_cards 调用次数
+    refresh_calls = []
+    original_refresh = reg._refresh_welcome_cards
+
+    def counting_refresh():
+        refresh_calls.append(1)
+        return original_refresh()
+
+    monkeypatch.setattr(reg, "_refresh_welcome_cards", counting_refresh)
+
+    # ── 1. 加载普通 UI 插件（仅注册 content renderer）──
+    plain_dir = tmp_path / "plain-plug"
+    plain_ui = plain_dir / "ui"
+    plain_ui.mkdir(parents=True)
+    (plain_ui / "__init__.py").write_text(
+        """
+def register_ui(registry):
+    registry.register_content_renderer('plain-plug', 't1', lambda d, c: 'ok', priority=0)
+""",
+        encoding="utf-8",
+    )
+    assert reg.load_plugin("plain-plug", plain_dir) is True
+    assert refresh_calls == [], "普通 UI 插件加载不应刷新欢迎卡片"
+
+    # ── 2. 加载注册 welcome tab 的插件 ──
+    welcome_dir = tmp_path / "welcome-plug"
+    welcome_ui = welcome_dir / "ui"
+    welcome_ui.mkdir(parents=True)
+    (welcome_ui / "__init__.py").write_text(
+        """
+def register_ui(registry):
+    registry.register_welcome_tab(
+        plugin_name='welcome-plug', mode_key='my-welcome', label='My Welcome',
+        render_func=lambda ctx: '<p>hi</p>', priority=0,
+    )
+""",
+        encoding="utf-8",
+    )
+    assert reg.load_plugin("welcome-plug", welcome_dir) is True
+    assert len(refresh_calls) == 1, "注册 welcome tab 的插件加载应刷新欢迎卡片"
+
+    # ── 3. 卸载普通 UI 插件：不应刷新 ──
+    assert reg.unload_plugin("plain-plug") is True
+    assert len(refresh_calls) == 1, "卸载普通 UI 插件不应刷新欢迎卡片"
+
+    # ── 4. 卸载 welcome tab 插件：应刷新 ──
+    assert reg.unload_plugin("welcome-plug") is True
+    assert len(refresh_calls) == 2, "卸载含 welcome tab 的插件应刷新欢迎卡片"
+
+    # ── 清理 ──
+    for k in list(sys.modules.keys()):
+        if k.startswith("ui_plugin_") and k.endswith(("_plain_plug", "_welcome_plug")):
+            del sys.modules[k]
+    reg.reset()
+
+
+# ═══════════════════════════════════════════════════════════════
 # __pycache__ 清理与热重载循环防护
 # ═══════════════════════════════════════════════════════════════
 
@@ -771,8 +838,8 @@ def test_reload_plugin_clears_and_recreates_pycache(tmp_path):
     ui_dir.mkdir(parents=True)
     (ui_dir / "cards.py").write_text('VERSION = "v1"\n', encoding="utf-8")
     (ui_dir / "__init__.py").write_text(
-        'from .cards import VERSION\n'
-        'def register_ui(registry):\n'
+        "from .cards import VERSION\n"
+        "def register_ui(registry):\n"
         '    registry.register_content_renderer("pycache-test", "t1", lambda d, c: VERSION, 0)\n',
         encoding="utf-8",
     )
@@ -790,22 +857,23 @@ def test_reload_plugin_clears_and_recreates_pycache(tmp_path):
         version = f"v{i + 2}"
         (ui_dir / "cards.py").write_text(f'VERSION = "{version}"\n', encoding="utf-8")
 
-        assert reg.reload_plugin("pycache-test", plugin_dir), f"第 {i+1} 次重载失败"
+        assert reg.reload_plugin("pycache-test", plugin_dir), f"第 {i + 1} 次重载失败"
 
         # 验证 __pycache__ 被重新创建
-        assert pycache.exists(), f"重载后 __pycache__ 应被重新创建 (第 {i+1} 次)"
+        assert pycache.exists(), f"重载后 __pycache__ 应被重新创建 (第 {i + 1} 次)"
         pyc_files = list(pycache.iterdir())
-        assert len(pyc_files) > 0, f"重载后 __pycache__ 中应有 .pyc 文件 (第 {i+1} 次)"
+        assert len(pyc_files) > 0, f"重载后 __pycache__ 中应有 .pyc 文件 (第 {i + 1} 次)"
 
         # 验证新代码生效
         info = reg.get_content_renderer("t1")
         assert info is not None
         assert info.render_func(None, None) == version, (
-            f"第 {i+1} 次重载后 renderer 应返回 {version}，实际: {info.render_func(None, None)}"
+            f"第 {i + 1} 次重载后 renderer 应返回 {version}，实际: {info.render_func(None, None)}"
         )
 
     # 清理
     import shutil
+
     for k in list(sys.modules.keys()):
         if k.startswith("ui_plugin_pycache_test"):
             del sys.modules[k]
@@ -821,6 +889,7 @@ def test_watchfiles_filter_ignores_pycache_paths():
 
     模拟 watchfiles 上报的路径，验证所有含 __pycache__ 的路径都被过滤。
     """
+
     # 重现 watchfiles 的过滤逻辑
     def _should_filter(change_path: str) -> bool:
         p = change_path.lower()

@@ -158,6 +158,8 @@ class PluginInstaller:
         # manifest 缓存（{name: manifest dict}，get_installed_map 扫描时填充，
         # 供 UI 图标/详情复用，避免重复读盘）
         self._manifest_cache: dict = {}
+        # 最近一次安装/更新失败原因（供 UI 记录区展示；成功/未执行时为空）
+        self.last_error: str = ""
 
     # 缓存字段组锁：worker 线程写（invalidate/预填充）、GUI 主线程读
     # （get_installed_map/get_status_map）。多字段（_inst_map_cache /
@@ -327,7 +329,11 @@ class PluginInstaller:
 
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
+            self.last_error = ""
             self.invalidate_installed_cache()
+        else:
+            if not self.last_error:
+                self.last_error = f"Install {name} failed"
         return success
 
     def update(self, plugin_meta: dict) -> bool:
@@ -358,7 +364,11 @@ class PluginInstaller:
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
+            self.last_error = ""
             self.invalidate_installed_cache()
+        else:
+            if not self.last_error:
+                self.last_error = f"Update {name} failed"
         return success
 
     # ── Source 类型分发 ──────────────────────────────────
@@ -494,9 +504,7 @@ class PluginInstaller:
                         break
                     except Exception as e:
                         last_err = e
-                        logger.warning(
-                            f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}"
-                        )
+                        logger.warning(f"[Installer] attempt #{i} failed ({cu}): {self._format_git_err(e)}")
                 if last_err is not None:
                     # 所有候选都失败：抛最后一个错误（带 stderr），让外层 logger.error 记录
                     raise last_err
@@ -548,7 +556,8 @@ class PluginInstaller:
             return True
 
         except Exception as e:
-            logger.error(f"[Installer] Download {name} failed: {self._format_git_err(e)}")
+            self.last_error = self._format_git_err(e)
+            logger.error(f"[Installer] Download {name} failed: {self.last_error}")
             return False
 
     def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
@@ -570,8 +579,10 @@ class PluginInstaller:
             result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
-                    result.returncode, result.args,
-                    output=result.stdout, stderr=result.stderr,
+                    result.returncode,
+                    result.args,
+                    output=result.stdout,
+                    stderr=result.stderr,
                 )
 
         if subpath in (".", ""):
