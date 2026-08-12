@@ -3,9 +3,58 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-08-13
+
+自上一版本以来的变更 | 提交数：38 · 文件变更：N · +5085/-1282 | 贡献者：dingma, mading
+
+> 重点：**插件市场 GitHub 代理 + 下载/更新记录**（内置代理直连回退、代理开关配置化、下载更新历史持久化与失败一键重试、并发任务队列）；**欢迎卡片动态 Tab 与模式切换**（插件注册欢迎 tab、sessions/changelog 模式切换、echarts 骨架加载、主题注入）；**OpenCode 免 key 改造**（移除内置共享 key、剥离 Authorization 头匿名调用）；**CommandCard 虚拟化**（性能优化）；**消息卡片渲染重构**（灵活分节与样式更新）。
+
 ### ✨ 新功能 (New Features)
 
 - **插件市场下载/更新记录** (`plugins/plugin-marketplace/ui/records.py` + `cards.py` + `installer.py`): 「代理」页新增「下载 / 更新记录」区块，持久化记录安装/更新的成功/失败事件（上限 100 条，跨会话可见），失败记录保留插件元数据并支持一键重试原动作（安装失败→重新安装，更新失败→重新更新），记录区占满代理页剩余空间
+- **插件市场 GitHub 代理管理器** (`plugins/plugin-marketplace/ui/proxy.py`): 新增 GitHub 代理配置管理器，支持 URL 重写与直连回退；「代理」页新增代理配置 Tab 与分组卡片 UI，应用 ComboBoxStyles 与上下文字体
+- **插件市场实时下载量** (`plugins/plugin-marketplace/`): 实现社区插件实时下载量获取，`DownloadsFetcher` 带 TTL 缓存与失败去重，市场合并时按同名插件累加下载数
+- **欢迎卡片动态 Tab 与模式切换** (`app/widgets/welcome_card.py` + `plugins/system/hooks/ui_plugin_registry.py`): 支持插件动态注册欢迎 tab；欢迎模式新增 sessions/changelog 切换与 changelog 展示支持
+- **欢迎 Tab ECharts 骨架加载** (`app/widgets/welcome_card.py` + UI 插件创建器): 在轻量骨架中预加载 ECharts 供插件 tab 使用，附加 echarts 支持与校验清单
+- **ui-plugin-creator 欢迎 tab 开发** (`plugins/system/skills/ui-plugin-creator/`): 增强欢迎 tab 的 echarts 支持与校验清单；同步欢迎 tab (HTML 注入式 session 卡片) 开发技术到参考文档；长参考文档加行号目录
+- **CommandCard 虚拟化** (`app/widgets/cards/command_card.py`): 实现 CommandCard 虚拟化渲染，提升大量命令项下的滚动性能
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **OpenCode 免 key 改造** (`app/core/conversation/`): keyless 请求剥离 Authorization 头而不是使用占位 key；允许无 API key 发送消息
+- **插件市场 git clone 错误处理** (`plugins/plugin-marketplace/ui/installer.py`): 增强 git clone 错误处理，GitHub URL 自动补 `.git` 后缀
+- **插件市场 row busy 状态** (`plugins/plugin-marketplace/ui/`): 修复 tab 切换重渲染后 row busy 状态丢失；披露行需尊重当前搜索过滤器，避免过滤被重置
+- **插件市场更新失败兜底** (`plugins/plugin-marketplace/ui/installer.py`): 更新失败时保留旧版本，先下载成功再切换
+- **插件市场代理 Tab 渲染** (`plugins/plugin-marketplace/ui/proxy.py` + 代理卡片): 代理 Tab 折叠为单层外框加 section 分隔线，移除内层卡片边框；卡片背景使用 `WA_StyledBackground` 渲染，未保存的开关状态跨 tab 切换保持；模块顶部导入 `get_proxy_config` 避免 NameError
+- **插件市场代理开关自动保存** (`plugins/plugin-marketplace/ui/proxy.py`): 代理开关切换自动保存启用状态，配置立即生效
+- **欢迎 Tab 主题注入** (`app/widgets/welcome_card.py`): 将 Qt 主题 `is_dark` 注入插件渲染上下文，修复深浅色不匹配
+- **欢迎 Tab 配置持久化** (`app/widgets/welcome_card.py` + `app/utils/config.py`): 插件注入的欢迎 tab 通过专用配置字段持久化
+- **全局卡片防重入** (`app/widgets/cards/global_card.py`): `ensure_settings_popup` 防止重入，避免重复设置卡片
+- **插件市场安装缓存预热** (`plugins/plugin-marketplace/ui/`): 在任务线程预热 installed/status 缓存，避免安装完成时 UI 卡顿
+- **插件市场任务序列化** (`plugins/plugin-marketplace/ui/`): 安装/更新/管理任务串行入队，防止并发安装互相打断
+
+### ♻️ 代码重构 (Refactoring)
+
+- **OpenCode 移除内置共享 key** (`app/utils/config.py`): 移除 OpenCode 历史内置共享 key，迁移到免 key 匿名调用，清理 `_LEGACY_OPENCODE_BUILTIN_KEYS` 常量与对应迁移方法
+- **消息卡片渲染重构** (`app/widgets/message_card.py`): 会话历史渲染改用灵活分节与更新样式
+- **插件市场命令重载与缓存** (`plugins/plugin-marketplace/ui/installer.py`): 增强插件安装器命令重载逻辑与缓存管理
+- **插件市场 FlowContainer 清理** (`plugins/plugin-marketplace/ui/`): 移除未使用的 `_FlowContainer` 及相关高度处理逻辑
+- **插件市场 busy 状态加固** (`plugins/plugin-marketplace/ui/`): 根据 review 加固 busy 状态恢复
+
+### 🎨 样式改进 (Style)
+
+- **插件市场代理 Tab 样式** (`plugins/plugin-marketplace/ui/proxy.py`): 代理 Tab 重命名为「代理」，使用 Fluent PushButton 与右对齐图标，应用上下文字体族
+- **插件市场 ComboBox 样式统一** (`plugins/plugin-marketplace/ui/`): 代理模式下拉框统一为应用全局 ComboBoxStyles；代理 Tab 标签使用上下文字体大小
+
+### 📚 文档 (Docs)
+
+- **ui-plugin-creator 文档同步** (`plugins/system/skills/ui-plugin-creator/`): 同步欢迎 tab (HTML 注入式 session 卡片) 开发技术到参考文档；长参考文档加行号目录
+- **移除过时的 issue 跟踪文档** (`docs/`): 移除与 issue 跟踪与 triage 流程相关的过时文档与技能
+- **移除 widgets-utils 冗余工具** (`docs/` + `plugins/`): 移除数字格式化、token 估算、日期格式化等冗余工具的文档与工具函数，简化插件功能
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级到 v0.5.0** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 跨版本号 (v0.4.14 → v0.5.0) 同步更新
 
 ## [v0.4.14] - 2026-08-09
 
