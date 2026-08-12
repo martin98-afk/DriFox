@@ -1348,8 +1348,10 @@ class HistoryCompactor:
         if self._compaction_http_client is not None and self._compaction_cache_config == config_key:
             return self._compaction_http_client
 
-        self._compaction_http_client = OpenAI(
-            api_key=api_key if api_key and auth_type != "none" else "dummy",
+        from app.utils.http_client import build_openai_client
+
+        self._compaction_http_client = build_openai_client(
+            api_key=api_key if auth_type != "none" else "",
             base_url=base_url,
             timeout=60.0,
         )

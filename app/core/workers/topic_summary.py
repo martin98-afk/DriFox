@@ -8,7 +8,6 @@ from typing import Callable
 
 import orjson as json
 from loguru import logger
-from openai import OpenAI
 from PyQt5.QtCore import QRunnable, pyqtSlot
 
 from app.core.workers.error_handler import create_api_call_with_retry
@@ -186,9 +185,10 @@ class TopicSummaryTask(QRunnable):
                     "```"
                 )
 
-            client = OpenAI(
-                # 无 key 补占位值，本地免认证端点（auth=none）等同无 key 调用
-                api_key=self.llm_config.get("API_KEY", "") or "not-needed",
+            from app.utils.http_client import build_openai_client
+
+            client = build_openai_client(
+                api_key=self.llm_config.get("API_KEY", ""),
                 base_url=self.llm_config.get("API_URL"),
             )
 

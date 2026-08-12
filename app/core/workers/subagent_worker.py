@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 import orjson as json
 from loguru import logger
-from openai import OpenAI
 from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
@@ -868,8 +867,10 @@ class SubAgentExecutor(QThread):
         if extra_body:
             req_kwargs["extra_body"] = extra_body
 
-        client = OpenAI(
-            api_key=api_key if api_key else "dummy",
+        from app.utils.http_client import build_openai_client
+
+        client = build_openai_client(
+            api_key=api_key,
             base_url=base_url,
             timeout=120.0,
         )
