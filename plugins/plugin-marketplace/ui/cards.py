@@ -1590,6 +1590,9 @@ class MarketplaceCard(QWidget):
         # 避免并发 git 进程互抢 cache/目标目录；完成自动启动下一个任务）
         self._task_queue: list = []  # [{kind,name,fn,busy_text,status_text,status_color}]
         self._task_active: bool = False
+        # 当前正在运行的任务（_run_next_task 从队列 pop 后保存）：
+        # 行全量重建（切 tab 回来重渲染）后用于恢复该行的 busy 状态
+        self._active_task: Optional[dict] = None
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
         # 市场拉取 worker：与任务 worker 分离，刷新市场不打断正在安装的任务
@@ -2831,6 +2834,9 @@ class MarketplaceCard(QWidget):
         if rows and not self._layout_has_stretch():
             self._content_layout.addStretch(1)
         if rows:
+            # 新行已入 _row_map：恢复任务行 busy（全量重建后行对象是新的，
+            # _busy 丢失；排队/运行中任务的行必须保持禁用防重复提交）
+            self._restore_task_busy()
             self._schedule_reveal()
 
     def _layout_has_stretch(self) -> bool:
@@ -3111,11 +3117,13 @@ class MarketplaceCard(QWidget):
         """从队列取出下一个任务并启动 worker 线程（无任务则停）"""
         if not self._task_queue:
             self._task_active = False
+            self._active_task = None
             self._worker_thread = None
             self._worker = None
             return
         self._task_active = True
         task = self._task_queue.pop(0)
+        self._active_task = task
         name = task["name"]
         self._status_label.setText(task["status_text"])
         self._status_label.setStyleSheet(f"color: {task['status_color']}; font-size: 12px; background: transparent;")
@@ -3140,6 +3148,9 @@ class MarketplaceCard(QWidget):
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
+        # 当前任务已结束（_active_task 清空，防行重建恢复 busy 时误置已完成任务）
+        if self._active_task is task:
+            self._active_task = None
         # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
         # 其他排队任务的行保持 busy（_refresh_row_states 跳过逻辑保护）
         self._release_row_busy(name)
@@ -3157,6 +3168,8 @@ class MarketplaceCard(QWidget):
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
+        if self._active_task is task:
+            self._active_task = None
         self._release_row_busy(name)
         if kind == "install":
             self._on_install_error(name, err)
@@ -3189,6 +3202,21 @@ class MarketplaceCard(QWidget):
             elif row._busy_text != busy_text:
                 row._busy_text = busy_text
                 row._update_btn_text()
+
+    def _restore_task_busy(self):
+        """行重建/补行后恢复任务行的 busy 状态（下载中/安装中等）
+
+        行对象销毁重建（_render_plugins 全量重建，如切 tab 回来 show_card
+        触发重渲染）后 _busy 状态丢失，任务实际仍在队列/线程中运行；
+        这里从任务队列 + 当前活动任务恢复 busy，防止「下载中」状态消失、
+        按钮被误点重复提交同一插件。
+        已完成任务不在队列/_active_task 中，不会误恢复。
+        """
+        tasks = list(self._task_queue)
+        if self._active_task is not None:
+            tasks.insert(0, self._active_task)
+        for task in tasks:
+            self._set_row_busy(task["name"], task["busy_text"])
 
     # ── 异步安装 ──
 
