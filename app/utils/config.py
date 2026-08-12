@@ -30,16 +30,6 @@ from qfluentwidgets import (
     RangeValidator,
 )
 
-# 历史内置 OpenCode 共享 key（已废弃）：无共享 key 概念后，命中这些 key 的
-# "opencode免费模型" 配置会被迁移为免 key（清空 API_KEY，走剥离 Authorization 头调用）。
-# 只用于一次性迁移，不参与任何运行时认证。
-_LEGACY_OPENCODE_BUILTIN_KEYS = frozenset(
-    {
-        "sk-nUee6hP1bn3GDn9sPApQD6wBv3v2ZBRXx4DLN44E98HSYm86FmWCCbnJNrVAdVoI",
-        "sk-zAIZkBM2o3MMKHzryhxmIWPffHyhxSwrpPjtIlyaxBIaCNbOkH2Qx0QXEOJlIRre",
-    }
-)
-
 
 class PatchPlatform(Enum):
     GITHUB = "github"
@@ -191,18 +181,12 @@ class Settings(QConfig):
         if not isinstance(saved_providers, dict):
             saved_providers = {}
 
-        # 已存在同名配置：仅当保存的是历史内置共享 key 时迁移为免 key，否则保持不动
-        # （允许用户改名来永久隐藏默认配置，也允许用户替换为自己的 key）
+        # 已存在同名配置：标记已注入并直接返回（用户可改名/替换 key 来隐藏或自定义）
         for config_id, info in saved_providers.items():
             if not isinstance(info, dict):
                 continue
             if info.get("name") != config_name:
                 continue
-            old_key = (info.get("API_KEY", "") or "").strip()
-            if old_key in _LEGACY_OPENCODE_BUILTIN_KEYS:
-                cls._upgrade_default_opencode_provider(
-                    instance, saved_providers, config_id, info, api_url, config_name
-                )
             instance.llm_default_opencode_injected.value = True
             return
 
@@ -229,50 +213,6 @@ class Settings(QConfig):
         instance.llm_default_opencode_injected.value = True
         instance.save()
         logger.info(f"已自动注入默认 OpenCode 免费服务商配置: {config_name} ({config_id})")
-
-    @classmethod
-    def _upgrade_default_opencode_provider(
-        cls,
-        instance,
-        saved_providers: dict,
-        old_config_id: str,
-        info: dict,
-        api_url: str,
-        config_name: str,
-    ):
-        """把历史内置共享 key 配置迁移为免 key 配置（清空 API_KEY）。
-
-        - 保留用户对该配置的其他修改（模型名称、温度等），只清空 API_KEY。
-        - 空 key 重算 config_id（(URL, key) hash），若与已有条目冲突则跳过迁移。
-        - 迁移会重算 config_id，并同步迁移已选模型映射，避免用户当前选中的模型
-          指向失效配置。
-        """
-        from app.core.provider_profile import compute_provider_config_id
-
-        new_info = dict(info)
-        new_info["API_KEY"] = ""
-        new_info["API_URL"] = api_url
-        new_config_id = compute_provider_config_id(new_info)
-
-        # 新 config_id 撞到别的配置 → 不迁移，避免覆盖
-        if new_config_id in saved_providers and new_config_id != old_config_id:
-            logger.warning(
-                f"[config] 内置 OpenCode 免 key 迁移跳过：新配置 {new_config_id} 已存在，保留旧条目 {old_config_id}"
-            )
-            return
-
-        new_info["config_id"] = new_config_id
-        del saved_providers[old_config_id]
-        saved_providers[new_config_id] = new_info
-
-        # 迁移已选模型：旧 config_id → 新 config_id
-        selected = instance.llm_selected_model.value
-        if selected == old_config_id:
-            instance.llm_selected_model.value = new_config_id
-
-        instance.llm_saved_providers.value = saved_providers
-        instance.save()
-        logger.info(f"已迁移内置 OpenCode 配置为免 key: {config_name} ({old_config_id} → {new_config_id})")
 
     @classmethod
     def _extend_theme_validator_before_load(cls):
@@ -379,7 +319,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.4.14"
+    current_version = "v0.5.0"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -457,9 +397,7 @@ class Settings(QConfig):
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")
 
     # ========== 欢迎卡片模式（sessions / changelog）==========
-    welcome_mode = OptionsConfigItem(
-        "UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"])
-    )
+    welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"]))
     # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
     # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
     welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
