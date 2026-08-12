@@ -451,6 +451,9 @@ class Settings(QConfig):
     welcome_mode = OptionsConfigItem(
         "UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"])
     )
+    # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
+    # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
+    welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
 
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())

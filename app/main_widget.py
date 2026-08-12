@@ -187,6 +187,7 @@ from app.widgets.message_card import (
     MessageCard,
     clear_global_render_cache,
     create_welcome_card,
+    resolve_initial_welcome_mode,
 )
 from app.widgets.simple_hover_tooltip import install_hover_tooltip, batch_install_hover_tooltips
 from app.widgets.ui_helpers import *
@@ -10791,10 +10792,17 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
-        # 模式：sessions（默认）/ changelog
+        # 模式：sessions（默认）/ changelog / 插件注册 tab
         from app.utils.config import Settings
 
-        welcome_mode = Settings.get_instance().welcome_mode.value
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        cfg = Settings.get_instance()
+        welcome_mode = resolve_initial_welcome_mode(
+            cfg.welcome_mode.value,
+            cfg.welcome_plugin_tab.value,
+            UIPluginRegistry.get_instance().get_welcome_tabs(),
+        )
 
         welcome_card = create_welcome_card(
             self, agent_name, agent_desc, recent_sessions, top_by_count,
@@ -10809,18 +10817,24 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_welcome_mode_changed(self, new_mode: str):
         """欢迎卡片右上角 segmented tabs 切换回调：写 QSettings"""
-        if new_mode not in ("sessions", "projects", "changelog"):
-            # 插件注册的 welcome tab mode 不持久化：OptionsValidator.correct
-            # 会把非法值纠正回 options[0]，用户当前是 changelog 时点击插件 tab
-            # 会把 welcome_mode 覆盖成 sessions。插件 tab 为会话级 UI 状态，
-            # 仅内置 mode 走 config 持久化。
-            return
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
-        if cfg.welcome_mode.value == new_mode:
-            return
-        cfg.welcome_mode.value = new_mode
+        if new_mode in ("sessions", "projects", "changelog"):
+            # 内置 mode：写 welcome_mode 并清空插件 tab 记忆
+            if cfg.welcome_plugin_tab.value:
+                cfg.welcome_plugin_tab.value = ""
+            if cfg.welcome_mode.value == new_mode:
+                return
+            cfg.welcome_mode.value = new_mode
+        else:
+            # 插件注册的 welcome tab：welcome_mode 的 OptionsValidator.correct
+            # 会把非法值纠正回 sessions，插件 tab 存独立字段。重启后仅当该 tab
+            # 仍注册时恢复（见 resolve_initial_welcome_mode），插件卸载/停用则
+            # 回退内置 mode，不影响正常启动。
+            if cfg.welcome_plugin_tab.value == new_mode:
+                return
+            cfg.welcome_plugin_tab.value = new_mode
         cfg.save()
 
     def _sanitize_user_message_for_display(self, content: str) -> str:

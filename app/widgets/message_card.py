@@ -10499,6 +10499,17 @@ class MessageCard(SimpleCardWidget):
         super().closeEvent(e)
 
 
+def resolve_initial_welcome_mode(saved_mode: str, saved_plugin_tab: str, registered_tabs: dict) -> str:
+    """解析欢迎卡片初始 mode：上次选中的插件 tab 仍注册时优先，否则回退内置 mode
+
+    - saved_plugin_tab: 配置里记忆的插件 mode_key（插件可能被卸载/停用）
+    - registered_tabs: 当前 UIPluginRegistry 已注册的插件 tabs（dict，key 为 mode_key）
+    """
+    if saved_plugin_tab and saved_plugin_tab in registered_tabs:
+        return saved_plugin_tab
+    return saved_mode
+
+
 def create_welcome_card(
     parent=None,
     agent_name: str = "",
