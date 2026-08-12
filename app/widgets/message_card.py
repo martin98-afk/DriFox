@@ -8075,6 +8075,18 @@ class MessageCard(SimpleCardWidget):
         seg = SegmentedWidget(self)
         for i, (key, label) in enumerate(self._WELCOME_MODE_ITEMS):
             seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
+        # 插件注册的欢迎 tab 动态追加（系统项之后）
+        try:
+            from app.core.ui_plugin_registry import UIPluginRegistry
+
+            for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
+                seg.addItem(
+                    key,
+                    info.label,
+                    onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k),
+                )
+        except Exception:
+            pass
         self._welcome_mode_tabs = seg
         top_layout.addWidget(seg)
         top_layout.addStretch()
@@ -10523,6 +10535,15 @@ def _render_welcome_body(
     """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发"""
     if mode == "changelog":
         return _render_changelog_body()
+    # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
+    try:
+        from app.core.ui_plugin_registry import UIPluginRegistry
+
+        tab = UIPluginRegistry.get_instance().get_welcome_tabs().get(mode)
+        if tab is not None:
+            return tab.render_func({}) or ""
+    except Exception:
+        pass
     return _render_sessions_body(recent_sessions, top_by_count)
 
 

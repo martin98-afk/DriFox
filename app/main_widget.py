@@ -10810,6 +10810,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_welcome_mode_changed(self, new_mode: str):
         """欢迎卡片右上角 segmented tabs 切换回调：写 QSettings"""
         if new_mode not in ("sessions", "projects", "changelog"):
+            # 插件注册的 welcome tab mode 不持久化：OptionsValidator.correct
+            # 会把非法值纠正回 options[0]，用户当前是 changelog 时点击插件 tab
+            # 会把 welcome_mode 覆盖成 sessions。插件 tab 为会话级 UI 状态，
+            # 仅内置 mode 走 config 持久化。
             return
         from app.utils.config import Settings
 
