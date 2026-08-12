@@ -14908,8 +14908,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # ---- 技能替换结束 ----
 
         # ---- 检查模型配置（用于后续判断图片支持）----
+        # 仅拦截"完全无模型配置"；有配置但无 API key 直接放行：
+        # - 本地免认证端点（auth=none，如 Ollama）无需 key
+        # - 云端端点无 key 时请求发出后服务端返回 401，走现有错误处理
         llm_config = self._get_current_model_config()
-        if not llm_config or not llm_config.get("API_KEY"):
+        if not llm_config:
             InfoBar.warning(
                 "请先选择模型",
                 "请在设置中选择一个可用的模型后再发送消息",

@@ -1323,8 +1323,11 @@ class OpenAIChatWorker(QThread):
         避免每次 API 调用都创建新的客户端。
         """
         if self._http_client is None:
+            # 无 API key 时补占位值：openai SDK 构造 client 强制要求非空 api_key，
+            # 本地免认证端点（auth=none，如 Ollama）服务端不校验 key，等同无 key 调用；
+            # 云端认证端点会正常返回 401 走现有错误处理。
             self._http_client = OpenAI(
-                api_key=self.llm_config.get("API_KEY", "").strip(),
+                api_key=self.llm_config.get("API_KEY", "").strip() or "not-needed",
                 base_url=self.llm_config.get("API_URL"),
                 timeout=httpx.Timeout(600.0, connect=60.0),
             )

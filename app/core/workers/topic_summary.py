@@ -187,7 +187,8 @@ class TopicSummaryTask(QRunnable):
                 )
 
             client = OpenAI(
-                api_key=self.llm_config.get("API_KEY", ""),
+                # 无 key 补占位值，本地免认证端点（auth=none）等同无 key 调用
+                api_key=self.llm_config.get("API_KEY", "") or "not-needed",
                 base_url=self.llm_config.get("API_URL"),
             )
 
