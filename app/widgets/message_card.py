@@ -3494,13 +3494,13 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 {"".join(tag_css)}
 
-                /* session 历史会话标签样式 */
+                /* session 历史会话标签样式（胶囊按内容宽度自然展开） */
                 .session-tag {{
                     background: rgba(100, 198, 255, 0.12);
                     border-color: rgba(100, 198, 255, 0.5);
                     color: #66c6ff;
-                    margin: 4px 4px;
-                    min-width: 120px;
+                    margin: 4px 6px 4px 0;
+                    max-width: 100%;
                 }}
                 .session-tag:hover {{
                     background: rgba(100, 198, 255, 0.25);
@@ -3516,30 +3516,22 @@ class CodeWebViewer(QWebEngineView):
                     color: #88d4ff;
                 }}
 
-                /* Markdown 表格样式 */
-                .session-table {{
-                    border-collapse: collapse;
-                    width: 100%;
-                    margin: 8px 0;
+                /* 欢迎卡片历史会话：每段一个小标题 + 胶囊流（自适应换行） */
+                .session-section {{
+                    margin: 10px 0 6px;
                 }}
-                .session-table th, .session-table td {{
-                    border: 1px solid rgba(100, 198, 255, 0.3);
-                    padding: 8px 12px;
-                    text-align: left;
-                    font-family: '{font_family}', sans-serif;
-                    font-size: {body_font_size}px;
-                }}
-                .session-table th {{
-                    background: rgba(100, 198, 255, 0.06);
-                    color: #66c6ff;
+                .session-section .section-title {{
+                    font-size: {tag_font_size}px;
                     font-weight: 600;
+                    color: #66c6ff;
+                    margin-bottom: 4px;
+                    opacity: 0.85;
                 }}
-                .session-table td {{
-                    background: transparent;
-                    vertical-align: middle;
-                }}
-                .session-table tr:hover td {{
-                    background: rgba(100, 198, 255, 0.04);
+                .session-tags {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 4px 6px;
+                    align-items: flex-start;
                 }}
 
                 /* 代码块通用样式 */
@@ -10291,41 +10283,38 @@ def create_welcome_card(
     # 随机选择欢迎语
     greeting = get_random_greeting()
 
-    # 构建历史会话链接（两列表格：最近会话 | 最多消息）
+    # 构建历史会话链接（两段独立 section：最近会话 / 最活跃会话）
     history_section = ""
-    if recent_sessions or top_by_count:
-        # 生成表格 HTML（使用纯 HTML 确保胶囊样式正确显示）
-        table_rows = ""
-        for i in range(3):
-            # 左边：最近会话
-            recent = recent_sessions[i] if recent_sessions and i < len(recent_sessions) else None
-            # 右边：消息最多
-            top = top_by_count[i] if top_by_count and i < len(top_by_count) else None
 
-            if recent:
-                title = escape(recent.get("title", "未命名会话"))
-                session_id = escape(recent.get("session_id", ""))
-                last_time = escape(recent.get("last_time") or "")
-                left_cell = f'<span class="context-tag session-tag" data-type="session" data-session-id="{session_id}" data-action="session">{title}<span class="session-time">{last_time}</span></span>'
+    def _render_section(title: str, items: list, count_mode: bool = False) -> str:
+        """渲染单个分类 section；items 为空则返回空串"""
+        if not items:
+            return ""
+        tag_html = []
+        for s in items[:3]:
+            t = escape(s.get("title", "未命名会话"))
+            sid = escape(s.get("session_id", ""))
+            if count_mode:
+                mc = s.get("message_count", 0)
+                meta = f"{mc}条消息"
             else:
-                left_cell = "-"
+                meta = escape(s.get("last_time") or "")
+            tag_html.append(
+                f'<span class="context-tag session-tag" data-type="session" '
+                f'data-session-id="{sid}" data-action="session">'
+                f'{t}<span class="session-time">{meta}</span></span>'
+            )
+        return (
+            f'<div class="session-section">'
+            f'<div class="section-title">{title}</div>'
+            f'<div class="session-tags">{"".join(tag_html)}</div>'
+            f"</div>"
+        )
 
-            if top:
-                title = escape(top.get("title", "未命名会话"))
-                session_id = escape(top.get("session_id", ""))
-                msg_count = top.get("message_count", 0)
-                right_cell = f'<span class="context-tag session-tag" data-type="session" data-session-id="{session_id}" data-action="session">{title}<span class="session-time">{msg_count}条消息</span></span>'
-            else:
-                right_cell = "-"
-
-            table_rows += f"<tr><td>{left_cell}</td><td>{right_cell}</td></tr>"
-
-        history_section = f"""
-<table class="session-table">
-<tr><th>最近会话</th><th>最活跃会话</th></tr>
-{table_rows}
-</table>
-"""
+    recent_block = _render_section("📅 最近会话", recent_sessions or [], count_mode=False)
+    top_block = _render_section("🔥 最活跃会话", top_by_count or [], count_mode=True)
+    if recent_block or top_block:
+        history_section = recent_block + top_block
 
     welcome_md = f"""### 👋 {greeting}
 
