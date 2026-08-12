@@ -40,17 +40,17 @@
   - 7.3 在卡片中使用 — L1472–L1489
   - 7.4 补充：卡片 _apply_latest_theme 需缓存 theme_colors — L1490–L1511
   - 7.5 所需额外 import — L1512–L1522
-- **八、欢迎卡片插件 tab（HTML 注入会话初始卡片）** — L1523–L1682
+- **八、欢迎卡片插件 tab（HTML 注入会话初始卡片）** — L1523–L1703
   - 8.1 适用场景 — L1529–L1538
   - 8.2 注册 API — L1539–L1555
-  - 8.3 完整模板（calendar 参考实现） — L1556–L1624
-  - 8.4 关键约束与技巧（踩坑记录） — L1625–L1669
-    - 8.4.1 `<script>` 不执行 → 内容 Python 预渲染 + onclick 内联 JS — L1627–L1636
-    - 8.4.2 onclick 属性引号冲突 → 用 DOM API + 占位符替换 — L1637–L1644
-    - 8.4.3 `<style>` 注入后生效 → 样式全内联 — L1645–L1649
-    - 8.4.4 明暗主题用 `prefers-color-scheme`，不用 Qt 主题 — L1650–L1663
-    - 8.4.5 欢迎卡片 mode 持久化（无需插件处理） — L1664–L1669
-  - 8.5 验证清单 — L1670–L1682
+  - 8.3 完整模板（calendar 参考实现） — L1556–L1631
+  - 8.4 关键约束与技巧（踩坑记录） — L1632–L1690
+    - 8.4.1 `<script>` 不执行 → 内容 Python 预渲染 + onclick 内联 JS — L1634–L1643
+    - 8.4.2 onclick 属性引号冲突 → 用 DOM API + 占位符替换 — L1644–L1651
+    - 8.4.3 `<style>` 注入后生效 → 样式全内联 — L1652–L1656
+    - 8.4.4 明暗主题：用主程序注入的 `ctx["is_dark"]`，prefers-color-scheme 只做兜底 — L1657–L1684
+    - 8.4.5 欢迎卡片 mode 持久化（无需插件处理） — L1685–L1690
+  - 8.5 验证清单 — L1691–L1703
 ## 一、浮动卡片模板（最常用）
 
 ### 1.1 完整骨架
@@ -1583,10 +1583,24 @@ w.setAttribute('data-y',y);w.setAttribute('data-m',m);
 }})(this,DELTA)"""
 
 
-def _render_html() -> str:
-    """渲染 HTML 片段：内容由 Python 预渲染，切换走 onclick 内联 JS"""
+def _render_html(ctx: dict = None) -> str:
+    """渲染 HTML 片段：内容由 Python 预渲染，切换走 onclick 内联 JS
+
+    明暗适配：优先用主程序注入的 ctx["is_dark"]（跟随 Qt 主题），
+    ctx 缺失时回退 prefers-color-scheme（跟随 OS）。
+    """
     now = datetime.now()
     shift = _SHIFT_JS.replace("TODAY_Y", str(now.year)).replace("TODAY_M", str(now.month)).replace("TODAY_D", str(now.day))
+    is_dark = ctx.get("is_dark") if isinstance(ctx, dict) else None
+    light = "--text: #333; --muted: #999;"
+    dark = "--text: #e6e6e6; --muted: #8a8a8a;"
+    if is_dark is not None:
+        root_css = f":root {{ {dark if is_dark else light} }}"
+    else:
+        root_css = (
+            f":root {{ {light} }}"
+            f"@media (prefers-color-scheme: dark) {{ :root {{ {dark} }} }}"
+        )
     return f"""<div class="wrap" data-y="{now.year}" data-m="{now.month}">
   <button class="nav" onclick="{shift.replace('DELTA', '-1')}" title="上一项">‹</button>
   <div class="title">{now.year} 年 {now.month} 月</div>
@@ -1594,14 +1608,7 @@ def _render_html() -> str:
 </div>
 <style>
 .wrap {{ max-width: 560px; margin: 0 auto; font-family: inherit; }}
-:root {{
-  --cal-text: #333; --cal-muted: #999; --cal-border: rgba(0,0,0,0.12);
-}}
-@media (prefers-color-scheme: dark) {{
-  :root {{
-    --cal-text: #e6e6e6; --cal-muted: #8a8a8a; --cal-border: rgba(255,255,255,0.14);
-  }}
-}}
+{root_css}
 </style>
 """
 
@@ -1618,7 +1625,7 @@ def register_ui(registry):
         plugin_name="<plugin-name>",
         mode_key="<mode>",
         label="<label>",
-        render_func=lambda ctx: _render_html(),
+        render_func=lambda ctx: _render_html(ctx),
     )
 ```
 
@@ -1647,19 +1654,33 @@ def register_ui(registry):
 `<style>` 标签经 innerHTML 注入后**会生效**，所以样式全部写在 HTML 片段
 尾部的 `<style>` 块里，无需外部 CSS 文件（骨架里也没有）。
 
-#### 8.4.4 明暗主题用 `prefers-color-scheme`，不用 Qt 主题
+#### 8.4.4 明暗主题：用主程序注入的 `ctx["is_dark"]`，prefers-color-scheme 只做兜底
 
-HTML 片段**拿不到** Qt 的 `isDarkTheme()` / 上下文 colors（纯 HTML 环境），
-明暗适配用 CSS 媒体查询：
+**根因**：`prefers-color-scheme` 跟随 **OS 主题**，不跟随 Qt 应用主题
+（Qt 用 theme_manager 控制，OS 亮色 + Qt 暗色时不生效）。
 
-```css
-:root { --cal-text: #333; }               /* 浅色默认 */
-@media (prefers-color-scheme: dark) {
-  :root { --cal-text: #e6e6e6; }          /* 深色覆盖 */
-}
+主程序 `_render_welcome_body` 已把 Qt 主题注入 ctx：`render_func({"is_dark": bool})`。
+插件**必须**读 ctx 渲染，**不要**单独依赖 prefers-color-scheme：
+
+```python
+def _render_html(ctx: dict = None) -> str:
+    light = "--text: #333;"
+    dark = "--text: #e6e6e6;"
+    is_dark = ctx.get("is_dark") if isinstance(ctx, dict) else None
+    if is_dark is not None:
+        root_css = f":root {{ {dark if is_dark else light} }}"
+    else:
+        # 兜底：ctx 缺失（旧主程序）时按 OS 自适应
+        root_css = (f":root {{ {light} }}"
+                    f"@media (prefers-color-scheme: dark) {{ :root {{ {dark} }} }}")
+    return f"...<style>{root_css}</style>"
 ```
 
-⚠️ 部分文字颜色可能被骨架 CSS 覆盖（如链接色），必要时加 `!important`。
+⚠️ 要点：
+- `render_func` 签名必须接收 `ctx`（`lambda ctx: ...`），否则主程序注入的主题被丢弃
+- 判断用 `ctx.get("is_dark")` 原值，**不要** `bool()` 包裹——`bool(None)` 是 False，
+  会把"未注入"误判成浅色，正确写法是 `is_dark is not None` 区分"未注入"与"浅色"
+- 部分文字颜色可能被骨架 CSS 覆盖（如链接色），必要时加 `!important`
 
 #### 8.4.5 欢迎卡片 mode 持久化（无需插件处理）
 
@@ -1674,7 +1695,7 @@ HTML 片段**拿不到** Qt 的 `isDarkTheme()` / 上下文 colors（纯 HTML �
 1. tab 标签文字显示正确？           → label 参数
 2. 内容渲染正确（无 script 报错）？  → 控制台无 JS 错误
 3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
-4. 明暗主题切换颜色跟随？           → prefers-color-scheme 生效
+4. 明暗主题切换颜色跟随？           → ctx["is_dark"] 注入生效（重点：Qt 暗色 + OS 亮色也生效）
 5. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
 6. 插件热重载无异常？               → sys.modules 前缀清理
 ```

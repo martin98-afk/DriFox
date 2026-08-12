@@ -44,11 +44,11 @@
 - **9. 跨环境验证** — L277–L286
 - **10. 提交前最终检查** — L287–L308
 - **11. 故障排查速查** — L309–L327
-- **12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）** — L328–L363
+- **12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）** — L328–L368
   - 12.1 注册与渲染 — L330–L336
   - 12.2 HTML 注入约束（核心 ⚠️） — L337–L345
-  - 12.3 主题适配 — L346–L350
-  - 12.4 功能验证 — L351–L363
+  - 12.3 主题适配（核心 ⚠️） — L346–L355
+  - 12.4 功能验证 — L356–L368
 ## 1. 基础验证（每个 UI 插件必查）
 
 ### 1.1 代码质量
@@ -343,10 +343,15 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 - [ ] 动态值用**占位符 `.replace()` 注入**（如 `TODAY_Y` / `DELTA`），不直接拼数字
 - [ ] JS 内生成 DOM 用 `createElement` + `textContent`（避免引号冲突）
 
-### 12.3 主题适配
+### 12.3 主题适配（核心 ⚠️）
 
-- [ ] 明暗主题用 `@media (prefers-color-scheme: dark)` 媒体查询
+- [ ] `render_func` 签名**接收 ctx**（`lambda ctx: ...`），不丢主程序注入的主题
+- [ ] 明暗优先用 `ctx["is_dark"]`（跟随 Qt 主题，theme_manager 控制）
+- [ ] 判断用 `ctx.get("is_dark")` 原值，**不用 `bool()` 包裹**（`bool(None)`=False 会误判浅色）
+- [ ] ctx 缺失时回退 `@media (prefers-color-scheme: dark)`（仅兜底，OS 亮色 + Qt 暗色不生效）
 - [ ] 必要文字颜色加 `!important`（防骨架 CSS 覆盖）
+
+> ⚠️ `prefers-color-scheme` 跟随 OS 而非 Qt 主题，**不能单独依赖**。
 
 ### 12.4 功能验证
 
@@ -355,7 +360,7 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 1. tab 标签文字显示正确？           → label 参数
 2. 内容渲染正确（无 JS 报错）？      → 控制台无错误
 3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
-4. 明暗主题切换颜色跟随？           → prefers-color-scheme 生效
+4. 明暗主题切换颜色跟随？           → ctx["is_dark"] 注入生效（重点：Qt 暗色 + OS 亮色也生效）
 5. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
 6. 插件热重载无异常？               → sys.modules 前缀清理
 ```

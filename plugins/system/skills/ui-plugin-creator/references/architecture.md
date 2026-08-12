@@ -94,8 +94,9 @@ AI 工具返回 {"type": "custom", "custom_type": "xxx", "data": {...}}
 ```
 
 **关键约束**：innerHTML 注入的 `<script>` 不执行 → 内容 Python 预渲染、
-交互用 onclick 内联 JS；`<style>` 注入生效 → 样式内联；明暗用
-`prefers-color-scheme` 媒体查询（拿不到 Qt 主题）。完整模板见 `templates.md §八`。
+交互用 onclick 内联 JS；`<style>` 注入生效 → 样式内联；明暗用主程序注入的
+`ctx["is_dark"]`（跟随 Qt 主题），prefers-color-scheme 仅作 ctx 缺失兜底。
+完整模板见 `templates.md §八`。
 
 ---
 

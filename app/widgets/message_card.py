@@ -10552,7 +10552,16 @@ def _render_welcome_body(
 
         tab = UIPluginRegistry.get_instance().get_welcome_tabs().get(mode)
         if tab is not None:
-            return tab.render_func({}) or ""
+            # 注入主题上下文：插件 HTML 拿不到 Qt 主题，必须由主程序传入。
+            # prefers-color-scheme 跟随 OS 而非 Qt 主题（theme_manager），
+            # 单独依赖它会导致 Qt 暗色 + OS 亮色时不生效。
+            try:
+                from app.utils.theme_manager import theme_manager
+
+                is_dark = not theme_manager.is_light_theme()
+            except Exception:
+                is_dark = False
+            return tab.render_func({"is_dark": is_dark}) or ""
     except Exception:
         pass
     return _render_sessions_body(recent_sessions, top_by_count)
