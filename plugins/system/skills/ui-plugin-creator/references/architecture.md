@@ -22,6 +22,7 @@
 │  │  ├─ _content_renderers: Dict[str, RendererInfo]   │  │
 │  │  ├─ _message_factories: List[FactoryInfo]         │  │
 │  │  ├─ _floating_cards: Dict[str, CardInfo]          │  │
+│  │  ├─ _welcome_tabs: Dict[str, WelcomeTabInfo]      │  │
 │  │  ├─ load_plugin() / unload_plugin()               │  │
 │  │  └─ _show_floating_card() → 创建/切换卡片         │  │
 │  └───────────────────────────────────────────────────┘  │
@@ -79,6 +80,22 @@ AI 工具返回 {"type": "custom", "custom_type": "xxx", "data": {...}}
   → factory_func(message, parent) 创建 widget
   → 失败则继续尝试下一个工厂，都不匹配走默认 MessageCard
 ```
+
+### 2.4 欢迎卡片插件 tab（WelcomeTab）
+
+**用途**：在欢迎卡片（会话初始卡片）新增一个 tab，内容为纯 HTML 片段。
+**注册**：`registry.register_welcome_tab(plugin_name, mode_key, label, render_func)`
+**调用链**：
+```
+欢迎卡片构建 → _build_welcome_mode_tabs() 把插件 tab 追加到 SegmentedWidget
+  → 点击 tab → set_welcome_mode(mode) → _render_welcome_body(mode)
+  → 命中插件 tab → render_func(ctx) 返回 HTML 片段
+  → 拼进 "### 👋 greeting\n\n{body}" → markdown 管线 → CodeWebViewer innerHTML 注入
+```
+
+**关键约束**：innerHTML 注入的 `<script>` 不执行 → 内容 Python 预渲染、
+交互用 onclick 内联 JS；`<style>` 注入生效 → 样式内联；明暗用
+`prefers-color-scheme` 媒体查询（拿不到 Qt 主题）。完整模板见 `templates.md §八`。
 
 ---
 
@@ -147,3 +164,4 @@ PluginManager.initialize()
 |------|------|---------|
 | `plugin-marketplace` | FloatingCard + ContentRenderer | 远程 HTTP 数据、HTML 渲染器、安装/启用/禁用/卸载管理 |
 | `context-usage-stats` | FloatingCard | SQLite 数据、自定义图表 QPainter、多图表组合 |
+| `calendar` | WelcomeTab | HTML 注入会话初始卡片、onclick 内联 JS、prefers-color-scheme 明暗适配 |

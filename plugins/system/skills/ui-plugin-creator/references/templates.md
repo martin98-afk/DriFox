@@ -1470,3 +1470,166 @@ from qfluentwidgets import BodyLabel, MaskDialogBase
 ```
 
 > `QPushButton`, `QVBoxLayout`, `QHBoxLayout` 在卡片模板中已默认导入。
+
+---
+
+## 八、欢迎卡片插件 tab（HTML 注入会话初始卡片）
+
+> 在欢迎卡片（会话初始卡片）新增一个 tab，内容为**纯 HTML 片段**，
+> 经欢迎卡片 markdown→CodeWebViewer(QWebEngineView) 管线渲染。
+> 参考实现：`calendar` 插件（.drifox/plugins/calendar/ui/__init__.py）。
+
+### 8.1 适用场景
+
+| 用户说 | 用这个 |
+|--------|--------|
+| "欢迎卡片加个日历/天气/待办 tab" | ✅ welcome tab |
+| "聊天里显示自定义 HTML 块" | 内容块渲染器（§二） |
+| "弹出独立面板" | 浮动卡片（§一） |
+
+**优势**：纯 HTML + 内联 CSS，无需 QWidget；交互用内联 JS，无需 Qt 信号链。
+
+### 8.2 注册 API
+
+```python
+registry.register_welcome_tab(
+    plugin_name="<plugin-name>",
+    mode_key="<unique-mode>",   # tab 唯一标识，同时用作 welcome mode 值
+    label="📅 日历",             # SegmentedWidget 上显示的文本
+    render_func=lambda ctx: _render_html(),  # (context: dict) -> str(HTML 片段)
+    priority=0,                 # 同 mode_key 时高者覆盖低者
+)
+```
+
+**约束**：
+- `mode_key` 避开系统内置 mode：`sessions` / `projects` / `changelog`
+- `render_func` 返回**独立 HTML 片段**（含内联 `<style>`），会拼进欢迎卡片 body
+- 调用发生在主线程（同步渲染），**不要**在 render_func 里做网络/大文件读取
+
+### 8.3 完整模板（calendar 参考实现）
+
+```python
+# -*- coding: utf-8 -*-
+"""<plugin-name> UI 组件入口 — 欢迎卡片 <名称> tab
+
+通过 register_welcome_tab 注册为欢迎卡片的新 tab（mode_key="<mode>"）。
+render_func 返回独立 HTML 片段（内联样式 + 预渲染内容 + onclick 切换），
+经欢迎卡片 markdown→CodeWebViewer(QWebEngineView) 管线渲染。
+
+渲染约束（骨架 updateContent 用 innerHTML 注入内容）：
+- `<script>` 标签不会执行（HTML 规范，innerHTML 注入的 script 被忽略）→
+  内容由 Python 预渲染，交互用 onclick 内联立即执行函数
+- `<style>` 标签注入后生效 → 样式全部内联在此
+"""
+
+import sys
+from datetime import datetime
+
+# 交互 JS（onclick 内联，无 <script> 依赖）。
+# 占位符由 Python 注入：TODAY_Y / TODAY_M / TODAY_D（今天）、DELTA（±1）。
+# 用 DOM API 构建节点（textContent），避免 HTML 字符串引号与 onclick 属性冲突。
+_SHIFT_JS = """(function(b,dl){{
+var w=b.parentNode.parentNode,y=+w.getAttribute('data-y'),m=+w.getAttribute('data-m');
+m+=dl;if(m<1){{m=12;y--}}if(m>12){{m=1;y++}}
+w.setAttribute('data-y',y);w.setAttribute('data-m',m);
+// ... 用 createElement / textContent 重建内容 ...
+}})(this,DELTA)"""
+
+
+def _render_html() -> str:
+    """渲染 HTML 片段：内容由 Python 预渲染，切换走 onclick 内联 JS"""
+    now = datetime.now()
+    shift = _SHIFT_JS.replace("TODAY_Y", str(now.year)).replace("TODAY_M", str(now.month)).replace("TODAY_D", str(now.day))
+    return f"""<div class="wrap" data-y="{now.year}" data-m="{now.month}">
+  <button class="nav" onclick="{shift.replace('DELTA', '-1')}" title="上一项">‹</button>
+  <div class="title">{now.year} 年 {now.month} 月</div>
+  <button class="nav" onclick="{shift.replace('DELTA', '1')}" title="下一项">›</button>
+</div>
+<style>
+.wrap {{ max-width: 560px; margin: 0 auto; font-family: inherit; }}
+:root {{
+  --cal-text: #333; --cal-muted: #999; --cal-border: rgba(0,0,0,0.12);
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{
+    --cal-text: #e6e6e6; --cal-muted: #8a8a8a; --cal-border: rgba(255,255,255,0.14);
+  }}
+}}
+</style>
+"""
+
+
+def register_ui(registry):
+    """注册 <plugin-name> 的 UI 组件（欢迎卡片 <名称> tab）"""
+    # 清理旧子模块缓存（热重载兼容）
+    prefix = "ui_plugin_<plugin_name>."
+    stale = [k for k in sys.modules if k.startswith(prefix)]
+    for k in stale:
+        del sys.modules[k]
+
+    registry.register_welcome_tab(
+        plugin_name="<plugin-name>",
+        mode_key="<mode>",
+        label="<label>",
+        render_func=lambda ctx: _render_html(),
+    )
+```
+
+### 8.4 关键约束与技巧（踩坑记录）
+
+#### 8.4.1 `<script>` 不执行 → 内容 Python 预渲染 + onclick 内联 JS
+
+骨架 `updateContent` 用 `innerHTML` 注入，**注入的 `<script>` 标签被浏览器忽略**
+（HTML 规范行为），所以：
+
+- ✅ **内容由 Python 预渲染**：日期网格/列表等在 render_func 里拼好 HTML
+- ✅ **交互用 `onclick` 内联立即执行函数**：`onclick="(function(b,dl){...})(this,1)"`，
+  `this` 是按钮元素，向上 `parentNode` 找容器
+- ❌ 不要写 `<script>` 块、不要写 `<script src=...>`
+
+#### 8.4.2 onclick 属性引号冲突 → 用 DOM API + 占位符替换
+
+- JS 串里 **双花括号 `{{ }}` 转义**（Python f-string 里是字面量 `{`）
+- **用占位符注入动态值**：`TODAY_Y` / `DELTA` 等由 `.replace()` 替换，
+  避免直接把数字拼进 JS 导致引号/转义灾难
+- JS 内部生成 DOM 用 `document.createElement` + `textContent`（不拼 HTML 字符串），
+  天然规避 onclick 属性里嵌套引号的问题
+
+#### 8.4.3 `<style>` 注入后生效 → 样式全内联
+
+`<style>` 标签经 innerHTML 注入后**会生效**，所以样式全部写在 HTML 片段
+尾部的 `<style>` 块里，无需外部 CSS 文件（骨架里也没有）。
+
+#### 8.4.4 明暗主题用 `prefers-color-scheme`，不用 Qt 主题
+
+HTML 片段**拿不到** Qt 的 `isDarkTheme()` / 上下文 colors（纯 HTML 环境），
+明暗适配用 CSS 媒体查询：
+
+```css
+:root { --cal-text: #333; }               /* 浅色默认 */
+@media (prefers-color-scheme: dark) {
+  :root { --cal-text: #e6e6e6; }          /* 深色覆盖 */
+}
+```
+
+⚠️ 部分文字颜色可能被骨架 CSS 覆盖（如链接色），必要时加 `!important`。
+
+#### 8.4.5 欢迎卡片 mode 持久化（无需插件处理）
+
+- 插件 tab 的 mode 存独立配置字段 `welcome_plugin_tab`
+- 重启后仅当该 tab **仍注册**时恢复；插件卸载/停用自动回退内置 mode
+- 插件侧**不需要**做任何持久化代码
+
+### 8.5 验证清单
+
+```
+启动程序 → 欢迎卡片出现新 tab
+1. tab 标签文字显示正确？           → label 参数
+2. 内容渲染正确（无 script 报错）？  → 控制台无 JS 错误
+3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
+4. 明暗主题切换颜色跟随？           → prefers-color-scheme 生效
+5. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
+6. 插件热重载无异常？               → sys.modules 前缀清理
+```
+
+> 完整验证清单见 `checklist.md §12`。

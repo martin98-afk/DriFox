@@ -1,6 +1,6 @@
 ---
 name: ui-plugin-creator
-description: DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂）。
+description: DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂 / 欢迎卡片插件 tab）。
 ---
 
 # ui-plugin-creator —— DriFox UI 插件开发技能
@@ -72,6 +72,7 @@ Step 6  按 checklist.md 验证
 | "读 SQLite""查 14 天数据""新字段 fallback" | **SQLite 读取** | `widgets-sqlite.md` |
 | "主题色跟着变""跟随系统颜色""深浅色适配" | **主题色映射** | `widgets-theme.md` |
 | "在聊天里显示HTML""渲染自定义内容""做个消息卡片样式" | **内容块渲染器**（ContentRenderer） | `templates.md` §二 |
+| "欢迎卡片加个 tab""会话初始卡片""HTML 注入初始卡片" | **欢迎卡片插件 tab**（WelcomeTab） | `templates.md` §八 |
 | "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
 | "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
 | "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
@@ -92,7 +93,7 @@ plugins/system/skills/ui-plugin-creator/
 └─ references/
    ├─ workflow.md          开发工作流（澄清需求 → 创建结构 → 验证 → 发布）
    ├─ patterns.md          核心模式（上下文注入/比例高度/异步/热重载/信号链/_vendor/）
-   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/register_ui）
+   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/welcome tab/register_ui）
    ├─ widgets.md           可复用控件库索引（设计原则 + 整合示例 + 陷阱速查）
    ├─ widgets-statcard.md  _StatCard（多层级统计卡片）
    ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget

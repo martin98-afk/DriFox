@@ -276,3 +276,44 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 | 打包后 ImportError | `_vendor/` 没配置 / sys.modules 缓存 | §3 |
 | 标签被裁剪 | 没算 `top_margin` / `label_y < margin_top` 没处理 | §7.1 |
 | 内存泄漏 | widget 没 `deleteLater` / worker 没清理 | §8.2 |
+| welcome tab 无交互 | onclick 内联 JS 引号冲突 / 用了 `<script>` | §12.2 |
+| welcome tab 明暗不跟 | 没写 `prefers-color-scheme` 媒体查询 | §12.3 |
+
+---
+
+## 12. 欢迎卡片插件 tab 验证（如果用了 `register_welcome_tab`）
+
+### 12.1 注册与渲染
+
+- [ ] `mode_key` 避开系统内置 mode（`sessions` / `projects` / `changelog`）
+- [ ] `render_func` 返回**独立 HTML 片段**（含内联 `<style>`），不依赖外部 CSS/JS 文件
+- [ ] `render_func` 是同步函数，无网络/大文件读取（主线程调用）
+- [ ] 热重载兼容：清理了 `sys.modules` 中 `ui_plugin_<safe_name>.` 前缀子模块
+
+### 12.2 HTML 注入约束（核心 ⚠️）
+
+- [ ] **没有 `<script>` 标签**（innerHTML 注入的 script 不执行）
+- [ ] 内容由 **Python 预渲染**（日期网格/列表等在 render_func 里拼 HTML）
+- [ ] 交互用 **onclick 内联立即执行函数**：`onclick="(function(b,dl){...})(this,1)"`
+- [ ] onclick 内 JS 用 `{{ }}` 双花括号转义（Python f-string 中）
+- [ ] 动态值用**占位符 `.replace()` 注入**（如 `TODAY_Y` / `DELTA`），不直接拼数字
+- [ ] JS 内生成 DOM 用 `createElement` + `textContent`（避免引号冲突）
+
+### 12.3 主题适配
+
+- [ ] 明暗主题用 `@media (prefers-color-scheme: dark)` 媒体查询
+- [ ] 必要文字颜色加 `!important`（防骨架 CSS 覆盖）
+
+### 12.4 功能验证
+
+```
+启动程序 → 欢迎卡片出现新 tab
+1. tab 标签文字显示正确？           → label 参数
+2. 内容渲染正确（无 JS 报错）？      → 控制台无错误
+3. 点击导航（‹/›）能切换？          → onclick 内联 JS 生效
+4. 明暗主题切换颜色跟随？           → prefers-color-scheme 生效
+5. 重启后 tab 记忆恢复？            → welcome_plugin_tab 字段
+6. 插件热重载无异常？               → sys.modules 前缀清理
+```
+
+> 完整模板与踩坑见 `templates.md §八`。
