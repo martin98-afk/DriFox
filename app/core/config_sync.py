@@ -577,6 +577,23 @@ class ConfigSyncService(QObject):
                 logger.warning(f"[ConfigSync] 下载后主题全量刷新调度失败: {_te}")
 
             logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，token 本地独立）")
+
+            # 🚀 P5e：消费同步窗口内被抑制的 watcher user-custom 变更 → 合并触发一次
+            # 插件子系统重载（rescan + agents/commands 等），替代 watcher 逐事件热重载链
+            # （2.5-4s × N）。若 pending 已置位（watcher 在下载解压期间捕获到变更），
+            # 延迟 200ms 执行一次；另安排 3s 兜底——watchfiles 2s 防抖可能使 pending
+            # 晚于本方法置位（解压完成 → emit → 主线程重载期间 watcher 尚未处理事件），
+            # 3s 后补查一次，确保 agents/commands 最终加载、事件不丢。
+            try:
+                from app.core.backend import ChatBackend
+
+                if getattr(ChatBackend, "_watcher_pending_reload", False):
+                    ChatBackend._watcher_pending_reload = False
+                    QTimer.singleShot(200, self._trigger_merged_plugin_reload)
+                    logger.info("[ConfigSync] 检测到同步期间被抑制的插件变更，200ms 后合并重载")
+                QTimer.singleShot(3000, self._consume_watcher_pending)
+            except Exception as _pe:
+                logger.warning(f"[ConfigSync] 合并插件重载调度失败: {_pe}")
         except Exception as e:
             logger.warning(f"[ConfigSync] Settings 重载失败: {e}")
 
@@ -611,6 +628,41 @@ class ConfigSyncService(QObject):
                 )
         except Exception as _te:
             logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
+
+    def _trigger_merged_plugin_reload(self):
+        """合并触发一次插件子系统重载（同步窗口内被抑制的 watcher 变更兜底）
+
+        🚀 P5e：由 QTimer.singleShot 在主线程调用。从活跃 backend 实例任选一个
+        执行 reload_plugin_subsystems（全局语义：rescan + agents/commands 等
+        子系统重载，与 watcher 热重载链结果一致，但只跑一次合并路径，
+        watcher 链 2.5-4s × N → 合并单次 ~500ms）。
+        """
+        try:
+            from app.core.backend import ChatBackend
+
+            target = next(iter(getattr(ChatBackend, "_active_instances", set())), None)
+            if target is None:
+                logger.debug("[ConfigSync] 无活跃 backend，跳过合并插件重载（数据下次启动加载）")
+                return
+            result = target.reload_plugin_subsystems()
+            logger.info(f"[ConfigSync] 合并插件重载完成: {result}")
+            try:
+                target.plugin_changed.emit(result)
+            except RuntimeError:
+                pass
+        except Exception as e:
+            logger.warning(f"[ConfigSync] 合并插件重载失败: {e}")
+
+    def _consume_watcher_pending(self):
+        """延迟兜底：watchfiles 2s 防抖使 pending 晚置位时的补消费（幂等）"""
+        try:
+            from app.core.backend import ChatBackend
+
+            if getattr(ChatBackend, "_watcher_pending_reload", False):
+                ChatBackend._watcher_pending_reload = False
+                self._trigger_merged_plugin_reload()
+        except Exception:
+            pass
 
     # ── Token 同步 ──────────────────────────────────────────
 
@@ -1346,12 +1398,26 @@ class ConfigSyncService(QObject):
         # OptionsValidator.correct() 静默重置为默认主题（options[0]），导致自定义主题丢失。
         # 因此把 Settings 重载延后到下面所有步骤（含 user-custom 解压落地）完成后统一触发。
         downloaded_config = False
+        custom_downloaded = False
         try:
             # ★ 进入下载立即取消防抖计时，防止之前 watch 事件的残留防抖与下载流程并发
             if self._debounce_timer:
                 self._debounce_timer.stop()
             # ★ 设 30s 抑制窗口，覆盖下载写盘 + Settings.load 级联效应的全过程
             self._suppress_until = time.time() + 30.0
+
+            # 🚀 P5e：同步 ChatBackend watcher 抑制窗口（35s 覆盖 30s 下载+应用 + 余量）。
+            # 下载解压 user-custom 会触发 backend 独立 watchfiles 线程 → 热重载链
+            # （rescan + agents 重载 + reload_all_commands + LSP + plugin_changed 广播，
+            # 2.5-4s）与本方法下方 Settings 应用链叠加阻塞主线程。抑制窗口内 watcher
+            # 跳过 user-custom 变更并标记 pending，下载完成后由
+            # _reload_settings_on_main_thread 末尾合并触发一次 reload_plugin_subsystems。
+            try:
+                from app.core.backend import ChatBackend
+
+                ChatBackend._suppress_watcher_until = time.time() + 35.0
+            except Exception:
+                pass
 
             # ── 1. app.config：必须成功，否则整个下载失败 ──
             # app.config 是核心配置，下载失败意味着本地配置未同步，后续不允许上传覆盖远端。
@@ -1390,6 +1456,7 @@ class ConfigSyncService(QObject):
                         ok = self._download_user_custom_zip()
                         if ok:
                             logger.debug("[ConfigSync] user-custom 已解压恢复")
+                            custom_downloaded = True
                         else:
                             logger.warning("[ConfigSync] user-custom 恢复失败")
                         results.append(ok)
@@ -1440,6 +1507,10 @@ class ConfigSyncService(QObject):
             # 因主题未注册而静默重置为默认主题。load 完成后自动发射 syncDone。
             if downloaded_config:
                 self._pending_sync_message = "配置与用户插件已从云端恢复"
+            if downloaded_config or custom_downloaded:
+                # 🚀 P5e：user-custom 有更新（无论 app.config 是否变化）都桥接主线程，
+                # 以便消费 watcher 抑制期 pending（合并插件重载）。app.config 未变时
+                # diff 短路（#4e）使 Settings 重载开销极小。
                 self._reloadSettings.emit()
 
             # 任何一项结果就算部分成功，不因 user-custom 失败而否定 app.config 恢复

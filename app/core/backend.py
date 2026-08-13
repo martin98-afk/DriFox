@@ -957,6 +957,14 @@ class ChatBackend(QObject):
     # ========== 插件热更新（watchfiles） ==========
 
     _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+    # 🚀 P5e：gitee 同步抑制窗口——config_sync 下载解压 user-custom 期间抑制
+    # 本 watcher 热重载链（backend 独立 watchfiles 线程），避免与 config_sync
+    # 应用链（Settings 写回 + 主题刷新）两条主线程重活链同时爆发叠加阻塞。
+    # _suppress_watcher_until: 抑制截止时间戳（0=不抑制）；
+    # _watcher_pending_reload: 抑制窗口内被跳过的 user-custom 变更标志，
+    # 由 config_sync 下载完成后兜底合并触发一次 reload_plugin_subsystems。
+    _suppress_watcher_until = 0.0
+    _watcher_pending_reload = False
     # ★ T3 修复：活跃 backend 实例集合（插件热更新广播目标）
     # 根因：watcher 线程是类级单例（_plugin_watcher_started），只有首个启动
     # watcher 的 backend 连接了 _hot_reload_requested → _on_hot_reload_requested
@@ -1138,6 +1146,23 @@ class ChatBackend(QObject):
                         relevant_changes.append((change_type, change_path))
 
                     if not relevant_changes:
+                        continue
+
+                    # 🚀 P5e：gitee 同步（config_sync 下载解压 user-custom）期间抑制
+                    # watcher 热重载链。同步窗口内 user-custom 变更不 emit（跳过），
+                    # 仅标记 pending，由 config_sync 下载完成 + Settings 重载后合并
+                    # 触发一次 reload_plugin_subsystems 兜底加载——避免 watcher 链
+                    # （rescan + agents 重载 + reload_all_commands ~2500ms + LSP 子进程
+                    # + plugin_changed 广播）与 config_sync 应用链同时爆发叠加阻塞主线程。
+                    # 抑制窗口外行为不变（正常热重载）；窗口内事件由 pending 兜底不丢。
+                    if time.time() < ChatBackend._suppress_watcher_until and any(
+                        "user-custom" in str(cp).lower() for _, cp in relevant_changes
+                    ):
+                        ChatBackend._watcher_pending_reload = True
+                        logger.info(
+                            f"[ChatBackend] gitee 同步抑制窗口内收到 user-custom 变更 "
+                            f"({len(relevant_changes)} 处)，标记 pending 待合并重载"
+                        )
                         continue
 
                     current_prefixes = _prefixes_ref[0]
