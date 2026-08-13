@@ -21,12 +21,20 @@ def _sample_data():
 
 def test_build_options_structure():
     options = build_options(_sample_data(), is_dark=True)
-    assert len(options) == 2  # 2 个 echarts 实例（双 grid 合并）
-    for opt in options:
-        assert isinstance(opt, dict)
-        # 可 JSON 序列化（echarts 代码块走 JSON.parse）
-        json.dumps(opt, ensure_ascii=False)
-        assert len(opt["series"]) == 2  # 每实例 2 图
+    assert len(options) == 1  # 单个 echarts 实例（2×2 四宫格）
+    opt = options[0]
+    assert isinstance(opt, dict)
+    json.dumps(opt, ensure_ascii=False)
+    assert len(opt["grid"]) == 4     # 4 grid 宫格
+    assert len(opt["series"]) == 4   # 4 图
+    assert len(opt["title"]) == 4    # 4 标题
+
+
+def test_build_options_tooltip():
+    """全局 tooltip 存在（鼠标悬停显示）"""
+    opt = build_options(_sample_data(), is_dark=True)[0]
+    assert "tooltip" in opt
+    assert opt["tooltip"].get("trigger") == "item"
 
 
 def test_build_options_json_serializable():

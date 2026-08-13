@@ -161,167 +161,160 @@ def _base_style(p: dict) -> dict:
 
 
 def _grid_layout() -> list:
-    """双 grid 左右布局（各占 50%）"""
+    """4 grid 2×2 正方形宫格（每格约 190px，适配 400px 容器）"""
     return [
-        {"left": 8, "right": "52%", "top": 34, "bottom": 20, "containLabel": True},
-        {"left": "52%", "right": 8, "top": 34, "bottom": 20, "containLabel": True},
+        {"left": 8, "right": "54%", "top": 32, "bottom": "54%", "containLabel": True},
+        {"left": "54%", "right": 8, "top": 32, "bottom": "54%", "containLabel": True},
+        {"left": 8, "right": "54%", "top": "54%", "bottom": 8, "containLabel": True},
+        {"left": "54%", "right": 8, "top": "54%", "bottom": 8, "containLabel": True},
     ]
 
 
 def _commit_trend_option(daily: list, p: dict) -> dict:
-    """左 grid：近 30 天 commit 柱状图"""
+    """左上 grid：近 30 天 commit 柱状图"""
     days = [d for d, _ in daily]
     vals = [c for _, c in daily]
     return {
         "type": "bar",
         "name": "Commits",
         "data": vals,
-        "barMaxWidth": 18,
-        "itemStyle": {"color": p["accent"], "borderRadius": [3, 3, 0, 0]},
+        "barMaxWidth": 14,
+        "itemStyle": {"color": p["accent"], "borderRadius": [2, 2, 0, 0]},
         "xAxisIndex": 0,
         "yAxisIndex": 0,
     }, {
         "type": "category", "gridIndex": 0, "data": days,
-        "axisLabel": {"color": p["muted"], "fontSize": 9, "interval": 4},
+        "axisLabel": {"color": p["muted"], "fontSize": 8, "interval": 4},
         "axisLine": {"lineStyle": {"color": p["grid"]}},
         "axisTick": {"show": False},
     }, {
         "type": "value", "gridIndex": 0, "minInterval": 1,
-        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "axisLabel": {"color": p["muted"], "fontSize": 8},
         "splitLine": {"lineStyle": {"color": p["grid"]}},
     }
 
 
 def _contributors_option(contributors: list, p: dict) -> dict:
-    """右 grid：贡献者 Top 横向条形图"""
+    """右上 grid：贡献者 Top 横向条形图"""
     names = [n for n, _ in contributors][::-1]
     counts = [c for _, c in contributors][::-1]
     return {
         "type": "bar",
         "name": "Commits",
         "data": counts,
-        "barMaxWidth": 12,
+        "barMaxWidth": 10,
         "itemStyle": {"color": p["success"]},
         "xAxisIndex": 1,
         "yAxisIndex": 1,
     }, {
         "type": "value", "gridIndex": 1, "minInterval": 1,
-        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "axisLabel": {"color": p["muted"], "fontSize": 8},
         "splitLine": {"lineStyle": {"color": p["grid"]}},
     }, {
         "type": "category", "gridIndex": 1, "data": names,
-        "axisLabel": {"color": p["text"], "fontSize": 9},
+        "axisLabel": {"color": p["text"], "fontSize": 8},
         "axisLine": {"lineStyle": {"color": p["grid"]}},
         "axisTick": {"show": False},
     }
 
 
 def _languages_option(languages: list, p: dict) -> dict:
-    """左 grid：语言分布环形图"""
+    """左下 grid：语言分布环形图（center 定位到左下象限）"""
     names = [n for n, _, _ in languages]
     files = [f for _, f, _ in languages]
     return {
         "type": "pie",
         "name": "语言分布",
         "radius": ["32%", "55%"],
-        "center": ["25%", "55%"],
+        "center": ["26%", "76%"],
         "itemStyle": {"borderColor": p["card"], "borderWidth": 2},
-        "label": {"color": p["text"], "fontSize": 9},
+        "label": {"color": p["text"], "fontSize": 8},
         "data": [{"name": n, "value": f} for n, f, _ in languages],
     }
 
 
 def _file_types_option(file_types: list, p: dict) -> dict:
-    """右 grid：文件类型 Top 横向条形图"""
+    """右下 grid：文件类型 Top 横向条形图"""
     exts = [e for e, _ in file_types][::-1]
     counts = [c for _, c in file_types][::-1]
     return {
         "type": "bar",
         "name": "文件数",
         "data": counts,
-        "barMaxWidth": 12,
+        "barMaxWidth": 10,
         "itemStyle": {"color": p["warn"]},
-        "xAxisIndex": 1,
-        "yAxisIndex": 1,
+        "xAxisIndex": 2,
+        "yAxisIndex": 2,
     }, {
-        "type": "value", "gridIndex": 1, "minInterval": 1,
-        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "type": "value", "gridIndex": 3, "minInterval": 1,
+        "axisLabel": {"color": p["muted"], "fontSize": 8},
         "splitLine": {"lineStyle": {"color": p["grid"]}},
     }, {
-        "type": "category", "gridIndex": 1, "data": exts,
-        "axisLabel": {"color": p["text"], "fontSize": 9},
+        "type": "category", "gridIndex": 3, "data": exts,
+        "axisLabel": {"color": p["text"], "fontSize": 8},
         "axisLine": {"lineStyle": {"color": p["grid"]}},
         "axisTick": {"show": False},
     }
 
 
 def build_options(data: dict, is_dark: bool) -> list:
-    """生成 2 个 echarts option（每个 400px 内双 grid 左右布局）
+    """生成单个 echarts option：4 grid 2×2 四宫格（总高 400px 与 context-stats 一致）
 
-    option[0]: commit 趋势(左柱) + 贡献者 Top(右横条)
-    option[1]: 语言分布(左环形) + 文件类型 Top(右横条)
+    布局：
+    ┌─────────────────┐
+    │ Commit  │ 贡献者 │
+    │ 语言    │ 文件类型│
+    └─────────────────┘
 
-    高度控制：2 实例 × 400px = 800px，避免 4 图各自 400px 过高。
+    高度：主程序 echarts 容器固定 400px，2×2 每格约 190px，正方形接近最佳观感。
+    返回列表（兼容 render 循环），无数据时返回空列表。
     """
     p = _palette(is_dark)
-    options = []
+    series: list = []
+    x_axes: list = []
+    y_axes: list = []
+    titles: list = []
 
-    # ── 实例 1：commit 趋势 + 贡献者 ──
-    series, axes = [], []
-    x_axes, y_axes = [], []
     if data.get("daily_commits"):
         s, x, y = _commit_trend_option(data["daily_commits"], p)
         series.append(s)
         x_axes.append(x)
         y_axes.append(y)
-        title_left = {"text": "近 30 天 Commit", "left": 8, "top": 6,
-                      "textStyle": {"fontSize": 11, "color": p["text"]}}
-    else:
-        title_left = {}
+        titles.append({"text": "近 30 天 Commit", "left": 8, "top": 8,
+                       "textStyle": {"fontSize": 10, "color": p["text"]}})
     if data.get("contributors"):
         s, x, y = _contributors_option(data["contributors"], p)
         series.append(s)
         x_axes.append(x)
         y_axes.append(y)
-        title_right = {"text": "贡献者 Top", "left": "52%", "top": 6,
-                       "textStyle": {"fontSize": 11, "color": p["text"]}}
-    else:
-        title_right = {}
-    if series:
-        options.append({
-            **_base_style(p),
-            "grid": _grid_layout(),
-            "title": [t for t in (title_left, title_right) if t],
-            "xAxis": x_axes,
-            "yAxis": y_axes,
-            "series": series,
-        })
-
-    # ── 实例 2：语言分布 + 文件类型 ──
-    series, x_axes, y_axes = [], [], []
+        titles.append({"text": "贡献者 Top", "left": "54%", "top": 8,
+                       "textStyle": {"fontSize": 10, "color": p["text"]}})
     if data.get("languages"):
         series.append(_languages_option(data["languages"], p))
-        title_left = {"text": "语言分布", "left": 8, "top": 6,
-                      "textStyle": {"fontSize": 11, "color": p["text"]}}
-    else:
-        title_left = {}
+        titles.append({"text": "语言分布", "left": 8, "top": "54%",
+                       "textStyle": {"fontSize": 10, "color": p["text"]}})
     if data.get("file_types"):
         s, x, y = _file_types_option(data["file_types"], p)
         series.append(s)
         x_axes.append(x)
         y_axes.append(y)
-        title_right = {"text": "文件类型", "left": "52%", "top": 6,
-                       "textStyle": {"fontSize": 11, "color": p["text"]}}
-    else:
-        title_right = {}
-    if series:
-        options.append({
-            **_base_style(p),
-            "grid": _grid_layout(),
-            "title": [t for t in (title_left, title_right) if t],
-            "xAxis": x_axes,
-            "yAxis": y_axes,
-            "series": series,
-        })
+        titles.append({"text": "文件类型", "left": "54%", "top": "54%",
+                       "textStyle": {"fontSize": 10, "color": p["text"]}})
 
-    return options
+    if not series:
+        return []
+
+    return [{
+        **_base_style(p),
+        "grid": _grid_layout(),
+        "title": titles,
+        "xAxis": x_axes,
+        "yAxis": y_axes,
+        "tooltip": {
+            "trigger": "item",
+            "backgroundColor": "rgba(26,31,46,0.92)",
+            "borderColor": p["accent"],
+            "textStyle": {"color": "#ffffff", "fontSize": 11},
+        },
+        "series": series,
+    }]
