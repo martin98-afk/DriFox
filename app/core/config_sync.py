@@ -545,7 +545,11 @@ class ConfigSyncService(QObject):
                                 _matched = _name
                                 break
                         if _matched:
-                            getattr(cfg, _matched).value = _value
+                            # 🚀 P5d：diff 短路——内存值已等于云端值时跳过赋值，
+                            # 省掉 setter + valueChanged 信号发射完整监听链路径
+                            # （隔天同步时多数配置未变，仅此项即可消除主线程 200-500ms 占用）
+                            if getattr(cfg, _matched).value != _value:
+                                getattr(cfg, _matched).value = _value
 
                 logger.debug("[ConfigSync] 全量配置已从文件同步到内存（含本地 Gitee token）")
             except Exception as _e:
@@ -561,14 +565,16 @@ class ConfigSyncService(QObject):
             # 仅当主题值确实变化才触发，避免无谓开销；dispatch_refresh 幂等（窗口侧
             # _last_color_theme_id 保护），与 LLMSettingsCard 链路的 30ms debounce 批量
             # 刷新不冲突（后者随后执行时颜色块会被幂等跳过）。
+            # 🚀 P5d：主题刷新拆到下一事件循环分片（150ms 后），避免单次事件循环内
+            # 写回 + 全窗口 refresh_theme 连续 1-2s 阻塞主线程；主题注册仍保持先于
+            # ui_theme_style 写回（上方），顺序约束不变。
             try:
-                if cfg.ui_theme_style.value != _old_theme_id:
-                    from app.utils.theme_manager import theme_manager as _tm
-
-                    _tm.dispatch_refresh()
-                    logger.info(f"[ConfigSync] 主题已从 {_old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新")
+                QTimer.singleShot(
+                    150,
+                    lambda cfg=cfg, old=_old_theme_id: self._delayed_theme_refresh(cfg, old),
+                )
             except Exception as _te:
-                logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
+                logger.warning(f"[ConfigSync] 下载后主题全量刷新调度失败: {_te}")
 
             logger.info("[ConfigSync] Settings 已重新加载（主线程，全量手动同步，token 本地独立）")
         except Exception as e:
@@ -587,6 +593,24 @@ class ConfigSyncService(QObject):
             self._pending_sync_message = None
             self._set_state("idle")
             self.syncDone.emit(True, msg)
+
+    def _delayed_theme_refresh(self, cfg, old_theme_id):
+        """延迟分片：写回完成后 ~150ms 执行主题显式全量刷新（修复 bug#6 兜底）
+
+        🚀 P5d：从 _reload_settings_on_main_thread 拆出的独立 QTimer 分片，
+        避免单次事件循环内写回 + dispatch_refresh（全窗口 refresh_theme）
+        连续 1-2s 阻塞主线程。仅当主题值确实变化才刷新（diff 短路）。
+        """
+        try:
+            if cfg.ui_theme_style.value != old_theme_id:
+                from app.utils.theme_manager import theme_manager as _tm
+
+                _tm.dispatch_refresh()
+                logger.info(
+                    f"[ConfigSync] 主题已从 {old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新"
+                )
+        except Exception as _te:
+            logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
 
     # ── Token 同步 ──────────────────────────────────────────
 
