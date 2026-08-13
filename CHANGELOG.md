@@ -3,6 +3,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **欢迎卡片会话 Tab 动画播两遍修复** (`app/main_widget.py` `_rerender_welcome_card`): workdir 延迟同步（启动 2s / 项目切换）后 `_sync_working_directory` 调用 `_rerender_welcome_card` 强制重渲染——sessions/changelog 内置 mode 不依赖 project_root，重渲染纯属多余，且 `_render_welcome_with_body` 每次生成随机 greeting 使 HTML 必然变化，`updateContent` 重建 DOM 导致卡片进入动画（stagger fade-in）重复播放一遍。修复：内置 mode 跳过重渲染，仅插件 tab（project-dashboard 类）保留强制刷新
+
 - **欢迎卡片会话 Tab 双列 3 行** (`app/widgets/message_card.py` `_render_sessions_body` + `app/main_widget.py`): 会话列表改双列网格，最近/最活跃各固定显示 3 行（6 张），无折叠与加载更多；`main_widget.py` 数据量提升到最近 6 / 最活跃 6，stagger 进入动画跨分区全局连贯
 
 - **欢迎卡片会话 Tab 视觉升级** (`app/widgets/message_card.py` `_render_sessions_body`): 「会话」模式从胶囊流改为卡片行列表——每行左侧渐变图标徽章（最近 💬 / 最活跃 ⚡）+ 标题省略号 + 副标题（时间/消息数），hover 时背景加深、蓝色边框高亮、箭头滑入并轻微右移；分区标题改为「图标 + 标题 + 数量徽章」。复用 `.context-tag` 点击事件链（`data-type="session"` + `data-session-id` 不变），JS 拦截逻辑与打开会话行为不受影响
