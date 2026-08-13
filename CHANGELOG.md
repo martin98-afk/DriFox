@@ -3,6 +3,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **欢迎卡片会话 Tab 双列 3 行** (`app/widgets/message_card.py` `_render_sessions_body` + `app/main_widget.py`): 会话列表改双列网格，最近/最活跃各固定显示 3 行（6 张），无折叠与加载更多；`main_widget.py` 数据量提升到最近 6 / 最活跃 6，stagger 进入动画跨分区全局连贯
+
 - **欢迎卡片会话 Tab 视觉升级** (`app/widgets/message_card.py` `_render_sessions_body`): 「会话」模式从胶囊流改为卡片行列表——每行左侧渐变图标徽章（最近 💬 / 最活跃 ⚡）+ 标题省略号 + 副标题（时间/消息数），hover 时背景加深、蓝色边框高亮、箭头滑入并轻微右移；分区标题改为「图标 + 标题 + 数量徽章」。复用 `.context-tag` 点击事件链（`data-type="session"` + `data-session-id` 不变），JS 拦截逻辑与打开会话行为不受影响
 
 - **多标签页欢迎卡片内容串项目** (`app/widgets/message_card.py` + `app/main_widget.py`): 欢迎卡片渲染插件 tab 时只传 `{"is_dark"}`，插件只能回读全局状态（`Settings.current_project` / 全局 workdir）取项目信息，多窗口下 A 窗口欢迎卡片会被渲染成 B 窗口的项目内容。修复：`create_welcome_card` 新增 `context_provider` 参数（传入窗口 `_build_ui_context`），`_render_welcome_body` 把窗口级 project_root / project_name / window_id 合并注入插件 `render_func(ctx)`，每个窗口渲染自己项目的内容

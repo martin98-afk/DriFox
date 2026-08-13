@@ -10815,9 +10815,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # get_history_list(merge_team=True) 的语义对齐：团队会话不进入推荐列表。
         history_list = [s for s in history_list if not (s.get("team_run_id") or "").strip()]
 
-        # 最近会话（按时间排序，取前3）
+        # 最近会话（按时间排序，取前6；欢迎卡片首屏 2×2 + 折叠区「展开更多」）
         recent_sessions = []
-        for session in history_list[:3]:
+        for session in history_list[:6]:
             recent_sessions.append(
                 {
                     "title": session.get("title"),
@@ -10827,8 +10827,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 }
             )
 
-        # 最多消息的会话（取前3）
-        top_sessions = heapq.nlargest(3, history_list, key=lambda x: x.get("message_count", 0))
+        # 最多消息的会话（取前6，双列 3 行）
+        top_sessions = heapq.nlargest(6, history_list, key=lambda x: x.get("message_count", 0))
         top_by_count = []
         for session in top_sessions:
             top_by_count.append(

@@ -3565,9 +3565,9 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.7;
                 }}
                 .session-list {{
-                    display: flex;
-                    flex-direction: column;
-                    gap: 6px;
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 6px 8px;
                 }}
                 /* 会话卡片行：复用 .context-tag 点击事件链，覆盖胶囊默认外观 */
                 .session-item.context-tag {{
@@ -3638,6 +3638,18 @@ class CodeWebViewer(QWebEngineView):
                 .session-item.context-tag:hover .session-item-arrow {{
                     opacity: 1;
                     transform: translateX(0);
+                }}
+                /* 卡片进入动画：逐行 stagger fade-in（backwards 保证延迟期隐藏，
+                   播完恢复自然样式，不锁死 transform，hover 位移不受影响） */
+                @keyframes session-item-in {{
+                    from {{ opacity: 0; transform: translateY(6px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+                .session-item.context-tag {{
+                    animation: session-item-in 0.32s ease backwards;
+                }}
+                @media (prefers-reduced-motion: reduce) {{
+                    .session-item.context-tag {{ animation: none; }}
                 }}
                 .welcome-empty {{
                     opacity: 0.55;
@@ -10717,16 +10729,20 @@ def _render_welcome_body(
     return _render_sessions_body(recent_sessions, top_by_count)
 
 
-def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
-    """渲染会话导览 body：最近 / 最活跃两个卡片行列表
+_SESSION_ROWS = 3  # 双列网格行数（每分类显示 3×2 = 6 张）
+_SESSION_COLS = 2
 
-    每个会话一行卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
+
+def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
+    """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
+
+    每张卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
     复用 .context-tag 点击事件链（data-type="session" + data-session-id），
     仅替换视觉外观，JS 拦截逻辑不变。
     """
 
-    def _render_item(s: dict, count_mode: bool) -> str:
-        """渲染单个会话卡片行"""
+    def _render_item(s: dict, count_mode: bool, idx: int) -> str:
+        """渲染单个会话卡片；idx 用于 stagger 动画延迟"""
         t = escape(s.get("title", "未命名会话"))
         sid = escape(s.get("session_id", ""))
         if count_mode:
@@ -10738,7 +10754,8 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             icon = "💬"
         return (
             f'<div class="context-tag session-item" data-type="session" '
-            f'data-session-id="{sid}" data-action="session">'
+            f'data-session-id="{sid}" data-action="session" '
+            f'style="animation-delay:{idx * 55}ms">'
             f'<span class="session-item-badge">{icon}</span>'
             f'<span class="session-item-body">'
             f'<span class="session-item-title">{t}</span>'
@@ -10748,24 +10765,30 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f"</div>"
         )
 
-    def _render_section(title: str, icon: str, items: list, count_mode: bool = False) -> str:
-        """渲染单个分类 section；items 为空则返回空串"""
+    def _render_section(title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0) -> str:
+        """渲染单个分类 section；items 为空则返回空串
+
+        start_idx: 全局连续卡片序号起点，保证跨分区的 stagger 动画连贯
+        （否则两个分区各自从 0 开始，动画同时播放显得凌乱）。
+        """
         if not items:
             return ""
-        rows = "".join(_render_item(s, count_mode) for s in items[:3])
+        shown = items[:_SESSION_ROWS * _SESSION_COLS]
+        rows = "".join(_render_item(s, count_mode, start_idx + i) for i, s in enumerate(shown))
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
             f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
-            f'<span class="session-header-count">{len(items[:3])}</span>'
+            f'<span class="session-header-count">{len(shown)}</span>'
             f'</div>'
             f'<div class="session-list">{rows}</div>'
             f"</div>"
         )
 
-    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False)
-    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True)
+    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=0)
+    top_start = len(recent_sessions[:_SESSION_ROWS * _SESSION_COLS])
+    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start)
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
