@@ -112,7 +112,11 @@ def collect_data(project_root: str) -> dict:
         parts = line.strip().split("\t")
         if len(parts) == 2:
             try:
-                result["contributors"].append((parts[1].strip(), int(parts[0])))
+                # 取姓名（去掉 <email>），空名回退完整行
+                name = parts[1].strip()
+                if "<" in name:
+                    name = name.split("<")[0].strip()
+                result["contributors"].append((name or parts[1].strip(), int(parts[0])))
             except ValueError:
                 pass
 
@@ -276,7 +280,7 @@ def generate_html(data: dict, is_dark: bool) -> str:
     branch = _esc(data.get("branch", ""))
     generated = _esc(data.get("generated_at", ""))
     total = data.get("total_commits", 0)
-    summary = f"**{repo}** · `{branch}` · 生成于 {generated} · 共 {total} commits"
+    summary = f"<b>{repo}</b> · 分支 {branch} · 生成于 {generated} · 共 {total} commits"
 
     charts = []
     if data.get("daily_commits"):
