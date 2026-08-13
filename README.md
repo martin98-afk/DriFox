@@ -25,6 +25,8 @@
 
 ![软件介绍](images/软件介绍.png)
 
+![v0.5.0 Release Poster](images/release-poster-v0.5.0.png)
+
 ---
 
 使用中遇到问题欢迎加入技术支持群进行反馈！

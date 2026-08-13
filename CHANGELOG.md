@@ -56,6 +56,29 @@ All notable changes to this project will be documented in this file.
 
 - **版本号升级到 v0.5.0** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 跨版本号 (v0.4.14 → v0.5.0) 同步更新
 
+
+#### 📦 附加变更（v0.5.0 一次重发补丁 | 自初次 tag 之后 14 个新提交）
+
+> v0.5.0 初次 tag 后追加的启动性能优化与 bug 修复：SQLite 初始化后台化（首帧省 ~2s）、backend 非首帧组件 QTimer 错峰创建、config-sync 写回 diff 短路与主题刷新分片、watcher 同步窗口抑制、主题 reload mtime 指纹缓存短路；修复命令卡片过滤后高度跟随收缩、插件市场更新后 UI 重载、错峰/会话存储审查问题；更新 release 海报资源。贡献者：mading, dingma
+
+##### ⚡ 性能优化 (Performance, 5)
+
+- **SQLite 初始化后台化** (`app/core/store/session_store.py`): 会话存储 SQLite 初始化移出主线程，首帧节省 ~2s
+- **非首帧组件 QTimer 错峰创建** (`app/core/backend.py`): 非首帧组件延迟错峰创建，避免启动集中构建
+- **config-sync 写回 diff 短路** (`app/core/config_sync.py`): ConfigItem 写回 diff 短路，主题刷新拆 QTimer 分片
+- **watcher 同步窗口抑制** (`app/core/backend.py` + `app/core/config_sync.py`): watcher 同步窗口抑制 + pending 合并重载
+- **主题 reload mtime 指纹缓存** (`app/utils/theme_manager.py`): 主题未变时短路跳过重载
+
+##### 🐛 问题修复 (Bug Fixes, 3)
+
+- **命令卡片过滤后高度跟随** (`app/widgets/cards/`): 过滤后容器高度跟随卡片收缩，消除底部留白
+- **插件市场更新后 UI 重载** (`plugins/plugin-marketplace/`): 更新后重载插件 UI（watchfiles 空组件不触发）
+- **错峰/会话存储审查修复** (`app/core/` + `app/utils/`): 修复错峰与会话存储审查问题
+
+##### 🔧 其他 (Chores & Build, 2)
+
+- **release 海报资源更新** (`images/` + `release-poster-v0.5.0.html`): 新增 release 海报，移除过时海报图片与 HTML
+
 ## [v0.4.14] - 2026-08-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma
