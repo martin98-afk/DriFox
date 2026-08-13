@@ -9990,6 +9990,13 @@ class OpenAIChatToolWindow(ToolWindow):
         mode = getattr(card, "_welcome_mode", "")
         if not mode:
             return
+        if mode in ("sessions", "changelog"):
+            # 内置 mode 不依赖 project_root/workdir，跳过重渲染。
+            # 否则每次 workdir 同步（启动 2s / 项目切换）都会全量重渲染：
+            # _render_welcome_with_body 每次生成随机 greeting → markdown/HTML
+            # 必然变化 → updateContent 重建 DOM → sessions 卡片进入动画
+            # 重复播放一遍（stagger fade-in 出现"播两遍"）。
+            return
         try:
             card.set_welcome_mode(mode)
         except Exception as e:  # noqa: BLE001

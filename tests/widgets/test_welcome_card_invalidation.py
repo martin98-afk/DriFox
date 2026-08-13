@@ -277,6 +277,19 @@ class TestRerenderWelcomeCard:
         assert widget._welcome_card_cache["win_other"] is other_widget_cache
         assert not other_widget_cache.deleteLater.called
 
+    def test_skips_builtin_modes(self):
+        """内置 mode（sessions/changelog）跳过重渲染：不依赖 project_root，
+        重渲染只会因随机 greeting 使 HTML 变化、触发进入动画重复播放"""
+        for builtin_mode in ("sessions", "changelog"):
+            widget = self._make_widget()
+            card = MagicMock()
+            card._welcome_mode = builtin_mode
+            widget._welcome_card_cache[widget._window_id] = card
+
+            widget._rerender_welcome_card()
+
+            card.set_welcome_mode.assert_not_called(), f"{builtin_mode} 不应触发重渲染"
+
 
 # ─── 3. 回归 bug 场景模拟 ─────────────────────────────────────
 
