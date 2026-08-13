@@ -767,6 +767,11 @@ class CommandCard(QWidget):
         self._data_provider: dict = {}  # 外部数据源（如 model_options）
         # 跳过容器展开/折叠动画，消除命令卡片弹出时的延迟感
         self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
+        # 声明高度严格跟随内容：dock 模式下容器也按卡片高度收缩，
+        # 否则过滤后卡片变矮、容器保持旧高度 → 最后一行下方留白（同 Question 卡片）。
+        self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
+        # 卡片当前目标高度（heightForWidth 供容器 follow_content 分支锁定高度用）
+        self._card_target_height = 0
         self.setVisible(False)
         self._setup_ui()
         self._setup_detail_widget()
@@ -1301,6 +1306,7 @@ class CommandCard(QWidget):
         budget = self._available_card_budget()
         if natural <= budget:
             # 正常/高窗口：完整展示至多 MAX_VISIBLE_ITEMS 项
+            self._card_target_height = natural
             self.setFixedHeight(natural)
             self._sync_desc_tooltip_position()
             self._sync_visible_slots()
@@ -1311,9 +1317,19 @@ class CommandCard(QWidget):
             CARD_MIN_VISIBLE_ITEMS,
             min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
         )
-        self.setFixedHeight(visible_fit * ITEM_HEIGHT + divider_count * 1)
+        self._card_target_height = visible_fit * ITEM_HEIGHT + divider_count * 1
+        self.setFixedHeight(self._card_target_height)
         self._sync_desc_tooltip_position()
         self._sync_visible_slots()
+
+    def hasHeightForWidth(self):
+        # follow_content 分支用 heightForWidth 精确锁定容器高度（避开 C++ 布局
+        # sizeHint 受 QScrollArea 默认尺寸影响的不确定性）。
+        return True
+
+    def heightForWidth(self, w):
+        """按宽度返回卡片目标高度（列表/矮窗口压缩/detail 三态统一）"""
+        return getattr(self, "_card_target_height", self.height()) or super().heightForWidth(w)
 
     def _sync_desc_tooltip_position(self):
         """卡片几何变化（高度/位置）后，将悬浮气泡重新锚定到卡片上方
@@ -1712,6 +1728,7 @@ class CommandCard(QWidget):
             content_height = 0
 
         total_height = v_margin + desc_height + spacing + hint_height + content_height + pos_hint_height
+        self._card_target_height = total_height
         self.setFixedHeight(total_height)
 
     # ---- 参数列表交互 ----
@@ -2536,9 +2553,7 @@ class CommandCard(QWidget):
         虚拟布局重建，仅刷新已绑定 widget 的 query 高亮。
         """
         new_items = self._filtered_items
-        cur_keys = [
-            (it["name"], it["type"], it.get("subtype", "")) for it in new_items
-        ]
+        cur_keys = [(it["name"], it["type"], it.get("subtype", "")) for it in new_items]
 
         # ---- 快速路径：新旧 items 完全一致，仅更新已绑定 widget 高亮 ----
         if cur_keys == self._last_render_keys:
