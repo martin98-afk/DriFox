@@ -3931,17 +3931,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
     def _load_all_ui_plugins(self):
-        """加载所有已启用的 UI 插件（三批 QTimer 错峰）
-
-        [PERF] 实测 14 个 UI 插件主线程同步 import+实例化占首帧 3.3-4.0s
-        （browser 6.3s / context-usage-stats 2.7s 为两个重头）。按插件类型分
-        三批错峰，批内 100ms 间隔串行，把集中阻塞摊薄到首帧绘制后：
-        - 批1（500ms）：聊天主流程相关卡片（file-tree/git-panel 等常用悬浮卡）
-        - 批2（1500ms）：其余（重型 browser/context-usage-stats/marketplace 等）
-        - 批3（3000ms）：welcome tab 类（calendar 欢迎页签）
-        全部加载完成后 re_register_all_commands + 窗口级处理器注册由
-        _finish_ui_plugins_after_batches 统一收尾。
-        """
+        """加载所有已启用的 UI 插件"""
         from app.core.ui_plugin_registry import UIPluginRegistry
         from app.core.plugin_manager import PluginManager
 
@@ -3964,80 +3954,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
-
-        # ── 分批：批1 常用悬浮卡（聊天主流程）→ 批2 其余（含重型）→ 批3 welcome tab ──
-        batch1 = []
-        batch2 = []
-        batch3 = []
-        for name, path in plugin_dirs:
-            if name in ("file-tree", "git-panel", "git-dashboard", "share-history", "shortcut-manager"):
-                batch1.append((name, path))
-            elif name in ("calendar",):  # welcome tab 类
-                batch3.append((name, path))
-            else:
-                batch2.append((name, path))
-        # 空批占位：保持三批调度结构稳定（不依赖具体插件集合）
-        if not batch1:
-            batch1, batch2 = batch2, batch1
-
-        self._plugin_batch_remaining = [batch2, batch3]
-        QTimer.singleShot(500, lambda: self._load_ui_plugin_batch(batch1))
-
-    def _load_ui_plugin_batch(self, batch):
-        """串行加载一批 UI 插件（批内每个插件间隔 100ms，避免单次长阻塞）"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
-
-        registry = UIPluginRegistry.get_instance()
-        if not batch:
-            self._schedule_next_ui_plugin_batch()
-            return
-        name, path = batch[0]
-        try:
-            registry.load_plugin(name, path)
-        except Exception as e:
-            logger.error(f"[MainWidget] UI plugin {name} 加载失败: {e}")
-        remaining = batch[1:]
-        if remaining:
-            QTimer.singleShot(100, lambda: self._load_ui_plugin_batch(remaining))
-        else:
-            self._schedule_next_ui_plugin_batch()
-
-    def _schedule_next_ui_plugin_batch(self):
-        """调度下一批（批2 @1500ms / 批3 @3000ms），全部完成后收尾注册"""
-        if not self._plugin_batch_remaining:
-            self._finish_ui_plugins_after_batches()
-            return
-        batch = self._plugin_batch_remaining.pop(0)
-        if self._plugin_batch_remaining:
-            delay = 1500  # 批2
-        else:
-            delay = 3000  # 批3
-        QTimer.singleShot(delay, lambda: self._load_ui_plugin_batch(batch))
-
-    def _finish_ui_plugins_after_batches(self):
-        """全部批次完成后：命令重注册 + 窗口级浮动卡片处理器注册"""
-        try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
-
-            ui_registry = UIPluginRegistry.get_instance()
-            ui_registry.re_register_all_commands()
-            for card_id, card_info in ui_registry.get_floating_cards().items():
-                if ":" in card_id:
-                    cmd_name = card_id
-                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
-                    cmd_name = card_id
-                else:
-                    cmd_name = f"{card_info.plugin_name}:{card_id}"
-                if cmd_name in self._function_command_handlers:
-                    continue
-
-                def _make_handler(cid=card_id, mw=self):
-                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
-
-                self._function_command_handlers[cmd_name] = _make_handler()
-            logger.info("[MainWidget] UI 插件分批加载完成，命令/卡片处理器已注册")
-        except Exception as e:
-            logger.error(f"[MainWidget] UI plugin finalize failed: {e}")
+        count = registry.load_all_enabled_plugins(plugin_dirs)
+        if count > 0:
+            logger.info(f"[MainWidget] Loaded {count}/{len(plugin_dirs)} UI plugins")
 
     def _build_ui_context(self) -> Dict[str, str]:
         """构建 UI 插件的上下文 dict
@@ -10903,11 +10822,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         welcome_card = create_welcome_card(
-            self,
-            agent_name,
-            agent_desc,
-            recent_sessions,
-            top_by_count,
+            self, agent_name, agent_desc, recent_sessions, top_by_count,
             mode=welcome_mode,
         )
         welcome_card._is_welcome = True
