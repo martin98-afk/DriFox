@@ -3,16 +3,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- **欢迎卡片会话 Tab 动画播两遍修复** (`app/main_widget.py` `_rerender_welcome_card`): workdir 延迟同步（启动 2s / 项目切换）后 `_sync_working_directory` 调用 `_rerender_welcome_card` 强制重渲染——sessions/changelog 内置 mode 不依赖 project_root，重渲染纯属多余，且 `_render_welcome_with_body` 每次生成随机 greeting 使 HTML 必然变化，`updateContent` 重建 DOM 导致卡片进入动画（stagger fade-in）重复播放一遍。修复：内置 mode 跳过重渲染，仅插件 tab（project-dashboard 类）保留强制刷新
-
-- **欢迎卡片会话 Tab 双列 3 行** (`app/widgets/message_card.py` `_render_sessions_body` + `app/main_widget.py`): 会话列表改双列网格，最近/最活跃各固定显示 3 行（6 张），无折叠与加载更多；`main_widget.py` 数据量提升到最近 6 / 最活跃 6，stagger 进入动画跨分区全局连贯
-
-- **欢迎卡片会话 Tab 视觉升级** (`app/widgets/message_card.py` `_render_sessions_body`): 「会话」模式从胶囊流改为卡片行列表——每行左侧渐变图标徽章（最近 💬 / 最活跃 ⚡）+ 标题省略号 + 副标题（时间/消息数），hover 时背景加深、蓝色边框高亮、箭头滑入并轻微右移；分区标题改为「图标 + 标题 + 数量徽章」。复用 `.context-tag` 点击事件链（`data-type="session"` + `data-session-id` 不变），JS 拦截逻辑与打开会话行为不受影响
-
-- **多标签页欢迎卡片内容串项目** (`app/widgets/message_card.py` + `app/main_widget.py`): 欢迎卡片渲染插件 tab 时只传 `{"is_dark"}`，插件只能回读全局状态（`Settings.current_project` / 全局 workdir）取项目信息，多窗口下 A 窗口欢迎卡片会被渲染成 B 窗口的项目内容。修复：`create_welcome_card` 新增 `context_provider` 参数（传入窗口 `_build_ui_context`），`_render_welcome_body` 把窗口级 project_root / project_name / window_id 合并注入插件 `render_func(ctx)`，每个窗口渲染自己项目的内容
-- **UI 插件多时欢迎卡片重建卡顿** (`app/core/ui_plugin_registry.py`): 插件批量加载/卸载时每个注册 welcome tab 的插件都同步触发 `_refresh_welcome_cards`，N 个插件 = N 次 QWebEngineView 重建（100-500ms/次）。修复：① `_schedule_welcome_refresh` debounce（`QTimer.singleShot(0)` 合并同一事件批次为单次刷新）；② 刷新重建走 `_schedule_initial_welcome` 交错时间片调度，不再同步阻塞。注意：**主程序不缓存插件 render_func 结果**——异步采集型插件（如 project-dashboard）首次渲染返回「加载中」占位，采集完成后重渲染拿真实图表，缓存占位会阻塞该机制（插件自身缓存数据即可）
-- **UI 插件 project_root 误注入软件启动目录** (`app/main_widget.py` `_build_ui_context` + `_sync_working_directory`): UI 插件上下文 workdir 兜底原为 `os.getcwd()`，软件启动/项目切换瞬间 workdir 尚未同步到 tool_executor 时会把**软件启动目录**（源码根/exe 目录）当作 project_root 注入；若该目录本身是 git 仓库（如 `D:/work/DriFox`），project-dashboard 看板会误展示启动目录的 git 信息。修复：① `_build_ui_context` 未设置 workdir 时返回空串（与 `backend._build_worktree_context` 修复模式一致，绝不回退 `os.getcwd()`）；② `_sync_working_directory` workdir 变化后强制重渲染欢迎卡片（新增 `_rerender_welcome_card`，同 mode 重渲染 body 不重建 QWebEngineView），看板自动从"未检测到 git 项目"恢复为正确项目。配套 project-dashboard 插件 v0.2.2 移除自身 `os.getcwd()` 兜底
-
 ## [v0.5.0] - 2026-08-13
 
 自上一版本以来的变更 | 提交数：38 · 文件变更：N · +5085/-1282 | 贡献者：dingma, mading
@@ -115,6 +105,29 @@ All notable changes to this project will be documented in this file.
 
 - **project-dashboard 设计规范** (`docs/.../specs/2026-08-13-project-dashboard-design.md`): 新增 project-dashboard 插件设计 spec（架构、数据流、ECharts 选型）
 - **project-dashboard 实现规划** (`docs/.../plans/2026-08-13-project-dashboard.md`): 新增 project-dashboard 完整实现规划（分阶段交付、回滚策略）
+
+
+#### 📦 附加变更（v0.5.0 三次重发补丁 | 自二次 tag 之后 6 个新提交）
+
+> v0.5.0 二次 tag 后追加的欢迎卡片会话 Tab 体验深化与稳定性修复：会话列表改卡片行列表（图标徽章 / hover 高亮 / 箭头滑入）+ 双列 3 行网格 + 重排序（最活跃优先于最近）+ 内置 mode 跳过重渲染修复动画播两遍；同时修复多窗口下欢迎卡片内容串项目、UI 插件多次同步重建卡顿、project_root 误注入软件启动目录、加载更多按钮主题切换文字色不更新。贡献者：dingma
+
+##### ✨ 新功能 (New Features, 4)
+
+- **欢迎卡片会话 Tab 视觉升级** (`app/widgets/message_card.py` `_render_sessions_body`): 「会话」模式从胶囊流改为卡片行列表——每行左侧渐变图标徽章（最近 💬 / 最活跃 ⚡）+ 标题省略号 + 副标题（时间/消息数），hover 时背景加深、蓝色边框高亮、箭头滑入并轻微右移；分区标题改为「图标 + 标题 + 数量徽章」。复用 `.context-tag` 点击事件链（`data-type="session"` + `data-session-id` 不变），JS 拦截逻辑与打开会话行为不受影响
+- **欢迎卡片会话 Tab 双列 3 行** (`app/widgets/message_card.py` `_render_sessions_body` + `app/main_widget.py`): 会话列表改双列网格，最近/最活跃各固定显示 3 行（6 张），无折叠与加载更多；`main_widget.py` 数据量提升到最近 6 / 最活跃 6，stagger 进入动画跨分区全局连贯
+- **欢迎卡片会话 Tab 重排序** (`app/widgets/message_card.py` `_render_sessions_body`): 「最活跃」分区置于「最近」之上，推荐优先展示高频会话；调整对应 `start_idx` 偏移保证 stagger 动画索引连续
+- **加载更多按钮主题切换文字色同步** (`plugins/plugin-marketplace/ui/cards.py` `MarketplaceCard`): 加载更多按钮 `objectName` 标记为 `loadMoreBtn`，主题刷新时正则替换 stylesheet 中的 `color` 字段；创建按钮时即注入当前主题文字色，主题切换后旧主题色不再残留
+
+##### 🐛 问题修复 (Bug Fixes, 4)
+
+- **欢迎卡片会话 Tab 动画播两遍修复** (`app/main_widget.py` `_rerender_welcome_card`): workdir 延迟同步（启动 2s / 项目切换）后 `_sync_working_directory` 调用 `_rerender_welcome_card` 强制重渲染——sessions/changelog 内置 mode 不依赖 project_root，重渲染纯属多余，且 `_render_welcome_with_body` 每次生成随机 greeting 使 HTML 必然变化，`updateContent` 重建 DOM 导致卡片进入动画（stagger fade-in）重复播放一遍。修复：内置 mode 跳过重渲染，仅插件 tab（project-dashboard 类）保留强制刷新
+- **多标签页欢迎卡片内容串项目** (`app/widgets/message_card.py` + `app/main_widget.py`): 欢迎卡片渲染插件 tab 时只传 `{"is_dark"}`，插件只能回读全局状态（`Settings.current_project` / 全局 workdir）取项目信息，多窗口下 A 窗口欢迎卡片会被渲染成 B 窗口的项目内容。修复：`create_welcome_card` 新增 `context_provider` 参数（传入窗口 `_build_ui_context`），`_render_welcome_body` 把窗口级 project_root / project_name / window_id 合并注入插件 `render_func(ctx)`，每个窗口渲染自己项目的内容
+- **UI 插件多时欢迎卡片重建卡顿** (`app/core/ui_plugin_registry.py`): 插件批量加载/卸载时每个注册 welcome tab 的插件都同步触发 `_refresh_welcome_cards`，N 个插件 = N 次 QWebEngineView 重建（100-500ms/次）。修复：① `_schedule_welcome_refresh` debounce（`QTimer.singleShot(0)` 合并同一事件批次为单次刷新）；② 刷新重建走 `_schedule_initial_welcome` 交错时间片调度，不再同步阻塞。注意：**主程序不缓存插件 render_func 结果**——异步采集型插件（如 project-dashboard）首次渲染返回「加载中」占位，采集完成后重渲染拿真实图表，缓存占位会阻塞该机制（插件自身缓存数据即可）
+- **UI 插件 project_root 误注入软件启动目录** (`app/main_widget.py` `_build_ui_context` + `_sync_working_directory`): UI 插件上下文 workdir 兜底原为 `os.getcwd()`，软件启动/项目切换瞬间 workdir 尚未同步到 tool_executor 时会把**软件启动目录**（源码根/exe 目录）当作 project_root 注入；若该目录本身是 git 仓库（如 `D:/work/DriFox`），project-dashboard 看板会误展示启动目录的 git 信息。修复：① `_build_ui_context` 未设置 workdir 时返回空串（与 `backend._build_worktree_context` 修复模式一致，绝不回退 `os.getcwd()`）；② `_sync_working_directory` workdir 变化后强制重渲染欢迎卡片（新增 `_rerender_welcome_card`，同 mode 重渲染 body 不重建 QWebEngineView），看板自动从"未检测到 git 项目"恢复为正确项目。配套 project-dashboard 插件 v0.2.2 移除自身 `os.getcwd()` 兜底
+
+##### 🔧 其他 (Chores & Build, 1)
+
+- **v0.5.0 三次重发 tag 覆盖** (`CHANGELOG.md` + git tag): 删除远程/本地 v0.5.0 tag 重新打在当前 HEAD，覆盖二次重发 tag 指向三次重发补丁后的最新代码
 
 ## [v0.4.14] - 2026-08-09
 
