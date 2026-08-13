@@ -253,8 +253,9 @@ class SessionStore:
         2. 一次性 VACUUM 永久激活 INCREMENTAL（重写库文件，秒级，老库必命中）
         3. auto_vacuum 生效状态检测
 
-        并发安全：后台段与主线程共用 DatabaseManager 读写锁（db_manager.py），
-        VACUUM 持写锁期间其他写自然串行等待，无并发写冲突；无需额外 busy_timeout。
+        并发安全：后台维护线程使用独立 SQLite 连接（不经过 DatabaseManager 单例），
+        VACUUM 持排他锁期间主线程写会阻塞——主连接已设 busy_timeout=5000（db_manager.py）
+        等待锁释放后自动重试，避免 SQLITE_BUSY 偶发丢写。
         后台段失败仅记录日志，不改变 _initialized（同步段完成即可用）。
         """
         thread = threading.Thread(

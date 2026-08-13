@@ -51,6 +51,15 @@ class DatabaseManager:
             self._db_path = abs_db_path
             # 启用关键优化
             self._apply_performance_pragmas()
+            # [审查 #8r] 主连接写锁等待超时：后台独立连接 VACUUM 持排他锁期间，
+            # 主线程写若立即失败会抛 SQLITE_BUSY（写路径有 try/except 不崩溃但丢一次
+            # 保存）。5s 等待让主线程写事务在锁释放后自动重试，避免偶发丢写。
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.close()
+            except Exception as e:
+                logger.debug(f"[DatabaseManager] busy_timeout 设置异常（非致命）: {e}")
             return True
         except Exception as e:
             self._conn = None

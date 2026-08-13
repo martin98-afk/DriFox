@@ -235,6 +235,10 @@ class ChatBackend(QObject):
     # 插件热更新信号（watchfiles 检测到变更时触发）
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
 
+    # SubAgentManager 延迟创建完成信号（[审查 #8r Bug D] 窗口在 __init__ 时
+    # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
+    sub_agent_ready = pyqtSignal()
+
     # Hook 执行状态信号（event_name, status_message, is_start）
     # TODO: 当前没有 UI 订阅此信号。状态消息字段 (`statusMessage`) 已可解析但尚未展示。
     #       待 hook_setting_card 或状态栏/通知组件接入后即可移除此 TODO。
@@ -261,6 +265,12 @@ class ChatBackend(QObject):
         self._session_store = None
         self._history_manager = None
         self._current_project = None
+        # 子智能体默认模型解析回调（由 main_widget 设置；延迟创建 SubAgentManager 时不可重置）
+        self._subagent_model_resolver: Optional[Callable] = None
+        # 子智能体获取主会话历史的回调（由 main_widget 设置；SubAgentManager 创建后补传）
+        self._sub_agent_history_getter: Optional[Callable] = None
+        # ChatEngine 未创建前暂存的 UI 回调（延迟创建完成后补注册，见 set_all_callbacks）
+        self._pending_engine_callbacks: Dict[str, Callable] = {}
 
         # 配置回调
         self._get_model_config: Optional[Callable] = None
@@ -672,6 +682,8 @@ class ChatBackend(QObject):
                 backend=self,
             )
             logger.info("[ChatBackend] ChatEngine 延迟创建完成")
+            # [审查 #8r Bug C] 窗口构造期暂存的 UI 回调（流式更新等）补注册
+            self._flush_pending_engine_callbacks()
         except Exception as e:
             logger.error(f"[ChatBackend] ChatEngine 延迟创建失败: {e}")
 
@@ -696,7 +708,9 @@ class ChatBackend(QObject):
             return
         try:
             # SubAgentManager（依赖 tool_executor / agent_manager）
-            self._subagent_model_resolver: Optional[Callable] = None  # 由 main_widget 设置
+            # 注意：不得重置 _subagent_model_resolver / _sub_agent_history_getter——
+            # main_widget 在窗口构造时（initialize 返回后）已设置，此处延迟创建
+            # 若覆盖会导致子智能体默认模型/历史回调失效（审查 #8r Bug A/B）。
 
             def _get_subagent_llm_config():
                 from app.utils.config import Settings
@@ -717,17 +731,18 @@ class ChatBackend(QObject):
                 get_llm_config=_get_subagent_llm_config,
             )
             self._sub_agent_manager.set_session_store(self._session_store)
+            # 补传主会话历史 getter（main_widget 设置时 SubAgentManager 尚未创建）
+            if self._sub_agent_history_getter:
+                self._sub_agent_manager.set_history_getter(self._sub_agent_history_getter)
             # 设置给 ToolExecutor，让工具能访问子智能体
             self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
             # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
             self._sub_agent_manager.start_stall_detector()
+            # [审查 #8r Bug D] 通知窗口补连子智能体信号（窗口构造时 manager 为 None）
+            self.sub_agent_ready.emit()
             logger.info("[ChatBackend] SubAgentManager 延迟创建完成")
         except Exception as e:
             logger.error(f"[ChatBackend] SubAgentManager 延迟创建失败: {e}")
-
-        # 提供设置 history getter 的方法（由 main_widget 在初始化时调用）
-        self._sub_agent_history_getter = None
-        self._get_memory_context_getter = None
 
         # 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
         try:
@@ -769,12 +784,32 @@ class ChatBackend(QObject):
         """设置回调（代理到 ChatEngine）"""
         if self._chat_engine:
             self._chat_engine.set_callback(name, callback)
+        else:
+            # [审查 #8r Bug C] ChatEngine 延迟创建（400ms 批）期间 main_widget 同步
+            # 设置回调会静默丢弃 → 暂存，创建完成后补注册
+            self._pending_engine_callbacks[name] = callback
 
     def set_all_callbacks(self, callbacks: Dict[str, Callable]):
         """批量设置回调"""
         if self._chat_engine:
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
+        else:
+            # [审查 #8r Bug C] 同上：先缓存，ChatEngine 创建后统一补注册
+            self._pending_engine_callbacks.update(callbacks)
+
+    def _flush_pending_engine_callbacks(self):
+        """ChatEngine 创建完成后补注册暂存的 UI 回调（审查 #8r Bug C）"""
+        if self._chat_engine is None or not self._pending_engine_callbacks:
+            return
+        callbacks, self._pending_engine_callbacks = self._pending_engine_callbacks, {}
+        for name, callback in callbacks.items():
+            try:
+                self._chat_engine.set_callback(name, callback)
+            except Exception as e:
+                logger.error(f"[ChatBackend] 补注册引擎回调失败 {name}: {e}")
+        if callbacks:
+            logger.debug(f"[ChatBackend] 补注册 {len(callbacks)} 个暂存引擎回调")
 
     def _on_hook_messages_changed(self):
         """槽：hook 消息已添加到 session，通知 UI 刷新消息列表
