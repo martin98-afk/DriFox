@@ -235,6 +235,10 @@ class ChatBackend(QObject):
     # 插件热更新信号（watchfiles 检测到变更时触发）
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
 
+    # SubAgentManager 延迟创建完成信号（[审查 #8r Bug D] 窗口在 __init__ 时
+    # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
+    sub_agent_ready = pyqtSignal()
+
     # Hook 执行状态信号（event_name, status_message, is_start）
     # TODO: 当前没有 UI 订阅此信号。状态消息字段 (`statusMessage`) 已可解析但尚未展示。
     #       待 hook_setting_card 或状态栏/通知组件接入后即可移除此 TODO。
@@ -261,6 +265,12 @@ class ChatBackend(QObject):
         self._session_store = None
         self._history_manager = None
         self._current_project = None
+        # 子智能体默认模型解析回调（由 main_widget 设置；延迟创建 SubAgentManager 时不可重置）
+        self._subagent_model_resolver: Optional[Callable] = None
+        # 子智能体获取主会话历史的回调（由 main_widget 设置；SubAgentManager 创建后补传）
+        self._sub_agent_history_getter: Optional[Callable] = None
+        # ChatEngine 未创建前暂存的 UI 回调（延迟创建完成后补注册，见 set_all_callbacks）
+        self._pending_engine_callbacks: Dict[str, Callable] = {}
 
         # 配置回调
         self._get_model_config: Optional[Callable] = None
@@ -373,6 +383,14 @@ class ChatBackend(QObject):
         """
         后端初始化 - 自己创建所有组件（不依赖 Qt）
 
+        [PERF] 组件创建分两段：
+        - 同步段：首帧必需组件（SessionManager / HookManager / create_session /
+          AgentManager 骨架 / HistoryManager），setup_ui 的 get_primary_agents
+          等路径立即可用。
+        - 延迟段：非首帧必需组件（MemoryManager / ToolExecutor / ChatEngine /
+          GatewayEngine / SubAgentManager + MCP + git 预热）用 QTimer
+          0/200/400/600ms 错峰创建，失败仅记日志不影响 UI 主流程。
+
         Args:
             get_model_config: 获取模型配置的回调
             agent_manager: 已有的 AgentManager（可选）
@@ -384,6 +402,7 @@ class ChatBackend(QObject):
         logger.info("[ChatBackend] 初始化中...")
 
         self._get_model_config = get_model_config
+        self._initial_workdir = workdir
 
         # 1. 创建 SessionManager（延迟导入，减少 import 级联）
         from app.core.store import SessionStore
@@ -393,13 +412,7 @@ class ChatBackend(QObject):
         self._session_manager = SessionManager()
         logger.info(f"[ChatBackend-Perf] SessionManager 创建完成 ({(_time.perf_counter() - _t0) * 1000:.0f}ms)")
 
-        # 2. 创建 MemoryManager（全局单例，跨窗口共享）
-        from app.core.memory_manager import MemoryManagerCore
-
-        self._memory_manager = MemoryManagerCore.get_instance()
-        logger.info("[ChatBackend] MemoryManager 创建完成")
-
-        # 3. 创建 HookManager（必须在 create_session 之前）
+        # 2. 创建 HookManager（必须在 create_session 之前）
         from app.core.hook_manager import HookManager
 
         self._hook_manager = HookManager(self._thread_pool)
@@ -549,108 +562,28 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.error(f"[ChatBackend] Failed to load global hooks from {global_hooks_file}: {e}")
 
-        # 6. 创建 ToolExecutor（不传递 homepage，解耦 Qt）
-        from app.core.tool_executor import ToolExecutor
+        # 6. 初始化 PluginManager（系统 + 用户插件发现）+ AgentManager 重载
+        # [PERF] 保持同步：插件加载的 agent/命令是 setup_ui 立即需要的（get_primary_agents），
+        # 主题/LSP/热更新等非关键子步骤已在 _init_plugin_system 内部延迟（QTimer 2s）。
+        self._init_plugin_system()
 
-        self._tool_executor = ToolExecutor(workdir=workdir, backend=self)
-        self._tool_executor.set_memory_manager(self._memory_manager)
-        self._tool_executor.set_llm_config_getter(get_model_config)
-        self._tool_executor.set_agent_manager(self._agent_manager)
-        # 初始化团队上下文（窗口 ID + 当前 agent，供团队工具使用）
-        if self._tool_executor._builtin_tools:
-            agent_name = self._agent_manager.list_agents(include_hidden=False)
-            default_agent = agent_name[0].name if agent_name else "build"
-            self._tool_executor._builtin_tools.set_team_context(self._window_id, default_agent)
-        # 设置 AgentManager 的 builtin_tools 引用（用于获取 MCP 工具 schema）
-        self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
-        # 设置关键文档仓储
-        if self._memory_manager and self._memory_manager.key_documents:
-            self._tool_executor.set_key_documents_repo(
-                self._memory_manager.key_documents,
-                "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
-            )
-        logger.info("[ChatBackend] ToolExecutor 创建完成")
-
-        # 7. 创建 ChatEngine（暂时不传 get_memory_context，后面通过 setter 设置）
-        from app.core.engines.ui import ChatEngine
-
-        self._chat_engine = ChatEngine(
-            session_manager=self._session_manager,
-            get_model_config=get_model_config,
-            tool_executor=self._tool_executor,
-            agent_manager=self._agent_manager,
-            get_chat_cards=getattr(self, "_build_chat_cards_context", None),
-            backend=self,  # 暂时设为 None，后面通过 setter 设置
-        )
-        logger.info("[ChatBackend] ChatEngine 创建完成")
-
-        # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
-        self._hook_messages_updated.connect(self._on_hook_messages_changed)
-
-        # 创建 GatewayEngine（全局单例，多个窗口共享）
-        from app.core.engines.gateway import GatewayEngine
-
-        self._gateway_engine = GatewayEngine.get_instance(
-            get_model_config=get_model_config,
-            tool_executor=self._tool_executor,
-            agent_manager=self._agent_manager,
-            session_store=self._session_store,
-        )
-        logger.info("[ChatBackend] GatewayEngine 创建完成")
-
-        # 创建 SubAgentManager（管理子智能体任务）
-        # 使用包装的 get_llm_config：优先使用子智能体默认模型，回退到主模型
-        self._subagent_model_resolver: Optional[Callable] = None  # 由 main_widget 设置
-
-        def _get_subagent_llm_config():
-            from app.utils.config import Settings
-
-            cfg = Settings.get_instance()
-            saved = cfg.llm_subagent_default_model.value
-            if saved and self._subagent_model_resolver:
-                resolved = self._subagent_model_resolver(saved)
-                if resolved:
-                    return resolved
-            return get_model_config()
-
-        from app.core.workers.subagent_worker import SubAgentManager
-
-        self._sub_agent_manager = SubAgentManager(
-            agent_manager=self._agent_manager,
-            tool_executor=self._tool_executor,
-            get_llm_config=_get_subagent_llm_config,
-        )
-        self._sub_agent_manager.set_session_store(self._session_store)
-        # 设置给 ToolExecutor，让工具能访问子智能体
-        self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
-        # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
-        self._sub_agent_manager.start_stall_detector()
-        logger.info("[ChatBackend] SubAgentManager 创建完成（Stall 检测器已启动）")
-
-        # 提供设置 history getter 的方法（由 main_widget 在初始化时调用）
-        self._sub_agent_history_getter = None
-
-        self._get_memory_context_getter = None
-
+        # 7. HistoryManager（全局单例）
+        # [PERF] 保持同步：main_widget 初始化时直接缓存 self.history_manager（92 处引用），
+        # 延迟会导致历史面板引用 None 而静默失效。
         from app.utils.history_manager import HistoryManager
 
         self._history_manager = HistoryManager.get_instance()
 
-        # 8. 初始化 PluginManager（系统 + 用户插件发现）
-        self._init_plugin_system()
+        # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
+        self._hook_messages_updated.connect(self._on_hook_messages_changed)
 
-        # 9. 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
-        self._discover_mcp_servers()
-
-        # 10. 初始化 MCP 连接
-        self._init_mcp_connections()
-
-        # 后台预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）
-        project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
-        self._warm_git_cache(project_root)
+        # 8. 非首帧必需组件：QTimer 错峰创建（Memory/ToolExecutor/Engine/SubAgent/MCP/git）
+        # [PERF] 延迟段组件失败仅记日志，不阻塞 UI 主流程；发送消息路径通过
+        # ensure_deferred_components() 同步补建兜底。
+        self._defer_non_critical_components()
 
         self._initialized = True
-        logger.info("[ChatBackend] 初始化完成")
+        logger.info("[ChatBackend] 初始化完成（同步段）")
 
         # 连接 Gateway 信号（跨线程安全，每个窗口实例连接自己的回调）
         self.gateway_input_received.connect(self._on_gateway_input)
@@ -667,16 +600,216 @@ class ChatBackend(QObject):
         else:
             self._init_gateway_async()
 
+    # ========== 非首帧必需组件：QTimer 错峰创建 ==========
+
+    def _defer_non_critical_components(self):
+        """[PERF] 非首帧必需组件用 QTimer 错峰创建（0/200/400/600ms）
+
+        首帧路径（OpenAIChatToolWindow.__init__）只保留 SessionManager /
+        HookManager / create_session / AgentManager / HistoryManager，
+        其余组件延迟到事件循环就绪后分批构建，缩短窗口显示前的主线程阻塞：
+
+        - 0ms:   MemoryManagerCore（全局单例，ToolExecutor 依赖）
+        - 200ms: ToolExecutor（app/tools 级联 import 8 模块 + LSP + codegraph，
+                实测 import 重头，最值得延迟）
+        - 400ms: ChatEngine + GatewayEngine（依赖 tool_executor）
+        - 600ms: SubAgentManager + MCP 连接 + git 缓存预热（依赖 tool_executor）
+
+        失败处理：各批 try/except 只记日志，不抛到事件循环；
+        UI 使用处均有 None 守卫（tool_executor/chat_engine 等访问都判空）。
+        发送消息路径由 main_widget 调 ensure_deferred_components() 同步兜底。
+        """
+        from PyQt5.QtCore import QTimer
+
+        QTimer.singleShot(0, self._deferred_create_memory_manager)
+        QTimer.singleShot(200, self._deferred_create_tool_executor)
+        QTimer.singleShot(400, self._deferred_create_engines)
+        QTimer.singleShot(600, self._deferred_create_sub_agent_and_misc)
+
+    def _deferred_create_memory_manager(self):
+        """0ms 批：MemoryManagerCore（全局单例，跨窗口共享）"""
+        try:
+            from app.core.memory_manager import MemoryManagerCore
+
+            self._memory_manager = MemoryManagerCore.get_instance()
+            logger.debug("[ChatBackend] MemoryManager 延迟创建完成")
+        except Exception as e:
+            logger.error(f"[ChatBackend] MemoryManager 延迟创建失败: {e}")
+
+    def _deferred_create_tool_executor(self):
+        """200ms 批：ToolExecutor（含 app.tools 级联 import）"""
+        if self._tool_executor is not None:
+            return
+        try:
+            from app.core.tool_executor import ToolExecutor
+
+            self._tool_executor = ToolExecutor(workdir=self._initial_workdir, backend=self)
+            if self._memory_manager:
+                self._tool_executor.set_memory_manager(self._memory_manager)
+            self._tool_executor.set_llm_config_getter(self._get_model_config)
+            self._tool_executor.set_agent_manager(self._agent_manager)
+            # 初始化团队上下文（窗口 ID + 当前 agent，供团队工具使用）
+            if self._tool_executor._builtin_tools:
+                agent_name = self._agent_manager.list_agents(include_hidden=False)
+                default_agent = agent_name[0].name if agent_name else "build"
+                self._tool_executor._builtin_tools.set_team_context(self._window_id, default_agent)
+            # 设置 AgentManager 的 builtin_tools 引用（用于获取 MCP 工具 schema）
+            self._agent_manager._builtin_tools = self._tool_executor._builtin_tools
+            # 设置关键文档仓储
+            if self._memory_manager and self._memory_manager.key_documents:
+                self._tool_executor.set_key_documents_repo(
+                    self._memory_manager.key_documents,
+                    "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
+                )
+            logger.info("[ChatBackend] ToolExecutor 延迟创建完成")
+        except Exception as e:
+            logger.error(f"[ChatBackend] ToolExecutor 延迟创建失败: {e}")
+
+    def _deferred_create_engines(self):
+        """400ms 批：ChatEngine + GatewayEngine（依赖 tool_executor）"""
+        if self._tool_executor is None:
+            logger.warning("[ChatBackend] ToolExecutor 未创建，跳过引擎延迟创建")
+            return
+        try:
+            from app.core.engines.ui import ChatEngine
+
+            self._chat_engine = ChatEngine(
+                session_manager=self._session_manager,
+                get_model_config=self._get_model_config,
+                tool_executor=self._tool_executor,
+                agent_manager=self._agent_manager,
+                get_chat_cards=getattr(self, "_build_chat_cards_context", None),
+                backend=self,
+            )
+            logger.info("[ChatBackend] ChatEngine 延迟创建完成")
+            # [审查 #8r Bug C] 窗口构造期暂存的 UI 回调（流式更新等）补注册
+            self._flush_pending_engine_callbacks()
+        except Exception as e:
+            logger.error(f"[ChatBackend] ChatEngine 延迟创建失败: {e}")
+
+        try:
+            # 创建 GatewayEngine（全局单例，多个窗口共享）
+            from app.core.engines.gateway import GatewayEngine
+
+            self._gateway_engine = GatewayEngine.get_instance(
+                get_model_config=self._get_model_config,
+                tool_executor=self._tool_executor,
+                agent_manager=self._agent_manager,
+                session_store=self._session_store,
+            )
+            logger.info("[ChatBackend] GatewayEngine 延迟创建完成")
+        except Exception as e:
+            logger.error(f"[ChatBackend] GatewayEngine 延迟创建失败: {e}")
+
+    def _deferred_create_sub_agent_and_misc(self):
+        """600ms 批：SubAgentManager + MCP 连接 + git 缓存预热"""
+        if self._tool_executor is None:
+            logger.warning("[ChatBackend] ToolExecutor 未创建，跳过 SubAgentManager 延迟创建")
+            return
+        try:
+            # SubAgentManager（依赖 tool_executor / agent_manager）
+            # 注意：不得重置 _subagent_model_resolver / _sub_agent_history_getter——
+            # main_widget 在窗口构造时（initialize 返回后）已设置，此处延迟创建
+            # 若覆盖会导致子智能体默认模型/历史回调失效（审查 #8r Bug A/B）。
+
+            def _get_subagent_llm_config():
+                from app.utils.config import Settings
+
+                cfg = Settings.get_instance()
+                saved = cfg.llm_subagent_default_model.value
+                if saved and self._subagent_model_resolver:
+                    resolved = self._subagent_model_resolver(saved)
+                    if resolved:
+                        return resolved
+                return self._get_model_config()
+
+            from app.core.workers.subagent_worker import SubAgentManager
+
+            self._sub_agent_manager = SubAgentManager(
+                agent_manager=self._agent_manager,
+                tool_executor=self._tool_executor,
+                get_llm_config=_get_subagent_llm_config,
+            )
+            self._sub_agent_manager.set_session_store(self._session_store)
+            # 补传主会话历史 getter（main_widget 设置时 SubAgentManager 尚未创建）
+            if self._sub_agent_history_getter:
+                self._sub_agent_manager.set_history_getter(self._sub_agent_history_getter)
+            # 设置给 ToolExecutor，让工具能访问子智能体
+            self._tool_executor.set_sub_agent_manager(self._sub_agent_manager)
+            # 启动日志活力度 stall 检测（默认 180s 无日志输出视为卡死）
+            self._sub_agent_manager.start_stall_detector()
+            # [审查 #8r Bug D] 通知窗口补连子智能体信号（窗口构造时 manager 为 None）
+            self.sub_agent_ready.emit()
+            logger.info("[ChatBackend] SubAgentManager 延迟创建完成")
+        except Exception as e:
+            logger.error(f"[ChatBackend] SubAgentManager 延迟创建失败: {e}")
+
+        # 自动发现并合并其他来源的 MCP 服务器配置（仅首次）
+        try:
+            self._discover_mcp_servers()
+        except Exception as e:
+            logger.error(f"[ChatBackend] MCP 自动发现失败: {e}")
+
+        # 初始化 MCP 连接（后台异步，不阻塞 UI）
+        try:
+            self._init_mcp_connections()
+        except Exception as e:
+            logger.error(f"[ChatBackend] MCP 连接失败: {e}")
+
+        # 后台预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）
+        try:
+            project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
+            self._warm_git_cache(project_root)
+        except Exception as e:
+            logger.error(f"[ChatBackend] git 缓存预热失败: {e}")
+
+    def ensure_deferred_components(self):
+        """发送消息等关键路径：同步补建延迟组件（QTimer 未触发时兜底）
+
+        用户可能在 600ms 延迟窗口内发起首条消息，此时 chat_engine 尚未创建，
+        发送会静默失败。此方法按依赖顺序同步创建缺失组件，保证发送路径可用。
+        """
+        if self._chat_engine is not None:
+            return
+        if self._memory_manager is None:
+            self._deferred_create_memory_manager()
+        if self._tool_executor is None:
+            self._deferred_create_tool_executor()
+        if self._chat_engine is None:
+            self._deferred_create_engines()
+        if self._sub_agent_manager is None:
+            self._deferred_create_sub_agent_and_misc()
+
     def set_callback(self, name: str, callback: Callable):
         """设置回调（代理到 ChatEngine）"""
         if self._chat_engine:
             self._chat_engine.set_callback(name, callback)
+        else:
+            # [审查 #8r Bug C] ChatEngine 延迟创建（400ms 批）期间 main_widget 同步
+            # 设置回调会静默丢弃 → 暂存，创建完成后补注册
+            self._pending_engine_callbacks[name] = callback
 
     def set_all_callbacks(self, callbacks: Dict[str, Callable]):
         """批量设置回调"""
         if self._chat_engine:
             for name, callback in callbacks.items():
                 self._chat_engine.set_callback(name, callback)
+        else:
+            # [审查 #8r Bug C] 同上：先缓存，ChatEngine 创建后统一补注册
+            self._pending_engine_callbacks.update(callbacks)
+
+    def _flush_pending_engine_callbacks(self):
+        """ChatEngine 创建完成后补注册暂存的 UI 回调（审查 #8r Bug C）"""
+        if self._chat_engine is None or not self._pending_engine_callbacks:
+            return
+        callbacks, self._pending_engine_callbacks = self._pending_engine_callbacks, {}
+        for name, callback in callbacks.items():
+            try:
+                self._chat_engine.set_callback(name, callback)
+            except Exception as e:
+                logger.error(f"[ChatBackend] 补注册引擎回调失败 {name}: {e}")
+        if callbacks:
+            logger.debug(f"[ChatBackend] 补注册 {len(callbacks)} 个暂存引擎回调")
 
     def _on_hook_messages_changed(self):
         """槽：hook 消息已添加到 session，通知 UI 刷新消息列表
@@ -859,6 +992,14 @@ class ChatBackend(QObject):
     # ========== 插件热更新（watchfiles） ==========
 
     _plugin_watcher_started = False  # 类级别标志，确保全局只启动一次
+    # 🚀 P5e：gitee 同步抑制窗口——config_sync 下载解压 user-custom 期间抑制
+    # 本 watcher 热重载链（backend 独立 watchfiles 线程），避免与 config_sync
+    # 应用链（Settings 写回 + 主题刷新）两条主线程重活链同时爆发叠加阻塞。
+    # _suppress_watcher_until: 抑制截止时间戳（0=不抑制）；
+    # _watcher_pending_reload: 抑制窗口内被跳过的 user-custom 变更标志，
+    # 由 config_sync 下载完成后兜底合并触发一次 reload_plugin_subsystems。
+    _suppress_watcher_until = 0.0
+    _watcher_pending_reload = False
     # ★ T3 修复：活跃 backend 实例集合（插件热更新广播目标）
     # 根因：watcher 线程是类级单例（_plugin_watcher_started），只有首个启动
     # watcher 的 backend 连接了 _hot_reload_requested → _on_hot_reload_requested
@@ -1040,6 +1181,23 @@ class ChatBackend(QObject):
                         relevant_changes.append((change_type, change_path))
 
                     if not relevant_changes:
+                        continue
+
+                    # 🚀 P5e：gitee 同步（config_sync 下载解压 user-custom）期间抑制
+                    # watcher 热重载链。同步窗口内 user-custom 变更不 emit（跳过），
+                    # 仅标记 pending，由 config_sync 下载完成 + Settings 重载后合并
+                    # 触发一次 reload_plugin_subsystems 兜底加载——避免 watcher 链
+                    # （rescan + agents 重载 + reload_all_commands ~2500ms + LSP 子进程
+                    # + plugin_changed 广播）与 config_sync 应用链同时爆发叠加阻塞主线程。
+                    # 抑制窗口外行为不变（正常热重载）；窗口内事件由 pending 兜底不丢。
+                    if time.time() < ChatBackend._suppress_watcher_until and any(
+                        "user-custom" in str(cp).lower() for _, cp in relevant_changes
+                    ):
+                        ChatBackend._watcher_pending_reload = True
+                        logger.info(
+                            f"[ChatBackend] gitee 同步抑制窗口内收到 user-custom 变更 "
+                            f"({len(relevant_changes)} 处)，标记 pending 待合并重载"
+                        )
                         continue
 
                     current_prefixes = _prefixes_ref[0]
@@ -2410,6 +2568,9 @@ class ChatBackend(QObject):
 
     def send_message_to_engine(self, text: str, **kwargs) -> bool:
         """发送消息到引擎，支持 _user_content（multimodal list）"""
+        # [PERF] 延迟组件兜底：若用户赶在 QTimer 错峰窗口内发送，
+        # 同步补建 ToolExecutor/ChatEngine，避免首条消息静默失败。
+        self.ensure_deferred_components()
         if self._chat_engine:
             return self._chat_engine.send_message(text, **kwargs)
         return False

@@ -14,6 +14,7 @@
 """
 
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,7 +98,22 @@ class SessionStore:
                 if not instance.compact_database(max_pages=1000):
                     break
 
-    def _check_and_repair_database(self):
+    def _exec(self, conn: Optional[sqlite3.Connection], sql: str, params: tuple = ()) -> Tuple[bool, Any]:
+        """在指定连接执行 SQL，返回 (success, result)；conn=None 时用主连接
+
+        后台维护线程传独立连接（非 DatabaseManager 共享连接），避免与主线程
+        close() 并发操作同一连接导致 C 层崩溃；统一返回 (bool, result) 接口。
+        """
+        if conn is None:
+            return self._db.execute_sql(sql, params)
+        try:
+            cursor = conn.execute(sql, params)
+            rows = cursor.fetchall()
+            return True, [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            return False, str(e)
+
+    def _check_and_repair_database(self, conn: Optional[sqlite3.Connection] = None):
         """检查并修复损坏的 SQLite 数据库
 
         PyInstaller 打包后运行时可能遇到数据库损坏问题：
@@ -112,11 +128,11 @@ class SessionStore:
 
         优化：如果上次正常关闭，跳过耗时较长的 PRAGMA integrity_check
         """
-        if not self._db or not self._db.is_connected:
+        if conn is None and (not self._db or not self._db.is_connected):
             logger.warning("[SessionStore] 数据库未连接，跳过检查")
             return
 
-        db_path = Path(self._db.db_path)
+        db_path = Path(self._db_path)
 
         # 检查是否为正常关闭后的首次启动
         clean_shutdown = False
@@ -130,7 +146,7 @@ class SessionStore:
 
         try:
             # 检查 WAL 模式
-            success, result = self._db.execute_sql("PRAGMA journal_mode")
+            success, result = self._exec(conn, "PRAGMA journal_mode")
             if not success:
                 logger.warning("[SessionStore] 无法读取 journal_mode")
                 return
@@ -143,7 +159,7 @@ class SessionStore:
             if journal_mode == "wal":
                 # WAL 模式下检查是否需要同步
                 try:
-                    self._db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+                    self._exec(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
                     logger.debug("[SessionStore] WAL 检查点执行完成")
                 except Exception as e:
                     logger.warning(f"[SessionStore] WAL 检查点失败: {e}")
@@ -164,12 +180,12 @@ class SessionStore:
 
             # 尝试执行完整性检查
             try:
-                success, result = self._db.execute_sql("PRAGMA integrity_check")
+                success, result = self._exec(conn, "PRAGMA integrity_check")
                 if success and result:
                     check_result = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
                     if check_result != "ok":
                         logger.warning(f"[SessionStore] 数据库完整性检查失败: {check_result}")
-                        self._repair_database()
+                        self._repair_database(conn)
                     else:
                         logger.debug("[SessionStore] 数据库完整性检查通过")
             except Exception as e:
@@ -178,27 +194,27 @@ class SessionStore:
         except Exception as e:
             logger.warning(f"[SessionStore] 数据库检查异常（继续初始化）: {e}")
 
-    def _repair_database(self):
+    def _repair_database(self, conn: Optional[sqlite3.Connection] = None):
         """尝试修复损坏的数据库"""
         try:
             # 切换为 DELETE 模式并执行 VACUUM
-            self._db.execute_sql("PRAGMA journal_mode=DELETE")
-            self._db.execute_sql("VACUUM")
+            self._exec(conn, "PRAGMA journal_mode=DELETE")
+            self._exec(conn, "VACUUM")
             logger.info("[SessionStore] 数据库修复成功")
         except Exception as e:
             logger.error(f"[SessionStore] 数据库修复失败: {e}")
 
-    def _check_auto_vacuum_status(self):
+    def _check_auto_vacuum_status(self, conn: Optional[sqlite3.Connection] = None):
         """检测 auto_vacuum=INCREMENTAL 是否对当前数据库真正生效
 
         SQLite 限制: 已存在的数据库必须先 VACUUM 一次, INCREMENTAL 模式才会真正
         开始跟踪历史 freelist. 如果未生效, 启动时打印一次性提示, 引导用户跑一次
         VACUUM (例如执行 .drifox/_vacuum.py 脚本).
         """
-        if not self._db or not self._db.is_connected:
+        if conn is None and (not self._db or not self._db.is_connected):
             return
         try:
-            success, result = self._db.execute_sql("PRAGMA auto_vacuum")
+            success, result = self._exec(conn, "PRAGMA auto_vacuum")
             if not success or not result:
                 return
             current = list(result[0].values())[0] if isinstance(result[0], dict) else str(result[0])
@@ -206,11 +222,11 @@ class SessionStore:
             # Python sqlite3 driver 可能返回 int 2 而非字符串 'incremental'
             if str(current).lower() == "incremental" or current == 2:
                 # 检查 freelist 是否还有很多 (> 50MB 提示用户首次 VACUUM)
-                success2, result2 = self._db.execute_sql("PRAGMA freelist_count")
+                success2, result2 = self._exec(conn, "PRAGMA freelist_count")
                 if success2 and result2:
                     freelist = list(result2[0].values())[0] if isinstance(result2[0], dict) else 0
                     page_size = 4096
-                    success3, result3 = self._db.execute_sql("PRAGMA page_size")
+                    success3, result3 = self._exec(conn, "PRAGMA page_size")
                     if success3 and result3:
                         page_size = list(result3[0].values())[0] or 4096
                     freelist_mb = freelist * page_size / 1024 / 1024
@@ -229,6 +245,63 @@ class SessionStore:
                 )
         except Exception as e:
             logger.debug(f"[SessionStore] auto_vacuum 状态检测失败: {e}")
+
+    def _start_background_maintenance(self, file_auto_vacuum: Optional[str]):
+        """将耗时维护移出启动关键路径，后台线程执行（不阻塞 UI 首帧）：
+
+        1. WAL checkpoint + integrity_check（非正常关闭时全库检查，大库 100ms-1s+）
+        2. 一次性 VACUUM 永久激活 INCREMENTAL（重写库文件，秒级，老库必命中）
+        3. auto_vacuum 生效状态检测
+
+        并发安全：后台维护线程使用独立 SQLite 连接（不经过 DatabaseManager 单例），
+        VACUUM 持排他锁期间主线程写会阻塞——主连接已设 busy_timeout=5000（db_manager.py）
+        等待锁释放后自动重试，避免 SQLITE_BUSY 偶发丢写。
+        后台段失败仅记录日志，不改变 _initialized（同步段完成即可用）。
+        """
+        thread = threading.Thread(
+            target=self._background_maintenance,
+            args=(file_auto_vacuum,),
+            name="SessionStore-maintenance",
+            daemon=True,
+        )
+        thread.start()
+
+    def _background_maintenance(self, file_auto_vacuum: Optional[str]):
+        """后台维护线程体：完整性检查 → 一次性 VACUUM 激活 INCREMENTAL → 状态检测
+
+        使用独立 sqlite3 连接（非 DatabaseManager 共享连接）：避免与主线程
+        close() 并发操作同一连接导致 C 层崩溃；busy_timeout 兜底 VACUUM
+        与主连接写冲突（等待而非报错）。失败仅记录日志，不改变 _initialized。
+        """
+        try:
+            conn = sqlite3.connect(self._db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+
+                # 1. 完整性检查与自动修复（含 WAL checkpoint，非正常关闭时耗时）
+                self._check_and_repair_database(conn)
+
+                # 2. 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
+                #    (迁移已在同步段完成，VACUUM 基于完整 schema 重建)
+                if file_auto_vacuum and file_auto_vacuum != "incremental":
+                    logger.info(
+                        f"[SessionStore] 文件头 auto_vacuum={file_auto_vacuum}, "
+                        f"后台执行一次性 VACUUM 永久激活 INCREMENTAL..."
+                    )
+                    try:
+                        self._exec(conn, "PRAGMA auto_vacuum=INCREMENTAL")
+                        self._exec(conn, "VACUUM")
+                        logger.info("[SessionStore] INCREMENTAL 模式已永久激活")
+                    except Exception as _e:
+                        logger.warning(f"[SessionStore] 首次激活 INCREMENTAL 失败: {_e}")
+
+                # 3. 检测 auto_vacuum 是否对当前数据库生效
+                self._check_auto_vacuum_status(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"[SessionStore] 后台维护异常（不影响数据库使用）: {e}")
 
     def compact_database(self, max_pages: int = 1000) -> bool:
         """增量回收空闲页 (PRAGMA incremental_vacuum)
@@ -280,11 +353,6 @@ class SessionStore:
                 # 使用 DatabaseManager（单例模式）
                 self._db = DatabaseManager()
                 self._db.connect(self._db_path)
-
-                # ========== 数据库完整性检查与自动修复 ==========
-                # 必须在连接之后执行，因为需要 DatabaseManager 实例来修复
-                self._check_and_repair_database()
-                # ================================================
 
                 # ========== 读取文件头真实的 auto_vacuum 值 ==========
                 # 必须在设置任何 PRAGMA 之前读取，否则读到的是当前连接的值而非文件头
@@ -417,25 +485,14 @@ class SessionStore:
                 self._input_history_repo = InputHistoryRepository(self._db)
                 self._input_history_repo.create_table()
 
-                # 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
-                # (必须在所有建表/迁移完成后执行，确保 VACUUM 基于完整 schema 重建)
-                if _file_auto_vacuum and _file_auto_vacuum != "incremental":
-                    logger.info(
-                        f"[SessionStore] 文件头 auto_vacuum={_file_auto_vacuum}, "
-                        f"执行一次性 VACUUM 永久激活 INCREMENTAL..."
-                    )
-                    try:
-                        self._db.execute_sql("PRAGMA auto_vacuum=INCREMENTAL")
-                        self._db.execute_sql("VACUUM")
-                        logger.info("[SessionStore] INCREMENTAL 模式已永久激活")
-                    except Exception as _e:
-                        logger.warning(f"[SessionStore] 首次激活 INCREMENTAL 失败: {_e}")
-
-                # 检测 auto_vacuum 是否对当前数据库生效
-                self._check_auto_vacuum_status()
-
+                # 同步段完成：表结构/索引/迁移就绪，UI 即可使用
                 self._initialized = True
                 logger.info("[SessionStore] 初始化完成（仓储模式）")
+
+                # 耗时维护移出启动关键路径，后台线程执行：
+                # 完整性检查/WAL checkpoint + 一次性 VACUUM 激活 INCREMENTAL + 状态检测
+                # （失败仅记录日志，不影响 _initialized）
+                self._start_background_maintenance(_file_auto_vacuum)
 
             except Exception as e:
                 logger.error(f"[SessionStore] 初始化失败: {e}")

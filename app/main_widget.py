@@ -1326,6 +1326,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._init_sub_agent_signals()
         # 设置子智能体获取主智能体历史消息的回调
         self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
+        # [审查 #8r Bug D] SubAgentManager 延迟创建（600ms 批）完成前信号连接会跳过；
+        # 监听 sub_agent_ready 信号补连 + 补传历史 getter
+        self.backend.sub_agent_ready.connect(self._on_sub_agent_ready)
 
         # 初始化历史管理器
         self._project_label.setText(self._current_project)
@@ -1452,6 +1455,20 @@ class OpenAIChatToolWindow(ToolWindow):
             sub_agent_mgr.task_finished.connect(self._on_sub_agent_task_finished)
             # ★ T24：子智能体 ask 权限请求 → 主线程弹窗（用户允许/拒绝）
             sub_agent_mgr.permission_requested.connect(self._on_subagent_permission_requested)
+
+    def _on_sub_agent_ready(self):
+        """[审查 #8r Bug D] SubAgentManager 延迟创建完成后的补连入口
+
+        backend 的 SubAgentManager 在 QTimer 600ms 批延迟创建；窗口 __init__
+        同步调用 _init_sub_agent_signals 时 manager 为 None 会静默跳过，
+        导致子智能体任务信号/权限弹窗永久缺失。此槽在 sub_agent_ready
+        信号发出时重连，并补传历史 getter（backend 侧也会补传，双保险）。
+        """
+        try:
+            self._init_sub_agent_signals()
+            self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
+        except Exception as e:
+            logger.warning(f"[MainWidget] SubAgent 补连失败: {e}")
 
     def _init_llm_api_service(self):
         """初始化 LLM API 服务"""

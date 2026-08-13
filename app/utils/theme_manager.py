@@ -42,6 +42,8 @@ class ThemeManager:
         self._themes: Dict[str, dict] = {}
         # 延迟加载：首次访问主题数据时再扫描，避免 import 时触发文件 I/O
         self._themes_loaded = False
+        # 🚀 P5c：主题源目录 mtime 指纹缓存（reload 短路用，None=未计算）
+        self._themes_fingerprint: Optional[str] = None
 
     # ── 扫描加载 ──────────────────────────────────────────
 
@@ -89,6 +91,8 @@ class ThemeManager:
             return
         self._themes_loaded = True
         self._load_themes()
+        # 记录首次加载后的指纹，供 reload() 短路比对（否则 reload 首次必重扫）
+        self._themes_fingerprint = self._compute_fingerprint()
 
     def _load_plugin_themes_directly(self):
         """直接扫描所有插件目录下的 themes/ 文件夹
@@ -460,19 +464,38 @@ class ThemeManager:
                 logger.warning(f"[ThemeManager] dispatch_refresh error: {e}")
         self._refresh_targets = alive
 
-    def reload(self):
+    def reload(self, force: bool = False):
         """重新加载所有主题（修改文件后调用）
 
         比对当前活动主题在重载前后是否变化，只有当前主题确实被修改/删除
         时才触发 UI 全量刷新（dispatch_refresh），避免热重载无关主题时
         不必要地重绘整个界面。
+
+        🚀 P5c：mtime 指纹缓存——重扫 4 来源（内置/插件直扫/PluginManager/
+        用户主题）前先计算目录指纹（主题文件路径+mtime_ns 哈希），与上次
+        重载结果比对：
+        - 指纹未变（gitee 同步等场景触发 reload，但主题文件未被改动）
+          → 直接短路返回，复用已有 _themes，跳过重扫与 UI 全量刷新
+          （reload 100-300ms → ~1ms）
+        - 指纹变化（主题文件新增/修改/删除）→ 正常重扫 + 刷新
+        - force=True（手动切主题等需要强制重扫的场景）→ 绕过指纹缓存
+
+        边界：mtime_ns 纳秒级校验，主题文件真实变化必然引起指纹变化；
+        首次加载（_themes 为空）不短路，保证数据就绪。
         """
+        # 指纹未变化且已有主题数据 → 直接复用，跳过重扫与 UI 刷新
+        if not force and self._themes and self._compute_fingerprint() == self._themes_fingerprint:
+            logger.debug("[ThemeManager] reload: 主题指纹未变化，跳过重扫与 UI 刷新")
+            return
+
         # 重载前：保存当前主题的快照，用于后续比对
         old_id = self.get_current_theme_id()
         old_data = self.get_theme(old_id)
 
         self._themes.clear()
         self._load_themes()
+        # 记录本次重载后的指纹，供下次 reload 比对
+        self._themes_fingerprint = self._compute_fingerprint()
         # 清除浅色检测缓存
         self._cached_light_check = (None, None)
 
@@ -488,6 +511,57 @@ class ThemeManager:
                 cb()
             except Exception as e:
                 logger.warning(f"[ThemeManager] reload callback error: {e}")
+
+    def _compute_fingerprint(self) -> str:
+        """计算主题源目录指纹：所有主题 YAML 的 (路径, mtime_ns) 排序哈希
+
+        与 _load_themes 的 4 个来源一一对应：
+        1. 内置主题目录（plugins/system/themes）
+        2. 插件主题直扫（plugins/*/themes，系统 + 用户插件目录）
+        3. PluginManager 提供的已启用插件主题路径
+        4. 用户主题目录（~/.drifox/themes）
+
+        mtime_ns 纳秒精度：主题文件任何真实改动（增/删/改）都会改变指纹；
+        仅重扫 stat 不读文件内容，比 YAML 解析快两个数量级。
+        """
+        import hashlib
+
+        from app.utils.utils import get_app_data_dir
+
+        h = hashlib.md5()
+        theme_dirs = {_BUILTIN_THEMES_DIR}
+
+        # 2. 插件主题直扫：系统 + 用户插件目录下所有插件子目录的 themes/
+        for base in (Path(__file__).parent.parent.parent / "plugins", get_app_data_dir() / "plugins"):
+            if base.is_dir():
+                for entry in sorted(base.iterdir()):
+                    if entry.is_dir():
+                        td = entry / "themes"
+                        if td.is_dir():
+                            theme_dirs.add(td)
+
+        # 3. PluginManager 已启用插件主题路径
+        try:
+            from app.core.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.is_initialized():
+                theme_dirs.update(Path(p) for p in pm.get_theme_paths())
+        except Exception:
+            pass
+
+        # 4. 用户主题目录
+        theme_dirs.add(get_app_data_dir() / "themes")
+
+        for base in sorted(theme_dirs, key=str):
+            if not base.is_dir():
+                continue
+            for yaml_file in sorted(base.rglob("*.yaml")) + sorted(base.rglob("*.yml")):
+                try:
+                    h.update(f"{yaml_file}:{yaml_file.stat().st_mtime_ns}".encode("utf-8"))
+                except OSError:
+                    pass  # 文件被并发删除等竞态 → 跳过，指纹可能含噪，重扫兜底
+        return h.hexdigest()
 
     def get_user_themes_dir(self) -> Path:
         """获取用户主题目录"""

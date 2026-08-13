@@ -675,7 +675,10 @@ class CardContainer(QWidget):
                 #    addStretch 吞掉空白的 bug。三者缺一不可，仅锁 max/min 但
                 #    不重分配 splitter 仍会留下槽位外空白。
                 self._last_expand_target = natural_h
-                min_floor = max(natural_h, self._dock_min())
+                # min 严格 = natural_h，不套 _dock_min 下限：follow_content
+                # 语义是"容器高度 = 卡片内容"，内容小（如命令卡片过滤剩 1 项）
+                # 时容器就该小；_dock_min 兜底会把容器撑高 → 卡片下方留白。
+                min_floor = natural_h
 
                 def _lock_to_content():
                     self._set_axis_max(natural_h)  # 显式锁 max，覆盖小差异路径
