@@ -759,6 +759,8 @@ class ChatBackend(QObject):
         # 后台预热 git 缓存，避免 create_session 时同步执行 git 子进程（~1.1s）
         try:
             project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
+            if project_root is None:
+                project_root = ""
             self._warm_git_cache(project_root)
         except Exception as e:
             logger.error(f"[ChatBackend] git 缓存预热失败: {e}")
@@ -2750,7 +2752,11 @@ class ChatBackend(QObject):
         # 【修复】未设置项目工作目录时直接留空，不要回退到 os.getcwd()。
         # 之前用 os.getcwd() 兜底，会让 hook（如 format_memory_context）把
         # 当前进程工作目录误当成"项目根目录"显示出来，与"未配置就不显示"的设计不符。
+        # get_workdir() 在用户显式设置前返回 None（初始化默认兜底不算用户设置），
+        # 这里统一转为空串，避免把软件启动路径注入 project_root。
         project_root = self._tool_executor.get_workdir() if self._tool_executor else ""
+        if project_root is None:
+            project_root = ""
 
         ctx: Dict[str, Any] = {
             "project_root": project_root,

@@ -48,6 +48,12 @@ class ToolExecutor:
         self._builtin_tools: Optional[BuiltinTools] = None
         # P002: 初始就用默认路径兜底，避免 self._workdir 与 _builtin_tools.workdir 不一致
         self._workdir = workdir or self._default_workdir()
+        # 【修复】区分"用户显式设置"与"初始化默认兜底"：
+        # 构造传入的 workdir 是给 BuiltinTools 的默认路径（源码根/exe 目录=软件启动路径），
+        # 不代表用户选择了项目工作目录。只有 set_workdir() 显式调用后才算用户设置。
+        # 否则 get_workdir() 在 _sync_working_directory 同步前会返回启动路径，
+        # 被 PreUserMessage hook（format_memory_context）误注入为"项目根目录"。
+        self._workdir_user_set = False
         self._custom_tools: Dict[str, Callable] = {}
         self._session_id: Optional[str] = None
         self._call_id: Optional[str] = None
@@ -635,9 +641,14 @@ class ToolExecutor:
     def get_workdir(self) -> Optional[str]:
         """获取当前工作目录（多窗口隔离：返回实例级值，非 DB 全局值）
 
-        返回 None 表示用户未设置根目录（已清除）。
+        返回 None 表示用户未设置根目录（已清除，或仍处于初始化默认兜底状态）。
         上游调用方需自行处理 None 情况（如回退到 os.getcwd() 或""）。
         """
+        # 未经过 set_workdir 显式设置时返回 None：
+        # _workdir 初始值可能是源码根/exe 目录（软件启动路径），
+        # 它不是用户选择的项目目录，不应作为项目根返回。
+        if not self._workdir_user_set:
+            return None
         return self._workdir if self._workdir else None
 
     def set_workdir(self, workdir: Optional[str]):
@@ -646,6 +657,8 @@ class ToolExecutor:
         清除时 _workdir 设为 None，get_workdir() 返回 None，
         下游代码据此判断"用户未设置根目录"。
         """
+        # 任何显式调用（含清除）都视为用户意图，标记 user_set
+        self._workdir_user_set = True
         if workdir:
             self._workdir = workdir
             if self._builtin_tools:
