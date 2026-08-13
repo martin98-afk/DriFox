@@ -3535,22 +3535,109 @@ class CodeWebViewer(QWebEngineView):
                     color: #88d4ff;
                 }}
 
-                /* 欢迎卡片历史会话：每段一个小标题 + 胶囊流（自适应换行） */
+                /* 欢迎卡片历史会话：分区标题 + 卡片行列表 */
                 .session-section {{
-                    margin: 10px 0 6px;
+                    margin: 4px 0 14px;
                 }}
-                .session-section .section-title {{
+                .session-header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                }}
+                .session-header-icon {{
+                    font-size: {tag_font_size}px;
+                    line-height: 1;
+                }}
+                .session-header-title {{
                     font-size: {tag_font_size}px;
                     font-weight: 600;
+                    color: var(--text);
+                    letter-spacing: 0.02em;
+                }}
+                .session-header-count {{
+                    font-size: {tiny_font_size}px;
                     color: #66c6ff;
-                    margin-bottom: 4px;
+                    background: rgba(100, 198, 255, 0.12);
+                    border: 1px solid rgba(100, 198, 255, 0.25);
+                    padding: 0 7px;
+                    border-radius: 999px;
+                    line-height: 1.7;
+                }}
+                .session-list {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                }}
+                /* 会话卡片行：复用 .context-tag 点击事件链，覆盖胶囊默认外观 */
+                .session-item.context-tag {{
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    width: 100%;
+                    box-sizing: border-box;
+                    padding: 8px 12px;
+                    margin: 0;
+                    border-radius: 10px;
+                    border: 1px solid var(--border);
+                    background: rgba(100, 198, 255, 0.05);
+                    font-weight: 500;
+                    color: var(--text);
+                    cursor: pointer;
+                    transition: background 0.18s ease, border-color 0.18s ease,
+                                transform 0.18s ease, box-shadow 0.18s ease;
+                    max-width: 100%;
+                }}
+                .session-item.context-tag:hover {{
+                    background: rgba(100, 198, 255, 0.12);
+                    border-color: rgba(100, 198, 255, 0.5);
+                    transform: translateX(2px);
+                    box-shadow: 0 2px 10px rgba(100, 198, 255, 0.10);
+                }}
+                .session-item-badge {{
+                    flex: 0 0 auto;
+                    width: 30px;
+                    height: 30px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 9px;
+                    background: linear-gradient(135deg, rgba(100, 198, 255, 0.25), rgba(100, 198, 255, 0.08));
+                    font-size: 14px;
+                    line-height: 1;
+                }}
+                .session-item-body {{
+                    flex: 1;
+                    min-width: 0;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                }}
+                .session-item-title {{
+                    font-size: {tag_font_size}px;
+                    font-weight: 600;
+                    color: var(--text);
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }}
+                .session-item-meta {{
+                    font-size: {tiny_font_size}px;
+                    color: var(--text-muted);
                     opacity: 0.85;
                 }}
-                .session-tags {{
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 4px 6px;
-                    align-items: flex-start;
+                .session-item-arrow {{
+                    flex: 0 0 auto;
+                    font-size: 15px;
+                    color: var(--text-muted);
+                    opacity: 0;
+                    transform: translateX(-4px);
+                    transition: opacity 0.18s ease, transform 0.18s ease;
+                    line-height: 1;
+                }}
+                .session-item.context-tag:hover .session-item-arrow {{
+                    opacity: 1;
+                    transform: translateX(0);
                 }}
                 .welcome-empty {{
                     opacity: 0.55;
@@ -10631,35 +10718,54 @@ def _render_welcome_body(
 
 
 def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
-    """渲染会话导览 body：最近 / 最活跃两段胶囊流"""
+    """渲染会话导览 body：最近 / 最活跃两个卡片行列表
 
-    def _render_section(title: str, items: list, count_mode: bool = False) -> str:
-        """渲染单个分类 section；items 为空则返回空串"""
-        if not items:
-            return ""
-        tag_html = []
-        for s in items[:3]:
-            t = escape(s.get("title", "未命名会话"))
-            sid = escape(s.get("session_id", ""))
-            if count_mode:
-                mc = s.get("message_count", 0)
-                meta = f"{mc}条消息"
-            else:
-                meta = escape(s.get("last_time") or "")
-            tag_html.append(
-                f'<span class="context-tag session-tag" data-type="session" '
-                f'data-session-id="{sid}" data-action="session">'
-                f'{t}<span class="session-time">{meta}</span></span>'
-            )
+    每个会话一行卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
+    复用 .context-tag 点击事件链（data-type="session" + data-session-id），
+    仅替换视觉外观，JS 拦截逻辑不变。
+    """
+
+    def _render_item(s: dict, count_mode: bool) -> str:
+        """渲染单个会话卡片行"""
+        t = escape(s.get("title", "未命名会话"))
+        sid = escape(s.get("session_id", ""))
+        if count_mode:
+            mc = s.get("message_count", 0)
+            meta = f"{mc} 条消息"
+            icon = "⚡"
+        else:
+            meta = escape(s.get("last_time") or "")
+            icon = "💬"
         return (
-            f'<div class="session-section">'
-            f'<div class="section-title">{title}</div>'
-            f'<div class="session-tags">{"".join(tag_html)}</div>'
+            f'<div class="context-tag session-item" data-type="session" '
+            f'data-session-id="{sid}" data-action="session">'
+            f'<span class="session-item-badge">{icon}</span>'
+            f'<span class="session-item-body">'
+            f'<span class="session-item-title">{t}</span>'
+            f'<span class="session-item-meta">{meta}</span>'
+            f'</span>'
+            f'<span class="session-item-arrow">›</span>'
             f"</div>"
         )
 
-    recent_block = _render_section("📅 最近会话", recent_sessions, count_mode=False)
-    top_block = _render_section("🔥 最活跃会话", top_by_count, count_mode=True)
+    def _render_section(title: str, icon: str, items: list, count_mode: bool = False) -> str:
+        """渲染单个分类 section；items 为空则返回空串"""
+        if not items:
+            return ""
+        rows = "".join(_render_item(s, count_mode) for s in items[:3])
+        return (
+            f'<div class="session-section">'
+            f'<div class="session-header">'
+            f'<span class="session-header-icon">{icon}</span>'
+            f'<span class="session-header-title">{title}</span>'
+            f'<span class="session-header-count">{len(items[:3])}</span>'
+            f'</div>'
+            f'<div class="session-list">{rows}</div>'
+            f"</div>"
+        )
+
+    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False)
+    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True)
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
