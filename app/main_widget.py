@@ -2059,24 +2059,21 @@ class OpenAIChatToolWindow(ToolWindow):
             # 最近一次 _on_project_selected 写入的"当前最新选择的项目",
             # 导致分支/复制窗口错位显示项目名。
             new_instance._current_project = self._current_project
-            new_instance._current_workdir = dict(self._current_workdir)  # 浅拷贝防共享
+            # 【按项目定义】不复制源窗口 workdir 实例缓存：复制窗口按当前项目
+            # 从 DB 读取项目定义的工作目录（showEvent is_duplicate 分支的
+            # _sync_working_directory 完成读取+写回）。避免继承源窗口的临时/
+            # 手动路径，确保 project_root 与项目定义一致，且不链式传播。
+            # new_instance._current_workdir = dict(self._current_workdir)  # 已移除
             new_instance.backend._current_project = self._current_project
+            # 注：此处 tool_executor 可能尚未创建（延迟 200ms），if 分支会跳过；
+            # workdir 由 showEvent 的 is_duplicate 分支 _sync_working_directory
+            # （500ms 延迟）从 DB 按项目恢复。
             if new_instance.backend.tool_executor:
                 new_instance.backend.tool_executor.set_current_project(self._current_project)
-                # 同步工作目录到新窗口的 tool_executor，避免因跳过
-                # _sync_working_directory 而导致 project_root 残留为 _internal
-                wd = self._current_workdir.get(self._current_project)
-                if wd:
-                    new_instance.backend.tool_executor.set_workdir(wd)
             if hasattr(new_instance, "_project_label"):
                 new_instance._project_label.setText(self._current_project)
 
-            # ── 同步工作目录到新窗口的记忆卡片（确保关键文档正确识别当前工作目录）──
-            if hasattr(new_instance, "_memory_card_popup") and new_instance._memory_card_popup:
-                for proj, wd in self._current_workdir.items():
-                    if wd:
-                        new_instance._memory_card_popup._instance_workdir[proj] = wd
-            # ──────────────────────────────────────────────────
+            # ── workdir 不再从源窗口复制：由 _sync_working_directory 按项目从 DB 恢复 ──
 
             # 同步刷新面包屑样式与 git 分支标签
             if hasattr(new_instance, "_refresh_project_branch_style"):
@@ -2398,6 +2395,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 跳过从磁盘重载模型配置和工作目录，直接进入完成状态
         if is_duplicate:
             QTimer.singleShot(0, lambda: self._safe_timer_call(self._on_initialization_complete))
+            # 【按项目定义】复制窗口 workdir 同步：
+            # _duplicate_window 不再复制源窗口 workdir（tool_executor 延迟创建
+            # 时 set_workdir 也会被跳过），此处延迟到 tool_executor 创建后，
+            # 由 _sync_working_directory 按当前项目从 DB 读取项目定义的工作目录
+            # （_current_workdir 为空 → get_working_directory 兜底 → 临时目录），
+            # 保证 project_root 与项目一致，且复制链不传播错误路径。
+            QTimer.singleShot(500, lambda: self._safe_timer_call(self._sync_working_directory))
         else:
             # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
             # _load_model_configs 遍历所有服务商配置（50-200ms），

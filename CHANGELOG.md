@@ -79,6 +79,33 @@ All notable changes to this project will be documented in this file.
 
 - **release 海报资源更新** (`images/` + `release-poster-v0.5.0.html`): 新增 release 海报，移除过时海报图片与 HTML
 
+#### 📦 附加变更（v0.5.0 二次重发补丁 | 自初次 tag 之后 11 个新提交）
+
+> v0.5.0 一次重发后追加的 project-dashboard 插件完整生命周期：设计规范与实现规划文档 → 插件骨架 → 数据采集层（git 统计 + 文件扫描） → HTML 生成层（4 图 echarts 报告） → welcome tab 与 function 命令注册 → 修复 iframe 概要 markdown 与贡献者姓名 → 异步采集并直接嵌入 echarts、移除 command 与 iframe → 4 图改 2×2 四宫格 + 全局 tooltip → 回滚整套插件；同时修复 project_root 被软件启动路径错误继承的 bug，以及插件市场卡片在数据无变化时的重复渲染与闪烁。贡献者：mading
+
+##### ✨ 新功能 (New Features, 5)
+
+- **project-dashboard 插件骨架** (`plugins/project-dashboard/.drifox-plugin/` + `commands/` + `icon*.svg`): 搭建 plugin.json 元数据、命令定义与亮/暗图标
+- **project-dashboard 数据采集层** (`plugins/project-dashboard/ui/dashboard.py` + `tests/test_project_dashboard_data.py`): 基于 git log + 文件扫描采集提交统计、贡献者、文件树、近期变更
+- **project-dashboard HTML 生成层** (`plugins/project-dashboard/ui/dashboard.py` + `tests/test_project_dashboard_html.py`): 输出 4 图 echarts 报告 HTML（趋势/分布/类型/作者）
+- **project-dashboard welcome tab 与 function 命令注册** (`plugins/project-dashboard/ui/__init__.py`): 注册欢迎 tab 与 `/project-dashboard` function 命令
+- **project-dashboard 2×2 四宫格 + 全局 tooltip** (`plugins/project-dashboard/ui/dashboard.py` + `tests/test_project_dashboard_html.py`): 4 图改为 2×2 网格布局，加入全局 tooltip 提升可读性
+
+##### 🐛 问题修复 (Bug Fixes, 2)
+
+- **project-dashboard iframe 渲染** (`plugins/project-dashboard/ui/dashboard.py`): iframe 概要行去除 markdown 语法，贡献者只取姓名（不再带邮箱）
+- **project_root 错误继承修复** (`app/core/backend.py` + `app/core/tool_executor.py` + `app/main_widget.py` + `plugins/plugin-marketplace/ui/cards.py`): 未配置项目工作目录时 `_workdir` 默认为初始化兜底路径，`get_workdir()` 在 `_sync_working_directory` 同步前会返回软件启动路径被 PreUserMessage hook 误注入为"项目根目录"；新增 `_workdir_user_set` 区分用户显式设置与初始化兜底，统一转为空串；同步修复插件市场卡片在数据无变化时的重复渲染与闪烁（`_render_pending` 防重入 + 顺序未变时复用已有行）
+
+##### ♻️ 代码重构 (Refactoring, 2)
+
+- **project-dashboard 异步采集 + 直接嵌入 echarts** (`plugins/project-dashboard/ui/__init__.py` + `dashboard.py` + `collector.py` + `tests/test_project_dashboard_html.py`): 数据采集改为异步线程，HTML 直接嵌入 echarts，移除 command 调用与 iframe 包装
+- **移除 project-dashboard 插件** (`plugins/plugin-manager/__init` + `plugins/project-dashboard/`): 回滚整套插件骨架与 UI 组件，清理空 plugin-manager 模块
+
+##### 📚 文档 (Docs, 2)
+
+- **project-dashboard 设计规范** (`docs/.../specs/2026-08-13-project-dashboard-design.md`): 新增 project-dashboard 插件设计 spec（架构、数据流、ECharts 选型）
+- **project-dashboard 实现规划** (`docs/.../plans/2026-08-13-project-dashboard.md`): 新增 project-dashboard 完整实现规划（分阶段交付、回滚策略）
+
 ## [v0.4.14] - 2026-08-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma

@@ -2283,9 +2283,16 @@ class MarketplaceCard(QWidget):
         self._flush_timer.start(80)
 
     def _flush_render(self):
-        """执行挂起的渲染：首屏未渲染时交给 _render_initial_view 统一完成"""
+        """执行挂起的渲染：首屏未渲染时交给 _render_initial_view 统一完成
+
+        防重：`_schedule_render` 的 80ms timer 与 `_on_market_all_done` 兜底
+        都可能触发本方法；`_render_pending` 为 False 时说明已渲染过
+        （或从未挂起），直接返回，避免一次刷新渲染两次全量列表。
+        """
         if not self._alive():
             return  # 卡片已销毁，放弃渲染
+        if not self._render_pending:
+            return  # 无挂起渲染（timer/all_done 已消费），防重复渲染
         self._render_pending = False
         if not self.isVisible():
             return  # 不可见仅合并不渲染（数据已入 _plugin_data，下次显示自动渲染）
@@ -2378,6 +2385,16 @@ class MarketplaceCard(QWidget):
         # 计算匹配列表（搜索 + tag + 筛选）并排序
         matched = [p for p in view_plugins if self._plugin_matches(p, query, filter_mode)]
         self._apply_sort(matched)
+
+        # 数据未变化且匹配顺序未变化（排序/数据顺序没变）→ 复用已有行，
+        # 不重建不闪烁：仅刷新安装状态、匹配与计数（_reconcile_rows 与渲染同范式）
+        if not data_changed and self._row_map and self._same_order(matched):
+            self._all_plugins = plugins  # 内容相同，但同步引用（与 _plugin_data 对齐）
+            self._matched = matched
+            self._reconcile_rows()
+            self._refresh_filter_counts()
+            return
+
         self._matched = matched
 
         # 重建渲染：清空 + 渲染首批 + 加载更多按钮
@@ -2390,19 +2407,38 @@ class MarketplaceCard(QWidget):
         self._refresh_filter_counts()
         self._render_next_batch()
 
+    def _same_order(self, matched: list) -> bool:
+        """比较新匹配列表与当前已渲染行的顺序是否一致（按 name 序列）
+
+        一致 → 可复用行（不重建、不闪烁）；不一致（排序方式变化 / 数据
+        顺序变化）→ 需全量重建重排。
+        """
+        old = getattr(self, "_matched", None) or []
+        if len(old) != len(matched):
+            return False
+        for a, b in zip(old, matched):
+            if a.get("name") != b.get("name"):
+                return False
+        return True
+
     @staticmethod
     def _plugins_same(old: list, new: list) -> bool:
-        """判断两次拉取的市场数据是否内容相同（name+version 逐项比较）
+        """判断两次拉取的市场数据是否内容相同（name/version/desc/downloads 逐项比较）
 
         拉取总是新建 dict/list（json 反序列化），引用必然不同；
-        内容相同时跳过 tag 栏/角标重建。
+        内容相同时可复用已有行（不重建、不闪烁），并跳过 tag 栏/角标重建。
         """
         if old is new:
             return True
         if len(old) != len(new):
             return False
         for a, b in zip(old, new):
-            if a.get("name") != b.get("name") or a.get("version") != b.get("version"):
+            if (
+                a.get("name") != b.get("name")
+                or a.get("version") != b.get("version")
+                or a.get("description") != b.get("description")
+                or a.get("downloads") != b.get("downloads")
+            ):
                 return False
         return True
 
