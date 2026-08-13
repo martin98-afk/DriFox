@@ -10786,12 +10786,13 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f"</div>"
         )
 
-    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=0)
-    top_start = len(recent_sessions[:_SESSION_ROWS * _SESSION_COLS])
-    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start)
+    # 最活跃在上（推荐优先展示），最近在下
+    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=0)
+    recent_start = len(top_by_count[:_SESSION_ROWS * _SESSION_COLS])
+    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=recent_start)
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
-    return recent_block + top_block
+    return top_block + recent_block
 
 
 def _render_changelog_body(releases: list = None, loading: bool = False, error_msg: str = "") -> str:
