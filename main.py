@@ -252,17 +252,11 @@ def main():
     # 注意：不在这里设置 QToolTip/ToolTip 样式，
     # 由 Colors.refresh() 在主题加载后用主题色统一设置。
     # 见 design_tokens.py: Colors.refresh() step 5。
-    # ========== 骨架屏：先显示轻量加载界面，主窗口分片构建 ==========
-    # [PERF] P0-3：完整主窗口（main_widget → ChatBackend → 35+ 工具 → UI 插件）
-    # 构建前先 show 一个零重型依赖的 SplashWidget，让首帧立即可见，
-    # 避免冷启动 2-4s 白屏/无响应。
-    from app.splash_widget import SplashWidget
-
-    splash = SplashWidget()
-    splash.show()
-    app.processEvents()  # 强制渲染骨架屏首帧
+    # 创建并显示窗口
+    logger.info("LLM Chatter 启动中...")
 
     from PyQt5.QtWidgets import QWidget
+    from app.main_widget import OpenAIChatToolWindow
 
     class FakePage(QWidget):
         def __init__(self):
@@ -297,6 +291,9 @@ def main():
         def hide_splitter(self):
             pass
 
+    fake_page = FakePage()
+    chat_window = OpenAIChatToolWindow(fake_page)
+
     def _activate_window(window):
         """激活窗口：显示 + 置前 + 还原"""
         window.show()
@@ -305,44 +302,26 @@ def main():
         if window.isMinimized():
             window.showNormal()
 
-    def _build_main_window():
-        """骨架屏显示后分片构建主窗口（QTimer 调度，不阻塞首帧）
+    def _show_popup():
+        from app.utils.config import Settings
 
-        [PERF] P0-1：OpenAIChatToolWindow 的函数内延迟导入 + 分片构建，
-        import app.main_widget 会级联加载 ChatBackend / 35+ 工具 / mcp 等
-        重型模块（实测约 4.6s），从「进程启动 → QApplication → 首帧」
-        关键路径移出，改为骨架屏之后异步构建。
-        """
-        from app.main_widget import OpenAIChatToolWindow
+        # 多窗口模式已暂时下线：无论配置如何，一律以 Tab 管理器模式启动。
+        # 配置项 enable_tab_manager 与 ToolPopupDialog 路径暂保留，便于未来回退。
+        settings = Settings.get_instance()
+        if not settings.enable_tab_manager.value:
+            settings.enable_tab_manager.value = True
+            settings.save()
+            logger.info("检测到多窗口模式配置，已强制修正为 Tab 管理器模式")
 
-        fake_page = FakePage()
-        chat_window = OpenAIChatToolWindow(fake_page)
+        # ── Tab 模式 ──
+        from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
-        def _show_popup():
-            from app.utils.config import Settings
-
-            # 多窗口模式已暂时下线：无论配置如何，一律以 Tab 管理器模式启动。
-            # 配置项 enable_tab_manager 与 ToolPopupDialog 路径暂保留，便于未来回退。
-            settings = Settings.get_instance()
-            if not settings.enable_tab_manager.value:
-                settings.enable_tab_manager.value = True
-                settings.save()
-                logger.info("检测到多窗口模式配置，已强制修正为 Tab 管理器模式")
-
-            # ── Tab 模式 ──
-            # [PERF] P0-1：TabManagerWindow 延迟导入（首次需要时），
-            # 其依赖链已随 main_widget 加载，此处不再额外阻塞首帧。
-            from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
-
-            tm = TabManagerWindow.create_instance()
-            tm.add_window(chat_window)
-            _guard.show_requested.connect(lambda: _activate_window(tm))
-            tm.show()
-            _apply_window_topmost(tm)
-            splash.close()  # 主窗口已显示，关闭骨架屏
-            logger.info("DriFox 以 Tab 管理器模式启动")
-
-        QTimer.singleShot(0, _show_popup)
+        tm = TabManagerWindow.create_instance()
+        tm.add_window(chat_window)
+        _guard.show_requested.connect(lambda: _activate_window(tm))
+        tm.show()
+        _apply_window_topmost(tm)
+        logger.info("DriFox 以 Tab 管理器模式启动")
 
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)
@@ -350,8 +329,8 @@ def main():
 
     app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
 
-    # 调度：骨架屏先显示 → 分片构建主窗口 → 弹窗 → 最后执行延迟启动
-    QTimer.singleShot(0, _build_main_window)
+    # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
+    QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
 
     sys.exit(app.exec_())
