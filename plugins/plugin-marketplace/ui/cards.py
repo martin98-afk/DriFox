@@ -3352,10 +3352,16 @@ class MarketplaceCard(QWidget):
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
+            # 更新替换了整个插件目录：_async_update 下载前已卸载旧 UI，
+            # 此处必须主动重载（watchfiles 对目录级替换识别为空组件，不触发
+            # UI 重载——否则插件 UI 保持卸载态直到重启/禁用再启用）。
+            self._reload_plugin_ui_on_gui(name)
             self._refresh_row_states()
             InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
-            # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试
+            # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试；
+            # UI 已在下载前被卸载，同样需要重载旧版组件恢复可用。
+            self._reload_plugin_ui_on_gui(name)
             self._update_row_state(name, installed=True, error=True)
             InfoBar.error(f"{name} 更新失败", "已保留旧版，可稍后重试", duration=3000, parent=bar_parent)
 
@@ -3382,6 +3388,30 @@ class MarketplaceCard(QWidget):
         InfoBar.error(f"{name} 更新失败", msg, duration=5000, parent=bar_parent)
 
     # ── 启用 / 禁用 / 卸载 ────────────────────────────────
+
+    def _reload_plugin_ui_on_gui(self, name: str):
+        """主线程：更新后重新加载插件 UI 组件（对称于 _unload_plugin_ui_on_gui）
+
+        更新流程在下载前就调用了 _unload_plugin_ui_on_gui 卸载 UI，但替换目录
+        产生的 watchfiles 事件是目录级（deleted/added 落在插件根路径），组件识别
+        为空 → _reload_single_plugin(name, "") 空组件跳过所有子系统，UI 不会自动
+        回来，只能等重启或禁用再启用。因此更新完成（无论成功失败）必须在此
+        显式重载：先 rescan 刷新 PluginManager 元数据，再 load_plugin 加载新版
+        （失败时目录仍是旧版，重载旧版恢复可用）。load_plugin 对已加载插件先
+        卸载再加载，幂等；重复调用无副作用。
+        """
+        try:
+            from app.core.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            pm.rescan_plugin(name)
+            plugin = pm.get_plugin(name)
+            if plugin is not None and plugin.has_component("ui"):
+                from app.core.ui_plugin_registry import UIPluginRegistry
+
+                UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
+        except Exception as e:
+            logger.debug(f"[Marketplace] 更新后重载插件 UI({name}) 失败（忽略）: {e}")
 
     def _unload_plugin_ui_on_gui(self, name: str):
         """主线程：卸载插件 UI 组件（含显示中卡片的自动关闭）
