@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **多标签页欢迎卡片内容串项目** (`app/widgets/message_card.py` + `app/main_widget.py`): 欢迎卡片渲染插件 tab 时只传 `{"is_dark"}`，插件只能回读全局状态（`Settings.current_project` / 全局 workdir）取项目信息，多窗口下 A 窗口欢迎卡片会被渲染成 B 窗口的项目内容。修复：`create_welcome_card` 新增 `context_provider` 参数（传入窗口 `_build_ui_context`），`_render_welcome_body` 把窗口级 project_root / project_name / window_id 合并注入插件 `render_func(ctx)`，每个窗口渲染自己项目的内容
+- **UI 插件多时欢迎卡片重建卡顿** (`app/core/ui_plugin_registry.py`): 插件批量加载/卸载时每个注册 welcome tab 的插件都同步触发 `_refresh_welcome_cards`，N 个插件 = N 次 QWebEngineView 重建（100-500ms/次）。修复：① `_schedule_welcome_refresh` debounce（`QTimer.singleShot(0)` 合并同一事件批次为单次刷新）；② 刷新重建走 `_schedule_initial_welcome` 交错时间片调度，不再同步阻塞。注意：**主程序不缓存插件 render_func 结果**——异步采集型插件（如 project-dashboard）首次渲染返回「加载中」占位，采集完成后重渲染拿真实图表，缓存占位会阻塞该机制（插件自身缓存数据即可）
+- **UI 插件 project_root 误注入软件启动目录** (`app/main_widget.py` `_build_ui_context` + `_sync_working_directory`): UI 插件上下文 workdir 兜底原为 `os.getcwd()`，软件启动/项目切换瞬间 workdir 尚未同步到 tool_executor 时会把**软件启动目录**（源码根/exe 目录）当作 project_root 注入；若该目录本身是 git 仓库（如 `D:/work/DriFox`），project-dashboard 看板会误展示启动目录的 git 信息。修复：① `_build_ui_context` 未设置 workdir 时返回空串（与 `backend._build_worktree_context` 修复模式一致，绝不回退 `os.getcwd()`）；② `_sync_working_directory` workdir 变化后强制重渲染欢迎卡片（新增 `_rerender_welcome_card`，同 mode 重渲染 body 不重建 QWebEngineView），看板自动从"未检测到 git 项目"恢复为正确项目。配套 project-dashboard 插件 v0.2.2 移除自身 `os.getcwd()` 兜底
+
 ## [v0.5.0] - 2026-08-13
 
 自上一版本以来的变更 | 提交数：38 · 文件变更：N · +5085/-1282 | 贡献者：dingma, mading

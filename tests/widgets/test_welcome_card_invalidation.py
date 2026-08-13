@@ -199,6 +199,69 @@ class TestInvalidationBehavior:
         # 缓存必然被 pop
         assert widget._window_id not in widget._welcome_card_cache
 
+
+# ─── 3. workdir 同步后看板重渲染（project-dashboard 修复回归） ─────
+
+
+class TestRerenderWelcomeCard:
+    """_rerender_welcome_card：workdir 延迟同步完成后强制重渲染看板 tab
+
+    修复背景（2026-08-13）：project-dashboard 看板依赖 project_root，
+    软件启动/项目切换瞬间 workdir 尚未同步到 tool_executor，UI provider
+    返回空 project_root（此前是 os.getcwd() 兜底 → 误显示软件启动目录的
+    git 信息）。_sync_working_directory 延迟同步完成后必须强制重渲染
+    欢迎卡片，否则看板停留在"未检测到 git 项目"。
+    """
+
+    def _make_widget(self):
+        from app.main_widget import OpenAIChatToolWindow
+
+        widget = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        widget._window_id = "win_rerender_01"
+        widget._welcome_card_cache = {}
+        return widget
+
+    def test_method_exists(self):
+        """_rerender_welcome_card 方法存在（AST）"""
+        cls = _get_target_class()
+        assert _get_method(cls, "_rerender_welcome_card") is not None
+
+    def test_sync_workdir_calls_rerender_when_changed(self):
+        """_sync_working_directory 在 workdir 变化时应调用 _rerender_welcome_card（AST）"""
+        cls = _get_target_class()
+        method = _get_method(cls, "_sync_working_directory")
+        assert method is not None
+        assert _method_calls(method, "_rerender_welcome_card"), (
+            "_sync_working_directory 未在 workdir 变化时调用 _rerender_welcome_card()"
+        )
+
+    def test_no_op_when_cache_empty(self):
+        """缓存为空时调用不应抛异常"""
+        widget = self._make_widget()
+        widget._rerender_welcome_card()  # 不抛异常即通过
+
+    def test_rerenders_same_mode(self):
+        """缓存有卡片时以同 mode 重渲染（set_welcome_mode 同 mode 也会刷新 body）"""
+        widget = self._make_widget()
+        card = MagicMock()
+        card._welcome_mode = "project-dashboard"
+        widget._welcome_card_cache[widget._window_id] = card
+
+        widget._rerender_welcome_card()
+
+        card.set_welcome_mode.assert_called_once_with("project-dashboard")
+
+    def test_skips_when_no_mode(self):
+        """卡片无 mode 时跳过，不调用 set_welcome_mode"""
+        widget = self._make_widget()
+        card = MagicMock()
+        card._welcome_mode = ""
+        widget._welcome_card_cache[widget._window_id] = card
+
+        widget._rerender_welcome_card()
+
+        card.set_welcome_mode.assert_not_called()
+
     def test_different_window_id_not_touched(self):
         """只 pop 自己 _window_id 对应的项，不影响其他窗口"""
         widget = self._make_widget()

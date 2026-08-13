@@ -3984,7 +3984,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 工作目录取值优先级 ──
         # 1. tool_executor.get_workdir() — 用户显式设置的项目根目录（最优先）
         # 2. _current_workdir 实例缓存 — 本窗口最后一次设置的工作目录
-        # 3. os.getcwd() — 最后兜底（在打包版中可能指向软件安装目录，不推荐）
+        # 3. 空串 — 未设置时返回空，绝不回退 os.getcwd()。
+        #    【修复】os.getcwd() 是软件启动目录（源码根/exe 目录），若恰好是 git
+        #    仓库（如 D:/work/DriFox），UI 插件会把启动目录误当项目根展示其 git 信息。
+        #    与 backend._build_worktree_context 修复模式一致：未设置 → 空串。
         from loguru import logger
 
         workdir = ""
@@ -4001,10 +4004,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.debug(f"[_build_ui_context] workdir from _current_workdir cache: {workdir}")
 
         if not workdir:
-            workdir = os.getcwd()
             logger.warning(
-                f"[_build_ui_context] workdir fallback to os.getcwd()={workdir}; "
-                f"tool_executor workdir may be unset. Consider calling set_workdir first."
+                f"[_build_ui_context] workdir unset for project '{getattr(self, '_current_project', '')}'; "
+                f"returning empty project_root (avoid injecting software startup dir)"
             )
 
         # 主题信息
@@ -9967,6 +9969,32 @@ class OpenAIChatToolWindow(ToolWindow):
                     self.chat_layout.removeWidget(widget)
                     widget.hide()
 
+    def _rerender_welcome_card(self):
+        """同 mode 重渲染欢迎卡片 body（不重建 QWebEngineView）
+
+        场景：workdir 延迟同步（启动 2s / 项目切换）完成后，看板类 tab
+        （project-dashboard）依赖 project_root，需强制重渲染才能拿到新值。
+        set_welcome_mode(mode) 同 mode 也会走 _render_welcome_with_body，
+        仅重写 markdown，不重建 QWebEngineView（省 100-500ms 主线程）。
+        """
+        card = self._welcome_card_cache.get(self._window_id)
+        if card is None:
+            return
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(card):
+                return
+        except Exception:
+            pass
+        mode = getattr(card, "_welcome_mode", "")
+        if not mode:
+            return
+        try:
+            card.set_welcome_mode(mode)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_rerender_welcome_card] re-render failed: {e}")
+
     def _invalidate_welcome_card(self):
         """显式失效欢迎卡片缓存（pop + delete widget）
 
@@ -10826,8 +10854,13 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         welcome_card = create_welcome_card(
-            self, agent_name, agent_desc, recent_sessions, top_by_count,
+            self,
+            agent_name,
+            agent_desc,
+            recent_sessions,
+            top_by_count,
             mode=welcome_mode,
+            context_provider=self._build_ui_context,
         )
         welcome_card._is_welcome = True
         welcome_card.contextActionRequested.connect(self.handle_recommended_question)
@@ -18617,7 +18650,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir:
             workdir = self._ensure_temp_workdir(project)
 
+        # workdir 变化时强制重渲染欢迎卡片（project-dashboard 看板等依赖 project_root）：
+        # 启动时 workdir 延迟 2s 才同步，同步前渲染会拿到空/兜底路径（显示
+        # "未检测到 git 项目"或旧项目信息）；同步完成后重渲染自动恢复为正确项目。
+        # 仅重渲染 body（markdown），不重建 QWebEngineView（省 100-500ms 主线程）。
+        prev_wd = self.backend.tool_executor.get_workdir()
         self.backend.tool_executor.set_workdir(workdir or None)
+        new_wd = self.backend.tool_executor.get_workdir()
+        if new_wd != prev_wd:
+            self._rerender_welcome_card()
 
         # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
         if hasattr(self, "_memory_card_popup") and self._memory_card_popup:

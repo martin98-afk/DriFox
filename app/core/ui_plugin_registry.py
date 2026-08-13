@@ -116,6 +116,10 @@ class UIPluginRegistry:
         self._context_providers: Dict[str, Callable[[], Dict[str, Any]]] = {}
         # 多窗口隔离：window_id → main_widget 映射，用于 unload 时正确清理容器
         self._window_main_widgets: Dict[str, Any] = {}
+        # 欢迎卡片刷新 debounce：插件批量加载/卸载时合并为一次刷新，
+        # 避免 N 个 welcome tab 插件逐个触发 N 次欢迎卡片重建（QWebEngineView
+        # 每次 100-500ms 主线程占用）导致启动/热重载卡顿
+        self._welcome_refresh_pending: bool = False
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -585,7 +589,7 @@ class UIPluginRegistry:
             logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
             after_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             if before_tabs != after_tabs:
-                self._refresh_welcome_cards()
+                self._schedule_welcome_refresh()
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
@@ -640,8 +644,38 @@ class UIPluginRegistry:
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
-            self._refresh_welcome_cards()
+            self._schedule_welcome_refresh()
         return True
+
+    def _schedule_welcome_refresh(self) -> None:
+        """延迟合并欢迎卡片刷新（debounce）
+
+        插件批量加载/卸载（load_all_enabled_plugins / 插件市场批量操作）会逐个
+        触发 load_plugin/unload_plugin，若每个注册 welcome tab 的插件都立即
+        _refresh_welcome_cards，会对所有窗口执行 N 次欢迎卡片重建
+        （QWebEngineView 每次 100-500ms 主线程占用）→ 启动/热重载卡顿。
+
+        用 QTimer.singleShot(0) 把同一事件循环批次内的多次请求合并为一次刷新：
+        同步 for 循环全部跑完后，事件循环才执行单次刷新回调。
+        """
+        if self._welcome_refresh_pending:
+            return
+        self._welcome_refresh_pending = True
+        try:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, self._flush_welcome_refresh)
+        except Exception:
+            # 无 Qt 事件循环环境（测试等）：同步兜底刷新
+            self._flush_welcome_refresh()
+
+    def _flush_welcome_refresh(self) -> None:
+        """执行合并后的欢迎卡片刷新（singleShot 回调 / 同步兜底）"""
+        self._welcome_refresh_pending = False
+        try:
+            self._refresh_welcome_cards()
+        except Exception:
+            pass
 
     def _refresh_welcome_cards(self) -> None:
         """插件 UI 加载/卸载后刷新所有窗口的欢迎卡片
@@ -662,8 +696,14 @@ class UIPluginRegistry:
                     continue  # 尚无缓存卡片，正常启动路径无需刷新
                 mw._invalidate_welcome_card()
                 if getattr(mw, "_displayed_session_id", None) is None:
-                    # 当前正显示欢迎卡片（无会话上下文）→ 立即重建，避免空白
-                    mw._show_initial_welcome()
+                    # 当前正显示欢迎卡片（无会话上下文）→ 立即重建，避免空白。
+                    # 走交错时间片调度（_schedule_initial_welcome），避免 N 个窗口
+                    # 的 QWebEngineView 重建（100-500ms/个）在同一事件批次连续
+                    # 同步执行卡死 UI（对齐 _create_new_session 的 C2 优化）。
+                    if hasattr(mw, "_schedule_initial_welcome"):
+                        mw._schedule_initial_welcome()
+                    else:
+                        mw._show_initial_welcome()
             except Exception:
                 pass
 
@@ -965,6 +1005,7 @@ class UIPluginRegistry:
         self._context_provider = None
         self._window_main_widgets.clear()
         self._context_providers.clear()
+        self._welcome_refresh_pending = False
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None
