@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""project-dashboard UI 组件入口 — 欢迎卡片「📊 项目看板」tab + function 命令
+"""project-dashboard UI 组件入口 — 欢迎卡片「📊 项目看板」tab
 
-- register_welcome_tab：欢迎卡片新增 tab，iframe 展示 .drifox/reports/project-dashboard.html
-- FunctionCommandHandlers：/project-dashboard 生成 HTML，生成后刷新欢迎卡片
+render_func 返回 markdown 片段（概要行 + ```echarts 代码块），
+经欢迎卡片 markdown → CodeWebViewer(QWebEngineView) 管线渲染，
+与 context-stats 插件同款模式：无 iframe、无独立 HTML 文件。
+
+数据采集全部异步（QThread）：首次打开显示「加载中」占位，
+后台采集完成自动重渲染欢迎卡片，不阻塞 UI 主线程。
 """
 
 import os
@@ -29,96 +33,52 @@ def _get_project_root() -> str:
     return os.getcwd()
 
 
-def _report_path() -> str:
-    """报告文件绝对路径（不存在返回空串）"""
-    root = _get_project_root()
-    try:
-        from dashboard import find_git_root
-
-        git_root = find_git_root(root)
-        if not git_root:
-            return ""
-        p = Path(git_root) / ".drifox" / "reports" / "project-dashboard.html"
-        return str(p) if p.exists() else ""
-    except Exception:
-        return ""
-
-
 def _render_welcome_tab(ctx: dict = None) -> str:
-    """welcome tab render_func：概要行 + iframe + 追问按钮
+    """welcome tab render_func：概要行 + echarts 代码块
 
-    iframe src 带 ?t=<mtime> 时间戳，生成后强制重新加载最新文件。
+    - 缓存命中：直接返回已采集数据的图表
+    - 未命中：返回「加载中」占位 + 启动后台采集（完成后自动重渲染）
     """
     is_dark = ctx.get("is_dark") if isinstance(ctx, dict) else None
-    light = "--text: #333; --muted: #999;"
-    dark = "--text: #e6e6e6; --muted: #8a8a8a;"
-    if is_dark is not None:
-        root_css = f":root {{ {dark if is_dark else light} }}"
-    else:
-        root_css = (
-            f":root {{ {light} }}"
-            f"@media (prefers-color-scheme: dark) {{ :root {{ {dark} }} }}"
-        )
+    if is_dark is None:
+        is_dark = True  # DriFox 默认深色主题
 
-    rp = _report_path()
-    if not rp:
-        body = '<div class="pd-empty">📊 尚未生成项目看板，点击下方按钮生成</div>'
-    else:
-        try:
-            mtime = int(Path(rp).stat().st_mtime)
-        except OSError:
-            mtime = 0
-        body = (
-            '<iframe class="pd-frame" '
-            f'src="file:///{Path(rp).as_posix()}?t={mtime}" '
-            'loading="lazy"></iframe>'
-        )
-
-    return f"""<div class="pd-wrap">
-  {body}
-  <span class="context-tag pd-refresh" data-action="ask"
-        data-content="/project-dashboard">🔄 重新生成</span>
-</div>
-<style>
-.pd-wrap {{ max-width: 640px; margin: 0 auto; }}
-.pd-frame {{ width: 100%; height: 460px; border: 1px solid var(--text-muted, rgba(128,128,128,0.2));
-             border-radius: 10px; background: transparent; }}
-.pd-empty {{ padding: 18px 4px; color: var(--text); }}
-.pd-refresh {{ display: inline-block; margin-top: 10px; cursor: pointer;
-               color: var(--text, #333); }}
-{root_css}
-</style>
-"""
-
-
-def _handler(args: str) -> None:
-    """/project-dashboard 命令 handler：生成 HTML + 刷新欢迎卡片"""
     root = _get_project_root()
-    try:
-        from dashboard import write_report
 
-        # is_dark：跟随 Qt 主题（生成时状态）
-        is_dark = True
-        try:
-            from app.utils.theme_manager import theme_manager
+    from collector import build_cache_key, get_collector
 
-            is_dark = not theme_manager.is_light_theme()
-        except Exception:
-            pass
-        path = write_report(root, is_dark)
-        if path:
-            logger.info(f"[project-dashboard] report generated: {path}")
-        else:
-            logger.warning("[project-dashboard] report generation failed (not a git repo?)")
-    except Exception as e:
-        logger.error(f"[project-dashboard] generate failed: {e}")
-    # 刷新欢迎卡片（重新渲染 iframe，加载最新文件）
-    try:
-        from app.core.ui_plugin_registry import UIPluginRegistry
+    collector = get_collector()
+    cache_key = build_cache_key(root)
+    data = collector.get_cached(cache_key)
 
-        UIPluginRegistry.get_instance()._refresh_welcome_cards()
-    except Exception:
-        pass
+    if data is None:
+        # 未命中：启动后台采集，先显示加载占位
+        collector.start(root, is_dark, cache_key)
+        return "📊 正在采集项目数据…\n\n*首次生成需数秒，完成后自动显示*"
+
+    if data.get("error"):
+        return f"> ⚠️ {data['error']}\n"
+
+    # 概要行
+    import json
+
+    from dashboard import build_options
+
+    repo = data.get("repo_name", "")
+    branch = data.get("branch", "")
+    generated = data.get("generated_at", "")
+    total = data.get("total_commits", 0)
+    summary = f"**{repo}** · `{branch}` · 生成于 {generated} · 近 30 天 **{total}** commits"
+
+    # 2 个 echarts 代码块（双 grid 合并，各 400px）
+    options = build_options(data, is_dark)
+    parts = [summary, ""]
+    for opt in options:
+        parts.append("```echarts")
+        parts.append(json.dumps(opt, ensure_ascii=False))
+        parts.append("```")
+        parts.append("")
+    return "\n".join(parts)
 
 
 def register_ui(registry):
@@ -129,7 +89,7 @@ def register_ui(registry):
     for k in stale:
         del sys.modules[k]
 
-    # 确保 ui 目录在 sys.path（相对导入 dashboard）
+    # 确保 ui 目录在 sys.path（相对导入 dashboard / async）
     ui_dir = str(Path(__file__).resolve().parent)
     if ui_dir not in sys.path:
         sys.path.insert(0, ui_dir)
@@ -141,21 +101,4 @@ def register_ui(registry):
         render_func=_render_welcome_tab,
         priority=0,
     )
-
-    # 注册 function 命令（命令定义已由 commands/*.md 提供）
-    try:
-        from app.core.builtin_commands import FunctionCommandHandlers
-        from app.core.command_manager import CommandManager, CommandType
-
-        cmd_mgr = CommandManager.get_instance()
-        if not cmd_mgr.has_command("project-dashboard"):
-            cmd_mgr.register(
-                name="project-dashboard",
-                command_type=CommandType.FUNCTION,
-                description="生成项目信息看板 HTML（.drifox/reports/）",
-            )
-        FunctionCommandHandlers.register("project-dashboard", _handler)
-    except Exception as e:
-        logger.error(f"[project-dashboard] command register failed: {e}")
-
     logger.info("[project-dashboard] UI components registered")

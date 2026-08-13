@@ -13,7 +13,6 @@
     "license": "MIT",
     "type": "system",
     "components": {
-        "ui": true,
-        "commands": true
+        "ui": true
     }
 }

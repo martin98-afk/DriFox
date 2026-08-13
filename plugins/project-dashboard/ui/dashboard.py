@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""project-dashboard 数据采集 — git 统计 + 文件系统扫描
+"""project-dashboard 数据采集 + echarts option 生成
 
-纯 stdlib，不依赖主程序模块，可独立测试。
+纯 stdlib（不依赖 PyQt / 主程序），可独立测试：
+- collect_data(): git 统计 + 文件系统扫描
+- build_options(): 生成 2 个 echarts option（双 grid 左右布局，控制高度）
 """
+
 import os
 import subprocess
-import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -79,13 +81,13 @@ def collect_data(project_root: str) -> dict:
 
     Returns:
         dict: repo_name/branch/total_commits/daily_commits/contributors/
-              languages/file_types/generated_at/error
+              languages/file_types/generated_at/head/error
     """
     result = {
         "repo_name": "", "branch": "", "total_commits": 0,
         "daily_commits": [], "contributors": [], "languages": [],
         "file_types": [], "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "error": None,
+        "head": "", "error": None,
     }
     git_root = find_git_root(project_root)
     if not git_root:
@@ -93,6 +95,7 @@ def collect_data(project_root: str) -> dict:
         return result
     result["repo_name"] = Path(git_root).name
     result["branch"] = _run_git(git_root, "branch", "--show-current") or "unknown"
+    result["head"] = _run_git(git_root, "rev-parse", "--short", "HEAD")
 
     # commit 趋势：近 30 天
     out = _run_git(
@@ -131,25 +134,8 @@ def collect_data(project_root: str) -> dict:
 
 
 # ============================================================
-# HTML 生成
+# echarts option 生成（双 grid 合并，控制高度）
 # ============================================================
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]  # DriFox 项目根
-
-
-def _vendor_script_tag() -> str:
-    """探测 DriFox echarts vendor 的 file:// 绝对路径 script 标签
-
-    PyInstaller 打包后资源在 sys._MEIPASS 下；开发环境在 _PROJECT_ROOT。
-    """
-    base_dirs = [_PROJECT_ROOT]
-    if hasattr(sys, "_MEIPASS"):
-        base_dirs.append(Path(sys._MEIPASS))
-    for base in base_dirs:
-        p = base / "app" / "resources" / "web" / "vendor" / "echarts.min.js"
-        if p.exists():
-            return f'<script src="file:///{p.as_posix()}"></script>'
-    return ""  # vendor 缺失时图表不渲染，但页面结构仍可读
 
 
 def _palette(is_dark: bool) -> dict:
@@ -167,182 +153,175 @@ def _palette(is_dark: bool) -> dict:
     }
 
 
-def _esc(s) -> str:
-    """HTML 转义（数据进入 HTML 必须转义）"""
-    import html as _html
-
-    return _html.escape(str(s), quote=True)
-
-
-def _commit_trend_option(daily: list, p: dict) -> dict:
-    days = [d for d, _ in daily]
-    vals = [c for _, c in daily]
+def _base_style(p: dict) -> dict:
     return {
         "backgroundColor": "transparent",
         "textStyle": {"color": p["text"]},
-        "tooltip": {"trigger": "axis"},
-        "grid": {"left": 40, "right": 16, "top": 30, "bottom": 24},
-        "title": {"text": "近 30 天 Commit 趋势", "left": 8, "top": 4,
-                  "textStyle": {"fontSize": 13, "color": p["text"]}},
-        "xAxis": {"type": "category", "data": days,
-                  "axisLabel": {"color": p["muted"], "fontSize": 10}},
-        "yAxis": {"type": "value", "minInterval": 1,
-                  "axisLabel": {"color": p["muted"], "fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": p["grid"]}}},
-        "series": [{"name": "Commits", "type": "bar", "data": vals,
-                    "itemStyle": {"color": p["accent"], "borderRadius": [3, 3, 0, 0]}}],
+    }
+
+
+def _grid_layout() -> list:
+    """双 grid 左右布局（各占 50%）"""
+    return [
+        {"left": 8, "right": "52%", "top": 34, "bottom": 20, "containLabel": True},
+        {"left": "52%", "right": 8, "top": 34, "bottom": 20, "containLabel": True},
+    ]
+
+
+def _commit_trend_option(daily: list, p: dict) -> dict:
+    """左 grid：近 30 天 commit 柱状图"""
+    days = [d for d, _ in daily]
+    vals = [c for _, c in daily]
+    return {
+        "type": "bar",
+        "name": "Commits",
+        "data": vals,
+        "barMaxWidth": 18,
+        "itemStyle": {"color": p["accent"], "borderRadius": [3, 3, 0, 0]},
+        "xAxisIndex": 0,
+        "yAxisIndex": 0,
+    }, {
+        "type": "category", "gridIndex": 0, "data": days,
+        "axisLabel": {"color": p["muted"], "fontSize": 9, "interval": 4},
+        "axisLine": {"lineStyle": {"color": p["grid"]}},
+        "axisTick": {"show": False},
+    }, {
+        "type": "value", "gridIndex": 0, "minInterval": 1,
+        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "splitLine": {"lineStyle": {"color": p["grid"]}},
     }
 
 
 def _contributors_option(contributors: list, p: dict) -> dict:
-    names = [n for n, _ in contributors]
-    counts = [c for _, c in contributors]
+    """右 grid：贡献者 Top 横向条形图"""
+    names = [n for n, _ in contributors][::-1]
+    counts = [c for _, c in contributors][::-1]
     return {
-        "backgroundColor": "transparent",
-        "textStyle": {"color": p["text"]},
-        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "grid": {"left": 100, "right": 24, "top": 30, "bottom": 20},
-        "title": {"text": "贡献者 Top", "left": 8, "top": 4,
-                  "textStyle": {"fontSize": 13, "color": p["text"]}},
-        "xAxis": {"type": "value", "minInterval": 1,
-                  "axisLabel": {"color": p["muted"], "fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": p["grid"]}}},
-        "yAxis": {"type": "category", "data": names,
-                  "axisLabel": {"color": p["text"], "fontSize": 11}},
-        "series": [{"name": "Commits", "type": "bar", "data": counts,
-                    "itemStyle": {"color": p["success"]}}],
+        "type": "bar",
+        "name": "Commits",
+        "data": counts,
+        "barMaxWidth": 12,
+        "itemStyle": {"color": p["success"]},
+        "xAxisIndex": 1,
+        "yAxisIndex": 1,
+    }, {
+        "type": "value", "gridIndex": 1, "minInterval": 1,
+        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "splitLine": {"lineStyle": {"color": p["grid"]}},
+    }, {
+        "type": "category", "gridIndex": 1, "data": names,
+        "axisLabel": {"color": p["text"], "fontSize": 9},
+        "axisLine": {"lineStyle": {"color": p["grid"]}},
+        "axisTick": {"show": False},
     }
 
 
 def _languages_option(languages: list, p: dict) -> dict:
+    """左 grid：语言分布环形图"""
     names = [n for n, _, _ in languages]
     files = [f for _, f, _ in languages]
     return {
-        "backgroundColor": "transparent",
-        "textStyle": {"color": p["text"]},
-        "tooltip": {"trigger": "item", "formatter": "{b}: {c} 文件 ({d}%)"},
-        "title": {"text": "语言分布（按文件数）", "left": 8, "top": 4,
-                  "textStyle": {"fontSize": 13, "color": p["text"]}},
-        "series": [{
-            "type": "pie", "radius": ["38%", "68%"], "center": ["50%", "55%"],
-            "itemStyle": {"borderColor": p["card"], "borderWidth": 2},
-            "label": {"color": p["text"], "fontSize": 11},
-            "data": [{"name": n, "value": f} for n, f, _ in languages],
-        }],
+        "type": "pie",
+        "name": "语言分布",
+        "radius": ["32%", "55%"],
+        "center": ["25%", "55%"],
+        "itemStyle": {"borderColor": p["card"], "borderWidth": 2},
+        "label": {"color": p["text"], "fontSize": 9},
+        "data": [{"name": n, "value": f} for n, f, _ in languages],
     }
 
 
 def _file_types_option(file_types: list, p: dict) -> dict:
-    exts = [e for e, _ in file_types]
-    counts = [c for _, c in file_types]
+    """右 grid：文件类型 Top 横向条形图"""
+    exts = [e for e, _ in file_types][::-1]
+    counts = [c for _, c in file_types][::-1]
     return {
-        "backgroundColor": "transparent",
-        "textStyle": {"color": p["text"]},
-        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "grid": {"left": 60, "right": 24, "top": 30, "bottom": 20},
-        "title": {"text": "文件类型 Top", "left": 8, "top": 4,
-                  "textStyle": {"fontSize": 13, "color": p["text"]}},
-        "xAxis": {"type": "value", "minInterval": 1,
-                  "axisLabel": {"color": p["muted"], "fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": p["grid"]}}},
-        "yAxis": {"type": "category", "data": exts,
-                  "axisLabel": {"color": p["text"], "fontSize": 11}},
-        "series": [{"name": "文件数", "type": "bar", "data": counts,
-                    "itemStyle": {"color": p["warn"]}}],
+        "type": "bar",
+        "name": "文件数",
+        "data": counts,
+        "barMaxWidth": 12,
+        "itemStyle": {"color": p["warn"]},
+        "xAxisIndex": 1,
+        "yAxisIndex": 1,
+    }, {
+        "type": "value", "gridIndex": 1, "minInterval": 1,
+        "axisLabel": {"color": p["muted"], "fontSize": 9},
+        "splitLine": {"lineStyle": {"color": p["grid"]}},
+    }, {
+        "type": "category", "gridIndex": 1, "data": exts,
+        "axisLabel": {"color": p["text"], "fontSize": 9},
+        "axisLine": {"lineStyle": {"color": p["grid"]}},
+        "axisTick": {"show": False},
     }
 
 
-_chart_seq = [0]
+def build_options(data: dict, is_dark: bool) -> list:
+    """生成 2 个 echarts option（每个 400px 内双 grid 左右布局）
 
+    option[0]: commit 趋势(左柱) + 贡献者 Top(右横条)
+    option[1]: 语言分布(左环形) + 文件类型 Top(右横条)
 
-def _chart_div(option: dict, height: int = 200) -> str:
-    """单个 echarts 容器 div + 初始化 JS（id 用自增序号，避免 hash 碰撞）"""
-    import json as _json
-
-    _chart_seq[0] += 1
-    cid = f"c{_chart_seq[0]}"
-    opt_json = _json.dumps(option, ensure_ascii=False)
-    return (
-        f'<div class="chart" id="{cid}" style="height:{height}px;"></div>\n'
-        f'<script>window._opts=window._opts||[];'
-        f'window._opts.push({{el:"{cid}",opt:{opt_json}}});</script>'
-    )
-
-
-def generate_html(data: dict, is_dark: bool) -> str:
-    """生成完整 HTML 文档（4 图 + 概要行），供 iframe 展示"""
-    p = _palette(is_dark)
-    vendor = _vendor_script_tag()
-    err_block = ""
-    if data.get("error"):
-        err_block = f'<div class="err">⚠️ {_esc(data["error"])}</div>'
-    repo = _esc(data.get("repo_name", ""))
-    branch = _esc(data.get("branch", ""))
-    generated = _esc(data.get("generated_at", ""))
-    total = data.get("total_commits", 0)
-    summary = f"<b>{repo}</b> · 分支 {branch} · 生成于 {generated} · 共 {total} commits"
-
-    charts = []
-    if data.get("daily_commits"):
-        charts.append(_chart_div(_commit_trend_option(data["daily_commits"], p), 190))
-    if data.get("contributors"):
-        charts.append(_chart_div(_contributors_option(data["contributors"], p), 190))
-    if data.get("languages"):
-        charts.append(_chart_div(_languages_option(data["languages"], p), 200))
-    if data.get("file_types"):
-        charts.append(_chart_div(_file_types_option(data["file_types"], p), 180))
-
-    return f"""<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<title>{repo} 项目看板</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ background: {p["bg"]}; color: {p["text"]};
-         font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-         padding: 12px 14px; }}
-  .summary {{ font-size: 13px; margin-bottom: 10px; opacity: 0.9; }}
-  .err {{ background: rgba(245,166,35,0.15); color: {p["warn"]};
-          padding: 10px 12px; border-radius: 8px; margin-bottom: 10px; }}
-  .chart {{ width: 100%; }}
-</style>
-</head>
-<body>
-  <div class="summary">{summary}</div>
-  {err_block}
-  {''.join(charts)}
-  {vendor}
-<script>
-  window.addEventListener('load', function () {{
-    if (typeof echarts === 'undefined') return;
-    (window._opts || []).forEach(function (o) {{
-      var el = document.getElementById(o.el);
-      if (el) {{ var c = echarts.init(el); c.setOption(o.opt); }}
-    }});
-  }});
-</script>
-</body>
-</html>
-"""
-
-
-def write_report(project_root: str, is_dark: bool) -> str:
-    """生成报告文件到 <git-root>/.drifox/reports/project-dashboard.html
-
-    Returns:
-        文件绝对路径；失败返回空串
+    高度控制：2 实例 × 400px = 800px，避免 4 图各自 400px 过高。
     """
-    git_root = find_git_root(project_root)
-    if not git_root:
-        return ""
-    data = collect_data(git_root)
-    out_dir = Path(git_root) / ".drifox" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "project-dashboard.html"
-    try:
-        out_file.write_text(generate_html(data, is_dark), encoding="utf-8")
-        return str(out_file)
-    except OSError:
-        return ""
+    p = _palette(is_dark)
+    options = []
 
+    # ── 实例 1：commit 趋势 + 贡献者 ──
+    series, axes = [], []
+    x_axes, y_axes = [], []
+    if data.get("daily_commits"):
+        s, x, y = _commit_trend_option(data["daily_commits"], p)
+        series.append(s)
+        x_axes.append(x)
+        y_axes.append(y)
+        title_left = {"text": "近 30 天 Commit", "left": 8, "top": 6,
+                      "textStyle": {"fontSize": 11, "color": p["text"]}}
+    else:
+        title_left = {}
+    if data.get("contributors"):
+        s, x, y = _contributors_option(data["contributors"], p)
+        series.append(s)
+        x_axes.append(x)
+        y_axes.append(y)
+        title_right = {"text": "贡献者 Top", "left": "52%", "top": 6,
+                       "textStyle": {"fontSize": 11, "color": p["text"]}}
+    else:
+        title_right = {}
+    if series:
+        options.append({
+            **_base_style(p),
+            "grid": _grid_layout(),
+            "title": [t for t in (title_left, title_right) if t],
+            "xAxis": x_axes,
+            "yAxis": y_axes,
+            "series": series,
+        })
+
+    # ── 实例 2：语言分布 + 文件类型 ──
+    series, x_axes, y_axes = [], [], []
+    if data.get("languages"):
+        series.append(_languages_option(data["languages"], p))
+        title_left = {"text": "语言分布", "left": 8, "top": 6,
+                      "textStyle": {"fontSize": 11, "color": p["text"]}}
+    else:
+        title_left = {}
+    if data.get("file_types"):
+        s, x, y = _file_types_option(data["file_types"], p)
+        series.append(s)
+        x_axes.append(x)
+        y_axes.append(y)
+        title_right = {"text": "文件类型", "left": "52%", "top": 6,
+                       "textStyle": {"fontSize": 11, "color": p["text"]}}
+    else:
+        title_right = {}
+    if series:
+        options.append({
+            **_base_style(p),
+            "grid": _grid_layout(),
+            "title": [t for t in (title_left, title_right) if t],
+            "xAxis": x_axes,
+            "yAxis": y_axes,
+            "series": series,
+        })
+
+    return options
