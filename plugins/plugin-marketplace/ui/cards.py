@@ -1843,6 +1843,9 @@ class MarketplaceCard(QWidget):
                 cur = child.styleSheet()
                 btn_fs = max(fs - 2, 11)
                 style_extra = f" font-size: {btn_fs}px;"
+                # 加载更多按钮主题切换时同步文字色（创建时可能用旧主题色）
+                if child.objectName() == "loadMoreBtn":
+                    cur = re.sub(r"color:\s*[^;]+;", f"color: {tc};", cur)
                 # 仅在上下文提供字体家族时追加，否则保持系统默认字体
                 if ff:
                     style_extra += f" font-family: '{ff}';"
@@ -2763,8 +2766,10 @@ class MarketplaceCard(QWidget):
         if btn is None:
             self._remove_load_more_button()
             btn = TransparentPushButton(self._content)
+            btn.setObjectName("loadMoreBtn")
+            tc = getattr(self, "_cached_tc", "") or _text_color()
             btn.setStyleSheet(
-                "PushButton { background: rgba(128,128,128,0.1); border-radius: 6px; padding: 6px; }"
+                f"PushButton {{ background: rgba(128,128,128,0.1); color: {tc}; border-radius: 6px; padding: 6px; }}"
                 "PushButton:hover { background: rgba(128,128,128,0.2); }"
             )
             btn.clicked.connect(self._on_load_more)

@@ -753,12 +753,18 @@ def test_reload_plugin_handles_non_ui_plugins_gracefully(tmp_path):
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_load_plugin_only_refreshes_welcome_cards_for_welcome_tab_plugins(tmp_path, monkeypatch):
+def test_load_plugin_only_refreshes_welcome_cards_for_welcome_tab_plugins(tmp_path, monkeypatch, _qt_app):
     """普通 UI 插件（无 welcome tab）加载不应触发欢迎卡片刷新；注册了 welcome tab 的插件才触发
 
     回归修复：load_plugin / unload_plugin 原先无条件调用 _refresh_welcome_cards，
     导致任何 UI 插件刷新（如插件市场刷新）都会重建欢迎卡片。
+
+    P3 优化（debounce）：welcome 刷新改为 QTimer.singleShot(0) 合并调度——
+    同一事件循环批次内的多次 load/unload 只刷新一次（插件批量加载时不逐个
+    重建 QWebEngineView）。断言点相应改为 processEvents 后统计。
     """
+    from PyQt5.QtWidgets import QApplication
+
     reg = UIPluginRegistry.get_instance()
     reg.reset()
 
@@ -786,7 +792,7 @@ def register_ui(registry):
     assert reg.load_plugin("plain-plug", plain_dir) is True
     assert refresh_calls == [], "普通 UI 插件加载不应刷新欢迎卡片"
 
-    # ── 2. 加载注册 welcome tab 的插件 ──
+    # ── 2. 加载注册 welcome tab 的插件 → 排队刷新（尚未执行）──
     welcome_dir = tmp_path / "welcome-plug"
     welcome_ui = welcome_dir / "ui"
     welcome_ui.mkdir(parents=True)
@@ -801,15 +807,19 @@ def register_ui(registry):
         encoding="utf-8",
     )
     assert reg.load_plugin("welcome-plug", welcome_dir) is True
-    assert len(refresh_calls) == 1, "注册 welcome tab 的插件加载应刷新欢迎卡片"
+    assert refresh_calls == [], "刷新已合并排队（debounce），事件循环处理前不应执行"
 
     # ── 3. 卸载普通 UI 插件：不应刷新 ──
     assert reg.unload_plugin("plain-plug") is True
-    assert len(refresh_calls) == 1, "卸载普通 UI 插件不应刷新欢迎卡片"
+    assert refresh_calls == [], "卸载普通 UI 插件不应刷新欢迎卡片"
 
-    # ── 4. 卸载 welcome tab 插件：应刷新 ──
+    # ── 4. 卸载 welcome tab 插件：与步骤 2 合并为同一批次单次刷新 ──
     assert reg.unload_plugin("welcome-plug") is True
-    assert len(refresh_calls) == 2, "卸载含 welcome tab 的插件应刷新欢迎卡片"
+    assert refresh_calls == [], "同一事件批次内的多次变更应合并为单次刷新"
+
+    # ── 5. 处理事件循环 → 恰好执行一次刷新 ──
+    QApplication.processEvents()
+    assert len(refresh_calls) == 1, "批量加载/卸载应合并为单次欢迎卡片刷新"
 
     # ── 清理 ──
     for k in list(sys.modules.keys()):

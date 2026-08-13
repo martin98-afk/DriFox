@@ -1782,7 +1782,9 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
 _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
 
-@lru_cache(maxsize=16)  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
+@lru_cache(
+    maxsize=16
+)  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
 def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
@@ -1949,6 +1951,8 @@ def _dispatch_render_done(seq: int, fut, wself) -> None:
         viewer.renderDone.emit(seq, html)
     except RuntimeError:
         pass  # viewer C++ 对象已销毁（sip deleted），丢弃
+
+
 # ── Skeleton 全局缓存：_load_skeleton 返回的 HTML 字符串（~54KB）在
 # 多张卡片间共享，避免每张卡片独立构造大段 CSS/JS 模板。
 # 缓存键：(is_light, theme_fingerprint, font_family, ...)
@@ -3531,22 +3535,121 @@ class CodeWebViewer(QWebEngineView):
                     color: #88d4ff;
                 }}
 
-                /* 欢迎卡片历史会话：每段一个小标题 + 胶囊流（自适应换行） */
+                /* 欢迎卡片历史会话：分区标题 + 卡片行列表 */
                 .session-section {{
-                    margin: 10px 0 6px;
+                    margin: 4px 0 14px;
                 }}
-                .session-section .section-title {{
+                .session-header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                }}
+                .session-header-icon {{
+                    font-size: {tag_font_size}px;
+                    line-height: 1;
+                }}
+                .session-header-title {{
                     font-size: {tag_font_size}px;
                     font-weight: 600;
+                    color: var(--text);
+                    letter-spacing: 0.02em;
+                }}
+                .session-header-count {{
+                    font-size: {tiny_font_size}px;
                     color: #66c6ff;
-                    margin-bottom: 4px;
+                    background: rgba(100, 198, 255, 0.12);
+                    border: 1px solid rgba(100, 198, 255, 0.25);
+                    padding: 0 7px;
+                    border-radius: 999px;
+                    line-height: 1.7;
+                }}
+                .session-list {{
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 6px 8px;
+                }}
+                /* 会话卡片行：复用 .context-tag 点击事件链，覆盖胶囊默认外观 */
+                .session-item.context-tag {{
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    width: 100%;
+                    box-sizing: border-box;
+                    padding: 8px 12px;
+                    margin: 0;
+                    border-radius: 10px;
+                    border: 1px solid var(--border);
+                    background: rgba(100, 198, 255, 0.05);
+                    font-weight: 500;
+                    color: var(--text);
+                    cursor: pointer;
+                    transition: background 0.18s ease, border-color 0.18s ease,
+                                transform 0.18s ease, box-shadow 0.18s ease;
+                    max-width: 100%;
+                }}
+                .session-item.context-tag:hover {{
+                    background: rgba(100, 198, 255, 0.12);
+                    border-color: rgba(100, 198, 255, 0.5);
+                    transform: translateX(2px);
+                    box-shadow: 0 2px 10px rgba(100, 198, 255, 0.10);
+                }}
+                .session-item-badge {{
+                    flex: 0 0 auto;
+                    width: 30px;
+                    height: 30px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 9px;
+                    background: linear-gradient(135deg, rgba(100, 198, 255, 0.25), rgba(100, 198, 255, 0.08));
+                    font-size: 14px;
+                    line-height: 1;
+                }}
+                .session-item-body {{
+                    flex: 1;
+                    min-width: 0;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                }}
+                .session-item-title {{
+                    font-size: {tag_font_size}px;
+                    font-weight: 600;
+                    color: var(--text);
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }}
+                .session-item-meta {{
+                    font-size: {tiny_font_size}px;
+                    color: var(--text-muted);
                     opacity: 0.85;
                 }}
-                .session-tags {{
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 4px 6px;
-                    align-items: flex-start;
+                .session-item-arrow {{
+                    flex: 0 0 auto;
+                    font-size: 15px;
+                    color: var(--text-muted);
+                    opacity: 0;
+                    transform: translateX(-4px);
+                    transition: opacity 0.18s ease, transform 0.18s ease;
+                    line-height: 1;
+                }}
+                .session-item.context-tag:hover .session-item-arrow {{
+                    opacity: 1;
+                    transform: translateX(0);
+                }}
+                /* 卡片进入动画：逐行 stagger fade-in（backwards 保证延迟期隐藏，
+                   播完恢复自然样式，不锁死 transform，hover 位移不受影响） */
+                @keyframes session-item-in {{
+                    from {{ opacity: 0; transform: translateY(6px); }}
+                    to {{ opacity: 1; transform: translateY(0); }}
+                }}
+                .session-item.context-tag {{
+                    animation: session-item-in 0.32s ease backwards;
+                }}
+                @media (prefers-reduced-motion: reduce) {{
+                    .session-item.context-tag {{ animation: none; }}
                 }}
                 .welcome-empty {{
                     opacity: 0.55;
@@ -7564,6 +7667,10 @@ class MessageCard(SimpleCardWidget):
         self._welcome_top: list = []
         self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
+        # 窗口上下文提供者（多窗口隔离）：欢迎卡片渲染插件 tab 时调用，注入
+        # 当前窗口的 project_root / project_name / window_id，避免插件回读全局
+        # 状态导致多标签页内容串项目（create_welcome_card 传入 window._build_ui_context）
+        self._welcome_ctx_provider: Optional[Callable[[], Dict[str, Any]]] = None
         # changelog 异步加载：单实例持有 fetcher + 已加载 releases
         self._changelog_fetcher: Optional["_ChangelogFetcher"] = None
         self._changelog_releases: list = []
@@ -8093,6 +8200,23 @@ class MessageCard(SimpleCardWidget):
         self.set_welcome_mode(mode)
         self.welcomeModeChanged.emit(mode)
 
+    def _get_welcome_window_context(self) -> dict:
+        """获取当前窗口的 UI 上下文（注入插件 render_func 用）
+
+        多窗口隔离：每张欢迎卡片持有自己窗口的 context provider（创建时由
+        create_welcome_card 传入 window._build_ui_context），渲染插件 tab 时
+        读到的 project_root / project_name 属于**本窗口**，不会因标签页切换
+        或全局配置变更而串成其他窗口的项目。
+        """
+        if self._welcome_ctx_provider is not None:
+            try:
+                ctx = self._welcome_ctx_provider()
+                if isinstance(ctx, dict):
+                    return ctx
+            except Exception:
+                pass
+        return {}
+
     def set_welcome_mode(self, mode: str):
         """切换欢迎卡片模式（同步 active tab + 重渲染 body）"""
         self._welcome_mode = mode
@@ -8106,7 +8230,12 @@ class MessageCard(SimpleCardWidget):
             self._start_changelog_fetcher()
             return
         # sessions 走 markdown 渲染
-        body_html = _render_welcome_body(mode, self._welcome_recent, self._welcome_top)
+        body_html = _render_welcome_body(
+            mode,
+            self._welcome_recent,
+            self._welcome_top,
+            self._get_welcome_window_context(),
+        )
         self._render_welcome_with_body(body_html)
 
     def _render_welcome_with_body(self, body_html: str):
@@ -8171,8 +8300,19 @@ class MessageCard(SimpleCardWidget):
         recent_sessions: list,
         top_by_count: list,
         mode: str = "sessions",
-    ):
-        """一次性设置欢迎卡片数据 + 初始 mode（被 create_welcome_card 调用）"""
+        context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
+        """一次性设置欢迎卡片数据 + 初始 mode（被 create_welcome_card 调用）
+
+        Args:
+            recent_sessions: 最近会话列表
+            top_by_count: 最活跃会话列表
+            mode: 初始欢迎模式（sessions / changelog / 插件注册 tab）
+            context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
+                渲染插件 tab 时注入当前窗口的 project_root / project_name /
+                window_id，避免插件回读全局状态导致跨标签页内容串项目。
+        """
+        self._welcome_ctx_provider = context_provider
         self._welcome_recent = list(recent_sessions or [])
         self._welcome_top = list(top_by_count or [])
         self._welcome_mode = mode
@@ -8183,11 +8323,14 @@ class MessageCard(SimpleCardWidget):
                 pass
         if mode == "changelog":
             # changelog 走异步：先存 loading 占位；viewer 就绪后会调 fetcher
-            self._pending_welcome_md = (
-                f"### 👋 {get_random_greeting()}\n\n{_render_changelog_body(loading=True)}\n"
-            )
+            self._pending_welcome_md = f"### 👋 {get_random_greeting()}\n\n{_render_changelog_body(loading=True)}\n"
             return
-        body_html = _render_welcome_body(mode, self._welcome_recent, self._welcome_top)
+        body_html = _render_welcome_body(
+            mode,
+            self._welcome_recent,
+            self._welcome_top,
+            self._get_welcome_window_context(),
+        )
         greeting = get_random_greeting()
         self._pending_welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
 
@@ -10512,6 +10655,7 @@ def create_welcome_card(
     recent_sessions: list = None,
     top_by_count: list = None,
     mode: str = "sessions",
+    context_provider: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> MessageCard:
     """创建欢迎卡片
 
@@ -10521,7 +10665,10 @@ def create_welcome_card(
         agent_description: 智能体描述
         recent_sessions: 最近的历史会话列表，每项包含 title, last_time, session_id, message_count
         top_by_count: 消息最多的会话列表，每项包含 title, last_time, session_id, message_count
-        mode: 欢迎卡片模式（sessions / changelog）
+        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
+            渲染插件 tab 时注入当前窗口的 project_root / project_name /
+            window_id，避免插件回读全局状态导致多标签页内容串项目。
     """
     card = MessageCard(role="welcome", timestamp="就绪", parent=parent)
     # 一次性把数据 + 模式交给卡片：tabs 在 PyQt 层；body 由卡片内部渲染
@@ -10529,6 +10676,7 @@ def create_welcome_card(
         recent_sessions=recent_sessions,
         top_by_count=top_by_count,
         mode=mode,
+        context_provider=context_provider,
     )
     return card
 
@@ -10537,8 +10685,23 @@ def _render_welcome_body(
     mode: str,
     recent_sessions: list,
     top_by_count: list,
+    window_context: Optional[dict] = None,
 ) -> str:
-    """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发"""
+    """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发
+
+    Args:
+        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        recent_sessions: 最近会话列表
+        top_by_count: 最活跃会话列表
+        window_context: 当前窗口的 UI 上下文（project_root / project_name /
+            window_id / session_id 等）。多窗口隔离的关键：注入插件 render_func，
+            保证每个窗口渲染自己项目的内容，避免插件回读全局状态串项目。
+
+    注意：**不缓存 render_func 结果**。部分插件 tab 是异步采集模式——首次渲染
+    返回「加载中」占位，后台采集完成后再次调用 render_func 返回真实图表；
+    缓存占位内容会导致数据永远不显示（project-dashboard 踩坑）。
+    插件如需缓存应在自己内部做（如 collector 数据缓存），主程序不越俎代庖。
+    """
     if mode == "changelog":
         return _render_changelog_body()
     # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
@@ -10556,42 +10719,76 @@ def _render_welcome_body(
                 is_dark = not theme_manager.is_light_theme()
             except Exception:
                 is_dark = False
-            return tab.render_func({"is_dark": is_dark}) or ""
+            # 窗口上下文合并进插件 ctx（window_context 自带 is_dark，覆盖兜底值）
+            ctx = {"is_dark": is_dark}
+            if window_context:
+                ctx.update(window_context)
+            return tab.render_func(ctx) or ""
     except Exception:
         pass
     return _render_sessions_body(recent_sessions, top_by_count)
 
 
-def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
-    """渲染会话导览 body：最近 / 最活跃两段胶囊流"""
+_SESSION_ROWS = 3  # 双列网格行数（每分类显示 3×2 = 6 张）
+_SESSION_COLS = 2
 
-    def _render_section(title: str, items: list, count_mode: bool = False) -> str:
-        """渲染单个分类 section；items 为空则返回空串"""
-        if not items:
-            return ""
-        tag_html = []
-        for s in items[:3]:
-            t = escape(s.get("title", "未命名会话"))
-            sid = escape(s.get("session_id", ""))
-            if count_mode:
-                mc = s.get("message_count", 0)
-                meta = f"{mc}条消息"
-            else:
-                meta = escape(s.get("last_time") or "")
-            tag_html.append(
-                f'<span class="context-tag session-tag" data-type="session" '
-                f'data-session-id="{sid}" data-action="session">'
-                f'{t}<span class="session-time">{meta}</span></span>'
-            )
+
+def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
+    """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
+
+    每张卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
+    复用 .context-tag 点击事件链（data-type="session" + data-session-id），
+    仅替换视觉外观，JS 拦截逻辑不变。
+    """
+
+    def _render_item(s: dict, count_mode: bool, idx: int) -> str:
+        """渲染单个会话卡片；idx 用于 stagger 动画延迟"""
+        t = escape(s.get("title", "未命名会话"))
+        sid = escape(s.get("session_id", ""))
+        if count_mode:
+            mc = s.get("message_count", 0)
+            meta = f"{mc} 条消息"
+            icon = "⚡"
+        else:
+            meta = escape(s.get("last_time") or "")
+            icon = "💬"
         return (
-            f'<div class="session-section">'
-            f'<div class="section-title">{title}</div>'
-            f'<div class="session-tags">{"".join(tag_html)}</div>'
+            f'<div class="context-tag session-item" data-type="session" '
+            f'data-session-id="{sid}" data-action="session" '
+            f'style="animation-delay:{idx * 55}ms">'
+            f'<span class="session-item-badge">{icon}</span>'
+            f'<span class="session-item-body">'
+            f'<span class="session-item-title">{t}</span>'
+            f'<span class="session-item-meta">{meta}</span>'
+            f'</span>'
+            f'<span class="session-item-arrow">›</span>'
             f"</div>"
         )
 
-    recent_block = _render_section("📅 最近会话", recent_sessions, count_mode=False)
-    top_block = _render_section("🔥 最活跃会话", top_by_count, count_mode=True)
+    def _render_section(title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0) -> str:
+        """渲染单个分类 section；items 为空则返回空串
+
+        start_idx: 全局连续卡片序号起点，保证跨分区的 stagger 动画连贯
+        （否则两个分区各自从 0 开始，动画同时播放显得凌乱）。
+        """
+        if not items:
+            return ""
+        shown = items[:_SESSION_ROWS * _SESSION_COLS]
+        rows = "".join(_render_item(s, count_mode, start_idx + i) for i, s in enumerate(shown))
+        return (
+            f'<div class="session-section">'
+            f'<div class="session-header">'
+            f'<span class="session-header-icon">{icon}</span>'
+            f'<span class="session-header-title">{title}</span>'
+            f'<span class="session-header-count">{len(shown)}</span>'
+            f'</div>'
+            f'<div class="session-list">{rows}</div>'
+            f"</div>"
+        )
+
+    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=0)
+    top_start = len(recent_sessions[:_SESSION_ROWS * _SESSION_COLS])
+    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start)
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
@@ -10615,7 +10812,7 @@ def _render_changelog_body(releases: list = None, loading: bool = False, error_m
     items = []
     bodies = []
     for i, r in enumerate(releases[:20]):
-        tag = escape(r.get("tag_name") or r.get("name") or f"v{i+1}")
+        tag = escape(r.get("tag_name") or r.get("name") or f"v{i + 1}")
         date = escape((r.get("published_at") or "")[:10])
         body_html = r.get("body_html") or "<em>无更新说明</em>"
         active = "active" if i == 0 else ""
@@ -10625,13 +10822,15 @@ def _render_changelog_body(releases: list = None, loading: bool = False, error_m
             f'<div class="ver-tag">{tag}</div>'
             f'<div class="ver-date">{date}</div></li>'
         )
-        bodies.append(f'<div class="changelog-body" data-idx="{i}" style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>')
+        bodies.append(
+            f'<div class="changelog-body" data-idx="{i}" style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>'
+        )
 
     return (
         '<div class="changelog-shell">'
         f'<ul class="changelog-versions">{"".join(items)}</ul>'
         f'<div class="changelog-detail">{"".join(bodies)}</div>'
-        '</div>'
+        "</div>"
     )
 
 
@@ -10643,6 +10842,7 @@ _changelog_cache: dict = {}  # in-memory: {releases: [...], fetched_at: float, e
 
 class _ChangelogFetcher(QThread):
     """后台拉 GitHub Releases；走完 emit finished(list) 或 error(str)"""
+
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -10691,11 +10891,13 @@ class _ChangelogFetcher(QThread):
             except Exception:
                 body_html = escape(body_md).replace("\n", "<br>")
             md.reset()
-            releases.append({
-                "tag_name": item.get("tag_name", ""),
-                "name": item.get("name", ""),
-                "body_html": body_html,
-                "published_at": item.get("published_at", ""),
-                "html_url": item.get("html_url", ""),
-            })
+            releases.append(
+                {
+                    "tag_name": item.get("tag_name", ""),
+                    "name": item.get("name", ""),
+                    "body_html": body_html,
+                    "published_at": item.get("published_at", ""),
+                    "html_url": item.get("html_url", ""),
+                }
+            )
         self.finished.emit([{"releases": releases, "etag": new_etag}])
