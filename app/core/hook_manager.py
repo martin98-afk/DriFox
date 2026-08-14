@@ -743,6 +743,9 @@ class HookManager:
     _shared_registered_functions: Dict[str, Callable] = {}
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
+    # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
+    _shared_hook_states: Dict[str, bool] = {}
+    _shared_hook_overrides: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self, thread_pool: Optional[QThreadPool] = None):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
@@ -773,12 +776,20 @@ class HookManager:
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
 
         # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
-        self._hook_states: Dict[str, bool] = self._load_hook_states()
+        # 🛡️ 类级共享：backend 与 settings popup 各自创建 HookManager 实例时，
+        # 若每个实例独立从磁盘加载快照，后保存者会用旧快照覆盖先保存者的修改
+        # （开关莫名变化根因之一）。改为类级共享字典，只在首次实例化时加载磁盘。
+        self._hook_states: Dict[str, bool] = HookManager._shared_hook_states
+        if not self._hook_states:
+            self._hook_states.update(self._load_hook_states())
 
         # hook 内容覆盖持久化（系统 hook 编辑覆盖，与 hook_states 共享同一文件）
         # 存储格式: {hook_id: {"command": "...", "statusMessage": "...", ...}}
         # 加载时覆盖系统插件源文件中的默认值，实现系统 hook 可编辑不丢失
-        self._hook_overrides: Dict[str, Dict[str, Any]] = self._load_hook_overrides()
+        # 🛡️ 类级共享（同上，避免多实例互相覆盖）
+        self._hook_overrides: Dict[str, Dict[str, Any]] = HookManager._shared_hook_overrides
+        if not self._hook_overrides:
+            self._hook_overrides.update(self._load_hook_overrides())
 
     @staticmethod
     def _get_hook_states_path() -> str:
