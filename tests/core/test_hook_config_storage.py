@@ -70,3 +70,25 @@ def test_hook_states_shared_across_instances():
     b = HookManager()
     a._hook_states["test_id"] = False
     assert b._hook_states.get("test_id") is False, "实例 B 必须看到实例 A 的修改"
+
+
+# ──────────────────────────────────────────────
+# Task 2: 非系统 hook toggle 写回源文件
+# ──────────────────────────────────────────────
+def test_plugin_hook_toggle_writes_source_file(tmp_path):
+    """非系统 hook toggle → enabled 写回源文件，hook_states.json 不记录"""
+    hm, hooks_file = _make_hook_manager_with_file(tmp_path)
+    # 找到 hook 并 toggle
+    hook = hm._hooks["PreUserMessage"][0].hooks[0]
+    assert hook.is_system_plugin is False
+    ok = hm.toggle_hook_by_id(hook.id, False)
+    assert ok is True
+    # 源文件必须写入 enabled: false
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    entry = data["hooks"]["PreUserMessage"][0]["hooks"][0]
+    assert entry.get("enabled") is False
+    # hook_states.json 不得出现该 id
+    states_fp = Path(HookManager._get_hook_states_path())
+    if states_fp.exists():
+        states = json.loads(states_fp.read_text(encoding="utf-8"))
+        assert hook.id not in states

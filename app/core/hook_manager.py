@@ -2224,13 +2224,24 @@ class HookManager:
 
         hook.enabled = enabled
 
-        # 持久化到 hook_states.json（所有 hook 共用，跨会话保持）
-        self._hook_states[hook.id] = enabled
-        self._save_hook_states()
-
-        # 也持久化到源文件（user-custom hook 的源 JSON 文件），使用 ID 匹配
-        if self._is_user_custom_hook(hook):
-            self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+        # 双轨制持久化：
+        # - 系统 hook（plugins/system/）：保留覆盖层（hook_states.json）
+        # - 非系统 hook（插件/user-custom）：写回源文件 enabled 字段（覆盖式）
+        #   并清理覆盖层残留（迁移兜底）
+        if hook.is_system_plugin:
+            self._hook_states[hook.id] = enabled
+            self._save_hook_states()
+        else:
+            if hook.config_file:
+                ok = self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+                if not ok:
+                    logger.error(
+                        f"[HookManager] Failed to persist toggle for {hook_id} to {hook.config_file}"
+                    )
+            # 清理覆盖层残留（旧数据迁移兜底：若该 id 仍在 hook_states 中）
+            if hook.id in self._hook_states:
+                del self._hook_states[hook.id]
+                self._save_hook_states()
 
         logger.info(f"[HookManager] Toggled hook {hook_id} enabled={enabled}")
         return True
