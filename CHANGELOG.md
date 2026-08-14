@@ -3,6 +3,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-08-14
+
+自上一版本以来的变更 | 提交数：20 · 文件变更：20 · +3037/-231 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **Responses API 推理渲染支持** (`app/core/`): 支持 GPT-5.x 模型与子智能体 Responses API，解析更多 reasoning 事件并渲染思考内容
+- **Hook 配置源文件写回** (`app/core/` + 插件 hooks.json): 插件 Hook 开关和配置直接写回源文件，系统 Hook 使用覆盖层持久化
+- **旧版 Hook 状态一次性迁移** (`app/core/`): 启动时将旧版状态迁移到新的存储结构
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **MCP 连接并发竞态** (`app/core/`): 防止启动全量连接与插件热重载单服务器连接互相取消，避免后台线程长时间阻塞
+- **插件热重载 MCP 连接** (`app/core/`): 热重载后自动连接新增且启用的 MCP 服务器
+- **Hook 热重载顺序与索引** (`app/core/`): 恢复规则位置并重新对齐 Hook 索引，保持事件顺序和分组映射稳定
+- **Hook 状态持久化重复与覆盖** (`app/core/`): 修复文件顺序变化导致的重复 ID、错误覆盖及多实例状态竞争
+- **OpenAI 模块导入死锁** (`app/core/`): 预加载资源子模块，避免启动时导入死锁
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Hook 状态共享** (`app/core/`): 在 HookManager 实例间共享状态，避免快照互相覆盖
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级到 v0.5.1** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 同步更新项目、配置、安装器和 README 版本号
+- **移除过时设计文档** (`docs/`): 清理项目 dashboard、Hook 配置重构和 Responses API 支持的过时设计文档
+
 ## [v0.5.0] - 2026-08-13
 
 自上一版本以来的变更 | 提交数：38 · 文件变更：N · +5085/-1282 | 贡献者：dingma, mading
