@@ -1283,11 +1283,21 @@ class HookManager:
             with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # 更新监控时间
-            self._config_watchers[config_file] = current_mtime
+            # 🛡️ 修复热重载失效：先清除去重缓存，再注册。
+            # 旧逻辑先更新 _config_watchers 再调 register_hooks_from_json，
+            # register 开头的去重检查 `config_file in self._config_watchers`
+            # 必然命中 → return 0 → 热重载永远不生效。
+            if config_file in self._config_watchers:
+                del self._config_watchers[config_file]
+
+            # 先注销旧的 user-custom hooks，避免重新注册后新旧 rule 并存
+            self.unregister_skill_hooks("user-custom")
 
             # 重新注册 (保留技能注册，skill_name 统一用 "user-custom")
             self.register_hooks_from_json("user-custom", "", config, config_file)
+
+            # 更新监控时间（注册成功后）
+            self._config_watchers[config_file] = current_mtime
 
             logger.info(f"[HookManager] Hot reloaded hooks from {config_file}")
             return True
@@ -1295,9 +1305,9 @@ class HookManager:
             logger.error(f"[HookManager] Failed to reload hooks: {e}")
             return False
 
-    def check_and_reload(self):
-        """检查配置是否变更，必要时热重载"""
-        self.reload_hooks_config()
+    def check_and_reload(self) -> bool:
+        """检查配置是否变更，必要时热重载（返回是否成功重载）"""
+        return self.reload_hooks_config()
 
     # ========== 条件匹配 ==========
 

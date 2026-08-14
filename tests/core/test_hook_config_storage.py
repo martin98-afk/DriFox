@@ -348,3 +348,57 @@ def test_migrate_legacy_states_writes_source_and_cleans_ghost(tmp_path):
     assert "ghost_1" not in hm._hook_states
     assert hm._hook_states.get("sys_1") is True
     assert migrated >= 2  # plugin_1 迁移 + ghost 清理
+
+
+# ──────────────────────────────────────────────
+# Task 8: reload_hooks_config 热重载失效修复
+# ──────────────────────────────────────────────
+def test_reload_hooks_config_actually_reloads(tmp_path):
+    """热重载必须真正重新注册（不被去重拦截）"""
+    import os as _os
+
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "", "hooks": [{"id": "h1", "type": "command", "command": "echo v1"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm._config_file = str(hooks_file)
+    hm.register_hooks_from_json(
+        "user-custom",
+        str(tmp_path),
+        json.loads(hooks_file.read_text(encoding="utf-8")),
+        str(hooks_file),
+    )
+    assert len(hm._hooks.get("PreUserMessage", [])) == 1
+
+    # 修改文件内容
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "", "hooks": [{"id": "h1", "type": "command", "command": "echo v2"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # 模拟 mtime 前进
+    future = _os.path.getmtime(hooks_file) + 5
+    _os.utime(hooks_file, (future, future))
+
+    ok = hm.check_and_reload()
+    assert ok is True, "热重载应成功"
+    # 重新注册后 hook 应来自新内容（v2）
+    hook = hm._hooks["PreUserMessage"][0].hooks[0]
+    assert hook.command == "echo v2"
