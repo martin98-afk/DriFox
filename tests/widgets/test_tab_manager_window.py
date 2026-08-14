@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """TabManagerWindow 组件测试"""
 
+from types import SimpleNamespace
+
 import pytest
 from PyQt5.QtWidgets import QLabel
 
@@ -74,3 +76,138 @@ class TestTabManagerWindowShowEvent:
         tm._tab_panel.refresh_ui_plugins = MagicMock()
         tm.showEvent(QShowEvent())
         tm._tab_panel.refresh_ui_plugins.assert_called_once()
+
+
+class TestChatWrapperWheelForward:
+    """限宽居中留白区滚轮转发：左右留白无子控件接收 Wheel，
+
+    由 _chat_wrapper 的 eventFilter 转发给当前窗口 chat_scroll_area。
+    """
+
+    @staticmethod
+    def _make_scroll_area(qtbot, inner_height=2000):
+        """构造带内容的滚动区域（内容高于视口，可滚动）"""
+        from PyQt5.QtWidgets import QScrollArea, QWidget
+
+        area = QScrollArea()
+        inner = QWidget()
+        inner.setMinimumHeight(inner_height)
+        area.setWidget(inner)
+        area.resize(400, 300)
+        area.show()
+        qtbot.addWidget(area)
+        return area
+
+    def test_wheel_forward_to_current_window_chat_area(self, qtbot):
+        """滚轮事件应转发到当前窗口的 chat_scroll_area"""
+        from PyQt5.QtCore import QPoint, QPointF, Qt
+        from PyQt5.QtGui import QWheelEvent
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        chat_area = self._make_scroll_area(qtbot)
+        assert chat_area.verticalScrollBar().value() == 0
+
+        # 构造一个"当前窗口"：仅需带 chat_scroll_area 属性的对象
+        win = SimpleNamespace(chat_scroll_area=chat_area)
+        tm.get_current_window = lambda: win
+
+        ev = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(10, 10),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        forwarded = tm._forward_wheel_to_scroll_area(ev)
+        assert forwarded is True
+        assert chat_area.verticalScrollBar().value() > 0
+
+    def test_wheel_forward_no_window_falls_back_to_content(self, qtbot):
+        """无当前窗口时回退查找内容区下第一个可见滚动区域"""
+        from PyQt5.QtCore import QPoint, QPointF, Qt
+        from PyQt5.QtGui import QWheelEvent
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        tm.show()
+        chat_area = self._make_scroll_area(qtbot)
+
+        # 无窗口 + 内容区没有滚动区域 → 返回 False（不消费事件）
+        tm._windows = []
+        tm._window_to_index = {}
+        ev = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(10, 10),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        assert tm._forward_wheel_to_scroll_area(ev) is False
+
+        # 内容区挂上滚动区域后回退查找生效
+        tm._content_stack.setCurrentIndex(1)  # 覆盖层页面
+        from PyQt5.QtWidgets import QVBoxLayout
+
+        layout = tm._global_overlay.layout()
+        if layout is None:
+            layout = QVBoxLayout(tm._global_overlay)
+        layout.addWidget(chat_area)
+        qtbot.wait(50)
+        assert tm._forward_wheel_to_scroll_area(ev) is True
+        assert chat_area.verticalScrollBar().value() > 0
+
+    def test_event_filter_wheel_accepted(self, qtbot):
+        """eventFilter 收到 Wheel 且转发成功时返回 True 并 accept"""
+        from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+        from PyQt5.QtGui import QWheelEvent
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        chat_area = self._make_scroll_area(qtbot)
+        win = SimpleNamespace(chat_scroll_area=chat_area)
+        tm.get_current_window = lambda: win
+
+        ev = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(10, 10),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        handled = tm.eventFilter(tm._chat_wrapper, ev)
+        assert handled is True
+        assert ev.isAccepted() is True
+        assert chat_area.verticalScrollBar().value() > 0
+
+    def test_event_filter_other_widget_ignored(self, qtbot):
+        """非 wrapper 对象上的 Wheel 不拦截"""
+        from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+        from PyQt5.QtGui import QWheelEvent
+        from PyQt5.QtWidgets import QLabel
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        label = QLabel("x")
+        qtbot.addWidget(label)
+        ev = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(10, 10),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        handled = tm.eventFilter(label, ev)
+        assert handled is False

@@ -15,6 +15,7 @@ from loguru import logger
 from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
+    QAbstractScrollArea,
     QApplication,
     QFrame,
     QGraphicsOpacityEffect,
@@ -1819,7 +1820,39 @@ class TabManagerWindow(QWidget):
                 self._sync_chat_wrapper_width()
             except Exception:
                 pass
+        elif obj is self._chat_wrapper and event.type() == QEvent.Wheel:
+            # 限宽居中的左右留白区域没有子控件接收滚轮事件，
+            # 转发给当前内容区（对话列表/覆盖层）的滚动区域。
+            try:
+                if self._forward_wheel_to_scroll_area(event):
+                    event.accept()
+                    return True
+            except Exception:
+                pass
         return super().eventFilter(obj, event)
+
+    def _forward_wheel_to_scroll_area(self, event) -> bool:
+        """把 wrapper 留白区的滚轮事件转发给当前可见内容区的滚动区域
+
+        优先转发当前窗口的 chat_scroll_area（带平滑滚动）；覆盖层模式
+        或找不到时，回退到当前内容下第一个可见滚动区域。
+        """
+        # 优先：当前窗口的对话滚动区域
+        win = self.get_current_window()
+        if win is not None:
+            area = getattr(win, "chat_scroll_area", None)
+            if area is not None and area.isVisible():
+                area.wheelEvent(event)
+                return True
+        # 回退：当前内容（对话区/覆盖层）下第一个可见滚动区域
+        root = self._content_stack.currentWidget()
+        if root is None:
+            return False
+        for child in root.findChildren(QAbstractScrollArea):
+            if child.isVisible():
+                child.wheelEvent(event)
+                return True
+        return False
 
     def _sync_chat_wrapper_width(self):
         """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中"""
