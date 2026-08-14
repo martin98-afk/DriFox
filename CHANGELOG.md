@@ -3,6 +3,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 新功能 (New Features)
+- **Windows Job Object 进程树管理** (`app/tools/process_job.py`): 创建 → kill-on-close → 子进程入 Job 的进程树容器；`command_safety.run_safe/run_with_shell` 新增可选 `job=` 参数，命令启动后自动入 Job（S3）
+- **工具结果截断** (`app/core/context_builder.py`): 超过 8192 字符的工具输出保留头 4096 + 尾 1024，中间省略标记（DSH tool-result-pruner 对齐）；仅在发送给 LLM 的上下文层裁剪，会话原始存储不受影响（S1）
+- **上下文用量投影对齐** (`app/core/engines/ui/engine.py` + `app/widgets/context_usage_ring.py` + `context_usage_tooltip.py`): 用量快照按截断后口径估算（与实际发送一致），环形图 tooltip 显示「工具结果截断节省 X tokens」（S2）
+- **后台任务 Job 杀树 + 事件广播** (`app/tools/terminal_tools.py`): `BackgroundTaskManager.stop` 优先用 Job Object 杀进程树（内核级），新增 `on_task_event` 事件广播（started/stopped/completed），UI 可观测（S4）
+- **持久 Shell 会话** (`app/tools/pty_session.py`): Windows ConPTY（pywinpty）交互式会话，cwd/env/函数跨调用保留，超时可配置（默认 300s）；生命周期挂靠 ProcessJob kill-on-close；**能力已就绪，工具接入待二期**（S5）
+
+### 🔧 其他 (Chores & Build)
+- **依赖新增**: `pywinpty>=3.0.5; sys_platform == 'win32'`（持久 shell 会话基础，S5）
+
 ## [v0.5.1] - 2026-08-14
 
 自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading
