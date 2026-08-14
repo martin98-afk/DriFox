@@ -2020,6 +2020,43 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
 
 
+# ===== 软段落边界（中文句子边界）=====
+# 大段中文正文常无 \n\n 空行（长报告/解释性输出多为连续段落），
+# 仅靠硬边界（空行）会导致差量渲染对大段正文完全失效（_extract_closed_segments
+# 恒返回空 → _stable_md_len 永不前进 → 尾部整体重转 O(n²)）。
+# 软边界：句号类标点（。！？；… + 英文 !?;）作为可增量闭合的句子边界。
+# 约束：仅纯文本区间生效（fence 内不切），段长达到阈值才切（避免切分过碎、
+# 每句一次 runJavaScript 开销过大）。
+_SENTENCE_END_CHARS = frozenset("。！？；…!?;")
+# 软边界最小段长：累积到该长度才在句号处闭合，避免每句话都切一段
+_MIN_SOFT_SEGMENT_CHARS = 100
+
+
+def _find_sentence_boundary(md: str, start: int, end: int, fence_open: bool) -> int:
+    """在 [start, end) 内找第一个「满足最小段长」的句号类标点软边界。
+
+    感知 ``` 代码块状态（fence 内不切，避免切坏代码/高亮结构）。
+    返回句号类标点之后的偏移（切分点，句号保留在段尾）；找不到返回 -1。
+
+    Args:
+        md: 待扫描的 markdown 文本
+        start: 扫描起点
+        end: 扫描终点（不含）
+        fence_open: 进入该区间时是否处于 ``` 代码块内
+    """
+    fence = fence_open
+    i = start
+    while i < end:
+        if md.startswith("```", i):
+            fence = not fence
+            i += 3
+            continue
+        if not fence and md[i] in _SENTENCE_END_CHARS and i + 1 - start >= _MIN_SOFT_SEGMENT_CHARS:
+            return i + 1
+        i += 1
+    return -1
+
+
 def _extract_closed_segments(md: str):
     """提取 markdown 中已闭合的完整段（供差量增量渲染）。
 
@@ -2057,28 +2094,34 @@ def _extract_closed_segments(md: str):
     fence_open = False  # 是否在 ``` 代码块内（跨段累计）
 
     while i < n:
+        # 1) 硬边界：空行 \n\n（markdown 段落分隔）
         seg_end = md.find("\n\n", i)
+        boundary_len = 2  # 空行占 2 字符，跳过
+        # 2) 软边界：无空行时按句号类标点切分——大段中文正文无 \n\n 也能增量闭合
         if seg_end == -1:
-            break  # 剩余文本无空行分隔：整段未闭合（无稳定边界）→ 停止
+            seg_end = _find_sentence_boundary(md, i, n, fence_open)
+            boundary_len = 0  # 句号保留在段尾，不跳过
+        if seg_end == -1:
+            break  # 剩余文本无硬/软边界：整段未闭合（无稳定边界）→ 停止
 
         seg = md[i:seg_end]
         if not seg:
             # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
-            i = seg_end + 2
+            i = seg_end + boundary_len
             continue
         fence_count = seg.count("```")
 
         if fence_open:
             # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
             if fence_count % 2 == 0:
-                i = seg_end + 2
+                i = seg_end + boundary_len
                 continue
             fence_open = False
         else:
             if fence_count % 2 == 1:
                 # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
                 fence_open = True
-                i = seg_end + 2
+                i = seg_end + boundary_len
                 continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
@@ -2094,8 +2137,8 @@ def _extract_closed_segments(md: str):
 
         # 该段完整闭合：产出
         segments.append(seg)
-        stable_len = seg_end + 2  # 含空行
-        i = seg_end + 2
+        stable_len = seg_end + boundary_len
+        i = seg_end + boundary_len
 
     return stable_len, segments
 
@@ -2537,7 +2580,7 @@ class _DialogEventFilter(QObject):
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
             # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
 
     def unregister(self, viewer):
@@ -2548,7 +2591,7 @@ class _DialogEventFilter(QObject):
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
         if not self._viewers:
             self._detach_from_application()
@@ -2855,7 +2898,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except TypeError, RuntimeError, AttributeError:
+            except (TypeError, RuntimeError, AttributeError):
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -5604,6 +5647,23 @@ class CodeWebViewer(QWebEngineView):
         stripped = md_text.rstrip()
         return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
 
+    @staticmethod
+    def _has_reached_soft_boundary(md_text: str) -> bool:
+        """检测 markdown 是否以句号类标点结尾（软边界，适合差量渲染）。
+
+        大段中文正文常无 \n\n 空行，_has_reached_clean_boundary（硬边界）无法
+        在流式期间及时触发渲染。句号结尾即视为「可增量闭合」的软边界，
+        触发差量渲染（_extract_closed_segments 会按句号软边界切段），
+        而不必等安全定时器兜底（300ms）——显著缩短纯文本停留时间。
+
+        Returns:
+            True: 文本以句号类标点结尾，适合触发差量渲染
+        """
+        if not md_text:
+            return False
+        stripped = md_text.rstrip()
+        return bool(stripped) and stripped[-1] in _SENTENCE_END_CHARS
+
     def append_chunk(self, text: str):
         if not text:
             return
@@ -5625,8 +5685,8 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            # 差量渲染：仅在自然边界触发全量渲染，否则靠增量文本 + 安全兜底
-            if self._has_reached_clean_boundary(self._markdown_text):
+            # 差量渲染：仅在自然边界（硬/软）触发，否则靠增量文本 + 安全兜底
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
                 self._schedule_render(immediate=True)
             else:
                 self._schedule_render(immediate=False)
@@ -5846,8 +5906,8 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 流式模式下检查自然边界
-            if self._has_reached_clean_boundary(self._markdown_text):
+            # 流式模式下检查自然边界（硬边界空行 / 软边界句号结尾）
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
                 self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
@@ -6179,23 +6239,19 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _has_active_tool_dom(self) -> bool:
-        """B1: 是否有活跃工具 DOM（JS 注入的**运行中/未完成**工具块）。
-
-        返回 True 时差量渲染必须让位全量渲染（save/restore 保护）。判定只认
-        _injected_pending_tools（JS 注入但结果未 append_tool_result 的工具 id，
-        运行框/预览框仍在 DOM），**不认 _tool_dom_dirty**：
-
-        - _tool_dom_dirty 表示"DOM 有 JS 注入工具块、全量渲染需 save/restore 保护"，
-          该保护由 _needs_save_restore 独立判断，不应阻塞差量渲染。
-        - dirty 的清除依赖"全量渲染应用成功"的 JS 回调；流式期间全量渲染结果
-          可能被 seq 过期丢弃（_apply_render_result 提前 return 不跑 JS）→ dirty
-          长期 True → 若据此让位，差量渲染（含 _render_tail_inline 尾部行内格式化）
-          在工具调用后永久失效 → 正文流式纯文本滞留到流式结束才刷新成 HTML。
-        - 差量渲染 updateContentAppend / updateTailHtml 只操作 content-placeholder
-          的 [data-incremental] 节点与追加段，不触碰 [data-tool-call-id] 工具块，
-          对已注入的工具 DOM 安全。
+        """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
+        返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
+        且 _tool_md_cache 影响 _inject_tool_blocks 输出——差量段渲染不带该缓存，
+        会导致工具块 HTML 与全量不一致）。
         """
+        if self._tool_dom_dirty:
+            return True
         try:
+            if getattr(self, "_restore_finished_ids", None):
+                return True
+            # pending 集合非空 = 仍有 JS 注入未完成的工具块在 DOM（运行框/预览框），
+            # 差量渲染同样必须让位全量渲染（save/restore 保护）。防御：dirty 清除
+            # 回调理论上已受 pending 守卫，此处再兜底一次防其他路径直接改 dirty。
             if getattr(self, "_injected_pending_tools", None):
                 return True
         except Exception:
@@ -7233,7 +7289,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -9522,9 +9578,11 @@ class MessageCard(SimpleCardWidget):
             self.viewer._thinking_finalized = True
             # ── 差量渲染（2026-07-22）──
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
-            # 仅在自然边界触发（段落结束 / 块闭合），非边界时只启安全定时器。
+            # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
             # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
-            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+            if self._streaming and (
+                self.viewer._has_reached_clean_boundary(last_text) or self.viewer._has_reached_soft_boundary(last_text)
+            ):
                 self.viewer._schedule_render(immediate=True)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -10593,7 +10651,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

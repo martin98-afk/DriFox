@@ -32,6 +32,7 @@ from app.widgets.message_card import (
     _has_unclosed_think_or_tool,
     _render_inline_tail,
     _render_markdown_to_html_cached_impl,
+    _render_stable_segment,
     CodeWebViewer,
 )
 
@@ -264,31 +265,60 @@ def test_render_inline_tail_filters_think_tool_tags():
 
 
 def test_stream_long_paragraph_tail_render_aligns_with_full():
-    """模拟流式：无空行分隔的长段落（核心场景）——每个 chunk 后尾部行内渲染，
-    最终 DOM 可见文本与全量渲染一致（markdown 源码不再滞留）。"""
+    """模拟流式：无空行分隔的长段落（核心场景）——软边界切段 + 尾部行内渲染，
+    最终 DOM 可见文本与全量渲染一致（markdown 源码不再滞留）。
+
+    软边界切分后，长段落（>= _MIN_SOFT_SEGMENT_CHARS 字符）按句号增量切段走
+    _render_stable_segment 差量渲染；不足阈值的尾部仍走 _render_inline_tail
+    行内渲染。两条路径都必须即时格式化 markdown 语法，不得字面显示源码。
+    """
     md = (
         "首先感谢您的提问。这个问题涉及到多个方面的考量，我们需要从整体架构、"
         "实现细节、性能影响以及后续维护等多个角度来全面分析。特别是当数据量"
         "增大时，**性能表现**会直接影响用户体验，因此`缓存策略`和`异步处理`"
         "就显得尤为重要。"
     )
-    # 模拟流式 chunk 注入 + 尾部行内渲染（复刻 _perform_update 无闭合段分支）
+    # 模拟流式 chunk 注入 + 差量切段 + 尾部行内渲染（复刻 _perform_update 差量快路径）
+    stable = 0
+    rendered_text = ""
     pos = 0
-    tail_visible = ""
     while pos < len(md):
         pos += 7
         chunk_md = md[:pos]
-        stable_len, segs = _extract_closed_segments(chunk_md[0:])
-        assert segs == [], "无空行长段落不应产出闭合段（核心场景前提）"
-        tail = chunk_md[0:]
+        stable_len, segs = _extract_closed_segments(chunk_md[stable:])
+        if segs:
+            for seg in segs:
+                rendered_text += _strip_tags(_render_stable_segment(seg, compact=False))
+            stable += stable_len
+        tail = chunk_md[stable:]
+        tail_text = ""
         if tail and not _has_unclosed_think_or_tool(tail):
-            tail_visible = _strip_tags(_render_inline_tail(tail, compact=False))
-    # 流式结束全量渲染
+            tail_text = _strip_tags(_render_inline_tail(tail, compact=False))
+        visible = rendered_text + tail_text
+    # 流式结束：完整内容已闭合，最终可见文本**不出现** markdown 源码
+    # （中间态未闭合语法字面显示是 markdown 固有行为，由
+    #   test_render_inline_tail_formats_inline_markdown 覆盖）
+    assert "**" not in visible, f"流式期间仍显示 markdown 源码: {visible!r}"
+    assert "`" not in visible, f"流式期间仍显示反引号源码: {visible!r}"
+    # 流式结束全量渲染：可见文本（去空白）与全量一致
+    # （软边界切段会把句号后的软换行吞掉，属差量渲染可接受差异，故比较时去空白）
     full_text = _strip_tags(_render_markdown_to_html_cached_impl(md, compact=False))
-    norm = lambda s: re.sub(r"\s+", " ", s).strip()
-    assert norm(tail_visible) == norm(full_text), (
-        f"流式期间尾部文本与全量不一致:\n tail={tail_visible!r}\n full={full_text!r}"
+    strip_ws = lambda s: re.sub(r"\s+", "", s)
+    assert strip_ws(visible) == strip_ws(full_text), (
+        f"流式期间文本与全量不一致:\n diff={visible!r}\n full={full_text!r}"
     )
-    # 关键断言：流式期间**不出现** markdown 源码（修复前是 **性能表现** 字面）
-    assert "**" not in tail_visible, f"流式期间仍显示 markdown 源码: {tail_visible!r}"
-    assert "`" not in tail_visible, f"流式期间仍显示反引号源码: {tail_visible!r}"
+
+
+def test_extract_closed_segments_splits_long_paragraph_by_sentence():
+    """软边界：无空行的大段中文正文（>= 阈值）应按句号增量切段，稳定区向前推进。"""
+    md = (
+        "这是第一句话内容比较长用来测试。这是第二句话内容也比较长用来测试。"
+        "这是第三句话内容继续比较长用来测试。这是第四句话内容仍然比较长用来测试。"
+        "这是第五句话内容还要比较长用来测试。这是第六句话内容终于比较长用来测试。"
+    )
+    stable_len, segs = _extract_closed_segments(md)
+    assert len(segs) >= 1, "大段正文应至少切出 1 段"
+    assert stable_len > 0, "软边界应推进稳定区"
+    # 每段必须以句号结尾（软边界切在句号后，句号保留在段尾）
+    for seg in segs:
+        assert seg.endswith("。"), f"软边界段应以句号结尾: {seg[-10:]!r}"
