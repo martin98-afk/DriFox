@@ -1026,6 +1026,54 @@ class HookManager:
 
         return count
 
+    def migrate_legacy_hook_states(self) -> int:
+        """一次性迁移旧覆盖层数据（必须在所有 hooks 注册完成后调用）
+
+        规则：
+        - 非系统 hook 条目 → 写回源文件 enabled → 从 _hook_states 删除
+        - 幽灵 id（内存中找不到 hook）→ 直接删除
+        - 系统 hook 条目 → 保留
+        单条失败跳过，下次启动重试。
+
+        Returns:
+            处理的条数
+        """
+        if not self._hook_states:
+            return 0
+        processed = 0
+        dirty = False
+        for hook_id, enabled in list(self._hook_states.items()):
+            found = self._find_hook_by_id(hook_id)
+            if found is None:
+                # 幽灵 id（本机无此 hook：插件已删/多端同步残留）
+                del self._hook_states[hook_id]
+                dirty = True
+                processed += 1
+                continue
+            _, _, _, hook = found
+            if hook.is_system_plugin:
+                continue  # 系统 hook 保留覆盖层
+            # 非系统 hook：写回源文件
+            if hook.config_file and os.path.exists(hook.config_file):
+                ok = self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+                if ok:
+                    del self._hook_states[hook_id]
+                    dirty = True
+                    processed += 1
+                else:
+                    logger.warning(
+                        f"[HookManager] Migration failed for {hook_id}, will retry next start"
+                    )
+            else:
+                del self._hook_states[hook_id]
+                dirty = True
+                processed += 1
+        if dirty:
+            self._save_hook_states()
+        if processed:
+            logger.info(f"[HookManager] Migrated {processed} legacy hook states")
+        return processed
+
     def _persist_hook_ids_to_file(self, config_file: str):
         """将内存中 hook 的 id 写回到 JSON 配置文件
 

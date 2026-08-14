@@ -304,3 +304,47 @@ def test_persist_ids_mixed_existing_and_missing(tmp_path):
     assert hook_map["echo a"] == "fixed_id_a"
     assert hook_map["echo b"] == id_b
     assert hook_map["echo c"] == id_c
+
+
+# ──────────────────────────────────────────────
+# Task 7: 启动迁移（非系统写回 + 幽灵清理）
+# ──────────────────────────────────────────────
+def test_migrate_legacy_states_writes_source_and_cleans_ghost(tmp_path):
+    """迁移：非系统条目写回源文件 + 幽灵 id 删除，系统条目保留"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "", "hooks": [{"id": "plugin_1", "type": "command", "command": "echo a"}]}
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    # 预置旧数据：plugin_1=False（非系统）、ghost=True（幽灵）、sys_1=True（系统）
+    hm._hook_states["plugin_1"] = False
+    hm._hook_states["ghost_1"] = True
+    hm._hook_states["sys_1"] = True
+    # 造一个系统 hook（is_system_plugin=True）
+    from app.core.hook_manager import Hook, HookMatchRule
+
+    sys_hook = Hook(id="sys_1", type="command", command="echo sys", is_system_plugin=True)
+    hm._hooks.setdefault("Stop", []).append(HookMatchRule(matcher="", hooks=[sys_hook]))
+
+    migrated = hm.migrate_legacy_hook_states()
+    # plugin_1 写回源文件
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    assert data["hooks"]["PreUserMessage"][0]["hooks"][0]["enabled"] is False
+    # ghost 删除，sys 保留
+    assert "plugin_1" not in hm._hook_states
+    assert "ghost_1" not in hm._hook_states
+    assert hm._hook_states.get("sys_1") is True
+    assert migrated >= 2  # plugin_1 迁移 + ghost 清理
