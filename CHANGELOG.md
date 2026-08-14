@@ -5,13 +5,14 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.1] - 2026-08-14
 
-自上一版本以来的变更 | 提交数：20 · 文件变更：20 · +3037/-231 | 贡献者：mading
+自上一版本以来的变更 | 提交数：21 · 文件变更：21 · +3207/-231 | 贡献者：mading
 
 ### ✨ 新功能 (New Features)
 
 - **Responses API 推理渲染支持** (`app/core/`): 支持 GPT-5.x 模型与子智能体 Responses API，解析更多 reasoning 事件并渲染思考内容
 - **Hook 配置源文件写回** (`app/core/` + 插件 hooks.json): 插件 Hook 开关和配置直接写回源文件，系统 Hook 使用覆盖层持久化
 - **旧版 Hook 状态一次性迁移** (`app/core/`): 启动时将旧版状态迁移到新的存储结构
+- **对话区滚轮事件转发** (`app/widgets/tab_manager_window.py`): TabManagerWindow 在限宽居中的左右留白区拦截滚轮事件并转发给当前对话/覆盖层的滚动区域，避免留白处滚轮失效
 
 ### 🐛 问题修复 (Bug Fixes)
 
