@@ -1053,16 +1053,36 @@ class HookManager:
                             mem_ids[event_name].append(hook.id)
 
             # 遍历文件中的 hook，按 event 内顺序逐个分配 id
+            # 🛡️ 防重复：分配前检查候选 id 是否已被文件其他 hook 占用。
+            # 正常注册（文件顺序=内存顺序）下 idx 天然对齐；文件被外部改动
+            # （gitee 同步/手动编辑）导致顺序不一致时，跳过已占用 id 而非
+            # 错配成重复 id（重复 id 会导致开关状态串台）。
+            existing_ids = set()
+            for _rules in raw_hooks.values():
+                for _rule in _rules:
+                    for _h in _rule.get("hooks", []):
+                        if _h.get("id"):
+                            existing_ids.add(_h["id"])
+
             for event_name, rules in raw_hooks.items():
+                ids = mem_ids.get(event_name, [])
                 idx = 0
                 for rule in rules:
                     for h in rule.get("hooks", []):
                         if not h.get("id"):
-                            ids = mem_ids.get(event_name, [])
+                            # 从当前位置向后找第一个未被占用的内存 id
+                            while idx < len(ids) and ids[idx] in existing_ids:
+                                idx += 1
                             if idx < len(ids):
                                 h["id"] = ids[idx]
+                                existing_ids.add(ids[idx])
                                 modified = True
-                            idx += 1
+                                idx += 1
+                            else:
+                                logger.warning(
+                                    f"[HookManager] No available id for hook in {event_name}: "
+                                    f"{h.get('command', '')[:40]}"
+                                )
                         else:
                             # 有 id 的也算进序号计数（保持位置对应）
                             idx += 1

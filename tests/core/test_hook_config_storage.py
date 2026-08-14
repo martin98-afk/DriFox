@@ -214,3 +214,93 @@ def test_apply_state_only_for_system_hook(tmp_path):
     hook = hm._hooks["PreUserMessage"][0].hooks[0]
     # 源文件无 enabled → 默认 True，且非系统 hook 不被覆盖层强制改 False
     assert hook.enabled is True
+
+
+# ──────────────────────────────────────────────
+# Task 6: _persist_hook_ids_to_file id 对齐
+# ──────────────────────────────────────────────
+def test_persist_ids_aligned_with_file_order(tmp_path):
+    """id 分配必须按文件顺序对齐，不因内存注册顺序错位"""
+    hooks_file = tmp_path / "hooks.json"
+    # 文件里两个 hook 都无 id，且命令不同
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {"type": "command", "command": "echo first"},
+                                {"type": "command", "command": "echo second"},
+                            ],
+                        }
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    # 注册后源文件应有两个不同 id（persist 已写回）
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    entries = data["hooks"]["PreUserMessage"][0]["hooks"]
+    assert len(entries) == 2
+    id1, id2 = entries[0]["id"], entries[1]["id"]
+    assert id1 and id2 and id1 != id2
+    # 再次注册（模拟重启）：id 必须保持稳定不漂移
+    hm2 = HookManager()
+    hm2.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    hook_map = {h.command: h.id for h in hm2._hooks["PreUserMessage"][0].hooks}
+    assert hook_map["echo first"] == id1
+    assert hook_map["echo second"] == id2
+
+
+def test_persist_ids_mixed_existing_and_missing(tmp_path):
+    """混合场景：文件里部分 hook 已有 id、部分没有 → 无 id 的按文件顺序补齐，已有的不被改"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {"id": "fixed_id_a", "type": "command", "command": "echo a"},
+                                {"type": "command", "command": "echo b"},
+                                {"type": "command", "command": "echo c"},
+                            ],
+                        }
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    entries = data["hooks"]["PreUserMessage"][0]["hooks"]
+    assert entries[0]["id"] == "fixed_id_a", "已有 id 的 hook 不得被改写"
+    id_b, id_c = entries[1]["id"], entries[2]["id"]
+    assert id_b and id_c, "无 id 的 hook 必须补齐"
+    assert id_b != id_c and id_b != "fixed_id_a" and id_c != "fixed_id_a"
+    # 重启后 id 稳定
+    hm2 = HookManager()
+    hm2.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    hook_map = {h.command: h.id for h in hm2._hooks["PreUserMessage"][0].hooks}
+    assert hook_map["echo a"] == "fixed_id_a"
+    assert hook_map["echo b"] == id_b
+    assert hook_map["echo c"] == id_c
