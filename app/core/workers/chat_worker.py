@@ -3643,8 +3643,16 @@ class OpenAIChatWorker(QThread):
             saw_any_chunk = True
             etype = getattr(event, "type", "") or ""
 
-            # ----- 思考内容（摘要文本）-----
-            if etype == "response.reasoning_summary_text.delta":
+            # ----- 思考内容（摘要/完整思考文本，兼容多种网关事件名）-----
+            # OpenAI 官方：reasoning_summary_text.delta（摘要，默认）
+            #          或 reasoning_text.delta（完整思考，需 include）
+            # 部分中转网关可能用 reasoning.delta / reasoning_summary_part.delta
+            if etype in (
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+                "response.reasoning.delta",
+                "response.reasoning_summary_part.delta",
+            ):
                 piece = getattr(event, "delta", "") or ""
                 if piece:
                     if not reasoning_started_this_call:

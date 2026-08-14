@@ -14,6 +14,7 @@ import pytest
 
 from app.core.message_content import messages_to_responses_input
 from app.core.workers.chat_worker import OpenAIChatWorker
+from app.core.workers.subagent_worker import SubAgentExecutor
 
 
 # ---------- 消息转换 ----------
@@ -191,3 +192,80 @@ class TestProcessResponsesStream:
         assert found is False
         # 取消路径返回 (False, False)
         assert pending is False
+
+
+# ---------- SubAgentExecutor 非流式 Responses 解析 ----------
+
+
+class _FakeItem:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _FakeUsage:
+    def __init__(self):
+        self.input_tokens = 10
+        self.output_tokens = 20
+        self.total_tokens = 30
+
+
+class _FakeSubResp:
+    def __init__(self, output, usage=None):
+        self.output = output
+        self.usage = usage
+
+
+class TestSubAgentResponses:
+    def _make_subagent(self):
+        w = SubAgentExecutor.__new__(SubAgentExecutor)
+        w._total_prompt_tokens = 0
+        w._total_completion_tokens = 0
+        w._total_tokens = 0
+        w._peak_total_tokens = 0
+        w.task_id = "t1"
+        w.token_usage_updated = type("S", (), {"emit": lambda *a, **k: None})()
+        return w
+
+    def test_parse_output(self):
+        w = self._make_subagent()
+        resp = _FakeSubResp(
+            output=[
+                _FakeItem(type="reasoning", summary=[_FakeItem(type="summary_text", text="先算乘法")]),
+                _FakeItem(type="reasoning", summary=[{"type": "summary_text", "text": "再算除法"}]),
+                _FakeItem(type="message", content=[_FakeItem(type="output_text", text="答案是 399")]),
+                _FakeItem(type="function_call", call_id="call_1", name="get_weather", arguments='{"city":"北京"}'),
+            ],
+            usage=_FakeUsage(),
+        )
+        content, tool_calls, reasoning = w._parse_responses_output(resp)
+        assert content == "答案是 399"
+        assert reasoning == "先算乘法再算除法"
+        assert tool_calls == [
+            {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city":"北京"}'}}
+        ]
+        assert w._total_tokens == 30
+
+    def test_use_responses_api_judge(self):
+        w = self._make_subagent()
+        assert w._use_responses_api({"模型名称": "gpt-5.6-luna"}) is True
+        assert w._use_responses_api({"模型名称": "deepseek-v4-flash"}) is False
+        # 强制覆盖
+        assert w._use_responses_api({"模型名称": "deepseek-v4-flash", "使用ResponsesAPI": True}) is True
+        assert w._use_responses_api({"模型名称": "gpt-5.6-luna", "使用ResponsesAPI": False}) is False
+
+    def test_responses_tools_conversion(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "read", "description": "读文件", "parameters": {"type": "object"}},
+            }
+        ]
+        out = SubAgentExecutor._responses_tools(tools)
+        assert out == [
+            {
+                "type": "function",
+                "name": "read",
+                "description": "读文件",
+                "parameters": {"type": "object"},
+            }
+        ]
