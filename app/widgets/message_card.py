@@ -6095,6 +6095,18 @@ class CodeWebViewer(QWebEngineView):
                     self._render_tail_inline()
                 return
 
+            # 🐛 修复（大段正文流式期间纯文本滞留）：差量快路径被 _needs_full_render
+            # （初始 True，首次全量渲染应用成功才置 False）或 _has_active_tool_dom()
+            # 让位时，流式正文只能依赖全量线程池渲染。大段正文渲染耗时长，期间新
+            # chunk 持续提交新 seq → 在途结果被 _apply_render_result 的 seq 校验
+            # 丢弃 → _needs_full_render 保持 True → 差量路径永远进不去 → 纯文本
+            # 滞留到流式结束才一次性刷新成 HTML。
+            # 尾部行内渲染不依赖全量渲染（自带哈希缓存、只操作 data-incremental
+            # 节点，对工具 DOM 安全），在差量不可走的流式路径也先执行，保证流式
+            # 期间 markdown 语法（**加粗**、`code`、[链接]）即时格式化。
+            if self._streaming:
+                self._render_tail_inline()
+
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
 
