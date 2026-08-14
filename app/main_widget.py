@@ -9868,6 +9868,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 并发新建 N 个会话时避免 N 个 welcome 在同一事件批次连续渲染卡死 UI（C2）。
         self._schedule_initial_welcome()
         self._refresh_context_usage_indicator()
+        # 🆕 刷新历史面板：建新会话时旧会话已被 _auto_save_current_session 入库，
+        # 但历史面板 UI 未收到信号 → 列表停留在保存前快照（旧会话缺失）。
+        # 仅历史卡片可见时执行（不可见时 0 开销）。
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     def _release_inactive_session_messages(self):
         """释放非活跃会话在 HistoryManager 中的消息数据。
@@ -16597,6 +16601,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 成功保存后清除脏标记，后续无变更的重复 save 将被跳过
         self._session_dirty = False
         self._update_node_preview()
+        # 🆕 历史面板刷新：保存后同步内存缓存到历史面板 UI，
+        # 避免「历史面板已展开但列表停在保存前快照」bug。
+        # 仅历史卡片可见时执行（不可见时 0 开销），下次打开面板仍走
+        # _toggle_history_card → _refresh_history_toggle_panel 拉取最新数据。
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     @staticmethod
     def _count_user_messages(messages: List[Dict]) -> int:
@@ -19082,6 +19091,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 立即落盘，确保退出前数据写入 SQLite
         if self.history_manager:
             self.history_manager.flush()
+
+        # 🆕 刷新历史面板：自动保存路径同样需要触发 UI 同步
+        # （关闭窗口/项目切换等触发此函数时，历史面板可能已展开）。
+        # 仅历史卡片可见时执行（不可见时 0 开销）。
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
         if self._current_session_id:
             idx = self.history_manager.find_index_by_session_id(self._current_session_id)
