@@ -6175,11 +6175,13 @@ class CodeWebViewer(QWebEngineView):
         if self._tool_dom_dirty:
             return True
         try:
-            if getattr(self, "_restore_finished_ids", None):
-                return True
-            # pending 集合非空 = 仍有 JS 注入未完成的工具块在 DOM（运行框/预览框），
-            # 差量渲染同样必须让位全量渲染（save/restore 保护）。防御：dirty 清除
-            # 回调理论上已受 pending 守卫，此处再兜底一次防其他路径直接改 dirty。
+            # 🐛 修复：不再用 _restore_finished_ids 判活跃。它是"已完成工具 id 集合"
+            # （= _finished_streaming_ids 引用，工具结果到达后只 add，卡片 cleanup 才
+            # clear），不代表"DOM 中有 JS 注入的工具块"。用它判活跃会让差量渲染在
+            # 任意工具调用后永久让位全量渲染（流式异步线程池 + seq 过期丢弃追不上
+            # 流式速度）→ 纯文本迟迟不刷新成 HTML。真正表示"JS 注入工具块仍在 DOM"
+            # 的是 _tool_dom_dirty（渲染回调后清除）与 _injected_pending_tools
+            # （结果 append/remove 后 discard），二者已覆盖需 save/restore 保护的场景。
             if getattr(self, "_injected_pending_tools", None):
                 return True
         except Exception:

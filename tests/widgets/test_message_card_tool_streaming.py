@@ -88,3 +88,29 @@ def test_append_tool_result_without_tool_call_id_does_not_track():
     before = set(card._finished_streaming_ids)
     card.append_tool_result(tool_name="read_file", arguments={}, result="ok")
     assert card._finished_streaming_ids == before
+
+
+def test_has_active_tool_dom_false_when_tool_done_and_dom_clean():
+    """回归：工具已完成（_restore_finished_ids 非空）但 DOM 无活跃工具块时，
+    _has_active_tool_dom() 必须返回 False。
+
+    此前 _restore_finished_ids（= _finished_streaming_ids 引用，工具结果到达后
+    只 add、卡片 cleanup 才 clear）被当作"活跃工具 DOM"判据，导致任意工具调用后
+    差量渲染永久让位全量渲染（异步线程池 + seq 过期丢弃追不上流式速度）→
+    流式纯文本迟迟不刷新成 HTML。
+    """
+    from app.widgets.message_card import CodeWebViewer
+
+    viewer = _StubViewer()
+    viewer._tool_dom_dirty = False
+    viewer._injected_pending_tools = set()
+    # 模拟真实链路：append_tool_result 同步给 viewer 的已完成集合（永不清空）
+    viewer._restore_finished_ids = {"call_done_1"}
+    assert CodeWebViewer._has_active_tool_dom(viewer) is False
+
+    # 对照：DOM 确有 JS 注入工具块时仍必须让位差量渲染
+    viewer._tool_dom_dirty = True
+    assert CodeWebViewer._has_active_tool_dom(viewer) is True
+    viewer._tool_dom_dirty = False
+    viewer._injected_pending_tools = {"call_running_2"}
+    assert CodeWebViewer._has_active_tool_dom(viewer) is True
