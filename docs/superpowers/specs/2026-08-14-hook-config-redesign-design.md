@@ -43,9 +43,23 @@
 | 2 | `edit_hook_by_id` | 非系统 hook：写源文件（替代 `_overrides`）；系统 hook 保留现状 |
 | 3 | `_apply_hook_state` / `_apply_hook_overrides` | 仅对系统 hook 生效（注册时判断 is_system_plugin） |
 | 4 | `_persist_hook_ids_to_file` | 修复 id 分配错位 bug（mem_ids 按 config_file 过滤后按文件顺序对齐） |
+| 4b | `_save_hook_to_file_by_id` / `_find_hook_fields` | **覆盖式写入，禁止追加**（见 §2.1 防重复约束） |
 | 5 | 迁移逻辑（新） | 启动注册完成后：hook_states 中非系统条目 → 写回源文件 enabled → 删除条目；幽灵 id → 删除 |
 | 6 | `_hook_states` / `_hook_overrides` | 改类级共享（与 `_shared_hooks` 一致），消除双实例快照竞态 |
 | 7 | `reload_hooks_config` | 修复热重载失效：先清 `_config_watchers` 再注册 |
+
+### §2.1 覆盖式写入防重复约束（历史教训）
+
+历史 bug：写回源文件时没有覆盖，而是在文件尾部追加新 rule → hook 重复。
+
+约束：
+- **匹配顺序**：`_find_hook_fields` 优先按 `hook_id` 精确匹配；id 匹配不到时，才按
+  `(event, matcher, command/url/function/prompt)` 唯一键兜底；两者都匹配不到 → 记日志 +
+  返回失败，**绝不 append 新条目**（append 只允许 `_add_hook` 新建场景）。
+- **事件移动**（matcher + new_event_name 变更）：目标事件若已存在同 matcher 的 rule →
+  **合并进该 rule**，禁止新建 rule；旧位置移除后校验不残留。
+- **写前防重**：写入前扫描目标文件，若存在同 id 或同 command 的重复条目 → 先清理重复再写。
+- **失败可见**：匹配不到时返回 False 并在 UI 提示保存失败（不再静默 return 假装成功）。
 
 ## 数据流示例
 
@@ -91,6 +105,10 @@ UI Switch → toggle_hook_by_id("ponytail_pre_user_message", False)
 3. 幽灵 id 启动清理
 4. 双实例（backend + settings）toggle 后互不覆盖
 5. 热重载生效（改源文件 → check_and_reload 重新注册）
+6. **防重复**：编辑已有 hook → 源文件条目被覆盖，不新增重复 rule（含事件移动场景：
+   目标事件已有同 matcher rule 时合并不新建）
+7. **防误更新**：同 command 多 hook 时，按 id 精确更新目标，不误更新第一条
+8. **失败可见**：源文件找不到目标 hook 时返回失败 + UI 提示，不静默
 
 ## 不做的事
 
