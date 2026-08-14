@@ -9062,6 +9062,13 @@ class OpenAIChatToolWindow(ToolWindow):
                         except Exception:
                             pass
                         mcp_card._refresh()
+                        # 补连新增/未连接的已启用服务器：
+                        # 热重载路径只刷新列表 + 断开孤儿连接（disconnect_missing），
+                        # 从不主动连接新出现的服务器——而唯一连接入口 _init_mcp_connections
+                        # 只在启动时跑一次。导致插件热重载安装（带 .mcp.json）后，
+                        # 配置显示开启但 MCP 实际未启动。refresh_connections 幂等：
+                        # 已连接的跳过、全局开关关闭时跳过。
+                        mcp_card.refresh_connections()
                         logger.debug("[HotReload] MCP server list refreshed")
                     break
                 except (RuntimeError, AttributeError) as e:
