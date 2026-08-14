@@ -51,6 +51,7 @@ class ContextUsageRing(QWidget):
         normal_tokens: int = 0,
         compacted_tokens: int = 0,
         breakdown: list = None,
+        pruned_tokens: int = 0,
     ):
 
         self._percent = max(0, min(100, int(percent)))
@@ -60,6 +61,7 @@ class ContextUsageRing(QWidget):
         self._compacted_tokens = compacted_tokens
         self._compaction = compaction or {}
         self._breakdown = breakdown or []
+        self._pruned_tokens = max(0, int(pruned_tokens or 0))
 
         Colors.refresh()
         ring_normal = QColor(Colors.RING_NORMAL)
@@ -127,6 +129,7 @@ class ContextUsageRing(QWidget):
                 "compacted_tokens": self._compacted_tokens,
                 "breakdown": self._breakdown,
                 "cache": self._cache_data,
+                "pruned_tokens": getattr(self, "_pruned_tokens", 0),
             }
         )
 

@@ -18,6 +18,7 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
+from app.core.context_builder import TOOL_RESULT_MAX_LEN, prune_tool_result
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
@@ -508,6 +509,7 @@ class UIEngine(BaseEngine):
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
                 "breakdown": [],
+                "pruned_tokens": 0,
             }
 
         # 快速路径：直接用 session.messages + system prompt 算 token
@@ -554,7 +556,21 @@ class UIEngine(BaseEngine):
         approx_messages: List[Dict] = []
         if system_prompt:
             approx_messages.append({"role": "system", "content": system_prompt})
-        approx_messages.extend(session.messages)
+        # S2: 工具结果截断投影 — 与 context_builder.build_messages 使用同一
+        # prune_tool_result（同参数），使 UI 估算 = 实际发送 token（截断后），
+        # 保证「投影与实际用量一致」；并累计节省量 pruned_tokens 供 UI 展示。
+        # 仅对超阈值消息建副本，不修改 session.messages 原始存储（可追溯）。
+        pruned_tokens = 0
+        for _m in session.messages:
+            _content = _m.get("content")
+            if _m.get("role") == "tool" and isinstance(_content, str) and len(_content) > TOOL_RESULT_MAX_LEN:
+                raw_tok = per_message_tokens(_m, model)
+                _m_copy = dict(_m)
+                _m_copy["content"] = prune_tool_result(_content)
+                approx_messages.append(_m_copy)
+                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model))
+            else:
+                approx_messages.append(_m)
 
         # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
@@ -622,7 +638,12 @@ class UIEngine(BaseEngine):
             elif role == "assistant":
                 assistant_tokens += t
             elif role == "tool":
-                tool_tokens += t
+                # S2: 工具结果按实际发送口径统计（超阈值先截断再计 token）
+                _m = msg
+                if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
+                    _m = dict(msg)
+                    _m["content"] = prune_tool_result(_m["content"])
+                tool_tokens += per_message_tokens(_m, model)
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
@@ -694,6 +715,7 @@ class UIEngine(BaseEngine):
             "normal_tokens": normal_tokens,
             "compacted_tokens": compacted_tokens,
             "breakdown": breakdown,
+            "pruned_tokens": pruned_tokens,
         }
 
     def _start_worker(
