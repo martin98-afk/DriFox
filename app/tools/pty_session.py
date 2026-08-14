@@ -32,6 +32,8 @@ from typing import Optional, Tuple
 
 from loguru import logger
 
+from app.tools.process_job import ProcessJob
+
 DEFAULT_TIMEOUT = 300.0  # 单条命令默认超时（秒）
 _IDLE_POLL = 0.05        # 读循环轮询间隔（秒）
 
@@ -61,10 +63,21 @@ class PtyShellSession:
             raise RuntimeError("PtyShellSession 仅支持 Windows 且需安装 pywinpty")
         import winpty
 
-        # /Q 关闭命令回显，减少输出噪音；ConPTY 保证状态（cwd/env）跨调用保留
-        self._proc = winpty.PtyProcess.spawn(["cmd.exe", "/Q"])
+        self._spawn_session()
         # 等待 cmd 启动就绪（横幅延迟输出，读至连续 0.8s 无数据视为就绪）
         self._wait_idle(0.8, total_timeout=6.0)
+
+    def _spawn_session(self) -> None:
+        """spawn 新 cmd 会话并挂靠 ProcessJob（生命周期统一管理）"""
+        import winpty
+
+        # /Q 关闭命令回显，减少输出噪音；ConPTY 保证状态（cwd/env）跨调用保留
+        self._proc = winpty.PtyProcess.spawn(["cmd.exe", "/Q"])
+        # 生命周期挂靠 S3 ProcessJob：cmd 进程树入 Job，close 时 kill-on-close
+        # 统一杀灭（与 BackgroundTaskManager 同一进程管理基建）
+        self._job = ProcessJob() if ProcessJob.is_supported() else None
+        if self._job is not None:
+            self._job.assign(self._proc.pid)
 
     # ========== 能力探测 ==========
 
@@ -175,9 +188,7 @@ class PtyShellSession:
         self.close()
         if not self.is_supported():
             return
-        import winpty
-
-        self._proc = winpty.PtyProcess.spawn(["cmd.exe", "/Q"])
+        self._spawn_session()
         self._closed = False
         self._wait_idle(0.8, total_timeout=6.0)
 
@@ -256,6 +267,13 @@ class PtyShellSession:
             return
         self._closed = True
         proc, self._proc = self._proc, None
+        job, self._job = getattr(self, "_job", None), None
+        if job is not None:
+            # kill-on-close：连同 cmd 进程树一起杀灭
+            try:
+                job.close()
+            except Exception as e:
+                logger.debug(f"[PtyShellSession] job close: {e}")
         if proc is None:
             return
         try:
