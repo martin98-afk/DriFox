@@ -1143,13 +1143,27 @@ class HookManager:
             logger.error(f"[HookManager] Failed to persist hook ids to {config_file}: {e}")
 
     def unregister_skill_hooks(self, skill_name: str):
-        """注销一个技能的所有 Hooks"""
+        """注销一个技能的所有 Hooks
+
+        🛡️ 索引对齐：pop 后必须更新其他 skill 的 _skill_to_hooks 索引，
+        否则其他插件热重载后其 hook 分组映射错位（掉进 user/自定义组）。
+        """
         if skill_name not in self._skill_to_hooks:
             return
 
-        for event_name, rule_index in reversed(self._skill_to_hooks[skill_name]):
+        # 先收集要删除的位置，从后往前 pop（避免索引位移影响后续删除）
+        removals = list(self._skill_to_hooks[skill_name])
+        for event_name, rule_index in reversed(removals):
             if event_name in self._hooks and rule_index < len(self._hooks[event_name]):
                 self._hooks[event_name].pop(rule_index)
+            # 同步修正其他 skill 的索引：被删位置之后的 rule_index 减 1
+            for other_name, entries in self._skill_to_hooks.items():
+                if other_name == skill_name:
+                    continue
+                self._skill_to_hooks[other_name] = [
+                    (e, i - 1 if (e == event_name and i > rule_index) else i)
+                    for (e, i) in entries
+                ]
 
         del self._skill_to_hooks[skill_name]
         logger.debug(f"[HookManager] Unregistered all hooks for skill {skill_name}")
@@ -1247,10 +1261,12 @@ class HookManager:
 
         rules.pop(hook_index)
 
-        # 更新技能索引
-        if skill_name in self._skill_to_hooks:
-            self._skill_to_hooks[skill_name] = [
-                (e, i - 1 if i > hook_index else i) for (e, i) in self._skill_to_hooks[skill_name] if i != hook_index
+        # 更新所有 skill 的索引（含自己）：被删位置之后的 rule_index 减 1
+        for _skill_name, entries in self._skill_to_hooks.items():
+            self._skill_to_hooks[_skill_name] = [
+                (e, i - 1 if (e == event_name and i > hook_index) else i)
+                for (e, i) in entries
+                if not (e == event_name and i == hook_index)
             ]
 
         logger.info(f"[HookManager] Dynamically unregistered hook: {event_name}[{hook_index}]")

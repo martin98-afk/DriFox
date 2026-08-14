@@ -402,3 +402,59 @@ def test_reload_hooks_config_actually_reloads(tmp_path):
     # 重新注册后 hook 应来自新内容（v2）
     hook = hm._hooks["PreUserMessage"][0].hooks[0]
     assert hook.command == "echo v2"
+
+
+# ──────────────────────────────────────────────
+# 回归：unregister 后其他 skill 的分组索引不得错位
+# ──────────────────────────────────────────────
+def test_unregister_skill_hooks_keeps_other_skill_indices_aligned(tmp_path):
+    """热重载一个插件后，其他插件的 hook 分组映射必须保持正确（不得掉进自定义组）"""
+    sys_file = tmp_path / "sys.json"
+    sys_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "", "hooks": [{"id": "sys_a", "type": "command", "command": "echo sa"}]},
+                        {"matcher": "", "hooks": [{"id": "sys_b", "type": "command", "command": "echo sb"}]},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pa_file = tmp_path / "pa.json"
+    pa_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "", "hooks": [{"id": "pa_hook", "type": "command", "command": "echo pa"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "system", str(tmp_path), json.loads(sys_file.read_text(encoding="utf-8")), str(sys_file), is_system_plugin=True
+    )
+    hm.register_hooks_from_json(
+        "plugin-a", str(tmp_path), json.loads(pa_file.read_text(encoding="utf-8")), str(pa_file)
+    )
+
+    # 模拟热重载 system 插件（watcher 触发路径）
+    hm.unregister_skill_hooks("system")
+    if str(sys_file) in hm._config_watchers:
+        del hm._config_watchers[str(sys_file)]
+    hm.register_hooks_from_json(
+        "system", str(tmp_path), json.loads(sys_file.read_text(encoding="utf-8")), str(sys_file), is_system_plugin=True
+    )
+
+    # plugin-a 的 hook 必须仍在 plugin 分组（不得掉进 user/自定义）
+    grouped = hm.get_all_hooks_grouped()
+    plugin_ids = {h["id"] for hooks in grouped["plugin"].values() for h in hooks}
+    user_ids = {h["id"] for hooks in grouped["user"].values() for h in hooks}
+    assert "pa_hook" in plugin_ids, f"pa_hook 必须保留在 plugin 分组，实际 user={user_ids}"
+    assert "pa_hook" not in user_ids
