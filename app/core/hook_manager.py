@@ -2065,8 +2065,11 @@ class HookManager:
                         hook_entry[key] = new_data[key]
 
                 # 处理 matcher 变更（移动到新事件）：合并进目标事件同 matcher rule，禁止新建重复 rule
-                if "matcher" in new_data and "new_event_name" in new_data:
-                    new_event = new_data["new_event_name"]
+                # 兼容两种调用方键名：UI 传 {"event": ..., "matcher": ...}，
+                # 内部迁移路径传 {"new_event_name": ..., "matcher": ...}
+                new_event = new_data.get("new_event_name") or new_data.get("event")
+                if "matcher" in new_data and new_event:
+                    new_event = str(new_event)
                     new_matcher = new_data["matcher"] or ""
 
                     if new_event not in raw_hooks:
@@ -2198,9 +2201,11 @@ class HookManager:
 
             new_rule_idx = next((i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks), 0)
             self._update_skill_index_for_hook(hook, new_event, new_rule_idx)
-            # 用户自定义 hook 的事件变更也持久化到源文件（全局生效）
-            if self._is_user_custom_hook(hook):
-                self._save_hook_to_file_by_id(hook, new_data)
+            # 非系统 hook 的事件变更也持久化到源文件（全局生效）；系统 hook 走覆盖层
+            if not hook.is_system_plugin:
+                ok = self._save_hook_to_file_by_id(hook, new_data)
+                if not ok:
+                    logger.error(f"[HookManager] Failed to persist event move for {hook_id}")
         elif "matcher" in new_data:
             # 同事件内更新共享内存的 matcher，用于 trigger_event 初始匹配
             self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
@@ -2225,12 +2230,19 @@ class HookManager:
             if key in new_data:
                 setattr(hook, attr, new_data[key])
 
-        # 持久化到源文件（user-custom hook）
-        if self._is_user_custom_hook(hook):
-            self._save_hook_to_file_by_id(hook, new_data)
+        # 双轨制持久化：
+        # - 非系统 hook（插件/user-custom）：写回源文件（覆盖式），并清理覆盖层残留
+        # - 系统 hook：持久化到 _hook_overrides（与 hook_states 共享同一文件），
+        #   只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
+        if not hook.is_system_plugin:
+            ok = self._save_hook_to_file_by_id(hook, new_data)
+            if not ok:
+                logger.error(f"[HookManager] Failed to persist edit for {hook_id}")
+            # 清理覆盖层残留（迁移兜底：若该 id 仍在 _hook_overrides 中）
+            if hook.id in self._hook_overrides:
+                del self._hook_overrides[hook.id]
+                self._save_hook_states()
         else:
-            # 系统 hook / skill hook：持久化到 _hook_overrides（与 hook_states 共享同一文件）
-            # 只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
             override_fields = {
                 "type",
                 "command",

@@ -28,6 +28,11 @@ def _isolate_hook_states(monkeypatch, tmp_path):
     # 重置类级共享状态，保证测试间隔离
     HookManager._shared_hook_states = {}
     HookManager._shared_hook_overrides = {}
+    HookManager._shared_hooks = {}
+    HookManager._shared_skill_to_hooks = {}
+    HookManager._shared_config_watchers = {}
+    HookManager._shared_registered_functions = {}
+    HookManager._shared_cwd_resolve_cache = {}
     yield states_dir
 
 
@@ -162,3 +167,20 @@ def test_edit_hook_not_found_returns_false(tmp_path):
     hm._hooks.setdefault("PreUserMessage", []).append(rule)
     ok = hm._save_hook_to_file_by_id(ghost, {"command": "echo y"})
     assert ok is False, "源文件无此 hook 必须返回 False"
+
+
+# ──────────────────────────────────────────────
+# Task 4: 非系统 hook edit 写回源文件
+# ──────────────────────────────────────────────
+def test_plugin_hook_edit_writes_source_not_overrides(tmp_path):
+    """非系统 hook 编辑 → 写回源文件，_hook_overrides 不记录"""
+    hm, hooks_file = _make_hook_manager_with_file(tmp_path)
+    hook = hm._hooks["PreUserMessage"][0].hooks[0]
+    ok = hm.edit_hook_by_id(hook.id, {"command": "echo edited", "statusMessage": "working"})
+    assert ok is True
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    entry = data["hooks"]["PreUserMessage"][0]["hooks"][0]
+    assert entry["command"] == "echo edited"
+    assert entry["statusMessage"] == "working"
+    # 非系统 hook 不得写入 overrides
+    assert hook.id not in hm._hook_overrides
