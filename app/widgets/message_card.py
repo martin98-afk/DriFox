@@ -6167,21 +6167,23 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _has_active_tool_dom(self) -> bool:
-        """B1: 是否有活跃工具 DOM（JS 注入的工具块 / 待 restore 的完成块）。
-        返回 True 时差量渲染必须让位全量渲染（工具块涉及 save/restore 保护，
-        且 _tool_md_cache 影响 _inject_tool_blocks 输出——差量段渲染不带该缓存，
-        会导致工具块 HTML 与全量不一致）。
+        """B1: 是否有活跃工具 DOM（JS 注入的**运行中/未完成**工具块）。
+
+        返回 True 时差量渲染必须让位全量渲染（save/restore 保护）。判定只认
+        _injected_pending_tools（JS 注入但结果未 append_tool_result 的工具 id，
+        运行框/预览框仍在 DOM），**不认 _tool_dom_dirty**：
+
+        - _tool_dom_dirty 表示"DOM 有 JS 注入工具块、全量渲染需 save/restore 保护"，
+          该保护由 _needs_save_restore 独立判断，不应阻塞差量渲染。
+        - dirty 的清除依赖"全量渲染应用成功"的 JS 回调；流式期间全量渲染结果
+          可能被 seq 过期丢弃（_apply_render_result 提前 return 不跑 JS）→ dirty
+          长期 True → 若据此让位，差量渲染（含 _render_tail_inline 尾部行内格式化）
+          在工具调用后永久失效 → 正文流式纯文本滞留到流式结束才刷新成 HTML。
+        - 差量渲染 updateContentAppend / updateTailHtml 只操作 content-placeholder
+          的 [data-incremental] 节点与追加段，不触碰 [data-tool-call-id] 工具块，
+          对已注入的工具 DOM 安全。
         """
-        if self._tool_dom_dirty:
-            return True
         try:
-            # 🐛 修复：不再用 _restore_finished_ids 判活跃。它是"已完成工具 id 集合"
-            # （= _finished_streaming_ids 引用，工具结果到达后只 add，卡片 cleanup 才
-            # clear），不代表"DOM 中有 JS 注入的工具块"。用它判活跃会让差量渲染在
-            # 任意工具调用后永久让位全量渲染（流式异步线程池 + seq 过期丢弃追不上
-            # 流式速度）→ 纯文本迟迟不刷新成 HTML。真正表示"JS 注入工具块仍在 DOM"
-            # 的是 _tool_dom_dirty（渲染回调后清除）与 _injected_pending_tools
-            # （结果 append/remove 后 discard），二者已覆盖需 save/restore 保护的场景。
             if getattr(self, "_injected_pending_tools", None):
                 return True
         except Exception:

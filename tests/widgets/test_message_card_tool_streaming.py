@@ -91,13 +91,15 @@ def test_append_tool_result_without_tool_call_id_does_not_track():
 
 
 def test_has_active_tool_dom_false_when_tool_done_and_dom_clean():
-    """回归：工具已完成（_restore_finished_ids 非空）但 DOM 无活跃工具块时，
-    _has_active_tool_dom() 必须返回 False。
+    """回归：工具已完成且 DOM 无**运行中**工具块时，_has_active_tool_dom() 必须返回 False。
 
-    此前 _restore_finished_ids（= _finished_streaming_ids 引用，工具结果到达后
-    只 add、卡片 cleanup 才 clear）被当作"活跃工具 DOM"判据，导致任意工具调用后
-    差量渲染永久让位全量渲染（异步线程池 + seq 过期丢弃追不上流式速度）→
-    流式纯文本迟迟不刷新成 HTML。
+    两层根因（任一都会让工具调用后的正文流式差量渲染永久让位全量渲染 →
+    纯文本滞留到流式结束才刷新成 HTML）：
+    1. _restore_finished_ids（= _finished_streaming_ids 引用，只 add、cleanup 才
+       clear）曾被当作"活跃工具 DOM"判据；
+    2. _tool_dom_dirty 清除依赖全量渲染应用成功的 JS 回调，流式期间全量结果被
+       seq 过期丢弃时 dirty 长期 True，也曾被当作"活跃工具 DOM"判据。
+    真正表示"JS 注入运行中工具块在 DOM"的是 _injected_pending_tools。
     """
     from app.widgets.message_card import CodeWebViewer
 
@@ -108,9 +110,12 @@ def test_has_active_tool_dom_false_when_tool_done_and_dom_clean():
     viewer._restore_finished_ids = {"call_done_1"}
     assert CodeWebViewer._has_active_tool_dom(viewer) is False
 
-    # 对照：DOM 确有 JS 注入工具块时仍必须让位差量渲染
+    # 对照：dirty 单独置 True（全量渲染需 save/restore 保护）不应阻塞差量渲染
     viewer._tool_dom_dirty = True
-    assert CodeWebViewer._has_active_tool_dom(viewer) is True
-    viewer._tool_dom_dirty = False
+    viewer._injected_pending_tools = set()
+    assert CodeWebViewer._has_active_tool_dom(viewer) is False
+
+    # 对照：DOM 确有 JS 注入的**运行中**工具块时仍必须让位差量渲染
+    viewer._tool_dom_dirty = True
     viewer._injected_pending_tools = {"call_running_2"}
     assert CodeWebViewer._has_active_tool_dom(viewer) is True
