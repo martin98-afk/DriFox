@@ -746,6 +746,9 @@ class HookManager:
     # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
     _shared_hook_states: Dict[str, bool] = {}
     _shared_hook_overrides: Dict[str, Dict[str, Any]] = {}
+    # 热重载恢复位置：{skill_name: {event_name: [rule_index, ...]}}
+    # unregister 前记录原位置，重新注册时 insert 恢复事件内交错顺序
+    _shared_restore_positions: Dict[str, Dict[str, List[int]]] = {}
 
     def __init__(self, thread_pool: Optional[QThreadPool] = None):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
@@ -972,10 +975,17 @@ class HookManager:
         # 检测配置格式
         raw_hooks = hooks_config.get("hooks", hooks_config)
 
+        # 🛡️ 热重载顺序恢复：若该 skill 有 unregister 时记录的原位置，
+        # 重新注册时按原位置 insert（而非 append 到末尾），保持事件内交错顺序。
+        restore_positions = HookManager._shared_restore_positions.pop(skill_name, None)
+
         count = 0
         for event_name, rules in raw_hooks.items():
             if event_name not in self._hooks:
                 self._hooks[event_name] = []
+
+            # 该事件下此 skill 的原位置（升序）
+            event_restore = sorted(restore_positions.get(event_name, [])) if restore_positions else []
 
             # 标准化规则格式
             if isinstance(rules, list):
@@ -991,8 +1001,23 @@ class HookManager:
                         rule_data, skill_root, config_file, is_system_plugin=is_system_plugin
                     )
                     if match_rule.hooks:
-                        rule_index = len(self._hooks[event_name])
-                        self._hooks[event_name].append(match_rule)
+                        if event_restore:
+                            # 从大到小插入（先插大索引，避免索引位移影响后续插入）
+                            target = event_restore.pop()
+                            target = min(target, len(self._hooks[event_name]))
+                            self._hooks[event_name].insert(target, match_rule)
+                            # 插入位置之后的 rule 索引 +1（其他 skill）
+                            for other_name, entries in self._skill_to_hooks.items():
+                                if other_name == skill_name:
+                                    continue
+                                self._skill_to_hooks[other_name] = [
+                                    (e, i + 1 if (e == event_name and i >= target) else i)
+                                    for (e, i) in entries
+                                ]
+                            rule_index = target
+                        else:
+                            rule_index = len(self._hooks[event_name])
+                            self._hooks[event_name].append(match_rule)
                         count += len(match_rule.hooks)
 
                         if skill_name not in self._skill_to_hooks:
@@ -1147,12 +1172,21 @@ class HookManager:
 
         🛡️ 索引对齐：pop 后必须更新其他 skill 的 _skill_to_hooks 索引，
         否则其他插件热重载后其 hook 分组映射错位（掉进 user/自定义组）。
+        🛡️ 顺序保持：删除前记录各 rule 在事件内的原位置，供重新注册时
+        insert 恢复（否则热重载后该插件 hook 会被 append 到事件末尾，
+        事件内交错顺序变化）。
         """
         if skill_name not in self._skill_to_hooks:
             return
 
         # 先收集要删除的位置，从后往前 pop（避免索引位移影响后续删除）
         removals = list(self._skill_to_hooks[skill_name])
+        # 记录原位置（供热重载恢复顺序）
+        restore: Dict[str, List[int]] = {}
+        for event_name, rule_index in removals:
+            restore.setdefault(event_name, []).append(rule_index)
+        HookManager._shared_restore_positions[skill_name] = restore
+
         for event_name, rule_index in reversed(removals):
             if event_name in self._hooks and rule_index < len(self._hooks[event_name]):
                 self._hooks[event_name].pop(rule_index)

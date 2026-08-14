@@ -33,6 +33,7 @@ def _isolate_hook_states(monkeypatch, tmp_path):
     HookManager._shared_config_watchers = {}
     HookManager._shared_registered_functions = {}
     HookManager._shared_cwd_resolve_cache = {}
+    HookManager._shared_restore_positions = {}
     yield states_dir
 
 
@@ -458,3 +459,74 @@ def test_unregister_skill_hooks_keeps_other_skill_indices_aligned(tmp_path):
     user_ids = {h["id"] for hooks in grouped["user"].values() for h in hooks}
     assert "pa_hook" in plugin_ids, f"pa_hook 必须保留在 plugin 分组，实际 user={user_ids}"
     assert "pa_hook" not in user_ids
+
+
+# ──────────────────────────────────────────────
+# 回归：热重载后事件内 hook 顺序保持稳定
+# ──────────────────────────────────────────────
+def test_hot_reload_preserves_rule_order(tmp_path):
+    """热重载一个插件后，事件内与其他插件的交错顺序必须保持（不移到末尾）"""
+    sys_file = tmp_path / "sys.json"
+    sys_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "", "hooks": [{"id": "sys_hook", "type": "command", "command": "echo s"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pa_file = tmp_path / "pa.json"
+    pa_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "", "hooks": [{"id": "pa_hook", "type": "command", "command": "echo pa"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    pb_file = tmp_path / "pb.json"
+    pb_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "", "hooks": [{"id": "pb_hook", "type": "command", "command": "echo pb"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    for name, fp, system in (
+        ("system", sys_file, True),
+        ("plugin-a", pa_file, False),
+        ("plugin-b", pb_file, False),
+    ):
+        hm.register_hooks_from_json(
+            name, str(tmp_path), json.loads(fp.read_text(encoding="utf-8")), str(fp), is_system_plugin=system
+        )
+
+    def _order():
+        return [r.hooks[0].id for r in hm._hooks["PreToolUse"]]
+
+    assert _order() == ["sys_hook", "pa_hook", "pb_hook"]
+
+    # 热重载中间插件 plugin-a（watcher 触发路径）
+    hm.unregister_skill_hooks("plugin-a")
+    if str(pa_file) in hm._config_watchers:
+        del hm._config_watchers[str(pa_file)]
+    hm.register_hooks_from_json(
+        "plugin-a", str(tmp_path), json.loads(pa_file.read_text(encoding="utf-8")), str(pa_file)
+    )
+
+    # 顺序必须保持：plugin-a 仍在中间，不被移到末尾
+    assert _order() == ["sys_hook", "pa_hook", "pb_hook"], f"实际顺序: {_order()}"
