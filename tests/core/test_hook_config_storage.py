@@ -184,3 +184,33 @@ def test_plugin_hook_edit_writes_source_not_overrides(tmp_path):
     assert entry["statusMessage"] == "working"
     # 非系统 hook 不得写入 overrides
     assert hook.id not in hm._hook_overrides
+
+
+# ──────────────────────────────────────────────
+# Task 5: _apply_hook_state/_overrides 仅系统 hook
+# ──────────────────────────────────────────────
+def test_apply_state_only_for_system_hook(tmp_path):
+    """注册时：非系统 hook 不应用 _hook_states 覆盖（状态以源文件为准）"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "", "hooks": [{"id": "plugin_1", "type": "command", "command": "echo a"}]}
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    # 预置覆盖层状态（模拟旧数据残留）
+    hm._hook_states["plugin_1"] = False
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    hook = hm._hooks["PreUserMessage"][0].hooks[0]
+    # 源文件无 enabled → 默认 True，且非系统 hook 不被覆盖层强制改 False
+    assert hook.enabled is True

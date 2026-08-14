@@ -1007,13 +1007,16 @@ class HookManager:
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
 
-        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖
+        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖（仅系统 hook）
+        # 非系统 hook 的状态以源文件为准（双轨制：插件 hook 写回源文件，不走覆盖层）
         if count > 0:
             for event_name, rules in raw_hooks.items():
                 if event_name not in self._hooks:
                     continue
                 for rule in self._hooks[event_name]:
                     for hook in rule.hooks:
+                        if not hook.is_system_plugin:
+                            continue
                         # 恢复开关状态（覆盖插件源文件中的默认值）
                         if self._hook_states:
                             self._apply_hook_state(hook)
