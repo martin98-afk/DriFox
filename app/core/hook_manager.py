@@ -1969,17 +1969,36 @@ class HookManager:
         return None
 
     def _find_hook_fields(self, hook: Hook, config: dict) -> Optional[tuple]:
-        """在配置中查找 hook 所在的路径字段，返回 (event_name, rule_idx, hook_idx) 或 None"""
+        """在配置中查找 hook 所在位置，返回 (event_name, rule_idx, hook_idx) 或 None
+
+        匹配策略（防误更新）：
+        1. 优先按 id 精确匹配（同 command 多 hook 场景不会误更新第一条）
+        2. id 匹配不到时，按 command/url/function/prompt 唯一键兜底
+        """
         raw_hooks = config.get("hooks", config)
+        target_cmd = hook.command or hook.url or hook.function or hook.prompt or ""
+
         for event_name, rules in raw_hooks.items():
             for rule_idx, rule in enumerate(rules):
                 hooks_list = rule.get("hooks", [])
                 for hook_idx, h in enumerate(hooks_list):
                     hook_id = h.get("id", "") or ""
-                    hook_cmd = h.get("command", "") or h.get("url", "") or h.get("function", "") or h.get("prompt", "")
-                    target_cmd = hook.command or hook.url or hook.function or hook.prompt or ""
-                    if hook_id == hook.id or hook_cmd == target_cmd:
+                    if hook_id and hook_id == hook.id:
                         return (event_name, rule_idx, hook_idx)
+        # id 兜底失败 → 唯一键兜底（command/url/function/prompt）
+        if target_cmd:
+            for event_name, rules in raw_hooks.items():
+                for rule_idx, rule in enumerate(rules):
+                    hooks_list = rule.get("hooks", [])
+                    for hook_idx, h in enumerate(hooks_list):
+                        h_cmd = (
+                            h.get("command", "")
+                            or h.get("url", "")
+                            or h.get("function", "")
+                            or h.get("prompt", "")
+                        )
+                        if h_cmd == target_cmd:
+                            return (event_name, rule_idx, hook_idx)
         return None
 
     def _update_skill_index_for_hook(self, hook: Hook, new_event_name: str, new_rule_idx: int):
@@ -2013,20 +2032,24 @@ class HookManager:
             # 添加到新位置
             self._skill_to_hooks[found_skill_name].append((new_event_name, new_rule_idx))
 
-    def _save_hook_to_file_by_id(self, hook: Hook, new_data: dict = None):
-        """通过 hook_id 保存到源文件（支持事件/matcher 变更时的移动）"""
+    def _save_hook_to_file_by_id(self, hook: Hook, new_data: dict = None) -> bool:
+        """通过 hook_id 覆盖式保存到源文件（禁止追加，防重复）
+
+        Returns:
+            True 成功 / False 匹配不到或写失败
+        """
         if not hook.config_file or not os.path.exists(hook.config_file):
-            return
+            return False
 
         try:
             with open(hook.config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # 查找 hook 位置
+            # 查找 hook 位置（优先 id 精确匹配，防误更新）
             location = self._find_hook_fields(hook, config)
             if location is None:
                 logger.warning(f"[HookManager] Hook {hook.id} not found in {hook.config_file}")
-                return
+                return False
 
             event_name, rule_idx, hook_idx = location
             raw_hooks = config.get("hooks", config)
@@ -2036,25 +2059,29 @@ class HookManager:
             # 合并更新数据
             hook_entry = target_hooks[hook_idx]
             if new_data:
-                # 处理 enabled
-                if "enabled" in new_data:
-                    hook_entry["enabled"] = new_data["enabled"]
-                # 处理 command/url/function
-                if "command" in new_data:
-                    hook_entry["command"] = new_data["command"]
-                if "url" in new_data:
-                    hook_entry["url"] = new_data["url"]
-                if "function" in new_data:
-                    hook_entry["function"] = new_data["function"]
-                # 处理 matcher 变更（移动到新事件）
+                # 处理 enabled/command/url/function
+                for key in ("enabled", "command", "url", "function"):
+                    if key in new_data:
+                        hook_entry[key] = new_data[key]
+
+                # 处理 matcher 变更（移动到新事件）：合并进目标事件同 matcher rule，禁止新建重复 rule
                 if "matcher" in new_data and "new_event_name" in new_data:
                     new_event = new_data["new_event_name"]
-                    new_matcher = new_data["matcher"]
+                    new_matcher = new_data["matcher"] or ""
 
-                    # 创建新事件条目
                     if new_event not in raw_hooks:
                         raw_hooks[new_event] = []
-                    raw_hooks[new_event].append({"matcher": new_matcher, "hooks": [hook_entry]})
+
+                    # 查找目标事件中同 matcher 的 rule，存在则合并，否则新建
+                    matched_rule = None
+                    for r in raw_hooks[new_event]:
+                        if (r.get("matcher") or "") == new_matcher:
+                            matched_rule = r
+                            break
+                    if matched_rule is not None:
+                        matched_rule.setdefault("hooks", []).append(hook_entry)
+                    else:
+                        raw_hooks[new_event].append({"matcher": new_matcher or "", "hooks": [hook_entry]})
 
                     # 从旧位置移除
                     target_hooks.pop(hook_idx)
@@ -2062,9 +2089,6 @@ class HookManager:
                         raw_hooks[event_name].pop(rule_idx)
                     if not raw_hooks.get(event_name):
                         del raw_hooks[event_name]
-
-                    # 更新内存中的 matcher
-                    hook.config_file = hook.config_file  # 保持不变
 
                 # 处理其他字段
                 for key in [
@@ -2080,6 +2104,7 @@ class HookManager:
                     "function_args",
                     "commandWindows",
                     "statusMessage",
+                    "prompt",
                 ]:
                     if key in new_data:
                         hook_entry[key] = new_data[key]
@@ -2087,12 +2112,40 @@ class HookManager:
             # 确保 id 字段存在
             hook_entry["id"] = hook.id
 
+            # 写前防重：清理同 id 重复条目（防御历史遗留）
+            self._dedupe_hook_entries(raw_hooks)
+
             with open(hook.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
 
             logger.debug(f"[HookManager] Saved hook {hook.id} to {hook.config_file}")
+            return True
         except Exception as e:
             logger.error(f"[HookManager] Failed to save hook {hook.id}: {e}")
+            return False
+
+    @staticmethod
+    def _dedupe_hook_entries(raw_hooks: dict):
+        """写前防重：同一 rule 内同 id 的 hook 条目只保留第一个"""
+        for rules in raw_hooks.values():
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                hooks = rule.get("hooks")
+                if not isinstance(hooks, list):
+                    continue
+                seen: set = set()
+                deduped = []
+                for h in hooks:
+                    hid = h.get("id", "")
+                    if hid and hid in seen:
+                        continue
+                    if hid:
+                        seen.add(hid)
+                    deduped.append(h)
+                rule["hooks"] = deduped
 
     def edit_hook_by_id(self, hook_id: str, new_data: dict) -> bool:
         """

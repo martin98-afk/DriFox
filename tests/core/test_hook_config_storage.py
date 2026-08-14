@@ -92,3 +92,73 @@ def test_plugin_hook_toggle_writes_source_file(tmp_path):
     if states_fp.exists():
         states = json.loads(states_fp.read_text(encoding="utf-8"))
         assert hook.id not in states
+
+
+# ──────────────────────────────────────────────
+# Task 3: 覆盖式写入防重复
+# ──────────────────────────────────────────────
+def test_edit_hook_does_not_duplicate_rule(tmp_path):
+    """编辑已有 hook → 覆盖原条目，不新增重复 rule"""
+    hm, hooks_file = _make_hook_manager_with_file(tmp_path)
+    hook = hm._hooks["PreUserMessage"][0].hooks[0]
+    # 编辑 command（覆盖）
+    ok = hm.edit_hook_by_id(hook.id, {"command": "echo edited"})
+    assert ok is True
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    rules = data["hooks"]["PreUserMessage"]
+    assert len(rules) == 1, "编辑不得新增 rule"
+    entries = rules[0]["hooks"]
+    assert len(entries) == 1, "编辑不得新增 hook 条目"
+    assert entries[0]["command"] == "echo edited"
+    assert entries[0]["id"] == hook.id
+
+
+def test_edit_hook_move_event_merges_existing_matcher_rule(tmp_path):
+    """hook 移动到目标事件：目标事件已有同 matcher rule → 合并，不新建"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "tool:bash", "hooks": [{"id": "h1", "type": "command", "command": "echo a"}]}
+                    ],
+                    "PostUserMessage": [
+                        {"matcher": "tool:bash", "hooks": [{"id": "h2", "type": "command", "command": "echo b"}]}
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    h1 = hm._hooks["PreUserMessage"][0].hooks[0]
+    ok = hm.edit_hook_by_id(h1.id, {"event": "PostUserMessage", "matcher": "tool:bash"})
+    assert ok is True
+    data = json.loads(hooks_file.read_text(encoding="utf-8"))
+    post_rules = data["hooks"]["PostUserMessage"]
+    # 目标事件应只有一个同 matcher rule，含两个 hook
+    assert len(post_rules) == 1
+    assert len(post_rules[0]["hooks"]) == 2
+
+
+def test_edit_hook_not_found_returns_false(tmp_path):
+    """源文件找不到目标 hook → 返回 False（失败可见），不静默"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(json.dumps({"hooks": {"PreUserMessage": []}}), encoding="utf-8")
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    # 伪造一个内存中不存在于文件的 hook（动态注册）
+    from app.core.hook_manager import Hook, HookMatchRule
+
+    ghost = Hook(id="ghost_1", type="command", command="echo x", config_file=str(hooks_file))
+    rule = HookMatchRule(matcher="", hooks=[ghost])
+    hm._hooks.setdefault("PreUserMessage", []).append(rule)
+    ok = hm._save_hook_to_file_by_id(ghost, {"command": "echo y"})
+    assert ok is False, "源文件无此 hook 必须返回 False"
