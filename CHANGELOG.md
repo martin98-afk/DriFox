@@ -129,6 +129,19 @@ All notable changes to this project will be documented in this file.
 
 - **v0.5.0 三次重发 tag 覆盖** (`CHANGELOG.md` + git tag): 删除远程/本地 v0.5.0 tag 重新打在当前 HEAD，覆盖二次重发 tag 指向三次重发补丁后的最新代码
 
+
+#### 📦 附加变更（v0.5.0 四次重发补丁 | 自三次 tag 之后 1 个新提交）
+
+> v0.5.0 三次 tag 后追加的历史面板 UI 同步 bug 修复：会话保存/自动保存后历史面板 UI 仍停留在保存前快照，导致「历史面板已展开但列表缺失最新会话」。修复：新建/保存/自动保存三处触发点调用 `refresh_history_card_if_visible` 同步内存缓存到 UI（仅历史卡片可见时执行，0 开销）；配套回归测试覆盖。贡献者：mading
+
+##### 🐛 问题修复 (Bug Fixes, 1)
+
+- **历史面板保存后刷新（避免快照过时）** (`app/main_widget.py` `_create_new_session` / `_save_current_session` / `_auto_save_current_session` + `tests/widgets/test_history_panel_refresh_on_save.py`): 旧版 `_auto_save_current_session` 与 `_save_current_session` 完成后仅清脏标记 + 更新预览，未触发历史面板 UI 同步——历史面板若已展开，列表会停留在保存前快照（旧会话缺失 / 标题过时）；`_create_new_session` 同理。修复：上述三处触发点新增 `refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)` 调用，仅在历史卡片可见时执行刷新（不可见时 0 开销），保证 UI 与内存缓存同步；新增 `test_history_panel_refresh_on_save.py` 覆盖三处调用点
+
+##### 🔧 其他 (Chores & Build, 1)
+
+- **v0.5.0 四次重发 tag 覆盖** (`CHANGELOG.md` + git tag): 删除远程/本地 v0.5.0 tag 重新打在当前 HEAD，覆盖三次重发 tag 指向四次重发补丁后的最新代码
+
 ## [v0.4.14] - 2026-08-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：37 · +2207/-2245 | 贡献者：dingma
@@ -988,7 +1001,7 @@ All notable changes to this project will be documented in this file.
 - **布局边距与命令卡片对齐优化**: 调整 `OpenAIChatToolWindow`、`CardContainer`、`bottom_input_area` 的布局边距以改进整体间距；将命令卡片标签对齐到顶部避免不均匀的内边距；新增 `CardManager` 方法支持跨容器隐藏非系统卡片
 - **command_card tooltip 首次显示延迟**: 修复 `command_card` 中 tooltip 在首次显示时的位置延迟问题，提升交互即时感
 - **Windows 命令找不到自动回退 cmd /c**: `command_safety.run_safe` 在 Windows 上找不到可执行文件时自动回退到 `cmd /c` 包装，支持 PATHEXT 扩展名解析（如 `pip → pip.exe`、`tsc → tsc.cmd`），解决 `shell=False` 模式下的 PATH 查找问题
-- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `\\` 与字面 `^`，避免路径误判
+- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `\` 与字面 `^`，避免路径误判
 - **command_safety 字符串风格与内置命令列表统一**: `command_safety` 模块统一使用双引号字符串风格（替换单引号）；扩展 Windows Shell 内置命令列表，覆盖 cmd.exe 内置命令全集
 - **diff 生成会话消息回退机制**: 实现从会话消息生成 diff 的回退路径，当工具调用结果不可用时仍能生成可读 diff；同步新增 `app.tools` 模块相关 diff 生成入口
 - **provider 配置处理与消息卡片交互优化**: 增强 `main_widget` 中 provider 配置的处理逻辑；改进 `tool_popup`、`terminal_tools`、`message_card` 等模块的交互流程，提升多 provider 切换与命令触发场景下的稳定性
