@@ -7064,6 +7064,7 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("normal_tokens", 0),
             snapshot.get("compacted_tokens", 0),
             breakdown=snapshot.get("breakdown", []),
+            pruned_tokens=snapshot.get("pruned_tokens", 0),
         )
         # 防闪：流式期间 session.messages 可能尚未包含本轮新增消息（陈旧），快照
         # used_tokens 会远小于 worker 实时 token_count，导致圆环/卡片闪现异常小的数值。
@@ -16826,6 +16827,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         normal_tokens,
                         compacted_tokens,
                         breakdown=getattr(ring, "_breakdown", None) or [],
+                        # 透传上一次的 pruned_tokens，避免该补充路径把节省量闪回 0
+                        pruned_tokens=getattr(ring, "_pruned_tokens", 0),
                     )
                     # 卡片底部 token 显示与上下文圆环同步（同一 last_tc）
                     card = getattr(self, "_current_assistant_card", None)

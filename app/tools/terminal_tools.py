@@ -583,9 +583,12 @@ class BackgroundTaskManager:
         except Exception:
             pass
         finally:
-            # 进程结束后更新状态
-            task.status = "completed"
-            self._emit("completed", task.task_id, "completed")
+            # 进程结束后更新状态：仅当任务仍为 running 时才置 completed。
+            # stop() 已把状态置为 stopped（并广播 stopped 事件），此处不得
+            # 覆盖为 completed，否则「已停止任务」会被误标完成并多发 completed 事件。
+            if task.status == "running":
+                task.status = "completed"
+                self._emit("completed", task.task_id, "completed")
 
     def stop(self, task_id: str) -> tuple[bool, str]:
         """停止指定任务"""

@@ -100,15 +100,18 @@ class TestTaskEventBroadcast:
         assert completed, "应收到 completed 事件"
 
     def test_stop_emits_stopped_event(self, manager):
-        """stop 触发 stopped 事件"""
+        """stop 触发 stopped 事件，且不得再发 completed（状态语义不矛盾）"""
         events = []
         manager.on_task_event(lambda e, tid, s, d="": events.append((e, s)))
         task_id, _ = manager.start("ping -n 8 127.0.0.1")
         time.sleep(0.8)
         manager.stop(task_id)
-        time.sleep(0.3)
+        time.sleep(0.5)
         stopped = [e for e in events if e[0] == "stopped"]
+        completed = [e for e in events if e[0] == "completed"]
         assert stopped, f"应收到 stopped 事件: {events}"
+        assert not completed, f"stop 后不应再发 completed 事件: {events}"
+        assert manager._tasks[task_id].status == "stopped", "stop 后任务状态应为 stopped"
 
     def test_callback_error_isolated(self, manager):
         """回调抛异常不影响任务本身"""
