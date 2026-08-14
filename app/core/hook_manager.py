@@ -743,6 +743,12 @@ class HookManager:
     _shared_registered_functions: Dict[str, Callable] = {}
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
+    # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
+    _shared_hook_states: Dict[str, bool] = {}
+    _shared_hook_overrides: Dict[str, Dict[str, Any]] = {}
+    # 热重载恢复位置：{skill_name: {event_name: [rule_index, ...]}}
+    # unregister 前记录原位置，重新注册时 insert 恢复事件内交错顺序
+    _shared_restore_positions: Dict[str, Dict[str, List[int]]] = {}
 
     def __init__(self, thread_pool: Optional[QThreadPool] = None):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
@@ -773,12 +779,20 @@ class HookManager:
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
 
         # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
-        self._hook_states: Dict[str, bool] = self._load_hook_states()
+        # 🛡️ 类级共享：backend 与 settings popup 各自创建 HookManager 实例时，
+        # 若每个实例独立从磁盘加载快照，后保存者会用旧快照覆盖先保存者的修改
+        # （开关莫名变化根因之一）。改为类级共享字典，只在首次实例化时加载磁盘。
+        self._hook_states: Dict[str, bool] = HookManager._shared_hook_states
+        if not self._hook_states:
+            self._hook_states.update(self._load_hook_states())
 
         # hook 内容覆盖持久化（系统 hook 编辑覆盖，与 hook_states 共享同一文件）
         # 存储格式: {hook_id: {"command": "...", "statusMessage": "...", ...}}
         # 加载时覆盖系统插件源文件中的默认值，实现系统 hook 可编辑不丢失
-        self._hook_overrides: Dict[str, Dict[str, Any]] = self._load_hook_overrides()
+        # 🛡️ 类级共享（同上，避免多实例互相覆盖）
+        self._hook_overrides: Dict[str, Dict[str, Any]] = HookManager._shared_hook_overrides
+        if not self._hook_overrides:
+            self._hook_overrides.update(self._load_hook_overrides())
 
     @staticmethod
     def _get_hook_states_path() -> str:
@@ -961,10 +975,17 @@ class HookManager:
         # 检测配置格式
         raw_hooks = hooks_config.get("hooks", hooks_config)
 
+        # 🛡️ 热重载顺序恢复：若该 skill 有 unregister 时记录的原位置，
+        # 重新注册时按原位置 insert（而非 append 到末尾），保持事件内交错顺序。
+        restore_positions = HookManager._shared_restore_positions.pop(skill_name, None)
+
         count = 0
         for event_name, rules in raw_hooks.items():
             if event_name not in self._hooks:
                 self._hooks[event_name] = []
+
+            # 该事件下此 skill 的原位置（升序）
+            event_restore = sorted(restore_positions.get(event_name, [])) if restore_positions else []
 
             # 标准化规则格式
             if isinstance(rules, list):
@@ -980,8 +1001,23 @@ class HookManager:
                         rule_data, skill_root, config_file, is_system_plugin=is_system_plugin
                     )
                     if match_rule.hooks:
-                        rule_index = len(self._hooks[event_name])
-                        self._hooks[event_name].append(match_rule)
+                        if event_restore:
+                            # 从大到小插入（先插大索引，避免索引位移影响后续插入）
+                            target = event_restore.pop()
+                            target = min(target, len(self._hooks[event_name]))
+                            self._hooks[event_name].insert(target, match_rule)
+                            # 插入位置之后的 rule 索引 +1（其他 skill）
+                            for other_name, entries in self._skill_to_hooks.items():
+                                if other_name == skill_name:
+                                    continue
+                                self._skill_to_hooks[other_name] = [
+                                    (e, i + 1 if (e == event_name and i >= target) else i)
+                                    for (e, i) in entries
+                                ]
+                            rule_index = target
+                        else:
+                            rule_index = len(self._hooks[event_name])
+                            self._hooks[event_name].append(match_rule)
                         count += len(match_rule.hooks)
 
                         if skill_name not in self._skill_to_hooks:
@@ -996,13 +1032,16 @@ class HookManager:
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
 
-        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖
+        # 从持久化的状态恢复已注册 hook 的开关和内容覆盖（仅系统 hook）
+        # 非系统 hook 的状态以源文件为准（双轨制：插件 hook 写回源文件，不走覆盖层）
         if count > 0:
             for event_name, rules in raw_hooks.items():
                 if event_name not in self._hooks:
                     continue
                 for rule in self._hooks[event_name]:
                     for hook in rule.hooks:
+                        if not hook.is_system_plugin:
+                            continue
                         # 恢复开关状态（覆盖插件源文件中的默认值）
                         if self._hook_states:
                             self._apply_hook_state(hook)
@@ -1011,6 +1050,54 @@ class HookManager:
                             self._apply_hook_overrides(hook, rule)
 
         return count
+
+    def migrate_legacy_hook_states(self) -> int:
+        """一次性迁移旧覆盖层数据（必须在所有 hooks 注册完成后调用）
+
+        规则：
+        - 非系统 hook 条目 → 写回源文件 enabled → 从 _hook_states 删除
+        - 幽灵 id（内存中找不到 hook）→ 直接删除
+        - 系统 hook 条目 → 保留
+        单条失败跳过，下次启动重试。
+
+        Returns:
+            处理的条数
+        """
+        if not self._hook_states:
+            return 0
+        processed = 0
+        dirty = False
+        for hook_id, enabled in list(self._hook_states.items()):
+            found = self._find_hook_by_id(hook_id)
+            if found is None:
+                # 幽灵 id（本机无此 hook：插件已删/多端同步残留）
+                del self._hook_states[hook_id]
+                dirty = True
+                processed += 1
+                continue
+            _, _, _, hook = found
+            if hook.is_system_plugin:
+                continue  # 系统 hook 保留覆盖层
+            # 非系统 hook：写回源文件
+            if hook.config_file and os.path.exists(hook.config_file):
+                ok = self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+                if ok:
+                    del self._hook_states[hook_id]
+                    dirty = True
+                    processed += 1
+                else:
+                    logger.warning(
+                        f"[HookManager] Migration failed for {hook_id}, will retry next start"
+                    )
+            else:
+                del self._hook_states[hook_id]
+                dirty = True
+                processed += 1
+        if dirty:
+            self._save_hook_states()
+        if processed:
+            logger.info(f"[HookManager] Migrated {processed} legacy hook states")
+        return processed
 
     def _persist_hook_ids_to_file(self, config_file: str):
         """将内存中 hook 的 id 写回到 JSON 配置文件
@@ -1039,16 +1126,36 @@ class HookManager:
                             mem_ids[event_name].append(hook.id)
 
             # 遍历文件中的 hook，按 event 内顺序逐个分配 id
+            # 🛡️ 防重复：分配前检查候选 id 是否已被文件其他 hook 占用。
+            # 正常注册（文件顺序=内存顺序）下 idx 天然对齐；文件被外部改动
+            # （gitee 同步/手动编辑）导致顺序不一致时，跳过已占用 id 而非
+            # 错配成重复 id（重复 id 会导致开关状态串台）。
+            existing_ids = set()
+            for _rules in raw_hooks.values():
+                for _rule in _rules:
+                    for _h in _rule.get("hooks", []):
+                        if _h.get("id"):
+                            existing_ids.add(_h["id"])
+
             for event_name, rules in raw_hooks.items():
+                ids = mem_ids.get(event_name, [])
                 idx = 0
                 for rule in rules:
                     for h in rule.get("hooks", []):
                         if not h.get("id"):
-                            ids = mem_ids.get(event_name, [])
+                            # 从当前位置向后找第一个未被占用的内存 id
+                            while idx < len(ids) and ids[idx] in existing_ids:
+                                idx += 1
                             if idx < len(ids):
                                 h["id"] = ids[idx]
+                                existing_ids.add(ids[idx])
                                 modified = True
-                            idx += 1
+                                idx += 1
+                            else:
+                                logger.warning(
+                                    f"[HookManager] No available id for hook in {event_name}: "
+                                    f"{h.get('command', '')[:40]}"
+                                )
                         else:
                             # 有 id 的也算进序号计数（保持位置对应）
                             idx += 1
@@ -1061,13 +1168,36 @@ class HookManager:
             logger.error(f"[HookManager] Failed to persist hook ids to {config_file}: {e}")
 
     def unregister_skill_hooks(self, skill_name: str):
-        """注销一个技能的所有 Hooks"""
+        """注销一个技能的所有 Hooks
+
+        🛡️ 索引对齐：pop 后必须更新其他 skill 的 _skill_to_hooks 索引，
+        否则其他插件热重载后其 hook 分组映射错位（掉进 user/自定义组）。
+        🛡️ 顺序保持：删除前记录各 rule 在事件内的原位置，供重新注册时
+        insert 恢复（否则热重载后该插件 hook 会被 append 到事件末尾，
+        事件内交错顺序变化）。
+        """
         if skill_name not in self._skill_to_hooks:
             return
 
-        for event_name, rule_index in reversed(self._skill_to_hooks[skill_name]):
+        # 先收集要删除的位置，从后往前 pop（避免索引位移影响后续删除）
+        removals = list(self._skill_to_hooks[skill_name])
+        # 记录原位置（供热重载恢复顺序）
+        restore: Dict[str, List[int]] = {}
+        for event_name, rule_index in removals:
+            restore.setdefault(event_name, []).append(rule_index)
+        HookManager._shared_restore_positions[skill_name] = restore
+
+        for event_name, rule_index in reversed(removals):
             if event_name in self._hooks and rule_index < len(self._hooks[event_name]):
                 self._hooks[event_name].pop(rule_index)
+            # 同步修正其他 skill 的索引：被删位置之后的 rule_index 减 1
+            for other_name, entries in self._skill_to_hooks.items():
+                if other_name == skill_name:
+                    continue
+                self._skill_to_hooks[other_name] = [
+                    (e, i - 1 if (e == event_name and i > rule_index) else i)
+                    for (e, i) in entries
+                ]
 
         del self._skill_to_hooks[skill_name]
         logger.debug(f"[HookManager] Unregistered all hooks for skill {skill_name}")
@@ -1165,10 +1295,12 @@ class HookManager:
 
         rules.pop(hook_index)
 
-        # 更新技能索引
-        if skill_name in self._skill_to_hooks:
-            self._skill_to_hooks[skill_name] = [
-                (e, i - 1 if i > hook_index else i) for (e, i) in self._skill_to_hooks[skill_name] if i != hook_index
+        # 更新所有 skill 的索引（含自己）：被删位置之后的 rule_index 减 1
+        for _skill_name, entries in self._skill_to_hooks.items():
+            self._skill_to_hooks[_skill_name] = [
+                (e, i - 1 if (e == event_name and i > hook_index) else i)
+                for (e, i) in entries
+                if not (e == event_name and i == hook_index)
             ]
 
         logger.info(f"[HookManager] Dynamically unregistered hook: {event_name}[{hook_index}]")
@@ -1201,11 +1333,21 @@ class HookManager:
             with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # 更新监控时间
-            self._config_watchers[config_file] = current_mtime
+            # 🛡️ 修复热重载失效：先清除去重缓存，再注册。
+            # 旧逻辑先更新 _config_watchers 再调 register_hooks_from_json，
+            # register 开头的去重检查 `config_file in self._config_watchers`
+            # 必然命中 → return 0 → 热重载永远不生效。
+            if config_file in self._config_watchers:
+                del self._config_watchers[config_file]
+
+            # 先注销旧的 user-custom hooks，避免重新注册后新旧 rule 并存
+            self.unregister_skill_hooks("user-custom")
 
             # 重新注册 (保留技能注册，skill_name 统一用 "user-custom")
             self.register_hooks_from_json("user-custom", "", config, config_file)
+
+            # 更新监控时间（注册成功后）
+            self._config_watchers[config_file] = current_mtime
 
             logger.info(f"[HookManager] Hot reloaded hooks from {config_file}")
             return True
@@ -1213,9 +1355,9 @@ class HookManager:
             logger.error(f"[HookManager] Failed to reload hooks: {e}")
             return False
 
-    def check_and_reload(self):
-        """检查配置是否变更，必要时热重载"""
-        self.reload_hooks_config()
+    def check_and_reload(self) -> bool:
+        """检查配置是否变更，必要时热重载（返回是否成功重载）"""
+        return self.reload_hooks_config()
 
     # ========== 条件匹配 ==========
 
@@ -1958,17 +2100,36 @@ class HookManager:
         return None
 
     def _find_hook_fields(self, hook: Hook, config: dict) -> Optional[tuple]:
-        """在配置中查找 hook 所在的路径字段，返回 (event_name, rule_idx, hook_idx) 或 None"""
+        """在配置中查找 hook 所在位置，返回 (event_name, rule_idx, hook_idx) 或 None
+
+        匹配策略（防误更新）：
+        1. 优先按 id 精确匹配（同 command 多 hook 场景不会误更新第一条）
+        2. id 匹配不到时，按 command/url/function/prompt 唯一键兜底
+        """
         raw_hooks = config.get("hooks", config)
+        target_cmd = hook.command or hook.url or hook.function or hook.prompt or ""
+
         for event_name, rules in raw_hooks.items():
             for rule_idx, rule in enumerate(rules):
                 hooks_list = rule.get("hooks", [])
                 for hook_idx, h in enumerate(hooks_list):
                     hook_id = h.get("id", "") or ""
-                    hook_cmd = h.get("command", "") or h.get("url", "") or h.get("function", "") or h.get("prompt", "")
-                    target_cmd = hook.command or hook.url or hook.function or hook.prompt or ""
-                    if hook_id == hook.id or hook_cmd == target_cmd:
+                    if hook_id and hook_id == hook.id:
                         return (event_name, rule_idx, hook_idx)
+        # id 兜底失败 → 唯一键兜底（command/url/function/prompt）
+        if target_cmd:
+            for event_name, rules in raw_hooks.items():
+                for rule_idx, rule in enumerate(rules):
+                    hooks_list = rule.get("hooks", [])
+                    for hook_idx, h in enumerate(hooks_list):
+                        h_cmd = (
+                            h.get("command", "")
+                            or h.get("url", "")
+                            or h.get("function", "")
+                            or h.get("prompt", "")
+                        )
+                        if h_cmd == target_cmd:
+                            return (event_name, rule_idx, hook_idx)
         return None
 
     def _update_skill_index_for_hook(self, hook: Hook, new_event_name: str, new_rule_idx: int):
@@ -2002,20 +2163,24 @@ class HookManager:
             # 添加到新位置
             self._skill_to_hooks[found_skill_name].append((new_event_name, new_rule_idx))
 
-    def _save_hook_to_file_by_id(self, hook: Hook, new_data: dict = None):
-        """通过 hook_id 保存到源文件（支持事件/matcher 变更时的移动）"""
+    def _save_hook_to_file_by_id(self, hook: Hook, new_data: dict = None) -> bool:
+        """通过 hook_id 覆盖式保存到源文件（禁止追加，防重复）
+
+        Returns:
+            True 成功 / False 匹配不到或写失败
+        """
         if not hook.config_file or not os.path.exists(hook.config_file):
-            return
+            return False
 
         try:
             with open(hook.config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-            # 查找 hook 位置
+            # 查找 hook 位置（优先 id 精确匹配，防误更新）
             location = self._find_hook_fields(hook, config)
             if location is None:
                 logger.warning(f"[HookManager] Hook {hook.id} not found in {hook.config_file}")
-                return
+                return False
 
             event_name, rule_idx, hook_idx = location
             raw_hooks = config.get("hooks", config)
@@ -2025,25 +2190,32 @@ class HookManager:
             # 合并更新数据
             hook_entry = target_hooks[hook_idx]
             if new_data:
-                # 处理 enabled
-                if "enabled" in new_data:
-                    hook_entry["enabled"] = new_data["enabled"]
-                # 处理 command/url/function
-                if "command" in new_data:
-                    hook_entry["command"] = new_data["command"]
-                if "url" in new_data:
-                    hook_entry["url"] = new_data["url"]
-                if "function" in new_data:
-                    hook_entry["function"] = new_data["function"]
-                # 处理 matcher 变更（移动到新事件）
-                if "matcher" in new_data and "new_event_name" in new_data:
-                    new_event = new_data["new_event_name"]
-                    new_matcher = new_data["matcher"]
+                # 处理 enabled/command/url/function
+                for key in ("enabled", "command", "url", "function"):
+                    if key in new_data:
+                        hook_entry[key] = new_data[key]
 
-                    # 创建新事件条目
+                # 处理 matcher 变更（移动到新事件）：合并进目标事件同 matcher rule，禁止新建重复 rule
+                # 兼容两种调用方键名：UI 传 {"event": ..., "matcher": ...}，
+                # 内部迁移路径传 {"new_event_name": ..., "matcher": ...}
+                new_event = new_data.get("new_event_name") or new_data.get("event")
+                if "matcher" in new_data and new_event:
+                    new_event = str(new_event)
+                    new_matcher = new_data["matcher"] or ""
+
                     if new_event not in raw_hooks:
                         raw_hooks[new_event] = []
-                    raw_hooks[new_event].append({"matcher": new_matcher, "hooks": [hook_entry]})
+
+                    # 查找目标事件中同 matcher 的 rule，存在则合并，否则新建
+                    matched_rule = None
+                    for r in raw_hooks[new_event]:
+                        if (r.get("matcher") or "") == new_matcher:
+                            matched_rule = r
+                            break
+                    if matched_rule is not None:
+                        matched_rule.setdefault("hooks", []).append(hook_entry)
+                    else:
+                        raw_hooks[new_event].append({"matcher": new_matcher or "", "hooks": [hook_entry]})
 
                     # 从旧位置移除
                     target_hooks.pop(hook_idx)
@@ -2051,9 +2223,6 @@ class HookManager:
                         raw_hooks[event_name].pop(rule_idx)
                     if not raw_hooks.get(event_name):
                         del raw_hooks[event_name]
-
-                    # 更新内存中的 matcher
-                    hook.config_file = hook.config_file  # 保持不变
 
                 # 处理其他字段
                 for key in [
@@ -2069,6 +2238,7 @@ class HookManager:
                     "function_args",
                     "commandWindows",
                     "statusMessage",
+                    "prompt",
                 ]:
                     if key in new_data:
                         hook_entry[key] = new_data[key]
@@ -2076,12 +2246,40 @@ class HookManager:
             # 确保 id 字段存在
             hook_entry["id"] = hook.id
 
+            # 写前防重：清理同 id 重复条目（防御历史遗留）
+            self._dedupe_hook_entries(raw_hooks)
+
             with open(hook.config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
 
             logger.debug(f"[HookManager] Saved hook {hook.id} to {hook.config_file}")
+            return True
         except Exception as e:
             logger.error(f"[HookManager] Failed to save hook {hook.id}: {e}")
+            return False
+
+    @staticmethod
+    def _dedupe_hook_entries(raw_hooks: dict):
+        """写前防重：同一 rule 内同 id 的 hook 条目只保留第一个"""
+        for rules in raw_hooks.values():
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                hooks = rule.get("hooks")
+                if not isinstance(hooks, list):
+                    continue
+                seen: set = set()
+                deduped = []
+                for h in hooks:
+                    hid = h.get("id", "")
+                    if hid and hid in seen:
+                        continue
+                    if hid:
+                        seen.add(hid)
+                    deduped.append(h)
+                rule["hooks"] = deduped
 
     def edit_hook_by_id(self, hook_id: str, new_data: dict) -> bool:
         """
@@ -2134,9 +2332,11 @@ class HookManager:
 
             new_rule_idx = next((i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks), 0)
             self._update_skill_index_for_hook(hook, new_event, new_rule_idx)
-            # 用户自定义 hook 的事件变更也持久化到源文件（全局生效）
-            if self._is_user_custom_hook(hook):
-                self._save_hook_to_file_by_id(hook, new_data)
+            # 非系统 hook 的事件变更也持久化到源文件（全局生效）；系统 hook 走覆盖层
+            if not hook.is_system_plugin:
+                ok = self._save_hook_to_file_by_id(hook, new_data)
+                if not ok:
+                    logger.error(f"[HookManager] Failed to persist event move for {hook_id}")
         elif "matcher" in new_data:
             # 同事件内更新共享内存的 matcher，用于 trigger_event 初始匹配
             self._hooks[event_name][rule_idx].matcher = new_data["matcher"] or None
@@ -2161,12 +2361,19 @@ class HookManager:
             if key in new_data:
                 setattr(hook, attr, new_data[key])
 
-        # 持久化到源文件（user-custom hook）
-        if self._is_user_custom_hook(hook):
-            self._save_hook_to_file_by_id(hook, new_data)
+        # 双轨制持久化：
+        # - 非系统 hook（插件/user-custom）：写回源文件（覆盖式），并清理覆盖层残留
+        # - 系统 hook：持久化到 _hook_overrides（与 hook_states 共享同一文件），
+        #   只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
+        if not hook.is_system_plugin:
+            ok = self._save_hook_to_file_by_id(hook, new_data)
+            if not ok:
+                logger.error(f"[HookManager] Failed to persist edit for {hook_id}")
+            # 清理覆盖层残留（迁移兜底：若该 id 仍在 _hook_overrides 中）
+            if hook.id in self._hook_overrides:
+                del self._hook_overrides[hook.id]
+                self._save_hook_states()
         else:
-            # 系统 hook / skill hook：持久化到 _hook_overrides（与 hook_states 共享同一文件）
-            # 只存储内容字段，不存储 event/enabled（它们有独立的持久化路径）
             override_fields = {
                 "type",
                 "command",
@@ -2213,13 +2420,24 @@ class HookManager:
 
         hook.enabled = enabled
 
-        # 持久化到 hook_states.json（所有 hook 共用，跨会话保持）
-        self._hook_states[hook.id] = enabled
-        self._save_hook_states()
-
-        # 也持久化到源文件（user-custom hook 的源 JSON 文件），使用 ID 匹配
-        if self._is_user_custom_hook(hook):
-            self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+        # 双轨制持久化：
+        # - 系统 hook（plugins/system/）：保留覆盖层（hook_states.json）
+        # - 非系统 hook（插件/user-custom）：写回源文件 enabled 字段（覆盖式）
+        #   并清理覆盖层残留（迁移兜底）
+        if hook.is_system_plugin:
+            self._hook_states[hook.id] = enabled
+            self._save_hook_states()
+        else:
+            if hook.config_file:
+                ok = self._save_hook_to_file_by_id(hook, {"enabled": enabled})
+                if not ok:
+                    logger.error(
+                        f"[HookManager] Failed to persist toggle for {hook_id} to {hook.config_file}"
+                    )
+            # 清理覆盖层残留（旧数据迁移兜底：若该 id 仍在 hook_states 中）
+            if hook.id in self._hook_states:
+                del self._hook_states[hook.id]
+                self._save_hook_states()
 
         logger.info(f"[HookManager] Toggled hook {hook_id} enabled={enabled}")
         return True

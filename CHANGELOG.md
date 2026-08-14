@@ -3,6 +3,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-08-14
+
+自上一版本以来的变更 | 提交数：21 · 文件变更：21 · +3207/-231 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **Responses API 推理渲染支持** (`app/core/`): 支持 GPT-5.x 模型与子智能体 Responses API，解析更多 reasoning 事件并渲染思考内容
+- **Hook 配置源文件写回** (`app/core/` + 插件 hooks.json): 插件 Hook 开关和配置直接写回源文件，系统 Hook 使用覆盖层持久化
+- **旧版 Hook 状态一次性迁移** (`app/core/`): 启动时将旧版状态迁移到新的存储结构
+- **对话区滚轮事件转发** (`app/widgets/tab_manager_window.py`): TabManagerWindow 在限宽居中的左右留白区拦截滚轮事件并转发给当前对话/覆盖层的滚动区域，避免留白处滚轮失效
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **MCP 连接并发竞态** (`app/core/`): 防止启动全量连接与插件热重载单服务器连接互相取消，避免后台线程长时间阻塞
+- **插件热重载 MCP 连接** (`app/core/`): 热重载后自动连接新增且启用的 MCP 服务器
+- **Hook 热重载顺序与索引** (`app/core/`): 恢复规则位置并重新对齐 Hook 索引，保持事件顺序和分组映射稳定
+- **Hook 状态持久化重复与覆盖** (`app/core/`): 修复文件顺序变化导致的重复 ID、错误覆盖及多实例状态竞争
+- **OpenAI 模块导入死锁** (`app/core/`): 预加载资源子模块，避免启动时导入死锁
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Hook 状态共享** (`app/core/`): 在 HookManager 实例间共享状态，避免快照互相覆盖
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级到 v0.5.1** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 同步更新项目、配置、安装器和 README 版本号
+- **移除过时设计文档** (`docs/`): 清理项目 dashboard、Hook 配置重构和 Responses API 支持的过时设计文档
+
 ## [v0.5.0] - 2026-08-13
 
 自上一版本以来的变更 | 提交数：38 · 文件变更：N · +5085/-1282 | 贡献者：dingma, mading
@@ -128,6 +156,19 @@ All notable changes to this project will be documented in this file.
 ##### 🔧 其他 (Chores & Build, 1)
 
 - **v0.5.0 三次重发 tag 覆盖** (`CHANGELOG.md` + git tag): 删除远程/本地 v0.5.0 tag 重新打在当前 HEAD，覆盖二次重发 tag 指向三次重发补丁后的最新代码
+
+
+#### 📦 附加变更（v0.5.0 四次重发补丁 | 自三次 tag 之后 1 个新提交）
+
+> v0.5.0 三次 tag 后追加的历史面板 UI 同步 bug 修复：会话保存/自动保存后历史面板 UI 仍停留在保存前快照，导致「历史面板已展开但列表缺失最新会话」。修复：新建/保存/自动保存三处触发点调用 `refresh_history_card_if_visible` 同步内存缓存到 UI（仅历史卡片可见时执行，0 开销）；配套回归测试覆盖。贡献者：mading
+
+##### 🐛 问题修复 (Bug Fixes, 1)
+
+- **历史面板保存后刷新（避免快照过时）** (`app/main_widget.py` `_create_new_session` / `_save_current_session` / `_auto_save_current_session` + `tests/widgets/test_history_panel_refresh_on_save.py`): 旧版 `_auto_save_current_session` 与 `_save_current_session` 完成后仅清脏标记 + 更新预览，未触发历史面板 UI 同步——历史面板若已展开，列表会停留在保存前快照（旧会话缺失 / 标题过时）；`_create_new_session` 同理。修复：上述三处触发点新增 `refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)` 调用，仅在历史卡片可见时执行刷新（不可见时 0 开销），保证 UI 与内存缓存同步；新增 `test_history_panel_refresh_on_save.py` 覆盖三处调用点
+
+##### 🔧 其他 (Chores & Build, 1)
+
+- **v0.5.0 四次重发 tag 覆盖** (`CHANGELOG.md` + git tag): 删除远程/本地 v0.5.0 tag 重新打在当前 HEAD，覆盖三次重发 tag 指向四次重发补丁后的最新代码
 
 ## [v0.4.14] - 2026-08-09
 
@@ -988,7 +1029,7 @@ All notable changes to this project will be documented in this file.
 - **布局边距与命令卡片对齐优化**: 调整 `OpenAIChatToolWindow`、`CardContainer`、`bottom_input_area` 的布局边距以改进整体间距；将命令卡片标签对齐到顶部避免不均匀的内边距；新增 `CardManager` 方法支持跨容器隐藏非系统卡片
 - **command_card tooltip 首次显示延迟**: 修复 `command_card` 中 tooltip 在首次显示时的位置延迟问题，提升交互即时感
 - **Windows 命令找不到自动回退 cmd /c**: `command_safety.run_safe` 在 Windows 上找不到可执行文件时自动回退到 `cmd /c` 包装，支持 PATHEXT 扩展名解析（如 `pip → pip.exe`、`tsc → tsc.cmd`），解决 `shell=False` 模式下的 PATH 查找问题
-- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `\\` 与字面 `^`，避免路径误判
+- **Windows Shell 元字符正则增强**: 修正 `WINDOWS_SHELL_META` 正则匹配逻辑，正确处理 Windows 路径分隔符 `\` 与字面 `^`，避免路径误判
 - **command_safety 字符串风格与内置命令列表统一**: `command_safety` 模块统一使用双引号字符串风格（替换单引号）；扩展 Windows Shell 内置命令列表，覆盖 cmd.exe 内置命令全集
 - **diff 生成会话消息回退机制**: 实现从会话消息生成 diff 的回退路径，当工具调用结果不可用时仍能生成可读 diff；同步新增 `app.tools` 模块相关 diff 生成入口
 - **provider 配置处理与消息卡片交互优化**: 增强 `main_widget` 中 provider 配置的处理逻辑；改进 `tool_popup`、`terminal_tools`、`message_card` 等模块的交互流程，提升多 provider 切换与命令触发场景下的稳定性

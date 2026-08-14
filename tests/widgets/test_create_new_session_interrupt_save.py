@@ -116,12 +116,10 @@ class TestCreateNewSessionStreamingBranch:
                 found_assign = True
                 break
         assert found_assign, (
-            "_create_new_session 必须接收 stop_streaming() 返回值（interrupted），"
-            "否则被打断的会话缺最后部分回复。"
+            "_create_new_session 必须接收 stop_streaming() 返回值（interrupted），否则被打断的会话缺最后部分回复。"
         )
         assert _method_calls(method, "_apply_interrupted_messages_to_session"), (
-            "_create_new_session 必须把中断消息应用回 session，"
-            "否则 _auto_save_current_session 保存的是旧消息。"
+            "_create_new_session 必须把中断消息应用回 session，否则 _auto_save_current_session 保存的是旧消息。"
         )
 
     def test_stop_streaming_before_session_switch(self):
@@ -138,21 +136,23 @@ class TestCreateNewSessionStreamingBranch:
             return None
 
         apply_pos = _pos(
-            lambda n: isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "_apply_interrupted_messages_to_session"
+            lambda n: (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "_apply_interrupted_messages_to_session"
+            )
         )
         sentinel_pos = _pos(
-            lambda n: isinstance(n, ast.Assign)
-            and len(n.targets) == 1
-            and isinstance(n.targets[0], ast.Attribute)
-            and n.targets[0].attr == "_session_switched"
+            lambda n: (
+                isinstance(n, ast.Assign)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Attribute)
+                and n.targets[0].attr == "_session_switched"
+            )
         )
         assert apply_pos is not None and sentinel_pos is not None
         # 中断消息必须属于旧会话，须在哨兵置位之前应用（create_session 在其后）
-        assert apply_pos < sentinel_pos, (
-            "中断消息应用必须在 _session_switched 哨兵置位之前，避免污染新会话。"
-        )
+        assert apply_pos < sentinel_pos, "中断消息应用必须在 _session_switched 哨兵置位之前，避免污染新会话。"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -221,6 +221,11 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst._safe_timer_call = MagicMock()
     inst.session_manager = MagicMock()
     inst.history_manager = MagicMock()
+    # 🆕 历史面板刷新链路的 stub（_create_new_session 末尾会调用
+    # refresh_history_card_if_visible）：设 None 走短路，避免 QWidget
+    # 未初始化访问属性触发 RuntimeError
+    inst._history_card = None
+    inst._refresh_history_toggle_panel = MagicMock()
     return inst
 
 

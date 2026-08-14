@@ -14,7 +14,7 @@ from loguru import logger
 from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
-from app.core.message_content import to_api_message
+from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
     resolve_context_limit,
@@ -875,6 +875,17 @@ class SubAgentExecutor(QThread):
             timeout=120.0,
         )
 
+        # GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning，思考在
+        # /v1/responses 的 reasoning item 中返回）
+        if self._use_responses_api(config):
+            try:
+                return self._make_responses_api_call(client, messages, tools, config)
+            except Exception as e:
+                # 网关不支持 responses 时回退 chat/completions
+                logger.warning(f"[SubAgentWorker] Responses API 调用失败，回退 chat/completions: {e}")
+                if self._is_cancelled:
+                    return "", [], ""
+
         from app.core.workers.error_handler import create_api_call_with_retry
 
         def create_completion():
@@ -928,6 +939,147 @@ class SubAgentExecutor(QThread):
             pass
 
         return response_content, tool_calls_found, reasoning_content
+
+    # ========== Responses API（GPT-5.x 系列）==========
+
+    def _use_responses_api(self, llm_config: Dict = None) -> bool:
+        """GPT-5.x 系列走 Responses API（chat/completions 不透传 reasoning）。"""
+        config = llm_config if llm_config is not None else self.llm_config
+        try:
+            if not isinstance(config, dict):
+                return False
+            override = config.get("使用ResponsesAPI")
+            if override is not None:
+                return bool(override)
+            model = str(config.get("模型名称", "") or "").lower()
+            return model.startswith("gpt-5")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _responses_tools(tools: List[Dict]) -> List[Dict]:
+        """chat/completions 工具格式 → Responses API 扁平格式。"""
+        out: List[Dict] = []
+        for t in tools or []:
+            if not isinstance(t, dict):
+                continue
+            func = t.get("function") or {}
+            if not isinstance(func, dict) or not func.get("name"):
+                continue
+            out.append(
+                {
+                    "type": "function",
+                    "name": func.get("name"),
+                    "description": func.get("description", ""),
+                    "parameters": func.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        return out
+
+    def _make_responses_api_call(self, client, messages, tools, config) -> tuple:
+        """非流式 Responses API 调用：解析 output 数组 → (content, tool_calls, reasoning)。"""
+        input_items, instructions = messages_to_responses_input(messages)
+        model = str(config.get("模型名称", "") or "")
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": False,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        if tools:
+            kwargs["tools"] = self._responses_tools(tools)
+
+        thinking_mode = config.get("思考模式")
+        if thinking_mode is True:
+            kwargs["reasoning"] = {"effort": config.get("思考等级", "medium")}
+        elif thinking_mode is False:
+            kwargs["reasoning"] = {"effort": "none"}
+
+        max_tokens = config.get("最大Token")
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_tokens, config)
+
+        task_session_id = getattr(self, "_task_session_id", None)
+        if task_session_id:
+            kwargs["user"] = task_session_id
+
+        logger.info(f"[SubAgentWorker][ResponsesAPI] model={model} 使用 Responses API")
+        response = client.responses.create(**kwargs)
+        return self._parse_responses_output(response)
+
+    def _parse_responses_output(self, response) -> tuple:
+        """解析非流式 Responses 对象 output 数组。
+
+        Returns:
+            (content, tool_calls, reasoning)
+        """
+        reasoning_parts: List[str] = []
+        content_parts: List[str] = []
+        tool_calls: List[Dict] = []
+
+        def _item_get(item, key, default=None):
+            if isinstance(item, dict):
+                return item.get(key, default)
+            return getattr(item, key, default)
+
+        for item in getattr(response, "output", None) or []:
+            itype = _item_get(item, "type", "")
+            if itype == "reasoning":
+                # summary 数组：OpenCode Go 网关提供思考摘要
+                summary = _item_get(item, "summary", None) or []
+                for s in summary:
+                    if isinstance(s, dict):
+                        text = s.get("text", "")
+                    else:
+                        text = getattr(s, "text", "") or ""
+                    if text:
+                        reasoning_parts.append(text)
+                # 兜底：完整思考内容（部分网关放 content/raw）
+                raw = _item_get(item, "content", None) or _item_get(item, "raw", None)
+                if isinstance(raw, str) and raw:
+                    reasoning_parts.append(raw)
+            elif itype == "message":
+                for part in _item_get(item, "content", None) or []:
+                    if _item_get(part, "type", "") == "output_text":
+                        text = _item_get(part, "text", "") or ""
+                        if text:
+                            content_parts.append(text)
+            elif itype == "function_call":
+                call_id = _item_get(item, "call_id", "") or _item_get(item, "id", "")
+                name = _item_get(item, "name", "") or ""
+                arguments = _item_get(item, "arguments", "") or "{}"
+                if call_id and name:
+                    tool_calls.append(
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                    )
+
+        content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
+        if content:
+            content = self._filter_thinking_content(content)
+
+        # 追踪 token 用量
+        try:
+            usage = getattr(response, "usage", None)
+            if usage:
+                pt = getattr(usage, "input_tokens", 0) or 0
+                ct = getattr(usage, "output_tokens", 0) or 0
+                tt = getattr(usage, "total_tokens", 0) or 0
+                self._total_prompt_tokens += pt
+                self._total_completion_tokens += ct
+                self._total_tokens += tt
+                if tt > self._peak_total_tokens:
+                    self._peak_total_tokens = tt
+                self.token_usage_updated.emit(self.task_id, pt, ct, tt)
+        except Exception:
+            pass
+
+        return content, tool_calls, reasoning
 
     def _cap_max_output_tokens(self, model: str, requested: int, llm_config: Dict = None) -> int:
         """

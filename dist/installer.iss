@@ -4,7 +4,7 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.5.0"
+  #define MyAppVersion "v0.5.1"
 #endif
 #define MyAppPublisher "Jinshan Psychiatric Hospital"
 #define MyAppURL "https://Drifox-sphinx-build.readthedocs.io/zh-cn/latest/"

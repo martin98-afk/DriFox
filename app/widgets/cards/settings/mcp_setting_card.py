@@ -875,6 +875,11 @@ class MCPListSettingCard(ExpandSettingCard):
             _parent = TabManagerWindow.get_instance() or self.window()
             # 提取友好提示
             hint = error_msg or "未知错误"
+            if hint == "服务器正在操作中，请稍后重试":
+                # 防重丢弃：另一入口正在连接同一服务器，属正常竞态抑制，
+                # 不是失败，不弹错误提示（否则热重载+开关并发时频繁误报）
+                logger.debug(f"[MCP] '{name}' 连接请求被防重丢弃（已有连接在进行中）")
+                return
             if "请检查配置类型是否正确" in hint:
                 # 拆分为标题和内容
                 parts = hint.split("（", 1)

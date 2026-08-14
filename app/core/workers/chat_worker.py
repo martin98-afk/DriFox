@@ -39,7 +39,14 @@ from PyQt5.QtGui import QImage
 from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import PermissionCache
-from app.core.message_content import append_text_block, consolidate_messages, messages_to_api, to_api_message
+from app.core.message_content import (
+    append_text_block,
+    consolidate_messages,
+    messages_to_api,
+    messages_to_responses_input,
+    to_api_message,
+)
+
 from app.core.model_capabilities import get_model_capabilities
 from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
@@ -1490,6 +1497,77 @@ class OpenAIChatWorker(QThread):
             "_is_o1_model": is_o1,
         }
 
+    # ========== Responses API（GPT-5.x 系列）==========
+    # GPT-5.x 的思考只在 /v1/responses 的 reasoning_summary_text 事件中返回，
+    # chat/completions 流式 delta 无 reasoning 字段 → 走本分支获取思考内容。
+
+    @staticmethod
+    def _tools_to_responses(tools: List[Dict]) -> List[Dict]:
+        """chat/completions 工具格式 → Responses API 扁平格式。
+
+        chat: {"type":"function","function":{"name","description","parameters"}}
+        responses: {"type":"function","name","description","parameters"}
+        """
+        out: List[Dict] = []
+        for t in tools or []:
+            if not isinstance(t, dict):
+                continue
+            func = t.get("function") or {}
+            if not isinstance(func, dict) or not func.get("name"):
+                continue
+            out.append(
+                {
+                    "type": "function",
+                    "name": func.get("name"),
+                    "description": func.get("description", ""),
+                    "parameters": func.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        return out
+
+    def _build_responses_kwargs(self, messages: List[Dict]) -> Dict[str, Any]:
+        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。"""
+        input_items, instructions = messages_to_responses_input(messages, supports_vision=self._supports_vision)
+        model = str(self.llm_config.get("模型名称", "") or "")
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": self.stream,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        if self.tools:
+            kwargs["tools"] = self._tools_to_responses(self.tools)
+
+        # 思考参数：responses 用 reasoning.effort（含 "none" 关闭）
+        thinking_mode = self.llm_config.get("思考模式")
+        if thinking_mode is True:
+            kwargs["reasoning"] = {"effort": self.llm_config.get("思考等级", "medium")}
+        elif thinking_mode is False:
+            kwargs["reasoning"] = {"effort": "none"}
+
+        # 最大输出 token（复用 chat 分支的上限保护）
+        max_tokens = self.llm_config.get("最大Token")
+        if max_tokens is not None:
+            kwargs["max_output_tokens"] = self._cap_max_output_tokens(model, max_tokens)
+
+        # 会话标识
+        if self.session_id:
+            kwargs["user"] = self.session_id
+
+        # 认证头（bce 认证方式）
+        auth_headers = None
+        if str(self.llm_config.get("认证方式", "bearer")) == "bce":
+            import base64
+
+            api_key = str(self.llm_config.get("API_KEY", "") or "")
+            auth_str = f"{api_key}:{api_key}"
+            b64_auth = base64.b64encode(auth_str.encode()).decode()
+            auth_headers = {"Authorization": f"Basic {b64_auth}"}
+        if auth_headers:
+            kwargs["extra_headers"] = auth_headers
+        return kwargs
+
     def provide_answer(self, answer: str):
         self._pending_answer = answer
         self._answer_event.set()
@@ -2577,6 +2655,27 @@ class OpenAIChatWorker(QThread):
             pass
         return False
 
+    def _use_responses_api(self) -> bool:
+        """当前模型是否走 Responses API（/v1/responses）。
+
+        GPT-5.x 系列（gpt-5.6-luna 等）的思考内容只在 Responses API 的
+        reasoning_summary_text 事件中返回；chat/completions 端点的流式 delta
+        不含任何 reasoning 字段（OpenCode Go 网关实测剥离），导致思考不渲染。
+        对该系列模型自动切换 Responses API 以获取并渲染思考内容。
+
+        判断规则（可被配置覆盖）：
+        - llm_config["使用ResponsesAPI"] 显式 True/False → 强制开关
+        - 否则模型名小写以 gpt-5 开头 → True
+        """
+        try:
+            override = self.llm_config.get("使用ResponsesAPI")
+            if override is not None:
+                return bool(override)
+            model = str(self.llm_config.get("模型名称", "") or "").lower()
+            return model.startswith("gpt-5")
+        except Exception:
+            return False
+
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """
         发起 API 调用。
@@ -2639,6 +2738,13 @@ class OpenAIChatWorker(QThread):
         client = self._get_http_client()
 
         max_retries = 15
+        # GPT-5.x 系列走 Responses API（思考内容只在 /v1/responses 返回）
+        use_responses = self._use_responses_api()
+        if use_responses:
+            logger.info(
+                f"[ResponsesAPI] model={cached_config['model']} 使用 Responses API（chat/completions 不透传 reasoning）"
+            )
+
         retry_delay = 5
         last_error = None
 
@@ -2648,11 +2754,18 @@ class OpenAIChatWorker(QThread):
                 logger.info("[API] 重试被用户取消")
                 return None, None
             try:
-                response = client.chat.completions.create(**req_kwargs)
+                if use_responses:
+                    # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
+                    self.stream = True
+                    response = client.responses.create(**self._build_responses_kwargs(messages))
+                else:
+                    response = client.chat.completions.create(**req_kwargs)
                 if attempt > 0:
                     self.retry_resolved.emit()
                 # 🛡️ 流式响应处理移入重试循环，流式协议错误可完整重试
                 try:
+                    if use_responses:
+                        return self._process_responses_stream(response)
                     return self._process_response(response)
                 except (httpx.ReadError, httpcore.ReadError):
                     # ⚠️ ReadError 不一定是用户取消：
@@ -2681,7 +2794,7 @@ class OpenAIChatWorker(QThread):
                     or "tool_calls" in error_str.lower()
                 )
 
-                if is_tool_call_order_error and attempt < max_retries - 1:
+                if is_tool_call_order_error and attempt < max_retries - 1 and not use_responses:
                     # 自动修复 tool result 顺序问题
                     logger.warning("[API] 检测到 tool call result 顺序错误 (2013)，尝试自动修复...")
                     # 🛡️ 仅调用一次修复：req_kwargs["messages"] 与 messages 的 tool_call_id 集合等价
@@ -2710,7 +2823,7 @@ class OpenAIChatWorker(QThread):
                     "Missing required arguments" in error_str or "missing a required argument" in error_str.lower()
                 )
 
-                if is_missing_args_error and attempt < max_retries - 1:
+                if is_missing_args_error and attempt < max_retries - 1 and not use_responses:
                     logger.warning("[API] 检测到工具参数丢失错误，尝试从历史消息中恢复...")
 
                     # 尝试从历史消息中恢复 tool_calls 的参数
@@ -3442,6 +3555,215 @@ class OpenAIChatWorker(QThread):
             freed_count = gc.collect()
             if freed_count > 100:
                 logger.debug(f"[MEM] 流式结束 gc.collect() 释放了 {freed_count} 个对象")
+
+        return tool_calls_found, tool_args_pending
+
+    # ========== Responses API 流式处理（GPT-5.x 系列）==========
+
+    @staticmethod
+    def _responses_item_get(item, key: str, default=None):
+        """兼容访问 Responses API item（pydantic 对象或 dict）。"""
+        if isinstance(item, dict):
+            return item.get(key, default)
+        return getattr(item, key, default)
+
+    def _handle_responses_function_call(self, item) -> None:
+        """Responses output_item.done(function_call) → 内部 tool_call 结构。
+
+        参数在 done 事件中已完整（arguments 为字符串），无需逐块预解析。
+        """
+        call_id = self._responses_item_get(item, "call_id") or self._responses_item_get(item, "id")
+        name = self._responses_item_get(item, "name") or ""
+        arguments = self._responses_item_get(item, "arguments") or "{}"
+        if not call_id or not name:
+            return
+        self._current_tool_calls[call_id] = {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+            "_args_parsed": True,
+        }
+        self._tool_calls_buffer.pop(self._responses_item_get(item, "id"), None)
+
+        # 解析参数用于预览
+        try:
+            parsed_args = json.loads(arguments) if arguments else {}
+        except Exception:
+            parsed_args = {"_status": "loading", "_raw_args": arguments[:500]}
+
+        # 发射 preview 阶段工具开始 + 参数更新
+        if name not in self._DEFERRED_PREVIEW_TOOLS and call_id not in self._previewed_tool_call_ids:
+            self._previewed_tool_call_ids.add(call_id)
+            if self.tool_start_callback:
+                self.tool_start_callback(call_id, name, parsed_args, "preview")
+            else:
+                self._emit_with_callback(
+                    "tool_call_started", self.tool_call_started, call_id, name, parsed_args, "preview"
+                )
+        self._emit_with_callback("tool_args_updated", self.tool_args_updated, call_id, name, parsed_args)
+
+    def _process_responses_stream(self, response) -> (bool, bool):
+        """解析 Responses API 流式事件，复用 chat/completions 的信号与状态机。
+
+        事件 → 信号映射：
+        - response.reasoning_summary_text.delta → thinking_started + reasoning_content_received
+        - response.output_text.delta → content_received
+        - response.output_item.done(function_call) → tool_call_started + tool_args_updated
+        - response.failed / error → 抛错
+        """
+        self._current_response = response
+        self._response_content_blocks = []
+        self._current_tool_calls = {}
+        self._tool_calls_buffer = {}
+        self._previewed_tool_call_ids = set()
+        tool_calls_found = False
+        tool_args_pending = True
+        reasoning_started_this_call = False
+        _reasoning_batch = ""
+        _reasoning_batch_time = time.time()
+        _content_batch = ""
+        _content_batch_time = time.time()
+        saw_any_chunk = False
+        failed_error: Optional[str] = None
+
+        for event in response:
+            if self._is_cancelled:
+                # 取消前刷新待处理批次
+                if _reasoning_batch:
+                    self._emit_with_callback(
+                        "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                    )
+                    _reasoning_batch = ""
+                if _content_batch:
+                    self._emit_with_callback("content_received", self.content_received, _content_batch)
+                    _content_batch = ""
+                self._current_response = None
+                return False, False
+
+            saw_any_chunk = True
+            etype = getattr(event, "type", "") or ""
+
+            # ----- 思考内容（摘要/完整思考文本，兼容多种网关事件名）-----
+            # OpenAI 官方：reasoning_summary_text.delta（摘要，默认）
+            #          或 reasoning_text.delta（完整思考，需 include）
+            # 部分中转网关可能用 reasoning.delta / reasoning_summary_part.delta
+            if etype in (
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+                "response.reasoning.delta",
+                "response.reasoning_summary_part.delta",
+            ):
+                piece = getattr(event, "delta", "") or ""
+                if piece:
+                    if not reasoning_started_this_call:
+                        reasoning_started_this_call = True
+                        self._emit_with_callback("thinking_started", self.thinking_started)
+                    self._reasoning_chunks.append(piece)
+                    _reasoning_batch += piece
+                    now = time.time()
+                    if len(_reasoning_batch) >= 20 or (now - _reasoning_batch_time) > 0.08:
+                        self._emit_with_callback(
+                            "reasoning_content_received", self.reasoning_content_received, _reasoning_batch
+                        )
+                        _reasoning_batch = ""
+                        _reasoning_batch_time = now
+
+            # ----- 正文内容 -----
+            elif etype == "response.output_text.delta":
+                piece = getattr(event, "delta", "") or ""
+                if piece:
+                    self._response_chunks.append(piece)
+                    self._response_content_blocks = append_text_block(self._response_content_blocks, piece)
+                    _content_batch += piece
+                    now = time.time()
+                    if len(_content_batch) >= 30 or (now - _content_batch_time) > 0.08:
+                        self._emit_with_callback("content_received", self.content_received, _content_batch)
+                        _content_batch = ""
+                        _content_batch_time = now
+
+            # ----- 工具调用参数累积 -----
+            elif etype == "response.function_call_arguments.delta":
+                tool_calls_found = True
+                item_id = getattr(event, "item_id", "")
+                piece = getattr(event, "delta", "") or ""
+                buffer = self._tool_calls_buffer.get(item_id)
+                if buffer:
+                    buffer["function"]["arguments"] += piece
+
+            # ----- 工具调用参数完成 -----
+            elif etype == "response.function_call_arguments.done":
+                item_id = getattr(event, "item_id", "")
+                buffer = self._tool_calls_buffer.get(item_id)
+                if buffer:
+                    args = getattr(event, "arguments", "") or ""
+                    buffer["function"]["arguments"] = args
+
+            # ----- 工具调用 item 新增（建立 buffer）-----
+            elif etype == "response.output_item.added":
+                item = getattr(event, "item", None) or {}
+                if self._responses_item_get(item, "type") == "function_call":
+                    tool_calls_found = True
+                    item_id = self._responses_item_get(item, "id")
+                    name = self._responses_item_get(item, "name") or ""
+                    if item_id and name:
+                        self._tool_calls_buffer[item_id] = {
+                            "id": item_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": ""},
+                        }
+                        self._response_content_blocks.append({"type": "tool_call_marker", "tool_call_id": item_id})
+
+            # ----- 工具调用 item 完成（拿到 call_id）-----
+            elif etype == "response.output_item.done":
+                item = getattr(event, "item", None) or {}
+                if self._responses_item_get(item, "type") == "function_call":
+                    tool_calls_found = True
+                    self._handle_responses_function_call(item)
+
+            # ----- 错误事件 -----
+            elif etype == "response.failed":
+                resp = getattr(event, "response", None) or {}
+                err = resp.get("error") if isinstance(resp, dict) else None
+                if isinstance(err, dict):
+                    failed_error = f"模型响应失败: {err.get('message', '')} ({err.get('code', '')})"
+                else:
+                    failed_error = "模型响应失败（response.failed）"
+            elif etype == "error":
+                err = getattr(event, "error", None) or {}
+                if isinstance(err, dict):
+                    failed_error = f"API 错误: {err.get('message', '')} ({err.get('code', '')})"
+                else:
+                    failed_error = f"API 错误: {err}"
+
+        # 冲刷剩余批次
+        if _reasoning_batch:
+            self._emit_with_callback("reasoning_content_received", self.reasoning_content_received, _reasoning_batch)
+        if _content_batch:
+            self._emit_with_callback("content_received", self.content_received, _content_batch)
+
+        # 清除响应引用
+        self._current_response = None
+        self._tool_calls_index_to_id = {}
+
+        # 工具参数在 done 事件已完整 → 直接标记完成
+        if tool_calls_found and not self._tool_calls_buffer:
+            tool_args_pending = False
+            for tc in self._current_tool_calls.values():
+                if not tc["function"]["arguments"]:
+                    tc["function"]["arguments"] = "{}"
+
+        # 错误上报
+        if failed_error:
+            raise StreamInterruptedError(failed_error)
+
+        # 空响应校验：收到事件但无任何输出（无 content/reasoning/tool_calls）
+        if saw_any_chunk and not tool_calls_found:
+            has_text = bool(self._response_chunks or self._response_content_blocks)
+            has_reasoning = bool(self._get_reasoning_content())
+            if not has_text and not has_reasoning:
+                raise StreamInterruptedError(
+                    "[空响应] 模型返回了空响应（未生成任何内容），可能是服务端过载或网络异常。请稍后重试。"
+                )
 
         return tool_calls_found, tool_args_pending
 

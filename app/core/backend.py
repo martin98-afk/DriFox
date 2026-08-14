@@ -567,6 +567,13 @@ class ChatBackend(QObject):
         # 主题/LSP/热更新等非关键子步骤已在 _init_plugin_system 内部延迟（QTimer 2s）。
         self._init_plugin_system()
 
+        # 旧覆盖层数据一次性迁移：非系统 hook 状态写回源文件、幽灵 id 清理
+        # （必须等插件 hooks 全部注册完成后调用，否则会误删禁用插件的状态）
+        try:
+            self._hook_manager.migrate_legacy_hook_states()
+        except Exception as e:
+            logger.error(f"[ChatBackend] Hook state migration failed: {e}")
+
         # 7. HistoryManager（全局单例）
         # [PERF] 保持同步：main_widget 初始化时直接缓存 self.history_manager（92 处引用），
         # 延迟会导致历史面板引用 None 而静默失效。

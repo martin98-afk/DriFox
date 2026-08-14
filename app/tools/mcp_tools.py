@@ -398,6 +398,9 @@ class MCPClientManager:
         self._busy_lock = threading.Lock()
         # 全局 connect_all 去重：多窗口同时启动时只允许一次全量连接
         self._connect_all_running = False
+        # 全量连接正在占用的服务器名（登记进 _busy_names，
+        # 防止 connect_server_background 在启动路径连接中时踩踏杀进程）
+        self._connect_all_names: set = set()
 
         # 保护 _connections / _connected 多线程访问（UI 线程 + 事件循环线程）
         self._lock = threading.Lock()
@@ -672,6 +675,12 @@ class MCPClientManager:
         多窗口场景下每个窗口都会调用一次，这里做全局去重：
         已有一轮全量连接在进行中时直接跳过，避免后启动的窗口把
         前一个窗口刚连好的连接全部断掉（连接踩踏）。
+
+        防热重载踩踏（2026-08）：把本轮全量连接的服务器名登记进
+        _busy_names，使热重载路径的 connect_server_background 对同名
+        服务器防重跳过——否则 _connect_all 与 _connect_single 并行连接
+        同一服务器时，后者会 _disconnect_single 杀掉前者的子进程并取消
+        其生命周期 Task，导致后台线程空等 90s、连接反复被杀重启。
         """
         with self._busy_lock:
             if self._connect_all_running:
@@ -683,6 +692,11 @@ class MCPClientManager:
                         pass
                 return
             self._connect_all_running = True
+            # 登记本轮占用的服务器名（enabled 且有名），期间单服务器连接被防重
+            self._connect_all_names = {
+                s.get("name") for s in servers_config if s.get("name") and s.get("enabled", True)
+            }
+            self._busy_names |= self._connect_all_names
 
         def _worker():
             try:
@@ -693,6 +707,9 @@ class MCPClientManager:
             finally:
                 with self._busy_lock:
                     self._connect_all_running = False
+                    # 释放本轮占用的服务器名，允许后续单服务器连接
+                    self._busy_names -= self._connect_all_names
+                    self._connect_all_names = set()
                 if on_done:
                     with self._lock:
                         connected = sum(1 for c in self._connections.values() if c.state == MCPState.CONNECTED)
@@ -787,16 +804,22 @@ class MCPClientManager:
         同一 name 只允许一个进行中的连接操作，重复请求被丢弃。
         """
         # 防重：同名服务器正在连接/断开中，跳过
+        # on_done 必须在锁外调用：真实 UI 的 on_done 会 emit 信号触发主线程
+        # InfoBar/刷新，若在持锁期间同步执行会拉长锁持有时间、干扰其他线程。
         with self._busy_lock:
             if name in self._busy_names:
-                logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
-                if on_done:
-                    try:
-                        on_done(name, False, "服务器正在操作中，请稍后重试")
-                    except Exception:
-                        pass
-                return
-            self._busy_names.add(name)
+                dup = True
+            else:
+                self._busy_names.add(name)
+                dup = False
+        if dup:
+            logger.debug(f"[MCP] '{name}' 正在连接/断开中，跳过重复请求")
+            if on_done:
+                try:
+                    on_done(name, False, "服务器正在操作中，请稍后重试")
+                except Exception:
+                    pass
+            return
 
         # 同步预登记 CONNECTING，保证指示灯从点击那一刻就变黄并持续到出结果，
         # 而不是等后台线程真正进入 _connect_single 才有状态可读。
