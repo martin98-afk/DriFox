@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
+from app.tools.process_job import ProcessJob
 from app.tools.result import ToolResult
 from loguru import logger
 
@@ -396,6 +397,7 @@ class BackgroundTask:
     output_buffer: list = field(default_factory=list)
     status: str = "running"  # running, stopped, completed
     pid: int = 0
+    job: object = None  # S4: Windows Job Object（kill-on-close 杀树），非 Windows 为 None
 
     def append_output(self, text: str):
         """追加输出到缓冲区"""
@@ -447,6 +449,11 @@ class BackgroundTaskManager:
                     cls._instance._manager_lock = threading.Lock()
                     cls._instance._workdir = Path.cwd()
                     cls._instance._get_workdir = None
+                    # S4: 任务状态事件广播回调（UI 可观测）。
+                    # 回调签名：cb(event: str, task_id: str, status: str, detail: str)
+                    # event ∈ {"started", "stopped", "completed"}。回调应轻量（可能
+                    # 在后台线程触发），线程安全由调用方保证。
+                    cls._instance._event_callbacks = []
         if owner_getter:
             # 泄漏修复（6c）：保持强引用（lambda 无其它持有者，弱引用会立即失效），
             # 由窗口关闭路径显式调用 clear_workdir_getter() 解除，避免单例
@@ -474,6 +481,26 @@ class BackgroundTaskManager:
         """设置工作目录"""
         self._workdir = workdir
 
+    # ========== S4: 任务状态事件广播 ==========
+
+    def on_task_event(self, callback: Callable) -> None:
+        """注册任务状态事件回调（started/stopped/completed）。
+
+        回调签名：callback(event: str, task_id: str, status: str, detail: str)
+        """
+        with self._manager_lock:
+            self._event_callbacks.append(callback)
+
+    def _emit(self, event: str, task_id: str, status: str, detail: str = "") -> None:
+        """广播任务事件（同步调用回调，异常隔离不抛出）"""
+        with self._manager_lock:
+            callbacks = list(self._event_callbacks)
+        for cb in callbacks:
+            try:
+                cb(event, task_id, status, detail)
+            except Exception as e:
+                logger.warning(f"[BackgroundTaskManager] event callback error: {e}")
+
     def _effective_workdir(self) -> Path:
         """获取当前有效工作目录（优先动态获取，其次静态缓存）"""
         if self._get_workdir:
@@ -494,12 +521,16 @@ class BackgroundTaskManager:
 
         try:
             use_shell = needs_shell(command)
+            # S4: 创建 Job Object（Windows）— kill-on-close 兜底杀进程树；
+            # assign 失败（进程已在其它 Job）降级为 stop 时的 taskkill/terminate 路径。
+            job = ProcessJob() if ProcessJob.is_supported() else None
 
             if use_shell:
                 # Path B: 需要 shell 特性 — 使用 shell=True（后台任务暂不强制审批）
                 cmd = _prepare_windows_encoding(command, workdir)
                 process = run_with_shell(
                     cmd,
+                    job=job,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.PIPE,
@@ -509,6 +540,7 @@ class BackgroundTaskManager:
                 # Path A: 安全路径 — shell=False
                 process = run_safe(
                     command,
+                    job=job,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.PIPE,
@@ -521,6 +553,7 @@ class BackgroundTaskManager:
                 process=process,
                 start_time=time.time(),
                 pid=process.pid,
+                job=job,
             )
 
             with self._manager_lock:
@@ -530,6 +563,7 @@ class BackgroundTaskManager:
             thread = threading.Thread(target=self._capture_output, args=(task,), daemon=True)
             thread.start()
 
+            self._emit("started", task_id, "running", command)
             return task_id, f"✅ 后台任务已启动\n- 任务ID: {task_id}\n- PID: {process.pid}\n- 命令: {command}"
 
         except Exception as e:
@@ -551,6 +585,7 @@ class BackgroundTaskManager:
         finally:
             # 进程结束后更新状态
             task.status = "completed"
+            self._emit("completed", task.task_id, "completed")
 
     def stop(self, task_id: str) -> tuple[bool, str]:
         """停止指定任务"""
@@ -566,7 +601,19 @@ class BackgroundTaskManager:
         try:
             task.status = "stopped"
 
-            # Windows: 使用 taskkill /T 杀死进程树（包括子进程）
+            # S4: 优先用 Job Object 杀进程树（内核级，比 taskkill 更可靠，
+            # 不依赖命令行解析；kill-on-close 兜底防止任务对象泄漏）。
+            if task.job is not None:
+                if task.job.kill():
+                    try:
+                        task.process.wait(timeout=3)
+                    except Exception:
+                        pass
+                    task.job.close()
+                    self._emit("stopped", task_id, "stopped", "job-kill")
+                    return True, f"✅ 已终止任务: {task_id} (PID: {task.pid}, Job 杀进程树)"
+
+            # Windows: 使用 taskkill /T 杀死进程树（包括子进程）— 降级路径
             if sys.platform == "win32":
                 import subprocess as sp
 
@@ -575,6 +622,7 @@ class BackgroundTaskManager:
                     ["taskkill", "/T", "/F", "/PID", str(task.pid)], capture_output=True, text=True, timeout=5
                 )
                 if result.returncode == 0:
+                    self._emit("stopped", task_id, "stopped", "taskkill")
                     return True, f"✅ 已终止任务: {task_id} (PID: {task.pid}, 含子进程)"
                 else:
                     # taskkill 失败，尝试直接 terminate + wait
@@ -584,6 +632,7 @@ class BackgroundTaskManager:
                     except subprocess.TimeoutExpired:
                         task.process.kill()
                         task.process.wait(timeout=1)
+                    self._emit("stopped", task_id, "stopped", "terminate")
                     return True, f"✅ 已终止任务: {task_id} (使用 terminate/kill)"
             else:
                 # Unix: 使用 terminate 和 SIGTERM
@@ -592,6 +641,7 @@ class BackgroundTaskManager:
                     task.process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     task.process.kill()
+                self._emit("stopped", task_id, "stopped", "terminate")
                 return True, f"✅ 已终止任务: {task_id}"
 
         except Exception as e:
