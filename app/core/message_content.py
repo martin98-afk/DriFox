@@ -1181,3 +1181,162 @@ def _extract_text_content(content: Any) -> str:
                         parts.append(txt)
         return " ".join(parts)
     return str(content)
+
+
+# ========== Responses API（OpenAI GPT-5.x 系列）消息转换 ==========
+# GPT-5.x 系列（如 gpt-5.6-luna）的思考内容只在 Responses API
+# （/v1/responses）的 reasoning_summary_text 事件中返回，chat/completions
+# 端点的流式 delta 不含任何 reasoning 字段（OpenCode Go 网关实测剥离）。
+# 因此对该系列模型切换 Responses API：消息需转换为 input items 格式。
+
+
+def _block_to_responses_content(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """将内部 multimodal 块转换为 Responses API content part。
+
+    返回 None 表示无法转换（跳过该块）。
+    """
+    if not isinstance(block, dict):
+        return None
+    btype = block.get("type")
+    if btype == "text":
+        text = str(block.get("text", ""))
+        return {"type": "input_text", "text": text} if text else None
+    if btype == "input_image":
+        # Responses API 的 input_image.image_url 是字符串（chat/completions 是对象）
+        url = block.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url", "")
+        return {"type": "input_image", "image_url": str(url or "")} if url else None
+    if btype == "image_url":
+        img = block.get("image_url", {}) or {}
+        url = img.get("url", "") if isinstance(img, dict) else img
+        return {"type": "input_image", "image_url": str(url or "")} if url else None
+    if btype == "image":
+        # Anthropic 格式 image 块 → data URI
+        src = block.get("source", {}) or {}
+        if isinstance(src, dict) and src.get("type") == "base64":
+            media = src.get("media_type", "image/png")
+            data = src.get("data", "")
+            if data:
+                return {"type": "input_image", "image_url": f"data:{media};base64,{data}"}
+        return None
+    return None
+
+
+def _extract_responses_content(content: Any, supports_vision: bool = True) -> List[Dict[str, Any]]:
+    """将内部消息 content 转换为 Responses API content parts 列表。
+
+    纯文本返回单段 input_text；含图片块返回多段。不支持视觉时图片替换为文本占位。
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}] if content else []
+    if isinstance(content, list):
+        parts: List[Dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = str(block.get("text", ""))
+                if text:
+                    parts.append({"type": "input_text", "text": text})
+            elif block.get("type") in ("image_url", "input_image", "image"):
+                if supports_vision:
+                    part = _block_to_responses_content(block)
+                    if part:
+                        parts.append(part)
+                else:
+                    parts.append({"type": "input_text", "text": "[图片]"})
+        return parts
+    text = str(content)
+    return [{"type": "input_text", "text": text}] if text else []
+
+
+def messages_to_responses_input(
+    messages: List[Dict[str, Any]],
+    supports_vision: bool = True,
+) -> tuple:
+    """将内部消息列表转换为 Responses API 请求参数。
+
+    Returns:
+        (input_items, instructions)：
+        - input_items: Responses API input 数组
+        - instructions: 从 system 消息提取的指令字符串（可能为空）
+
+    Responses API 与 chat/completions 的差异：
+    - system 消息 → instructions 顶层参数（input 中不允许 system role）
+    - assistant 工具调用 → function_call item（call_id/name/arguments）
+    - tool 结果 → function_call_output item
+    - 图片块 → input_image part（image_url 为字符串）
+    """
+    input_items: List[Dict[str, Any]] = []
+    instructions_parts: List[str] = []
+
+    for message in messages:
+        normalized = normalize_message(message)
+        if not normalized:
+            continue
+        role = normalized.get("role")
+        content = normalized.get("content", "")
+        if role == "system":
+            text = _extract_text_content(content)
+            if text:
+                instructions_parts.append(text)
+            continue
+        if role == "user":
+            parts = _extract_responses_content(content, supports_vision=supports_vision)
+            if not parts:
+                continue
+            input_items.append({"type": "message", "role": "user", "content": parts})
+            continue
+        if role == "assistant":
+            tool_calls = normalized.get("tool_calls") or []
+            text = _extract_text_content(content)
+            if text:
+                input_items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    }
+                )
+            for tc in tool_calls:
+                func = tc.get("function") or {}
+                call_id = tc.get("id") or tc.get("tool_call_id") or ""
+                name = func.get("name") or ""
+                arguments = func.get("arguments") or "{}"
+                if not call_id or not name:
+                    continue
+                input_items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments
+                        if isinstance(arguments, str)
+                        else json.dumps(arguments, ensure_ascii=False),
+                    }
+                )
+            continue
+        if role == "tool":
+            call_id = str(normalized.get("tool_call_id", "") or "")
+            if not call_id:
+                continue
+            # tool 结果转为纯文本（Responses API 的 output 必须是字符串）
+            output = _extract_text_content(content)
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        text_parts.append(str(block.get("text", "")))
+                    elif block.get("type") in ("image_url", "input_image", "image"):
+                        text_parts.append("[Image: base64 data]")
+                output = "\n".join(p for p in text_parts if p) or output
+            input_items.append({"type": "function_call_output", "call_id": call_id, "output": str(output or "")})
+            continue
+
+    instructions = "\n\n".join(p for p in instructions_parts if p)
+    return input_items, instructions
