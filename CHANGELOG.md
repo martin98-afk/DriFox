@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.1] - 2026-08-14
 
-自上一版本以来的变更 | 提交数：21 · 文件变更：21 · +3207/-231 | 贡献者：mading
+自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading
 
 ### ✨ 新功能 (New Features)
 
@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - **插件热重载 MCP 连接** (`app/core/`): 热重载后自动连接新增且启用的 MCP 服务器
 - **Hook 热重载顺序与索引** (`app/core/`): 恢复规则位置并重新对齐 Hook 索引，保持事件顺序和分组映射稳定
 - **Hook 状态持久化重复与覆盖** (`app/core/`): 修复文件顺序变化导致的重复 ID、错误覆盖及多实例状态竞争
+- **Hook 源标签热重载后失真** (`app/core/hook_manager.py`, P021): 修复热重载后 Hook 所属来源/插件标签错位，确保 `plugins/<name>` 与系统来源标签稳定
 - **OpenAI 模块导入死锁** (`app/core/`): 预加载资源子模块，避免启动时导入死锁
 
 ### ♻️ 代码重构 (Refactoring)
