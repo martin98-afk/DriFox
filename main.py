@@ -144,6 +144,18 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
 
+        # 预导入 openai resources 子模块（chat/responses 等）
+        # 必须在任何 worker 线程启动前完成：openai SDK 懒加载 + Python 3.14
+        # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
+        # 会抛 _ModuleLock deadlock。
+        try:
+            from app.utils.http_client import preload_openai_resources
+
+            preload_openai_resources()
+            logger.debug("[DeferredStartup] openai resources 子模块预导入完成")
+        except Exception:
+            logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
+
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
         # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
