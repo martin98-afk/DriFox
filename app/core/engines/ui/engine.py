@@ -202,6 +202,7 @@ class UIEngine(BaseEngine):
         if self._backend is not None:
             controller = getattr(self._backend, "tool_permission_controller", None)
 
+        policies: Dict[str, str] = {}
         if controller is not None:
             toggles = controller.get_toggles()
             behavior = controller.get_behavior()
@@ -212,11 +213,18 @@ class UIEngine(BaseEngine):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
             behavior = settings.tool_off_behavior.value
+            policies = dict(settings.tool_permission_policy.value)
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}")
-            return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
+            # per-tool 关闭策略优先，缺失回退全局 behavior（ask/deny 由 INTERACTIVE 策略驱动对话框）
+            from app.core.tool_permission_controller import resolve_tool_off_policy
+
+            policy = resolve_tool_off_policy(check_name, controller, policies, behavior)
+            logger.info(
+                f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}"
+            )
+            return policy
         # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（跳过模板 deny）
         # 与子智能体 _check_ui_tool_permission 语义一致："UI 覆盖模板"
         if controller is not None and controller.is_user_modified(check_name):

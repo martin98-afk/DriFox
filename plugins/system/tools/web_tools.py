@@ -3,7 +3,7 @@
 系统工具插件 — 网络工具（自包含实现）
 
 websearch / webfetch 完全自包含：httpx/html2text/bs4 直接实现，
-API key 从 tool_ctx["env"]["api_keys"] 读取（ToolExecutor 注入）。
+API key 优先读环境变量，未设置时使用插件内置默认值（主程序不再注入）。
 """
 import os
 import re
@@ -37,13 +37,22 @@ def _get_client() -> httpx.Client:
     return _http_client
 
 
+# 插件内置默认 key（用户配置值迁入插件；环境变量优先，未设置时回退此处）
+_DEFAULT_TAVILY_KEY = "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"
+_DEFAULT_TINYFISH_KEY = "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU"
+
+
 def _api_key(tool_ctx, name: str) -> str:
-    """从环境变量或 tool_ctx.env.api_keys 读取 API key"""
+    """读取搜索服务 API key：环境变量优先，未设置时回退插件内置默认值
+
+    - 环境变量：TAVILY_API_KEY / TINYFISH_API_KEY
+    - 默认常量：_DEFAULT_TAVILY_KEY / _DEFAULT_TINYFISH_KEY
+    - 主程序不再注入（tool_ctx.env.api_keys 已移除）
+    """
     env_key = os.environ.get(name)
     if env_key:
         return env_key
-    keys = (tool_ctx.get("env") or {}).get("api_keys") or {}
-    return keys.get(name, "")
+    return _DEFAULT_TAVILY_KEY if name == "TAVILY_API_KEY" else _DEFAULT_TINYFISH_KEY
 
 
 _WEBSEARCH_SCHEMA = {

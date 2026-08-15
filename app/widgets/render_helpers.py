@@ -30,6 +30,28 @@ _DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
 _current_diff_style = "dracula"
 
 
+def _sync_diff_style_to_theme() -> None:
+    """根据当前主题同步 _current_diff_style，确保 _get_diff_formatter 返回正确风格。
+
+    🐛 工具渲染管线（render_helpers.format_tool_block → _render_edit_diff_body）
+    调用 _render_diff_preview 时不会经过 message_card._render_markdown_to_html
+    的 set_diff_highlight_style 入口，因此主题切换后 _current_diff_style 可能
+    仍是旧值，formatter 仍用 dracula 风格的前景色渲染到浅色主题背景上
+    → 白字白底不可见（"偶尔出现"是因为切主题后第一次 markdown 渲染恰好
+    把 _current_diff_style 同步过去才看起来正常）。
+    此处按当前主题即时同步，避免渲染管线入口漏同步导致颜色错位。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        target = "friendly" if theme_manager.is_light_theme() else "dracula"
+        if target != _current_diff_style:
+            set_diff_highlight_style(target)
+    except Exception:
+        # 主题管理器尚未初始化（如单元测试/导入期）→ 保持当前风格，不破坏渲染
+        pass
+
+
 def set_diff_highlight_style(style_name: str):
     """设置 diff 高亮风格并清除缓存"""
     global _current_diff_style
@@ -453,6 +475,8 @@ def _render_diff_preview(diff_text: str) -> str:
     """
     将 unified diff 渲染为带语法高亮、段落级差异的 HTML。
 
+    渲染入口先同步主题（见 _sync_diff_style_to_theme 注释），避免主题切换
+    后 formatter 仍是旧主题的前景色导致浅色背景下白字白底不可见。
     - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
       「差异段」，差异段同时输出两套视图：
       · 单列视图（.diff-seg-col，默认）：所有删除行先、所有新增行后，
@@ -461,6 +485,8 @@ def _render_diff_preview(diff_text: str) -> str:
       · 双列视图（.diff-seg-paired，split-view）：左右对照的配对行 + 词级差异高亮
     超过 500 行时截断并显示行数。
     """
+    # 渲染前按当前主题同步 diff 风格，避免工具渲染管线漏同步导致浅色背景白字
+    _sync_diff_style_to_theme()
     lines = diff_text.split("\n")[1:]
     # 去掉 split 产生的尾随空行（diff 文本通常以一个换行结尾），避免渲染出多余空行
     while lines and lines[-1] == "":

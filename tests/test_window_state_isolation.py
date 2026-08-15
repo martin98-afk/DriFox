@@ -330,7 +330,7 @@ class TestFileMtimeIsolation:
         f.write_text("x = 999\n", encoding="utf-8")
         r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 1", newString="x = 2")
         assert not r_edit.success
-        assert "modified externally" in r_edit.error
+        assert "外部修改" in r_edit.error
 
     def test_other_window_read_does_not_mask_external_change(self, tmp_path):
         """D3 症状：A read(T0) → 外部改文件(T1) → B read → A edit 必须被拒。
@@ -362,7 +362,7 @@ class TestFileMtimeIsolation:
         # A edit：必须被拒（A 记录 T0 vs 当前 T1）
         r_edit = ft._edit_impl(tool_ctx=ctx_a, path=str(f.name), oldString="x = 777", newString="x = 2")
         assert not r_edit.success, "B read 不得掩盖 A 的外部修改检测（窗口级 mtime 隔离）"
-        assert "modified externally" in r_edit.error
+        assert "外部修改" in r_edit.error
 
     def test_external_change_directly_rejects_control(self, tmp_path):
         """D3 对照：A read → 外部改 → A edit 直接拒（两实现一致，验证检测本身有效）"""
@@ -382,4 +382,4 @@ class TestFileMtimeIsolation:
 
         r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 666", newString="x = 2")
         assert not r_edit.success
-        assert "modified externally" in r_edit.error
+        assert "外部修改" in r_edit.error

@@ -1278,6 +1278,7 @@ class SubAgentExecutor(QThread):
         if backend is not None:
             controller = getattr(backend, "tool_permission_controller", None)
 
+        policies: Dict[str, str] = {}
         if controller is not None:
             toggles = controller.get_toggles()
             behavior = controller.get_behavior()
@@ -1287,10 +1288,14 @@ class SubAgentExecutor(QThread):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
             behavior = settings.tool_off_behavior.value
+            policies = dict(settings.tool_permission_policy.value)
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            return behavior  # UI 关闭 → deny 或 ask（UI 为准，覆盖模板）
+            # per-tool 关闭策略优先，缺失回退全局 behavior（与 UI 引擎 _check_tool_permission 同口径）
+            from app.core.tool_permission_controller import resolve_tool_off_policy
+
+            return resolve_tool_off_policy(check_name, controller, policies, behavior)
 
         # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（覆盖模板 deny）
         if controller is not None and controller.is_user_modified(check_name):

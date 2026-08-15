@@ -973,7 +973,7 @@ class ToolExecutor:
         tool_ctx 设计（插件自包含的关键）：
         - workdir: 当前工作目录
         - session_id / call_id: 会话上下文
-        - env: 环境配置（api_keys / app_data_dir / desktop_automation_enabled）
+        - env: 环境配置（app_data_dir / desktop_automation_enabled）
         - services: 平台能力接口（todo/terminal/subagent/team/lsp/codegraph/
           mcp/ask_user/skills/gitee/diagnostics）— 主程序基础设施按能力注入，
           不暴露 BuiltinTools 内部结构
@@ -999,18 +999,6 @@ class ToolExecutor:
             from app.utils.config import Settings
 
             settings = Settings.get_instance()
-            env["api_keys"] = {
-                "TAVILY_API_KEY": (
-                    getattr(settings, "TAVILY_API_KEY", None)
-                    and settings.TAVILY_API_KEY.value
-                    or ""
-                ),
-                "TINYFISH_API_KEY": (
-                    getattr(settings, "TINYFISH_API_KEY", None)
-                    and settings.TINYFISH_API_KEY.value
-                    or ""
-                ),
-            }
             env["desktop_automation_enabled"] = bool(
                 getattr(settings, "llm_desktop_automation_enabled", None)
                 and settings.llm_desktop_automation_enabled.value

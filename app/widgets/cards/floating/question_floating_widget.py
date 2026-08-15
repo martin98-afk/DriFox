@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.widgets.cards.card_container import CardContainer
 
 # ═══════════════════════════════════════════════════════════
 # 自适应高度滚动区
@@ -46,8 +47,24 @@ class _AutoHeightScrollArea(QScrollArea):
 
     def minimumSizeHint(self):
         # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
-        # 会把短内容强行垫高。内容高度完全由 sizeHint 决定即可。
-        return QSize(0, 0)
+        # 会把短内容强行垫高，因此不复用默认值。改为返回"内容高度下限"：
+        # 容器高度动画滞后 / 布局空间不足时，问题标题区是布局中唯一可被
+        # 压到 0 的成员，minimumSizeHint=(0,0) 会被优先压没（标题完全不可见）。
+        # 下限 = 内容高度（封顶 maximumHeight），保证问题标题区始终可见。
+        base = super().sizeHint()
+        w = self.widget()
+        if w is None:
+            return QSize(0, 0)
+        frame = 2 * self.frameWidth()
+        vw = self.viewport().width()
+        if vw <= 0:
+            vw = max(1, base.width() - frame)
+        if w.hasHeightForWidth():
+            content_h = w.heightForWidth(vw)
+        else:
+            content_h = w.sizeHint().height()
+        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
+        return QSize(base.width(), h)
 
     def sizeHint(self):
         base = super().sizeHint()
@@ -611,6 +628,11 @@ class QuestionFloatingWidget(QWidget):
         # 默认不随内容收缩），也锁定容器高度 = 卡片 sizeHint，
         # 避免"容器比内容高 → 卡片内部/底部出现空白"。
         self.setProperty("followContent", True)
+        # 声明跳过容器 200ms 展开/折叠动画：自定义输入框增高时高度变化经
+        # heightChanged 触发容器 _do_expand，动画期间容器高度滞后于卡片实际
+        # 高度，QVBoxLayout 空间不足会优先把问题标题区压没。跳过动画让容器
+        # 高度直接 snap 到目标值，消除滞后窗口期。
+        self.setProperty(CardContainer.NO_ANIMATION_PROP, True)
         self._setup_ui()
 
     def showEvent(self, event):

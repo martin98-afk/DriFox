@@ -31,6 +31,9 @@ OFF_BEHAVIOR_OPTIONS = [
     ("ask", "询问用户"),
 ]
 
+# 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
+MIXED_OPTION = ("__mixed__", "未统一")
+
 
 class ToolControlCardContent(QWidget):
     """工具控制卡片内容 — 分组折叠 + 独立开关"""
@@ -41,6 +44,7 @@ class ToolControlCardContent(QWidget):
         super().__init__(parent)
         self._controller = controller  # ToolPermissionController
         self._toggle_widgets: dict = {}
+        self._policy_combos: dict = {}  # tool_name -> ComboBox(关闭策略,仅关闭时显示)
         self._group_switches: dict = {}
         self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
@@ -91,6 +95,7 @@ class ToolControlCardContent(QWidget):
         """
         controller.togglesChanged.connect(self._on_active_toggles_changed)
         controller.behaviorChanged.connect(self._on_active_behavior_changed)
+        controller.policiesChanged.connect(self._on_active_policies_changed)
         controller.activeAgentChanged.connect(lambda _: self._on_active_agent_changed())
 
     def _on_active_toggles_changed(self, toggles):
@@ -107,6 +112,10 @@ class ToolControlCardContent(QWidget):
         """controller 通知 active behavior 变化,转发 togglesChanged 让工具栏刷新"""
         if self._controller:
             self.togglesChanged.emit(self._controller.get_toggles())
+
+    def _on_active_policies_changed(self, _policies):
+        """controller 通知 per-tool 关闭策略变化,同步行内下拉与可见性"""
+        self._apply_toggles()
 
     def _setup_ui(self):
         self._layout = QVBoxLayout(self)
@@ -144,6 +153,7 @@ class ToolControlCardContent(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._toggle_widgets.clear()
+        self._policy_combos.clear()
         self._group_switches.clear()
         self._group_labels.clear()
 
@@ -201,6 +211,19 @@ class ToolControlCardContent(QWidget):
                 sw.blockSignals(True)
                 sw.setChecked(enabled)
                 sw.blockSignals(False)
+
+        # 更新单个工具关闭策略下拉(值 + 可见性:仅开关关闭时显示)
+        # 与行渲染/右上角"未统一"判定共用 get_active_tool_behavior_map,口径一致
+        policies_map = self._controller.get_active_tool_behavior_map()
+        for tool_name, combo in self._policy_combos.items():
+            enabled = toggles.get(tool_name, True)
+            combo.setVisible(not enabled)
+            policy = policies_map.get(tool_name, self._controller.get_behavior())
+            idx = combo.findData(policy)
+            if idx >= 0 and idx != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
 
         # 更新整组开关 + 组标题"启用数/总数"
         for group_name, tool_names in self._get_groups():
@@ -350,6 +373,28 @@ class ToolControlCardContent(QWidget):
         )
         row_layout.addWidget(desc_label)
 
+        # 关闭策略下拉(仅开关关闭时显示): ask=询问用户 / deny=直接拒绝
+        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
+        policy = (
+            self._controller.get_active_tool_behavior_map().get(tool_name, "deny")
+            if self._controller
+            else "deny"
+        )
+        policy_combo = ComboBox()
+        for value, label in OFF_BEHAVIOR_OPTIONS:
+            policy_combo.addItem(label, userData=value)
+        idx = policy_combo.findData(policy)
+        if idx >= 0:
+            policy_combo.setCurrentIndex(idx)
+        policy_combo.setVisible(not enabled)  # 仅关闭时显示,开启时隐藏
+        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
+        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
+        row_layout.addWidget(policy_combo)
+        self._policy_combos[tool_name] = policy_combo
+        policy_combo.currentIndexChanged.connect(
+            lambda _idx, name=tool_name: self._on_tool_policy_changed(name)
+        )
+
         sw = SwitchButton()
         sw.setChecked(enabled)
         row_layout.addWidget(sw)
@@ -377,6 +422,26 @@ class ToolControlCardContent(QWidget):
         self._apply_toggles()
         # 通知 frame 刷新统计
         self.togglesChanged.emit(self._controller.get_toggles())
+
+    def _on_tool_policy_changed(self, tool_name: str):
+        """用户编辑单工具关闭策略(ask/deny)
+        - 非 agent 模式:user 和 active 同步更新(并持久化)
+        - agent 模式:只更新 active(临时改 agent 生效权限,user 偏好不变)
+        """
+        from loguru import logger
+        combo = self._policy_combos.get(tool_name)
+        if combo is None or self._controller is None:
+            return
+        policy = combo.itemData(combo.currentIndex())
+        if policy not in ("ask", "deny"):
+            return
+        logger.info(
+            f"[ToolCard] _on_tool_policy_changed: {tool_name}={policy}, "
+            f"agent_active={self._controller.is_agent_active()}"
+        )
+        self._controller.set_user_tool_policy(tool_name, policy)
+        # 轻量级刷新 UI(controller 信号也会触发 _apply_toggles,开销极低)
+        self._apply_toggles()
 
     def _on_group_toggled(self, tool_names: list, enabled: bool):
         """用户编辑整组开关
@@ -410,7 +475,6 @@ class ToolControlCardFrame(SystemCardFrame):
     """工具控制卡片框架 — SystemCardFrame 包裹"""
 
     togglesChanged = pyqtSignal(dict)
-    behaviorChanged = pyqtSignal(str)
 
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
@@ -424,17 +488,14 @@ class ToolControlCardFrame(SystemCardFrame):
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
         self.icon_label.setFixedSize(18, 18)
 
-        # ========== 右上角下拉框:关闭时行为 ==========
+        # ========== 右上角下拉框:关闭时行为(统一策略视图 + 强制统一入口) ==========
         self._behavior_combo = ComboBox(self)
         for value, label in OFF_BEHAVIOR_OPTIONS:
             self._behavior_combo.addItem(label, userData=value)
-        # 从 controller 读取当前 behavior
-        current_behavior = (
-            self._controller.get_behavior() if self._controller else "deny"
-        )
-        idx = self._behavior_combo.findData(current_behavior)
-        if idx >= 0:
-            self._behavior_combo.setCurrentIndex(idx)
+        # "未统一"仅作展示占位:各工具关闭策略不一致时显示,不可选中
+        self._behavior_combo.addItem(MIXED_OPTION[1], userData=MIXED_OPTION[0])
+        # 与 per-tool 策略对齐:一致显示该策略,不一致显示"未统一"
+        self._sync_behavior_combo()
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
 
         # ========== 智能体徽章 + 恢复按钮(仅 agent 激活时显示) ==========
@@ -481,6 +542,7 @@ class ToolControlCardFrame(SystemCardFrame):
         # 监听 controller 的智能体激活状态变化
         if self._controller:
             self._controller.activeAgentChanged.connect(self._on_agent_changed)
+            self._controller.policiesChanged.connect(lambda _: self._sync_behavior_combo())
             # 初始状态
             self._on_agent_changed(self._controller.get_active_agent_name() or "")
 
@@ -489,14 +551,13 @@ class ToolControlCardFrame(SystemCardFrame):
         self._controller = controller
         if controller is None:
             return
-        # 同步 behavior combo 当前值
-        idx = self._behavior_combo.findData(controller.get_behavior())
-        if idx >= 0:
-            self._behavior_combo.setCurrentIndex(idx)
+        # 同步 behavior combo 当前值(与 per-tool 策略对齐)
+        self._sync_behavior_combo()
         # 注入到 content
         self._card.set_controller(controller)
         # 监听 controller 信号
         controller.activeAgentChanged.connect(self._on_agent_changed)
+        controller.policiesChanged.connect(lambda _: self._sync_behavior_combo())
         # 初始状态
         self._on_agent_changed(controller.get_active_agent_name() or "")
 
@@ -510,11 +571,45 @@ class ToolControlCardFrame(SystemCardFrame):
             self._card.refresh_style()
         self.update()
 
+    def _sync_behavior_combo(self):
+        """右上角下拉与 per-tool 策略对齐：
+        - 所有工具关闭策略一致 → 显示该策略
+        - 无任何工具 → 显示全局 behavior
+        - 不一致 → 显示"未统一"占位(不可选中)
+        """
+        if self._controller is None:
+            return
+        values = set(self._controller.get_active_tool_behavior_map().values())
+        if len(values) == 1:
+            target = next(iter(values))
+        elif not values:
+            target = self._controller.get_behavior()
+        else:
+            target = MIXED_OPTION[0]
+        idx = self._behavior_combo.findData(target)
+        if idx >= 0 and idx != self._behavior_combo.currentIndex():
+            self._behavior_combo.blockSignals(True)
+            self._behavior_combo.setCurrentIndex(idx)
+            self._behavior_combo.blockSignals(False)
+
     def _on_behavior_changed(self, idx: int):
         value = self._behavior_combo.itemData(idx)
-        if self._controller:
+        if self._controller is None or value is None:
+            return
+        if value == MIXED_OPTION[0]:
+            # "未统一"占位不可选中(理论不可达,防御性回退)
+            self._sync_behavior_combo()
+            return
+        if value in ("deny", "ask"):
+            # 强制统一:所有工具关闭策略设为该值(含开启的工具,保持判定一致)
+            from app.tools.tool_classifier import get_all_tools
+
+            all_tools = get_all_tools()
+            self._controller.set_user_tool_policies({t: value for t in all_tools})
+            # MINOR-1:同步全局 behavior——新注册工具(插件热插拔)缺失 per-tool 时回退一致
+            # set_user_behavior 自带双态语义(agent 只改 active 不持久化 user)
             self._controller.set_user_behavior(value)
-        self.behaviorChanged.emit(value)
+        self._sync_behavior_combo()
 
     def _on_restore_clicked(self):
         """用户点击"恢复"按钮"""
@@ -530,12 +625,8 @@ class ToolControlCardFrame(SystemCardFrame):
             self._card.refresh()
         # 刷新徽章和恢复按钮显示
         self._on_agent_changed(self._controller.get_active_agent_name() or "")
-        # 刷新 behavior combo
-        idx = self._behavior_combo.findData(self._controller.get_behavior())
-        if idx >= 0 and idx != self._behavior_combo.currentIndex():
-            self._behavior_combo.blockSignals(True)
-            self._behavior_combo.setCurrentIndex(idx)
-            self._behavior_combo.blockSignals(False)
+        # 刷新 behavior combo(与 per-tool 策略对齐)
+        self._sync_behavior_combo()
         self.update()
 
     def _on_agent_changed(self, agent_name: str):

@@ -415,18 +415,6 @@ class Settings(QConfig):
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
     disabled_plugins = ConfigItem("Plugin", "DisabledPlugins", [])
 
-    # ========== AI搜索引擎API ==========
-    TAVILY_API_KEY = ConfigItem(
-        "CloudAPI",
-        "Tavily",
-        "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",
-    )
-    TINYFISH_API_KEY = ConfigItem(
-        "CloudAPI",
-        "TinyFish",
-        "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU",
-    )
-
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信
     gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())
@@ -496,6 +484,8 @@ class Settings(QConfig):
     # ========== 工具开关控制 ==========
     tool_toggles = ConfigItem("Tools", "Toggles", {})
     tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")
+    # per-tool 关闭策略：{tool_name: "deny"|"ask"}，缺失回退 tool_off_behavior
+    tool_permission_policy = ConfigItem("Tools", "PermissionPolicy", {})
 
     # ========== 锁屏远程 ==========
     # 开启后锁屏状态下也保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行

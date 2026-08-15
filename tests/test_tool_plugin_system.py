@@ -133,17 +133,17 @@ class TestRegistry:
 class TestSystemPluginTools:
     """系统插件工具（plugins/system/tools/）"""
 
-    def test_all_34_tools_registered(self):
+    def test_all_30_tools_registered(self):
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg)
         names = set(reg.names())
-        # 系统插件固定 33 个工具；codegraph_explore 来自社区插件 codegraph-tools
+        # 系统插件固定 30 个工具；codegraph_explore 来自社区插件 codegraph-tools
         # （引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
         expected = {
             "read", "write", "edit", "multi_edit", "grep", "list", "glob",
             "scan_repo", "stage_files", "websearch", "webfetch", "bash",
             "bg_start", "bg_stop", "bg_logs", "bg_list", "todowrite",
-            "todoread", "mouse", "keyboard", "screenshot", "get_diagnostics",
+            "todoread", "get_diagnostics",
             "lsp", "subagent_para", "subagent_status",
             "subagent_dag", "team_send_message", "team_list_members",
             "question", "skill", "list_skills", "mcp_list_servers", "upload_file",
@@ -158,7 +158,6 @@ class TestSystemPluginTools:
         load_plugin_tools(registry=reg)
         assert reg.get_danger("write") == DANGER_DANGEROUS
         assert reg.get_danger("bash") == DANGER_DANGEROUS
-        assert reg.get_danger("mouse") == DANGER_DANGEROUS
         assert reg.get_danger("read") == DANGER_SAFE
         assert reg.get_danger("websearch") == DANGER_SAFE
         assert reg.get_danger("subagent_para") == DANGER_DANGEROUS
@@ -320,8 +319,8 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 33 个系统插件工具 + codegraph_explore（社区插件 codegraph-tools 可选）
-        assert len(toggles) == 33 or (len(toggles) == 34 and "codegraph_explore" in toggles)
+        # 30 个系统插件工具 + codegraph_explore（社区插件 codegraph-tools 可选）
+        assert len(toggles) == 30 or (len(toggles) == 31 and "codegraph_explore" in toggles)
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
@@ -379,6 +378,365 @@ class TestPermissionLinkage:
         card.deleteLater()
         pc.deleteLater()
         qt_app.processEvents()
+
+
+class TestPerToolPolicy:
+    """per-tool 关闭策略(T3):设置/持久化/回退/UI 联动/生效层一致性"""
+
+    @staticmethod
+    def _snapshot_settings():
+        from app.utils.config import Settings
+
+        s = Settings.get_instance()
+        return (s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value)
+
+    @staticmethod
+    def _restore_settings(snap):
+        from app.utils.config import Settings
+
+        s = Settings.get_instance()
+        s.tool_toggles.value, s.tool_off_behavior.value, s.tool_permission_policy.value = snap
+        s.save()
+
+    def test_tool_policy_set_persist_fallback(self, qt_app):
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            # 初始:无 per-tool 策略 → 回退全局 behavior(默认 deny)
+            assert pc.get_tool_policy("read") == "deny"
+            # 设置 per-tool 策略
+            pc.set_user_tool_policy("read", "ask")
+            assert pc.get_tool_policy("read") == "ask"
+            # 持久化到 Settings
+            from app.utils.config import Settings
+
+            assert Settings.get_instance().tool_permission_policy.value.get("read") == "ask"
+            # 其他工具不受影响(仍回退全局)
+            assert pc.get_tool_policy("bash") == "deny"
+            # 非法值被忽略
+            pc.set_user_tool_policy("bash", "banana")
+            assert pc.get_tool_policy("bash") == "deny"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_apply_agent_generates_policies_and_copy(self, qt_app):
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            pc.set_user_tool_policy("read", "ask")
+            # apply_agent:active 侧生成 agent 权限策略(ask→ask/deny→deny),user 偏好不变
+            pc.apply_agent(
+                agent_name="test_agent",
+                agent_tools={},
+                agent_permission={"read": "ask", "bash": "deny", "*": "allow"},
+            )
+            assert pc.get_tool_policy("read") == "ask"
+            assert pc.get_tool_policy("bash") == "deny"
+            # user 偏好层不受 agent 激活影响
+            assert pc.get_user_tool_policy("read") == "ask"
+            assert pc.get_user_tool_policy("bash") == "deny"
+            # 复制状态(copy_state_from 带新字段)
+            pc2 = ToolPermissionController()
+            pc2.copy_state_from(pc)
+            assert pc2.get_tool_policy("read") == "ask"
+            assert pc2.get_tool_policy("bash") == "deny"
+            # 恢复用户偏好
+            pc.restore_user()
+            assert pc.get_tool_policy("read") == "ask"
+            assert pc.get_tool_policy("bash") == "deny"
+            pc.deleteLater()
+            pc2.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_tool_policy_combo_visibility(self, qt_app):
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            card = ToolControlCardContent(controller=pc)
+            card.show_content()
+            # 默认全开 → 策略下拉隐藏
+            combo = card._policy_combos.get("read")
+            assert combo is not None
+            assert combo.isHidden()
+            # 关闭 read → 下拉显示
+            pc.set_user_toggle("read", False)
+            qt_app.processEvents()
+            assert not combo.isHidden()
+            # 重新开启 → 隐藏
+            pc.set_user_toggle("read", True)
+            qt_app.processEvents()
+            assert combo.isHidden()
+            card.deleteLater()
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_behavior_combo_mixed_and_force(self, qt_app):
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import (
+            MIXED_OPTION,
+            ToolControlCardFrame,
+        )
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            # 环境隔离：清空残留 per-tool 策略，保证初始状态一致（回退全局 deny）
+            from app.utils.config import Settings
+            s = Settings.get_instance()
+            s.tool_permission_policy.value = {}
+            s.save()
+            pc = ToolPermissionController()
+            frame = ToolControlCardFrame(controller=pc)
+            # 初始:无 per-tool 策略 → 全部回退全局 deny → 一致 → 显示 deny
+            assert frame._behavior_combo.currentData() == "deny"
+            # 设置一个工具 ask → 不一致 → "未统一"占位
+            pc.set_user_tool_policy("read", "ask")
+            qt_app.processEvents()
+            assert frame._behavior_combo.currentData() == MIXED_OPTION[0]
+            # 强制统一:右上角选择 ask → 所有工具策略变 ask
+            frame._on_behavior_changed(frame._behavior_combo.findData("ask"))
+            qt_app.processEvents()
+            assert pc.get_tool_policy("read") == "ask"
+            assert pc.get_tool_policy("bash") == "ask"
+            assert frame._behavior_combo.currentData() == "ask"
+            frame.deleteLater()
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_engine_off_policy_resolution(self, qt_app):
+        """engine/subagent_worker 共用 resolve_tool_off_policy:关闭分支查 per-tool 策略"""
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import (
+            ToolPermissionController,
+            resolve_tool_off_policy,
+        )
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            # controller 存在:per-tool 优先,缺失回退全局 behavior
+            pc.set_user_tool_policy("read", "ask")
+            assert resolve_tool_off_policy("read", pc, {}, "deny") == "ask"
+            assert resolve_tool_off_policy("bash", pc, {}, "deny") == "deny"
+            # controller 不存在(API 模式):查 Settings policies 字典兜底
+            assert resolve_tool_off_policy("read", None, {"read": "ask"}, "deny") == "ask"
+            assert resolve_tool_off_policy("bash", None, {"read": "ask"}, "deny") == "deny"
+            # 非法值回退全局 behavior
+            assert resolve_tool_off_policy("read", None, {"read": "banana"}, "deny") == "deny"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_policy_change_does_not_bypass_template_deny(self, qt_app):
+        """MAJOR-1 锚点:改策略不污染 _user_modified → 不绕过 agent 模板 deny"""
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import (
+            ToolPermissionController,
+            resolve_tool_off_policy,
+        )
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            # 激活 agent:bash 模板 deny(安全策略)
+            pc.apply_agent(
+                agent_name="t", agent_tools={},
+                agent_permission={"bash": "deny", "*": "allow"},
+            )
+            # 用户只改 bash 关闭策略为 ask(开关仍 off)
+            pc.set_user_tool_policy("bash", "ask")
+            assert pc.get_tool_policy("bash") == "ask"
+            # 未进入 _user_modified → 模板 deny 不被绕过
+            assert not pc.is_user_modified("bash")
+            # 关闭分支按 per-tool 返回 ask(而非被 is_user_modified 放行)
+            assert resolve_tool_off_policy("bash", pc, {}, "deny") == "ask"
+            # 对照:显式拨开关才进 _user_modified(T28 语义保留)
+            pc.set_user_toggle("read", True)
+            assert pc.is_user_modified("read")
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_set_policy_agent_mode_active_only(self, qt_app):
+        """MINOR-2①:agent 激活时 set_user_tool_policy 只改 active,user 偏好不变"""
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            # 用户偏好:bash 关闭策略 = ask
+            pc.set_user_tool_policy("bash", "ask")
+            # 激活 agent(bash 模板 deny → active 侧策略 deny)
+            pc.apply_agent(
+                agent_name="t", agent_tools={},
+                agent_permission={"bash": "deny", "*": "allow"},
+            )
+            assert pc.get_tool_policy("bash") == "deny"  # active 反映模板
+            # agent 模式下改 bash 策略为 ask → 只改 active
+            pc.set_user_tool_policy("bash", "ask")
+            assert pc.get_tool_policy("bash") == "ask"  # active 生效
+            assert pc.get_user_tool_policy("bash") == "ask"  # user 偏好仍是用户原值
+            # 恢复用户偏好 → 回到用户设置
+            pc.restore_user()
+            assert pc.get_tool_policy("bash") == "ask"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_settings_external_policy_change(self, qt_app):
+        """MINOR-2②:Settings 外部变更(ConfigSync 场景)自动刷新 + 回环防护"""
+        from app.tools.registry import ToolRegistry
+        from app.utils.config import Settings
+        from app.core.tool_permission_controller import ToolPermissionController
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            s = Settings.get_instance()
+            pc = ToolPermissionController()
+            # 模拟外部变更(ConfigSync 下载新配置):直接写 Settings 触发 valueChanged
+            s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
+            qt_app.processEvents()
+            # 已存在 controller 自动刷新(双相等性检查通过后应用)
+            assert pc.get_user_tool_policy("read") == "ask"
+            # 新 controller 从 Settings 读同一配置
+            pc2 = ToolPermissionController()
+            assert pc2.get_user_tool_policy("read") == "ask"
+            # 残留工具(stale_tool 未注册)被清理,不进全量补全结果
+            assert "stale_tool" not in pc2.get_user_tool_policies()
+            # 自写回环不重复应用:set_user_tool_policy 后状态不被外部监听清掉
+            pc2.set_user_tool_policy("read", "deny")
+            assert pc2.get_user_tool_policy("read") == "deny"
+            pc.deleteLater()
+            pc2.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_subagent_worker_ui_permission_policy(self, qt_app):
+        """MINOR-2③:subagent_worker._check_ui_tool_permission 关闭分支查 per-tool 策略"""
+        from unittest.mock import MagicMock
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.workers.subagent_worker import SubAgentExecutor
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            pc.set_user_toggle("read", False)  # 关闭 read
+            pc.set_user_tool_policy("read", "ask")
+            backend = MagicMock()
+            backend.tool_permission_controller = pc
+            executor = MagicMock()
+            executor._backend = backend
+            # 绕过 __init__ 构造最小 worker(仅测 _check_ui_tool_permission)
+            worker = SubAgentExecutor.__new__(SubAgentExecutor)
+            worker.tool_executor = executor
+            worker.agent_manager = None
+            worker.agent_name = ""
+            # 关闭 + per-tool ask → 返回 ask
+            assert worker._check_ui_tool_permission("read", {}) == "ask"
+            # 关闭 + per-tool deny → 返回 deny
+            pc.set_user_tool_policy("read", "deny")
+            assert worker._check_ui_tool_permission("read", {}) == "deny"
+            # 缺失 per-tool → 回退全局 behavior
+            pc.set_user_toggle("bash", False)
+            assert worker._check_ui_tool_permission("bash", {}) == "deny"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+
+class TestWebToolsEnvKey:
+    """T8:web_tools._api_key 仅读环境变量(主程序不再注入 token)"""
+
+    @staticmethod
+    def _load_web_tools():
+        """按插件加载器同款方式动态加载 web_tools 模块"""
+        import importlib.util
+
+        path = Path(__file__).parent.parent / "plugins" / "system" / "tools" / "web_tools.py"
+        spec = importlib.util.spec_from_file_location("_test_web_tools", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_api_key_reads_env_only(self, monkeypatch):
+        mod = self._load_web_tools()
+        # 插件内置默认 key 非空(用户配置值已迁入插件)
+        assert mod._DEFAULT_TAVILY_KEY
+        assert mod._DEFAULT_TINYFISH_KEY
+        monkeypatch.setenv("TAVILY_API_KEY", "env-test-key")
+        # 无 tool_ctx / 无 env.api_keys → 仍能读到(os.environ 优先)
+        assert mod._api_key({}, "TAVILY_API_KEY") == "env-test-key"
+        assert mod._api_key(None, "TAVILY_API_KEY") == "env-test-key"
+        # 未设置环境变量 → 回退插件内置默认常量(非空)
+        monkeypatch.delenv("TAVILY_API_KEY")
+        assert mod._api_key({}, "TAVILY_API_KEY") == mod._DEFAULT_TAVILY_KEY
+        # TINYFISH 同样:环境变量优先
+        monkeypatch.setenv("TINYFISH_API_KEY", "tiny-test-key")
+        assert mod._api_key({}, "TINYFISH_API_KEY") == "tiny-test-key"
+        # TINYFISH 未设置 → 回退内置默认
+        monkeypatch.delenv("TINYFISH_API_KEY")
+        assert mod._api_key({}, "TINYFISH_API_KEY") == mod._DEFAULT_TINYFISH_KEY
 
 
 class TestSelfContained:
@@ -516,23 +874,33 @@ class TestSelfContained:
         assert reg.get_render_mode("read") == "inline"
         html = render_tool_block("read", {"path": "x"}, result="内容", success=True)
         assert "tool-expanded-content" not in html
-        # render_mode：screenshot=expand（禁用折叠框，body 始终展开、无 cm-collapsible）
-        assert reg.get_render_mode("screenshot") == "expand"
-        html = render_tool_block("screenshot", {"region": [0, 0, 100, 100]}, result="已截图", success=True)
-        assert "cm-collapsible" not in html
-        assert "tool-block--no-collapse" in html
-        assert "tool-expanded-content" in html  # body 直接展开
-        # expand 模式：简洁模式偏好下也不折叠
-        html = render_tool_block("screenshot", {}, result="已截图", success=True, collapsed=True)
-        assert "cm-collapsible" not in html
-        assert "tool-block--no-collapse" in html
+        # render_mode：expand 由插件声明（截图类工具迁移后按需注册；此处验证渲染分支）
+        reg.register(
+            "_test_expand",
+            {"type": "function", "function": {"name": "_test_expand", "parameters": {"type": "object", "properties": {}}},
+             "required": []},
+            impl=lambda tool_ctx, **kw: None,
+            danger="safe", render_mode="expand", source="plugin:test",
+        )
+        try:
+            assert reg.get_render_mode("_test_expand") == "expand"
+            html = render_tool_block("_test_expand", {}, result="已截图", success=True)
+            assert "cm-collapsible" not in html
+            assert "tool-block--no-collapse" in html
+            assert "tool-expanded-content" in html  # body 直接展开
+            # expand 模式：简洁模式偏好下也不折叠
+            html = render_tool_block("_test_expand", {}, result="已截图", success=True, collapsed=True)
+            assert "cm-collapsible" not in html
+            assert "tool-block--no-collapse" in html
+        finally:
+            reg.unregister("_test_expand")
         # preview 闭包：插件注册的自然语言预览（不写死主程序）
         p = reg.get_preview("read")
         assert p is not None
         assert p({"path": "x.py", "startline": 5}) == '读取 "x.py" (从第 5 行)'
-        p = reg.get_preview("mouse")
+        p = reg.get_preview("websearch")
         assert p is not None
-        assert p({"action": "click", "x": 10, "y": 20}) == "鼠标点击 (10, 20)"
+        assert p({"query": "python"}) == '搜索 "python"'
         p = reg.get_preview("question")
         assert p is not None
         assert p({"questions": [{"question": "继续？"}]}) == "继续？"

@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - **codegraph 迁社区插件** (`.drifox/plugins/codegraph-tools/`): codegraph_explore 引擎从主程序迁出为社区插件（引擎单例 + workdir 自动重初始化），主程序 `app/tools/codegraph_tools.py` 删除
 ### 🔧 其他 (Chores & Build)
 - **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
+- **web 搜索 token 迁移至环境变量** (`app/utils/config.py` + `app/core/tool_executor.py` + `plugins/system/tools/web_tools.py`): `websearch` 的 `TAVILY_API_KEY`/`TINYFISH_API_KEY` 不再存储于应用配置（config.py 硬编码默认值移除），改由环境变量提供；未设置时 `websearch` 返回「搜索失败：无可用搜索引擎」
 - **测试**: 新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）
 - **Windows Job Object 进程树管理** (`app/tools/process_job.py`): 创建 → kill-on-close → 子进程入 Job 的进程树容器；`command_safety.run_safe/run_with_shell` 新增可选 `job=` 参数，命令启动后自动入 Job（S3）
 - **工具结果截断** (`app/core/context_builder.py`): 超过 8192 字符的工具输出保留头 4096 + 尾 1024，中间省略标记（DSH tool-result-pruner 对齐）；仅在发送给 LLM 的上下文层裁剪，会话原始存储不受影响（S1）

@@ -51,10 +51,10 @@ def _read_result_with_image(mime="image/png", data="aGVsbG8="):
     }
 
 
-def _screenshot_result_with_path(path: str):
-    """screenshot 工具结果（协议 A：content 含 absolute_path）"""
+def _read_result_with_path(path: str):
+    """read 工具结果（协议 A：content 含 absolute_path）"""
     return {
-        "name": "screenshot",
+        "name": "read",
         "success": True,
         "content": "截图完成",
         "raw_content": {"absolute_path": path},
@@ -158,7 +158,7 @@ class TestRegistryExceptionFallback:
             tmp.write(b"\x89PNG\r\n\x1a\nfake-png")
             tmp_path = tmp.name
         try:
-            tool_results = [_screenshot_result_with_path(tmp_path)]
+            tool_results = [_read_result_with_path(tmp_path)]
             ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=[])
             assert ok, "回退集应覆盖 screenshot 工具"
         finally:
@@ -168,14 +168,14 @@ class TestRegistryExceptionFallback:
 class TestProtocolAPathExtraction:
     """T25-4：协议 A（screenshot 本地路径提取）"""
 
-    def test_screenshot_absolute_path_injected(self, tmp_path):
-        """screenshot content 含 absolute_path → 读取文件注入 base64"""
+    def test_absolute_path_injected(self, tmp_path):
+        """read content 含 absolute_path → 读取文件注入 base64（协议 A）"""
         img = tmp_path / "shot.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-content")
 
         w = _make_vision_worker("gpt-4o")
         current_messages = [{"role": "user", "content": "看截图"}]
-        tool_results = [_screenshot_result_with_path(str(img))]
+        tool_results = [_read_result_with_path(str(img))]
 
         ok = w._try_inject_vision_content(tool_results, current_messages, session_messages=[])
         assert ok
@@ -189,13 +189,13 @@ class TestProtocolAPathExtraction:
         assert url.endswith(expected)
 
     def test_path_from_raw_content(self, tmp_path):
-        """raw_content.absolute_path 提取（screenshot 常见结构）"""
+        """raw_content.absolute_path 提取（视觉工具常见结构）"""
         img = tmp_path / "shot2.png"
         img.write_bytes(b"png-bytes-2")
         w = _make_vision_worker("gpt-4o")
         current_messages = [{"role": "user", "content": "x"}]
         tool_results = [{
-            "name": "screenshot", "success": True,
+            "name": "read", "success": True,
             "content": "已截图",
             "raw_content": {"path": str(img)},  # path 字段也可提取
         }]
@@ -207,9 +207,9 @@ class TestNonVisionHint:
     """T25-5：非视觉模型 + 视觉工具成功 → 追加"不支持视觉"提示"""
 
     def test_non_vision_hint_appended(self):
-        """minimax-m2.5 + screenshot 成功 → tool 消息追加不支持视觉提示"""
+        """minimax-m2.5 + read 成功 → tool 消息追加不支持视觉提示"""
         w = _make_vision_worker("minimax-m2.5")
-        tool_msg = {"role": "tool", "name": "screenshot", "content": "截图完成"}
+        tool_msg = {"role": "tool", "name": "read", "content": "截图完成"}
         current_messages = [
             {"role": "user", "content": "截图给我看"},
             {"role": "assistant", "content": "好", "tool_calls": []},
@@ -217,7 +217,7 @@ class TestNonVisionHint:
         ]
 
         ok = w._try_inject_vision_content(tool_results=[{
-            "name": "screenshot", "success": True, "content": "截图完成",
+            "name": "read", "success": True, "content": "截图完成",
         }], current_messages=current_messages, session_messages=[])
 
         assert not ok
@@ -238,9 +238,9 @@ class TestNonVisionHint:
     def test_non_vision_hint_idempotent(self):
         """重复调用不重复追加提示"""
         w = _make_vision_worker("minimax-m2.5")
-        tool_msg = {"role": "tool", "name": "screenshot", "content": "截图完成"}
+        tool_msg = {"role": "tool", "name": "read", "content": "截图完成"}
         current_messages = [{"role": "user", "content": "x"}, tool_msg]
-        tr = [{"name": "screenshot", "success": True, "content": "截图完成"}]
+        tr = [{"name": "read", "success": True, "content": "截图完成"}]
 
         w._try_inject_vision_content(tr, current_messages, session_messages=[])
         w._try_inject_vision_content(tr, current_messages, session_messages=[])

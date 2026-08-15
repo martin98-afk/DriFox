@@ -190,6 +190,11 @@ plugins/system/          # 系统内置插件（打包在 exe 中）
 | **记忆** | memory_save/search/list |
 | **其他** | scan_repo, stage_files, question, todowrite/read |
 
+> **websearch API key 配置**：`websearch` 工具通过环境变量读取搜索服务 API key——
+> `TAVILY_API_KEY`（Tavily 搜索）、`TINYFISH_API_KEY`（TinyFish 搜索，Tavily 不可用/未配置时回退）。
+> 不再从应用配置读取，请在启动环境（系统环境变量或启动脚本）中设置；两者均未设置时，
+> `websearch` 返回「搜索失败：无可用搜索引擎」。
+
 ---
 
 ## Hotkeys & Commands

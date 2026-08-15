@@ -135,8 +135,9 @@ def _check_modified(tool_ctx, workdir: Optional[Path], full_path: Path, original
             return ToolResult(
                 False,
                 error=(
-                    f"File has been modified externally since it was read: {_display_path(workdir, full_path, original)}. "
-                    f"Re-read the file to get the latest content before editing."
+                    f"[错误] 文件自上次读取后已被外部修改：{_display_path(workdir, full_path, original)}。"
+                    f"当前编辑基于过期内容，可能覆盖最新变更。"
+                    f"请先用 read 工具重新读取该文件，拿到最新内容后再重试编辑。"
                 ),
             )
     return None
@@ -402,14 +403,22 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             return check
         old_content = full_path.read_text(encoding="utf-8", errors="replace")
         current = old_content
+        failures = []
         for i, edit in enumerate(edits or []):
             old_s, new_s = edit.get("oldString", ""), edit.get("newString", "")
-            if old_s not in current:
-                return ToolResult(
-                    False,
-                    error=f"Edit #{i + 1} failed: oldString not found (文件可能已被前面的编辑改动)。",
+            if old_s in current:
+                current = current.replace(old_s, new_s, 1)
+            else:
+                snippet = old_s[:50].replace("\n", "\\n")
+                failures.append(
+                    f"Edit #{i + 1} failed: oldString 未找到。oldString 开头: {snippet!r}"
                 )
-            current = current.replace(old_s, new_s, 1)
+        if failures and current == old_content:
+            # 全部失败：不写文件，避免破坏原内容
+            return ToolResult(
+                False,
+                error="批量编辑全部失败（文件未改动）：\n" + "\n".join(failures),
+            )
         full_path.write_text(current, encoding="utf-8")
         _record_mtime(tool_ctx, full_path)
         diff_lines = list(
@@ -420,7 +429,16 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         )
         diff_str = "\n".join(diff_lines) if diff_lines else ""
         display = _display_path(workdir, full_path, path)
-        return ToolResult(True, content=f"已批量编辑 {display}（{len(edits)} 处）", diff=diff_str)
+        if failures:
+            success_count = len(edits or []) - len(failures)
+            content = (
+                f"已批量编辑 {display}（成功 {success_count}/{len(edits)} 处，"
+                f"失败 {len(failures)} 处，成功项已写入）：\n"
+                + "\n".join(failures)
+            )
+        else:
+            content = f"已批量编辑 {display}（{len(edits)} 处全部成功）"
+        return ToolResult(True, content=content, diff=diff_str)
     except Exception as e:
         return ToolResult(False, error=f"MultiEdit error: {str(e)}")
 
