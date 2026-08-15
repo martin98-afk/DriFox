@@ -12,6 +12,8 @@ import uuid
 
 import orjson
 
+from loguru import logger
+
 from app.tools.result import ToolResult
 from app.tools.registry import make_summarize_from_preview
 
@@ -118,6 +120,23 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
         return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
 
     tm = _get_team_manager()
+    # 🐛 发件人角色兜底：tool_ctx["team_agent_name"] 来自 BuiltinTools 团队上下文，
+    # 若 join 时序晚于 chat_engine 就绪（或恢复路径漏同步），会滞留默认值 "build"。
+    # 这里以 TeamManager 成员表为权威（join_team 恰好一次写盘，与窗口真实角色一致），
+    # 按 window_id 反查并覆盖，保证邮件发件人显示实际成员名。
+    try:
+        for _m in tm.get_members() or []:
+            if _m.get("window_id") == window_id and _m.get("agent_name"):
+                if _m["agent_name"] != from_agent:
+                    logger.info(
+                        f"[TeamMail] 发件人角色校正 {from_agent} → {_m['agent_name']} "
+                        f"(tool_ctx 与成员表不一致，以成员表为准)"
+                    )
+                from_agent = _m["agent_name"]
+                break
+    except Exception:
+        pass  # 成员表不可用时保持 tool_ctx 原值
+
     mail_id = tm.send_task(
         from_window=window_id,
         from_agent=from_agent,

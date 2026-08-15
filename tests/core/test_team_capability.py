@@ -384,3 +384,56 @@ class TestTeamToolsCapabilityDisplay:
         assert result.success, result.error
         assert "目标能力:" in result.content, f"应附目标能力提示，实际:\n{result.content}"
         assert "plan" in result.content
+
+    def test_team_send_message_sender_role_from_member_table(self, tm, monkeypatch):
+        """🐛 发件人角色兜底：tool_ctx 角色与成员表不一致时，以成员表为准。
+
+        线上症状：团队邮件发件人恒为 build@win_xxx（BuiltinTools 团队上下文
+        因 join/chat_engine 时序滞留默认值 build）。修复：发送时按 window_id
+        从 TeamManager 成员表反查权威角色覆盖，保证邮件显示实际成员名。
+        """
+        subagent = _load_subagent_tools()
+        _patch_agent_manager(
+            monkeypatch,
+            {
+                "leader": _fake_agent("leader", "统筹团队任务"),
+                "build": _fake_agent("build", "负责编码实现", permission={"write": "allow"}),
+            },
+        )
+        # win_01 实际角色是 leader（成员表权威）
+        tm.join_team("win_01", "leader")
+        tm.join_team("win_02", "build")
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
+
+        # tool_ctx 角色错误（滞留 build）→ 发送后 from_agent 应为成员表里的 leader
+        result = subagent._team_send_message(self._tool_ctx("win_01", "build"), to_agent="build", message="派活")
+        assert result.success, result.error
+        mails = tm.get_mailbox_mails("win_02")
+        assert mails and mails[0]["from_agent"] == "leader", (
+            f"邮件发件人应为成员表权威角色 leader，实际: {mails[0]['from_agent'] if mails else None}"
+        )
+        assert mails[0]["from_window"] == "win_01"
+
+    def test_team_send_message_sender_role_keeps_correct_ctx(self, tm, monkeypatch):
+        """兜底不误伤：tool_ctx 角色与成员表一致时保持原值，不覆盖。"""
+        subagent = _load_subagent_tools()
+        _patch_agent_manager(
+            monkeypatch,
+            {
+                "leader": _fake_agent("leader", "统筹团队任务"),
+                "build": _fake_agent("build", "负责编码实现", permission={"write": "allow"}),
+            },
+        )
+        tm.join_team("win_01", "leader")
+        tm.join_team("win_02", "build")
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
+
+        result = subagent._team_send_message(self._tool_ctx("win_01", "leader"), to_agent="build", message="派活")
+        assert result.success, result.error
+        mails = tm.get_mailbox_mails("win_02")
+        assert mails and mails[0]["from_agent"] == "leader", "角色一致时不应被覆盖"
+        # 成员表无此 window 时不崩溃，保持 tool_ctx 原值
+        result2 = subagent._team_send_message(self._tool_ctx("win_99", "build"), to_agent="build", message="派活2")
+        assert result2.success, result2.error
+        mails2 = tm.get_mailbox_mails("win_02")
+        assert mails2[-1]["from_agent"] == "build", "成员表查不到时保留 tool_ctx 角色"
