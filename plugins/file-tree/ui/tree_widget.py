@@ -142,19 +142,18 @@ class FileTreeModel(QAbstractItemModel):
         return True
 
     def refresh_children(self, dir_path: str, entries):
-        """外部变更后刷新子节点"""
+        """外部变更后增量刷新子节点 — 只增删差异，保留未变节点（展开/选择/滚动状态不丢失）"""
         node = self._find_node(dir_path)
         if not node or not node.loaded:
             return
+        if node.children is None:
+            node.children = []
         parent_idx = self._index_for_node(node)
-        self._clear_children(node, parent_idx)
-        self._insert_children(node, parent_idx, entries)
+        self._sync_entries(node.children, parent_idx, entries, node)
 
     def refresh_root(self, entries):
-        """外部变更后刷新根目录顶级条目（根目录自身无节点，单独处理）"""
-        self.beginResetModel()
-        self._root_entries = self._build_nodes(entries, None)
-        self.endResetModel()
+        """外部变更后增量刷新根目录顶级条目（根目录自身无节点，单独处理）"""
+        self._sync_entries(self._root_entries, QModelIndex(), entries, None)
 
     def rename_node(self, old_path: str, new_name: str) -> Optional[str]:
         """重命名节点，返回新路径；失败返回 None"""
@@ -373,6 +372,50 @@ class FileTreeModel(QAbstractItemModel):
             self.beginRemoveRows(parent_idx, 0, count - 1)
             node.children = None
             self.endRemoveRows()
+
+    def _sync_entries(
+        self,
+        container: List[_FileNode],
+        parent_idx: QModelIndex,
+        entries,
+        parent_node: Optional[_FileNode],
+    ):
+        """增量同步条目列表 — 只增删差异，未变节点保持原引用
+
+        - 保留未变节点的展开/选择/滚动状态（不触发模型 reset）
+        - 删除已消失条目、插入新增条目（按 scanner 排序规则定位）
+        - 新增目录节点 loaded=False，展开时走懒加载
+        """
+        new_keys = {(e.name, e.is_dir) for e in entries}
+
+        # 1) 删除已消失的条目（从后往前，保持索引有效）
+        for row in range(len(container) - 1, -1, -1):
+            child = container[row]
+            if (child.name, child.is_dir) not in new_keys:
+                self.beginRemoveRows(parent_idx, row, row)
+                container.pop(row)
+                self.endRemoveRows()
+
+        # 2) 插入新增条目（按排序规则定位，保持目录在前、名称字母序）
+        existing = {(c.name, c.is_dir) for c in container}
+        for entry in entries:
+            key = (entry.name, entry.is_dir)
+            if key in existing:
+                continue
+            row = self._sorted_insert_pos(container, entry)
+            self.beginInsertRows(parent_idx, row, row)
+            container.insert(
+                row,
+                _FileNode(
+                    name=entry.name,
+                    path=entry.path,
+                    is_dir=entry.is_dir,
+                    parent_node=parent_node,
+                    loaded=False,
+                ),
+            )
+            self.endInsertRows()
+            existing.add(key)
 
     def _find_node(self, norm_path: str) -> Optional[_FileNode]:
         target = os.path.normpath(norm_path)
