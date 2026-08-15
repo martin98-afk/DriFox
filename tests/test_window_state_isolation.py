@@ -331,3 +331,55 @@ class TestFileMtimeIsolation:
         r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 1", newString="x = 2")
         assert not r_edit.success
         assert "modified externally" in r_edit.error
+
+    def test_other_window_read_does_not_mask_external_change(self, tmp_path):
+        """D3 症状：A read(T0) → 外部改文件(T1) → B read → A edit 必须被拒。
+
+        窗口级实现：A 容器记录 T0，B 容器记录 T1 → A edit 对比 T0 vs T1 → 拒 ✓。
+        模块级缺陷实现：B read 覆盖模块级记录为 T1 → A edit 对比 T1 vs T1 → 通过（假绿）。
+        """
+        import os
+        import time as _t
+
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ex_a = _new_executor()
+        ex_b = _new_executor()
+        ctx_a = {"workdir": str(tmp_path), "session_id": "a", "services": _ws_services(ex_a)}
+        ctx_b = {"workdir": str(tmp_path), "session_id": "b", "services": _ws_services(ex_b)}
+
+        # A read：A 容器记录 mtime_T0
+        assert ft._read_impl(tool_ctx=ctx_a, path=str(f.name)).success
+        # 外部修改：显式改 mtime 为 T1（os.utime 保证 mtime 变化，不依赖 sleep 精度）
+        _t.sleep(0.02)
+        f.write_text("x = 777\n", encoding="utf-8")
+        new_mtime = f.stat().st_mtime + 1.0
+        os.utime(f, (new_mtime, new_mtime))
+
+        # B read：B 容器记录 T1（若模块级缺陷实现，这里会覆盖共享记录 → 假绿）
+        assert ft._read_impl(tool_ctx=ctx_b, path=str(f.name)).success
+
+        # A edit：必须被拒（A 记录 T0 vs 当前 T1）
+        r_edit = ft._edit_impl(tool_ctx=ctx_a, path=str(f.name), oldString="x = 777", newString="x = 2")
+        assert not r_edit.success, "B read 不得掩盖 A 的外部修改检测（窗口级 mtime 隔离）"
+        assert "modified externally" in r_edit.error
+
+    def test_external_change_directly_rejects_control(self, tmp_path):
+        """D3 对照：A read → 外部改 → A edit 直接拒（两实现一致，验证检测本身有效）"""
+        import os
+        import time as _t
+
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ex = _new_executor()
+        ctx = {"workdir": str(tmp_path), "session_id": "a", "services": _ws_services(ex)}
+
+        assert ft._read_impl(tool_ctx=ctx, path=str(f.name)).success
+        _t.sleep(0.02)
+        f.write_text("x = 666\n", encoding="utf-8")
+        new_mtime = f.stat().st_mtime + 1.0
+        os.utime(f, (new_mtime, new_mtime))
+
+        r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 666", newString="x = 2")
+        assert not r_edit.success
+        assert "modified externally" in r_edit.error

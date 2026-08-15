@@ -80,6 +80,24 @@ class TestResultContainsFieldKeywords:
         assert html
         assert "最终结果" in html
 
+    def test_result_interleaved_line_start_fields_not_truncated(self):
+        """D4：result 内含行首独立字段行（success: world）→ 完整渲染不截断。
+
+        旧解析器命中第一个行首 success → 截断 result → 「更多内容」缺失（红）；
+        新解析器行锚定取最后匹配 → result 完整 → 「更多内容」渲染存在（绿）。
+        """
+        content = (
+            "name: write\n"
+            'args: {"path": "x.py"}\n'
+            "result: 第一行\n"
+            "success: world\n"
+            "更多内容\n"
+            "success: true"
+        )
+        html = _render_tool_block_content(content)
+        assert "更多内容" in html, "result 不得被行内 success 字段字样截断（取最后行首匹配）"
+        assert "第一行" in html
+
 
 class TestArgsWithResultSubstring:
     """补充 4-2：args 含 'result:' 子串不串位"""

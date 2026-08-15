@@ -67,6 +67,17 @@ class TestCodeGraphContract:
     安装后由 TestCodeGraphModule（skipif 保护）验证功能。
     """
 
+    @pytest.fixture(autouse=True)
+    def _restore_system_plugins(self):
+        """测试后恢复系统插件注册（防顺序污染：reset 后不恢复会清空 registry，
+        导致后续测试（如 test_agent_smoke 的 tools 解析）查 registry 失败——T22 实测）。"""
+        yield
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+
     def test_load_without_codegraph_plugin_no_error(self, tmp_path):
         """临时空插件根（无 codegraph）→ load_plugin_tools 不报错"""
         from app.tools.plugin_tool_loader import load_plugin_tools

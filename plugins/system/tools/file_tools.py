@@ -893,7 +893,8 @@ def register(registry):
         render_mode="inline",
         preview=_make_file_preview("read"),
         summarize=_make_file_summarize("read"),
-        metadata={"permission_arg": "filePath"},
+        # provides_image：读取图片时返回 image_data（协议 B），供 chat_worker 视觉模型注入
+        metadata={"permission_arg": "filePath", "provides_image": True},
     )
     registry.register(
         "write", _WRITE_SCHEMA, impl=_write_impl,

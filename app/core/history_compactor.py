@@ -524,7 +524,7 @@ def _prune_old_tool_results(
             continue
 
         # 🔒 保护 <persisted-output> 块不被剪枝:
-        #   这些块包含文件路径, 如果被摘要替换, LLM 将丢失路径无法 read_persisted_output,
+        #   这些块包含文件路径, 如果被摘要替换, LLM 将丢失路径无法按文件路径读取,
         #   被迫重读原始文件 → 超大结果 → 再次固化 → 死循环
         if content.lstrip().startswith("<persisted-output>"):
             continue

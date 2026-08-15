@@ -2307,6 +2307,17 @@ class OpenAIChatWorker(QThread):
         if not tool_results or not current_messages:
             return False
 
+        # T11-2：视觉工具集合由 registry 声明驱动（metadata["provides_image"]=True，
+        # 替代硬编码 screenshot/read 判断；双协议自动适配：image_data 协议 B / 路径协议 A）
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _provides_image = ToolRegistry.get_instance().provides_image_tools()
+        except Exception:
+            # T4d：registry 异常时保守回退（与 T21 _interactive_set 同风格），
+            # 保持旧工具名兜底，视觉判断不静默失效
+            _provides_image = frozenset({"screenshot", "read"})
+
         # 检查模型是否支持视觉
         model_name = str(self.llm_config.get("模型名称", "") or "")
         caps = get_model_capabilities(model_name)
@@ -2317,9 +2328,9 @@ class OpenAIChatWorker(QThread):
                 if not isinstance(r, dict) or not r.get("success"):
                     continue
                 tn = r.get("name", "")
-                if tn == "screenshot":
-                    _non_vision_tools.add(tn)
-                elif tn == "read" and isinstance(r.get("image_data"), dict) and r["image_data"].get("data"):
+                if tn in _provides_image:
+                    # T4d：放宽回基线语义——工具在视觉集合即提示（协议 A 工具天然产出路径，
+                    # 无需内容结构判定；read 有 image_data 亦命中）
                     _non_vision_tools.add(tn)
             if _non_vision_tools:
                 _nv_hint = (
@@ -2350,58 +2361,60 @@ class OpenAIChatWorker(QThread):
             if not isinstance(r, dict) or not r.get("success"):
                 continue
             tool_name = r.get("name", "")
+            if tool_name not in _provides_image:
+                continue
 
-            if tool_name == "screenshot":
-                # 从 raw_content（原始 ToolResult.content）提取路径
-                raw = r.get("raw_content")
-                img_path = None
-                if isinstance(raw, dict):
-                    img_path = raw.get("absolute_path") or raw.get("path")
-                if not img_path:
-                    content = r.get("content", "")
-                    if isinstance(content, dict):
-                        img_path = content.get("absolute_path") or content.get("path")
-                    elif isinstance(content, str):
-                        if content.startswith("{") and "absolute_path" in content:
-                            import ast
+            # 协议 B：优先用 image_data 字段（read 图片等已编码的 base64）
+            img_data = r.get("image_data")
+            if isinstance(img_data, dict):
+                mime = img_data.get("mime", "image/png")
+                data = img_data.get("data", "")
+                if data:
+                    data_uris.append(f"data:{mime};base64,{data}")
+                    logger.debug(f"[Vision] {tool_name} 图片注入(协议B): mime={mime}, base64_len={len(data)}")
+                    continue
+                # T4d：data 为空时继续协议 A 路径提取兜底（不提前 continue）
 
-                            try:
-                                d = ast.literal_eval(content)
-                                if isinstance(d, dict):
-                                    img_path = d.get("absolute_path") or d.get("path")
-                            except (ValueError, SyntaxError):
-                                pass
-                        if not img_path:
-                            m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
-                            if m:
-                                img_path = m.group(1)
-                if img_path and os.path.isfile(img_path):
-                    try:
-                        with open(img_path, "rb") as f:
-                            img_data = base64.b64encode(f.read()).decode("utf-8")
-                        ext = os.path.splitext(img_path)[1].lower()
-                        mime_map = {
-                            ".png": "image/png",
-                            ".jpg": "image/jpeg",
-                            ".jpeg": "image/jpeg",
-                            ".gif": "image/gif",
-                            ".webp": "image/webp",
-                            ".bmp": "image/bmp",
-                        }
-                        mime = mime_map.get(ext, "image/png")
-                        data_uris.append(f"data:{mime};base64,{img_data}")
-                    except Exception as e:
-                        logger.warning(f"[Vision] Failed to read screenshot {img_path}: {e}")
+            # 协议 A：从 raw_content/content 提取本地图片路径（screenshot 等）
+            raw = r.get("raw_content")
+            img_path = None
+            if isinstance(raw, dict):
+                img_path = raw.get("absolute_path") or raw.get("path")
+            if not img_path:
+                content = r.get("content", "")
+                if isinstance(content, dict):
+                    img_path = content.get("absolute_path") or content.get("path")
+                elif isinstance(content, str):
+                    if content.startswith("{") and "absolute_path" in content:
+                        import ast
 
-            elif tool_name == "read":
-                # 从 image_data 字段获取已编码的图片数据
-                img_data = r.get("image_data")
-                if isinstance(img_data, dict):
-                    mime = img_data.get("mime", "image/png")
-                    data = img_data.get("data", "")
-                    if data:
-                        data_uris.append(f"data:{mime};base64,{data}")
-                        logger.debug(f"[Vision] read 图片注入: mime={mime}, base64_len={len(data)}")
+                        try:
+                            d = ast.literal_eval(content)
+                            if isinstance(d, dict):
+                                img_path = d.get("absolute_path") or d.get("path")
+                        except (ValueError, SyntaxError):
+                            pass
+                    if not img_path:
+                        m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
+                        if m:
+                            img_path = m.group(1)
+            if img_path and os.path.isfile(img_path):
+                try:
+                    with open(img_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                    ext = os.path.splitext(img_path)[1].lower()
+                    mime_map = {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".gif": "image/gif",
+                        ".webp": "image/webp",
+                        ".bmp": "image/bmp",
+                    }
+                    mime = mime_map.get(ext, "image/png")
+                    data_uris.append(f"data:{mime};base64,{img_data}")
+                except Exception as e:
+                    logger.warning(f"[Vision] Failed to read screenshot {img_path}: {e}")
 
         if not data_uris:
             return False
@@ -3803,7 +3816,9 @@ class OpenAIChatWorker(QThread):
             _reg = ToolRegistry.get_instance()
             _interactive_set = frozenset(n for n in _reg.names() if _reg.is_interactive(n))
         except Exception:
-            _interactive_set = frozenset()
+            # T21：registry 不可用时保守回退（保护优先，与 agent._subagent_forbidden_tools
+            # / history_compactor.is_protected 的"保护优先"风格一致），保持 question 串行语义
+            _interactive_set = frozenset({"question"})
         for tc in tool_calls:
             if tc["function"]["name"] in _interactive_set:
                 return self._execute_tools_sequential(tool_calls)
@@ -4266,11 +4281,19 @@ class OpenAIChatWorker(QThread):
         """
         raw_content = getattr(result_obj, "content", None) if result_obj else None
 
-        # ---- 根据模型能力为 screenshot 工具结果追加提示 ----
-        # 目的：防止 LLM 反复截图。程序侧知道模型是否支持视觉，而 LLM 不知道。
-        # - 视觉模型：告知截图已自动以图片形式注入上下文，无需重复截图
-        # - 非视觉模型：告知本模型无法看到图像内容，截图只能获得文件路径
-        if tool_name == "screenshot" and success:
+        # ---- 根据模型能力为视觉工具结果追加提示 ----
+        # 目的：防止 LLM 反复截图/读图。程序侧知道模型是否支持视觉，而 LLM 不知道。
+        # - 视觉模型：告知图片已自动以图片形式注入上下文，无需重复截图
+        # - 非视觉模型：告知本模型无法看到图像内容，只能获得文件路径
+        # T11-2：工具集合由 registry 声明驱动（metadata["provides_image"]）
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _provides_image = ToolRegistry.get_instance().provides_image_tools()
+        except Exception:
+            # T4d：registry 异常时保守回退，保持旧工具名兜底
+            _provides_image = frozenset({"screenshot", "read"})
+        if tool_name in _provides_image and success:
             try:
                 from app.core.model_capabilities import get_model_capabilities
 

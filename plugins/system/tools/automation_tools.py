@@ -383,6 +383,8 @@ def register(registry):
         render=_render_screenshot_body,
         preview=_preview_screenshot,
         summarize=make_summarize_from_preview(_preview_screenshot),
+        # 视觉注入声明：结果可解析出本地图片路径（协议 A），供 chat_worker 视觉模型注入
+        metadata={"provides_image": True},
     )
     registry.register(
         "mouse", _MOUSE_SCHEMA, impl=_mouse_impl,

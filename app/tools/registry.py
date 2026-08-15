@@ -353,6 +353,18 @@ class ToolRegistry:
         with self._lock:
             return [n for n, r in self._tools.items() if r.team_only]
 
+    def provides_image_tools(self) -> frozenset:
+        """提供视觉内容（截图/图片读取）的工具名集合（metadata["provides_image"]=True）。
+
+        供 chat_worker 视觉注入路径使用（替代硬编码 screenshot/read 判断）：
+        工具结果可携带 image_data（协议 B）或可解析出本地图片路径（协议 A）时声明。
+        """
+        with self._lock:
+            return frozenset(
+                r.name for r in self._tools.values()
+                if (r.metadata or {}).get("provides_image")
+            )
+
     def group_map(self) -> Dict[str, List[ToolRegistration]]:
         """按展示分组聚合（权限卡片用）。保持注册顺序，组内危险工具在前。"""
         groups: Dict[str, List[ToolRegistration]] = {}

@@ -153,3 +153,50 @@ class TestTeamOnlyFilter:
         assert "team_only_a" in tools
         assert "team_only_b" in tools
         assert "not_team_c" not in tools
+
+
+class TestAgentDimensionIsolation:
+    """D2b：get_builtin_tools_schema 按 agent_manager 实例隔离缓存。
+
+    subagent_para 的 description 在有/无子智能体时后缀不同（"可用子智能体见系统提示"）。
+    缓存键含 _CACHE_AGENT_REF（agent 实例引用比对）：B（无子智能体）调用不得命中
+    A（有子智能体）的缓存 → B 的 description 不含后缀。
+    revert（去掉 agent ref 比对）→ B 命中 A 缓存 → B 含后缀 → 红。
+    """
+
+    class _FakeAgentManager:
+        def __init__(self, names):
+            self._names = names
+
+        def list_subagent_names(self, include_hidden=True):
+            return self._names
+
+    @pytest.fixture(autouse=True)
+    def _load_system_plugins(self):
+        """subagent_para 是系统插件工具：reset 后需重新加载"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+
+        load_plugin_tools()
+        yield
+
+    @staticmethod
+    def _subagent_desc(schemas):
+        for s in schemas:
+            if s["function"]["name"] == "subagent_para":
+                return s["function"]["description"]
+        return None
+
+    def test_agent_dimension_isolated(self):
+        """A（有子智能体）与 B（无）交替调用 → subagent_para description 各自独立"""
+        am_a = self._FakeAgentManager(["agent-alpha"])
+        am_b = self._FakeAgentManager([])  # 无子智能体
+
+        s_a1 = get_builtin_tools_schema(am_a)
+        s_b = get_builtin_tools_schema(am_b)  # revert 后这里会命中 A 缓存（缺陷）
+        s_a2 = get_builtin_tools_schema(am_a)
+
+        assert "可用子智能体见系统提示" in self._subagent_desc(s_a1), "A 有子智能体应含后缀"
+        assert "可用子智能体见系统提示" not in self._subagent_desc(s_b), (
+            "B 无子智能体不得拿到 A 的列表（agent 维度缓存隔离）"
+        )
+        assert "可用子智能体见系统提示" in self._subagent_desc(s_a2), "切回 A 应恢复 A 的列表"
