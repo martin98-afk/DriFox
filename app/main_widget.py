@@ -4905,6 +4905,17 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             if _tmw is not None:
                 _tmw._tab_panel.end_batch_add()
+        # 🐛 模板加载后 tab 自动切到第一个成员：add_window 每次激活新窗口
+        # （批量创建 N 个成员后激活停在最后一个），此处统一切回第一个新窗口。
+        # 注：单个成员（快速新建成员 _handle_team_add_member）时切回自身，
+        # 行为不变；仅批量场景（/team --load）生效。
+        if new_windows and _tmw is not None:
+            try:
+                _first_idx = _tmw._window_to_index.get(id(new_windows[0]), -1)
+                if 0 <= _first_idx < len(_tmw._windows):
+                    _tmw._tab_panel.set_active_index(_first_idx)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[_spawn_team_members] 切回首个成员 tab 失败: {e}")
         # 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
         self._pending_arrange_count = len(new_windows)
         if self._pending_arrange_count == 0:
