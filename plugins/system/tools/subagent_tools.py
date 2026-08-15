@@ -1,16 +1,151 @@
 # -*- coding: utf-8 -*-
 """
-系统工具插件 — 子智能体与团队协作（平台服务）
+系统工具插件 — 子智能体与团队协作（自包含实现）
 
-subagent_* / team_*：子智能体调度（SubAgentManager）与团队协作（TeamManager）
-是平台能力，impl 通过 tool_ctx["services"] 调用，工具层逻辑（参数/结果）在插件内。
+subagent_*：直接使用 tool_ctx["sub_agent_manager"]（ToolExecutor 注入的主程序
+子智能体调度器），不依赖主程序服务转发。
+team_*：直接调用主程序 TeamManager（插件 import 主程序，正常方向），
+窗口团队上下文从 tool_ctx["team_window_id"]/["team_agent_name"] 获取。
+团队专用工具注册 team_only=True → 非团队成员从 schema 定义中过滤。
 """
+import uuid
+
 import orjson
 
 from app.tools.result import ToolResult
 
 GROUP_SUBAGENT = "子智能体"
 GROUP_TEAM = "团队协作"
+
+
+# ============================================================
+# 团队服务（内联实现：TeamManager 为主程序平台能力，插件 import 调用）
+# ============================================================
+
+_STATUS_LABELS = {
+    "busy": "🟡 执行任务中",
+    "idle": "🟢 空闲",
+    "running": "🟡 执行任务中",
+    "pending": "⏳ 等待处理",
+}
+
+
+def _get_team_manager():
+    from app.core.team_manager import TeamManager
+
+    return TeamManager.get_instance()
+
+
+def _format_capability(cap: dict) -> str:
+    """格式化能力摘要：如 `写✓/编✓/bash✓ | 标签: implement`。"""
+    mark = lambda ok: "✓" if ok else "✗"
+    parts = [
+        f"写{mark(bool(cap.get('can_write')))}",
+        f"bash{mark(bool(cap.get('can_bash')))}",
+        # T16：团队成员恒具团队工具 → 恒 ✓（不读 can_team，防御老快照）
+        "团队✓",
+    ]
+    tags = cap.get("task_tags") or []
+    if tags:
+        parts.append("标签: " + ",".join(tags))
+    return " / ".join(parts)
+
+
+def _team_list_members(tool_ctx) -> ToolResult:
+    """列出团队所有成员（含 agent_name@window_id 标识符、状态、角色、权限）"""
+    window_id = tool_ctx.get("team_window_id", "")
+    agent_name = tool_ctx.get("team_agent_name", "")
+    if not window_id:
+        return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
+
+    tm = _get_team_manager()
+    members = tm.get_members()
+    if not members:
+        return ToolResult(True, content="当前没有团队成员。使用 /team --join=<agent> 加入团队。")
+
+    role_descs = {}
+    try:
+        template = tm.get_template()
+        for item in (template or {}).get("agents") or []:
+            if isinstance(item, dict) and item.get("agent_name"):
+                desc = str(item.get("description") or "").strip()
+                if desc:
+                    role_descs[item["agent_name"]] = desc
+    except Exception:
+        role_descs = {}
+
+    lines = [f"团队成员 ({len(members)} 人):"]
+    for m in members:
+        suffix = ""
+        if m["window_id"] == window_id and m["agent_name"] == agent_name:
+            suffix = " ← 你"
+        status = tm.get_member_busy_status(m["window_id"])
+        running_tasks = tm.get_running_tasks(m["window_id"])
+        pending_tasks = tm.get_pending_tasks(m["window_id"])
+        if running_tasks:
+            status_label = _STATUS_LABELS.get("running", "🟡 执行任务中")
+            task_summary = running_tasks[0].get("subject", "")[:40]
+            if task_summary:
+                status_label += f" 「{task_summary}」"
+        elif pending_tasks:
+            status_label = _STATUS_LABELS.get("pending", "⏳ 等待处理")
+            task_summary = pending_tasks[0].get("subject", "")[:40]
+            if task_summary:
+                status_label += f" 「{task_summary}」"
+        else:
+            status_label = _STATUS_LABELS.get(status, "🟢 空闲")
+        line = f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}"
+        desc = role_descs.get(m["agent_name"], "")
+        if desc:
+            line += f"\n      角色: {desc}"
+        cap = None
+        try:
+            cap = tm.get_member_capability(m["agent_name"])
+        except Exception:
+            cap = None
+        if cap:
+            line += f"\n      权限: {_format_capability(cap)}"
+        lines.append(line)
+    return ToolResult(True, content="\n".join(lines))
+
+
+def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
+    """向团队成员发送任务邮件（支持 agent_name 或 agent_name@window_id）"""
+    window_id = tool_ctx.get("team_window_id", "")
+    from_agent = tool_ctx.get("team_agent_name", "")
+    if not window_id or not from_agent:
+        return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
+
+    tm = _get_team_manager()
+    mail_id = tm.send_task(
+        from_window=window_id,
+        from_agent=from_agent,
+        to_identifier=to_agent,
+        task_description=message,
+    )
+    if mail_id:
+        target = tm.find_member(to_agent)
+        target_label = to_agent
+        if target:
+            target_label = f"{target['agent_name']}@{target['window_id']}"
+        cap_hint = ""
+        target_agent_name = (target or {}).get("agent_name", "")
+        try:
+            cap = tm.get_member_capability(target_agent_name) if target_agent_name else None
+            if cap:
+                cap_hint = f"\n      目标能力: {_format_capability(cap)}"
+        except Exception:
+            cap_hint = ""
+        return ToolResult(True, content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}")
+    else:
+        members = tm.get_members()
+        available = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in members)
+        return ToolResult(False, error=f"未找到目标「{to_agent}」。当前团队成员: {available}")
+
+
+# ============================================================
+# schema
+# ============================================================
 
 _SUBAGENT_PARA_SCHEMA = {
     "type": "function",
@@ -40,21 +175,6 @@ _SUBAGENT_PARA_SCHEMA = {
     },
 }
 
-
-def _subagent_para_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("subagent")
-    if service is None:
-        return ToolResult(False, error="子智能体服务不可用")
-    tasks_val = kwargs.get("tasks", [])
-    tasks = orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or [])
-    return service.subagent_para_execute(
-        tasks,
-        kwargs.get("share_context", False),
-        session_id=tool_ctx.get("session_id", ""),
-        sub_agent_manager=tool_ctx.get("sub_agent_manager"),
-    )
-
-
 _SUBAGENT_STATUS_SCHEMA = {
     "type": "function",
     "function": {
@@ -73,20 +193,6 @@ _SUBAGENT_STATUS_SCHEMA = {
         },
     },
 }
-
-
-def _subagent_status_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("subagent")
-    if service is None:
-        return ToolResult(False, error="子智能体服务不可用")
-    return service.subagent_status(
-        kwargs.get("task_ids"),
-        kwargs.get("with_log", False),
-        kwargs.get("with_result", True),
-        session_id=tool_ctx.get("session_id", ""),
-        sub_agent_manager=tool_ctx.get("sub_agent_manager"),
-    )
-
 
 _SUBAGENT_DAG_SCHEMA = {
     "type": "function",
@@ -128,19 +234,6 @@ _SUBAGENT_DAG_SCHEMA = {
     },
 }
 
-
-def _subagent_dag_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("subagent")
-    if service is None:
-        return ToolResult(False, error="子智能体服务不可用")
-    return service.subagent_dag_execute(
-        kwargs.get("nodes", []),
-        kwargs.get("edges", []),
-        session_id=tool_ctx.get("session_id", ""),
-        sub_agent_manager=tool_ctx.get("sub_agent_manager"),
-    )
-
-
 _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
@@ -160,17 +253,6 @@ _TEAM_SEND_SCHEMA = {
     },
 }
 
-
-def _team_send_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("team")
-    if service is None:
-        return ToolResult(False, error="团队服务不可用")
-    return service.team_send_message(
-        to_agent=kwargs.get("to_agent", ""),
-        message=kwargs.get("message", ""),
-    )
-
-
 _TEAM_LIST_SCHEMA = {
     "type": "function",
     "function": {
@@ -181,11 +263,87 @@ _TEAM_LIST_SCHEMA = {
 }
 
 
+# ============================================================
+# impl
+# ============================================================
+
+def _subagent_para_impl(tool_ctx, **kwargs):
+    manager = tool_ctx.get("sub_agent_manager")
+    if not manager:
+        return ToolResult(False, error="子智能体管理器未初始化")
+    tasks_val = kwargs.get("tasks", [])
+    tasks = orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or [])
+    if not tasks:
+        return ToolResult(False, error="任务列表为空")
+    share_context = kwargs.get("share_context", False)
+    session_id = tool_ctx.get("session_id", "")
+
+    task_ids = []
+    for task_item in tasks:
+        agent = task_item.get("agent", "")
+        description = task_item.get("description", "")
+        context = task_item.get("context", "")
+        if not agent or not description:
+            continue
+        task_id = str(uuid.uuid4())
+        manager.execute_task(
+            task_id=task_id,
+            agent_name=agent,
+            task_description=description,
+            parent_context=context or "",
+            on_finished=None,
+            on_error=None,
+            executor_ref=None,
+            share_context=share_context,
+            session_id=session_id,
+        )
+        task_ids.append(task_id)
+
+    return ToolResult(
+        True,
+        content={
+            "task_ids": task_ids,
+            "status": "running",
+            "count": len(task_ids),
+        },
+    )
+
+
+def _subagent_status_impl(tool_ctx, **kwargs):
+    manager = tool_ctx.get("sub_agent_manager")
+    if not manager:
+        return ToolResult(False, error="子智能体管理器未初始化")
+    task_ids = kwargs.get("task_ids")
+    with_log = kwargs.get("with_log", False)
+    with_result = kwargs.get("with_result", True)
+    session_id = tool_ctx.get("session_id", "")
+    if task_ids:
+        if isinstance(task_ids, list):
+            id_list = [str(tid).strip() for tid in task_ids if tid]
+        else:
+            id_list = [tid.strip() for tid in str(task_ids).split(",") if tid.strip()]
+        return manager.get_tasks_status_with_details(id_list, with_log, with_result, session_id=session_id)
+    return manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
+
+
+def _subagent_dag_impl(tool_ctx, **kwargs):
+    manager = tool_ctx.get("sub_agent_manager")
+    if not manager:
+        return ToolResult(False, error="子智能体管理器未初始化")
+    nodes = kwargs.get("nodes", [])
+    edges = kwargs.get("edges", [])
+    if not nodes:
+        return ToolResult(False, error="节点列表为空")
+    session_id = tool_ctx.get("session_id", "")
+    return manager.execute_dag(nodes=nodes, edges=edges, session_id=session_id)
+
+
+def _team_send_impl(tool_ctx, **kwargs):
+    return _team_send_message(tool_ctx, kwargs.get("to_agent", ""), kwargs.get("message", ""))
+
+
 def _team_list_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("team")
-    if service is None:
-        return ToolResult(False, error="团队服务不可用")
-    return service.team_list_members()
+    return _team_list_members(tool_ctx)
 
 
 def register(registry):
@@ -207,13 +365,14 @@ def register(registry):
         group=GROUP_SUBAGENT, description="DAG工作流子智能体",
         aliases=["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
     )
+    # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
     registry.register(
         "team_send_message", _TEAM_SEND_SCHEMA, impl=_team_send_impl,
         danger="dangerous", icon="邮件-发送", cn_name="发送邮件",
-        group=GROUP_TEAM, description="向团队成员发送任务",
+        group=GROUP_TEAM, description="向团队成员发送任务", team_only=True,
     )
     registry.register(
         "team_list_members", _TEAM_LIST_SCHEMA, impl=_team_list_impl,
         danger="safe", icon="团队", cn_name="团队成员",
-        group=GROUP_TEAM, description="列出团队成员",
+        group=GROUP_TEAM, description="列出团队成员", team_only=True,
     )

@@ -15385,7 +15385,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _handle_todos_command(self, args: str):
         """/todos 命令：手动显示/刷新待办事项卡片"""
-        todos = self.backend.get_todos()
+        # 工具插件化：待办状态在工具插件内，主程序不读插件状态——
+        # 通过执行 todoread 工具拿当前列表（主程序 → 工具执行，正常方向）
+        todos = []
+        try:
+            if self.backend and getattr(self.backend, "_tool_executor", None):
+                result = self.backend._tool_executor.execute("todoread", {})
+                if result is not None:
+                    todos = getattr(result, "todos", None) or []
+        except Exception:
+            todos = []
         if todos:
             self._todo_floating_widget.update_todos(todos)
             # 确保卡片可见（update_todos 内部已处理自动显示，但通过 CardManager 确保容器展开）
@@ -16092,8 +16101,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 统一处理工具完成状态
         if tool_name in ("todowrite", "todoread"):
-            todos = self.backend.get_todos()
-            self._todo_floating_widget.update_todos(todos)
+            # 工具插件化：待办状态在插件内，UI 从 ToolResult.todos 字段联动（主程序不读插件状态）
+            todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
+            if todos:
+                self._todo_floating_widget.update_todos(todos)
             if self._is_system_card_visible:
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass

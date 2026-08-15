@@ -634,9 +634,7 @@ class ToolExecutor:
         """设置当前项目（供 update_project_note 使用）"""
         if self._builtin_tools:
             self._builtin_tools.set_current_project(project)
-            # 同步更新 TaskTools._current_project（stage_files 也用）
-            if self._builtin_tools._task_tools:
-                self._builtin_tools._task_tools._current_project = project
+            # 工具插件化：stage_files 已自包含，无需注入项目状态
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
     def get_workdir(self) -> Optional[str]:
@@ -694,54 +692,8 @@ class ToolExecutor:
             return str(Path(__file__).resolve().parent.parent.parent)
 
     def set_key_documents_repo(self, repo, project: str = "默认项目"):
-        """设置关键文档仓储和当前项目"""
-        if self._builtin_tools and self._builtin_tools._task_tools:
-            self._builtin_tools._task_tools._key_documents_repo = repo
-            self._builtin_tools._task_tools._current_project = project
-            logger.info(f"[ToolExecutor] KeyDocumentsRepo attached to TaskTools (project={project})")
-
-    # 工具必需参数定义
-    REQUIRED_ARGS = {
-        "read": ["path"],
-        "write": ["path", "content"],
-        "edit": ["path", "oldString", "newString"],
-        "multi_edit": ["path", "edits"],
-        "grep": ["pattern"],
-        "glob": ["pattern"],
-        "bash": ["command"],
-        # 后台任务工具
-        "bg_start": ["command"],
-        "bg_stop": ["task_id"],
-        "bg_logs": ["task_id"],
-        "bg_list": [],
-        "webfetch": ["url"],
-        "websearch": ["query"],
-        "scan_repo": [],
-        "stage_files": ["files"],
-        "git_status": [],
-        "git_log": [],
-        "git_diff": [],
-        "get_diagnostics": ["path"],
-        "summarize_changes": ["text"],
-        "todowrite": ["todos"],
-        "todoread": [],
-        "subagent_para": ["tasks"],
-        "subagent_dag": ["nodes"],
-        "task_wait": ["task_ids"],
-        "subagent_status": [],
-        "skill": ["name"],
-        "list_skills": [],
-        "question": ["questions"],
-        "read_persisted_output": ["file_path"],
-        "gitee_upload": ["local_path"],
-        "upload_file": ["local_path"],
-        # 桌面自动化 (mouse / keyboard / screenshot)
-        "mouse": ["action"],
-        "keyboard": ["action"],
-        "screenshot": [],
-        # LSP 工具
-        "lsp": ["operation"],
-    }
+        """设置关键文档仓储和当前项目（工具插件化：stage_files 已自包含，仓储不再注入插件）"""
+        logger.info(f"[ToolExecutor] KeyDocumentsRepo set (project={project})")
 
     def execute(
         self,
@@ -883,12 +835,11 @@ class ToolExecutor:
                         or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block).",
                     )
 
-        # 校验必需参数
-        if tool_name in self.REQUIRED_ARGS:
-            required = self.REQUIRED_ARGS[tool_name]
-            missing = [p for p in required if not args.get(p)]
-            if missing:
-                return ToolResult(False, error=f"Missing required arguments: {missing}")
+        # 校验必需参数（单一数据源：注册工具从 registry schema 的 function.required 读取；
+        required = self._get_required_args(tool_name)
+        missing = [p for p in required if not args.get(p)]
+        if missing:
+            return ToolResult(False, error=f"Missing required arguments: {missing}")
 
         # 文件操作前记录（用于撤销）
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
@@ -977,6 +928,19 @@ class ToolExecutor:
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
 
+    def _get_required_args(self, tool_name: str) -> list:
+        """获取工具必填参数（单一数据源：registry schema；内部工具用小映射）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                # OpenAI schema：required 位于 function.parameters.required
+                params = ((reg.schema.get("function") or {}).get("parameters") or {})
+                return params.get("required") or []
+        except Exception:
+            pass
+
     def _execute_registered_tool(self, reg, args: dict, session_id: str) -> Callable:
         """构造注册工具（插件）的执行闭包。
 
@@ -995,17 +959,17 @@ class ToolExecutor:
         impl = reg.impl
         bt = self._builtin_tools
         services = {}
+        # 平台能力服务（主程序内部：BuiltinTools 动态转发到 task/team 服务模块），
+        # 通过 tool_ctx 注入给插件 impl 调用——主程序不加载插件内容（方向正确）。
         if bt is not None:
-            services = {
-                "todo": bt,
-                                "subagent": bt,
-                "team": bt,
-                "lsp": getattr(bt, "_lsp_tools", None),
-                "mcp": getattr(bt, "_mcp_manager", None),
-                "ask_user": getattr(bt, "ask_question", None),
-                "skills": bt,
-                "gitee": getattr(bt, "gitee_upload", None),
-                            }
+            services["todo"] = bt
+            services["subagent"] = bt
+            services["ask_user"] = getattr(bt, "ask_question", None)
+            services["skills"] = bt
+            services["team"] = bt
+            services["lsp"] = getattr(bt, "_lsp_tools", None)
+            services["mcp"] = getattr(bt, "_mcp_manager", None)
+            services["gitee"] = getattr(bt, "gitee_upload", None)
         env = {"desktop_automation_enabled": True}
         try:
             from app.utils.config import Settings
@@ -1040,6 +1004,8 @@ class ToolExecutor:
             "session_id": session_id,
             "call_id": self._call_id,
             "sub_agent_manager": self._sub_agent_manager,
+            "team_window_id": getattr(bt, "_team_window_id", "") if bt else "",
+            "team_agent_name": getattr(bt, "_team_agent_name", "") if bt else "",
             "env": env,
             "services": services,
         }
@@ -1152,8 +1118,7 @@ class ToolExecutor:
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
         # 实例级引用：subagent_para/subagent_status lambda 使用此引用来路由到正确的窗口
         self._sub_agent_manager = sub_agent_manager
-        # 共享 BuiltinTools 回退：供旧代码路径兼容
+        # 共享 BuiltinTools 回退：供旧代码路径兼容（sub_agent_manager 由 tool_ctx 注入插件 impl）
         if self._builtin_tools:
             self._builtin_tools._sub_agent_manager = sub_agent_manager
-            self._builtin_tools._task_tools._sub_agent_manager = sub_agent_manager
             logger.info("[ToolExecutor] SubAgentManager attached to instance and BuiltinTools")

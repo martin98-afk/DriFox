@@ -1,13 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-系统工具插件 — 任务与待办（平台服务）
+系统工具插件 — 任务与待办（自包含实现）
 
-todowrite / todoread：待办状态由主程序维护（UI 待办卡片联动读取），
-impl 通过 tool_ctx["services"]["todo"] 调用能力接口，工具层逻辑在插件内。
+todowrite / todoread：待办状态维护在本模块（进程级模块单例），
+ToolResult 携带 todos 字段回传 UI（主程序不读插件状态，UI 从工具结果联动）。
 """
+from typing import Dict, List
+
 from app.tools.result import ToolResult
 
 GROUP_TODO = "任务与待办"
+
+# 模块级待办状态（跨调用共享；主程序 UI 通过 ToolResult.todos 字段联动）
+_todo_list: List[Dict] = []
+
+
+def _normalize_todos(todos) -> List[Dict]:
+    """归一化待办（对齐 UI 期望的键/值）"""
+    normalized: List[Dict] = []
+    for item in todos or []:
+        if not isinstance(item, dict):
+            continue
+        lower_item = {str(k).lower(): v for k, v in item.items()}
+        status = str(lower_item.get("status", "")).lower()
+        priority = str(lower_item.get("priority", "medium")).lower()
+        content = lower_item.get("content") or lower_item.get("description") or ""
+        normalized.append(
+            {
+                "id": lower_item.get("id"),
+                "content": content,
+                "status": status or "pending",
+                "priority": priority or "medium",
+            }
+        )
+    return normalized
+
 
 _TODOWRITE_SCHEMA = {
     "type": "function",
@@ -39,11 +66,9 @@ _TODOWRITE_SCHEMA = {
 
 
 def _todowrite_impl(tool_ctx, **kwargs):
-    todos = kwargs.get("todos", [])
-    service = tool_ctx.get("services", {}).get("todo")
-    if service is None:
-        return ToolResult(False, error="待办服务不可用")
-    return service.todo_write(todos)
+    global _todo_list
+    _todo_list = _normalize_todos(kwargs.get("todos", []))
+    return ToolResult(True, content=f"Todo list updated: {len(_todo_list)} items", todos=list(_todo_list))
 
 
 _TODOREAD_SCHEMA = {
@@ -57,10 +82,21 @@ _TODOREAD_SCHEMA = {
 
 
 def _todoread_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("todo")
-    if service is None:
-        return ToolResult(False, error="待办服务不可用")
-    return service.todo_read()
+    if not _todo_list:
+        return ToolResult(True, content="No todos", todos=[])
+    lines = []
+    for i, todo in enumerate(_todo_list, 1):
+        status = todo.get("status", "")
+        if status == "completed":
+            status_icon = "✓"
+        elif status == "in_progress":
+            status_icon = "▶"
+        else:
+            status_icon = "○"
+        content = todo.get("content", "")
+        priority = todo.get("priority", "medium")
+        lines.append(f"{i}. [{priority}] {status_icon} {content}")
+    return ToolResult(True, content="\n".join(lines), todos=list(_todo_list))
 
 
 def register(registry):

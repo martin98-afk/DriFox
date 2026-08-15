@@ -52,11 +52,16 @@ _QUESTION_SCHEMA = {
 
 
 def _question_impl(tool_ctx, **kwargs):
-    ask_user = tool_ctx.get("services", {}).get("ask_user")
-    if ask_user is None:
-        return ToolResult(False, error="提问服务不可用（UI 未就绪）")
-    questions = kwargs.pop("questions", None)
-    return ask_user(questions, **kwargs)
+    """向用户提问：返回 question 类型结果（UI 弹窗渲染，主程序不读插件状态）"""
+    questions = kwargs.get("questions", [])
+    # 兼容旧格式：单问题参数
+    if not questions and "question" in kwargs:
+        questions = [{
+            "question": kwargs["question"],
+            "options": kwargs.get("options", []),
+            "multiple": kwargs.get("multiple", False),
+        }]
+    return ToolResult(True, content={"questions": questions or [], "type": "question"})
 
 
 _SKILL_SCHEMA = {
@@ -76,10 +81,16 @@ _SKILL_SCHEMA = {
 
 
 def _skill_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("skills")
-    if service is None:
-        return ToolResult(False, error="技能服务不可用")
-    return service.load_skill(kwargs.get("name", ""))
+    from app.utils.utils import load_skill
+
+    name = kwargs.get("name", "")
+    success, content, workspace = load_skill(name)
+    if success:
+        return ToolResult(
+            True,
+            content=f"Skill loaded: {name}\n\nSkill workspace: {workspace}\n\n{content}",
+        )
+    return ToolResult(False, error=content)
 
 
 _LIST_SKILLS_SCHEMA = {
@@ -93,10 +104,9 @@ _LIST_SKILLS_SCHEMA = {
 
 
 def _list_skills_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("skills")
-    if service is None:
-        return ToolResult(False, error="技能服务不可用")
-    return service.list_skills()
+    from app.utils.utils import list_skills_with_intro
+
+    return ToolResult(True, content=list_skills_with_intro())
 
 
 _MCP_LIST_SCHEMA = {

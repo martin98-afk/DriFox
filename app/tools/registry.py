@@ -51,6 +51,7 @@ class ToolRegistration:
     group: str = ""  # 权限卡片分组（空 → 按 danger 落入兜底组）
     description: str = ""  # 权限卡片行内描述
     source: str = "builtin"  # builtin | plugin:<name>
+    team_only: bool = False  # 团队专用：仅团队成员可见（非成员从 schema 定义中过滤）
     aliases: List[str] = field(default_factory=list)  # Claude Code 风格别名
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -115,6 +116,7 @@ class ToolRegistry:
         description: str = "",
         source: str = "builtin",
         aliases: Optional[List[str]] = None,
+        team_only: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         trusted: bool = False,
     ) -> bool:
@@ -151,6 +153,7 @@ class ToolRegistry:
             group=group,
             description=description,
             source=source,
+            team_only=bool(team_only),
             aliases=list(aliases or []),
             metadata=dict(metadata or {}),
         )
@@ -258,6 +261,16 @@ class ToolRegistry:
     def get_aliases(self, name: str) -> List[str]:
         reg = self.get(name)
         return list(reg.aliases) if reg is not None else []
+
+    def is_team_only(self, name: str) -> bool:
+        """工具是否团队专用（仅团队成员可见）"""
+        reg = self.get(name)
+        return reg.team_only if reg is not None else False
+
+    def team_only_tools(self) -> List[str]:
+        """全部团队专用工具名（供 schema 过滤）"""
+        with self._lock:
+            return [n for n, r in self._tools.items() if r.team_only]
 
     def group_map(self) -> Dict[str, List[ToolRegistration]]:
         """按展示分组聚合（权限卡片用）。保持注册顺序，组内危险工具在前。"""

@@ -22,8 +22,6 @@ from app.core.lsp.lsp_tools import LspToolsIntegration
 # Import all tool modules（工具插件化：file/web/automation/codegraph/terminal/diagnostics 工具实现已迁插件）
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
-from app.tools.task_tools import TaskTools
-from app.tools.team_tools import TeamTools
 
 
 class BuiltinTools(QObject):
@@ -79,23 +77,11 @@ class BuiltinTools(QObject):
 
     def _register_tools(self):
         """Register all tool modules - add new tools here"""
-        # 工具插件化：bash/bg/get_diagnostics/codegraph/桌面 的实现已迁插件（自包含），
-        # 此处仅保留需主程序共享状态的服务模块（task/team/lsp/mcp）。
-        self._tools["task"] = TaskTools(self)
-
+        # 工具插件化：工具实现（含 task/team 服务）已全部迁插件，
+        # 此处仅保留主程序平台服务：LSP 集成（lsp 工具 impl 经 services 调用）。
         # LSP 工具集成
         self._lsp_tools = LspToolsIntegration(get_lsp_manager(), owner=self)
         self._tools["lsp"] = self._lsp_tools
-
-        # 团队协作工具
-        self._tools["team"] = TeamTools(self)
-
-        # Expose properties for backward compatibility
-        self._task_tools = self._tools["task"]
-
-    @property
-    def task_tools(self):
-        return self._task_tools
 
     @property
     def mcp_manager(self):
@@ -126,35 +112,13 @@ class BuiltinTools(QObject):
         self._team_window_id = window_id
         self._team_agent_name = agent_name
 
-    def get_todos(self):
-        """获取待办事项列表（返回副本，防止外部直接修改内部状态）"""
-        return list(self._task_tools._todo_list)
-
-    def todo_write(self, todos: List[Dict]):
-        result = self._task_tools.todo_write(todos)
-        self._todo_list = list(self._task_tools._todo_list)
-        return result
-
-    def todo_clear(self):
-        self._task_tools.todo_clear()
-        self._todo_list = []
-
-    def reset_session_state(self):
-        """Reset session-scoped state when switching sessions"""
-        self._todo_list = []
-        self._task_tools.reset_session_state()
-
     def cleanup(self):
         """
         彻底清理 BuiltinTools 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
-        # 清理待办事项
+        # 清理会话状态（工具插件待办/技能状态随工具插件生命周期，主程序不持有）
         self._todo_list = []
-        if hasattr(self._task_tools, "cleanup"):
-            self._task_tools.cleanup()
-
-        # 清理加载的技能
         self._loaded_skills = {}
         self._skill_workspaces = {}
 
@@ -242,9 +206,6 @@ class BuiltinTools(QObject):
     def set_agent_manager(self, agent_manager):
         """设置 AgentManager 实例，用于动态生成工具 schema"""
         self._agent_manager = agent_manager
-        # 同时设置给 task_tools
-        if hasattr(self._task_tools, "_agent_manager"):
-            self._task_tools._agent_manager = agent_manager
 
     def set_current_project(self, project: str):
         """设置当前项目（供更新项目笔记时使用）"""

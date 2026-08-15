@@ -4,7 +4,8 @@ from typing import Any, Optional
 class ToolResult:
     def __init__(self, success: bool, content: Any = None, error: Optional[str] = None,
                  diff: Optional[str] = None, anchors: Optional[str] = None,
-                 echarts: Optional[str] = None, image_data: Optional[dict] = None):
+                 echarts: Optional[str] = None, image_data: Optional[dict] = None,
+                 todos: Optional[list] = None):
         self.success = success
         self.content = content
         self.error = error
@@ -12,6 +13,7 @@ class ToolResult:
         self.anchors = anchors  # 新锚点块，供 LLM 链式编辑
         self.echarts = echarts  # ECharts 图表 JSON，供 UI 渲染 DAG 图
         self.image_data = image_data  # 图片数据: {"mime": str, "data": str(base64)}
+        self.todos = todos  # 待办列表（工具插件 todowrite/todoread 回传，UI 卡片联动读取）
 
     def to_dict(self) -> dict:
         d = {"success": self.success}
@@ -27,6 +29,8 @@ class ToolResult:
             d["echarts"] = self.echarts
         if self.image_data:
             d["image_data"] = self.image_data
+        if self.todos:
+            d["todos"] = self.todos
         return d
 
     def __str__(self):

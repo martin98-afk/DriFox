@@ -750,13 +750,17 @@ class AgentManager:
             f"team_window_id={bt_window_id!r}, is_in_team={is_in_team}"
         )
 
-        team_tools = {"team_send_message", "team_list_members"}
+        # 团队专用工具（registry 标记 team_only=True，可扩展）：
+        # 非团队成员从 schema 定义中过滤（LLM 看不到），仅团队成员可用。
+        from app.tools.registry import ToolRegistry
+
+        team_only_tools = set(ToolRegistry.get_instance().team_only_tools())
 
         filtered_tools = []
         for tool in all_tools:
             tool_name = tool["function"]["name"].lower()
-            # 团队工具：仅团队成员可见
-            if tool_name in team_tools:
+            # 团队专用工具：仅团队成员可见
+            if tool_name in team_only_tools:
                 if is_in_team:
                     filtered_tools.append(tool)
                 continue
