@@ -44,6 +44,7 @@ class ToolControlCardContent(QWidget):
         self._group_switches: dict = {}
         self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
+        self._rebuild_pending = False  # 合并同批 registry 变更,避免逐个排队全量重建
         self._setup_ui()
         self._bind_registry()
 
@@ -55,10 +56,24 @@ class ToolControlCardContent(QWidget):
         ToolRegistry.get_instance().on_change(self._on_registry_changed)
 
     def _on_registry_changed(self, version):
-        """registry 版本变化（工具插件热插拔/热更新）→ 重建卡片"""
+        """registry 版本变化（工具插件热插拔/热更新）→ 重建卡片
+
+        去抖：一次重扫会「逐个注销 + 全量重注册」全部工具，产生几十次
+        change 事件（每次 register/unregister 都 notify）。若每次排队
+        全量 _rebuild（~180ms/次）会串行刷屏数秒。pending 标记合并
+        同批变更 → 只重建一次；重建期间新变更会再触发一次，不丢。
+        """
         if not self._built:
             return
-        QTimer.singleShot(0, self._rebuild)
+        if self._rebuild_pending:
+            return
+        self._rebuild_pending = True
+        QTimer.singleShot(0, self._do_rebuild)
+
+    def _do_rebuild(self):
+        """singleShot 回调：重置 pending 后执行全量重建"""
+        self._rebuild_pending = False
+        self._rebuild()
 
     def set_controller(self, controller):
         """延迟绑定 controller(main_widget 在 super().__init__ 之后注入时使用)"""

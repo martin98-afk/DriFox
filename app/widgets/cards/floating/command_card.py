@@ -1291,6 +1291,14 @@ class CommandCard(QWidget):
         detail 模式由 _adjust_detail_height 控制高度，此处不干预。
         """
         # 虚拟化后 _item_widgets 是固定大小的池，改用数据源计数
+        # 高度口径必须与 _build_virtual_layout 一致：
+        # 真实总高 = item_count * ITEM_HEIGHT + divider_count * 1
+        # 若用 total_items（含 dividers）作 visible 基数，
+        # 当 item_count < MAX_VISIBLE_ITEMS 时 visible = item_count + divider_count，
+        # 卡片高度 = (item_count + divider_count) * ITEM_HEIGHT + divider_count
+        # = 真实高度 + divider_count * (ITEM_HEIGHT - 1) + (visible - item_count) * ITEM_HEIGHT
+        # 即多出空槽占位，导致列表底部出现大量空白。
+        # 因此 visible 只能按 item_count 计算，dividers 单独加 1px 即可。
         item_count = len(self._filtered_items)
         divider_count = self._divider_count
         total_items = item_count + divider_count
@@ -1300,7 +1308,7 @@ class CommandCard(QWidget):
         if self._detail_mode:
             return
 
-        visible = min(total_items, MAX_VISIBLE_ITEMS)
+        visible = min(item_count, MAX_VISIBLE_ITEMS)
         natural = visible * ITEM_HEIGHT + divider_count * 1
 
         budget = self._available_card_budget()
@@ -1315,7 +1323,7 @@ class CommandCard(QWidget):
         # ── 矮窗口自适应压缩：仅压缩可见项数量 ──
         visible_fit = max(
             CARD_MIN_VISIBLE_ITEMS,
-            min(total_items, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
+            min(item_count, MAX_VISIBLE_ITEMS, budget // ITEM_HEIGHT),
         )
         self._card_target_height = visible_fit * ITEM_HEIGHT + divider_count * 1
         self.setFixedHeight(self._card_target_height)

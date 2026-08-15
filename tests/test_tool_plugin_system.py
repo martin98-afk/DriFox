@@ -323,6 +323,40 @@ class TestPermissionLinkage:
         pc.deleteLater()
         qt_app.processEvents()
 
+    def test_registry_burst_change_debounced(self, qt_app):
+        """回归：watcher 重扫会逐个注销+重注册全部工具（几十次 change 事件），
+        卡片必须合并为一次全量重建，不能逐个排队（曾导致 ~180ms/次 × 35 次刷屏 6s）"""
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        pc = ToolPermissionController()
+        card = ToolControlCardContent(controller=pc)
+        card.show_content()  # 首次构建
+        assert card._built
+
+        rebuild_calls = []
+        card._rebuild = lambda: rebuild_calls.append(1)
+
+        # 模拟重扫：35 次 change 事件连续到达
+        base = reg.version()
+        for i in range(35):
+            card._on_registry_changed(base + i + 1)
+        assert card._rebuild_pending  # 同批变更已合并，仅排队一次
+
+        qt_app.processEvents()
+        qt_app.processEvents()
+        assert card._rebuild_pending is False
+        assert len(rebuild_calls) == 1  # 35 次变更只重建 1 次
+
+        card.deleteLater()
+        pc.deleteLater()
+        qt_app.processEvents()
+
 
 class TestSelfContained:
     """自包含验证：纯逻辑工具 impl 不依赖主程序工具模块"""
