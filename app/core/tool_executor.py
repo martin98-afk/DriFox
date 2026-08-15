@@ -61,6 +61,9 @@ class ToolExecutor:
         self._homepage = homepage
         self._backend = backend  # ChatBackend 引用，用于访问 HookManager
         self._builtin_tools: Optional[BuiltinTools] = None
+        # 窗口级待办状态（每窗口独立，M5：从进程级共享改回窗口隔离）
+        self._todo_list: list = []
+        self._todo_lock = threading.Lock()
         # P002: 初始就用默认路径兜底，避免 self._workdir 与 _builtin_tools.workdir 不一致
         self._workdir = workdir or self._default_workdir()
         # 【修复】区分"用户显式设置"与"初始化默认兜底"：
@@ -122,8 +125,7 @@ class ToolExecutor:
     def _todo_impl(self, tool_name: str):
         """获取待办工具（todoread/todowrite）的插件 impl（registry 驱动）
 
-        待办状态已迁插件（plugins/system/tools/task_tools.py 模块级单例），
-        主程序经 registry 调用 impl，不直接耦合插件模块内部结构。
+        兼容保留：插件 impl 仍可访问（注入 tool_ctx），但窗口级状态由本类持有。
         """
         try:
             from app.tools.registry import ToolRegistry
@@ -136,28 +138,36 @@ class ToolExecutor:
         return None
 
     def get_todos(self):
-        """获取待办事项列表（返回副本）"""
-        impl = self._todo_impl("todoread")
-        if impl is None:
-            return []
-        try:
-            result = impl(None)
-            return list(result.todos or [])
-        except Exception as e:
-            logger.warning(f"[ToolExecutor] 读取待办失败: {e}")
-            return []
+        """获取待办事项列表（窗口级，返回副本）"""
+        with self._todo_lock:
+            return [dict(t) for t in self._todo_list]
+
+    def set_todos(self, todos) -> list:
+        """覆盖待办列表（窗口级）；返回归一化副本"""
+        normalized = []
+        for item in todos or []:
+            if not isinstance(item, dict):
+                continue
+            lower_item = {str(k).lower(): v for k, v in item.items()}
+            status = str(lower_item.get("status", "")).lower()
+            priority = str(lower_item.get("priority", "medium")).lower()
+            content = lower_item.get("content") or lower_item.get("description") or ""
+            normalized.append(
+                {
+                    "id": lower_item.get("id"),
+                    "content": content,
+                    "status": status or "pending",
+                    "priority": priority or "medium",
+                }
+            )
+        with self._todo_lock:
+            self._todo_list = normalized
+        return [dict(t) for t in normalized]
 
     def clear_todo_list(self):
-        """清空待办事项列表"""
-        impl = self._todo_impl("todowrite")
-        if impl is None:
-            logger.warning("[ToolExecutor] todowrite 工具未注册，无法清空待办")
-            return
-        try:
-            impl(None, todos=[])
-        except Exception as e:
-            logger.warning(f"[ToolExecutor] 清空待办失败: {e}")
-
+        """清空待办事项列表（窗口级，只影响本窗口）"""
+        with self._todo_lock:
+            self._todo_list = []
     def reset_session_state(self):
         """Reset session-scoped state when switching sessions（旧语义：清空待办）"""
         self.clear_todo_list()
@@ -1004,8 +1014,9 @@ class ToolExecutor:
         bt = self._builtin_tools
         services = {}
         # 平台能力服务（主程序内部：精确能力接口注入，不暴露 BuiltinTools 对象）。
-        # 仅注入插件实际使用的能力（lsp/mcp/gitee）；todo 自包含（task_tools 模块级
-        # 状态）、subagent 通过 tool_ctx["sub_agent_manager"] 注入。
+        # todo：窗口级状态注入（每窗口独立，M5 窗口隔离）——插件经
+        # tool_ctx["services"]["todo"] 读写本窗口待办。
+        services["todo"] = {"get": self.get_todos, "set": self.set_todos}
         if bt is not None:
             services["lsp"] = getattr(bt, "_lsp_tools", None)
             services["mcp"] = getattr(bt, "_mcp_manager", None)

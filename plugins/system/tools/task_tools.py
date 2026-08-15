@@ -2,18 +2,29 @@
 """
 系统工具插件 — 任务与待办（自包含实现）
 
-todowrite / todoread：待办状态维护在本模块（进程级模块单例），
-ToolResult 携带 todos 字段回传 UI（主程序不读插件状态，UI 从工具结果联动）。
+todowrite / todoread：待办状态**窗口级**（tool_ctx services["todo"] 注入，
+每窗口独立）；无窗口上下文（测试等）回退 app.tools.task_state 模块级兑底。
+ToolResult 携带 todos 字段回传 UI（UI 从工具结果联动）。
 """
 from typing import Dict, List
 
 from app.tools.result import ToolResult
 
-from app.tools.task_state import get_todos, set_todos
+from app.tools.task_state import get_todos as _module_get_todos
+from app.tools.task_state import set_todos as _module_set_todos
 
 GROUP_TODO = "任务与待办"
 
-# 待办状态在 _task_state（下划线前缀，热重载不重置）——跨插件重载保留
+
+def _todo_state(tool_ctx):
+    """窗口级待办状态接口：tool_ctx services 注入优先（每窗口独立）；
+
+    无注入（直接调 impl 的测试/无窗口场景）回退模块级兑底。
+    """
+    svc = ((tool_ctx or {}).get("services") or {}).get("todo")
+    if svc and callable(svc.get("get")) and callable(svc.get("set")):
+        return svc
+    return {"get": _module_get_todos, "set": _module_set_todos}
 
 
 def _normalize_todos(todos) -> List[Dict]:
@@ -68,7 +79,7 @@ _TODOWRITE_SCHEMA = {
 
 def _todowrite_impl(tool_ctx, **kwargs):
     normalized = _normalize_todos(kwargs.get("todos", []))
-    set_todos(normalized)
+    _todo_state(tool_ctx)["set"](normalized)
     return ToolResult(True, content=f"Todo list updated: {len(normalized)} items", todos=normalized)
 
 
@@ -83,7 +94,7 @@ _TODOREAD_SCHEMA = {
 
 
 def _todoread_impl(tool_ctx, **kwargs):
-    todo_list = get_todos()
+    todo_list = _todo_state(tool_ctx)["get"]()
     if not todo_list:
         return ToolResult(True, content="No todos", todos=[])
     lines = []
