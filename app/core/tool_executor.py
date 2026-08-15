@@ -998,17 +998,14 @@ class ToolExecutor:
         if bt is not None:
             services = {
                 "todo": bt,
-                "terminal": bt,
-                "subagent": bt,
+                                "subagent": bt,
                 "team": bt,
                 "lsp": getattr(bt, "_lsp_tools", None),
-                "codegraph": bt,
                 "mcp": getattr(bt, "_mcp_manager", None),
                 "ask_user": getattr(bt, "ask_question", None),
                 "skills": bt,
                 "gitee": getattr(bt, "gitee_upload", None),
-                "diagnostics": bt,
-            }
+                            }
         env = {"desktop_automation_enabled": True}
         try:
             from app.utils.config import Settings

@@ -13,7 +13,15 @@ import time
 
 import pytest
 
-from app.tools.terminal_tools import BackgroundTaskManager
+# 工具插件化：BackgroundTaskManager 随终端工具迁入系统插件
+import importlib.util
+from pathlib import Path
+
+_PLUGIN_PATH = Path(__file__).resolve().parent.parent / "plugins" / "system" / "tools" / "terminal_tools.py"
+_spec = importlib.util.spec_from_file_location("_terminal_plugin", _PLUGIN_PATH)
+_terminal_plugin = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_terminal_plugin)
+BackgroundTaskManager = _terminal_plugin.BackgroundTaskManager
 
 
 def _alive(pid):

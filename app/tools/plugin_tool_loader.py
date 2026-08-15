@@ -148,13 +148,24 @@ def _load_module(plugin_name: str, path: Path):
         logger.warning(f"[PluginToolLoader] 无法加载 {path}")
         return None
     module = importlib.util.module_from_spec(spec)
+    # 修复：module_from_spec 的模块 dict 中 __builtins__ 可能异常（NoneType），
+    # 强制注入真实 builtins（exec 自定义命名空间的规范做法）。
+    module.__dict__["__builtins__"] = __builtins__
+    # 修复：exec 前注册到 sys.modules——dataclasses 等库在 _process_class 中
+    # 检查 `cls.__module__ in sys.modules`，未注册会导致装饰器异常。
+    sys.modules[mod_name] = module
     try:
         source = path.read_text(encoding="utf-8")
         code = compile(source, str(path), "exec")
     except (OSError, SyntaxError) as e:
+        sys.modules.pop(mod_name, None)
         logger.warning(f"[PluginToolLoader] 读取/编译失败 {path}: {e}")
         return None
-    exec(code, module.__dict__)
+    try:
+        exec(code, module.__dict__)
+    except Exception:
+        sys.modules.pop(mod_name, None)
+        raise
     return module
 
 

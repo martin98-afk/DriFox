@@ -18,11 +18,17 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# ── 跳过条件 ─────────────────────────────────────────────────────────────
+# ── 跳过条件（工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/） ──
 try:
     import codegraph  # noqa: F401
-    from app.tools.codegraph_tools import CodeGraphTools
-    from app.tools.codegraph_tools import _HAS_CODEGRAPH
+    import importlib.util
+
+    _PLUGIN_PATH = PROJECT_ROOT / ".drifox" / "plugins" / "codegraph-tools" / "tools" / "codegraph.py"
+    _spec = importlib.util.spec_from_file_location("_codegraph_plugin", _PLUGIN_PATH)
+    _cg_plugin = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_cg_plugin)
+    CodeGraphTools = _cg_plugin.CodeGraphTools
+    _HAS_CODEGRAPH = _cg_plugin._HAS_CODEGRAPH
     _CODEGRAPH_AVAILABLE = _HAS_CODEGRAPH
 except ImportError:
     _CODEGRAPH_AVAILABLE = False
@@ -30,11 +36,16 @@ except ImportError:
 
 # ── 夹具 ─────────────────────────────────────────────────────────────────
 
+class _OwnerShim:
+    """引擎 owner 最小实现（仅 workdir）"""
+    def __init__(self, workdir):
+        self.workdir = workdir
+
+
 @pytest.fixture(scope="class")
 def cg_tools():
     """创建 CodeGraphTools 实例（指向实际项目）"""
-    tools = CodeGraphTools(None)
-    tools._owner = type("Owner", (), {"workdir": Path(os.getcwd())})()
+    tools = CodeGraphTools(_OwnerShim(Path(os.getcwd())))
     yield tools
     tools.cleanup()
 
@@ -53,8 +64,9 @@ class TestCodeGraphModule:
         assert hasattr(codegraph, "__version__")
 
     def test_import_codegraph_tools(self):
-        from app.tools import codegraph_tools  # noqa: F401
-        assert codegraph_tools._HAS_CODEGRAPH
+        # 工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/tools/codegraph.py
+        assert _cg_plugin is not None
+        assert _cg_plugin._HAS_CODEGRAPH
 
     def test_tool_classifier(self):
         from app.tools.registry import ToolRegistry
@@ -256,15 +268,14 @@ class TestCodeGraphFunctional:
         tools._owner = type("Owner", (), {"workdir": Path(os.getcwd())})()
 
         # 模拟未安装
-        import app.tools.codegraph_tools as cgt
-        original = cgt._HAS_CODEGRAPH
-        cgt._HAS_CODEGRAPH = False
+        original = _cg_plugin._HAS_CODEGRAPH
+        _cg_plugin._HAS_CODEGRAPH = False
         try:
             r = tools.codegraph_explore(mode="status")
             assert not r.is_success()
             assert "未安装" in r.error or "未安装" in r.content
         finally:
-            cgt._HAS_CODEGRAPH = original
+            _cg_plugin._HAS_CODEGRAPH = original
         tools.cleanup()
 
 

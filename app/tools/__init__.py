@@ -18,16 +18,12 @@ from PyQt5.QtCore import QObject
 
 from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
 from app.core.lsp.lsp_tools import LspToolsIntegration
-from app.tools.automation import AutomationTools
 
-# Import all tool modules（工具插件化：file/web/automation 工具实现已迁 plugins/system/tools/）
-from app.tools.codegraph_tools import CodeGraphTools
-from app.tools.diagnostics_tools import DiagnosticsTools
+# Import all tool modules（工具插件化：file/web/automation/codegraph/terminal/diagnostics 工具实现已迁插件）
 from app.tools.mcp_tools import MCPClientManager
 from app.tools.result import ToolResult
 from app.tools.task_tools import TaskTools
 from app.tools.team_tools import TeamTools
-from app.tools.terminal_tools import TerminalTools
 
 
 class BuiltinTools(QObject):
@@ -83,41 +79,23 @@ class BuiltinTools(QObject):
 
     def _register_tools(self):
         """Register all tool modules - add new tools here"""
-        # 工具插件化：file/web/automation 的实现已迁 plugins/system/tools/（自包含），
-        # 此处仅注册平台服务模块（terminal/task/diagnostics/team/lsp/codegraph/mcp）。
-        self._tools["terminal"] = TerminalTools(self)
+        # 工具插件化：bash/bg/get_diagnostics/codegraph/桌面 的实现已迁插件（自包含），
+        # 此处仅保留需主程序共享状态的服务模块（task/team/lsp/mcp）。
         self._tools["task"] = TaskTools(self)
-        self._tools["diagnostics"] = DiagnosticsTools(self)
-        self._tools["automation"] = AutomationTools(self)  # 紧急停止热键服务（Ctrl+Alt+Esc）
 
         # LSP 工具集成
         self._lsp_tools = LspToolsIntegration(get_lsp_manager(), owner=self)
         self._tools["lsp"] = self._lsp_tools
 
-        # CodeGraph 代码智能引擎
-        self._codegraph_tools = CodeGraphTools(self)
-        self._tools["codegraph"] = self._codegraph_tools
-
         # 团队协作工具
         self._tools["team"] = TeamTools(self)
 
         # Expose properties for backward compatibility
-        self._terminal_tools = self._tools["terminal"]
         self._task_tools = self._tools["task"]
-        self._diagnostics_tools = self._tools["diagnostics"]
-        self._automation_tools = self._tools["automation"]
-
-    @property
-    def terminal_tools(self):
-        return self._terminal_tools
 
     @property
     def task_tools(self):
         return self._task_tools
-
-    @property
-    def diagnostics_tools(self):
-        return self._diagnostics_tools
 
     @property
     def mcp_manager(self):
@@ -182,10 +160,6 @@ class BuiltinTools(QObject):
 
         # 清理子智能体管理器
         self._sub_agent_manager = None
-
-        # 释放 CodeGraph 实例
-        if hasattr(self, "_codegraph_tools"):
-            self._codegraph_tools.cleanup()
 
         # 释放 MCP 引用（引用计数归零时才真正断开）
         self._mcp_manager.release()

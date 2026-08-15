@@ -1,11 +1,255 @@
 # -*- coding: utf-8 -*-
 """
-系统工具插件 — 诊断与代码智能（平台服务）
+系统工具插件 — 诊断（get_diagnostics 完整实现）
 
-get_diagnostics / lsp / codegraph_explore：LSP 与 CodeGraph 引擎是平台能力，
-impl 通过 tool_ctx["services"] 调用，工具层逻辑（参数/结果）在插件内。
+从主程序 app/tools/diagnostics_tools.py 整体迁移（工具插件化）：
+- DiagnosticsTools 类：LSP CLI 诊断（pyright/mypy/flake8/tsc/eslint/shellcheck）
+- impl 通过 tool_ctx["workdir"] 驱动，不依赖主程序 services
 """
+
+# -*- coding: utf-8 -*-
+"""
+诊断工具集 - 提供代码静态分析功能
+
+支持：
+- Python: pyright 语法检查
+- JavaScript/TypeScript: ESLint 检查
+- 通用: grep 搜索错误关键词
+"""
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional, Tuple
+
+import orjson as json
+
 from app.tools.result import ToolResult
+
+# pyright Python 模块可用性检测
+try:
+    from pyright import cli as pyright_cli
+    _HAS_PYRIGHT = True
+except ImportError:
+    _HAS_PYRIGHT = False
+
+class DiagnosticsTools:
+    def __init__(self, owner):
+        self._owner = owner
+
+    @property
+    def workdir(self) -> Path:
+        return self._owner.workdir
+
+    def _detect_language(self, file_path: str) -> str:
+        ext = Path(file_path).suffix.lower()
+        return {
+            ".py": "python",
+            ".js": "javascript",
+            ".mjs": "javascript",
+            ".cjs": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".sh": "shellscript",
+            ".bash": "shellscript",
+            ".zsh": "shellscript",
+        }.get(ext, "unknown")
+
+    def _run_quietly(self, cmd: list, cwd: Optional[str] = None, timeout: int = 30):
+        # Windows: 如果命令不以 .exe/.cmd/.bat 结尾，通过 cmd /c 包装以支持 PATHEXT（如 tsc → tsc.cmd）
+        if sys.platform == "win32" and cmd and not cmd[0].lower().endswith((".exe", ".cmd", ".bat")):
+            cmd = ["cmd", "/c"] + cmd
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(self.workdir) if cwd is None else cwd,
+                creationflags=subprocess.CREATE_NO_WINDOW
+                if sys.platform == "win32"
+                else 0,
+            )
+            out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
+            return r.returncode, out
+        except FileNotFoundError:
+            return -1, f"(command not found: {cmd[0]})"
+        except subprocess.TimeoutExpired:
+            return -1, f"(timed out after {timeout}s)"
+        except Exception as e:
+            return -1, f"(error: {e})"
+
+    def _run_pyright_module(self, file_path: str, timeout: int = 60) -> Tuple[int, str]:
+        """使用 pyright Python 模块运行诊断"""
+        try:
+            r = pyright_cli.run(  # type: ignore[possibly-undefined]
+                "--outputjson", file_path, capture_output=True, timeout=timeout
+            )
+            stdout = r.stdout
+            if stdout is None:
+                return r.returncode, ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8")
+            return r.returncode, stdout
+        except Exception as e:
+            return -1, f"(pyright module error: {e})"
+
+    def _parse_pyright_json(self, output: str) -> Optional[str]:
+        """解析 pyright JSON 输出，返回格式化字符串或 None"""
+        try:
+            data = json.loads(output)
+            diags = data.get("generalDiagnostics", [])
+            if not diags:
+                return None
+            lines = [f"pyright ({len(diags)} issue(s)):"]
+            for d in diags[:50]:
+                rng = d.get("range", {}).get("start", {})
+                ln = rng.get("line", 0) + 1
+                ch = rng.get("character", 0) + 1
+                sev = d.get("severity", "error")
+                msg = d.get("message", "")
+                rule = d.get("rule", "")
+                lines.append(
+                    f"  {ln}:{ch} [{sev}] {msg}" + (f" ({rule})" if rule else "")
+                )
+            return "\n".join(lines)
+        except (json.JSONDecodeError, KeyError):
+            # 解析失败时返回原始输出的截断版本
+            if len(output) > 0:
+                return output[:3000]
+            return None
+
+    def get_diagnostics(self, file_path: str, language: Optional[str] = None) -> ToolResult:
+        p = Path(file_path)
+        if not p.exists():
+            return ToolResult(False, error=f"File not found: {file_path}")
+
+        lang = language or self._detect_language(file_path)
+        abs_path = str(p.resolve())
+        results = []
+
+        if lang == "python":
+            # 优先使用 pyright Python 模块
+            if _HAS_PYRIGHT:
+                rc, out = self._run_pyright_module(abs_path)
+                if rc != -1:
+                    parsed = self._parse_pyright_json(out)
+                    if parsed:
+                        results.append(parsed)
+                    else:
+                        results.append("pyright: no diagnostics")
+                else:
+                    results.append(f"pyright: {out}")
+            else:
+                # 回退到系统 pyright 命令
+                rc, out = self._run_quietly(["pyright", "--outputjson", abs_path])
+                if rc != -1:
+                    try:
+                        data = json.loads(out)
+                        diags = data.get("generalDiagnostics", [])
+                        if not diags:
+                            results.append("pyright: no diagnostics")
+                        else:
+                            lines = [f"pyright ({len(diags)} issue(s)):"]
+                            for d in diags[:50]:
+                                rng = d.get("range", {}).get("start", {})
+                                ln = rng.get("line", 0) + 1
+                                ch = rng.get("character", 0) + 1
+                                sev = d.get("severity", "error")
+                                msg = d.get("message", "")
+                                rule = d.get("rule", "")
+                                lines.append(
+                                    f"  {ln}:{ch} [{sev}] {msg}"
+                                    + (f" ({rule})" if rule else "")
+                                )
+                            results.append("\n".join(lines))
+                    except json.JSONDecodeError:
+                        if out:
+                            results.append(f"pyright:\n{out[:3000]}")
+                else:
+                    # 最后回退到 mypy/flake8/py_compile
+                    rc2, out2 = self._run_quietly(["mypy", "--no-error-summary", abs_path])
+                    if rc2 != -1:
+                        results.append(
+                            f"mypy:\n{out2[:3000]}" if out2 else "mypy: no diagnostics"
+                        )
+                    else:
+                        rc3, out3 = self._run_quietly(["flake8", abs_path])
+                        if rc3 != -1:
+                            results.append(
+                                f"flake8:\n{out3[:3000]}"
+                                if out3
+                                else "flake8: no diagnostics"
+                            )
+                        else:
+                            rc4, out4 = self._run_quietly(
+                                ["python3", "-m", "py_compile", abs_path]
+                            )
+                            if out4:
+                                results.append(f"py_compile (syntax check):\n{out4}")
+                            else:
+                                results.append(
+                                    "py_compile: syntax OK (no further tools available)"
+                                )
+
+        elif lang in ("javascript", "typescript"):
+            rc, out = self._run_quietly(["tsc", "--noEmit", "--strict", abs_path])
+            if rc != -1:
+                results.append(f"tsc:\n{out[:3000]}" if out else "tsc: no errors")
+            else:
+                rc2, out2 = self._run_quietly(["eslint", abs_path])
+                if rc2 != -1:
+                    results.append(
+                        f"eslint:\n{out2[:3000]}" if out2 else "eslint: no issues"
+                    )
+                else:
+                    results.append(
+                        "No TypeScript/JavaScript checker found (install tsc or eslint)"
+                    )
+
+        elif lang == "shellscript":
+            rc, out = self._run_quietly(["shellcheck", abs_path])
+            if rc != -1:
+                results.append(
+                    f"shellcheck:\n{out[:3000]}" if out else "shellcheck: no issues"
+                )
+            else:
+                rc2, out2 = self._run_quietly(["bash", "-n", abs_path])
+                results.append(
+                    f"bash -n (syntax check):\n{out2}" if out2 else "bash -n: syntax OK"
+                )
+
+        else:
+            results.append(
+                f"No diagnostic tool available for language: {lang or 'unknown'} (ext: {Path(file_path).suffix})"
+            )
+
+        return ToolResult(
+            True, content="\n\n".join(results) if results else "(no diagnostics output)"
+        )
+
+# ============================================================
+# 工具插件化：owner 包装 / impl / register
+# ============================================================
+
+class _OwnerShim:
+    """DiagnosticsTools 的 owner 最小实现（仅 workdir）"""
+
+    def __init__(self, workdir):
+        self.workdir = Path(workdir)
+
+
+_diag_instance = None
+
+
+def _get_diagnostics_tools(workdir):
+    """获取 DiagnosticsTools 实例（进程级懒创建，workdir 每次更新）"""
+    global _diag_instance
+    if _diag_instance is None:
+        _diag_instance = DiagnosticsTools(_OwnerShim(workdir))
+    else:
+        _diag_instance._owner.workdir = Path(workdir)
+    return _diag_instance
+
 
 GROUP_DIAG = "诊断与代码智能"
 
@@ -27,10 +271,8 @@ _GET_DIAGNOSTICS_SCHEMA = {
 
 
 def _get_diagnostics_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("diagnostics")
-    if service is None:
-        return ToolResult(False, error="诊断服务不可用")
-    return service.get_diagnostics(kwargs.get("path", ""), kwargs.get("language"))
+    diag = _get_diagnostics_tools(tool_ctx.get("workdir") or Path.cwd())
+    return diag.get_diagnostics(kwargs.get("path", ""), kwargs.get("language"))
 
 
 _LSP_SCHEMA = {
@@ -81,75 +323,6 @@ def _lsp_impl(tool_ctx, **kwargs):
     )
 
 
-_CODEGRAPH_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "codegraph_explore",
-        "description": (
-            "统一代码探索工具。通过 mode 切换不同能力：\n"
-            "  - status: 查看索引状态（文件/符号/边/待同步变更）\n"
-            "  - search: 搜索符号（函数/类/方法/变量），支持按 kind 过滤\n"
-            "  - callers: 查找谁调用了指定符号\n"
-            "  - callees: 查找指定符号调用了谁\n"
-            "  - explore: （默认）综合搜索+调用上下文，一次输出\n"
-            "  - impact: 变更影响分析，评估改动波及范围\n"
-            "  - sync: 同步索引与文件系统变更\n"
-            "  - files: 列出已索引文件\n"
-            "\n"
-            "新参数（v1.4.0）:\n"
-            "  substring=true  — 子串匹配，搜 Manager 也能找到 SessionManager\n"
-            "  visibility=private — 只搜 _ 开头的私有符号\n"
-            "  case_sensitive=true — 大小写敏感\n"
-            "\n"
-            "使用示例：\n"
-            "  codegraph_explore(mode='status') — 看索引状态\n"
-            "  codegraph_explore('ChatBackend') — 探索 ChatBackend\n"
-            "  codegraph_explore('Manager', mode='search', substring=true, kind='class') — 搜所有 Manager 类\n"
-            "  codegraph_explore('send_message', mode='callers') — 找调用者\n"
-            "  codegraph_explore('on_click', mode='impact') — 影响分析"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索的符号名或关键词（status/sync/files 模式不需要）", "default": ""},
-                "mode": {
-                    "type": "string",
-                    "enum": ["status", "search", "callers", "callees", "explore", "impact", "sync", "files"],
-                    "description": "操作模式（默认 explore）",
-                    "default": "explore",
-                },
-                "depth": {"type": "integer", "description": "callers/callees/impact 的遍历深度（默认 2）", "default": 2},
-                "kind": {"type": "string", "description": "search 模式按类型过滤：function/class/method/variable/field/enum 等"},
-                "max_files": {"type": "integer", "description": "explore 模式最大文件数（默认 50）", "default": 50},
-                "directory": {"type": "string", "description": "files 模式按目录筛选（如 app/tools）"},
-                "limit": {"type": "integer", "description": "search 模式最大返回数（默认 50）", "default": 50},
-                "exact": {"type": "boolean", "description": "search 模式是否精确匹配（默认模糊）", "default": False},
-                "substring": {"type": "boolean", "description": "search 模式使用子串匹配（搜 Manager 也可命中 SessionManager）", "default": False},
-                "visibility": {"type": "string", "enum": ["public", "private"], "description": "search 模式按可见性过滤：public（无 _ 前缀）/private（有 _ 前缀）"},
-                "case_sensitive": {"type": "boolean", "description": "search 模式是否大小写敏感（默认不敏感）", "default": False},
-            },
-            "required": [],
-        },
-    },
-}
-
-
-def _codegraph_impl(tool_ctx, **kwargs):
-    service = tool_ctx.get("services", {}).get("codegraph")
-    if service is None:
-        return ToolResult(False, error="代码图服务不可用")
-    return service.codegraph_explore(
-        query=kwargs.get("query", ""),
-        mode=kwargs.get("mode", "explore"),
-        depth=int(kwargs.get("depth") or 2),
-        max_files=int(kwargs.get("max_files") or 50),
-        kind=kwargs.get("kind"),
-        directory=kwargs.get("directory"),
-        limit=int(kwargs.get("limit") or 50),
-        exact=kwargs.get("exact", False),
-    )
-
-
 def register(registry):
     registry.register(
         "get_diagnostics", _GET_DIAGNOSTICS_SCHEMA, impl=_get_diagnostics_impl,
@@ -160,10 +333,4 @@ def register(registry):
         "lsp", _LSP_SCHEMA, impl=_lsp_impl,
         danger="safe", icon="工具", cn_name="LSP",
         group=GROUP_DIAG, description="LSP代码智能操作",
-    )
-    registry.register(
-        "codegraph_explore", _CODEGRAPH_SCHEMA, impl=_codegraph_impl,
-        danger="safe", icon="Search", cn_name="代码探索",
-        group=GROUP_DIAG, description="语义级代码探索",
-        aliases=["CodeGraphExplore", "cg_explore", "codegraph"],
     )

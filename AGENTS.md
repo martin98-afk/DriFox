@@ -35,9 +35,10 @@ git push origin develop
 |---|---|
 | `app/core/` | 引擎：backend、chat_session、hook_manager、workers |
 | `app/gateway/` | 多平台网关（钉钉/Telegram/Discord/飞书） |
-| `app/tools/` | 工具执行层：registry（注册表）、plugin_tool_loader（插件加载/热重载）、tool_executor（分发） |
+| `app/tools/` | 工具框架（registry/plugin_tool_loader/tool_classifier/tool_name_mapper）+ 共享服务（task/team/mcp）+ 基础设施（command_safety/process_job/pty_session） |
 | `app/widgets/` | UI 组件、设置卡片、像素宠物 |
-| `plugins/system/tools/` | 系统内置工具插件（34 个工具，register(registry) 注册 schema/impl/icon/cn_name/danger/group） |
+| `plugins/system/tools/` | 系统内置工具插件（33 个工具，register(registry) 注册 schema/impl/icon/cn_name/danger/group） |
+| `.drifox/plugins/` | 社区插件目录（用户级，watchfiles 自动扫描）：如 `codegraph-tools/`（codegraph_explore 引擎） |
 | `plugins/system/` | 插件：hooks、skills、themes、commands、tools |
 | `tests/` | 测试 |
 

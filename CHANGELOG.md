@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - **工具逻辑自包含** (`plugins/system/tools/`): 纯逻辑工具（文件 9 个/网络 2 个/桌面 3 个）impl 用标准库/第三方库独立实现（含 mtime 检测、unified diff、图片 base64、命令安全等核心行为），不依赖主程序 BuiltinTools；平台工具（bash/subagent/MCP/LSP/CodeGraph/团队/todo/question/skill/上传）通过 `tool_ctx["services"]` 能力接口调用（不暴露 BuiltinTools 内部）；图标资源随插件（`tools/icons/` 深色 + `tools/icons_light/` 浅色，主题感知 data URI 加载）
 - **工具权限卡片动态分组** (`app/widgets/cards/settings/tool_control_card.py`): 分组与描述从 registry 读取（功能域分组，危险工具 🔥 标记 + 组内危险在前），registry 热更新自动重建卡片
 - **渲染联动** (`app/widgets/render_helpers.py`): 工具图标/中文名从 registry 读取，插件工具自动获得展示元数据（MCP 特殊处理保留）
+- **terminal/diagnostics/automation 迁系统插件** (\`plugins/system/tools/\`): bash/bg_*/get_diagnostics 完整实现（含安全拦截/进程树/pty/紧急停止热键）迁入插件自包含，主程序删除三个文件；修复 exec 加载插件模块的 dataclass 装饰器异常（模块未注册 sys.modules + builtins 注入）
+- **codegraph 迁社区插件** (`.drifox/plugins/codegraph-tools/`): codegraph_explore 引擎从主程序迁出为社区插件（引擎单例 + workdir 自动重初始化），主程序 `app/tools/codegraph_tools.py` 删除
 ### 🔧 其他 (Chores & Build)
 - **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
 - **测试**: 新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）

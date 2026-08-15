@@ -2450,18 +2450,13 @@ class ChatBackend(QObject):
         # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
         if self._tool_executor:
             try:
-                # 泄漏修复（P1）：AutomationTools 构造时注册进类级集合
-                # AutomationTools._stop_listener_instances 后只 add 不 remove，
-                # 窗口关闭前先注销自身，释放类级集合对窗口 BuiltinTools 的强引用
-                # （紧急停止广播自然跳过已关闭实例）。必须在 tool_executor.cleanup()
-                # 之前调用——后者会把 _builtin_tools 置 None。
+                # 工具插件化：AutomationTools（紧急停止）/ TerminalTools（bash/bg）已迁
+                # 系统插件（模块级单例，无窗口引用），以下 getattr 容错保留为防御性清理。
                 _bt = getattr(self._tool_executor, "_builtin_tools", None)
                 if _bt is not None:
                     _automation = getattr(_bt, "_automation_tools", None)
                     if _automation is not None and hasattr(_automation, "cleanup"):
                         _automation.cleanup()
-                    # 泄漏修复（6c）：解除 BackgroundTaskManager 单例对
-                    # TerminalTools workdir getter 的强引用（lambda 捕获 self）
                     _terminal = getattr(_bt, "_terminal_tools", None)
                     if _terminal is not None and hasattr(_terminal, "cleanup"):
                         _terminal.cleanup()
