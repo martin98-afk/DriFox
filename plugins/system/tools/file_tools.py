@@ -874,6 +874,7 @@ def register(registry):
         aliases=["Write", "WriteFile", "CreateFile", "create_file"],
         preview=_make_file_preview("write"),
         summarize=_make_file_summarize("write"),
+        render=_render_edit_diff_body,  # 全部 diff 渲染走插件闭包（主程序无兜底）
         metadata={"permission_arg": "filePath"},
     )
     registry.register(

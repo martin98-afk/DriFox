@@ -1071,7 +1071,10 @@ def render_tool_block(
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
-    # ── inline diff 预览区（编辑类工具：优先插件 render 闭包） ──
+    # ── inline diff 预览区（编辑类工具：全部由插件 render 闭包渲染） ──
+    # 主程序不做任何 diff 渲染兜底：工具有 diff 时插件闭包负责输出（如 edit/
+    # multi_edit/write 注册的 _render_edit_diff_body），闭包返回 None/异常时
+    # 回退通用文本/表格渲染。diff 行数统计仅用于折叠阈值判断。
     diff_html = ""
     diff_line_count = 0
     if diff:
@@ -1085,32 +1088,10 @@ def render_tool_block(
                 if body:
                     diff_html = body
         except Exception as e:
-            logger.warning(f"[render] 工具 {tool_name} diff 渲染闭包异常，回退主程序 diff: {e}")
+            logger.warning(f"[render] 工具 {tool_name} diff 渲染闭包异常: {e}")
             diff_html = ""
-    if diff and not diff_html:
-        diff_body = _render_diff_preview(diff)
-        # 统计 diff 的行数（用于判断折叠阈值）
-        diff_line_count = diff_summary["added"] + diff_summary["deleted"]
-        diff_files = diff_summary["files"]
-        file_label = diff_files[0] if diff_files else "文件变更"
-        file_label = os.path.basename(file_label)
-        if len(diff_files) > 1:
-            file_label = f"{file_label} 等 {len(diff_files)} 个文件"
-        added = diff_summary["added"]
-        deleted = diff_summary["deleted"]
-        diff_html = f"""
-        <div class="tool-diff-inline">
-            <div class="tool-diff-inline__header" style="{get_font_family_css()}">
-                <span class="tool-diff-inline__file" title="{escape(file_label)}">{escape(file_label)}</span>
-                <span class="tool-diff-inline__summary">
-                    <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
-                    <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
-                </span>
-            </div>
-            <div class="tool-diff-inline__body" style="font-family: '{_gf}', Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
-                {diff_body}
-            </div>
-        </div>"""
+        if diff_html:
+            diff_line_count = diff_summary["added"] + diff_summary["deleted"]
 
     # ── ECharts 图表区 ──
     echarts_html = ""
