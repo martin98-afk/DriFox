@@ -105,21 +105,48 @@ class ToolExecutor:
             pass
         return True
 
+    def _todo_impl(self, tool_name: str):
+        """获取待办工具（todoread/todowrite）的插件 impl（registry 驱动）
+
+        待办状态已迁插件（plugins/system/tools/task_tools.py 模块级单例），
+        主程序经 registry 调用 impl，不直接耦合插件模块内部结构。
+        """
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None and reg.impl is not None:
+                return reg.impl
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 获取待办工具 {tool_name} 失败: {e}")
+        return None
+
     def get_todos(self):
         """获取待办事项列表（返回副本）"""
-        if self._builtin_tools:
-            return self._builtin_tools.get_todos()
-        return []
+        impl = self._todo_impl("todoread")
+        if impl is None:
+            return []
+        try:
+            result = impl(None)
+            return list(result.todos or [])
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 读取待办失败: {e}")
+            return []
 
     def clear_todo_list(self):
         """清空待办事项列表"""
-        if self._builtin_tools:
-            self._builtin_tools.todo_clear()
+        impl = self._todo_impl("todowrite")
+        if impl is None:
+            logger.warning("[ToolExecutor] todowrite 工具未注册，无法清空待办")
+            return
+        try:
+            impl(None, todos=[])
+        except Exception as e:
+            logger.warning(f"[ToolExecutor] 清空待办失败: {e}")
 
     def reset_session_state(self):
-        """Reset session-scoped state when switching sessions"""
-        if self._builtin_tools:
-            self._builtin_tools.reset_session_state()
+        """Reset session-scoped state when switching sessions（旧语义：清空待办）"""
+        self.clear_todo_list()
 
     def cleanup(self):
         """
@@ -940,6 +967,7 @@ class ToolExecutor:
                 return params.get("required") or []
         except Exception:
             pass
+        return []
 
     def _execute_registered_tool(self, reg, args: dict, session_id: str) -> Callable:
         """构造注册工具（插件）的执行闭包。

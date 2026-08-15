@@ -130,7 +130,7 @@ class IsolatedChatContext:
                 self._tool_executor._session_id = None
                 self._tool_executor._call_id = None
                 if self._tool_executor._builtin_tools:
-                    self._tool_executor._builtin_tools.todo_clear()
+                    self._tool_executor.clear_todo_list()
             logger.debug(f"[GatewayLocal] 上下文已清理: {self.context_id}")
 
 

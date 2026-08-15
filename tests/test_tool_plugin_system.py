@@ -411,7 +411,7 @@ class TestSelfContained:
         assert dark_svg != light_svg  # 深浅图标内容不同
 
     def test_services_injected(self):
-        """平台服务工具：services 注入可用"""
+        """平台服务工具：services 缺失优雅降级；todo 自包含（不依赖 services）"""
         from app.tools.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
@@ -419,7 +419,12 @@ class TestSelfContained:
         load_plugin_tools()
         reg = ToolRegistry.get_instance()
         ctx = {"workdir": None, "session_id": "s", "services": {}}
-        # services 缺失 → 优雅失败（不崩溃）
+        # todo 自包含：无 services 也正常工作（模块级状态）
+        result = reg.get("todowrite").impl(tool_ctx=ctx, todos=[{"content": "t1", "status": "pending"}])
+        assert result.success
+        assert result.todos and result.todos[0]["content"] == "t1"
         result = reg.get("todoread").impl(tool_ctx=ctx)
+        assert result.success
+        # 团队工具：无窗口上下文 → 优雅失败（不崩溃）
+        result = reg.get("team_list_members").impl(tool_ctx=ctx)
         assert not result.success
-        assert "服务不可用" in result.error
