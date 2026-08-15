@@ -149,12 +149,20 @@ def _upload_file_impl(tool_ctx, **kwargs):
     return service(local_path=kwargs.get("local_path", ""))
 
 
+def _render_question_body(result, tool_name, tool_args, success):
+    """question 完成框渲染闭包：选项弹窗块（从主程序 render_helpers 迁出）"""
+    from app.widgets.render_helpers import _render_question_block
+
+    return _render_question_block(tool_args or {}, getattr(result, "content", "") or "")
+
+
 def register(registry):
     registry.register(
         "question", _QUESTION_SCHEMA, impl=_question_impl,
         danger="safe", icon="question", cn_name="提问",
         group=GROUP_INTERACTION, description="向用户提问确认",
         aliases=["Question", "AskUser", "ask_user", "AskUserQuestion"],
+        render=_render_question_body,
     )
     registry.register(
         "skill", _SKILL_SCHEMA, impl=_skill_impl,

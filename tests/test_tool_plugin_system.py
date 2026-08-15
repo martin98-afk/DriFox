@@ -410,6 +410,82 @@ class TestSelfContained:
             light_svg = svg_of(_get_tool_icon_html(icon_name, tool_name="read"))
         assert dark_svg != light_svg  # 深浅图标内容不同
 
+    def test_render_closure(self):
+        """工具完成框渲染闭包：插件注册 render → 渲染层优先调用；无注册回退默认"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import _render_text_output
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+        reg = ToolRegistry.get_instance()
+        # codegraph 社区插件注册了 render 闭包
+        assert reg.get_render("codegraph_explore") is not None
+        html = _render_text_output("### 标题\n📄 文件.py", "codegraph_explore", {})
+        assert "58a6ff" in html  # 插件闭包标题蓝
+        # 未注册 render 的工具走默认渲染
+        assert reg.get_render("read") is None
+        html2 = _render_text_output("普通输出", "read", {"path": "x"})
+        assert html2
+
+    def test_dag_echarts_render_closure(self):
+        """subagent_dag 的 echarts 渲染走插件 render 闭包"""
+        import json
+
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import render_tool_block
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+        reg = ToolRegistry.get_instance()
+        assert reg.get_render("subagent_dag") is not None
+        echarts_json = json.dumps({"type": "graph", "data": [], "links": []})
+        html = render_tool_block("subagent_dag", {"nodes": [{"id": "a"}]},
+                                 result="DAG 完成", success=True, echarts=echarts_json)
+        assert "echarts-container" in html
+
+    def test_render_mode_and_closures(self):
+        """render_mode（inline/none）+ 渲染闭包（edit diff/bash/question）"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import render_tool_block
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+        reg = ToolRegistry.get_instance()
+        # render_mode：read=inline（紧凑无 body）
+        assert reg.get_render_mode("read") == "inline"
+        html = render_tool_block("read", {"path": "x"}, result="内容", success=True)
+        assert "tool-expanded-content" not in html
+        # render_mode：screenshot=expand（禁用折叠框，body 始终展开、无 cm-collapsible）
+        assert reg.get_render_mode("screenshot") == "expand"
+        html = render_tool_block("screenshot", {"region": [0, 0, 100, 100]}, result="已截图", success=True)
+        assert "cm-collapsible" not in html
+        assert "tool-block--no-collapse" in html
+        assert "tool-expanded-content" in html  # body 直接展开
+        # expand 模式：简洁模式偏好下也不折叠
+        html = render_tool_block("screenshot", {}, result="已截图", success=True, collapsed=True)
+        assert "cm-collapsible" not in html
+        assert "tool-block--no-collapse" in html
+        # 渲染闭包已注册
+        assert reg.get_render("edit") is not None
+        assert reg.get_render("bash") is not None
+        assert reg.get_render("question") is not None
+        assert reg.get_render("multi_edit") is not None
+
+    def test_team_tools_danger(self):
+        """团队工具/标记文件为安全操作（非危险）"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+        reg = ToolRegistry.get_instance()
+        assert reg.get_danger("team_send_message") == "safe"
+        assert reg.get_danger("stage_files") == "safe"
+        assert reg.is_team_only("team_send_message")
+
     def test_services_injected(self):
         """平台服务工具：services 缺失优雅降级；todo 自包含（不依赖 services）"""
         from app.tools.plugin_tool_loader import load_plugin_tools

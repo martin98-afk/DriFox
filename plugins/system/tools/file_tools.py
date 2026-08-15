@@ -690,12 +690,56 @@ def _stage_files_impl(tool_ctx, **kwargs):
     return ToolResult(True, content=f"已标记 {len(staged)} 个文件:\n" + "\n".join(staged))
 
 
+def _render_edit_diff_body(result, tool_name, tool_args, success):
+    """编辑类工具（edit/multi_edit）完成框渲染闭包：inline diff 预览
+
+    从主程序 render_helpers 的 diff 分支迁出，渲染逻辑随工具插件定义。
+    """
+    import os
+
+    from app.widgets.render_helpers import (
+        _get_global_font,
+        _render_diff_preview,
+        _summarize_diff,
+        escape,
+        scale_font_size,
+    )
+
+    diff = getattr(result, "diff", None) or ""
+    if not diff:
+        return None  # 无 diff → 回退默认
+    diff_summary = _summarize_diff(diff)
+    diff_body = _render_diff_preview(diff)
+    diff_files = diff_summary["files"]
+    file_label = diff_files[0] if diff_files else "文件变更"
+    file_label = os.path.basename(file_label)
+    if len(diff_files) > 1:
+        file_label = f"{file_label} 等 {len(diff_files)} 个文件"
+    added = diff_summary["added"]
+    deleted = diff_summary["deleted"]
+    _gf = _get_global_font()
+    return f"""
+    <div class="tool-diff-inline">
+        <div class="tool-diff-inline__header" style="{get_font_family_css()}">
+            <span class="tool-diff-inline__file" title="{escape(file_label)}">{escape(file_label)}</span>
+            <span class="tool-diff-inline__summary">
+                <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
+                <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
+            </span>
+        </div>
+        <div class="tool-diff-inline__body" style="font-family: '{_gf}', Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
+            {diff_body}
+        </div>
+    </div>"""
+
+
 def register(registry):
     registry.register(
         "read", _READ_SCHEMA, impl=_read_impl,
         danger="safe", icon="read", cn_name="读取",
         group=GROUP_READ, description="读取文件内容",
         aliases=["Read", "ReadFile", "ReadFiles", "cat"],
+        render_mode="inline",
     )
     registry.register(
         "write", _WRITE_SCHEMA, impl=_write_impl,
@@ -708,40 +752,47 @@ def register(registry):
         danger="dangerous", icon="编辑", cn_name="编辑",
         group=GROUP_WRITE, description="精确文本替换",
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
+        render=_render_edit_diff_body,
     )
     registry.register(
         "multi_edit", _MULTI_EDIT_SCHEMA, impl=_multi_edit_impl,
         danger="dangerous", icon="编辑", cn_name="批量编辑",
         group=GROUP_WRITE, description="批量文件编辑",
         aliases=["MultiEdit", "MultiEditTool"],
+        render=_render_edit_diff_body,
     )
     registry.register(
         "grep", _GREP_SCHEMA, impl=_grep_impl,
         danger="safe", icon="Search", cn_name="搜索",
         group=GROUP_READ, description="正则搜索文件内容",
         aliases=["Grep", "Search", "SearchFiles", "Find"],
+        render_mode="inline",
     )
     registry.register(
         "list", _LIST_SCHEMA, impl=_list_impl,
         danger="safe", icon="folder", cn_name="列出文件",
         group=GROUP_READ, description="列出目录内容",
         aliases=["List", "LS", "Ls", "ListDir", "list_directory"],
+        render_mode="inline",
     )
     registry.register(
         "glob", _GLOB_SCHEMA, impl=_glob_impl,
         danger="safe", icon="Search", cn_name="匹配",
         group=GROUP_READ, description="通配符查找文件",
         aliases=["Glob", "LS", "ListFiles", "list_files"],
+        render_mode="inline",
     )
     registry.register(
         "scan_repo", _SCAN_REPO_SCHEMA, impl=_scan_repo_impl,
         danger="safe", icon="Search", cn_name="扫描仓库",
         group=GROUP_READ, description="扫描仓库生成摘要",
         aliases=["ScanRepo", "scan_repo"],
+        render_mode="inline",
     )
     registry.register(
         "stage_files", _STAGE_FILES_SCHEMA, impl=_stage_files_impl,
-        danger="dangerous", icon="Search", cn_name="标记文件",
+        danger="safe", icon="Search", cn_name="标记文件",
         group=GROUP_READ, description="标记相关文件",
         aliases=["StageFiles", "stage_files"],
+        render_mode="inline",
     )

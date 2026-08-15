@@ -314,6 +314,7 @@ def register(registry):
         "screenshot", _SCREENSHOT_SCHEMA, impl=_screenshot_impl,
         danger="safe", icon="裁剪", cn_name="截图",
         group=GROUP_DESKTOP, description="截取屏幕截图",
+        render_mode="expand",  # 图片直接展示，禁用折叠框
     )
     registry.register(
         "mouse", _MOUSE_SCHEMA, impl=_mouse_impl,

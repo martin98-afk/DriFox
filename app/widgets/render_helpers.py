@@ -1162,6 +1162,23 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
     tool_args = tool_args or {}
     _gf = _get_global_font()  # 用户主题全局字体
 
+    # ── 插件自定义渲染闭包优先（工具完成框渲染插件化） ──
+    # 工具插件注册时带 render= 闭包（如 codegraph 结构化渲染），
+    # 主程序不再写死各工具的特殊渲染逻辑。
+    try:
+        from app.tools.registry import ToolRegistry
+
+        render_fn = ToolRegistry.get_instance().get_render(tool_name)
+        if render_fn is not None:
+            # 闭包签名：render(result, tool_name, tool_args, success)，result 为 ToolResult 对象
+            from app.tools.result import ToolResult as _TR
+
+            body = render_fn(_TR(True, content=_unescape_newlines(result)), tool_name, tool_args, True)
+            if body:
+                return body
+    except Exception:
+        pass
+
     # ── bash: 终端风格（命令头 + 输出体） ──
     if tool_name == "bash":
         cmd = tool_args.get("command", "")
@@ -1237,48 +1254,6 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
                 lines_html.append(escape(line))
         return f"""
         <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{"\n".join(lines_html)}</pre>"""
-
-    # ── codegraph_explore: 结构化代码探索结果 ──
-    if tool_name == "codegraph_explore":
-        lines = raw.split("\n")
-        html_lines = []
-        for line in lines:
-            escaped = escape(line)
-            # 标题行: ### xxx
-            if line.startswith("### "):
-                html_lines.append(
-                    f'<div style="color:#58a6ff;font-weight:700;font-size:{scale_font_size(14)}px;'
-                    f'padding:8px 0 4px 0;">{escaped}</div>'
-                )
-            # 粗体文件路径: **xxx**
-            elif "**" in line:
-                # 简单替换 **xxx** 为带颜色的粗体
-                parts = []
-                in_bold = False
-                buf = ""
-                for ch in line:
-                    if ch == "*":
-                        continue
-                    # Actually much simpler: just color lines starting with 📄
-                # Simpler approach: check for emoji patterns
-                if line.strip().startswith("📄"):
-                    html_lines.append(f'<div style="color:#7ee787;font-weight:600;padding:2px 0;">{escaped}</div>')
-                elif line.strip().startswith(("⬆", "⬇", "←", "→", "💥")):
-                    html_lines.append(f'<div style="color:#d2a8ff;padding:1px 0 1px 12px;">{escaped}</div>')
-                elif line.strip().startswith(("[", "- [")):
-                    html_lines.append(f'<div style="color:#c9d1d9;padding:1px 0 1px 12px;">{escaped}</div>')
-                else:
-                    html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
-            elif line.strip() == "---":
-                html_lines.append('<div style="border-top:1px solid rgba(48,54,61,0.25);margin:6px 0;"></div>')
-            else:
-                html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
-
-        content = "".join(html_lines)
-        return f"""
-        <div style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;padding:8px 12px;">
-            {content}
-        </div>"""
 
     # ── grep / glob / list / scan: 匹配/列表示结果 ──
     if tool_name in ("grep", "glob", "list", "scan_repo", "stage_files"):
@@ -1540,8 +1515,19 @@ def render_tool_block(
         if tool_args.get("description"):
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
-    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body）
-    if tool_name in _INLINE_TOOLS:
+    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body；render_mode="inline"，read 风格）
+    try:
+        from app.tools.registry import ToolRegistry
+
+        render_mode = ToolRegistry.get_instance().get_render_mode(tool_name)
+    except Exception:
+        render_mode = ""
+    # render_mode="expand"：禁用折叠框 — 完整卡但无 cm-collapsible 折叠交互，body 始终展开
+    no_collapse = render_mode == "expand"
+    if render_mode == "none":
+        # 不渲染工具完成框
+        return ""
+    if render_mode == "inline" or tool_name in _INLINE_TOOLS:
         return _render_inline_tool(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -1623,10 +1609,22 @@ def render_tool_block(
                 count = str(len([ln for ln in result.split("\n") if ln.strip()]))
             match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
 
-    # ── inline diff 预览区 ──
+    # ── inline diff 预览区（编辑类工具：优先插件 render 闭包） ──
     diff_html = ""
     diff_line_count = 0
     if diff:
+        try:
+            from app.tools.registry import ToolRegistry
+            from app.tools.result import ToolResult as _TR
+
+            diff_render_fn = ToolRegistry.get_instance().get_render(tool_name)
+            if diff_render_fn is not None:
+                body = diff_render_fn(_TR(True, content=result or "", diff=diff), tool_name, tool_args, success)
+                if body:
+                    diff_html = body
+        except Exception:
+            diff_html = ""
+    if diff and not diff_html:
         diff_body = _render_diff_preview(diff)
         # 统计 diff 的行数（用于判断折叠阈值）
         diff_line_count = diff_summary["added"] + diff_summary["deleted"]
@@ -1655,12 +1653,22 @@ def render_tool_block(
     echarts_html = ""
     if echarts:
         try:
-            import base64 as _b64
+            # 工具自定义渲染闭包优先（如 subagent_dag 注册的 DAG 图渲染）
+            from app.tools.registry import ToolRegistry
+            from app.tools.result import ToolResult as _TR
 
-            b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
-            chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
-            echarts_html = f'''
-            <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
+            render_fn = ToolRegistry.get_instance().get_render(tool_name)
+            if render_fn is not None:
+                body = render_fn(_TR(True, content=result or "", echarts=echarts), tool_name, tool_args, success)
+                if body:
+                    echarts_html = body
+            if not echarts_html:
+                import base64 as _b64
+
+                b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
+                chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
+                echarts_html = f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
         except Exception:
             pass
 
@@ -1704,6 +1712,9 @@ def render_tool_block(
     # 注意：调用方传入的 collapsed 代表模式偏好（简洁模式=True，非简洁=False）。
     # 内容类型逻辑仅在非简洁模式下生效；简洁模式下保持 collapsed=True 全部折叠。
     DIFF_AUTO_COLLAPSE_LINES = 10
+    if no_collapse:
+        # 禁用折叠框：无论简洁模式偏好，内容始终展开
+        collapsed = False
     if echarts:
         if not collapsed:  # 非简洁模式下图表默认展开
             collapsed = False
@@ -1737,6 +1748,18 @@ def render_tool_block(
     elif tool_name == "question" and success is not False:
         collapsed = True
         question_html = _render_question_block(tool_args, result)
+        # 插件自定义 question 渲染闭包优先
+        try:
+            from app.tools.registry import ToolRegistry
+            from app.tools.result import ToolResult as _TR
+
+            q_render_fn = ToolRegistry.get_instance().get_render("question")
+            if q_render_fn is not None:
+                body = q_render_fn(_TR(True, content=result or "", echarts=""), "question", tool_args, success)
+                if body:
+                    question_html = body
+        except Exception:
+            pass
         expanded_content = f"""
         <div class="tool-expanded-content">
             {question_html}
@@ -1764,6 +1787,31 @@ def render_tool_block(
     block_key = "tool-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
+
+    if no_collapse:
+        # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
+        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+        </span>
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {escape(args_preview)}
+            </span>
+            {match_count_html}
+            {diff_stats_html}
+            {subagent_log_btn_html}
+        </span>
+    </div>
+    <div class="tool-block__body" style="padding: 0 8px 4px;">
+        {expanded_content}
+    </div>
+</div>"""
 
     return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">

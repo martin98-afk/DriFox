@@ -346,6 +346,21 @@ def _team_list_impl(tool_ctx, **kwargs):
     return _team_list_members(tool_ctx)
 
 
+def _render_dag_body(result, tool_name, tool_args, success):
+    """subagent_dag 完成框渲染闭包：ECharts DAG 节点图（从主程序 render_helpers 迁出）"""
+    import base64
+    import hashlib
+
+    echarts = getattr(result, "echarts", None) or ""
+    if not echarts:
+        return None  # 无图表 → 回退默认渲染
+    b64_json = base64.b64encode(echarts.encode("utf-8")).decode("ascii")
+    chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
+    return f"""
+    <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}"
+        style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>"""
+
+
 def register(registry):
     registry.register(
         "subagent_para", _SUBAGENT_PARA_SCHEMA, impl=_subagent_para_impl,
@@ -364,11 +379,12 @@ def register(registry):
         danger="dangerous", icon="设置-subagent", cn_name="分发工作流",
         group=GROUP_SUBAGENT, description="DAG工作流子智能体",
         aliases=["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
+        render=_render_dag_body,
     )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
     registry.register(
         "team_send_message", _TEAM_SEND_SCHEMA, impl=_team_send_impl,
-        danger="dangerous", icon="邮件-发送", cn_name="发送邮件",
+        danger="safe", icon="邮件-发送", cn_name="发送邮件",
         group=GROUP_TEAM, description="向团队成员发送任务", team_only=True,
     )
     registry.register(

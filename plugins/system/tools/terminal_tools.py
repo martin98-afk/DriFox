@@ -1008,12 +1008,35 @@ _BG_LIST_SCHEMA = {
 }
 
 
+def _render_bash_body(result, tool_name, tool_args, success):
+    """bash 完成框渲染闭包：终端风格（命令头 + 输出体，从主程序 render_helpers 迁出）"""
+    from app.widgets.render_helpers import (
+        _get_global_font,
+        escape,
+        scale_font_size,
+    )
+
+    _gf = _get_global_font()
+    raw = getattr(result, "content", "") or ""
+    tool_args = tool_args or {}
+    cmd = tool_args.get("command", "")
+    cmd_display = escape(cmd[:120]) if cmd else "(no command)"
+    return f"""
+    <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+        <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+            $ <span style="color:#c9d1d9;">{cmd_display}</span>
+        </div>
+        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+    </div>"""
+
+
 def register(registry):
     registry.register(
         "bash", _BASH_SCHEMA, impl=_bash_impl,
         danger="dangerous", icon="shell", cn_name="执行命令",
         group=GROUP_TERMINAL, description="执行shell命令",
         aliases=["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
+        render=_render_bash_body,
     )
     registry.register(
         "bg_start", _BG_START_SCHEMA, impl=_bg_start_impl,

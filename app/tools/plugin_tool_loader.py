@@ -127,6 +127,8 @@ class _PluginRegistryProxy:
             description=meta.get("description", ""),
             aliases=meta.get("aliases"),
             team_only=meta.get("team_only", False),
+            render=meta.get("render"),
+            render_mode=meta.get("render_mode", ""),
             source=f"plugin:{self._plugin_name}",
             metadata=metadata,
         )
