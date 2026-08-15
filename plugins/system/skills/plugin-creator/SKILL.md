@@ -423,8 +423,46 @@ def register(registry):
         group="工具組",              # 權限卡片分組
         description="權限卡片內描述",
         aliases=["MyTool"],         # Claude Code 風格別名（可選）
+        # ── 以下均為可選：渲染與行為完全由插件聲明，主程序零工具名硬編碼 ──
+        render=_render_body,        # body 渲染閉包：render(result, tool_name, tool_args, success) -> str|None
+        render_mode="expand",       # ""=默認摺疊卡 / inline=單行緊湊(無body) / expand=無摺疊展開 / none=不渲染完成框
+        preview=_preview,           # 自然語言預覽閉包：preview(tool_args) -> str（inline 卡/摺疊頭）
+        summarize=_summarize,       # 壓縮摘要閉包：summarize(tool_name, tool_args, content) -> str（歷史壓縮）
+        metadata={                  # 附加行為標記（見下表）
+            "permission_arg": "path",   # 權限檢查用哪個參數（bash→command、read→filePath...）
+            "protect": True,            # 工具結果壓縮時完整保留
+            "interactive": True,        # 交互式工具（UI 彈窗，子智能體禁用）
+            "ui_managed": True,         # 專屬 UI 工具（不創建通用流式塊）
+            "operation_icons": {...},   # 按參數切換圖標（如 lsp 按 operation）
+        },
     )
 ```
+
+**渲染三閉包 + render_mode（主程序 render_helpers 只做閉包路由 + 通用兜底）**：
+
+| 字段 | 簽名 | 用途 |
+|------|------|------|
+| `render` | `render(result, tool_name, tool_args, success) -> str\|None` | 完成框 body 自定義渲染；返回 None 回退默認（文本/表格/diff/echarts） |
+| `preview` | `preview(tool_args) -> str` | 自然語言參數預覽（inline 卡/摺疊頭），回退 key=value |
+| `summarize` | `summarize(tool_name, tool_args, tool_content) -> str` | 歷史壓縮的 1 行摘要；未註冊回退通用 `[name] args (N chars)` |
+| `render_mode` | `""`/`"inline"`/`"expand"`/`"none"` | 完成框形態：默認摺疊卡 / 單行緊湊 / 無摺疊展開 / 不渲染 |
+
+**metadata 行為標記**：
+
+| 標記 | 值 | 效果 |
+|------|-----|------|
+| `permission_arg` | str | 權限檢查提取該參數（`PermissionResolver.resolve(name, arg)`） |
+| `permission_task` | true | 子智能體分發權限（`resolve_task(首個 agent)`） |
+| `protect` | true | 壓縮時結果完整保留（歷史壓縮跳過裁剪） |
+| `interactive` | true | 交互式工具：UI 彈窗處理、子智能體禁用執行 |
+| `ui_managed` | true | 專屬 UI 工具：不創建通用流式工具塊 |
+| `operation_icons` | dict | 按參數值切換圖標（如 lsp 的 operation→圖標） |
+| `subagent_task` | true | 子智能體任務卡：表格渲染 + 日誌按鈕 |
+
+**group 語義（能力判定）**：工具註冊的 `group` 同時是權限卡片分組與**能力分組**。
+主程序按 group 驅動能力判定（不寫死工具名）：
+- 「文件寫入」分組（write/edit/multi_edit）→ 團隊 `can_write`、文件備份跟踪、自動 LSP 診斷
+- 新寫工具註冊到該 group 即自動獲得備份/診斷能力
 
 **自包含原則**：
 - 純邏輯工具（文件/網絡/桌面）impl 用標準庫/第三方庫獨立實現，不依賴主程序
@@ -437,7 +475,7 @@ def register(registry):
 無需重啟；同名工具先註冊者優先（工作樹 plugins/ 優先於用戶插件目錄）。
 
 **參考**：
-- `plugins/system/tools/`（34 個系統工具真實案例：file_tools/web_tools/
+- `plugins/system/tools/`（33 個系統工具真實案例：file_tools/web_tools/
   automation_tools 為自包含實現，subagent_tools/terminal_tools 等為平台服務）
 - `app/tools/registry.py`（ToolRegistration 字段定義）
 - `app/tools/plugin_tool_loader.py`（掃描/熱重載實現）

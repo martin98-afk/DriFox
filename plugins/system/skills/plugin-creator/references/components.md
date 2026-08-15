@@ -454,9 +454,58 @@ def register(registry):
 | danger | ✓ | safe / dangerous（插件工具強制聲明） |
 | icon | 建議 | SVG 文件名（不含擴展名） |
 | cn_name | 建議 | 中文顯示名（消息卡片/權限卡片） |
-| group | 建議 | 權限卡片分組（缺省按 danger 兜底） |
+| group | 建議 | 權限卡片分組（**同時是能力分組**，見下） |
 | description | 建議 | 權限卡片行內描述 |
 | aliases | 可選 | Claude Code 風格別名（hook/命令解析用） |
+| render | 可選 | body 渲染閉包：render(result, tool_name, tool_args, success) -> str\|None |
+| render_mode | 可選 | `""`=默認摺疊卡 / `"inline"`=單行緊湊(無body) / `"expand"`=無摺疊展開 / `"none"`=不渲染 |
+| preview | 可選 | 自然語言預覽閉包：preview(tool_args) -> str（inline 卡/摺疊頭） |
+| summarize | 可選 | 壓縮摘要閉包：summarize(tool_name, tool_args, content) -> str（歷史壓縮） |
+| metadata | 可選 | 行為標記 dict（permission_arg/protect/interactive/ui_managed/...） |
+
+### 渲染三閉包（主程序零工具名硬編碼）
+
+> 工具的**渲染完全由插件聲明**：主程序 `render_helpers` 只做閉包路由 + 通用兜底。
+> 參考 `plugins/system/tools/`（bash 終端塊、question 彈窗、screenshot 圖片、
+> codegraph 結構化、edit diff 均為插件閉包實現）。
+
+```python
+def _render_body(result, tool_name, tool_args, success):
+    """完成框 body 渲染：返回 HTML 字符串；None 回退默認渲染（文本/表格/diff/echarts）"""
+    from app.widgets.render_helpers import _get_global_font, escape, scale_font_size
+    raw = getattr(result, "content", "") or ""
+    return f'<pre style="...">{escape(raw)}</pre>'
+
+def _preview(tool_args: dict) -> str:
+    """自然語言參數預覽（inline 卡/摺疊頭標題）；空串回退 key=value"""
+    return f'處理 "{tool_args.get("path", "")}"'
+
+def _summarize(tool_name, tool_args, tool_content):
+    """歷史壓縮 1 行摘要（壓縮器優先調用插件閉包）"""
+    return f"[{tool_name}] {_preview(tool_args)} ({len(tool_content)} chars)"
+```
+
+### metadata 行為標記
+
+| 標記 | 值 | 效果 |
+|------|-----|------|
+| `permission_arg` | str | 權限檢查提取該參數（`resolve(name, arg)`；bash→command、read→filePath） |
+| `permission_task` | true | 子智能體分發權限（`resolve_task(首個 agent)`） |
+| `protect` | true | 歷史壓縮時結果完整保留（skill/todowrite 即此標記） |
+| `interactive` | true | 交互式工具：UI 彈窗處理、子智能體禁用執行（question 即此標記） |
+| `ui_managed` | true | 專屬 UI 工具：不創建通用流式工具塊 |
+| `operation_icons` | dict | 按參數值切換圖標（lsp 的 operation→圖標） |
+| `subagent_task` | true | 子智能體任務卡：表格渲染 + 日誌按鈕 |
+
+### group 能力分組
+
+工具註冊的 `group` 同時是權限卡片分組與**能力分組**，主程序按 group 驅動
+能力判定（不寫死工具名）：
+- **「文件寫入」**（write/edit/multi_edit）→ 團隊 `can_write` 判定、文件備份跟踪、
+  自動 LSP 診斷
+- **「終端與進程」**（bash/bg_*）→ 終端能力歸組
+
+新寫工具註冊到對應 group 即自動獲得該組的備份/診斷/權限語義。
 
 ### impl 簽名與 tool_ctx
 
