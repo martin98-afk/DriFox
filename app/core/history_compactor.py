@@ -67,13 +67,17 @@ MAX_TAIL_OVERFLOW_MULTIPLIER = 2.5
 
 
 def _is_protected_tool(tool_name: str) -> bool:
-    """工具内容是否需完整保留（registry 驱动；异常时回退不保护）"""
+    """工具内容是否需完整保留（registry 驱动）。
+
+    契约是"protect 内容必须完整保留"→ 异常时回退 True（保护优先），
+    宁可多保留也不在极端场景丢失内容。
+    """
     try:
         from app.tools.registry import ToolRegistry
 
         return ToolRegistry.get_instance().is_protected(tool_name)
     except Exception:
-        return False
+        return True
 
 # ========== Hermes Agent 预剪枝常量 ==========
 # 单图 token 估算（匹配 Claude Code 常量）
@@ -263,6 +267,11 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     content = tool_content or ""
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
+
+    # ── 以下为通用/兼容兜底分支（Hermes 移植 + 未注册 summarize 的 DriFox 工具名）。
+    # DriFox 工具的摘要已由插件 summarize 闭包接管（上方闭包优先），
+    # 此处仅当 registry 未初始化或工具未注册闭包时兜底，不承载主逻辑。
+    # 注意：与插件 summarize 存在功能重叠，属刻意保留的兼容层。
 
     if tool_name == "terminal" or tool_name == "bash" or tool_name == "shell":
         cmd = args.get("command", "")

@@ -10,6 +10,7 @@ import re
 from html import escape
 
 import orjson as json
+from loguru import logger
 
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -710,7 +711,8 @@ def _get_tool_icon_name(tool_name: str, tool_args: dict = None) -> str:
         reg = ToolRegistry.get_instance().get(tool_name)
         if reg is not None and tool_args:
             op_icons = reg.metadata.get("operation_icons") if reg.metadata else None
-            if op_icons:
+            # 类型守门：坏元数据（非 dict）回退静态图标，不抛异常
+            if isinstance(op_icons, dict):
                 operation = tool_args.get("operation", "")
                 if operation in op_icons:
                     return op_icons[operation]
@@ -948,8 +950,8 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
             body = render_fn(_TR(True, content=result), tool_name, tool_args, True)
             if body:
                 return body
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[render] 工具 {tool_name} render 闭包异常，回退默认渲染: {e}")
 
     # ── 通用文本输出兜底 (webfetch, websearch, mouse, keyboard 等) ──
     return f"""
@@ -1082,7 +1084,8 @@ def render_tool_block(
                 body = diff_render_fn(_TR(True, content=result or "", diff=diff), tool_name, tool_args, success)
                 if body:
                     diff_html = body
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[render] 工具 {tool_name} diff 渲染闭包异常，回退主程序 diff: {e}")
             diff_html = ""
     if diff and not diff_html:
         diff_body = _render_diff_preview(diff)
@@ -1129,8 +1132,8 @@ def render_tool_block(
                 chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
                 echarts_html = f'''
                 <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[render] 工具 {tool_name} echarts 渲染闭包异常，回退默认图表: {e}")
 
     # ── 文本输出：所有成功且有结果文本的工具均渲染（闭包路由 / 通用 pre） ──
     # 不再有工具名白名单：任何工具的结果渲染都优先走插件 render 闭包，
@@ -1154,8 +1157,9 @@ def render_tool_block(
             {echarts_html}
             {diff_html}
         </div>"""
-    elif diff and diff_line_count > 0:
-        # 编辑类工具：diff 优先于文本输出（diff 是核心结果）
+    elif diff and (diff_html or diff_line_count > 0):
+        # 编辑类工具：diff 优先于文本输出（diff 是核心结果）。
+        # 闭包成功（diff_html 非空）或主程序兜底（diff_line_count > 0）都走此分支
         if not collapsed:  # 非简洁模式下按行数自动判断
             collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""

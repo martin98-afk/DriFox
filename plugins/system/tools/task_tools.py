@@ -9,10 +9,11 @@ from typing import Dict, List
 
 from app.tools.result import ToolResult
 
+from app.tools.task_state import get_todos, set_todos
+
 GROUP_TODO = "任务与待办"
 
-# 模块级待办状态（跨调用共享；主程序 UI 通过 ToolResult.todos 字段联动）
-_todo_list: List[Dict] = []
+# 待办状态在 _task_state（下划线前缀，热重载不重置）——跨插件重载保留
 
 
 def _normalize_todos(todos) -> List[Dict]:
@@ -66,9 +67,9 @@ _TODOWRITE_SCHEMA = {
 
 
 def _todowrite_impl(tool_ctx, **kwargs):
-    global _todo_list
-    _todo_list = _normalize_todos(kwargs.get("todos", []))
-    return ToolResult(True, content=f"Todo list updated: {len(_todo_list)} items", todos=list(_todo_list))
+    normalized = _normalize_todos(kwargs.get("todos", []))
+    set_todos(normalized)
+    return ToolResult(True, content=f"Todo list updated: {len(normalized)} items", todos=normalized)
 
 
 _TODOREAD_SCHEMA = {
@@ -82,10 +83,11 @@ _TODOREAD_SCHEMA = {
 
 
 def _todoread_impl(tool_ctx, **kwargs):
-    if not _todo_list:
+    todo_list = get_todos()
+    if not todo_list:
         return ToolResult(True, content="No todos", todos=[])
     lines = []
-    for i, todo in enumerate(_todo_list, 1):
+    for i, todo in enumerate(todo_list, 1):
         status = todo.get("status", "")
         if status == "completed":
             status_icon = "✓"
@@ -96,7 +98,7 @@ def _todoread_impl(tool_ctx, **kwargs):
         content = todo.get("content", "")
         priority = todo.get("priority", "medium")
         lines.append(f"{i}. [{priority}] {status_icon} {content}")
-    return ToolResult(True, content="\n".join(lines), todos=list(_todo_list))
+    return ToolResult(True, content="\n".join(lines), todos=list(todo_list))
 
 
 def _preview_todoread(tool_args: dict) -> str:

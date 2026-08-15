@@ -249,7 +249,17 @@ class ConversationExecutor:
 
             if tool_name in ToolRegistry.get_instance().team_only_tools():
                 return "allow"
-            result = resolver.resolve(tool_name)
+            # 权限参数适配（与 UI 引擎同口径）：bash 用 command、read 用 filePath...
+            try:
+                mode, arg = ToolRegistry.get_instance().permission_resolve_args(tool_name, arguments or {})
+            except Exception:
+                mode, arg = "plain", ""
+            if mode == "task":
+                result = resolver.resolve_task(arg)
+            elif arg:
+                result = resolver.resolve(tool_name, arg)
+            else:
+                result = resolver.resolve(tool_name)
             if result == "ask":
                 return "deny"
             return result

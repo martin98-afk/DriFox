@@ -144,6 +144,9 @@ class ToolRegistry:
         - danger 强制声明：插件工具（source != builtin）未声明 danger 拒绝注册
         - source 白名单：builtin 源只能由内置种子流程（trusted=True）写入，
           防止插件伪装 builtin 绕过 danger 强制声明
+
+        注意：当前全部工具经 _PluginRegistryProxy 强制 source="plugin:*"，
+        source="builtin" 路径已无生产调用方（保留兼容 + 安全护栏，勿删）。
         """
         if not name or not isinstance(name, str):
             logger.warning(f"[ToolRegistry] 非法工具名: {name!r}")
@@ -325,6 +328,26 @@ class ToolRegistry:
         reg = self.get(name)
         return bool(reg and reg.metadata and reg.metadata.get("ui_managed"))
 
+    def permission_resolve_args(self, name: str, arguments: dict) -> tuple:
+        """提取权限检查参数（统一消费点，避免各执行路径行为分叉）。
+
+        返回 (mode, arg)：
+        - ("task", first_agent)：metadata["permission_task"] → resolver.resolve_task(first_agent)
+        - ("plain", arg)：metadata["permission_arg"] → resolver.resolve(name, arg)
+        - ("plain", "")：未声明 → resolver.resolve(name)
+        """
+        reg = self.get(name)
+        meta = (reg.metadata or {}) if reg is not None else {}
+        arguments = arguments or {}
+        if meta.get("permission_task"):
+            tasks = arguments.get("tasks", [])
+            first_agent = tasks[0].get("agent", "") if tasks and len(tasks) > 0 else ""
+            return "task", first_agent
+        arg_name = meta.get("permission_arg")
+        if arg_name:
+            return "plain", arguments.get(arg_name, "")
+        return "plain", ""
+
     def team_only_tools(self) -> List[str]:
         """全部团队专用工具名（供 schema 过滤）"""
         with self._lock:
@@ -381,7 +404,11 @@ class ToolRegistry:
 
 
 def _classify_fallback(tool_name: str) -> str:
-    """builtin 源未声明 danger 时的兜底分类（registry 空时无法查表，按危险关键词启发式）"""
+    """builtin 源未声明 danger 时的兜底分类（registry 空时无法查表，按危险关键词启发式）。
+
+    [deprecated] 当前无生产调用方（全部工具经插件代理注册且强制声明 danger），
+    仅保留供 builtin 种子路径/安全护栏使用。
+    """
     dangerous_hint = (
         "write", "edit", "multi_edit", "bash", "exec", "kill", "remove", "delete",
         "upload", "mouse", "keyboard", "subagent_para", "subagent_dag",

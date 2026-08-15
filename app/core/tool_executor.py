@@ -7,6 +7,7 @@ import json as _json
 import inspect
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -885,6 +886,8 @@ class ToolExecutor:
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
 
         if tool_name in self._custom_tools:
+            # [deprecated] custom_tools 是遗留机制：执行优先级最高但绕过 registry
+            # （不进 schema/权限分组/渲染）。新工具请走插件注册（registry.register）。
             try:
                 result_data = self._custom_tools[tool_name](args)
                 my_result = ToolResult(True, content=result_data)

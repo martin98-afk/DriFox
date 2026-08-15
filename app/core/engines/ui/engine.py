@@ -238,23 +238,18 @@ class UIEngine(BaseEngine):
             result = perm_resolver.resolve(tool_name)
             logger.info(f"[_check_tool_permission] agent={self._current_agent}, tool={tool_name}, result={result}")
 
-            # 权限参数提取由工具插件声明（metadata）驱动，主程序不写死工具名：
-            # - permission_arg: 权限检查用哪个参数（bash→command、read→filePath...）
-            # - permission_task: 子智能体分发（resolve_task 按首个 agent 判定）
+            # 权限参数提取由工具插件声明（metadata）驱动，主程序不写死工具名；
+            # 统一走 registry.permission_resolve_args（与子智能体/CLI 同口径）
             try:
                 from app.tools.registry import ToolRegistry
 
-                _reg_tool = ToolRegistry.get_instance().get(tool_name)
-                _meta = (_reg_tool.metadata or {}) if _reg_tool is not None else {}
+                _mode, _arg = ToolRegistry.get_instance().permission_resolve_args(tool_name, arguments)
             except Exception:
-                _meta = {}
-            if _meta.get("permission_task"):
-                tasks = arguments.get("tasks", [])
-                first_agent = tasks[0].get("agent", "") if tasks and len(tasks) > 0 else ""
-                return perm_resolver.resolve_task(first_agent)
-            _arg_name = _meta.get("permission_arg")
-            if _arg_name:
-                return perm_resolver.resolve(tool_name, arguments.get(_arg_name, ""))
+                _mode, _arg = "plain", ""
+            if _mode == "task":
+                return perm_resolver.resolve_task(_arg)
+            if _arg:
+                return perm_resolver.resolve(tool_name, _arg)
             return perm_resolver.resolve(tool_name)
 
         except Exception as e:

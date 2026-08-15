@@ -703,6 +703,7 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
         _render_diff_preview,
         _summarize_diff,
         escape,
+        get_font_family_css,
         scale_font_size,
     )
 
