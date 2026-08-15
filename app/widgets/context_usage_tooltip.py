@@ -380,6 +380,12 @@ class ContextBreakdownTooltip(QWidget):
             if note:
                 lines.append(note)
 
+        # 工具结果截断节省（S2）：显示实际发送口径下的截断收益
+        pruned = int(data.get("pruned_tokens", 0) or 0)
+        if pruned > 0:
+            if lines:
+                lines.append("")
+            lines.append(f"工具结果截断节省: {pruned:,} tokens")
         # 缓存统计：压缩为单行核心指标（命中率 + 节省成本），去掉冗余明细
         cache = data.get("cache") or {}
         has_cache = cache.get("hit_rate", 0) > 0 or cache.get("cost_savings", 0) > 0

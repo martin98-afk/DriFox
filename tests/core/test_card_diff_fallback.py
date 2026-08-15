@@ -49,6 +49,9 @@ def _make_window():
 
     inst = mw.OpenAIChatToolWindow.__new__(mw.OpenAIChatToolWindow)
     inst.backend = SimpleNamespace(tool_executor=MagicMock(), file_recorder=MagicMock())
+    # 生产代码 InfoBar 引导的 parent 参数计算 `TabManagerWindow.get_instance() or self.window()`，
+    # __new__ 绕过基类初始化后 QWidget.window() 不可用 → 提供 stub（T8 修复）
+    inst.window = lambda: None
     return inst
 
 

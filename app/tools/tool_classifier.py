@@ -1,56 +1,58 @@
 # -*- coding: utf-8 -*-
 """
-工具安全分类器 — 按功能语义将工具分为危险/安全两类
+工具安全分类器 — 危险级别查询（registry 驱动）
+
+数据源：ToolRegistry（工具插件注册时显式声明的 danger 字段）。
+保留旧函数签名兼容调用方，内部实现改为查 registry。
 """
+from __future__ import annotations
 
-# 危险工具：修改文件、执行命令、控制桌面、上传文件
-DANGEROUS_TOOLS = frozenset(
-    {
-        "write",
-        "edit",
-        "multi_edit",  # 文件写入
-        "bash",
-        "bg_start",
-        "bg_stop",  # 终端命令
-        "mouse",
-        "keyboard",  # 桌面控制
-        "upload_file",  # 文件上传
-        "todowrite",  # 状态修改
-        "stage_files",  # 文件标记
-        "subagent_para",
-        "subagent_dag",  # 子智能体（可执行任意代码/修改文件）
-    }
-)
+from typing import Dict, List
 
-# 安全工具：只读、查询、无副作用
-SAFE_TOOLS = frozenset(
-    {
-        "read",
-        "grep",
-        "list",
-        "glob",
-        "scan_repo",  # 文件只读
-        "webfetch",
-        "websearch",  # 网络查询
-        "bg_logs",
-        "bg_list",  # 后台查看
-        "screenshot",  # 截图
-        "get_diagnostics",  # 诊断
-        "todoread",  # 待办只读
-        "question",
-        "skill",
-        "list_skills",  # 交互/技能
-        "subagent_status",  # 子智能体（只读查询）
-        "mcp_list_servers",  # MCP列表
-        "lsp",  # LSP 工具（只读）
-        # CodeGraph 代码智能工具（只读）
-        "codegraph_explore",
-    }
-)
+from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
+
+
+def _registry() -> ToolRegistry:
+    """惰性获取 registry（避免模块导入时序问题）"""
+    return ToolRegistry.get_instance()
+
+
+def DANGEROUS_TOOLS() -> frozenset:
+    """危险工具集合（动态，registry 驱动）"""
+    return frozenset(_registry().dangerous_tools())
+
+
+def SAFE_TOOLS() -> frozenset:
+    """安全工具集合（动态，registry 驱动）"""
+    return frozenset(_registry().safe_tools())
+
+
+# 兼容旧代码：DANGEROUS_TOOLS / SAFE_TOOLS 曾被当作 frozenset 常量使用
+# （如 `list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)`、`for tool in DANGEROUS_TOOLS`）。
+# 改为函数后上述用法需调用 DANGEROUS_TOOLS()。为降低迁移成本，提供 callable 版本
+# 并在 module 级导出函数名（调用方改一行即可）。
+# 说明：函数名大写是历史命名，保持向后兼容。
+
+# 兼容辅助：get_all_tools / get_tool_names（供权限控制器等使用）
+
+
+def get_all_tools() -> List[str]:
+    """获取全部已注册工具名（危险+安全，registry 驱动）"""
+    return _registry().names()
+
+
+def get_dangerous_tools() -> List[str]:
+    """获取全部危险工具名"""
+    return _registry().dangerous_tools()
+
+
+def get_safe_tools() -> List[str]:
+    """获取全部安全工具名"""
+    return _registry().safe_tools()
 
 
 def classify_tool_danger(tool_name: str) -> str:
-    """判断工具危险级别
+    """判断工具危险级别（registry 驱动）
 
     Args:
         tool_name: 工具名（内置名或 mcp__xxx 格式名）
@@ -58,19 +60,17 @@ def classify_tool_danger(tool_name: str) -> str:
     Returns:
         "dangerous" | "safe"
     """
-    # MCP 工具：取 mcp__{server}__{toolname} 中的 toolname 部分
-    base_name = tool_name
+    # MCP 工具：未注册，按 toolname 部分启发式判断（沿用旧语义：不在危险表即安全）
     if tool_name.startswith("mcp__"):
         parts = tool_name.split("__", 2)
         base_name = parts[2] if len(parts) > 2 else tool_name
-
-    if base_name in DANGEROUS_TOOLS:
-        return "dangerous"
-    return "safe"
+        dangerous = frozenset(DANGEROUS_TOOLS())
+        return DANGER_DANGEROUS if base_name in dangerous else DANGER_SAFE
+    return _registry().get_danger(tool_name)
 
 
 def get_tool_counts(toggles: dict) -> tuple:
-    """统计当前危险/安全工具启用数量
+    """统计当前危险/安全工具启用数量（registry 驱动）
 
     Args:
         toggles: {tool_name: bool, ...}
@@ -82,7 +82,7 @@ def get_tool_counts(toggles: dict) -> tuple:
     safe_count = 0
     for name, enabled in toggles.items():
         if enabled:
-            if classify_tool_danger(name) == "dangerous":
+            if classify_tool_danger(name) == DANGER_DANGEROUS:
                 dangerous_count += 1
             else:
                 safe_count += 1
@@ -99,3 +99,12 @@ def get_default_toggles(tool_names: list) -> dict:
         {tool_name: True, ...}
     """
     return {name: True for name in tool_names}
+
+
+def get_tool_groups() -> Dict[str, List[str]]:
+    """按展示分组聚合工具名（权限卡片用，registry 驱动）
+
+    Returns:
+        {group_name: [tool_name, ...]}
+    """
+    return {g: [r.name for r in tools] for g, tools in _registry().group_map().items()}

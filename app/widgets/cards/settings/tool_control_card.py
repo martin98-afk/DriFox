@@ -7,7 +7,7 @@
 - 用户编辑写入 user_tool_toggles(智能体模式下不影响 active)
 - "↺ 恢复"按钮调用 controller.restore_user()
 """
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -19,74 +19,20 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, SwitchButton
 
-from app.tools.tool_classifier import (
-    DANGEROUS_TOOLS,
-    SAFE_TOOLS,
-    get_default_toggles,
-)
+from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
+from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel
 
-# =============================================================================
-# 工具分组定义
-# =============================================================================
-TOOL_GROUPS = [
-    ("📁 文件写入", ["write", "edit", "multi_edit"]),
-    ("💻 终端命令", ["bash", "bg_start", "bg_stop"]),
-    ("🖱 桌面控制", ["mouse", "keyboard"]),
-    ("☁️ 文件上传", ["upload_file"]),
-    ("📝 状态修改", ["todowrite", "stage_files"]),
-    ("🤖 子智能体", ["subagent_para", "subagent_dag"]),
-    ("✅ 安全操作", sorted(SAFE_TOOLS)),
-]
-
-TOOL_DESCRIPTIONS = {
-    "write": "覆盖/创建文件",
-    "edit": "精确文本替换",
-    "multi_edit": "批量文件编辑",
-    "bash": "执行shell命令",
-    "bg_start": "启动后台命令",
-    "bg_stop": "停止后台任务",
-    "mouse": "鼠标操作",
-    "keyboard": "键盘操作",
-    "upload_file": "上传本地文件到Gitee",
-    
-    "todowrite": "创建/更新待办",
-    "stage_files": "标记相关文件",
-    "subagent_para": "并行启动子智能体",
-    "subagent_dag": "DAG工作流子智能体",
-    # 文件与信息检索
-    "read": "读取文件内容",
-    "grep": "正则搜索文件内容",
-    "list": "列出目录内容",
-    "glob": "通配符查找文件",
-    "scan_repo": "扫描仓库生成摘要",
-    "webfetch": "获取网页内容",
-    "websearch": "网络关键词搜索",
-    # 后台任务与系统
-    "bg_logs": "查看后台任务日志",
-    "bg_list": "列出后台任务状态",
-    "screenshot": "截取屏幕截图",
-    "get_diagnostics": "获取代码诊断信息",
-    # 待办
-    "todoread": "读取待办列表",
-    # 交互与元工具
-    "question": "向用户提问确认",
-    "skill": "加载指定技能",
-    "list_skills": "列出可用技能",
-    "subagent_status": "查询子智能体状态",
-    "mcp_list_servers": "列出MCP服务器",
-    "lsp": "LSP代码智能操作",
-    # CodeGraph 代码智能
-    "codegraph_explore": "语义级代码探索",
-}
-
 OFF_BEHAVIOR_OPTIONS = [
     ("deny", "直接拒绝"),
     ("ask", "询问用户"),
 ]
+
+# 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
+MIXED_OPTION = ("__mixed__", "未统一")
 
 
 class ToolControlCardContent(QWidget):
@@ -98,13 +44,40 @@ class ToolControlCardContent(QWidget):
         super().__init__(parent)
         self._controller = controller  # ToolPermissionController
         self._toggle_widgets: dict = {}
+        self._policy_combos: dict = {}  # tool_name -> ComboBox(关闭策略,仅关闭时显示)
         self._group_switches: dict = {}
         self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
+        self._rebuild_pending = False  # 合并同批 registry 变更,避免逐个排队全量重建
         self._setup_ui()
+        self._bind_registry()
 
         if self._controller:
             self._bind_controller(self._controller)
+
+    def _bind_registry(self):
+        """监听 registry 热更新：工具插件变更时重建卡片（主线程安全）"""
+        ToolRegistry.get_instance().on_change(self._on_registry_changed)
+
+    def _on_registry_changed(self, version):
+        """registry 版本变化（工具插件热插拔/热更新）→ 重建卡片
+
+        去抖：一次重扫会「逐个注销 + 全量重注册」全部工具，产生几十次
+        change 事件（每次 register/unregister 都 notify）。若每次排队
+        全量 _rebuild（~180ms/次）会串行刷屏数秒。pending 标记合并
+        同批变更 → 只重建一次；重建期间新变更会再触发一次，不丢。
+        """
+        if not self._built:
+            return
+        if self._rebuild_pending:
+            return
+        self._rebuild_pending = True
+        QTimer.singleShot(0, self._do_rebuild)
+
+    def _do_rebuild(self):
+        """singleShot 回调：重置 pending 后执行全量重建"""
+        self._rebuild_pending = False
+        self._rebuild()
 
     def set_controller(self, controller):
         """延迟绑定 controller(main_widget 在 super().__init__ 之后注入时使用)"""
@@ -122,6 +95,7 @@ class ToolControlCardContent(QWidget):
         """
         controller.togglesChanged.connect(self._on_active_toggles_changed)
         controller.behaviorChanged.connect(self._on_active_behavior_changed)
+        controller.policiesChanged.connect(self._on_active_policies_changed)
         controller.activeAgentChanged.connect(lambda _: self._on_active_agent_changed())
 
     def _on_active_toggles_changed(self, toggles):
@@ -138,6 +112,10 @@ class ToolControlCardContent(QWidget):
         """controller 通知 active behavior 变化,转发 togglesChanged 让工具栏刷新"""
         if self._controller:
             self.togglesChanged.emit(self._controller.get_toggles())
+
+    def _on_active_policies_changed(self, _policies):
+        """controller 通知 per-tool 关闭策略变化,同步行内下拉与可见性"""
+        self._apply_toggles()
 
     def _setup_ui(self):
         self._layout = QVBoxLayout(self)
@@ -175,6 +153,7 @@ class ToolControlCardContent(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._toggle_widgets.clear()
+        self._policy_combos.clear()
         self._group_switches.clear()
         self._group_labels.clear()
 
@@ -188,17 +167,36 @@ class ToolControlCardContent(QWidget):
             logger.info("[ToolCard] _rebuild: controller=None!")
 
         # 确保所有工具都在 toggles 中
-        all_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
-        defaults = get_default_toggles(list(all_tools))
+        all_tools = get_all_tools()
+        defaults = get_default_toggles(all_tools)
         for name in all_tools:
             if name not in toggles:
                 toggles[name] = defaults[name]
 
-        # 按组构建
-        for group_name, tool_names in TOOL_GROUPS:
+        # 按组构建（registry 动态分组，组内危险工具在前）
+        groups = self._get_groups()
+        for group_name, tool_names in groups:
             self._build_group(group_name, tool_names, toggles)
 
         self._layout.addStretch()
+
+    def _get_groups(self) -> list:
+        """从 registry 动态聚合分组：[(group_name, [tool_name, ...]), ...]
+
+        组排序：危险工具占比高/含危险工具的组在前，全安全组在后。
+        """
+        groups = ToolRegistry.get_instance().group_map()
+        ordered = sorted(
+            groups.items(),
+            key=lambda kv: (
+                # 含危险工具 → 排前
+                0 if any(r.danger == DANGER_DANGEROUS for r in kv[1]) else 1,
+                # 组内危险工具数降序
+                -sum(1 for r in kv[1] if r.danger == DANGER_DANGEROUS),
+                kv[0],
+            ),
+        )
+        return [(g, [r.name for r in tools]) for g, tools in ordered]
 
     def _apply_toggles(self):
         """轻量级更新所有开关状态,不全量重建 widget"""
@@ -214,8 +212,21 @@ class ToolControlCardContent(QWidget):
                 sw.setChecked(enabled)
                 sw.blockSignals(False)
 
+        # 更新单个工具关闭策略下拉(值 + 可见性:仅开关关闭时显示)
+        # 与行渲染/右上角"未统一"判定共用 get_active_tool_behavior_map,口径一致
+        policies_map = self._controller.get_active_tool_behavior_map()
+        for tool_name, combo in self._policy_combos.items():
+            enabled = toggles.get(tool_name, True)
+            combo.setVisible(not enabled)
+            policy = policies_map.get(tool_name, self._controller.get_behavior())
+            idx = combo.findData(policy)
+            if idx >= 0 and idx != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+
         # 更新整组开关 + 组标题"启用数/总数"
-        for group_name, tool_names in TOOL_GROUPS:
+        for group_name, tool_names in self._get_groups():
             gs = self._group_switches.get(group_name)
             if gs:
                 all_on = all(toggles.get(t, True) for t in tool_names)
@@ -236,7 +247,7 @@ class ToolControlCardContent(QWidget):
         if not self._controller:
             return
         toggles = self._controller.get_toggles()
-        for group_name, tool_names in TOOL_GROUPS:
+        for group_name, tool_names in self._get_groups():
             gs = self._group_switches.get(group_name)
             if gs:
                 all_on = all(toggles.get(t, True) for t in tool_names)
@@ -245,11 +256,14 @@ class ToolControlCardContent(QWidget):
                 gs.blockSignals(False)
 
     def _build_group(self, group_name: str, tool_names: list, all_toggles: dict):
-        """构建一个工具组"""
+        """构建一个工具组（组内危险工具数驱动配色）"""
         Colors.refresh()
-        is_safe = group_name.startswith("✅")
-        border_color = "rgba(34,197,94,0.2)" if is_safe else "rgba(255,80,80,0.2)"
-        header_bg = "rgba(34,197,94,0.06)" if is_safe else "rgba(255,80,80,0.08)"
+        # 组内是否含危险工具：含 → 红系主题；全安全 → 绿系主题
+        has_danger = any(
+            ToolRegistry.get_instance().get_danger(t) == DANGER_DANGEROUS for t in tool_names
+        )
+        border_color = "rgba(34,197,94,0.2)" if not has_danger else "rgba(255,80,80,0.2)"
+        header_bg = "rgba(34,197,94,0.06)" if not has_danger else "rgba(255,80,80,0.08)"
 
         group = QFrame()
         group.setStyleSheet(f"""
@@ -315,11 +329,11 @@ class ToolControlCardContent(QWidget):
         )
 
         # 安全组默认折叠
-        if is_safe:
+        if not has_danger:
             body.setVisible(False)
 
     def _build_tool_row(self, tool_name: str, all_toggles: dict) -> QWidget:
-        """构建单个工具行"""
+        """构建单个工具行（中文名 + 危险标记 + registry 描述）"""
         row = QWidget()
         row.setStyleSheet("background: transparent; border: none;")
         row_layout = QHBoxLayout(row)
@@ -328,14 +342,29 @@ class ToolControlCardContent(QWidget):
 
         enabled = all_toggles.get(tool_name, True)
 
-        name_label = QLabel(tool_name)
+        # 工具元数据（registry 驱动：中文名 / 描述 / 危险级别）
+        meta = ToolRegistry.get_instance().get_meta(tool_name)
+        display_name = meta.get("cn_name") or tool_name
+        desc = meta.get("description", "")
+        is_danger = meta.get("danger") == DANGER_DANGEROUS
+
+        name_label = QLabel(display_name)
         name_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none; "
             f"{font_size_css(12)} {get_font_family_css()}"
         )
+        if is_danger:
+            # 危险工具：名字加 🔥 标记 + 微红着色
+            name_label.setText(f"🔥 {display_name}")
+            name_label.setStyleSheet(
+                f"color: #ff6b6b; background: transparent; border: none; "
+                f"{font_size_css(12)} {get_font_family_css()}"
+            )
+            name_label.setToolTip(f"{display_name}（危险操作：{desc or '可能修改系统状态'}）")
+        else:
+            name_label.setToolTip(f"{display_name}（安全操作）")
         row_layout.addWidget(name_label)
 
-        desc = TOOL_DESCRIPTIONS.get(tool_name, "")
         desc_label = _ElidedLabel(desc)
         desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
@@ -343,6 +372,28 @@ class ToolControlCardContent(QWidget):
             f"{font_size_css(10)} {get_font_family_css()}"
         )
         row_layout.addWidget(desc_label)
+
+        # 关闭策略下拉(仅开关关闭时显示): ask=询问用户 / deny=直接拒绝
+        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
+        policy = (
+            self._controller.get_active_tool_behavior_map().get(tool_name, "deny")
+            if self._controller
+            else "deny"
+        )
+        policy_combo = ComboBox()
+        for value, label in OFF_BEHAVIOR_OPTIONS:
+            policy_combo.addItem(label, userData=value)
+        idx = policy_combo.findData(policy)
+        if idx >= 0:
+            policy_combo.setCurrentIndex(idx)
+        policy_combo.setVisible(not enabled)  # 仅关闭时显示,开启时隐藏
+        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
+        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
+        row_layout.addWidget(policy_combo)
+        self._policy_combos[tool_name] = policy_combo
+        policy_combo.currentIndexChanged.connect(
+            lambda _idx, name=tool_name: self._on_tool_policy_changed(name)
+        )
 
         sw = SwitchButton()
         sw.setChecked(enabled)
@@ -371,6 +422,26 @@ class ToolControlCardContent(QWidget):
         self._apply_toggles()
         # 通知 frame 刷新统计
         self.togglesChanged.emit(self._controller.get_toggles())
+
+    def _on_tool_policy_changed(self, tool_name: str):
+        """用户编辑单工具关闭策略(ask/deny)
+        - 非 agent 模式:user 和 active 同步更新(并持久化)
+        - agent 模式:只更新 active(临时改 agent 生效权限,user 偏好不变)
+        """
+        from loguru import logger
+        combo = self._policy_combos.get(tool_name)
+        if combo is None or self._controller is None:
+            return
+        policy = combo.itemData(combo.currentIndex())
+        if policy not in ("ask", "deny"):
+            return
+        logger.info(
+            f"[ToolCard] _on_tool_policy_changed: {tool_name}={policy}, "
+            f"agent_active={self._controller.is_agent_active()}"
+        )
+        self._controller.set_user_tool_policy(tool_name, policy)
+        # 轻量级刷新 UI(controller 信号也会触发 _apply_toggles,开销极低)
+        self._apply_toggles()
 
     def _on_group_toggled(self, tool_names: list, enabled: bool):
         """用户编辑整组开关
@@ -404,7 +475,6 @@ class ToolControlCardFrame(SystemCardFrame):
     """工具控制卡片框架 — SystemCardFrame 包裹"""
 
     togglesChanged = pyqtSignal(dict)
-    behaviorChanged = pyqtSignal(str)
 
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
@@ -418,17 +488,14 @@ class ToolControlCardFrame(SystemCardFrame):
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
         self.icon_label.setFixedSize(18, 18)
 
-        # ========== 右上角下拉框:关闭时行为 ==========
+        # ========== 右上角下拉框:关闭时行为(统一策略视图 + 强制统一入口) ==========
         self._behavior_combo = ComboBox(self)
         for value, label in OFF_BEHAVIOR_OPTIONS:
             self._behavior_combo.addItem(label, userData=value)
-        # 从 controller 读取当前 behavior
-        current_behavior = (
-            self._controller.get_behavior() if self._controller else "deny"
-        )
-        idx = self._behavior_combo.findData(current_behavior)
-        if idx >= 0:
-            self._behavior_combo.setCurrentIndex(idx)
+        # "未统一"仅作展示占位:各工具关闭策略不一致时显示,不可选中
+        self._behavior_combo.addItem(MIXED_OPTION[1], userData=MIXED_OPTION[0])
+        # 与 per-tool 策略对齐:一致显示该策略,不一致显示"未统一"
+        self._sync_behavior_combo()
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
 
         # ========== 智能体徽章 + 恢复按钮(仅 agent 激活时显示) ==========
@@ -475,6 +542,7 @@ class ToolControlCardFrame(SystemCardFrame):
         # 监听 controller 的智能体激活状态变化
         if self._controller:
             self._controller.activeAgentChanged.connect(self._on_agent_changed)
+            self._controller.policiesChanged.connect(lambda _: self._sync_behavior_combo())
             # 初始状态
             self._on_agent_changed(self._controller.get_active_agent_name() or "")
 
@@ -483,14 +551,13 @@ class ToolControlCardFrame(SystemCardFrame):
         self._controller = controller
         if controller is None:
             return
-        # 同步 behavior combo 当前值
-        idx = self._behavior_combo.findData(controller.get_behavior())
-        if idx >= 0:
-            self._behavior_combo.setCurrentIndex(idx)
+        # 同步 behavior combo 当前值(与 per-tool 策略对齐)
+        self._sync_behavior_combo()
         # 注入到 content
         self._card.set_controller(controller)
         # 监听 controller 信号
         controller.activeAgentChanged.connect(self._on_agent_changed)
+        controller.policiesChanged.connect(lambda _: self._sync_behavior_combo())
         # 初始状态
         self._on_agent_changed(controller.get_active_agent_name() or "")
 
@@ -504,11 +571,45 @@ class ToolControlCardFrame(SystemCardFrame):
             self._card.refresh_style()
         self.update()
 
+    def _sync_behavior_combo(self):
+        """右上角下拉与 per-tool 策略对齐：
+        - 所有工具关闭策略一致 → 显示该策略
+        - 无任何工具 → 显示全局 behavior
+        - 不一致 → 显示"未统一"占位(不可选中)
+        """
+        if self._controller is None:
+            return
+        values = set(self._controller.get_active_tool_behavior_map().values())
+        if len(values) == 1:
+            target = next(iter(values))
+        elif not values:
+            target = self._controller.get_behavior()
+        else:
+            target = MIXED_OPTION[0]
+        idx = self._behavior_combo.findData(target)
+        if idx >= 0 and idx != self._behavior_combo.currentIndex():
+            self._behavior_combo.blockSignals(True)
+            self._behavior_combo.setCurrentIndex(idx)
+            self._behavior_combo.blockSignals(False)
+
     def _on_behavior_changed(self, idx: int):
         value = self._behavior_combo.itemData(idx)
-        if self._controller:
+        if self._controller is None or value is None:
+            return
+        if value == MIXED_OPTION[0]:
+            # "未统一"占位不可选中(理论不可达,防御性回退)
+            self._sync_behavior_combo()
+            return
+        if value in ("deny", "ask"):
+            # 强制统一:所有工具关闭策略设为该值(含开启的工具,保持判定一致)
+            from app.tools.tool_classifier import get_all_tools
+
+            all_tools = get_all_tools()
+            self._controller.set_user_tool_policies({t: value for t in all_tools})
+            # MINOR-1:同步全局 behavior——新注册工具(插件热插拔)缺失 per-tool 时回退一致
+            # set_user_behavior 自带双态语义(agent 只改 active 不持久化 user)
             self._controller.set_user_behavior(value)
-        self.behaviorChanged.emit(value)
+        self._sync_behavior_combo()
 
     def _on_restore_clicked(self):
         """用户点击"恢复"按钮"""
@@ -524,12 +625,8 @@ class ToolControlCardFrame(SystemCardFrame):
             self._card.refresh()
         # 刷新徽章和恢复按钮显示
         self._on_agent_changed(self._controller.get_active_agent_name() or "")
-        # 刷新 behavior combo
-        idx = self._behavior_combo.findData(self._controller.get_behavior())
-        if idx >= 0 and idx != self._behavior_combo.currentIndex():
-            self._behavior_combo.blockSignals(True)
-            self._behavior_combo.setCurrentIndex(idx)
-            self._behavior_combo.blockSignals(False)
+        # 刷新 behavior combo(与 per-tool 策略对齐)
+        self._sync_behavior_combo()
         self.update()
 
     def _on_agent_changed(self, agent_name: str):

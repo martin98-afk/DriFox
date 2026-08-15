@@ -274,6 +274,10 @@ class HookMatchRule:
 
     matcher: Optional[str] = None
     hooks: List[Hook] = field(default_factory=list)
+    # 归属 skill（注册时注入，作为 hook 来源标签的真相来源）。
+    # 🛡️ 避免依赖 _skill_to_hooks 索引：索引会在热重载 insert/pop 后错位，
+    # 而 rule 对象本身的位置无关，来源归属永远准确。
+    skill_name: str = ""
 
     def __post_init__(self):
         if self.hooks is None:
@@ -746,9 +750,10 @@ class HookManager:
     # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
     _shared_hook_states: Dict[str, bool] = {}
     _shared_hook_overrides: Dict[str, Dict[str, Any]] = {}
-    # 热重载恢复位置：{skill_name: {event_name: [rule_index, ...]}}
-    # unregister 前记录原位置，重新注册时 insert 恢复事件内交错顺序
-    _shared_restore_positions: Dict[str, Dict[str, List[int]]] = {}
+    # 热重载顺序快照：{skill_name: {event_name: [(hook_id, owner_skill), ...]}}
+    # unregister 前记录事件内完整 rule 顺序（用首个 hook.id 标识 rule），
+    # 重新注册时按快照归并重建，精确恢复交错顺序（不依赖脆弱的索引计算）。
+    _shared_restore_snapshots: Dict[str, Dict[str, List[tuple]]] = {}
 
     def __init__(self, thread_pool: Optional[QThreadPool] = None):
         # hooks 注册数据指向类级别的共享字典（所有窗口共用）
@@ -891,15 +896,14 @@ class HookManager:
         # 先通过 config_file 路径快速判断
         if hook.config_file and "user-custom" in hook.config_file.replace("\\", "/"):
             return True
-        # 兜底：通过 _skill_to_hooks 索引查找
-        for skill_name, entries in self._skill_to_hooks.items():
-            if skill_name == "user-custom":
-                for event_name, rule_idx in entries:
-                    if event_name in self._hooks and rule_idx < len(self._hooks[event_name]):
-                        rule = self._hooks[event_name][rule_idx]
-                        for h in rule.hooks:
-                            if h.id == hook.id:
-                                return True
+        # 兜底：按 rule.skill_name 判断（P021 修复：不依赖索引，索引可能错位）
+        for event_name, rules in self._hooks.items():
+            for rule in rules:
+                if getattr(rule, "skill_name", "") != "user-custom":
+                    continue
+                for h in rule.hooks:
+                    if h.id == hook.id:
+                        return True
         return False
 
     def _get_effective_hook_dict(self, hook: Hook) -> dict:
@@ -975,17 +979,16 @@ class HookManager:
         # 检测配置格式
         raw_hooks = hooks_config.get("hooks", hooks_config)
 
-        # 🛡️ 热重载顺序恢复：若该 skill 有 unregister 时记录的原位置，
-        # 重新注册时按原位置 insert（而非 append 到末尾），保持事件内交错顺序。
-        restore_positions = HookManager._shared_restore_positions.pop(skill_name, None)
+        # 🛡️ 热重载顺序恢复：unregister 时记录的事件内顺序快照（hook.id 标识），
+        # 重新注册后按快照归并重建，精确恢复交错顺序。
+        # 不用旧索引方案：insert 恢复时的索引位移计算在多 skill 交错下必然出错，
+        # 导致 _skill_to_hooks 错位 → UI 来源标签错乱（P021）。
+        snapshot = HookManager._shared_restore_snapshots.pop(skill_name, None)
 
         count = 0
         for event_name, rules in raw_hooks.items():
             if event_name not in self._hooks:
                 self._hooks[event_name] = []
-
-            # 该事件下此 skill 的原位置（升序）
-            event_restore = sorted(restore_positions.get(event_name, [])) if restore_positions else []
 
             # 标准化规则格式
             if isinstance(rules, list):
@@ -1000,37 +1003,28 @@ class HookManager:
                     match_rule = HookMatchRule.from_dict(
                         rule_data, skill_root, config_file, is_system_plugin=is_system_plugin
                     )
+                    # 注入归属 skill（来源标签的真相来源）
+                    match_rule.skill_name = skill_name
                     if match_rule.hooks:
-                        if event_restore:
-                            # 从大到小插入（先插大索引，避免索引位移影响后续插入）
-                            target = event_restore.pop()
-                            target = min(target, len(self._hooks[event_name]))
-                            self._hooks[event_name].insert(target, match_rule)
-                            # 插入位置之后的 rule 索引 +1（其他 skill）
-                            for other_name, entries in self._skill_to_hooks.items():
-                                if other_name == skill_name:
-                                    continue
-                                self._skill_to_hooks[other_name] = [
-                                    (e, i + 1 if (e == event_name and i >= target) else i)
-                                    for (e, i) in entries
-                                ]
-                            rule_index = target
-                        else:
-                            rule_index = len(self._hooks[event_name])
-                            self._hooks[event_name].append(match_rule)
+                        # 统一 append：不手工 insert（顺序恢复由 _restore_rule_order 完成）
+                        self._hooks[event_name].append(match_rule)
                         count += len(match_rule.hooks)
-
-                        if skill_name not in self._skill_to_hooks:
-                            self._skill_to_hooks[skill_name] = []
-                        self._skill_to_hooks[skill_name].append((event_name, rule_index))
             else:
                 logger.warning(f"[HookManager] Invalid rules format for {event_name}")
 
         logger.info(f"[HookManager] Registered {count} hooks for skill {skill_name}")
 
         # 持久化生成的 hook id 到源文件（确保下次启动 id 不变）
+        # ⚠️ 必须在顺序恢复之前：此时内存顺序=文件顺序，id 对齐才可靠
         if count > 0 and config_file:
             self._persist_hook_ids_to_file(config_file)
+
+        # 热重载顺序恢复（基于 hook.id 归并，不依赖索引）
+        if count > 0 and snapshot:
+            self._restore_rule_order(skill_name, snapshot)
+
+        # 重建 _skill_to_hooks 索引（从 rule.skill_name 全量派生，保证与 _hooks 一致）
+        self._rebuild_skill_to_hooks()
 
         # 从持久化的状态恢复已注册 hook 的开关和内容覆盖（仅系统 hook）
         # 非系统 hook 的状态以源文件为准（双轨制：插件 hook 写回源文件，不走覆盖层）
@@ -1086,9 +1080,7 @@ class HookManager:
                     dirty = True
                     processed += 1
                 else:
-                    logger.warning(
-                        f"[HookManager] Migration failed for {hook_id}, will retry next start"
-                    )
+                    logger.warning(f"[HookManager] Migration failed for {hook_id}, will retry next start")
             else:
                 del self._hook_states[hook_id]
                 dirty = True
@@ -1170,37 +1162,83 @@ class HookManager:
     def unregister_skill_hooks(self, skill_name: str):
         """注销一个技能的所有 Hooks
 
-        🛡️ 索引对齐：pop 后必须更新其他 skill 的 _skill_to_hooks 索引，
-        否则其他插件热重载后其 hook 分组映射错位（掉进 user/自定义组）。
-        🛡️ 顺序保持：删除前记录各 rule 在事件内的原位置，供重新注册时
-        insert 恢复（否则热重载后该插件 hook 会被 append 到事件末尾，
-        事件内交错顺序变化）。
+        🛡️ 按归属删除：通过 rule.skill_name 定位（而非 _skill_to_hooks 索引），
+        索引错位时不会误删其他 skill 的 rule。
+        🛡️ 顺序快照：删除前记录各事件内完整 rule 顺序（hook.id 标识），
+        供重新注册时精确恢复交错顺序（P021 修复，替代脆弱的索引恢复）。
         """
         if skill_name not in self._skill_to_hooks:
             return
 
-        # 先收集要删除的位置，从后往前 pop（避免索引位移影响后续删除）
-        removals = list(self._skill_to_hooks[skill_name])
-        # 记录原位置（供热重载恢复顺序）
-        restore: Dict[str, List[int]] = {}
-        for event_name, rule_index in removals:
-            restore.setdefault(event_name, []).append(rule_index)
-        HookManager._shared_restore_positions[skill_name] = restore
+        # 记录事件内顺序快照（供热重载恢复）：
+        # {event_name: [(rule 首个 hook.id, owner_skill), ...]}
+        snapshot: Dict[str, List[tuple]] = {}
+        for event_name, rules in self._hooks.items():
+            snapshot[event_name] = [
+                (rule.hooks[0].id if rule.hooks else "", getattr(rule, "skill_name", "")) for rule in rules
+            ]
+        HookManager._shared_restore_snapshots[skill_name] = snapshot
 
-        for event_name, rule_index in reversed(removals):
-            if event_name in self._hooks and rule_index < len(self._hooks[event_name]):
-                self._hooks[event_name].pop(rule_index)
-            # 同步修正其他 skill 的索引：被删位置之后的 rule_index 减 1
-            for other_name, entries in self._skill_to_hooks.items():
-                if other_name == skill_name:
-                    continue
-                self._skill_to_hooks[other_name] = [
-                    (e, i - 1 if (e == event_name and i > rule_index) else i)
-                    for (e, i) in entries
-                ]
+        # 按归属过滤删除本 skill 的 rule（不依赖索引，索引错位也不误删）
+        empty_events: List[str] = []
+        for event_name, rules in self._hooks.items():
+            kept = [r for r in rules if getattr(r, "skill_name", "") != skill_name]
+            if kept:
+                self._hooks[event_name] = kept
+            else:
+                empty_events.append(event_name)
+        # 删除空事件（在遍历结束后统一删，避免迭代中修改字典）
+        for event_name in empty_events:
+            del self._hooks[event_name]
 
+        # 全量重建索引（pop 后其他 skill 的索引位移由重建统一修正）
         del self._skill_to_hooks[skill_name]
+        self._rebuild_skill_to_hooks()
         logger.debug(f"[HookManager] Unregistered all hooks for skill {skill_name}")
+
+    def _rebuild_skill_to_hooks(self):
+        """从 rule.skill_name 全量重建 _skill_to_hooks 索引
+
+        _skill_to_hooks 是纯派生数据：任何 rule 增删/移动后调用本方法，
+        保证索引与 _hooks 实际位置严格一致（P021 根因修复）。
+        """
+        new_index: Dict[str, List[tuple[str, int]]] = {}
+        for event_name, rules in self._hooks.items():
+            for rule_idx, rule in enumerate(rules):
+                owner = getattr(rule, "skill_name", "")
+                if owner:
+                    new_index.setdefault(owner, []).append((event_name, rule_idx))
+        self._skill_to_hooks.clear()
+        self._skill_to_hooks.update(new_index)
+
+    def _restore_rule_order(self, skill_name: str, snapshot: Dict[str, List[tuple]]):
+        """按 unregister 时的事件内顺序快照重建 rule 顺序（精确恢复交错）
+
+        用 rule 首个 hook.id 匹配归属（id 由 _persist_hook_ids_to_file 持久化，
+        热重载后不变）。非本 skill 的 rule 保持相对顺序。
+        """
+        for event_name, order in snapshot.items():
+            rules = self._hooks.get(event_name)
+            if not rules:
+                continue
+            mine: List = []
+            others: List = []
+            for r in rules:
+                (mine if getattr(r, "skill_name", "") == skill_name else others).append(r)
+            mine_by_id = {r.hooks[0].id: r for r in mine if r.hooks}
+            rebuilt: List = []
+            for hook_id, owner in order:
+                if owner == skill_name:
+                    r = mine_by_id.pop(hook_id, None)
+                    if r is not None:
+                        rebuilt.append(r)
+                    # id 不匹配（文件被外部改动）：跳过该位置，其余继续按序补位
+                elif others:
+                    rebuilt.append(others.pop(0))
+            # 残余（新文件新增的 rule / 快照外新增的 rule）追加到末尾
+            rebuilt.extend(mine_by_id.values())
+            rebuilt.extend(others)
+            self._hooks[event_name] = rebuilt
 
     def _clear_config_watcher(self, config_file: str):
         """清除配置去重缓存，允许同一文件用不同 skill_name 重新注册
@@ -1264,12 +1302,10 @@ class HookManager:
             self._hooks[event_name] = []
 
         rule = HookMatchRule(matcher=matcher, hooks=[hook])
+        rule.skill_name = skill_name
         rule_index = len(self._hooks[event_name])
         self._hooks[event_name].append(rule)
-
-        if skill_name not in self._skill_to_hooks:
-            self._skill_to_hooks[skill_name] = []
-        self._skill_to_hooks[skill_name].append((event_name, rule_index))
+        self._rebuild_skill_to_hooks()
 
         logger.info(f"[HookManager] Dynamically registered hook: {event_name} for {skill_name}")
         return rule_index
@@ -1295,13 +1331,8 @@ class HookManager:
 
         rules.pop(hook_index)
 
-        # 更新所有 skill 的索引（含自己）：被删位置之后的 rule_index 减 1
-        for _skill_name, entries in self._skill_to_hooks.items():
-            self._skill_to_hooks[_skill_name] = [
-                (e, i - 1 if (e == event_name and i > hook_index) else i)
-                for (e, i) in entries
-                if not (e == event_name and i == hook_index)
-            ]
+        # 全量重建索引（pop 后位移由重建统一修正）
+        self._rebuild_skill_to_hooks()
 
         logger.info(f"[HookManager] Dynamically unregistered hook: {event_name}[{hook_index}]")
         return True
@@ -2074,18 +2105,19 @@ class HookManager:
         return grouped
 
     def _build_hook_source_map(self) -> Dict[str, tuple]:
-        """构建 hook_id -> (source_type, display_name) 的映射"""
-        result = {}
-        for skill_name, entries in self._skill_to_hooks.items():
-            if skill_name == "user-custom":
-                source_type, display_name = "user", "自定义"
-            else:
-                source_type, display_name = "plugin", skill_name
+        """构建 hook_id -> (source_type, display_name) 的映射
 
-            for event_name, rule_idx in entries:
-                if event_name not in self._hooks or rule_idx >= len(self._hooks[event_name]):
-                    continue
-                rule = self._hooks[event_name][rule_idx]
+        🛡️ 基于 rule.skill_name（真相来源）而非 _skill_to_hooks 索引：
+        索引可能在热重载后错位，导致来源标签错乱（P021）。
+        """
+        result = {}
+        for event_name, rules in self._hooks.items():
+            for rule in rules:
+                owner = getattr(rule, "skill_name", "")
+                if owner == "user-custom":
+                    source_type, display_name = "user", "自定义"
+                else:
+                    source_type, display_name = "plugin", owner
                 for hook in rule.hooks:
                     result[hook.id] = (source_type, display_name)
         return result
@@ -2122,46 +2154,10 @@ class HookManager:
                 for rule_idx, rule in enumerate(rules):
                     hooks_list = rule.get("hooks", [])
                     for hook_idx, h in enumerate(hooks_list):
-                        h_cmd = (
-                            h.get("command", "")
-                            or h.get("url", "")
-                            or h.get("function", "")
-                            or h.get("prompt", "")
-                        )
+                        h_cmd = h.get("command", "") or h.get("url", "") or h.get("function", "") or h.get("prompt", "")
                         if h_cmd == target_cmd:
                             return (event_name, rule_idx, hook_idx)
         return None
-
-    def _update_skill_index_for_hook(self, hook: Hook, new_event_name: str, new_rule_idx: int):
-        """更新 skill_to_hooks 索引（当 hook 移动到不同事件时）"""
-        # 遍历所有 skill，找到引用该 hook 的
-        old_event = None
-        old_rule_idx = None
-        found_skill_name = None
-        for skill_name, entries in self._skill_to_hooks.items():
-            for i, (evt, ridx) in enumerate(entries):
-                if evt in self._hooks and ridx < len(self._hooks[evt]):
-                    rule = self._hooks[evt][ridx]
-                    for h in rule.hooks:
-                        if h.id == hook.id:
-                            old_event = evt
-                            old_rule_idx = ridx
-                            found_skill_name = skill_name
-                            break
-                if old_event:
-                    break
-            if old_event:
-                break
-
-        if old_event and found_skill_name and old_event != new_event_name:
-            # 从旧位置移除
-            self._skill_to_hooks[found_skill_name] = [
-                (e, r)
-                for (e, r) in self._skill_to_hooks[found_skill_name]
-                if not (e == old_event and r == old_rule_idx)
-            ]
-            # 添加到新位置
-            self._skill_to_hooks[found_skill_name].append((new_event_name, new_rule_idx))
 
     def _save_hook_to_file_by_id(self, hook: Hook, new_data: dict = None) -> bool:
         """通过 hook_id 覆盖式保存到源文件（禁止追加，防重复）
@@ -2326,12 +2322,17 @@ class HookManager:
                     break
             if matched_rule:
                 matched_rule.hooks.append(hook)
+                # 目标 rule 无归属时继承原 rule 的（避免来源标签为空）
+                if not getattr(matched_rule, "skill_name", ""):
+                    matched_rule.skill_name = getattr(rule, "skill_name", "")
             else:
                 new_rule = HookMatchRule(matcher=new_matcher or None, hooks=[hook])
+                # 继承原 rule 的归属 skill（来源标签真相）
+                new_rule.skill_name = getattr(rule, "skill_name", "")
                 self._hooks[new_event].append(new_rule)
 
-            new_rule_idx = next((i for i, r in enumerate(self._hooks[new_event]) if hook in r.hooks), 0)
-            self._update_skill_index_for_hook(hook, new_event, new_rule_idx)
+            # 全量重建索引（rule 移动/合并后位置统一修正，P021 修复）
+            self._rebuild_skill_to_hooks()
             # 非系统 hook 的事件变更也持久化到源文件（全局生效）；系统 hook 走覆盖层
             if not hook.is_system_plugin:
                 ok = self._save_hook_to_file_by_id(hook, new_data)
@@ -2431,9 +2432,7 @@ class HookManager:
             if hook.config_file:
                 ok = self._save_hook_to_file_by_id(hook, {"enabled": enabled})
                 if not ok:
-                    logger.error(
-                        f"[HookManager] Failed to persist toggle for {hook_id} to {hook.config_file}"
-                    )
+                    logger.error(f"[HookManager] Failed to persist toggle for {hook_id} to {hook.config_file}")
             # 清理覆盖层残留（旧数据迁移兜底：若该 id 仍在 hook_states 中）
             if hook.id in self._hook_states:
                 del self._hook_states[hook.id]

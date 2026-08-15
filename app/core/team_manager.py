@@ -565,7 +565,20 @@ class TeamManager:
                 val = permission.get("*", "allow")
             return str(val).lower() == "allow"
 
-        can_write = all(_is_allowed(t) for t in ("write", "edit", "multi_edit"))
+        def _group_tools(group_name: str) -> list:
+            """按注册表分组取工具名（能力判定不写死工具名，随插件 group 声明）"""
+            try:
+                from app.tools.registry import ToolRegistry
+
+                reg = ToolRegistry.get_instance()
+                return [n for n in reg.names() if reg.get(n).group == group_name]
+            except Exception:
+                return []
+
+        # can_write：注册表"文件写入"分组的工具（write/edit/multi_edit）全部 allow
+        write_tools = _group_tools("文件写入")
+        can_write = all(_is_allowed(t) for t in write_tools) if write_tools else False
+        # can_bash：单工具能力判定（bash 即能力名，非写死集合）
         can_bash = _is_allowed("bash")
         # 🛡️ T16：can_team 对团队成员恒真——团队工具（team_send_message /
         # team_list_members）的实际可用性由 schema 层按 is_in_team 判定

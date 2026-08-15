@@ -18,6 +18,7 @@ from app.core.chat_session import (
     ChatSession,
     SessionManager,
 )
+from app.core.context_builder import TOOL_RESULT_MAX_LEN, prune_tool_result
 from app.core.conversation.adapters import UIConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
@@ -180,12 +181,13 @@ class UIEngine(BaseEngine):
     # ========== 权限检查 ==========
 
     def _check_tool_permission(self, tool_name: str, arguments: dict) -> str:
-        # ========== 团队工具无条件放行 ==========
+        # 团队工具无条件放行
         # 团队工具在 schema 层已按 is_in_team 过滤（get_agent_tools_schema），
         # 仅团队成员可见。因此到执行层的工具调用必然来自团队成员，
         # 无需再经过工具开关和 Agent 权限检查，直接放行。
-        _TEAM_TOOLS = {"team_send_message", "team_list_members"}
-        if tool_name in _TEAM_TOOLS:
+        from app.tools.registry import ToolRegistry
+
+        if tool_name in ToolRegistry.get_instance().team_only_tools():
             return "allow"
         # ========== 工具开关过滤（优先于 Agent 权限检查） ==========
         # 前移至此以接入 PermissionStrategy.INTERACTIVE 的 ask/deny 对话框机制。
@@ -200,6 +202,7 @@ class UIEngine(BaseEngine):
         if self._backend is not None:
             controller = getattr(self._backend, "tool_permission_controller", None)
 
+        policies: Dict[str, str] = {}
         if controller is not None:
             toggles = controller.get_toggles()
             behavior = controller.get_behavior()
@@ -210,11 +213,18 @@ class UIEngine(BaseEngine):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
             behavior = settings.tool_off_behavior.value
+            policies = dict(settings.tool_permission_policy.value)
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False behavior={behavior}")
-            return behavior  # "deny" 或 "ask"，由 ConversationExecutor 的 INTERACTIVE 策略驱动对话框
+            # per-tool 关闭策略优先，缺失回退全局 behavior（ask/deny 由 INTERACTIVE 策略驱动对话框）
+            from app.core.tool_permission_controller import resolve_tool_off_policy
+
+            policy = resolve_tool_off_policy(check_name, controller, policies, behavior)
+            logger.info(
+                f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}"
+            )
+            return policy
         # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（跳过模板 deny）
         # 与子智能体 _check_ui_tool_permission 语义一致："UI 覆盖模板"
         if controller is not None and controller.is_user_modified(check_name):
@@ -236,29 +246,19 @@ class UIEngine(BaseEngine):
             result = perm_resolver.resolve(tool_name)
             logger.info(f"[_check_tool_permission] agent={self._current_agent}, tool={tool_name}, result={result}")
 
-            if tool_name == "bash":
-                command = arguments.get("command", "")
-                return perm_resolver.resolve(tool_name, command)
-            elif tool_name in ("read", "edit", "multi_edit", "write"):
-                file_path = arguments.get("filePath", "")
-                return perm_resolver.resolve(tool_name, file_path)
-            elif tool_name == "webfetch":
-                url = arguments.get("url", "")
-                return perm_resolver.resolve(tool_name, url)
-            elif tool_name == "websearch":
-                query = arguments.get("query", "")
-                return perm_resolver.resolve(tool_name, query)
-            elif tool_name == "subagent_para":
-                tasks = arguments.get("tasks", [])
-                if tasks and len(tasks) > 0:
-                    first_agent = tasks[0].get("agent", "")
-                    return perm_resolver.resolve_task(first_agent)
-                return perm_resolver.resolve_task("")
-            elif tool_name == "skill":
-                skill_name = arguments.get("name", "")
-                return perm_resolver.resolve(tool_name, skill_name)
-            else:
-                return perm_resolver.resolve(tool_name)
+            # 权限参数提取由工具插件声明（metadata）驱动，主程序不写死工具名；
+            # 统一走 registry.permission_resolve_args（与子智能体/CLI 同口径）
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _mode, _arg = ToolRegistry.get_instance().permission_resolve_args(tool_name, arguments)
+            except Exception:
+                _mode, _arg = "plain", ""
+            if _mode == "task":
+                return perm_resolver.resolve_task(_arg)
+            if _arg:
+                return perm_resolver.resolve(tool_name, _arg)
+            return perm_resolver.resolve(tool_name)
 
         except Exception as e:
             logger.warning(f"[ChatEngine] Permission check error: {e}")
@@ -508,6 +508,7 @@ class UIEngine(BaseEngine):
                 "normal_tokens": 0,
                 "compacted_tokens": 0,
                 "breakdown": [],
+                "pruned_tokens": 0,
             }
 
         # 快速路径：直接用 session.messages + system prompt 算 token
@@ -554,7 +555,21 @@ class UIEngine(BaseEngine):
         approx_messages: List[Dict] = []
         if system_prompt:
             approx_messages.append({"role": "system", "content": system_prompt})
-        approx_messages.extend(session.messages)
+        # S2: 工具结果截断投影 — 与 context_builder.build_messages 使用同一
+        # prune_tool_result（同参数），使 UI 估算 = 实际发送 token（截断后），
+        # 保证「投影与实际用量一致」；并累计节省量 pruned_tokens 供 UI 展示。
+        # 仅对超阈值消息建副本，不修改 session.messages 原始存储（可追溯）。
+        pruned_tokens = 0
+        for _m in session.messages:
+            _content = _m.get("content")
+            if _m.get("role") == "tool" and isinstance(_content, str) and len(_content) > TOOL_RESULT_MAX_LEN:
+                raw_tok = per_message_tokens(_m, model)
+                _m_copy = dict(_m)
+                _m_copy["content"] = prune_tool_result(_content)
+                approx_messages.append(_m_copy)
+                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model))
+            else:
+                approx_messages.append(_m)
 
         # 获取工具 schema（与实际 API 请求一致），必须计入上下文占用
         # ⚠️ 旧实现此处漏传 tools，导致工具定义（35+ 工具）的 token 完全未计入，
@@ -622,7 +637,12 @@ class UIEngine(BaseEngine):
             elif role == "assistant":
                 assistant_tokens += t
             elif role == "tool":
-                tool_tokens += t
+                # S2: 工具结果按实际发送口径统计（超阈值先截断再计 token）
+                _m = msg
+                if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
+                    _m = dict(msg)
+                    _m["content"] = prune_tool_result(_m["content"])
+                tool_tokens += per_message_tokens(_m, model)
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
@@ -694,6 +714,7 @@ class UIEngine(BaseEngine):
             "normal_tokens": normal_tokens,
             "compacted_tokens": compacted_tokens,
             "breakdown": breakdown,
+            "pruned_tokens": pruned_tokens,
         }
 
     def _start_worker(

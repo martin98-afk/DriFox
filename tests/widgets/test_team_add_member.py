@@ -600,6 +600,41 @@ def test_spawn_team_members_counts_and_arranges(qapp):
     inst._do_team_window_arrange.assert_called_once()
 
 
+def test_spawn_team_members_activates_first_member_tab(qapp):
+    """批量创建后激活 tab 切回第一个成员（修复：add_window 每次激活新窗口，
+    批量创建 N 个后激活停在最后一个成员）。
+
+    回归场景：/team --load=<模板> 加载 N 个角色 → 应自动选中第一个成员 tab，
+    而非最后一个。单个成员（快速新建成员）时切回自身，行为不变。
+    """
+    from unittest.mock import call
+
+    from app.widgets.tab_manager_window import TabManagerWindow
+
+    inst = _make_main_widget_instance()
+
+    w1, w2, w3 = MagicMock(), MagicMock(), MagicMock()
+    inst._spawn_team_member_window = MagicMock(side_effect=[w1, w2, w3])
+    inst._do_team_window_arrange = MagicMock()
+
+    # 模拟 TabManagerWindow：add_window 每次激活最新窗口（idx = 该窗口在
+    # _windows 中的索引），批量创建后激活停在最后一个（w3 → idx 2）。
+    tm_instance = TabManagerWindow.__new__(TabManagerWindow)
+    tm_instance._windows = [w1, w2, w3]
+    tm_instance._window_to_index = {id(w1): 0, id(w2): 1, id(w3): 2}
+    tm_instance._tab_panel = MagicMock()
+    TabManagerWindow._instance = tm_instance
+    try:
+        n = inst._spawn_team_members(["build", "plan", "review"])
+        assert n == 3
+        # 批量创建后必须把激活 tab 切回第一个成员（w1 → idx 0）
+        calls = tm_instance._tab_panel.set_active_index.call_args_list
+        assert calls, "批量创建后未切换激活 tab"
+        assert calls[-1] == call(0), f"激活应切回第一个成员 tab(idx 0)，实际: {calls[-1]}"
+    finally:
+        TabManagerWindow._instance = None
+
+
 # ══════════════════════════════════════════════════════════
 # ⑦ main_widget._handle_team_add_member：快速新建成员（可重复角色）
 # ══════════════════════════════════════════════════════════

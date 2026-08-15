@@ -3,9 +3,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 新功能 (New Features)
+- **工具插件化** (`app/tools/registry.py` + `app/tools/plugin_tool_loader.py` + `plugins/system/tools/`): 工具作为插件的一部分注册，34 个内置工具全部迁移到系统插件 `plugins/system/tools/*.py`，通过 `register(registry)` 注册 schema/impl/icon/cn_name/danger/group/description/aliases；单一数据源驱动 LLM schema、消息渲染（图标/中文名）、权限卡片（分组/危险标记）、权限控制器、ToolNameMapper 别名；轮询热插拔/热更新（文件增删改自动生效，含跨根优先级保护）
+- **工具逻辑自包含** (`plugins/system/tools/`): 纯逻辑工具（文件 9 个/网络 2 个/桌面 3 个）impl 用标准库/第三方库独立实现（含 mtime 检测、unified diff、图片 base64、命令安全等核心行为），不依赖主程序 BuiltinTools；平台工具（bash/subagent/MCP/LSP/CodeGraph/团队/todo/question/skill/上传）通过 `tool_ctx["services"]` 能力接口调用（不暴露 BuiltinTools 内部）；图标资源随插件（`tools/icons/` 深色 + `tools/icons_light/` 浅色，主题感知 data URI 加载）
+- **工具权限卡片动态分组** (`app/widgets/cards/settings/tool_control_card.py`): 分组与描述从 registry 读取（功能域分组，危险工具 🔥 标记 + 组内危险在前），registry 热更新自动重建卡片
+- **渲染联动** (`app/widgets/render_helpers.py`): 工具图标/中文名从 registry 读取，插件工具自动获得展示元数据（MCP 特殊处理保留）
+- **terminal/diagnostics/automation 迁系统插件** (\`plugins/system/tools/\`): bash/bg_*/get_diagnostics 完整实现（含安全拦截/进程树/pty/紧急停止热键）迁入插件自包含，主程序删除三个文件；修复 exec 加载插件模块的 dataclass 装饰器异常（模块未注册 sys.modules + builtins 注入）
+- **codegraph 迁社区插件** (`.drifox/plugins/codegraph-tools/`): codegraph_explore 引擎从主程序迁出为社区插件（引擎单例 + workdir 自动重初始化），主程序 `app/tools/codegraph_tools.py` 删除
+### 🔧 其他 (Chores & Build)
+- **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
+- **web 搜索 token 迁移至环境变量** (`app/utils/config.py` + `app/core/tool_executor.py` + `plugins/system/tools/web_tools.py`): `websearch` 的 `TAVILY_API_KEY`/`TINYFISH_API_KEY` 不再存储于应用配置（config.py 硬编码默认值移除），改由环境变量提供；未设置时 `websearch` 返回「搜索失败：无可用搜索引擎」
+- **测试**: 新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）
+- **Windows Job Object 进程树管理** (`app/tools/process_job.py`): 创建 → kill-on-close → 子进程入 Job 的进程树容器；`command_safety.run_safe/run_with_shell` 新增可选 `job=` 参数，命令启动后自动入 Job（S3）
+- **工具结果截断** (`app/core/context_builder.py`): 超过 8192 字符的工具输出保留头 4096 + 尾 1024，中间省略标记（DSH tool-result-pruner 对齐）；仅在发送给 LLM 的上下文层裁剪，会话原始存储不受影响（S1）
+- **上下文用量投影对齐** (`app/core/engines/ui/engine.py` + `app/widgets/context_usage_ring.py` + `context_usage_tooltip.py`): 用量快照按截断后口径估算（与实际发送一致），环形图 tooltip 显示「工具结果截断节省 X tokens」（S2）
+- **后台任务 Job 杀树 + 事件广播** (`app/tools/terminal_tools.py`): `BackgroundTaskManager.stop` 优先用 Job Object 杀进程树（内核级），新增 `on_task_event` 事件广播（started/stopped/completed），UI 可观测（S4）
+- **持久 Shell 会话** (`app/tools/pty_session.py`): Windows ConPTY（pywinpty）交互式会话，cwd/env/函数跨调用保留，超时可配置（默认 300s）；生命周期挂靠 ProcessJob kill-on-close；**能力已就绪，工具接入待二期**（S5）
+
+### 🔧 其他 (Chores & Build)
+- **依赖新增**: `pywinpty>=3.0.5; sys_platform == 'win32'`（持久 shell 会话基础，S5）
+
 ## [v0.5.1] - 2026-08-14
 
-自上一版本以来的变更 | 提交数：21 · 文件变更：21 · +3207/-231 | 贡献者：mading
+自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading
 
 ### ✨ 新功能 (New Features)
 
@@ -20,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - **插件热重载 MCP 连接** (`app/core/`): 热重载后自动连接新增且启用的 MCP 服务器
 - **Hook 热重载顺序与索引** (`app/core/`): 恢复规则位置并重新对齐 Hook 索引，保持事件顺序和分组映射稳定
 - **Hook 状态持久化重复与覆盖** (`app/core/`): 修复文件顺序变化导致的重复 ID、错误覆盖及多实例状态竞争
+- **Hook 源标签热重载后失真** (`app/core/hook_manager.py`, P021): 修复热重载后 Hook 所属来源/插件标签错位，确保 `plugins/<name>` 与系统来源标签稳定
 - **OpenAI 模块导入死锁** (`app/core/`): 预加载资源子模块，避免启动时导入死锁
 
 ### ♻️ 代码重构 (Refactoring)

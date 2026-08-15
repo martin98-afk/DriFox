@@ -986,6 +986,14 @@ def compute_diff_stats(operations: list) -> dict:
     import difflib
     from pathlib import Path
 
+    # 文件写入组工具（registry 派生，与 tool_executor._is_write_group 同源；异常回退旧名单）
+    try:
+        from app.tools.registry import ToolRegistry
+
+        write_tools = ToolRegistry.get_instance().tools_in_group("文件写入")
+    except Exception:
+        write_tools = ["write", "edit", "multi_edit"]
+
     seen_files = set()
     total_files = 0
     total_additions = 0
@@ -997,7 +1005,7 @@ def compute_diff_stats(operations: list) -> dict:
         tool_name = op.get("tool_name", "")
 
         # 跳过非编辑类操作
-        if tool_name not in ("write", "edit", "multi_edit"):
+        if tool_name not in write_tools:
             continue
         # 按文件路径去重
         if file_path in seen_files:

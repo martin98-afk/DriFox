@@ -228,7 +228,13 @@ class TestCommandCardDivider:
         assert card.height() == expected_h, f"全集高度 {card.height()} != {expected_h}"
 
     def test_apply_list_height_sync(self):
-        """_apply_list_height 使用的 divider_count = len(_dividers) 准确"""
+        """_apply_list_height 高度口径与 _build_virtual_layout 一致
+
+        真实总高 = item_count * ITEM_HEIGHT + divider_count * 1。
+        若用 total_items（含 dividers）作 visible 基数，item_count < MAX_VISIBLE_ITEMS
+        时 visible = item_count + divider_count，卡片高度 = 真实高度 + 多余空槽占位，
+        列表底部留白。修复后 visible = min(item_count, MAX_VISIBLE_ITEMS)。
+        """
         _ensure_qapp()
         from app.widgets.cards.floating.command_card import (
             MAX_VISIBLE_ITEMS,
@@ -241,10 +247,47 @@ class TestCommandCardDivider:
         card._divider_count = 2  # 2 dividers
 
         card._apply_list_height()
-        total = 7 + 2
-        visible = min(total, MAX_VISIBLE_ITEMS)
-        expected = visible * ITEM_HEIGHT + 2
+        # 真实高度 = 7 * ITEM_HEIGHT + 2 * 1 = 254
+        # 旧 bug：visible = min(7 + 2, 8) = 7，算出 7 * 36 + 2 = 254（看似正确），
+        # 但当 item_count < MAX_VISIBLE_ITEMS 时（如 5 + 2）会出现 (visible - item_count) * 36 空槽。
+        # 修复后：visible = min(item_count, MAX_VISIBLE_ITEMS) = 7，结果与真实高度一致。
+        expected = 7 * ITEM_HEIGHT + 2
         assert card.height() == expected, f"_apply_list_height 结果 {card.height()} != {expected}"
+
+    def test_apply_list_height_no_blank_tail_few_items(self):
+        """回归：item_count < MAX_VISIBLE_ITEMS + 多 divider 时无底部空槽
+
+        复现 /plugin- 过滤：5 items 跨 3 个 section（UI + skill + prompt）→ 2 dividers。
+        旧实现 visible = min(7, 8) = 7，card 高度 = 7*36 + 2 = 254，真实虚拟内容
+        高度 5*36 + 2 = 182，底部 72px 空槽。修复后 visible = min(5, 8) = 5，card = 182。
+        """
+        _ensure_qapp()
+        from app.widgets.cards.floating.command_card import (
+            MAX_VISIBLE_ITEMS,
+            ITEM_HEIGHT,
+        )
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+
+        # 放到合理高度的窗口中，避免矮窗口压缩分支掩盖 bug
+        _parent = QWidget()
+        _parent.resize(800, 600)
+        _parent.setLayout(QVBoxLayout())
+        card = _make_card()
+        _parent.layout().addWidget(card)
+        _REF_HOLDER.append(_parent)
+
+        card._filtered_items = [{} for _ in range(5)]
+        card._divider_count = 2  # UI/skill/prompt 三个 section → 2 dividers
+        card._apply_list_height()
+
+        # 真实虚拟内容高度 = 5 * 36 + 2 = 182
+        expected_real = 5 * ITEM_HEIGHT + 2
+        # 修复前：visible = min(7, 8) = 7 → 7 * 36 + 2 = 254，比真实多 72px 空槽
+        # 修复后：visible = min(5, 8) = 5 → 5 * 36 + 2 = 182，与真实一致
+        assert card.height() == expected_real, (
+            f"item_count < MAX 时卡片高度 {card.height()} 应 = 真实高度 {expected_real}"
+            f"（5 items + 2 dividers = 5*36+2 = 182）"
+        )
 
     def test_apply_list_height_many_items(self):
         """总 items 数 > MAX_VISIBLE_ITEMS 时高度上限正确"""

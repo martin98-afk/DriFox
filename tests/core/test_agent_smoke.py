@@ -260,8 +260,8 @@ class TestPermissionResolver:
     def test_default_permissions_has_ask_tools(self, mod):
         """Some tools default to 'ask'."""
         defaults = mod.PermissionResolver.DEFAULT_PERMISSIONS
-        assert defaults.get("external_directory") == "ask"
-        assert defaults.get("doom_loop") == "ask"
+        # external_directory/doom_loop 死条目已删除（无对应注册工具，T4a 清理）
+        assert all(v in ("allow", "ask", "deny") for v in defaults.values())
 
     # ── resolve ───────────────────────────────────────────────────────
 

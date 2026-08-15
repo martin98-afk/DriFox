@@ -384,11 +384,15 @@ def _ensure_no_window(kwargs: dict) -> dict:
     return kwargs
 
 
-def run_safe(command: str, **kwargs) -> "subprocess.Popen":
+def run_safe(command: str, job=None, **kwargs) -> "subprocess.Popen":
     """Path A: 使用 shell=False 执行安全命令
 
     参数与 subprocess.Popen 一致。
     返回 Popen 对象，调用方负责 communicate/wait。
+
+    job: 可选 ProcessJob，创建成功后自动把进程加入 Job
+    （kill-on-close 时连同子进程树一起杀灭）。非 Windows / assign 失败
+    不阻断执行，仅记日志。
 
     Windows 特殊处理：如果命令找不到（FileNotFoundError），自动回退到
     cmd /c 包装，以支持 PATHEXT 解析（如 pip → pip.exe、tsc → tsc.cmd）。
@@ -399,28 +403,45 @@ def run_safe(command: str, **kwargs) -> "subprocess.Popen":
 
     no_window_kwargs = _ensure_no_window(kwargs)
     try:
-        return subprocess.Popen(args, shell=False, **no_window_kwargs)
+        proc = subprocess.Popen(args, shell=False, **no_window_kwargs)
     except FileNotFoundError:
         # Windows 上 shell=False 不会解析 PATHEXT（.exe/.cmd/.bat 扩展名），
         # 导致 pip/npm/tsc 等命令找不到。回退到 cmd /c 包装。
         if sys.platform == "win32" and args:
             logger.info(f"run_safe: '{args[0]}' not found as executable, retrying with cmd /c")
-            return subprocess.Popen(
+            proc = subprocess.Popen(
                 ["cmd", "/c"] + args,
                 shell=False,
                 **no_window_kwargs,
             )
-        raise
+        else:
+            raise
+    _assign_to_job(proc, job)
+    return proc
 
 
-def run_with_shell(command: str, **kwargs) -> "subprocess.Popen":
+def run_with_shell(command: str, job=None, **kwargs) -> "subprocess.Popen":
     """Path B: 使用 shell=True 执行复杂命令（需外部审批保障）
 
     此路径仅在命令包含 shell 元字符时使用。
     调用方必须确保命令已通过用户审批。
+
+    job: 可选 ProcessJob，同 run_safe。
     """
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         command,
         shell=True,
         **_ensure_no_window(kwargs),
     )
+    _assign_to_job(proc, job)
+    return proc
+
+
+def _assign_to_job(proc: "subprocess.Popen", job) -> None:
+    """把已启动的 Popen 进程加入 Job（best-effort，失败不阻断）。"""
+    if job is None:
+        return
+    try:
+        job.assign(proc.pid)
+    except Exception as e:  # noqa: BLE001 - 安全垫，绝不阻断命令执行
+        logger.warning(f"assign to ProcessJob failed: {e}")

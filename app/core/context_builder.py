@@ -24,6 +24,42 @@ from app.core.token_estimator import count_messages_tokens
 SYSTEM_PROMPT_RESERVE_RATIO = 0.15  # 预留 15% 给系统提示（含技能、记忆等）
 MIN_HISTORY_BUDGET_RATIO = 0.60  # 历史消息分配占比 60%（配合 SOFT_LIMIT=84% → 触发于总体 ~50%）
 
+# ============================================================
+# 工具结果截断（S1，对齐 DSH tool-result-pruner 参数）
+# 超过 TOOL_RESULT_MAX_LEN 的工具输出，保留头 HEAD + 尾 TAIL，
+# 中间用省略标记替换 —— 避免超大工具结果全量占用上下文 token。
+# 仅在「组装发送给 LLM 的上下文」时截断，session 原始存储不受影响。
+# ============================================================
+TOOL_RESULT_MAX_LEN = 8192   # 超过此长度触发截断
+TOOL_RESULT_HEAD_KEEP = 4096  # 保留头部字符数
+TOOL_RESULT_TAIL_KEEP = 1024  # 保留尾部字符数
+TOOL_RESULT_ELLIPSIS = "\n...[工具结果过长，已截断中间 {dropped} 字符，头 {head} + 尾 {tail}]...\n"
+
+
+def prune_tool_result(
+    content: str,
+    max_len: Optional[int] = None,
+    head_keep: Optional[int] = None,
+    tail_keep: Optional[int] = None,
+) -> str:
+    """截断超长工具结果：保留头部 + 尾部，中间省略标记。
+
+    返回截断后的字符串；未超阈值或非字符串原样返回。
+    省略标记内含被裁字符数，供 token 计量（S2）量化截断收益。
+    """
+    if not isinstance(content, str) or not content:
+        return content
+    limit = max_len if max_len is not None else TOOL_RESULT_MAX_LEN
+    if len(content) <= limit:
+        return content
+    head = head_keep if head_keep is not None else TOOL_RESULT_HEAD_KEEP
+    tail = tail_keep if tail_keep is not None else TOOL_RESULT_TAIL_KEEP
+    dropped = len(content) - head - tail
+    if dropped <= 0:
+        # 阈值配置异常（head+tail >= len），保底只留 head
+        return content[:head]
+    return content[:head] + TOOL_RESULT_ELLIPSIS.format(dropped=dropped, head=head, tail=tail) + content[-tail:]
+
 
 class ContextBudgetAllocator:
     """
@@ -168,6 +204,11 @@ class ContextBudgetAllocator:
         # 否则压缩后的历史摘要会整体丢失，见 history_compactor.py issue #225 修复）
         filtered_history = [m for m in history_for_api
                            if m.get("role") != "system" or m.get("_hook_event") or m.get("_compaction_summary")]
+        # S1: 工具结果截断 — 超大 tool 输出（>8192）保留头 4096 + 尾 1024，中间省略。
+        # 只在「发给 LLM 的上下文」层裁剪，session 原始存储不受影响（可追溯/可重放）。
+        for m in filtered_history:
+            if m.get("role") == "tool" and isinstance(m.get("content"), str):
+                m["content"] = prune_tool_result(m["content"])
         messages.extend(filtered_history)
 
         # 添加用户消息

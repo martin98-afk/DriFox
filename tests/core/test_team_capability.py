@@ -16,11 +16,31 @@
 - monkeypatch AgentManager.get_instance 返回伪造管理器，验证 join 登记与动态解析
 """
 
+import importlib.util
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.core import team_manager as tm_mod
+
+# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system/tools/subagent_tools.py
+# 的模块级函数（_format_capability / _team_list_members / _team_send_message，tool_ctx 签名）。
+# 复用 test_file_tree_root_watch.py 的 _load_module 模式加载插件模块（plugins/ 非 Python 包）。
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools"
+
+
+def _load_subagent_tools():
+    """加载插件模块 subagent_tools.py（幂等：已加载则返回缓存）"""
+    mod_name = "_team_capability_subagent_tools"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "subagent_tools.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture
@@ -257,10 +277,15 @@ class TestMatchMembers:
 
 
 class TestTeamToolsCapabilityDisplay:
-    """team_tools：权限摘要渲染（_format_capability）"""
+    """团队工具插件（subagent_tools.py 模块级函数）：权限摘要渲染（_format_capability）"""
+
+    @staticmethod
+    def _tool_ctx(window_id="win_01", agent_name="build"):
+        """构造插件 impl 的 tool_ctx（含团队窗口上下文）"""
+        return {"team_window_id": window_id, "team_agent_name": agent_name}
 
     def test_format_capability(self, tm):
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         cap = {
             "can_write": True,
@@ -268,14 +293,14 @@ class TestTeamToolsCapabilityDisplay:
             "can_team": True,
             "task_tags": ["implement"],
         }
-        text = TeamTools._format_capability(cap)
+        text = subagent._format_capability(cap)
         assert "写✓" in text, f"can_write=True 应显示写✓，实际 {text}"
         assert "bash✓" in text
         assert "团队✓" in text
         assert "implement" in text
 
     def test_format_capability_denied(self, tm):
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         cap = {
             "can_write": False,
@@ -283,7 +308,7 @@ class TestTeamToolsCapabilityDisplay:
             "can_team": False,
             "task_tags": ["review"],
         }
-        text = TeamTools._format_capability(cap)
+        text = subagent._format_capability(cap)
         assert "写✗" in text and "bash✗" in text
         # T16：团队工具对团队成员恒真 → 显示层恒 团队✓（不再出现团队✗），
         # 即使传入的 cap.can_team=False（存量老快照防御）
@@ -293,7 +318,7 @@ class TestTeamToolsCapabilityDisplay:
 
     def test_team_list_members_contains_capability_line(self, tm, monkeypatch):
         """team_list_members 输出包含权限摘要行（F9 主链路）。"""
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         _patch_agent_manager(
             monkeypatch,
@@ -301,11 +326,8 @@ class TestTeamToolsCapabilityDisplay:
         )
         tm.join_team("win_01", "build")
 
-        bt = SimpleNamespace(_team_window_id="win_01", _team_agent_name="build")
-        tool = TeamTools(bt)
-        # 需要真实 TeamManager.get_instance 指向我们的实例
         monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
-        result = tool.team_list_members()
+        result = subagent._team_list_members(self._tool_ctx("win_01", "build"))
         assert result.success, result.error
         assert "build@win_01" in result.content
         assert "权限:" in result.content, f"应含权限摘要行，实际:\n{result.content}"
@@ -318,7 +340,7 @@ class TestTeamToolsCapabilityDisplay:
         team_* 条目）→ 旧逻辑 can_team=False → 显示"团队✗"；修复后成员
         列表恒显 团队✓（团队成员必具团队工具）。
         """
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         _patch_agent_manager(
             monkeypatch,
@@ -332,11 +354,9 @@ class TestTeamToolsCapabilityDisplay:
         )
         tm.join_team("win_01", "review")
 
-        bt = SimpleNamespace(_team_window_id="win_01", _team_agent_name="review")
-        tool = TeamTools(bt)
         monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
 
-        result = tool.team_list_members()
+        result = subagent._team_list_members(self._tool_ctx("win_01", "review"))
         assert result.success, result.error
         assert "review@win_01" in result.content
         assert "权限:" in result.content, f"应含权限摘要行，实际:\n{result.content}"
@@ -346,7 +366,7 @@ class TestTeamToolsCapabilityDisplay:
 
     def test_team_send_message_attaches_capability_hint(self, tm, monkeypatch):
         """team_send_message 结果附带目标能力提示。"""
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         _patch_agent_manager(
             monkeypatch,
@@ -358,11 +378,62 @@ class TestTeamToolsCapabilityDisplay:
         tm.join_team("win_01", "build")
         tm.join_team("win_02", "plan")
 
-        bt = SimpleNamespace(_team_window_id="win_01", _team_agent_name="build")
-        tool = TeamTools(bt)
         monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
 
-        result = tool.team_send_message(to_agent="plan", message="做规划")
+        result = subagent._team_send_message(self._tool_ctx("win_01", "build"), to_agent="plan", message="做规划")
         assert result.success, result.error
         assert "目标能力:" in result.content, f"应附目标能力提示，实际:\n{result.content}"
         assert "plan" in result.content
+
+    def test_team_send_message_sender_role_from_member_table(self, tm, monkeypatch):
+        """🐛 发件人角色兜底：tool_ctx 角色与成员表不一致时，以成员表为准。
+
+        线上症状：团队邮件发件人恒为 build@win_xxx（BuiltinTools 团队上下文
+        因 join/chat_engine 时序滞留默认值 build）。修复：发送时按 window_id
+        从 TeamManager 成员表反查权威角色覆盖，保证邮件显示实际成员名。
+        """
+        subagent = _load_subagent_tools()
+        _patch_agent_manager(
+            monkeypatch,
+            {
+                "leader": _fake_agent("leader", "统筹团队任务"),
+                "build": _fake_agent("build", "负责编码实现", permission={"write": "allow"}),
+            },
+        )
+        # win_01 实际角色是 leader（成员表权威）
+        tm.join_team("win_01", "leader")
+        tm.join_team("win_02", "build")
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
+
+        # tool_ctx 角色错误（滞留 build）→ 发送后 from_agent 应为成员表里的 leader
+        result = subagent._team_send_message(self._tool_ctx("win_01", "build"), to_agent="build", message="派活")
+        assert result.success, result.error
+        mails = tm.get_mailbox_mails("win_02")
+        assert mails and mails[0]["from_agent"] == "leader", (
+            f"邮件发件人应为成员表权威角色 leader，实际: {mails[0]['from_agent'] if mails else None}"
+        )
+        assert mails[0]["from_window"] == "win_01"
+
+    def test_team_send_message_sender_role_keeps_correct_ctx(self, tm, monkeypatch):
+        """兜底不误伤：tool_ctx 角色与成员表一致时保持原值，不覆盖。"""
+        subagent = _load_subagent_tools()
+        _patch_agent_manager(
+            monkeypatch,
+            {
+                "leader": _fake_agent("leader", "统筹团队任务"),
+                "build": _fake_agent("build", "负责编码实现", permission={"write": "allow"}),
+            },
+        )
+        tm.join_team("win_01", "leader")
+        tm.join_team("win_02", "build")
+        monkeypatch.setattr(tm_mod.TeamManager, "get_instance", staticmethod(lambda: tm))
+
+        result = subagent._team_send_message(self._tool_ctx("win_01", "leader"), to_agent="build", message="派活")
+        assert result.success, result.error
+        mails = tm.get_mailbox_mails("win_02")
+        assert mails and mails[0]["from_agent"] == "leader", "角色一致时不应被覆盖"
+        # 成员表无此 window 时不崩溃，保持 tool_ctx 原值
+        result2 = subagent._team_send_message(self._tool_ctx("win_99", "build"), to_agent="build", message="派活2")
+        assert result2.success, result2.error
+        mails2 = tm.get_mailbox_mails("win_02")
+        assert mails2[-1]["from_agent"] == "build", "成员表查不到时保留 tool_ctx 角色"

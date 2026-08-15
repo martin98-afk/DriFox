@@ -4905,6 +4905,17 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             if _tmw is not None:
                 _tmw._tab_panel.end_batch_add()
+        # 🐛 模板加载后 tab 自动切到第一个成员：add_window 每次激活新窗口
+        # （批量创建 N 个成员后激活停在最后一个），此处统一切回第一个新窗口。
+        # 注：单个成员（快速新建成员 _handle_team_add_member）时切回自身，
+        # 行为不变；仅批量场景（/team --load）生效。
+        if new_windows and _tmw is not None:
+            try:
+                _first_idx = _tmw._window_to_index.get(id(new_windows[0]), -1)
+                if 0 <= _first_idx < len(_tmw._windows):
+                    _tmw._tab_panel.set_active_index(_first_idx)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[_spawn_team_members] 切回首个成员 tab 失败: {e}")
         # 初始化延迟计数（新窗口 join 完成后逐个递减并排列）
         self._pending_arrange_count = len(new_windows)
         if self._pending_arrange_count == 0:
@@ -5108,13 +5119,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     if self._pending_arrange_count == 0:
                         self._do_team_window_arrange()
                 return
-            if not getattr(win, "backend", None) or not win.backend.agent_manager:
-                # C4 就绪轮询：backend 未就绪 → 重试而非直接放弃
+            if (
+                not getattr(win, "backend", None)
+                or not win.backend.agent_manager
+                # 🐛 团队邮件角色 build 修复：_on_agent_changed 有
+                # `not self.backend.chat_engine` 守卫（ChatEngine 400ms 延迟创建），
+                # 仅等 agent_manager 会导致回调在 chat_engine 就绪前提前 return，
+                # switch_agent/set_team_context 未写入正确角色 → 邮件发件人恒为默认 build。
+                # 补查 chat_engine，就绪后再回调，从根上消除竞态。
+                or not win.backend.chat_engine
+            ):
+                # C4 就绪轮询：backend/chat_engine 未就绪 → 重试而非直接放弃
                 retries = getattr(win, "_team_join_retries", 0)
                 if retries < self._TEAM_JOIN_MAX_RETRIES:
                     win._team_join_retries = retries + 1
                     logger.warning(
-                        f"[_join_new_window_for_template] window {window_id} backend 未就绪，"
+                        f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
                         f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
                     )
                     QTimer.singleShot(
@@ -7064,6 +7084,7 @@ class OpenAIChatToolWindow(ToolWindow):
             snapshot.get("normal_tokens", 0),
             snapshot.get("compacted_tokens", 0),
             breakdown=snapshot.get("breakdown", []),
+            pruned_tokens=snapshot.get("pruned_tokens", 0),
         )
         # 防闪：流式期间 session.messages 可能尚未包含本轮新增消息（陈旧），快照
         # used_tokens 会远小于 worker 实时 token_count，导致圆环/卡片闪现异常小的数值。
@@ -9606,7 +9627,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 即使按钮组不存在（工具开关模式下智能体切换 UI 已移除），
         # 仍需同步 _current_agent 到 ChatEngine，否则 PermissionResolver 会使用错误的默认 agent
         if not hasattr(self, "_agent_btn_group"):
-            self._current_agent = getattr(self, "_current_agent", "build")
+            # 🐛 团队邮件角色 build 修复：团队窗口加入时 _on_agent_changed 可能因
+            # chat_engine 未就绪提前 return，_current_agent 保持默认 "build"；
+            # 此处优先取团队角色（_team_agent_name），团队窗口不再回退到 build，
+            # 保证 set_current_agent → set_team_context 写入正确成员名。
+            team_agent = getattr(self, "_team_agent_name", "") or ""
+            self._current_agent = team_agent or getattr(self, "_current_agent", "build")
             if self.backend.chat_engine:
                 self.backend.set_current_agent(self._current_agent)
                 logger.info(
@@ -13240,22 +13266,18 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[RESTORE] Failed to persist session: {e}")
 
         # 恢复文件操作（重写 AI 编辑后的文件内容）
+        # （write_file 兼容分支已删：DB 实证 0 记录；fr_op 通用结构保留，
+        #   含 content 的条目即按内容重写）
         file_restore_ops = cache.get("file_restore_ops", [])
         for fr_op in file_restore_ops:
             try:
-                fp = fr_op["file_path"]
-                tn = fr_op["tool_name"]
-                if tn == "write_file":
-                    content = fr_op.get("content", "")
+                fp = fr_op.get("file_path")
+                content = fr_op.get("content", "")
+                if fp and content:
                     Path(fp).parent.mkdir(parents=True, exist_ok=True)
                     with open(fp, "w", encoding="utf-8") as f:
                         f.write(content)
                     logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
-                elif tn == "delete_file":
-                    p = Path(fp)
-                    if p.exists():
-                        p.unlink()
-                    logger.info(f"[RESTORE] 已恢复文件删除: {fp}")
             except Exception as e:
                 logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
 
@@ -13550,31 +13572,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
                     # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
+                    # （write_file 兼容分支已删：DB 实证 0 记录，工具名已为
+                    #   write/edit/multi_edit；file_restore_ops 通用结构保留，
+                    #   供后续按 registry 文件写入组分组的恢复实现复用）
                     file_restore_ops = []
-                    for op in selected_ops:
-                        fp = op.get("file_path")
-                        tn = op.get("tool_name", "")
-                        if tn == "write_file" and fp and Path(fp).exists():
-                            try:
-                                with open(fp, "r", encoding="utf-8") as f:
-                                    content = f.read()
-                                file_restore_ops.append(
-                                    {
-                                        "tool_name": "write_file",
-                                        "file_path": fp,
-                                        "content": content,
-                                    }
-                                )
-                            except Exception as e:
-                                logger.warning(f"[UNDO] 无法读取文件内容用于恢复: {fp} - {e}")
-                        elif tn == "delete_file" and fp:
-                            # delete_file 先记录路径，回滚后文件会被恢复，恢复时重新删除
-                            file_restore_ops.append(
-                                {
-                                    "tool_name": "delete_file",
-                                    "file_path": fp,
-                                }
-                            )
                     self._undo_delete_cache["file_restore_ops"] = file_restore_ops
 
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
@@ -14138,9 +14139,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 收集统一 diff 文本（每个文件一段 unified diff），用于注入 review 任务描述
 
-            # 写工具白名单：只审查产生文件内容改动的工具（write/edit/multi_edit 之外，
-            # 兼容 str_replace_editor / apply_patch 这类常见别名；读取类不在此列）
-            WRITE_TOOLS = {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
+            # 写工具白名单：只审查产生文件内容改动的工具（registry group 派生，与
+            # tool_executor._is_write_group 同源；str_replace_editor/apply_patch 为
+            # Claude Code 生态名，file_recorder 只记录 registry 文件写入组工具，永不出现）
+
+            def _write_group_tools() -> set:
+                """文件写入组工具集合（registry 派生；异常时回退旧白名单保持过滤语义）"""
+                try:
+                    from app.tools.registry import ToolRegistry
+
+                    return set(ToolRegistry.get_instance().tools_in_group("文件写入"))
+                except Exception:
+                    return {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
+
+            WRITE_TOOLS = _write_group_tools()
 
             # 按文件路径分组：同一文件在当轮的多次连续编辑合并为一份累积 diff，
             # 避免文件名列重复、diff 碎片化，让 review 看清从初始到最终的完整变化。
@@ -15207,8 +15219,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
-        # question / todowrite / todoread 有自己的 UI 处理，不创建流式块
-        if tool_name in ("question", "todowrite", "todoread"):
+        # 专属 UI 工具（metadata["ui_managed"]）：不创建流式块，由专属 UI 处理
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _ui_managed = ToolRegistry.get_instance().is_ui_managed(tool_name)
+        except Exception:
+            _ui_managed = False
+        if _ui_managed:
             return
 
         # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
@@ -15255,16 +15273,24 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_auto_loop_running:
             return
 
-        if tool_name == "question":
-            # question 工具由 chat_worker 的 question_asked 信号 →
-            # _on_question_asked 统一处理（含规范化后的数据）
-            # 这里只需记录 ID，不做显示避免竞态
+        # 交互式工具（metadata["interactive"]=True）：由 chat_worker 的 question_asked
+        # 信号 → _on_question_asked 统一处理（含规范化后的数据）
+        # 这里只需记录 ID，不做显示避免竞态
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _interactive = ToolRegistry.get_instance().is_interactive(tool_name)
+            _ui_managed = ToolRegistry.get_instance().is_ui_managed(tool_name)
+        except Exception:
+            _interactive = False
+            _ui_managed = False
+        if _interactive:
             self._question_tool_call_id = tool_call_id
             self._hide_all_cards_for_question()
             return
 
-        if tool_name in ("todowrite", "todoread"):
-            # 更新数据，但只有在系统卡片未打开时才能显示
+        # 专属 UI 工具：更新数据，但只有在系统卡片未打开时才能显示
+        if _ui_managed:
             if not self._is_system_card_visible:
                 self._card_manager.show_card("todo", self._window_id)
             return
@@ -15384,7 +15410,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _handle_todos_command(self, args: str):
         """/todos 命令：手动显示/刷新待办事项卡片"""
-        todos = self.backend.get_todos()
+        # 工具插件化：待办状态在工具插件内，主程序不读插件状态——
+        # 通过执行 todoread 工具拿当前列表（主程序 → 工具执行，正常方向）
+        todos = []
+        try:
+            if self.backend and getattr(self.backend, "_tool_executor", None):
+                result = self.backend._tool_executor.execute("todoread", {})
+                if result is not None:
+                    todos = getattr(result, "todos", None) or []
+        except Exception:
+            todos = []
         if todos:
             self._todo_floating_widget.update_todos(todos)
             # 确保卡片可见（update_todos 内部已处理自动显示，但通过 CardManager 确保容器展开）
@@ -16090,17 +16125,12 @@ class OpenAIChatToolWindow(ToolWindow):
             content = str(result) if result else ""
 
         # 统一处理工具完成状态
-        if tool_name in ("todowrite", "todoread"):
-            todos = self.backend.get_todos()
+        # 字段驱动：任何工具结果携带 todos 字段 → 联动待办 UI（插件声明，主程序不写死工具名）
+        todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
+        if todos:
             self._todo_floating_widget.update_todos(todos)
-            if self._is_system_card_visible:
-                # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
-                pass
-        elif tool_name not in ("question",):
-            # 工具结果块由 append_tool_result 内部通过原地转换（In-Place
-            # Transformation）替换流式块，不再需要手动 remove_tool_streaming。
-            # 原地转换保持 DOM 树位置不变，避免删除+新建导致的高度抖动。
-            pass
+        # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
+        #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None
@@ -16132,8 +16162,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._scroll_to_bottom()
 
-        # 编辑类工具执行后实时更新差异统计
-        if tool_name in ("write", "edit", "multi_edit"):
+        # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
+        if diff_val:
             self._update_card_diff_stats_for_call(tool_call_id)
 
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:
@@ -16826,6 +16856,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         normal_tokens,
                         compacted_tokens,
                         breakdown=getattr(ring, "_breakdown", None) or [],
+                        # 透传上一次的 pruned_tokens，避免该补充路径把节省量闪回 0
+                        pruned_tokens=getattr(ring, "_pruned_tokens", 0),
                     )
                     # 卡片底部 token 显示与上下文圆环同步（同一 last_tc）
                     card = getattr(self, "_current_assistant_card", None)
@@ -17933,6 +17965,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
         self._broadcast_team_project(project, prev_project)
+
+        # Tab 模式下同步更新 Tab 图标（与 _on_project_selected 对齐：
+        # 新建项目后必须显式刷新，否则依赖 windowTitleChanged 间接触发，
+        # 标题未变化时图标停留在旧项目）
+        if self.cfg.enable_tab_manager.value:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
+                tm = TabManagerWindow.get_instance()
+                if tm and self in tm._windows:
+                    idx = tm._windows.index(self)
+                    _update_tab_icon(idx, project)
+            except Exception:
+                pass
 
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
@@ -20151,12 +20197,6 @@ def _cleanup_global_lru_caches():
         from app.widgets.message_card import _render_tool_block_content
 
         _render_tool_block_content.cache_clear()
-    except Exception:
-        pass
-    try:
-        from app.tools.file_tools import _compile_grep_pattern
-
-        _compile_grep_pattern.cache_clear()
     except Exception:
         pass
 

@@ -39,10 +39,9 @@ class FileOperationRecorder:
     在文件操作前备份，记录操作信息，支持撤销回滚
     """
 
-    # 支持记录的文件操作类型
-    TRACKED_OPERATIONS = {
-        "write", "edit", "multi_edit" # tool_executor 中的名称
-    }
+    # 支持记录的文件操作类型：注册表"文件写入"分组（write/edit/multi_edit，插件声明）
+    # 主程序不写死工具名——新写工具注册到该 group 即自动纳入备份跟踪。
+    TRACKED_OPERATION_GROUP = "文件写入"
 
     def __init__(self, session_store: Optional[SessionStore] = None):
         self._session_store = session_store or SessionStore.get_instance()
@@ -50,8 +49,16 @@ class FileOperationRecorder:
         self._backup_base_dir = get_app_data_dir() / "backups"
 
     def is_tracked_operation(self, tool_name: str) -> bool:
-        """判断是否为需要记录的操作"""
-        return tool_name in self.TRACKED_OPERATIONS
+        """判断是否为需要记录的操作（registry 分组驱动）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                return reg.group == self.TRACKED_OPERATION_GROUP
+        except Exception:
+            pass
+        return False
 
     # 编辑后备份文件的后缀
     AFTER_BACKUP_SUFFIX = ".after.bak"
@@ -270,18 +277,6 @@ class FileOperationRecorder:
                 tool_name = op.get("tool_name", "")
 
                 if not file_path:
-                    continue
-
-                # 处理 write_file 和 delete_file
-                if tool_name == "delete_file":
-                    # delete_file 的备份文件实际上是原文件，撤销时恢复
-                    if backup_path and Path(backup_path).exists():
-                        resolved_path = Path(file_path)
-                        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(backup_path, resolved_path)
-                        Path(backup_path).unlink()
-                        result.success_count += 1
-                        logger.info(f"[FileRecorder] 已恢复删除的文件: {file_path}")
                     continue
 
                 # 检查备份文件是否存在

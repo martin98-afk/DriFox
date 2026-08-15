@@ -959,3 +959,27 @@ class AsyncUpdateChecker(QThread):
             result = None
         finally:
             self.check_finished.emit(result)
+
+
+def resolve_path(workdir, path: str) -> Path:
+    """解析相对路径为绝对路径（从 app/tools/file_tools.py 迁移，工具插件化后主程序内部使用）
+
+    Args:
+        workdir: 工作目录（Path）
+        path: 要解析的路径
+    Returns:
+        解析后的绝对路径（解析失败回退 workdir）
+    """
+    if not path:
+        return Path(workdir)
+    try:
+        expanded = os.path.expandvars(path)
+        if expanded != path:
+            path = expanded
+        p = Path(path)
+        if p.is_absolute():
+            return p.resolve()
+        return (Path(workdir) / p).resolve()
+    except (ValueError, OSError, RuntimeError) as e:
+        logger.warning(f"[resolve_path] Failed to resolve path {path}: {e}")
+        return Path(workdir)

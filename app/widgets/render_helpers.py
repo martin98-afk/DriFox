@@ -10,6 +10,7 @@ import re
 from html import escape
 
 import orjson as json
+from loguru import logger
 
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -27,6 +28,28 @@ _DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
 
 # 行内 diff 高亮风格（与 message_card.py 同步，由 set_diff_highlight_style 切换）
 _current_diff_style = "dracula"
+
+
+def _sync_diff_style_to_theme() -> None:
+    """根据当前主题同步 _current_diff_style，确保 _get_diff_formatter 返回正确风格。
+
+    🐛 工具渲染管线（render_helpers.format_tool_block → _render_edit_diff_body）
+    调用 _render_diff_preview 时不会经过 message_card._render_markdown_to_html
+    的 set_diff_highlight_style 入口，因此主题切换后 _current_diff_style 可能
+    仍是旧值，formatter 仍用 dracula 风格的前景色渲染到浅色主题背景上
+    → 白字白底不可见（"偶尔出现"是因为切主题后第一次 markdown 渲染恰好
+    把 _current_diff_style 同步过去才看起来正常）。
+    此处按当前主题即时同步，避免渲染管线入口漏同步导致颜色错位。
+    """
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        target = "friendly" if theme_manager.is_light_theme() else "dracula"
+        if target != _current_diff_style:
+            set_diff_highlight_style(target)
+    except Exception:
+        # 主题管理器尚未初始化（如单元测试/导入期）→ 保持当前风格，不破坏渲染
+        pass
 
 
 def set_diff_highlight_style(style_name: str):
@@ -452,6 +475,8 @@ def _render_diff_preview(diff_text: str) -> str:
     """
     将 unified diff 渲染为带语法高亮、段落级差异的 HTML。
 
+    渲染入口先同步主题（见 _sync_diff_style_to_theme 注释），避免主题切换
+    后 formatter 仍是旧主题的前景色导致浅色背景下白字白底不可见。
     - 相邻的增/删差异（包括被 hunk 头隔开的紧邻小改动）聚合成一个
       「差异段」，差异段同时输出两套视图：
       · 单列视图（.diff-seg-col，默认）：所有删除行先、所有新增行后，
@@ -460,6 +485,8 @@ def _render_diff_preview(diff_text: str) -> str:
       · 双列视图（.diff-seg-paired，split-view）：左右对照的配对行 + 词级差异高亮
     超过 500 行时截断并显示行数。
     """
+    # 渲染前按当前主题同步 diff 风格，避免工具渲染管线漏同步导致浅色背景白字
+    _sync_diff_style_to_theme()
     lines = diff_text.split("\n")[1:]
     # 去掉 split 产生的尾随空行（diff 文本通常以一个换行结尾），避免渲染出多余空行
     while lines and lines[-1] == "":
@@ -698,134 +725,88 @@ def _render_diff_preview(diff_text: str) -> str:
     return "".join(rows)
 
 
-# 内建工具图标映射（按模块×操作类型分类 → SVG 图标文件名）
-_TOOL_ICON_MAP = {
-    # 文件工具 - 读取
-    "read": "read",
-    "todoread": "todo",
-    # 文件工具 - 写入/编辑
-    "write": "编辑",
-    "edit": "编辑",
-    "multi_edit": "编辑",
-    "todowrite": "todo",
-    # 文件工具 - 搜索/扫描
-    "grep": "Search",
-    "glob": "Search",
-    "list": "folder",
-    "scan_repo": "Search",
-    "stage_files": "Search",
-    # 终端/后台命令
-    "bash": "shell",
-    "bg_start": "shell",
-    "bg_stop": "shell",
-    "bg_logs": "shell",
-    "bg_list": "shell",
-    # 网络工具
-    "websearch": "websearch",
-    "webfetch": "websearch",
-    # 子智能体任务
-    "subagent_para": "设置-subagent",
-    "subagent_status": "设置-subagent",
-    "subagent_dag": "设置-subagent",
-    # 技能工具
-    "skill": "技能",
-    "list_skills": "技能",
-    # 提问工具
-    "question": "question",
-    # 诊断工具
-    "get_diagnostics": "工具",
-    # 截图工具
-    "screenshot": "裁剪",
-    "mouse": "鼠标",
-    "keyboard": "233键盘-线性",
-    # LSP 工具（默认 = 工具图标；具体 operation 由 _get_tool_icon 解析）
-    "lsp": "工具",
-    # CodeGraph 代码智能
-    "codegraph_explore": "Search",
-    # 团队协作工具
-    "team_send_message": "邮件-发送",
-    "team_list_members": "团队",
-    # 上传文件
-    "upload_file": "upload-file",
-}
-
-# 工具名 → 中文显示名
-_TOOL_CN_NAME_MAP = {
-    "read": "读取",
-    "todoread": "查看待办",
-    "write": "写入",
-    "edit": "编辑",
-    "multi_edit": "批量编辑",
-    "todowrite": "更新待办",
-    "grep": "搜索",
-    "glob": "匹配",
-    "list": "列出文件",
-    "scan_repo": "扫描仓库",
-    "stage_files": "标记文件",
-    "bash": "执行命令",
-    "bg_start": "后台启动",
-    "bg_stop": "后台停止",
-    "bg_logs": "后台日志",
-    "bg_list": "后台列表",
-    "websearch": "网页搜索",
-    "webfetch": "抓取网页",
-    "subagent_para": "分发任务",
-    "subagent_status": "查询任务状态",
-    "subagent_dag": "分发工作流",
-    "skill": "加载技能",
-    "list_skills": "列出技能",
-    "question": "提问",
-    "get_diagnostics": "诊断",
-    "screenshot": "截图",
-    "mouse": "鼠标",
-    "keyboard": "键盘",
-    "lsp": "LSP",
-    "codegraph_explore": "代码探索",
-    "team_send_message": "发送邮件",
-    "team_list_members": "团队成员",
-    "upload_file": "上传文件",
-}
-
-
-# LSP 工具 operation → 图标（SVG 图标名）
-_LSP_OPERATION_ICON_MAP = {
-    "diagnostics": "工具",
-    "documentSymbols": "Search",
-    "goToDefinition": "Search",
-    "findReferences": "Search",
-    "hover": "question",
-    "listServers": "folder",
-}
-
-
 def _get_tool_icon_name(tool_name: str, tool_args: dict = None) -> str:
     """根据工具名（必要时结合 tool_args）查找图标文件名（不含扩展名）
 
-    普通工具直接查 _TOOL_ICON_MAP；
-    LSP 工具按 operation 参数切换图标。
+    数据源：ToolRegistry（工具插件注册时声明的 icon）。
+    插件可通过 metadata["operation_icons"] 声明按参数切换的图标（如 lsp 按 operation）。
     """
-    if tool_name == "lsp" and tool_args:
-        operation = tool_args.get("operation", "")
-        if operation in _LSP_OPERATION_ICON_MAP:
-            return _LSP_OPERATION_ICON_MAP[operation]
-    return _TOOL_ICON_MAP.get(tool_name, "工具")
+    try:
+        from app.tools.registry import ToolRegistry
+
+        reg = ToolRegistry.get_instance().get(tool_name)
+        if reg is not None and tool_args:
+            op_icons = reg.metadata.get("operation_icons") if reg.metadata else None
+            # 类型守门：坏元数据（非 dict）回退静态图标，不抛异常
+            if isinstance(op_icons, dict):
+                operation = tool_args.get("operation", "")
+                if operation in op_icons:
+                    return op_icons[operation]
+        return ToolRegistry.get_instance().get_icon(tool_name)
+    except Exception:
+        return "工具"
 
 
 def _get_tool_cn_name(tool_name: str) -> str:
-    """获取工具的中文显示名"""
-    # MCP 工具：返回服务名
+    """获取工具的中文显示名（registry 驱动）"""
+    # MCP 工具：返回服务名（动态发现，不进 registry）
     if tool_name.startswith("mcp__"):
         return "__".join(tool_name.split("__")[2:]) if len(tool_name.split("__")) > 2 else "MCP"
-    if tool_name == "mcp_list_servers":
-        return "MCP列表"
-    return _TOOL_CN_NAME_MAP.get(tool_name, tool_name)
+    try:
+        from app.tools.registry import ToolRegistry
+
+        cn = ToolRegistry.get_instance().get_cn_name(tool_name)
+        if cn:
+            return cn
+    except Exception:
+        pass
+    return tool_name
 
 
-def _get_tool_icon_html(icon_name: str, size: int = 18) -> str:
+def _get_tool_icon_html(icon_name: str, size: int = 18, tool_name: str = None) -> str:
     """生成工具图标的 HTML <img> 标签（主题感知）
 
-    根据当前主题选择 qrc:/icons 或 qrc:/icons_light 前缀。
+    图标来源优先级：
+    1. 工具插件自带图标（<插件>/tools/icons/ + icons_light/，icon 自包含）
+       - 浅色主题 → icons_light/；深色主题 → icons/
+       - 缺浅色版 → 回退深色版 → 回退主程序 qrc
+    2. 主程序 qrc 资源（qrc:/icons 或 qrc:/icons_light，主题感知）
     """
+    if tool_name:
+        try:
+            from pathlib import Path
+
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                # 主题感知：浅色优先 icons_light，深色用 icons
+                is_light = False
+                try:
+                    from app.utils.theme_manager import theme_manager
+
+                    is_light = theme_manager.is_light_theme()
+                except Exception:
+                    pass
+                icon_dirs = [reg.icon_dir_light if is_light else reg.icon_dir]
+                if is_light and not icon_dirs[0]:
+                    icon_dirs.append(reg.icon_dir)  # 浅色缺失 → 回退深色
+                for d in icon_dirs:
+                    if not d:
+                        continue
+                    svg_path = Path(d) / f"{icon_name}.svg"
+                    if svg_path.exists():
+                        import base64
+
+                        svg_bytes = svg_path.read_bytes()
+                        b64 = base64.b64encode(svg_bytes).decode("ascii")
+                        return (
+                            f'<img src="data:image/svg+xml;base64,{b64}" '
+                            f'style="width:{size}px;height:{size}px;pointer-events:none;" />'
+                        )
+        except Exception:
+            pass
+    # 2) 主程序 qrc 资源（主题感知）
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -897,250 +878,25 @@ def _to_rel_path(path: str) -> str:
     return path
 
 
-# 参数展示型工具 — 渲染为紧凑单行卡片（无折叠、无 body、无工具结果）
-_INLINE_TOOLS = frozenset(
-    {
-        "read",
-        "todoread",
-        "grep",
-        "glob",
-        "list",
-        "scan_repo",
-        "stage_files",
-        "get_diagnostics",
-    }
-)
+# 参数展示型工具（render_mode="inline"）→ 紧凑单行卡片（无折叠、无 body、无工具结果）
+# 注意：不再有工具名白名单 —— 是否 inline 完全由插件注册的 render_mode 决定。
 
 
 def _format_natural_preview(tool_name: str, tool_args: dict) -> str:
-    """将工具调用转为自然语言描述（用于内联卡片和折叠头的预览）"""
-    # todoread 等即使无参数也应有描述
-    if tool_name == "todoread":
-        label = "查看待办事项"
-        offset = tool_args.get("offset")
-        limit = tool_args.get("limit")
-        if offset is not None and limit is not None and offset > 1:
-            label += f" (第 {offset}-{offset + limit - 1} 行)"
-        elif offset is not None and offset > 1:
-            label += f" (从第 {offset} 行)"
-        elif limit is not None:
-            label += f" (前 {limit} 行)"
-        return label
+    """将工具调用转为自然语言描述（用于内联卡片和折叠头的预览）
 
-    # ── 无参数也有描述的工具 ──
-    if tool_name == "list_skills":
-        return "列出可用技能"
-    if tool_name == "mcp_list_servers":
-        return "列出 MCP 服务器"
-    if tool_name == "screenshot":
-        region = tool_args.get("region")
-        if region and isinstance(region, (list, tuple)) and len(region) == 4:
-            return f"截取屏幕 ({region[2]}×{region[3]})"
-        return "截取屏幕"
+    渲染完全由工具插件决定：优先调用插件注册的 preview 闭包
+    （preview(tool_args) -> str），未注册时返回空串（渲染层 fallback key=value）。
+    """
+    try:
+        from app.tools.registry import ToolRegistry
 
-    if not tool_args:
-        return ""
-    desc = ""
-    if tool_name == "read":
-        raw = tool_args.get("path") or tool_args.get("file_path") or ""
-        path = _to_rel_path(raw.rstrip("/").rstrip("\\")) if raw else ""
-        if path:
-            desc = f'读取 "{path}"'
-        else:
-            desc = "读取文件"
-        startline = tool_args.get("startline")
-        endline = tool_args.get("endline")
-        if startline is not None and endline is not None:
-            desc += f" (第 {startline}-{endline} 行)"
-        elif startline is not None and startline > 1:
-            desc += f" (从第 {startline} 行)"
-        elif endline is not None:
-            desc += f" (前 {endline} 行)"
-    elif tool_name == "grep":
-        pattern = tool_args.get("pattern", "")
-        path = _to_rel_path(tool_args.get("path", ""))
-        include = tool_args.get("include", "")
-        desc = f'搜索 "{pattern}"'
-        parts = []
-        if path:
-            parts.append(path)
-        if include:
-            parts.append(include)
-        if parts:
-            desc += " (" + ", ".join(parts) + ")"
-    elif tool_name == "glob":
-        pattern = tool_args.get("pattern", "")
-        path = _to_rel_path(tool_args.get("path", ""))
-        desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
-        if path:
-            desc += f" ({path})"
-    elif tool_name == "list":
-        path = _to_rel_path(tool_args.get("path", "."))
-        desc = f"{path}"
-    elif tool_name == "scan_repo":
-        path = _to_rel_path(tool_args.get("path", "."))
-        desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
-        max_depth = tool_args.get("max_depth")
-        if max_depth is not None:
-            desc += f" (深度 {max_depth})"
-    elif tool_name == "stage_files":
-        files = tool_args.get("files", [])
-        if files and isinstance(files, (list, tuple)):
-            names = [_to_rel_path(f) if os.path.isabs(f) else f for f in files[:3]]
-            names = [os.path.basename(n) if "/" in n or "\\" in n else n for n in names]
-            names = [n[:30] for n in names]
-            if len(files) > 3:
-                desc = "标记 " + ", ".join(names) + f" 等 {len(files)} 个"
-            else:
-                desc = "标记 " + ", ".join(names)
-        else:
-            desc = "标记文件"
-    elif tool_name == "get_diagnostics":
-        path = _to_rel_path(tool_args.get("path", ""))
-        language = tool_args.get("language", "")
-        desc = f"诊断 {path}" if path else "代码诊断"
-        if language:
-            desc += f" ({language})"
-    # ── 折叠工具的自然预览 ──
-    elif tool_name in ("write", "edit", "multi_edit"):
-        raw = tool_args.get("path") or tool_args.get("file_path") or ""
-        path = _to_rel_path(raw) if raw else ""
-        fname = path or "文件"
-        if tool_name == "write":
-            desc = f'写入 "{fname}"'
-        elif tool_name == "edit":
-            desc = f'编辑 "{fname}"'
-        else:
-            edits = tool_args.get("edits", [])
-            count = len(edits) if isinstance(edits, list) else 0
-            desc = f'批量编辑 "{fname}"' + (f" ({count}处)" if count else "")
-    elif tool_name == "todowrite":
-        todos = tool_args.get("todos", [])
-        count = len(todos) if isinstance(todos, list) else 0
-        desc = "更新待办事项" + (f" ({count}项)" if count else "")
-    elif tool_name == "skill":
-        name = tool_args.get("name", "")
-        desc = f'加载技能 "{name}"' if name else "加载技能"
-    elif tool_name == "lsp":
-        operation = tool_args.get("operation", "")
-        raw = tool_args.get("path", "")
-        path = _to_rel_path(raw) if raw else ""
-        op_labels = {
-            "diagnostics": "诊断",
-            "documentSymbols": "符号列表",
-            "goToDefinition": "跳转定义",
-            "findReferences": "查找引用",
-            "hover": "悬浮文档",
-            "listServers": "服务器列表",
-        }
-        op_label = op_labels.get(operation, operation or "LSP")
-        desc = f"LSP {op_label}"
-        if path:
-            desc += f' "{path}"'
-    elif tool_name == "subagent_para":
-        tasks = tool_args.get("tasks", [])
-        count = len(tasks) if isinstance(tasks, list) else 0
-        if count:
-            agents = set()
-            for t in tasks:
-                if isinstance(t, dict):
-                    agents.add(t.get("agent", "?"))
-            agent_names = ", ".join(sorted(agents)) if agents else ""
-            desc = f"分发 {count} 个子任务" + (f" → {agent_names}" if agent_names else "")
-        else:
-            desc = "分发子智能体任务"
-    elif tool_name == "subagent_status":
-        task_ids = tool_args.get("task_ids", [])
-        if isinstance(task_ids, list) and task_ids:
-            desc = f"查询子智能体状态 ({', '.join(str(t)[:12] for t in task_ids[:3])})"
-        else:
-            desc = "查询子智能体状态"
-    elif tool_name == "subagent_dag":
-        nodes = tool_args.get("nodes", [])
-        count = len(nodes) if isinstance(nodes, list) else 0
-        desc = "DAG 工作流" + (f" ({count}节点)" if count else "")
-    elif tool_name == "websearch":
-        query = tool_args.get("query", "")
-        desc = f'搜索 "{query}"' if query else "网络搜索"
-    elif tool_name == "webfetch":
-        url = tool_args.get("url", "")
-        desc = f"获取网页 {url}" if url else "获取网页"
-    elif tool_name == "mouse":
-        action = tool_args.get("action", "")
-        x = tool_args.get("x", "")
-        y = tool_args.get("y", "")
-        action_labels = {
-            "move": "移动",
-            "click": "点击",
-            "double_click": "双击",
-            "right_click": "右键",
-            "scroll": "滚动",
-            "drag": "拖拽",
-            "position": "查询位置",
-        }
-        action_label = action_labels.get(action, action or "操作")
-        if action == "position":
-            desc = "查询鼠标位置"
-        elif x != "" and y != "":
-            desc = f"鼠标{action_label} ({x}, {y})"
-        else:
-            desc = f"鼠标{action_label}"
-    elif tool_name == "keyboard":
-        action = tool_args.get("action", "")
-        if action == "type":
-            text = tool_args.get("text", "")
-            preview = text[:30] + ("…" if len(text) > 30 else "")
-            desc = f'键盘输入 "{preview}"' if preview else "键盘输入"
-        elif action == "press":
-            key = tool_args.get("key", "")
-            desc = f"按键 {key}" if key else "按键"
-        elif action == "hotkey":
-            keys = tool_args.get("keys", "")
-            desc = f"热键 {keys}" if keys else "热键"
-        else:
-            desc = "键盘操作"
-    # ── CodeGraph 代码智能 ──
-    elif tool_name == "codegraph_explore":
-        mode = tool_args.get("mode", "explore")
-        query = tool_args.get("query", "")
-        mode_labels = {
-            "status": "查看索引状态",
-            "sync": "同步索引",
-            "search": f'搜索 "{query}"' if query else "搜索符号",
-            "callers": f'查找 "{query}" 的调用者' if query else "查找调用者",
-            "callees": f'查找 "{query}" 调用了什么' if query else "查找被调用者",
-            "explore": f'探索 "{query}"' if query else "代码探索",
-            "impact": f'分析 "{query}" 的影响范围' if query else "影响分析",
-            "files": "列出已索引文件",
-        }
-        desc = mode_labels.get(mode, f"CodeGraph {mode}")
-
-        # 各 mode 特有参数的修饰语（修复：之前只显示 query/depth，其它参数全部丢失）
-        extras = []
-        if mode == "files":
-            directory = tool_args.get("directory")
-            if directory:
-                extras.append(f"目录 {directory}")
-        elif mode == "search":
-            kind = tool_args.get("kind")
-            if kind:
-                extras.append(f"类型 {kind}")
-            limit = tool_args.get("limit")
-            if limit is not None and limit != 20:
-                extras.append(f"返回 {limit}")
-            if tool_args.get("exact"):
-                extras.append("精确匹配")
-        elif mode == "explore":
-            max_files = tool_args.get("max_files")
-            if max_files is not None and max_files != 12:
-                extras.append(f"文件数 {max_files}")
-
-        if mode in ("search", "callers", "callees", "explore", "impact") and query:
-            extras.append(f"深度 {tool_args.get('depth', 2)}")
-
-        if extras:
-            desc += " (" + ", ".join(extras) + ")"
-    return desc
+        preview_fn = ToolRegistry.get_instance().get_preview(tool_name)
+        if preview_fn is not None:
+            return preview_fn(tool_args or {}) or ""
+    except Exception:
+        pass
+    return ""
 
 
 def _render_tool_status_badge(success: bool) -> str:
@@ -1162,7 +918,7 @@ def _render_inline_tool(
     新设计：SVG 图标 + 状态徽章 + 中文名 + 自然语言参数描述
     """
     icon_name = _get_tool_icon_name(tool_name, tool_args)
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     badge_html = _render_tool_status_badge(success)
     cn_name = _get_tool_cn_name(tool_name)
     natural_preview = _format_natural_preview(tool_name, tool_args)
@@ -1170,7 +926,9 @@ def _render_inline_tool(
     if natural_preview.startswith(cn_name):
         natural_preview = natural_preview[len(cn_name) :].lstrip()
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
-    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -1194,346 +952,64 @@ _MAX_OUTPUT_CHARS = 5000
 
 
 def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None) -> str:
-    """将工具结果以格式化 <pre> 文本块渲染（bash/read/grep/webfetch/diagnostics 等）"""
+    """将工具结果以格式化 <pre> 文本块渲染
+
+    渲染完全由工具插件决定：优先调用插件注册的 render 闭包
+    （如 bash 终端风格 / question 弹窗 / screenshot 图片 / codegraph 结构化），
+    未注册闭包时回退通用等宽 <pre> 兜底。主程序不写死任何工具名。
+    """
+    if not isinstance(result, str):
+        result = str(result)
     raw = _unescape_newlines(result)[:_MAX_OUTPUT_CHARS]
     if not raw.strip():
         return ""
     tool_args = tool_args or {}
     _gf = _get_global_font()  # 用户主题全局字体
 
-    # ── bash: 终端风格（命令头 + 输出体） ──
-    if tool_name == "bash":
-        cmd = tool_args.get("command", "")
-        cmd_display = escape(cmd[:120]) if cmd else "(no command)"
-        return f"""
-        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-                $ <span style="color:#c9d1d9;">{cmd_display}</span>
-            </div>
-            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
-        </div>"""
+    # ── 插件自定义渲染闭包优先（工具完成框渲染插件化） ──
+    try:
+        from app.tools.registry import ToolRegistry
 
-    # ── bg_start / bg_stop: 与 bash 同样的终端风格（命令头 + 状态体） ──
-    if tool_name == "bg_start":
-        cmd = tool_args.get("command", "")
-        header = f"bg_start command={escape(cmd[:120])}" if cmd else "bg_start"
-        return f"""
-        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-                $ <span style="color:#c9d1d9;">{escape(header)}</span>
-            </div>
-            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
-        </div>"""
+        render_fn = ToolRegistry.get_instance().get_render(tool_name)
+        if render_fn is not None:
+            # 闭包签名：render(result, tool_name, tool_args, success)，result 为 ToolResult 对象
+            from app.tools.result import ToolResult as _TR
 
-    if tool_name == "bg_stop":
-        task_id = tool_args.get("task_id", "")
-        header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
-        return f"""
-        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-                $ <span style="color:#c9d1d9;">{escape(header)}</span>
-            </div>
-            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
-        </div>"""
+            body = render_fn(_TR(True, content=result), tool_name, tool_args, True)
+            if body:
+                return body
+    except Exception as e:
+        logger.warning(f"[render] 工具 {tool_name} render 闭包异常，回退默认渲染: {e}")
 
-    # ── bg_logs: 与 bash 同样的终端风格（任务标识头 + 日志体） ──
-    if tool_name == "bg_logs":
-        task_id = tool_args.get("task_id", "")
-        lines = tool_args.get("lines", 100)
-        header = f"bg_logs task_id={task_id} lines={lines}"
-        return f"""
-        <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-            <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-                $ <span style="color:#c9d1d9;">{escape(header)}</span>
-            </div>
-            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
-        </div>"""
-
-    # ── read: 代码预览（文件路径头 + 内容体） ──
-    if tool_name in ("read", "todoread"):
-        path_hint = tool_args.get("path") or tool_args.get("file_path") or ""
-        path_display = escape(path_hint[:100]) if path_hint else "file"
-        return f"""
-        <div style="background:rgba(22,27,34,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-            <div style="padding:6px 12px;background:rgba(28,33,40,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-                📄 <span style="color:#c9d1d9;">{path_display}</span>
-            </div>
-            <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
-        </div>"""
-
-    # ── diagnostics: 按严重级别着色 ──
-    if tool_name == "get_diagnostics":
-        lines_html = []
-        for line in raw.split("\n"):
-            lower = line.lower()
-            if "error" in lower or "[error" in lower:
-                lines_html.append(f'<span style="color:#f85149;">{escape(line)}</span>')
-            elif "warning" in lower or "[warning" in lower:
-                lines_html.append(f'<span style="color:#d2991d;">{escape(line)}</span>')
-            elif "success" in lower or " issue" in lower or "issues" in lower:
-                lines_html.append(f'<span style="color:#7ee787;">{escape(line)}</span>')
-            else:
-                lines_html.append(escape(line))
-        return f"""
-        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{"\n".join(lines_html)}</pre>"""
-
-    # ── codegraph_explore: 结构化代码探索结果 ──
-    if tool_name == "codegraph_explore":
-        lines = raw.split("\n")
-        html_lines = []
-        for line in lines:
-            escaped = escape(line)
-            # 标题行: ### xxx
-            if line.startswith("### "):
-                html_lines.append(
-                    f'<div style="color:#58a6ff;font-weight:700;font-size:{scale_font_size(14)}px;'
-                    f'padding:8px 0 4px 0;">{escaped}</div>'
-                )
-            # 粗体文件路径: **xxx**
-            elif "**" in line:
-                # 简单替换 **xxx** 为带颜色的粗体
-                parts = []
-                in_bold = False
-                buf = ""
-                for ch in line:
-                    if ch == "*":
-                        continue
-                    # Actually much simpler: just color lines starting with 📄
-                # Simpler approach: check for emoji patterns
-                if line.strip().startswith("📄"):
-                    html_lines.append(f'<div style="color:#7ee787;font-weight:600;padding:2px 0;">{escaped}</div>')
-                elif line.strip().startswith(("⬆", "⬇", "←", "→", "💥")):
-                    html_lines.append(f'<div style="color:#d2a8ff;padding:1px 0 1px 12px;">{escaped}</div>')
-                elif line.strip().startswith(("[", "- [")):
-                    html_lines.append(f'<div style="color:#c9d1d9;padding:1px 0 1px 12px;">{escaped}</div>')
-                else:
-                    html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
-            elif line.strip() == "---":
-                html_lines.append('<div style="border-top:1px solid rgba(48,54,61,0.25);margin:6px 0;"></div>')
-            else:
-                html_lines.append(f'<div style="padding:1px 0;">{escaped}</div>')
-
-        content = "".join(html_lines)
-        return f"""
-        <div style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.55;padding:8px 12px;">
-            {content}
-        </div>"""
-
-    # ── grep / glob / list / scan: 匹配/列表示结果 ──
-    if tool_name in ("grep", "glob", "list", "scan_repo", "stage_files"):
-        return f"""
-        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
-
-    # ── 通用文本输出 (webfetch, websearch, mouse, keyboard 等) ──
+    # ── 通用文本输出兜底 (webfetch, websearch, mouse, keyboard 等) ──
     return f"""
     <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
 
 
-def _normalize_question_item(q) -> dict:
-    """将 question 条目规范化为 dict 格式
+def _keep_in_content_tools() -> frozenset:
+    """始终展示在正文的工具集合（registry 派生，与 message_card._edit_tools 同源）。
 
-    兼容 LLM 传参的各种格式：
-    - dict: {"question": "...", "options": [...], "multiple": ...}
-    - str:  "问题文本"
-    - 其他: 转为字符串
+    规则：文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
+    + interactive（question）。用于工具块渲染 data-keep-in-content 属性。
     """
-    if isinstance(q, dict):
-        return q
-    elif isinstance(q, str):
-        return {"question": q, "options": [], "multiple": False}
-    else:
-        return {"question": str(q), "options": [], "multiple": False}
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().keep_in_content_tools()
+    except Exception:
+        return frozenset()
 
 
-def _normalize_option_item(opt) -> dict:
-    """将选项条目规范化为 dict 格式
+def _reg_metadata_flag(tool_name: str, key: str) -> bool:
+    """查询工具注册声明的 metadata 布尔标记（未注册/异常返回 False）"""
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
 
-    兼容 LLM 传参的各种格式：
-    - dict: {"label": "...", "description": "..."}
-    - str:  "选项文本"
-    - 其他: 转为字符串
-    """
-    if isinstance(opt, dict):
-        label = opt.get("label", "")
-        if not label:
-            for key in ("name", "text", "value", "title"):
-                label = opt.get(key, "")
-                if label:
-                    break
-        if not label:
-            for v in opt.values():
-                if isinstance(v, str) and v:
-                    label = v
-                    break
-            if not label:
-                label = str(opt)
-        return {"label": label, "description": opt.get("description", "")}
-    elif isinstance(opt, str):
-        return {"label": opt, "description": ""}
-    else:
-        return {"label": str(opt), "description": ""}
-
-
-def _parse_questions_field(questions_raw) -> list:
-    """解析 questions 字段，兼容 list / str / None
-
-    当 message_content 序列化截断后，questions 可能变成一个 JSON 字符串
-    而非 list，此处统一还原为规范化 list[dict]。
-    """
-    if not questions_raw:
-        return []
-
-    if isinstance(questions_raw, list):
-        return [_normalize_question_item(q) for q in questions_raw]
-
-    if isinstance(questions_raw, str):
-        # 尝试 JSON 解析（完整或截断的 JSON 字符串）
-        try:
-            parsed = json.loads(questions_raw)
-            if isinstance(parsed, list):
-                return [_normalize_question_item(q) for q in parsed]
-            elif isinstance(parsed, dict):
-                return [_normalize_question_item(parsed)]
-        except (json.JSONDecodeError, ValueError):
-            pass
-        # JSON 解析失败（可能被截断），作为单个问题展示原始文本
-        return [{"question": questions_raw, "options": [], "multiple": False}]
-
-    return [{"question": str(questions_raw), "options": [], "multiple": False}]
-
-
-# 预编译：匹配 "问题「xxx」的回答：" 格式
-_QRESULT_SECTION_RE = re.compile(r"问题「(.+?)」的回答：\n?(.*)", re.DOTALL)
-# 预编译：匹配 【label】 格式的选中项
-_QRESULT_SELECTED_RE = re.compile(r"【(.+?)】")
-
-
-def _parse_question_result(result: str) -> dict:
-    """解析 question 工具的回答字符串，提取每个问题的选中选项和自定义回答
-
-    回答格式（来自 question_floating_widget._build_and_emit_answer）:
-        问题「问题文本」的回答：
-        【选项1】；【选项2】；自定义文本
-        ---
-        问题「问题2」的回答：
-        【选项A】
-
-    返回: {question_text: {"selected": [label, ...], "custom": str or None}}
-    """
-    if not result:
-        return {}
-
-    text = _unescape_newlines(result)
-    answers = {}
-
-    for section in re.split(r"\n---\n", text):
-        m = _QRESULT_SECTION_RE.match(section.strip())
-        if not m:
-            continue
-        q_text = m.group(1).strip()
-        answer_text = m.group(2).strip()
-
-        # 提取 【label】 格式的选中选项
-        selected = _QRESULT_SELECTED_RE.findall(answer_text)
-
-        # 自定义文本 = 移除 【label】 和分隔符后的剩余文本
-        custom_text = _QRESULT_SELECTED_RE.sub("", answer_text)
-        # 移除中英文分号分隔符
-        custom_text = custom_text.replace("；", "").replace(";", "").strip()
-        # 过滤掉仅含省略号或空白的假自定义文本
-        if custom_text and custom_text != "...":
-            custom = custom_text
-        else:
-            custom = None
-
-        answers[q_text] = {"selected": selected, "custom": custom}
-
-    return answers
-
-
-def _render_question_block(tool_args: dict, result: str = None) -> str:
-    """将 question 工具渲染为 bash 风格的终端块
-
-    渲染规则：
-    - 终端头: ❓ question: 第一个问题文本（预览）
-    - 终端体: 逐个展示问题 → 选项列表 → 用户回答
-    - 选项标记: 选中 ● / 未选中 ○（多选时用 ◉ / ○）
-    - 自定义回答: 单独以 ✎ 自定义: xxx 显示
-
-    兼容多种参数格式（list / str / 旧格式单 question 字段）。
-    """
-    _gf = _get_global_font()
-
-    # 获取问题列表（兼容新旧格式 + 字符串类型）
-    questions_raw = tool_args.get("questions", [])
-    if not questions_raw and "question" in tool_args:
-        questions_raw = [
-            {
-                "question": str(tool_args.get("question", "")),
-                "options": tool_args.get("options", []),
-                "multiple": tool_args.get("multiple", False),
-            }
-        ]
-    normalized = _parse_questions_field(questions_raw)
-    if not normalized:
-        return ""
-
-    # 解析用户回答
-    answer_map = _parse_question_result(result) if result else {}
-
-    # 构建终端体文本
-    lines = []
-    for q in normalized:
-        q_text = q.get("question", "")
-        options = q.get("options", [])
-        multiple = q.get("multiple", False)
-        suffix = " (多选)" if multiple else ""
-        answer_info = answer_map.get(q_text, {})
-        selected_labels = answer_info.get("selected", [])
-        custom_text = answer_info.get("custom")
-
-        # 问题文本行
-        lines.append(f"❓ {q_text}{suffix}")
-
-        # 选项列表
-        if options:
-            lines.append("")
-            unselected_marker = "○"
-            selected_marker = "◉" if multiple else "●"
-            for opt in options:
-                opt = _normalize_option_item(opt)
-                label = opt.get("label", "")
-                desc = opt.get("description", "")
-                is_selected = label in selected_labels
-                marker = selected_marker if is_selected else unselected_marker
-                if desc:
-                    lines.append(f"  {marker} {label}  —  {desc}")
-                else:
-                    lines.append(f"  {marker} {label}")
-            lines.append("")
-
-        # 用户回答：只有自定义输入才单独显示（选中的选项已用实心标记）
-        if custom_text:
-            lines.append(f"  ✎ 自定义: {custom_text}")
-        if not selected_labels and not custom_text and not options:
-            # 无选项且无回答时，显示原始 result
-            if result:
-                lines.append(f"  ✎ 回答: {_unescape_newlines(result)}")
-        lines.append("")
-
-    body_text = "\n".join(lines).rstrip()
-
-    # 终端头预览（第一个问题文本）
-    first_q = normalized[0].get("question", "")
-    q_preview = first_q[:80] + ("…" if len(first_q) > 80 else "")
-
-    return f"""
-    <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-        <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-            <span style="color:#FFA500;">❓</span> <span style="color:#c9d1d9;">question: {escape(q_preview)}</span>
-        </div>
-        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(body_text)}</pre>
-    </div>"""
+        reg = ToolRegistry.get_instance().get(ToolNameMapper.to_native(tool_name))
+        return bool(reg and reg.metadata and reg.metadata.get(key))
+    except Exception:
+        return False
 
 
 def render_tool_block(
@@ -1550,11 +1026,20 @@ def render_tool_block(
 
     _gf = _get_global_font()  # 用户主题全局字体
 
-    # 检测是否为 MCP 工具（mcp__ 前缀或 mcp_list_servers）
-    is_mcp_tool = tool_name.startswith("mcp__") or tool_name == "mcp_list_servers"
+    # 检测是否为 MCP 工具（mcp__ 前缀，动态发现工具；固定工具走 registry 图标）
+    is_mcp_tool = tool_name.startswith("mcp__")
 
-    # 检测是否为子智能体任务（特殊渲染逻辑）
-    is_sub_agent_task = tool_name in ("subagent_para", "subagent_dag")
+    # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 日志按钮）
+    # 历史消息中的旧名 task（现为 subagent_para 的 alias）经 to_native 归一化后命中
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
+
+        _native = ToolNameMapper.to_native(tool_name)
+        _sub_reg = ToolRegistry.get_instance().get(_native)
+        is_sub_agent_task = bool(_sub_reg and _sub_reg.metadata and _sub_reg.metadata.get("subagent_task"))
+    except Exception:
+        is_sub_agent_task = False
 
     # 图标与颜色按类型区分
     if is_mcp_tool:
@@ -1569,7 +1054,7 @@ def render_tool_block(
 
     # 状态徽章（图标右上角）
     badge_html = _render_tool_status_badge(success)
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
 
     # 子智能体任务特殊处理
@@ -1579,8 +1064,19 @@ def render_tool_block(
         if tool_args.get("description"):
             task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
-    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body）
-    if tool_name in _INLINE_TOOLS:
+    # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body；render_mode="inline"，read 风格）
+    try:
+        from app.tools.registry import ToolRegistry
+
+        render_mode = ToolRegistry.get_instance().get_render_mode(tool_name)
+    except Exception:
+        render_mode = ""
+    # render_mode="expand"：禁用折叠框 — 完整卡但无 cm-collapsible 折叠交互，body 始终展开
+    no_collapse = render_mode == "expand"
+    if render_mode == "none":
+        # 不渲染工具完成框
+        return ""
+    if render_mode == "inline":
         return _render_inline_tool(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -1624,125 +1120,73 @@ def render_tool_block(
         </span>'''
 
     # 生成参数预览（折叠时显示）
-    # question 特殊处理：预览显示第一个问题文本
-    if tool_name == "question":
-        questions_raw = tool_args.get("questions", [])
-        if not questions_raw and "question" in tool_args:
-            questions_raw = [{"question": str(tool_args["question"])}]
-        normalized = _parse_questions_field(questions_raw)
-        q_text = normalized[0].get("question", "") if normalized else ""
-        args_preview = q_text[:120] + ("…" if len(q_text) > 120 else "") if q_text else "(无问题)"
-    else:
-        # 优先使用自然语言预览，无匹配时 fallback 到 key=value 格式
-        natural = _format_natural_preview(tool_name, tool_args)
-        args_preview = natural if natural else _format_args_preview(tool_args)
+    # 优先使用插件 preview 闭包（自然语言预览），无匹配时 fallback 到 key=value 格式
+    natural = _format_natural_preview(tool_name, tool_args)
+    args_preview = natural if natural else _format_args_preview(tool_args)
 
     # 去重：自然语言预览开头如与工具名重复则省略
     if args_preview.startswith(cn_name):
         args_preview = args_preview[len(cn_name) :].lstrip()
 
-    # ── grep/glob 结果计数 ──
-    match_count_html = ""
-    if success and result and tool_name in ("grep", "glob"):
-        import re as _re
-
-        if tool_name == "grep":
-            # 从 meta 行解析 "# Search: ... | X matches ..."
-            m = _re.search(r"\|\s*(\d+)\s+matches", result)
-            if m:
-                count = m.group(1)
-                match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
-        elif tool_name == "glob":
-            # 先检查是否有 meta 头
-            m = _re.search(r"\|\s*(\d+)\s+matches", result)
-            if m:
-                count = m.group(1)
-            else:
-                # 无 meta 头：每行一个文件
-                count = str(len([ln for ln in result.split("\n") if ln.strip()]))
-            match_count_html = f'<span style="color: #39d353; font-weight: 600; font-size: {scale_font_size(11)}px; margin-left: 6px;">{count}项</span>'
-
-    # ── inline diff 预览区 ──
+    # ── inline diff 预览区（编辑类工具：全部由插件 render 闭包渲染） ──
+    # 主程序不做任何 diff 渲染兜底：工具有 diff 时插件闭包负责输出（如 edit/
+    # multi_edit/write 注册的 _render_edit_diff_body），闭包返回 None/异常时
+    # 回退通用文本/表格渲染。diff 行数统计仅用于折叠阈值判断。
     diff_html = ""
     diff_line_count = 0
     if diff:
-        diff_body = _render_diff_preview(diff)
-        # 统计 diff 的行数（用于判断折叠阈值）
-        diff_line_count = diff_summary["added"] + diff_summary["deleted"]
-        diff_files = diff_summary["files"]
-        file_label = diff_files[0] if diff_files else "文件变更"
-        file_label = os.path.basename(file_label)
-        if len(diff_files) > 1:
-            file_label = f"{file_label} 等 {len(diff_files)} 个文件"
-        added = diff_summary["added"]
-        deleted = diff_summary["deleted"]
-        diff_html = f"""
-        <div class="tool-diff-inline">
-            <div class="tool-diff-inline__header" style="{get_font_family_css()}">
-                <span class="tool-diff-inline__file" title="{escape(file_label)}">{escape(file_label)}</span>
-                <span class="tool-diff-inline__summary">
-                    <span class="tool-diff-inline__add" style="color: #56d364;">+{added}</span>
-                    <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
-                </span>
-            </div>
-            <div class="tool-diff-inline__body" style="font-family: '{_gf}', Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
-                {diff_body}
-            </div>
-        </div>"""
+        try:
+            from app.tools.registry import ToolRegistry
+            from app.tools.result import ToolResult as _TR
+
+            diff_render_fn = ToolRegistry.get_instance().get_render(tool_name)
+            if diff_render_fn is not None:
+                body = diff_render_fn(_TR(True, content=result or "", diff=diff), tool_name, tool_args, success)
+                if body:
+                    diff_html = body
+        except Exception as e:
+            logger.warning(f"[render] 工具 {tool_name} diff 渲染闭包异常: {e}")
+            diff_html = ""
+        if diff_html:
+            diff_line_count = diff_summary["added"] + diff_summary["deleted"]
 
     # ── ECharts 图表区 ──
     echarts_html = ""
     if echarts:
         try:
-            import base64 as _b64
+            # 工具自定义渲染闭包优先（如 subagent_dag 注册的 DAG 图渲染）
+            from app.tools.registry import ToolRegistry
+            from app.tools.result import ToolResult as _TR
 
-            b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
-            chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
-            echarts_html = f'''
-            <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
-        except Exception:
-            pass
+            render_fn = ToolRegistry.get_instance().get_render(tool_name)
+            if render_fn is not None:
+                body = render_fn(_TR(True, content=result or "", echarts=echarts), tool_name, tool_args, success)
+                if body:
+                    echarts_html = body
+            if not echarts_html:
+                import base64 as _b64
 
-    # ── 截图工具：提取图片路径，直接显示截图 ──
-    screenshot_image_html = ""
-    if tool_name == "screenshot" and success is not False:
-        img_path = _extract_screenshot_image_path(result)
-        if img_path:
-            screenshot_image_html = f'''
-            <div class="screenshot-preview" style="margin: 0; padding: 0;">
-                <img src="{escape(img_path)}" style="width: 100%; height: auto; display: block; border-radius: 8px;" alt="Screenshot" />
-            </div>'''
+                b64_json = _b64.b64encode(echarts.encode("utf-8")).decode("ascii")
+                chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
+                echarts_html = f'''
+                <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}" style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>'''
+        except Exception as e:
+            logger.warning(f"[render] 工具 {tool_name} echarts 渲染闭包异常，回退默认图表: {e}")
 
-    # ── 通用文本输出工具：bash/read/grep/webfetch/websearch/diagnostics 等 ──
-    _RAW_OUTPUT_TOOLS = frozenset(
-        {
-            "bash",
-            "bg_start",
-            "bg_logs",
-            "bg_stop",
-            "read",
-            "todoread",
-            "grep",
-            "glob",
-            "list",
-            "scan_repo",
-            "stage_files",
-            "webfetch",
-            "websearch",
-            "get_diagnostics",
-            "mouse",
-            "keyboard",
-            "codegraph_explore",
-        }
-    )
+    # ── 文本输出：所有成功且有结果文本的工具均渲染（闭包路由 / 通用 pre） ──
+    # 不再有工具名白名单：任何工具的结果渲染都优先走插件 render 闭包，
+    # 未注册闭包则回退通用 <pre>；子智能体任务保持表格渲染。
     raw_output_html = ""
-    if tool_name in _RAW_OUTPUT_TOOLS and success is not False:
+    if result and success is not False and not is_sub_agent_task:
         raw_output_html = _render_text_output(result, tool_name, tool_args)
 
     # 有 echarts / 截图 / 文本输出 / diff 时：跳过参数表格，直接显示内容
     # 注意：调用方传入的 collapsed 代表模式偏好（简洁模式=True，非简洁=False）。
     # 内容类型逻辑仅在非简洁模式下生效；简洁模式下保持 collapsed=True 全部折叠。
     DIFF_AUTO_COLLAPSE_LINES = 10
+    if no_collapse:
+        # 禁用折叠框：无论简洁模式偏好，内容始终展开
+        collapsed = False
     if echarts:
         if not collapsed:  # 非简洁模式下图表默认展开
             collapsed = False
@@ -1751,21 +1195,9 @@ def render_tool_block(
             {echarts_html}
             {diff_html}
         </div>"""
-    elif screenshot_image_html:
-        if not collapsed:  # 非简洁模式下截图默认展开
-            collapsed = False
-        expanded_content = f"""
-        <div class="tool-expanded-content">
-            {screenshot_image_html}
-        </div>"""
-    elif raw_output_html:
-        # 文本输出始终折叠（内容通常很长），简洁/非简洁均保持
-        collapsed = True
-        expanded_content = f"""
-        <div class="tool-expanded-content">
-            {raw_output_html}
-        </div>"""
-    elif diff and diff_line_count > 0:
+    elif diff and (diff_html or diff_line_count > 0):
+        # 编辑类工具：diff 优先于文本输出（diff 是核心结果）。
+        # 闭包成功（diff_html 非空）或主程序兜底（diff_line_count > 0）都走此分支
         if not collapsed:  # 非简洁模式下按行数自动判断
             collapsed = diff_line_count > DIFF_AUTO_COLLAPSE_LINES
         expanded_content = f"""
@@ -1773,12 +1205,12 @@ def render_tool_block(
             {echarts_html}
             {diff_html}
         </div>"""
-    elif tool_name == "question" and success is not False:
+    elif raw_output_html:
+        # 文本输出始终折叠（内容通常很长），简洁/非简洁均保持
         collapsed = True
-        question_html = _render_question_block(tool_args, result)
         expanded_content = f"""
         <div class="tool-expanded-content">
-            {question_html}
+            {raw_output_html}
         </div>"""
     else:
         # 无特殊渲染时：显示参数表格
@@ -1804,7 +1236,33 @@ def render_tool_block(
     expanded_attr = "false" if collapsed else "true"
     body_style = "" if collapsed else ' style="height:auto; opacity:1;"'
 
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    if no_collapse:
+        # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
+        _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
+        <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
+            <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
+                {icon_html}
+                {badge_html}
+            </span>
+            <span style="white-space: nowrap; flex: 0 0 auto; {get_font_family_css()}">{escape(cn_name)}</span>
+        </span>
+        <span style="display: flex; align-items: center; gap: 8px; margin-left: 10px; min-width: 0; flex: 1 1 auto; justify-content: flex-start; overflow: hidden;">
+            <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                {escape(args_preview)}
+            </span>
+            {diff_stats_html}
+            {subagent_log_btn_html}
+        </span>
+    </div>
+    <div class="tool-block__body" style="padding: 0 8px 4px;">
+        {expanded_content}
+    </div>
+</div>"""
+
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
@@ -1817,7 +1275,6 @@ def render_tool_block(
             <span style="color: {Colors.TEXT_SECONDARY}; font-size: {scale_font_size(11)}px; text-align: left; word-break: break-all; white-space: normal; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
                 {escape(args_preview)}
             </span>
-            {match_count_html}
             {diff_stats_html}
             {subagent_log_btn_html}
         </span>

@@ -18,9 +18,28 @@
 - 落盘断言直接读 team.json 文件，验证持久化语义而非仅内存缓存
 """
 
+import importlib.util
+import sys
+from pathlib import Path
+
 import pytest
 
 from app.core import team_manager as tm_mod
+
+# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system/tools/subagent_tools.py
+# 模块级函数 _team_list_members（tool_ctx 签名）。复用 _load_module 模式加载插件模块。
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools"
+
+
+def _load_subagent_tools():
+    mod_name = "_team_runtime_status_subagent_tools"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "subagent_tools.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture
@@ -197,13 +216,8 @@ class TestTeamToolsDisplay:
 
     @staticmethod
     def _make_tools(window_id, agent_name):
-        from app.tools.team_tools import TeamTools
-
-        class _BT:
-            _team_window_id = window_id
-            _team_agent_name = agent_name
-
-        return TeamTools(_BT())
+        """构造插件 impl 的 tool_ctx（含团队窗口上下文）"""
+        return {"team_window_id": window_id, "team_agent_name": agent_name}
 
     @staticmethod
     def _line(result, member_id):
@@ -215,11 +229,11 @@ class TestTeamToolsDisplay:
 
     def test_runtime_busy_shows_executing(self, tm):
         """成员流式/思考中（runtime busy、无任务邮件）查询显示「🟡 执行任务中」。"""
+        subagent = _load_subagent_tools()
         tm.set_active_window_ids({"win_01", "win_02"})
         _joined_tm(tm)
         tm.set_member_runtime_status("win_02", "busy")
-        tools = self._make_tools("win_01", "leader")
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_tools("win_01", "leader"))
         assert result.success, result.error
         build_line = self._line(result, "build@win_02")
         assert "🟡 执行任务中" in build_line, f"runtime busy 应显示执行任务中:\n{result.content}"
@@ -227,23 +241,23 @@ class TestTeamToolsDisplay:
 
     def test_runtime_idle_shows_idle(self, tm):
         """成员空闲时显示「🟢 空闲」。"""
+        subagent = _load_subagent_tools()
         tm.set_active_window_ids({"win_01", "win_02"})
         _joined_tm(tm)
-        tools = self._make_tools("win_01", "leader")
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_tools("win_01", "leader"))
         assert result.success, result.error
         build_line = self._line(result, "build@win_02")
         assert "🟢 空闲" in build_line, f"空闲成员应显示空闲:\n{result.content}"
 
     def test_pending_mail_still_shows_waiting_label(self, tm):
         """回归：有 pending 邮件时仍显示「⏳ 等待处理」（邮件状态显示逻辑不被破坏）。"""
+        subagent = _load_subagent_tools()
         tm.set_active_window_ids({"win_01", "win_02"})
         _joined_tm(tm)
         tm.send_task(
             from_window="win_01", from_agent="leader", to_identifier="build", task_description="等待处理的活"
         )
-        tools = self._make_tools("win_01", "leader")
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_tools("win_01", "leader"))
         assert result.success, result.error
         build_line = self._line(result, "build@win_02")
         assert "⏳ 等待处理" in build_line, f"pending 邮件应显示等待处理:\n{result.content}"

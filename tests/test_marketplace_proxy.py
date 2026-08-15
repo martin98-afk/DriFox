@@ -5,6 +5,7 @@
 配置持久化往返 / 损坏回退 / 地址校验 / 未启用零开销。
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -15,7 +16,16 @@ PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
 
-from ui.proxy import ProxyConfig, get_proxy_config  # noqa: E402
+# 唯一包名加载 plugin-marketplace/ui：避免与其他插件的 ui 包抢占 sys.modules["ui"]（T8）
+if "pm_ui" not in sys.modules:
+    import types
+
+    _pkg = types.ModuleType("pm_ui")
+    _pkg.__path__ = [str(PLUGIN_MARKETPLACE / "ui")]
+    _pkg.__package__ = "pm_ui"
+    sys.modules["pm_ui"] = _pkg
+
+from pm_ui.proxy import ProxyConfig, get_proxy_config  # noqa: E402
 
 GIT_URL = "https://github.com/martin98-afk/drifox-plugins.git"
 RAW_URL = "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/marketplace.json"
@@ -118,7 +128,7 @@ def test_fetch_marketplace_proxy_fallback_direct(monkeypatch, tmp_path):
     """代理请求失败时回退直连拉取市场数据"""
     import json as _json
 
-    from ui import marketplace_manager as mm
+    from pm_ui import marketplace_manager as mm
 
     # 注入临时代理配置（前缀模式，指向不可达地址 → 必失败）
     proxy = ProxyConfig(file=tmp_path / "proxy.json")
@@ -156,7 +166,7 @@ def test_fetch_marketplace_proxy_fallback_direct(monkeypatch, tmp_path):
 
 def test_installer_proxy_fallback_direct(monkeypatch, tmp_path):
     """git clone 代理失败时回退直连重跑一次"""
-    from ui import installer as inst
+    from pm_ui import installer as inst
 
     proxy = ProxyConfig(file=tmp_path / "proxy.json")
     assert proxy.save(True, "prefix", "https://127.0.0.1:1/")
@@ -184,8 +194,10 @@ def test_installer_proxy_fallback_direct(monkeypatch, tmp_path):
 
     ok = p._download_and_move("demo", "https://github.com/x/demo.git", ".", "main", target)
     assert ok
-    assert len(calls) == 2
-    assert calls[0][0].startswith("https://127.0.0.1:1/")
-    assert calls[1][0] == "https://github.com/x/demo.git"
-    assert calls[1][1] is None  # 直连无额外参数
+    # 候选序列（9c7337c1 引入多候选重试后）：代理带 .git → 代理去 .git → 直连带 .git（成功即停）
+    assert len(calls) == 3
+    assert calls[0][0].startswith("https://127.0.0.1:1/")  # 代理（带 .git）失败
+    assert calls[1][0].startswith("https://127.0.0.1:1/")  # 代理去 .git 失败
+    assert calls[2][0] == "https://github.com/x/demo"  # 直连去 .git 成功（candidate #3）
+    assert calls[2][1] == []  # 直连无额外参数
     assert (target / "__init__.py").exists()

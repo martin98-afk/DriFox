@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """project-dashboard echarts option 生成测试"""
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "plugins" / "project-dashboard" / "ui"))
-from dashboard import build_options  # noqa: E402
+# project-dashboard 已迁至 .drifox/plugins（引擎插件化），用唯一模块名加载（T8）
+_UI_DIR = Path(__file__).resolve().parent.parent / ".drifox" / "plugins" / "project-dashboard" / "ui"
+_spec = importlib.util.spec_from_file_location("pd_dashboard", _UI_DIR / "dashboard.py")
+_dashboard = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_dashboard)
+build_options = _dashboard.build_options
 
 
 def _sample_data():

@@ -4,8 +4,10 @@
 """
 
 import json as _json
+import inspect
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -23,9 +25,9 @@ from app.tools.tool_name_mapper import ToolNameMapper
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
-from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
+from app.core.lsp.lsp_manager import get_lsp_manager
 from app.tools import BuiltinTools, ToolResult
-from app.tools.file_tools import _resolve_path
+from app.utils.utils import resolve_path
 from app.utils.config import Settings
 from app.utils.file_operation_recorder import (
     FileOperationRecorder,
@@ -35,8 +37,23 @@ from app.utils.file_operation_recorder import (
 class ToolExecutor:
     """工具执行器 - 统一调度各种工具"""
 
-    # 需要记录的文件操作
-    _FILE_OPS_TO_TRACK = {"write", "edit", "multi_edit"}
+    # 文件写入分组（registry 驱动）：自动 LSP 诊断与备份跟踪的判定依据
+    _WRITE_GROUP = "文件写入"
+
+    @staticmethod
+    def _is_write_group(tool_name: str) -> bool:
+        """工具是否属于文件写入分组（registry 驱动，不写死工具名）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                return reg.group == ToolExecutor._WRITE_GROUP
+        except Exception:
+            pass
+        # registry 不可用/工具未注册：不视为文件写入。
+        # 调用点均在工具执行路径（registry 注册必然已完成），兜底不可达。
+        return False
 
     # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
     # 确保工作目录（workdir）完全隔离，多窗口互不影响
@@ -46,6 +63,10 @@ class ToolExecutor:
         self._homepage = homepage
         self._backend = backend  # ChatBackend 引用，用于访问 HookManager
         self._builtin_tools: Optional[BuiltinTools] = None
+        # 通用窗口级状态容器（每窗口独立；插件经 services["window_state"] 存取，
+        # 任何工具声明即用，无需为主程序加特制代码）
+        self._window_state: Dict[str, Any] = {}
+        self._window_state_lock = threading.Lock()
         # P002: 初始就用默认路径兜底，避免 self._workdir 与 _builtin_tools.workdir 不一致
         self._workdir = workdir or self._default_workdir()
         # 【修复】区分"用户显式设置"与"初始化默认兜底"：
@@ -54,7 +75,6 @@ class ToolExecutor:
         # 否则 get_workdir() 在 _sync_working_directory 同步前会返回启动路径，
         # 被 PreUserMessage hook（format_memory_context）误注入为"项目根目录"。
         self._workdir_user_set = False
-        self._custom_tools: Dict[str, Callable] = {}
         self._session_id: Optional[str] = None
         self._call_id: Optional[str] = None
 
@@ -104,21 +124,56 @@ class ToolExecutor:
             pass
         return True
 
+    # ========== 通用窗口级状态（services["window_state"] 注入） ==========
+
+    def window_state_get(self, key: str, default=None):
+        """读取窗口级状态（键值容器，线程安全）"""
+        with self._window_state_lock:
+            return self._window_state.get(key, default)
+
+    def window_state_set(self, key: str, value) -> None:
+        """写入窗口级状态"""
+        with self._window_state_lock:
+            self._window_state[key] = value
+
+    def window_state_delete(self, key: str):
+        """删除窗口级状态"""
+        with self._window_state_lock:
+            return self._window_state.pop(key, None)
+
+    # ========== 待办便捷包装（UI/backend 接口，基于通用 window_state） ==========
+
     def get_todos(self):
-        """获取待办事项列表（返回副本）"""
-        if self._builtin_tools:
-            return self._builtin_tools.get_todos()
-        return []
+        """获取待办事项列表（窗口级，返回副本）"""
+        return [dict(t) for t in (self.window_state_get("todo", []) or [])]
+
+    def set_todos(self, todos) -> list:
+        """覆盖待办列表（窗口级）；返回归一化副本"""
+        normalized = []
+        for item in todos or []:
+            if not isinstance(item, dict):
+                continue
+            lower_item = {str(k).lower(): v for k, v in item.items()}
+            status = str(lower_item.get("status", "")).lower()
+            priority = str(lower_item.get("priority", "medium")).lower()
+            content = lower_item.get("content") or lower_item.get("description") or ""
+            normalized.append(
+                {
+                    "id": lower_item.get("id"),
+                    "content": content,
+                    "status": status or "pending",
+                    "priority": priority or "medium",
+                }
+            )
+        self.window_state_set("todo", normalized)
+        return [dict(t) for t in normalized]
 
     def clear_todo_list(self):
-        """清空待办事项列表"""
-        if self._builtin_tools:
-            self._builtin_tools.todo_clear()
-
+        """清空待办事项列表（窗口级，只影响本窗口）"""
+        self.window_state_delete("todo")
     def reset_session_state(self):
-        """Reset session-scoped state when switching sessions"""
-        if self._builtin_tools:
-            self._builtin_tools.reset_session_state()
+        """Reset session-scoped state when switching sessions（旧语义：清空待办）"""
+        self.clear_todo_list()
 
     def cleanup(self):
         """
@@ -133,9 +188,6 @@ class ToolExecutor:
         # 清理会话上下文
         self._session_id = None
         self._call_id = None
-
-        # 清理自定义工具
-        self._custom_tools.clear()
 
         # 清理当前窗口的 BuiltinTools
         if self._builtin_tools:
@@ -194,7 +246,7 @@ class ToolExecutor:
         Returns:
             str: 文件完整路径，用于后续的编辑后备份
         """
-        if tool_name not in self._FILE_OPS_TO_TRACK:
+        if not self._is_write_group(tool_name):
             return None
 
         # 使用传入的值或回退到实例变量
@@ -219,10 +271,10 @@ class ToolExecutor:
             # 移除 file: 前缀，处理单斜杠或双斜杠
             path = _FILE_PREFIX_PATTERN.sub("", path)
 
-        # 获取完整的文件路径
-        if hasattr(self._builtin_tools, "_file_tools"):
-            full_path = self._builtin_tools._file_tools._resolve_path(path)
-        else:
+        # 获取完整的文件路径（工具插件化：_file_tools 已移除，用 utils.resolve_path）
+        try:
+            full_path = resolve_path(self._builtin_tools.workdir, path)
+        except Exception:
             from pathlib import Path
 
             full_path = Path(path).resolve()
@@ -260,7 +312,7 @@ class ToolExecutor:
         if not file_path_before:
             return
 
-        if tool_name not in self._FILE_OPS_TO_TRACK:
+        if not self._is_write_group(tool_name):
             return
 
         sid = session_id or self._session_id
@@ -578,7 +630,7 @@ class ToolExecutor:
             return result
 
         try:
-            full_path = _resolve_path(self._builtin_tools.workdir, file_path)
+            full_path = resolve_path(self._builtin_tools.workdir, file_path)
         except Exception as e:
             logger.debug(f"[ToolExecutor] 自动诊断路径解析失败: {e}")
             return result
@@ -633,9 +685,7 @@ class ToolExecutor:
         """设置当前项目（供 update_project_note 使用）"""
         if self._builtin_tools:
             self._builtin_tools.set_current_project(project)
-            # 同步更新 TaskTools._current_project（stage_files 也用）
-            if self._builtin_tools._task_tools:
-                self._builtin_tools._task_tools._current_project = project
+            # 工具插件化：stage_files 已自包含，无需注入项目状态
             logger.info(f"[ToolExecutor] set_current_project({project})")
 
     def get_workdir(self) -> Optional[str]:
@@ -693,54 +743,8 @@ class ToolExecutor:
             return str(Path(__file__).resolve().parent.parent.parent)
 
     def set_key_documents_repo(self, repo, project: str = "默认项目"):
-        """设置关键文档仓储和当前项目"""
-        if self._builtin_tools and self._builtin_tools._task_tools:
-            self._builtin_tools._task_tools._key_documents_repo = repo
-            self._builtin_tools._task_tools._current_project = project
-            logger.info(f"[ToolExecutor] KeyDocumentsRepo attached to TaskTools (project={project})")
-
-    # 工具必需参数定义
-    REQUIRED_ARGS = {
-        "read": ["path"],
-        "write": ["path", "content"],
-        "edit": ["path", "oldString", "newString"],
-        "multi_edit": ["path", "edits"],
-        "grep": ["pattern"],
-        "glob": ["pattern"],
-        "bash": ["command"],
-        # 后台任务工具
-        "bg_start": ["command"],
-        "bg_stop": ["task_id"],
-        "bg_logs": ["task_id"],
-        "bg_list": [],
-        "webfetch": ["url"],
-        "websearch": ["query"],
-        "scan_repo": [],
-        "stage_files": ["files"],
-        "git_status": [],
-        "git_log": [],
-        "git_diff": [],
-        "get_diagnostics": ["path"],
-        "summarize_changes": ["text"],
-        "todowrite": ["todos"],
-        "todoread": [],
-        "subagent_para": ["tasks"],
-        "subagent_dag": ["nodes"],
-        "task_wait": ["task_ids"],
-        "subagent_status": [],
-        "skill": ["name"],
-        "list_skills": [],
-        "question": ["questions"],
-        "read_persisted_output": ["file_path"],
-        "gitee_upload": ["local_path"],
-        "upload_file": ["local_path"],
-        # 桌面自动化 (mouse / keyboard / screenshot)
-        "mouse": ["action"],
-        "keyboard": ["action"],
-        "screenshot": [],
-        # LSP 工具
-        "lsp": ["operation"],
-    }
+        """设置关键文档仓储和当前项目（工具插件化：stage_files 已自包含，仓储不再注入插件）"""
+        logger.info(f"[ToolExecutor] KeyDocumentsRepo set (project={project})")
 
     def execute(
         self,
@@ -882,174 +886,34 @@ class ToolExecutor:
                         or f"Tool '{tool_name}' was blocked by PreToolUse hook (exit code 2 / decision:block).",
                     )
 
-        # 校验必需参数
-        if tool_name in self.REQUIRED_ARGS:
-            required = self.REQUIRED_ARGS[tool_name]
-            missing = [p for p in required if not args.get(p)]
-            if missing:
-                return ToolResult(False, error=f"Missing required arguments: {missing}")
+        # 校验必需参数（单一数据源：注册工具从 registry schema 的 function.required 读取；
+        required = self._get_required_args(tool_name)
+        missing = [p for p in required if not args.get(p)]
+        if missing:
+            return ToolResult(False, error=f"Missing required arguments: {missing}")
 
         # 文件操作前记录（用于撤销）
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
-
-        if tool_name in self._custom_tools:
-            try:
-                result_data = self._custom_tools[tool_name](args)
-                my_result = ToolResult(True, content=result_data)
-                self._trigger_post_tool_use(tool_name, args, my_result)
-                return my_result
-            except Exception as e:
-                my_result = ToolResult(False, error=f"Custom tool error: {str(e)}")
-                self._trigger_post_tool_use(tool_name, args, my_result)
-                return my_result
 
         # MCP 工具调用：工具名以 "mcp__" 开头
         if tool_name.startswith("mcp__") and self._builtin_tools:
             return self._execute_mcp_tool(tool_name, args)
 
-        tool_map = {
-            "read": lambda: self._builtin_tools.read_file(
-                path=args.get("path"),  # 统一使用 path
-                startline=int(args.get("startline")) if args.get("startline") is not None else 1,
-                endline=int(args.get("endline")) if args.get("endline") is not None else None,
-            ),
-            "write": lambda: self._builtin_tools.write_file(path=args.get("path"), content=args.get("content", "")),
-            "edit": lambda: self._builtin_tools.edit_file(
-                path=args.get("path"),
-                oldString=args.get("oldString", ""),
-                newString=args.get("newString", ""),
-                replaceAll=args.get("replaceAll", False),
-            ),
-            "multi_edit": lambda: self._builtin_tools.multi_edit(
-                path=args.get("path"),
-                edits=args.get("edits", []),
-            ),
-            "grep": lambda: self._builtin_tools.grep_files(
-                pattern=args.get("pattern"),
-                path=args.get("path", ""),  # 默认当前路径
-                include=args.get("include"),
-            ),
-            "glob": lambda: self._builtin_tools.glob_files(
-                pattern=args.get("pattern"),
-                path=args.get("path", ""),  # 默认当前路径
-            ),
-            "list": lambda: self._builtin_tools.list_directory(
-                path=args.get("path", "")  # 默认当前路径
-            ),
-            "git_status": lambda: self._builtin_tools.git_status(args.get("path")),
-            "git_log": lambda: self._builtin_tools.git_log(args.get("path"), args.get("max_count", 10)),
-            "git_diff": lambda: self._builtin_tools.git_diff(args.get("ref1"), args.get("ref2"), args.get("path")),
-            "bash": lambda: self._builtin_tools.execute_bash(args.get("command", ""), args.get("timeout", 120)),
-            # 后台任务工具
-            "bg_start": lambda: self._builtin_tools.bg_start(args.get("command", ""), args.get("cwd")),
-            "bg_stop": lambda: self._builtin_tools.bg_stop(args.get("task_id", "")),
-            "bg_logs": lambda: self._builtin_tools.bg_logs(args.get("task_id", ""), args.get("lines", 100)),
-            "bg_list": lambda: self._builtin_tools.bg_list(),
-            "webfetch": lambda: self._builtin_tools.fetch_web(
-                args.get("url", ""), args.get("format", "markdown"), args.get("max_chars", 26000)
-            ),
-            "websearch": lambda: self._builtin_tools.search_web(args.get("query", ""), args.get("num_results", 10)),
-            "scan_repo": lambda: self._builtin_tools.scan_repo(args.get("path"), args.get("max_depth", 2)),
-            "stage_files": lambda: self._builtin_tools.stage_files(args.get("files", [])),
-            "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(args.get("path", ""), args.get("language")),
-            "summarize_changes": lambda: self._builtin_tools.summarize_changes(
-                args.get("text", ""), args.get("limit", 1200)
-            ),
-            "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
-            "todoread": lambda: self._builtin_tools.todo_read(),
-            "subagent_para": lambda: (
-                lambda tasks_val: self._builtin_tools.subagent_para_execute(
-                    orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
-                    args.get("share_context", False),
-                    session_id=local_session_id,
-                    sub_agent_manager=self._sub_agent_manager,
-                )
-            )(args.get("tasks", [])),
-            "subagent_status": lambda: self._builtin_tools.subagent_status(
-                args.get("task_ids"),
-                args.get("with_log", False),
-                args.get("with_result", True),
-                session_id=local_session_id,
-                sub_agent_manager=self._sub_agent_manager,
-            ),
-            "subagent_dag": lambda: self._builtin_tools.subagent_dag_execute(
-                args.get("nodes", []),
-                args.get("edges", []),
-                session_id=local_session_id,
-                sub_agent_manager=self._sub_agent_manager,
-            ),
-            "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
-            "list_skills": lambda: self._builtin_tools.list_skills(),
-            "question": lambda: self._builtin_tools.ask_question(
-                args.get("questions"),
-                **args,
-            ),
-            "mcp_list_servers": lambda: ToolResult(True, content=self._builtin_tools._mcp_manager.get_status()),
-            "gitee_upload": lambda: self._builtin_tools.gitee_upload(
-                local_path=args.get("local_path", ""),
-            ),
-            "upload_file": lambda: self._builtin_tools.gitee_upload(
-                local_path=args.get("local_path", ""),
-            ),
-            "read_persisted_output": lambda: self._builtin_tools.read_persisted_output(
-                file_path=args.get("file_path", "")
-            ),
-            # ========== 桌面自动化 (AutomationTools) ==========
-            "mouse": lambda: self._builtin_tools.mouse(
-                action=args.get("action", ""),
-                x=int(args.get("x", 0) or 0),
-                y=int(args.get("y", 0) or 0),
-                button=args.get("button", "left"),
-                clicks=int(args.get("clicks", 1) or 1),
-                dx=int(args.get("dx", 0) or 0),
-                dy=int(args.get("dy", -1) if args.get("dy") is not None else -1),
-                duration=float(args.get("duration", 0) or 0),
-            ),
-            "keyboard": lambda: self._builtin_tools.keyboard(
-                action=args.get("action", ""),
-                text=args.get("text", "") or "",
-                key=args.get("key", "") or "",
-                keys=args.get("keys", "") or "",
-            ),
-            "screenshot": lambda: self._builtin_tools.screenshot(
-                path=args.get("path", "") or "",
-                region=(tuple(args.get("region", [])) if args.get("region") else None),
-            ),
-            # ========== LSP 工具 ==========
-            "lsp": lambda: self._builtin_tools._lsp_tools.lsp(
-                path=args.get("path", ""),
-                operation=args.get("operation", "diagnostics"),
-                line=int(args.get("line", 0) or 0),
-                column=int(args.get("column", 0) or 0),
-                language=args.get("language"),
-            ),
-            # ========== 团队协作工具 ==========
-            "team_send_message": lambda: self._builtin_tools.team_send_message(
-                to_agent=args.get("to_agent", ""),
-                message=args.get("message", ""),
-            ),
-            "team_list_members": lambda: self._builtin_tools.team_list_members(),
-            # ========== CodeGraph 代码智能 ==========
-            "codegraph_explore": lambda: self._builtin_tools.codegraph_explore(
-                query=args.get("query", ""),
-                mode=args.get("mode", "explore"),
-                depth=int(args.get("depth", 2) or 2),
-                max_files=int(args.get("max_files", 50) or 50),
-                kind=args.get("kind"),
-                directory=args.get("directory"),
-                limit=int(args.get("limit", 50) or 50),
-                exact=args.get("exact", False),
-            ),
-        }
-
         # ========== 工具执行前的有效性检查 ==========
         # 在 UI 关闭场景下，即使方法开头检查通过，
-        # lambda 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
+        # 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
         if not self.is_valid():
             logger.warning("[ToolExecutor] ToolExecutor became invalid during hook phase")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
-        executor = tool_map.get(tool_name)
+        # registry 注册工具（插件工具：系统插件 + 第三方插件）
+        from app.tools.registry import ToolRegistry
+
+        _reg = ToolRegistry.get_instance().get(tool_name)
+        executor = None
+        if _reg is not None and _reg.impl is not None:
+            executor = self._execute_registered_tool(_reg, args, local_session_id)
+
         if executor:
             try:
                 result = executor()
@@ -1062,13 +926,13 @@ class ToolExecutor:
                         result.success = False
                         result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
-                if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
+                if self._is_write_group(tool_name) and result and result.success:
                     self._record_file_operation_after(
                         tool_name, args, file_path_before, local_session_id, local_call_id
                     )
 
                 # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
-                if result and result.success and tool_name in ("write", "edit", "multi_edit"):
+                if result and result.success and self._is_write_group(tool_name):
                     result = self._try_auto_lsp_diagnose(tool_name, args, result)
 
                 # Trigger PostToolUse hook（统一方法，含结果回填）
@@ -1077,13 +941,103 @@ class ToolExecutor:
                 return result
             except Exception as e:
                 # 文件编辑操作失败时清理备份
-                if tool_name in self._FILE_OPS_TO_TRACK:
+                if self._is_write_group(tool_name):
                     self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 err_result = ToolResult(False, error=f"Execution error: {str(e)}")
                 self._trigger_post_tool_use(tool_name, args, err_result)
                 return err_result
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
+
+    def _get_required_args(self, tool_name: str) -> list:
+        """获取工具必填参数（单一数据源：registry schema；内部工具用小映射）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                # OpenAI schema：required 位于 function.parameters.required
+                params = ((reg.schema.get("function") or {}).get("parameters") or {})
+                return params.get("required") or []
+        except Exception:
+            pass
+        return []
+
+    def _execute_registered_tool(self, reg, args: dict, session_id: str) -> Callable:
+        """构造注册工具（插件）的执行闭包。
+
+        工具插件 impl 签名：
+        - 新风格：impl(tool_ctx, **kwargs) — tool_ctx 提供运行环境与平台能力接口
+        - 旧风格：impl(**kwargs) — 兼容 dsh_learning 分支纯函数约定
+
+        tool_ctx 设计（插件自包含的关键）：
+        - workdir: 当前工作目录
+        - session_id / call_id: 会话上下文
+        - env: 环境配置（app_data_dir / desktop_automation_enabled）
+        - services: 平台能力接口（todo/terminal/subagent/team/lsp/codegraph/
+          mcp/ask_user/skills/gitee/diagnostics）— 主程序基础设施按能力注入，
+          不暴露 BuiltinTools 内部结构
+        """
+        impl = reg.impl
+        bt = self._builtin_tools
+        services = {}
+        # 平台能力服务（主程序内部：精确能力接口注入，不暴露 BuiltinTools 对象）。
+        # 通用窗口级状态：任何插件工具需要窗口隔离状态时，经
+        # tool_ctx["services"]["window_state"] 按 key 存取（每窗口独立）。
+        # 示例：ws = services["window_state"]; ws["set"]("todo", [...]); ws["get"]("todo")
+        services["window_state"] = {
+            "get": self.window_state_get,
+            "set": self.window_state_set,
+            "delete": self.window_state_delete,
+        }
+        if bt is not None:
+            services["lsp"] = getattr(bt, "_lsp_tools", None)
+            services["mcp"] = getattr(bt, "_mcp_manager", None)
+            services["gitee"] = getattr(bt, "gitee_upload", None)
+        env = {"desktop_automation_enabled": True}
+        try:
+            from app.utils.config import Settings
+
+            settings = Settings.get_instance()
+            env["desktop_automation_enabled"] = bool(
+                getattr(settings, "llm_desktop_automation_enabled", None)
+                and settings.llm_desktop_automation_enabled.value
+            )
+        except Exception:
+            pass
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            env["app_data_dir"] = get_app_data_dir()
+        except Exception:
+            pass
+        ctx = {
+            "workdir": self._workdir,
+            "session_id": session_id,
+            "call_id": self._call_id,
+            "sub_agent_manager": self._sub_agent_manager,
+            "team_window_id": getattr(bt, "_team_window_id", "") if bt else "",
+            "team_agent_name": getattr(bt, "_team_agent_name", "") if bt else "",
+            "env": env,
+            "services": services,
+        }
+
+        # 签名检测：是否接受 tool_ctx（无法检测时尝试注入）
+        try:
+            has_ctx = "tool_ctx" in inspect.signature(impl).parameters
+        except (TypeError, ValueError):
+            has_ctx = True
+
+        def _run():
+            if has_ctx:
+                result = impl(tool_ctx=ctx, **args)
+            else:
+                result = impl(**args)
+            if isinstance(result, ToolResult):
+                return result
+            return ToolResult(True, content=str(result))
+
+        return _run
 
     def _execute_mcp_tool(self, tool_name: str, args: dict) -> ToolResult:
         """执行 MCP 工具调用"""
@@ -1176,8 +1130,7 @@ class ToolExecutor:
         """设置子智能体管理器（实例级 + 共享 BuiltinTools 回退）"""
         # 实例级引用：subagent_para/subagent_status lambda 使用此引用来路由到正确的窗口
         self._sub_agent_manager = sub_agent_manager
-        # 共享 BuiltinTools 回退：供旧代码路径兼容
+        # 共享 BuiltinTools 回退：供旧代码路径兼容（sub_agent_manager 由 tool_ctx 注入插件 impl）
         if self._builtin_tools:
             self._builtin_tools._sub_agent_manager = sub_agent_manager
-            self._builtin_tools._task_tools._sub_agent_manager = sub_agent_manager
             logger.info("[ToolExecutor] SubAgentManager attached to instance and BuiltinTools")

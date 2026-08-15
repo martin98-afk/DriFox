@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QTreeView
 
 _PLUGIN_UI = Path(__file__).resolve().parent.parent.parent / "plugins" / "file-tree" / "ui"
 
@@ -49,6 +49,7 @@ cards_mod = _load_module("file_tree_ui.cards", _PLUGIN_UI / "cards.py")
 
 _DirWatcher = watcher_mod._DirWatcher
 FileTreeModel = tree_widget_mod.FileTreeModel
+FileTreeFilterProxy = tree_widget_mod.FileTreeFilterProxy
 FileTreeCard = cards_mod.FileTreeCard
 _MAX_WATCH_PATHS = watcher_mod._MAX_WATCH_PATHS
 
@@ -240,4 +241,163 @@ class TestCardRootChange:
         finally:
             card._cleanup_worker()
             card.deleteLater()
+            QApplication.processEvents()
+
+
+class TestModelIncrementalRefresh:
+    """FileTreeModel 增量刷新 — 未变节点保持原引用（展开状态保留的前提）"""
+
+    def test_refresh_root_keeps_unchanged_nodes(self, tmp_path):
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "sub").mkdir()
+        (root / "a.txt").write_text("x")
+        (root / "b.txt").write_text("y")
+        model.set_project(str(root), _scan_dir(root))
+
+        sub_before = model.find_node(str(root / "sub"))
+        a_before = model.find_node(str(root / "a.txt"))
+
+        # 根目录新增 c.txt + 删除 b.txt → 增量刷新
+        (root / "c.txt").write_text("z")
+        (root / "b.txt").unlink()
+        model.refresh_root(_scan_dir(root))
+
+        assert model.find_node(str(root / "sub")) is sub_before  # 未变目录保留原对象
+        assert model.find_node(str(root / "a.txt")) is a_before  # 未变文件保留原对象
+        assert model.find_node(str(root / "b.txt")) is None
+        assert model.find_node(str(root / "c.txt")) is not None
+
+    def test_refresh_root_keeps_loaded_subdir_state(self, tmp_path):
+        """根刷新后已展开子目录保持原节点 + loaded 状态（孙级数据不丢）"""
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / "inner.txt").write_text("1")
+        model.set_project(str(root), _scan_dir(root))
+        model.populate_children(str(sub), _scan_dir(sub))
+        sub_node = model.find_node(str(sub))
+        assert sub_node.loaded
+
+        # 根目录新增文件 → 增量刷新根
+        (root / "new.txt").write_text("n")
+        model.refresh_root(_scan_dir(root))
+
+        sub_after = model.find_node(str(sub))
+        assert sub_after is sub_node
+        assert sub_after.loaded is True
+        # 孙级数据仍可通过原节点访问（未触发重扫）
+        assert model.find_node(str(sub / "inner.txt")) is not None
+
+    def test_refresh_children_keeps_unchanged_nodes(self, tmp_path):
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / "x.txt").write_text("1")
+        (sub / "y.txt").write_text("2")
+        model.set_project(str(root), _scan_dir(root))
+        model.populate_children(str(sub), _scan_dir(sub))
+
+        x_before = model.find_node(str(sub / "x.txt"))
+        y_before = model.find_node(str(sub / "y.txt"))
+
+        # sub 内新增 z.txt + 删除 y.txt → 增量刷新
+        (sub / "z.txt").write_text("3")
+        (sub / "y.txt").unlink()
+        model.refresh_children(str(sub), _scan_dir(sub))
+
+        assert model.find_node(str(sub / "x.txt")) is x_before
+        assert model.find_node(str(sub / "y.txt")) is None
+        assert model.find_node(str(sub / "z.txt")) is not None
+
+    def test_refresh_children_when_empty(self, tmp_path):
+        """刷新为空的目录：全部子节点被移除"""
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / "x.txt").write_text("1")
+        model.set_project(str(root), _scan_dir(root))
+        model.populate_children(str(sub), _scan_dir(sub))
+        assert model.rowCount(model._index_for_node(model.find_node(str(sub)))) == 1
+
+        (sub / "x.txt").unlink()
+        model.refresh_children(str(sub), _scan_dir(sub))
+        assert model.rowCount(model._index_for_node(model.find_node(str(sub)))) == 0
+
+
+class TestViewExpandedStatePreserved:
+    """刷新后展开状态保留（用户痛点回归：文件变化刷新导致整树折叠）"""
+
+    def test_expanded_dir_survives_root_refresh(self, tmp_path):
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        sub = root / "sub"
+        sub.mkdir()
+        (sub / "inner.txt").write_text("1")
+        (root / "a.txt").write_text("x")
+
+        proxy = FileTreeFilterProxy()
+        proxy.setSourceModel(model)
+        view = QTreeView()
+        view.setModel(proxy)
+        try:
+            model.set_project(str(root), _scan_dir(root))
+            sub_proxy = proxy.mapFromSource(model._index_for_node(model.find_node(str(sub))))
+            view.expand(sub_proxy)  # 展开（触发 fetchMore，数据随后填充）
+            model.populate_children(str(sub), _scan_dir(sub))
+            assert view.isExpanded(sub_proxy) is True
+
+            # 根目录新增文件 → 增量刷新根（旧实现 beginResetModel 会折叠整树）
+            (root / "b.txt").write_text("y")
+            model.refresh_root(_scan_dir(root))
+
+            sub_after = model.find_node(str(sub))
+            sub_proxy_after = proxy.mapFromSource(model._index_for_node(sub_after))
+            assert view.isExpanded(sub_proxy_after) is True
+        finally:
+            view.deleteLater()
+            QApplication.processEvents()
+
+    def test_expanded_subdir_survives_child_refresh(self, tmp_path):
+        """父目录刷新后，已展开的孙目录保持展开（旧实现清空重建会丢失）"""
+        model = FileTreeModel()
+        root = tmp_path / "root"
+        root.mkdir()
+        parent = root / "parent"
+        parent.mkdir()
+        sub = parent / "sub"
+        sub.mkdir()
+        (sub / "inner.txt").write_text("1")
+        (parent / "a.txt").write_text("x")
+
+        proxy = FileTreeFilterProxy()
+        proxy.setSourceModel(model)
+        view = QTreeView()
+        view.setModel(proxy)
+        try:
+            model.set_project(str(root), _scan_dir(root))
+            model.populate_children(str(parent), _scan_dir(parent))
+            sub_proxy = proxy.mapFromSource(model._index_for_node(model.find_node(str(sub))))
+            view.expand(sub_proxy)
+            model.populate_children(str(sub), _scan_dir(sub))
+            assert view.isExpanded(sub_proxy) is True
+
+            # parent 内新增文件 → 增量刷新 parent
+            (parent / "b.txt").write_text("y")
+            model.refresh_children(str(parent), _scan_dir(parent))
+
+            sub_after = model.find_node(str(sub))
+            assert sub_after is not None
+            sub_proxy_after = proxy.mapFromSource(model._index_for_node(sub_after))
+            assert view.isExpanded(sub_proxy_after) is True
+        finally:
+            view.deleteLater()
             QApplication.processEvents()

@@ -18,25 +18,106 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# ── 跳过条件 ─────────────────────────────────────────────────────────────
+# ── 跳过条件（工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/） ──
 try:
     import codegraph  # noqa: F401
-    from app.tools.codegraph_tools import CodeGraphTools
-    from app.tools.codegraph_tools import _HAS_CODEGRAPH
+    import importlib.util
+
+    _PLUGIN_PATH = PROJECT_ROOT / ".drifox" / "plugins" / "codegraph-tools" / "tools" / "codegraph.py"
+    # 社区插件未安装/未同步时优雅跳过（不报收集错误）
+    if not _PLUGIN_PATH.exists():
+        raise ImportError(f"codegraph-tools 社区插件未安装: {_PLUGIN_PATH}")
+    _spec = importlib.util.spec_from_file_location("_codegraph_plugin", _PLUGIN_PATH)
+    _cg_plugin = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_cg_plugin)
+    CodeGraphTools = _cg_plugin.CodeGraphTools
+    _HAS_CODEGRAPH = _cg_plugin._HAS_CODEGRAPH
     _CODEGRAPH_AVAILABLE = _HAS_CODEGRAPH
-except ImportError:
+except (ImportError, FileNotFoundError):
     _CODEGRAPH_AVAILABLE = False
+    _cg_plugin = None
 
 
 # ── 夹具 ─────────────────────────────────────────────────────────────────
 
+class _OwnerShim:
+    """引擎 owner 最小实现（仅 workdir）"""
+    def __init__(self, workdir):
+        self.workdir = workdir
+
+
 @pytest.fixture(scope="class")
 def cg_tools():
     """创建 CodeGraphTools 实例（指向实际项目）"""
-    tools = CodeGraphTools(None)
-    tools._owner = type("Owner", (), {"workdir": Path(os.getcwd())})()
+    tools = CodeGraphTools(_OwnerShim(Path(os.getcwd())))
     yield tools
     tools.cleanup()
+
+
+# =========================================================================
+# 0. 契约测试（不依赖 codegraph-py 安装，P11）
+# =========================================================================
+
+
+class TestCodeGraphContract:
+    """社区插件契约：缺插件/缺依赖时加载器容错（T2 计划 P11）。
+
+    契约语义：codegraph 引擎是社区插件（.drifox/plugins/codegraph-tools），
+    未安装/未同步时主程序必须优雅降级——加载不报错、registry 无 codegraph 工具。
+    安装后由 TestCodeGraphModule（skipif 保护）验证功能。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_system_plugins(self):
+        """测试后恢复系统插件注册（防顺序污染：reset 后不恢复会清空 registry，
+        导致后续测试（如 test_agent_smoke 的 tools 解析）查 registry 失败——T22 实测）。"""
+        yield
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+
+    def test_load_without_codegraph_plugin_no_error(self, tmp_path):
+        """临时空插件根（无 codegraph）→ load_plugin_tools 不报错"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        empty_root = tmp_path / "empty-plugins"
+        empty_root.mkdir()
+        loaded = load_plugin_tools(plugin_roots=[empty_root])  # 不应抛异常
+        assert isinstance(loaded, dict)
+        assert "codegraph-tools" not in loaded
+        ToolRegistry.reset_instance()
+
+    def test_no_codegraph_tool_registered_when_missing(self, tmp_path):
+        """缺 codegraph 插件 → registry 无 codegraph_explore（不误注册）"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        empty_root = tmp_path / "empty2"
+        empty_root.mkdir()
+        load_plugin_tools(plugin_roots=[empty_root])
+        reg = ToolRegistry.get_instance()
+        assert reg.get("codegraph_explore") is None
+        assert "codegraph_explore" not in reg.names()
+        ToolRegistry.reset_instance()
+
+    def test_broken_plugin_dir_does_not_kill_loader(self, tmp_path):
+        """损坏的插件目录（无 register 函数）→ 加载器容错跳过，不崩溃"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        root = tmp_path / "broken-root"
+        (root / "broken-plug" / "tools").mkdir(parents=True)
+        (root / "broken-plug" / "tools" / "x.py").write_text("x = 1\n", encoding="utf-8")
+        # 不抛异常；broken-plug 不在 enabled 白名单被过滤跳过（P0-1），或已启用时无 register 函数返回空集
+        loaded = load_plugin_tools(plugin_roots=[root])
+        assert isinstance(loaded, dict)
+        ToolRegistry.reset_instance()
 
 
 # =========================================================================
@@ -53,12 +134,18 @@ class TestCodeGraphModule:
         assert hasattr(codegraph, "__version__")
 
     def test_import_codegraph_tools(self):
-        from app.tools import codegraph_tools  # noqa: F401
-        assert codegraph_tools._HAS_CODEGRAPH
+        # 工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/tools/codegraph.py
+        assert _cg_plugin is not None
+        assert _cg_plugin._HAS_CODEGRAPH
 
     def test_tool_classifier(self):
-        from app.tools.tool_classifier import SAFE_TOOLS, classify_tool_danger
-        assert "codegraph_explore" in SAFE_TOOLS
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_classifier import get_safe_tools, classify_tool_danger
+        from app.tools.plugin_tool_loader import load_plugin_tools
+
+        load_plugin_tools()
+        assert "codegraph_explore" in get_safe_tools()
+        assert ToolRegistry.get_instance().get_danger("codegraph_explore") == "safe"
         assert classify_tool_danger("codegraph_explore") == "safe"
 
     def test_tool_name_mapper(self):
@@ -67,9 +154,12 @@ class TestCodeGraphModule:
         assert ToolNameMapper.to_native("CodeGraphExplore") == "codegraph_explore"
         assert ToolNameMapper.to_native("cg_explore") == "codegraph_explore"
 
-    def test_tool_schema_in_toole_schemas(self):
-        from app.tools.__init__ import TOOL_SCHEMAS
-        cg_schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"].startswith("codegraph_")]
+    def test_tool_schema_in_tool_schemas(self):
+        # 工具插件化后：schema 从 registry 读取（TOOL_SCHEMAS 静态表已删除）
+        from app.tools import get_builtin_tools_schema
+
+        schemas = get_builtin_tools_schema()
+        cg_schemas = [s for s in schemas if s["function"]["name"].startswith("codegraph_")]
         assert len(cg_schemas) == 1
         schema = cg_schemas[0]
         assert schema["function"]["name"] == "codegraph_explore"
@@ -248,15 +338,14 @@ class TestCodeGraphFunctional:
         tools._owner = type("Owner", (), {"workdir": Path(os.getcwd())})()
 
         # 模拟未安装
-        import app.tools.codegraph_tools as cgt
-        original = cgt._HAS_CODEGRAPH
-        cgt._HAS_CODEGRAPH = False
+        original = _cg_plugin._HAS_CODEGRAPH
+        _cg_plugin._HAS_CODEGRAPH = False
         try:
             r = tools.codegraph_explore(mode="status")
             assert not r.is_success()
             assert "未安装" in r.error or "未安装" in r.content
         finally:
-            cgt._HAS_CODEGRAPH = original
+            _cg_plugin._HAS_CODEGRAPH = original
         tools.cleanup()
 
 

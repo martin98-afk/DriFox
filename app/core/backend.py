@@ -930,6 +930,19 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[ChatBackend] 延迟启动插件监听失败: {e}")
 
+            # 插件工具按启用状态对齐重扫：工具加载发生在 import 期（早于 pm.initialize），
+            # 彼时新插件尚未被 _restore_enabled_from_settings 补齐到 enabled 列表 →
+            # 新装插件工具被过滤；pm.initialize 已在此前完成，重扫后
+            # 新安装插件工具注册、被禁用插件工具注销，两边同时正确。
+            try:
+                from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+
+                watcher = ensure_plugin_tool_watcher()
+                if watcher is not None:
+                    watcher.scan_now()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 插件工具启用状态对齐重扫失败: {e}")
+
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
                 from app.core.lsp.lsp_manager import get_lsp_manager
@@ -2450,18 +2463,13 @@ class ChatBackend(QObject):
         # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
         if self._tool_executor:
             try:
-                # 泄漏修复（P1）：AutomationTools 构造时注册进类级集合
-                # AutomationTools._stop_listener_instances 后只 add 不 remove，
-                # 窗口关闭前先注销自身，释放类级集合对窗口 BuiltinTools 的强引用
-                # （紧急停止广播自然跳过已关闭实例）。必须在 tool_executor.cleanup()
-                # 之前调用——后者会把 _builtin_tools 置 None。
+                # 工具插件化：AutomationTools（紧急停止）/ TerminalTools（bash/bg）已迁
+                # 系统插件（模块级单例，无窗口引用），以下 getattr 容错保留为防御性清理。
                 _bt = getattr(self._tool_executor, "_builtin_tools", None)
                 if _bt is not None:
                     _automation = getattr(_bt, "_automation_tools", None)
                     if _automation is not None and hasattr(_automation, "cleanup"):
                         _automation.cleanup()
-                    # 泄漏修复（6c）：解除 BackgroundTaskManager 单例对
-                    # TerminalTools workdir getter 的强引用（lambda 捕获 self）
                     _terminal = getattr(_bt, "_terminal_tools", None)
                     if _terminal is not None and hasattr(_terminal, "cleanup"):
                         _terminal.cleanup()

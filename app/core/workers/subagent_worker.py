@@ -1170,15 +1170,21 @@ class SubAgentExecutor(QThread):
 
             tool_call_id = tc["id"]
 
-            if tool_name == "question":
-                # 子智能体不需要 question 工具
+            # 交互式工具（UI 弹窗，metadata["interactive"]=True）：子智能体不执行
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _interactive = ToolRegistry.get_instance().is_interactive(tool_name)
+            except Exception:
+                _interactive = False
+            if _interactive:
                 return None, []
 
             # ★ T24 方案 B：UI 工具权限检查（执行前）
             # UI 调整（ToolPermissionController）对子智能体结构性生效：
             # - deny：跳过执行，回填失败 ToolResult（保持 tool_call_id 与消息顺序）
             # - ask：emit 信号桥接主线程弹窗，允许才执行，拒绝/超时回填失败
-            _ui_permission = self._check_ui_tool_permission(tool_name)
+            _ui_permission = self._check_ui_tool_permission(tool_name, arguments)
             _ui_denied = False
             if _ui_permission == "ask":
                 _ui_denied = not self._ask_permission(tool_name, arguments)
@@ -1244,7 +1250,7 @@ class SubAgentExecutor(QThread):
 
         return tool_results, hook_messages
 
-    def _check_ui_tool_permission(self, tool_name: str) -> str:
+    def _check_ui_tool_permission(self, tool_name: str, arguments: dict = None) -> str:
         """UI 工具权限检查（T24 执行层唯一控制点）— 返回 "allow" / "deny" / "ask"。
 
         优先级（对齐产品指示）：
@@ -1258,7 +1264,9 @@ class SubAgentExecutor(QThread):
         check_name 归一化（mcp__server__tool → tool）；无 controller（API 模式）
         回退 Settings.tool_toggles。
         """
-        if tool_name in ("team_send_message", "team_list_members"):
+        from app.tools.registry import ToolRegistry
+
+        if tool_name in ToolRegistry.get_instance().team_only_tools():
             return "allow"
         check_name = tool_name
         if tool_name.startswith("mcp__"):
@@ -1270,6 +1278,7 @@ class SubAgentExecutor(QThread):
         if backend is not None:
             controller = getattr(backend, "tool_permission_controller", None)
 
+        policies: Dict[str, str] = {}
         if controller is not None:
             toggles = controller.get_toggles()
             behavior = controller.get_behavior()
@@ -1279,10 +1288,14 @@ class SubAgentExecutor(QThread):
             settings = Settings.get_instance()
             toggles = dict(settings.tool_toggles.value)
             behavior = settings.tool_off_behavior.value
+            policies = dict(settings.tool_permission_policy.value)
 
         is_enabled = toggles.get(check_name, True)
         if not is_enabled:
-            return behavior  # UI 关闭 → deny 或 ask（UI 为准，覆盖模板）
+            # per-tool 关闭策略优先，缺失回退全局 behavior（与 UI 引擎 _check_tool_permission 同口径）
+            from app.core.tool_permission_controller import resolve_tool_off_policy
+
+            return resolve_tool_off_policy(check_name, controller, policies, behavior)
 
         # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（覆盖模板 deny）
         if controller is not None and controller.is_user_modified(check_name):
@@ -1295,7 +1308,19 @@ class SubAgentExecutor(QThread):
                 from app.core.agent import PermissionResolver
 
                 resolver = PermissionResolver(agent.permission, {}, agent.tools)
-                if resolver.resolve(check_name) == "deny":
+                # 权限参数适配（与 UI 引擎/AGENT_CONFIG 同口径）：
+                # bash 用 command、read 用 filePath...（registry metadata 驱动）
+                try:
+                    mode, arg = ToolRegistry.get_instance().permission_resolve_args(tool_name, arguments or {})
+                except Exception:
+                    mode, arg = "plain", ""
+                if mode == "task":
+                    check_result = resolver.resolve_task(arg)
+                elif arg:
+                    check_result = resolver.resolve(tool_name, arg)
+                else:
+                    check_result = resolver.resolve(tool_name)
+                if check_result == "deny":
                     return "deny"
         except Exception as e:
             logger.debug(f"[SubAgent] 模板权限解析失败，放行: {e}")

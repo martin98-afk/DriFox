@@ -109,6 +109,7 @@ from app.widgets.render_helpers import (
     _get_tool_icon,
     _get_tool_icon_html,
     _get_tool_icon_name,
+    _reg_metadata_flag,
     render_tool_block,
 )
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
@@ -238,7 +239,17 @@ AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
-_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit", "subagent_para", "subagent_dag", "question"})
+# 集合由 registry 派生（group/metadata 声明驱动，不硬编码工具名）：
+#   文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
+#   + interactive（question）——与旧常量集合行为等价
+def _edit_tools() -> frozenset:
+    """编辑/子智能体/提问类工具集合（registry 派生，数据源统一）"""
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().keep_in_content_tools()
+    except Exception:
+        return frozenset()
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -1058,8 +1069,18 @@ def _render_tool_streaming_block(
     """
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
-    # 子智能体任务
-    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
+    # 子智能体任务：与 render_tool_block 统一走 registry metadata 声明
+    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para/subagent_dag，
+    #   历史消息中的旧名 task 经 ToolNameMapper.to_native 归一化后命中）
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
+
+        _native = ToolNameMapper.to_native(tool_name)
+        _sub_reg = ToolRegistry.get_instance().get(_native)
+        is_sub_agent_task = bool(_sub_reg and _sub_reg.metadata and _sub_reg.metadata.get("subagent_task"))
+    except Exception:
+        is_sub_agent_task = False
     display_name = tool_name or ""
     if is_mcp:
         display_name = "__".join(display_name.split("__")[2:])
@@ -1077,7 +1098,7 @@ def _render_tool_streaming_block(
         icon_name = _get_tool_icon(tool_name)
         title_color = "#FFA500"
 
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name if not is_mcp else None)
     cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
 
     # spinner
@@ -1089,8 +1110,10 @@ def _render_tool_streaming_block(
         preview_display += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
 
     streaming_state = "false" if completed else "true"
+    # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _edit_tools() else ""
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -1297,13 +1320,23 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
 
     content = content.strip()
 
-    # ========== 解析 name ==========
+    # ========== 解析 name（行首匹配保持） ==========
     name_match = _TOOL_NAME_PATTERN.search(content)
+    name_end = name_match.end() if name_match else 0
     if name_match:
         tool_name = name_match.group(1).strip()
 
-    # ========== 解析 args（需要正确处理嵌套 JSON 和数组）==========
-    args_start = content.find("args:")
+    # ========== 字段位置索引（行锚定，取每个字段最后匹配） ==========
+    # diff/success/tool_call_id/echarts 用 finditer 行锚定（^字段:\s*，MULTILINE）
+    # 取最后一个匹配位置：流式接收中字段可能重复出现（如 result 内容内含字段字样），
+    # 只有行首的字段声明才是真正字段；最后一个行首匹配是最终值。
+    _field_positions = {}
+    for _m in re.finditer(r"^(?:success|tool_call_id|diff|echarts):\s*", content, re.MULTILINE):
+        _fname = _m.group(0).rstrip(": \t\n")
+        _field_positions[_fname] = _m.start()
+
+    # ========== 解析 args（定位从 name 之后开始） ===========
+    args_start = content.find("args:", name_end)
     result_search_start = 0  # 默认值
     tool_args_str = ""
 
@@ -1352,30 +1385,45 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
             tool_args_str = line[args_start + 5 :].strip()
             result_search_start = args_start + len(line)
     else:
-        # 没有找到 args:，尝试直接解析整个 JSON 对象
-        brace_start = content.find("{")
+        # 没有找到 args:，尝试直接解析整个 JSON 对象（从 name 之后开始）
+        brace_start = content.find("{", name_end)
         if brace_start >= 0:
             tool_args_str = content[brace_start:]
 
-    # ========== 解析 success ==========
-    success_match = _TOOL_SUCCESS_PATTERN.search(content)
-    if success_match:
-        tool_success = success_match.group(1).strip().lower() == "true"
+    # ========== 解析 success（取最后一个行首匹配） ==========
+    tool_success = True
+    _success_match = None
+    for _sm in _TOOL_SUCCESS_PATTERN.finditer(content):
+        _success_match = _sm
+    if _success_match:
+        tool_success = _success_match.group(1).strip().lower() == "true"
 
-    # ========== 解析 tool_call_id ==========
-    id_match = _TOOL_ID_PATTERN.search(content)
-    if id_match:
-        tool_call_id = id_match.group(1).strip()
+    # ========== 解析 tool_call_id（取最后一个行首匹配） ==========
+    tool_call_id = None
+    _id_match = None
+    for _im in _TOOL_ID_PATTERN.finditer(content):
+        _id_match = _im
+    if _id_match:
+        tool_call_id = _id_match.group(1).strip()
 
-    # ========== 解析 result ==========
-    # 关键：从 result: 之后开始搜索，而不是从 result_search_start
-    result_start = content.find("result:")
+    # ========== 解析 result（定位从 args JSON 闭合之后开始） ==========
+    # result 终点 = 各字段最后匹配位置的最小值（须在 result 之后）；
+    # 全 -1（无后续字段）时取到块尾（保留兜底）。
+    _result_start = content.find("result:", result_search_start)
+    _result_end = len(content)
+    for _fpos in _field_positions.values():
+        if _fpos > _result_start:
+            _result_end = min(_result_end, _fpos)
+    if _result_start >= 0:
+        tool_result = content[_result_start + 7 : _result_end].strip()
+    else:
+        tool_result = ""
 
-    # ========== 解析 diff（可选字段，仅 edit/write 工具有）==========
+    # ========== 解析 diff（可选字段，仅 edit/write 工具有；行锚定取最后一个） ==========
     diff_content = ""
-    diff_start = content.find("\ndiff:")
-    if diff_start != -1:
-        diff_after = content[diff_start + 6 :]  # skip "\ndiff:"
+    _diff_pos = _field_positions.get("diff", -1)
+    if _diff_pos != -1:
+        diff_after = content[_diff_pos + 5 :]  # skip "diff:"
         # diff 内容持续到下一个字段（\nsuccess:）或末尾
         diff_next = _NEXT_FIELD_PATTERN.search(diff_after)
         if diff_next:
@@ -1383,30 +1431,17 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         else:
             diff_content = diff_after.strip()
 
-    # ========== 解析 echarts（可选字段，仅 subagent_dag 有）==========
+    # ========== 解析 echarts（可选字段，仅 subagent_dag 有；行锚定取最后一个） ==========
     echarts_content = ""
-    echarts_start = content.find("\necharts:")
-    if echarts_start != -1:
-        echarts_after = content[echarts_start + 9 :]
+    _echarts_pos = _field_positions.get("echarts", -1)
+    if _echarts_pos != -1:
+        echarts_after = content[_echarts_pos + 8 :]
         # echarts JSON 持续到末尾或下一个字段
         echarts_next = _NEXT_FIELD_PATTERN.search(echarts_after)
         if echarts_next:
             echarts_content = echarts_after[: echarts_next.start()].strip()
         else:
             echarts_content = echarts_after.strip()
-    if result_start >= 0:
-        result_after = content[result_start + 7 :]  # 跳过 "result:"
-        # 找到 result 内容的结束位置（下一个字段之前）
-        next_field = _NEXT_FIELD_PATTERN.search(result_after)
-        if next_field:
-            tool_result = result_after[: next_field.start()].strip()
-        else:
-            tool_result = result_after.strip()
-    else:
-        tool_result = ""
-
-    # 转义 result 中的换行符（参数预览和表格不支持多行显示）
-    tool_result = tool_result.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
 
     # ========== 解析 args JSON 为字典 ==========
     args_dict = {}
@@ -1436,8 +1471,9 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         # 没有 args，尝试从整个 content 中提取参数
         args_dict = _extract_args_by_regex(content)
 
-    # 历史工具 diff 缺失时的 fallback（从参数重建）
-    if not diff_content and tool_name == "edit":
+    # 历史工具 diff 缺失时的 fallback（从参数重建）：仅 edit 工具的
+    # operations/anchor/lines 参数结构支持重建，由注册声明 metadata["reconstruct_diff"] 驱动
+    if not diff_content and _reg_metadata_flag(tool_name, "reconstruct_diff"):
         fpath = args_dict.get("file_path") or args_dict.get("path") or ""
         if fpath:
             ops = args_dict.get("operations", [])
@@ -2020,6 +2056,43 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
 
 
+# ===== 软段落边界（中文句子边界）=====
+# 大段中文正文常无 \n\n 空行（长报告/解释性输出多为连续段落），
+# 仅靠硬边界（空行）会导致差量渲染对大段正文完全失效（_extract_closed_segments
+# 恒返回空 → _stable_md_len 永不前进 → 尾部整体重转 O(n²)）。
+# 软边界：句号类标点（。！？；… + 英文 !?;）作为可增量闭合的句子边界。
+# 约束：仅纯文本区间生效（fence 内不切），段长达到阈值才切（避免切分过碎、
+# 每句一次 runJavaScript 开销过大）。
+_SENTENCE_END_CHARS = frozenset("。！？；…!?;")
+# 软边界最小段长：累积到该长度才在句号处闭合，避免每句话都切一段
+_MIN_SOFT_SEGMENT_CHARS = 100
+
+
+def _find_sentence_boundary(md: str, start: int, end: int, fence_open: bool) -> int:
+    """在 [start, end) 内找第一个「满足最小段长」的句号类标点软边界。
+
+    感知 ``` 代码块状态（fence 内不切，避免切坏代码/高亮结构）。
+    返回句号类标点之后的偏移（切分点，句号保留在段尾）；找不到返回 -1。
+
+    Args:
+        md: 待扫描的 markdown 文本
+        start: 扫描起点
+        end: 扫描终点（不含）
+        fence_open: 进入该区间时是否处于 ``` 代码块内
+    """
+    fence = fence_open
+    i = start
+    while i < end:
+        if md.startswith("```", i):
+            fence = not fence
+            i += 3
+            continue
+        if not fence and md[i] in _SENTENCE_END_CHARS and i + 1 - start >= _MIN_SOFT_SEGMENT_CHARS:
+            return i + 1
+        i += 1
+    return -1
+
+
 def _extract_closed_segments(md: str):
     """提取 markdown 中已闭合的完整段（供差量增量渲染）。
 
@@ -2057,28 +2130,34 @@ def _extract_closed_segments(md: str):
     fence_open = False  # 是否在 ``` 代码块内（跨段累计）
 
     while i < n:
+        # 1) 硬边界：空行 \n\n（markdown 段落分隔）
         seg_end = md.find("\n\n", i)
+        boundary_len = 2  # 空行占 2 字符，跳过
+        # 2) 软边界：无空行时按句号类标点切分——大段中文正文无 \n\n 也能增量闭合
         if seg_end == -1:
-            break  # 剩余文本无空行分隔：整段未闭合（无稳定边界）→ 停止
+            seg_end = _find_sentence_boundary(md, i, n, fence_open)
+            boundary_len = 0  # 句号保留在段尾，不跳过
+        if seg_end == -1:
+            break  # 剩余文本无硬/软边界：整段未闭合（无稳定边界）→ 停止
 
         seg = md[i:seg_end]
         if not seg:
             # 空段（连续空行 / 段首恰为分隔符）：跳过，不产出
-            i = seg_end + 2
+            i = seg_end + boundary_len
             continue
         fence_count = seg.count("```")
 
         if fence_open:
             # 在 fence 内：偶数个 ``` → 仍在 fence 内（不切）；奇数个 → fence 闭合
             if fence_count % 2 == 0:
-                i = seg_end + 2
+                i = seg_end + boundary_len
                 continue
             fence_open = False
         else:
             if fence_count % 2 == 1:
                 # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
                 fence_open = True
-                i = seg_end + 2
+                i = seg_end + boundary_len
                 continue
 
         # fence 已闭合（或与 fence 无关）：检查 think/tool 配对是否闭合
@@ -2094,8 +2173,8 @@ def _extract_closed_segments(md: str):
 
         # 该段完整闭合：产出
         segments.append(seg)
-        stable_len = seg_end + 2  # 含空行
-        i = seg_end + 2
+        stable_len = seg_end + boundary_len
+        i = seg_end + boundary_len
 
     return stable_len, segments
 
@@ -2537,7 +2616,7 @@ class _DialogEventFilter(QObject):
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
             # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
 
     def unregister(self, viewer):
@@ -2548,7 +2627,7 @@ class _DialogEventFilter(QObject):
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
         if not self._viewers:
             self._detach_from_application()
@@ -2855,7 +2934,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except TypeError, RuntimeError, AttributeError:
+            except (TypeError, RuntimeError, AttributeError):
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -4993,7 +5072,9 @@ class CodeWebViewer(QWebEngineView):
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
                 // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
-                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"]):not([data-tool-name="subagent_para"]):not([data-tool-name="subagent_dag"]):not([data-tool-name="question"])';
+                // 工具名集合由 Python 渲染端派生（registry 声明），经 data-keep-in-content 属性传入，
+                // JS 不再硬编码工具名。
+                var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
                 // 更新"工具与思考"标题（总项数，无勾叉 badge）
                 function _updateToolSectionHeader() {{
@@ -5604,6 +5685,23 @@ class CodeWebViewer(QWebEngineView):
         stripped = md_text.rstrip()
         return stripped.endswith("</think>") or CodeWebViewer._CLEAN_BOUNDARY_CODE_BLOCK_RE.search(stripped) is not None
 
+    @staticmethod
+    def _has_reached_soft_boundary(md_text: str) -> bool:
+        """检测 markdown 是否以句号类标点结尾（软边界，适合差量渲染）。
+
+        大段中文正文常无 \n\n 空行，_has_reached_clean_boundary（硬边界）无法
+        在流式期间及时触发渲染。句号结尾即视为「可增量闭合」的软边界，
+        触发差量渲染（_extract_closed_segments 会按句号软边界切段），
+        而不必等安全定时器兜底（300ms）——显著缩短纯文本停留时间。
+
+        Returns:
+            True: 文本以句号类标点结尾，适合触发差量渲染
+        """
+        if not md_text:
+            return False
+        stripped = md_text.rstrip()
+        return bool(stripped) and stripped[-1] in _SENTENCE_END_CHARS
+
     def append_chunk(self, text: str):
         if not text:
             return
@@ -5625,8 +5723,8 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            # 差量渲染：仅在自然边界触发全量渲染，否则靠增量文本 + 安全兜底
-            if self._has_reached_clean_boundary(self._markdown_text):
+            # 差量渲染：仅在自然边界（硬/软）触发，否则靠增量文本 + 安全兜底
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
                 self._schedule_render(immediate=True)
             else:
                 self._schedule_render(immediate=False)
@@ -5846,8 +5944,8 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 流式模式下检查自然边界
-            if self._has_reached_clean_boundary(self._markdown_text):
+            # 流式模式下检查自然边界（硬边界空行 / 软边界句号结尾）
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
                 self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
@@ -6094,6 +6192,18 @@ class CodeWebViewer(QWebEngineView):
                     # 结构正确），替换 DOM 增量节点；未闭合 think/tool 跳过防泄漏。
                     self._render_tail_inline()
                 return
+
+            # 🐛 修复（大段正文流式期间纯文本滞留）：差量快路径被 _needs_full_render
+            # （初始 True，首次全量渲染应用成功才置 False）或 _has_active_tool_dom()
+            # 让位时，流式正文只能依赖全量线程池渲染。大段正文渲染耗时长，期间新
+            # chunk 持续提交新 seq → 在途结果被 _apply_render_result 的 seq 校验
+            # 丢弃 → _needs_full_render 保持 True → 差量路径永远进不去 → 纯文本
+            # 滞留到流式结束才一次性刷新成 HTML。
+            # 尾部行内渲染不依赖全量渲染（自带哈希缓存、只操作 data-incremental
+            # 节点，对工具 DOM 安全），在差量不可走的流式路径也先执行，保证流式
+            # 期间 markdown 语法（**加粗**、`code`、[链接]）即时格式化。
+            if self._streaming:
+                self._render_tail_inline()
 
             # 刷新字体 CSS var
             self._refresh_viewer_font_css()
@@ -6372,7 +6482,7 @@ class CodeWebViewer(QWebEngineView):
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
             # 🆕 修复（简洁模式编辑工具框消失）：save 阶段必须同时覆盖正文容器
-            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _EDIT_TOOLS）
+            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _edit_tools() 派生）
             # 的流式/完成块由 JS 注入到正文（L9328 _stream_target），简洁模式下
             # _tool_target_id="tool-content"，旧 save 只遍历 _tc → 编辑工具运行框
             # 不在保存范围 → 全量渲染 updateContent 重建正文时被抹除，直到
@@ -7217,7 +7327,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -9506,9 +9616,11 @@ class MessageCard(SimpleCardWidget):
             self.viewer._thinking_finalized = True
             # ── 差量渲染（2026-07-22）──
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
-            # 仅在自然边界触发（段落结束 / 块闭合），非边界时只启安全定时器。
+            # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
             # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
-            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
+            if self._streaming and (
+                self.viewer._has_reached_clean_boundary(last_text) or self.viewer._has_reached_soft_boundary(last_text)
+            ):
                 self.viewer._schedule_render(immediate=True)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -9612,7 +9724,7 @@ class MessageCard(SimpleCardWidget):
         try:
             # 编辑类工具注入到 content-placeholder，跳过回调与渲染避免闪烁。
             # DOM 已通过 JS 注入到位，markdown 缓存已就绪供后续全量渲染使用。
-            _is_edit_tool = tool_name in _EDIT_TOOLS
+            _is_edit_tool = tool_name in _edit_tools()
             if not _is_edit_tool:
                 self.viewer._lazy_markdown_cb = self._build_incremental_md
                 self.viewer._schedule_render(immediate=True)
@@ -9680,7 +9792,7 @@ class MessageCard(SimpleCardWidget):
                 _use_incremental = "false"
 
             # 编辑类工具始终注入到正文区域，不进入"工具与思考"
-            tool_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+            tool_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
 
             js_code = f"""
             (function() {{
@@ -10010,7 +10122,7 @@ class MessageCard(SimpleCardWidget):
                 completed=completed,
             )
             # 编辑类工具流式块始终注入到正文区域
-            _stream_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+            _stream_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
 
             # 🆕 方案 D：计算工具块的 data-order（与 reorganizeContent 的 posMap 同尺度），
             # 使 JS 注入的流式块在下次全量渲染排序时能回到正确位置，而非恒沉底
@@ -10577,7 +10689,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):

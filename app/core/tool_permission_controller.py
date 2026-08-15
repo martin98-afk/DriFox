@@ -18,8 +18,32 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from app.tools.tool_classifier import DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles
+from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.config import Settings
+
+# 合法的 per-tool 关闭策略值（ask=询问用户 / deny=直接拒绝）
+VALID_TOOL_POLICIES = ("deny", "ask")
+
+
+def resolve_tool_off_policy(
+    check_name: str,
+    controller: Optional["ToolPermissionController"],
+    policies: Dict[str, str],
+    behavior: str,
+) -> str:
+    """解析工具「关闭后」的处理策略：per-tool 策略优先，缺失回退全局 behavior。
+
+    - controller 存在：走 controller.get_tool_policy（含 active 层状态，agent 激活生效）
+    - controller 不存在（API 模式）：用传入的 Settings policies 字典兜底
+    - 非法值（非 deny/ask）回退全局 behavior，保证返回值只允许 deny/ask
+
+    供 engine / subagent_worker 两处执行层共用，保证口径逐字一致。
+    """
+    if controller is not None:
+        policy = controller.get_tool_policy(check_name)
+    else:
+        policy = policies.get(check_name)
+    return policy if policy in VALID_TOOL_POLICIES else behavior
 
 
 class ToolPermissionController(QObject):
@@ -28,11 +52,13 @@ class ToolPermissionController(QObject):
     # 当前生效状态变化
     togglesChanged = pyqtSignal(dict)  # 引擎读取这个来获取最新 toggles
     behaviorChanged = pyqtSignal(str)  # 关闭行为变化
+    policiesChanged = pyqtSignal(dict)  # per-tool 关闭策略变化(active 层)
     activeAgentChanged = pyqtSignal(str)  # 当前激活的智能体(空字符串=用户模式)
 
     # 用户偏好状态变化(用于 UI 反映"用户原始设置")
     userTogglesChanged = pyqtSignal(dict)
     userBehaviorChanged = pyqtSignal(str)
+    userPoliciesChanged = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -40,11 +66,11 @@ class ToolPermissionController(QObject):
         settings = Settings.get_instance()
         saved_toggles = dict(settings.tool_toggles.value or {})
         if not saved_toggles:
-            all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+            all_tools = get_all_tools()
             saved_toggles = get_default_toggles(all_tools)
 
         # 清理已删除工具的残留配置(只保留当前已知的工具)
-        known_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
+        known_tools = set(get_all_tools())
         cleaned_toggles = {k: v for k, v in saved_toggles.items() if k in known_tools}
         # 补全新增工具的默认开启
         for tool in known_tools:
@@ -64,6 +90,9 @@ class ToolPermissionController(QObject):
         # 用户偏好
         self._user_tool_toggles: Dict[str, bool] = dict(cleaned_toggles)
         self._user_tool_off_behavior: str = settings.tool_off_behavior.value or "deny"
+        # per-tool 关闭策略(用户偏好层)：{tool_name: "deny"|"ask"}，缺失回退全局 behavior
+        saved_policies = dict(settings.tool_permission_policy.value or {})
+        self._user_tool_policies: Dict[str, str] = self._clean_policies(saved_policies)
         # ★ T28：用户显式调整过的工具集合（区分"显式开启"与"默认开启"）
         # 执行层用它实现"UI 覆盖模板"：显式开启 → UI 为准放行（覆盖模板 deny）
         self._user_modified: set = set()
@@ -71,6 +100,7 @@ class ToolPermissionController(QObject):
         # 当前生效(初始 = 用户偏好)
         self._active_tool_toggles: Dict[str, bool] = dict(self._user_tool_toggles)
         self._active_tool_off_behavior: str = self._user_tool_off_behavior
+        self._active_tool_policies: Dict[str, str] = dict(self._user_tool_policies)
 
         # 当前激活的智能体(None = 用户模式)
         self._active_agent_name: Optional[str] = None
@@ -83,6 +113,7 @@ class ToolPermissionController(QObject):
         try:
             settings.tool_toggles.valueChanged.connect(self._on_settings_toggles_changed)
             settings.tool_off_behavior.valueChanged.connect(self._on_settings_behavior_changed)
+            settings.tool_permission_policy.valueChanged.connect(self._on_settings_policies_changed)
         except Exception:
             pass
 
@@ -94,10 +125,10 @@ class ToolPermissionController(QObject):
         """补全未知工具的默认值,并清理已删除工具的残留配置
 
         工具被删除后,旧 toggle 还残留在配置中会导致统计数量虚高
-        (例如 input box 显示的危险/安全总数比 TOOL_GROUPS 实际列表多)。
-        这里统一过滤掉不在当前 DANGEROUS+SAFE 集合里的工具。
+        (例如 input box 显示的危险/安全总数比注册工具实际列表多)。
+        这里统一过滤掉不在当前已注册工具集合里的工具。
         """
-        all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+        all_tools = get_all_tools()
         all_tools_set = set(all_tools)
         # 清理已删除工具的残留开关
         result = {tool: enabled for tool, enabled in toggles.items() if tool in all_tools_set}
@@ -106,6 +137,16 @@ class ToolPermissionController(QObject):
             if tool not in result:
                 result[tool] = True
         return result
+
+    def _clean_policies(self, policies: Dict[str, str]) -> Dict[str, str]:
+        """清理 per-tool 策略：过滤已删除工具 + 非法值（仅保留 deny/ask）"""
+        if not isinstance(policies, dict):
+            return {}
+        known_tools = set(get_all_tools())
+        return {
+            k: v for k, v in policies.items()
+            if k in known_tools and v in VALID_TOOL_POLICIES
+        }
 
     def get_toggles(self) -> Dict[str, bool]:
         """获取当前生效的工具开关(供 engine 使用)"""
@@ -122,6 +163,46 @@ class ToolPermissionController(QObject):
     def get_user_behavior(self) -> str:
         """获取用户偏好的关闭行为"""
         return self._user_tool_off_behavior
+
+    # ── per-tool 关闭策略(ask/deny) ─────────────────────────────────
+
+    def _complete_policies(self, policies: Dict[str, str], fallback: str) -> Dict[str, str]:
+        """补全所有已知工具的关闭策略：per-tool 缺失/非法回退 fallback（全局 behavior）"""
+        result = {}
+        for tool in get_all_tools():
+            policy = policies.get(tool)
+            result[tool] = policy if policy in VALID_TOOL_POLICIES else fallback
+        return result
+
+    def get_tool_policies(self) -> Dict[str, str]:
+        """获取当前生效的 per-tool 关闭策略(全量补全，缺失回退 active behavior)"""
+        return self._complete_policies(self._active_tool_policies, self._active_tool_off_behavior)
+
+    def get_tool_policy(self, tool_name: str) -> str:
+        """获取当前生效的单工具关闭策略：per-tool 缺失回退全局 behavior"""
+        policy = self._active_tool_policies.get(tool_name)
+        if policy not in VALID_TOOL_POLICIES:
+            return self._active_tool_off_behavior
+        return policy
+
+    def get_active_tool_behavior_map(self) -> Dict[str, str]:
+        """当前生效的「工具 → 关闭策略」完整映射（行渲染与"未统一"判定共用）
+
+        所有已知工具均有值：per-tool 策略优先，缺失回退 active behavior。
+        保证 UI 行内下拉与右上角全局下拉的聚合口径一致。
+        """
+        return self.get_tool_policies()
+
+    def get_user_tool_policies(self) -> Dict[str, str]:
+        """获取用户偏好的 per-tool 关闭策略(全量补全，缺失回退 user behavior)"""
+        return self._complete_policies(self._user_tool_policies, self._user_tool_off_behavior)
+
+    def get_user_tool_policy(self, tool_name: str) -> str:
+        """获取用户偏好的单工具关闭策略：per-tool 缺失回退全局 behavior"""
+        policy = self._user_tool_policies.get(tool_name)
+        if policy not in VALID_TOOL_POLICIES:
+            return self._user_tool_off_behavior
+        return policy
 
     def get_active_agent_name(self) -> Optional[str]:
         """获取当前激活的智能体名(None=用户模式)"""
@@ -193,6 +274,56 @@ class ToolPermissionController(QObject):
             self.behaviorChanged.emit(behavior)
             self.userBehaviorChanged.emit(behavior)
 
+    # ── per-tool 关闭策略编辑 ─────────────────────────────────────────
+
+    def set_user_tool_policy(self, tool_name: str, policy: str):
+        """用户编辑单个工具的关闭策略（ask/deny）：
+        - 非 agent 模式:同时更新 user(偏好,持久化) 和 active(生效)
+        - agent 模式:只更新 active(临时修改 agent 生效权限,user 偏好不变)
+
+        ★ MAJOR-1：策略修改不写入 _user_modified——只改策略时开关仍 off，
+        执行层走 per-tool 策略分支（ask→询问/deny→拒绝），模板 deny 不被绕过；
+        用户显式拨开关才进 _user_modified（T28 UI 覆盖模板判定集）。
+        """
+        if policy not in VALID_TOOL_POLICIES:
+            return
+        if self.is_agent_active():
+            # agent 模式:只改 active,user 偏好不变
+            self._active_tool_policies[tool_name] = policy
+            self.policiesChanged.emit(self.get_tool_policies())
+        else:
+            # 用户模式:user 和 active 同步
+            self._user_tool_policies[tool_name] = policy
+            self._active_tool_policies[tool_name] = policy
+            self._persist_user_policies()
+            self.policiesChanged.emit(self.get_tool_policies())
+            self.userPoliciesChanged.emit(self.get_user_tool_policies())
+
+    def set_user_tool_policies(self, policies: Dict[str, str]):
+        """批量更新工具关闭策略（用于右上角"未统一"强制统一）
+
+        ★ MAJOR-1：同 set_user_tool_policy,不写入 _user_modified。
+        """
+        valid = {k: v for k, v in policies.items() if v in VALID_TOOL_POLICIES}
+        if not valid:
+            return
+        if self.is_agent_active():
+            # agent 模式:只改 active
+            self._active_tool_policies.update(valid)
+            self.policiesChanged.emit(self.get_tool_policies())
+        else:
+            # 用户模式:user 和 active 同步
+            self._user_tool_policies.update(valid)
+            self._active_tool_policies.update(valid)
+            self._persist_user_policies()
+            self.policiesChanged.emit(self.get_tool_policies())
+            self.userPoliciesChanged.emit(self.get_user_tool_policies())
+
+    def _persist_user_policies(self):
+        """同步 user_tool_policies 到全局 Settings(保证新窗口默认值更新)"""
+        Settings.get_instance().tool_permission_policy.value = dict(self._user_tool_policies)
+        Settings.get_instance().save()
+
     def _persist_user_toggles(self):
         """同步 user_tool_toggles 到全局 Settings(保证新窗口默认值更新)"""
         Settings.get_instance().tool_toggles.value = dict(self._user_tool_toggles)
@@ -227,8 +358,9 @@ class ToolPermissionController(QObject):
             logger.warning(f"[ToolPermission] 创建 resolver 失败: {e},agent 权限将被忽略")
             resolver = None
 
-        all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+        all_tools = get_all_tools()
         new_toggles: Dict[str, bool] = {}
+        new_policies: Dict[str, str] = {}
         has_ask = False
         has_deny = False
 
@@ -244,6 +376,9 @@ class ToolPermissionController(QObject):
                 new_toggles[tool] = True
             else:
                 new_toggles[tool] = False
+                # per-tool 关闭策略：ask→ask / deny→deny（allow 工具不写，回退聚合 behavior）
+                if result in VALID_TOOL_POLICIES:
+                    new_policies[tool] = result
                 if result == "ask":
                     has_ask = True
                 elif result == "deny":
@@ -259,6 +394,7 @@ class ToolPermissionController(QObject):
 
         self._active_tool_toggles = new_toggles
         self._active_tool_off_behavior = new_behavior
+        self._active_tool_policies = new_policies
         self._active_agent_name = agent_name
 
         enabled_count = sum(1 for v in new_toggles.values() if v)
@@ -269,18 +405,21 @@ class ToolPermissionController(QObject):
 
         self.togglesChanged.emit(self.get_toggles())
         self.behaviorChanged.emit(self.get_behavior())
+        self.policiesChanged.emit(self.get_tool_policies())
         self.activeAgentChanged.emit(agent_name)
 
     def restore_user(self):
         """恢复用户偏好(取消智能体激活)"""
         self._active_tool_toggles = dict(self._user_tool_toggles)
         self._active_tool_off_behavior = self._user_tool_off_behavior
+        self._active_tool_policies = dict(self._user_tool_policies)
         self._active_agent_name = None
 
         logger.info("[ToolPermission] restored user permissions")
 
         self.togglesChanged.emit(self.get_toggles())
         self.behaviorChanged.emit(self.get_behavior())
+        self.policiesChanged.emit(self.get_tool_policies())
         self.activeAgentChanged.emit("")  # 空字符串 = 用户模式
 
     # ===================================================================
@@ -328,6 +467,26 @@ class ToolPermissionController(QObject):
         self.userBehaviorChanged.emit(new_behavior)
         logger.info("[ToolPermission] 关闭行为偏好已从更新的 Settings 刷新")
 
+    def _on_settings_policies_changed(self, new_policies: dict):
+        """Settings.tool_permission_policy 被外部变更后自动刷新用户偏好"""
+        if not isinstance(new_policies, dict):
+            return
+        # 相等性检查（原始字典）：防止 _persist_user_policies() 写入后回环重复发射。
+        # 不能用 _clean_policies 后的结果比较——registry 为空（工具未加载）时
+        # clean 会过滤掉全部条目，导致自写回环被误判为外部变更、清掉刚设置的值。
+        if new_policies == self._user_tool_policies:
+            return
+        cleaned = self._clean_policies(new_policies)
+        if cleaned == self._user_tool_policies:
+            return
+
+        self._user_tool_policies = cleaned
+        if not self.is_agent_active():
+            self._active_tool_policies = dict(cleaned)
+            self.policiesChanged.emit(self.get_tool_policies())
+        self.userPoliciesChanged.emit(self.get_user_tool_policies())
+        logger.info("[ToolPermission] 关闭策略偏好已从更新的 Settings 刷新")
+
     # ===================================================================
     #  状态复制(用于窗口复制/分支)
     # ===================================================================
@@ -336,8 +495,10 @@ class ToolPermissionController(QObject):
         """从另一个 controller 复制完整状态(用于窗口复制/分支)"""
         self._user_tool_toggles = dict(other._user_tool_toggles)
         self._user_tool_off_behavior = other._user_tool_off_behavior
+        self._user_tool_policies = dict(other._user_tool_policies)
         self._active_tool_toggles = dict(other._active_tool_toggles)
         self._active_tool_off_behavior = other._active_tool_off_behavior
+        self._active_tool_policies = dict(other._active_tool_policies)
         self._active_agent_name = other._active_agent_name
         # ★ T28：同步用户显式调整集合（分支窗口行为一致）
         self._user_modified = set(other._user_modified)
@@ -345,6 +506,8 @@ class ToolPermissionController(QObject):
         # 主动发射所有信号刷新 UI
         self.togglesChanged.emit(self.get_toggles())
         self.behaviorChanged.emit(self.get_behavior())
+        self.policiesChanged.emit(self.get_tool_policies())
         self.activeAgentChanged.emit(self._active_agent_name or "")
         self.userTogglesChanged.emit(self.get_user_toggles())
         self.userBehaviorChanged.emit(self.get_user_behavior())
+        self.userPoliciesChanged.emit(self.get_user_tool_policies())

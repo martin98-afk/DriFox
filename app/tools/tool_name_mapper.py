@@ -1,21 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-工具名别名映射器 — 双向映射
+工具名别名映射器 — 双向映射（registry 驱动）
+
+数据源：ToolRegistry（工具插件注册时的 aliases 元数据）。
 
 功能：
-1. to_native(): 将 Claude Code/Cursor 等外部平台工具名 → DriFoxx 原生名（小写）
+1. to_native(): 将 Claude Code/Cursor 等外部平台工具名 → DriFox 原生名（小写）
 2. to_claude_style(): 将任意已知工具名 → Claude Code 风格（PascalCase）
    用于 hook context，使第三方 Claude Code 插件能正确匹配工具名。
 
-LLM 永远看到 DriFoxx 原生名，此映射器只在系统内部使用。
+LLM 永远看到 DriFox 原生名，此映射器只在系统内部使用。
 """
-
 from typing import Dict, List, Optional
 
 
-class ToolNameMapper:
+class _ToolNameMapperMeta(type):
+    """元类：让 ToolNameMapper.ALIAS_MAP 作为动态属性（兼容旧代码直接读 ALIAS_MAP）"""
+
+    @property
+    def ALIAS_MAP(cls) -> Dict[str, List[str]]:
+        return cls._build_alias_map()
+
+
+class ToolNameMapper(metaclass=_ToolNameMapperMeta):
     """
-    工具名双向映射器
+    工具名双向映射器（registry 驱动）
 
     用法：
         ToolNameMapper.to_native("Read")       → "read"
@@ -24,44 +33,64 @@ class ToolNameMapper:
         ToolNameMapper.to_claude_style("read") → "Read"
     """
 
-    # DriFoxx 原生名 → 其他平台常见名称列表
-    ALIAS_MAP: Dict[str, List[str]] = {
-        "read": ["Read", "ReadFile", "ReadFiles", "cat"],
-        "write": ["Write", "WriteFile", "CreateFile", "create_file"],
-        "edit": ["Edit", "TextEdit", "ReplaceInFile", "replace"],
-        "multi_edit": ["MultiEdit", "MultiEditTool"],
-        "grep": ["Grep", "Search", "SearchFiles", "Find"],
-        "glob": ["Glob", "LS", "ListFiles", "list_files"],
-        "list": ["List", "LS", "Ls", "ListDir", "list_directory"],
-        "bash": ["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
-        "question": ["Question", "AskUser", "ask_user", "AskUserQuestion"],
-        "websearch": ["WebSearch", "web_search", "Search", "SearchWeb"],
-        "webfetch": ["WebFetch", "Fetch", "FetchPage", "FetchUrl"],
-        "subagent_para": ["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
-        "subagent_status": ["subagent-status", "TaskStatus", "Status"],
-        "subagent_dag": ["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
-        "todowrite": ["TodoWrite", "todo_write"],
-        "todoread": ["TodoRead", "todo_read"],
-        "skill": ["Skill"],
-        "list_skills": ["ListSkills", "listSkills"],
-        "scan_repo": ["ScanRepo", "scan_repo"],
-        "mcp_list_servers": ["McpListServers", "mcp_list_servers"],
-        "bg_start": ["BgStart", "bg_start"],
-        "bg_stop": ["BgStop", "bg_stop"],
-        "bg_logs": ["BgLogs", "bg_logs"],
-        "bg_list": ["BgList", "bg_list"],
-        "stage_files": ["StageFiles", "stage_files"],
-        "mcp": ["Mcp"],  # MCP 工具前缀
-        # CodeGraph 代码智能工具（单入口）
-        "codegraph_explore": ["CodeGraphExplore", "cg_explore", "codegraph"],
-    }
-
-    # 反向映射：外来名 → 原生名（延迟构建）
+    # 运行时补充别名（register_alias 写入，叠加在 registry 之上）
+    _extra_aliases: Dict[str, List[str]] = {}
+    # 反向映射缓存（registry 版本变化时失效）
     _reverse_map: Optional[Dict[str, str]] = None
+    _reverse_version: int = -1
+
+    @classmethod
+    def _build_alias_map(cls) -> Dict[str, List[str]]:
+        """从 registry 聚合全部工具的别名映射"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            result: Dict[str, List[str]] = {}
+            for reg in ToolRegistry.get_instance().list():
+                aliases = list(reg.aliases)
+                if aliases:
+                    result[reg.name] = aliases
+            for name, aliases in cls._extra_aliases.items():
+                result.setdefault(name, [])
+                for a in aliases:
+                    if a not in result[name]:
+                        result[name].append(a)
+            return result
+        except Exception:
+            return dict(cls._extra_aliases)
+
+    @classmethod
+    def _reverse(cls) -> Dict[str, str]:
+        """构建反向映射（带 registry 版本缓存）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            version = ToolRegistry.get_instance().version()
+        except Exception:
+            version = -1
+        if cls._reverse_map is not None and cls._reverse_version == version:
+            return cls._reverse_map
+        reverse: Dict[str, str] = {}
+        for native, aliases in cls._build_alias_map().items():
+            for alias in aliases:
+                reverse[alias] = native
+        cls._reverse_map = reverse
+        cls._reverse_version = version
+        return reverse
+
+    @classmethod
+    def known_names(cls) -> List[str]:
+        """获取全部已知工具名（registry 驱动，供 hook 设置卡片下拉等使用）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            return ToolRegistry.get_instance().names()
+        except Exception:
+            return sorted(cls._build_alias_map().keys())
 
     @classmethod
     def to_native(cls, name: str) -> str:
-        """将任意已知工具名转换为 DriFoxx 原生名
+        """将任意已知工具名转换为 DriFox 原生名
 
         如果已经是原生名或未知名，原样返回。
         """
@@ -71,23 +100,18 @@ class ToolNameMapper:
         name_lower = name.lower()
 
         # 快速路径：已经是原生名
-        if name_lower in cls.ALIAS_MAP:
+        if name_lower in cls._build_alias_map():
             return name_lower
 
-        # 延迟构建反向映射
-        if cls._reverse_map is None:
-            cls._reverse_map = {}
-            for native, aliases in cls.ALIAS_MAP.items():
-                for alias in aliases:
-                    cls._reverse_map[alias] = native
+        reverse = cls._reverse()
 
         # 精确匹配（保留大小写，如 "Read" → "read"）
-        if name in cls._reverse_map:
-            return cls._reverse_map[name]
+        if name in reverse:
+            return reverse[name]
 
         # 不区分大小写匹配（如 "ReAd" → "read"）
-        if name_lower in cls._reverse_map:
-            return cls._reverse_map[name_lower]
+        if name_lower in reverse:
+            return reverse[name_lower]
 
         return name  # 未知名，原样返回
 
@@ -113,15 +137,15 @@ class ToolNameMapper:
         if name.startswith("mcp__"):
             return name
 
-        # 先归一化到 DriFoxx 原生名
+        # 先归一化到 DriFox 原生名
         native = cls.to_native(name)
 
         # 快速路径：原生名本身就是 Claude Code 风格（如 "mcp__xxx"）
         if native.startswith("mcp__"):
             return native
 
-        # 查找 ALIAS_MAP 中该原生名的第一个别名（通常是 Claude Code 风格）
-        aliases = cls.ALIAS_MAP.get(native, [])
+        # 查找别名映射中该原生名的第一个别名（通常是 Claude Code 风格）
+        aliases = cls._build_alias_map().get(native, [])
         if aliases:
             return aliases[0]  # 第一个别名：如 "edit" → "Edit", "read" → "Read"
 
@@ -130,10 +154,10 @@ class ToolNameMapper:
 
     @classmethod
     def is_known(cls, name: str) -> bool:
-        """检查工具名是否可映射到已知的 DriFoxx 工具
+        """检查工具名是否可映射到已知的 DriFox 工具
 
         已知工具包括：
-        - 内置工具（ALIAS_MAP 中的原生名）
+        - 注册工具（registry 中的原生名）
         - MCP 工具（以 mcp__ 开头的动态工具名）
 
         Args:
@@ -145,7 +169,7 @@ class ToolNameMapper:
         if not name:
             return False
         native = cls.to_native(name)
-        if native in cls.ALIAS_MAP:
+        if native in cls._build_alias_map():
             return True
         # MCP 工具（动态发现，运行时注入）
         if native.startswith("mcp__"):
@@ -154,11 +178,11 @@ class ToolNameMapper:
 
     @classmethod
     def register_alias(cls, native_name: str, alias: str):
-        """动态注册别名（供插件或测试使用）"""
+        """动态注册别名（运行时补充，叠加在 registry 之上）"""
         native_lower = native_name.lower()
-        if native_lower not in cls.ALIAS_MAP:
-            cls.ALIAS_MAP[native_lower] = []
-        if alias not in cls.ALIAS_MAP[native_lower]:
-            cls.ALIAS_MAP[native_lower].append(alias)
+        if native_lower not in cls._extra_aliases:
+            cls._extra_aliases[native_lower] = []
+        if alias not in cls._extra_aliases[native_lower]:
+            cls._extra_aliases[native_lower].append(alias)
         # 清除反向映射缓存以便重建
         cls._reverse_map = None

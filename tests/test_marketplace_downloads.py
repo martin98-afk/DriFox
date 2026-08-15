@@ -6,6 +6,7 @@
 - DownloadsFetcher 缓存命中/失败防抖/TTL 过期/批量查询
 """
 
+import importlib.util
 import os
 import sys
 import time
@@ -16,7 +17,17 @@ PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
 
-from ui.marketplace_manager import MarketplaceSourceManager  # noqa: E402
+# 唯一包名加载 plugin-marketplace/ui：避免与其他插件（context-usage-stats 等）的 ui 包
+# 抢占 sys.modules["ui"] 导致全量收集失败（T8）。相对导入 .proxy/.data 由 __package__ 解析。
+if "pm_ui" not in sys.modules:
+    import types
+
+    _pkg = types.ModuleType("pm_ui")
+    _pkg.__path__ = [str(PLUGIN_MARKETPLACE / "ui")]
+    _pkg.__package__ = "pm_ui"
+    sys.modules["pm_ui"] = _pkg
+
+from pm_ui.marketplace_manager import MarketplaceSourceManager  # noqa: E402
 
 
 # ── Task 1: 同名求和 ──────────────────────────────────────
@@ -105,7 +116,7 @@ def test_fetch_all_bad_downloads_value(tmp_path):
 
 def _mk_fetcher(monkeypatch, responses: dict):
     """构造 fetcher：mock _get_one 返回给定 {name: count}，None 表示失败"""
-    from ui.downloads import DownloadsFetcher
+    from pm_ui.downloads import DownloadsFetcher
 
     fetcher = DownloadsFetcher()
 
@@ -159,7 +170,7 @@ def test_fetch_missing_fail_dedupe_within_fail_ttl(monkeypatch):
 
 
 def test_fetch_missing_ttl_expiry_refetches(monkeypatch):
-    from ui.downloads import TTL
+    from pm_ui.downloads import TTL
 
     fetcher = _mk_fetcher(monkeypatch, {"p1": 10})
     calls = []
@@ -184,8 +195,8 @@ def test_fetch_missing_ttl_expiry_refetches(monkeypatch):
 def _mk_card(monkeypatch, plugins):
     """构造卡片 + 返回插件数据"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from ui.cards import MarketplaceCard
-    from ui.marketplace_manager import MarketplaceSourceManager
+    from pm_ui.cards import MarketplaceCard
+    from pm_ui.marketplace_manager import MarketplaceSourceManager
 
     monkeypatch.setattr(
         MarketplaceSourceManager,
@@ -222,7 +233,7 @@ def test_render_no_fetch_when_live_query_disabled(monkeypatch, tmp_path):
     CountAPI 实时查询（key 不存在大量 404 + 服务无批量接口）。
     恢复实时查询时：置开关 True 并把本测试改回「查询 → 回填」断言。
     """
-    from ui import cards as cards_mod
+    from pm_ui import cards as cards_mod
 
     assert cards_mod._DOWNLOADS_LIVE_QUERY_ENABLED is False, "实时查询开关应为关闭状态"
 

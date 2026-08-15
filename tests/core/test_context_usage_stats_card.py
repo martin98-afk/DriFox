@@ -12,6 +12,7 @@
 - 因此集中测试纯函数逻辑和注册表集成
 - 控件级测试（set_colors、show_card）建议在集成测试或手动验证中覆盖
 """
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict
@@ -19,18 +20,23 @@ from typing import Any, Callable, Dict
 import pytest
 from PyQt5.QtGui import QColor
 
-# 插件目录不在标准模块路径中，手动添加
-_SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent / "plugins" / "context-usage-stats"
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+# context-usage-stats 插件重构（T8）：纯函数已从 ui/cards.py 迁出——
+# _fast_estimate_tokens/_estimate_messages_tokens → ui/data.py；
+# _format_number/_make_chart_colors_from_context → ui/charts.py。
+# 用唯一模块名加载，避免与其他插件的 ui 包冲突。
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent / "plugins" / "context-usage-stats" / "ui"
 
-# 纯函数：安全导入
-from ui.cards import (
-    _format_number,
-    _fast_estimate_tokens,
-    _estimate_messages_tokens,
-    _make_chart_colors_from_context,
-)
+_cus_data_spec = importlib.util.spec_from_file_location("cus_data", _SCRIPT_DIR / "data.py")
+_cus_data = importlib.util.module_from_spec(_cus_data_spec)
+_cus_data_spec.loader.exec_module(_cus_data)
+_fast_estimate_tokens = _cus_data._fast_estimate_tokens
+_estimate_messages_tokens = _cus_data._estimate_messages_tokens
+
+_cus_charts_spec = importlib.util.spec_from_file_location("cus_charts", _SCRIPT_DIR / "charts.py")
+_cus_charts = importlib.util.module_from_spec(_cus_charts_spec)
+_cus_charts_spec.loader.exec_module(_cus_charts)
+_format_number = _cus_charts._format_number
+_make_chart_colors_from_context = _cus_charts._make_chart_colors_from_context
 
 
 # ══════════════════════════════════════════════════════════
@@ -158,8 +164,8 @@ class TestFastEstimateTokens:
     def test_chinese_only(self):
         result = _fast_estimate_tokens("你好世界测试")
         assert result >= 1
-        # 6 汉字 / 2 = 3
-        assert result == 3
+        # 6 汉字 × 1.2 token/字 ≈ 7（data.py 现实现：int(chinese * 1.2 + non_chinese / 4.0)）
+        assert result == 7
 
     def test_mixed_text(self):
         result = _fast_estimate_tokens("Hello 你好 World 世界")

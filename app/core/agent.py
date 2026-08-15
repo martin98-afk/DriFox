@@ -24,6 +24,26 @@ from app.tools.tool_name_mapper import ToolNameMapper
 _agent_file_cache: Dict[str, Dict[str, tuple]] = {}
 
 
+def _subagent_forbidden_tools() -> set:
+    """子智能体调用时禁止使用的工具集合（registry 派生，不硬编码工具名）。
+
+    规则（与旧硬编码 {question, subagent_para, subagent_status, subagent_dag} 等价）：
+    - metadata["interactive"]：交互式提问（question）
+    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status/subagent_dag）
+    """
+    try:
+        from app.tools.registry import ToolRegistry
+
+        reg = ToolRegistry.get_instance()
+        return {
+            r.name for r in reg.list()
+            if (r.metadata or {}).get("interactive") or r.group == "子智能体"
+        }
+    except Exception:
+        # registry 不可用：回退旧集合（保持过滤语义不失效）
+        return {"question", "subagent_para", "subagent_status", "subagent_dag"}
+
+
 @dataclass
 class Agent:
     name: str
@@ -173,8 +193,6 @@ class PermissionResolver:
         "todowrite": "allow",
         "mcp_list_servers": "allow",
         "mcp": "allow",  # MCP 工具前缀匹配
-        "external_directory": "ask",
-        "doom_loop": "ask",
     }
 
     def __init__(
@@ -723,7 +741,8 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        forbidden_tools = {"question", "subagent_para", "subagent_status", "subagent_dag"}
+        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status/subagent_dag）
+        forbidden_tools = _subagent_forbidden_tools()
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]
@@ -750,13 +769,20 @@ class AgentManager:
             f"team_window_id={bt_window_id!r}, is_in_team={is_in_team}"
         )
 
-        team_tools = {"team_send_message", "team_list_members"}
+        # 团队专用工具（registry 标记 team_only=True，可扩展）：
+        # 非团队成员从 schema 定义中过滤（LLM 看不到），仅团队成员可用。
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
+
+        # D10：统一大小写/别名后比较（registry 原生名与 LLM 传入名可能大小写/别名不同）
+        team_only_tools = set(ToolRegistry.get_instance().team_only_tools())
+        team_only_norm = {ToolNameMapper.to_native(n).lower() for n in team_only_tools}
 
         filtered_tools = []
         for tool in all_tools:
-            tool_name = tool["function"]["name"].lower()
-            # 团队工具：仅团队成员可见
-            if tool_name in team_tools:
+            tool_name = ToolNameMapper.to_native(tool["function"]["name"]).lower()
+            # 团队专用工具：仅团队成员可见
+            if tool_name in team_only_norm:
                 if is_in_team:
                     filtered_tools.append(tool)
                 continue

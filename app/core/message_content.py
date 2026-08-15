@@ -334,16 +334,12 @@ def make_tool_result_block(
         diff: Optional[str] = None,
         echarts: Optional[str] = None,
 ) -> Dict[str, Any]:
-    # 检测是否为子智能体任务（task tool）
-    is_subagent = str(tool_name).lower() == "task"
-
     block = {
         "type": "tool_result",
         "name": str(tool_name or "tool"),
         "arguments": _sanitize_tool_args(arguments),
         "result": _sanitize_rendering_string("") if result is None else _sanitize_rendering_string(str(result)),
         "success": bool(success),
-        "is_subagent": is_subagent,  # 标记是否为子智能体结果
     }
     if tool_call_id:
         block["tool_call_id"] = str(tool_call_id)

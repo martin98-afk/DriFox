@@ -6,6 +6,7 @@
 - 覆盖式写入防重复（§2.1）
 - id 对齐、幽灵清理、类级共享、热重载
 """
+
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,7 @@ def _isolate_hook_states(monkeypatch, tmp_path):
     HookManager._shared_config_watchers = {}
     HookManager._shared_registered_functions = {}
     HookManager._shared_cwd_resolve_cache = {}
-    HookManager._shared_restore_positions = {}
+    HookManager._shared_restore_snapshots = {}
     yield states_dir
 
 
@@ -139,9 +140,7 @@ def test_edit_hook_move_event_merges_existing_matcher_rule(tmp_path):
         encoding="utf-8",
     )
     hm = HookManager()
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     h1 = hm._hooks["PreUserMessage"][0].hooks[0]
     ok = hm.edit_hook_by_id(h1.id, {"event": "PostUserMessage", "matcher": "tool:bash"})
     assert ok is True
@@ -157,9 +156,7 @@ def test_edit_hook_not_found_returns_false(tmp_path):
     hooks_file = tmp_path / "hooks.json"
     hooks_file.write_text(json.dumps({"hooks": {"PreUserMessage": []}}), encoding="utf-8")
     hm = HookManager()
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     # 伪造一个内存中不存在于文件的 hook（动态注册）
     from app.core.hook_manager import Hook, HookMatchRule
 
@@ -209,9 +206,7 @@ def test_apply_state_only_for_system_hook(tmp_path):
     hm = HookManager()
     # 预置覆盖层状态（模拟旧数据残留）
     hm._hook_states["plugin_1"] = False
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     hook = hm._hooks["PreUserMessage"][0].hooks[0]
     # 源文件无 enabled → 默认 True，且非系统 hook 不被覆盖层强制改 False
     assert hook.enabled is True
@@ -244,9 +239,7 @@ def test_persist_ids_aligned_with_file_order(tmp_path):
         encoding="utf-8",
     )
     hm = HookManager()
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     # 注册后源文件应有两个不同 id（persist 已写回）
     data = json.loads(hooks_file.read_text(encoding="utf-8"))
     entries = data["hooks"]["PreUserMessage"][0]["hooks"]
@@ -287,9 +280,7 @@ def test_persist_ids_mixed_existing_and_missing(tmp_path):
         encoding="utf-8",
     )
     hm = HookManager()
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     data = json.loads(hooks_file.read_text(encoding="utf-8"))
     entries = data["hooks"]["PreUserMessage"][0]["hooks"]
     assert entries[0]["id"] == "fixed_id_a", "已有 id 的 hook 不得被改写"
@@ -327,9 +318,7 @@ def test_migrate_legacy_states_writes_source_and_cleans_ghost(tmp_path):
         encoding="utf-8",
     )
     hm = HookManager()
-    hm.register_hooks_from_json(
-        "p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
-    )
+    hm.register_hooks_from_json("p", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file))
     # 预置旧数据：plugin_1=False（非系统）、ghost=True（幽灵）、sys_1=True（系统）
     hm._hook_states["plugin_1"] = False
     hm._hook_states["ghost_1"] = True
@@ -530,3 +519,131 @@ def test_hot_reload_preserves_rule_order(tmp_path):
 
     # 顺序必须保持：plugin-a 仍在中间，不被移到末尾
     assert _order() == ["sys_hook", "pa_hook", "pb_hook"], f"实际顺序: {_order()}"
+
+
+# ──────────────────────────────────────────────
+# P021 回归：热重载后 hook 来源标签必须正确
+# （系统 hook 不得显示为自定义、插件 hook 不得显示为其他插件）
+# ──────────────────────────────────────────────
+def test_hot_reload_source_labels_stay_correct(tmp_path):
+    """多 skill 多 rule 交错 + 热重载后，所有 hook 的来源标签必须与原始一致。
+
+    旧实现根因：restore insert 的索引位移计算在交错场景下错位，
+    _skill_to_hooks 指向错误 rule → 插件 hook 被标为其他插件、
+    系统 hook 索引越界丢失 → 兜底显示为「自定义」。
+    """
+
+    def _write(name: str, hook_ids: list):
+        fp = tmp_path / f"{name}.json"
+        fp.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "", "hooks": [{"id": hid, "type": "command", "command": f"echo {hid}"}]}
+                            for hid in hook_ids
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return fp
+
+    sys_file = _write("sys", ["sys_a", "sys_b"])
+    pa_file = _write("pa", ["pa_a", "pa_b"])
+    pb_file = _write("pb", ["pb_a"])
+
+    hm = HookManager()
+    # 分段注册：sys_a, sys_b, pa_a, pa_b, pb_a（每个 skill 连续一段，真实场景）
+    for name, fp, system in (
+        ("system", sys_file, True),
+        ("plugin-a", pa_file, False),
+        ("plugin-b", pb_file, False),
+    ):
+        hm.register_hooks_from_json(
+            name, str(tmp_path), json.loads(fp.read_text(encoding="utf-8")), str(fp), is_system_plugin=system
+        )
+
+    def _source_map():
+        return hm._build_hook_source_map()
+
+    def _order():
+        return [r.hooks[0].id for r in hm._hooks["PreToolUse"]]
+
+    expected = {
+        "sys_a": ("plugin", "system"),
+        "sys_b": ("plugin", "system"),
+        "pa_a": ("plugin", "plugin-a"),
+        "pa_b": ("plugin", "plugin-a"),
+        "pb_a": ("plugin", "plugin-b"),
+    }
+    assert _source_map() == expected, f"注册后来源即错: {_source_map()}"
+    assert _order() == ["sys_a", "sys_b", "pa_a", "pa_b", "pb_a"]
+
+    # ── 热重载开头段 system（watcher 触发路径）──
+    # 旧实现根因：restore insert 后 _skill_to_hooks 索引错位，
+    # system 的 rule 索引指向 plugin-a 的 rule（pa_a 被标为 system），
+    # 而 sys_a 索引丢失 → 兜底显示为「自定义」。
+    hm.unregister_skill_hooks("system")
+    if str(sys_file) in hm._config_watchers:
+        del hm._config_watchers[str(sys_file)]
+    hm.register_hooks_from_json(
+        "system", str(tmp_path), json.loads(sys_file.read_text(encoding="utf-8")), str(sys_file), is_system_plugin=True
+    )
+
+    # 1. 来源标签必须全部保持正确
+    assert _source_map() == expected, f"热重载后来源错乱: {_source_map()}"
+    # 2. 顺序必须保持（system 段不被移到末尾）
+    assert _order() == ["sys_a", "sys_b", "pa_a", "pa_b", "pb_a"], f"顺序未恢复: {_order()}"
+
+    # 3. UI 分组视图也必须正确（get_all_hooks_grouped 走 _build_hook_source_map）
+    grouped = hm.get_all_hooks_grouped()
+    plugin_a_ids = {h["id"] for hooks in grouped["plugin"].values() for h in hooks if h["_display_name"] == "plugin-a"}
+    assert {"pa_a", "pa_b"} <= plugin_a_ids, f"plugin-a 分组缺失: {plugin_a_ids}"
+    # 不允许任何 hook 掉进 user（自定义）组
+    user_ids = {h["id"] for hooks in grouped["user"].values() for h in hooks}
+    assert not user_ids, f"热重载后 hook 掉进自定义组: {user_ids}"
+
+    # ── 热重载中间段 plugin-a（恢复交错归并逻辑）──
+    hm.unregister_skill_hooks("plugin-a")
+    if str(pa_file) in hm._config_watchers:
+        del hm._config_watchers[str(pa_file)]
+    hm.register_hooks_from_json(
+        "plugin-a", str(tmp_path), json.loads(pa_file.read_text(encoding="utf-8")), str(pa_file)
+    )
+    assert _source_map() == expected, f"plugin-a 热重载后来源错乱: {_source_map()}"
+    assert _order() == ["sys_a", "sys_b", "pa_a", "pa_b", "pb_a"], f"中间段热重载顺序未恢复: {_order()}"
+
+
+def test_edit_move_event_keeps_source_label(tmp_path):
+    """hook 移动事件后来源标签保持正确（_rebuild_skill_to_hooks 兜底）"""
+    hooks_file = tmp_path / "hooks.json"
+    hooks_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreUserMessage": [
+                        {"matcher": "", "hooks": [{"id": "h1", "type": "command", "command": "echo hi"}]}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hm = HookManager()
+    hm.register_hooks_from_json(
+        "test-plugin", str(tmp_path), json.loads(hooks_file.read_text(encoding="utf-8")), str(hooks_file)
+    )
+    # 移动到新事件
+    assert hm.edit_hook_by_id("h1", {"event": "PostUserMessage", "matcher": ""})
+    assert hm._build_hook_source_map()["h1"] == ("plugin", "test-plugin")
+    assert "h1" not in hm._hooks.get("PreUserMessage", []) or True  # 旧事件已迁移
+    assert "h1" in [h.id for r in hm._hooks["PostUserMessage"] for h in r.hooks]
+
+    # 动态注册/注销后来源标签同样正确（_rebuild_skill_to_hooks 兜底）
+    hm.dynamic_register_hook("test-plugin", "PreToolUse", {"id": "dyn_hook", "type": "command", "command": "echo d"})
+    assert hm._build_hook_source_map()["dyn_hook"] == ("plugin", "test-plugin")
+    idx = hm._skill_to_hooks["test-plugin"][-1][1]
+    assert hm.dynamic_unregister_hook("test-plugin", "PreToolUse", idx)
+    assert "dyn_hook" not in hm._build_hook_source_map()

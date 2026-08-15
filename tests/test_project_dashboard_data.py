@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """project-dashboard 数据采集层测试（临时 git 仓库）"""
+import importlib.util
 import os
 import subprocess
 import sys
@@ -7,8 +8,13 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "plugins" / "project-dashboard" / "ui"))
-from dashboard import collect_data, find_git_root  # noqa: E402
+# project-dashboard 已迁至 .drifox/plugins（引擎插件化），用唯一模块名加载，避免 ui 包冲突（T8）
+_UI_DIR = Path(__file__).resolve().parent.parent / ".drifox" / "plugins" / "project-dashboard" / "ui"
+_spec = importlib.util.spec_from_file_location("pd_dashboard", _UI_DIR / "dashboard.py")
+_dashboard = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_dashboard)
+collect_data = _dashboard.collect_data
+find_git_root = _dashboard.find_git_root
 
 
 @pytest.fixture

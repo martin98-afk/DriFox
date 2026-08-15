@@ -61,8 +61,23 @@ MAX_TOOL_CONTENT_CHARS = 3000
 MAX_TAIL_OVERFLOW_MULTIPLIER = 2.5
 
 # ========== 工具保护配置 ==========
-# 不应被压缩的工具列表（这些工具的内容需要完整保留）
-PROTECTED_TOOLS = {"skill", "todowrite"}  # 可以添加更多工具
+# 不应被压缩的工具列表（这些工具的内容需要完整保留）。
+# 由工具插件注册 metadata["protect"]=True 声明（registry 单一数据源），
+# 主程序不再维护工具名白名单。
+
+
+def _is_protected_tool(tool_name: str) -> bool:
+    """工具内容是否需完整保留（registry 驱动）。
+
+    契约是"protect 内容必须完整保留"→ 异常时回退 True（保护优先），
+    宁可多保留也不在极端场景丢失内容。
+    """
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().is_protected(tool_name)
+    except Exception:
+        return True
 
 # ========== Hermes Agent 预剪枝常量 ==========
 # 单图 token 估算（匹配 Claude Code 常量）
@@ -230,15 +245,33 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     Used during the pre-compression pruning pass to replace large tool outputs
     with a short but useful description of what the tool did, rather than
     a generic placeholder that carries zero information.
+
+    DriFox 工具（插件注册）优先走 registry 的 summarize 闭包（摘要逻辑随插件定义）；
+    未注册（如 Hermes 移植分支的非 DriFox 工具名）回退到下方通用分支。
     """
     try:
         args = json.loads(tool_args) if tool_args else {}
     except (json.JSONDecodeError, TypeError):
         args = {}
 
+    # ── DriFox 插件工具：summarize 闭包优先（主程序不写死工具名） ──
+    try:
+        from app.tools.registry import ToolRegistry
+
+        summarize_fn = ToolRegistry.get_instance().get_summarize(tool_name)
+        if summarize_fn is not None:
+            return summarize_fn(tool_name, args, tool_content or "")
+    except Exception:
+        pass
+
     content = tool_content or ""
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
+
+    # ── 以下为通用/兼容兜底分支（Hermes 移植 + 未注册 summarize 的 DriFox 工具名）。
+    # DriFox 工具的摘要已由插件 summarize 闭包接管（上方闭包优先），
+    # 此处仅当 registry 未初始化或工具未注册闭包时兜底，不承载主逻辑。
+    # 注意：与插件 summarize 存在功能重叠，属刻意保留的兼容层。
 
     if tool_name == "terminal" or tool_name == "bash" or tool_name == "shell":
         cmd = args.get("command", "")
@@ -479,7 +512,7 @@ def _prune_old_tool_results(
             continue
 
         tool_name, tool_args = call_id_to_tool[tool_call_id]
-        if tool_name in PROTECTED_TOOLS:
+        if _is_protected_tool(tool_name):
             continue  # 保护特定工具不被剪枝
 
         content = msg.get("content", "") or ""
@@ -491,7 +524,7 @@ def _prune_old_tool_results(
             continue
 
         # 🔒 保护 <persisted-output> 块不被剪枝:
-        #   这些块包含文件路径, 如果被摘要替换, LLM 将丢失路径无法 read_persisted_output,
+        #   这些块包含文件路径, 如果被摘要替换, LLM 将丢失路径无法按文件路径读取,
         #   被迫重读原始文件 → 超大结果 → 再次固化 → 死循环
         if content.lstrip().startswith("<persisted-output>"):
             continue
@@ -1485,7 +1518,7 @@ class HistoryCompactor:
             is_protected_tool = False
             if role == "tool":
                 tool_name = msg.get("name", "")
-                if tool_name in PROTECTED_TOOLS:
+                if _is_protected_tool(tool_name):
                     is_protected_tool = True
 
             # 自适应截断：越旧截断越多（受保护工具除外）
@@ -1513,7 +1546,7 @@ class HistoryCompactor:
                     ratios=content_ratios if total_content_length > 1000 else None,
                 )
                 # 标记受保护的工具
-                prefix = "[🔒] " if tool_name in PROTECTED_TOOLS else ""
+                prefix = "[🔒] " if _is_protected_tool(tool_name) else ""
                 summary_lines.append(f"{prefix}# {tool_name}\nTool Args: {arguments}\nTool Res: {content}")
 
         return "\n".join(summary_lines)
