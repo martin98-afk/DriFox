@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Shell 输出压缩 - 减少 LLM token 消耗

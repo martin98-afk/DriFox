@@ -4,8 +4,8 @@
         "dark": "icon_dark.svg"
     },
     "name": "system",
-    "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks 和 MCP 配置",
-    "version": "1.0.0",
+    "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置和内置工具（工具插件化：schema/图标/中文名/危险/分组注册）",
+    "version": "2.0.0",
     "author": {
         "name": "DriFoxx Team"
     },
@@ -19,6 +19,7 @@
         "themes": true,
         "hooks": true,
         "mcp": true,
-        "lsp": true
+        "lsp": true,
+        "tools": true
     }
 }

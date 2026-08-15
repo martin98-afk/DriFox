@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### ✨ 新功能 (New Features)
+- **工具插件化** (`app/tools/registry.py` + `app/tools/plugin_tool_loader.py` + `plugins/system/tools/`): 工具作为插件的一部分注册，34 个内置工具全部迁移到系统插件 `plugins/system/tools/*.py`，通过 `register(registry)` 注册 schema/impl/icon/cn_name/danger/group/description/aliases；单一数据源驱动 LLM schema、消息渲染（图标/中文名）、权限卡片（分组/危险标记）、权限控制器、ToolNameMapper 别名；轮询热插拔/热更新（文件增删改自动生效，含跨根优先级保护）
+- **工具逻辑自包含** (`plugins/system/tools/`): 纯逻辑工具（文件 9 个/网络 2 个/桌面 3 个）impl 用标准库/第三方库独立实现（含 mtime 检测、unified diff、图片 base64、命令安全等核心行为），不依赖主程序 BuiltinTools；平台工具（bash/subagent/MCP/LSP/CodeGraph/团队/todo/question/skill/上传）通过 `tool_ctx["services"]` 能力接口调用（不暴露 BuiltinTools 内部）；图标资源随插件（`tools/icons/` 深色 + `tools/icons_light/` 浅色，主题感知 data URI 加载）
+- **工具权限卡片动态分组** (`app/widgets/cards/settings/tool_control_card.py`): 分组与描述从 registry 读取（功能域分组，危险工具 🔥 标记 + 组内危险在前），registry 热更新自动重建卡片
+- **渲染联动** (`app/widgets/render_helpers.py`): 工具图标/中文名从 registry 读取，插件工具自动获得展示元数据（MCP 特殊处理保留）
+### 🔧 其他 (Chores & Build)
+- **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
+- **测试**: 新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）
 - **Windows Job Object 进程树管理** (`app/tools/process_job.py`): 创建 → kill-on-close → 子进程入 Job 的进程树容器；`command_safety.run_safe/run_with_shell` 新增可选 `job=` 参数，命令启动后自动入 Job（S3）
 - **工具结果截断** (`app/core/context_builder.py`): 超过 8192 字符的工具输出保留头 4096 + 尾 1024，中间省略标记（DSH tool-result-pruner 对齐）；仅在发送给 LLM 的上下文层裁剪，会话原始存储不受影响（S1）
 - **上下文用量投影对齐** (`app/core/engines/ui/engine.py` + `app/widgets/context_usage_ring.py` + `context_usage_tooltip.py`): 用量快照按截断后口径估算（与实际发送一致），环形图 tooltip 显示「工具结果截断节省 X tokens」（S2）

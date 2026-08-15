@@ -10,11 +10,12 @@
 
 import fnmatch
 import os
-import re
 import threading
+from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
+from loguru import logger
 from PyQt5.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import (
@@ -32,102 +33,40 @@ from app.widgets.elided_label import _ElidedLabel
 
 ITEM_HEIGHT = 36
 MAX_VISIBLE_ITEMS = 8
-# 最大渲染 widget 数。超过此数量的匹配项仅保留在 _filtered_items 中供搜索，
-# 不创建 widget（不可见不可选中），但打分排序仍然参与——用户输更具体的 query
-# 就可能把目标文件"拉"进可见区。
-# 注：删除/修改此值前请同步更新 _render_incremental 的切片逻辑。
-MAX_RENDERED_ITEMS = 300
+# 每次创建/追加 widget 的批量大小：初始渲染 + 滚动/键盘向下时逐批追加（懒加载）
+RENDER_CHUNK = 200
+
+# 渲染软上限：最多创建的 widget 数。超过后不再追加，避免海量 QWidget 内存爆炸。
+# 相比旧实现（硬截断 300 且永不追加），此值只限制「浏览到列表末端」的极端场景；
+# 精确搜索不受影响——输入 query 后匹配集通常远小于此值。
+MAX_RENDERED_ITEMS = 5000
+
+# 文件缓存硬上限：递归扫描累计到该数量即停止（防呆，避免根目录指到 C:\ 等爆炸）。
+# 扫描已改为后台线程执行（不阻塞 UI），故上限从 2000 大幅放宽到 100000；
+# 命中上限时 _on_scan_finished 会记日志告警。
+MAX_SCAN_ITEMS = 100000
+
+# 增量扫描（主线程、目录变更事件触发）的软上限：保留旧 2000 量级，
+# 避免新建超大目录时主线程递归扫描导致 tab 切换尖峰；全量由后台扫描兜底。
+MAX_INCREMENTAL_SCAN_ITEMS = 2000
 
 
-class _IgnoreRules:
-    """预编译的忽略规则集合（fnmatch 模式 → 正则，消除逐路径段 fnmatch 调用）
-
-    gitignore 条目结构：(negate, full_rxs, name_rxs)
-    - negate: 是否为 ! 取反模式
-    - full_rxs: 匹配完整相对路径的正则列表（fnmatch 语义 + 目录前缀字面匹配）
-    - name_rxs: 匹配文件名的正则列表（无路径分隔符的模式，可命中任意层级）
-
-    规则顺序与语义与原 _is_ignored 完全等价：
-    1. 任一目录段精确命中 _IGNORED_DIRS → 忽略
-    2. 任一目录段命中 _IGNORED_DIR_PATTERNS（通配）→ 忽略
-    3. 文件扩展名命中 _IGNORED_EXT → 忽略
-    4. .gitignore 模式（最后匹配者生效，支持 ! 取反与尾部 / 前缀）
-    """
-
-    __slots__ = ("ignored_dirs", "dir_patterns", "ignored_ext", "gitignore")
-
-    def __init__(
-        self,
-        ignored_dirs: Set[str],
-        dir_patterns: List["re.Pattern"],
-        ignored_ext: Set[str],
-        gitignore: List[Tuple[bool, List["re.Pattern"], List["re.Pattern"]]],
-    ):
-        # 目录名精确匹配集合（已小写），set 查找 O(1)
-        self.ignored_dirs = ignored_dirs
-        # _IGNORED_DIR_PATTERNS 编译的正则（fnmatch.translate + re.I）
-        self.dir_patterns = dir_patterns
-        # 扩展名集合（小写、含点）
-        self.ignored_ext = ignored_ext
-        # gitignore 预编译条目
-        self.gitignore = gitignore
-
-    def is_ignored(self, rel_path: str, is_dir: bool) -> bool:
-        """检查相对路径是否被忽略（纯正则匹配，无逐个 fnmatch 调用）"""
-        path_parts = rel_path.replace("\\", "/").split("/")
-        name = path_parts[-1]
-        name_lower = name.lower()
-
-        # 1+1b. 目录名：精确集合优先（O(1)），未命中再试通配正则
-        for part in path_parts:
-            if part.lower() in self.ignored_dirs:
-                return True
-        for part in path_parts:
-            for rx in self.dir_patterns:
-                if rx.match(part):
-                    return True
-
-        # 2. 扩展名
-        if not is_dir:
-            for ext in self.ignored_ext:
-                if name_lower.endswith(ext):
-                    return True
-
-        # 3. .gitignore 模式（最后匹配生效）
-        if not self.gitignore:
-            return False
-        match_path = rel_path.replace("\\", "/")
-        ignored = False
-        for negate, full_rxs, name_rxs in self.gitignore:
-            hit = False
-            for rx in full_rxs:
-                if rx.match(match_path):
-                    hit = True
-                    break
-            if not hit and name_rxs:
-                for rx in name_rxs:
-                    if rx.match(name):
-                        hit = True
-                        break
-            if hit:
-                ignored = not negate
-        return ignored
-
-
-def _scan_tree(root_dir: str, rules: _IgnoreRules):
+def _scan_tree(root_dir: str, is_ignored_fn, max_items: int):
     """递归扫描目录树（纯 Python，供后台线程执行，不触碰任何 Qt 对象）
 
-    返回 (items, snapshots, watched)：
-    - items: 文件缓存条目列表（最多 2000 项）
+    返回 (items, snapshots, watched, truncated)：
+    - items: 文件缓存条目列表（达到 max_items 即停止）
     - snapshots: 目录绝对路径 → 文件名集合
     - watched: 需要注册文件系统监视器的目录集合
+    - truncated: 是否因达到 max_items 上限而截断
     """
     items: List[Dict[str, str]] = []
     snapshots: Dict[str, Set[str]] = {}
     watched: Set[str] = set()
-    max_items = 2000
+    truncated = False
 
     def walk(dirpath: str, rel_prefix: str):
+        nonlocal truncated
         dirpath = os.path.normpath(dirpath)
         watched.add(dirpath)
         names: Set[str] = set()
@@ -135,11 +74,12 @@ def _scan_tree(root_dir: str, rules: _IgnoreRules):
             with os.scandir(dirpath) as it:
                 for entry in it:
                     if len(items) >= max_items:
+                        truncated = True
                         return
                     name = entry.name
                     rel = f"{rel_prefix}/{name}" if rel_prefix else name
                     is_dir = entry.is_dir(follow_symlinks=False)
-                    if rules.is_ignored(rel, is_dir):
+                    if is_ignored_fn(rel, is_dir):
                         continue
                     names.add(name)
                     items.append(
@@ -157,7 +97,7 @@ def _scan_tree(root_dir: str, rules: _IgnoreRules):
         snapshots[dirpath] = names
 
     walk(root_dir, "")
-    return items, snapshots, watched
+    return items, snapshots, watched, truncated
 
 
 class FileMentionItemWidget(QWidget):
@@ -447,12 +387,14 @@ class FileMentionCard(QWidget):
         self._file_cache: List[Dict[str, str]] = []
         self._cache_dirty = True
         self._gitignore_patterns: List[str] = []  # .gitignore 模式缓存
-        self._ignore_rules: Optional[_IgnoreRules] = None  # 预编译忽略规则缓存
         self._async_pending = False  # 异步扫描进行中标志，防重复调度
         self._scanning = False  # 扫描进行中标志，防止自身扫描触发目录变化信号
         self._pending_refresh = False  # 扫描完成后是否需要刷新显示
+        self._pending_query = ""  # 扫描期间缓存的 query（完成后用于刷新）
         self._scan_thread: Optional[threading.Thread] = None  # 后台扫描线程引用
         self._last_query = ""  # 上次过滤的 query，用于增量剪枝
+        self._scan_generation = 0  # 扫描代次：根目录切换时递增，用于丢弃过期后台扫描结果
+        self._rendered_count = 0  # 当前已渲染的 widget 数量（懒加载，滚动/键盘向下时递增）
 
         # ---- 文件系统监视器：本地新增/删除文件时自动标记缓存失效 ----
         self._fs_watcher = QFileSystemWatcher(self)
@@ -478,6 +420,8 @@ class FileMentionCard(QWidget):
 
         self.setVisible(False)
         self._setup_ui()
+        # 后台扫描完成 → 回主线程应用结果（跨线程，Qt 自动使用队列连接）
+        self._scanFinished.connect(self._on_scan_finished)
 
     def sizeHint(self):
         """返回卡片期望高度。
@@ -537,6 +481,8 @@ class FileMentionCard(QWidget):
 
         self._scroll_area.setWidget(self._scroll_content)
         self._scroll_area.viewport().setStyleSheet("background: transparent; border: none; padding: 0; margin: 0;")
+        # 懒加载：滚动接近底部时追加下一批 widget
+        self._scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
         layout.addWidget(self._scroll_area)
 
     def refresh_style(self):
@@ -572,6 +518,7 @@ class FileMentionCard(QWidget):
         if root_dir != self._root_dir:
             self._root_dir = root_dir
             self._cache_dirty = True
+            self._scan_generation += 1  # 使进行中的后台扫描结果作废
             self._update_fs_watcher()
 
     def _update_fs_watcher(self):
@@ -713,7 +660,9 @@ class FileMentionCard(QWidget):
     def _incremental_scan_new_dir(self, dirpath: str, rel_prefix: str):
         """递归扫描新创建的目录：填满缓存、快照、监视器
 
-        与 _scan_dir 一致地用 max_items=500 防止大目录导致缓存膨胀失控。
+        在主线程运行（由目录变更事件触发），用 MAX_INCREMENTAL_SCAN_ITEMS 软上限
+        防止新建超大目录时主线程递归扫描造成 tab 切换尖峰；完整文件列表由
+        后台全量扫描（_scan_files → _scan_tree）兜底。
         """
         dirpath = os.path.normpath(dirpath)
         # 注册监视器
@@ -722,7 +671,7 @@ class FileMentionCard(QWidget):
             self._fs_watcher.addPath(dirpath)
 
         # 记录快照
-        max_items = 2000
+        max_items = MAX_INCREMENTAL_SCAN_ITEMS
         names: Set[str] = set()
         try:
             with os.scandir(dirpath) as it:
@@ -1015,88 +964,108 @@ class FileMentionCard(QWidget):
         return ignored
 
     def _scan_files(self):
-        """扫描根目录下的文件（全递归，最多 2000 项，常量定义在调用处）
+        """启动后台线程扫描根目录（不阻塞 UI，无 2000 文件硬上限）
 
-        使用 os.scandir — Python 最快目录遍历 API（C 实现，
-        不创建 Path 对象）。忽略 .gitignore 和内置忽略规则。
-        只在缓存脏时调用一次，后续 @ 即时过滤。
+        扫描在后台线程执行（_scan_tree 纯 Python，不触碰 Qt），完成后通过
+        _scanFinished 信号（跨线程队列连接）回主线程应用结果。
+
+        对比旧实现（主线程同步扫描 + max_items=2000 硬上限）：
+        - 旧实现 >2000 文件时静默丢弃，@ 精确搜索也搜不到；
+        - 新实现扫描全部文件（上限仅作防呆），且 UI 全程不卡。
         """
-        self._file_cache = []
         if not self._root_dir or not os.path.isdir(self._root_dir):
             return
+        if self._scan_thread and self._scan_thread.is_alive():
+            # 已有扫描进行中：其完成信号会应用结果；若届时缓存仍脏会重扫
+            return
 
+        gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
+        self._gitignore_patterns = gitignore_patterns
         self._scanning = True
-        try:
-            gitignore_patterns = self._parse_gitignore(Path(self._root_dir))
-            self._gitignore_patterns = gitignore_patterns
-            max_items = 2000
+        root_dir = self._root_dir
+        gen = self._scan_generation
+        max_items = MAX_SCAN_ITEMS
+        # 静态方法，纯函数（只读类常量 + 传入模式列表），线程安全
+        is_ignored_fn = partial(FileMentionCard._is_ignored, gitignore_patterns=gitignore_patterns)
 
+        def worker():
             try:
-                # 递归扫描——无深度限制，忽略目录不进入
-                self._scan_dir(self._root_dir, "", gitignore_patterns, max_items)
-            except Exception:
-                pass
+                items, snapshots, watched, truncated = _scan_tree(root_dir, is_ignored_fn, max_items)
+                self._scanFinished.emit((gen, items, snapshots, watched, truncated))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[FileMention] 后台扫描异常: {e}")
+                self._scanFinished.emit((gen, None, None, None, False))
 
-            # 一次性排序（目录优先，同名不区分大小写）
-            self._sort_file_cache()
-            self._cache_dirty = False
-        finally:
-            self._scanning = False
+        self._scan_thread = threading.Thread(target=worker, name="file-mention-scan", daemon=True)
+        self._scan_thread.start()
 
-    def _scan_dir(self, dirpath: str, rel_prefix: str, gitignore_patterns: List[str], max_items: int):
-        """递归扫描单层目录（os.scandir 实现）
+    def _on_scan_finished(self, result):
+        """后台扫描完成（主线程）：应用缓存、注册监视器、按需刷新显示"""
+        gen, items, snapshots, watched, truncated = result
+        self._scan_thread = None
+        self._scanning = False
 
-        同时将扫描到的目录注册到文件系统监视器，以便实时检测新增/删除文件。
-        """
-        dirpath = os.path.normpath(dirpath)
-        # 将当前目录加入文件系统监视器（去重）
-        if dirpath not in self._watched_dirs:
-            self._watched_dirs.add(dirpath)
-            self._fs_watcher.addPath(dirpath)
+        if items is None:
+            # 扫描失败：保持缓存脏，不自动重试（避免异常导致死循环），
+            # 下次 show / 切目录会重新扫描。
+            return
 
-        names: Set[str] = set()
-        try:
-            with os.scandir(dirpath) as it:
-                for entry in it:
-                    if len(self._file_cache) >= max_items:
-                        return
+        if gen != self._scan_generation:
+            # 结果过期（扫描期间根目录已切换）→ 丢弃；若仍脏则重扫
+            if self._cache_dirty and self._root_dir and os.path.isdir(self._root_dir):
+                QTimer.singleShot(0, self._scan_files)
+            return
 
-                    name = entry.name
-                    rel = f"{rel_prefix}/{name}" if rel_prefix else name
-                    is_dir = entry.is_dir(follow_symlinks=False)
+        self._file_cache = items
+        self._dir_snapshots = snapshots
 
-                    # 检查是否被忽略
-                    if self._is_ignored(rel, is_dir, gitignore_patterns):
-                        continue
+        # 注册目录监视器（Qt 对象仅能在主线程触碰）
+        for d in watched:
+            if d not in self._watched_dirs:
+                self._watched_dirs.add(d)
+                self._fs_watcher.addPath(d)
 
-                    names.add(name)
-                    item = {
-                        "name": name,
-                        "path": os.path.normpath(entry.path),
-                        "relative_path": rel,
-                        "type": "dir" if is_dir else "file",
-                    }
-                    self._file_cache.append(item)
+        self._sort_file_cache()
+        self._cache_dirty = False
 
-                    # 递归子目录
-                    if is_dir:
-                        self._scan_dir(os.path.normpath(entry.path), rel, gitignore_patterns, max_items)
+        if truncated:
+            logger.warning(
+                f"[FileMention] 扫描目录 {self._root_dir!r} 达到文件上限 {MAX_SCAN_ITEMS}，"
+                f"存在未索引文件，@ 搜索将漏掉部分文件。"
+            )
 
-            self._dir_snapshots[dirpath] = names
-        except PermissionError:
-            pass
+        if self._pending_refresh:
+            self._pending_refresh = False
+            self._async_pending = False
+            self._current_query = self._pending_query
+            self.load_items(self._pending_query)
+            self._filter_timer.stop()
+            self._do_filter_and_render()
+            # 强制容器重算布局（扫描完成后卡片高度可能变化）
+            parent = self.parentWidget()
+            if parent and hasattr(parent, "_schedule_expand"):
+                QTimer.singleShot(0, self._deferred_container_expand)
+            has_items = len(self._filtered_items) > 0
+            self._visible = has_items
+            self.setVisible(has_items)
+            self.updateGeometry()
+            # 延迟一帧重新应用选中状态（新 widget 的 setStyleSheet 可能延迟生效）
+            if has_items and self._item_widgets:
+                self._last_selected_index = -1
+                QTimer.singleShot(0, self._deferred_select_first)
 
     def _render_incremental(self):
         """增量渲染——复用现有 widget，避免反复创建/销毁
 
-        只渲染 _filtered_items 的前 MAX_RENDERED_ITEMS 项（通常 300）。
-        超过此数的匹配项不会创建 widget，但保留在 _filtered_items 中——
-        用户继续输入更精确的 query 即可将其"拉"进可见列表。
+        懒加载：初始只渲染前 RENDER_CHUNK 项（保持首屏流畅），滚动/键盘向下时
+        由 _extend_render 逐批追加，最多到 MAX_RENDERED_ITEMS 软上限。
+        精确搜索不受渲染上限影响——_filtered_items 始终保留全量匹配结果。
 
         快速路径：新旧 items 完全相同则跳过全量重建，仅刷新 query 高亮。
         """
-        # 仅取前 MAX_RENDERED_ITEMS 项用于 widget 创建，避免大规模 widget 管理开销
-        new_items = self._filtered_items[:MAX_RENDERED_ITEMS]
+        # 懒加载：初始渲染前 RENDER_CHUNK 项，其余由 _extend_render 按需追加
+        self._rendered_count = min(RENDER_CHUNK, len(self._filtered_items))
+        new_items = self._filtered_items[:self._rendered_count]
 
         # ---- 快速路径：新旧 items 完全一致，仅更新高亮 ----
         if len(self._item_widgets) == len(new_items):
@@ -1162,6 +1131,32 @@ class FileMentionCard(QWidget):
         # 滚动位置导致 _update_selection 的 ensureWidgetVisible 滚动到中间
         self._scroll_area.verticalScrollBar().setValue(0)
 
+    def _extend_render(self):
+        """懒加载：追加下一批 widget（仅新建，不复用/重排已有项）
+
+        相比全量 _render_incremental，本方法只创建新 widget 并追加到布局尾部，
+        O(chunk) 复杂度，滚动/键盘浏览到深列表时保持流畅。
+        """
+        total = len(self._filtered_items)
+        if self._rendered_count >= total or self._rendered_count >= MAX_RENDERED_ITEMS:
+            return
+        end = min(self._rendered_count + RENDER_CHUNK, total, MAX_RENDERED_ITEMS)
+        for item in self._filtered_items[self._rendered_count:end]:
+            w = FileMentionItemWidget(item, self._current_query, self._scroll_content)
+            w.clicked.connect(self._on_item_clicked)
+            w.hovered.connect(self._on_item_hovered)
+            self._item_widgets.append(w)
+            self._scroll_layout.addWidget(w)
+        self._rendered_count = end
+
+    def _on_scroll(self, value: int):
+        """滚动条接近底部时追加下一批 widget（懒加载）"""
+        if self._rendered_count >= len(self._filtered_items):
+            return
+        sb = self._scroll_area.verticalScrollBar()
+        if sb.maximum() - value < ITEM_HEIGHT * 3:
+            self._extend_render()
+
     @staticmethod
     def _matches_multi(item: Dict[str, str], query: str) -> bool:
         """多关键字匹配：| = OR, & = AND
@@ -1190,7 +1185,8 @@ class FileMentionCard(QWidget):
         """根据 query 即时筛选并防抖渲染（多关键字 + fuzzy）
 
         _filtered_items 始终包含**全量匹配结果**，搜索永不丢失文件。
-        视觉上的 widget 创建由 _render_incremental 截断到 MAX_RENDERED_ITEMS 项。
+        视觉上的 widget 由 _render_incremental 懒加载（初始 RENDER_CHUNK 项，
+        滚动/键盘向下时逐批追加，上限 MAX_RENDERED_ITEMS）。
 
         无 query 时按「目录深度浅→深 + 目录优先 → 同名不区分大小写」排序，
         保证各个文件夹的文件都能出现在列表前端，不会出现一个文件夹霸占全部显示。
@@ -1300,8 +1296,13 @@ class FileMentionCard(QWidget):
             self._scroll_area.ensureWidgetVisible(self._item_widgets[self._selected_index], 0, 0)
 
     def select_next(self) -> bool:
-        """选择下一项"""
-        if self._item_widgets and self._selected_index < len(self._item_widgets) - 1:
+        """选择下一项（懒加载：到已渲染末尾时先追加下一批，让键盘可继续向下）"""
+        if not self._item_widgets:
+            return False
+        # 到已渲染末尾且还有更多 → 先追加，让键盘能继续向下
+        if self._selected_index >= len(self._item_widgets) - 1 and len(self._item_widgets) < len(self._filtered_items):
+            self._extend_render()
+        if self._selected_index < len(self._item_widgets) - 1:
             self._selected_index += 1
             self._update_selection()
             return True
@@ -1357,9 +1358,9 @@ class FileMentionCard(QWidget):
             self.updateGeometry()
             return
         if root_dir:
-            if root_dir != self._root_dir:
-                self._root_dir = root_dir
-                self._cache_dirty = True
+            # 走 set_root_dir：归一化路径 + 根变化时递增扫描代次（使在途后台扫描作废）
+            # + 重置文件系统监视器。此前直接赋值漏掉了这三者。
+            self.set_root_dir(root_dir)
         self._current_query = query  # root_dir 有值时始终更新 query
 
         if self._cache_dirty and not self._async_pending:
@@ -1393,42 +1394,15 @@ class FileMentionCard(QWidget):
             QTimer.singleShot(0, self._deferred_container_expand)
 
     def _async_scan_and_refresh(self):
-        """异步扫描完成后立即渲染（跳过防抖）
+        """触发后台扫描，扫描完成信号 _on_scan_finished 会刷新显示
 
-        扫描本身已异步耗时（50-200ms），完成后直接渲染，不再等 20ms 防抖。
-        首次打开时还需延迟一帧让 Qt 完成布局后再应用选中状态。
-
-        ⚠️ 关键修复：容器 _do_expand 的动画可能正在约束 maximumHeight（0→ITEM_HEIGHT），
-        导致卡片 setFixedHeight(N*ITEM_HEIGHT) 后无法触发 Resize 事件（卡片已处于被约束
-        的几何尺寸）。这里触父容器的 _schedule_expand 停掉旧动画，重读 sizeHint 重新展开。
+        旧实现在此同步执行 _scan_files（主线程阻塞 50-200ms，大项目更久），
+        新实现只设置 _pending_refresh 标志并启动后台扫描，UI 全程不卡；
+        渲染/容器展开逻辑统一收敛到 _on_scan_finished。
         """
         self._async_pending = False
+        self._pending_refresh = True
         self._scan_files()
-        self._current_query = self._pending_query
-        self.load_items(self._pending_query)
-        self._filter_timer.stop()  # 取消防抖
-        self._do_filter_and_render()  # 立即渲染
-
-        # ---- 强制容器重算布局 ----
-        # _render_incremental 已调用了 setFixedHeight(N*ITEM_HEIGHT)，
-        # 但容器动画可能仍在约束 maxHeight 在旧值（ITEM_HEIGHT），导致
-        # 卡片无法触发 Resize → 容器不会重新 _do_expand → 高度永久卡住。
-        # ⚠️ 必须延迟到下一帧：setFixedHeight 发出的 LayoutRequest 需要
-        # 通过事件循环传播到父容器布局后才能被 _do_expand→sizeHint() 读到新值。
-        parent = self.parentWidget()
-        if parent and hasattr(parent, "_schedule_expand"):
-            QTimer.singleShot(0, self._deferred_container_expand)
-
-        has_items = len(self._filtered_items) > 0
-        self._visible = has_items
-        self.setVisible(has_items)
-        self.updateGeometry()
-        # 延迟一帧重新应用选中状态：新 widget 刚被创建并加入布局，
-        # setStyleSheet 可能延迟到下一轮事件循环的 style 事件才生效，
-        # 延迟刷新确保选中高亮可见
-        if has_items and self._item_widgets:
-            self._last_selected_index = -1
-            QTimer.singleShot(0, self._deferred_select_first)
 
     def dismiss(self):
         """关闭卡片"""

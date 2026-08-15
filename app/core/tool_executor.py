@@ -4,6 +4,7 @@
 """
 
 import json as _json
+import inspect
 import os
 import re
 import threading
@@ -25,7 +26,7 @@ _FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
 from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
 from app.tools import BuiltinTools, ToolResult
-from app.tools.file_tools import _resolve_path
+from app.utils.utils import resolve_path
 from app.utils.config import Settings
 from app.utils.file_operation_recorder import (
     FileOperationRecorder,
@@ -219,10 +220,10 @@ class ToolExecutor:
             # 移除 file: 前缀，处理单斜杠或双斜杠
             path = _FILE_PREFIX_PATTERN.sub("", path)
 
-        # 获取完整的文件路径
-        if hasattr(self._builtin_tools, "_file_tools"):
-            full_path = self._builtin_tools._file_tools._resolve_path(path)
-        else:
+        # 获取完整的文件路径（工具插件化：_file_tools 已移除，用 utils.resolve_path）
+        try:
+            full_path = resolve_path(self._builtin_tools.workdir, path)
+        except Exception:
             from pathlib import Path
 
             full_path = Path(path).resolve()
@@ -578,7 +579,7 @@ class ToolExecutor:
             return result
 
         try:
-            full_path = _resolve_path(self._builtin_tools.workdir, file_path)
+            full_path = resolve_path(self._builtin_tools.workdir, file_path)
         except Exception as e:
             logger.debug(f"[ToolExecutor] 自动诊断路径解析失败: {e}")
             return result
@@ -907,138 +908,20 @@ class ToolExecutor:
         if tool_name.startswith("mcp__") and self._builtin_tools:
             return self._execute_mcp_tool(tool_name, args)
 
-        tool_map = {
-            "read": lambda: self._builtin_tools.read_file(
-                path=args.get("path"),  # 统一使用 path
-                startline=int(args.get("startline")) if args.get("startline") is not None else 1,
-                endline=int(args.get("endline")) if args.get("endline") is not None else None,
-            ),
-            "write": lambda: self._builtin_tools.write_file(path=args.get("path"), content=args.get("content", "")),
-            "edit": lambda: self._builtin_tools.edit_file(
-                path=args.get("path"),
-                oldString=args.get("oldString", ""),
-                newString=args.get("newString", ""),
-                replaceAll=args.get("replaceAll", False),
-            ),
-            "multi_edit": lambda: self._builtin_tools.multi_edit(
-                path=args.get("path"),
-                edits=args.get("edits", []),
-            ),
-            "grep": lambda: self._builtin_tools.grep_files(
-                pattern=args.get("pattern"),
-                path=args.get("path", ""),  # 默认当前路径
-                include=args.get("include"),
-            ),
-            "glob": lambda: self._builtin_tools.glob_files(
-                pattern=args.get("pattern"),
-                path=args.get("path", ""),  # 默认当前路径
-            ),
-            "list": lambda: self._builtin_tools.list_directory(
-                path=args.get("path", "")  # 默认当前路径
-            ),
+        # ========== 内部工具（不进 registry，非 LLM 可见） ==========
+        # 工具执行路径：_custom_tools → MCP → 内部工具 → registry 注册工具
+        _internal = {
             "git_status": lambda: self._builtin_tools.git_status(args.get("path")),
             "git_log": lambda: self._builtin_tools.git_log(args.get("path"), args.get("max_count", 10)),
             "git_diff": lambda: self._builtin_tools.git_diff(args.get("ref1"), args.get("ref2"), args.get("path")),
-            "bash": lambda: self._builtin_tools.execute_bash(args.get("command", ""), args.get("timeout", 120)),
-            # 后台任务工具
-            "bg_start": lambda: self._builtin_tools.bg_start(args.get("command", ""), args.get("cwd")),
-            "bg_stop": lambda: self._builtin_tools.bg_stop(args.get("task_id", "")),
-            "bg_logs": lambda: self._builtin_tools.bg_logs(args.get("task_id", ""), args.get("lines", 100)),
-            "bg_list": lambda: self._builtin_tools.bg_list(),
-            "webfetch": lambda: self._builtin_tools.fetch_web(
-                args.get("url", ""), args.get("format", "markdown"), args.get("max_chars", 26000)
-            ),
-            "websearch": lambda: self._builtin_tools.search_web(args.get("query", ""), args.get("num_results", 10)),
-            "scan_repo": lambda: self._builtin_tools.scan_repo(args.get("path"), args.get("max_depth", 2)),
-            "stage_files": lambda: self._builtin_tools.stage_files(args.get("files", [])),
-            "get_diagnostics": lambda: self._builtin_tools.get_diagnostics(args.get("path", ""), args.get("language")),
             "summarize_changes": lambda: self._builtin_tools.summarize_changes(
                 args.get("text", ""), args.get("limit", 1200)
-            ),
-            "todowrite": lambda: self._builtin_tools.todo_write(args.get("todos", [])),
-            "todoread": lambda: self._builtin_tools.todo_read(),
-            "subagent_para": lambda: (
-                lambda tasks_val: self._builtin_tools.subagent_para_execute(
-                    orjson.loads(tasks_val) if isinstance(tasks_val, str) else (tasks_val or []),
-                    args.get("share_context", False),
-                    session_id=local_session_id,
-                    sub_agent_manager=self._sub_agent_manager,
-                )
-            )(args.get("tasks", [])),
-            "subagent_status": lambda: self._builtin_tools.subagent_status(
-                args.get("task_ids"),
-                args.get("with_log", False),
-                args.get("with_result", True),
-                session_id=local_session_id,
-                sub_agent_manager=self._sub_agent_manager,
-            ),
-            "subagent_dag": lambda: self._builtin_tools.subagent_dag_execute(
-                args.get("nodes", []),
-                args.get("edges", []),
-                session_id=local_session_id,
-                sub_agent_manager=self._sub_agent_manager,
-            ),
-            "skill": lambda: self._builtin_tools.load_skill(args.get("name", "")),
-            "list_skills": lambda: self._builtin_tools.list_skills(),
-            "question": lambda: self._builtin_tools.ask_question(
-                args.get("questions"),
-                **args,
-            ),
-            "mcp_list_servers": lambda: ToolResult(True, content=self._builtin_tools._mcp_manager.get_status()),
-            "gitee_upload": lambda: self._builtin_tools.gitee_upload(
-                local_path=args.get("local_path", ""),
-            ),
-            "upload_file": lambda: self._builtin_tools.gitee_upload(
-                local_path=args.get("local_path", ""),
             ),
             "read_persisted_output": lambda: self._builtin_tools.read_persisted_output(
                 file_path=args.get("file_path", "")
             ),
-            # ========== 桌面自动化 (AutomationTools) ==========
-            "mouse": lambda: self._builtin_tools.mouse(
-                action=args.get("action", ""),
-                x=int(args.get("x", 0) or 0),
-                y=int(args.get("y", 0) or 0),
-                button=args.get("button", "left"),
-                clicks=int(args.get("clicks", 1) or 1),
-                dx=int(args.get("dx", 0) or 0),
-                dy=int(args.get("dy", -1) if args.get("dy") is not None else -1),
-                duration=float(args.get("duration", 0) or 0),
-            ),
-            "keyboard": lambda: self._builtin_tools.keyboard(
-                action=args.get("action", ""),
-                text=args.get("text", "") or "",
-                key=args.get("key", "") or "",
-                keys=args.get("keys", "") or "",
-            ),
-            "screenshot": lambda: self._builtin_tools.screenshot(
-                path=args.get("path", "") or "",
-                region=(tuple(args.get("region", [])) if args.get("region") else None),
-            ),
-            # ========== LSP 工具 ==========
-            "lsp": lambda: self._builtin_tools._lsp_tools.lsp(
-                path=args.get("path", ""),
-                operation=args.get("operation", "diagnostics"),
-                line=int(args.get("line", 0) or 0),
-                column=int(args.get("column", 0) or 0),
-                language=args.get("language"),
-            ),
-            # ========== 团队协作工具 ==========
-            "team_send_message": lambda: self._builtin_tools.team_send_message(
-                to_agent=args.get("to_agent", ""),
-                message=args.get("message", ""),
-            ),
-            "team_list_members": lambda: self._builtin_tools.team_list_members(),
-            # ========== CodeGraph 代码智能 ==========
-            "codegraph_explore": lambda: self._builtin_tools.codegraph_explore(
-                query=args.get("query", ""),
-                mode=args.get("mode", "explore"),
-                depth=int(args.get("depth", 2) or 2),
-                max_files=int(args.get("max_files", 50) or 50),
-                kind=args.get("kind"),
-                directory=args.get("directory"),
-                limit=int(args.get("limit", 50) or 50),
-                exact=args.get("exact", False),
+            "gitee_upload": lambda: self._builtin_tools.gitee_upload(
+                local_path=args.get("local_path", ""),
             ),
         }
 
@@ -1049,7 +932,16 @@ class ToolExecutor:
             logger.warning("[ToolExecutor] ToolExecutor became invalid during hook phase")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
-        executor = tool_map.get(tool_name)
+        executor = _internal.get(tool_name)
+
+        # registry 注册工具（插件工具：系统插件 + 第三方插件）
+        if executor is None:
+            from app.tools.registry import ToolRegistry
+
+            _reg = ToolRegistry.get_instance().get(tool_name)
+            if _reg is not None and _reg.impl is not None:
+                executor = self._execute_registered_tool(_reg, args, local_session_id)
+
         if executor:
             try:
                 result = executor()
@@ -1084,6 +976,93 @@ class ToolExecutor:
                 return err_result
 
         return ToolResult(False, error=f"Unknown tool: {tool_name}")
+
+    def _execute_registered_tool(self, reg, args: dict, session_id: str) -> Callable:
+        """构造注册工具（插件）的执行闭包。
+
+        工具插件 impl 签名：
+        - 新风格：impl(tool_ctx, **kwargs) — tool_ctx 提供运行环境与平台能力接口
+        - 旧风格：impl(**kwargs) — 兼容 dsh_learning 分支纯函数约定
+
+        tool_ctx 设计（插件自包含的关键）：
+        - workdir: 当前工作目录
+        - session_id / call_id: 会话上下文
+        - env: 环境配置（api_keys / app_data_dir / desktop_automation_enabled）
+        - services: 平台能力接口（todo/terminal/subagent/team/lsp/codegraph/
+          mcp/ask_user/skills/gitee/diagnostics）— 主程序基础设施按能力注入，
+          不暴露 BuiltinTools 内部结构
+        """
+        impl = reg.impl
+        bt = self._builtin_tools
+        services = {}
+        if bt is not None:
+            services = {
+                "todo": bt,
+                "terminal": bt,
+                "subagent": bt,
+                "team": bt,
+                "lsp": getattr(bt, "_lsp_tools", None),
+                "codegraph": bt,
+                "mcp": getattr(bt, "_mcp_manager", None),
+                "ask_user": getattr(bt, "ask_question", None),
+                "skills": bt,
+                "gitee": getattr(bt, "gitee_upload", None),
+                "diagnostics": bt,
+            }
+        env = {"desktop_automation_enabled": True}
+        try:
+            from app.utils.config import Settings
+
+            settings = Settings.get_instance()
+            env["api_keys"] = {
+                "TAVILY_API_KEY": (
+                    getattr(settings, "TAVILY_API_KEY", None)
+                    and settings.TAVILY_API_KEY.value
+                    or ""
+                ),
+                "TINYFISH_API_KEY": (
+                    getattr(settings, "TINYFISH_API_KEY", None)
+                    and settings.TINYFISH_API_KEY.value
+                    or ""
+                ),
+            }
+            env["desktop_automation_enabled"] = bool(
+                getattr(settings, "llm_desktop_automation_enabled", None)
+                and settings.llm_desktop_automation_enabled.value
+            )
+        except Exception:
+            pass
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            env["app_data_dir"] = get_app_data_dir()
+        except Exception:
+            pass
+        ctx = {
+            "workdir": self._workdir,
+            "session_id": session_id,
+            "call_id": self._call_id,
+            "sub_agent_manager": self._sub_agent_manager,
+            "env": env,
+            "services": services,
+        }
+
+        # 签名检测：是否接受 tool_ctx（无法检测时尝试注入）
+        try:
+            has_ctx = "tool_ctx" in inspect.signature(impl).parameters
+        except (TypeError, ValueError):
+            has_ctx = True
+
+        def _run():
+            if has_ctx:
+                result = impl(tool_ctx=ctx, **args)
+            else:
+                result = impl(**args)
+            if isinstance(result, ToolResult):
+                return result
+            return ToolResult(True, content=str(result))
+
+        return _run
 
     def _execute_mcp_tool(self, tool_name: str, args: dict) -> ToolResult:
         """执行 MCP 工具调用"""

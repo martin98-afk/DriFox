@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from app.tools.tool_classifier import DANGEROUS_TOOLS, SAFE_TOOLS, get_default_toggles
+from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.config import Settings
 
 
@@ -40,11 +40,11 @@ class ToolPermissionController(QObject):
         settings = Settings.get_instance()
         saved_toggles = dict(settings.tool_toggles.value or {})
         if not saved_toggles:
-            all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+            all_tools = get_all_tools()
             saved_toggles = get_default_toggles(all_tools)
 
         # 清理已删除工具的残留配置(只保留当前已知的工具)
-        known_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
+        known_tools = set(get_all_tools())
         cleaned_toggles = {k: v for k, v in saved_toggles.items() if k in known_tools}
         # 补全新增工具的默认开启
         for tool in known_tools:
@@ -94,10 +94,10 @@ class ToolPermissionController(QObject):
         """补全未知工具的默认值,并清理已删除工具的残留配置
 
         工具被删除后,旧 toggle 还残留在配置中会导致统计数量虚高
-        (例如 input box 显示的危险/安全总数比 TOOL_GROUPS 实际列表多)。
-        这里统一过滤掉不在当前 DANGEROUS+SAFE 集合里的工具。
+        (例如 input box 显示的危险/安全总数比注册工具实际列表多)。
+        这里统一过滤掉不在当前已注册工具集合里的工具。
         """
-        all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+        all_tools = get_all_tools()
         all_tools_set = set(all_tools)
         # 清理已删除工具的残留开关
         result = {tool: enabled for tool, enabled in toggles.items() if tool in all_tools_set}
@@ -227,7 +227,7 @@ class ToolPermissionController(QObject):
             logger.warning(f"[ToolPermission] 创建 resolver 失败: {e},agent 权限将被忽略")
             resolver = None
 
-        all_tools = list(DANGEROUS_TOOLS) + list(SAFE_TOOLS)
+        all_tools = get_all_tools()
         new_toggles: Dict[str, bool] = {}
         has_ask = False
         has_deny = False

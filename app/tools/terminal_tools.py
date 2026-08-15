@@ -25,6 +25,43 @@ from typing import Callable, Optional
 from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.process_job import ProcessJob
 from app.tools.result import ToolResult
+
+# ============================================================
+# bash 输出压缩模块加载器（工具插件化）
+# 压缩逻辑是 bash 工具实现的一部分，随工具插件存放：
+#   plugins/system/tools/_shell_compressor.py（下划线前缀 → 插件 loader 跳过，不注册为工具）
+# 主程序 terminal 服务（平台能力）通过 importlib 从插件路径加载，模块级缓存一次。
+# ============================================================
+_shell_compressor_module = None
+
+
+def _get_shell_compressor():
+    """从插件目录加载 bash 输出压缩函数（进程级缓存一次）"""
+    global _shell_compressor_module
+    if _shell_compressor_module is not None:
+        return _shell_compressor_module
+    import importlib.util
+    from pathlib import Path
+
+    plugin_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "plugins" / "system" / "tools" / "_shell_compressor.py"
+    )
+    if not plugin_path.exists():
+        # 回退：不再返回压缩（输出原样）
+        logger.warning(f"[TerminalTools] 插件压缩模块缺失: {plugin_path}")
+        return lambda command, output: output
+    spec = importlib.util.spec_from_file_location("_plugin_shell_compressor", plugin_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        _shell_compressor_module = mod.compress
+        return _shell_compressor_module
+    except Exception as e:
+        logger.warning(f"[TerminalTools] 压缩模块加载失败: {e}")
+        return lambda command, output: output
+
+
 from loguru import logger
 
 # ── findstr 管道符修复 ────────────────────────────────────────────────
@@ -833,9 +870,9 @@ class TerminalTools:
                     error=f"Command exited with code {process.returncode}:\n{detail}",
                 )
 
-            # Shell 输出压缩（减少 token 消耗）
-            from app.tools.shell_compressor import compress
-
+            # Shell 输出压缩（减少 token 消耗）— 压缩模块随工具插件走
+            # （plugins/system/tools/_shell_compressor.py，bash 工具实现的一部分）
+            compress = _get_shell_compressor()
             compressed = compress(command, combined if combined else "(command completed with no output)")
 
             return ToolResult(True, content=compressed)

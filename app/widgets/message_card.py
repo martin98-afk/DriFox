@@ -1077,7 +1077,7 @@ def _render_tool_streaming_block(
         icon_name = _get_tool_icon(tool_name)
         title_color = "#FFA500"
 
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name if not is_mcp else None)
     cn_name = _get_tool_cn_name(tool_name) if not is_mcp else display_name
 
     # spinner

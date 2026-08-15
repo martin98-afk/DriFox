@@ -20156,12 +20156,6 @@ def _cleanup_global_lru_caches():
         _render_tool_block_content.cache_clear()
     except Exception:
         pass
-    try:
-        from app.tools.file_tools import _compile_grep_pattern
-
-        _compile_grep_pattern.cache_clear()
-    except Exception:
-        pass
 
 
 def _compact_process_heap_after_cleanup():

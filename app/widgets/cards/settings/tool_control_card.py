@@ -7,7 +7,7 @@
 - 用户编辑写入 user_tool_toggles(智能体模式下不影响 active)
 - "↺ 恢复"按钮调用 controller.restore_user()
 """
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -19,69 +19,12 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, SwitchButton
 
-from app.tools.tool_classifier import (
-    DANGEROUS_TOOLS,
-    SAFE_TOOLS,
-    get_default_toggles,
-)
+from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
+from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.elided_label import _ElidedLabel
-
-# =============================================================================
-# 工具分组定义
-# =============================================================================
-TOOL_GROUPS = [
-    ("📁 文件写入", ["write", "edit", "multi_edit"]),
-    ("💻 终端命令", ["bash", "bg_start", "bg_stop"]),
-    ("🖱 桌面控制", ["mouse", "keyboard"]),
-    ("☁️ 文件上传", ["upload_file"]),
-    ("📝 状态修改", ["todowrite", "stage_files"]),
-    ("🤖 子智能体", ["subagent_para", "subagent_dag"]),
-    ("✅ 安全操作", sorted(SAFE_TOOLS)),
-]
-
-TOOL_DESCRIPTIONS = {
-    "write": "覆盖/创建文件",
-    "edit": "精确文本替换",
-    "multi_edit": "批量文件编辑",
-    "bash": "执行shell命令",
-    "bg_start": "启动后台命令",
-    "bg_stop": "停止后台任务",
-    "mouse": "鼠标操作",
-    "keyboard": "键盘操作",
-    "upload_file": "上传本地文件到Gitee",
-    
-    "todowrite": "创建/更新待办",
-    "stage_files": "标记相关文件",
-    "subagent_para": "并行启动子智能体",
-    "subagent_dag": "DAG工作流子智能体",
-    # 文件与信息检索
-    "read": "读取文件内容",
-    "grep": "正则搜索文件内容",
-    "list": "列出目录内容",
-    "glob": "通配符查找文件",
-    "scan_repo": "扫描仓库生成摘要",
-    "webfetch": "获取网页内容",
-    "websearch": "网络关键词搜索",
-    # 后台任务与系统
-    "bg_logs": "查看后台任务日志",
-    "bg_list": "列出后台任务状态",
-    "screenshot": "截取屏幕截图",
-    "get_diagnostics": "获取代码诊断信息",
-    # 待办
-    "todoread": "读取待办列表",
-    # 交互与元工具
-    "question": "向用户提问确认",
-    "skill": "加载指定技能",
-    "list_skills": "列出可用技能",
-    "subagent_status": "查询子智能体状态",
-    "mcp_list_servers": "列出MCP服务器",
-    "lsp": "LSP代码智能操作",
-    # CodeGraph 代码智能
-    "codegraph_explore": "语义级代码探索",
-}
 
 OFF_BEHAVIOR_OPTIONS = [
     ("deny", "直接拒绝"),
@@ -102,9 +45,20 @@ class ToolControlCardContent(QWidget):
         self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
         self._setup_ui()
+        self._bind_registry()
 
         if self._controller:
             self._bind_controller(self._controller)
+
+    def _bind_registry(self):
+        """监听 registry 热更新：工具插件变更时重建卡片（主线程安全）"""
+        ToolRegistry.get_instance().on_change(self._on_registry_changed)
+
+    def _on_registry_changed(self, version):
+        """registry 版本变化（工具插件热插拔/热更新）→ 重建卡片"""
+        if not self._built:
+            return
+        QTimer.singleShot(0, self._rebuild)
 
     def set_controller(self, controller):
         """延迟绑定 controller(main_widget 在 super().__init__ 之后注入时使用)"""
@@ -188,17 +142,36 @@ class ToolControlCardContent(QWidget):
             logger.info("[ToolCard] _rebuild: controller=None!")
 
         # 确保所有工具都在 toggles 中
-        all_tools = set(DANGEROUS_TOOLS) | set(SAFE_TOOLS)
-        defaults = get_default_toggles(list(all_tools))
+        all_tools = get_all_tools()
+        defaults = get_default_toggles(all_tools)
         for name in all_tools:
             if name not in toggles:
                 toggles[name] = defaults[name]
 
-        # 按组构建
-        for group_name, tool_names in TOOL_GROUPS:
+        # 按组构建（registry 动态分组，组内危险工具在前）
+        groups = self._get_groups()
+        for group_name, tool_names in groups:
             self._build_group(group_name, tool_names, toggles)
 
         self._layout.addStretch()
+
+    def _get_groups(self) -> list:
+        """从 registry 动态聚合分组：[(group_name, [tool_name, ...]), ...]
+
+        组排序：危险工具占比高/含危险工具的组在前，全安全组在后。
+        """
+        groups = ToolRegistry.get_instance().group_map()
+        ordered = sorted(
+            groups.items(),
+            key=lambda kv: (
+                # 含危险工具 → 排前
+                0 if any(r.danger == DANGER_DANGEROUS for r in kv[1]) else 1,
+                # 组内危险工具数降序
+                -sum(1 for r in kv[1] if r.danger == DANGER_DANGEROUS),
+                kv[0],
+            ),
+        )
+        return [(g, [r.name for r in tools]) for g, tools in ordered]
 
     def _apply_toggles(self):
         """轻量级更新所有开关状态,不全量重建 widget"""
@@ -215,7 +188,7 @@ class ToolControlCardContent(QWidget):
                 sw.blockSignals(False)
 
         # 更新整组开关 + 组标题"启用数/总数"
-        for group_name, tool_names in TOOL_GROUPS:
+        for group_name, tool_names in self._get_groups():
             gs = self._group_switches.get(group_name)
             if gs:
                 all_on = all(toggles.get(t, True) for t in tool_names)
@@ -236,7 +209,7 @@ class ToolControlCardContent(QWidget):
         if not self._controller:
             return
         toggles = self._controller.get_toggles()
-        for group_name, tool_names in TOOL_GROUPS:
+        for group_name, tool_names in self._get_groups():
             gs = self._group_switches.get(group_name)
             if gs:
                 all_on = all(toggles.get(t, True) for t in tool_names)
@@ -245,11 +218,14 @@ class ToolControlCardContent(QWidget):
                 gs.blockSignals(False)
 
     def _build_group(self, group_name: str, tool_names: list, all_toggles: dict):
-        """构建一个工具组"""
+        """构建一个工具组（组内危险工具数驱动配色）"""
         Colors.refresh()
-        is_safe = group_name.startswith("✅")
-        border_color = "rgba(34,197,94,0.2)" if is_safe else "rgba(255,80,80,0.2)"
-        header_bg = "rgba(34,197,94,0.06)" if is_safe else "rgba(255,80,80,0.08)"
+        # 组内是否含危险工具：含 → 红系主题；全安全 → 绿系主题
+        has_danger = any(
+            ToolRegistry.get_instance().get_danger(t) == DANGER_DANGEROUS for t in tool_names
+        )
+        border_color = "rgba(34,197,94,0.2)" if not has_danger else "rgba(255,80,80,0.2)"
+        header_bg = "rgba(34,197,94,0.06)" if not has_danger else "rgba(255,80,80,0.08)"
 
         group = QFrame()
         group.setStyleSheet(f"""
@@ -315,11 +291,11 @@ class ToolControlCardContent(QWidget):
         )
 
         # 安全组默认折叠
-        if is_safe:
+        if not has_danger:
             body.setVisible(False)
 
     def _build_tool_row(self, tool_name: str, all_toggles: dict) -> QWidget:
-        """构建单个工具行"""
+        """构建单个工具行（中文名 + 危险标记 + registry 描述）"""
         row = QWidget()
         row.setStyleSheet("background: transparent; border: none;")
         row_layout = QHBoxLayout(row)
@@ -328,14 +304,29 @@ class ToolControlCardContent(QWidget):
 
         enabled = all_toggles.get(tool_name, True)
 
-        name_label = QLabel(tool_name)
+        # 工具元数据（registry 驱动：中文名 / 描述 / 危险级别）
+        meta = ToolRegistry.get_instance().get_meta(tool_name)
+        display_name = meta.get("cn_name") or tool_name
+        desc = meta.get("description", "")
+        is_danger = meta.get("danger") == DANGER_DANGEROUS
+
+        name_label = QLabel(display_name)
         name_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none; "
             f"{font_size_css(12)} {get_font_family_css()}"
         )
+        if is_danger:
+            # 危险工具：名字加 🔥 标记 + 微红着色
+            name_label.setText(f"🔥 {display_name}")
+            name_label.setStyleSheet(
+                f"color: #ff6b6b; background: transparent; border: none; "
+                f"{font_size_css(12)} {get_font_family_css()}"
+            )
+            name_label.setToolTip(f"{display_name}（危险操作：{desc or '可能修改系统状态'}）")
+        else:
+            name_label.setToolTip(f"{display_name}（安全操作）")
         row_layout.addWidget(name_label)
 
-        desc = TOOL_DESCRIPTIONS.get(tool_name, "")
         desc_label = _ElidedLabel(desc)
         desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(

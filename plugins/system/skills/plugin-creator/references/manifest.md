@@ -67,6 +67,7 @@ python tools/validate_plugins.py
   "mcp": true,         // .mcp.json → MCP 伺服器
   "lsp": true,         // .lsp.json → LSP 語言伺服器
   "ui": true           // ui/__init__.py → UI 組件
+  "tools": true         // tools/*.py → 工具組件（register(registry) 註冊）
 }
 ```
 

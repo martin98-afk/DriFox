@@ -698,96 +698,7 @@ def _render_diff_preview(diff_text: str) -> str:
     return "".join(rows)
 
 
-# 内建工具图标映射（按模块×操作类型分类 → SVG 图标文件名）
-_TOOL_ICON_MAP = {
-    # 文件工具 - 读取
-    "read": "read",
-    "todoread": "todo",
-    # 文件工具 - 写入/编辑
-    "write": "编辑",
-    "edit": "编辑",
-    "multi_edit": "编辑",
-    "todowrite": "todo",
-    # 文件工具 - 搜索/扫描
-    "grep": "Search",
-    "glob": "Search",
-    "list": "folder",
-    "scan_repo": "Search",
-    "stage_files": "Search",
-    # 终端/后台命令
-    "bash": "shell",
-    "bg_start": "shell",
-    "bg_stop": "shell",
-    "bg_logs": "shell",
-    "bg_list": "shell",
-    # 网络工具
-    "websearch": "websearch",
-    "webfetch": "websearch",
-    # 子智能体任务
-    "subagent_para": "设置-subagent",
-    "subagent_status": "设置-subagent",
-    "subagent_dag": "设置-subagent",
-    # 技能工具
-    "skill": "技能",
-    "list_skills": "技能",
-    # 提问工具
-    "question": "question",
-    # 诊断工具
-    "get_diagnostics": "工具",
-    # 截图工具
-    "screenshot": "裁剪",
-    "mouse": "鼠标",
-    "keyboard": "233键盘-线性",
-    # LSP 工具（默认 = 工具图标；具体 operation 由 _get_tool_icon 解析）
-    "lsp": "工具",
-    # CodeGraph 代码智能
-    "codegraph_explore": "Search",
-    # 团队协作工具
-    "team_send_message": "邮件-发送",
-    "team_list_members": "团队",
-    # 上传文件
-    "upload_file": "upload-file",
-}
-
-# 工具名 → 中文显示名
-_TOOL_CN_NAME_MAP = {
-    "read": "读取",
-    "todoread": "查看待办",
-    "write": "写入",
-    "edit": "编辑",
-    "multi_edit": "批量编辑",
-    "todowrite": "更新待办",
-    "grep": "搜索",
-    "glob": "匹配",
-    "list": "列出文件",
-    "scan_repo": "扫描仓库",
-    "stage_files": "标记文件",
-    "bash": "执行命令",
-    "bg_start": "后台启动",
-    "bg_stop": "后台停止",
-    "bg_logs": "后台日志",
-    "bg_list": "后台列表",
-    "websearch": "网页搜索",
-    "webfetch": "抓取网页",
-    "subagent_para": "分发任务",
-    "subagent_status": "查询任务状态",
-    "subagent_dag": "分发工作流",
-    "skill": "加载技能",
-    "list_skills": "列出技能",
-    "question": "提问",
-    "get_diagnostics": "诊断",
-    "screenshot": "截图",
-    "mouse": "鼠标",
-    "keyboard": "键盘",
-    "lsp": "LSP",
-    "codegraph_explore": "代码探索",
-    "team_send_message": "发送邮件",
-    "team_list_members": "团队成员",
-    "upload_file": "上传文件",
-}
-
-
-# LSP 工具 operation → 图标（SVG 图标名）
+# LSP 工具 operation → 图标（SVG 图标名，渲染细节，与工具注册无关）
 _LSP_OPERATION_ICON_MAP = {
     "diagnostics": "工具",
     "documentSymbols": "Search",
@@ -801,31 +712,81 @@ _LSP_OPERATION_ICON_MAP = {
 def _get_tool_icon_name(tool_name: str, tool_args: dict = None) -> str:
     """根据工具名（必要时结合 tool_args）查找图标文件名（不含扩展名）
 
-    普通工具直接查 _TOOL_ICON_MAP；
-    LSP 工具按 operation 参数切换图标。
+    数据源：ToolRegistry（工具插件注册时声明的 icon）。
+    普通工具查 registry；LSP 工具按 operation 参数切换图标。
     """
     if tool_name == "lsp" and tool_args:
         operation = tool_args.get("operation", "")
         if operation in _LSP_OPERATION_ICON_MAP:
             return _LSP_OPERATION_ICON_MAP[operation]
-    return _TOOL_ICON_MAP.get(tool_name, "工具")
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().get_icon(tool_name)
+    except Exception:
+        return "工具"
 
 
 def _get_tool_cn_name(tool_name: str) -> str:
-    """获取工具的中文显示名"""
-    # MCP 工具：返回服务名
+    """获取工具的中文显示名（registry 驱动）"""
+    # MCP 工具：返回服务名（动态发现，不进 registry）
     if tool_name.startswith("mcp__"):
         return "__".join(tool_name.split("__")[2:]) if len(tool_name.split("__")) > 2 else "MCP"
-    if tool_name == "mcp_list_servers":
-        return "MCP列表"
-    return _TOOL_CN_NAME_MAP.get(tool_name, tool_name)
+    try:
+        from app.tools.registry import ToolRegistry
+
+        cn = ToolRegistry.get_instance().get_cn_name(tool_name)
+        if cn:
+            return cn
+    except Exception:
+        pass
+    return tool_name
 
 
-def _get_tool_icon_html(icon_name: str, size: int = 18) -> str:
+def _get_tool_icon_html(icon_name: str, size: int = 18, tool_name: str = None) -> str:
     """生成工具图标的 HTML <img> 标签（主题感知）
 
-    根据当前主题选择 qrc:/icons 或 qrc:/icons_light 前缀。
+    图标来源优先级：
+    1. 工具插件自带图标（<插件>/tools/icons/ + icons_light/，icon 自包含）
+       - 浅色主题 → icons_light/；深色主题 → icons/
+       - 缺浅色版 → 回退深色版 → 回退主程序 qrc
+    2. 主程序 qrc 资源（qrc:/icons 或 qrc:/icons_light，主题感知）
     """
+    if tool_name:
+        try:
+            from pathlib import Path
+
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                # 主题感知：浅色优先 icons_light，深色用 icons
+                is_light = False
+                try:
+                    from app.utils.theme_manager import theme_manager
+
+                    is_light = theme_manager.is_light_theme()
+                except Exception:
+                    pass
+                icon_dirs = [reg.icon_dir_light if is_light else reg.icon_dir]
+                if is_light and not icon_dirs[0]:
+                    icon_dirs.append(reg.icon_dir)  # 浅色缺失 → 回退深色
+                for d in icon_dirs:
+                    if not d:
+                        continue
+                    svg_path = Path(d) / f"{icon_name}.svg"
+                    if svg_path.exists():
+                        import base64
+
+                        svg_bytes = svg_path.read_bytes()
+                        b64 = base64.b64encode(svg_bytes).decode("ascii")
+                        return (
+                            f'<img src="data:image/svg+xml;base64,{b64}" '
+                            f'style="width:{size}px;height:{size}px;pointer-events:none;" />'
+                        )
+        except Exception:
+            pass
+    # 2) 主程序 qrc 资源（主题感知）
     try:
         from app.utils.theme_manager import theme_manager
 
@@ -1162,7 +1123,7 @@ def _render_inline_tool(
     新设计：SVG 图标 + 状态徽章 + 中文名 + 自然语言参数描述
     """
     icon_name = _get_tool_icon_name(tool_name, tool_args)
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     badge_html = _render_tool_status_badge(success)
     cn_name = _get_tool_cn_name(tool_name)
     natural_preview = _format_natural_preview(tool_name, tool_args)
@@ -1569,7 +1530,7 @@ def render_tool_block(
 
     # 状态徽章（图标右上角）
     badge_html = _render_tool_status_badge(success)
-    icon_html = _get_tool_icon_html(icon_name)
+    icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
 
     # 子智能体任务特殊处理

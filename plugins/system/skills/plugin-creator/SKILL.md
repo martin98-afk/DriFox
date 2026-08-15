@@ -94,13 +94,17 @@ your-plugin/
 │   ├── __init__.py          ← 必須：register_ui(registry)
 │   └── my_card.py
 │
+├── tools/                   ← 工具組件（AI 可調用的工具，工具插件化）
+│   ├── my_tool.py           ← 每個工具文件暴露 register(registry)
+│   └── icons/               ← 工具自帶圖標（深色）+ icons_light/（淺色）
+│
 ├── .mcp.json                ← MCP 伺服器配置（插件根目錄）
 ├── .lsp.json                ← LSP 語言伺服器配置（插件根目錄）
 ├── README.md                ← 插件說明
 └── __init__.py              ← Python 包標記（可選）
 ```
 
-### 2.2 8 類組件速查
+### 2.2 9 類組件速查
 
 | # | 組件 | manifest flag | 必備文件 | 觸發方式 | 適用場景 |
 |---|------|--------------|---------|---------|---------|
@@ -112,6 +116,7 @@ your-plugin/
 | 6 | **LSP** | `lsp: true` | `.lsp.json`（插件根） | DriFox 啟動 | 註冊語言伺服器 |
 | 7 | **Themes** | `themes: true` | `themes/<name>/*.yaml` | 用戶 `/theme xx` | 配色方案 |
 | 8 | **UI** | `ui: true` | `ui/__init__.py` + widgets | DriFox 啟動 + 命令 | 浮動卡片/內容渲染器/消息工廠 |
+| 9 | **Tools** | `tools: true` | `tools/*.py`（register 入口） | AI 工具調用 | 擴展 AI 可用的工具（schema/impl/圖標/權限元數據） |
 
 ### 2.3 官方資源
 
@@ -143,6 +148,7 @@ your-plugin/
 | "配置 LSP 語言伺服器" | **LSP** | §5.6 或 `references/components.md §LSP` |
 | "做個主題""改配色" | **Themes** | §5.7 或 `references/components.md §Themes` |
 | "做個 UI 插件""浮動卡片" | **UI** | → **調用 `ui-plugin-creator` 技能** |
+| "加個工具""做個 AI 工具" | **Tools** | §5.9 或 `references/components.md §Tools` |
 | "改 plugin.json" | **Manifest** | `references/manifest.md` |
 | "驗證""跑測試" | **驗證** | §6 或 `references/testing.md` |
 | "發布到市場""提 PR" | **發布** | §7 或 `references/publishing.md` |
@@ -357,6 +363,85 @@ ui/
 - [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（完整 UI 生態入口）
 - [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（瀏覽/安裝/啟禁/卸載 UI）
 
+### 5.9 Tools（工具插件化）
+
+> DriFox 的工具已插件化：工具作為插件的一部分，通過 `register(registry)` 註冊
+> schema/impl/圖標/中文名/危險級別/分組等元數據，主程序不再硬編碼工具。
+
+```
+tools/
+├── my_tool.py           ← 每個工具文件暴露 register(registry)
+└── icons/               ← 工具自帶圖標（深色，白/亮色）
+    └── icons_light/     ← 淺色版圖標（深色描邊；可選，缺省回退深色版）
+```
+
+**關鍵約束**：
+- 每個 `tools/*.py` 必須暴露 `register(registry)` 函數（loader 掃描調用）
+- `danger`（safe/dangerous）**必須顯式聲明**，未聲明 registry 拒絕註冊
+- `source` 由 loader 強制注入為 `plugin:<name>`（插件無法偽裝 builtin）
+- manifest：`"components": { "tools": true }`
+
+**註冊模板**：
+
+```python
+# tools/my_tool.py
+from app.tools.result import ToolResult
+
+def _my_impl(tool_ctx, **kwargs):
+    """impl 簽名：impl(tool_ctx, **kwargs) → ToolResult 或 str
+    tool_ctx 提供：
+      - workdir: 當前工作目錄
+      - session_id / call_id: 會話上下文
+      - env: 環境配置（api_keys / app_data_dir / desktop_automation_enabled）
+      - services: 平台能力接口（todo/terminal/subagent/team/lsp/codegraph/
+        mcp/ask_user/skills/gitee/diagnostics）— 僅平台工具需要
+    """
+    name = kwargs.get("name", "朋友")
+    return ToolResult(True, content=f"你好，{name}！")
+
+def register(registry):
+    registry.register(
+        "my_tool",
+        {
+            "type": "function",
+            "function": {
+                "name": "my_tool",
+                "description": "工具描述（LLM 可見）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "參數描述"},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        impl=_my_impl,
+        danger="safe",              # 必填：safe | dangerous
+        icon="my_tool",             # SVG 文件名（<插件>/tools/icons/ 下）
+        cn_name="我的工具",          # 中文顯示名（消息卡片/權限卡片）
+        group="工具組",              # 權限卡片分組
+        description="權限卡片內描述",
+        aliases=["MyTool"],         # Claude Code 風格別名（可選）
+    )
+```
+
+**自包含原則**：
+- 純邏輯工具（文件/網絡/桌面）impl 用標準庫/第三方庫獨立實現，不依賴主程序
+- 平台工具（bash/子智能體/MCP/LSP/CodeGraph/團隊/todo 等）通過
+  `tool_ctx["services"]` 調用平台能力，不直接訪問主程序內部
+- 圖標自包含：`tools/icons/*.svg`（深色）+ `tools/icons_light/*.svg`（淺色），
+  渲染按主題加載（缺淺色版回退深色/qrc）
+
+**熱插拔**：`tools/*.py` 文件增/刪/改自動熱生效（後台 watcher 輪詢），
+無需重啟；同名工具先註冊者優先（工作樹 plugins/ 優先於用戶插件目錄）。
+
+**參考**：
+- `plugins/system/tools/`（34 個系統工具真實案例：file_tools/web_tools/
+  automation_tools 為自包含實現，subagent_tools/terminal_tools 等為平台服務）
+- `app/tools/registry.py`（ToolRegistration 字段定義）
+- `app/tools/plugin_tool_loader.py`（掃描/熱重載實現）
+
 ---
 
 ## 6. 測試與驗證
@@ -484,6 +569,12 @@ marketplace.json 中每條記錄的結構由 `tools/generate_marketplace.py` 自
 ```json
 // ❌ "components": { "commands": true } 但沒有 commands/ 目錄
 // ✅ 每個 true 的 flag 必須有對應目錄或文件
+```
+
+### 🚫 工具沒聲明 danger
+```python
+# ❌ registry.register("my_tool", schema, impl=...)  # 缺 danger
+# ✅ registry.register(..., danger="safe")  # 插件工具必須顯式聲明
 ```
 
 ### 🚫 UI 插件走了本技能

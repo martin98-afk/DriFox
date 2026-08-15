@@ -57,8 +57,13 @@ class TestCodeGraphModule:
         assert codegraph_tools._HAS_CODEGRAPH
 
     def test_tool_classifier(self):
-        from app.tools.tool_classifier import SAFE_TOOLS, classify_tool_danger
-        assert "codegraph_explore" in SAFE_TOOLS
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_classifier import get_safe_tools, classify_tool_danger
+        from app.tools.plugin_tool_loader import load_plugin_tools
+
+        load_plugin_tools()
+        assert "codegraph_explore" in get_safe_tools()
+        assert ToolRegistry.get_instance().get_danger("codegraph_explore") == "safe"
         assert classify_tool_danger("codegraph_explore") == "safe"
 
     def test_tool_name_mapper(self):
@@ -67,9 +72,12 @@ class TestCodeGraphModule:
         assert ToolNameMapper.to_native("CodeGraphExplore") == "codegraph_explore"
         assert ToolNameMapper.to_native("cg_explore") == "codegraph_explore"
 
-    def test_tool_schema_in_toole_schemas(self):
-        from app.tools.__init__ import TOOL_SCHEMAS
-        cg_schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"].startswith("codegraph_")]
+    def test_tool_schema_in_tool_schemas(self):
+        # 工具插件化后：schema 从 registry 读取（TOOL_SCHEMAS 静态表已删除）
+        from app.tools import get_builtin_tools_schema
+
+        schemas = get_builtin_tools_schema()
+        cg_schemas = [s for s in schemas if s["function"]["name"].startswith("codegraph_")]
         assert len(cg_schemas) == 1
         schema = cg_schemas[0]
         assert schema["function"]["name"] == "codegraph_explore"

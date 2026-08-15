@@ -400,3 +400,100 @@ def register_ui(registry: UIPluginRegistry):
 - 浮動卡片案例：[plugins/context-usage-stats/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/context-usage-stats)
 - 完整 UI 插件：[plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)
 - **開發 UI 插件**：調用 `ui-plugin-creator` 技能
+
+## Tools（工具插件化）
+
+> 工具作為插件的一部分註冊：schema / impl / 圖標 / 中文名 / 危險級別 / 分組 / 別名
+> 全部由插件聲明，主程序（ToolRegistry）只負責聚合與分發。
+
+### 文件位置
+
+\`\`\`
+<plugin>/
+├── tools/
+│   ├── my_tool.py        ← 每個工具文件暴露 register(registry)
+│   └── icons/            ← 深色圖標（tools/icons/*.svg）
+│       └── icons_light/  ← 淺色圖標（tools/icons_light/*.svg，可選）
+└── .drifox-plugin/
+    └── plugin.json       ← components.tools = true
+\`\`\`
+
+### 最小模板
+
+\`\`\`python
+# tools/my_tool.py
+from app.tools.result import ToolResult
+
+def _my_impl(tool_ctx, **kwargs):
+    """impl 簽名：impl(tool_ctx, **kwargs)
+    tool_ctx: workdir / session_id / call_id / env / services
+    """
+    return ToolResult(True, content=f"結果: {kwargs.get('text', '')}")
+
+def register(registry):
+    registry.register(
+        "my_tool",
+        {"type": "function", "function": {"name": "my_tool", "description": "描述", "parameters": {"type": "object", "properties": {}}}},
+        impl=_my_impl,
+        danger="safe",        # 必填：safe | dangerous（未聲明拒絕註冊）
+        icon="my_tool",       # SVG 文件名（tools/icons/ 下）
+        cn_name="我的工具",    # 中文顯示名
+        group="工具組",        # 權限卡片分組
+        description="權限卡片描述",
+        aliases=["MyTool"],   # 可選：Claude Code 風格別名
+    )
+\`\`\`
+
+### 註冊元數據（registry.register 參數）
+
+| 參數 | 必填 | 說明 |
+|------|------|------|
+| name | ✓ | 工具名（小寫，LLM 可見） |
+| schema | ✓ | OpenAI function schema（description 給 LLM） |
+| impl | 平台工具✓ | 執行函數 impl(tool_ctx, **kwargs) → ToolResult/str/dict |
+| danger | ✓ | safe / dangerous（插件工具強制聲明） |
+| icon | 建議 | SVG 文件名（不含擴展名） |
+| cn_name | 建議 | 中文顯示名（消息卡片/權限卡片） |
+| group | 建議 | 權限卡片分組（缺省按 danger 兜底） |
+| description | 建議 | 權限卡片行內描述 |
+| aliases | 可選 | Claude Code 風格別名（hook/命令解析用） |
+
+### impl 簽名與 tool_ctx
+
+\`\`\`python
+def impl(tool_ctx, **kwargs):
+    workdir = tool_ctx.get("workdir")        # 當前工作目錄
+    session_id = tool_ctx.get("session_id")  # 會話上下文
+    env = tool_ctx.get("env", {})            # api_keys / app_data_dir / desktop_automation_enabled
+    services = tool_ctx.get("services", {})  # 平台能力接口
+\`\`\`
+
+- **純邏輯工具**（文件/網絡/桌面）：只用 workdir/env，標準庫/第三方庫獨立實現
+- **平台工具**（bash/子智能體/MCP/LSP/CodeGraph/團隊/todo/question/skill/上傳）：
+  通過 \`services\` 能力接口調用（todo/terminal/subagent/team/lsp/codegraph/mcp/
+  ask_user/skills/gitee/diagnostics），不直接訪問主程序內部
+- 返回：ToolResult（推薦，可帶 diff/image_data 擴展字段）或 str（自動包裝）
+
+### 圖標自包含
+
+- 深色版：\`tools/icons/<icon>.svg\`（亮色/白色描邊，深色主題可見）
+- 淺色版：\`tools/icons_light/<icon>.svg\`（深色描邊，淺色主題可見；缺省回退深色版）
+- 渲染自動按主題選擇（data URI 加載），無需註冊到 qrc
+
+### 熱插拔
+
+- \`tools/*.py\` 增/刪/改 → 後台 watcher 自動重掃（1-3 秒生效）
+- 執行中的工具調用不受影響（快照機制）
+- 同名工具：先註冊者優先（工作樹 plugins/ > 用戶插件目錄）；同插件熱更新可覆蓋
+
+### 關鍵約束
+
+- \`danger\` 未聲明 → registry 拒絕註冊
+- \`source\` 由 loader 強制注入 plugin:<name>，插件無法偽裝 builtin
+- 修改 tools 後重啟或等 watcher 生效；manifest 更新 components.tools = true
+
+### 參考
+
+- 系統工具真實案例：\`plugins/system/tools/\`（file_tools 自包含、subagent_tools 平台服務）
+- 註冊表實現：\`app/tools/registry.py\`
+- 掃描/熱重載：\`app/tools/plugin_tool_loader.py\`
