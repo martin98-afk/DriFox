@@ -65,3 +65,51 @@ def _qt_app():
     app = QApplication([])
     yield app
     app.quit()
+
+
+# ══════════════════════════════════════════════════════════
+# 插件工具测试共享夹具（工具插件化测试用）
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def make_temp_plugin():
+    """构造 tools/ 目录结构插件，返回 (root, py_path)。
+
+    用法::
+        root, py = make_temp_plugin(tmp_path, "my-plugin", "my_tool", "def register(registry): ...")
+        # 插件布局: <tmp_path>/<plugin_name>/tools/<tool_name>.py
+    """
+
+    def _make(root, plugin_name: str, tool_name: str, content: str):
+        tools_dir = root / plugin_name / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        py = tools_dir / f"{tool_name}.py"
+        py.write_text(content, encoding="utf-8")
+        return root, py
+
+    return _make
+
+
+@pytest.fixture
+def plugin_enabled():
+    """把插件名临时加入 Settings.enabled_plugins（P0-1 加载过滤适配），返回恢复函数。
+
+    build P0-1 后 load_plugin_tools 以 Settings.enabled_plugins 为准过滤插件；
+    临时插件名不在白名单会被跳过。本 fixture 自动加入并在测试结束后恢复原值。
+    """
+
+    def _enable(plugin_name: str):
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        if plugin_name not in saved:
+            cfg.enabled_plugins.value = saved + [plugin_name]
+
+        def restore():
+            cfg.enabled_plugins.value = saved
+
+        return restore
+
+    return _enable

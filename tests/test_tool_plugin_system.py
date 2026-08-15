@@ -137,17 +137,21 @@ class TestSystemPluginTools:
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg)
         names = set(reg.names())
+        # 系统插件固定 33 个工具；codegraph_explore 来自社区插件 codegraph-tools
+        # （引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
         expected = {
             "read", "write", "edit", "multi_edit", "grep", "list", "glob",
             "scan_repo", "stage_files", "websearch", "webfetch", "bash",
             "bg_start", "bg_stop", "bg_logs", "bg_list", "todowrite",
             "todoread", "mouse", "keyboard", "screenshot", "get_diagnostics",
-            "lsp", "codegraph_explore", "subagent_para", "subagent_status",
+            "lsp", "subagent_para", "subagent_status",
             "subagent_dag", "team_send_message", "team_list_members",
             "question", "skill", "list_skills", "mcp_list_servers", "upload_file",
         }
         assert expected <= names, f"缺失: {expected - names}"
-        assert len(names) == 34
+        # codegraph_explore：依赖 .drifox/plugins/codegraph-tools/ 社区插件（可能未安装）
+        if "codegraph_explore" in names:
+            assert reg.get_danger("codegraph_explore") == DANGER_SAFE
 
     def test_danger_classification(self):
         reg = ToolRegistry.get_instance()
@@ -180,6 +184,24 @@ class TestSystemPluginTools:
 
 class TestHotPlug:
     """热插拔：临时插件工具注册→注销"""
+
+    @pytest.fixture(autouse=True)
+    def _enable_hotplug_plugin(self):
+        """P0-1 适配：临时插件 hotplug-test 加入 enabled_plugins。
+
+        加载过滤以 Settings.enabled_plugins 为准；测试环境不隔离 Settings，
+        须将临时插件名临时注入启用列表，否则会被「已禁用插件」过滤跳过。
+        """
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        try:
+            saved = list(cfg.enabled_plugins.value or [])
+        except Exception:
+            saved = []
+        cfg.enabled_plugins.value = saved + ["hotplug-test"]
+        yield
+        cfg.enabled_plugins.value = saved
 
     def _make_temp_plugin(self, tmpdir: Path, tool_name: str, content: str) -> Path:
         tools_dir = tmpdir / "hotplug-test" / "tools"
@@ -298,7 +320,8 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        assert len(toggles) == 34
+        # 33 个系统插件工具 + codegraph_explore（社区插件 codegraph-tools 可选）
+        assert len(toggles) == 33 or (len(toggles) == 34 and "codegraph_explore" in toggles)
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
@@ -453,10 +476,11 @@ class TestSelfContained:
         ToolRegistry.reset_instance()
         load_plugin_tools()
         reg = ToolRegistry.get_instance()
-        # codegraph 社区插件注册了 render 闭包
-        assert reg.get_render("codegraph_explore") is not None
-        html = _render_text_output("### 标题\n📄 文件.py", "codegraph_explore", {})
-        assert "58a6ff" in html  # 插件闭包标题蓝
+        # codegraph 社区插件注册了 render 闭包（未安装 codegraph-tools 时跳过该子断言）
+        if reg.get("codegraph_explore") is not None:
+            assert reg.get_render("codegraph_explore") is not None
+            html = _render_text_output("### 标题\n📄 文件.py", "codegraph_explore", {})
+            assert "58a6ff" in html  # 插件闭包标题蓝
         # 未注册 render 的工具走默认渲染
         assert reg.get_render("read") is None
         html2 = _render_text_output("普通输出", "read", {"path": "x"})
@@ -554,3 +578,181 @@ class TestSelfContained:
         # 团队工具：无窗口上下文 → 优雅失败（不崩溃）
         result = reg.get("team_list_members").impl(tool_ctx=ctx)
         assert not result.success
+
+# ══════════════════════════════════════════════════════════
+# 补充（quality-engineer 盘点后新增）：渲染模式 / diff 降级 / 元数据 / 加载容错
+# ══════════════════════════════════════════════════════════
+
+
+class TestRenderModeNone:
+    """render_mode="none"：不渲染工具完成框"""
+
+    def test_none_mode_returns_empty_html(self):
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        reg.register(
+            "none_tool",
+            {"type": "function", "function": {"name": "none_tool"}},
+            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+            render_mode="none",
+        )
+        from app.widgets.render_helpers import render_tool_block
+
+        html = render_tool_block("none_tool", {}, result="内容", success=True)
+        assert html == "", f"render_mode=none 应不渲染完成框，实际: {html[:80]}"
+
+    def test_unregistered_tool_default_render(self):
+        """未注册工具回退默认折叠卡（render_mode 默认空）"""
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import render_tool_block
+
+        ToolRegistry.reset_instance()
+        html = render_tool_block("unknown_tool", {}, result="内容", success=True)
+        assert html != ""
+        assert "cm-collapsible" in html
+
+
+class TestDiffRenderDegradation:
+    """diff 渲染插件化降级（e293b056 删除主程序 fallback 后的行为锁定）"""
+
+    def test_diff_without_render_closure_no_fallback(self):
+        """带 diff 但工具无 render 闭包 → 无 diff 渲染（主程序无兜底）"""
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import render_tool_block
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        reg.register(
+            "diff_tool",
+            {"type": "function", "function": {"name": "diff_tool"}},
+            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+        )
+        diff_text = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new"
+        html = render_tool_block("diff_tool", {}, result="已修改", success=True, diff=diff_text)
+        assert "tool-diff-inline" not in html, "无 render 闭包的工具不应输出插件 diff 渲染"
+        assert "tool-diff-inline__header" not in html, "主程序 fallback 已删除，不应再输出 diff header"
+
+    def test_render_closure_exception_falls_back_to_text(self):
+        """render 闭包抛异常 → 回退通用文本渲染（不崩溃）"""
+        from app.tools.registry import ToolRegistry
+        from app.widgets.render_helpers import render_tool_block
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        def _boom_render(result, tool_name, tool_args, success):
+            raise RuntimeError("render boom")
+        reg.register(
+            "boom_tool",
+            {"type": "function", "function": {"name": "boom_tool"}},
+            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+            render=_boom_render,
+        )
+        html = render_tool_block("boom_tool", {}, result="结果文本", success=True, diff="+a\n-b")
+        assert "tool-diff-inline" not in html, "闭包异常应放弃 diff 渲染"
+        assert "结果文本" in html, "结果文本应仍渲染（回退通用渲染）"
+
+
+class TestRegistryMetadata:
+    """registry 元数据消费点（permission_resolve_args / summarize / protect / interactive / ui_managed）"""
+
+    @staticmethod
+    def _reg_with_meta():
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        def _mk(name, metadata):
+            reg.register(
+                name,
+                {"type": "function", "function": {"name": name}},
+                impl=lambda **kw: "x", danger="safe", source="plugin:t",
+                metadata=metadata,
+            )
+        _mk("mt_protect", {"protect": True})
+        _mk("mt_interactive", {"interactive": True})
+        _mk("mt_ui", {"ui_managed": True})
+        _mk("mt_task", {"permission_task": True})
+        _mk("mt_arg", {"permission_arg": "path"})
+        _mk("mt_plain", {})
+        return reg
+
+    def test_permission_resolve_args_task(self):
+        reg = self._reg_with_meta()
+        assert reg.permission_resolve_args("mt_task", {"tasks": [{"agent": "build"}]}) == ("task", "build")
+        assert reg.permission_resolve_args("mt_task", {"tasks": []}) == ("task", "")
+
+    def test_permission_resolve_args_plain(self):
+        reg = self._reg_with_meta()
+        assert reg.permission_resolve_args("mt_arg", {"path": "/tmp/x"}) == ("plain", "/tmp/x")
+        assert reg.permission_resolve_args("mt_plain", {"path": "/tmp/x"}) == ("plain", "")
+
+    def test_make_summarize_from_preview(self):
+        from app.tools.registry import make_summarize_from_preview
+
+        fn = make_summarize_from_preview(lambda args: f"预览 {args.get('n', '')}")
+        assert fn("tool", {"n": 5}, "content") == "[tool] 预览 5 (7 chars)"
+        assert fn("tool", None, "") == "[tool] 预览  (0 chars)"
+
+    def test_protected_interactive_ui_managed(self):
+        reg = self._reg_with_meta()
+        assert reg.is_protected("mt_protect") is True
+        assert reg.is_protected("mt_plain") is False
+        assert reg.is_interactive("mt_interactive") is True
+        assert reg.is_interactive("mt_protect") is False
+        assert reg.is_ui_managed("mt_ui") is True
+        assert reg.is_ui_managed("mt_plain") is False
+
+    def test_subagent_task_keep_in_content(self):
+        """subagent_para/subagent_dag 因 metadata[subagent_task] 常驻正文（keep_in_content_tools）"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        load_plugin_tools()
+        reg = ToolRegistry.get_instance()
+        kept = reg.keep_in_content_tools()
+        assert "subagent_para" in kept
+        assert "subagent_dag" in kept
+        assert "write" in kept, "文件写入组工具应常驻正文"
+
+
+class TestPluginLoadFaultTolerance:
+    """插件 register 抛异常 → load_plugin_tools 跳过该插件继续加载其他插件"""
+
+    def test_broken_plugin_skipped_others_loaded(self, tmp_path):
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import DANGER_SAFE, ToolRegistry
+
+        ToolRegistry.reset_instance()
+        # 坏插件：register 抛异常
+        bad_dir = tmp_path / "bad-plugin" / "tools"
+        bad_dir.mkdir(parents=True)
+        (bad_dir / "bad_tool.py").write_text(
+            "def register(registry):\n    raise RuntimeError('boom')\n", encoding="utf-8"
+        )
+        # 好插件：正常注册
+        good_dir = tmp_path / "good-plugin" / "tools"
+        good_dir.mkdir(parents=True)
+        (good_dir / "good_tool.py").write_text(
+            "def register(registry):\n"
+            "    registry.register('good_tool', {'type': 'function', 'function': {'name': 'good_tool'}},\n"
+            "                impl=lambda **kw: 'ok', danger='safe')\n",
+            encoding="utf-8",
+        )
+        # 两插件名加入 enabled_plugins 避免 P0-1 过滤
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        cfg.enabled_plugins.value = saved + ["bad-plugin", "good-plugin"]
+        try:
+            reg = ToolRegistry.get_instance()
+            loaded = load_plugin_tools(registry=reg, plugin_roots=[tmp_path])
+            assert "good_tool" in reg.names(), f"好插件应加载，实际: {reg.names()}"
+            assert "bad_tool" not in reg.names()
+            assert "good-plugin" in loaded
+            assert "bad-plugin" not in loaded, "register 失败的插件不应计入 loaded"
+        finally:
+            cfg.enabled_plugins.value = saved

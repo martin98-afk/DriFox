@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
 

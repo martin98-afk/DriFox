@@ -21,7 +21,9 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,22 @@ from app.core.team.template_schema import (
     TemplateAgent,
     TemplateError,
 )
+
+# 工具插件化：TeamTools 类已删除，team_list_members 迁移为
+# plugins/system/tools/subagent_tools.py 模块级函数（tool_ctx 签名）。
+# 复用 _load_module 模式加载插件模块（plugins/ 非 Python 包）。
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools"
+
+
+def _load_subagent_tools():
+    mod_name = "_team_template_subagent_tools"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "subagent_tools.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ══════════════════════════════════════════════════════════
@@ -1015,11 +1033,8 @@ class TestTeamListMembersRoleDesc:
     """team_list_members 工具应显示成员的角色描述（来自模板上下文，无描述时兼容省略）。"""
 
     def _make_builtin_tools(self, window_id="win_01", agent_name="build"):
-        class _FakeBT:
-            _team_window_id = window_id
-            _team_agent_name = agent_name
-
-        return _FakeBT()
+        """构造插件 impl 的 tool_ctx（含团队窗口上下文）"""
+        return {"team_window_id": window_id, "team_agent_name": agent_name}
 
     def _make_tm(self, template=None, members=None):
         from app.core import team_manager as tm_mod
@@ -1049,7 +1064,7 @@ class TestTeamListMembersRoleDesc:
 
     def test_members_with_role_desc_shown(self, tmp_path):
         """模板上下文含角色描述时，成员行下方显示角色描述。"""
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         tm = self._make_tm(
             template={
@@ -1065,8 +1080,7 @@ class TestTeamListMembersRoleDesc:
                 {"window_id": "win_02", "agent_name": "build"},
             ],
         )
-        tools = TeamTools(self._make_builtin_tools(window_id="win_01", agent_name="leader"))
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_builtin_tools(window_id="win_01", agent_name="leader"))
         assert result.success
         content = result.content
         assert "leader@win_01" in content
@@ -1076,7 +1090,7 @@ class TestTeamListMembersRoleDesc:
 
     def test_members_without_role_desc_omitted(self, tmp_path):
         """无角色描述（手动加入成员/旧模板）时不显示角色行，兼容。"""
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         tm = self._make_tm(
             template={
@@ -1086,8 +1100,7 @@ class TestTeamListMembersRoleDesc:
             },
             members=[{"window_id": "win_01", "agent_name": "build"}],
         )
-        tools = TeamTools(self._make_builtin_tools())
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_builtin_tools())
         assert result.success
         content = result.content
         assert "build@win_01" in content
@@ -1095,7 +1108,7 @@ class TestTeamListMembersRoleDesc:
 
     def test_no_template_still_lists_members(self, tmp_path):
         """未加载模板（手动加入团队）时仍能列出成员，不显示角色描述。"""
-        from app.tools.team_tools import TeamTools
+        subagent = _load_subagent_tools()
 
         tm = self._make_tm(
             template=None,
@@ -1104,8 +1117,7 @@ class TestTeamListMembersRoleDesc:
                 {"window_id": "win_02", "agent_name": "plan"},
             ],
         )
-        tools = TeamTools(self._make_builtin_tools())
-        result = tools.team_list_members()
+        result = subagent._team_list_members(self._make_builtin_tools())
         assert result.success
         assert "build@win_01" in result.content
         assert "plan@win_02" in result.content
@@ -1742,3 +1754,78 @@ class TestHistorySessionRestoreRegistersTeamMember:
         assert members["win_agent_002"]["agent_name"] == "review", "agent_name 不得被改写"
         assert not inst._start_team_watcher.called, "已注册且 agent 一致时不得重复启动 watcher"
         assert not inst._sync_active_windows_to_team_manager.called, "已注册且 agent 一致时不得重复同步"
+
+
+# ══════════════════════════════════════════════════════════
+# 15. 回归：团队邮件发件人角色（build 固化 bug）
+# ══════════════════════════════════════════════════════════
+
+
+class TestTeamMailSenderRoleGuard:
+    """修复：团队窗口邮件发件人恒为 build（ChatEngine 400ms 延迟创建竞态）。
+
+    线上症状：任务邮件第一行「📨 来自 [build@win_206]」不显示实际成员角色。
+    根因链：
+    1. _join_new_window_for_template（300ms 回调）→ _on_agent_changed 有
+       `not self.backend.chat_engine` 守卫，而 ChatEngine 是 400ms 延迟创建，
+       回调时必然未就绪 → 提前 return → switch_agent/set_team_context 未写入正确角色；
+    2. _deferred_create_tool_executor 默认 agent = list_agents()[0]（恰为 build）；
+    3. _load_agent_list 无按钮组分支用默认 _current_agent（"build"）二次覆盖。
+    修复：① join 轮询补查 chat_engine；② _load_agent_list 团队窗口优先取
+    _team_agent_name（AST 静态校验防回退，与文件既有风格一致）。
+    """
+
+    def _read_main_widget_src(self) -> str:
+        src = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+        return src.read_text(encoding="utf-8")
+
+    def test_join_poll_waits_chat_engine(self):
+        """_join_new_window_for_template 的 C4 轮询条件必须包含 chat_engine 检查。"""
+        import ast
+
+        tree = ast.parse(self._read_main_widget_src())
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_join_new_window_for_template":
+                target = node
+                break
+        assert target is not None, "缺少 _join_new_window_for_template"
+        src = ast.unparse(target)
+        # 就绪条件必须同时覆盖 agent_manager 与 chat_engine（缺一即重试）
+        assert "win.backend.agent_manager" in src
+        assert "win.backend.chat_engine" in src
+        # 重试分支必须保留（未就绪不直接放弃）
+        assert "_TEAM_JOIN_MAX_RETRIES" in src
+
+    def test_load_agent_list_prefers_team_agent(self):
+        """_load_agent_list 无按钮组分支：团队窗口优先用 _team_agent_name，禁止回退 build。"""
+        import ast
+
+        tree = ast.parse(self._read_main_widget_src())
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_load_agent_list":
+                target = node
+                break
+        assert target is not None, "缺少 _load_agent_list"
+        src = ast.unparse(target)
+        # 团队角色必须是 _current_agent 的优先来源
+        assert "_team_agent_name" in src
+        # 仍保留 build 兜底（非团队窗口），但只能作为最后回退
+        assert '"build"' in src or "'build'" in src
+
+    def test_on_agent_changed_guard_kept(self):
+        """_on_agent_changed 的 chat_engine 守卫必须保留（错误 agent 不得提前写入状态）。"""
+        import ast
+
+        tree = ast.parse(self._read_main_widget_src())
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_on_agent_changed":
+                target = node
+                break
+        assert target is not None, "缺少 _on_agent_changed"
+        src = ast.unparse(target)
+        assert "chat_engine" in src
+        assert "switch_agent" in src
+

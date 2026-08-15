@@ -180,7 +180,7 @@ class OpenAIChatWorker(QThread):
     retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
     retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
     context_updated = pyqtSignal(int, int, bool)  # token_count, limit, from_api，每轮 API 调用后实时更新
-    _DEFERRED_PREVIEW_TOOLS = {"question", "task", "todowrite", "todoread"}
+    _DEFERRED_PREVIEW_TOOLS = {"question", "subagent_para", "todowrite", "todoread"}
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
     # Qwen/DashScope 服务端会拒绝"连续多轮相同 (name, args) 的工具调用"，返回 400。

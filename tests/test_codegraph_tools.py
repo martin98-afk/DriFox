@@ -24,14 +24,18 @@ try:
     import importlib.util
 
     _PLUGIN_PATH = PROJECT_ROOT / ".drifox" / "plugins" / "codegraph-tools" / "tools" / "codegraph.py"
+    # 社区插件未安装/未同步时优雅跳过（不报收集错误）
+    if not _PLUGIN_PATH.exists():
+        raise ImportError(f"codegraph-tools 社区插件未安装: {_PLUGIN_PATH}")
     _spec = importlib.util.spec_from_file_location("_codegraph_plugin", _PLUGIN_PATH)
     _cg_plugin = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_cg_plugin)
     CodeGraphTools = _cg_plugin.CodeGraphTools
     _HAS_CODEGRAPH = _cg_plugin._HAS_CODEGRAPH
     _CODEGRAPH_AVAILABLE = _HAS_CODEGRAPH
-except ImportError:
+except (ImportError, FileNotFoundError):
     _CODEGRAPH_AVAILABLE = False
+    _cg_plugin = None
 
 
 # ── 夹具 ─────────────────────────────────────────────────────────────────

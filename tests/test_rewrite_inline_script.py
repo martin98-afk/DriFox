@@ -9,19 +9,34 @@
 4. 含空格临时目录路径正确加引号
 """
 
+import importlib.util
 import os
 import shlex
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
-from app.tools.terminal_tools import (
-    _parse_inline_script,
-    _rewrite_inline_script,
-    _cleanup_script_temp,
-)
+# 工具插件化：app/tools/terminal_tools.py 已迁移为 plugins/system/tools/terminal_tools.py
+# （主程序 fallback 已移除）。plugins/ 非 Python 包，用 _load_module 模式加载插件模块
+# （复用 test_file_tree_root_watch.py 的做法）。
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent / "plugins" / "system" / "tools"
+
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_terminal_tools = _load_module("_rewrite_inline_script_terminal", _PLUGIN_TOOLS / "terminal_tools.py")
+_parse_inline_script = _terminal_tools._parse_inline_script
+_rewrite_inline_script = _terminal_tools._rewrite_inline_script
+_cleanup_script_temp = _terminal_tools._cleanup_script_temp
 
 
 # ========================================================================

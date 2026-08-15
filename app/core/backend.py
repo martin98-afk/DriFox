@@ -930,6 +930,19 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[ChatBackend] 延迟启动插件监听失败: {e}")
 
+            # 插件工具按启用状态对齐重扫：工具加载发生在 import 期（早于 pm.initialize），
+            # 彼时新插件尚未被 _restore_enabled_from_settings 补齐到 enabled 列表 →
+            # 新装插件工具被过滤；pm.initialize 已在此前完成，重扫后
+            # 新安装插件工具注册、被禁用插件工具注销，两边同时正确。
+            try:
+                from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+
+                watcher = ensure_plugin_tool_watcher()
+                if watcher is not None:
+                    watcher.scan_now()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 插件工具启用状态对齐重扫失败: {e}")
+
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
                 from app.core.lsp.lsp_manager import get_lsp_manager

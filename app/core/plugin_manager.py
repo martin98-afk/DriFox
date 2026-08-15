@@ -398,6 +398,8 @@ class PluginManager:
             logger.info(f"[PluginManager] Enabled plugin: {name}")
         # 联动加载 UI 组件
         self._load_plugin_ui(name)
+        # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
+        self._rescan_plugin_tools()
 
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）"""
@@ -412,6 +414,23 @@ class PluginManager:
             logger.info(f"[PluginManager] Disabled plugin: {name}")
         # 联动卸载 UI 组件
         self._unload_plugin_ui(name)
+        # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
+        self._rescan_plugin_tools()
+
+    def _rescan_plugin_tools(self) -> None:
+        """插件启停后对齐工具注册（工具插件随启停热生效）。
+
+        触发 PluginToolWatcher 全量重扫：注销全部已加载插件工具后按
+        enabled 状态重新注册（scan_now 幂等 + 锁保护；watcher 未启动/异常时跳过）。
+        """
+        try:
+            from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+
+            watcher = ensure_plugin_tool_watcher()
+            if watcher is not None:
+                watcher.scan_now()
+        except Exception as e:
+            logger.warning(f"[PluginManager] 插件工具重扫失败: {e}")
 
     def _load_plugin_ui(self, name: str):
         """加载指定插件的 UI 组件"""

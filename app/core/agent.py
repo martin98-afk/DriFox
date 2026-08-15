@@ -24,6 +24,26 @@ from app.tools.tool_name_mapper import ToolNameMapper
 _agent_file_cache: Dict[str, Dict[str, tuple]] = {}
 
 
+def _subagent_forbidden_tools() -> set:
+    """子智能体调用时禁止使用的工具集合（registry 派生，不硬编码工具名）。
+
+    规则（与旧硬编码 {question, subagent_para, subagent_status, subagent_dag} 等价）：
+    - metadata["interactive"]：交互式提问（question）
+    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status/subagent_dag）
+    """
+    try:
+        from app.tools.registry import ToolRegistry
+
+        reg = ToolRegistry.get_instance()
+        return {
+            r.name for r in reg.list()
+            if (r.metadata or {}).get("interactive") or r.group == "子智能体"
+        }
+    except Exception:
+        # registry 不可用：回退旧集合（保持过滤语义不失效）
+        return {"question", "subagent_para", "subagent_status", "subagent_dag"}
+
+
 @dataclass
 class Agent:
     name: str
@@ -723,7 +743,8 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        forbidden_tools = {"question", "subagent_para", "subagent_status", "subagent_dag"}
+        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status/subagent_dag）
+        forbidden_tools = _subagent_forbidden_tools()
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
             all_tools = [t for t in all_tools if t["function"]["name"].lower() not in forbidden_tools]

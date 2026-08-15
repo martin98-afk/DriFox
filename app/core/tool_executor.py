@@ -25,7 +25,7 @@ from app.tools.tool_name_mapper import ToolNameMapper
 # 预编译正则表达式
 _FILE_PREFIX_PATTERN = re.compile(r"^file:/{1,3}")
 
-from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
+from app.core.lsp.lsp_manager import get_lsp_manager
 from app.tools import BuiltinTools, ToolResult
 from app.utils.utils import resolve_path
 from app.utils.config import Settings
@@ -51,7 +51,9 @@ class ToolExecutor:
                 return reg.group == ToolExecutor._WRITE_GROUP
         except Exception:
             pass
-        return tool_name in ("write", "edit", "multi_edit")  # registry 未初始化时兜底
+        # registry 不可用/工具未注册：不视为文件写入。
+        # 调用点均在工具执行路径（registry 注册必然已完成），兜底不可达。
+        return False
 
     # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
     # 确保工作目录（workdir）完全隔离，多窗口互不影响
@@ -73,7 +75,6 @@ class ToolExecutor:
         # 否则 get_workdir() 在 _sync_working_directory 同步前会返回启动路径，
         # 被 PreUserMessage hook（format_memory_context）误注入为"项目根目录"。
         self._workdir_user_set = False
-        self._custom_tools: Dict[str, Callable] = {}
         self._session_id: Optional[str] = None
         self._call_id: Optional[str] = None
 
@@ -187,9 +188,6 @@ class ToolExecutor:
         # 清理会话上下文
         self._session_id = None
         self._call_id = None
-
-        # 清理自定义工具
-        self._custom_tools.clear()
 
         # 清理当前窗口的 BuiltinTools
         if self._builtin_tools:
@@ -897,56 +895,24 @@ class ToolExecutor:
         # 文件操作前记录（用于撤销）
         file_path_before = self._record_file_operation_before(tool_name, args, local_session_id, local_call_id)
 
-        if tool_name in self._custom_tools:
-            # [deprecated] custom_tools 是遗留机制：执行优先级最高但绕过 registry
-            # （不进 schema/权限分组/渲染）。新工具请走插件注册（registry.register）。
-            try:
-                result_data = self._custom_tools[tool_name](args)
-                my_result = ToolResult(True, content=result_data)
-                self._trigger_post_tool_use(tool_name, args, my_result)
-                return my_result
-            except Exception as e:
-                my_result = ToolResult(False, error=f"Custom tool error: {str(e)}")
-                self._trigger_post_tool_use(tool_name, args, my_result)
-                return my_result
-
         # MCP 工具调用：工具名以 "mcp__" 开头
         if tool_name.startswith("mcp__") and self._builtin_tools:
             return self._execute_mcp_tool(tool_name, args)
 
-        # ========== 内部工具（不进 registry，非 LLM 可见） ==========
-        # 工具执行路径：_custom_tools → MCP → 内部工具 → registry 注册工具
-        _internal = {
-            "git_status": lambda: self._builtin_tools.git_status(args.get("path")),
-            "git_log": lambda: self._builtin_tools.git_log(args.get("path"), args.get("max_count", 10)),
-            "git_diff": lambda: self._builtin_tools.git_diff(args.get("ref1"), args.get("ref2"), args.get("path")),
-            "summarize_changes": lambda: self._builtin_tools.summarize_changes(
-                args.get("text", ""), args.get("limit", 1200)
-            ),
-            "read_persisted_output": lambda: self._builtin_tools.read_persisted_output(
-                file_path=args.get("file_path", "")
-            ),
-            "gitee_upload": lambda: self._builtin_tools.gitee_upload(
-                local_path=args.get("local_path", ""),
-            ),
-        }
-
         # ========== 工具执行前的有效性检查 ==========
         # 在 UI 关闭场景下，即使方法开头检查通过，
-        # lambda 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
+        # 执行期间 UI 可能被关闭，导致 BuiltinTools 访问崩溃
         if not self.is_valid():
             logger.warning("[ToolExecutor] ToolExecutor became invalid during hook phase")
             return ToolResult(False, error="UI has been closed, tool execution unavailable")
 
-        executor = _internal.get(tool_name)
-
         # registry 注册工具（插件工具：系统插件 + 第三方插件）
-        if executor is None:
-            from app.tools.registry import ToolRegistry
+        from app.tools.registry import ToolRegistry
 
-            _reg = ToolRegistry.get_instance().get(tool_name)
-            if _reg is not None and _reg.impl is not None:
-                executor = self._execute_registered_tool(_reg, args, local_session_id)
+        _reg = ToolRegistry.get_instance().get(tool_name)
+        executor = None
+        if _reg is not None and _reg.impl is not None:
+            executor = self._execute_registered_tool(_reg, args, local_session_id)
 
         if executor:
             try:

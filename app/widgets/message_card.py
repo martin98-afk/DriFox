@@ -109,6 +109,7 @@ from app.widgets.render_helpers import (
     _get_tool_icon,
     _get_tool_icon_html,
     _get_tool_icon_name,
+    _reg_metadata_flag,
     render_tool_block,
 )
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
@@ -238,7 +239,17 @@ AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
-_EDIT_TOOLS = frozenset({"write", "edit", "multi_edit", "subagent_para", "subagent_dag", "question"})
+# 集合由 registry 派生（group/metadata 声明驱动，不硬编码工具名）：
+#   文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
+#   + interactive（question）——与旧常量集合行为等价
+def _edit_tools() -> frozenset:
+    """编辑/子智能体/提问类工具集合（registry 派生，数据源统一）"""
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().keep_in_content_tools()
+    except Exception:
+        return frozenset()
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -1058,8 +1069,18 @@ def _render_tool_streaming_block(
     """
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
-    # 子智能体任务
-    is_sub_agent_task = tool_name in ("task", "subagent_para", "subagent_dag")
+    # 子智能体任务：与 render_tool_block 统一走 registry metadata 声明
+    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para/subagent_dag，
+    #   历史消息中的旧名 task 经 ToolNameMapper.to_native 归一化后命中）
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
+
+        _native = ToolNameMapper.to_native(tool_name)
+        _sub_reg = ToolRegistry.get_instance().get(_native)
+        is_sub_agent_task = bool(_sub_reg and _sub_reg.metadata and _sub_reg.metadata.get("subagent_task"))
+    except Exception:
+        is_sub_agent_task = False
     display_name = tool_name or ""
     if is_mcp:
         display_name = "__".join(display_name.split("__")[2:])
@@ -1089,8 +1110,10 @@ def _render_tool_streaming_block(
         preview_display += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
 
     streaming_state = "false" if completed else "true"
+    # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _edit_tools() else ""
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}" style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -1436,8 +1459,9 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         # 没有 args，尝试从整个 content 中提取参数
         args_dict = _extract_args_by_regex(content)
 
-    # 历史工具 diff 缺失时的 fallback（从参数重建）
-    if not diff_content and tool_name == "edit":
+    # 历史工具 diff 缺失时的 fallback（从参数重建）：仅 edit 工具的
+    # operations/anchor/lines 参数结构支持重建，由注册声明 metadata["reconstruct_diff"] 驱动
+    if not diff_content and _reg_metadata_flag(tool_name, "reconstruct_diff"):
         fpath = args_dict.get("file_path") or args_dict.get("path") or ""
         if fpath:
             ops = args_dict.get("operations", [])
@@ -5036,7 +5060,9 @@ class CodeWebViewer(QWebEngineView):
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
                 // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
                 // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
-                var _EDIT_TOOLS_SELECTOR = ':not([data-tool-name="write"]):not([data-tool-name="edit"]):not([data-tool-name="multi_edit"]):not([data-tool-name="subagent_para"]):not([data-tool-name="subagent_dag"]):not([data-tool-name="question"])';
+                // 工具名集合由 Python 渲染端派生（registry 声明），经 data-keep-in-content 属性传入，
+                // JS 不再硬编码工具名。
+                var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
                 // 更新"工具与思考"标题（总项数，无勾叉 badge）
                 function _updateToolSectionHeader() {{
@@ -6444,7 +6470,7 @@ class CodeWebViewer(QWebEngineView):
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
             # 🆕 修复（简洁模式编辑工具框消失）：save 阶段必须同时覆盖正文容器
-            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _EDIT_TOOLS）
+            # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _edit_tools() 派生）
             # 的流式/完成块由 JS 注入到正文（L9328 _stream_target），简洁模式下
             # _tool_target_id="tool-content"，旧 save 只遍历 _tc → 编辑工具运行框
             # 不在保存范围 → 全量渲染 updateContent 重建正文时被抹除，直到
@@ -9686,7 +9712,7 @@ class MessageCard(SimpleCardWidget):
         try:
             # 编辑类工具注入到 content-placeholder，跳过回调与渲染避免闪烁。
             # DOM 已通过 JS 注入到位，markdown 缓存已就绪供后续全量渲染使用。
-            _is_edit_tool = tool_name in _EDIT_TOOLS
+            _is_edit_tool = tool_name in _edit_tools()
             if not _is_edit_tool:
                 self.viewer._lazy_markdown_cb = self._build_incremental_md
                 self.viewer._schedule_render(immediate=True)
@@ -9754,7 +9780,7 @@ class MessageCard(SimpleCardWidget):
                 _use_incremental = "false"
 
             # 编辑类工具始终注入到正文区域，不进入"工具与思考"
-            tool_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+            tool_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
 
             js_code = f"""
             (function() {{
@@ -10084,7 +10110,7 @@ class MessageCard(SimpleCardWidget):
                 completed=completed,
             )
             # 编辑类工具流式块始终注入到正文区域
-            _stream_target = "content-placeholder" if tool_name in _EDIT_TOOLS else self.viewer._tool_target_id
+            _stream_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
 
             # 🆕 方案 D：计算工具块的 data-order（与 reorganizeContent 的 posMap 同尺度），
             # 使 JS 注入的流式块在下次全量渲染排序时能回到正确位置，而非恒沉底

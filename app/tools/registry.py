@@ -363,6 +363,31 @@ class ToolRegistry:
             tools.sort(key=lambda r: 0 if r.danger == DANGER_DANGEROUS else 1)
         return groups
 
+    def tools_in_group(self, group: str) -> List[str]:
+        """返回指定展示分组内的全部工具名（插件注册时声明的 group）。
+
+        供主程序各消费点（文件写入组判定/审查白名单/统计）复用，
+        避免 group 名散落为硬编码工具名集合。
+        """
+        with self._lock:
+            return [n for n, r in self._tools.items() if r.group == group]
+
+    def keep_in_content_tools(self) -> frozenset:
+        """始终展示在正文的工具名集合（消息卡片正文/工具区分区用）。
+
+        规则（与旧 message_card._EDIT_TOOLS 常量行为等价，语义收敛到注册声明）：
+        - 文件写入组：write/edit/multi_edit（group="文件写入"）
+        - 子智能体任务：subagent_para/subagent_dag（metadata["subagent_task"]）
+        - 交互式提问：question（metadata["interactive"]）
+        """
+        with self._lock:
+            return frozenset(
+                r.name for r in self._tools.values()
+                if r.group == "文件写入"
+                or (r.metadata or {}).get("subagent_task")
+                or (r.metadata or {}).get("interactive")
+            )
+
     def dangerous_tools(self) -> List[str]:
         with self._lock:
             return [n for n, r in self._tools.items() if r.danger == DANGER_DANGEROUS]

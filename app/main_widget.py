@@ -5108,13 +5108,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     if self._pending_arrange_count == 0:
                         self._do_team_window_arrange()
                 return
-            if not getattr(win, "backend", None) or not win.backend.agent_manager:
-                # C4 就绪轮询：backend 未就绪 → 重试而非直接放弃
+            if (
+                not getattr(win, "backend", None)
+                or not win.backend.agent_manager
+                # 🐛 团队邮件角色 build 修复：_on_agent_changed 有
+                # `not self.backend.chat_engine` 守卫（ChatEngine 400ms 延迟创建），
+                # 仅等 agent_manager 会导致回调在 chat_engine 就绪前提前 return，
+                # switch_agent/set_team_context 未写入正确角色 → 邮件发件人恒为默认 build。
+                # 补查 chat_engine，就绪后再回调，从根上消除竞态。
+                or not win.backend.chat_engine
+            ):
+                # C4 就绪轮询：backend/chat_engine 未就绪 → 重试而非直接放弃
                 retries = getattr(win, "_team_join_retries", 0)
                 if retries < self._TEAM_JOIN_MAX_RETRIES:
                     win._team_join_retries = retries + 1
                     logger.warning(
-                        f"[_join_new_window_for_template] window {window_id} backend 未就绪，"
+                        f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
                         f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
                     )
                     QTimer.singleShot(
@@ -9607,7 +9616,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 即使按钮组不存在（工具开关模式下智能体切换 UI 已移除），
         # 仍需同步 _current_agent 到 ChatEngine，否则 PermissionResolver 会使用错误的默认 agent
         if not hasattr(self, "_agent_btn_group"):
-            self._current_agent = getattr(self, "_current_agent", "build")
+            # 🐛 团队邮件角色 build 修复：团队窗口加入时 _on_agent_changed 可能因
+            # chat_engine 未就绪提前 return，_current_agent 保持默认 "build"；
+            # 此处优先取团队角色（_team_agent_name），团队窗口不再回退到 build，
+            # 保证 set_current_agent → set_team_context 写入正确成员名。
+            team_agent = getattr(self, "_team_agent_name", "") or ""
+            self._current_agent = team_agent or getattr(self, "_current_agent", "build")
             if self.backend.chat_engine:
                 self.backend.set_current_agent(self._current_agent)
                 logger.info(
@@ -14139,9 +14153,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 收集统一 diff 文本（每个文件一段 unified diff），用于注入 review 任务描述
 
-            # 写工具白名单：只审查产生文件内容改动的工具（write/edit/multi_edit 之外，
-            # 兼容 str_replace_editor / apply_patch 这类常见别名；读取类不在此列）
-            WRITE_TOOLS = {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
+            # 写工具白名单：只审查产生文件内容改动的工具（registry group 派生，与
+            # tool_executor._is_write_group 同源；str_replace_editor/apply_patch 为
+            # Claude Code 生态名，file_recorder 只记录 registry 文件写入组工具，永不出现）
+
+            def _write_group_tools() -> set:
+                """文件写入组工具集合（registry 派生；异常时回退旧白名单保持过滤语义）"""
+                try:
+                    from app.tools.registry import ToolRegistry
+
+                    return set(ToolRegistry.get_instance().tools_in_group("文件写入"))
+                except Exception:
+                    return {"write", "edit", "multi_edit", "str_replace_editor", "apply_patch"}
+
+            WRITE_TOOLS = _write_group_tools()
 
             # 按文件路径分组：同一文件在当轮的多次连续编辑合并为一份累积 diff，
             # 避免文件名列重复、diff 碎片化，让 review 看清从初始到最终的完整变化。

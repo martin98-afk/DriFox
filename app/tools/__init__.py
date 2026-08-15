@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject
 
-from app.core.lsp.lsp_manager import LspManager, get_lsp_manager
+from app.core.lsp.lsp_manager import get_lsp_manager
 from app.core.lsp.lsp_tools import LspToolsIntegration
 
 # Import all tool modules（工具插件化：file/web/automation/codegraph/terminal/diagnostics 工具实现已迁插件）
@@ -54,11 +54,6 @@ class BuiltinTools(QObject):
         # Initialize all tool instances
         self._tools: Dict[str, Any] = {}
         self._register_tools()
-
-        # Session-scoped state
-        self._todo_list = []
-        self._loaded_skills = {}
-        self._skill_workspaces = {}
 
         # MCP 客户端管理器（全局单例，多窗口共享连接）
         self._mcp_manager = MCPClientManager.get_instance()
@@ -117,12 +112,7 @@ class BuiltinTools(QObject):
         彻底清理 BuiltinTools 的所有缓存，防止内存泄漏。
         应该在对话结束后或切换会话时调用。
         """
-        # 清理会话状态（工具插件待办/技能状态随工具插件生命周期，主程序不持有）
-        self._todo_list = []
-        self._loaded_skills = {}
-        self._skill_workspaces = {}
-
-        # 清理子智能体管理器
+        # 清理子智能体管理器（工具插件待办/技能状态随插件生命周期，主程序不持有）
         self._sub_agent_manager = None
 
         # 释放 MCP 引用（引用计数归零时才真正断开）
@@ -150,7 +140,12 @@ class BuiltinTools(QObject):
         )
 
     def read_persisted_output(self, file_path: str) -> ToolResult:
-        """读取之前被持久化的工具结果完整内容（平台能力，供 read_persisted_output 内部工具调用）"""
+        """读取之前被持久化的工具结果完整内容（平台能力，供 read_persisted_output 内部工具调用）
+
+        TODO: 孤儿方法——原 _internal 调用方已删（P0-2），tool_result_persister 提示文本仍引用该工具名。
+        quality-engineer 重写 test_all_builtin_tools.py（registry 驱动）确认不再引用后删除，
+        或迁移为插件工具（经 services["persisted_output"] 注入）。
+        """
         from pathlib import Path
 
         from app.utils.utils import get_app_data_dir
@@ -174,6 +169,8 @@ class BuiltinTools(QObject):
             return ToolResult(False, error=f"读取持久化文件失败: {e}")
 
     def summarize_changes(self, text: str = "", limit: int = 1200) -> ToolResult:
+        """TODO: 孤儿方法——原 _internal 调用方已删（P0-2），全仓无调用方。
+        quality-engineer 重写 test_all_builtin_tools.py 确认不再引用后删除。"""
         text = (text or "").strip()
         if not text:
             return ToolResult(False, error="No text provided for summarization")

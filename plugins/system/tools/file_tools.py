@@ -885,7 +885,9 @@ def register(registry):
         render=_render_edit_diff_body,
         preview=_make_file_preview("edit"),
         summarize=_make_file_summarize("edit"),
-        metadata={"permission_arg": "filePath"},
+        # reconstruct_diff：历史消息 diff 缺失时，渲染层按 operations 参数重建伪 diff
+        # （仅 edit 的 operations/anchor/lines 结构支持重建）
+        metadata={"permission_arg": "filePath", "reconstruct_diff": True},
     )
     registry.register(
         "multi_edit", _MULTI_EDIT_SCHEMA, impl=_multi_edit_impl,

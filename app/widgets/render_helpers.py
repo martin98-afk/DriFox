@@ -900,7 +900,9 @@ def _render_inline_tool(
     if natural_preview.startswith(cn_name):
         natural_preview = natural_preview[len(cn_name) :].lstrip()
     tc_id_attr = f' data-tool-call-id="{escape(tool_call_id)}"' if tool_call_id else ""
-    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+    return f"""<div class="tool-block" data-tool-name="{escape(tool_name)}"{tc_id_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -958,6 +960,32 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
     <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
 
 
+def _keep_in_content_tools() -> frozenset:
+    """始终展示在正文的工具集合（registry 派生，与 message_card._edit_tools 同源）。
+
+    规则：文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
+    + interactive（question）。用于工具块渲染 data-keep-in-content 属性。
+    """
+    try:
+        from app.tools.registry import ToolRegistry
+
+        return ToolRegistry.get_instance().keep_in_content_tools()
+    except Exception:
+        return frozenset()
+
+
+def _reg_metadata_flag(tool_name: str, key: str) -> bool:
+    """查询工具注册声明的 metadata 布尔标记（未注册/异常返回 False）"""
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
+
+        reg = ToolRegistry.get_instance().get(ToolNameMapper.to_native(tool_name))
+        return bool(reg and reg.metadata and reg.metadata.get(key))
+    except Exception:
+        return False
+
+
 def render_tool_block(
     tool_name: str,
     tool_args: dict,
@@ -976,10 +1004,13 @@ def render_tool_block(
     is_mcp_tool = tool_name.startswith("mcp__")
 
     # 子智能体任务检测：插件注册 metadata["subagent_task"]=True 声明（表格语义 + 日志按钮）
+    # 历史消息中的旧名 task（现为 subagent_para 的 alias）经 to_native 归一化后命中
     try:
         from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
 
-        _sub_reg = ToolRegistry.get_instance().get(tool_name)
+        _native = ToolNameMapper.to_native(tool_name)
+        _sub_reg = ToolRegistry.get_instance().get(_native)
         is_sub_agent_task = bool(_sub_reg and _sub_reg.metadata and _sub_reg.metadata.get("subagent_task"))
     except Exception:
         is_sub_agent_task = False
@@ -1181,7 +1212,8 @@ def render_tool_block(
 
     if no_collapse:
         # 禁用折叠框渲染：无 cm-collapsible 交互，标题栏 + body 直接展示
-        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+        _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+        return f"""<div class="tool-block tool-block--no-collapse" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <div class="tool-block__header" style="cursor: default; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
@@ -1203,7 +1235,8 @@ def render_tool_block(
     </div>
 </div>"""
 
-    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}" style="margin: 4px 0; background: transparent; border-radius: 6px;">
+    _keep_attr = ' data-keep-in-content="true"' if tool_name in _keep_in_content_tools() else ""
+    return f"""<div class="cm-collapsible tool-block" data-block-key="{block_key}" data-expanded="{expanded_attr}" data-tool-name="{escape(tool_name)}" data-tool-call-id="{escape(tool_call_id or "")}"{_keep_attr} style="margin: 4px 0; background: transparent; border-radius: 6px;">
     <button type="button" class="cm-collapsible__summary tool-block__summary" aria-expanded="{expanded_attr}" style="cursor: pointer; padding: 4px 8px; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500; display: flex; align-items: center; gap: 6px; width: 100%; background: transparent; border: none; text-align: left; box-sizing: border-box; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 14px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">

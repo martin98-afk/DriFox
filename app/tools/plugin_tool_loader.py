@@ -174,6 +174,43 @@ def _load_module(plugin_name: str, path: Path):
     return module
 
 
+def _is_plugin_enabled(plugin_name: str) -> bool:
+    """按插件启用状态过滤工具加载（P0-1：修复安全边界失效）。
+
+    统一以 Settings.enabled_plugins 为准（与 PluginManager.is_enabled 同源）。
+    关键：不能依赖 pm.is_initialized()——真实启动链中 app.tools 在
+    backend.initialize（pm.initialize 唯一调用点）之前即被导入并加载工具，
+    此时 pm 恒未初始化。故 pm 未初始化时直接读 Settings（import 期可用）。
+
+    语义对齐 PluginManager 其他组件（commands/agents/skills/mcp 均以
+    enabled_plugins 集合为准）：插件被 Settings 禁用后其工具不再注册。
+
+    边界情形：
+    - pm 已初始化且插件无 manifest（裸 tools/ 目录）→ 默认启用（不受插件启停管理）
+    - 从未配置 enabled_plugins（真·首次启动，pm 尚未填充全部插件）→ 全部启用，
+      对齐 _restore_enabled_from_settings「新发现插件默认启用」语义
+    """
+    try:
+        from app.core.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_enabled(plugin_name)
+        # pm 未初始化（真实启动链）：Settings 在 import 期可用
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.enabled_plugins.value or []
+        if not saved:
+            return True  # 从未配置（首次启动）→ 全部启用
+        return plugin_name in saved
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 插件启用状态检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
 def _run_register(
     registry: ToolRegistry,
     plugin_name: str,
@@ -211,6 +248,10 @@ def load_plugin_tools(
 
     for root in roots:
         for plugin_name, py_path in _iter_tool_modules(Path(root)):
+            # P0-1：安全边界——插件被 Settings 禁用后其工具不再注册
+            if not _is_plugin_enabled(plugin_name):
+                logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                continue
             try:
                 new_tools = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
                 loaded.setdefault(plugin_name, set()).update(new_tools)
@@ -244,6 +285,7 @@ class PluginToolWatcher:
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
         self._loaded: Dict[str, Set[str]] = {}  # plugin_name -> tool_names（当前生效）
         self._root_tracker: Dict[str, Path] = {}  # tool_name -> 来源根（跨根优先级）
+        self._scan_lock = threading.Lock()  # 重扫互斥（UI 触发 + 轮询线程并发安全）
         self._thread = None
         self._stop = False
 
@@ -255,15 +297,16 @@ class PluginToolWatcher:
         记录丢失 → 后续删除文件时无法注销残留工具。改为先注销再全量重扫，
         _loaded 始终等于 registry 中该插件的实际工具集。
         """
-        # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
-        for plugin_name, old_names in self._loaded.items():
-            unload_plugin_tools(plugin_name, old_names, self._registry)
-        # 2) 全量重扫注册（含跨根优先级保护，load_plugin_tools 内部处理）
-        try:
-            self._loaded = load_plugin_tools(registry=self._registry, plugin_roots=self._roots)
-        except Exception as e:
-            logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
-            # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
+        with self._scan_lock:
+            # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
+            for plugin_name, old_names in self._loaded.items():
+                unload_plugin_tools(plugin_name, old_names, self._registry)
+            # 2) 全量重扫注册（含跨根优先级保护与 enabled 过滤，load_plugin_tools 内部处理）
+            try:
+                self._loaded = load_plugin_tools(registry=self._registry, plugin_roots=self._roots)
+            except Exception as e:
+                logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
+                # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
 
     def start(self, poll_interval: float = 2.0) -> None:
         """后台线程轮询监听（轻量轮询，避免线程模型冲突）"""
