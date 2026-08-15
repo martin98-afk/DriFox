@@ -7,6 +7,7 @@
 - 用户编辑写入 user_tool_toggles(智能体模式下不影响 active)
 - "↺ 恢复"按钮调用 controller.restore_user()
 """
+
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QFrame,
@@ -33,6 +34,35 @@ OFF_BEHAVIOR_OPTIONS = [
 
 # 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
 MIXED_OPTION = ("__mixed__", "未统一")
+
+# 工具来源标签样式（参考 hook 配置卡片的 sourceLabel 色块风格）
+# - builtin（内置）：灰色 #888
+# - system（系统插件）：红色 #e74c3c
+# - user（用户插件）：绿色 #2ecc71
+_SOURCE_TAG_COLORS = {
+    "builtin": ("#888", "内置"),
+    "system": ("#e74c3c", "系统"),
+    "user": ("#2ecc71", "用户"),
+}
+
+
+def _format_source_label(source: str, plugin_root_kind: str = "") -> tuple:
+    """生成来源标签 (color, text)。
+
+    source 取自 ToolRegistration.source：
+    - "builtin"        → 内置
+    - "plugin:<name>"  → 直接显示插件名（截断 8 字符）；
+                        颜色由 plugin_root_kind 区分（system 红 / user 绿）
+    """
+    if source == "builtin" or not source:
+        return _SOURCE_TAG_COLORS["builtin"]
+    plugin_name = source[len("plugin:") :] if source.startswith("plugin:") else ""
+    kind = plugin_root_kind if plugin_root_kind in ("system", "user") else "system"
+    color, _base_text = _SOURCE_TAG_COLORS[kind]
+    if plugin_name:
+        display = plugin_name[:8] + ("…" if len(plugin_name) > 8 else "")
+        return color, display
+    return color, _SOURCE_TAG_COLORS[kind][1]
 
 
 class ToolControlCardContent(QWidget):
@@ -101,6 +131,7 @@ class ToolControlCardContent(QWidget):
     def _on_active_toggles_changed(self, toggles):
         """controller 通知 active toggles 变化(智能体激活/恢复/用户编辑)"""
         from loguru import logger
+
         agent_name = self._controller.get_active_agent_name() if self._controller else None
         enabled = sum(1 for v in toggles.values() if v)
         logger.info(f"[ToolCard] togglesChanged: agent={agent_name}, enabled={enabled}/{len(toggles)}")
@@ -147,6 +178,7 @@ class ToolControlCardContent(QWidget):
     def _rebuild(self):
         """全量重建内容"""
         from loguru import logger
+
         self._built = True  # 标记已构建
         while self._layout.count():
             item = self._layout.takeAt(0)
@@ -161,7 +193,9 @@ class ToolControlCardContent(QWidget):
         if self._controller:
             toggles = self._controller.get_toggles()
             agent = self._controller.get_active_agent_name()
-            logger.info(f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}")
+            logger.info(
+                f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}"
+            )
         else:
             toggles = {}
             logger.info("[ToolCard] _rebuild: controller=None!")
@@ -259,9 +293,7 @@ class ToolControlCardContent(QWidget):
         """构建一个工具组（组内危险工具数驱动配色）"""
         Colors.refresh()
         # 组内是否含危险工具：含 → 红系主题；全安全 → 绿系主题
-        has_danger = any(
-            ToolRegistry.get_instance().get_danger(t) == DANGER_DANGEROUS for t in tool_names
-        )
+        has_danger = any(ToolRegistry.get_instance().get_danger(t) == DANGER_DANGEROUS for t in tool_names)
         border_color = "rgba(34,197,94,0.2)" if not has_danger else "rgba(255,80,80,0.2)"
         header_bg = "rgba(34,197,94,0.06)" if not has_danger else "rgba(255,80,80,0.08)"
 
@@ -279,9 +311,7 @@ class ToolControlCardContent(QWidget):
 
         # 组头
         header = QWidget()
-        header.setStyleSheet(
-            f"background: {header_bg}; border: none; border-radius: 8px;"
-        )
+        header.setStyleSheet(f"background: {header_bg}; border: none; border-radius: 8px;")
         header.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 8, 10, 8)
@@ -324,16 +354,14 @@ class ToolControlCardContent(QWidget):
         header.mousePressEvent = lambda e, b=body: b.setVisible(not b.isVisible())
 
         # 整组开关连接
-        group_switch.checkedChanged.connect(
-            lambda checked, names=tool_names: self._on_group_toggled(names, checked)
-        )
+        group_switch.checkedChanged.connect(lambda checked, names=tool_names: self._on_group_toggled(names, checked))
 
         # 安全组默认折叠
         if not has_danger:
             body.setVisible(False)
 
     def _build_tool_row(self, tool_name: str, all_toggles: dict) -> QWidget:
-        """构建单个工具行（中文名 + 危险标记 + registry 描述）"""
+        """构建单个工具行（中文名 + 来源标签 + 危险标记 + registry 描述）"""
         row = QWidget()
         row.setStyleSheet("background: transparent; border: none;")
         row_layout = QHBoxLayout(row)
@@ -347,6 +375,11 @@ class ToolControlCardContent(QWidget):
         display_name = meta.get("cn_name") or tool_name
         desc = meta.get("description", "")
         is_danger = meta.get("danger") == DANGER_DANGEROUS
+        source = meta.get("source", "builtin")
+        # root_kind 经 plugin_tool_loader 写入 metadata（_plugin_root_kind），
+        # builtin 工具走 trusted 种子路径，无 metadata 时按 builtin 兜底。
+        reg = ToolRegistry.get_instance().get(tool_name)
+        plugin_root_kind = (reg.metadata or {}).get("_plugin_root_kind", "") if reg is not None else ""
 
         name_label = QLabel(display_name)
         name_label.setStyleSheet(
@@ -357,12 +390,31 @@ class ToolControlCardContent(QWidget):
             # 危险工具：名字加 🔥 标记 + 微红着色
             name_label.setText(f"🔥 {display_name}")
             name_label.setStyleSheet(
-                f"color: #ff6b6b; background: transparent; border: none; "
-                f"{font_size_css(12)} {get_font_family_css()}"
+                f"color: #ff6b6b; background: transparent; border: none; {font_size_css(12)} {get_font_family_css()}"
             )
             name_label.setToolTip(f"{display_name}（危险操作：{desc or '可能修改系统状态'}）")
         else:
             name_label.setToolTip(f"{display_name}（安全操作）")
+
+        # 来源标签（与 hook 配置卡片 sourceLabel 一致：彩色小色块 + 文字）
+        # 布局顺序：来源 tag → 工具名 → 描述
+        source_color, source_text = _format_source_label(source, plugin_root_kind)
+        source_label = QLabel(source_text)
+        source_label.setStyleSheet(
+            f"background-color: {source_color}; color: white; "
+            f"{font_size_css(10)} {get_font_family_css()} "
+            f"font-weight: bold; padding: 1px 6px; border-radius: 4px;"
+        )
+        source_label.setFixedHeight(18)
+        # tooltip 提示完整 plugin 名 + 描述
+        if source.startswith("plugin:"):
+            full_plugin = source[len("plugin:") :]
+            source_label.setToolTip(f"来源：{plugin_root_kind or 'system'} 插件 {full_plugin}")
+        else:
+            source_label.setToolTip("来源：内置工具")
+        row_layout.addWidget(source_label)
+        row_layout.addSpacing(4)
+
         row_layout.addWidget(name_label)
 
         desc_label = _ElidedLabel(desc)
@@ -375,11 +427,7 @@ class ToolControlCardContent(QWidget):
 
         # 关闭策略下拉(仅开关关闭时显示): ask=询问用户 / deny=直接拒绝
         # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
-        policy = (
-            self._controller.get_active_tool_behavior_map().get(tool_name, "deny")
-            if self._controller
-            else "deny"
-        )
+        policy = self._controller.get_active_tool_behavior_map().get(tool_name, "deny") if self._controller else "deny"
         policy_combo = ComboBox()
         for value, label in OFF_BEHAVIOR_OPTIONS:
             policy_combo.addItem(label, userData=value)
@@ -391,18 +439,14 @@ class ToolControlCardContent(QWidget):
         policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
         row_layout.addWidget(policy_combo)
         self._policy_combos[tool_name] = policy_combo
-        policy_combo.currentIndexChanged.connect(
-            lambda _idx, name=tool_name: self._on_tool_policy_changed(name)
-        )
+        policy_combo.currentIndexChanged.connect(lambda _idx, name=tool_name: self._on_tool_policy_changed(name))
 
         sw = SwitchButton()
         sw.setChecked(enabled)
         row_layout.addWidget(sw)
         self._toggle_widgets[tool_name] = sw
 
-        sw.checkedChanged.connect(
-            lambda checked, name=tool_name: self._on_tool_toggled(name, checked)
-        )
+        sw.checkedChanged.connect(lambda checked, name=tool_name: self._on_tool_toggled(name, checked))
 
         return row
 
@@ -412,10 +456,13 @@ class ToolControlCardContent(QWidget):
         - agent 模式:只更新 active(临时改 agent 生效权限,user 偏好不变)
         """
         from loguru import logger
+
         if self._controller is None:
             logger.warning(f"[ToolCard] _on_tool_toggled({tool_name},{enabled}) skipped: controller=None")
             return
-        logger.info(f"[ToolCard] _on_tool_toggled: {tool_name}={enabled}, agent_active={self._controller.is_agent_active()}")
+        logger.info(
+            f"[ToolCard] _on_tool_toggled: {tool_name}={enabled}, agent_active={self._controller.is_agent_active()}"
+        )
         # 直接更新 controller(触发信号链供外部使用)
         self._controller.set_user_toggle(tool_name, enabled)
         # 轻量级刷新 UI（controller 信号也会触发 _apply_toggles，但开销极低）
@@ -429,6 +476,7 @@ class ToolControlCardContent(QWidget):
         - agent 模式:只更新 active(临时改 agent 生效权限,user 偏好不变)
         """
         from loguru import logger
+
         combo = self._policy_combos.get(tool_name)
         if combo is None or self._controller is None:
             return
@@ -506,9 +554,7 @@ class ToolControlCardFrame(SystemCardFrame):
             f"border-radius: 6px; padding: 2px 8px; {font_size_css(12)} {get_font_family_css()}"
         )
         self._active_agent_label.setVisible(False)
-        self._active_agent_label.setToolTip(
-            "当前工具权限由智能体命令注入,点击「恢复」可回到用户设置"
-        )
+        self._active_agent_label.setToolTip("当前工具权限由智能体命令注入,点击「恢复」可回到用户设置")
 
         self._restore_btn = QPushButton("↺ 恢复", self)
         self._restore_btn.setFixedHeight(26)
