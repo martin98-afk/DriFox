@@ -2,9 +2,9 @@
 """
 系统工具插件 — 任务与待办（自包含实现）
 
-todowrite / todoread：待办状态**窗口级**（tool_ctx services["todo"] 注入，
-每窗口独立）；无窗口上下文（测试等）回退 app.tools.task_state 模块级兑底。
-ToolResult 携带 todos 字段回传 UI（UI 从工具结果联动）。
+todowrite / todoread：待办状态**窗口级**（通用 services["window_state"]，
+key="todo"，每窗口独立）；无窗口上下文（测试等）回退 app.tools.task_state
+模块级兑底。ToolResult 携带 todos 字段回传 UI（UI 从工具结果联动）。
 """
 from typing import Dict, List
 
@@ -17,13 +17,17 @@ GROUP_TODO = "任务与待办"
 
 
 def _todo_state(tool_ctx):
-    """窗口级待办状态接口：tool_ctx services 注入优先（每窗口独立）；
+    """窗口级待办状态接口：通用 services["window_state"]（key="todo"）。
 
+    任何工具需要窗口隔离状态时都走同一容器（键值存取），无需为主程序加特制代码；
     无注入（直接调 impl 的测试/无窗口场景）回退模块级兑底。
     """
-    svc = ((tool_ctx or {}).get("services") or {}).get("todo")
-    if svc and callable(svc.get("get")) and callable(svc.get("set")):
-        return svc
+    ws = ((tool_ctx or {}).get("services") or {}).get("window_state")
+    if ws and callable(ws.get("get")) and callable(ws.get("set")):
+        return {
+            "get": lambda: ws["get"]("todo", []) or [],
+            "set": lambda todos: ws["set"]("todo", todos),
+        }
     return {"get": _module_get_todos, "set": _module_set_todos}
 
 

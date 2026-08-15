@@ -519,9 +519,25 @@ def impl(tool_ctx, **kwargs):
 
 - **純邏輯工具**（文件/網絡/桌面）：只用 workdir/env，標準庫/第三方庫獨立實現
 - **平台工具**（bash/子智能體/MCP/LSP/CodeGraph/團隊/todo/question/skill/上傳）：
-  通過 \`services\` 能力接口調用（todo/terminal/subagent/team/lsp/codegraph/mcp/
-  ask_user/skills/gitee/diagnostics），不直接訪問主程序內部
+  通過 `services` 能力接口調用（window_state/lsp/codegraph/mcp/gitee 等），
+  不直接訪問主程序內部
 - 返回：ToolResult（推薦，可帶 diff/image_data 擴展字段）或 str（自動包裝）
+
+### 窗口級狀態（services["window_state"]）
+
+需要**窗口隔離狀態**的工具（每窗口獨立、不跨窗口共享）經通用鍵值容器存取，
+無需修改主程序：
+
+```python
+ws = tool_ctx.get("services", {}).get("window_state", {})
+ws["set"]("my_state", {...})     # 寫入（窗口級）
+data = ws["get"]("my_state", {}) # 讀取（窗口級，缺省值）
+ws["delete"]("my_state")         # 刪除
+```
+
+- 存儲由 tool_executor 按窗口持有（多窗口互不影響），線程安全
+- 任意 key 自定義（todo 工具用 key="todo"）；無注入（測試/無窗口）場景需插件自備兜底
+- 參考：`plugins/system/tools/task_tools.py`（_todo_state 讀寫模式）
 
 ### 圖標自包含
 
