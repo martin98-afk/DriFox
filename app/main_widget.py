@@ -17986,6 +17986,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
         self._broadcast_team_project(project, prev_project)
 
+        # Tab 模式下同步更新 Tab 图标（与 _on_project_selected 对齐：
+        # 新建项目后必须显式刷新，否则依赖 windowTitleChanged 间接触发，
+        # 标题未变化时图标停留在旧项目）
+        if self.cfg.enable_tab_manager.value:
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
+                tm = TabManagerWindow.get_instance()
+                if tm and self in tm._windows:
+                    idx = tm._windows.index(self)
+                    _update_tab_icon(idx, project)
+            except Exception:
+                pass
+
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
         ## 触发警示动画
