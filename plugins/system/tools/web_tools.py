@@ -14,6 +14,8 @@ import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
+from app.tools.registry import make_summarize_from_preview
+
 from app.tools.result import ToolResult
 
 GROUP_NETWORK = "网络"
@@ -207,6 +209,8 @@ def register(registry):
         group=GROUP_NETWORK, description="网络关键词搜索",
         aliases=["WebSearch", "web_search", "Search", "SearchWeb"],
         preview=_preview_websearch,
+        summarize=make_summarize_from_preview(_preview_websearch),
+        metadata={"permission_arg": "query"},
     )
     registry.register(
         "webfetch", _WEBFETCH_SCHEMA, impl=_webfetch_impl,
@@ -214,4 +218,6 @@ def register(registry):
         group=GROUP_NETWORK, description="获取网页内容",
         aliases=["WebFetch", "Fetch", "FetchPage", "FetchUrl"],
         preview=_preview_webfetch,
+        summarize=make_summarize_from_preview(_preview_webfetch),
+        metadata={"permission_arg": "url"},
     )

@@ -36,8 +36,21 @@ from app.utils.file_operation_recorder import (
 class ToolExecutor:
     """工具执行器 - 统一调度各种工具"""
 
-    # 需要记录的文件操作
-    _FILE_OPS_TO_TRACK = {"write", "edit", "multi_edit"}
+    # 文件写入分组（registry 驱动）：自动 LSP 诊断与备份跟踪的判定依据
+    _WRITE_GROUP = "文件写入"
+
+    @staticmethod
+    def _is_write_group(tool_name: str) -> bool:
+        """工具是否属于文件写入分组（registry 驱动，不写死工具名）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                return reg.group == ToolExecutor._WRITE_GROUP
+        except Exception:
+            pass
+        return tool_name in ("write", "edit", "multi_edit")  # registry 未初始化时兜底
 
     # 注意：BuiltinTools 不再跨窗口共享，每个窗口拥有独立实例
     # 确保工作目录（workdir）完全隔离，多窗口互不影响
@@ -222,7 +235,7 @@ class ToolExecutor:
         Returns:
             str: 文件完整路径，用于后续的编辑后备份
         """
-        if tool_name not in self._FILE_OPS_TO_TRACK:
+        if not self._is_write_group(tool_name):
             return None
 
         # 使用传入的值或回退到实例变量
@@ -288,7 +301,7 @@ class ToolExecutor:
         if not file_path_before:
             return
 
-        if tool_name not in self._FILE_OPS_TO_TRACK:
+        if not self._is_write_group(tool_name):
             return
 
         sid = session_id or self._session_id
@@ -932,13 +945,13 @@ class ToolExecutor:
                         result.success = False
                         result.content = (result.content or "") + "\n[警告: UI 在执行过程中已关闭]"
                 # 文件操作成功后备份编辑后的文件（用于差异对比）
-                if tool_name in self._FILE_OPS_TO_TRACK and result and result.success:
+                if self._is_write_group(tool_name) and result and result.success:
                     self._record_file_operation_after(
                         tool_name, args, file_path_before, local_session_id, local_call_id
                     )
 
                 # 自动 LSP 诊断：文件编辑成功后，若开启则自动诊断
-                if result and result.success and tool_name in ("write", "edit", "multi_edit"):
+                if result and result.success and self._is_write_group(tool_name):
                     result = self._try_auto_lsp_diagnose(tool_name, args, result)
 
                 # Trigger PostToolUse hook（统一方法，含结果回填）
@@ -947,7 +960,7 @@ class ToolExecutor:
                 return result
             except Exception as e:
                 # 文件编辑操作失败时清理备份
-                if tool_name in self._FILE_OPS_TO_TRACK:
+                if self._is_write_group(tool_name):
                     self._cleanup_backup_on_failure(local_session_id, local_call_id)
                 err_result = ToolResult(False, error=f"Execution error: {str(e)}")
                 self._trigger_post_tool_use(tool_name, args, err_result)
@@ -987,14 +1000,10 @@ class ToolExecutor:
         impl = reg.impl
         bt = self._builtin_tools
         services = {}
-        # 平台能力服务（主程序内部：BuiltinTools 动态转发到 task/team 服务模块），
-        # 通过 tool_ctx 注入给插件 impl 调用——主程序不加载插件内容（方向正确）。
+        # 平台能力服务（主程序内部：精确能力接口注入，不暴露 BuiltinTools 对象）。
+        # 仅注入插件实际使用的能力（lsp/mcp/gitee）；todo 自包含（task_tools 模块级
+        # 状态）、subagent 通过 tool_ctx["sub_agent_manager"] 注入。
         if bt is not None:
-            services["todo"] = bt
-            services["subagent"] = bt
-            services["ask_user"] = getattr(bt, "ask_question", None)
-            services["skills"] = bt
-            services["team"] = bt
             services["lsp"] = getattr(bt, "_lsp_tools", None)
             services["mcp"] = getattr(bt, "_mcp_manager", None)
             services["gitee"] = getattr(bt, "gitee_upload", None)

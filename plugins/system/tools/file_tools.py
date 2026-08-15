@@ -824,6 +824,37 @@ def _make_file_preview(tool_name: str):
     return _preview
 
 
+def _make_file_summarize(tool_name: str):
+    """生成文件工具的压缩摘要闭包（从 history_compactor 迁出）"""
+
+    def _summarize(name, tool_args, tool_content):
+        import re as _re
+
+        args = tool_args or {}
+        content = tool_content or ""
+        content_len = len(content)
+        if name == "read":
+            path = args.get("path", "?")
+            startline = args.get("startline", 1)
+            return f"[{name}] read {path} from line {startline} ({content_len:,} chars)"
+        if name in ("write", "edit", "multi_edit"):
+            path = args.get("path", "?")
+            written_lines = args.get("content", "").count("\n") + 1 if args.get("content") else "?"
+            return f"[{name}] wrote to {path} ({written_lines} lines)"
+        if name == "grep":
+            pattern = args.get("pattern", "?")
+            path = args.get("path", ".")
+            match_count = _re.search(r'"total_count"\s*:\s*(\d+)', content)
+            count = match_count.group(1) if match_count else "?"
+            return f"[{name}] content search for '{pattern}' in {path} -> {count} matches"
+        # glob/list/scan_repo/stage_files：预览 + 长度
+        preview_fn = _make_file_preview(name)
+        label = preview_fn(args) if preview_fn else ""
+        return f"[{name}] {label} ({content_len:,} chars)"
+
+    return _summarize
+
+
 def register(registry):
     registry.register(
         "read", _READ_SCHEMA, impl=_read_impl,
@@ -832,6 +863,8 @@ def register(registry):
         aliases=["Read", "ReadFile", "ReadFiles", "cat"],
         render_mode="inline",
         preview=_make_file_preview("read"),
+        summarize=_make_file_summarize("read"),
+        metadata={"permission_arg": "filePath"},
     )
     registry.register(
         "write", _WRITE_SCHEMA, impl=_write_impl,
@@ -839,6 +872,8 @@ def register(registry):
         group=GROUP_WRITE, description="覆盖/创建文件",
         aliases=["Write", "WriteFile", "CreateFile", "create_file"],
         preview=_make_file_preview("write"),
+        summarize=_make_file_summarize("write"),
+        metadata={"permission_arg": "filePath"},
     )
     registry.register(
         "edit", _EDIT_SCHEMA, impl=_edit_impl,
@@ -847,6 +882,8 @@ def register(registry):
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
         render=_render_edit_diff_body,
         preview=_make_file_preview("edit"),
+        summarize=_make_file_summarize("edit"),
+        metadata={"permission_arg": "filePath"},
     )
     registry.register(
         "multi_edit", _MULTI_EDIT_SCHEMA, impl=_multi_edit_impl,
@@ -855,6 +892,8 @@ def register(registry):
         aliases=["MultiEdit", "MultiEditTool"],
         render=_render_edit_diff_body,
         preview=_make_file_preview("multi_edit"),
+        summarize=_make_file_summarize("multi_edit"),
+        metadata={"permission_arg": "filePath"},
     )
     registry.register(
         "grep", _GREP_SCHEMA, impl=_grep_impl,
@@ -863,6 +902,7 @@ def register(registry):
         aliases=["Grep", "Search", "SearchFiles", "Find"],
         render_mode="inline",
         preview=_make_file_preview("grep"),
+        summarize=_make_file_summarize("grep"),
     )
     registry.register(
         "list", _LIST_SCHEMA, impl=_list_impl,
@@ -871,6 +911,7 @@ def register(registry):
         aliases=["List", "LS", "Ls", "ListDir", "list_directory"],
         render_mode="inline",
         preview=_make_file_preview("list"),
+        summarize=_make_file_summarize("list"),
     )
     registry.register(
         "glob", _GLOB_SCHEMA, impl=_glob_impl,
@@ -879,6 +920,7 @@ def register(registry):
         aliases=["Glob", "LS", "ListFiles", "list_files"],
         render_mode="inline",
         preview=_make_file_preview("glob"),
+        summarize=_make_file_summarize("glob"),
     )
     registry.register(
         "scan_repo", _SCAN_REPO_SCHEMA, impl=_scan_repo_impl,
@@ -887,6 +929,7 @@ def register(registry):
         aliases=["ScanRepo", "scan_repo"],
         render_mode="inline",
         preview=_make_file_preview("scan_repo"),
+        summarize=_make_file_summarize("scan_repo"),
     )
     registry.register(
         "stage_files", _STAGE_FILES_SCHEMA, impl=_stage_files_impl,
@@ -895,4 +938,5 @@ def register(registry):
         aliases=["StageFiles", "stage_files"],
         render_mode="inline",
         preview=_make_file_preview("stage_files"),
+        summarize=_make_file_summarize("stage_files"),
     )

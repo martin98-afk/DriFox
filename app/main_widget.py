@@ -15208,8 +15208,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
-        # question / todowrite / todoread 有自己的 UI 处理，不创建流式块
-        if tool_name in ("question", "todowrite", "todoread"):
+        # 专属 UI 工具（metadata["ui_managed"]）：不创建流式块，由专属 UI 处理
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _ui_managed = ToolRegistry.get_instance().is_ui_managed(tool_name)
+        except Exception:
+            _ui_managed = False
+        if _ui_managed:
             return
 
         # 注入到当前助手卡片的消息内容中（替代独立 ToolFloatingWidget）
@@ -15256,16 +15262,24 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._is_auto_loop_running:
             return
 
-        if tool_name == "question":
-            # question 工具由 chat_worker 的 question_asked 信号 →
-            # _on_question_asked 统一处理（含规范化后的数据）
-            # 这里只需记录 ID，不做显示避免竞态
+        # 交互式工具（metadata["interactive"]=True）：由 chat_worker 的 question_asked
+        # 信号 → _on_question_asked 统一处理（含规范化后的数据）
+        # 这里只需记录 ID，不做显示避免竞态
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _interactive = ToolRegistry.get_instance().is_interactive(tool_name)
+            _ui_managed = ToolRegistry.get_instance().is_ui_managed(tool_name)
+        except Exception:
+            _interactive = False
+            _ui_managed = False
+        if _interactive:
             self._question_tool_call_id = tool_call_id
             self._hide_all_cards_for_question()
             return
 
-        if tool_name in ("todowrite", "todoread"):
-            # 更新数据，但只有在系统卡片未打开时才能显示
+        # 专属 UI 工具：更新数据，但只有在系统卡片未打开时才能显示
+        if _ui_managed:
             if not self._is_system_card_visible:
                 self._card_manager.show_card("todo", self._window_id)
             return
@@ -16100,12 +16114,11 @@ class OpenAIChatToolWindow(ToolWindow):
             content = str(result) if result else ""
 
         # 统一处理工具完成状态
-        if tool_name in ("todowrite", "todoread"):
-            # 工具插件化：待办状态在插件内，UI 从 ToolResult.todos 字段联动（主程序不读插件状态）
-            todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
-            if todos:
-                self._todo_floating_widget.update_todos(todos)
-            if self._is_system_card_visible:
+        # 字段驱动：任何工具结果携带 todos 字段 → 联动待办 UI（插件声明，主程序不写死工具名）
+        todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
+        if todos:
+            self._todo_floating_widget.update_todos(todos)
+        if todos and self._is_system_card_visible:
                 # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
                 pass
         elif tool_name not in ("question",):
@@ -16144,8 +16157,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._scroll_to_bottom()
 
-        # 编辑类工具执行后实时更新差异统计
-        if tool_name in ("write", "edit", "multi_edit"):
+        # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
+        if diff_val:
             self._update_card_diff_stats_for_call(tool_call_id)
 
     def _find_latest_assistant_card(self) -> Optional[MessageCard]:

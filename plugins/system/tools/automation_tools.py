@@ -19,6 +19,7 @@ import mss
 import mss.tools
 
 from app.tools.result import ToolResult
+from app.tools.registry import make_summarize_from_preview
 
 GROUP_DESKTOP = "桌面控制"
 
@@ -381,6 +382,7 @@ def register(registry):
         render_mode="expand",  # 图片直接展示，禁用折叠框
         render=_render_screenshot_body,
         preview=_preview_screenshot,
+        summarize=make_summarize_from_preview(_preview_screenshot),
     )
     registry.register(
         "mouse", _MOUSE_SCHEMA, impl=_mouse_impl,
@@ -388,6 +390,7 @@ def register(registry):
         group=GROUP_DESKTOP, description="鼠标操作",
         aliases=["Mouse"],
         preview=_preview_mouse,
+        summarize=make_summarize_from_preview(_preview_mouse),
     )
     registry.register(
         "keyboard", _KEYBOARD_SCHEMA, impl=_keyboard_impl,
@@ -395,6 +398,7 @@ def register(registry):
         group=GROUP_DESKTOP, description="键盘操作",
         aliases=["Keyboard"],
         preview=_preview_keyboard,
+        summarize=make_summarize_from_preview(_preview_keyboard),
     )
 
 # -*- coding: utf-8 -*-

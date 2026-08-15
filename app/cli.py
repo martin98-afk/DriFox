@@ -565,19 +565,17 @@ def _show_repl_help():
 
 
 def _summarize_args(tool_name: str, arguments: dict) -> str:
-    """简化工具参数显示"""
-    if tool_name in ("read", "write", "edit", "multi_edit"):
-        path = arguments.get("path") or arguments.get("filePath", "")
-        return f" \033[90m{path}\033[0m" if path else ""
-    if tool_name == "bash":
-        cmd = arguments.get("command", "")
-        return f" \033[90m{cmd[:60]}\033[0m" if cmd else ""
-    if tool_name == "grep":
-        p = arguments.get("pattern", "")
-        return f" \033[90m/{p}/\033[0m" if p else ""
-    if tool_name in ("websearch", "webfetch"):
-        q = arguments.get("query") or arguments.get("url", "")
-        return f" \033[90m{q[:60]}\033[0m" if q else ""
+    """简化工具参数显示（复用插件 preview 闭包，不写死工具名）"""
+    try:
+        from app.tools.registry import ToolRegistry
+
+        preview_fn = ToolRegistry.get_instance().get_preview(tool_name)
+        if preview_fn is not None:
+            desc = preview_fn(arguments or {})
+            if desc:
+                return f" \033[90m{desc[:80]}\033[0m"
+    except Exception:
+        pass
     return ""
 
 

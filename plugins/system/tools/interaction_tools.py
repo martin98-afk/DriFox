@@ -13,6 +13,7 @@ import json
 import re
 
 from app.tools.result import ToolResult
+from app.tools.registry import make_summarize_from_preview
 
 GROUP_INTERACTION = "交互与技能"
 GROUP_SYSTEM = "系统与上传"
@@ -376,6 +377,18 @@ def _preview_mcp_list_servers(tool_args: dict) -> str:
     return "列出 MCP 服务器"
 
 
+def _summarize_question(tool_name, tool_args, tool_content):
+    """question 压缩摘要（从 history_compactor 迁出）"""
+    return "[clarify] asked user a question"
+
+
+def _summarize_skill(tool_name, tool_args, tool_content):
+    """skill 压缩摘要（从 history_compactor 迁出）"""
+    name = (tool_args or {}).get("name", "?")
+    content_len = len(tool_content or "")
+    return f"[{tool_name}] name={name} ({content_len:,} chars)"
+
+
 def register(registry):
     registry.register(
         "question", _QUESTION_SCHEMA, impl=_question_impl,
@@ -384,6 +397,8 @@ def register(registry):
         aliases=["Question", "AskUser", "ask_user", "AskUserQuestion"],
         render=_render_question_body,
         preview=_preview_question,
+        summarize=_summarize_question,
+        metadata={"interactive": True, "ui_managed": True},  # UI 弹窗交互，非纯工具执行
     )
     registry.register(
         "skill", _SKILL_SCHEMA, impl=_skill_impl,
@@ -391,6 +406,8 @@ def register(registry):
         group=GROUP_INTERACTION, description="加载指定技能",
         aliases=["Skill"],
         preview=_preview_skill,
+        summarize=_summarize_skill,
+        metadata={"protect": True, "permission_arg": "name"},  # 技能内容完整保留；权限按技能名
     )
     registry.register(
         "list_skills", _LIST_SKILLS_SCHEMA, impl=_list_skills_impl,
@@ -398,6 +415,7 @@ def register(registry):
         group=GROUP_INTERACTION, description="列出可用技能",
         aliases=["ListSkills", "listSkills"],
         preview=_preview_list_skills,
+        summarize=make_summarize_from_preview(_preview_list_skills),
     )
     registry.register(
         "mcp_list_servers", _MCP_LIST_SCHEMA, impl=_mcp_list_impl,
@@ -405,6 +423,7 @@ def register(registry):
         group=GROUP_SYSTEM, description="列出MCP服务器",
         aliases=["McpListServers", "mcp_list_servers"],
         preview=_preview_mcp_list_servers,
+        summarize=make_summarize_from_preview(_preview_mcp_list_servers),
     )
     registry.register(
         "upload_file", _UPLOAD_FILE_SCHEMA, impl=_upload_file_impl,

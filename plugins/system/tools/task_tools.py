@@ -118,6 +118,14 @@ def _preview_todowrite(tool_args: dict) -> str:
     return "更新待办事项" + (f" ({count}项)" if count else "")
 
 
+def _summarize_todo(tool_name, tool_args, tool_content):
+    """待办工具压缩摘要（从 history_compactor 迁出）"""
+    if tool_name == "todowrite":
+        return "[todo] updated task list"
+    content_len = len(tool_content or "")
+    return f"[todoread] read todo list ({content_len:,} chars)"
+
+
 def register(registry):
     registry.register(
         "todowrite", _TODOWRITE_SCHEMA, impl=_todowrite_impl,
@@ -125,6 +133,8 @@ def register(registry):
         group=GROUP_TODO, description="创建/更新待办",
         aliases=["TodoWrite", "todo_write"],
         preview=_preview_todowrite,
+        summarize=_summarize_todo,
+        metadata={"protect": True, "ui_managed": True},  # 待办内容压缩时完整保留；UI 专属处理
     )
     registry.register(
         "todoread", _TODOREAD_SCHEMA, impl=_todoread_impl,
@@ -133,4 +143,6 @@ def register(registry):
         aliases=["TodoRead", "todo_read"],
         render_mode="inline",
         preview=_preview_todoread,
+        metadata={"ui_managed": True},
+        summarize=_summarize_todo,
     )

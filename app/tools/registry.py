@@ -55,6 +55,7 @@ class ToolRegistration:
     render: Optional[Callable] = None  # 工具完成框 body 渲染闭包：render(result, tool_name, tool_args, success) -> str|None
     render_mode: str = ""  # 完成框渲染模式：""=默认折叠卡 / "inline"=紧凑单行(无body) / "expand"=完整卡无折叠(body始终展开) / "none"=不渲染完成框
     preview: Optional[Callable] = None  # 自然语言预览闭包：preview(tool_args) -> str（用于 inline 卡/折叠头参数预览）
+    summarize: Optional[Callable] = None  # 结果压缩摘要闭包：summarize(tool_name, tool_args: dict, tool_content: str) -> str（历史压缩用）
     aliases: List[str] = field(default_factory=list)  # Claude Code 风格别名
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -72,6 +73,17 @@ class ToolRegistration:
     @property
     def display_cn_name(self) -> str:
         return self.cn_name or self.name
+
+
+def make_summarize_from_preview(preview_fn):
+    """通用压缩摘要工厂：复用 preview 闭包生成「[工具名] 预览 (N chars)」"""
+
+    def _summarize(tool_name, tool_args, tool_content):
+        label = preview_fn(tool_args or {}) if preview_fn else ""
+        content_len = len(tool_content or "")
+        return f"[{tool_name}] {label} ({content_len:,} chars)"
+
+    return _summarize
 
 
 class ToolRegistry:
@@ -123,6 +135,7 @@ class ToolRegistry:
         render: Optional[Callable] = None,
         render_mode: str = "",
         preview: Optional[Callable] = None,
+        summarize: Optional[Callable] = None,
         metadata: Optional[Dict[str, Any]] = None,
         trusted: bool = False,
     ) -> bool:
@@ -163,6 +176,7 @@ class ToolRegistry:
             render=render,
             render_mode=render_mode,
             preview=preview,
+            summarize=summarize,
             aliases=list(aliases or []),
             metadata=dict(metadata or {}),
         )
@@ -290,6 +304,26 @@ class ToolRegistry:
         """获取工具自然语言预览闭包（未注册返回 None，渲染层回退 key=value 格式）"""
         reg = self.get(name)
         return reg.preview if reg is not None else None
+
+    def get_summarize(self, name: str):
+        """获取工具结果压缩摘要闭包（未注册返回 None，压缩器回退通用摘要）"""
+        reg = self.get(name)
+        return reg.summarize if reg is not None else None
+
+    def is_protected(self, name: str) -> bool:
+        """工具内容是否需完整保留（压缩时跳过裁剪，metadata["protect"]=True）"""
+        reg = self.get(name)
+        return bool(reg and reg.metadata and reg.metadata.get("protect"))
+
+    def is_interactive(self, name: str) -> bool:
+        """是否为交互式工具（UI 弹窗/人工介入，metadata["interactive"]=True）"""
+        reg = self.get(name)
+        return bool(reg and reg.metadata and reg.metadata.get("interactive"))
+
+    def is_ui_managed(self, name: str) -> bool:
+        """是否为专属 UI 工具（不创建通用流式块，由专属 UI 处理，metadata["ui_managed"]=True）"""
+        reg = self.get(name)
+        return bool(reg and reg.metadata and reg.metadata.get("ui_managed"))
 
     def team_only_tools(self) -> List[str]:
         """全部团队专用工具名（供 schema 过滤）"""

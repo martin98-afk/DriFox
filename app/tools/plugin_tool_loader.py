@@ -130,6 +130,7 @@ class _PluginRegistryProxy:
             render=meta.get("render"),
             render_mode=meta.get("render_mode", ""),
             preview=meta.get("preview"),
+            summarize=meta.get("summarize"),
             source=f"plugin:{self._plugin_name}",
             metadata=metadata,
         )

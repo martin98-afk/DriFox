@@ -39,10 +39,9 @@ class FileOperationRecorder:
     在文件操作前备份，记录操作信息，支持撤销回滚
     """
 
-    # 支持记录的文件操作类型
-    TRACKED_OPERATIONS = {
-        "write", "edit", "multi_edit" # tool_executor 中的名称
-    }
+    # 支持记录的文件操作类型：注册表"文件写入"分组（write/edit/multi_edit，插件声明）
+    # 主程序不写死工具名——新写工具注册到该 group 即自动纳入备份跟踪。
+    TRACKED_OPERATION_GROUP = "文件写入"
 
     def __init__(self, session_store: Optional[SessionStore] = None):
         self._session_store = session_store or SessionStore.get_instance()
@@ -50,8 +49,16 @@ class FileOperationRecorder:
         self._backup_base_dir = get_app_data_dir() / "backups"
 
     def is_tracked_operation(self, tool_name: str) -> bool:
-        """判断是否为需要记录的操作"""
-        return tool_name in self.TRACKED_OPERATIONS
+        """判断是否为需要记录的操作（registry 分组驱动）"""
+        try:
+            from app.tools.registry import ToolRegistry
+
+            reg = ToolRegistry.get_instance().get(tool_name)
+            if reg is not None:
+                return reg.group == self.TRACKED_OPERATION_GROUP
+        except Exception:
+            pass
+        return False
 
     # 编辑后备份文件的后缀
     AFTER_BACKUP_SUFFIX = ".after.bak"

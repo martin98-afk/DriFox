@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 import orjson as json
 
 from app.tools.result import ToolResult
+from app.tools.registry import make_summarize_from_preview
 
 # pyright Python 模块可用性检测
 try:
@@ -362,12 +363,14 @@ def register(registry):
         group=GROUP_DIAG, description="获取代码诊断信息",
         render_mode="inline",
         preview=_preview_get_diagnostics,
+        summarize=make_summarize_from_preview(_preview_get_diagnostics),
     )
     registry.register(
         "lsp", _LSP_SCHEMA, impl=_lsp_impl,
         danger="safe", icon="工具", cn_name="LSP",
         group=GROUP_DIAG, description="LSP代码智能操作",
         preview=_preview_lsp,
+        summarize=make_summarize_from_preview(_preview_lsp),
         metadata={
             "operation_icons": {
                 "diagnostics": "工具",

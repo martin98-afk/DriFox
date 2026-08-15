@@ -1170,8 +1170,14 @@ class SubAgentExecutor(QThread):
 
             tool_call_id = tc["id"]
 
-            if tool_name == "question":
-                # 子智能体不需要 question 工具
+            # 交互式工具（UI 弹窗，metadata["interactive"]=True）：子智能体不执行
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _interactive = ToolRegistry.get_instance().is_interactive(tool_name)
+            except Exception:
+                _interactive = False
+            if _interactive:
                 return None, []
 
             # ★ T24 方案 B：UI 工具权限检查（执行前）

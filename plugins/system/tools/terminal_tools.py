@@ -1087,6 +1087,32 @@ def _make_bg_preview(tool_name: str):
     return _preview
 
 
+def _summarize_bash(tool_name, tool_args, tool_content):
+    """bash 压缩摘要：命令 + exit code + 输出行数（从 history_compactor 迁出）"""
+    import re as _re
+
+    args = tool_args or {}
+    content = tool_content or ""
+    cmd = args.get("command", "")
+    if len(cmd) > 80:
+        cmd = cmd[:77] + "..."
+    exit_match = _re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
+    exit_code = exit_match.group(1) if exit_match else "?"
+    line_count = content.count("\n") + 1 if content.strip() else 0
+    return f"[{tool_name}] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+
+
+def _make_bg_summarize(preview_fn):
+    """bg_* 通用压缩摘要：预览 + 内容长度"""
+
+    def _summarize(tool_name, tool_args, tool_content):
+        label = preview_fn(tool_args or {}) if preview_fn else ""
+        content_len = len(tool_content or "")
+        return f"[{tool_name}] {label} ({content_len:,} chars)"
+
+    return _summarize
+
+
 def register(registry):
     registry.register(
         "bash", _BASH_SCHEMA, impl=_bash_impl,
@@ -1095,6 +1121,8 @@ def register(registry):
         aliases=["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
         render=_render_bash_body,
         preview=_preview_bash,
+        summarize=_summarize_bash,
+        metadata={"permission_arg": "command"},
     )
     registry.register(
         "bg_start", _BG_START_SCHEMA, impl=_bg_start_impl,
@@ -1103,6 +1131,7 @@ def register(registry):
         aliases=["BgStart", "bg_start"],
         render=_render_bg_body,
         preview=_make_bg_preview("bg_start"),
+        summarize=_make_bg_summarize(_make_bg_preview("bg_start")),
     )
     registry.register(
         "bg_stop", _BG_STOP_SCHEMA, impl=_bg_stop_impl,
@@ -1111,6 +1140,7 @@ def register(registry):
         aliases=["BgStop", "bg_stop"],
         render=_render_bg_body,
         preview=_make_bg_preview("bg_stop"),
+        summarize=_make_bg_summarize(_make_bg_preview("bg_stop")),
     )
     registry.register(
         "bg_logs", _BG_LOGS_SCHEMA, impl=_bg_logs_impl,
@@ -1119,6 +1149,7 @@ def register(registry):
         aliases=["BgLogs", "bg_logs"],
         render=_render_bg_body,
         preview=_make_bg_preview("bg_logs"),
+        summarize=_make_bg_summarize(_make_bg_preview("bg_logs")),
     )
     registry.register(
         "bg_list", _BG_LIST_SCHEMA, impl=_bg_list_impl,
@@ -1126,4 +1157,5 @@ def register(registry):
         group=GROUP_TERMINAL, description="列出后台任务状态",
         aliases=["BgList", "bg_list"],
         preview=_make_bg_preview("bg_list"),
+        summarize=_make_bg_summarize(_make_bg_preview("bg_list")),
     )

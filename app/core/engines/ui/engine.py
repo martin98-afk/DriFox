@@ -238,29 +238,24 @@ class UIEngine(BaseEngine):
             result = perm_resolver.resolve(tool_name)
             logger.info(f"[_check_tool_permission] agent={self._current_agent}, tool={tool_name}, result={result}")
 
-            if tool_name == "bash":
-                command = arguments.get("command", "")
-                return perm_resolver.resolve(tool_name, command)
-            elif tool_name in ("read", "edit", "multi_edit", "write"):
-                file_path = arguments.get("filePath", "")
-                return perm_resolver.resolve(tool_name, file_path)
-            elif tool_name == "webfetch":
-                url = arguments.get("url", "")
-                return perm_resolver.resolve(tool_name, url)
-            elif tool_name == "websearch":
-                query = arguments.get("query", "")
-                return perm_resolver.resolve(tool_name, query)
-            elif tool_name == "subagent_para":
+            # 权限参数提取由工具插件声明（metadata）驱动，主程序不写死工具名：
+            # - permission_arg: 权限检查用哪个参数（bash→command、read→filePath...）
+            # - permission_task: 子智能体分发（resolve_task 按首个 agent 判定）
+            try:
+                from app.tools.registry import ToolRegistry
+
+                _reg_tool = ToolRegistry.get_instance().get(tool_name)
+                _meta = (_reg_tool.metadata or {}) if _reg_tool is not None else {}
+            except Exception:
+                _meta = {}
+            if _meta.get("permission_task"):
                 tasks = arguments.get("tasks", [])
-                if tasks and len(tasks) > 0:
-                    first_agent = tasks[0].get("agent", "")
-                    return perm_resolver.resolve_task(first_agent)
-                return perm_resolver.resolve_task("")
-            elif tool_name == "skill":
-                skill_name = arguments.get("name", "")
-                return perm_resolver.resolve(tool_name, skill_name)
-            else:
-                return perm_resolver.resolve(tool_name)
+                first_agent = tasks[0].get("agent", "") if tasks and len(tasks) > 0 else ""
+                return perm_resolver.resolve_task(first_agent)
+            _arg_name = _meta.get("permission_arg")
+            if _arg_name:
+                return perm_resolver.resolve(tool_name, arguments.get(_arg_name, ""))
+            return perm_resolver.resolve(tool_name)
 
         except Exception as e:
             logger.warning(f"[ChatEngine] Permission check error: {e}")

@@ -13,6 +13,7 @@ import uuid
 import orjson
 
 from app.tools.result import ToolResult
+from app.tools.registry import make_summarize_from_preview
 
 GROUP_SUBAGENT = "子智能体"
 GROUP_TEAM = "团队协作"
@@ -396,7 +397,8 @@ def register(registry):
         group=GROUP_SUBAGENT, description="并行启动子智能体",
         aliases=["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
         preview=_preview_subagent_para,
-        metadata={"subagent_task": True},
+        summarize=make_summarize_from_preview(_preview_subagent_para),
+        metadata={"subagent_task": True, "permission_task": True},
     )
     registry.register(
         "subagent_status", _SUBAGENT_STATUS_SCHEMA, impl=_subagent_status_impl,
@@ -404,6 +406,7 @@ def register(registry):
         group=GROUP_SUBAGENT, description="查询子智能体状态",
         aliases=["subagent-status", "TaskStatus", "Status"],
         preview=_preview_subagent_status,
+        summarize=make_summarize_from_preview(_preview_subagent_status),
     )
     registry.register(
         "subagent_dag", _SUBAGENT_DAG_SCHEMA, impl=_subagent_dag_impl,
@@ -412,6 +415,7 @@ def register(registry):
         aliases=["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
         render=_render_dag_body,
         preview=_preview_subagent_dag,
+        summarize=make_summarize_from_preview(_preview_subagent_dag),
         metadata={"subagent_task": True},
     )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
