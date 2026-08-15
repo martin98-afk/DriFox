@@ -323,14 +323,59 @@ def _lsp_impl(tool_ctx, **kwargs):
     )
 
 
+def _preview_get_diagnostics(tool_args: dict) -> str:
+    from app.widgets.render_helpers import _to_rel_path
+
+    path = _to_rel_path(tool_args.get("path", ""))
+    language = tool_args.get("language", "")
+    desc = f"诊断 {path}" if path else "代码诊断"
+    if language:
+        desc += f" ({language})"
+    return desc
+
+
+def _preview_lsp(tool_args: dict) -> str:
+    from app.widgets.render_helpers import _to_rel_path
+
+    operation = tool_args.get("operation", "")
+    raw = tool_args.get("path", "")
+    path = _to_rel_path(raw) if raw else ""
+    op_labels = {
+        "diagnostics": "诊断",
+        "documentSymbols": "符号列表",
+        "goToDefinition": "跳转定义",
+        "findReferences": "查找引用",
+        "hover": "悬浮文档",
+        "listServers": "服务器列表",
+    }
+    op_label = op_labels.get(operation, operation or "LSP")
+    desc = f"LSP {op_label}"
+    if path:
+        desc += f' "{path}"'
+    return desc
+
+
 def register(registry):
     registry.register(
         "get_diagnostics", _GET_DIAGNOSTICS_SCHEMA, impl=_get_diagnostics_impl,
         danger="safe", icon="工具", cn_name="诊断",
         group=GROUP_DIAG, description="获取代码诊断信息",
+        render_mode="inline",
+        preview=_preview_get_diagnostics,
     )
     registry.register(
         "lsp", _LSP_SCHEMA, impl=_lsp_impl,
         danger="safe", icon="工具", cn_name="LSP",
         group=GROUP_DIAG, description="LSP代码智能操作",
+        preview=_preview_lsp,
+        metadata={
+            "operation_icons": {
+                "diagnostics": "工具",
+                "documentSymbols": "Search",
+                "goToDefinition": "Search",
+                "findReferences": "Search",
+                "hover": "question",
+                "listServers": "folder",
+            },
+        },
     )

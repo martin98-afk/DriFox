@@ -697,6 +697,7 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
     """
     import os
 
+
     from app.widgets.render_helpers import (
         _get_global_font,
         _render_diff_preview,
@@ -733,6 +734,96 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
     </div>"""
 
 
+def _make_file_preview(tool_name: str):
+    """生成文件工具的自然语言预览闭包（绑定工具名，渲染逻辑随插件定义）
+
+    从主程序 render_helpers._format_natural_preview 的文件工具分支迁出。
+    """
+
+    def _preview(tool_args: dict) -> str:
+        from app.widgets.render_helpers import _to_rel_path
+
+        tool_args = tool_args or {}
+        if not tool_args:
+            return ""
+        desc = ""
+        if tool_name == "read":
+            raw = tool_args.get("path") or tool_args.get("file_path") or ""
+            path = _to_rel_path(raw.rstrip("/").rstrip("\\")) if raw else ""
+            if path:
+                desc = f'读取 "{path}"'
+            else:
+                desc = "读取文件"
+            startline = tool_args.get("startline")
+            endline = tool_args.get("endline")
+            if startline is not None and endline is not None:
+                desc += f" (第 {startline}-{endline} 行)"
+            elif startline is not None and startline > 1:
+                desc += f" (从第 {startline} 行)"
+            elif endline is not None:
+                desc += f" (前 {endline} 行)"
+        elif tool_name == "grep":
+            pattern = tool_args.get("pattern", "")
+            path = _to_rel_path(tool_args.get("path", ""))
+            include = tool_args.get("include", "")
+            desc = f'搜索 "{pattern}"'
+            parts = []
+            if path:
+                parts.append(path)
+            if include:
+                parts.append(include)
+            if parts:
+                desc += " (" + ", ".join(parts) + ")"
+        elif tool_name == "glob":
+            pattern = tool_args.get("pattern", "")
+            path = _to_rel_path(tool_args.get("path", ""))
+            desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
+            if path:
+                desc += f" ({path})"
+        elif tool_name == "list":
+            path = _to_rel_path(tool_args.get("path", "."))
+            desc = f"{path}"
+        elif tool_name == "scan_repo":
+            path = _to_rel_path(tool_args.get("path", "."))
+            desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
+            max_depth = tool_args.get("max_depth")
+            if max_depth is not None:
+                desc += f" (深度 {max_depth})"
+        elif tool_name == "stage_files":
+            files = tool_args.get("files", [])
+            if files and isinstance(files, (list, tuple)):
+                names = [_to_rel_path(f) if os.path.isabs(f) else f for f in files[:3]]
+                names = [os.path.basename(n) if "/" in n or "\\" in n else n for n in names]
+                names = [n[:30] for n in names]
+                if len(files) > 3:
+                    desc = "标记 " + ", ".join(names) + f" 等 {len(files)} 个"
+                else:
+                    desc = "标记 " + ", ".join(names)
+            else:
+                desc = "标记文件"
+        elif tool_name == "get_diagnostics":
+            path = _to_rel_path(tool_args.get("path", ""))
+            language = tool_args.get("language", "")
+            desc = f"诊断 {path}" if path else "代码诊断"
+            if language:
+                desc += f" ({language})"
+        elif tool_name in ("write", "edit", "multi_edit"):
+            raw = tool_args.get("path") or tool_args.get("file_path") or ""
+            path = _to_rel_path(raw) if raw else ""
+            fname = path or "文件"
+            if tool_name == "write":
+                desc = f'写入 "{fname}"'
+            elif tool_name == "edit":
+                desc = f'编辑 "{fname}"'
+            else:
+                edits = tool_args.get("edits", [])
+                count = len(edits) if isinstance(edits, list) else 0
+                desc = f'批量编辑 "{fname}"' + (f" ({count}处)" if count else "")
+        return desc
+
+    return _preview
+
+
 def register(registry):
     registry.register(
         "read", _READ_SCHEMA, impl=_read_impl,
@@ -740,12 +831,14 @@ def register(registry):
         group=GROUP_READ, description="读取文件内容",
         aliases=["Read", "ReadFile", "ReadFiles", "cat"],
         render_mode="inline",
+        preview=_make_file_preview("read"),
     )
     registry.register(
         "write", _WRITE_SCHEMA, impl=_write_impl,
         danger="dangerous", icon="编辑", cn_name="写入",
         group=GROUP_WRITE, description="覆盖/创建文件",
         aliases=["Write", "WriteFile", "CreateFile", "create_file"],
+        preview=_make_file_preview("write"),
     )
     registry.register(
         "edit", _EDIT_SCHEMA, impl=_edit_impl,
@@ -753,6 +846,7 @@ def register(registry):
         group=GROUP_WRITE, description="精确文本替换",
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
         render=_render_edit_diff_body,
+        preview=_make_file_preview("edit"),
     )
     registry.register(
         "multi_edit", _MULTI_EDIT_SCHEMA, impl=_multi_edit_impl,
@@ -760,6 +854,7 @@ def register(registry):
         group=GROUP_WRITE, description="批量文件编辑",
         aliases=["MultiEdit", "MultiEditTool"],
         render=_render_edit_diff_body,
+        preview=_make_file_preview("multi_edit"),
     )
     registry.register(
         "grep", _GREP_SCHEMA, impl=_grep_impl,
@@ -767,6 +862,7 @@ def register(registry):
         group=GROUP_READ, description="正则搜索文件内容",
         aliases=["Grep", "Search", "SearchFiles", "Find"],
         render_mode="inline",
+        preview=_make_file_preview("grep"),
     )
     registry.register(
         "list", _LIST_SCHEMA, impl=_list_impl,
@@ -774,6 +870,7 @@ def register(registry):
         group=GROUP_READ, description="列出目录内容",
         aliases=["List", "LS", "Ls", "ListDir", "list_directory"],
         render_mode="inline",
+        preview=_make_file_preview("list"),
     )
     registry.register(
         "glob", _GLOB_SCHEMA, impl=_glob_impl,
@@ -781,6 +878,7 @@ def register(registry):
         group=GROUP_READ, description="通配符查找文件",
         aliases=["Glob", "LS", "ListFiles", "list_files"],
         render_mode="inline",
+        preview=_make_file_preview("glob"),
     )
     registry.register(
         "scan_repo", _SCAN_REPO_SCHEMA, impl=_scan_repo_impl,
@@ -788,6 +886,7 @@ def register(registry):
         group=GROUP_READ, description="扫描仓库生成摘要",
         aliases=["ScanRepo", "scan_repo"],
         render_mode="inline",
+        preview=_make_file_preview("scan_repo"),
     )
     registry.register(
         "stage_files", _STAGE_FILES_SCHEMA, impl=_stage_files_impl,
@@ -795,4 +894,5 @@ def register(registry):
         group=GROUP_READ, description="标记相关文件",
         aliases=["StageFiles", "stage_files"],
         render_mode="inline",
+        preview=_make_file_preview("stage_files"),
     )

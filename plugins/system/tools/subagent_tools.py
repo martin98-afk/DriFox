@@ -361,18 +361,49 @@ def _render_dag_body(result, tool_name, tool_args, success):
         style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>"""
 
 
+def _preview_subagent_para(tool_args: dict) -> str:
+    tasks = tool_args.get("tasks", [])
+    count = len(tasks) if isinstance(tasks, list) else 0
+    if count:
+        agents = set()
+        for t in tasks:
+            if isinstance(t, dict):
+                agents.add(t.get("agent", "?"))
+        agent_names = ", ".join(sorted(agents)) if agents else ""
+        desc = f"分发 {count} 个子任务" + (f" → {agent_names}" if agent_names else "")
+    else:
+        desc = "分发子智能体任务"
+    return desc
+
+
+def _preview_subagent_status(tool_args: dict) -> str:
+    task_ids = tool_args.get("task_ids", [])
+    if isinstance(task_ids, list) and task_ids:
+        return f"查询子智能体状态 ({', '.join(str(t)[:12] for t in task_ids[:3])})"
+    return "查询子智能体状态"
+
+
+def _preview_subagent_dag(tool_args: dict) -> str:
+    nodes = tool_args.get("nodes", [])
+    count = len(nodes) if isinstance(nodes, list) else 0
+    return "DAG 工作流" + (f" ({count}节点)" if count else "")
+
+
 def register(registry):
     registry.register(
         "subagent_para", _SUBAGENT_PARA_SCHEMA, impl=_subagent_para_impl,
         danger="dangerous", icon="设置-subagent", cn_name="分发任务",
         group=GROUP_SUBAGENT, description="并行启动子智能体",
         aliases=["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
+        preview=_preview_subagent_para,
+        metadata={"subagent_task": True},
     )
     registry.register(
         "subagent_status", _SUBAGENT_STATUS_SCHEMA, impl=_subagent_status_impl,
         danger="safe", icon="设置-subagent", cn_name="查询任务状态",
         group=GROUP_SUBAGENT, description="查询子智能体状态",
         aliases=["subagent-status", "TaskStatus", "Status"],
+        preview=_preview_subagent_status,
     )
     registry.register(
         "subagent_dag", _SUBAGENT_DAG_SCHEMA, impl=_subagent_dag_impl,
@@ -380,6 +411,8 @@ def register(registry):
         group=GROUP_SUBAGENT, description="DAG工作流子智能体",
         aliases=["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
         render=_render_dag_body,
+        preview=_preview_subagent_dag,
+        metadata={"subagent_task": True},
     )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
     registry.register(

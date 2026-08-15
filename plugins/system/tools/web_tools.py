@@ -190,16 +190,28 @@ def _webfetch_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=f"Fetch error: {str(e)}")
 
 
+def _preview_websearch(tool_args: dict) -> str:
+    query = tool_args.get("query", "")
+    return f'搜索 "{query}"' if query else "网络搜索"
+
+
+def _preview_webfetch(tool_args: dict) -> str:
+    url = tool_args.get("url", "")
+    return f"获取网页 {url}" if url else "获取网页"
+
+
 def register(registry):
     registry.register(
         "websearch", _WEBSEARCH_SCHEMA, impl=_websearch_impl,
         danger="safe", icon="websearch", cn_name="网页搜索",
         group=GROUP_NETWORK, description="网络关键词搜索",
         aliases=["WebSearch", "web_search", "Search", "SearchWeb"],
+        preview=_preview_websearch,
     )
     registry.register(
         "webfetch", _WEBFETCH_SCHEMA, impl=_webfetch_impl,
         danger="safe", icon="websearch", cn_name="抓取网页",
         group=GROUP_NETWORK, description="获取网页内容",
         aliases=["WebFetch", "Fetch", "FetchPage", "FetchUrl"],
+        preview=_preview_webfetch,
     )

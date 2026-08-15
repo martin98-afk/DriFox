@@ -129,6 +129,7 @@ class _PluginRegistryProxy:
             team_only=meta.get("team_only", False),
             render=meta.get("render"),
             render_mode=meta.get("render_mode", ""),
+            preview=meta.get("preview"),
             source=f"plugin:{self._plugin_name}",
             metadata=metadata,
         )

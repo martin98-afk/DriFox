@@ -1258,7 +1258,9 @@ class SubAgentExecutor(QThread):
         check_name 归一化（mcp__server__tool → tool）；无 controller（API 模式）
         回退 Settings.tool_toggles。
         """
-        if tool_name in ("team_send_message", "team_list_members"):
+        from app.tools.registry import ToolRegistry
+
+        if tool_name in ToolRegistry.get_instance().team_only_tools():
             return "allow"
         check_name = tool_name
         if tool_name.startswith("mcp__"):

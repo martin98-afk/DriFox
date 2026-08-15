@@ -99,16 +99,38 @@ def _todoread_impl(tool_ctx, **kwargs):
     return ToolResult(True, content="\n".join(lines), todos=list(_todo_list))
 
 
+def _preview_todoread(tool_args: dict) -> str:
+    label = "查看待办事项"
+    offset = tool_args.get("offset")
+    limit = tool_args.get("limit")
+    if offset is not None and limit is not None and offset > 1:
+        label += f" (第 {offset}-{offset + limit - 1} 行)"
+    elif offset is not None and offset > 1:
+        label += f" (从第 {offset} 行)"
+    elif limit is not None:
+        label += f" (前 {limit} 行)"
+    return label
+
+
+def _preview_todowrite(tool_args: dict) -> str:
+    todos = tool_args.get("todos", [])
+    count = len(todos) if isinstance(todos, list) else 0
+    return "更新待办事项" + (f" ({count}项)" if count else "")
+
+
 def register(registry):
     registry.register(
         "todowrite", _TODOWRITE_SCHEMA, impl=_todowrite_impl,
         danger="dangerous", icon="todo", cn_name="更新待办",
         group=GROUP_TODO, description="创建/更新待办",
         aliases=["TodoWrite", "todo_write"],
+        preview=_preview_todowrite,
     )
     registry.register(
         "todoread", _TODOREAD_SCHEMA, impl=_todoread_impl,
         danger="safe", icon="todo", cn_name="查看待办",
         group=GROUP_TODO, description="读取待办列表",
         aliases=["TodoRead", "todo_read"],
+        render_mode="inline",
+        preview=_preview_todoread,
     )

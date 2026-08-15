@@ -309,24 +309,92 @@ def _keyboard_impl(tool_ctx, **kwargs):
         return ToolResult(False, error=f"Keyboard error: {str(e)}")
 
 
+def _render_screenshot_body(result, tool_name, tool_args, success):
+    """screenshot 完成框渲染闭包：直接展示截图图片
+
+    从主程序 render_helpers 的截图分支迁出；图片路径从结果提取
+    （兼容 dict 字符串 / 正则），无图片时回退默认渲染。
+    """
+    from app.widgets.render_helpers import _extract_screenshot_image_path, escape
+
+    raw = getattr(result, "content", "") or ""
+    if isinstance(raw, dict):
+        img_path = raw.get("absolute_path") or raw.get("path") or ""
+    else:
+        img_path = _extract_screenshot_image_path(str(raw))
+    if not img_path:
+        return None
+    return f'''
+    <div class="screenshot-preview" style="margin: 0; padding: 0;">
+        <img src="{escape(img_path)}" style="width: 100%; height: auto; display: block; border-radius: 8px;" alt="Screenshot" />
+    </div>'''
+
+
+def _preview_screenshot(tool_args: dict) -> str:
+    region = tool_args.get("region")
+    if region and isinstance(region, (list, tuple)) and len(region) == 4:
+        return f"截取屏幕 ({region[2]}×{region[3]})"
+    return "截取屏幕"
+
+
+def _preview_mouse(tool_args: dict) -> str:
+    action = tool_args.get("action", "")
+    x = tool_args.get("x", "")
+    y = tool_args.get("y", "")
+    action_labels = {
+        "move": "移动",
+        "click": "点击",
+        "double_click": "双击",
+        "right_click": "右键",
+        "scroll": "滚动",
+        "drag": "拖拽",
+        "position": "查询位置",
+    }
+    action_label = action_labels.get(action, action or "操作")
+    if action == "position":
+        return "查询鼠标位置"
+    if x != "" and y != "":
+        return f"鼠标{action_label} ({x}, {y})"
+    return f"鼠标{action_label}"
+
+
+def _preview_keyboard(tool_args: dict) -> str:
+    action = tool_args.get("action", "")
+    if action == "type":
+        text = tool_args.get("text", "")
+        preview = text[:30] + ("…" if len(text) > 30 else "")
+        return f'键盘输入 "{preview}"' if preview else "键盘输入"
+    if action == "press":
+        key = tool_args.get("key", "")
+        return f"按键 {key}" if key else "按键"
+    if action == "hotkey":
+        keys = tool_args.get("keys", "")
+        return f"热键 {keys}" if keys else "热键"
+    return "键盘操作"
+
+
 def register(registry):
     registry.register(
         "screenshot", _SCREENSHOT_SCHEMA, impl=_screenshot_impl,
         danger="safe", icon="裁剪", cn_name="截图",
         group=GROUP_DESKTOP, description="截取屏幕截图",
         render_mode="expand",  # 图片直接展示，禁用折叠框
+        render=_render_screenshot_body,
+        preview=_preview_screenshot,
     )
     registry.register(
         "mouse", _MOUSE_SCHEMA, impl=_mouse_impl,
         danger="dangerous", icon="鼠标", cn_name="鼠标",
         group=GROUP_DESKTOP, description="鼠标操作",
         aliases=["Mouse"],
+        preview=_preview_mouse,
     )
     registry.register(
         "keyboard", _KEYBOARD_SCHEMA, impl=_keyboard_impl,
         danger="dangerous", icon="233键盘-线性", cn_name="键盘",
         group=GROUP_DESKTOP, description="键盘操作",
         aliases=["Keyboard"],
+        preview=_preview_keyboard,
     )
 
 # -*- coding: utf-8 -*-

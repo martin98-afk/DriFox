@@ -468,6 +468,22 @@ class TestSelfContained:
         html = render_tool_block("screenshot", {}, result="已截图", success=True, collapsed=True)
         assert "cm-collapsible" not in html
         assert "tool-block--no-collapse" in html
+        # preview 闭包：插件注册的自然语言预览（不写死主程序）
+        p = reg.get_preview("read")
+        assert p is not None
+        assert p({"path": "x.py", "startline": 5}) == '读取 "x.py" (从第 5 行)'
+        p = reg.get_preview("mouse")
+        assert p is not None
+        assert p({"action": "click", "x": 10, "y": 20}) == "鼠标点击 (10, 20)"
+        p = reg.get_preview("question")
+        assert p is not None
+        assert p({"questions": [{"question": "继续？"}]}) == "继续？"
+        # inline 渲染走 preview 闭包文案（去重：自然语言预览去掉与中文名重复的前缀）
+        html = render_tool_block("todoread", {"limit": 5}, result="todo", success=True)
+        assert "前 5 行" in html
+        # 文本输出无白名单：任意工具成功结果均渲染（闭包路由或通用 pre）
+        html = render_tool_block("websearch", {"query": "x"}, result="搜索结果", success=True)
+        assert "<pre" in html
         # 渲染闭包已注册
         assert reg.get_render("edit") is not None
         assert reg.get_render("bash") is not None

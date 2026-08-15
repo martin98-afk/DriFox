@@ -4123,7 +4123,9 @@ class OpenAIChatWorker(QThread):
         当权限被拒绝时，自动追加错误结果到 results。
         """
         # 团队工具：无条件放行（schema 层已按团队成员身份过滤，执行层不再拦截）
-        if tool_name in ("team_send_message", "team_list_members"):
+        from app.tools.registry import ToolRegistry
+
+        if tool_name in ToolRegistry.get_instance().team_only_tools():
             return True
 
         if not self.permission_check_callback:

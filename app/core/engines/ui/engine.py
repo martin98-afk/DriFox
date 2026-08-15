@@ -181,12 +181,13 @@ class UIEngine(BaseEngine):
     # ========== 权限检查 ==========
 
     def _check_tool_permission(self, tool_name: str, arguments: dict) -> str:
-        # ========== 团队工具无条件放行 ==========
+        # 团队工具无条件放行
         # 团队工具在 schema 层已按 is_in_team 过滤（get_agent_tools_schema），
         # 仅团队成员可见。因此到执行层的工具调用必然来自团队成员，
         # 无需再经过工具开关和 Agent 权限检查，直接放行。
-        _TEAM_TOOLS = {"team_send_message", "team_list_members"}
-        if tool_name in _TEAM_TOOLS:
+        from app.tools.registry import ToolRegistry
+
+        if tool_name in ToolRegistry.get_instance().team_only_tools():
             return "allow"
         # ========== 工具开关过滤（优先于 Agent 权限检查） ==========
         # 前移至此以接入 PermissionStrategy.INTERACTIVE 的 ask/deny 对话框机制。

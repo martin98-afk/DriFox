@@ -54,6 +54,7 @@ class ToolRegistration:
     team_only: bool = False  # 团队专用：仅团队成员可见（非成员从 schema 定义中过滤）
     render: Optional[Callable] = None  # 工具完成框 body 渲染闭包：render(result, tool_name, tool_args, success) -> str|None
     render_mode: str = ""  # 完成框渲染模式：""=默认折叠卡 / "inline"=紧凑单行(无body) / "expand"=完整卡无折叠(body始终展开) / "none"=不渲染完成框
+    preview: Optional[Callable] = None  # 自然语言预览闭包：preview(tool_args) -> str（用于 inline 卡/折叠头参数预览）
     aliases: List[str] = field(default_factory=list)  # Claude Code 风格别名
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -121,6 +122,7 @@ class ToolRegistry:
         team_only: bool = False,
         render: Optional[Callable] = None,
         render_mode: str = "",
+        preview: Optional[Callable] = None,
         metadata: Optional[Dict[str, Any]] = None,
         trusted: bool = False,
     ) -> bool:
@@ -160,6 +162,7 @@ class ToolRegistry:
             team_only=bool(team_only),
             render=render,
             render_mode=render_mode,
+            preview=preview,
             aliases=list(aliases or []),
             metadata=dict(metadata or {}),
         )
@@ -282,6 +285,11 @@ class ToolRegistry:
         """获取工具完成框渲染模式（""=默认折叠卡 / inline=紧凑单行 / expand=无折叠展开 / none=不渲染）"""
         reg = self.get(name)
         return reg.render_mode if reg is not None else ""
+
+    def get_preview(self, name: str):
+        """获取工具自然语言预览闭包（未注册返回 None，渲染层回退 key=value 格式）"""
+        reg = self.get(name)
+        return reg.preview if reg is not None else None
 
     def team_only_tools(self) -> List[str]:
         """全部团队专用工具名（供 schema 过滤）"""

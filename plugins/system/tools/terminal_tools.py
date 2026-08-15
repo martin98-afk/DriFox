@@ -1030,6 +1030,63 @@ def _render_bash_body(result, tool_name, tool_args, success):
     </div>"""
 
 
+def _render_bg_body(result, tool_name, tool_args, success):
+    """bg_start/bg_stop/bg_logs 完成框渲染闭包：终端风格（任务标识头 + 状态体）"""
+    from app.widgets.render_helpers import (
+        _get_global_font,
+        escape,
+        scale_font_size,
+    )
+
+    _gf = _get_global_font()
+    raw = getattr(result, "content", "") or ""
+    tool_args = tool_args or {}
+    if tool_name == "bg_start":
+        cmd = tool_args.get("command", "")
+        header = f"bg_start command={escape(cmd[:120])}" if cmd else "bg_start"
+    elif tool_name == "bg_stop":
+        task_id = tool_args.get("task_id", "")
+        header = f"bg_stop task_id={task_id}" if task_id else "bg_stop"
+    elif tool_name == "bg_logs":
+        task_id = tool_args.get("task_id", "")
+        lines = tool_args.get("lines", 100)
+        header = f"bg_logs task_id={task_id} lines={lines}"
+    else:
+        header = tool_name
+    return f"""
+    <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
+        <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
+            $ <span style="color:#c9d1d9;">{escape(header)}</span>
+        </div>
+        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(raw)}</pre>
+    </div>"""
+
+
+def _preview_bash(tool_args: dict) -> str:
+    cmd = tool_args.get("command", "")
+    return f'执行 "{cmd[:60]}"' if cmd else "执行命令"
+
+
+def _make_bg_preview(tool_name: str):
+    """生成 bg_* 工具的自然语言预览闭包（绑定工具名，避免模块级状态）"""
+
+    def _preview(tool_args: dict) -> str:
+        tool_args = tool_args or {}
+        if tool_name == "bg_start":
+            cmd = tool_args.get("command", "")
+            return f'后台启动 "{cmd[:40]}"' if cmd else "后台启动"
+        if tool_name == "bg_stop":
+            task_id = tool_args.get("task_id", "")
+            return f"停止后台任务 {task_id}" if task_id else "停止后台任务"
+        if tool_name == "bg_logs":
+            task_id = tool_args.get("task_id", "")
+            lines = tool_args.get("lines", 100)
+            return f"后台日志 {task_id} (前 {lines} 行)" if task_id else "后台日志"
+        return "后台任务列表"
+
+    return _preview
+
+
 def register(registry):
     registry.register(
         "bash", _BASH_SCHEMA, impl=_bash_impl,
@@ -1037,28 +1094,36 @@ def register(registry):
         group=GROUP_TERMINAL, description="执行shell命令",
         aliases=["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
         render=_render_bash_body,
+        preview=_preview_bash,
     )
     registry.register(
         "bg_start", _BG_START_SCHEMA, impl=_bg_start_impl,
         danger="dangerous", icon="shell", cn_name="后台启动",
         group=GROUP_TERMINAL, description="启动后台命令",
         aliases=["BgStart", "bg_start"],
+        render=_render_bg_body,
+        preview=_make_bg_preview("bg_start"),
     )
     registry.register(
         "bg_stop", _BG_STOP_SCHEMA, impl=_bg_stop_impl,
         danger="dangerous", icon="shell", cn_name="后台停止",
         group=GROUP_TERMINAL, description="停止后台任务",
         aliases=["BgStop", "bg_stop"],
+        render=_render_bg_body,
+        preview=_make_bg_preview("bg_stop"),
     )
     registry.register(
         "bg_logs", _BG_LOGS_SCHEMA, impl=_bg_logs_impl,
         danger="safe", icon="shell", cn_name="后台日志",
         group=GROUP_TERMINAL, description="查看后台任务日志",
         aliases=["BgLogs", "bg_logs"],
+        render=_render_bg_body,
+        preview=_make_bg_preview("bg_logs"),
     )
     registry.register(
         "bg_list", _BG_LIST_SCHEMA, impl=_bg_list_impl,
         danger="safe", icon="shell", cn_name="后台列表",
         group=GROUP_TERMINAL, description="列出后台任务状态",
         aliases=["BgList", "bg_list"],
+        preview=_make_bg_preview("bg_list"),
     )
