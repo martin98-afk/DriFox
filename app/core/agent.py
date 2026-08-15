@@ -193,8 +193,6 @@ class PermissionResolver:
         "todowrite": "allow",
         "mcp_list_servers": "allow",
         "mcp": "allow",  # MCP 工具前缀匹配
-        "external_directory": "ask",
-        "doom_loop": "ask",
     }
 
     def __init__(
@@ -774,14 +772,17 @@ class AgentManager:
         # 团队专用工具（registry 标记 team_only=True，可扩展）：
         # 非团队成员从 schema 定义中过滤（LLM 看不到），仅团队成员可用。
         from app.tools.registry import ToolRegistry
+        from app.tools.tool_name_mapper import ToolNameMapper
 
+        # D10：统一大小写/别名后比较（registry 原生名与 LLM 传入名可能大小写/别名不同）
         team_only_tools = set(ToolRegistry.get_instance().team_only_tools())
+        team_only_norm = {ToolNameMapper.to_native(n).lower() for n in team_only_tools}
 
         filtered_tools = []
         for tool in all_tools:
-            tool_name = tool["function"]["name"].lower()
+            tool_name = ToolNameMapper.to_native(tool["function"]["name"]).lower()
             # 团队专用工具：仅团队成员可见
-            if tool_name in team_only_tools:
+            if tool_name in team_only_norm:
                 if is_in_team:
                     filtered_tools.append(tool)
                 continue

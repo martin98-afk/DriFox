@@ -3794,9 +3794,18 @@ class OpenAIChatWorker(QThread):
                 self._emit_cancelled_tool_result(tc)
             return []
 
-        # 检查是否有 question 工具（需要用户交互，不能并行）
+        # 检查是否有交互式工具（需要用户交互，不能并行）
+        # T11-3a：registry.is_interactive() 驱动（插件注册 metadata["interactive"] 声明，
+        # 如 question），主程序不写死工具名
+        try:
+            from app.tools.registry import ToolRegistry
+
+            _reg = ToolRegistry.get_instance()
+            _interactive_set = frozenset(n for n in _reg.names() if _reg.is_interactive(n))
+        except Exception:
+            _interactive_set = frozenset()
         for tc in tool_calls:
-            if tc["function"]["name"] == "question":
+            if tc["function"]["name"] in _interactive_set:
                 return self._execute_tools_sequential(tool_calls)
 
         # ⏩ 并行执行

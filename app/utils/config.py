@@ -413,6 +413,7 @@ class Settings(QConfig):
 
     # ========== 插件系统配置 ==========
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
+    disabled_plugins = ConfigItem("Plugin", "DisabledPlugins", [])
 
     # ========== AI搜索引擎API ==========
     TAVILY_API_KEY = ConfigItem(

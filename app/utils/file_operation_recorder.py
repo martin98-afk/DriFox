@@ -279,18 +279,6 @@ class FileOperationRecorder:
                 if not file_path:
                     continue
 
-                # 处理 write_file 和 delete_file
-                if tool_name == "delete_file":
-                    # delete_file 的备份文件实际上是原文件，撤销时恢复
-                    if backup_path and Path(backup_path).exists():
-                        resolved_path = Path(file_path)
-                        resolved_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(backup_path, resolved_path)
-                        Path(backup_path).unlink()
-                        result.success_count += 1
-                        logger.info(f"[FileRecorder] 已恢复删除的文件: {file_path}")
-                    continue
-
                 # 检查备份文件是否存在
                 if not backup_path or not Path(backup_path).exists():
                     logger.warning(f"[FileRecorder] 备份文件不存在: {backup_path}")

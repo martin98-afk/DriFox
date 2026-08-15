@@ -756,3 +756,40 @@ class TestPluginLoadFaultTolerance:
             assert "bad-plugin" not in loaded, "register 失败的插件不应计入 loaded"
         finally:
             cfg.enabled_plugins.value = saved
+
+    def test_partial_register_rolls_back(self, tmp_path):
+        """插件 register 注册 2 个后第 3 个抛异常 → 前 2 个回滚（无半套工具残留）"""
+        from app.tools.plugin_tool_loader import PluginToolWatcher, load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        plugin_dir = tmp_path / "partial-plugin" / "tools"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "partial_tool.py").write_text(
+            "def register(registry):\n"
+            "    registry.register('t_a', {'type': 'function', 'function': {'name': 't_a'}},\n"
+            "                impl=lambda **kw: 'a', danger='safe')\n"
+            "    registry.register('t_b', {'type': 'function', 'function': {'name': 't_b'}},\n"
+            "                impl=lambda **kw: 'b', danger='safe')\n"
+            "    raise RuntimeError('third step boom')\n",
+            encoding="utf-8",
+        )
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        cfg.enabled_plugins.value = saved + ["partial-plugin"]
+        try:
+            reg = ToolRegistry.get_instance()
+            loaded = load_plugin_tools(registry=reg, plugin_roots=[tmp_path])
+            # 前 2 个已注册工具必须回滚（失败插件不留半套工具）
+            assert reg.get("t_a") is None, "t_a 应被回滚注销"
+            assert reg.get("t_b") is None, "t_b 应被回滚注销"
+            assert "partial-plugin" not in loaded
+            # watcher scan_now 重扫后仍无残留（回滚彻底，无幽灵工具）
+            watcher = PluginToolWatcher(registry=reg, roots=[tmp_path])
+            watcher.scan_now()
+            assert reg.get("t_a") is None
+            assert reg.get("t_b") is None
+        finally:
+            cfg.enabled_plugins.value = saved

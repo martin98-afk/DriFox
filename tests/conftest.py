@@ -67,6 +67,20 @@ def _qt_app():
     app.quit()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _settings_guard():
+    """Settings 单例强引用保持（T17：防 Qt 单例 GC 顺序污染）。
+
+    全量 283 项失败 88% 根因是 Settings.ConfigItem 被 Qt GC 销毁
+    （wrapped C/C++ object deleted）。本 fixture 在 session 期始终强引用
+    Settings 实例，避免其被回收导致 ConfigItem 失效。
+    """
+    from app.utils.config import Settings
+
+    s = Settings.get_instance()
+    yield s
+
+
 # ══════════════════════════════════════════════════════════
 # 插件工具测试共享夹具（工具插件化测试用）
 # ══════════════════════════════════════════════════════════

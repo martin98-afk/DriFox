@@ -1320,13 +1320,23 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
 
     content = content.strip()
 
-    # ========== 解析 name ==========
+    # ========== 解析 name（行首匹配保持） ==========
     name_match = _TOOL_NAME_PATTERN.search(content)
+    name_end = name_match.end() if name_match else 0
     if name_match:
         tool_name = name_match.group(1).strip()
 
-    # ========== 解析 args（需要正确处理嵌套 JSON 和数组）==========
-    args_start = content.find("args:")
+    # ========== 字段位置索引（行锚定，取每个字段最后匹配） ==========
+    # diff/success/tool_call_id/echarts 用 finditer 行锚定（^字段:\s*，MULTILINE）
+    # 取最后一个匹配位置：流式接收中字段可能重复出现（如 result 内容内含字段字样），
+    # 只有行首的字段声明才是真正字段；最后一个行首匹配是最终值。
+    _field_positions = {}
+    for _m in re.finditer(r"^(?:success|tool_call_id|diff|echarts):\s*", content, re.MULTILINE):
+        _fname = _m.group(0).rstrip(": \t\n")
+        _field_positions[_fname] = _m.start()
+
+    # ========== 解析 args（定位从 name 之后开始） ===========
+    args_start = content.find("args:", name_end)
     result_search_start = 0  # 默认值
     tool_args_str = ""
 
@@ -1375,30 +1385,45 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
             tool_args_str = line[args_start + 5 :].strip()
             result_search_start = args_start + len(line)
     else:
-        # 没有找到 args:，尝试直接解析整个 JSON 对象
-        brace_start = content.find("{")
+        # 没有找到 args:，尝试直接解析整个 JSON 对象（从 name 之后开始）
+        brace_start = content.find("{", name_end)
         if brace_start >= 0:
             tool_args_str = content[brace_start:]
 
-    # ========== 解析 success ==========
-    success_match = _TOOL_SUCCESS_PATTERN.search(content)
-    if success_match:
-        tool_success = success_match.group(1).strip().lower() == "true"
+    # ========== 解析 success（取最后一个行首匹配） ==========
+    tool_success = True
+    _success_match = None
+    for _sm in _TOOL_SUCCESS_PATTERN.finditer(content):
+        _success_match = _sm
+    if _success_match:
+        tool_success = _success_match.group(1).strip().lower() == "true"
 
-    # ========== 解析 tool_call_id ==========
-    id_match = _TOOL_ID_PATTERN.search(content)
-    if id_match:
-        tool_call_id = id_match.group(1).strip()
+    # ========== 解析 tool_call_id（取最后一个行首匹配） ==========
+    tool_call_id = None
+    _id_match = None
+    for _im in _TOOL_ID_PATTERN.finditer(content):
+        _id_match = _im
+    if _id_match:
+        tool_call_id = _id_match.group(1).strip()
 
-    # ========== 解析 result ==========
-    # 关键：从 result: 之后开始搜索，而不是从 result_search_start
-    result_start = content.find("result:")
+    # ========== 解析 result（定位从 args JSON 闭合之后开始） ==========
+    # result 终点 = 各字段最后匹配位置的最小值（须在 result 之后）；
+    # 全 -1（无后续字段）时取到块尾（保留兜底）。
+    _result_start = content.find("result:", result_search_start)
+    _result_end = len(content)
+    for _fpos in _field_positions.values():
+        if _fpos > _result_start:
+            _result_end = min(_result_end, _fpos)
+    if _result_start >= 0:
+        tool_result = content[_result_start + 7 : _result_end].strip()
+    else:
+        tool_result = ""
 
-    # ========== 解析 diff（可选字段，仅 edit/write 工具有）==========
+    # ========== 解析 diff（可选字段，仅 edit/write 工具有；行锚定取最后一个） ==========
     diff_content = ""
-    diff_start = content.find("\ndiff:")
-    if diff_start != -1:
-        diff_after = content[diff_start + 6 :]  # skip "\ndiff:"
+    _diff_pos = _field_positions.get("diff", -1)
+    if _diff_pos != -1:
+        diff_after = content[_diff_pos + 5 :]  # skip "diff:"
         # diff 内容持续到下一个字段（\nsuccess:）或末尾
         diff_next = _NEXT_FIELD_PATTERN.search(diff_after)
         if diff_next:
@@ -1406,30 +1431,17 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         else:
             diff_content = diff_after.strip()
 
-    # ========== 解析 echarts（可选字段，仅 subagent_dag 有）==========
+    # ========== 解析 echarts（可选字段，仅 subagent_dag 有；行锚定取最后一个） ==========
     echarts_content = ""
-    echarts_start = content.find("\necharts:")
-    if echarts_start != -1:
-        echarts_after = content[echarts_start + 9 :]
+    _echarts_pos = _field_positions.get("echarts", -1)
+    if _echarts_pos != -1:
+        echarts_after = content[_echarts_pos + 8 :]
         # echarts JSON 持续到末尾或下一个字段
         echarts_next = _NEXT_FIELD_PATTERN.search(echarts_after)
         if echarts_next:
             echarts_content = echarts_after[: echarts_next.start()].strip()
         else:
             echarts_content = echarts_after.strip()
-    if result_start >= 0:
-        result_after = content[result_start + 7 :]  # 跳过 "result:"
-        # 找到 result 内容的结束位置（下一个字段之前）
-        next_field = _NEXT_FIELD_PATTERN.search(result_after)
-        if next_field:
-            tool_result = result_after[: next_field.start()].strip()
-        else:
-            tool_result = result_after.strip()
-    else:
-        tool_result = ""
-
-    # 转义 result 中的换行符（参数预览和表格不支持多行显示）
-    tool_result = tool_result.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
 
     # ========== 解析 args JSON 为字典 ==========
     args_dict = {}

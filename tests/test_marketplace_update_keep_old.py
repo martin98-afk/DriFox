@@ -8,6 +8,7 @@
 「旧版备份 → 新版落位 → 删备份」，失败回滚旧版。
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -16,7 +17,16 @@ PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
 
-from ui import installer as inst  # noqa: E402
+# 唯一包名加载 plugin-marketplace/ui：避免与其他插件的 ui 包抢占 sys.modules["ui"]（T8）
+if "pm_ui" not in sys.modules:
+    import types
+
+    _pkg = types.ModuleType("pm_ui")
+    _pkg.__path__ = [str(PLUGIN_MARKETPLACE / "ui")]
+    _pkg.__package__ = "pm_ui"
+    sys.modules["pm_ui"] = _pkg
+
+from pm_ui import installer as inst  # noqa: E402
 
 
 def _make_installer(tmp_path):

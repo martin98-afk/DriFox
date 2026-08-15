@@ -13255,22 +13255,18 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[RESTORE] Failed to persist session: {e}")
 
         # 恢复文件操作（重写 AI 编辑后的文件内容）
+        # （write_file 兼容分支已删：DB 实证 0 记录；fr_op 通用结构保留，
+        #   含 content 的条目即按内容重写）
         file_restore_ops = cache.get("file_restore_ops", [])
         for fr_op in file_restore_ops:
             try:
-                fp = fr_op["file_path"]
-                tn = fr_op["tool_name"]
-                if tn == "write_file":
-                    content = fr_op.get("content", "")
+                fp = fr_op.get("file_path")
+                content = fr_op.get("content", "")
+                if fp and content:
                     Path(fp).parent.mkdir(parents=True, exist_ok=True)
                     with open(fp, "w", encoding="utf-8") as f:
                         f.write(content)
                     logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
-                elif tn == "delete_file":
-                    p = Path(fp)
-                    if p.exists():
-                        p.unlink()
-                    logger.info(f"[RESTORE] 已恢复文件删除: {fp}")
             except Exception as e:
                 logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
 
@@ -13565,31 +13561,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
                     # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
+                    # （write_file 兼容分支已删：DB 实证 0 记录，工具名已为
+                    #   write/edit/multi_edit；file_restore_ops 通用结构保留，
+                    #   供后续按 registry 文件写入组分组的恢复实现复用）
                     file_restore_ops = []
-                    for op in selected_ops:
-                        fp = op.get("file_path")
-                        tn = op.get("tool_name", "")
-                        if tn == "write_file" and fp and Path(fp).exists():
-                            try:
-                                with open(fp, "r", encoding="utf-8") as f:
-                                    content = f.read()
-                                file_restore_ops.append(
-                                    {
-                                        "tool_name": "write_file",
-                                        "file_path": fp,
-                                        "content": content,
-                                    }
-                                )
-                            except Exception as e:
-                                logger.warning(f"[UNDO] 无法读取文件内容用于恢复: {fp} - {e}")
-                        elif tn == "delete_file" and fp:
-                            # delete_file 先记录路径，回滚后文件会被恢复，恢复时重新删除
-                            file_restore_ops.append(
-                                {
-                                    "tool_name": "delete_file",
-                                    "file_path": fp,
-                                }
-                            )
                     self._undo_delete_cache["file_restore_ops"] = file_restore_ops
 
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
@@ -16143,14 +16118,8 @@ class OpenAIChatToolWindow(ToolWindow):
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._todo_floating_widget.update_todos(todos)
-        if todos and self._is_system_card_visible:
-                # 不显示 todo，等系统卡片关闭后由 _restore_after_system_close 统一恢复
-                pass
-        elif tool_name not in ("question",):
-            # 工具结果块由 append_tool_result 内部通过原地转换（In-Place
-            # Transformation）替换流式块，不再需要手动 remove_tool_streaming。
-            # 原地转换保持 DOM 树位置不变，避免删除+新建导致的高度抖动。
-            pass
+        # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
+        #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
         # 提取 diff 字段（ToolResult 对象或 dict 格式）
         diff_val = None

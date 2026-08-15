@@ -235,3 +235,99 @@ class TestFallbackModuleState:
         # 旧 services["todo"] 键已废弃：仅 window_state 生效 → 回退模块级，不崩溃
         r = task._todowrite_impl(tool_ctx=ctx, todos=[{"content": "x", "status": "pending"}])
         assert r.success
+
+
+# ══════════════════════════════════════════════════════════
+# 补充 3（T14 盲区 3）：文件 mtime 状态窗口隔离（D7）
+# 窗口 A read 后 A edit 不被拒；B 的 read 不覆盖 A 的 mtime 记录；
+# 无 services 降级模块级。
+# ══════════════════════════════════════════════════════════
+
+
+def _load_file_tools():
+    mod_name = "_ws_test_file_tools"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _PLUGIN_TOOLS / "file_tools.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestFileMtimeIsolation:
+    """窗口 A/B 独立 mtime 记录：read→edit 校验互不干扰（D7 修复）"""
+
+    @pytest.fixture(autouse=True)
+    def _clean_module_mtimes(self):
+        """清理模块级 mtime 残留（防跨测试污染）"""
+        ft = _load_file_tools()
+        ft._file_mtimes.clear()
+        yield
+        ft._file_mtimes.clear()
+
+    def _make_file(self, tmp_path, name="a.py", content="x = 1\n"):
+        f = tmp_path / name
+        f.write_text(content, encoding="utf-8")
+        return f
+
+    def test_read_then_edit_same_window_ok(self, tmp_path):
+        """窗口 A read 后 A edit 不被拒（mtime 一致）"""
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ex = _new_executor()
+        ctx = {"workdir": str(tmp_path), "session_id": "a", "services": _ws_services(ex)}
+
+        r_read = ft._read_impl(tool_ctx=ctx, path=str(f.name))
+        assert r_read.success
+        r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 1", newString="x = 2")
+        assert r_edit.success, f"A read 后 A edit 应通过，实际: {r_edit.error}"
+
+    def test_other_window_read_does_not_break_edit(self, tmp_path):
+        """B read 同一文件 → A edit 仍不被拒（B 的 mtime 不覆盖 A）"""
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ex_a = _new_executor()
+        ex_b = _new_executor()
+        ctx_a = {"workdir": str(tmp_path), "session_id": "a", "services": _ws_services(ex_a)}
+        ctx_b = {"workdir": str(tmp_path), "session_id": "b", "services": _ws_services(ex_b)}
+
+        # A read → A 容器记录 mtime
+        assert ft._read_impl(tool_ctx=ctx_a, path=str(f.name)).success
+        # B read 同一文件 → B 容器记录（不应覆盖 A 的记录）
+        assert ft._read_impl(tool_ctx=ctx_b, path=str(f.name)).success
+        assert ex_a.window_state_get("file_mtimes") is not None
+        assert ex_b.window_state_get("file_mtimes") is not None
+
+        # A edit 仍通过（A 容器 mtime 未被 B 污染）
+        r_edit = ft._edit_impl(tool_ctx=ctx_a, path=str(f.name), oldString="x = 1", newString="x = 2")
+        assert r_edit.success, f"B 的 read 不应影响 A 的 edit，实际: {r_edit.error}"
+
+    def test_no_services_falls_back_to_module_mtimes(self, tmp_path):
+        """无 services → 降级模块级 _file_mtimes（read→edit 仍通过）"""
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ctx = {"workdir": str(tmp_path), "session_id": "x", "services": {}}
+
+        assert ft._read_impl(tool_ctx=ctx, path=str(f.name)).success
+        # mtime 写入模块级缓存
+        assert ft._file_mtimes.get(str(f.resolve())) is not None
+        r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 1", newString="x = 2")
+        assert r_edit.success
+
+    def test_external_modification_still_detected(self, tmp_path):
+        """外部修改（read 后文件被改）→ edit 仍被拒（隔离不削弱检测）"""
+        import time
+
+        ft = _load_file_tools()
+        f = self._make_file(tmp_path)
+        ex = _new_executor()
+        ctx = {"workdir": str(tmp_path), "session_id": "a", "services": _ws_services(ex)}
+
+        assert ft._read_impl(tool_ctx=ctx, path=str(f.name)).success
+        # 外部修改：改写文件并确保 mtime 变化
+        time.sleep(0.01)
+        f.write_text("x = 999\n", encoding="utf-8")
+        r_edit = ft._edit_impl(tool_ctx=ctx, path=str(f.name), oldString="x = 1", newString="x = 2")
+        assert not r_edit.success
+        assert "modified externally" in r_edit.error

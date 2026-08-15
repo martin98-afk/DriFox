@@ -67,8 +67,36 @@ _TEXT_EXTENSIONS = frozenset(
 
 _BINARY_NULL_LIMIT = 8192
 
-# 模块级 mtime 缓存（外部修改检测）
+# 模块级 mtime 缓存（外部修改检测；无 window_state 时降级使用）
 _file_mtimes: Dict[str, float] = {}
+
+
+def _mtimes_state(tool_ctx=None) -> Dict[str, float]:
+    """获取 mtime 状态字典：有 window_state → 窗口隔离；无 → 模块级降级。
+
+    注意：window_state.get 返回内部引用——共享同一 dict 引用原地修改，
+    勿新建替换（否则隔离失效）。首次取到 None 时创建并 set 一次，
+    后续读写共用同一 dict。
+    """
+    try:
+        ws = (tool_ctx or {}).get("services", {}).get("window_state")
+        if ws is not None:
+            d = ws["get"]("file_mtimes")
+            if d is None:
+                d = {}
+                ws["set"]("file_mtimes", d)
+            return d
+    except Exception:
+        pass
+    return _file_mtimes
+
+
+def _record_mtime(tool_ctx, full_path: Path) -> None:
+    """记录文件 mtime（窗口隔离感知）"""
+    try:
+        _mtimes_state(tool_ctx)[str(full_path)] = full_path.stat().st_mtime
+    except OSError:
+        pass
 
 
 # ========== 内部 helper（自包含） ==========
@@ -94,10 +122,10 @@ def _display_path(workdir: Optional[Path], full_path: Path, original: str) -> st
     return original
 
 
-def _check_modified(workdir: Optional[Path], full_path: Path, original: str) -> Optional[ToolResult]:
+def _check_modified(tool_ctx, workdir: Optional[Path], full_path: Path, original: str) -> Optional[ToolResult]:
     """外部修改检测：read 后文件被外部改动则拒绝编辑"""
     key = str(full_path)
-    recorded = _file_mtimes.get(key)
+    recorded = _mtimes_state(tool_ctx).get(key)
     if recorded is not None:
         try:
             current = full_path.stat().st_mtime
@@ -191,10 +219,10 @@ def _read_impl(tool_ctx, **kwargs):
             img_b64 = base64.b64encode(img_bytes).decode("utf-8")
             size_kb = len(img_bytes) / 1024
             preview = f"[图片: {display} ({size_kb:.1f} KB, {ext.upper()})]"
-            _file_mtimes[str(full_path)] = full_path.stat().st_mtime
+            _record_mtime(tool_ctx, full_path)
             return ToolResult(True, content=preview, image_data={"mime": mime, "data": img_b64})
 
-        _file_mtimes[str(full_path)] = full_path.stat().st_mtime
+        _record_mtime(tool_ctx, full_path)
         start_idx = max(0, startline - 1)
         read_end = endline if endline is not None else start_idx + 500
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -239,7 +267,7 @@ def _write_impl(tool_ctx, **kwargs):
     try:
         full_path = _resolve(workdir, path)
         # 外部修改检测 + 旧内容（diff 计算用）
-        check = _check_modified(workdir, full_path, path)
+        check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
         old_content = ""
@@ -250,7 +278,7 @@ def _write_impl(tool_ctx, **kwargs):
             old_content = ""
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
-        _file_mtimes[str(full_path)] = full_path.stat().st_mtime
+        _record_mtime(tool_ctx, full_path)
         # unified diff（新建/覆盖均生成，与主程序行为一致）
         diff_str = ""
         if old_content or content:
@@ -298,7 +326,7 @@ def _edit_impl(tool_ctx, **kwargs):
         full_path = _resolve(workdir, path)
         if not full_path.exists():
             return ToolResult(False, error=f"File not found: {path}")
-        check = _check_modified(workdir, full_path, path)
+        check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
         old_content = full_path.read_text(encoding="utf-8", errors="replace")
@@ -317,7 +345,7 @@ def _edit_impl(tool_ctx, **kwargs):
             )
         new_content = old_content.replace(old_string, new_string, -1 if replace_all else 1)
         full_path.write_text(new_content, encoding="utf-8")
-        _file_mtimes[str(full_path)] = full_path.stat().st_mtime
+        _record_mtime(tool_ctx, full_path)
         diff_lines = list(
             difflib.unified_diff(
                 old_content.splitlines(), new_content.splitlines(),
@@ -369,7 +397,7 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         full_path = _resolve(workdir, path)
         if not full_path.exists():
             return ToolResult(False, error=f"File not found: {path}")
-        check = _check_modified(workdir, full_path, path)
+        check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
         old_content = full_path.read_text(encoding="utf-8", errors="replace")
@@ -383,7 +411,7 @@ def _multi_edit_impl(tool_ctx, **kwargs):
                 )
             current = current.replace(old_s, new_s, 1)
         full_path.write_text(current, encoding="utf-8")
-        _file_mtimes[str(full_path)] = full_path.stat().st_mtime
+        _record_mtime(tool_ctx, full_path)
         diff_lines = list(
             difflib.unified_diff(
                 old_content.splitlines(), current.splitlines(),

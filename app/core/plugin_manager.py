@@ -182,15 +182,16 @@ class PluginManager:
         self._restore_enabled_from_settings()
 
     def _restore_enabled_from_settings(self):
-        """从 Settings 恢复已启用插件状态，新发现的插件默认启用"""
+        """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
         try:
             from app.utils.config import Settings
 
             cfg = Settings.get_instance()
             saved = cfg.enabled_plugins.value or []
             saved_set = set(saved)
+            disabled_set = set(cfg.disabled_plugins.value or [])
             for name in self._plugins:
-                if name not in saved_set:
+                if name not in saved_set and name not in disabled_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
         except ImportError, Exception:
@@ -394,6 +395,11 @@ class PluginManager:
         if name not in enabled:
             enabled.add(name)
             self._save_enabled_set(enabled)
+            # 对称双写：从禁用集移除（D8：启停持久化）
+            disabled = self._get_disabled_set()
+            if name in disabled:
+                disabled.discard(name)
+                self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
             logger.info(f"[PluginManager] Enabled plugin: {name}")
         # 联动加载 UI 组件
@@ -410,6 +416,10 @@ class PluginManager:
         if name in enabled:
             enabled.discard(name)
             self._save_enabled_set(enabled)
+            # 对称双写：加入禁用集（D8：启停持久化）
+            disabled = self._get_disabled_set()
+            disabled.add(name)
+            self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
             logger.info(f"[PluginManager] Disabled plugin: {name}")
         # 联动卸载 UI 组件
@@ -468,6 +478,26 @@ class PluginManager:
 
             cfg = Settings.get_instance()
             cfg.set(cfg.enabled_plugins, list(enabled), save=True)
+        except ImportError, Exception:
+            pass
+
+    def _get_disabled_set(self) -> set:
+        """从 Settings 读取已禁用的插件名集合（D8：启停持久化）"""
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            return set(cfg.disabled_plugins.value or [])
+        except ImportError, Exception:
+            return set()
+
+    def _save_disabled_set(self, disabled: set):
+        """保存已禁用集合到 Settings（D8：启停持久化）"""
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.disabled_plugins, list(disabled), save=True)
         except ImportError, Exception:
             pass
 

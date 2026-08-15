@@ -246,12 +246,15 @@ class TestEnabledFilter:
         _make_plugin(tmp_path, "w_read", _register_snippet("w_read"))
         cfg = Settings.get_instance()
         saved = list(cfg.enabled_plugins.value or [])
+        saved_disabled = list(cfg.disabled_plugins.value or [])
         try:
-            # 移除测试插件 → 禁用
+            # D8 双写禁用：enabled 移除 + disabled 加入
             cfg.enabled_plugins.value = [p for p in saved if p != _TEST_PLUGIN]
+            cfg.disabled_plugins.value = saved_disabled + [_TEST_PLUGIN]
             reg = ToolRegistry.get_instance()
             watcher = _make_watcher(tmp_path, reg)
             watcher.scan_now()
             assert reg.names() == [], f"禁用插件的工具不应注册，实际: {reg.names()}"
         finally:
             cfg.enabled_plugins.value = saved
+            cfg.disabled_plugins.value = saved_disabled

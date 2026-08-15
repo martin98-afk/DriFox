@@ -203,8 +203,10 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
 
         cfg = Settings.get_instance()
         saved = cfg.enabled_plugins.value or []
-        if not saved:
-            return True  # 从未配置（首次启动）→ 全部启用
+        disabled = cfg.disabled_plugins.value or []
+        # 从未配置 enabled 且从未禁用（真·首次启动）→ 全部启用，对齐 _restore 语义
+        if not saved and not disabled:
+            return True
         return plugin_name in saved
     except Exception as e:
         logger.warning(f"[PluginToolLoader] 插件启用状态检查失败，默认加载 {plugin_name}: {e}")
@@ -224,7 +226,18 @@ def _run_register(
     if not callable(register_fn):
         return set()
     before = set(registry.names())
-    register_fn(_PluginRegistryProxy(registry, plugin_name, root=root, root_tracker=root_tracker))
+    try:
+        register_fn(_PluginRegistryProxy(registry, plugin_name, root=root, root_tracker=root_tracker))
+    except Exception:
+        # 部分成功回滚：异常在第 N 个注册时抛出，此前已注册的工具需逐一注销，
+        # 避免失败插件留下半套工具污染 registry（T12 要求：except 内重算 after）
+        after = set(registry.names())
+        for name in after - before:
+            reg = registry.get(name)
+            if reg is not None and reg.source == f"plugin:{plugin_name}":
+                registry.unregister(name)
+                logger.warning(f"[PluginToolLoader] 回滚部分注册工具: {name} ({plugin_name})")
+        raise  # 保持 load_plugin_tools 既有 warning 语义（loaded 不含该插件）
     after = set(registry.names())
     new_tools = after - before
     if new_tools:

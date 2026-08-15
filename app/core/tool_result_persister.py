@@ -46,7 +46,6 @@ SKIP_TOOLS = frozenset(
         "list_skills",  # 技能列表
         "mcp_list_servers",  # MCP 服务器列表
         "skill",  # 技能加载结果
-        "read_persisted_output",  # 已经恢复过的内容
     }
 )
 
@@ -265,8 +264,8 @@ class ToolResultPersister:
         - JSON 内容: prettify 为带缩进的多行格式
         - 非 JSON 超长单行: 在合理宽度强制换行, 防止 LLM 无法定位行尾
 
-        核心目的: 避免单行超长内容写入磁盘后, LLM 通过 read_persisted_output
-        读取时拿到单行巨文无法解析, 导致"读取→超长结果→再次固化"的死循环。
+        核心目的: 避免单行超长内容写入磁盘后, 读取时拿到单行巨文无法解析,
+        导致"读取→超长结果→再次固化"的死循环。
         """
         stripped = content.strip()
         # 1) JSON 内容 -> prettify
@@ -404,8 +403,8 @@ class ToolResultPersister:
                 f"{json_preview}\n"
                 f"</persisted-output>\n"
                 f"\n"
-                f"If you need to see the full content, use the "
-                f"`read_persisted_output` tool with the file path above."
+                f"The full content was truncated due to size limits. "
+                f"Use the file path above to read it if needed."
             )
         else:
             # 非 JSON: 原始字节截断
@@ -421,8 +420,8 @@ class ToolResultPersister:
                 f"...\n"
                 f"</persisted-output>\n"
                 f"\n"
-                f"If you need to see the full content, use the "
-                f"`read_persisted_output` tool with the file path above."
+                f"The full content was truncated due to size limits. "
+                f"Use the file path above to read it if needed."
             )
 
         return block

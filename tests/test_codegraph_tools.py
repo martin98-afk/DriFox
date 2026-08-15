@@ -55,6 +55,61 @@ def cg_tools():
 
 
 # =========================================================================
+# 0. 契约测试（不依赖 codegraph-py 安装，P11）
+# =========================================================================
+
+
+class TestCodeGraphContract:
+    """社区插件契约：缺插件/缺依赖时加载器容错（T2 计划 P11）。
+
+    契约语义：codegraph 引擎是社区插件（.drifox/plugins/codegraph-tools），
+    未安装/未同步时主程序必须优雅降级——加载不报错、registry 无 codegraph 工具。
+    安装后由 TestCodeGraphModule（skipif 保护）验证功能。
+    """
+
+    def test_load_without_codegraph_plugin_no_error(self, tmp_path):
+        """临时空插件根（无 codegraph）→ load_plugin_tools 不报错"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        empty_root = tmp_path / "empty-plugins"
+        empty_root.mkdir()
+        loaded = load_plugin_tools(plugin_roots=[empty_root])  # 不应抛异常
+        assert isinstance(loaded, dict)
+        assert "codegraph-tools" not in loaded
+        ToolRegistry.reset_instance()
+
+    def test_no_codegraph_tool_registered_when_missing(self, tmp_path):
+        """缺 codegraph 插件 → registry 无 codegraph_explore（不误注册）"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        empty_root = tmp_path / "empty2"
+        empty_root.mkdir()
+        load_plugin_tools(plugin_roots=[empty_root])
+        reg = ToolRegistry.get_instance()
+        assert reg.get("codegraph_explore") is None
+        assert "codegraph_explore" not in reg.names()
+        ToolRegistry.reset_instance()
+
+    def test_broken_plugin_dir_does_not_kill_loader(self, tmp_path):
+        """损坏的插件目录（无 register 函数）→ 加载器容错跳过，不崩溃"""
+        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        root = tmp_path / "broken-root"
+        (root / "broken-plug" / "tools").mkdir(parents=True)
+        (root / "broken-plug" / "tools" / "x.py").write_text("x = 1\n", encoding="utf-8")
+        # 不抛异常；broken-plug 不在 enabled 白名单被过滤跳过（P0-1），或已启用时无 register 函数返回空集
+        loaded = load_plugin_tools(plugin_roots=[root])
+        assert isinstance(loaded, dict)
+        ToolRegistry.reset_instance()
+
+
+# =========================================================================
 # 1. 模块完整性测试
 # =========================================================================
 

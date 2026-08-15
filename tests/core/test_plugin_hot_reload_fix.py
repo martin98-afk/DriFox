@@ -160,7 +160,12 @@ class TestHotReloadNewPluginFallback:
         assert "single" not in called
 
     def test_new_plugin_sentinel_for_registered_plugin_falls_back(self, tmp_path, monkeypatch):
-        """已注册插件被误判为 __NEW__ → 兜底降级为 _reload_single_plugin"""
+        """已注册插件被误判为 __NEW__ → 仍走 _reload_new_plugin（幂等，组件错重载）
+
+        fc024a43 起 __NEW__ 分支不再 has_plugin 降级为 _reload_single_plugin：
+        watch 线程可能在 emit 前对全新安装的插件做过 rescan 注册（组件尚未加载），
+        降级会全 False 跳过导致组件永不生效；_reload_new_plugin 对已注册插件幂等。
+        """
         backend, pm = self._make_backend_with_registered_plugin(tmp_path, "existing")
         called = {}
 
@@ -175,10 +180,10 @@ class TestHotReloadNewPluginFallback:
         monkeypatch.setattr(backend, "_reload_new_plugin", fake_new_plugin)
         monkeypatch.setattr(backend, "_reload_single_plugin", fake_single_plugin)
 
-        # "existing" 已注册 → 降级为增量重载，不再走全量 __NEW__ 路径
+        # "existing" 已注册但被误判为 __NEW__ → 仍走 _reload_new_plugin（幂等，不降级）
         backend._on_hot_reload_requested(ChatBackend._NEW_PLUGIN_SENTINEL, "existing")
-        assert "new" not in called
-        assert called.get("single") == ("existing", "")
+        assert called.get("new") == "existing"
+        assert "single" not in called
 
     def test_rebuild_prefixes_runs_in_finally(self, tmp_path, monkeypatch):
         """_rebuild_watcher_prefixes 在重载异常时也必然执行（try/finally）"""

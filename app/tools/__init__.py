@@ -139,58 +139,6 @@ class BuiltinTools(QObject):
             },
         )
 
-    def read_persisted_output(self, file_path: str) -> ToolResult:
-        """读取之前被持久化的工具结果完整内容（平台能力，供 read_persisted_output 内部工具调用）
-
-        TODO: 孤儿方法——原 _internal 调用方已删（P0-2），tool_result_persister 提示文本仍引用该工具名。
-        quality-engineer 重写 test_all_builtin_tools.py（registry 驱动）确认不再引用后删除，
-        或迁移为插件工具（经 services["persisted_output"] 注入）。
-        """
-        from pathlib import Path
-
-        from app.utils.utils import get_app_data_dir
-
-        p = Path(file_path)
-        try:
-            allowed_root = (get_app_data_dir() / ".drifox" / "projects").resolve()
-        except Exception:
-            allowed_root = None
-        if allowed_root is not None:
-            try:
-                p.resolve().relative_to(allowed_root)
-            except ValueError:
-                return ToolResult(False, error="路径越权：只允许读取 .drifox/projects/ 下的持久化结果")
-        if not p.exists():
-            return ToolResult(False, error=f"持久化文件不存在: {file_path}")
-        try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-            return ToolResult(True, content=content)
-        except Exception as e:
-            return ToolResult(False, error=f"读取持久化文件失败: {e}")
-
-    def summarize_changes(self, text: str = "", limit: int = 1200) -> ToolResult:
-        """TODO: 孤儿方法——原 _internal 调用方已删（P0-2），全仓无调用方。
-        quality-engineer 重写 test_all_builtin_tools.py 确认不再引用后删除。"""
-        text = (text or "").strip()
-        if not text:
-            return ToolResult(False, error="No text provided for summarization")
-
-        clean_lines = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if clean_lines and clean_lines[-1] == stripped:
-                continue
-            clean_lines.append(stripped)
-
-        summary = "\n".join(clean_lines)
-        if len(summary) > limit:
-            head = summary[: int(limit * 0.75)].rstrip()
-            tail = summary[-int(limit * 0.15) :].lstrip()
-            summary = f"{head}\n\n[... 已省略 {len(summary) - len(head) - len(tail)} 个字符 ...]\n\n{tail}"
-        return ToolResult(True, content=summary)
-
     def set_memory_manager(self, memory_manager):
         self._memory_manager = memory_manager
 
@@ -237,6 +185,7 @@ def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
 _CACHE_RESULT: Optional[List[Dict]] = None
 _CACHE_TIMESTAMP: float = 0.0
 _CACHE_VERSION: int = -1  # 缓存对应的 registry 版本（版本变化即失效）
+_CACHE_AGENT_REF: Optional[object] = None  # 缓存对应的 agent_manager 引用（is 比对，换 agent 实例即失效）
 _CACHE_TTL = 5.0  # 秒
 
 _plugin_tools_loaded = False
@@ -285,7 +234,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         agent_manager: AgentManager 实例，用于动态注入可用子智能体列表
         builtin_tools: BuiltinTools 实例，用于动态注入 MCP 工具 schema
     """
-    global _CACHE_RESULT, _CACHE_TIMESTAMP, _CACHE_VERSION
+    global _CACHE_RESULT, _CACHE_TIMESTAMP, _CACHE_VERSION, _CACHE_AGENT_REF
 
     _ensure_plugin_tools_loaded()
 
@@ -300,6 +249,7 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         _CACHE_RESULT is not None
         and now - _CACHE_TIMESTAMP < _CACHE_TTL
         and _CACHE_VERSION == current_version
+        and _CACHE_AGENT_REF is agent_manager  # 引用比对：agent 实例更换即失效（多窗口隔离）
     ):
         return copy.deepcopy(_CACHE_RESULT)
 
@@ -363,5 +313,6 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     _CACHE_RESULT = schemas
     _CACHE_TIMESTAMP = now
     _CACHE_VERSION = current_version
+    _CACHE_AGENT_REF = agent_manager
 
-    return schemas
+    return copy.deepcopy(schemas)
