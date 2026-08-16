@@ -411,8 +411,10 @@ class PluginManager:
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
 
         系统插件保护：manifest type == "system" 的插件（如 plugin-marketplace、
-        system、system-cleaner，目录随主程序分发）拒绝禁用——禁用配置会导致
+        system，目录随主程序分发）拒绝禁用——禁用配置会导致
         资源加载链路不一致且用户无法恢复。
+        system-cleaner 等内置非 system 插件（manifest type=user）允许通过
+        Settings.disabled_plugins 禁用，与 installer 的 _set_managed_enabled 判定对齐。
 
         注意判定依据是 manifest type 而非 PluginInfo.is_system（plugin_type）：
         项目根 plugins/ 下所有插件在扫描时 plugin_type 均为 "system"（目录位置
