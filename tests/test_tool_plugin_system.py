@@ -704,15 +704,23 @@ class TestPermissionLinkage:
         pc = ToolPermissionController()
         card = ToolControlCardContent(controller=pc)
         card.show_content()  # 首次构建
+        card.show()  # 模拟卡片可见（隐藏时变更延迟到下次显示，重建只在可见时发生）
         assert card._built
+        # 清掉 _bind_registry() 注册时立即回调的伪变更（_queued_built=False 不重建，
+        # 但会残留 pending 排队，影响下方"35 次变更合并为 1 次"的计数断言）
+        qt_app.processEvents()
+        qt_app.processEvents()
+        assert not card._rebuild_pending
 
         rebuild_calls = []
         card._rebuild = lambda: rebuild_calls.append(1)
 
-        # 模拟重扫：35 次 change 事件连续到达
+        # 模拟重扫：35 次 change 事件连续到达（version 同步真实递增，
+        # 与 ToolControlCardContent._do_rebuild 的 version 稳定性合并对齐）
         base = reg.version()
         for i in range(35):
             card._on_registry_changed(base + i + 1)
+            reg._version += 1  # 同步真实 version（watcher 重扫每次 change 都真实递增）
         assert card._rebuild_pending  # 同批变更已合并，仅排队一次
 
         qt_app.processEvents()
@@ -746,6 +754,7 @@ class TestPermissionLinkage:
         pc = ToolPermissionController()
         card = ToolControlCardContent(controller=pc)
         card.show_content()  # 首次构建
+        card.show()  # 模拟卡片可见（隐藏时变更延迟到下次显示，重建只在可见时发生）
         before = len(card._toggle_widgets)
         assert before > 0
 

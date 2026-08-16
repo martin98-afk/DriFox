@@ -8,8 +8,11 @@
 - "↺ 恢复"按钮调用 controller.restore_user()
 """
 
+import time as _time
+
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -46,6 +49,29 @@ _SOURCE_TAG_COLORS = {
 }
 
 
+# [PROBE] 幽灵窗口排查探针（定位后移除）：记录当前可见的顶层窗口快照。
+# 幽灵窗口「空白/半透明小窗口一闪即逝」若来自卡片重建期间弹出的独立窗口
+# （ComboBox 下拉菜单 RoundMenu / ToolTip / MaskDialog），此快照可捕获其类型。
+def _probe_visible_top_windows(tag: str):
+    from loguru import logger
+
+    try:
+        wins = []
+        for w in QApplication.topLevelWidgets():
+            if not w.isVisible():
+                continue
+            cls = type(w).__name__
+            title = ""
+            try:
+                title = w.windowTitle()[:24]
+            except Exception:
+                pass
+            wins.append(f"{cls}({title})" if title else cls)
+        logger.info(f"[ToolCard][probe] {tag}: top_windows={wins}")
+    except Exception as e:
+        logger.warning(f"[ToolCard][probe] {tag} failed: {e}")
+
+
 def _format_source_label(source: str, plugin_root_kind: str = "") -> tuple:
     """生成来源标签 (color, text)。
 
@@ -71,6 +97,9 @@ class ToolControlCardContent(QWidget):
     togglesChanged = pyqtSignal(dict)
     _registryChanged = pyqtSignal(int)  # registry 变更桥接（可能来自后台 watcher 线程）
 
+    # version 稳定性重排上限：registry 持续变更（异常场景）时最多重排 50 轮后强制重建
+    _REBUILD_RETRY_MAX = 50
+
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
         self._controller = controller  # ToolPermissionController
@@ -81,6 +110,11 @@ class ToolControlCardContent(QWidget):
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
         self._rebuild_pending = False  # 合并同批 registry 变更,避免逐个排队全量重建
         self._queued_built = False  # 排队时刻的 _built 快照(重建与否据此判定)
+        self._queued_version = -1  # 排队时刻的 registry version（稳定性合并依据）
+        self._rebuild_reschedule = 0  # version 未稳定重排次数（防饿死上限）
+        self._needs_rebuild = False  # 隐藏期间收到 registry 变更→延迟到下次显示时重建
+        self._groups_cache = []  # 分组缓存（registry version 变化时失效）
+        self._groups_cache_version = -1
         self._registryChanged.connect(self._on_registry_changed_ui)  # 后台线程变更→主线程刷新
         self._setup_ui()
         self._bind_registry()
@@ -102,13 +136,19 @@ class ToolControlCardContent(QWidget):
         """
         self._registryChanged.emit(version)
 
-    def _on_registry_changed_ui(self, _version):
+    def _on_registry_changed_ui(self, version):
         """主线程槽：去抖合并同批变更，排队一次刷新（重建卡片 + 通知上层计数）。
 
         一次重扫会「逐个注销 + 全量重注册」全部工具，产生几十次
         change 事件（每次 register/unregister 都 notify）。若每次排队
         全量 _rebuild（~180ms/次）会串行刷屏数秒。pending 标记合并
         同批变更 → 只刷新一次；刷新期间新变更会再触发一次，不丢。
+
+        ★ 性能修复（2026-08-16）：记录排队时的 registry version，
+        _do_rebuild 执行时若 version 又变（重扫仍在进行），继续重排等
+        稳定——把「一次重扫多次重建」严格收敛为「一次」。日志实证：打开
+        卡片后一次后台重扫可触发第二次全量 rebuild（间隔 ~300ms 两次
+        ~200ms 重建 = 明显卡顿）。
 
         无论卡片是否已构建（_built）都要通知上层——主窗口工具栏按钮
         的计数动态读 registry，热重载后必须刷新；否则只有新建窗口
@@ -117,9 +157,11 @@ class ToolControlCardContent(QWidget):
         if self._rebuild_pending:
             # 已排队但期间卡片完成构建 → 升级为需要重建（否则变更被吞）
             self._queued_built = self._queued_built or self._built
+            self._queued_version = max(self._queued_version, version)
             return
         self._rebuild_pending = True
         self._queued_built = self._built  # 快照排队时刻构建状态
+        self._queued_version = version
         QTimer.singleShot(0, self._do_rebuild)
 
     def _do_rebuild(self):
@@ -127,10 +169,34 @@ class ToolControlCardContent(QWidget):
 
         重建与否取决于排队时刻的 _built 快照：未构建时跳过重建（首次
         show_content 会从 registry 拉最新数据），但始终通知上层刷新计数。
+
+        ★ 性能修复（2026-08-16）：
+        1) registry version 未稳定（重扫仍在进行）→ 重排等稳定，
+           一次重扫只重建一次（上限 _REBUILD_RETRY_MAX，防饿死）；
+        2) 卡片当前不可见（隐藏/未展开/所在 Tab 非活跃）时**不立即全量
+           重建**，仅标记 _needs_rebuild——等下次 show_content 时一次性
+           重建。原逻辑下任何 registry 变更（插件热重载，watchfiles 监控
+           plugins/ 目录每次保存都触发）都会对「显示过但当前隐藏」的卡片
+           执行全量重建（~200ms/张），多 Tab 窗口 × 高频热重载 = 主线程数秒冻结。
         """
         self._rebuild_pending = False
+        if self._queued_version >= 0 and self._queued_version != ToolRegistry.get_instance().version():
+            if self._rebuild_reschedule >= self._REBUILD_RETRY_MAX:
+                # 异常高频变更（持续 50 轮）→ 放弃等待，直接按当前状态重建
+                self._rebuild_reschedule = 0
+            else:
+                self._rebuild_reschedule += 1
+                self._rebuild_pending = True
+                self._queued_built = self._queued_built or self._built
+                self._queued_version = ToolRegistry.get_instance().version()
+                QTimer.singleShot(0, self._do_rebuild)
+                return
+        self._rebuild_reschedule = 0
         if self._queued_built:
-            self._rebuild()
+            if self.isVisible():
+                self._rebuild()
+            else:
+                self._needs_rebuild = True
         # 通知上层刷新计数（main_widget 工具栏按钮：动态读 registry 显示新数量）
         if self._controller:
             self.togglesChanged.emit(self._controller.get_toggles())
@@ -205,6 +271,10 @@ class ToolControlCardContent(QWidget):
         """全量重建内容"""
         from loguru import logger
 
+        t0 = _time.monotonic()
+        # [PROBE] 重建前后顶层窗口快照：捕获重建期间出现的瞬态独立窗口
+        _probe_visible_top_windows("rebuild_start")
+
         self._built = True  # 标记已构建
         while self._layout.count():
             item = self._layout.takeAt(0)
@@ -240,23 +310,34 @@ class ToolControlCardContent(QWidget):
 
         self._layout.addStretch()
 
+        # [PROBE] 重建完成：顶层窗口快照 + 耗时（性能基线）
+        _probe_visible_top_windows("rebuild_end")
+        logger.info(f"[ToolCard] _rebuild done: {(_time.monotonic() - t0) * 1000:.0f} ms, groups={len(groups)}")
+
     def _get_groups(self) -> list:
         """从 registry 动态聚合分组：[(group_name, [tool_name, ...]), ...]
 
         组排序：危险工具占比高/含危险工具的组在前，全安全组在后。
+        ★ 性能：按 registry version 缓存，避免 _apply_toggles（每次状态变化
+        调用）反复执行 group_map + 排序；registry 变更（热重载）时 version
+        递增自动失效。
         """
-        groups = ToolRegistry.get_instance().group_map()
-        ordered = sorted(
-            groups.items(),
-            key=lambda kv: (
-                # 含危险工具 → 排前
-                0 if any(r.danger == DANGER_DANGEROUS for r in kv[1]) else 1,
-                # 组内危险工具数降序
-                -sum(1 for r in kv[1] if r.danger == DANGER_DANGEROUS),
-                kv[0],
-            ),
-        )
-        return [(g, [r.name for r in tools]) for g, tools in ordered]
+        version = ToolRegistry.get_instance().version()
+        if version != self._groups_cache_version:
+            groups = ToolRegistry.get_instance().group_map()
+            ordered = sorted(
+                groups.items(),
+                key=lambda kv: (
+                    # 含危险工具 → 排前
+                    0 if any(r.danger == DANGER_DANGEROUS for r in kv[1]) else 1,
+                    # 组内危险工具数降序
+                    -sum(1 for r in kv[1] if r.danger == DANGER_DANGEROUS),
+                    kv[0],
+                ),
+            )
+            self._groups_cache = [(g, [r.name for r in tools]) for g, tools in ordered]
+            self._groups_cache_version = version
+        return self._groups_cache
 
     def _apply_toggles(self):
         """轻量级更新所有开关状态,不全量重建 widget"""
@@ -277,7 +358,9 @@ class ToolControlCardContent(QWidget):
         policies_map = self._controller.get_active_tool_behavior_map()
         for tool_name, combo in self._policy_combos.items():
             enabled = toggles.get(tool_name, True)
-            combo.setVisible(not enabled)
+            target_hidden = enabled  # 开关开启 → 策略下拉隐藏
+            if combo.isHidden() != target_hidden:
+                combo.setVisible(not enabled)
             policy = policies_map.get(tool_name, self._controller.get_behavior())
             idx = combo.findData(policy)
             if idx >= 0 and idx != combo.currentIndex():
@@ -535,8 +618,18 @@ class ToolControlCardContent(QWidget):
 
         惰性构建:首次显示才全量 _rebuild(),后续走 _apply_toggles 轻量更新。
         避免每次打开卡片都重建 33 个 SwitchButton 导致 ~200ms 卡顿。
+        隐藏期间收到 registry 变更(_needs_rebuild)时,显示时补一次重建。
+
+        ★ 性能修复（2026-08-16）：若此刻已有排队的 registry 变更
+        （_rebuild_pending），取消排队、吸收进本次重建——避免「打开卡片
+        重建一次 → 紧随其后的变更再重建一次」的二次卡顿。
         """
-        if not self._built:
+        if self._rebuild_pending:
+            # 有排队中的 registry 变更：取消，吸收进本次重建（打开后不立刻二次 rebuild）
+            self._rebuild_pending = False
+            self._queued_built = True
+        if not self._built or self._needs_rebuild:
+            self._needs_rebuild = False
             self._rebuild()
         else:
             self._apply_toggles()

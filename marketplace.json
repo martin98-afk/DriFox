@@ -1,0 +1,42 @@
+{
+    "name": "drifox-system",
+    "description": "DriFox 系统插件市场 — 系统内置插件（默认命令、智能体、技能、主题、Hooks、MCP 配置与内置工具）的官方更新源",
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "plugins": [
+        {
+            "name": "system",
+            "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置和内置工具（工具插件化：schema/图标/中文名/危险/分组注册）",
+            "version": "2.0.0",
+            "author": "DriFoxx Team",
+            "license": "MIT",
+            "categories": [
+                "theme",
+                "mcp",
+                "lsp",
+                "agent",
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system",
+                "ref": "master"
+            },
+            "components": {
+                "commands": true,
+                "agents": true,
+                "skills": true,
+                "themes": true,
+                "hooks": true,
+                "mcp": true,
+                "lsp": true,
+                "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        }
+    ]
+}

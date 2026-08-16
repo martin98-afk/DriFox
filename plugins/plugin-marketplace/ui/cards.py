@@ -933,7 +933,7 @@ class _PluginRow(QFrame):
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
-        self._status = status  # "enabled" | "disabled" | "system" | ""（未安装）
+        self._status = status  # "enabled"|"disabled"（用户）|"system"（真系统）|builtin_enabled/builtin_disabled（内置非 system）|""（未安装）
         self._busy = False
         self._font_size = font_size  # 上下文字体大小（用于头像自适应 + 行内字号派生）
         self._ff = font_family  # 上下文字体家族
@@ -1014,22 +1014,26 @@ class _PluginRow(QFrame):
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
     def _status_text(self) -> str:
-        """按安装状态生成状态标签文本"""
-        if self._status == "disabled":
+        """按安装状态生成状态标签文本
+
+        内置非 system 插件（builtin_enabled/builtin_disabled）与用户插件
+        显示同样的启用/禁用文本；真系统插件保留「🔒 系统插件」。
+        """
+        if self._status in ("disabled", "builtin_disabled"):
             return "⛔ 已禁用"
         if self._status == "system":
             return "🔒 系统插件"
-        if self._status == "enabled":
+        if self._status in ("enabled", "builtin_enabled"):
             return "✅ 已启用"
         return ""
 
     def _status_color(self) -> str:
         """状态标签颜色"""
-        if self._status == "disabled":
+        if self._status in ("disabled", "builtin_disabled"):
             return "#FF9800"
         if self._status == "system":
             return "#2196F3"
-        if self._status == "enabled":
+        if self._status in ("enabled", "builtin_enabled"):
             return "#4CAF50"
         return self._tcs
 
@@ -1252,7 +1256,14 @@ class _PluginRow(QFrame):
         return btn
 
     def _update_manage_buttons(self):
-        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）"""
+        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）
+
+        - status=system（真系统插件）：无管理按钮；有更新时更新按钮在主按钮位
+          （_update_btn_text 的 has_update 分支），行内不重复
+        - builtin_enabled/builtin_disabled（内置非 system）：显示禁用/启用，
+          不显示卸载（目录随主程序分发，删除不可恢复）
+        - enabled/disabled（用户插件）：禁用/启用 + 卸载
+        """
         while self._manage_layout.count():
             item = self._manage_layout.takeAt(0)
             if item.widget():
@@ -1261,14 +1272,15 @@ class _PluginRow(QFrame):
         if self._busy or not self._installed:
             return
         if self._status == "system":
-            # 系统插件只读，行内不提供管理操作（详情弹窗同样无）
+            # 真系统插件只读，行内不提供管理操作（详情弹窗同样无）
             return
 
-        if self._status == "disabled":
+        if self._status in ("disabled", "builtin_disabled"):
             self._manage_layout.addWidget(self._make_manage_btn("启用", "#4CAF50", self._on_enable))
         else:
             self._manage_layout.addWidget(self._make_manage_btn("禁用", "#FF9800", self._on_disable))
-        self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
+        if self._status not in ("builtin_enabled", "builtin_disabled"):
+            self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
 
     def _on_enable(self):
         self.enableRequested.emit(self._meta)
@@ -3145,6 +3157,7 @@ class MarketplaceCard(QWidget):
         status_color: str,
         meta: Optional[dict] = None,
         keep_disabled: bool = False,
+        reload_ui: bool = False,
     ):
         """提交后台任务到调度队列（per-plugin 串行 + 全局并发上限）
 
@@ -3165,6 +3178,9 @@ class MarketplaceCard(QWidget):
             status_color: 状态栏文字颜色
             meta: 插件元数据（install/update 时传入，用于失败记录一键重试）
             keep_disabled: 更新前插件处于禁用态 → 完成后保持禁用（不重载 UI）
+            reload_ui: enable 内置插件时置 True → 完成后主线程补加载 UI 组件
+                （PluginManager.enable_plugin 内部 _load_plugin_ui 在 worker 线程
+                执行有 Qt 跨线程风险，与 disable 路径主线程先行卸载对称，后行重载）
         """
         self._task_queue.append(
             {
@@ -3176,6 +3192,7 @@ class MarketplaceCard(QWidget):
                 "status_color": status_color,
                 "meta": meta,
                 "keep_disabled": keep_disabled,
+                "reload_ui": reload_ui,
             }
         )
         # 行立即置 busy（行可能未渲染/已隐藏，忽略）
@@ -3256,8 +3273,7 @@ class MarketplaceCard(QWidget):
         elif kind == "update":
             self._on_update_done(task, success)
         else:
-            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
-            self._on_manage_done(name, action, success)
+            self._on_manage_done(task, success)
         self._try_start_next()
 
     def _on_task_error(self, task: dict, err: str):
@@ -3415,7 +3431,7 @@ class MarketplaceCard(QWidget):
         name = plugin_meta.get("name", "")
         # 立即反馈：该行置为「下载中…」（旧版仍可用，仅按钮禁用）
         self._set_row_downloading(name)
-        was_disabled = (getattr(self, "_status_map", None) or {}).get(name) == "disabled"
+        was_disabled = (getattr(self, "_status_map", None) or {}).get(name) in ("disabled", "builtin_disabled")
         if not was_disabled:
             # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭）；下载成功替换前
             # installer 内还会 purge 模块缓存释放文件句柄
@@ -3535,6 +3551,11 @@ class MarketplaceCard(QWidget):
     def _async_enable(self, plugin_meta: dict):
         """启用已禁用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
+        # 内置插件（builtin_disabled）启用：worker 线程仅写配置；UI 组件加载由
+        # 主线程在完成后补做（reload_ui=True）。PluginManager.enable_plugin 内部
+        # _load_plugin_ui 在 worker 线程执行有 Qt 跨线程风险——与 disable 路径
+        # 主线程先行卸载对称，此处后行重载（_on_manage_done 主线程补加载）。
+        was_builtin = (getattr(self, "_status_map", None) or {}).get(name) == "builtin_disabled"
         self._submit_task(
             kind="enable",
             name=name,
@@ -3542,6 +3563,7 @@ class MarketplaceCard(QWidget):
             busy_text="启用中…",
             status_text="启用中…",
             status_color="#4CAF50",
+            reload_ui=was_builtin,
         )
 
     def _async_disable(self, plugin_meta: dict):
@@ -3603,15 +3625,23 @@ class MarketplaceCard(QWidget):
         )
         return dialog.exec_() == 1
 
-    def _on_manage_done(self, name: str, action: str, success: bool):
+    def _on_manage_done(self, task: dict, success: bool):
         """启用/禁用/卸载完成"""
         if not self._alive():
             return  # 卡片已销毁
+        name = task["name"]
+        kind = task["kind"]
+        action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
         self._status_label.setText("")
         from app.widgets.tab_manager_window import TabManagerWindow
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
+            # 内置插件启用：主线程补加载 UI 组件（对称 _async_disable 主线程先行卸载；
+            # worker 线程 enable_plugin 已注册的元数据被主线程 unload+load 覆盖，
+            # 最终 UI 处于主线程语义）。load_plugin 幂等，重复调用无副作用。
+            if kind == "enable" and task.get("reload_ui"):
+                self._reload_plugin_ui_on_gui(name)
             self._refresh_row_states()
             InfoBar.success(f"{name} {action}成功", "", duration=2000, parent=bar_parent)
         else:

@@ -152,7 +152,7 @@ class PluginInstaller:
         # 已安装插件状态缓存（{name: version|None}），TTL 防频繁磁盘扫描
         self._inst_map_cache: Optional[dict] = None
         self._inst_map_ts: float = 0.0
-        # 插件状态缓存（{name: "enabled"|"disabled"|"system"}）
+        # 插件状态缓存（{name: "enabled"|"disabled"|"system"|"builtin_enabled"|"builtin_disabled"}）
         self._status_map_cache: Optional[dict] = None
         self._status_map_ts: float = 0.0
         # manifest 缓存（{name: manifest dict}，get_installed_map 扫描时填充，
@@ -224,12 +224,14 @@ class PluginInstaller:
         return result
 
     def get_status_map(self, use_cache: bool = True) -> dict:
-        """批量扫描插件状态，返回 {插件名: "enabled"|"disabled"|"system"}
+        """批量扫描插件状态，返回 {插件名: "enabled"|"disabled"|"system"|"builtin_enabled"|"builtin_disabled"}
 
         与 get_installed_map 的扫描范围一致：
         - .drifox/plugins → enabled
         - .drifox/plugins-disabled → disabled
-        - 项目根 plugins/（不重名）→ system
+        - 项目根 plugins/（不重名）→ 按 manifest type 区分：
+          type=system → system（真系统插件）；type!=system → builtin_enabled/
+          builtin_disabled（内置非 system 插件，按 Settings.disabled_plugins 判定）
         """
         now = time.time()
         with self._cache_lock:
@@ -254,10 +256,20 @@ class PluginInstaller:
         # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _system_dir 时跳过）。
         system_dir = getattr(self, "_system_dir", None)
         if system_dir is not None and system_dir.is_dir():
+            disabled_set = self._load_disabled_names()
             try:
                 for entry in os.scandir(system_dir):
-                    if entry.is_dir() and entry.name not in result:
+                    if not entry.is_dir() or entry.name in result:
+                        continue
+                    # 按 manifest type 区分：type=system → 真系统插件（仅更新）；
+                    # 其余（type=user/缺失）→ 内置非 system 插件，可禁用/启用
+                    manifest = self._read_manifest_at(Path(entry.path))
+                    if manifest is not None and manifest.get("type") == "system":
                         result[entry.name] = "system"
+                    else:
+                        result[entry.name] = (
+                            "builtin_disabled" if entry.name in disabled_set else "builtin_enabled"
+                        )
             except OSError:
                 pass
 
@@ -278,6 +290,60 @@ class PluginInstaller:
                 except Exception:
                     return None, None
         return None, None
+
+    @staticmethod
+    def _read_manifest_at(plugin_dir: Path) -> Optional[dict]:
+        """读取插件目录 manifest（.drifox-plugin 优先，其次 .claude-plugin），失败返回 None"""
+        for sub in (".drifox-plugin", ".claude-plugin"):
+            mp = plugin_dir / sub / "plugin.json"
+            if mp.exists():
+                try:
+                    return json.loads(mp.read_text(encoding="utf-8"))
+                except Exception:
+                    return None
+        return None
+
+    @staticmethod
+    def _load_disabled_names() -> set:
+        """从 Settings 读取禁用插件集合（内置插件禁用判定）"""
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            return set(cfg.disabled_plugins.value or [])
+        except Exception:
+            return set()
+
+    def _set_managed_enabled(self, name: str, enabled: bool) -> bool:
+        """通过 PluginManager 启用/禁用内置插件（写 Settings + 联动 UI/工具注册）
+
+        仅内置非 system 插件（项目根 plugins/ 且 manifest type != system）使用：
+        不移动文件（目录随主程序分发），改由 PluginManager.disable_plugin /
+        enable_plugin 写 enabled_plugins/disabled_plugins 配置并联动卸载/加载
+        UI 组件、重扫工具注册。_iter_enabled_plugins 按 enabled 集过滤，
+        禁用后该插件资源自动不加载。
+
+        在后台 worker 线程调用：disable_plugin 内部 _unload_plugin_ui 对
+        UIPluginRegistry 幂等（UI 已由 cards 主线程先行卸载/未加载时直接返回），
+        不触碰 Qt 控件。
+        """
+        try:
+            from app.core.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if pm.get_plugin(name) is None:
+                logger.warning(f"[Installer] PluginManager 中不存在插件，无法{'启用' if enabled else '禁用'}: {name}")
+                return False
+            if enabled:
+                pm.enable_plugin(name)
+            else:
+                pm.disable_plugin(name)
+            self.invalidate_installed_cache()
+            logger.info(f"[Installer] {'Enabled' if enabled else 'Disabled'} builtin plugin {name} (settings)")
+            return True
+        except Exception as e:
+            logger.error(f"[Installer] set managed {'enable' if enabled else 'disable'} {name} failed: {e}")
+            return False
 
     def invalidate_installed_cache(self):
         """使缓存失效（清空后立即在调用线程重填，语义=清后立即重填）
@@ -367,6 +433,13 @@ class PluginInstaller:
         disabled_dir = getattr(self, "_disabled_dir", None)
         if not target.exists() and disabled_dir is not None and (disabled_dir / name).exists():
             target = disabled_dir / name
+        elif not target.exists():
+            # 内置插件（项目根 plugins/<name> 目录存在，含真系统 type=system 与
+            # builtin 非 system type=user/缺失）→ 原地覆盖项目目录，避免双副本。
+            # 更新完成后由 cards 主线程回调 rescan_plugin 热重载（含 UI 组件）。
+            system_dir = getattr(self, "_system_dir", None)
+            if system_dir is not None and (system_dir / name).is_dir():
+                target = system_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
         # 目标目录已存在 → 走 _download_and_move 的备份替换分支；
@@ -738,39 +811,60 @@ class PluginInstaller:
     # ── 启用 / 禁用 ──────────────────────────────────────
 
     def disable(self, name: str) -> bool:
-        """禁用已启用的用户插件（移动到 plugins-disabled 目录）
+        """禁用已启用的插件
 
-        系统插件（项目根 plugins/）不可禁用。
+        - 用户插件（.drifox/plugins/）：移动到 plugins-disabled 目录
+        - 内置非 system 插件（项目根 plugins/ 且 manifest type != system）：
+          通过 PluginManager 写 Settings 禁用（不移动文件，目录随主程序分发）
+        真系统插件（manifest type == system）不可禁用。
         """
         src = self._plugins_dir / name
-        if not src.exists():
-            return False
-        # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
-        self._purge_plugin_module_cache(name)
-        try:
-            self._disabled_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(self._disabled_dir / name))
-            self.invalidate_installed_cache()
-            logger.info(f"[Installer] Disabled plugin {name}")
-            return True
-        except Exception as e:
-            logger.error(f"[Installer] Disable {name} failed: {e}")
-            return False
+        if src.exists():
+            # 用户插件：move 到 plugins-disabled
+            # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
+            self._purge_plugin_module_cache(name)
+            try:
+                self._disabled_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(self._disabled_dir / name))
+                self.invalidate_installed_cache()
+                logger.info(f"[Installer] Disabled plugin {name}")
+                return True
+            except Exception as e:
+                logger.error(f"[Installer] Disable {name} failed: {e}")
+                return False
+        # 内置非 system 插件（项目根 plugins/ 且 type != system）→ 配置禁用
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and (system_dir / name).is_dir():
+            manifest = self._read_manifest_at(system_dir / name)
+            if manifest is None or manifest.get("type") != "system":
+                return self._set_managed_enabled(name, enabled=False)
+        return False
 
     def enable(self, name: str) -> bool:
-        """启用已禁用的插件（从 plugins-disabled 移回 plugins）"""
+        """启用已禁用的插件
+
+        - 用户插件（plugins-disabled/）：移回 plugins/
+        - 内置非 system 插件（项目根 plugins/ 且 type != system）：
+          通过 PluginManager 写 Settings 启用
+        """
         src = self._disabled_dir / name
-        if not src.exists():
-            return False
-        try:
-            self._plugins_dir.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(self._plugins_dir / name))
-            self.invalidate_installed_cache()
-            logger.info(f"[Installer] Enabled plugin {name}")
-            return True
-        except Exception as e:
-            logger.error(f"[Installer] Enable {name} failed: {e}")
-            return False
+        if src.exists():
+            try:
+                self._plugins_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(self._plugins_dir / name))
+                self.invalidate_installed_cache()
+                logger.info(f"[Installer] Enabled plugin {name}")
+                return True
+            except Exception as e:
+                logger.error(f"[Installer] Enable {name} failed: {e}")
+                return False
+        # 内置非 system 插件 → 配置启用
+        system_dir = getattr(self, "_system_dir", None)
+        if system_dir is not None and (system_dir / name).is_dir():
+            manifest = self._read_manifest_at(system_dir / name)
+            if manifest is None or manifest.get("type") != "system":
+                return self._set_managed_enabled(name, enabled=True)
+        return False
 
     # ── 状态查询 ─────────────────────────────────────────
 

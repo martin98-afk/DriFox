@@ -61,7 +61,16 @@ _DEFAULT_SOURCES = [
         },
         "auto_update": True,
         "builtin": True,
-    }
+    },
+    {
+        "name": "drifox-system",
+        "source": {
+            "source": "url",
+            "url": "https://raw.githubusercontent.com/martin98-afk/DriFox/master/marketplace.json",
+        },
+        "auto_update": True,
+        "builtin": True,
+    },
 ]
 
 
@@ -112,13 +121,39 @@ class MarketplaceSourceManager:
             logger.warning(f"[Marketplace] 市场源配置迁移失败: {e}")
 
     def _ensure_defaults(self):
-        """确保默认市场源已写入持久化文件"""
-        if self._sources_file.exists():
+        """确保默认市场源已写入持久化文件
+
+        - 文件不存在：写入全部默认源
+        - 文件已存在：按 name 将缺失的 builtin 默认源追加（去重合并）。
+          存量用户升级后自动补齐新增的 builtin 源（如 drifox-system），
+          保留用户自定义源的顺序与字段，不覆盖任何已有条目。
+        """
+        if not self._sources_file.exists():
+            self._sources_file.write_text(
+                json.dumps(_DEFAULT_SOURCES, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             return
-        self._sources_file.write_text(
-            json.dumps(_DEFAULT_SOURCES, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            existing = json.loads(self._sources_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"[Marketplace] 读取市场源配置失败，跳过默认源合并: {e}")
+            return
+        if not isinstance(existing, list):
+            logger.warning("[Marketplace] 市场源配置格式异常，跳过默认源合并")
+            return
+        existing_names = {s.get("name") for s in existing if isinstance(s, dict)}
+        missing = [d for d in _DEFAULT_SOURCES if d.get("name") not in existing_names]
+        if not missing:
+            return
+        try:
+            self._sources_file.write_text(
+                json.dumps(existing + missing, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(f"[Marketplace] 已追加缺失的默认市场源: {[m.get('name') for m in missing]}")
+        except OSError as e:
+            logger.warning(f"[Marketplace] 写回市场源配置失败: {e}")
 
     # ── 拉取状态 ──
 
