@@ -180,6 +180,24 @@ _hidden_imports = [
     "app.gateway.adapters.discord",
     "app.gateway.adapters.feishu",
     "app.gateway.adapters.extra",
+    # system 插件工具（plugins/system/tools/*.py 运行时加载）引用的 app 内模块
+    "app.tools.task_state",
+    "app.tools.process_job",
+    "app.tools.bg_manager",
+    # system 插件引用的第三方包
+    "html2text",
+    "bs4",
+]
+
+# 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
+# 不打进主程序，运行时靠插件 sys.path 注入加载
+_exclude_modules = [
+    "codegraph",
+    "click",
+    "pynput",
+    "mss",
+    "six",
+    "colorama",
 ]
 
 # 3. 构造参数列表
@@ -192,6 +210,8 @@ params = [
     f"--add-data=plugins{os.pathsep}plugins",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）
     *[f"--hidden-import={m}" for m in _hidden_imports],
+    # 排除插件自包含依赖（由插件 deps/ 目录运行时提供）
+    *[f"--exclude-module={m}" for m in _exclude_modules],
 ]
 
 if icon_arg:

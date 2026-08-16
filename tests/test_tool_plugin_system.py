@@ -4,6 +4,7 @@
 
 运行: python -m pytest tests/test_tool_plugin_system.py -v
 """
+
 import os
 import sys
 import tempfile
@@ -72,31 +73,37 @@ class TestRegistry:
     def test_plugin_without_danger_rejected(self):
         reg = ToolRegistry.get_instance()
         ok = reg.register(
-            "no_danger", {"type": "function", "function": {"name": "no_danger"}},
-            impl=lambda **kw: "x", source="plugin:x",
+            "no_danger",
+            {"type": "function", "function": {"name": "no_danger"}},
+            impl=lambda **kw: "x",
+            source="plugin:x",
         )
         assert not ok
 
     def test_plugin_cannot_forge_builtin(self):
         reg = ToolRegistry.get_instance()
         ok = reg.register(
-            "forge", {"type": "function", "function": {"name": "forge"}},
-            danger="safe", source="builtin",
+            "forge",
+            {"type": "function", "function": {"name": "forge"}},
+            danger="safe",
+            source="builtin",
         )
         assert not ok  # 非 trusted 流程拒绝
 
     def test_trusted_builtin_allowed(self):
         reg = ToolRegistry.get_instance()
         ok = reg.register(
-            "trusted_b", {"type": "function", "function": {"name": "trusted_b"}},
-            danger="safe", source="builtin", trusted=True,
+            "trusted_b",
+            {"type": "function", "function": {"name": "trusted_b"}},
+            danger="safe",
+            source="builtin",
+            trusted=True,
         )
         assert ok
 
     def test_unregister_and_version(self):
         reg = ToolRegistry.get_instance()
-        reg.register("a", {"type": "function", "function": {"name": "a"}},
-                     danger="safe", source="plugin:x")
+        reg.register("a", {"type": "function", "function": {"name": "a"}}, danger="safe", source="plugin:x")
         v1 = reg.version()
         assert reg.unregister("a")
         assert reg.version() == v1 + 1
@@ -104,19 +111,23 @@ class TestRegistry:
 
     def test_group_map_danger_first(self):
         reg = ToolRegistry.get_instance()
-        reg.register("safe1", {"type": "function", "function": {"name": "safe1"}},
-                     danger="safe", group="G", source="plugin:x")
-        reg.register("danger1", {"type": "function", "function": {"name": "danger1"}},
-                     danger="dangerous", group="G", source="plugin:x")
+        reg.register(
+            "safe1", {"type": "function", "function": {"name": "safe1"}}, danger="safe", group="G", source="plugin:x"
+        )
+        reg.register(
+            "danger1",
+            {"type": "function", "function": {"name": "danger1"}},
+            danger="dangerous",
+            group="G",
+            source="plugin:x",
+        )
         groups = reg.group_map()
         assert [r.name for r in groups["G"]] == ["danger1", "safe1"]
 
     def test_display_group_fallback(self):
         reg = ToolRegistry.get_instance()
-        reg.register("s1", {"type": "function", "function": {"name": "s1"}},
-                     danger="safe", source="plugin:x")
-        reg.register("d1", {"type": "function", "function": {"name": "d1"}},
-                     danger="dangerous", source="plugin:x")
+        reg.register("s1", {"type": "function", "function": {"name": "s1"}}, danger="safe", source="plugin:x")
+        reg.register("d1", {"type": "function", "function": {"name": "d1"}}, danger="dangerous", source="plugin:x")
         assert reg.get_group("s1") == "安全操作"
         assert reg.get_group("d1") == "其他"
 
@@ -124,8 +135,7 @@ class TestRegistry:
         reg = ToolRegistry.get_instance()
         versions = []
         reg.on_change(lambda v: versions.append(v))  # 立即回调一次
-        reg.register("b", {"type": "function", "function": {"name": "b"}},
-                     danger="safe", source="plugin:x")
+        reg.register("b", {"type": "function", "function": {"name": "b"}}, danger="safe", source="plugin:x")
         assert len(versions) == 2  # 初始 + 注册
         assert versions[1] == 1
 
@@ -140,13 +150,36 @@ class TestSystemPluginTools:
         # 系统插件固定 30 个工具；codegraph_explore 来自社区插件 codegraph-tools
         # （引擎插件化后迁出系统插件，未安装时不注册），单独按可用性断言。
         expected = {
-            "read", "write", "edit", "multi_edit", "grep", "list", "glob",
-            "scan_repo", "stage_files", "websearch", "webfetch", "bash",
-            "bg_start", "bg_stop", "bg_logs", "bg_list", "todowrite",
-            "todoread", "get_diagnostics",
-            "lsp", "subagent_para", "subagent_status",
-            "subagent_dag", "team_send_message", "team_list_members",
-            "question", "skill", "list_skills", "mcp_list_servers", "upload_file",
+            "read",
+            "write",
+            "edit",
+            "multi_edit",
+            "grep",
+            "list",
+            "glob",
+            "scan_repo",
+            "stage_files",
+            "websearch",
+            "webfetch",
+            "bash",
+            "bg_start",
+            "bg_stop",
+            "bg_logs",
+            "bg_list",
+            "todowrite",
+            "todoread",
+            "get_diagnostics",
+            "lsp",
+            "subagent_para",
+            "subagent_status",
+            "subagent_dag",
+            "team_send_message",
+            "team_list_members",
+            "question",
+            "skill",
+            "list_skills",
+            "mcp_list_servers",
+            "upload_file",
         }
         assert expected <= names, f"缺失: {expected - names}"
         # codegraph_explore：依赖 .drifox/plugins/codegraph-tools/ 社区插件（可能未安装）
@@ -212,8 +245,9 @@ class TestHotPlug:
     def test_plugin_register_and_unload(self, tmp_path):
         reg = ToolRegistry.get_instance()
         root = self._make_temp_plugin(
-            tmp_path, "hello_plug",
-            '''
+            tmp_path,
+            "hello_plug",
+            """
 from app.tools.result import ToolResult
 
 def _impl(**kwargs):
@@ -226,7 +260,7 @@ def register(registry):
         impl=_impl, danger="safe", icon="工具", cn_name="热插拔",
         group="测试", description="热插拔测试",
     )
-''',
+""",
         )
         loaded = load_plugin_tools(registry=reg, plugin_roots=[root])
         assert "hello_plug" in reg.names()
@@ -241,19 +275,330 @@ def register(registry):
         """同名工具先注册者优先（工作树 plugins/ 优先于用户目录）"""
         reg = ToolRegistry.get_instance()
         user_root = self._make_temp_plugin(
-            tmp_path, "read",
-            '''
+            tmp_path,
+            "read",
+            """
 def register(registry):
     registry.register(
         "read",
         {"type": "function", "function": {"name": "read"}},
         impl=lambda **kw: "user", danger="safe",
     )
-''',
+""",
         )
         load_plugin_tools(registry=reg, plugin_roots=[user_root])
         # 系统插件后加载，不应覆盖用户同名（此处无系统，验证 proxy 拒绝重复源）
         assert reg.get("read").source == "plugin:hotplug-test"
+
+
+class TestUserOverrideSystem:
+    """跨根优先级：user 插件可覆盖 system 插件的同名工具。
+
+    设计：
+    - root_kind 优先级 system(0) < user(1)
+    - 高等级根可覆盖低等级根的同名工具；同根/反向/同级按先注册者优先
+    - root_tracker 在 watcher 中持久，跨 scan_now 保留覆盖关系
+    """
+
+    @pytest.fixture(autouse=True)
+    def _enable_override_plugin(self):
+        """启用临时 user override 插件"""
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = list(cfg.enabled_plugins.value or [])
+        try:
+            cfg.enabled_plugins.value = list(set(saved + ["user-override-plug"]))
+            yield
+        finally:
+            cfg.enabled_plugins.value = saved
+
+    @staticmethod
+    def _make_user_override_plugin(user_root: Path) -> Path:
+        """在 user_root/user-override-plug/tools/override.py 写一个 read 覆盖
+
+        注意：user_root 必须等于 get_app_data_dir()/plugins，否则 _root_kind
+        无法识别为 user 等级。
+        """
+        plug = user_root / "user-override-plug"
+        plug.mkdir(parents=True, exist_ok=True)
+        tools = plug / "tools"
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / "override.py").write_text(
+            """
+def register(registry):
+    registry.register(
+        "read",
+        {"type": "function", "function": {"name": "read"}},
+        impl=lambda **kw: "USER-VERSION",
+        danger="safe",
+        cn_name="读取（用户覆盖）",
+        description="由用户插件覆盖",
+    )
+""",
+            encoding="utf-8",
+        )
+        return user_root
+
+    def _setup_user_root(self, tmp_path, monkeypatch):
+        """把 user_root 设为 tmp_path（_root_kind 必须能识别）
+
+        返回 (system_root, user_root)。
+        注意：_PLUGIN_ROOTS 是模块级缓存，测试必须显式传 plugin_roots 参数，
+        否则 monkeypatch 改 get_app_data_dir 不会影响已缓存的 _PLUGIN_ROOTS。
+        """
+        monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
+        user_root = tmp_path / "plugins"
+        self._make_user_override_plugin(user_root)
+        system_root = Path(__file__).parent.parent / "plugins"
+        return system_root, user_root
+
+    def test_root_kind_priority_constants(self):
+        """_ROOT_KIND_PRIORITY 必须为 system < user"""
+        from app.tools.plugin_tool_loader import (
+            _ROOT_KIND_PRIORITY,
+            _ROOT_KIND_SYSTEM,
+            _ROOT_KIND_USER,
+        )
+
+        assert _ROOT_KIND_PRIORITY[_ROOT_KIND_SYSTEM] < _ROOT_KIND_PRIORITY[_ROOT_KIND_USER]
+
+    def test_root_kind_recognizes_user_root(self, tmp_path, monkeypatch):
+        """_root_kind 必须把 <app_data>/plugins 识别为 user（前置条件）"""
+        from app.tools.plugin_tool_loader import _root_kind, _ROOT_KIND_USER
+
+        monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
+        assert _root_kind(tmp_path / "plugins") == _ROOT_KIND_USER
+
+    def test_user_plugin_overrides_system(self, tmp_path, monkeypatch):
+        """场景 1：完整加载（system + user）→ user 覆盖 system 同名"""
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        reg = ToolRegistry.get_instance()
+
+        # 显式传 plugin_roots（_PLUGIN_ROOTS 是模块级缓存，monkeypatch 不会刷新）
+        tracker = {}
+        load_plugin_tools(registry=reg, plugin_roots=[system_root, user_root], root_tracker=tracker)
+        # user 覆盖 system：read.source 应为 user 插件名
+        assert reg.get("read").source == "plugin:user-override-plug"
+        # cn_name 是 user 版本
+        assert reg.get("read").cn_name == "读取（用户覆盖）"
+        # root_tracker 记录 read 来自 user 根
+        assert tracker.get("read") == user_root
+        # metadata._plugin_root_kind 为 user
+        assert reg.get("read").metadata.get("_plugin_root_kind") == "user"
+
+    def test_system_reload_preserves_user_override(self, tmp_path, monkeypatch):
+        """场景 2：仅重扫 system 根，user 覆盖应保留"""
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        reg = ToolRegistry.get_instance()
+
+        tracker = {}
+        load_plugin_tools(registry=reg, plugin_roots=[system_root, user_root], root_tracker=tracker)
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        # 仅重扫 system 根：复用同一 tracker
+        load_plugin_tools(registry=reg, plugin_roots=[system_root], root_tracker=tracker)
+        # user 覆盖仍然存在（system 不能再覆盖回）
+        assert reg.get("read").source == "plugin:user-override-plug"
+        assert reg.get("read").cn_name == "读取（用户覆盖）"
+
+    def test_watcher_scan_preserves_user_override(self, tmp_path, monkeypatch):
+        """场景 3：watcher 重扫后 user 覆盖关系保持
+
+        回归：旧实现 root_tracker 每次 load_plugin_tools 都新建，
+        跨根保护失效，导致 user 覆盖在 scan_now 后被还原为 system。
+        修复：watcher.scan_now 传入自身 _root_tracker。
+        """
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        reg = ToolRegistry.get_instance()
+
+        from app.tools.plugin_tool_loader import PluginToolWatcher
+
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()  # 触发首次扫描 + user 覆盖
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        # 再触发一次重扫：模拟 watcher 周期检测到变更
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+        assert reg.get("read").cn_name == "读取（用户覆盖）"
+
+    def test_user_vs_user_first_wins(self, tmp_path, monkeypatch):
+        """场景 4：两个用户插件同名 → 同根内先注册者优先（避免互相覆盖打架）"""
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        old = list(cfg.enabled_plugins.value or [])
+        try:
+            cfg.enabled_plugins.value = list(set(old + ["user-override-plug", "user-override-plug-2"]))
+
+            system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+            # 第二个用户插件
+            plug2 = user_root / "user-override-plug-2"
+            plug2.mkdir(parents=True, exist_ok=True)
+            (plug2 / "tools").mkdir(parents=True, exist_ok=True)
+            (plug2 / "tools" / "override.py").write_text(
+                """
+def register(registry):
+    registry.register(
+        "read",
+        {"type": "function", "function": {"name": "read"}},
+        impl=lambda **kw: "USER2",
+        danger="safe",
+        cn_name="读取（用户覆盖 2）",
+    )
+""",
+                encoding="utf-8",
+            )
+
+            reg = ToolRegistry.get_instance()
+            tracker = {}
+            load_plugin_tools(registry=reg, plugin_roots=[user_root], root_tracker=tracker)
+            # user-override-plug 先注册（_iter_tool_modules 按 sorted 顺序遍历）
+            # user-override-plug-2 同根内后注册，应被拒绝
+            assert reg.get("read").source == "plugin:user-override-plug"
+        finally:
+            cfg.enabled_plugins.value = old
+
+    def test_metadata_root_kind_injected_for_all_plugins(self):
+        """场景 5：所有插件工具的 metadata._plugin_root_kind 都被正确注入"""
+        reg = ToolRegistry.get_instance()
+        # 显式只加载 system_root，隔离用户插件（如 hashline-edit 覆盖 read）干扰
+        system_root = Path(__file__).parent.parent / "plugins"
+        load_plugin_tools(registry=reg, plugin_roots=[system_root])
+        # 系统插件工具：kind=system
+        for name in ("read", "write", "bash"):
+            reg_obj = reg.get(name)
+            assert reg_obj.metadata.get("_plugin_root_kind") == "system", f"{name} root_kind 应为 system"
+
+    def test_get_meta_includes_source(self):
+        """get_meta 暴露 source 字段，权限卡片已可用"""
+        reg = ToolRegistry.get_instance()
+        system_root = Path(__file__).parent.parent / "plugins"
+        load_plugin_tools(registry=reg, plugin_roots=[system_root])
+        meta = reg.get_meta("read")
+        assert "source" in meta
+        assert meta["source"].startswith("plugin:")
+
+    def test_removing_user_plugin_restores_system(self, tmp_path, monkeypatch):
+        """场景 6：覆盖 system 的用户插件被删除 → 系统插件恢复
+
+        回归：旧实现 _run_register 用 after-before diff 记录 _loaded，
+        覆盖场景 diff 为空 → watcher 漏记被覆盖工具 → 用户插件删除后
+        system 无法恢复（幽灵残留）。修复：proxy.registered_names 显式记录
+        + unload 时清理 root_tracker 残留。
+        """
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.tools.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+
+        # 1) 用户插件覆盖 system
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+        assert "read" in watcher._loaded.get("user-override-plug", set()), (
+            "watcher 必须记录被覆盖的工具（否则删除后无法注销）"
+        )
+
+        # 2) 删除用户插件目录 → 重扫 → system 恢复
+        import shutil
+
+        shutil.rmtree(user_root / "user-override-plug", ignore_errors=True)
+        watcher.scan_now()
+        r = reg.get("read")
+        assert r is not None, "read 不应丢失"
+        assert r.source == "plugin:system", f"system 应恢复，实际: {r.source}"
+        assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
+
+    def test_disabling_user_plugin_restores_system(self, tmp_path, monkeypatch):
+        """场景 7：覆盖 system 的用户插件被禁用 → 系统插件恢复
+
+        与删除等价：enabled_plugins 移除插件名后，watcher 重扫跳过其工具。
+        """
+        from app.utils.config import Settings
+
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.tools.plugin_tool_loader import PluginToolWatcher
+
+        cfg = Settings.get_instance()
+        old = list(cfg.enabled_plugins.value or [])
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+
+        # 覆盖生效
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        # 禁用用户插件（从 enabled_plugins 移除）
+        cfg.enabled_plugins.value = [p for p in old if p != "user-override-plug"]
+        watcher.scan_now()
+        r = reg.get("read")
+        assert r is not None and r.source == "plugin:system", f"禁用后 system 应恢复，实际: {r.source if r else None}"
+        cfg.enabled_plugins.value = old
+
+
+class TestSourceLabelRender:
+    """工具权限卡片来源标签渲染（参考 hook 配置卡片的 sourceLabel 色块风格）"""
+
+    def test_format_source_label_builtin(self):
+        from app.widgets.cards.settings.tool_control_card import _format_source_label
+
+        color, text = _format_source_label("builtin", "")
+        assert color == "#888"
+        assert text == "内置"
+
+    def test_format_source_label_system_plugin(self):
+        from app.widgets.cards.settings.tool_control_card import _format_source_label
+
+        color, text = _format_source_label("plugin:system", "system")
+        assert color == "#e74c3c"
+        assert text == "system"  # 直接显示插件名，无前缀
+
+    def test_format_source_label_user_plugin(self):
+        from app.widgets.cards.settings.tool_control_card import _format_source_label
+
+        color, text = _format_source_label("plugin:my-plug", "user")
+        assert color == "#2ecc71"
+        assert text == "my-plug"  # 直接显示插件名，无前缀
+
+    def test_format_source_label_long_plugin_truncated(self):
+        from app.widgets.cards.settings.tool_control_card import _format_source_label
+
+        # 长插件名截断（> 8 字符加 …）
+        # 长插件名截断（> 8 字符加 …）
+        long_name = "plugin:verylongpluginname"
+        _, text = _format_source_label(long_name, "user")
+        assert text == "verylong…"
+        _, text = _format_source_label(long_name, "user")
+        assert "…" in text or len(text.split("·", 1)[1].rstrip("…")) <= 8
+
+    def test_card_row_has_source_label(self, qt_app):
+        """工具行构建后存在来源 QLabel（与 hook 卡片 sourceLabel 同位置/风格）"""
+        from PyQt5.QtWidgets import QLabel
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        # 显式只加载 system_root，隔离用户插件（hashline-edit 覆盖 read）干扰
+        system_root = Path(__file__).parent.parent / "plugins"
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg, plugin_roots=[system_root])
+
+        pc = ToolPermissionController()
+        card = ToolControlCardContent(controller=pc)
+        card.show_content()
+
+        # 收集来源标签文本（内置 / 纯插件名）
+        all_labels = card.findChildren(QLabel)
+        source_texts = {lbl.text() for lbl in all_labels}
+        # 至少存在系统插件来源标签（插件名 system）或内置标签
+        assert "system" in source_texts or "内置" in source_texts, f"缺来源标签: {source_texts}"
+
+        card.deleteLater()
+        pc.deleteLater()
+        qt_app.processEvents()
 
 
 class TestRenderLinkage:
@@ -359,15 +704,23 @@ class TestPermissionLinkage:
         pc = ToolPermissionController()
         card = ToolControlCardContent(controller=pc)
         card.show_content()  # 首次构建
+        card.show()  # 模拟卡片可见（隐藏时变更延迟到下次显示，重建只在可见时发生）
         assert card._built
+        # 清掉 _bind_registry() 注册时立即回调的伪变更（_queued_built=False 不重建，
+        # 但会残留 pending 排队，影响下方"35 次变更合并为 1 次"的计数断言）
+        qt_app.processEvents()
+        qt_app.processEvents()
+        assert not card._rebuild_pending
 
         rebuild_calls = []
         card._rebuild = lambda: rebuild_calls.append(1)
 
-        # 模拟重扫：35 次 change 事件连续到达
+        # 模拟重扫：35 次 change 事件连续到达（version 同步真实递增，
+        # 与 ToolControlCardContent._do_rebuild 的 version 稳定性合并对齐）
         base = reg.version()
         for i in range(35):
             card._on_registry_changed(base + i + 1)
+            reg._version += 1  # 同步真实 version（watcher 重扫每次 change 都真实递增）
         assert card._rebuild_pending  # 同批变更已合并，仅排队一次
 
         qt_app.processEvents()
@@ -379,6 +732,77 @@ class TestPermissionLinkage:
         pc.deleteLater()
         qt_app.processEvents()
 
+    def test_registry_change_from_bg_thread_rebuilds(self, qt_app):
+        """回归：热重载 watcher 在后台线程触发 registry 变更（unregister/register 同步
+        notify listener），卡片必须经信号桥接在主线程重建，且重建后发射
+        togglesChanged（main_widget 连它刷新工具栏按钮的「危险 X 安全 Y」计数）。
+
+        旧实现在后台线程直接 QTimer.singleShot(0, ...) 跨线程操作 Qt 定时器，
+        且重建完成后不发射 togglesChanged → 工具栏按钮计数保持旧值，
+        只有新建窗口（重新初始化按钮）才显示正确数量。
+        """
+        import threading
+
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        pc = ToolPermissionController()
+        card = ToolControlCardContent(controller=pc)
+        card.show_content()  # 首次构建
+        card.show()  # 模拟卡片可见（隐藏时变更延迟到下次显示，重建只在可见时发生）
+        before = len(card._toggle_widgets)
+        assert before > 0
+
+        # 模拟 main_widget 连接：togglesChanged -> 刷新工具栏计数
+        refresh_payloads = []
+        card.togglesChanged.connect(refresh_payloads.append)
+
+        new_tool = "_bg_reload_test_tool"
+        assert new_tool not in reg.names()
+        errors = []
+
+        def bg():
+            try:
+                reg.unregister("read")
+                reg.register(
+                    new_tool,
+                    schema={"type": "object"},
+                    impl=lambda **kw: "ok",
+                    danger="safe",
+                    source="plugin:test",
+                    cn_name="后台热重载测试",
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=bg)
+        t.start()
+        t.join()
+        assert not errors, errors
+        assert new_tool in reg.names()
+
+        # 处理 QueuedConnection 信号 + 去抖定时器
+        for _ in range(5):
+            qt_app.processEvents()
+
+        assert not card._rebuild_pending
+        assert "read" not in card._toggle_widgets  # 被注销工具消失
+        assert new_tool in card._toggle_widgets  # 新工具出现
+        assert len(card._toggle_widgets) == before  # 数量同步（-1 +1）
+
+        # 重建后必须通知上层刷新计数（工具栏按钮动态读 registry）
+        assert refresh_payloads, "热重载后未发射 togglesChanged（工具栏按钮计数不会刷新）"
+        latest = refresh_payloads[-1]
+        assert new_tool in latest and "read" not in latest  # 载荷同步到最新工具集
+
+        card.deleteLater()
+        pc.deleteLater()
+        qt_app.processEvents()
 
 class TestPerToolPolicy:
     """per-tool 关闭策略(T3):设置/持久化/回退/UI 联动/生效层一致性"""
@@ -514,6 +938,7 @@ class TestPerToolPolicy:
         try:
             # 环境隔离：清空残留 per-tool 策略，保证初始状态一致（回退全局 deny）
             from app.utils.config import Settings
+
             s = Settings.get_instance()
             s.tool_permission_policy.value = {}
             s.save()
@@ -583,7 +1008,8 @@ class TestPerToolPolicy:
             pc = ToolPermissionController()
             # 激活 agent:bash 模板 deny(安全策略)
             pc.apply_agent(
-                agent_name="t", agent_tools={},
+                agent_name="t",
+                agent_tools={},
                 agent_permission={"bash": "deny", "*": "allow"},
             )
             # 用户只改 bash 关闭策略为 ask(开关仍 off)
@@ -617,7 +1043,8 @@ class TestPerToolPolicy:
             pc.set_user_tool_policy("bash", "ask")
             # 激活 agent(bash 模板 deny → active 侧策略 deny)
             pc.apply_agent(
-                agent_name="t", agent_tools={},
+                agent_name="t",
+                agent_tools={},
                 agent_permission={"bash": "deny", "*": "allow"},
             )
             assert pc.get_tool_policy("bash") == "deny"  # active 反映模板
@@ -750,8 +1177,8 @@ class TestSelfContained:
             "from app.tools.file_tools import",
             "from app.tools.web_tools import",
             "from app.tools.automation import",
-            "tool_ctx[\"builtin_tools\"]",
-            "tool_ctx.get(\"builtin_tools\")",
+            'tool_ctx["builtin_tools"]',
+            'tool_ctx.get("builtin_tools")',
         ]
         # 只检查 import 行 + builtin_tools 访问（docstring 说明文字不受限）
         for py in glob.glob("plugins/system/tools/*.py"):
@@ -792,7 +1219,8 @@ class TestSelfContained:
         from app.widgets.render_helpers import _get_tool_icon_html, _get_tool_icon_name
 
         ToolRegistry.reset_instance()
-        load_plugin_tools()
+        # 显式只加载 system_root，隔离用户插件覆盖（hashline-edit 无 read.svg 图标）
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
         reg = ToolRegistry.get_instance()
         assert reg.get_icon_dir("read")
         assert reg.get_icon_dir_light("read")
@@ -812,7 +1240,8 @@ class TestSelfContained:
         from app.widgets.render_helpers import _get_tool_icon_html, _get_tool_icon_name
 
         ToolRegistry.reset_instance()
-        load_plugin_tools()
+        # 显式只加载 system_root，隔离用户插件覆盖
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
         icon_name = _get_tool_icon_name("read")
 
         def svg_of(html):
@@ -857,8 +1286,9 @@ class TestSelfContained:
         reg = ToolRegistry.get_instance()
         assert reg.get_render("subagent_dag") is not None
         echarts_json = json.dumps({"type": "graph", "data": [], "links": []})
-        html = render_tool_block("subagent_dag", {"nodes": [{"id": "a"}]},
-                                 result="DAG 完成", success=True, echarts=echarts_json)
+        html = render_tool_block(
+            "subagent_dag", {"nodes": [{"id": "a"}]}, result="DAG 完成", success=True, echarts=echarts_json
+        )
         assert "echarts-container" in html
 
     def test_render_mode_and_closures(self):
@@ -877,10 +1307,15 @@ class TestSelfContained:
         # render_mode：expand 由插件声明（截图类工具迁移后按需注册；此处验证渲染分支）
         reg.register(
             "_test_expand",
-            {"type": "function", "function": {"name": "_test_expand", "parameters": {"type": "object", "properties": {}}},
-             "required": []},
+            {
+                "type": "function",
+                "function": {"name": "_test_expand", "parameters": {"type": "object", "properties": {}}},
+                "required": [],
+            },
             impl=lambda tool_ctx, **kw: None,
-            danger="safe", render_mode="expand", source="plugin:test",
+            danger="safe",
+            render_mode="expand",
+            source="plugin:test",
         )
         try:
             assert reg.get_render_mode("_test_expand") == "expand"
@@ -947,6 +1382,7 @@ class TestSelfContained:
         result = reg.get("team_list_members").impl(tool_ctx=ctx)
         assert not result.success
 
+
 # ══════════════════════════════════════════════════════════
 # 补充（quality-engineer 盘点后新增）：渲染模式 / diff 降级 / 元数据 / 加载容错
 # ══════════════════════════════════════════════════════════
@@ -963,7 +1399,9 @@ class TestRenderModeNone:
         reg.register(
             "none_tool",
             {"type": "function", "function": {"name": "none_tool"}},
-            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+            impl=lambda **kw: "x",
+            danger="safe",
+            source="plugin:t",
             render_mode="none",
         )
         from app.widgets.render_helpers import render_tool_block
@@ -995,7 +1433,9 @@ class TestDiffRenderDegradation:
         reg.register(
             "diff_tool",
             {"type": "function", "function": {"name": "diff_tool"}},
-            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+            impl=lambda **kw: "x",
+            danger="safe",
+            source="plugin:t",
         )
         diff_text = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new"
         html = render_tool_block("diff_tool", {}, result="已修改", success=True, diff=diff_text)
@@ -1009,12 +1449,16 @@ class TestDiffRenderDegradation:
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
+
         def _boom_render(result, tool_name, tool_args, success):
             raise RuntimeError("render boom")
+
         reg.register(
             "boom_tool",
             {"type": "function", "function": {"name": "boom_tool"}},
-            impl=lambda **kw: "x", danger="safe", source="plugin:t",
+            impl=lambda **kw: "x",
+            danger="safe",
+            source="plugin:t",
             render=_boom_render,
         )
         html = render_tool_block("boom_tool", {}, result="结果文本", success=True, diff="+a\n-b")
@@ -1031,13 +1475,17 @@ class TestRegistryMetadata:
 
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
+
         def _mk(name, metadata):
             reg.register(
                 name,
                 {"type": "function", "function": {"name": name}},
-                impl=lambda **kw: "x", danger="safe", source="plugin:t",
+                impl=lambda **kw: "x",
+                danger="safe",
+                source="plugin:t",
                 metadata=metadata,
             )
+
         _mk("mt_protect", {"protect": True})
         _mk("mt_interactive", {"interactive": True})
         _mk("mt_ui", {"ui_managed": True})

@@ -40,9 +40,6 @@ dependencies = [
     "requests",
     "orjson>=3.8.0",
     "pypinyin",
-    # 桌面自动化 (pynput + mss 组合)
-    "pynput>=1.7.6",
-    "mss>=9.0.1",
     # 全局热键
     "keyboard>=0.13.5",
     # MCP (Model Context Protocol)
@@ -53,8 +50,6 @@ dependencies = [
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",
-    # CodeGraph 代码智能引擎 (语义级代码探索)
-    "codegraph-py[all]>=1.4.0",
     # Windows 平台上 pyqt5-qt5 / pyqtwebengine-qt5 仅 5.15.2 提供 win_amd64 wheel
     "pyqt5-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
     "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",

@@ -20,8 +20,10 @@
 
 优先级：
 - 多根遍历按顺序；同名工具「先注册者优先」（工作树 plugins/ 先扫 → system 内置优先）
+- 跨根覆盖：user 插件可覆盖 system 插件的同名工具（user > system）；同根或同级按先注册者优先
 - 同根内：已被其他插件占用的同名工具不覆盖
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -29,11 +31,17 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
 from app.tools.registry import ToolRegistry
+
+
+# 插件根等级：system < user。低等级根注册的同名工具可被高等级根覆盖
+_ROOT_KIND_SYSTEM = "system"  # 项目工作树 plugins/（含 plugins/system/）
+_ROOT_KIND_USER = "user"  # 用户数据目录 <app_data>/plugins/
+_ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
 
 
 def _plugin_roots() -> List[Path]:
@@ -46,6 +54,24 @@ def _plugin_roots() -> List[Path]:
     except Exception:
         pass
     return roots
+
+
+def _root_kind(root: Optional[Path]) -> str:
+    """识别 root 等级：项目工作树 → system；app_data/plugins → user
+
+    测试场景传入自定义 root（既非工作树也非 app_data），按 system 兜底。
+    """
+    if root is None:
+        return _ROOT_KIND_SYSTEM
+    try:
+        from app.utils.utils import get_app_data_dir
+
+        user_root = get_app_data_dir() / "plugins"
+        if root == user_root:
+            return _ROOT_KIND_USER
+    except Exception:
+        pass
+    return _ROOT_KIND_SYSTEM
 
 
 _PLUGIN_ROOTS: List[Path] = _plugin_roots()
@@ -77,7 +103,10 @@ class _PluginRegistryProxy:
     插件代码的 `register(registry)` 收到的是本代理而非裸 ToolRegistry：
     - source 强制为 `plugin:<plugin_name>`（忽略插件自报，防伪造 builtin 绕过 danger 校验）
     - danger 仍必须显式声明（裸 registry 的校验继续生效）
-    - 同名保护：已被其他源注册的同名工具不覆盖（先注册者优先）
+    - 同名保护规则（root_kind 优先级）：
+        * 同根内：已被其他插件/内置占用时不覆盖（同插件重扫由 watcher 卸载兜底）
+        * 跨根：user 插件（高优先级）可覆盖 system 插件（低优先级）的同名工具；
+          反向与同级按「先注册者优先」（root_tracker 记录首注册根）
     """
 
     def __init__(
@@ -90,20 +119,32 @@ class _PluginRegistryProxy:
         self._registry = registry
         self._plugin_name = plugin_name
         self._root = root
+        self._root_kind = _root_kind(root)
         # root_tracker: {tool_name: 来源根路径}（跨根优先级判定）
         self._root_tracker = root_tracker if root_tracker is not None else {}
+        # 本次 register() 实际注册（含覆盖）成功的工具名。
+        # 关键：覆盖场景下工具名在注册前后都在 registry（仅 source 变化），
+        # 用 after-before diff 会得到空集 → watcher 的 _loaded 记录不到被覆盖
+        # 的工具 → 用户插件删除/禁用后系统插件无法恢复。故由 proxy 显式记录。
+        self.registered_names: Set[str] = set()
 
     def register(self, name, schema, impl=None, danger=None, source=None, metadata=None, **meta) -> bool:
         """注册（透传全部元数据：icon/cn_name/group/description/aliases）"""
-        # 跨根同名保护（先注册者优先）：同名工具已被**其他根**注册时不覆盖
-        if self._root is not None:
-            src_root = self._root_tracker.get(name)
-            if src_root is not None and src_root != self._root:
+        # 同名工具覆盖判定（root_kind 优先级）
+        # - 同根/无 root/首次注册：已被其他插件占用 → 拒绝（先注册者优先；同插件重扫由 watcher 卸载兜底）
+        # - 跨根：高等级根（user）可覆盖低等级根（system）的同名工具；同级/反向拒绝
+        src_root = self._root_tracker.get(name) if self._root is not None else None
+        is_cross_root = src_root is not None and src_root != self._root
+        if is_cross_root:
+            # 跨根：仅允许高等级覆盖低等级
+            if _ROOT_KIND_PRIORITY.get(self._root_kind, 0) <= _ROOT_KIND_PRIORITY.get(_root_kind(src_root), 0):
                 return False
-        # 同根内：已被其他插件/内置占用时不覆盖
-        existing = self._registry.get(name)
-        if existing is not None and existing.source != f"plugin:{self._plugin_name}":
-            return False
+            # 高等级覆盖：直接放行（existing 来源是低等级根，应被替换；不再走同根保护）
+        else:
+            # 同根/无 root/首次注册：已被其他插件占用时不覆盖
+            existing = self._registry.get(name)
+            if existing is not None and existing.source != f"plugin:{self._plugin_name}":
+                return False
         # 插件自带图标目录：<plugin>/tools/icons/（深色）+ tools/icons_light/（浅色，icon 自包含）
         icon_dir = ""
         icon_dir_light = ""
@@ -114,6 +155,9 @@ class _PluginRegistryProxy:
             _icons_light = Path(self._root) / self._plugin_name / "tools" / "icons_light"
             if _icons_light.is_dir():
                 icon_dir_light = str(_icons_light)
+        # 把 root_kind 注入 metadata（渲染层/卡片用：区分 system / user 来源）
+        merged_metadata = dict(metadata or {})
+        merged_metadata.setdefault("_plugin_root_kind", self._root_kind)
         ok = self._registry.register(
             name,
             schema,
@@ -132,10 +176,12 @@ class _PluginRegistryProxy:
             preview=meta.get("preview"),
             summarize=meta.get("summarize"),
             source=f"plugin:{self._plugin_name}",
-            metadata=metadata,
+            metadata=merged_metadata,
         )
-        if ok and self._root is not None:
-            self._root_tracker[name] = self._root
+        if ok:
+            self.registered_names.add(name)
+            if self._root is not None:
+                self._root_tracker[name] = self._root
         return ok
 
 
@@ -220,26 +266,29 @@ def _run_register(
     root: Path,
     root_tracker: Dict[str, Path],
 ) -> Set[str]:
-    """执行单个工具文件的 register，返回新注册的工具名集合"""
+    """执行单个工具文件的 register，返回本次实际注册（含覆盖）的工具名集合
+
+    注意：返回集是 proxy.registered_names（显式记录），而非 after-before diff——
+    覆盖场景（工具已存在、仅替换 source/impl）下 diff 为空集，会导致 watcher
+    的 _loaded 漏记被覆盖工具，用户插件删除后系统插件无法恢复。
+    """
     module = _load_module(plugin_name, py_path)
     register_fn = getattr(module, "register", None) if module else None
     if not callable(register_fn):
         return set()
-    before = set(registry.names())
+    proxy = _PluginRegistryProxy(registry, plugin_name, root=root, root_tracker=root_tracker)
     try:
-        register_fn(_PluginRegistryProxy(registry, plugin_name, root=root, root_tracker=root_tracker))
+        register_fn(proxy)
     except Exception:
         # 部分成功回滚：异常在第 N 个注册时抛出，此前已注册的工具需逐一注销，
-        # 避免失败插件留下半套工具污染 registry（T12 要求：except 内重算 after）
-        after = set(registry.names())
-        for name in after - before:
+        # 避免失败插件留下半套工具污染 registry（含覆盖的工具，proxy 已记录）
+        for name in proxy.registered_names:
             reg = registry.get(name)
             if reg is not None and reg.source == f"plugin:{plugin_name}":
                 registry.unregister(name)
                 logger.warning(f"[PluginToolLoader] 回滚部分注册工具: {name} ({plugin_name})")
         raise  # 保持 load_plugin_tools 既有 warning 语义（loaded 不含该插件）
-    after = set(registry.names())
-    new_tools = after - before
+    new_tools = proxy.registered_names
     if new_tools:
         logger.info(f"[PluginToolLoader] 插件 {plugin_name} 注册工具: {sorted(new_tools)}")
     return new_tools
@@ -248,8 +297,13 @@ def _run_register(
 def load_plugin_tools(
     registry: Optional[ToolRegistry] = None,
     plugin_roots: Optional[List[Path]] = None,
+    root_tracker: Optional[Dict[str, Path]] = None,
 ) -> Dict[str, Set[str]]:
     """扫描并注册全部插件工具（含系统插件）。
+
+    Args:
+        root_tracker: 跨根覆盖追踪表（{tool_name: 首注册根}）。watcher 传入
+            同一 dict 以持久跨次 scan 的覆盖状态；测试可传 None 取一次性。
 
     Returns:
         {plugin_name: {tool_name, ...}} — 本次加载的插件工具映射
@@ -257,7 +311,8 @@ def load_plugin_tools(
     registry = registry or ToolRegistry.get_instance()
     roots = plugin_roots if plugin_roots is not None else _PLUGIN_ROOTS
     loaded: Dict[str, Set[str]] = {}
-    root_tracker: Dict[str, Path] = {}  # tool_name -> 来源根（跨根优先级）
+    if root_tracker is None:
+        root_tracker = {}  # tool_name -> 来源根（跨根优先级）
 
     for root in roots:
         for plugin_name, py_path in _iter_tool_modules(Path(root)):
@@ -273,13 +328,26 @@ def load_plugin_tools(
     return loaded
 
 
-def unload_plugin_tools(plugin_name: str, tool_names: Set[str], registry: Optional[ToolRegistry] = None) -> None:
-    """注销指定插件的工具（热重载/插件卸载时调用，幂等）"""
+def unload_plugin_tools(
+    plugin_name: str,
+    tool_names: Set[str],
+    registry: Optional[ToolRegistry] = None,
+    root_tracker: Optional[Dict[str, Path]] = None,
+) -> None:
+    """注销指定插件的工具（热重载/插件卸载时调用，幂等）
+
+    Args:
+        root_tracker: 跨根覆盖追踪表。注销成功后同步清理对应条目——
+            工具已从 registry 移除，旧「来源根」记录会误导后续重扫
+            （如用户插件删除后，残留的 read→user_root 会挡住 system 恢复）。
+    """
     registry = registry or ToolRegistry.get_instance()
     for name in tool_names:
         reg = registry.get(name)
         if reg is not None and reg.source == f"plugin:{plugin_name}":
             registry.unregister(name)
+            if root_tracker is not None:
+                root_tracker.pop(name, None)
             logger.info(f"[PluginToolLoader] 注销插件工具: {name} ({plugin_name})")
 
 
@@ -301,6 +369,10 @@ class PluginToolWatcher:
         self._scan_lock = threading.Lock()  # 重扫互斥（UI 触发 + 轮询线程并发安全）
         self._thread = None
         self._stop = False
+        # 热重载完成监听（轮询检测到变更并完成重扫后触发，后台线程回调）
+        # 用途：UI 弹风险通知等。仅 watcher 轮询路径触发，
+        # 显式 scan_now()（启动对齐 / 插件启停）不触发——那些场景用户已知情。
+        self._reload_listeners: List[Callable[[], None]] = []
 
     def scan_now(self) -> None:
         """全量重扫：先注销已加载插件的全部工具，再全量重新注册（幂等）。
@@ -309,17 +381,37 @@ class PluginToolWatcher:
         热更新场景（工具已注册、文件内容变更）diff 为空集，导致 _loaded
         记录丢失 → 后续删除文件时无法注销残留工具。改为先注销再全量重扫，
         _loaded 始终等于 registry 中该插件的实际工具集。
+
+        ⚠️ 跨根覆盖追踪：传入 watcher 自己的 _root_tracker，使 user→system
+        的覆盖关系跨多次 scan 持续生效（否则每次 scan 都新建 root_tracker，
+        跨根保护失效，用户覆盖会被还原）。
         """
         with self._scan_lock:
             # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
             for plugin_name, old_names in self._loaded.items():
-                unload_plugin_tools(plugin_name, old_names, self._registry)
+                unload_plugin_tools(plugin_name, old_names, self._registry, root_tracker=self._root_tracker)
             # 2) 全量重扫注册（含跨根优先级保护与 enabled 过滤，load_plugin_tools 内部处理）
             try:
-                self._loaded = load_plugin_tools(registry=self._registry, plugin_roots=self._roots)
+                self._loaded = load_plugin_tools(
+                    registry=self._registry,
+                    plugin_roots=self._roots,
+                    root_tracker=self._root_tracker,
+                )
             except Exception as e:
                 logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
                 # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
+
+    def on_tools_reloaded(self, listener: Callable[[], None]) -> None:
+        """注册热重载完成监听（后台线程回调；仅 watcher 轮询检测到变更时触发）"""
+        self._reload_listeners.append(listener)
+
+    def _notify_reloaded(self) -> None:
+        """通知全部监听者：一次轮询周期内的重扫已完成"""
+        for listener in list(self._reload_listeners):
+            try:
+                listener()
+            except Exception as e:
+                logger.warning(f"[PluginToolWatcher] 热重载监听回调失败: {e}")
 
     def start(self, poll_interval: float = 2.0) -> None:
         """后台线程轮询监听（轻量轮询，避免线程模型冲突）"""
@@ -338,6 +430,8 @@ class PluginToolWatcher:
                         self.scan_now()
                     except Exception as e:
                         logger.warning(f"[PluginToolWatcher] 重扫失败: {e}")
+                    # 重扫完成后通知监听者（无论成败，工具定义变更事实已发生）
+                    self._notify_reloaded()
                     last_sig = self._signature()
 
         self._thread = threading.Thread(target=_loop, daemon=True, name="plugin-tool-watcher")

@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "## 主智能体约束\n### 提问\n- 需用户确认 → 用 `question` 工具。\n- 预测用户需追问 → 回复末尾给追问清单：`[问题描述](ask)`。\n\n### 渲染\n- Markdown\n- 行内交互 ECharts → ```echarts 代码块 (JSON 配置)",
+            "prompt": "## 主智能体约束\n### 提问\n- 需用户确认 → 用 `question` 工具。\n\n### 渲染\n- Markdown\n- 行内交互 ECharts → ```echarts 代码块 (JSON 配置)",
             "add_output_to_context": true,
             "statusMessage": "主智能体约束:",
             "id": "builtin_primary_constraints"
@@ -181,12 +181,24 @@
     ],
     "Stop": [
       {
+        "matcher": "completed",
         "hooks": [
           {
             "type": "prompt",
             "prompt": "check uncommitted/incomplete → list todos, clean up the trash you made.",
             "statusMessage": "Before end:",
             "id": "builtin_stop_cleanup"
+          }
+        ]
+      },
+      {
+        "matcher": "completed",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "### 以用户口吻预测追问（输出在回复末尾）\n站在**用户视角**，用**用户的口吻**（口语化、非技术、直接）预测用户看到本次回复后最可能追问的 2~3 个问题，以清单形式输出：`- [追问内容](ask)`。\n\n要求：\n- 用用户会说的原话提问，如「那 xxx 怎么改？」「能不能顺便把 xxx 也做了？」，不用「是否需要我…」式客套\n- 只预测与本次回复真实相关、值得追问的问题，不凑数\n- 本次回复已完整覆盖、无真实追问点 → 末尾输出一行「无需追问」即可\n- 每条追问一行，不解释不展开",
+            "statusMessage": "追问预测:",
+            "id": "builtin_stop_followup"
           }
         ]
       },

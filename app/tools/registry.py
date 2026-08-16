@@ -35,6 +35,9 @@ DANGER_DANGEROUS = "dangerous"
 GROUP_DEFAULT_SAFE = "安全操作"
 GROUP_DEFAULT_DANGEROUS = "其他"
 
+# 工具默认 fallback icon 名（插件未声明、registry 找不到、渲染层 except 兜底统一引用）
+# 单一来源：修改此处即同步影响 dataclass 默认值 / register() 默认 / get_icon() 兜底 / render_helpers._get_tool_icon_name()
+DEFAULT_FALLBACK_ICON = "工具"
 
 @dataclass
 class ToolRegistration:
@@ -44,7 +47,7 @@ class ToolRegistration:
     schema: Dict[str, Any]
     impl: Optional[Callable] = None  # 执行函数（可选；内置工具可走 ToolExecutor 特殊分发）
     danger: str = DANGER_SAFE  # safe | dangerous（强制声明）
-    icon: str = "工具"  # SVG 图标文件名（不含扩展名，渲染层 fallback "工具"）
+    icon: str = DEFAULT_FALLBACK_ICON  # SVG 图标文件名（不含扩展名，渲染层 fallback DEFAULT_FALLBACK_ICON）
     icon_dir: str = ""  # 插件自带深色图标目录（绝对路径；空 → 渲染回退主程序 qrc 资源）
     icon_dir_light: str = ""  # 插件自带浅色图标目录（主题感知；空 → 回退深色/qrc）
     cn_name: str = ""  # 中文显示名（空 → 渲染层回退原名）
@@ -168,7 +171,7 @@ class ToolRegistry:
             schema=copy.deepcopy(schema),
             impl=impl,
             danger=danger,
-            icon=icon or "工具",
+            icon=icon or DEFAULT_FALLBACK_ICON,
             icon_dir=icon_dir,
             icon_dir_light=icon_dir_light,
             cn_name=cn_name,
@@ -259,7 +262,7 @@ class ToolRegistry:
 
     def get_icon(self, name: str) -> str:
         reg = self.get(name)
-        return reg.icon if reg is not None else "工具"
+        return reg.icon if reg is not None else DEFAULT_FALLBACK_ICON
 
     def get_icon_dir(self, name: str) -> str:
         """获取工具插件的自带深色图标目录（空 = 无插件图标，渲染回退主程序资源）"""

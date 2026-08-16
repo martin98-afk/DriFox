@@ -149,9 +149,12 @@ class _MarketplaceWorker(QObject):
 
 
 class _MarketFetchWorker(QObject):
-    """逐市场拉取：每拉完一个市场源就 emit 一次，不等待全部完成
+    """多市场并行拉取：每拉完一个市场源就 emit 一次，不等待全部完成
+
     实现「远程拉到一个更新一个」：首个市场数据到达即可渲染，
     单个市场失败/超时不阻塞后续市场（fetch_marketplace 内部已捕获异常返回 _error）。
+    各市场源互不依赖 → ThreadPoolExecutor 并发拉取，N 个源最坏等待
+    时间从 15×N 秒降到 ~15 秒；并发上限 4。
     """
 
     market_fetched = pyqtSignal(dict, int)  # (市场数据, gen) 单个市场数据 {"name":..., "plugins":[...]}
@@ -165,18 +168,28 @@ class _MarketFetchWorker(QObject):
         self._gen = gen
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         from .marketplace_manager import get_marketplace_manager
 
         mgr = get_marketplace_manager()
+        sources = mgr.get_sources()
         failed: list = []
+        if not sources:
+            self.all_done.emit(self._gen)
+            return
         try:
-            for src in mgr.get_sources():
-                data = mgr.fetch_marketplace(src, force=self._force)
-                if data.get("_error"):
-                    # 失败源：绝不进入插件列表，仅收集名称供 UI 做失败标记
-                    failed.append(src["name"])
-                    continue
-                self.market_fetched.emit(data, self._gen)
+            max_workers = min(4, len(sources))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(mgr.fetch_marketplace, src, self._force): src for src in sources}
+                for fut in as_completed(futures):
+                    src = futures[fut]
+                    data = fut.result()
+                    if data.get("_error"):
+                        # 失败源：绝不进入插件列表，仅收集名称供 UI 做失败标记
+                        failed.append(src["name"])
+                        continue
+                    self.market_fetched.emit(data, self._gen)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}", self._gen)
         if failed:
@@ -920,7 +933,7 @@ class _PluginRow(QFrame):
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
-        self._status = status  # "enabled" | "disabled" | "system" | ""（未安装）
+        self._status = status  # "enabled"|"disabled"（用户）|"system"（真系统）|builtin_enabled/builtin_disabled（内置非 system）|""（未安装）
         self._busy = False
         self._font_size = font_size  # 上下文字体大小（用于头像自适应 + 行内字号派生）
         self._ff = font_family  # 上下文字体家族
@@ -1001,22 +1014,26 @@ class _PluginRow(QFrame):
     # ── 状态标签（启用/禁用/系统） ──────────────────────────
 
     def _status_text(self) -> str:
-        """按安装状态生成状态标签文本"""
-        if self._status == "disabled":
+        """按安装状态生成状态标签文本
+
+        内置非 system 插件（builtin_enabled/builtin_disabled）与用户插件
+        显示同样的启用/禁用文本；真系统插件保留「🔒 系统插件」。
+        """
+        if self._status in ("disabled", "builtin_disabled"):
             return "⛔ 已禁用"
         if self._status == "system":
             return "🔒 系统插件"
-        if self._status == "enabled":
+        if self._status in ("enabled", "builtin_enabled"):
             return "✅ 已启用"
         return ""
 
     def _status_color(self) -> str:
         """状态标签颜色"""
-        if self._status == "disabled":
+        if self._status in ("disabled", "builtin_disabled"):
             return "#FF9800"
         if self._status == "system":
             return "#2196F3"
-        if self._status == "enabled":
+        if self._status in ("enabled", "builtin_enabled"):
             return "#4CAF50"
         return self._tcs
 
@@ -1239,7 +1256,14 @@ class _PluginRow(QFrame):
         return btn
 
     def _update_manage_buttons(self):
-        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）"""
+        """按安装状态刷新管理按钮（系统/未安装隐藏；禁用→启用；启用→禁用）
+
+        - status=system（真系统插件）：无管理按钮；有更新时更新按钮在主按钮位
+          （_update_btn_text 的 has_update 分支），行内不重复
+        - builtin_enabled/builtin_disabled（内置非 system）：显示禁用/启用，
+          不显示卸载（目录随主程序分发，删除不可恢复）
+        - enabled/disabled（用户插件）：禁用/启用 + 卸载
+        """
         while self._manage_layout.count():
             item = self._manage_layout.takeAt(0)
             if item.widget():
@@ -1248,14 +1272,15 @@ class _PluginRow(QFrame):
         if self._busy or not self._installed:
             return
         if self._status == "system":
-            # 系统插件只读，行内不提供管理操作（详情弹窗同样无）
+            # 真系统插件只读，行内不提供管理操作（详情弹窗同样无）
             return
 
-        if self._status == "disabled":
+        if self._status in ("disabled", "builtin_disabled"):
             self._manage_layout.addWidget(self._make_manage_btn("启用", "#4CAF50", self._on_enable))
         else:
             self._manage_layout.addWidget(self._make_manage_btn("禁用", "#FF9800", self._on_disable))
-        self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
+        if self._status not in ("builtin_enabled", "builtin_disabled"):
+            self._manage_layout.addWidget(self._make_manage_btn("卸载", "#F44336", self._on_uninstall))
 
     def _on_enable(self):
         self.enableRequested.emit(self._meta)
@@ -1587,13 +1612,14 @@ class MarketplaceCard(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
-        # 安装/更新/启用/禁用/卸载：串行任务队列（一次只跑一个 worker 线程，
-        # 避免并发 git 进程互抢 cache/目标目录；完成自动启动下一个任务）
-        self._task_queue: list = []  # [{kind,name,fn,busy_text,status_text,status_color}]
-        self._task_active: bool = False
-        # 当前正在运行的任务（_run_next_task 从队列 pop 后保存）：
-        # 行全量重建（切 tab 回来重渲染）后用于恢复该行的 busy 状态
-        self._active_task: Optional[dict] = None
+        # 安装/更新/启用/禁用/卸载任务调度：per-plugin 串行 + 全局并发上限
+        # （_MAX_CONCURRENT_TASKS）。同一插件任务必须排队（目录互斥：
+        # install/update 写 plugins/<name>，enable/disable move 同一目录）；
+        # 不同插件任务互不影响 → 并发执行，安装进行中可立即启用/禁用其他插件。
+        self._task_queue: list = []  # 等待槽位的任务 [{kind,name,fn,busy_text,status_text,status_color,...}]
+        self._active_tasks: dict = {}  # 正在运行的任务 {plugin_name: task}（task 含 thread/worker 引用）
+        self._task_active: bool = False  # 兼容字段：是否任一任务运行中（= bool(_active_tasks)）
+        self._active_task: Optional[dict] = None  # 兼容字段：首个运行中任务（_restore_task_busy 兜底）
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[_MarketplaceWorker] = None
         # 市场拉取 worker：与任务 worker 分离，刷新市场不打断正在安装的任务
@@ -2348,6 +2374,7 @@ class MarketplaceCard(QWidget):
     # ── 渲染 ──
 
     _RENDER_BATCH = 30
+    _MAX_CONCURRENT_TASKS = 3  # 任务并发上限：不同插件任务并行，超过则 FIFO 等待
 
     def _render_plugins(self, plugins: list):
         """渲染插件列表：匹配才渲染 + 分段加载
@@ -3129,13 +3156,18 @@ class MarketplaceCard(QWidget):
         status_text: str,
         status_color: str,
         meta: Optional[dict] = None,
+        keep_disabled: bool = False,
+        reload_ui: bool = False,
     ):
-        """提交后台任务到串行队列
+        """提交后台任务到调度队列（per-plugin 串行 + 全局并发上限）
 
-        队列保证同一时刻只有一个任务线程在跑，避免多个 git 进程并发
-        互抢 cache/目标目录（此前多任务共用单个 worker 槽位，新任务
-        会 quit 旧线程导致进行中的安装静默终止）。任务完成自动启动
-        下一个；行在任务期间保持 busy（按钮禁用，防重复提交）。
+        同一插件任务必须排队：install/update 写 plugins/<name>、enable/disable
+        move 同一目录，并发会互抢目标目录；不同插件任务互不影响 → 立即并发
+        执行（安装进行中可同时启用/禁用其他插件）。
+
+        全局并发上限 _MAX_CONCURRENT_TASKS（git/文件操作并发过多无益反增
+        IO 压力）；超限任务按 FIFO 等待槽位。行在任务期间保持 busy
+        （按钮禁用，防重复提交）。
 
         Args:
             kind: "install" | "update" | "enable" | "disable" | "uninstall"
@@ -3145,6 +3177,10 @@ class MarketplaceCard(QWidget):
             status_text: 头部状态栏文案
             status_color: 状态栏文字颜色
             meta: 插件元数据（install/update 时传入，用于失败记录一键重试）
+            keep_disabled: 更新前插件处于禁用态 → 完成后保持禁用（不重载 UI）
+            reload_ui: enable 内置插件时置 True → 完成后主线程补加载 UI 组件
+                （PluginManager.enable_plugin 内部 _load_plugin_ui 在 worker 线程
+                执行有 Qt 跨线程风险，与 disable 路径主线程先行卸载对称，后行重载）
         """
         self._task_queue.append(
             {
@@ -3155,54 +3191,78 @@ class MarketplaceCard(QWidget):
                 "status_text": status_text,
                 "status_color": status_color,
                 "meta": meta,
+                "keep_disabled": keep_disabled,
+                "reload_ui": reload_ui,
             }
         )
         # 行立即置 busy（行可能未渲染/已隐藏，忽略）
         self._set_row_busy(name, busy_text)
-        if not self._task_active:
-            self._run_next_task()
+        self._try_start_next()
 
-    def _run_next_task(self):
-        """从队列取出下一个任务并启动 worker 线程（无任务则停）"""
-        if not self._task_queue:
-            self._task_active = False
-            self._active_task = None
-            self._worker_thread = None
-            self._worker = None
-            return
-        self._task_active = True
-        task = self._task_queue.pop(0)
-        self._active_task = task
+    def _try_start_next(self):
+        """从等待队列启动可运行的任务（同插件串行 + 并发上限）
+
+        扫描队列：跳过同插件已有 active 任务的任务，启动第一个满足
+        「该插件无 active 且并发未满」的任务；并发满则全部等待。
+        """
+        while self._task_queue:
+            started = False
+            for i, task in enumerate(self._task_queue):
+                tname = task.get("name", "")
+                if tname in self._active_tasks:
+                    continue  # 同插件任务必须等待（目录互斥）
+                if len(self._active_tasks) >= self._MAX_CONCURRENT_TASKS:
+                    break  # 并发已满，剩余任务继续等待
+                self._task_queue.pop(i)
+                self._start_task(task)
+                started = True
+                break
+            if not started:
+                break
+        # 状态栏显示任一活跃任务（并发时避免被完成回调清空后无提示）
+        if self._active_tasks:
+            task = next(iter(self._active_tasks.values()))
+            self._status_label.setText(task["status_text"])
+            self._status_label.setStyleSheet(
+                f"color: {task['status_color']}; font-size: 12px; background: transparent;"
+            )
+
+    def _start_task(self, task: dict):
+        """启动单个任务的 worker 线程（task 已从队列 pop）"""
         name = task["name"]
-        self._status_label.setText(task["status_text"])
-        self._status_label.setStyleSheet(f"color: {task['status_color']}; font-size: 12px; background: transparent;")
+        self._task_active = True
+        self._active_task = task
+        self._active_tasks[name] = task
         # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
         self._set_row_busy(name, task["busy_text"])
 
-        self._worker = _MarketplaceWorker(task["fn"])
-        self._worker_thread = QThread(self)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
-        self._worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.error.connect(self._worker_thread.quit)
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
-        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
-        self._worker_thread.start()
+        worker = _MarketplaceWorker(task["fn"])
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda ok, t=task: self._on_task_done(t, bool(ok)))
+        worker.error.connect(lambda e, t=task: self._on_task_error(t, e))
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        task["thread"] = thread
+        task["worker"] = worker
+        self._worker = worker  # 兼容字段：最近启动的 worker
+        self._worker_thread = thread  # 兼容字段：最近启动的线程
+        thread.start()
 
     def _on_task_done(self, task: dict, success: bool):
-        """任务完成：分发到对应类型的完成处理 + 启动下一个任务"""
+        """任务完成：从活跃表移除 + 分发完成处理 + 启动下一个可运行任务"""
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
-        # 当前任务已结束（_active_task 清空，防行重建恢复 busy 时误置已完成任务）。
-        # 用 is 比较而非无条件清空：每个任务入队都是独立 dict 对象，闭包
-        # t=task 捕获的引用与 _active_task 指向一致；is 可防止异常时序下
-        # 误清下一个任务的 active 状态。
-        if self._active_task is task:
-            self._active_task = None
+        # 仅当该任务确在活跃表中才移除（is 比较防异常时序误清同名下个任务）
+        if self._active_tasks.get(name) is task:
+            self._active_tasks.pop(name, None)
+            self._active_task = next(iter(self._active_tasks.values()), None)
+            self._task_active = bool(self._active_tasks)
         # 该任务自身行任务已结束：解除 busy，让完成处理能刷新它；
         # 其他排队任务的行保持 busy（_refresh_row_states 跳过逻辑保护）
         self._release_row_busy(name)
@@ -3211,19 +3271,20 @@ class MarketplaceCard(QWidget):
         if kind == "install":
             self._on_install_done(name, success)
         elif kind == "update":
-            self._on_update_done(name, success)
+            self._on_update_done(task, success)
         else:
-            action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
-            self._on_manage_done(name, action, success)
-        self._run_next_task()
+            self._on_manage_done(task, success)
+        self._try_start_next()
 
     def _on_task_error(self, task: dict, err: str):
-        """任务出错：分发到对应类型的错误处理 + 启动下一个任务"""
+        """任务出错：从活跃表移除 + 分发错误处理 + 启动下一个可运行任务"""
         if not self._alive():
             return
         kind, name = task["kind"], task["name"]
-        if self._active_task is task:
-            self._active_task = None
+        if self._active_tasks.get(name) is task:
+            self._active_tasks.pop(name, None)
+            self._active_task = next(iter(self._active_tasks.values()), None)
+            self._task_active = bool(self._active_tasks)
         self._release_row_busy(name)
         # 记录安装/更新失败（异常路径，err 为完整错误信息）
         self._record_task_result(task, False, err)
@@ -3234,7 +3295,7 @@ class MarketplaceCard(QWidget):
         else:
             action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
             self._on_manage_error(name, action, err)
-        self._run_next_task()
+        self._try_start_next()
 
     def _record_task_result(self, task: dict, success: bool, err: str = ""):
         """记录安装/更新结果到持久化记录（代理页「下载/更新记录」展示 + 失败重试）
@@ -3286,13 +3347,16 @@ class MarketplaceCard(QWidget):
 
         行对象销毁重建（_render_plugins 全量重建，如切 tab 回来 show_card
         触发重渲染）后 _busy 状态丢失，任务实际仍在队列/线程中运行；
-        这里从任务队列 + 当前活动任务恢复 busy，防止「下载中」状态消失、
+        这里从等待队列 + 活跃任务恢复 busy，防止「下载中」状态消失、
         按钮被误点重复提交同一插件。
-        已完成任务不在队列/_active_task 中，不会误恢复。
+        已完成任务不在队列/活跃表中，不会误恢复。
         """
         tasks = list(self._task_queue)
-        if self._active_task is not None:
-            tasks.insert(0, self._active_task)
+        for task in self._active_tasks.values():
+            tasks.append(task)
+        # 兼容旧测试直接赋值 _active_task（非 _active_tasks 路径）
+        if self._active_task is not None and self._active_task not in self._active_tasks.values():
+            tasks.append(self._active_task)
         for task in tasks:
             name = task.get("name")
             if not name:
@@ -3355,17 +3419,23 @@ class MarketplaceCard(QWidget):
     # ── 异步更新 ────────────────────────────────────────
 
     def _async_update(self, plugin_meta: dict):
-        """更新插件：先下载新版，下载成功后再替换旧版（入串行队列）
+        """更新插件：先下载新版，下载成功后再替换旧版
 
         点击后该行置为「下载中…」（保持已安装态，旧版未删）；
         下载成功才备份旧版并替换，失败保留旧版插件可用。
+
+        禁用中的插件（目录在 plugins-disabled/）原地更新：installer 已支持
+        目标目录指向禁用目录；此处跳过 UI 卸载（禁用插件 UI 未加载），
+        更新完成后保持禁用（不重载 UI）。
         """
         name = plugin_meta.get("name", "")
         # 立即反馈：该行置为「下载中…」（旧版仍可用，仅按钮禁用）
         self._set_row_downloading(name)
-        # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭）；下载成功替换前
-        # installer 内还会 purge 模块缓存释放文件句柄
-        self._unload_plugin_ui_on_gui(name)
+        was_disabled = (getattr(self, "_status_map", None) or {}).get(name) in ("disabled", "builtin_disabled")
+        if not was_disabled:
+            # 主线程先卸载旧版 UI 组件（显示中卡片自动关闭）；下载成功替换前
+            # installer 内还会 purge 模块缓存释放文件句柄
+            self._unload_plugin_ui_on_gui(name)
 
         self._submit_task(
             kind="update",
@@ -3375,6 +3445,7 @@ class MarketplaceCard(QWidget):
             status_text="更新中…",
             status_color="#FFA726",
             meta=plugin_meta,
+            keep_disabled=was_disabled,
         )
 
     def _set_row_downloading(self, name: str):
@@ -3383,8 +3454,10 @@ class MarketplaceCard(QWidget):
         if row is not None:
             row.set_downloading()
 
-    def _on_update_done(self, name: str, success: bool):
-        """更新完成"""
+    def _on_update_done(self, task: dict, success: bool):
+        """更新完成（task 含 keep_disabled：更新前是否处于禁用态）"""
+        name = task["name"]
+        keep_disabled = task.get("keep_disabled", False)
         if not self._alive():
             return  # 卡片已销毁
         self._status_label.setText("")
@@ -3393,16 +3466,18 @@ class MarketplaceCard(QWidget):
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
-            # 更新替换了整个插件目录：_async_update 下载前已卸载旧 UI，
-            # 此处必须主动重载（watchfiles 对目录级替换识别为空组件，不触发
-            # UI 重载——否则插件 UI 保持卸载态直到重启/禁用再启用）。
-            self._reload_plugin_ui_on_gui(name)
+            if not keep_disabled:
+                # 更新替换了整个插件目录：_async_update 下载前已卸载旧 UI，
+                # 此处必须主动重载（watchfiles 对目录级替换识别为空组件，不触发
+                # UI 重载——否则插件 UI 保持卸载态直到重启/禁用再启用）。
+                self._reload_plugin_ui_on_gui(name)
             self._refresh_row_states()
             InfoBar.success(f"{name} 更新成功", "", duration=2000, parent=bar_parent)
         else:
-            # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试；
-            # UI 已在下载前被卸载，同样需要重载旧版组件恢复可用。
-            self._reload_plugin_ui_on_gui(name)
+            if not keep_disabled:
+                # 下载失败：旧版保留（未删），行恢复「更新」按钮可重试；
+                # UI 已在下载前被卸载，同样需要重载旧版组件恢复可用。
+                self._reload_plugin_ui_on_gui(name)
             self._update_row_state(name, installed=True, error=True)
             InfoBar.error(f"{name} 更新失败", "已保留旧版，可稍后重试", duration=3000, parent=bar_parent)
 
@@ -3476,6 +3551,11 @@ class MarketplaceCard(QWidget):
     def _async_enable(self, plugin_meta: dict):
         """启用已禁用的插件（入串行队列）"""
         name = plugin_meta.get("name", "")
+        # 内置插件（builtin_disabled）启用：worker 线程仅写配置；UI 组件加载由
+        # 主线程在完成后补做（reload_ui=True）。PluginManager.enable_plugin 内部
+        # _load_plugin_ui 在 worker 线程执行有 Qt 跨线程风险——与 disable 路径
+        # 主线程先行卸载对称，此处后行重载（_on_manage_done 主线程补加载）。
+        was_builtin = (getattr(self, "_status_map", None) or {}).get(name) == "builtin_disabled"
         self._submit_task(
             kind="enable",
             name=name,
@@ -3483,6 +3563,7 @@ class MarketplaceCard(QWidget):
             busy_text="启用中…",
             status_text="启用中…",
             status_color="#4CAF50",
+            reload_ui=was_builtin,
         )
 
     def _async_disable(self, plugin_meta: dict):
@@ -3544,15 +3625,23 @@ class MarketplaceCard(QWidget):
         )
         return dialog.exec_() == 1
 
-    def _on_manage_done(self, name: str, action: str, success: bool):
+    def _on_manage_done(self, task: dict, success: bool):
         """启用/禁用/卸载完成"""
         if not self._alive():
             return  # 卡片已销毁
+        name = task["name"]
+        kind = task["kind"]
+        action = {"enable": "启用", "disable": "禁用", "uninstall": "卸载"}[kind]
         self._status_label.setText("")
         from app.widgets.tab_manager_window import TabManagerWindow
 
         bar_parent = TabManagerWindow.get_instance() or self.window()
         if success:
+            # 内置插件启用：主线程补加载 UI 组件（对称 _async_disable 主线程先行卸载；
+            # worker 线程 enable_plugin 已注册的元数据被主线程 unload+load 覆盖，
+            # 最终 UI 处于主线程语义）。load_plugin 幂等，重复调用无副作用。
+            if kind == "enable" and task.get("reload_ui"):
+                self._reload_plugin_ui_on_gui(name)
             self._refresh_row_states()
             InfoBar.success(f"{name} {action}成功", "", duration=2000, parent=bar_parent)
         else:
@@ -3659,9 +3748,10 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(p, query, filter_mode))
             row.update_search_highlight(query)
 
-        # 补齐缺失行 + 更新按钮/计数（无条件调用：安装/卸载后匹配列表
-        # 可能新增行，按 _matched 顺序补尚无 widget 的插件）
-        self._render_next_batch()
+        # 不调用 _render_next_batch()：状态刷新不得推进增量加载（每批 30 的
+        # 「加载更多」是浏览路径专属）。此前每次安装/卸载/启用/禁用完成都补
+        # 30 个缺失行 → 列表自动膨胀直到全量（用户视角：安装后刷出所有插件）。
+        # 缺行（如筛选变化新匹配的行）由 _render_plugins 全量重算路径兜底。
         # 行显隐/按钮变化 → 内容高度变化 → 手动同步（widgetResizable=False）
         self._sync_content_size()
         self._update_empty_state()
@@ -4842,11 +4932,23 @@ class MarketplaceCard(QWidget):
                 pass
 
     def _cleanup_worker(self):
-        """安全清理任务 worker/thread（安装/更新/启用/禁用/卸载）"""
-        thread = self._worker_thread
+        """安全清理任务 worker/thread（安装/更新/启用/禁用/卸载）
+
+        并行调度下可能同时存在多个活跃任务线程：逐个剥离为孤儿
+        （quit + setParent(None) + 强引用持有，不阻塞主线程）。
+        """
+        threads = []
+        for task in list(self._active_tasks.values()):
+            t = task.get("thread")
+            if t is not None:
+                threads.append(t)
+        self._active_tasks.clear()
+        self._task_active = False
+        self._active_task = None
         self._worker_thread = None
         self._worker = None
-        self._orphan_worker_thread(thread)
+        for t in threads:
+            self._orphan_worker_thread(t)
 
     def _cleanup_fetch_worker(self):
         """安全清理市场拉取 worker/thread（与任务 worker 相互独立）"""

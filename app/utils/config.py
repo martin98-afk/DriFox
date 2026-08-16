@@ -486,6 +486,8 @@ class Settings(QConfig):
     tool_off_behavior = ConfigItem("Tools", "OffBehavior", "deny")
     # per-tool 关闭策略：{tool_name: "deny"|"ask"}，缺失回退 tool_off_behavior
     tool_permission_policy = ConfigItem("Tools", "PermissionPolicy", {})
+    # 工具热重载风险通知（True=每次热重载弹提醒；False=用户选择不再提醒，持久化）
+    tool_reload_risk_notice = ConfigItem("Tools", "ReloadRiskNotice", True, BoolValidator())
 
     # ========== 锁屏远程 ==========
     # 开启后锁屏状态下也保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行

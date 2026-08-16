@@ -110,3 +110,61 @@ def test_update_reload_tolerates_failure(monkeypatch):
 
     card = MarketplaceCard.__new__(MarketplaceCard)
     card._reload_plugin_ui_on_gui("demo")  # 不应抛异常
+
+
+
+class FakeStatusLabel:
+    """最小状态栏桩：_on_update_done 只 setText 清空文案，无需真实 widget"""
+
+    def setText(self, text):
+        self._text = text
+
+    def setStyleSheet(self, css):
+        pass
+
+
+def test_update_done_skips_reload_when_keep_disabled(monkeypatch):
+    """禁用插件更新完成：keep_disabled=True → 不重载 UI（保持禁用）"""
+    from ui.cards import MarketplaceCard
+
+    card = MarketplaceCard.__new__(MarketplaceCard)
+    card._alive = lambda: True  # __new__ 构造无 C++ 对象，_alive 恒 False → 强制存活
+    card.window = lambda: None  # 跳过 self.window()（QWidget 未初始化）
+    card._status_label = FakeStatusLabel()
+    reload_calls = []
+    card._reload_plugin_ui_on_gui = lambda name: reload_calls.append(name)
+    card._refresh_row_states = lambda: None
+    card._update_row_state = lambda *a, **k: None
+    # 禁用 InfoBar 真实弹窗
+    import ui.cards as cards_mod
+
+    monkeypatch.setattr(cards_mod, "InfoBar", type("FakeInfoBar", (), {"success": staticmethod(lambda *a, **k: None), "error": staticmethod(lambda *a, **k: None)}))
+
+    card._on_update_done({"name": "demo", "keep_disabled": True}, True)
+    assert reload_calls == [], "禁用插件更新成功不得重载 UI"
+
+    card._on_update_done({"name": "demo", "keep_disabled": True}, False)
+    assert reload_calls == [], "禁用插件更新失败也不得重载 UI"
+
+
+def test_update_done_reloads_when_not_disabled(monkeypatch):
+    """启用插件更新完成：keep_disabled=False → 照常重载 UI"""
+    from ui.cards import MarketplaceCard
+
+    card = MarketplaceCard.__new__(MarketplaceCard)
+    card._alive = lambda: True  # __new__ 构造无 C++ 对象，_alive 恒 False → 强制存活
+    card.window = lambda: None  # 跳过 self.window()（QWidget 未初始化）
+    card._status_label = FakeStatusLabel()
+    reload_calls = []
+    card._reload_plugin_ui_on_gui = lambda name: reload_calls.append(name)
+    card._refresh_row_states = lambda: None
+    card._update_row_state = lambda *a, **k: None
+    import ui.cards as cards_mod
+
+    monkeypatch.setattr(cards_mod, "InfoBar", type("FakeInfoBar", (), {"success": staticmethod(lambda *a, **k: None), "error": staticmethod(lambda *a, **k: None)}))
+
+    card._on_update_done({"name": "demo", "keep_disabled": False}, True)
+    assert reload_calls == ["demo"], "启用插件更新成功必须重载 UI"
+
+    card._on_update_done({"name": "demo", "keep_disabled": False}, False)
+    assert reload_calls == ["demo", "demo"], "启用插件更新失败也必须重载 UI（恢复旧版）"

@@ -1,0 +1,194 @@
+name: Marketplace Consistency
+
+# 系统插件市场一致性检查 + 自动修复
+#
+# marketplace.json（DriFox 系统插件市场，source 指向 master 分支）由
+# tools/generate_marketplace.py 从 plugins/system/.drifox-plugin/plugin.json 生成。
+# 本 workflow 保证 marketplace.json 与 manifest 不漂移：
+#   - check：marketplace.json 与插件 manifest 不一致时失败
+#   - auto-fix-marketplace：check 失败且 marketplace.json 确有变化时，
+#     重新生成并 push 回触发分支（PR 回推 head 分支 / push 回推 master、dev），
+#     commit message 带 [skip ci] 防止无限循环
+
+on:
+  pull_request:
+    branches: [master, dev]
+  push:
+    branches: [master, dev]
+
+# 防止并发运行导致 marketplace.json 修复冲突
+concurrency:
+  group: marketplace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  marketplace-check:
+    name: 检查 marketplace.json 一致性
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          python-version: "3.14"
+          enable-cache: true
+          cache-suffix: "uv-marketplace"
+
+      - name: 检查 marketplace.json 一致性
+        id: marketplace-check
+        run: |
+          # --check 失败时 set -e 会让 step 失败但我们仍要输出 consistent 标记
+          if uv run --no-project python tools/generate_marketplace.py --check; then
+            echo "consistent=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "consistent=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+  # ------------------------------------------------------------------
+  # 自动修复 marketplace.json
+  #
+  # 触发场景（需要 check job 失败）：
+  #   1) pull_request 推送 → 重新生成 → push 回 PR head 分支
+  #   2) push 到 master/dev → 重新生成 → push 回触发分支，保证分支始终 green
+  #
+  # 关键设计：
+  #   1) bot commit message 携带 [skip ci] 防止 push 后再次触发
+  #      workflow（GitHub Actions 原生识别 [skip ci] / [no ci] / [ci skip]）；
+  #      副作用：GITHUB_TOKEN 的 push 不会自动触发 workflow 重跑，
+  #      bot 修复后需手动 re-run 才能看到校验结果（PR 场景需重新 push 触发）
+  #   2) 仅在 marketplace.json 真的有变化（drift）时才提交；如果失败原因
+  #      不在 marketplace（生成器异常等），PR 留 comment、分支 push 让 job
+  #      失败（不污染分支历史、不掩盖真实问题）
+  #   3) 用 token 显式 push（需 repo Settings 打开
+  #      "Allow GitHub Actions to create and approve pull requests"）；
+  #      token 优先级：DRIFOX_BOT_TOKEN > GITHUB_TOKEN（GITHUB_TOKEN 恒非空，
+  #      放前面会遮蔽 bot token；且 GITHUB_TOKEN push 不触发重跑，bot token 可）
+  #   4) fork PR 不自动修复：fork 的 head 分支对仓库无写权限，push 必然 403，
+  #      故排除 fork 场景（fork PR 由 maintainer 合入前自行跑 --check）
+  # ------------------------------------------------------------------
+  auto-fix-marketplace:
+    name: 自动修复 marketplace.json
+    needs: marketplace-check
+    if: |
+      (failure() || success()) &&
+      needs.marketplace-check.result == 'failure' &&
+      (github.event_name == 'pull_request' ||
+       github.ref == 'refs/heads/master' ||
+       github.ref == 'refs/heads/dev') &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout 目标分支
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # 默认 token 在 PR 上有写权限；若组织禁用了默认 token，
+          # 需在 secrets 配 DRIFOX_BOT_TOKEN（优先级高于 GITHUB_TOKEN）
+          token: ${{ secrets.DRIFOX_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          python-version: "3.14"
+          enable-cache: true
+          cache-suffix: "uv-marketplace-fix"
+
+      - name: 重新生成 marketplace.json
+        run: |
+          uv run --no-project python tools/generate_marketplace.py
+
+      - name: 检查 marketplace.json 是否真有变化
+        id: drift
+        run: |
+          if git diff --quiet marketplace.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ marketplace.json 已最新，无需提交" >&2
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "📝 marketplace.json 有更新需要提交" >&2
+            git diff --stat marketplace.json >&2
+          fi
+
+      - name: 决定 push 目标分支
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "branch=${{ github.head_ref }}" >> "$GITHUB_OUTPUT"
+            echo "is_pr=true" >> "$GITHUB_OUTPUT"
+            echo "📍 push 目标: PR head ref ${{ github.head_ref }}" >&2
+          else
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "is_pr=false" >> "$GITHUB_OUTPUT"
+            echo "📍 push 目标: 直接 push 回 ${{ github.ref_name }}" >&2
+          fi
+
+      - name: Commit 并 push marketplace.json 修复
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
+          # 优先 DRIFOX_BOT_TOKEN：GITHUB_TOKEN push 不会触发 workflow 重跑
+          # （[skip ci] 之外的副作用），bot token 可正常触发；
+          # 未配 bot token 时回落 GITHUB_TOKEN（修复后需手动 re-run 验证）
+        run: |
+          git config user.name "drifox-bot"
+          git config user.email "drifox-bot@users.noreply.github.com"
+          git add marketplace.json
+
+          # 主体 commit message：[skip ci] 是 GitHub Actions 原生识别的标志，
+          # 触发 push 后会跳过整个 workflow，避免无限循环
+          git commit \
+            -m "chore(marketplace): auto-regenerate from plugin.json [skip ci]" \
+            -m "由 GitHub Actions 自动生成。"
+
+          # 设置带 token 的 remote URL（persist-credentials: false 未保存凭证，需显式注入）
+          TOKEN="${{ secrets.DRIFOX_BOT_TOKEN || secrets.GITHUB_TOKEN }}"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          echo "📤 推送到 ${TARGET_BRANCH}..." >&2
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: PR 评论（PR 触发 + 失败原因不在 marketplace）
+        if: |
+          steps.drift.outputs.changed == 'false' &&
+          steps.target.outputs.is_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 **drifox-bot 报告**：CI 失败但 marketplace.json 已最新。\n\n' +
+                    '失败原因不在 marketplace 漂移，请查看上面的 marketplace-check job 详情。\n\n' +
+                    '**常见原因**：\n' +
+                    '- 生成器 tools/generate_marketplace.py 执行异常\n' +
+                    '- plugins/system/ 插件 manifest 缺失或损坏\n\n' +
+                    '修复后重新 push 即可，CI 会再次校验。\n\n' +
+                    '> ℹ️ 若由 bot 自动修复（[skip ci] 提交），push 不会触发重跑，需手动 re-run workflow。'
+            })
+
+      - name: 报告失败（分支 push + 失败原因不在 marketplace）
+        if: |
+          steps.drift.outputs.changed == 'false' &&
+          steps.target.outputs.is_pr == 'false'
+        run: |
+          echo "❌ push 到分支后 CI 失败，但失败原因不在 marketplace 漂移。" >&2
+          echo "请查看 marketplace-check job 详情修复后重新 push。" >&2
+          echo "" >&2
+          echo "自动修复策略：只接管 marketplace 漂移这类自动可修的失败，" >&2
+          echo "其他类型的失败（生成器异常 / manifest 损坏等）需要人工修复，" >&2
+          echo "避免 bot 提交掩盖真实问题。" >&2
+          exit 1

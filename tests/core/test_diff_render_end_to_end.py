@@ -109,6 +109,66 @@ class TestFailureBranch:
         assert "<pre" in html
 
 
+class TestFailureNoteInDiff:
+    """补充 7：diff 存在时失败/部分失败详情不被吞（multi_edit 部分失败场景）
+
+    主程序 diff 分支只渲染 diff、丢弃 result 文本 → 错误详情不可见。
+    修复：插件渲染闭包检测失败关键词/success=False，在 diff 上方输出提示块。
+    """
+
+    _DIFF_PATH = (
+        "--- tests/test_marketplace_update_disabled.py\n"
+        "+++ tests/test_marketplace_update_disabled.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    def test_partial_failure_note_shown(self):
+        """multi_edit 部分失败（success=True + diff + content 含失败详情）→ 失败详情可见"""
+        result = (
+            "已批量编辑 tests/test_marketplace_update_disabled.py（成功 1/2 处，失败 1 处）：\n"
+            "Edit #2 failed: oldString 未找到。oldString 开头: 'xxx'"
+        )
+        html = render_tool_block(
+            "multi_edit",
+            {"path": "tests/test_marketplace_update_disabled.py"},
+            result=result,
+            success=True,
+            diff=self._DIFF_PATH,
+        )
+        # diff 渲染闭包出现
+        assert "tool-diff-inline" in html
+        # 失败详情以提示块输出（不再被 diff 吞掉）
+        assert "tool-diff-inline__note" in html
+        assert "Edit #2 failed" in html
+        assert "成功 1/2 处" in html
+
+    def test_failure_with_diff_note_shown(self):
+        """success=False + diff 非空 → 错误信息仍展示（防御：渲染层不丢 result）"""
+        html = render_tool_block(
+            "multi_edit",
+            {"path": "tests/test_marketplace_update_disabled.py"},
+            result="批量编辑全部失败（文件未改动）：\nEdit #1 failed: oldString 未找到",
+            success=False,
+            diff=self._DIFF_PATH,
+        )
+        assert "tool-diff-inline__note" in html
+        assert "Edit #1 failed" in html
+
+    def test_success_no_note(self):
+        """全部成功 → 不输出提示块（无失败关键词，行为不变）"""
+        html = render_tool_block(
+            "multi_edit",
+            {"path": "x.py"},
+            result="已批量编辑 x.py（2 处全部成功）",
+            success=True,
+            diff=_DIFF,
+        )
+        assert "tool-diff-inline" in html
+        assert "tool-diff-inline__note" not in html
+
+
 class TestReconstructDiffFromOperations:
     """D9：edit 工具 operations 参数重建伪 diff（历史消息 diff 缺失 fallback）"""
 
