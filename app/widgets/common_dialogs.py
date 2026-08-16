@@ -75,7 +75,10 @@ class ConfirmDialog(MaskDialogBase):
         layout.setSpacing(0)
 
         # 标题
-        title_label = BodyLabel(title, self.widget)
+        # 标题（兼容 qfluentwidgets 旧版：BodyLabel 仅接受 parent，文本用 setText 设置）
+        title_label = BodyLabel(self.widget)
+        title_label.setText(title)
+
         title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(16)}; font-weight: bold;"
@@ -86,7 +89,9 @@ class ConfirmDialog(MaskDialogBase):
         layout.addSpacing(12)
 
         # 内容
-        content_label = BodyLabel(content, self.widget)
+        content_label = BodyLabel(self.widget)
+        content_label.setText(content)
+
         content_label.setWordWrap(True)
         content_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
@@ -216,7 +221,10 @@ class InfoDialog(MaskDialogBase):
         layout.setSpacing(0)
 
         # 标题
-        title_label = BodyLabel(title, self.widget)
+        # 标题（兼容 qfluentwidgets 旧版：BodyLabel 仅接受 parent，文本用 setText 设置）
+        title_label = BodyLabel(self.widget)
+        title_label.setText(title)
+
         title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
             f"{get_font_family_css()} {font_size_css(16)}; font-weight: bold;"
@@ -227,7 +235,9 @@ class InfoDialog(MaskDialogBase):
         layout.addSpacing(12)
 
         # 内容
-        content_label = BodyLabel(content, self.widget)
+        content_label = BodyLabel(self.widget)
+        content_label.setText(content)
+
         content_label.setWordWrap(True)
         content_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; "
