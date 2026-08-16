@@ -175,9 +175,11 @@ class InfoDialog(MaskDialogBase):
     """通用信息提示弹框 — 单按钮确认，替代 qfluentwidgets MessageBox（仅确认按钮场景）
 
     统一 MaskDialogBase 风格。
+    可选传 dismiss_text 增加次级「不再提醒」按钮（点击 emit dismissed）。
     """
 
     confirmed = pyqtSignal()
+    dismissed = pyqtSignal()
 
     DEFAULT_WIDTH = 400
     DEFAULT_HEIGHT = 240
@@ -187,12 +189,13 @@ class InfoDialog(MaskDialogBase):
         title: str,
         content: str,
         confirm_text: str = "知道了",
+        dismiss_text: str = "",
         parent=None,
     ):
         super().__init__(parent)
-        self._init_ui(title, content, confirm_text)
+        self._init_ui(title, content, confirm_text, dismiss_text)
 
-    def _init_ui(self, title: str, content: str, confirm_text: str):
+    def _init_ui(self, title: str, content: str, confirm_text: str, dismiss_text: str = ""):
         Colors.refresh()
         self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
         self.setClosableOnMaskClicked(True)
@@ -234,9 +237,34 @@ class InfoDialog(MaskDialogBase):
 
         layout.addStretch()
 
-        # 单按钮行
+        # 按钮行（可选：次级「不再提醒」按钮 + 主确认按钮）
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
+
+        if dismiss_text:
+            dismiss_btn = QPushButton(dismiss_text, self.widget)
+            dismiss_btn.setCursor(Qt.PointingHandCursor)
+            dismiss_btn.setFixedHeight(36)
+            dismiss_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Colors.CARD_BG.format(alpha=180)};
+                    color: {Colors.TEXT_PRIMARY};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 8px;
+                    padding: 4px 28px;
+                    {get_font_family_css()} {font_size_css(13)}
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.HOVER_BG};
+                    border-color: {Colors.BORDER_ACCENT};
+                }}
+                QPushButton:pressed {{
+                    background-color: {Colors.SELECTED_BG};
+                }}
+            """)
+            dismiss_btn.clicked.connect(self._on_dismiss)
+            btn_layout.addStretch()
+            btn_layout.addWidget(dismiss_btn)
 
         confirm_btn = QPushButton(confirm_text, self.widget)
         confirm_btn.setCursor(Qt.PointingHandCursor)
@@ -270,6 +298,11 @@ class InfoDialog(MaskDialogBase):
     def _on_confirm(self):
         self.close()
         self.confirmed.emit()
+
+    def _on_dismiss(self):
+        """点击「不再提醒」：关闭并 emit dismissed（调用方持久化设置）"""
+        self.close()
+        self.dismissed.emit()
 
     def _center_widget(self):
         """让 widget 在 dialog 中保持居中"""

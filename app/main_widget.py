@@ -970,6 +970,24 @@ class ToolWindow(QWidget):
         """)
 
 
+class _ToolReloadNoticeBridge(QObject):
+    """工具热重载风险通知桥：watcher 后台线程 emit → 主线程槽执行
+
+    reloaded 由 watcher 后台线程 emit；桥在主线程创建，reloaded→notified
+    跨线程自动 QueuedConnection，确保外部槽在主线程执行。
+    """
+
+    reloaded = pyqtSignal()
+    notified = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.reloaded.connect(self.notified)
+
+
+_tool_reload_notice_bridge: Optional[_ToolReloadNoticeBridge] = None
+
+
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
@@ -1006,6 +1024,9 @@ class OpenAIChatToolWindow(ToolWindow):
     # 指纹 = result 序列化（同一次广播 result 相同）；10s 短窗内同指纹只执行一次。
     _last_hot_reload_fingerprint: Optional[str] = None
     _last_hot_reload_at: float = 0.0
+
+    # 工具热重载风险通知：进程级注册标记（多窗口只注册一次 listener）
+    _tool_reload_notice_registered: bool = False
 
     # 团队模板：新建窗口延后 join team 的延迟（ms），等 backend 初始化完成
     # TODO: 根据用户机器性能动态调整此值
@@ -1143,6 +1164,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
         self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
+        # 注册工具热重载风险通知监听（进程级一次）
+        self._register_tool_reload_notice()
         # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
         self.backend.auto_compact_requested.connect(self._on_auto_compact_requested)
         self.backend._current_project = self._current_project
@@ -8917,6 +8940,70 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
             )
+
+    def _register_tool_reload_notice(self):
+        """注册工具热重载风险通知监听（进程级一次，多窗口只注册首个）
+
+        PluginToolWatcher 检测到插件工具目录变更并完成重扫后，后台线程触发
+        listener → 桥接信号 QueuedConnection 到主线程 → 弹 MaskDialog 风险通知。
+        仅 watcher 轮询路径触发；启动对齐 / 插件启停的重扫不触发（用户已知情）。
+        """
+        if OpenAIChatToolWindow._tool_reload_notice_registered:
+            return
+        OpenAIChatToolWindow._tool_reload_notice_registered = True
+        global _tool_reload_notice_bridge
+        try:
+            from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+
+            watcher = ensure_plugin_tool_watcher()
+            if watcher is None:
+                # watcher 未就绪（watchfiles 未安装等）→ 解除注册，下次窗口再试
+                OpenAIChatToolWindow._tool_reload_notice_registered = False
+                return
+            if _tool_reload_notice_bridge is None:
+                _tool_reload_notice_bridge = _ToolReloadNoticeBridge()
+                _tool_reload_notice_bridge.notified.connect(OpenAIChatToolWindow._on_tool_reload_notice)
+            watcher.on_tools_reloaded(_tool_reload_notice_bridge.reloaded.emit)
+            logger.debug("[ToolReloadNotice] 工具热重载风险通知监听已注册")
+        except Exception as e:
+            logger.warning(f"[ToolReloadNotice] 注册热重载监听失败: {e}")
+            OpenAIChatToolWindow._tool_reload_notice_registered = False
+
+    @staticmethod
+    def _on_tool_reload_notice():
+        """主线程槽：工具热重载完成 → 弹风险通知（MaskDialog 风格）"""
+        try:
+            from app.widgets.common_dialogs import InfoDialog
+
+            cfg = Settings.get_instance()
+            if not cfg.tool_reload_risk_notice.value:
+                return  # 用户已选择「不再提醒」
+            # 找主窗口作 parent（Tab 管理器优先，否则首个存活窗口）
+            parent = TabManagerWindow.get_instance()
+            if parent is None:
+                for win in OpenAIChatToolWindow._instances:
+                    if not getattr(win, "_is_destroyed", False):
+                        parent = win
+                        break
+            if parent is None:
+                return
+            dialog = InfoDialog(
+                title="工具热重载完成",
+                content=(
+                    "检测到工具插件已被热重载，模型可用的工具定义已更新。\n\n"
+                    "请注意：\n"
+                    "• 正在进行的对话仍使用重载前的工具列表，新工具需新开对话才生效\n"
+                    "• 历史会话中已记录的工具调用可能与新定义存在差异\n"
+                    "• 若工具不可用或调用异常，请检查插件代码后重试",
+                ),
+                confirm_text="知道了",
+                dismiss_text="不再提醒",
+                parent=parent,
+            )
+            dialog.dismissed.connect(lambda: cfg.set(cfg.tool_reload_risk_notice, False, save=True))
+            dialog.exec_()
+        except Exception as e:
+            logger.warning(f"[ToolReloadNotice] 弹框失败: {e}")
 
     def _on_plugin_hot_reload(self, result: dict):
         """插件热更新完成时的回调（watchfiles 自动触发）

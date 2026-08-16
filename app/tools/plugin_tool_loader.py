@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -369,6 +369,10 @@ class PluginToolWatcher:
         self._scan_lock = threading.Lock()  # 重扫互斥（UI 触发 + 轮询线程并发安全）
         self._thread = None
         self._stop = False
+        # 热重载完成监听（轮询检测到变更并完成重扫后触发，后台线程回调）
+        # 用途：UI 弹风险通知等。仅 watcher 轮询路径触发，
+        # 显式 scan_now()（启动对齐 / 插件启停）不触发——那些场景用户已知情。
+        self._reload_listeners: List[Callable[[], None]] = []
 
     def scan_now(self) -> None:
         """全量重扫：先注销已加载插件的全部工具，再全量重新注册（幂等）。
@@ -397,6 +401,18 @@ class PluginToolWatcher:
                 logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
                 # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
 
+    def on_tools_reloaded(self, listener: Callable[[], None]) -> None:
+        """注册热重载完成监听（后台线程回调；仅 watcher 轮询检测到变更时触发）"""
+        self._reload_listeners.append(listener)
+
+    def _notify_reloaded(self) -> None:
+        """通知全部监听者：一次轮询周期内的重扫已完成"""
+        for listener in list(self._reload_listeners):
+            try:
+                listener()
+            except Exception as e:
+                logger.warning(f"[PluginToolWatcher] 热重载监听回调失败: {e}")
+
     def start(self, poll_interval: float = 2.0) -> None:
         """后台线程轮询监听（轻量轮询，避免线程模型冲突）"""
         if self._thread is not None and self._thread.is_alive():
@@ -414,6 +430,8 @@ class PluginToolWatcher:
                         self.scan_now()
                     except Exception as e:
                         logger.warning(f"[PluginToolWatcher] 重扫失败: {e}")
+                    # 重扫完成后通知监听者（无论成败，工具定义变更事实已发生）
+                    self._notify_reloaded()
                     last_sig = self._signature()
 
         self._thread = threading.Thread(target=_loop, daemon=True, name="plugin-tool-watcher")
