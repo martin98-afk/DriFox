@@ -420,7 +420,7 @@ def register(registry):
     registry.register(
         "mcp_list_servers", _MCP_LIST_SCHEMA, impl=_mcp_list_impl,
         danger="safe", icon="工具", cn_name="MCP列表",
-        group=GROUP_SYSTEM, description="列出MCP服务器",
+        group=GROUP_INTERACTION, description="列出MCP服务器",
         aliases=["McpListServers", "mcp_list_servers"],
         preview=_preview_mcp_list_servers,
         summarize=make_summarize_from_preview(_preview_mcp_list_servers),
