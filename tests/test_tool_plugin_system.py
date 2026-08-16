@@ -1609,3 +1609,87 @@ class TestPluginLoadFaultTolerance:
             assert reg.get("t_b") is None
         finally:
             cfg.enabled_plugins.value = saved
+
+
+class TestToolCardRebuildAndListener:
+    """P1-1 回归 + P2-3 弱引用：show_content 吸收排队不丢变更 / listener 不泄漏"""
+
+    def test_show_content_absorbs_queued_change_rebuilds(self, qt_app):
+        """P1-1：隐藏期间 registry 变更排队 → 立即显示必须重建（新工具不丢失）"""
+        from app.tools.registry import ToolRegistry
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        reg = ToolRegistry.get_instance()
+        card = ToolControlCardContent()
+        # 首次构建（吸收创建时的立即回调排队）
+        card.show_content()
+        assert card._built
+        assert not card._rebuild_pending
+        assert "p11_probe_tool" not in card._toggle_widgets
+
+        calls = []
+        _orig_rebuild = ToolControlCardContent._rebuild
+
+        def _counting(self):
+            calls.append(1)
+            return _orig_rebuild(self)
+
+        ToolControlCardContent._rebuild = _counting
+        try:
+            # 模拟隐藏期间热重载：注册新工具 → registry 变更 → 排队
+            reg.register(
+                "p11_probe_tool",
+                {"type": "function", "function": {"name": "p11_probe_tool"}},
+                impl=lambda **kw: "ok",
+                danger="safe",
+                icon="read",
+                cn_name="探针工具",
+                group="测试组",
+                description="P1-1 回归探针",
+                source="plugin:test",
+            )
+            assert card._rebuild_pending, "registry 变更应排队"
+            assert card._rebuild_timer.isActive(), "排队 timer 应激活"
+            # 立即打开卡片（隐藏 → 显示）：吸收排队并重建
+            card.show_content()
+            assert len(calls) == 1, f"吸收排队后应重建 1 次, 实际 {len(calls)}"
+            assert "p11_probe_tool" in card._toggle_widgets, "新工具应出现在卡片（吸收的变更不丢失）"
+            assert not card._rebuild_pending
+            assert not card._rebuild_timer.isActive()
+        finally:
+            ToolControlCardContent._rebuild = _orig_rebuild
+            card.deleteLater()
+            qt_app.processEvents()
+
+    def test_registry_listener_weakref_released(self):
+        """P2-3：bound method 监听者对象销毁后 registry 不再回调（弱引用 + 死引用清理）"""
+        import gc
+        import weakref
+
+        from app.tools.registry import ToolRegistry
+
+        reg = ToolRegistry.get_instance()
+        assert len(reg._listeners) == 0  # fresh_registry 重置后无残留
+
+        class Probe:
+            def __init__(self):
+                self.calls = []
+
+            def on_change(self, version):
+                self.calls.append(version)
+
+        p = Probe()
+        ref = weakref.ref(p)
+        reg.on_change(p.on_change)
+        assert len(p.calls) == 1  # 注册即回调一次
+        reg._notify_change()
+        assert len(p.calls) == 2  # 对象存活时正常回调
+
+        del p
+        gc.collect()
+        assert ref() is None, "listener 对象应被回收（弱引用不保活）"
+        # 通知不再触发已销毁对象（无异常），并顺带清理死引用
+        before = len(reg._listeners)
+        reg._notify_change()
+        after = len(reg._listeners)
+        assert before == 1 and after == 0, f"死引用应被清理: {before} -> {after}"
