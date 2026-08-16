@@ -3642,6 +3642,17 @@ class MarketplaceCard(QWidget):
             # 最终 UI 处于主线程语义）。load_plugin 幂等，重复调用无副作用。
             if kind == "enable" and task.get("reload_ui"):
                 self._reload_plugin_ui_on_gui(name)
+            # 启用/禁用后刷新 tab_panel 启动器按钮：disable 后 UI 组件已卸载、
+            # floating_cards 已清空，不刷新则按钮残留点不开；enable 同理补新按钮。
+            # 与热重载路径 _update_shared_launcher（内部 refresh_ui_plugins）一致，
+            # 主线程执行安全；窗口未就绪（get_instance None）时跳过。
+            if kind in ("enable", "disable"):
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    try:
+                        tm._update_shared_launcher()
+                    except Exception as e:
+                        logger.debug(f"[Marketplace] 刷新 shared launcher 失败（忽略）: {e}")
             self._refresh_row_states()
             InfoBar.success(f"{name} {action}成功", "", duration=2000, parent=bar_parent)
         else:
