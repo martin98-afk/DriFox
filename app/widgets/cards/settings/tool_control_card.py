@@ -69,6 +69,7 @@ class ToolControlCardContent(QWidget):
     """工具控制卡片内容 — 分组折叠 + 独立开关"""
 
     togglesChanged = pyqtSignal(dict)
+    _registryChanged = pyqtSignal(int)  # registry 变更桥接（可能来自后台 watcher 线程）
 
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
@@ -79,6 +80,8 @@ class ToolControlCardContent(QWidget):
         self._group_labels: dict = {}  # group_name -> (QLabel, tool_names) 用于刷新"启用数/总数"
         self._built = False  # 首次 show_content 才构建,避免启动即耗 CPU
         self._rebuild_pending = False  # 合并同批 registry 变更,避免逐个排队全量重建
+        self._queued_built = False  # 排队时刻的 _built 快照(重建与否据此判定)
+        self._registryChanged.connect(self._on_registry_changed_ui)  # 后台线程变更→主线程刷新
         self._setup_ui()
         self._bind_registry()
 
@@ -86,28 +89,51 @@ class ToolControlCardContent(QWidget):
             self._bind_controller(self._controller)
 
     def _bind_registry(self):
-        """监听 registry 热更新：工具插件变更时重建卡片（主线程安全）"""
+        """监听 registry 热更新：工具插件变更时重建卡片（线程安全桥接）"""
         ToolRegistry.get_instance().on_change(self._on_registry_changed)
 
     def _on_registry_changed(self, version):
-        """registry 版本变化（工具插件热插拔/热更新）→ 重建卡片
+        """registry 版本变化（工具插件热插拔/热更新）→ 转发信号到 UI 线程。
 
-        去抖：一次重扫会「逐个注销 + 全量重注册」全部工具，产生几十次
+        ⚠️ 此回调可能来自后台 watcher 线程（PluginToolWatcher 轮询线程执行
+        scan_now，registry.register/unregister 同步 notify 全部 listener）。
+        直接 emit 信号：pyqtSignal QueuedConnection 自动排队到 widget 所在
+        线程（主线程）执行刷新，避免在后台线程直接操作 Qt 定时器。
+        """
+        self._registryChanged.emit(version)
+
+    def _on_registry_changed_ui(self, _version):
+        """主线程槽：去抖合并同批变更，排队一次刷新（重建卡片 + 通知上层计数）。
+
+        一次重扫会「逐个注销 + 全量重注册」全部工具，产生几十次
         change 事件（每次 register/unregister 都 notify）。若每次排队
         全量 _rebuild（~180ms/次）会串行刷屏数秒。pending 标记合并
-        同批变更 → 只重建一次；重建期间新变更会再触发一次，不丢。
+        同批变更 → 只刷新一次；刷新期间新变更会再触发一次，不丢。
+
+        无论卡片是否已构建（_built）都要通知上层——主窗口工具栏按钮
+        的计数动态读 registry，热重载后必须刷新；否则只有新建窗口
+        （重新初始化按钮）才显示正确数量。
         """
-        if not self._built:
-            return
         if self._rebuild_pending:
+            # 已排队但期间卡片完成构建 → 升级为需要重建（否则变更被吞）
+            self._queued_built = self._queued_built or self._built
             return
         self._rebuild_pending = True
+        self._queued_built = self._built  # 快照排队时刻构建状态
         QTimer.singleShot(0, self._do_rebuild)
 
     def _do_rebuild(self):
-        """singleShot 回调：重置 pending 后执行全量重建"""
+        """singleShot 回调：重置 pending 后执行刷新（重建卡片 + 通知上层计数）
+
+        重建与否取决于排队时刻的 _built 快照：未构建时跳过重建（首次
+        show_content 会从 registry 拉最新数据），但始终通知上层刷新计数。
+        """
         self._rebuild_pending = False
-        self._rebuild()
+        if self._queued_built:
+            self._rebuild()
+        # 通知上层刷新计数（main_widget 工具栏按钮：动态读 registry 显示新数量）
+        if self._controller:
+            self.togglesChanged.emit(self._controller.get_toggles())
 
     def set_controller(self, controller):
         """延迟绑定 controller(main_widget 在 super().__init__ 之后注入时使用)"""

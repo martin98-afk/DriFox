@@ -724,6 +724,76 @@ class TestPermissionLinkage:
         pc.deleteLater()
         qt_app.processEvents()
 
+    def test_registry_change_from_bg_thread_rebuilds(self, qt_app):
+        """回归：热重载 watcher 在后台线程触发 registry 变更（unregister/register 同步
+        notify listener），卡片必须经信号桥接在主线程重建，且重建后发射
+        togglesChanged（main_widget 连它刷新工具栏按钮的「危险 X 安全 Y」计数）。
+
+        旧实现在后台线程直接 QTimer.singleShot(0, ...) 跨线程操作 Qt 定时器，
+        且重建完成后不发射 togglesChanged → 工具栏按钮计数保持旧值，
+        只有新建窗口（重新初始化按钮）才显示正确数量。
+        """
+        import threading
+
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        pc = ToolPermissionController()
+        card = ToolControlCardContent(controller=pc)
+        card.show_content()  # 首次构建
+        before = len(card._toggle_widgets)
+        assert before > 0
+
+        # 模拟 main_widget 连接：togglesChanged -> 刷新工具栏计数
+        refresh_payloads = []
+        card.togglesChanged.connect(refresh_payloads.append)
+
+        new_tool = "_bg_reload_test_tool"
+        assert new_tool not in reg.names()
+        errors = []
+
+        def bg():
+            try:
+                reg.unregister("read")
+                reg.register(
+                    new_tool,
+                    schema={"type": "object"},
+                    impl=lambda **kw: "ok",
+                    danger="safe",
+                    source="plugin:test",
+                    cn_name="后台热重载测试",
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=bg)
+        t.start()
+        t.join()
+        assert not errors, errors
+        assert new_tool in reg.names()
+
+        # 处理 QueuedConnection 信号 + 去抖定时器
+        for _ in range(5):
+            qt_app.processEvents()
+
+        assert not card._rebuild_pending
+        assert "read" not in card._toggle_widgets  # 被注销工具消失
+        assert new_tool in card._toggle_widgets  # 新工具出现
+        assert len(card._toggle_widgets) == before  # 数量同步（-1 +1）
+
+        # 重建后必须通知上层刷新计数（工具栏按钮动态读 registry）
+        assert refresh_payloads, "热重载后未发射 togglesChanged（工具栏按钮计数不会刷新）"
+        latest = refresh_payloads[-1]
+        assert new_tool in latest and "read" not in latest  # 载荷同步到最新工具集
+
+        card.deleteLater()
+        pc.deleteLater()
+        qt_app.processEvents()
 
 class TestPerToolPolicy:
     """per-tool 关闭策略(T3):设置/持久化/回退/UI 联动/生效层一致性"""
