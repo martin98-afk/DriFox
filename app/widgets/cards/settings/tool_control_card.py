@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +39,23 @@ OFF_BEHAVIOR_OPTIONS = [
 # 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
 MIXED_OPTION = ("__mixed__", "未统一")
 
+# ── 行/组样式常量模板（模块级：rebuild 中大量重复 setStyleSheet，
+#    模板化减少 Python 层重复字符串构造，QSS 规则与内联写法完全一致） ──
+_TRANSPARENT_STYLE = "background: transparent; border: none;"
+_TEXT_LABEL_STYLE = "color: {color}; background: transparent; border: none; {weight}{font_size} {font_family}"
+_SOURCE_TAG_STYLE = (
+    "background-color: {color}; color: white; "
+    "{font_size} {font_family} font-weight: bold; padding: 1px 6px; border-radius: 4px;"
+)
+_GROUP_FRAME_STYLE = """
+    QFrame {{
+        background: transparent;
+        border: 1px solid {border_color};
+        border-radius: 8px;
+    }}
+"""
+_GROUP_HEADER_STYLE = "background: {bg}; border: none; border-radius: 8px;"
+
 # 工具来源标签样式（参考 hook 配置卡片的 sourceLabel 色块风格）
 # - builtin（内置）：灰色 #888
 # - system（系统插件）：红色 #e74c3c
@@ -47,29 +65,6 @@ _SOURCE_TAG_COLORS = {
     "system": ("#e74c3c", "系统"),
     "user": ("#2ecc71", "用户"),
 }
-
-
-# [PROBE] 幽灵窗口排查探针（定位后移除）：记录当前可见的顶层窗口快照。
-# 幽灵窗口「空白/半透明小窗口一闪即逝」若来自卡片重建期间弹出的独立窗口
-# （ComboBox 下拉菜单 RoundMenu / ToolTip / MaskDialog），此快照可捕获其类型。
-def _probe_visible_top_windows(tag: str):
-    from loguru import logger
-
-    try:
-        wins = []
-        for w in QApplication.topLevelWidgets():
-            if not w.isVisible():
-                continue
-            cls = type(w).__name__
-            title = ""
-            try:
-                title = w.windowTitle()[:24]
-            except Exception:
-                pass
-            wins.append(f"{cls}({title})" if title else cls)
-        logger.info(f"[ToolCard][probe] {tag}: top_windows={wins}")
-    except Exception as e:
-        logger.warning(f"[ToolCard][probe] {tag} failed: {e}")
 
 
 def _format_source_label(source: str, plugin_root_kind: str = "") -> tuple:
@@ -116,15 +111,35 @@ class ToolControlCardContent(QWidget):
         self._groups_cache = []  # 分组缓存（registry version 变化时失效）
         self._groups_cache_version = -1
         self._registryChanged.connect(self._on_registry_changed_ui)  # 后台线程变更→主线程刷新
+        # 成员 QTimer 替代 QTimer.singleShot：show_content 吸收排队时可用 stop()
+        # 取消已排队的 _do_rebuild，避免「打开卡片吸收排队重建后，紧随的
+        # _do_rebuild 仍执行第二次全量 rebuild」（singleShot 无法取消）
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.timeout.connect(self._do_rebuild)
         self._setup_ui()
         self._bind_registry()
+        # 卡片销毁时解除 registry 监听（双保险：registry 侧弱引用也会自动失效）
+        self.destroyed.connect(self._unbind_registry)
 
         if self._controller:
             self._bind_controller(self._controller)
 
     def _bind_registry(self):
-        """监听 registry 热更新：工具插件变更时重建卡片（线程安全桥接）"""
-        ToolRegistry.get_instance().on_change(self._on_registry_changed)
+        """监听 registry 热更新：工具插件变更时重建卡片（线程安全桥接）
+
+        listener 以弱引用注册（registry.on_change 对 bound method 弱持有），
+        卡片销毁后自动失效；_unbind_registry 在 destroyed 时显式解除作双保险。
+        """
+        self._registry_listener = self._on_registry_changed
+        ToolRegistry.get_instance().on_change(self._registry_listener)
+
+    def _unbind_registry(self):
+        """卡片销毁时解除 registry 监听（registry 侧弱引用兜底，此处显式解除）"""
+        try:
+            ToolRegistry.get_instance().off_change(self._registry_listener)
+        except Exception:
+            pass
 
     def _on_registry_changed(self, version):
         """registry 版本变化（工具插件热插拔/热更新）→ 转发信号到 UI 线程。
@@ -162,10 +177,10 @@ class ToolControlCardContent(QWidget):
         self._rebuild_pending = True
         self._queued_built = self._built  # 快照排队时刻构建状态
         self._queued_version = version
-        QTimer.singleShot(0, self._do_rebuild)
+        self._rebuild_timer.start(0)
 
     def _do_rebuild(self):
-        """singleShot 回调：重置 pending 后执行刷新（重建卡片 + 通知上层计数）
+        """定时器回调：重置 pending 后执行刷新（重建卡片 + 通知上层计数）
 
         重建与否取决于排队时刻的 _built 快照：未构建时跳过重建（首次
         show_content 会从 registry 拉最新数据），但始终通知上层刷新计数。
@@ -189,7 +204,7 @@ class ToolControlCardContent(QWidget):
                 self._rebuild_pending = True
                 self._queued_built = self._queued_built or self._built
                 self._queued_version = ToolRegistry.get_instance().version()
-                QTimer.singleShot(0, self._do_rebuild)
+                self._rebuild_timer.start(0)
                 return
         self._rebuild_reschedule = 0
         if self._queued_built:
@@ -259,59 +274,82 @@ class ToolControlCardContent(QWidget):
         self._apply_toggles()
 
     def refresh_style(self):
-        """主题/字体变更时重建全部 widget 以应用新样式
+        """主题/字体变更时刷新样式
 
-        未构建时跳过 — 等下次 show_content 时会自动重建以应用新样式。
+        未构建时跳过；**隐藏时不全量重建**，仅标记 _needs_rebuild 延迟到下次
+        show_content——与 _do_rebuild 的隐藏延迟策略一致。主题切换会对所有
+        「显示过但当前隐藏」的卡片调用本方法，隐藏卡片全量重建（~200ms/张）
+        是主题切换卡顿的组成部分；可见才重建可消除。
         """
         if not self._built:
             return
-        self._rebuild()
+        if self.isVisible():
+            self._rebuild()
+        else:
+            self._needs_rebuild = True
 
     def _rebuild(self):
         """全量重建内容"""
         from loguru import logger
 
         t0 = _time.monotonic()
-        # [PROBE] 重建前后顶层窗口快照：捕获重建期间出现的瞬态独立窗口
-        _probe_visible_top_windows("rebuild_start")
 
         self._built = True  # 标记已构建
-        while self._layout.count():
-            item = self._layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._toggle_widgets.clear()
-        self._policy_combos.clear()
-        self._group_switches.clear()
-        self._group_labels.clear()
 
-        # 从 controller 获取当前生效的 toggles
-        if self._controller:
-            toggles = self._controller.get_toggles()
-            agent = self._controller.get_active_agent_name()
-            logger.info(
-                f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}"
-            )
-        else:
-            toggles = {}
-            logger.info("[ToolCard] _rebuild: controller=None!")
+        # ★ 幽灵窗口防护：清空旧行前先关闭所有行内 ComboBox 下拉菜单，
+        # 并隐藏正在显示的原生 tooltip。
+        # 1) ComboBox 菜单：qfluentwidgets ComboBoxMenu 是半透明顶层窗口，
+        #    fade-in 动画中父 combo 被 deleteLater 销毁会残留孤儿窗口。
+        # 2) 原生 QToolTip（行内 label/switch 均 setToolTip）：悬停中的
+        #    tooltip 是 Windows 无边框原生窗口，rebuild 销毁其宿主控件时
+        #    tooltip 被强制中断，Windows 为其创建的 SysShadow 系统阴影
+        #    窗口可能残留「空白/半透明小窗一闪即逝」（实测确认）。
+        #    先 hideText 走正常隐藏路径，Windows 正常清理阴影。
+        self._close_all_combo_menus()
+        QToolTip.hideText()
 
-        # 确保所有工具都在 toggles 中
-        all_tools = get_all_tools()
-        defaults = get_default_toggles(all_tools)
-        for name in all_tools:
-            if name not in toggles:
-                toggles[name] = defaults[name]
+        # ★ 性能优化：重建期间冻结重绘，避免每 addWidget 触发一次布局/绘制
+        # （实测 30 行构建 125ms → 84ms，-33%）。构建完成后恢复并统一刷新。
+        updates_enabled = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+        try:
+            while self._layout.count():
+                item = self._layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self._toggle_widgets.clear()
+            self._policy_combos.clear()
+            self._group_switches.clear()
+            self._group_labels.clear()
 
-        # 按组构建（registry 动态分组，组内危险工具在前）
-        groups = self._get_groups()
-        for group_name, tool_names in groups:
-            self._build_group(group_name, tool_names, toggles)
+            # 从 controller 获取当前生效的 toggles
+            if self._controller:
+                toggles = self._controller.get_toggles()
+                agent = self._controller.get_active_agent_name()
+                logger.info(
+                    f"[ToolCard] _rebuild: agent={agent}, toggles_enabled={sum(1 for v in toggles.values() if v)}/{len(toggles)}"
+                )
+            else:
+                toggles = {}
+                logger.info("[ToolCard] _rebuild: controller=None!")
 
-        self._layout.addStretch()
+            # 确保所有工具都在 toggles 中
+            all_tools = get_all_tools()
+            defaults = get_default_toggles(all_tools)
+            for name in all_tools:
+                if name not in toggles:
+                    toggles[name] = defaults[name]
 
-        # [PROBE] 重建完成：顶层窗口快照 + 耗时（性能基线）
-        _probe_visible_top_windows("rebuild_end")
+            # 按组构建（registry 动态分组，组内危险工具在前）
+            groups = self._get_groups()
+            for group_name, tool_names in groups:
+                self._build_group(group_name, tool_names, toggles)
+
+            self._layout.addStretch()
+        finally:
+            self.setUpdatesEnabled(updates_enabled)
+            self.update()
+
         logger.info(f"[ToolCard] _rebuild done: {(_time.monotonic() - t0) * 1000:.0f} ms, groups={len(groups)}")
 
     def _get_groups(self) -> list:
@@ -355,18 +393,25 @@ class ToolControlCardContent(QWidget):
 
         # 更新单个工具关闭策略下拉(值 + 可见性:仅开关关闭时显示)
         # 与行渲染/右上角"未统一"判定共用 get_active_tool_behavior_map,口径一致
+        # ★ 懒创建配套：开启行无 combo（_policy_combos 缺失）；开关切为关闭时
+        # 动态补建并插入行布局，切回开启时仅隐藏不销毁（保留下一次快速显示）。
         policies_map = self._controller.get_active_tool_behavior_map()
-        for tool_name, combo in self._policy_combos.items():
+        for tool_name, sw in self._toggle_widgets.items():
             enabled = toggles.get(tool_name, True)
-            target_hidden = enabled  # 开关开启 → 策略下拉隐藏
-            if combo.isHidden() != target_hidden:
-                combo.setVisible(not enabled)
-            policy = policies_map.get(tool_name, self._controller.get_behavior())
-            idx = combo.findData(policy)
-            if idx >= 0 and idx != combo.currentIndex():
-                combo.blockSignals(True)
-                combo.setCurrentIndex(idx)
-                combo.blockSignals(False)
+            combo = self._policy_combos.get(tool_name)
+            if not enabled:
+                if combo is None:
+                    combo = self._create_policy_combo(tool_name, sw.parentWidget().layout(), sw)
+                elif combo.isHidden():
+                    combo.setVisible(True)
+                policy = policies_map.get(tool_name, self._controller.get_behavior())
+                idx = combo.findData(policy)
+                if idx >= 0 and idx != combo.currentIndex():
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+            elif combo is not None and not combo.isHidden():
+                combo.setVisible(False)
 
         # 更新整组开关 + 组标题"启用数/总数"
         for group_name, tool_names in self._get_groups():
@@ -407,20 +452,14 @@ class ToolControlCardContent(QWidget):
         header_bg = "rgba(34,197,94,0.06)" if not has_danger else "rgba(255,80,80,0.08)"
 
         group = QFrame()
-        group.setStyleSheet(f"""
-            QFrame {{
-                background: transparent;
-                border: 1px solid {border_color};
-                border-radius: 8px;
-            }}
-        """)
+        group.setStyleSheet(_GROUP_FRAME_STYLE.format(border_color=border_color))
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(0, 0, 0, 0)
         group_layout.setSpacing(0)
 
         # 组头
         header = QWidget()
-        header.setStyleSheet(f"background: {header_bg}; border: none; border-radius: 8px;")
+        header.setStyleSheet(_GROUP_HEADER_STYLE.format(bg=header_bg))
         header.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 8, 10, 8)
@@ -428,8 +467,12 @@ class ToolControlCardContent(QWidget):
         enabled_count = sum(1 for t in tool_names if all_toggles.get(t, True))
         label = QLabel(f"{group_name} ({enabled_count}/{len(tool_names)})")
         label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; background: transparent; border: none; "
-            f"{font_size_css(12)} {get_font_family_css()}"
+            _TEXT_LABEL_STYLE.format(
+                color=Colors.TEXT_PRIMARY,
+                weight="font-weight: 600; ",
+                font_size=font_size_css(12),
+                font_family=get_font_family_css(),
+            )
         )
         header_layout.addWidget(label)
         header_layout.addStretch()
@@ -447,7 +490,7 @@ class ToolControlCardContent(QWidget):
 
         # 折叠体
         body = QWidget()
-        body.setStyleSheet("background: transparent; border: none;")
+        body.setStyleSheet(_TRANSPARENT_STYLE)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(10, 6, 14, 8)
         body_layout.setSpacing(3)
@@ -472,7 +515,7 @@ class ToolControlCardContent(QWidget):
     def _build_tool_row(self, tool_name: str, all_toggles: dict) -> QWidget:
         """构建单个工具行（中文名 + 来源标签 + 危险标记 + registry 描述）"""
         row = QWidget()
-        row.setStyleSheet("background: transparent; border: none;")
+        row.setStyleSheet(_TRANSPARENT_STYLE)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 3, 0, 3)
         row_layout.setSpacing(8)
@@ -491,18 +534,21 @@ class ToolControlCardContent(QWidget):
         plugin_root_kind = (reg.metadata or {}).get("_plugin_root_kind", "") if reg is not None else ""
 
         name_label = QLabel(display_name)
-        name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none; "
-            f"{font_size_css(12)} {get_font_family_css()}"
-        )
         if is_danger:
             # 危险工具：名字加 🔥 标记 + 微红着色
             name_label.setText(f"🔥 {display_name}")
             name_label.setStyleSheet(
-                f"color: #ff6b6b; background: transparent; border: none; {font_size_css(12)} {get_font_family_css()}"
+                _TEXT_LABEL_STYLE.format(
+                    color="#ff6b6b", weight="", font_size=font_size_css(12), font_family=get_font_family_css()
+                )
             )
             name_label.setToolTip(f"{display_name}（危险操作：{desc or '可能修改系统状态'}）")
         else:
+            name_label.setStyleSheet(
+                _TEXT_LABEL_STYLE.format(
+                    color=Colors.TEXT_PRIMARY, weight="", font_size=font_size_css(12), font_family=get_font_family_css()
+                )
+            )
             name_label.setToolTip(f"{display_name}（安全操作）")
 
         # 来源标签（与 hook 配置卡片 sourceLabel 一致：彩色小色块 + 文字）
@@ -510,9 +556,7 @@ class ToolControlCardContent(QWidget):
         source_color, source_text = _format_source_label(source, plugin_root_kind)
         source_label = QLabel(source_text)
         source_label.setStyleSheet(
-            f"background-color: {source_color}; color: white; "
-            f"{font_size_css(10)} {get_font_family_css()} "
-            f"font-weight: bold; padding: 1px 6px; border-radius: 4px;"
+            _SOURCE_TAG_STYLE.format(color=source_color, font_size=font_size_css(10), font_family=get_font_family_css())
         )
         source_label.setFixedHeight(18)
         # tooltip 提示完整 plugin 名 + 描述
@@ -529,26 +573,11 @@ class ToolControlCardContent(QWidget):
         desc_label = _ElidedLabel(desc)
         desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; "
-            f"{font_size_css(10)} {get_font_family_css()}"
+            _TEXT_LABEL_STYLE.format(
+                color=Colors.TEXT_SECONDARY, weight="", font_size=font_size_css(10), font_family=get_font_family_css()
+            )
         )
         row_layout.addWidget(desc_label)
-
-        # 关闭策略下拉(仅开关关闭时显示): ask=询问用户 / deny=直接拒绝
-        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
-        policy = self._controller.get_active_tool_behavior_map().get(tool_name, "deny") if self._controller else "deny"
-        policy_combo = ComboBox()
-        for value, label in OFF_BEHAVIOR_OPTIONS:
-            policy_combo.addItem(label, userData=value)
-        idx = policy_combo.findData(policy)
-        if idx >= 0:
-            policy_combo.setCurrentIndex(idx)
-        policy_combo.setVisible(not enabled)  # 仅关闭时显示,开启时隐藏
-        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
-        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
-        row_layout.addWidget(policy_combo)
-        self._policy_combos[tool_name] = policy_combo
-        policy_combo.currentIndexChanged.connect(lambda _idx, name=tool_name: self._on_tool_policy_changed(name))
 
         sw = SwitchButton()
         sw.setChecked(enabled)
@@ -557,7 +586,52 @@ class ToolControlCardContent(QWidget):
 
         sw.checkedChanged.connect(lambda checked, name=tool_name: self._on_tool_toggled(name, checked))
 
+        # 关闭策略下拉(仅开关关闭时创建): ask=询问用户 / deny=直接拒绝
+        # ★ 懒创建优化：开启状态的工具不创建 ComboBox（34 工具全开时省
+        # 34 次 combo 创建 + 行布局项），_apply_toggles 在开关切为关闭时
+        # 动态补建（插入到 switch 前）、切回开启时仅隐藏不销毁。
+        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
+        if not enabled:
+            self._create_policy_combo(tool_name, row_layout, sw)
+
         return row
+
+    def _create_policy_combo(self, tool_name: str, row_layout: QHBoxLayout, sw: SwitchButton) -> ComboBox:
+        """创建工具行关闭策略下拉并插入行布局（switch 之前）
+
+        懒创建入口：_build_tool_row 仅关闭行创建；_apply_toggles 在开关
+        切换为关闭时动态补建。值口径与行渲染一致（get_active_tool_behavior_map）。
+        """
+        policy = self._controller.get_active_tool_behavior_map().get(tool_name, "deny") if self._controller else "deny"
+        policy_combo = ComboBox()
+        for value, label in OFF_BEHAVIOR_OPTIONS:
+            policy_combo.addItem(label, userData=value)
+        idx = policy_combo.findData(policy)
+        if idx >= 0:
+            policy_combo.setCurrentIndex(idx)
+        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
+        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
+        if sw is not None:
+            row_layout.insertWidget(row_layout.indexOf(sw), policy_combo)
+        else:
+            row_layout.addWidget(policy_combo)
+        policy_combo.currentIndexChanged.connect(lambda _idx, name=tool_name: self._on_tool_policy_changed(name))
+        self._policy_combos[tool_name] = policy_combo
+        return policy_combo
+
+    def _close_all_combo_menus(self):
+        """关闭所有行内 ComboBox 下拉菜单（幽灵窗口防护）
+
+        qfluentwidgets ComboBox 的 ComboBoxMenu 是半透明顶层窗口（Qt.Popup），
+        父 combo 隐藏/销毁时若菜单处于动画中会残留「空白小窗口一闪即逝」。
+        在 rebuild 清空旧行前 / hide_content 卡片隐藏时调用：先关菜单再动
+        widget，避免菜单变孤儿顶层窗口。
+        """
+        for combo in self._policy_combos.values():
+            try:
+                combo._closeComboMenu()
+            except Exception:
+                pass
 
     def _on_tool_toggled(self, tool_name: str, enabled: bool):
         """用户编辑单个开关
@@ -572,12 +646,10 @@ class ToolControlCardContent(QWidget):
         logger.info(
             f"[ToolCard] _on_tool_toggled: {tool_name}={enabled}, agent_active={self._controller.is_agent_active()}"
         )
-        # 直接更新 controller(触发信号链供外部使用)
+        # 直接更新 controller：togglesChanged → _on_active_toggles_changed 信号链
+        # 会同步执行 _apply_toggles + togglesChanged.emit（上层计数刷新），
+        # 此处不重复调用（原双份 _apply_toggles + emit = 信号风暴，P2-5）
         self._controller.set_user_toggle(tool_name, enabled)
-        # 轻量级刷新 UI（controller 信号也会触发 _apply_toggles，但开销极低）
-        self._apply_toggles()
-        # 通知 frame 刷新统计
-        self.togglesChanged.emit(self._controller.get_toggles())
 
     def _on_tool_policy_changed(self, tool_name: str):
         """用户编辑单工具关闭策略(ask/deny)
@@ -596,9 +668,9 @@ class ToolControlCardContent(QWidget):
             f"[ToolCard] _on_tool_policy_changed: {tool_name}={policy}, "
             f"agent_active={self._controller.is_agent_active()}"
         )
+        # 更新 controller：policiesChanged → _on_active_policies_changed 信号链
+        # 会同步执行 _apply_toggles（行内下拉/可见性刷新），此处不重复调用
         self._controller.set_user_tool_policy(tool_name, policy)
-        # 轻量级刷新 UI(controller 信号也会触发 _apply_toggles,开销极低)
-        self._apply_toggles()
 
     def _on_group_toggled(self, tool_names: list, enabled: bool):
         """用户编辑整组开关
@@ -608,10 +680,9 @@ class ToolControlCardContent(QWidget):
         if self._controller is None:
             return
         new_toggles = {name: enabled for name in tool_names}
+        # 更新 controller：togglesChanged → _on_active_toggles_changed 信号链
+        # 会同步执行 _apply_toggles + 上层计数刷新，此处不重复调用
         self._controller.set_user_toggles(new_toggles)
-        # 轻量级刷新 UI
-        self._apply_toggles()
-        self.togglesChanged.emit(self._controller.get_toggles())
 
     def show_content(self):
         """卡片显示时刷新(从 controller 拉取最新状态)
@@ -625,9 +696,17 @@ class ToolControlCardContent(QWidget):
         重建一次 → 紧随其后的变更再重建一次」的二次卡顿。
         """
         if self._rebuild_pending:
-            # 有排队中的 registry 变更：取消，吸收进本次重建（打开后不立刻二次 rebuild）
+            # 有排队中的 registry 变更：stop 掉已排队的 _do_rebuild（成员 QTimer
+            # 可取消，singleShot 不行）并吸收进本次重建——否则排队的 _do_rebuild
+            # 会在事件循环里再执行一次全量 rebuild（打开卡片 = 两次 ~200ms 重建）
+            self._rebuild_timer.stop()
             self._rebuild_pending = False
             self._queued_built = True
+            if self._built:
+                # P1-1 边界兜底：卡片已构建过时，吸收的变更必须在本
+                # 次显示重建——否则 show_content 走 _apply_toggles 轻量
+                # 路径，隐藏期间的新增/删除工具不会出现在卡片上
+                self._needs_rebuild = True
         if not self._built or self._needs_rebuild:
             self._needs_rebuild = False
             self._rebuild()
@@ -635,7 +714,15 @@ class ToolControlCardContent(QWidget):
             self._apply_toggles()
 
     def hide_content(self):
-        pass
+        """卡片隐藏时关闭行内下拉菜单 + 隐藏原生 tooltip（幽灵窗口补漏）
+
+        用户开着 combo 菜单直接关卡片时，Qt.Popup 是独立顶层窗口、不随父
+        widget 隐藏 → 下次 show 时残留。隐藏前先关全部菜单可消除。
+        原生 QToolTip 同理：悬停中的 tooltip 宿主控件随卡片隐藏，Windows
+        SysShadow 阴影窗口可能残留，先 hideText 走正常隐藏路径。
+        """
+        self._close_all_combo_menus()
+        QToolTip.hideText()
 
 
 class ToolControlCardFrame(SystemCardFrame):
@@ -727,13 +814,17 @@ class ToolControlCardFrame(SystemCardFrame):
         self._on_agent_changed(controller.get_active_agent_name() or "")
 
     def refresh_style(self):
-        """主题/字体变更时刷新卡片样式"""
+        """主题/字体变更时刷新卡片样式
+
+        super().refresh_style() 内部 _refresh_content_children 已递归刷新
+        _content_layout 子控件（含 _card.refresh_style），**不再显式调用
+        _card.refresh_style()**——原实现每次主题刷新固定双 _rebuild（plan
+        定位的直接根因）。_card.refresh_style 自身带隐藏延迟策略（可见才
+        全量重建），此处只补 frame 级样式。
+        """
         super().refresh_style()
         # 刷新主题感知图标（浅色/深色切换后更新图标颜色）
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
-        # 刷新内容区 widget（全量重建以应用新样式）
-        if hasattr(self, "_card") and self._card is not None:
-            self._card.refresh_style()
         self.update()
 
     def _sync_behavior_combo(self):

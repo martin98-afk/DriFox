@@ -11467,7 +11467,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
         # 批次全部渲染完成，统一更新滚动
-        if self._loading_session:
+        # 🐛 修复：用户已主动滚离底部时禁止在此强制置底——否则向上滚动
+        # 到顶加载历史批次时，懒渲染完成会把视口拉回底部（滚轮自动置底回归）。
+        if self._loading_session and not self._user_intentionally_away_from_bottom:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             if not self._initial_scroll_to_bottom or scroll_bar.value() >= scroll_bar.maximum() - 50:
                 scroll_bar.setValue(scroll_bar.maximum())
@@ -11484,7 +11486,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🐛 修复：所有懒渲染批次完成后，卡片仍在异步报告高度，
             # layout 持续扩展但不再触发滚底。用 sticky 模式在接下来
             # 900ms 内持续滚动到底部，覆盖卡片异步高度上报期。
-            if self._initial_scroll_to_bottom:
+            # 但用户已主动滚离底部时跳过——否则向上滚动加载历史批次
+            # 完成后会把视口强制拉回底部（滚轮自动置底回归）。
+            if self._initial_scroll_to_bottom and not self._user_intentionally_away_from_bottom:
                 self._scroll_to_bottom(sticky_ms=900)
 
     def _get_current_user_round_index(self) -> int:
@@ -13128,9 +13132,12 @@ class OpenAIChatToolWindow(ToolWindow):
             if value < scroll_bar.maximum():
                 self._bottom_anchor_deadline = 0.0
                 self._bottom_anchor_timer.stop()
-        # 检测用户是否主动滚离底部（距离底部超过 30px）
+        # 检测用户是否主动滚离底部（距离底部超过 30px）；
+        # 滚回底部附近时复位，保证 away 标志状态机闭合（置 True 处见上）
         if value < scroll_bar.maximum() - 30:
             self._user_intentionally_away_from_bottom = True
+        elif scroll_bar.maximum() > 0:
+            self._user_intentionally_away_from_bottom = False
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
@@ -16641,6 +16648,22 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         saved_messages = list(session.messages or []) if session else []
         if not saved_messages:
+            return
+
+        # 🛡️ 团队解散空白会话守卫：跳过没有用户消息的会话。
+        # 团队批量创建窗口时 create_session 触发 SessionStart hook 注入团队指引
+        # （role=user 但带 _hook_event）。若团队在首次真实对话前被解散/离开
+        # （_team_run_id 已清空），后台 finalize 链（_launch_background_finalize）
+        # 强制置脏后走本方法保存——旧实现仅检查 saved_messages 非空 + _session_dirty，
+        # 会把仅含 hook 消息的空白会话落库成普通类型记录（历史面板出现大量空白
+        # 普通会话）。与 _auto_save_current_session 同口径：team 邮件
+        # （_hook_event="TeamMail"）视为真实用户问题（邮件触发的对话应保存），
+        # 其余 hook 消息不算。
+        has_user_message = any(
+            msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
+            for msg in saved_messages
+        )
+        if not has_user_message:
             return
 
         # 🛡️ 跳过无变更保存：自上次保存后会话没有新消息/修改，

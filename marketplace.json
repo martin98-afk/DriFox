@@ -1,8 +1,126 @@
 {
     "name": "drifox-system",
-    "description": "DriFox 系统插件市场 — 系统内置插件（默认命令、智能体、技能、主题、Hooks、MCP 配置与内置工具）的官方更新源",
+    "description": "DriFox 插件市场 — 主仓库内置插件（系统插件与内置工具插件）的官方更新源",
     "homepage": "https://github.com/martin98-afk/DriFox",
     "plugins": [
+        {
+            "name": "context-usage-stats",
+            "description": "对话上下文用量统计 — 展示最近对话的 token 用量、消息数量趋势、会话活跃度图表",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/context-usage-stats",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "file-tree",
+            "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持右键菜单与实时文件监听",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/file-tree",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "plugin-marketplace",
+            "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
+            "version": "0.3.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/plugin-marketplace",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/drifox-plugins",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "share-history",
+            "description": "分享记录管理器 - 追踪会话分享和项目导出的历史记录",
+            "version": "1.0.0",
+            "author": "DriFox Team",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/share-history",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "shortcut-manager",
+            "description": "管理系统命令的快捷键，支持自定义快捷键覆盖系统配置",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/shortcut-manager",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
         {
             "name": "system",
             "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置和内置工具（工具插件化：schema/图标/中文名/危险/分组注册）",
@@ -31,6 +149,30 @@
                 "mcp": true,
                 "lsp": true,
                 "tools": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "system-cleaner",
+            "description": "系统清理工具 — 一键清理 DriFox 缓存垃圾（备份/日志/应用缓存/截图/归档会话），释放磁盘空间与内存",
+            "version": "0.1.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/system-cleaner",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {

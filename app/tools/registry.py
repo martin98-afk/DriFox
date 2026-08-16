@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -89,6 +90,39 @@ def make_summarize_from_preview(preview_fn):
     return _summarize
 
 
+def _to_listener_ref(listener: Callable[[int], None]):
+    """监听者引用归一化：bound method → (弱引用对象, 函数)；普通 callable 原样保留。
+
+    bound method 每次访问都是新对象，无法直接弱引用；拆成 (obj, func) 后只弱引用
+    obj——监听者对象销毁（如权限卡片窗口关闭）后引用自动失效，_notify_change 遍历
+    时跳过并顺带清理，避免「已销毁 QWidget 持续接收变更回调」的 listener 泄漏
+    （多窗口 × 高频热重载场景：listener 只增不删 → 变更遍历越来越慢 + 内存泄漏）。
+    """
+    self_ = getattr(listener, "__self__", None)
+    func = getattr(listener, "__func__", None)
+    if self_ is not None and func is not None:
+        return (weakref.ref(self_), func)
+    return listener
+
+
+def _from_listener_ref(ref) -> Optional[Callable[[int], None]]:
+    """解析存储的监听者引用；对象已销毁返回 None（调用方丢弃该引用）。"""
+    if isinstance(ref, tuple):
+        obj = ref[0]()
+        if obj is None:
+            return None
+        return ref[1].__get__(obj)
+    return ref
+
+
+def _same_listener(a, b) -> bool:
+    """判断两个监听者引用是否同一（用于 off_change 精确解除）。"""
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        obj_a = a[0]()
+        return obj_a is not None and obj_a is b[0]() and a[1] is b[1]
+    return a is b or a == b
+
+
 class ToolRegistry:
     """工具注册表（进程级单例）。version 号驱动缓存失效与热重载快照。"""
 
@@ -99,7 +133,7 @@ class ToolRegistry:
         self._tools: Dict[str, ToolRegistration] = {}
         self._lock = threading.RLock()
         self._version = 0
-        self._listeners: List[Callable[[int], None]] = []  # (new_version) 缓存失效钩子
+        self._listeners: List = []  # 变更监听（bound method 以 (weakref, func) 弱持有，见 _to_listener_ref）
 
     # ========== 单例 ==========
 
@@ -424,23 +458,39 @@ class ToolRegistry:
     # ========== 缓存失效钩子 ==========
 
     def on_change(self, listener: Callable[[int], None]) -> None:
-        """注册变更监听（schema 缓存失效 / UI 刷新）。返回后立即以当前版本回调一次。"""
+        """注册变更监听（schema 缓存失效 / UI 刷新）。返回后立即以当前版本回调一次。
+
+        bound method 监听者以弱引用持有：监听者对象销毁后引用自动失效，不会发生
+        「已销毁对象持续接收回调」的泄漏；需要主动解除时调用 off_change。
+        """
         with self._lock:
-            self._listeners.append(listener)
+            self._listeners.append(_to_listener_ref(listener))
         try:
             listener(self._version)
         except Exception as e:
             logger.warning(f"[ToolRegistry] 变更监听回调失败: {e}")
 
+    def off_change(self, listener: Callable[[int], None]) -> None:
+        """解除变更监听（不存在 / 已随对象销毁自动失效时静默忽略）。"""
+        target = _to_listener_ref(listener)
+        with self._lock:
+            self._listeners[:] = [r for r in self._listeners if not _same_listener(r, target)]
+
     def _notify_change(self) -> None:
         with self._lock:
             version = self._version
-            listeners = list(self._listeners)
-        for listener in listeners:
+            refs = list(self._listeners)
+        for ref in refs:
+            listener = _from_listener_ref(ref)
+            if listener is None:
+                continue  # 监听者对象已销毁 → 跳过（下方统一清理）
             try:
                 listener(version)
             except Exception as e:
                 logger.warning(f"[ToolRegistry] 变更监听回调失败: {e}")
+        # 顺带清理已销毁对象的弱引用，防止 list 无限增长
+        with self._lock:
+            self._listeners[:] = [r for r in self._listeners if _from_listener_ref(r) is not None]
 
 
 def _classify_fallback(tool_name: str) -> str:

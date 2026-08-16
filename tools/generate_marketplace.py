@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-generate_marketplace.py — 从 plugins/system/.drifox-plugin/plugin.json 生成系统插件 marketplace.json
+generate_marketplace.py — 从 plugins/ 下所有插件的 .drifox-plugin/plugin.json 生成 marketplace.json
 
-DriFox 主仓库的系统插件市场生成器。系统插件（plugins/system/）随 DriFox 主仓库分发，
-由本脚本生成 marketplace.json 供插件市场从 GitHub（martin98-afk/DriFox, master 分支）拉取更新。
+DriFox 主仓库的插件市场生成器。plugins/ 下所有内置插件（系统插件与内置工具插件）
+随 DriFox 主仓库分发，由本脚本生成 marketplace.json 供插件市场从 GitHub
+（martin98-afk/DriFox, master 分支）拉取更新。
 
 用法:
     python tools/generate_marketplace.py           # 生成/更新 marketplace.json
@@ -29,16 +30,15 @@ from typing import Any
 # ============================================================
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# 系统插件目录：plugins/system/ 为单一系统插件（.drifox-plugin/plugin.json 唯一 manifest）
-SYSTEM_PLUGIN_DIR = REPO_ROOT / "plugins" / "system"
+# 插件目录：plugins/ 下所有含 .drifox-plugin/plugin.json 的目录均为插件
+PLUGINS_DIR = REPO_ROOT / "plugins"
 MARKETPLACE_PATH = REPO_ROOT / "marketplace.json"
 MANIFEST_PATH = Path(".drifox-plugin") / "plugin.json"
 
 # 仓库元信息（与 DriFox 仓库 GitHub 链接一致）
 REPO_NAME = "drifox-system"
 REPO_DESCRIPTION = (
-    "DriFox 系统插件市场 — 系统内置插件（默认命令、智能体、技能、主题、"
-    "Hooks、MCP 配置与内置工具）的官方更新源"
+    "DriFox 插件市场 — 主仓库内置插件（系统插件与内置工具插件）的官方更新源"
 )
 REPO_URL = "https://github.com/martin98-afk/DriFox"
 DEFAULT_REF = "master"
@@ -73,10 +73,12 @@ def _bold(s: str) -> str:
 
 
 def discover_plugins() -> list[Path]:
-    """发现系统插件目录（当前粒度：plugins/system 单插件）。"""
-    if not SYSTEM_PLUGIN_DIR.exists():
+    """发现 plugins/ 下所有插件目录（含 manifest 的才算插件，由调用方过滤）。"""
+    if not PLUGINS_DIR.exists():
         return []
-    return [SYSTEM_PLUGIN_DIR]
+    return sorted(
+        d for d in PLUGINS_DIR.iterdir() if d.is_dir() and not d.name.startswith(".")
+    )
 
 
 def load_manifest(plugin_dir: Path) -> dict | None:
@@ -205,7 +207,7 @@ def build_plugin_entry(plugin_dir: Path, manifest: dict) -> dict:
 
 
 def generate_marketplace() -> dict:
-    """扫描系统插件，生成完整的 marketplace.json 结构。"""
+    """扫描 plugins/ 下全部插件，生成完整的 marketplace.json 结构。"""
     plugins = discover_plugins()
     entries: list[dict] = []
 
@@ -280,7 +282,7 @@ def check_consistency(generated: dict, existing: dict) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="从 plugins/system/.drifox-plugin/plugin.json 生成系统插件 marketplace.json"
+        description="从 plugins/ 下所有插件的 .drifox-plugin/plugin.json 生成 marketplace.json"
     )
     parser.add_argument(
         "--check",
@@ -289,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else None)
 
-    print(_bold("DriFox system-plugin marketplace generator"))
+    print(_bold("DriFox marketplace generator"))
     print(f"  repo:         {REPO_ROOT}")
     print(f"  marketplace:  {MARKETPLACE_PATH.relative_to(REPO_ROOT)}")
     print()
@@ -298,10 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     plugin_count = len(generated["plugins"])
 
     if plugin_count == 0:
-        print(_yellow("未发现任何系统插件。"))
+        print(_yellow("未发现任何插件。"))
         return 2
 
-    print(f"发现 {plugin_count} 个系统插件:")
+    print(f"发现 {plugin_count} 个插件:")
     for p in generated["plugins"]:
         print(f"  {p['name']:20s} v{p['version']:10s} {p['description'][:50]}")
     print()

@@ -277,16 +277,18 @@ class TestConsistencyAcrossAllFourSites:
         return pos_count + neg_count
 
     def test_main_widget_team_mail_filter_count_exact(self):
-        """main_widget.py 中含 TeamMail 的过滤点数量应精确为 11（R6 4 + R7 5 + F1 1 + F4 Bug1 1）
+        """main_widget.py 中含 TeamMail 的过滤点数量应精确为 12（R6 4 + R7 5 + F1 1 + F4 Bug1 1 + 空白会话守卫 1）
 
         计数演进（均为合理新增，语义见各自提交）：
         - R6/R7 修复：9 处（标题生成/历史问题卡片 4 + 自动保存/归档/worker 识别 5）
         - F1（停止重触发修复）：+1 处（_check_and_process_pending 停止冷却判定附近）
         - F4 Bug1（round_index 口径统一）：+1 处（_get_current_user_round_index
           改为含 TeamMail 例外，与全仓口径一致）
+        - 团队解散空白会话守卫：+1 处（_save_current_session_to_history 新增
+          has_user_message 守卫，拦截仅含 SessionStart hook 消息的空白会话落库）
         """
         count = self._count_team_mail_filters()
-        assert count == 11, f"含 TeamMail 的过滤点应精确为 11（R6 4 + R7 5 + F1 1 + F4 1），实际 {count} 处"
+        assert count == 12, f"含 TeamMail 的过滤点应精确为 12（R6 4 + R7 5 + F1 1 + F4 1 + 守卫 1），实际 {count} 处"
 
     def test_no_bare_hook_event_filter_remains(self):
         """main_widget.py 不应再残留裸 `not msg.get("_hook_event")`（不含 TeamMail 例外）的 **user 消息** 过滤

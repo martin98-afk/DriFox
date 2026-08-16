@@ -139,6 +139,8 @@ _render_tls = threading.local()
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
 _CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask)(?:\|([^)]*))?\)")
+# 追问新格式：<ask>内容</ask>（替代 [内容](ask)），先归一化为旧格式再统一走 replacer
+_ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -2323,11 +2325,14 @@ def get_random_greeting() -> str:
 
 
 def _inject_context_links(md_text: str) -> str:
-    """将 [文本](ask/jump/create/generate/view/session) 转换为胶囊样式的追问标签
+    """将 [文本](ask/jump/create/generate/view/session) 或 <ask>文本</ask> 转换为胶囊样式的追问标签
 
     session 类型格式：[文本](session|session_id|last_time)
     last_time 如果为空则不显示
     """
+
+    # 新格式 <ask>内容</ask> → 归一化为 [内容](ask)，与旧格式共用 replacer 逻辑
+    md_text = _ASK_TAG_PATTERN.sub(lambda m: f"[{m.group(1).strip()}](ask)", md_text)
 
     def replacer(match):
         content = match.group(1)
