@@ -444,3 +444,46 @@ def test_filter_and_resize_no_blank(monkeypatch):
     gap3 = _stretch_gap(card)
     print(f"  清空搜索: content={card._content.height()} gap={gap3}")
     assert gap3 <= 60, f"清空搜索后出现空白: gap={gap3}"
+
+
+
+def test_task_done_refresh_keeps_incremental_rows(monkeypatch):
+    """安装/卸载等任务完成的状态刷新不得推进增量加载（修复前补行 30→40 全量）
+
+    复现背景：_on_row_states_scanned UI 段调用 _render_next_batch() 补缺失行，
+    每次安装/更新/启用/禁用/卸载完成都推进一批增量 → 列表自动膨胀直到全量
+    （用户视角：装一个插件后列表刷出所有插件）。增量加载（每批 30 + 加载更多）
+    是浏览路径专属，状态刷新只应更新已有行。
+    """
+    card = _new_card(monkeypatch)  # 40 个插件市场
+    card.show()
+    card.show_card()
+
+    # 等待首屏渲染完成（增量：只渲染前 30 行 + 加载更多按钮）
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+    _pump(0.3)
+    rows_before = len(card._row_map)
+    assert rows_before == 30, f"首屏应为增量 30 行，实际 {rows_before}"
+
+    # 模拟安装完成：_refresh_row_states 的扫描完成回调（UI 段）
+    card._on_row_states_scanned(({}, {}, []))
+    _pump(0.3)
+
+    rows_after = len(card._row_map)
+    assert rows_after == 30, (
+        f"状态刷新推进了增量加载（修复前 30→40 全量）: 实际 {rows_after} 行"
+    )
+
+    # 增量加载仍正常：点「加载更多」应能继续补行
+    card._on_load_more()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        _pump(0.05)
+        if len(card._row_map) >= 40:
+            break
+    assert len(card._row_map) == 40, f"加载更多失效: {len(card._row_map)}"

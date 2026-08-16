@@ -345,6 +345,10 @@ class PluginInstaller:
         替换环节失败 → 回滚旧版，插件保持可用状态（不出现
         「旧版已删、新版未装」的未安装窗口）。
 
+        禁用中的插件（目录在 plugins-disabled/）原地更新：目标目录指向
+        禁用目录，更新后插件仍保持禁用（修复此前更新把新版装到 plugins/
+        导致双副本 + 禁用状态被破坏的问题）。
+
         Args:
             plugin_meta: marketplace.json 中的插件元数据
 
@@ -357,6 +361,12 @@ class PluginInstaller:
 
         source = plugin_meta.get("source", {})
         target = self._plugins_dir / name
+        # 禁用中的插件（目录在 plugins-disabled/）原地更新：目标指向禁用目录，
+        # 保持禁用状态（修复此前新版装到 plugins/ 导致双副本 + 禁用失效）。
+        # getattr 兜底：兼容测试用 __new__ 手赋属性的构造（无 _disabled_dir 时跳过）
+        disabled_dir = getattr(self, "_disabled_dir", None)
+        if not target.exists() and disabled_dir is not None and (disabled_dir / name).exists():
+            target = disabled_dir / name
         remote_ver = plugin_meta.get("version", "0.0.0")
 
         # 目标目录已存在 → 走 _download_and_move 的备份替换分支；

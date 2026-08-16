@@ -110,6 +110,7 @@ from app.widgets.render_helpers import (
     _get_tool_icon_html,
     _get_tool_icon_name,
     _reg_metadata_flag,
+    get_tool_qrc_prefix,
     render_tool_block,
 )
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
@@ -170,14 +171,9 @@ _CODE_FONT_SIZE: int = scale_font_size(13)
 
 
 def _update_icon_prefix():
-    """主题切换时更新图标前缀缓存"""
+    """主题切换时更新图标前缀缓存（单一来源 get_tool_qrc_prefix）"""
     global _ICON_PREFIX_CACHE
-    try:
-        from app.utils.theme_manager import theme_manager
-
-        _ICON_PREFIX_CACHE = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except Exception:
-        _ICON_PREFIX_CACHE = "qrc:/icons"
+    _ICON_PREFIX_CACHE = get_tool_qrc_prefix()
 
 
 # HTML 实体解码函数（str.maketrans 只能做单字符→单字符，无法解码 &quot; 等多字符实体）
@@ -436,16 +432,9 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
 
 def _get_think_icon_html(size: int = 18) -> str:
     """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
-    try:
-        from app.utils.theme_manager import theme_manager
-
-        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except Exception:
-        prefix = "qrc:/icons"
+    prefix = get_tool_qrc_prefix()
     style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
     return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
-
-
 def _get_think_block_styles() -> str:
     """获取思考块的全局字体样式"""
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"

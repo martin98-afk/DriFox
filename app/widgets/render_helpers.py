@@ -12,6 +12,7 @@ from html import escape
 import orjson as json
 from loguru import logger
 
+from app.tools.registry import DEFAULT_FALLBACK_ICON
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
@@ -22,6 +23,46 @@ from pygments import highlight as _pyg_highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
 
+
+# ===== 主题感知的 qrc 图标前缀（单一来源，替代 render_helpers / message_card 散落的硬编码） =====
+# 主题判断失败默认走深色，与 history 行为一致；调用方必须接受 fallback。
+def get_tool_qrc_prefix() -> str:
+    """获取当前主题对应的工具图标 qrc 前缀（qrc:/icons_light 或 qrc:/icons）"""
+    try:
+        from app.utils.theme_manager import theme_manager
+
+        return "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
+    except Exception:
+        return "qrc:/icons"
+
+# ===== 主程序 qrc 资源存在性缓存（避免每条消息都查 QFile） =====
+# icon 在插件目录里查不到时，渲染层会用 DEFAULT_FALLBACK_ICON ("工具") 兜底——
+# 该常量已知存在于 icons.qrc + icons_light.qrc，避免破图。
+_QRC_ICON_EXISTS_CACHE: dict = {}
+_QRC_ICON_CACHE_MAX = 256
+
+
+def _qrc_icon_exists(prefix: str, icon_name: str) -> bool:
+    """检查主程序 qrc 资源是否存在指定 icon（带缓存，避免每次都 QFile.exists）
+
+    prefix 形如 "qrc:/icons"，QFile 接受 ":icons/..."（去 qrc 前缀加冒号）。
+    主题管理器/Qt 未初始化时按"找不到"处理，让上层走 DEFAULT_FALLBACK_ICON 兜底。
+    """
+    key = f"{prefix}/{icon_name}.svg"
+    cached = _QRC_ICON_EXISTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    exists = False
+    try:
+        from PyQt5.QtCore import QFile
+        qrc_path = ":" + prefix[len("qrc:"):] if prefix.startswith("qrc:") else prefix
+        exists = QFile.exists(f"{qrc_path}/{icon_name}.svg")
+    except Exception:
+        exists = False
+    if len(_QRC_ICON_EXISTS_CACHE) >= _QRC_ICON_CACHE_MAX:
+        _QRC_ICON_EXISTS_CACHE.clear()
+    _QRC_ICON_EXISTS_CACHE[key] = exists
+    return exists
 # 行内 diff 专用 formatter（缓存）：按风格切换，nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
 _DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
 
@@ -744,7 +785,7 @@ def _get_tool_icon_name(tool_name: str, tool_args: dict = None) -> str:
                     return op_icons[operation]
         return ToolRegistry.get_instance().get_icon(tool_name)
     except Exception:
-        return "工具"
+        return DEFAULT_FALLBACK_ICON
 
 
 def _get_tool_cn_name(tool_name: str) -> str:
@@ -804,18 +845,23 @@ def _get_tool_icon_html(icon_name: str, size: int = 18, tool_name: str = None) -
                             f'<img src="data:image/svg+xml;base64,{b64}" '
                             f'style="width:{size}px;height:{size}px;pointer-events:none;" />'
                         )
-        except Exception:
-            pass
-    # 2) 主程序 qrc 资源（主题感知）
-    try:
-        from app.utils.theme_manager import theme_manager
-
-        prefix = "qrc:/icons_light" if theme_manager.is_light_theme() else "qrc:/icons"
-    except Exception:
-        prefix = "qrc:/icons"
+                    logger.debug(
+                        f"[icon] 插件目录 {d} 找不到 {icon_name}.svg（tool={tool_name}），跳过"
+                    )
+        except Exception as e:
+            logger.debug(
+                f"[icon] tool={tool_name} icon={icon_name} 插件目录查询异常：{e}"
+            )
+    # 2) 主程序 qrc 资源（主题感知；单一来源 get_tool_qrc_prefix）
+    prefix = get_tool_qrc_prefix()
+    # 插件目录与主程序 qrc 都查不到时（插件声明了一个 qrc 未收录的文件名），
+    # 强制回退到 DEFAULT_FALLBACK_ICON，避免 WebEngineView 显示破图。
+    if not _qrc_icon_exists(prefix, icon_name):
+        logger.debug(
+            f"[icon] qrc {prefix}/{icon_name}.svg 不存在，回退到 {DEFAULT_FALLBACK_ICON}"
+        )
+        icon_name = DEFAULT_FALLBACK_ICON
     return f'<img src="{prefix}/{icon_name}.svg" style="width:{size}px;height:{size}px;pointer-events:none;" />'
-
-
 def _get_tool_icon(tool_name: str, tool_args: dict = None) -> str:
     """[已弃用] 根据工具名查找图标（保留兼容，返回图标文件名）
 

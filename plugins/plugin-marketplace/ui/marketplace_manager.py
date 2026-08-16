@@ -8,6 +8,9 @@
 
 import json
 import sys
+import threading
+import time
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -64,6 +67,11 @@ _DEFAULT_SOURCES = [
 
 class MarketplaceSourceManager:
     """管理多个市场源：增删、持久化、拉取"""
+
+    # status.json 并发写锁（类级：兼容测试用 __new__ 手赋属性的构造，
+    # 多市场并行拉取时 _record_status/_save_status 可能被多个 worker 线程
+    # 同时调用写同一文件，锁保证不互相覆盖/损坏）
+    _status_lock = threading.Lock()
 
     def __init__(self):
         drifox = _drifox_dir()
@@ -145,24 +153,31 @@ class MarketplaceSourceManager:
         ok=True: 拉到数据（网络成功或缓存命中）
         ok=False: 拉取失败（含失败后回退缓存的情况，error 保留原因）
         """
-        self._fetch_status[name] = {
-            "ok": ok,
-            "error": error,
-            "from_cache": from_cache,
-            "plugins": plugins,
-            "time": time.time(),
-        }
-        self._save_status()
+        with self._status_lock:
+            self._fetch_status[name] = {
+                "ok": ok,
+                "error": error,
+                "from_cache": from_cache,
+                "plugins": plugins,
+                "time": time.time(),
+            }
+            self._save_status()
 
     def get_source_status(self, name: str) -> Optional[Dict[str, Any]]:
         """获取某市场源最近一次拉取状态，无记录返回 None"""
-        return self._fetch_status.get(name)
+        with self._status_lock:
+            return self._fetch_status.get(name)
 
     def get_all_status(self) -> Dict[str, Dict[str, Any]]:
         """获取全部市场源拉取状态"""
-        return dict(self._fetch_status)
+        with self._status_lock:
+            return dict(self._fetch_status)
 
     def clear_status(self, name: str):
+        """清除某市场源的拉取状态（源被移除时调用）"""
+        with self._status_lock:
+            self._fetch_status.pop(name, None)
+            self._save_status()
         """清除某市场源的拉取状态（源被移除时调用）"""
         self._fetch_status.pop(name, None)
         self._save_status()
@@ -365,17 +380,31 @@ class MarketplaceSourceManager:
         return market_data
 
     def fetch_all(self, force: bool = False) -> tuple:
-        """拉取所有市场的插件列表（合并）
+        """拉取所有市场的插件列表（合并，多市场并行拉取）
+
+        各市场源互不依赖（不同 URL/缓存文件/状态），用线程池并发拉取：
+        N 个源最坏等待时间从 15×N 秒降到 ~15 秒。
+        合并逻辑保持与源顺序一致（executor.map 保序），同名插件 downloads 求和。
 
         Returns:
             (all_plugins: list, marketplaces: list, errors: list)
         """
+        from concurrent.futures import ThreadPoolExecutor
+
+        sources = self.get_sources()
         all_plugins: Dict[str, Dict[str, Any]] = {}
         marketplaces: List[Dict[str, Any]] = []
         errors: List[str] = []
 
-        for src_def in self.get_sources():
-            data = self.fetch_marketplace(src_def, force=force)
+        if sources:
+            # 并发上限 4：过多线程同时建连意义不大，反增代理/源站压力
+            max_workers = min(4, len(sources))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(lambda s: self.fetch_marketplace(s, force=force), sources))
+        else:
+            results = []
+
+        for src_def, data in zip(sources, results):
             if data.get("_error"):
                 errors.append(f"{src_def['name']}: {data['_error']}")
             marketplaces.append(data)

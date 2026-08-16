@@ -736,10 +736,16 @@ def _stage_files_impl(tool_ctx, **kwargs):
     return ToolResult(True, content=f"已标记 {len(staged)} 个文件:\n" + "\n".join(staged))
 
 
+_FAILURE_WORD_RE = re.compile(r"失败|failed|error", re.IGNORECASE)
+
+
 def _render_edit_diff_body(result, tool_name, tool_args, success):
     """编辑类工具（edit/multi_edit）完成框渲染闭包：inline diff 预览
 
     从主程序 render_helpers 的 diff 分支迁出，渲染逻辑随工具插件定义。
+    主程序 diff 分支只渲染 diff、丢弃 result 文本 → 失败/部分失败场景
+    （multi_edit 部分失败 success=True + content 含失败详情）错误信息会被
+    吞掉只剩 diff。这里把失败详情作为提示块输出在 diff 上方。
     """
     import os
 
@@ -760,12 +766,28 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
     diff_body = _render_diff_preview(diff)
     diff_files = diff_summary["files"]
     file_label = diff_files[0] if diff_files else "文件变更"
-    file_label = os.path.basename(file_label)
+    file_label = os.path.basename(file_label) if file_label else "文件变更"
     if len(diff_files) > 1:
         file_label = f"{file_label} 等 {len(diff_files)} 个文件"
     added = diff_summary["added"]
     deleted = diff_summary["deleted"]
     _gf = _get_global_font()
+
+    # 失败/部分失败信息：diff 存在时主程序只渲染 diff，result 文本（错误详情）
+    # 会被丢弃 → 这里检测 success=False 或 content 含失败关键词，输出提示块。
+    # 失败时错误信息在 error 字段（content 可能为 None），一并兜底。
+    content = getattr(result, "content", None) or getattr(result, "error", None) or ""
+    note_html = ""
+    if content and (success is False or _FAILURE_WORD_RE.search(content)):
+        note_html = (
+            f'<div class="tool-diff-inline__note" '
+            f'style="margin:0 0 8px;padding:8px 10px;background:rgba(248,81,73,0.10);'
+            f'border:1px solid rgba(248,81,73,0.35);border-radius:6px;'
+            f'color:#f85149;font-family:\'{_gf}\',Consolas,monospace;'
+            f'font-size:{scale_font_size(12)}px;line-height:1.5;white-space:pre-wrap;'
+            f'word-break:break-all;">{escape(content)}</div>'
+        )
+
     return f"""
     <div class="tool-diff-inline">
         <div class="tool-diff-inline__header" style="{get_font_family_css()}">
@@ -775,6 +797,7 @@ def _render_edit_diff_body(result, tool_name, tool_args, success):
                 <span class="tool-diff-inline__del" style="color: #ff7b72;">-{deleted}</span>
             </span>
         </div>
+        {note_html}
         <div class="tool-diff-inline__body" style="font-family: '{_gf}', Consolas, 'Courier New', monospace; font-size: {scale_font_size(12)}px;">
             {diff_body}
         </div>
