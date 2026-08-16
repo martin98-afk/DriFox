@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +38,23 @@ OFF_BEHAVIOR_OPTIONS = [
 
 # 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
 MIXED_OPTION = ("__mixed__", "未统一")
+
+# ── 行/组样式常量模板（模块级：rebuild 中大量重复 setStyleSheet，
+#    模板化减少 Python 层重复字符串构造，QSS 规则与内联写法完全一致） ──
+_TRANSPARENT_STYLE = "background: transparent; border: none;"
+_TEXT_LABEL_STYLE = "color: {color}; background: transparent; border: none; {weight}{font_size} {font_family}"
+_SOURCE_TAG_STYLE = (
+    "background-color: {color}; color: white; "
+    "{font_size} {font_family} font-weight: bold; padding: 1px 6px; border-radius: 4px;"
+)
+_GROUP_FRAME_STYLE = """
+    QFrame {{
+        background: transparent;
+        border: 1px solid {border_color};
+        border-radius: 8px;
+    }}
+"""
+_GROUP_HEADER_STYLE = "background: {bg}; border: none; border-radius: 8px;"
 
 # 工具来源标签样式（参考 hook 配置卡片的 sourceLabel 色块风格）
 # - builtin（内置）：灰色 #888
@@ -278,11 +296,17 @@ class ToolControlCardContent(QWidget):
 
         self._built = True  # 标记已构建
 
-        # ★ 幽灵窗口修复：清空旧行前先关闭所有行内 ComboBox 的下拉菜单。
-        # qfluentwidgets ComboBox 的 ComboBoxMenu 是半透明顶层窗口，若在
-        # fade-in 动画中父 combo 被 deleteLater 销毁，菜单会变孤儿窗口残留
-        # （"空白/半透明小窗口一闪即逝"）。先 _closeComboMenu 再销毁可消除。
+        # ★ 幽灵窗口防护：清空旧行前先关闭所有行内 ComboBox 下拉菜单，
+        # 并隐藏正在显示的原生 tooltip。
+        # 1) ComboBox 菜单：qfluentwidgets ComboBoxMenu 是半透明顶层窗口，
+        #    fade-in 动画中父 combo 被 deleteLater 销毁会残留孤儿窗口。
+        # 2) 原生 QToolTip（行内 label/switch 均 setToolTip）：悬停中的
+        #    tooltip 是 Windows 无边框原生窗口，rebuild 销毁其宿主控件时
+        #    tooltip 被强制中断，Windows 为其创建的 SysShadow 系统阴影
+        #    窗口可能残留「空白/半透明小窗一闪即逝」（实测确认）。
+        #    先 hideText 走正常隐藏路径，Windows 正常清理阴影。
         self._close_all_combo_menus()
+        QToolTip.hideText()
 
         # ★ 性能优化：重建期间冻结重绘，避免每 addWidget 触发一次布局/绘制
         # （实测 30 行构建 125ms → 84ms，-33%）。构建完成后恢复并统一刷新。
@@ -369,18 +393,25 @@ class ToolControlCardContent(QWidget):
 
         # 更新单个工具关闭策略下拉(值 + 可见性:仅开关关闭时显示)
         # 与行渲染/右上角"未统一"判定共用 get_active_tool_behavior_map,口径一致
+        # ★ 懒创建配套：开启行无 combo（_policy_combos 缺失）；开关切为关闭时
+        # 动态补建并插入行布局，切回开启时仅隐藏不销毁（保留下一次快速显示）。
         policies_map = self._controller.get_active_tool_behavior_map()
-        for tool_name, combo in self._policy_combos.items():
+        for tool_name, sw in self._toggle_widgets.items():
             enabled = toggles.get(tool_name, True)
-            target_hidden = enabled  # 开关开启 → 策略下拉隐藏
-            if combo.isHidden() != target_hidden:
-                combo.setVisible(not enabled)
-            policy = policies_map.get(tool_name, self._controller.get_behavior())
-            idx = combo.findData(policy)
-            if idx >= 0 and idx != combo.currentIndex():
-                combo.blockSignals(True)
-                combo.setCurrentIndex(idx)
-                combo.blockSignals(False)
+            combo = self._policy_combos.get(tool_name)
+            if not enabled:
+                if combo is None:
+                    combo = self._create_policy_combo(tool_name, sw.parentWidget().layout(), sw)
+                elif combo.isHidden():
+                    combo.setVisible(True)
+                policy = policies_map.get(tool_name, self._controller.get_behavior())
+                idx = combo.findData(policy)
+                if idx >= 0 and idx != combo.currentIndex():
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+            elif combo is not None and not combo.isHidden():
+                combo.setVisible(False)
 
         # 更新整组开关 + 组标题"启用数/总数"
         for group_name, tool_names in self._get_groups():
@@ -421,20 +452,14 @@ class ToolControlCardContent(QWidget):
         header_bg = "rgba(34,197,94,0.06)" if not has_danger else "rgba(255,80,80,0.08)"
 
         group = QFrame()
-        group.setStyleSheet(f"""
-            QFrame {{
-                background: transparent;
-                border: 1px solid {border_color};
-                border-radius: 8px;
-            }}
-        """)
+        group.setStyleSheet(_GROUP_FRAME_STYLE.format(border_color=border_color))
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(0, 0, 0, 0)
         group_layout.setSpacing(0)
 
         # 组头
         header = QWidget()
-        header.setStyleSheet(f"background: {header_bg}; border: none; border-radius: 8px;")
+        header.setStyleSheet(_GROUP_HEADER_STYLE.format(bg=header_bg))
         header.setCursor(Qt.PointingHandCursor)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(10, 8, 10, 8)
@@ -442,8 +467,12 @@ class ToolControlCardContent(QWidget):
         enabled_count = sum(1 for t in tool_names if all_toggles.get(t, True))
         label = QLabel(f"{group_name} ({enabled_count}/{len(tool_names)})")
         label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; background: transparent; border: none; "
-            f"{font_size_css(12)} {get_font_family_css()}"
+            _TEXT_LABEL_STYLE.format(
+                color=Colors.TEXT_PRIMARY,
+                weight="font-weight: 600; ",
+                font_size=font_size_css(12),
+                font_family=get_font_family_css(),
+            )
         )
         header_layout.addWidget(label)
         header_layout.addStretch()
@@ -461,7 +490,7 @@ class ToolControlCardContent(QWidget):
 
         # 折叠体
         body = QWidget()
-        body.setStyleSheet("background: transparent; border: none;")
+        body.setStyleSheet(_TRANSPARENT_STYLE)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(10, 6, 14, 8)
         body_layout.setSpacing(3)
@@ -486,7 +515,7 @@ class ToolControlCardContent(QWidget):
     def _build_tool_row(self, tool_name: str, all_toggles: dict) -> QWidget:
         """构建单个工具行（中文名 + 来源标签 + 危险标记 + registry 描述）"""
         row = QWidget()
-        row.setStyleSheet("background: transparent; border: none;")
+        row.setStyleSheet(_TRANSPARENT_STYLE)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 3, 0, 3)
         row_layout.setSpacing(8)
@@ -505,18 +534,21 @@ class ToolControlCardContent(QWidget):
         plugin_root_kind = (reg.metadata or {}).get("_plugin_root_kind", "") if reg is not None else ""
 
         name_label = QLabel(display_name)
-        name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none; "
-            f"{font_size_css(12)} {get_font_family_css()}"
-        )
         if is_danger:
             # 危险工具：名字加 🔥 标记 + 微红着色
             name_label.setText(f"🔥 {display_name}")
             name_label.setStyleSheet(
-                f"color: #ff6b6b; background: transparent; border: none; {font_size_css(12)} {get_font_family_css()}"
+                _TEXT_LABEL_STYLE.format(
+                    color="#ff6b6b", weight="", font_size=font_size_css(12), font_family=get_font_family_css()
+                )
             )
             name_label.setToolTip(f"{display_name}（危险操作：{desc or '可能修改系统状态'}）")
         else:
+            name_label.setStyleSheet(
+                _TEXT_LABEL_STYLE.format(
+                    color=Colors.TEXT_PRIMARY, weight="", font_size=font_size_css(12), font_family=get_font_family_css()
+                )
+            )
             name_label.setToolTip(f"{display_name}（安全操作）")
 
         # 来源标签（与 hook 配置卡片 sourceLabel 一致：彩色小色块 + 文字）
@@ -524,9 +556,7 @@ class ToolControlCardContent(QWidget):
         source_color, source_text = _format_source_label(source, plugin_root_kind)
         source_label = QLabel(source_text)
         source_label.setStyleSheet(
-            f"background-color: {source_color}; color: white; "
-            f"{font_size_css(10)} {get_font_family_css()} "
-            f"font-weight: bold; padding: 1px 6px; border-radius: 4px;"
+            _SOURCE_TAG_STYLE.format(color=source_color, font_size=font_size_css(10), font_family=get_font_family_css())
         )
         source_label.setFixedHeight(18)
         # tooltip 提示完整 plugin 名 + 描述
@@ -543,26 +573,11 @@ class ToolControlCardContent(QWidget):
         desc_label = _ElidedLabel(desc)
         desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent; border: none; "
-            f"{font_size_css(10)} {get_font_family_css()}"
+            _TEXT_LABEL_STYLE.format(
+                color=Colors.TEXT_SECONDARY, weight="", font_size=font_size_css(10), font_family=get_font_family_css()
+            )
         )
         row_layout.addWidget(desc_label)
-
-        # 关闭策略下拉(仅开关关闭时显示): ask=询问用户 / deny=直接拒绝
-        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
-        policy = self._controller.get_active_tool_behavior_map().get(tool_name, "deny") if self._controller else "deny"
-        policy_combo = ComboBox()
-        for value, label in OFF_BEHAVIOR_OPTIONS:
-            policy_combo.addItem(label, userData=value)
-        idx = policy_combo.findData(policy)
-        if idx >= 0:
-            policy_combo.setCurrentIndex(idx)
-        policy_combo.setVisible(not enabled)  # 仅关闭时显示,开启时隐藏
-        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
-        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
-        row_layout.addWidget(policy_combo)
-        self._policy_combos[tool_name] = policy_combo
-        policy_combo.currentIndexChanged.connect(lambda _idx, name=tool_name: self._on_tool_policy_changed(name))
 
         sw = SwitchButton()
         sw.setChecked(enabled)
@@ -571,7 +586,38 @@ class ToolControlCardContent(QWidget):
 
         sw.checkedChanged.connect(lambda checked, name=tool_name: self._on_tool_toggled(name, checked))
 
+        # 关闭策略下拉(仅开关关闭时创建): ask=询问用户 / deny=直接拒绝
+        # ★ 懒创建优化：开启状态的工具不创建 ComboBox（34 工具全开时省
+        # 34 次 combo 创建 + 行布局项），_apply_toggles 在开关切为关闭时
+        # 动态补建（插入到 switch 前）、切回开启时仅隐藏不销毁。
+        # 策略取自 get_active_tool_behavior_map(与右上角"未统一"判定同源同口径)
+        if not enabled:
+            self._create_policy_combo(tool_name, row_layout, sw)
+
         return row
+
+    def _create_policy_combo(self, tool_name: str, row_layout: QHBoxLayout, sw: SwitchButton) -> ComboBox:
+        """创建工具行关闭策略下拉并插入行布局（switch 之前）
+
+        懒创建入口：_build_tool_row 仅关闭行创建；_apply_toggles 在开关
+        切换为关闭时动态补建。值口径与行渲染一致（get_active_tool_behavior_map）。
+        """
+        policy = self._controller.get_active_tool_behavior_map().get(tool_name, "deny") if self._controller else "deny"
+        policy_combo = ComboBox()
+        for value, label in OFF_BEHAVIOR_OPTIONS:
+            policy_combo.addItem(label, userData=value)
+        idx = policy_combo.findData(policy)
+        if idx >= 0:
+            policy_combo.setCurrentIndex(idx)
+        policy_combo.setFixedWidth(110)  # 固定宽度,防止撑宽行布局
+        policy_combo.setToolTip("该工具关闭后：询问用户 / 直接拒绝")
+        if sw is not None:
+            row_layout.insertWidget(row_layout.indexOf(sw), policy_combo)
+        else:
+            row_layout.addWidget(policy_combo)
+        policy_combo.currentIndexChanged.connect(lambda _idx, name=tool_name: self._on_tool_policy_changed(name))
+        self._policy_combos[tool_name] = policy_combo
+        return policy_combo
 
     def _close_all_combo_menus(self):
         """关闭所有行内 ComboBox 下拉菜单（幽灵窗口防护）
@@ -668,12 +714,15 @@ class ToolControlCardContent(QWidget):
             self._apply_toggles()
 
     def hide_content(self):
-        """卡片隐藏时关闭所有行内下拉菜单（幽灵窗口补漏）
+        """卡片隐藏时关闭行内下拉菜单 + 隐藏原生 tooltip（幽灵窗口补漏）
 
         用户开着 combo 菜单直接关卡片时，Qt.Popup 是独立顶层窗口、不随父
         widget 隐藏 → 下次 show 时残留。隐藏前先关全部菜单可消除。
+        原生 QToolTip 同理：悬停中的 tooltip 宿主控件随卡片隐藏，Windows
+        SysShadow 阴影窗口可能残留，先 hideText 走正常隐藏路径。
         """
         self._close_all_combo_menus()
+        QToolTip.hideText()
 
 
 class ToolControlCardFrame(SystemCardFrame):

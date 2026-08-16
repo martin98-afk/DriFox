@@ -804,6 +804,7 @@ class TestPermissionLinkage:
         pc.deleteLater()
         qt_app.processEvents()
 
+
 class TestPerToolPolicy:
     """per-tool 关闭策略(T3):设置/持久化/回退/UI 联动/生效层一致性"""
 
@@ -904,17 +905,21 @@ class TestPerToolPolicy:
             pc = ToolPermissionController()
             card = ToolControlCardContent(controller=pc)
             card.show_content()
-            # 默认全开 → 策略下拉隐藏
+            # 默认全开 → 策略下拉懒创建：开启行无 combo 或隐藏（行为语义，
+            # 不锁对象存在性）
             combo = card._policy_combos.get("read")
-            assert combo is not None
-            assert combo.isHidden()
-            # 关闭 read → 下拉显示
+            assert combo is None or combo.isHidden()
+            # 关闭 read → 下拉创建并显示
             pc.set_user_toggle("read", False)
             qt_app.processEvents()
+            combo = card._policy_combos.get("read")
+            assert combo is not None
             assert not combo.isHidden()
-            # 重新开启 → 隐藏
+            # 重新开启 → 隐藏（懒创建对象保留，仅切可见性）
             pc.set_user_toggle("read", True)
             qt_app.processEvents()
+            combo = card._policy_combos.get("read")
+            assert combo is not None
             assert combo.isHidden()
             card.deleteLater()
             pc.deleteLater()
