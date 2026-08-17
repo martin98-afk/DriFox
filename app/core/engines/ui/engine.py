@@ -236,6 +236,14 @@ class UIEngine(BaseEngine):
         if not agent_manager or not self._current_agent:
             return "allow"
 
+        # ★ 方案 B：agent 模板仅在 agent 命令激活时拦截。
+        # 用户点「↺ 恢复」(restore_user) / 未激活 agent 时，权限完全由
+        # UI 开关(user toggles)控制，不再受 _current_agent(团队角色 /
+        # UI 切换角色)的 permission 模板限制——否则恢复后执行行为与
+        # agent 激活期间一致，用户感觉"权限控制没生效"。
+        if controller is not None and not controller.is_agent_active():
+            return "allow"
+
         try:
             agent = agent_manager.get_agent(self._current_agent)
             if not agent:
