@@ -10,6 +10,7 @@
 
 import time as _time
 
+from PyQt5 import sip
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
     QApplication,
@@ -148,7 +149,13 @@ class ToolControlCardContent(QWidget):
         scan_now，registry.register/unregister 同步 notify 全部 listener）。
         直接 emit 信号：pyqtSignal QueuedConnection 自动排队到 widget 所在
         线程（主线程）执行刷新，避免在后台线程直接操作 Qt 定时器。
+
+        ★ 防崩溃：卡片底层 C++ 对象可能已被销毁（设置窗口关闭/卡片
+        deleteLater 重建），而 PyQt wrapper 仍存活（weakref 未失效），
+        此时访问 _registryChanged 会抛 RuntimeError。isdeleted 检查直接跳过。
         """
+        if sip.isdeleted(self):
+            return
         self._registryChanged.emit(version)
 
     def _on_registry_changed_ui(self, version):

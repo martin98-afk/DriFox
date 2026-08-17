@@ -94,4 +94,24 @@ def hook(event: str, context: dict) -> str:
         if role_desc:
             parts.append(f"你的角色「{agent_name}」：{role_desc}")
 
+    # 🛡️ M1：多团队并存时追加团队间沟通规则——
+    # 1) 避免各成员误向其他团队成员发件；2) 提示经各自 leader 转发。
+    try:
+        run_ids = tm.get_team_run_ids()
+    except Exception:
+        run_ids = []
+    if len(run_ids) > 1:
+        labels: list = []
+        for rid in run_ids:
+            try:
+                labels.append(tm.get_team_label_by_run(rid) or rid)
+            except Exception:
+                labels.append(rid)
+        labels_text = "、".join(f"「{l}」" for l in labels)
+        parts.append(
+            f"⚠ 多团队并存：本系统有 {len(run_ids)} 个团队同时运行（{labels_text}）。"
+            f"团队间沟通规则：你只能向本团队成员发送任务；"
+            f"如需联系其他团队，只通过各自 leader 传递团队间消息。"
+        )
+
     return "\n".join(parts)

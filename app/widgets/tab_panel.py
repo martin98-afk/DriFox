@@ -822,6 +822,8 @@ class UIPluginRow(QFrame):
             QMenu::item {{
                 padding: 6px 20px;
                 border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
             }}
             QMenu::item:selected {{
                 background: {Colors.HOVER_BG};
@@ -2336,6 +2338,8 @@ class TabPanel(QWidget):
             QMenu::item {{
                 padding: 6px 20px;
                 border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
             }}
             QMenu::item:selected {{
                 background: {Colors.HOVER_BG};

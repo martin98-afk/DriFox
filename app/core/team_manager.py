@@ -348,7 +348,14 @@ class TeamManager:
 
     # ── 成员管理 ─────────────────────────────────────
 
-    def join_team(self, window_id: str, agent_name: str, team_name: str = DEFAULT_TEAM):
+    def join_team(
+        self,
+        window_id: str,
+        agent_name: str,
+        team_name: str = DEFAULT_TEAM,
+        run_id: str = "",
+        team_label: str = "",
+    ):
         """窗口加入团队
 
         🛡️ F5（T4 Bug6）：read-modify-write 全程持 _data_lock，防止多窗口并发
@@ -362,6 +369,11 @@ class TeamManager:
         ⚠️ F3 注意：后续任务 F3（手动成员快照）会在本方法基础上叠加
         join_team 写顶层 team_members，改动点即下方 `data["members"][window_id]`
         赋值处——请保持本方法结构不变，在其上扩展。
+
+        🛡️ M1（多团队归属）：run_id / team_label 为空时不写字段（兼容老调用），
+        非空时写入 `data["members"][wid]` 与 `data["team_members"][wid]` 两处
+        快照，确保 _cleanup_stale_members 清理后存活成员仍可追溯归属（top-level
+        team_members 不被清理）。
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
@@ -371,6 +383,12 @@ class TeamManager:
                 "agent_name": agent_name,
                 "joined_at": time.time(),
             }
+            # 🛡️ M1：多团队归属（仅显式传入时写入；空串保留为未归属，便于
+            # 旧调用方/无 run 场景的成员继续按"本团队"规则分组）。
+            if run_id:
+                member["run_id"] = run_id
+            if team_label:
+                member["team_label"] = team_label
             # 🛡️ F9：capability 自动登记（动态解析，失败静默降级为无快照——
             # get_member_capability 会在无快照时重新动态解析，不破坏老数据）
             try:
@@ -390,11 +408,17 @@ class TeamManager:
             # 各占一条记录，不再互相覆盖；记录内显式存 agent_name 字段。
             data.setdefault("team_members", {})
             existing = data["team_members"].get(window_id) or {}
-            data["team_members"][window_id] = {
+            snap_entry = {
                 "agent_name": agent_name,
                 "source": existing.get("source", "manual"),
                 "joined_at": existing.get("joined_at", time.time()),
             }
+            # 🛡️ M1：顶层快照同步归属字段，便于恢复路径（rebuild/join 链）回填。
+            if run_id:
+                snap_entry["run_id"] = run_id
+            if team_label:
+                snap_entry["team_label"] = team_label
+            data["team_members"][window_id] = snap_entry
             self._save_team_data(team_name)
         self._mailbox_dir(team_name, window_id).mkdir(parents=True, exist_ok=True)
 
@@ -479,9 +503,47 @@ class TeamManager:
 
         threading.Thread(target=_do_rmtree, daemon=True, name=f"team-rmtree-{path.name}").start()
 
-    def get_members(self, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
-        data = self._get_team_data(team_name)
-        return list(data.get("members", {}).values())
+    def get_members(
+        self,
+        team_name: str = DEFAULT_TEAM,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取团队成员列表。
+
+        🛡️ M1（多团队归属过滤）：
+        - run_id=None  → 返回全部成员（向后兼容）
+        - run_id=""    → 仅返回无归属成员（m.get("run_id","")==""）
+        - run_id="x"  → 仅返回归属该 run 的成员
+
+        过滤在内存中按成员 dict 的 run_id 字段判定，不依赖持久化键。
+        """
+        members = list(self._get_team_data(team_name).get("members", {}).values())
+        if run_id is None:
+            return members
+        if run_id == "":
+            return [m for m in members if not m.get("run_id")]
+        return [m for m in members if m.get("run_id") == run_id]
+
+    def get_member_run_id(
+        self,
+        window_id: str,
+        team_name: str = DEFAULT_TEAM,
+    ) -> str:
+        """🛡️ M1：反查成员所属 run_id（多团队拦截关键 API）。
+
+        非成员 / 老成员（无 run_id 字段）均返回空串。优先取顶层
+        `team_members` 快照（_cleanup_stale_members 不清理），其次回退
+        到 `members`，保证恢复路径与活跃成员两种视角一致。
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            snap = (data.get("team_members") or {}).get(window_id)
+            if isinstance(snap, dict) and snap.get("run_id"):
+                return snap["run_id"]
+            member = (data.get("members") or {}).get(window_id)
+            if isinstance(member, dict) and member.get("run_id"):
+                return member["run_id"]
+        return ""
 
     def get_member_by_agent(self, agent_name: str, team_name: str = DEFAULT_TEAM) -> Optional[Dict[str, Any]]:
         """通过智能体名查找成员（唯一匹配时返回；多个匹配返回第一个活跃的）"""
@@ -663,21 +725,34 @@ class TeamManager:
         保持 T3 语义：同角色多成员（异 wid）各保留一条；模板 agents 不在
         team_members 中（get_team_member_snapshot 并集时模板优先）。
 
+        🛡️ M1：entries 中单项支持 2 元组 (wid, agent) 或 4 元组
+        (wid, agent, run_id, team_label)——后者把多团队归属一并写入快照，
+        用于恢复路径直接把窗口绑回原 run。
+
         Args:
-            entries: [(window_id, agent_name), ...] 本次恢复的实际窗口集合
+            entries: [(window_id, agent_name), ...] 或
+                [(window_id, agent_name, run_id, team_label), ...]
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
             snapshot = {}
-            for wid, agent in entries:
-                wid = str(wid or "").strip()
-                agent = str(agent or "").strip()
+            for entry in entries:
+                # 🛡️ M1：兼容 2 元组（wid, agent）与 4 元组（wid, agent, run_id, team_label）
+                wid = str(entry[0] or "").strip() if len(entry) >= 1 else ""
+                agent = str(entry[1] or "").strip() if len(entry) >= 2 else ""
+                run_id = str(entry[2]).strip() if len(entry) >= 3 and entry[2] is not None else ""
+                team_label = str(entry[3]).strip() if len(entry) >= 4 and entry[3] is not None else ""
                 if wid and agent:
-                    snapshot[wid] = {
+                    rec = {
                         "agent_name": agent,
                         "source": "restore",
                         "joined_at": time.time(),
                     }
+                    if run_id:
+                        rec["run_id"] = run_id
+                    if team_label:
+                        rec["team_label"] = team_label
+                    snapshot[wid] = rec
             data["team_members"] = snapshot
             self._save_team_data(team_name)
 
@@ -745,6 +820,89 @@ class TeamManager:
         data = self._get_team_data(team_name)
         return data.get("template")
 
+    # ── 团队标签（M1 多团队并存：人名/label）──
+
+    def get_team_label(self, team_name: str = DEFAULT_TEAM) -> str:
+        """🛡️ M1：当前团队对外展示的标签。
+
+        优先级：模板 `template["name"]` > 团队目录名 > `"default"`。
+        模板加载（/team --load）后会写入 template.name，作为用户在
+        `team_list_members` 等场景看到的"团队名"。
+        """
+        data = self._get_team_data(team_name)
+        template = data.get("template") or {}
+        name = template.get("name") if isinstance(template, dict) else None
+        if name:
+            return str(name)
+        return team_name or "default"
+
+    def get_team_label_by_run(
+        self,
+        run_id: str,
+        team_name: str = DEFAULT_TEAM,
+    ) -> str:
+        """🛡️ M1：按 run_id 反查对应的 team_label。
+
+        跨团队沟通提示中需要展示"目标团队 X"——扫描 team_members 快照
+        找到 run_id 命中任一记录的 team_label；无则回退 run_id 本身
+        （仍可识别但不友好）。
+        """
+        if not run_id:
+            return ""
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            for entry in (data.get("team_members") or {}).values():
+                if isinstance(entry, dict) and entry.get("run_id") == run_id:
+                    label = entry.get("team_label")
+                    if label:
+                        return str(label)
+            for member in (data.get("members") or {}).values():
+                if isinstance(member, dict) and member.get("run_id") == run_id:
+                    label = member.get("team_label")
+                    if label:
+                        return str(label)
+        return run_id
+
+    def update_member_team(
+        self,
+        window_id: str,
+        run_id: str = "",
+        team_label: str = "",
+        team_name: str = DEFAULT_TEAM,
+    ) -> bool:
+        """🛡️ M1：补写成员的 run_id / team_label（恢复路径专用）。
+
+        用于历史会话恢复时把 run 归属回填到老成员记录——
+        非成员静默跳过（返回 False）；至少一个非空字段才落盘，避免
+        无意义写盘；同步更新顶层 `team_members` 快照。
+        """
+        wid = str(window_id or "").strip()
+        if not wid:
+            return False
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            members = data.setdefault("members", {})
+            if wid not in members:
+                return False
+            if not run_id and not team_label:
+                return False
+            member = members[wid]
+            if run_id:
+                member["run_id"] = run_id
+            if team_label:
+                member["team_label"] = team_label
+            # 顶层快照同步
+            tm_snap = data.setdefault("team_members", {})
+            snap = tm_snap.get(wid)
+            if isinstance(snap, dict):
+                if run_id:
+                    snap["run_id"] = run_id
+                if team_label:
+                    snap["team_label"] = team_label
+                tm_snap[wid] = snap
+            self._save_team_data(team_name)
+        return True
+
     # ── 团队运行标识（run_id，方案 A 团队会话恢复）──
 
     def start_team_run(self, team_name: str = DEFAULT_TEAM, force: bool = False) -> str:
@@ -782,6 +940,29 @@ class TeamManager:
         with self._data_lock:
             data = self._get_team_data(team_name)
             return data.get("run_id", "") or ""
+
+    def get_team_run_ids(self, team_name: str = DEFAULT_TEAM) -> List[str]:
+        """🛡️ M1：列出当前团队中所有出现过的 run_id（去重，按首次出现顺序）。
+
+        来源：顶层 `team_members` 快照 ∪ 活跃 `members`——前者覆盖 _cleanup
+        后仍存活的恢复成员，后者覆盖尚未触发 _cleanup 的活跃窗口。
+        无归属成员（run_id 为空）不计入。多团队并存判断（>1）由调用方进行。
+        """
+        seen: List[str] = []
+        seen_set = set()
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            for entry in (data.get("team_members") or {}).values():
+                rid = entry.get("run_id") if isinstance(entry, dict) else None
+                if rid and rid not in seen_set:
+                    seen_set.add(rid)
+                    seen.append(rid)
+            for member in (data.get("members") or {}).values():
+                rid = member.get("run_id") if isinstance(member, dict) else None
+                if rid and rid not in seen_set:
+                    seen_set.add(rid)
+                    seen.append(rid)
+        return seen
 
     # ── 团队级统一项目（一人改项目全员同步）──
 
@@ -844,8 +1025,13 @@ class TeamManager:
         to_identifier: str,  # agent_name 或 agent_name@window_id
         task_description: str,
         team_name: str = DEFAULT_TEAM,
+        from_run_id: str = "",
+        to_run_id: str = "",
     ) -> Optional[str]:
         """发送任务邮件给队友
+
+        🛡️ M1（user 拍板放行+打标）：from_run_id / to_run_id 写入 mail dict
+        以便跨团队消息在 UI/历史面板可追溯；老调用不传 → 空串（向后兼容）。
 
         Returns:
             邮件 ID，失败返回 None
@@ -863,6 +1049,10 @@ class TeamManager:
             "from_agent": from_agent,
             "to_window": target["window_id"],
             "to_agent": target["agent_name"],
+            # 🛡️ M1：跨团队消息追溯字段——非空时写 mail dict，便于历史面板
+            # / 接收方 UI 展示「⚠ 跨团队消息」标识。
+            "from_run_id": from_run_id,
+            "to_run_id": to_run_id,
             "subject": task_description[:80],
             "body": task_description,
             "status": "pending",

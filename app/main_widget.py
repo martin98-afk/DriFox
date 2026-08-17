@@ -4499,8 +4499,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._on_agent_changed(agent_name)
         self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
-        tm.join_team(window_id=self._window_id, agent_name=agent_name)
-        self._team_agent_name = agent_name
         # 团队名：优先取当前模板名，无模板回退 default（与 TeamManager.DEFAULT_TEAM 一致）
         self._team_name = (tm.get_template() or {}).get("name") or "default"
         # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
@@ -4513,6 +4511,21 @@ class OpenAIChatToolWindow(ToolWindow):
         if not run_id:
             run_id = tm.start_team_run()
         self._team_run_id = run_id
+        # 🛡️ M1：手动 join 路径也透传 run_id / team_label 到 TeamManager，
+        # 让成员记录带上团队归属（多团队分组、跨团队拦截的前置条件）。
+        team_label = tm.get_team_label()
+        tm.join_team(
+            window_id=self._window_id,
+            agent_name=agent_name,
+            run_id=run_id,
+            team_label=team_label,
+        )
+        # 🛡️ B1（review 阻断修复）—— self._team_agent_name 必须保持与
+        # agent_name 同步：会话保存（agent_name 字段落空）、项目/工作目录广播
+        # （getattr 守卫拦截）、恢复路径 join_team 守卫、getattr fallback 链路
+        # 等 4 处业务功能均依赖该字段。join_team 仅写 TeamManager 成员表，
+        # 不回写窗口实例标记——此处必须显式赋值（与原行为一致）。
+        self._team_agent_name = agent_name
         # 应用团队级统一项目（若已设置）：手动加入团队后与团队共享同一项目
         team_project = tm.get_team_project()
         if team_project:
@@ -4796,7 +4809,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 每次新建团队对话都是独立运行，不复用旧 run_id，与一键恢复路径
         # force=True 语义对齐；本次模板加载的所有新窗口共享同一 run_id，
         # 团队会话自动保存时落库。
-        tm_mgr.start_team_run(force=True)
+        # 🛡️ M1：捕获返回值 new_run_id，批量透传给后续 _spawn_team_members，
+        # 保证一次 /team --load 创建的所有成员共享同一团队归属（多团队分组）。
+        new_run_id = tm_mgr.start_team_run(force=True)
 
         # 🐛 构建团队默认项目继承：团队级项目是持久化的（team.json 顶层，
         # 任一成员切项目即写入）。若不在此重置，新团队会沿用上次构建残留的
@@ -4812,9 +4827,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
         # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
         # _spawn_team_member_window 内部 get_team_run_id() 取到的即新 run_id。
-        self._spawn_team_members(agents_needed)
+        # 🛡️ M1：透传 run_id + 模板名作为 team_label（多团队并存时按 label
+        # 分组展示）；team_label 优先用 template.template_name，无则回退
+        # 当前 TeamManager 推断值（get_team_label 会取 template["name"]）。
+        team_label = template.template_name or tm_mgr.get_team_label()
+        self._spawn_team_members(agents_needed, run_id=new_run_id, team_label=team_label)
 
-    def _spawn_team_member_window(self, agent_name: str) -> Optional["OpenAIChatToolWindow"]:
+    def _spawn_team_member_window(
+        self,
+        agent_name: str,
+        run_id: str = "",
+        team_label: str = "",
+    ) -> Optional["OpenAIChatToolWindow"]:
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
         创建链路（与 _handle_team_load 原始循环体一致）：
@@ -4868,7 +4892,17 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_name = team_name
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
-            tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+            # 🛡️ M1：把 run_id / team_label 透传到 join_team——**仅当调用方
+            # 显式传参（非空）时才追加到 kwargs**，避免老路径（如
+            # _handle_team_add_member / 测试 mock 严格断言）收到意外 kwargs。
+            # _handle_team_load 路径透传 run_id/team_label → 写入归属字段；
+            # _handle_team_add_member 路径不传 → 走 TeamManager 默认空归属（向后兼容）。
+            join_kwargs = {"window_id": win._window_id, "agent_name": agent_name}
+            if run_id:
+                join_kwargs["run_id"] = run_id
+            if team_label:
+                join_kwargs["team_label"] = team_label
+            tm_mgr.join_team(**join_kwargs)
             # 应用团队级统一项目：新窗口与团队共享同一项目。
             # 🐛 构建团队默认项目继承：首次 /team --load / 快速新建成员时
             # 团队级项目尚未设置（get_team_project 为空串），此前新窗口会回落到
@@ -4904,11 +4938,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 _abort_team_window(win)
             return None
 
-    def _spawn_team_members(self, agent_names: List[str]) -> int:
+    def _spawn_team_members(
+        self,
+        agent_names: List[str],
+        run_id: str = "",
+        team_label: str = "",
+    ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
         Args:
             agent_names: 要创建的角色名列表（不含已存在成员）
+            run_id: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
+                （_spawn_team_member_window 回退到 tm_mgr.get_team_run_id()）
+            team_label: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
 
         Returns:
             成功创建的窗口数
@@ -4922,7 +4964,13 @@ class OpenAIChatToolWindow(ToolWindow):
             _tmw._tab_panel.begin_batch_add()
         try:
             for agent_name in agent_names:
-                win = self._spawn_team_member_window(agent_name)
+                # 🛡️ M1：run_id / team_label 透传到 join_team，保证一次 /team --load
+                # 生成的所有新窗口共享同一团队归属（多团队分组基础）。
+                win = self._spawn_team_member_window(
+                    agent_name,
+                    run_id=run_id,
+                    team_label=team_label,
+                )
                 if win is not None:
                     new_windows.append(win)
         finally:
@@ -4991,6 +5039,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QMenu::item {{
                 padding: 6px 20px;
                 border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
             }}
             QMenu::item:selected {{
                 background: {Colors.HOVER_BG};
@@ -8398,7 +8448,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     win._team_agent_name = agent_name
                     win._team_name = team_display_name
                     win._team_run_id = new_run_id
-                    tm_mgr.join_team(window_id=win._window_id, agent_name=agent_name)
+                    # 🛡️ M1：恢复路径也补回团队归属——run_id 沿用局部变量
+                    # new_run_id（用户期望恢复后归属原 run_id），team_label
+                    # 沿用 team_display_name（恢复窗口与原团队同名）。
+                    tm_mgr.join_team(
+                        window_id=win._window_id,
+                        agent_name=agent_name,
+                        run_id=new_run_id,
+                        team_label=team_display_name,
+                    )
                     restored_windows.append(win)
                     restored_count += 1
                 except Exception as e:  # noqa: BLE001
@@ -8411,8 +8469,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清除历史残留 wid（T3 key=window_id 后快照只增不删，残留会导致
         # 下次恢复按 snap_counts 计数 → 窗口数随恢复次数线性膨胀 2→4→6…）。
         # 重建后快照 = 实际窗口集合，多次恢复窗口数恒定（= 成员数）。
+        # 🛡️ M1：传 4 元组 (wid, agent, run_id, team_label)——把团队归属一并
+        # 写入快照，恢复路径不依赖后续 update_member_team 二次回填（已
+        # 在 join_team 写入 + 重建确认）。
         try:
-            tm_mgr.rebuild_team_members_snapshot([(w._window_id, w._team_agent_name) for w in restored_windows])
+            tm_mgr.rebuild_team_members_snapshot(
+                [
+                    (w._window_id, w._team_agent_name, new_run_id, team_display_name)
+                    for w in restored_windows
+                ]
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[_on_team_restore_requested] 重建成员快照失败: {e}")
 

@@ -1,27 +1,79 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.5.2] - 2026-08-17
+
+自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
-- **工具插件化** (`app/tools/registry.py` + `app/tools/plugin_tool_loader.py` + `plugins/system/tools/`): 工具作为插件的一部分注册，34 个内置工具全部迁移到系统插件 `plugins/system/tools/*.py`，通过 `register(registry)` 注册 schema/impl/icon/cn_name/danger/group/description/aliases；单一数据源驱动 LLM schema、消息渲染（图标/中文名）、权限卡片（分组/危险标记）、权限控制器、ToolNameMapper 别名；轮询热插拔/热更新（文件增删改自动生效，含跨根优先级保护）
-- **工具逻辑自包含** (`plugins/system/tools/`): 纯逻辑工具（文件 9 个/网络 2 个/桌面 3 个）impl 用标准库/第三方库独立实现（含 mtime 检测、unified diff、图片 base64、命令安全等核心行为），不依赖主程序 BuiltinTools；平台工具（bash/subagent/MCP/LSP/CodeGraph/团队/todo/question/skill/上传）通过 `tool_ctx["services"]` 能力接口调用（不暴露 BuiltinTools 内部）；图标资源随插件（`tools/icons/` 深色 + `tools/icons_light/` 浅色，主题感知 data URI 加载）
-- **工具权限卡片动态分组** (`app/widgets/cards/settings/tool_control_card.py`): 分组与描述从 registry 读取（功能域分组，危险工具 🔥 标记 + 组内危险在前），registry 热更新自动重建卡片
-- **渲染联动** (`app/widgets/render_helpers.py`): 工具图标/中文名从 registry 读取，插件工具自动获得展示元数据（MCP 特殊处理保留）
-- **terminal/diagnostics/automation 迁系统插件** (\`plugins/system/tools/\`): bash/bg_*/get_diagnostics 完整实现（含安全拦截/进程树/pty/紧急停止热键）迁入插件自包含，主程序删除三个文件；修复 exec 加载插件模块的 dataclass 装饰器异常（模块未注册 sys.modules + builtins 注入）
-- **codegraph 迁社区插件** (`.drifox/plugins/codegraph-tools/`): codegraph_explore 引擎从主程序迁出为社区插件（引擎单例 + workdir 自动重初始化），主程序 `app/tools/codegraph_tools.py` 删除
-### 🔧 其他 (Chores & Build)
-- **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
-- **web 搜索 token 迁移至环境变量** (`app/utils/config.py` + `app/core/tool_executor.py` + `plugins/system/tools/web_tools.py`): `websearch` 的 `TAVILY_API_KEY`/`TINYFISH_API_KEY` 不再存储于应用配置（config.py 硬编码默认值移除），改由环境变量提供；未设置时 `websearch` 返回「搜索失败：无可用搜索引擎」
-- **测试**: 新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）
+
+- **工具系统插件化** (`plugins/system/tools/` + `app/tools/`): 实施"工具即插件"架构，34 个内置工具全部迁移为系统插件 `plugins/system/tools/*.py`，通过 `register(registry)` 统一注册 schema/impl/icon/cn_name/danger/group/description/aliases；registry 单一数据源驱动 LLM schema、消息渲染、权限卡片、ToolNameMapper 别名；支持文件增删改自动热插拔/热更新（跨根优先级保护 + 轮询检测）
+- **工具逻辑自包含** (`plugins/system/tools/`): 纯逻辑工具（文件 9 个/网络 2 个/桌面 3 个）impl 用标准库/第三方库独立实现（mtime 检测、unified diff、图片 base64、命令安全等），不依赖主程序 BuiltinTools；平台工具（bash/subagent/MCP/LSP/CodeGraph/团队/todo/question/skill/上传）通过 `tool_ctx["services"]` 能力接口调用（不暴露 BuiltinTools 内部）；图标随插件（`tools/icons/` 深色 + `tools/icons_light/` 浅色，主题感知 data URI 加载）
+- **四类系统工具插件齐套** (`plugins/system/tools/`): subagents / tasks / terminal / web utilities 完整实现（含 mtime 检测、unified diff、图片 base64、命令安全、JOB 进程树、紧急停止热键、reactive diff 渲染），主程序对应实现全部下沉
+- **工具权限卡片动态分组 + 源标签** (`app/widgets/cards/settings/tool_control_card.py`): 分组与描述、源标签、社区/系统徽章全部从 registry 读取（功能域分组，危险工具 🔥 标记 + 组内危险在前），registry 热更新自动重建卡片
+- **registry 变更信号 + 防抖重建** (`app/widgets/cards/settings/tool_control_card.py`): 新增 registry 变化信号，UI 接收信号后防抖重建（避免热重载时频繁刷新）
+- **单工具权限策略 + UI 集成** (`app/core/tool_executor.py` + `app/widgets/cards/settings/tool_control_card.py`): 单工具 ask/always/deny 权限模型，UI 卡片可视化编辑
+- **工具热重载风险提示** (`app/widgets/cards/settings/tool_control_card.py`): 工具热重载后弹出 MaskDialog 风险提示，可永久关闭
+- **插件市场 + 系统插件保护** (`app/plugins/marketplace/`): 新增 `drifox-system` 市场源，系统插件在"已禁插件"列表中显示禁用按钮（普通插件移除此按钮，避免误卸载系统插件）
+- **插件市场统一生成** (`app/plugins/marketplace/`): 整合 drifox-system 源与社区插件源，新增插件更新机制及 UI 交互
+- **drifox-system 市场源** (`app/plugins/marketplace/`): 新增系统市场源，区别于社区插件源，便于集中管理
+- **团队解散空白会话守卫** (`app/core/team/`): 团队解散时检测空白会话，拦截并保存有效会话逻辑
+- **ToolExecutor / IsolatedChatContext todo 增强** (`app/core/tool_executor.py` + `app/core/engines/`): 改进 todo 状态管理与错误处理，状态迁移到 `app/tools/`
+- **window_state 服务** (`app/tools/services/`): 通用窗口隔离状态服务，工具可注册窗口作用域状态（替换硬编码全局状态）
+- **render_mode expand** (`plugins/system/tools/`): 工具新增 `expand` 渲染模式，禁用折叠统一渲染；render/preview/summarize 闭包完整迁移到插件
+- **message_card 增量渲染** (`app/widgets/message_card.py`): 流式输出长段落软边界检测；流式渲染时 tail inline 即时刷新；不再阻塞 diff-render 在 stale tool_dom_dirty
 - **Windows Job Object 进程树管理** (`app/tools/process_job.py`): 创建 → kill-on-close → 子进程入 Job 的进程树容器；`command_safety.run_safe/run_with_shell` 新增可选 `job=` 参数，命令启动后自动入 Job（S3）
+- **后台任务 Job 杀树 + 事件广播** (`app/tools/terminal_tools.py`): `BackgroundTaskManager.stop` 优先用 Job Object 杀进程树（内核级），新增 `on_task_event` 事件广播（started/stopped/completed），UI 可观测（S4）
+- **持久 Shell 会话** (`app/tools/pty_session.py`): Windows ConPTY（pywinpty）交互式会话，cwd/env/函数跨调用保留，超时可配置（默认 300s）；生命周期挂靠 ProcessJob kill-on-close（S5）
 - **工具结果截断** (`app/core/context_builder.py`): 超过 8192 字符的工具输出保留头 4096 + 尾 1024，中间省略标记（DSH tool-result-pruner 对齐）；仅在发送给 LLM 的上下文层裁剪，会话原始存储不受影响（S1）
 - **上下文用量投影对齐** (`app/core/engines/ui/engine.py` + `app/widgets/context_usage_ring.py` + `context_usage_tooltip.py`): 用量快照按截断后口径估算（与实际发送一致），环形图 tooltip 显示「工具结果截断节省 X tokens」（S2）
-- **后台任务 Job 杀树 + 事件广播** (`app/tools/terminal_tools.py`): `BackgroundTaskManager.stop` 优先用 Job Object 杀进程树（内核级），新增 `on_task_event` 事件广播（started/stopped/completed），UI 可观测（S4）
-- **持久 Shell 会话** (`app/tools/pty_session.py`): Windows ConPTY（pywinpty）交互式会话，cwd/env/函数跨调用保留，超时可配置（默认 300s）；生命周期挂靠 ProcessJob kill-on-close；**能力已就绪，工具接入待二期**（S5）
+- **视觉工具集成增强** (`app/core/tool_executor.py` + `plugins/system/tools/`): 视觉工具完善图片处理与测试，新增图像处理能力
+- **文件树增量刷新** (`app/widgets/file_tree.py`): 文件树模型实现子节点与根节点的增量刷新，保留节点状态（展开/选中/滚动）
+- **多团队支持 TeamManager** (`app/core/team/team_manager.py` + `app/widgets/team_management.py`): 实现多团队创建/切换/解散；团队管理 UI 适配多团队场景，TeamManager 状态机与成员表同步
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **QMenu 菜单项样式** (`app/widgets/`): 调优 QMenu 菜单项样式，修复在浅色/深色主题下可见性差的问题（**v0.5.2 重发修复**）
+- **plugin-marketplace 系统插件禁用按钮** (`app/plugins/marketplace/`): 为 `system-cleaner` 等系统插件暴露禁用按钮，修复此前无法停用的问题
+- **tool control card SysShadow 幽灵窗口** (`app/widgets/cards/settings/tool_control_card.py`): 修复 SysShadow 幽灵窗口 + 策略下拉懒创建
+- **tool control card 双重重建 + 重建卡顿** (`app/widgets/cards/settings/tool_control_card.py`): 修复幽灵窗口、registry 变化双重重建；防抖优化重建性能
+- **command card 可见项计算** (`app/widgets/cards/settings/command_card.py`): 调整可见项计算逻辑，避免过多空白；分割线高度与项数/分割线对齐
+- **tool reload notice 元组化** (`app/widgets/cards/settings/tool_control_card.py`): 拖尾逗号导致"工具重载通知"内容变为元组
+- **BodyLabel 旧版兼容** (`app/widgets/`): 用 `BodyLabel(parent)+setText` 兼容旧版 qfluentwidgets
+- **团队成员批量创建后激活首个 tab** (`app/widgets/team_management.py`): 修复批量创建团队成员后未激活第一个成员 tab
+- **tab manager 项目图标同步** (`app/widgets/tab_manager_window.py`): 新建项目后同步 tab 项目图标
+- **团队消息发送者角色** (`app/core/team/`): 修复团队消息中发送者角色与成员表不一致
+- **tools 窗口隔离 todo 状态恢复** (`app/tools/services/`): 恢复 window-isolated todo 状态（M5）
+- **tools inline diff 渲染恢复** (`app/tools/` + `app/widgets/`): 恢复 inline diff 渲染，状态迁移到 `app/tools/`，权限参数统一化
+- **message_card 软边界检测** (`app/widgets/message_card.py`): 长段落软边界检测，增强增量渲染
+- **message_card 流式 tail inline** (`app/widgets/message_card.py`): 流式渲染时由 diff 路径切换回 inline tail 即时刷新
+- **message_card 解除 stale tool_dom_dirty 阻塞** (`app/widgets/message_card.py`): 解除 stale tool_dom_dirty 对 diff-render 的阻塞，让流式 body 及时刷新为 html
+- **message_card finished tool id 误判** (`app/widgets/message_card.py`): 停止将已完成的 tool id 视为 active tool DOM，恢复流式 diff-render
+- **context/tools pruned_tokens 联动** (`app/core/context_builder.py` + `app/widgets/context_usage_ring.py`): 将 pruned_tokens 接入环形图 tooltip；后台任务 completed 状态守卫
+- **pty session 生命周期挂靠** (`app/tools/pty_session.py`): pty 会话生命周期挂靠 ProcessJob kill-on-close（S5）
+
+### ♻️ 代码重构 (Refactoring)
+
+- **tools diff 渲染全插件驱动** (`plugins/system/tools/` + `app/tools/`): diff 渲染完全由插件驱动，移除主程序 fallback
+- **tools 权限/总结/保护/交互迁插件 registry** (`plugins/system/tools/`): permission/summarize/protect/interactive 逻辑全部迁移到 plugin registry
+- **tools 消除硬编码工具名渲染分支** (`plugins/system/tools/`): 消除所有硬编码工具名渲染分支，全部使用 render/preview 闭包
+- **task/team 工具迁插件架构** (`plugins/system/tools/`): 任务与团队工具全部迁移到插件架构
+- **mcp_list_servers 工具分组迁移** (`plugins/system/tools/`): `mcp_list_servers` 工具分组从原位置迁移到 interaction & skills
+- **移除废弃 automation 工具插件** (`plugins/system/tools/`): 移除已废弃的 automation 工具插件（410 行删除）
+
+### 📚 文档 (Documentation)
+
+- **plugin-creator 渲染闭包文档** (`docs/plugins/plugin-creator.md`): 文档化 render/preview/summarize 闭包、`render_mode=expand`、metadata flags、group capability 语义
+- **S1-S5 Unreleased 变更记录** (`CHANGELOG.md`): 增补工具截断/用量投影/Job 杀树/pty 会话等 S1-S5 阶段的 Unreleased 变更记录
 
 ### 🔧 其他 (Chores & Build)
+
+- **废弃 automation 工具插件** (`plugins/system/tools/`): 移除已废弃的 `tools/automation_tools.py`（被 process_job + 插件化实现取代）
+- **依赖移除**: `app/tools/__init__.py` 中静态 `TOOL_SCHEMAS`（~860 行）删除，schema 聚合改读 ToolRegistry（版本号驱动缓存失效）
+- **web 搜索 token 迁移至环境变量** (`app/utils/config.py` + `app/core/tool_executor.py` + `plugins/system/tools/web_tools.py`): `websearch` 的 `TAVILY_API_KEY`/`TINYFISH_API_KEY` 不再存储于应用配置（config.py 硬编码默认值移除），改由环境变量提供；未设置时 `websearch` 返回「搜索失败：无可用搜索引擎」
 - **依赖新增**: `pywinpty>=3.0.5; sys_platform == 'win32'`（持久 shell 会话基础，S5）
+- **测试**：新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）+ `tests/test_codegraph_plugin_contracts.py`（codegraph 插件加载与错误处理契约测试）+ `tests/test_plugin_system_isolation.py`（插件系统窗口状态隔离增强）
+- **版本号**: v0.5.1 → v0.5.2（`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md` 同步）
 
 ## [v0.5.1] - 2026-08-14
 

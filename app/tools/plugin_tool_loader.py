@@ -387,19 +387,23 @@ class PluginToolWatcher:
         跨根保护失效，用户覆盖会被还原）。
         """
         with self._scan_lock:
-            # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
-            for plugin_name, old_names in self._loaded.items():
-                unload_plugin_tools(plugin_name, old_names, self._registry, root_tracker=self._root_tracker)
-            # 2) 全量重扫注册（含跨根优先级保护与 enabled 过滤，load_plugin_tools 内部处理）
-            try:
-                self._loaded = load_plugin_tools(
-                    registry=self._registry,
-                    plugin_roots=self._roots,
-                    root_tracker=self._root_tracker,
-                )
-            except Exception as e:
-                logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
-                # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
+            # 批量通知合并：注销+全量重扫期内几十次 register/unregister 的
+            # 变更通知合并为一次（registry.notify_batch，异常安全），避免
+            # UI 重建/缓存失效在热重载时反复排队。
+            with self._registry.notify_batch():
+                # 1) 注销已加载插件的全部工具（幂等；执行中的调用不受影响——快照机制）
+                for plugin_name, old_names in self._loaded.items():
+                    unload_plugin_tools(plugin_name, old_names, self._registry, root_tracker=self._root_tracker)
+                # 2) 全量重扫注册（含跨根优先级保护与 enabled 过滤，load_plugin_tools 内部处理）
+                try:
+                    self._loaded = load_plugin_tools(
+                        registry=self._registry,
+                        plugin_roots=self._roots,
+                        root_tracker=self._root_tracker,
+                    )
+                except Exception as e:
+                    logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
+                    # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
 
     def on_tools_reloaded(self, listener: Callable[[], None]) -> None:
         """注册热重载完成监听（后台线程回调；仅 watcher 轮询检测到变更时触发）"""
