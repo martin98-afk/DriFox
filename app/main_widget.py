@@ -4838,6 +4838,7 @@ class OpenAIChatToolWindow(ToolWindow):
         agent_name: str,
         run_id: str = "",
         team_label: str = "",
+        team_name: str = "",
     ) -> Optional["OpenAIChatToolWindow"]:
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
@@ -4862,12 +4863,21 @@ class OpenAIChatToolWindow(ToolWindow):
         （T3 坑 1）。仅"开新团队"路径（/team --load）与"新建任务"
         （_handle_team_new_task）先行 force 生成 run_id。
 
+        🛡️ M1：调用方透传的 run_id / team_label / team_name 优先——多团队
+        并存场景下，team.json 顶层 run_id 可能不是调用方期望的归属（典型：
+        快速添加成员时 team.json 顶层是其他团队的 run_id，导致新窗口
+        "漂"到错误团队框）。_handle_team_load / _handle_team_add_member
+        必须各自透传自身期望的目标 run_id。
+
         ⚠️ 角色重复：**允许同 agent_name 多窗口**（F14 快速新建成员可重复角色）。
         TeamManager.join_team 以 window_id 为 key，同角色多窗口互不冲突；
         Tab 分组 key 为 run_id，同组多 TabItem 渲染正常。
 
         Args:
             agent_name: 要创建的角色名
+            run_id: 目标团队 run_id；空串时回退到 team.json 顶层
+            team_label: 团队显示名（写入快照）；空串时回退到当前 TeamManager 推断值
+            team_name: 团队名（窗口实例 _team_name）；空串时回退到当前模板名
 
         Returns:
             新建窗口；创建失败返回 None（调用方负责计数与提示）
@@ -4877,8 +4887,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ D2 根治：团队标记前置传入 _create_fresh_window（add_window
             # 之前写入），Tab 管理器 add_window 时直接命中团队分组，消除
             # "tab 先落独立区、依赖 300ms 后置 refresh 补救"的竞态窗口期。
-            team_name = (tm_mgr.get_template() or {}).get("name") or "default"
-            team_run_id = tm_mgr.get_team_run_id()
+            # 🛡️ M1：调用方透传的 team_name 优先（_handle_team_add_member 透传
+            # self._team_name 锁定目标团队）；空串回退到模板名（_handle_team_load 场景）。
+            team_name = team_name or (tm_mgr.get_template() or {}).get("name") or "default"
+            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
+            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
+            team_run_id = run_id or tm_mgr.get_team_run_id()
             win = self._create_fresh_window(
                 team_agent=agent_name,
                 team_name=team_name,
@@ -4893,13 +4907,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
             # 🛡️ M1：把 run_id / team_label 透传到 join_team——**仅当调用方
-            # 显式传参（非空）时才追加到 kwargs**，避免老路径（如
-            # _handle_team_add_member / 测试 mock 严格断言）收到意外 kwargs。
-            # _handle_team_load 路径透传 run_id/team_label → 写入归属字段；
-            # _handle_team_add_member 路径不传 → 走 TeamManager 默认空归属（向后兼容）。
+            # 显式传参（非空）时才追加到 kwargs**，避免老路径（如测试 mock
+            # 严格断言）收到意外 kwargs。
+            # 🆕 M1'：_handle_team_add_member 也透传 self._team_run_id/
+            # team_label，避免新成员加入错误的团队（多团队并存场景）；
+            # _handle_team_load 路径透传 new_run_id/team_label → 写入归属字段。
+            # _do_join_team 等其他"老路径"调用不传 → 走 TeamManager 默认空归属
+            # （向后兼容）。
             join_kwargs = {"window_id": win._window_id, "agent_name": agent_name}
-            if run_id:
-                join_kwargs["run_id"] = run_id
+            if team_run_id:
+                join_kwargs["run_id"] = team_run_id
             if team_label:
                 join_kwargs["team_label"] = team_label
             tm_mgr.join_team(**join_kwargs)
@@ -4943,6 +4960,7 @@ class OpenAIChatToolWindow(ToolWindow):
         agent_names: List[str],
         run_id: str = "",
         team_label: str = "",
+        team_name: str = "",
     ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
@@ -4951,6 +4969,9 @@ class OpenAIChatToolWindow(ToolWindow):
             run_id: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
                 （_spawn_team_member_window 回退到 tm_mgr.get_team_run_id()）
             team_label: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
+            team_name: 🛡️ M1' 透传给 _spawn_team_member_window 的窗口实例
+                _team_name（_handle_team_add_member 锁定当前团队名，
+                避免 team.json 模板名覆盖为别的团队）
 
         Returns:
             成功创建的窗口数
@@ -4966,10 +4987,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for agent_name in agent_names:
                 # 🛡️ M1：run_id / team_label 透传到 join_team，保证一次 /team --load
                 # 生成的所有新窗口共享同一团队归属（多团队分组基础）。
+                # 🛡️ M1'：team_name 同样透传，避免窗口实例 _team_name 被 team.json
+                # 模板名覆盖为别的团队（多团队并存下模板可能不是当前团队）。
                 win = self._spawn_team_member_window(
                     agent_name,
                     run_id=run_id,
                     team_label=team_label,
+                    team_name=team_name,
                 )
                 if win is not None:
                     new_windows.append(win)
@@ -5010,7 +5034,17 @@ class OpenAIChatToolWindow(ToolWindow):
         template = tm_mgr.get_template()
         if template and template.get("agents"):
             all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
-        member_agents = [m.get("agent_name") for m in tm_mgr.get_members() if m.get("agent_name")]
+        # 🛡️ M1'：get_members 必须按当前 run_id 过滤——多团队并存下 tm_mgr 全量
+        # get_members() 含所有 run 的成员，会把别的团队成员混入快速新建弹窗
+        # （"弹窗全部团队显示最新新建的团队的成员"bug 根因）。ref_win 的
+        # _team_run_id 即为目标 run_id（团队框 UI 上下文）；空串时回退到
+        # team.json 顶层（兼容历史单团队语义）。
+        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
+        member_agents = [
+            m.get("agent_name")
+            for m in tm_mgr.get_members(run_id=_target_run_id or None)
+            if m.get("agent_name")
+        ]
         for name in member_agents:
             if name not in all_agents:
                 all_agents.append(name)
@@ -5054,7 +5088,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if chosen is None:
             return
         agent_name = chosen.text()
-        created = self._spawn_team_members([agent_name])
+        # 🛡️ M1：透传调用方窗口所属团队的 run_id / team_name / team_label，
+        # 避免新成员落到 team.json 顶层 run_id 的错误团队框（多团队并存场景：
+        # team.json 顶层 run_id 是其他团队时，新成员会"漂"到那个团队）。
+        # _handle_team_load 路径透传 new_run_id 同理。
+        created = self._spawn_team_members(
+            [agent_name],
+            run_id=self._team_run_id or "",
+            team_label=self._team_name or "",
+            team_name=self._team_name or "",
+        )
         if created:
             InfoBar.success(
                 "已创建成员",

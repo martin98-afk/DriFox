@@ -55,6 +55,16 @@ def _method_text(method: ast.AST) -> str:
     return "\n".join(SRC.splitlines()[method.lineno - 1: method.end_lineno])
 
 
+def _is_not_effectively_visible_test(test: ast.expr) -> bool:
+    return (
+        isinstance(test, ast.UnaryOp)
+        and isinstance(test.op, ast.Not)
+        and isinstance(test.operand, ast.Call)
+        and isinstance(test.operand.func, ast.Attribute)
+        and test.operand.func.attr == "_is_effectively_visible"
+    )
+
+
 def _is_not_visible_test(test: ast.expr) -> bool:
     return (
         isinstance(test, ast.UnaryOp)
@@ -80,28 +90,28 @@ def _branch_sets_flag_and_returns(if_node: ast.If) -> bool:
 
 
 def test_ensure_rendered_guards_invisible_before_viewer():
-    """ensure_rendered 必须在创建 QWebEngineView 前门控不可见，避免弹出幽灵窗口。"""
+    """ensure_rendered 必须在创建 QWebEngineView 前门控非当前可见标签页，避免弹出幽灵窗口。"""
     mc = _class("MessageCard")
     er = _method(mc, "ensure_rendered")
     do = _nested_func(er, "_do_ensure_rendered")
 
-    # 找到 `if not self.isVisible(): ... _render_deferred=True; return`
+    # 找到 `if not self._is_effectively_visible(): ... _render_deferred=True; return`
     guard = None
     for stmt in do.body:
-        if isinstance(stmt, ast.If) and _is_not_visible_test(stmt.test):
+        if isinstance(stmt, ast.If) and _is_not_effectively_visible_test(stmt.test):
             guard = stmt
             break
-    assert guard is not None, "ensure_rendered._do_ensure_rendered 缺少 isVisible 可见性守卫"
+    assert guard is not None, "ensure_rendered._do_ensure_rendered 缺少 _is_effectively_visible 守卫"
     assert _branch_sets_flag_and_returns(guard), (
-        "isVisible 守卫分支必须（不可见时）设置 _render_deferred=True 并 return"
+        "_is_effectively_visible 守卫分支必须（非当前可见标签页时）设置 _render_deferred=True 并 return"
     )
 
     # 守卫必须位于 CodeWebViewer( 实例化之前
     text = _method_text(do)
-    idx_guard = text.find("isVisible()")
+    idx_guard = text.find("_is_effectively_visible()")
     idx_viewer = text.find("CodeWebViewer(")
     assert idx_guard != -1 and idx_viewer != -1, "无法定位守卫与 CodeWebViewer 实例化"
-    assert idx_guard < idx_viewer, "可见性守卫未在 QWebEngineView 实例化之前"
+    assert idx_guard < idx_viewer, "_is_effectively_visible 守卫未在 QWebEngineView 实例化之前"
 
 
 def test_message_card_show_event_resumes_deferred_render():

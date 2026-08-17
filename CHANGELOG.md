@@ -87,6 +87,31 @@ All notable changes to this project will be documented in this file.
 
 - **README + leader.md 表述优化** (`README.md` + `docs/leader.md`): 文档表述优化与功能描述补充（`57f885eb`）
 
+### 🚑 Hotfix (2026-08-18 第三次重发布)
+
+> **自上一 tag (v0.5.2 `d5f65d33`) 以来的变更** | 提交数：9 · 文件变更：20 · +1947/-2147 | 贡献者：dingma, mading, drifox-bot
+
+#### ✨ 新功能 (New Features)
+
+- **Marketplace 探索模式（网格卡片）** (`plugins/plugin-marketplace/`): 新增 `_ExploreCard`（固定宽度垂直布局网格展示插件）+ `_ExploreGridSection`（分类插件网格分组）；`MarketplaceCard` 默认打开 featured explore 页并带刷新随机化分类；列表/探索视图插件状态同步（安装/更新时 UI 一致更新）（`2ef28807`）
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **Hook 配置存储双轨化** (`app/core/`): 重构 Hook 配置存储，支持插件 hooks 与系统 hooks 双轨，确保状态持久化与旧数据迁移（`6ffe9c73`）
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **输入区字体样式刷新** (`app/main_widget.py`): 修复输入区字体样式刷新异常（`1a1d9baa`）
+- **团队权限恢复真正生效** (`app/core/team/`): 恢复用户权限现已实际生效——agent 模板仅在 agent 命令激活时拦截（`42a651a9`）；成员快照调用守卫 None `team_run_id`（`91d20157`）；高频保存中成员快照按 run_id 过滤并携带 `team_members`（`db9714f5`）
+- **Explore 网格文字颜色** (`plugins/plugin-marketplace/`): 修正 Explore 网格区标题与工具提示文字颜色，提升浅色/深色主题可见性（`550705e5`）
+- **消息卡片与欢迎卡片** (`app/widgets/message_card.py` + `app/widgets/welcome_card.py`): 修复消息卡片渲染与欢迎卡片幽灵窗口问题（`1a1d9baa`）
+- **Marketplace featured 空数据** (`plugins/plugin-marketplace/`): 修复 featured 无数据场景处理（`1a1d9baa`）
+
+#### 🔧 其他 (Chores & Build)
+
+- **插件市场自动生成** (`plugins/plugin-marketplace/`): 由 GitHub Actions 依据 `plugin.json` 自动重新生成 [skip ci]（`c1d79b24`）
+- **插件市场版本** (`plugins/plugin-marketplace/`): 升级至 0.3.1（`a0584068`）
+
 ## [v0.5.1] - 2026-08-14
 
 自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading

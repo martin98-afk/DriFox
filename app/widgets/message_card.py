@@ -9405,6 +9405,29 @@ class MessageCard(SimpleCardWidget):
         if getattr(self, "_render_deferred", False) and not getattr(self, "_lazy_rendered", False):
             self.ensure_rendered()
 
+    def _is_effectively_visible(self) -> bool:
+        """判断本卡片是否真正显示在屏幕上（有有效父 native window 供 QWebEngineView 附着）。
+
+        仅用 isVisible() 不可靠：批量建标签页时，被 QStackedWidget 挤出 current 的
+        隐藏页在某些时序下 isVisible() 仍返回 True，导致 QWebEngineView（Windows 上
+        创建原生 HWND 子窗口）在缺少有效父句柄时弹出独立原生窗口（幽灵窗口/白窗一闪而过）。
+        故直接检查本卡片是否在其所在 QStackedWidget 的当前页子树中。
+        """
+        top = self.window()
+        if top is None or not top.isVisible():
+            return False
+        # 沿父链查找 QStackedWidget（duck-typing，避免强依赖导入）
+        p = self.parentWidget()
+        while p is not None:
+            cur = getattr(p, "currentWidget", None)
+            if cur is not None and callable(cur):
+                current = cur()
+                if current is None or not current.isAncestorOf(self):
+                    return False
+                return True
+            p = p.parentWidget()
+        return True
+
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
 
@@ -9421,8 +9444,8 @@ class MessageCard(SimpleCardWidget):
             # native window 句柄，Chromium 会弹出独立原生窗口（幽灵窗口）。
             # 快速批量建标签页时，只有最后一个标签页可见，前 N-1 个在 200ms 懒渲染队列
             # 触发 ensure_rendered 时已不可见 → 弹出幽灵窗口。
-            # 修复：不可见时标记 _render_deferred 并 return，等 showEvent（窗口切回可见）补渲。
-            if not self.isVisible():
+            # 修复：非当前可见标签页时标记 _render_deferred 并 return，等 showEvent（窗口切回可见）补渲。
+            if not self._is_effectively_visible():
                 self._render_deferred = True
                 return
             # 移除占位符，创建真正的viewer

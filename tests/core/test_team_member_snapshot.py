@@ -151,20 +151,34 @@ class TestTeamMemberSnapshot:
         )
         assert len(snap) == 2, f"run 过滤后成员数 = 该 run join 成员数，实际 {snap}"
 
-    def test_snapshot_run_filter_keeps_legacy_no_run_records(self, tm):
-        """M1-r：run_id 过滤时保留无 run_id 字段的遗留记录（M1 前 join）。
+    def test_snapshot_run_filter_strict_match_no_run_records_excluded(self, tm):
+        """M1-r'：多团队并存下 run_id 过滤严格匹配，**不**保留无 run_id 遗留记录。
 
-        M1 前 join_team 不写归属字段——这类记录属于"本团队"（当时唯一团队），
-        run 过滤时不得误删（否则老团队恢复丢成员）。
+        历史（M1-r）行为："无 run_id 记录保留兜底"——单团队时代兼容设计，
+        但多团队并存下若保留会把"无主"成员算入所有 run 的快照，污染合并条目
+        成员列表（"多了其他团队的成员"bug 根因）。新行为：run_id 非空时
+        rec_run 必须严格匹配；空 rec_run 视为"无主"，不算入任何 run。
+
+        老成员找回路径改走：①get_team_member_snapshot() 不传 run_id（兼容旧语义）；
+        ②恢复路径的 rebuild_team_members_snapshot 显式重置。两者均不依赖
+        本方法的"无主兜底"。
         """
         tm.set_active_window_ids({"win_01", "win_02"})
-        tm.join_team("win_01", "plan")  # 无 run_id（遗留）
+        tm.join_team("win_01", "plan")  # 无 run_id（遗留 / 其他路径未传）
         tm.join_team("win_02", "build", run_id="run_a")
 
         snap = tm.get_team_member_snapshot(run_id="run_a")
         wids = {r["window_id"] for r in snap}
-        assert "win_01" in wids, "无 run_id 遗留记录应保留（归属本团队兜底）"
+        assert "win_01" not in wids, (
+            "多团队并存下无 run_id 记录不应再兜底到任意 run（污染合并条目）"
+        )
         assert "win_02" in wids, "run 匹配记录应保留"
+
+        # 兼容：get_team_member_snapshot() 不传 run_id 时仍返回全部（兜底入口）
+        snap_all = tm.get_team_member_snapshot()
+        all_wids = {r["window_id"] for r in snap_all}
+        assert "win_01" in all_wids, "不传 run_id 时无主记录仍可见（兼容旧语义）"
+        assert "win_02" in all_wids
 
     def test_cleanup_stale_members_preserves_team_members(self, tm):
         """_cleanup_stale_members 清理失效成员时保留顶层 team_members（活跃窗口）。
