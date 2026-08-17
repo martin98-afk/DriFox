@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.2] - 2026-08-17
 
-自上一版本以来的变更 | 提交数：48 · 文件变更：367 · +18733/-10544 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -29,9 +29,11 @@ All notable changes to this project will be documented in this file.
 - **上下文用量投影对齐** (`app/core/engines/ui/engine.py` + `app/widgets/context_usage_ring.py` + `context_usage_tooltip.py`): 用量快照按截断后口径估算（与实际发送一致），环形图 tooltip 显示「工具结果截断节省 X tokens」（S2）
 - **视觉工具集成增强** (`app/core/tool_executor.py` + `plugins/system/tools/`): 视觉工具完善图片处理与测试，新增图像处理能力
 - **文件树增量刷新** (`app/widgets/file_tree.py`): 文件树模型实现子节点与根节点的增量刷新，保留节点状态（展开/选中/滚动）
+- **多团队支持 TeamManager** (`app/core/team/team_manager.py` + `app/widgets/team_management.py`): 实现多团队创建/切换/解散；团队管理 UI 适配多团队场景，TeamManager 状态机与成员表同步
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **QMenu 菜单项样式** (`app/widgets/`): 调优 QMenu 菜单项样式，修复在浅色/深色主题下可见性差的问题（**v0.5.2 重发修复**）
 - **plugin-marketplace 系统插件禁用按钮** (`app/plugins/marketplace/`): 为 `system-cleaner` 等系统插件暴露禁用按钮，修复此前无法停用的问题
 - **tool control card SysShadow 幽灵窗口** (`app/widgets/cards/settings/tool_control_card.py`): 修复 SysShadow 幽灵窗口 + 策略下拉懒创建
 - **tool control card 双重重建 + 重建卡顿** (`app/widgets/cards/settings/tool_control_card.py`): 修复幽灵窗口、registry 变化双重重建；防抖优化重建性能
