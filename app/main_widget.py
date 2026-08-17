@@ -19181,7 +19181,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return ""
         try:
             tm = self._get_team_manager()
-            snapshot = tm.get_team_member_snapshot(run_id=self._team_run_id)
+            snapshot = tm.get_team_member_snapshot(run_id=self._team_run_id or "")
             import json as _json
 
             return _json.dumps(snapshot, ensure_ascii=False)
