@@ -56,6 +56,9 @@ def _new_card(monkeypatch):
         lambda self, src, force=False: {"name": "fake", "plugins": _make_plugins(40)},
     )
     card = MarketplaceCard()
+    # 默认进入页为「精选」（列表页被切出内容栈，行不可见）；
+    # 列表渲染/压缩帧相关测试需在列表模式断言 → 显式切回「全部」
+    card._filter_bar.setCurrentItem("all")
     return card
 
 
@@ -73,6 +76,7 @@ def test_render_rows_not_compressed(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()  # 真实流程：load_timer(50ms) → start_load → async_refresh + 300ms 首屏窗口
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
 
     # 等待行渲染完成并稳定展开（reveal 后 content 高度应超过视口）
     deadline = time.time() + 8
@@ -107,6 +111,7 @@ def test_refresh_rebuild_not_compressed(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
 
     deadline = time.time() + 8
     while time.time() < deadline:
@@ -152,6 +157,7 @@ def test_load_more_no_blank_tail(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
 
     deadline = time.time() + 8
     while time.time() < deadline:
@@ -390,6 +396,7 @@ def test_filter_and_resize_no_blank(monkeypatch):
     card.resize(800, 600)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
 
     deadline = time.time() + 8
     while time.time() < deadline:
@@ -458,6 +465,7 @@ def test_task_done_refresh_keeps_incremental_rows(monkeypatch):
     card = _new_card(monkeypatch)  # 40 个插件市场
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
 
     # 等待首屏渲染完成（增量：只渲染前 30 行 + 加载更多按钮）
     deadline = time.time() + 8

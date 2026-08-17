@@ -54,7 +54,7 @@
         {
             "name": "plugin-marketplace",
             "description": "DriFox 官方插件市场 — 浏览、安装、管理插件",
-            "version": "0.3.0",
+            "version": "0.3.1",
             "author": "DriFox Contributors",
             "license": "MIT",
             "categories": [

@@ -1005,6 +1005,23 @@ def group_messages_for_display(
     return batches
 
 
+def _prune_tool_content_for_api(content: str) -> str:
+    """发送给 API 前对工具结果应用 S1 截断（与 context_builder.build_messages 同参数）。
+
+    动机：chat_worker 工具迭代路径（发送全量）与 build_messages 路径（S1 截断）对同一
+    工具结果产生不同 content，导致 prompt 前缀分叉、缓存命中失效。统一在此转换层截断后，
+    两条路径字节一致（build_messages 已截断内容 < 阈值，再截断为 no-op）。
+
+    延迟 import 避免循环依赖：context_builder 顶部 import 本模块。
+    仅作用于发送内容；session / UI 存储保持全量。
+    """
+    if not isinstance(content, str) or not content:
+        return content
+    from app.core.context_builder import prune_tool_result
+
+    return prune_tool_result(content)
+
+
 def to_api_message(
     message: Dict[str, Any],
     supports_vision: bool = True,
@@ -1098,7 +1115,7 @@ def to_api_message(
             "role": "tool",
             "tool_call_id": str(normalized_message.get("tool_call_id", "")),
             "name": str(normalized_message.get("name", "")),
-            "content": str(tool_content or ""),
+            "content": _prune_tool_content_for_api(str(tool_content or "")),
         }
     return {
         "role": role,
@@ -1331,7 +1348,13 @@ def messages_to_responses_input(
                     elif block.get("type") in ("image_url", "input_image", "image"):
                         text_parts.append("[Image: base64 data]")
                 output = "\n".join(p for p in text_parts if p) or output
-            input_items.append({"type": "function_call_output", "call_id": call_id, "output": str(output or "")})
+            input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": _prune_tool_content_for_api(str(output or "")),
+                }
+            )
             continue
 
     instructions = "\n\n".join(p for p in instructions_parts if p)

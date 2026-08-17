@@ -75,6 +75,18 @@ All notable changes to this project will be documented in this file.
 - **测试**：新增 `tests/test_tool_plugin_system.py`（19 用例：registry/系统插件/热插拔/渲染/权限联动）+ `tests/test_codegraph_plugin_contracts.py`（codegraph 插件加载与错误处理契约测试）+ `tests/test_plugin_system_isolation.py`（插件系统窗口状态隔离增强）
 - **版本号**: v0.5.1 → v0.5.2（`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md` 同步）
 
+### 🚑 Hotfix (2026-08-17 第二次重发布)
+
+> **重大缓存失效 bug 修复**：chat_worker 工具迭代路径（发送全量）与 `build_messages` 路径（S1 截断）对同一工具结果产生不同 content，导致 prompt 前缀分叉、API 提示词缓存命中失效。
+
+#### ✨ 新功能 (New Features)
+
+- **API 工具内容截断统一** (`app/core/message_content.py`): 在 `to_api_message` 与 `messages_to_responses_input` 转换层统一调用 `prune_tool_result`（S1 截断，与 `context_builder.build_messages` 同参数），消除两条发送路径对同一工具结果的字节分叉；`build_messages` 已截断内容 < 阈值时再截断为 no-op，无副作用；修复 API 缓存命中失效（`6e98e1fe`）
+
+#### 📚 文档 (Documentation)
+
+- **README + leader.md 表述优化** (`README.md` + `docs/leader.md`): 文档表述优化与功能描述补充（`57f885eb`）
+
 ## [v0.5.1] - 2026-08-14
 
 自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading

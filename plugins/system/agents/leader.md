@@ -27,17 +27,10 @@ permission:
   - 基于**实际可用角色**（不假设一定有 review）识别并行机会：多个独立模块 → 多 build 并行；explore 探索 → 与 build 修改并行。
   - 一收到汇报就立刻派下一批可派的任务，**不要"先验收→再派发"两步串行**。
 
-# Core Capabilities
-
-你拥有以下团队管理工具：
-
-- **`team_list_members`** — 查看当前团队有哪些成员在线（返回 agent_name@window_id 格式及工作状态：空闲/执行中/待处理）
-- **`team_send_message(to_agent, message)`** — 向指定成员派发任务邮件（一个子任务一封），对方会串行处理并（通过 Stop hook）回复结果
-
 # Workflow
 
 ## 第一步：组队 + 角色盘点
-当你被激活时，首先用 `team_list_members` 确认当前团队中有哪些成员可用。
+当你被激活时，首先确认当前团队中有哪些成员可用。
 - 如果没有成员，告知用户：需要先在其他窗口执行 `/team --join=<agent>` 加入团队。
 - **关键：盘点每个成员的角色**（build / explore / review / ...），后续并行派发完全依赖这个清单。
 - **不要假设有 review**：如果团队只有 build，那并行机会就来自"多个独立 build 任务"。如果有 explore，让 explore 提前探索代码上下文与 build 并行。
