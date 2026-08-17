@@ -63,6 +63,9 @@ def _new_card(monkeypatch):
         lambda self, src, force=False: {"name": "fake", "plugins": _make_plugins(40)},
     )
     card = MarketplaceCard()
+    # 默认进入页为「精选」（列表页被切出内容栈，行不可见）；
+    # 列表渲染/搜索相关测试需显式切回「全部」列表模式
+    card._filter_bar.setCurrentItem("all")
     # 隔离本地已安装插件（真实环境 .drifox 有 minimax-h3 等，名字/描述含数字会干扰搜索断言）
     card._build_local_extra_plugins = lambda: []
     return card
@@ -95,6 +98,7 @@ def test_search_renders_matches_outside_first_batch(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
     assert _wait_rows(card, 30), f"首屏未渲染满 30 行: {len(card._row_map)}"
 
     card._search_edit.setText("3")
@@ -126,6 +130,7 @@ def test_search_match_less_than_rendered_still_complete(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
     assert _wait_rows(card, 30), f"首屏未渲染满 30 行: {len(card._row_map)}"
 
     card._search_edit.setText("2")
@@ -143,6 +148,7 @@ def test_search_no_match_shows_empty_state(monkeypatch):
     card = _new_card(monkeypatch)
     card.show()
     card.show_card()
+    card._filter_bar.setCurrentItem("all")  # 默认进入精选页：切回列表模式断言列表行为
     assert _wait_rows(card, 30)
 
     card._search_edit.setText("zzz-no-match")

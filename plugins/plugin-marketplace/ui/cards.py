@@ -28,6 +28,7 @@ from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -1579,6 +1580,418 @@ class _PluginRow(QFrame):
                 self._tag_labels[i].setText(tag_text)
 
 
+# ── 探索模式（精选分组横滑卡片） ─────────────────────────────
+
+# 分类 → 分组标题（带 emoji，商店风格）
+_EXPLORE_CATEGORY_LABELS = {
+    "agent": "🤖 智能体",
+    "lsp": "🛠 语言服务",
+    "language": "🌐 语言",
+    "mcp": "🔌 MCP 服务",
+    "stats": "📊 统计",
+    "theme": "🎨 主题",
+    "tool": "🧰 工具",
+    "ui": "🖥 界面",
+    "workflow": "⚙️ 工作流",
+}
+# 分类分组展示顺序（不在表中的分类排后面，按首字母）
+_EXPLORE_CATEGORY_ORDER = ["agent", "lsp", "language", "mcp", "stats", "theme", "tool", "ui", "workflow"]
+_EXPLORE_GROUP_SIZE = 6  # 精选页每组网格卡片数（3 列 × 2 行）
+
+
+class _ExploreCard(QFrame):
+    """探索模式横滑卡片（商店卡片风格：固定宽、竖排图标+名称+描述+操作）
+
+    与 _PluginRow（列表行）不同：固定宽度紧凑竖排、支持横向滚动容器；
+    复用同一套状态语义（installed/has_update/status/busy）与信号，
+    由 MarketplaceCard 统一连接安装/更新/详情处理。
+    """
+
+    installRequested = pyqtSignal(dict)
+    updateRequested = pyqtSignal(dict)
+    detailRequested = pyqtSignal(dict)
+
+    def __init__(
+        self,
+        plugin_meta: dict,
+        installed: bool,
+        has_update: bool = False,
+        local_version: Optional[str] = None,
+        status: str = "",
+        parent=None,
+        font_size: int = 0,
+        tc: Optional[str] = None,
+        tcs: Optional[str] = None,
+        font_family: str = "",
+    ):
+        super().__init__(parent)
+        self._meta = plugin_meta
+        self._installed = installed
+        self._has_update = has_update
+        self._local_version = local_version
+        self._status = status
+        self._busy = False
+        self._font_size = font_size
+        self._ff = font_family
+        self._tc = tc or _text_color()
+        self._tcs = tcs or _text_color(secondary=True)
+        self._local_path = self._resolve_local_path()
+        self._avatar = None
+        self._setup_ui()
+        self.setCursor(Qt.PointingHandCursor)
+
+    # ── 字号派生（与 _PluginRow 一致） ──
+
+    def _derive_size(self, base_px: int, offset: int) -> int:
+        if self._font_size > 0:
+            return max(8, self._font_size + offset)
+        return base_px
+
+    def _font_qss(self, size_px: int) -> str:
+        qss = f"font-size: {size_px}px;"
+        if self._ff:
+            qss += f" font-family: '{self._ff}';"
+        return qss
+
+    def _setup_ui(self):
+        self.setObjectName("exploreCard")
+        # 网格模式：不设固定宽（随 QGridLayout 列拉伸自适应），仅保最小宽
+        self.setMinimumWidth(170)
+        self.setStyleSheet(
+            "#exploreCard { background: rgba(128,128,128,0.08);"
+            " border: 1px solid rgba(128,128,128,0.15); border-radius: 10px; }"
+            "#exploreCard:hover { border: 1px solid rgba(98,160,234,0.6); background: rgba(128,128,128,0.12); }"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 10)
+        lay.setSpacing(6)
+
+        # 图标 + 名称行
+        head = QWidget(self)
+        head.setStyleSheet("background: transparent;")
+        head_lay = QHBoxLayout(head)
+        head_lay.setContentsMargins(0, 0, 0, 0)
+        head_lay.setSpacing(8)
+        self._avatar = self._create_icon_widget(head)
+        head_lay.addWidget(self._avatar)
+
+        name = self._meta.get("name", "未知")
+        self._name_label = QLabel(name, head)
+        self._name_label.setObjectName("exploreCardName")
+        self._name_label.setStyleSheet(
+            f"color: {self._tc}; font-weight: bold; background: transparent;"
+            f" {self._font_qss(self._derive_size(13, -1))}"
+        )
+        self._name_label.setWordWrap(True)
+        head_lay.addWidget(self._name_label, 1)
+        lay.addWidget(head)
+
+        # 描述（两行截断）
+        desc = self._meta.get("description", "")
+        self._desc_label = None
+        if desc:
+            fm = self._name_label.fontMetrics()
+            elided = fm.elidedText(desc[:80], Qt.ElideRight, 176 - 24)
+            self._desc_label = QLabel(elided, self)
+            self._desc_label.setObjectName("exploreCardDesc")
+            self._desc_label.setStyleSheet(
+                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(11, -3))}"
+            )
+            lay.addWidget(self._desc_label)
+
+        # 下载量 + 版本
+        meta_row = QWidget(self)
+        meta_row.setStyleSheet("background: transparent;")
+        meta_lay = QHBoxLayout(meta_row)
+        meta_lay.setContentsMargins(0, 0, 0, 0)
+        meta_lay.setSpacing(6)
+        downloads = self._meta.get("downloads", 0)
+        self._down_label = None
+        if downloads:
+            self._down_label = QLabel(f"⤓ {downloads:,}", meta_row)
+            self._down_label.setObjectName("exploreCardDown")  # 橙色固定，主题 re-theme 跳过
+            self._down_label.setStyleSheet(
+                f"color: #FFA726; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
+            )
+            meta_lay.addWidget(self._down_label)
+        ver = self._meta.get("version", "")
+        if ver:
+            self._ver_label = QLabel(f"v{ver}", meta_row)
+            self._ver_label.setObjectName("exploreCardVer")
+            self._ver_label.setStyleSheet(
+                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
+            )
+            meta_lay.addWidget(self._ver_label)
+        meta_lay.addStretch(1)
+        lay.addWidget(meta_row)
+
+        # 关注点：下载量标签不随主题 re-theme（橙色固定），objectName 保留
+
+        # 操作按钮
+        self._btn = QPushButton(self)
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.setFixedHeight(28)
+        self._btn.clicked.connect(self._on_main_action)
+        self._style_button()
+        lay.addWidget(self._btn)
+        self._update_btn_text()
+
+        # 点击卡片空白区域 → 详情
+        self._install_mouse_forward()
+
+    def _install_mouse_forward(self):
+        """卡片内非交互区域点击 → 打开详情（商店卡片整卡可点）"""
+        try:
+            self._btn.installEventFilter(self)
+            self._avatar.installEventFilter(self)
+            if self._desc_label is not None:
+                self._desc_label.installEventFilter(self)
+            for w in (self._name_label, self):
+                w.installEventFilter(self)
+        except RuntimeError:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == event.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if obj is not self._btn:
+                    self.detailRequested.emit(self._meta)
+                    return True
+        except RuntimeError:
+            pass
+        return super().eventFilter(obj, event)
+
+    def _style_button(self):
+        accent = "#62a0ea"
+        self._btn.setStyleSheet(
+            f"QPushButton {{ background: rgba(98,160,234,0.15); color: {accent};"
+            f" border: none; border-radius: 6px; {self._font_qss(self._derive_size(11, -2))} }}"
+            "QPushButton:hover { background: rgba(98,160,234,0.28); }"
+            "QPushButton:disabled { color: rgba(128,128,128,0.5); background: rgba(128,128,128,0.08); }"
+        )
+
+    def _update_btn_text(self):
+        if self._busy:
+            self._btn.setText(self._busy_text or "处理中…")
+            self._btn.setEnabled(False)
+            return
+        if not self._installed:
+            self._btn.setText("安装")
+            self._btn.setEnabled(True)
+        elif self._has_update:
+            self._btn.setText("更新")
+            self._btn.setEnabled(True)
+            self._style_update_button()
+        else:
+            self._btn.setText("已安装")
+            self._btn.setEnabled(False)
+            self._style_button()
+
+    def _style_update_button(self):
+        self._btn.setStyleSheet(
+            "QPushButton { background: rgba(255,167,38,0.18); color: #FFA726;"
+            f" border: none; border-radius: 6px; {self._font_qss(self._derive_size(11, -2))} }}"
+            "QPushButton:hover { background: rgba(255,167,38,0.32); }"
+        )
+
+    def _on_main_action(self):
+        if self._busy:
+            return
+        if not self._installed:
+            self._busy = True
+            self._busy_text = "安装中…"
+            self._update_btn_text()
+            self.installRequested.emit(self._meta)
+        elif self._has_update:
+            self._busy = True
+            self._busy_text = "更新中…"
+            self._update_btn_text()
+            self.updateRequested.emit(self._meta)
+        else:
+            self.detailRequested.emit(self._meta)
+
+    def apply_state(
+        self, installed: bool, has_update: bool = False, local_version: Optional[str] = None, status: str = ""
+    ):
+        """安装/更新/卸载后刷新状态（与 _PluginRow.set_installed 同语义）"""
+        self._installed = installed
+        self._has_update = has_update
+        self._local_version = local_version
+        self._status = status
+        self._busy = False
+        self._busy_text = ""
+        self._update_btn_text()
+
+    def set_downloading(self):
+        """更新流程：按钮置「下载中…」禁用（旧版保留，同列表行语义）"""
+        self._busy = True
+        self._busy_text = "下载中…"
+        self._update_btn_text()
+
+    def set_error(self):
+        self._busy = False
+        self._busy_text = ""
+        self._update_btn_text()
+
+    def _resolve_local_path(self) -> Optional[Path]:
+        """解析本地插件路径（与 _PluginRow 同逻辑）"""
+        name = self._meta.get("name", "")
+        if not name:
+            return None
+        if self._installed:
+            p = _drifox_dir() / "plugins" / name
+            if p.is_dir():
+                return p
+        return _PluginRow._find_local_plugin_path(name)
+
+    def _create_icon_widget(self, parent) -> QWidget:
+        """创建插件图标（复用 _PluginRow 的优先级逻辑：本地 SVG → 远程 → 缩写头像）"""
+        plugin_name = self._meta.get("name", "?")
+        icon_size = 40
+        local_path = self._local_path
+        if local_path:
+            manifest = get_installer()._manifest_cache.get(plugin_name)
+            if manifest is None:
+                import json as _json
+
+                for _meta_dir in (".drifox-plugin", ".claude-plugin"):
+                    _mp = local_path / _meta_dir / "plugin.json"
+                    if _mp.exists():
+                        try:
+                            manifest = _json.loads(_mp.read_text(encoding="utf-8"))
+                        except Exception:
+                            pass
+                        break
+            if manifest:
+                return PluginIconWidget(
+                    plugin_dir=local_path,
+                    manifest=manifest,
+                    font_size=self._font_size,
+                    parent=parent,
+                    icon_size=icon_size,
+                )
+        remote_urls = resolve_remote_icon_urls(self._meta)
+        if remote_urls:
+            manifest = {"name": plugin_name, "icon": self._meta.get("icon")}
+            return PluginIconWidget(
+                manifest=manifest,
+                font_size=self._font_size,
+                parent=parent,
+                remote_urls=remote_urls,
+                icon_size=icon_size,
+            )
+        return SquircleAvatar(
+            extract_initials(plugin_name),
+            name_color(plugin_name),
+            parent,
+            size=icon_size,
+            font_size=self._font_size,
+        )
+
+    def set_font_size(self, font_size: int):
+        """字号变化：头像自适应 + 复垦标签（与 _PluginRow.set_font_size 同范式）"""
+        if font_size <= 0:
+            return
+        self._font_size = font_size
+        if self._avatar is not None:
+            if hasattr(self._avatar, "set_icon_size"):
+                self._avatar.set_icon_size(40)
+            elif hasattr(self._avatar, "set_size"):
+                self._avatar.set_size(40)
+            elif hasattr(self._avatar, "set_font_size"):
+                self._avatar.set_font_size(font_size)
+        self._name_label.setStyleSheet(
+            f"color: {self._tc}; font-weight: bold; background: transparent;"
+            f" {self._font_qss(self._derive_size(13, -1))}"
+        )
+        if self._desc_label is not None:
+            self._desc_label.setStyleSheet(
+                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(11, -3))}"
+            )
+        if getattr(self, "_ver_label", None) is not None:
+            self._ver_label.setStyleSheet(
+                f"color: {self._tcs}; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
+            )
+        self._style_button()
+        if self._has_update and self._installed:
+            self._style_update_button()
+
+
+class _ExploreGridSection(QFrame):
+    """探索分组：圆角边框容器（标题行 + 数量 + 查看更多）+ 3 列网格卡片
+
+    与旧版 _ExploreSection（横向滚动）不同：无任何滚动容器，
+    卡片按 QGridLayout 3 列排布（组内约 6 张：3×2）；
+    右上「查看更多 →」按钮点击后调用 on_more(tag) 回调，
+    由 MarketplaceCard 切到「全部」列表并激活对应分类过滤。
+    """
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str = "",
+        parent=None,
+        on_more: Optional[Callable[[], None]] = None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("exploreSection")
+        # 圆角边框容器：浅背景 + 细边框（内容区留白靠 layout margins）
+        self.setStyleSheet(
+            "#exploreSection { background: rgba(128,128,128,0.05);"
+            " border: 1px solid rgba(128,128,128,0.14); border-radius: 12px; }"
+        )
+        self._cards: list = []  # [(name, _ExploreCard)]
+        self._title = title
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(10)
+
+        # 标题行：组名 + 数量角标 +（右）查看更多
+        title_row = QWidget(self)
+        title_row.setStyleSheet("background: transparent;")
+        title_lay = QHBoxLayout(title_row)
+        title_lay.setContentsMargins(2, 0, 2, 0)
+        title_lay.setSpacing(8)
+        t = StrongBodyLabel(title, title_row)
+        t.setStyleSheet("background: transparent;")
+        title_lay.addWidget(t)
+        if subtitle:
+            sub = BodyLabel(subtitle, title_row)
+            sub.setStyleSheet("background: transparent;")
+            title_lay.addWidget(sub)
+        title_lay.addStretch(1)
+        if on_more is not None:
+            more_btn = TransparentPushButton("查看更多 →", title_row)
+            more_btn.setCursor(Qt.PointingHandCursor)
+            more_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; color: #62a0ea;"
+                " font-size: 12px; font-weight: bold; }"
+                "QPushButton:hover { color: #82b4f0; }"
+            )
+            more_btn.clicked.connect(on_more)
+            title_lay.addWidget(more_btn)
+        lay.addWidget(title_row)
+        self._title_label = t
+
+        # 3 列网格（组内 6 张 = 3×2，数量少于 6 时行数自适应）
+        self._card_layout = QGridLayout()
+        self._card_layout.setContentsMargins(0, 0, 0, 0)
+        self._card_layout.setSpacing(10)
+        self._card_layout.setColumnStretch(0, 1)
+        self._card_layout.setColumnStretch(1, 1)
+        self._card_layout.setColumnStretch(2, 1)
+        lay.addLayout(self._card_layout)
+
+    def add_card(self, name: str, card: _ExploreCard):
+        """插入卡片：按当前数量计算网格位置（col = n % 3, row = n // 3）"""
+        n = len(self._cards)
+        self._card_layout.addWidget(card, n // 3, n % 3)
+        self._cards.append((name, card))
+
+    def cards(self):
+        return self._cards
+
+
 # ── 市场主卡片 ──────────────────────────────────────────────
 
 
@@ -1666,6 +2079,10 @@ class MarketplaceCard(QWidget):
         self.setVisible(True)
         self._apply_latest_theme()
         self._apply_plugin_icon()
+        # 默认回到精选探索页（每次打开市场都从探索模式进入，商店首页语义）
+        self._filter_bar.setCurrentItem("featured")
+        self._current_filter = "featured"
+        self._apply_browse_mode("featured")
         # 清除旧搜索状态、防抖定时器
         self._search_edit.clear()
         self._search_debounce.stop()
@@ -1777,6 +2194,8 @@ class MarketplaceCard(QWidget):
         if font_size != getattr(self, "_last_font_size", None):
             for row in self.findChildren(_PluginRow):
                 row.set_font_size(font_size)
+            for card in self.findChildren(_ExploreCard):
+                card.set_font_size(font_size)
             self._last_font_size = font_size
 
         # ── 字体（通过 QFont 级联，使用系统字体大小） ──
@@ -1817,6 +2236,9 @@ class MarketplaceCard(QWidget):
         "proxyRecordTitle": -1,  # 记录区段标题
         "proxyRecordRow": -2,  # 记录行正文（动作/插件名/原因）
         "proxyRecordTime": -3,  # 记录行时间
+        "exploreCardName": -1,  # 探索卡片名称
+        "exploreCardDesc": -3,  # 探索卡片描述
+        "exploreCardVer": -3,  # 探索卡片版本
     }
 
     def _retheme(self):
@@ -1837,6 +2259,8 @@ class MarketplaceCard(QWidget):
         for child in self.findChildren(QLabel):
             if child.objectName() == "updatesBadge":
                 continue  # 亮黄 badge 固定黑字，不跟随主题文字色
+            if child.objectName() == "exploreCardDown":
+                continue  # 探索卡片下载量固定橙色，不跟随主题
             try:
                 # 标题/描述应用 font_size 偏移
                 offset = self._PLUGIN_ROW_SIZE_OFFSETS.get(child.objectName(), 0)
@@ -1960,17 +2384,20 @@ class MarketplaceCard(QWidget):
 
         # ── 筛选行：Pivot + 待更新角标 + 排序 ──
         filter_row = QWidget(self._browse_page)
+        self._filter_row = filter_row
         filter_row.setStyleSheet("background: transparent;")
         filter_layout = QHBoxLayout(filter_row)
         filter_layout.setContentsMargins(12, 2, 12, 0)
         filter_layout.setSpacing(8)
 
         self._filter_bar = Pivot(filter_row)
+        self._featured_item = self._filter_bar.addItem("featured", "精选", None, None)
         self._filter_bar.addItem("all", "全部", None, None)
         self._filter_bar.addItem("installed", "已安装", None, None)
         self._filter_bar.addItem("uninstalled", "未安装", None, None)
         self._updates_item = self._filter_bar.addItem("updates", "待更新", None, None)
-        self._filter_bar.setCurrentItem("all")
+        self._filter_bar.setCurrentItem("featured")
+        self._current_filter = "featured"
         self._filter_bar.currentItemChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self._filter_bar)
 
@@ -2037,6 +2464,7 @@ class MarketplaceCard(QWidget):
         # ── 市场来源过滤栏（横向滚动，数据加载后构建）──
         # ── 市场来源过滤行（来源: 标签 + 横向滚动按钮）──
         source_row = QWidget(self._browse_page)
+        self._source_row = source_row
         source_row.setStyleSheet("background: transparent;")
         source_row_layout = QHBoxLayout(source_row)
         source_row_layout.setContentsMargins(12, 0, 12, 0)
@@ -2071,6 +2499,7 @@ class MarketplaceCard(QWidget):
 
         # ── Tag 过滤行（类型: 标签 + 横向滚动按钮）──
         tag_row = QWidget(self._browse_page)
+        self._tag_row = tag_row
         tag_row.setStyleSheet("background: transparent;")
         tag_row_layout = QHBoxLayout(tag_row)
         tag_row_layout.setContentsMargins(12, 0, 12, 0)
@@ -2127,6 +2556,53 @@ class MarketplaceCard(QWidget):
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         self._content_stack.addWidget(self._empty_label)
+
+        # ── 精选探索页（默认进入）：单页网格分组 ──
+        self._explore_scroll = QScrollArea(self._browse_page)
+        self._explore_scroll.setWidgetResizable(True)
+        self._explore_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._explore_scroll.setStyleSheet(_scroll_area_qss())
+        self._explore_content = QWidget(self._explore_scroll)
+        self._explore_content.setStyleSheet("background: transparent;")
+        self._explore_root_layout = QVBoxLayout(self._explore_content)
+        self._explore_root_layout.setContentsMargins(0, 0, 0, 0)
+        self._explore_root_layout.setSpacing(0)
+
+        # 精选页工具行：说明 + 「刷新分组」按钮（重新随机分类）
+        tool_row = QWidget(self._explore_content)
+        tool_row.setStyleSheet("background: transparent;")
+        tool_lay = QHBoxLayout(tool_row)
+        tool_lay.setContentsMargins(16, 8, 16, 0)
+        tool_lay.setSpacing(8)
+        tip = BodyLabel("为你随机推荐的分类精选", tool_row)
+        tip.setStyleSheet("background: transparent;")
+        tool_lay.addWidget(tip)
+        tool_lay.addStretch(1)
+        refresh_btn = TransparentToolButton(FluentIcon.SYNC, tool_row)
+        refresh_btn.setToolTip("刷新分组")
+        refresh_btn.setCursor(Qt.PointingHandCursor)
+        refresh_btn.setFixedSize(30, 30)
+        refresh_btn.setStyleSheet(
+            "QToolButton { border: none; border-radius: 8px; }"
+            "QToolButton:hover { background: rgba(128,128,128,0.15); }"
+        )
+        refresh_btn.clicked.connect(self._rebuild_explore)
+        tool_lay.addWidget(refresh_btn)
+        self._explore_refresh_btn = refresh_btn
+        self._explore_root_layout.addWidget(tool_row)
+
+        # 分组容器（重建只清空分组、保留工具行）
+        self._explore_layout = QVBoxLayout()
+        self._explore_layout.setContentsMargins(12, 8, 12, 8)
+        self._explore_layout.setSpacing(18)
+        self._explore_layout.setAlignment(Qt.AlignTop)
+        self._explore_root_layout.addLayout(self._explore_layout)
+        # 内容不足一屏时：多余空间由底部 stretch 吸收（空白收在最后，
+        # 避免被工具行/分组抢占拉伸）
+        self._explore_root_layout.addStretch(1)
+        self._explore_scroll.setWidget(self._explore_content)
+        self._content_stack.addWidget(self._explore_scroll)
+        self._explore_sections: list = []  # [_ExploreGridSection]
 
         self._content_stack.setCurrentIndex(0)
         browse_root.addWidget(self._content_stack, 1)
@@ -2398,12 +2874,15 @@ class MarketplaceCard(QWidget):
         self._version_map = inst_map
         self._status_map = get_installer().get_status_map()
 
-        # 数据内容变化 → 更新全量数据 + 重建 tag 栏 / 来源栏
+        # 数据内容变化 → 更新全量数据 + 重建 tag 栏 / 来源栏 / 精选探索页
         data_changed = not self._all_plugins or not self._plugins_same(self._all_plugins, plugins)
         if data_changed:
             self._all_plugins = plugins
             self._rebuild_tag_bar()
             self._rebuild_source_bar()
+            self._rebuild_explore()
+            # 重建 tag/source 栏会重新 setVisible(True)，精选模式下需按模式校正
+            self._apply_browse_mode(self._current_filter)
 
         # 「已安装」视图：并入市场列表外的本地插件（系统/禁用/手动安装）
         # 任何筛选下都并入，由 _plugin_matches 按 filter_mode 过滤（uninstalled 会剔除已装）
@@ -3035,13 +3514,15 @@ class MarketplaceCard(QWidget):
         return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _update_empty_state(self):
-        """匹配为空时显示空态提示"""
+        """匹配为空时显示空态提示（精选模式不参与，探索视图独立占位）"""
+        if self._current_filter == "featured":
+            return
         if not self._matched:
             query = self._search_edit.text().strip()
             self._empty_label.setText("没有匹配的插件" if (query or self._active_tags) else "暂无可用插件")
-            self._content_stack.setCurrentIndex(1)
+            self._content_stack.setCurrentWidget(self._empty_label)
         else:
-            self._content_stack.setCurrentIndex(0)
+            self._content_stack.setCurrentWidget(self._scroll)
 
     def _update_status(self):
         """更新状态栏：搜索/过滤结果计数"""
@@ -3326,11 +3807,18 @@ class MarketplaceCard(QWidget):
             row._busy = False
             row._busy_text = ""
             row._update_btn_text()
+        # 同步探索卡片
+        card = self._explore_card_by_name(name)
+        if card is not None and card._busy:
+            card._busy = False
+            card._busy_text = ""
+            card._update_btn_text()
 
     def _set_row_busy(self, name: str, busy_text: str):
         """将指定插件行置为 busy（任务入队/开始时调用，行不存在则忽略）
 
         行已 busy 时仅刷新文案不重复禁用（避免覆盖更精确的状态）。
+        同步探索卡片（探索页与列表页共享任务状态）。
         """
         row = self._row_map.get(name)
         if row is not None:
@@ -3341,6 +3829,15 @@ class MarketplaceCard(QWidget):
             elif row._busy_text != busy_text:
                 row._busy_text = busy_text
                 row._update_btn_text()
+        card = self._explore_card_by_name(name)
+        if card is not None:
+            if not card._busy:
+                card._busy = True
+                card._busy_text = busy_text
+                card._update_btn_text()
+            elif card._busy_text != busy_text:
+                card._busy_text = busy_text
+                card._update_btn_text()
 
     def _restore_task_busy(self):
         """行重建/补行后恢复任务行的 busy 状态（下载中/安装中等）
@@ -3453,6 +3950,10 @@ class MarketplaceCard(QWidget):
         row = self._row_map.get(name)
         if row is not None:
             row.set_downloading()
+        # 同步探索卡片
+        card = self._explore_card_by_name(name)
+        if card is not None:
+            card.set_downloading()
 
     def _on_update_done(self, task: dict, success: bool):
         """更新完成（task 含 keep_disabled：更新前是否处于禁用态）"""
@@ -3759,6 +4260,14 @@ class MarketplaceCard(QWidget):
             row.setVisible(self._plugin_matches(p, query, filter_mode))
             row.update_search_highlight(query)
 
+        # 同步探索卡片状态（busy 中卡片保持禁用，逻辑与列表行一致）
+        for section in self._explore_sections:
+            for card_name, card in section.cards():
+                if card._busy:
+                    continue
+                installed, has_update, local_ver, status = self._row_state(card._meta)
+                card.apply_state(installed, has_update, local_ver, status)
+
         # 不调用 _render_next_batch()：状态刷新不得推进增量加载（每批 30 的
         # 「加载更多」是浏览路径专属）。此前每次安装/卸载/启用/禁用完成都补
         # 30 个缺失行 → 列表自动膨胀直到全量（用户视角：安装后刷出所有插件）。
@@ -3790,6 +4299,8 @@ class MarketplaceCard(QWidget):
             error: 操作是否出错
             updated: 是否刚完成更新（需刷新版本显示）
         """
+        # 同步探索卡片（最新状态整体刷新，避免分支重复）
+        self._card_state_sync(name)
         row = self._row_map.get(name)
         if row is None:
             return
@@ -3804,6 +4315,16 @@ class MarketplaceCard(QWidget):
             row._update_btn_text()
         else:
             row.set_installed(installed)
+
+    def _card_state_sync(self, name: str):
+        """按最新安装状态同步指定插件对应探索卡片（busy 中卡片跳过）"""
+        card = self._explore_card_by_name(name)
+        if card is None:
+            return
+        if card._busy:
+            return  # 任务中的卡片保持禁用文案，不被状态刷新覆盖
+        installed, has_update, local_ver, status = self._row_state(card._meta)
+        card.apply_state(installed, has_update, local_ver, status)
 
     # ── 加速配置 ──
 
@@ -4278,10 +4799,194 @@ class MarketplaceCard(QWidget):
             self._page_stack.setCurrentIndex(2)
 
     def _on_filter_changed(self, key: str):
-        """筛选标签切换"""
+        """筛选标签切换（featured=精选探索页，其余=列表/空态）"""
         self._current_filter = key
+        self._apply_browse_mode(key)
+        if key == "featured":
+            return  # 精选页独立渲染，不走列表过滤
         if self._plugin_data:
             self._render_plugins(self._plugin_data)
+
+    def _apply_browse_mode(self, key: str):
+        """浏览页模式切换：精选 vs 列表（展示对应视图 + 显隐筛选控件）
+
+        精选页只保留 Pivot，隐藏搜索/排序/来源/标签行（商店首页干净形态）；
+        列表模式恢复全部筛选控件。
+        """
+        featured = key == "featured"
+        # 内容栈：探索页 index=2，列表=0，空态=1
+        if featured:
+            self._content_stack.setCurrentWidget(self._explore_scroll)
+        elif self._matched:
+            self._content_stack.setCurrentWidget(self._scroll)
+        else:
+            self._content_stack.setCurrentWidget(self._empty_label)
+        # 精选模式隐藏筛选辅助控件
+        for w in (self._filter_row, self._source_row, self._tag_row):
+            try:
+                w.setVisible(True)
+            except RuntimeError:
+                pass
+        if featured:
+            self._source_row.setVisible(False)
+            self._tag_row.setVisible(False)
+        else:
+            # 列表模式：按数据状态恢复（不能用 isVisible——父被隐藏时恒 False；
+            # 用布局内容判断是否有数据）
+            has_src = bool(getattr(self, "_source_layout", None) and self._source_layout.count() > 1)
+            self._source_row.setVisible(has_src)
+            has_tags = bool(getattr(self, "_tag_layout", None) and self._tag_layout.count() > 1)
+            self._tag_row.setVisible(has_tags)
+        try:
+            self._search_edit.setVisible(not featured)
+            self._sort_combo.setVisible(not featured)
+        except RuntimeError:
+            pass
+
+    # ── 精选探索视图 ──
+
+    def _rebuild_explore(self):
+        """重建精选探索页（单页网格分组，无横向滚动）
+
+        分组：从数据分类池**随机抽 3 个分类**（每次进入/刷新/点「刷新分组」都不同），
+        每组取该分类下载量 Top _EXPLORE_GROUP_SIZE（约 6 个）插件；
+        每组标题 = 分类名 + 分类总数角标，右上「查看更多 →」跳到列表模式并
+        激活对应分类过滤；顶部工具行「🔄 刷新分组」重新随机换一组分类。
+
+        注：市场数据无上架时间字段（仅有 name/version/author/categories/
+        downloads 等），版本号不反映上架先后 → 不做「最新上架」分组；
+        用随机分类代替（回归需求「精选/随机分组」的随机侧）。
+
+        卡片复用安装/更新/详情信号（implicit 语义与列表行一致）。
+        """
+        # 清空旧分组
+        self._explore_sections.clear()
+        while self._explore_layout.count():
+            item = self._explore_layout.takeAt(0)
+            if item.widget():
+                item.widget().hide()
+                item.widget().deleteLater()
+            item = None
+
+        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        if not view_plugins:
+            return
+
+        # 分类 → 插件
+        by_cat: dict = {}
+        for p in view_plugins:
+            for cat in (p.get("categories") or []) or []:
+                by_cat.setdefault(cat, []).append(p)
+
+        # 随机抽 3 个分类（池子按稳定顺序排列后再洗牌；分类不足 3 个时全显）
+        cats = [c for c in _EXPLORE_CATEGORY_ORDER if c in by_cat]
+        cats += sorted(c for c in by_cat if c not in _EXPLORE_CATEGORY_ORDER)
+        import random as _random
+
+        _random.shuffle(cats)
+        cats = cats[:3]
+
+        for cat in cats:
+            group = sorted(by_cat[cat], key=lambda p: p.get("downloads", 0) or 0, reverse=True)
+            total = len(group)  # 角标显示分类总数（组内只展示 Top N）
+            group = group[: _EXPLORE_GROUP_SIZE]
+            label = _EXPLORE_CATEGORY_LABELS.get(cat, f"📁 {cat}")
+            self._add_explore_section(label, f"{total} 个", group, tag=cat)
+
+        if not self._explore_sections:
+            # 有数据但无任何分类（插件缺 categories 字段）：兜底显示全部（无「查看更多」）
+            self._add_explore_section("全部插件", f"{len(view_plugins)} 个", view_plugins, tag=None)
+
+    def _add_explore_section(self, title: str, subtitle: str, plugins: list, *, tag: Optional[str] = None):
+        """创建网格分组并填充卡片（信号连接与 _create_row 一致）
+
+        tag 非空时标题行右侧显示「查看更多 →」→ 切列表模式并按该分类过滤。
+        """
+        section = _ExploreGridSection(
+            title,
+            subtitle,
+            self._explore_content,
+            on_more=(lambda: self._on_explore_more(tag)) if tag is not None else None,
+        )
+        self._fill_explore_section(section, plugins)
+        if section.cards():
+            self._explore_layout.addWidget(section)
+            self._explore_sections.append(section)
+
+    def _fill_explore_section(self, section: _ExploreGridSection, plugins: list):
+        """向分组填充卡片（信号连接与 _create_row 一致）"""
+        for p in plugins:
+            try:
+                installed, has_update, local_ver, status = self._row_state(p)
+                card = _ExploreCard(
+                    p,
+                    installed,
+                    has_update=has_update,
+                    local_version=local_ver,
+                    status=status,
+                    parent=section,
+                    font_size=getattr(self, "_cached_font_size", 0),
+                    tc=getattr(self, "_cached_tc", None),
+                    tcs=getattr(self, "_cached_tcs", None),
+                    font_family=getattr(self, "_cached_font_family", "") or "",
+                )
+            except Exception as e:
+                logger.warning(f"[Marketplace] 探索卡片渲染失败: {e}")
+                continue
+            card.installRequested.connect(self._async_install)
+            card.updateRequested.connect(self._async_update)
+            card.detailRequested.connect(self._on_plugin_detail)
+            section.add_card(p.get("name", ""), card)
+
+    def _on_explore_more(self, tag: str):
+        """精选分组「查看更多」→ 切到「全部」列表并激活对应分类过滤
+
+        激活分类 tag → 切 filter tab 到 all（触发 _apply_browse_mode +
+        _render_plugins 按新条件过滤）→ 同步 tag 按钮高亮。
+        """
+        self._active_tags = {tag}
+        self._filter_bar.setCurrentItem("all")
+        sync = getattr(self, "_sync_tag_buttons", None)
+        if sync is not None:
+            sync()
+
+    def _explore_card_by_name(self, name: str):
+        """按插件名查找探索卡片（状态刷新用）"""
+        for section in self._explore_sections:
+            for n, card in section.cards():
+                if n == name:
+                    return card
+        return None
+
+    def _refresh_explore_states(self):
+        """安装/更新/卸载后同步探索卡片状态（与 _refresh_row_states 同步调用）"""
+        for section in self._explore_sections:
+            for name, card in section.cards():
+                try:
+                    installed, has_update, local_ver, status = self._row_state(card._meta)
+                    card.apply_state(installed, has_update=has_update, local_version=local_ver, status=status)
+                except RuntimeError:
+                    pass
+
+    def _set_explore_card_busy(self, name: str, busy_text: str):
+        """任务开始/排队时同步探索卡片 busy（与 _set_row_busy 同触发器）"""
+        card = self._explore_card_by_name(name)
+        if card is not None:
+            card._busy = True
+            card._busy_text = busy_text
+            card._update_btn_text()
+
+    def _on_explore_card_downloading(self, name: str):
+        """更新下载中：同步探索卡片（与 _set_row_downloading 同触发器）"""
+        card = self._explore_card_by_name(name)
+        if card is not None:
+            card.set_downloading()
+
+    def _on_explore_card_error(self, name: str):
+        """任务失败：恢复探索卡片按钮（与 _update_row_state(error) 同触发器）"""
+        card = self._explore_card_by_name(name)
+        if card is not None:
+            card.set_error()
 
     # ── 排序 / 角标 ──
 
@@ -4861,10 +5566,34 @@ class MarketplaceCard(QWidget):
         )
 
     def _on_remove_marketplace(self, name: str):
-        """移除市场源"""
+        """移除市场源
+
+        - 删除配置 + 清理状态
+        - 过滤内存中该源插件（_merge_market_data 只移除「本轮拉到的市场」
+          的旧数据；被删源不会再被拉到 → 残留，必须主动过滤，否则列表/
+          探索页仍显示已删源的插件）
+        - 重新拉取剩余市场（force=False 命中缓存秒回；失败也不丢已过滤结果）
+        """
         mgr = get_marketplace_manager()
-        mgr.remove_source(name)
+        if not mgr.remove_source(name):
+            return
         self._build_markets_page(force=True)
+        # 过滤内存残留（列表 + 探索页数据源）
+        old_len = len(self._plugin_data)
+        self._plugin_data = [p for p in self._plugin_data if p.get("_marketplace") != name]
+        if self._all_plugins:
+            self._all_plugins = [p for p in self._all_plugins if p.get("_marketplace") != name]
+        if len(self._plugin_data) != old_len:
+            self._status_label.setText(f"已移除 {name}")
+            # 数据已变化：同步探索页 + 来源/标签栏 + 列表
+            # 注意：_all_plugins 已同步过滤 → _render_plugins 的 data_changed
+            # 判定可能不触发（内容一致）；探索页/来源栏/标签栏必须显式重建
+            self._rebuild_tag_bar()
+            self._rebuild_source_bar()
+            self._rebuild_explore()
+            self._render_plugins(self._plugin_data)
+        # 重新拉取剩余市场（缓存命中时秒回；拉取结果由 _merge_market_data 合并）
+        self._async_refresh()
 
     def _open_url(self, url: str):
         """在浏览器中打开 URL"""

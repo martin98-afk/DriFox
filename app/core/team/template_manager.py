@@ -17,7 +17,8 @@
 - 错误统一抛 TemplateError，由调用方负责转 InfoBar 提示
 - 使用 PyYAML（项目已依赖），不带 ruamel 等额外依赖
 - 模板文件名由 template_name 派生：
-    只允许 [a-zA-Z0-9_-]，否则拒收（避免路径穿越 / 跨平台问题）
+    允许字母/数字/下划线/中划线，以及中文等 Unicode 字母（放宽以支持中文名）；
+    仍禁止 . / 反斜杠 与 ..，避免扩展名冲突与路径穿越（跨平台文件名为 UTF-8，安全）。
 """
 
 from __future__ import annotations
@@ -33,8 +34,9 @@ from loguru import logger
 from app.core.team.template_schema import SUPPORTED_SCHEMA_VERSIONS, Template, TemplateError
 
 
-# 模板名允许字符（不含路径分隔符、不含 ..）
-_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# 模板名允许字符（Unicode 模式）：首字符为字母/数字（含中文），后续允许字母/数字/_/-；
+# 天然排除 . / 反斜杠 与 ..（避免扩展名冲突与路径穿越）。长度 1-64。
+_NAME_PATTERN = re.compile(r"^[^\W_][\w-]{0,63}$")
 
 
 class TemplateManager:
@@ -126,7 +128,7 @@ class TemplateManager:
         if not name:
             raise TemplateError("模板名不能为空")
         if not _NAME_PATTERN.match(name):
-            raise TemplateError(f"模板名非法: {name!r}（仅允许字母/数字/下划线/中划线，且以字母或数字开头，长度 1-64）")
+            raise TemplateError(f"模板名非法: {name!r}（仅允许字母/数字/中文/下划线/中划线，禁止 . 与路径分隔符，长度 1-64）")
         return name
 
     def _template_path_in_dir(self, directory: Path, name: str) -> Path:

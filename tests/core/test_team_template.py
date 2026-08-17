@@ -509,15 +509,20 @@ class TestInvalidName:
                 )
             )
 
-    def test_non_ascii_name_rejected(self, fresh_tm):
-        """中文名应被拒绝（保持跨平台稳定性）。"""
-        with pytest.raises(TemplateError, match="模板名非法"):
-            fresh_tm.save(
-                Template(
-                    template_name="中文模板",
-                    agents=[TemplateAgent("build")],
-                )
+    def test_non_ascii_name_allowed(self, fresh_tm):
+        """中文名应被允许（放宽支持 Unicode 名称）。"""
+        path = fresh_tm.save(
+            Template(
+                template_name="中文模板",
+                agents=[TemplateAgent("build")],
             )
+        )
+        assert path.exists()
+        assert path.stem == "中文模板"
+        # 往返：保存后能从文件名正确加载回来（本次 bug 的核心场景）
+        reloaded = fresh_tm.load("中文模板")
+        assert reloaded.template_name == "中文模板"
+        assert reloaded.agents[0].agent_name == "build"
 
     def test_name_with_dot_rejected(self, fresh_tm):
         """包含 . 的名称应被拒绝（避免和扩展名冲突）。"""
