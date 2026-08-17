@@ -4816,7 +4816,14 @@ class MarketplaceCard(QWidget):
         featured = key == "featured"
         # 内容栈：探索页 index=2，列表=0，空态=1
         if featured:
-            self._content_stack.setCurrentWidget(self._explore_scroll)
+            # 精选数据未到达 / 精选缓存为空（_all_plugins=[]）→ 显示空状态
+            # 占位，避免把"全部"插件塞进精选框（历史回归：_rebuild_explore
+            # 会把本地 extras 兜底渲染成"全部插件"分组）。
+            if not self._all_plugins:
+                self._empty_label.setText("精选数据加载中…")
+                self._content_stack.setCurrentWidget(self._empty_label)
+            else:
+                self._content_stack.setCurrentWidget(self._explore_scroll)
         elif self._matched:
             self._content_stack.setCurrentWidget(self._scroll)
         else:
@@ -4858,6 +4865,15 @@ class MarketplaceCard(QWidget):
         用随机分类代替（回归需求「精选/随机分组」的随机侧）。
 
         卡片复用安装/更新/详情信号（implicit 语义与列表行一致）。
+
+        精选页**只展示市场数据**（_all_plugins），**不混入本地 extras**：
+        - 精选缓存为空 / 远端未到达（_all_plugins=[]）时直接 return，不渲染
+          任何分组（也不兜底出"全部插件"框）。
+        - 本地已装但不在市场中的插件（系统/手动安装/禁用）走「全部/已安装」
+          tab 的列表视图，**不属于精选页**。
+        - 历史实现把 `_build_local_extra_plugins()` 并入 view_plugins，本地
+          extras 默认无 `categories` 字段，会落进兜底"全部插件"分组 → 在
+          远端未到达时把"全部"本地插件塞进精选框。该回归已修复。
         """
         # 清空旧分组
         self._explore_sections.clear()
@@ -4868,7 +4884,9 @@ class MarketplaceCard(QWidget):
                 item.widget().deleteLater()
             item = None
 
-        view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()
+        # 精选页只看市场数据；空数据直接 return（不渲染任何分组，
+        # 也不把本地 extras 兜底塞进精选框）
+        view_plugins = list(self._all_plugins)
         if not view_plugins:
             return
 
@@ -4894,7 +4912,8 @@ class MarketplaceCard(QWidget):
             self._add_explore_section(label, f"{total} 个", group, tag=cat)
 
         if not self._explore_sections:
-            # 有数据但无任何分类（插件缺 categories 字段）：兜底显示全部（无「查看更多」）
+            # 市场数据非空但所有插件都缺 categories 字段：兜底显示"全部插件"
+            # 分组（无「查看更多」按钮，因 tag 无法匹配）
             self._add_explore_section("全部插件", f"{len(view_plugins)} 个", view_plugins, tag=None)
 
     def _add_explore_section(self, title: str, subtitle: str, plugins: list, *, tag: Optional[str] = None):

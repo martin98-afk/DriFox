@@ -8182,107 +8182,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
         self._card_manager.hide_card("history", self._window_id)
 
-    def _disband_current_team_for_restore(self):
-        """恢复团队会话前解散当前团队 + 关闭所有团队窗口（用户确认语义 D1）。
-
-        语义：恢复操作会重建团队窗口并共享同一 run_id，先清理现有团队
-        状态，避免新旧团队会话/邮箱目录/成员登记互相串扰。
-        - 遍历 OpenAIChatToolWindow._instances 快照，跳过已销毁窗口及非团队窗口
-        - 每个团队窗口：停 watcher（幂等）→ leave_team（清成员登记+邮箱目录）
-          → 清空 _team_agent_name/_team_name/_team_run_id
-        - 主窗口（self）：保留，刷新为独立模式 UI + 新建空白会话
-          （_create_new_session 自动保存旧会话；必须在 _team_run_id 清空后
-          调用，避免新会话污染旧团队会话记录）
-        - 其他团队窗口：从 Tab 管理器移除（remove_window 只移除 tab）+
-          close()（closeEvent 自动保存+清理+从 _instances 移除）
-        """
-        tm_mgr = self._get_team_manager()
-        for win in list(getattr(OpenAIChatToolWindow, "_instances", [])):
-            try:
-                if getattr(win, "_is_destroyed", False):
-                    continue
-                if getattr(win, "windowClosed", False):
-                    continue
-                if not getattr(win, "_team_agent_name", ""):
-                    continue
-
-                # 1) 停 watcher（幂等），避免 leave_team rmtree 邮箱目录时触发重建
-                stop_watcher = getattr(win, "_stop_team_watcher", None)
-                if callable(stop_watcher):
-                    try:
-                        stop_watcher()
-                    except Exception:
-                        pass
-
-                # 2) 离开团队（清理成员登记 + 邮箱目录）
-                # 🛡️ W3b-2 1c：批量 leave 循环内挂起落盘（save_now=False），
-                # 循环结束后统一 flush 一次写盘，避免 n 次 json.dump+os.replace。
-                wid = getattr(win, "_window_id", "")
-                try:
-                    if wid:
-                        tm_mgr.leave_team(wid, save_now=False)
-                except Exception:
-                    pass
-
-                # 3) 清空团队标记（必须在 _create_new_session 之前，
-                #    避免新会话仍带旧团队 run_id）
-                win._team_agent_name = ""
-                win._team_name = ""
-                win._team_run_id = ""
-
-                if win is self:
-                    # 主窗口保留：刷新独立模式 UI + 新建空白会话
-                    refresh_ui = getattr(win, "_refresh_team_ui", None)
-                    if callable(refresh_ui):
-                        try:
-                            refresh_ui(is_team=False)
-                        except Exception:
-                            pass
-                    create_session = getattr(win, "_create_new_session", None)
-                    if callable(create_session):
-                        try:
-                            create_session()
-                        except Exception:
-                            pass
-                else:
-                    # 其他团队窗口：从 Tab 管理器移除 + 关闭
-                    try:
-                        from app.widgets.tab_manager_window import TabManagerWindow
-
-                        tab_mgr = TabManagerWindow.get_instance()
-                        if tab_mgr is not None:
-                            tab_mgr.remove_window(win)
-                    except Exception:
-                        pass
-                    close_win = getattr(win, "close", None)
-                    if callable(close_win):
-                        try:
-                            close_win()
-                        except Exception:
-                            pass
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[_disband_current_team_for_restore] 处理窗口异常: {e}")
-
-        # 🛡️ W3b-2 1c：批量 leave_team(save_now=False) 循环结束后统一落盘一次
-        # （合并 n 次 json.dump+os.replace → 1 次）。try/except 包裹——flush
-        # 失败静默，不破坏恢复流程（内存态已更新，下次写盘以最新内存态为准）。
-        try:
-            TeamManager.get_instance().flush_pending_saves()
-        except Exception:
-            pass
-
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
 
         按 run_id 收集该团队全部成员会话（直接查 SQLite，绕开
         _history_limit=500 截断）→ 按 agent_name 去重（每组取最新会话，
         空消息 agent 也建窗口）→ 为每个角色新建全新窗口、加载对应历史
-        会话内容、重新登记为团队成员（join_team）并共享同一 run_id
-        （优先复用当前团队已有 run_id——用户期望恢复后新对话归属原 run_id
-        的团队会话；无 run_id 时才生成新值），Tab 分组按 run_id 同组。
+        会话内容、重新登记为团队成员（join_team）→ 全部共享**全新** run_id
+        （独立团队：现有团队不被动，Tab 上独立成另一团队框；多团队并存）。
 
-        恢复语义：内容恢复 + 新 session_id（恢复是一次新的团队运行，
-        产生新会话记录，不覆盖原历史记录）。
+        恢复语义：内容恢复 + 新 session_id + 新 run_id（恢复是一次新的团队
+        运行，产生新会话记录，不覆盖原历史记录）。
 
         Args:
             run_id: 要恢复的团队运行标识（来自 history_card.teamRestoreRequested）
@@ -8312,17 +8222,18 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 2) 用户确认语义（D1）：恢复前解散现有团队 + 关闭所有团队窗口。
-        #    主窗口保留并新建空白会话（_create_new_session 自动保存旧会话）。
-        #    仅在收集成功校验通过后调用——失败恢复不白解散。
-        self._disband_current_team_for_restore()
-
-        # 3) 团队运行标识：优先复用当前 team.json 顶层已有 run_id（用户期望——
-        #    恢复团队会话后新对话归属原 run_id 的团队会话，历史面板分组不分裂）；
-        #    无 run_id（全新团队 / 历史遗留无 run_id）时才生成新值
-        #    （start_team_run 幂等，无 run_id 时生成并落盘）。
+        # 2) 多团队并存（M1）：恢复 = 创建**独立**新团队，不动现有团队——
+        #    - 不再调用 disband：现有团队的成员窗口 / 邮箱 / 成员登记全保留，
+        #      Tab 上原团队框继续存在；
+        #    - 不复用现有 team.json 顶层 run_id：start_team_run(force=True)
+        #      会改写顶层 run_id → 后续 /team --join 等读取 get_team_run_id()
+        #      的入口会"漂"到新团队，破坏现有团队。
+        #    → 改为直接生成 UUID 作为本次恢复的 run_id，仅写入新成员记录
+        #      （join_team 透传），不动 team.json 顶层 run_id；恢复窗口的
+        #      _team_run_id / members.run_id / team_members.run_id 三处一致
+        #      用这个 UUID → Tab 分组 key 唯一，落到独立的新团队框。
         tm_mgr = self._get_team_manager()
-        new_run_id = tm_mgr.get_team_run_id() or tm_mgr.start_team_run()
+        new_run_id = uuid.uuid4().hex
 
         # 4) 按 agent_name 去重：每组取 last_time 最新一条会话，
         #    避免同 agent 多轮会话建重复窗口（恢复成员 4→1 的修复之一）。
@@ -8511,12 +8422,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
         else:
-            # 🛡️ S-3：恢复失败但现有团队已被解散（_disband_current_team_for_restore
-            # 在 start_team_run 前执行），必须明确提示用户，避免"旧团队已解散
-            # 但恢复失败"无反馈。
+            # 🛡️ S-3：恢复失败（无可建窗）但未触碰现有团队——独立新团队语义下
+            # 现有团队完整保留，无需"重新发起恢复"措辞；只提示本次未恢复。
             InfoBar.warning(
                 "团队会话恢复失败",
-                "未创建任何恢复窗口（可能为空会话）\n当前团队已解散，可重新发起恢复",
+                "未创建任何恢复窗口（可能为空会话）",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
@@ -9439,8 +9349,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
-            # 输入区字体
-            if hasattr(self, "input_area"):
+            # 输入区字体：QSS 中 font-family/font-size 声明优先级高于 setFont，
+            # 仅 setFont 无法让字体变化生效，必须重建 QSS（refresh_style）。
+            # is_color 时 5a 块已调 refresh_style，这里跳过避免重复重建。
+            if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
+                if not is_color:
+                    self.input_area.refresh_style()
+            elif hasattr(self, "input_area"):
                 setFont(self.input_area, scale_font_size(15))
 
             # 递归刷新所有 qfluentwidgets 组件字体大小
@@ -19358,7 +19273,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # （windowTitleChanged → _tab_title_changed_slot、ai_state_changed →
         # _tab_ai_state_slot）。tab_manager_window._close_window_at 已断开
         # 一次（覆盖 Tab 关闭路径），此处兜底覆盖非 Tab 路径/窗口直接 close
-        # （如 _disband_current_team_for_restore 的批量关闭），防止闭包
+        # （如 _on_team_close_requested 的批量关闭），防止闭包
         # __defaults__ 持有窗口引用导致整树泄漏。须在 C++ 对象存活时
         # disconnect 安全执行。
         for _slot_attr, _signal in (

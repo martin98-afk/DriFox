@@ -9393,6 +9393,18 @@ class MessageCard(SimpleCardWidget):
             return
         self.append_text(txt)
 
+    def showEvent(self, event):
+        """可见性恢复：窗口切回可见时补渲此前因不可见而推迟的欢迎卡片 QWebEngineView。
+
+        批量建标签页时，非 current 标签页的欢迎卡片在 200ms 懒渲染队列触发
+        ensure_rendered 时窗口不可见，被 _do_ensure_rendered 的可见性守卫推迟
+        （设 _render_deferred=True 并 return，避免弹出幽灵窗口）。切回该标签页
+        时本事件触发，此时父 HWND 已就绪，可安全创建 QWebEngineView。
+        """
+        super().showEvent(event)
+        if getattr(self, "_render_deferred", False) and not getattr(self, "_lazy_rendered", False):
+            self.ensure_rendered()
+
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
 
@@ -9403,6 +9415,16 @@ class MessageCard(SimpleCardWidget):
             return
 
         def _do_ensure_rendered():
+            # 🛡️ 防幽灵窗口：与 _schedule_render 对称，不可见时不创建 QWebEngineView。
+            # QWebEngineView 在 Windows 上创建原生 HWND 子窗口（见 _hide_for_dialog 注释）。
+            # 当 widget 所在窗口不可见（Tab 管理器中非 current 标签页）时，父链无有效
+            # native window 句柄，Chromium 会弹出独立原生窗口（幽灵窗口）。
+            # 快速批量建标签页时，只有最后一个标签页可见，前 N-1 个在 200ms 懒渲染队列
+            # 触发 ensure_rendered 时已不可见 → 弹出幽灵窗口。
+            # 修复：不可见时标记 _render_deferred 并 return，等 showEvent（窗口切回可见）补渲。
+            if not self.isVisible():
+                self._render_deferred = True
+                return
             # 移除占位符，创建真正的viewer
             for i in reversed(range(self._viewer_layout.count())):
                 item = self._viewer_layout.itemAt(i)
@@ -9434,6 +9456,9 @@ class MessageCard(SimpleCardWidget):
 
             self._viewer_layout.addWidget(self.viewer)
             self._lazy_rendered = True
+            # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
+            # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
+            self._render_deferred = False
 
             # 如果有等待渲染的内容，现在渲染
             if self._pending_content is not None:
