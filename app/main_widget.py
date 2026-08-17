@@ -8474,10 +8474,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 在 join_team 写入 + 重建确认）。
         try:
             tm_mgr.rebuild_team_members_snapshot(
-                [
-                    (w._window_id, w._team_agent_name, new_run_id, team_display_name)
-                    for w in restored_windows
-                ]
+                [(w._window_id, w._team_agent_name, new_run_id, team_display_name) for w in restored_windows]
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[_on_team_restore_requested] 重建成员快照失败: {e}")
@@ -16745,12 +16742,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 _auto_save_current_session 语义一致：仅当本窗口处于团队模式
         # （_team_run_id 非空）才传团队字段；非团队窗口不传（None →
         # update 保留现值 / INSERT 落空值），避免普通编辑篡改团队元数据。
+        # 🛡️ M1-r：team_members 快照也随高频保存落库（与 _auto_save
+        # _current_session 同口径）——否则仅靠关闭窗口时的 _auto_save 落库，
+        # 没对话过的成员（无自身会话、仅靠快照找回）在历史合并条目中不显示
+        # （_merge_team_lightweight 快照成员并入依赖会话记录里的 team_members）。
         team_kwargs = {}
         if getattr(self, "_team_run_id", None):
             team_kwargs = {
                 "team_run_id": self._team_run_id,
                 "team_name": getattr(self, "_team_name", "") or "",
                 "agent_name": getattr(self, "_team_agent_name", "") or "",
+                "team_members": self._get_team_members_snapshot_json(),
             }
 
         system_prompt = getattr(session, "system_prompt", "") or ""
@@ -19169,12 +19171,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """获取团队成员快照 JSON 字符串（供会话落库，F3 第 2 层）。
 
         仅团队模式有值；非团队窗口返回空串（避免普通会话写入团队字段）。
+
+        🛡️ M1-r：快照按当前 run_id 过滤——M1 多团队并存时 default team.json
+        的 team_members 含所有 run 的成员，不过滤会把其他团队的成员写进
+        本团队会话快照（会话保存"成员污染"）；传入 run_id 后仅保存
+        当前团队的成员，且含没对话过的成员（join 即入快照）。
         """
         if not getattr(self, "_team_run_id", ""):
             return ""
         try:
             tm = self._get_team_manager()
-            snapshot = tm.get_team_member_snapshot()
+            snapshot = tm.get_team_member_snapshot(run_id=self._team_run_id)
             import json as _json
 
             return _json.dumps(snapshot, ensure_ascii=False)
