@@ -55,7 +55,11 @@ def _format_capability(cap: dict) -> str:
 
 
 def _team_list_members(tool_ctx) -> ToolResult:
-    """列出团队所有成员（含 agent_name@window_id 标识符、状态、角色、权限）"""
+    """列出团队所有成员（🛡️ M1：按 run 分组，单团队/多团队自适应）。
+
+    - 单团队（无 run_id 成员 / 仅 1 个 run）：输出本团队明细，无其他团队段
+    - 多团队并存：本团队明细 + 「其他团队 (N 个):」概要 + 跨团队沟通提示
+    """
     window_id = tool_ctx.get("team_window_id", "")
     agent_name = tool_ctx.get("team_agent_name", "")
     if not window_id:
@@ -65,6 +69,26 @@ def _team_list_members(tool_ctx) -> ToolResult:
     members = tm.get_members()
     if not members:
         return ToolResult(True, content="当前没有团队成员。使用 /team --join=<agent> 加入团队。")
+
+    # 🛡️ M1 防御性调用：旧测试用 _FakeTM mock 可能不实现新增方法，
+    # getattr fallback 让老测试零改动仍工作。
+    def _safe_team_label() -> str:
+        getter = getattr(tm, "get_team_label", None)
+        if callable(getter):
+            try:
+                return getter() or "default"
+            except Exception:
+                return "default"
+        return "default"
+
+    def _safe_team_label_by_run(rid: str) -> str:
+        getter = getattr(tm, "get_team_label_by_run", None)
+        if callable(getter) and rid:
+            try:
+                return getter(rid) or rid
+            except Exception:
+                return rid
+        return rid
 
     role_descs = {}
     try:
@@ -77,8 +101,64 @@ def _team_list_members(tool_ctx) -> ToolResult:
     except Exception:
         role_descs = {}
 
-    lines = [f"团队成员 ({len(members)} 人):"]
+    # 🛡️ M1：按 run_id 分组——当前窗口所属 run 视为「本团队」，其他 run
+    # 折叠到「其他团队」概要；无 run_id 老成员并入「本团队」（向后兼容）。
+    from collections import OrderedDict
+
+    by_run: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    legacy_members: list = []
     for m in members:
+        rid = m.get("run_id", "") or ""
+        if rid:
+            slot = by_run.get(rid)
+            if slot is None:
+                slot = {"label": (m.get("team_label") or ""), "members": []}
+                by_run[rid] = slot
+            elif not slot["label"] and m.get("team_label"):
+                slot["label"] = m["team_label"]
+            slot["members"].append(m)
+        else:
+            legacy_members.append(m)
+
+    # 当前窗口所属 run（决定「本团队」边界）
+    my_run_id = ""
+    for m in members:
+        if m["window_id"] == window_id:
+            my_run_id = m.get("run_id", "") or ""
+            break
+
+    # 🛡️ M1（S1 review 修复）：多团队判定——
+    #   - 系统存在任何 run_id 成员 → 多团队
+    #     ├─ 当前窗口有 run_id：本团队 = 该 run 成员 ∪ legacy；其他团队 = 其他 run
+    #     └─ 当前窗口无 run_id：本团队 = 所有无归属成员（含自己）；其他团队 = 所有 run
+    #   - 系统无任何 run_id（纯 legacy） → 单团队，全部视为本团队（向后兼容）
+    multi_team = bool(by_run)
+
+    if multi_team:
+        if my_run_id:
+            # 当前窗口有 run：本团队 = 该 run 的成员 ∪ legacy 成员
+            my_slot = by_run.get(my_run_id, {"label": "", "members": []})
+            my_members = list(my_slot["members"]) + list(legacy_members)
+            my_label = (
+                my_slot.get("label")
+                or _safe_team_label_by_run(my_run_id)
+                or _safe_team_label()
+            )
+            other_teams = [(rid, info) for rid, info in by_run.items() if rid != my_run_id]
+        else:
+            # 🛡️ S1（review 建议修）：当前窗口无 run_id 但系统存在 run 团队 →
+            # 本团队折叠为「未归属」组（所有无 run_id 成员），有 run_id 的成员
+            # 按 label 折叠进「其他团队」概要——避免误判为单团队把所有人混在一起。
+            my_members = list(legacy_members)
+            my_label = "未归属"
+            other_teams = list(by_run.items())
+    else:
+        # 单团队（含 legacy 兼容）：全部视为本团队
+        my_members = list(members)
+        my_label = _safe_team_label()
+        other_teams = []
+
+    def _render_member(m: dict) -> str:
         suffix = ""
         if m["window_id"] == window_id and m["agent_name"] == agent_name:
             suffix = " ← 你"
@@ -97,7 +177,9 @@ def _team_list_members(tool_ctx) -> ToolResult:
                 status_label += f" 「{task_summary}」"
         else:
             status_label = _STATUS_LABELS.get(status, "🟢 空闲")
-        line = f"  - {m['agent_name']}@{m['window_id']}  {status_label}{suffix}"
+        # 🛡️ M1：行格式「agent_name: agent_name@window_id」便于按角色扫读；
+        # 同时保留 @window_id 以满足现有按 window_id 标识成员的调用方式。
+        line = f"  - {m['agent_name']}: {m['agent_name']}@{m['window_id']}  {status_label}{suffix}"
         desc = role_descs.get(m["agent_name"], "")
         if desc:
             line += f"\n      角色: {desc}"
@@ -108,22 +190,48 @@ def _team_list_members(tool_ctx) -> ToolResult:
             cap = None
         if cap:
             line += f"\n      权限: {_format_capability(cap)}"
-        lines.append(line)
+        return line
+
+    lines: list = [f"团队「{my_label}」 ({len(my_members)} 人):"]
+    for m in my_members:
+        lines.append(_render_member(m))
+
+    if other_teams:
+        lines.append("")
+        lines.append(f"其他团队 ({len(other_teams)} 个):")
+        for rid, info in other_teams:
+            label = info.get("label") or _safe_team_label_by_run(rid) or rid
+            lines.append(f"  团队「{label}」({len(info['members'])} 人):")
+            for m in info["members"]:
+                lines.append(_render_member(m))
+        lines.append("")
+        lines.append(
+            "⚠ 团队间沟通：你只能向本团队成员发送任务；如需联系其他团队，"
+            "只通过各自 leader 传递团队间消息。"
+        )
+
     return ToolResult(True, content="\n".join(lines))
 
 
 def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
-    """向团队成员发送任务邮件（支持 agent_name 或 agent_name@window_id）"""
+    """向团队成员发送任务邮件（支持 agent_name 或 agent_name@window_id）
+
+    🛡️ M1（user 拍板放行+打标）：跨团队消息**不再硬拦截**，改为放行+打标——
+    mail dict 写 from_run_id / to_run_id 字段，返回成功结果后追加「⚠ 跨团队
+    消息已发送（run_a → run_b）」提示，由接收方/历史面板决定如何呈现。
+    """
     window_id = tool_ctx.get("team_window_id", "")
     from_agent = tool_ctx.get("team_agent_name", "")
     if not window_id or not from_agent:
         return ToolResult(False, error="当前不在团队上下文中，请先执行 /team --join=<agent> 加入团队")
 
     tm = _get_team_manager()
-    # 🐛 发件人角色兜底：tool_ctx["team_agent_name"] 来自 BuiltinTools 团队上下文，
-    # 若 join 时序晚于 chat_engine 就绪（或恢复路径漏同步），会滞留默认值 "build"。
-    # 这里以 TeamManager 成员表为权威（join_team 恰好一次写盘，与窗口真实角色一致），
-    # 按 window_id 反查并覆盖，保证邮件发件人显示实际成员名。
+
+    # 🐛 发件人角色兜底（B1 修复后保留作最后防线）：tool_ctx["team_agent_name"]
+    # 来自 BuiltinTools 团队上下文，若 join 时序晚于 chat_engine 就绪会滞留
+    # 默认值 "build"。这里以 TeamManager 成员表为权威反查并覆盖，保证邮件
+    # 发件人显示实际成员名。B1 修复后正常路径不应触发，触发即说明存在别的
+    # tool_ctx 漏传问题——保留以便定位而不至于发件人字段错乱。
     try:
         for _m in tm.get_members() or []:
             if _m.get("window_id") == window_id and _m.get("agent_name"):
@@ -137,11 +245,31 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
     except Exception:
         pass  # 成员表不可用时保持 tool_ctx 原值
 
+    # 🛡️ M1（user 拍板放行+打标）：跨团队判定用于附加提示，不再拦截发件。
+    # 双方 run_id 均非空且不同 → 跨团队消息，追加「⚠ 跨团队消息已发送」提示。
+    from_run_id: str = ""
+    to_run_id: str = ""
+    cross_team_notice: str = ""
+    try:
+        from_run_id = tm.get_member_run_id(window_id) or ""
+        target_pre = tm.find_member(to_agent)
+        to_run_id = ((target_pre or {}).get("run_id") or "") if target_pre else ""
+        if from_run_id and to_run_id and from_run_id != to_run_id:
+            cross_team_notice = (
+                f"\n⚠ 跨团队消息已发送（{from_run_id} → {to_run_id}）："
+                f"建议经双方 leader 协调任务边界"
+            )
+    except Exception:
+        # 跨团队判定失败不影响正常发件（兜底：仅放行不报）
+        pass
+
     mail_id = tm.send_task(
         from_window=window_id,
         from_agent=from_agent,
         to_identifier=to_agent,
         task_description=message,
+        from_run_id=from_run_id,
+        to_run_id=to_run_id,
     )
     if mail_id:
         target = tm.find_member(to_agent)
@@ -156,7 +284,7 @@ def _team_send_message(tool_ctx, to_agent: str, message: str) -> ToolResult:
                 cap_hint = f"\n      目标能力: {_format_capability(cap)}"
         except Exception:
             cap_hint = ""
-        return ToolResult(True, content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}")
+        return ToolResult(True, content=f"任务邮件已发送给「{target_label}」(#{mail_id}){cap_hint}{cross_team_notice}")
     else:
         members = tm.get_members()
         available = ", ".join(f"{m['agent_name']}@{m['window_id']}" for m in members)

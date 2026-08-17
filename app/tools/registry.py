@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import threading
 import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -134,6 +135,8 @@ class ToolRegistry:
         self._lock = threading.RLock()
         self._version = 0
         self._listeners: List = []  # 变更监听（bound method 以 (weakref, func) 弱持有，见 _to_listener_ref）
+        self._notify_suspend = 0  # 批量通知挂起计数（嵌套安全）
+        self._notify_pending = False  # 挂起期间是否发生变更（恢复计数归零时补发一次）
 
     # ========== 单例 ==========
 
@@ -476,21 +479,75 @@ class ToolRegistry:
         with self._lock:
             self._listeners[:] = [r for r in self._listeners if not _same_listener(r, target)]
 
-    def _notify_change(self) -> None:
+    @contextmanager
+    def notify_batch(self):
+        """批量变更上下文：期内多次 register/unregister 合并为一次变更通知。
+
+        热重载全量重扫（先注销全部工具再全量重注册）会产生几十次变更，
+        若逐次 notify 会让 UI 重建/缓存失效反复排队。批量上下文把通知
+        压成一次：恢复计数归零时若有变更标记立即补发。可嵌套。
+
+        用法::
+            with registry.notify_batch():
+                registry.register(...)
+                registry.register(...)
+        """
+        self.suspend_notify()
+        try:
+            yield
+        finally:
+            self.resume_notify()
+
+    def suspend_notify(self) -> None:
+        """挂起变更通知（可嵌套，配合 resume_notify 使用）"""
         with self._lock:
+            self._notify_suspend += 1
+
+    def resume_notify(self) -> None:
+        """恢复变更通知；挂起计数归零且期间发生过变更时补发一次。
+
+        ★ 并发安全：flush 决策（清 pending + 版本/监听快照）与计数操作
+        原子完成于锁内，回调在锁外执行——避免另一线程在回调前重新挂起
+        导致"已清 pending 但通知被吞"的延迟语义错位。
+        """
+        with self._lock:
+            if self._notify_suspend <= 0:
+                return
+            self._notify_suspend -= 1
+            if self._notify_suspend != 0 or not self._notify_pending:
+                return
+            self._notify_pending = False
             version = self._version
             refs = list(self._listeners)
+        self._dispatch_notify(version, refs)
+
+    def _notify_change(self) -> None:
+        with self._lock:
+            if self._notify_suspend > 0:
+                # 挂起中：只记标记，不发通知（resume 计数归零时补发一次）
+                self._notify_pending = True
+                return
+            version = self._version
+            refs = list(self._listeners)
+        self._dispatch_notify(version, refs)
+
+    def _dispatch_notify(self, version: int, refs: List) -> None:
+        """锁外执行变更通知（回调不应持 registry 锁，避免阻塞 register/unregister）。"""
+        dead_ids = set()
         for ref in refs:
             listener = _from_listener_ref(ref)
             if listener is None:
-                continue  # 监听者对象已销毁 → 跳过（下方统一清理）
+                dead_ids.add(id(ref))  # 监听者对象已销毁 → 跳过（下方统一清理）
+                continue
             try:
                 listener(version)
             except Exception as e:
                 logger.warning(f"[ToolRegistry] 变更监听回调失败: {e}")
-        # 顺带清理已销毁对象的弱引用，防止 list 无限增长
-        with self._lock:
-            self._listeners[:] = [r for r in self._listeners if _from_listener_ref(r) is not None]
+        # 顺带清理已销毁对象的弱引用，防止 list 无限增长（仅删除快照中已销毁者，
+        # 保留期间新注册的监听者）
+        if dead_ids:
+            with self._lock:
+                self._listeners[:] = [r for r in self._listeners if id(r) not in dead_ids]
 
 
 def _classify_fallback(tool_name: str) -> str:
