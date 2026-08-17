@@ -17,10 +17,11 @@
 
 </div>
 
-<h1 align="center">DriFox 飘狐 v0.5.2 — 轻量化 AI 桌面对话助手</h1>
+<h1 align="center">DriFox 飘狐 — AI 智能体团队编排平台</h1>
 
 <p align="center">
-  <b>不做大而全的 IDE。</b> 只是一个对话框——随时调出，随意提问，随性分支。
+  <b>不是聊天框，是一间只有你一个员工的 AI 公司。</b><br>
+  Leader 派单 · 多团队并存 · 跨团队协同 · 任意 OpenAI 兼容模型
 </p>
 
 ![软件介绍](images/软件介绍.png)
@@ -35,25 +36,78 @@
 
 ---
 
+## 什么是「一人公司」？
+
+DriFox 把"团队"建模为**多窗口 + 文件邮箱**——把"团队协作"这套工程实践搬进 AI 智能体场景：
+
+> 想象你是一个独立创业者，但你不是一个人——你拥有一支 AI 团队：
+>
+> | 角色 | 工作 |
+> | --- | --- |
+> | 🎯 **产品团队 Leader** | 拆需求、写 PRD、排优先级 |
+> | 💻 **前端团队** × N | 组件开发、UI 调优 |
+> | ⚙️ **后端团队** × N | API、数据库、性能 |
+> | 🧪 **测试团队** | 自动化测试、用例覆盖 |
+> | 🧭 **CEO + Coordinator**（可选） | 跨团队协调、应急仲裁 |
+>
+> 你只负责**定方向**。其余全部由 DriFox 的多窗口 Agent 团队协作完成。
+>
+> **Leader 自己**就是 DriFox 的灵魂——它按 **P0/P1/P2 三级协议**派单（紧急打断 / 任务变更 / 普通补充），能并行就并行、有人空闲就立刻填满，**绝不让任何成员"干等"**。
+
+---
+
+## 🧭 与 Claude Code / DeepSeek Harness 的核心差异
+
+> **比较时点**：2026-08-17。
+> Claude Code Agent Teams 仍为 **research preview / experimental**（需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 启用）。
+> DeepSeek Harness 仍为 **developer preview**（2026-08-13 发布）。
+
+| 维度 | **DriFox** | Claude Code (Agent Teams) | DeepSeek Harness (`dsh`) |
+|---|---|---|---|
+| **核心定位** | 多团队并存 + Leader 派单 | 单团队多 worker + 1 orchestrator | 插件编排 + 可调用 Claude Code / Codex 作 subagent |
+| **多团队并存** | ✅ **run_id / team_label**（M1，同进程跑多个团队） | ❌ 单会话单团队 | ⚠️ plugin-based，无显式多团队概念 |
+| **跨团队互通** | ✅ **跨团队邮件放行 + from_run_id/to_run_id 打标** | ❌ | ❌ |
+| **团队模型** | 多窗口 + 文件邮箱（原子 JSON 写） | `.claude/teams/<id>/inbox/`（`<teammate-message>` 注入） | Cordis plugin + `@deepseek-ai/dsh-tool-subagent*` |
+| **子智能体↔子智能体通信** | ✅ 邮件 peer-to-peer（leader 通过话术协议兜底） | ✅ sendMessage（agent↔agent 直发 + 广播） | ✅ continuable activation + `relay` form |
+| **可继续子智能体** | ❌ 一次性（leader 可用 P0 中断重派） | ⚠️ cold resume 支持 partial | ✅ continuable activation（FIFO inbox + cold-resume） |
+| **打断机制** | ✅ **协议层 P0/P1/P2**（写在 agent prompt 里） | ⚠️ 平台 API `interrupt_agent` | ✅ 平台 API `SubagentRuntime.interrupt` |
+| **Agent Persona 隔离** | ✅ per-agent `prompt`/`description`/`color`/`temperature`/`model` | ✅ 子智能体独立 system prompt | ✅ `deployment.persona` 影子模板 |
+| **工具隔离** | ✅ per-agent `tools` 白名单 + `PermissionResolver` | ✅ `allowedTools` in `.claude/agents/*.md` | ✅ `toolFilter`（`tools.restrict()`） |
+| **输出结构化** | ✅ 邮件 dict 契约（`from_agent`/`to_identifier`/`status`/`result`/`run_id`） | ❌（无原生 schema） | ✅ `outputSchema` + `assertObjectJsonSchema` |
+| **委派深度限制** | ❌ | ❌ | ✅ `depthLimit`（descriptor 校验） |
+| **会话内容级恢复** | ✅ **一键恢复团队 + 每个成员的历史消息** | partial（session resume，不含内容恢复） | ✅ cold-resume |
+| **多模型后端** | ✅ **原生 OpenAI 兼容**：OpenAI / Claude / DeepSeek / Gemini / Groq / MiniMax / 通义 / 智谱 / Ollama / 火山方舟 / 百度千帆 / SiliconFlow | ⚠️ 需 proxy（claude-code-proxy / claude-code-openai-wrapper / Bifrost gateway） | ✅ plugin-based，可接入任意 LLM 适配器 |
+| **开源协议** | MIT | 闭源（商业） | MIT |
+| **技术栈** | Python 3.14+ / PyQt5 | TypeScript / Node | TypeScript + Cordis 插件框架 |
+| **开发成熟度** | v0.5.2（持续迭代） | 研究预览（v2.1.32+） | 开发者预览（2026-08-13） |
+
+### DriFox 真正独有的三件事
+
+1. **多团队并存（M1）**——同一进程跑产品 / 后端 / 前端 / 测试等多个团队，跨团队消息放行 + `from_run_id/to_run_id` 打标可追溯。Claude Code / Harness 都不支持。
+2. **协议层 P0/P1/P2 打断**——通过 `plugins/system/agents/leader.md` 的话术协议实现，不需要平台 API 改造，加 P3/P4 改一行字就全员生效。Claude Code / Harness 都用平台 API（更结构化但扩展成本高）。
+3. **会话内容级恢复**——`_on_team_restore_requested` 按 run_id 查 SQLite 收集成员会话，逐 agent 建窗并注入历史消息，恢复的不是空窗口而是**完整对话上下文**。
+
+---
+
 ## 核心特性一览
 
 | 特性 | 说明 |
 |------|------|
+| 🧭 **AI 智能体团队编排** | 多窗口团队、文件邮箱、Leader 派单、P0/P1/P2 三级打断协议、多团队并存（M1）、一键会话内容级恢复 |
+| 🤖 **多智能体并行** | 20+ 子智能体，并行派发（`subagent_para`）+ DAG 工作流编排（`subagent_dag`，失败级联跳过）+ ECharts DAG 可视化 |
 | 🎯 **极简悬浮界面** | 置顶对话框，随开随用，支持穿透/透明度/锁定 |
 | 🔀 **分支会话** | 问题分叉，多窗口并行，待办追踪 |
 | 🌲 **Git Worktree** | UI 直接管理 worktree，AI 感知当前分支 |
 | 🧠 **长记忆系统** | SQLite 持久化，置信度评分，自动学习偏好 |
 | 📊 **上下文压缩** | Token 预算控制，长对话自动摘要，环形图可视化 |
-| 📈 **交互式图表** | ````echarts` 代码块渲染 ECharts 图表 |
+| 📈 **交互式图表** | ```echarts` 代码块渲染 ECharts 图表 |
 | ☁️ **词云总结** | `/wordcloud` 一键生成 ECharts 词云 |
 | 🧩 **UI 插件系统** | 浮动卡片/内容渲染器/消息工厂，热插拔 |
-| 🤖 **团队协作** | Leader 智能体，任务邮件，模板管理 |
 | 🧠 **CodeGraph 引擎** | 语义化代码探索（search/explore/callers/callees/impact）|
 | 🎨 **动态主题系统** | 21 套主题，浅色/深色，组件级感知 |
-| 🤖 **多智能体并行** | 20+ 子智能体，DAG 工作流编排 |
 | 🧩 **插件系统** | 33+ 即装即用插件，命令/Agent/Skill/主题/Hook/MCP |
 | 🛠️ **40+ 内置工具** | 文件/执行/网络/代码/桌面/团队/MCP |
-| 🔌 **多模型** | OpenAI / Claude / DeepSeek / MiniMax / 通义 / Gemini / Groq / OpenCode Zen / OpenCode Go / SiliconFlow / Ollama / 火山方舟 / 百度千帆 / 智谱AI |
+| 🔌 **多模型** | **原生 OpenAI 兼容**：OpenAI / Claude / DeepSeek / MiniMax / 通义 / Gemini / Groq / OpenCode Zen / OpenCode Go / SiliconFlow / Ollama / 火山方舟 / 百度千帆 / 智谱AI |
 | ☁️ **Gitee 云同步** | OAuth 绑定，配置自动备份/恢复，图床上传，分享记录云端管理，Token 自动续期 |
 | 🌐 **MCP 系统** | Model Context Protocol，扩展工具能力 |
 | 🔌 **Hook 系统** | 6 种事件钩子，PreToolUse 可 BLOCK |
@@ -112,6 +166,67 @@ python main.py
 
 ---
 
+## 🧭 团队编排深度说明
+
+### 团队 = 多窗口 + 文件邮箱
+
+```
+~/.drifox/teams/
+├── default/                     ← 团队目录（每个团队一个目录）
+│   ├── team.json                ← 团队元信息 + 成员列表
+│   └── mailboxes/{window_id}/   ← 每个成员的消息邮箱（JSON 文件）
+│       ├── {mail_id}.json
+│       └── ...
+├── team_product/                ← 另一团队（M1 多团队并存）
+└── ...
+```
+
+- **每个聊天窗口 = 1 个团队成员**（一个角色、一个 `window_id`）
+- **每个成员 = 1 个独立 Agent 身份**（per-agent 工具白名单 / 提示词 / 模型）
+- **邮件** = 团队目录下的 JSON 文件（原子写：tmp + `os.replace`）
+- **Leader** 通过 `team_send_message(to_agent, message)` 派单，成员处理完自动通过 Stop hook 回复结果
+
+### Leader 的三级打断协议（`plugins/system/agents/leader.md`）
+
+| 标记头 | 级别 | 适用场景 | 成员预期行为 |
+|---|---|---|---|
+| `【⚠️ 紧急打断 P0】` | 最高 | 用户指令变更、安全/数据风险、全局阻塞依赖 | 立即暂停当前子任务 → 优先处理 → 秒回确认 |
+| `【🔁 任务变更 P1】` | 高 | 依赖变化、需求调整、上游成果修正 | 完成当前原子步骤后优先处理（不中断中途工具循环） |
+| `【📝 补充 P2】` | 普通 | 进度询问、接口约定同步、非紧急澄清 | 不打断；在自然暂停点（子任务完成/回合间隙）回复 |
+
+每条打断消息必须含六要素：**标记头 / 来源原因 / 受影响任务编号 / 具体指令 / 预期响应 / 恢复计划**。
+防滥用规则：**P0 仅限三类**（用户指令变更 / 安全数据风险 / 全局阻塞依赖）；**每任务 P0 ≤1 次**；**能重派不打断**。
+
+### 多团队并存（M1，commit `12408ee2`）
+
+- **run_id** 标识一次团队运行；**team_label** 标识团队对外名
+- `TeamManager.get_member_run_id(window_id)` 反查成员所属团队
+- **跨团队邮件放行 + 打标**：`mail dict` 写入 `from_run_id` / `to_run_id`，历史面板可追溯
+- 顶层 `team_members` 快照与 `members` 双写，恢复时优先快照
+
+### 一键恢复团队 + 历史会话
+
+`main_widget._on_team_restore_requested(run_id)`：
+
+1. 查 SQLite 收集该 run_id 全部成员会话（绕开 `_history_limit=500` 截断）
+2. 解散当前团队、关闭团队窗口
+3. 按 `agent_name` 去重（同角色多窗口各保留一条）
+4. **逐 agent 新建窗口 + 注入历史消息**（`history_manager.get_session_messages(session_id)`）
+5. 复用当前 `run_id`（用户期望恢复后归属原团队会话）
+6. Tab 分组按 run_id 同组
+
+恢复语义：内容恢复 + 新 `session_id`（不覆盖原历史记录）。
+
+### 派单最佳实践（来自 leader.md）
+
+- **并行优先、流水线作业、最小化总完成时间**
+- 首波无依赖任务一次性同时派出（不要分开发）
+- 收到汇报即派下一波（不要"先验收再派发"两步串行）
+- 探索类子任务与修改类子任务并行（若有 explore 角色）
+- 失败不卡死：派给备用成员或拆分后重派
+
+---
+
 ## 功能速览
 
 ### 核心交互
@@ -131,11 +246,6 @@ python main.py
 ### UI 插件系统 (v0.3.0+)
 插件可渲染三种 UI 组件：**浮动卡片**（独立面板，自动注册 `/命令`）、**内容渲染器**（自定义消息块）、**消息工厂**（自定义 Widget）。支持热插拔、多窗口隔离、上下文注入。内置 4 个 UI 插件：上下文用量统计、项目文件树、Git 仪表盘、_vendor/ 依赖演示。
 
-### 团队协作 (v0.3.3+)
-- **Leader 智能体** — 任务拆解、分发、监控、汇总
-- **任务邮件系统** — Agent 之间异步收发任务
-- **团队模板管理** — `/team` 命令保存/加载/列表/删除模板
-
 ### CodeGraph 代码智能引擎 (v0.3.4+)
 语义化代码探索工具，5 种模式：`search`（搜索符号）、`explore`（综合探索+调用上下文）、`callers`（谁调用了）、`callees`（调用了谁）、`impact`（变更影响分析）。工作目录变更时自动重初始化。
 
@@ -151,10 +261,25 @@ python main.py
 | 类型 | 典型 Agent |
 |------|-----------|
 | **Primary** | plan（规划）、build（编码）、code-reviewer（审查）|
-| **Subagent** | explore、leader（团队领导）、architecture-critic、security-auditor、test-engineer、legacy-analyst、code-simplifier、deep-research 等 15+ |
+| **Subagent** | explore、leader（团队领导，P0/P1/P2 三级打断）、architecture-critic、security-auditor、test-engineer、legacy-analyst、code-simplifier、deep-research、diagnose、perf-analyzer、business-rules-extractor 等 15+ |
 | **Hidden** | summary、compaction、title、auto_loop |
 
 支持 DAG 工作流编排、并行分发（subagent_para）、级联执行（subagent_dag）。
+
+**per-agent 工具隔离**：YAML 中声明 `tools: { read: true, write: true, bash: false }`，`PermissionResolver` 按 agent 身份校验。
+**per-agent Persona**：`prompt` / `description` / `color` / `temperature` / `model` 均为 agent 身份独立配置。
+
+---
+
+## 🗺️ 路线图
+
+| 阶段 | 状态 | 关键能力 |
+|---|---|---|
+| **v0.3.x** | ✅ 已发 | 团队协作、Leader、CodeGraph、21 主题 |
+| **v0.4.x** | ✅ 已发 | Gitee 云同步、性能优化、桌宠 |
+| **v0.5.x** | ✅ 已发 | 多团队并存（M1）、跨团队邮件放行、P0/P1/P2 协议、会话内容级恢复 |
+| **v0.6** | 🔜 计划 | meta-leader 模板（产品/前端/后端/测试 + CEO）、可继续子智能体、全局 `list_agents`、跨团队状态合并面板 |
+| **v0.7** | 📋 规划 | 委派深度限制（`max_depth`）、协作 interrupt（按 P0 协议优雅退出）、append-only SessionEvent 可重放 timeline |
 
 ---
 
@@ -210,6 +335,7 @@ plugins/system/          # 系统内置插件（打包在 exe 中）
 
 | 版本 | 亮点 |
 |------|------|
+| **v0.5.2** | **多团队并存 TeamManager** (M1，commit `12408ee2`)、跨团队邮件放行+`from_run_id/to_run_id` 打标、会话内容级恢复、Leader P0/P1/P2 三级打断协议 |
 | **v0.4.7** | **Gitee OAuth Token 自动刷新** — refresh_token 滚动续期，ConfigSync 全链路同步，401 自动重试，不再因 token 过期而中断服务 |
 | **v0.4.6** | Gitee 配置云同步增强（user-custom 插件备份/恢复、分享记录管理），工具权限自动同步，Token 过期防护 |
 | **v0.4.5** | 子智能体紧凑卡片高度修复，Windows 暗色模式 Tooltip 修复 |
