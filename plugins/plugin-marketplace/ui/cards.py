@@ -1953,11 +1953,11 @@ class _ExploreGridSection(QFrame):
         title_lay.setContentsMargins(2, 0, 2, 0)
         title_lay.setSpacing(8)
         t = StrongBodyLabel(title, title_row)
-        t.setStyleSheet("background: transparent;")
+        t.setStyleSheet(f"color: {_text_color()}; background: transparent;")
         title_lay.addWidget(t)
         if subtitle:
             sub = BodyLabel(subtitle, title_row)
-            sub.setStyleSheet("background: transparent;")
+            sub.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
             title_lay.addWidget(sub)
         title_lay.addStretch(1)
         if on_more is not None:
@@ -2575,7 +2575,7 @@ class MarketplaceCard(QWidget):
         tool_lay.setContentsMargins(16, 8, 16, 0)
         tool_lay.setSpacing(8)
         tip = BodyLabel("为你随机推荐的分类精选", tool_row)
-        tip.setStyleSheet("background: transparent;")
+        tip.setStyleSheet(f"color: {_text_color(secondary=True)}; background: transparent;")
         tool_lay.addWidget(tip)
         tool_lay.addStretch(1)
         refresh_btn = TransparentToolButton(FluentIcon.SYNC, tool_row)
