@@ -115,6 +115,50 @@ def test_transform_model_reasoning_effort_budget_controls():
         assert result["thinking_param"] == expected
 
 
+def test_transform_model_effort_values_collected():
+    """effort 带 values（如 ["high", "max"]）→ 存入 reasoning_effort_values 供 UI 渲染。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+        "reasoning_options": [{"type": "effort", "values": ["high", "max"]}],
+    }
+    result = sync._transform_model("openai", "effort-model", info)
+    assert result["supports_thinking"] is True
+    assert result["thinking_param"] == "reasoning_effort"
+    assert result["reasoning_effort_values"] == ["high", "max"]
+
+
+def test_transform_model_effort_values_empty_no_field():
+    """effort 无 values / values 为空 → 不写 reasoning_effort_values，UI 回退固定默认。"""
+    info_template = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+    }
+    for options in ([{"type": "effort"}], [{"type": "effort", "values": []}]):
+        info = {**info_template, "reasoning_options": options}
+        result = sync._transform_model("openai", "effort-model", info)
+        assert result["thinking_param"] == "reasoning_effort"
+        assert "reasoning_effort_values" not in result
+
+
+def test_transform_model_effort_values_after_toggle_still_collected():
+    """effort 出现在 toggle 之后 → values 仍被收集（不受 thinking_param 首个匹配 break 影响）。"""
+    info = {
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "limit": {"context": 200000},
+        "reasoning": True,
+        "reasoning_options": [
+            {"type": "toggle"},
+            {"type": "effort", "values": ["low", "high"]},
+        ],
+    }
+    result = sync._transform_model("opencode", "hybrid-model", info)
+    assert result["thinking_param"] == "thinking"
+    assert result["reasoning_effort_values"] == ["low", "high"]
+
+
 def test_transform_model_cost():
     """cost 四字段完整解析，原样保留不换算。"""
     info = {
@@ -241,6 +285,17 @@ def test_merge_model_caps_cost_field_merge():
     assert merged["cost"]["cache_write"] == 0.5
 
 
+def test_merge_model_caps_effort_values_new_wins():
+    """reasoning_effort_values：new 有值取 new，无值保留 existing。"""
+    existing = {"reasoning_effort_values": ["low", "high"]}
+    new = {"reasoning_effort_values": ["high", "max"]}
+    merged = sync._merge_model_caps(existing, new)
+    assert merged["reasoning_effort_values"] == ["high", "max"]
+
+    merged2 = sync._merge_model_caps(existing, {"context_limit": 123})
+    assert merged2["reasoning_effort_values"] == ["low", "high"]
+
+
 # ============================================================
 # get_model_capabilities（动态为准：models.dev 有数据则硬编码不参与思考判定）
 # ============================================================
@@ -307,6 +362,91 @@ def test_get_model_capabilities_dynamic_thinking_fields_replace_hardcode(monkeyp
     result = mc.get_model_capabilities("minimax-m2.5")
     assert result["supports_thinking"] is False
     assert "thinking_param" not in result
+
+
+def test_get_model_capabilities_effort_values_from_dynamic(monkeypatch):
+    """动态能力里的 reasoning_effort_values 应透传到 get_model_capabilities 结果。"""
+    from app.core import model_capabilities as mc
+
+    dynamic = sync.DynamicModelsResult(
+        provider_models={},
+        model_capabilities={
+            "effort-model": {
+                "supports_thinking": True,
+                "thinking_param": "reasoning_effort",
+                "reasoning_effort_values": ["high", "max"],
+                "context_limit": 200000,
+            }
+        },
+        from_cache=False,
+        fetched_at=None,
+    )
+    monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
+    result = mc.get_model_capabilities("effort-model")
+    assert result["reasoning_effort_values"] == ["high", "max"]
+
+
+def test_apply_model_defaults_effort_values_first_as_default(monkeypatch):
+    """思考等级默认值：模型有 effort values → 取第一个；无 → 回退 medium。"""
+    from app.core import model_capabilities as mc
+
+    def _fake_dynamic(model_caps):
+        return sync.DynamicModelsResult(
+            provider_models={}, model_capabilities=model_caps, from_cache=False, fetched_at=None
+        )
+
+    # 有 values：默认取 values[0]（如 ["high", "max"] → "high"，medium 不合法）
+    monkeypatch.setattr(
+        sync,
+        "get_dynamic_models",
+        lambda: _fake_dynamic(
+            {
+                "effort-model": {
+                    "supports_thinking": True,
+                    "thinking_param": "reasoning_effort",
+                    "reasoning_effort_values": ["high", "max"],
+                    "context_limit": 200000,
+                }
+            }
+        ),
+    )
+    result = mc.apply_model_defaults({}, "effort-model")
+    assert result["思考等级"] == "high"
+
+    # 无 values：回退固定默认 medium
+    monkeypatch.setattr(
+        sync,
+        "get_dynamic_models",
+        lambda: _fake_dynamic(
+            {
+                "no-values-model": {
+                    "supports_thinking": True,
+                    "thinking_param": "reasoning_effort",
+                    "context_limit": 200000,
+                }
+            }
+        ),
+    )
+    result = mc.apply_model_defaults({}, "no-values-model")
+    assert result["思考等级"] == "medium"
+
+    # toggle 型思考（无强度概念）→ 不注入思考等级
+    monkeypatch.setattr(
+        sync,
+        "get_dynamic_models",
+        lambda: _fake_dynamic(
+            {
+                "toggle-model": {
+                    "supports_thinking": True,
+                    "thinking_param": "thinking",
+                    "context_limit": 200000,
+                }
+            }
+        ),
+    )
+    result = mc.apply_model_defaults({}, "toggle-model")
+    assert result["思考模式"] is True
+    assert "思考等级" not in result
 
 
 # ============================================================

@@ -60,6 +60,7 @@ class ModelConfigCard(QWidget):
         super().__init__(parent)
         self.config = {}
         self.current_provider = ""
+        self.current_model_name = ""
         self._widgets = {}
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -102,9 +103,10 @@ class ModelConfigCard(QWidget):
     # ------------------------------------------------------------------
     # 渲染
     # ------------------------------------------------------------------
-    def set_config(self, title: str, config: dict):
+    def set_config(self, title: str, config: dict, model_name: str = ""):
         self.config = config.copy()
         self.current_provider = title
+        self.current_model_name = model_name or ""
 
         self._clear_layout(self.layout)
         self._widgets.clear()
@@ -126,6 +128,15 @@ class ModelConfigCard(QWidget):
             meta = PARAM_SCHEMA.get(key, {})
             if meta.get("hide_in_card"):
                 continue
+            # 思考等级：仅当模型是 reasoning_effort 型且 models.dev 给出了 effort
+            # 可选值（reasoning_effort_values）才显示——无 values = 不支持调整强度，
+            # toggle/budget 型思考模型也没有"强度"概念，一并隐藏该配置项
+            if key == "思考等级" and self.current_model_name:
+                from app.core.model_capabilities import get_model_capabilities
+
+                caps = get_model_capabilities(self.current_model_name)
+                if caps.get("thinking_param") != "reasoning_effort" or not caps.get("reasoning_effort_values"):
+                    continue
             display_name = meta.get("display_name", key)
             if display_name in seen_display_names:
                 continue
@@ -284,7 +295,17 @@ class ModelConfigCard(QWidget):
 
         elif ui_type == "combobox":
             widget = ComboBox(self)
-            options = meta.get("options", [])
+            options = list(meta.get("options", []))
+            # 思考等级：以 models.dev 模型能力为准——下拉选项来自该模型
+            # reasoning_options 中 effort 的 values（如 ["high", "max"]）；
+            # models.dev 无数据时回退 PARAM_SCHEMA 固定默认。
+            if key == "思考等级" and self.current_model_name:
+                from app.core.model_capabilities import get_model_capabilities
+
+                caps = get_model_capabilities(self.current_model_name)
+                dyn_values = caps.get("reasoning_effort_values")
+                if dyn_values:
+                    options = list(dyn_values)
             widget.addItems(options)
             current = str(value) if value else ""
             if current in options:

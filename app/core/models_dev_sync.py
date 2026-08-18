@@ -180,14 +180,20 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     # reasoning=True 但 options 为空 / type 缺失 → 思考不可控或数据未知，
     # 不显示思考开关（保守原则：未知不误报，宁可少显示不可错显示）。
     thinking_param = None
+    reasoning_effort_values: Optional[List[str]] = None
     if reasoning and isinstance(reasoning_options, list):
         for opt in reasoning_options:
-            if isinstance(opt, dict):
-                reasoning_type = opt.get("type")
-                if reasoning_type:
-                    thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type)
-                    if thinking_param:
-                        break
+            if not isinstance(opt, dict):
+                continue
+            reasoning_type = opt.get("type")
+            # 收集 effort 可选值（如 models.dev 的 ["high", "max"]），
+            # 供 UI 渲染"思考等级"下拉框选项；首个可映射 type 决定 thinking_param
+            if reasoning_type == "effort":
+                values = opt.get("values")
+                if isinstance(values, list) and values:
+                    reasoning_effort_values = [str(v) for v in values]
+            if thinking_param is None:
+                thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type or "")
 
     # 输出上限（可选）
     max_output_tokens = limit.get("output")
@@ -220,6 +226,8 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
     }
     if thinking_param:
         result["thinking_param"] = thinking_param
+    if reasoning_effort_values:
+        result["reasoning_effort_values"] = reasoning_effort_values
     if max_output_tokens is not None:
         result["max_output_tokens"] = max_output_tokens
 
@@ -305,6 +313,8 @@ def _fetch_opencode_zen_free_models(
             }
             if "thinking_enable_value" in base_caps:
                 caps[model_id]["thinking_enable_value"] = base_caps["thinking_enable_value"]
+            if base_caps.get("reasoning_effort_values"):
+                caps[model_id]["reasoning_effort_values"] = base_caps["reasoning_effort_values"]
 
     if free_models:
         logger.info(f"[models.dev] OpenCode Zen 免费模型: {free_models}")

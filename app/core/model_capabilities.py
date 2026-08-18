@@ -65,6 +65,10 @@ DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
 #                                    #   "reasoning_effort" -> 请求体 reasoning_effort 字段
 #                                    #   "thinking"         -> extra_body.thinking
 #                                    #   "thinking_budget"  -> extra_body.thinking_budget
+#     reasoning_effort_values: list[str]
+#                                    # effort 可选值（来自 models.dev reasoning_options，
+#                                    # 如 ["high", "max"]）；"思考等级"下拉框按它渲染，
+#                                    # 缺省回退 PARAM_SCHEMA 固定默认
 #     thinking_enable_value: str = "enabled"
 #                                    # thinking.type 的值。多数模型用 "enabled"，
 #                                    # MiniMax 系列用 "adaptive"
@@ -497,8 +501,12 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
             # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）
             if "思考模式" not in result:
                 result["思考模式"] = True
-            if "思考等级" not in result:
-                result["思考等级"] = "medium"
+            # 思考等级只对 reasoning_effort 型模型有意义（toggle/budget 型无强度概念）
+            if "思考等级" not in result and caps.get("thinking_param") == "reasoning_effort":
+                # 默认等级优先取 models.dev 给出的 effort 可选值第一个，
+                # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
+                effort_values = caps.get("reasoning_effort_values") or []
+                result["思考等级"] = effort_values[0] if effort_values else "medium"
         else:
             # 模型不支持思考 → 主动移除思考相关字段
             # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）

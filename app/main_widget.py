@@ -3417,10 +3417,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
-        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
-        self.settings_btn.setFixedSize(22, 22)
+        self.settings_btn = QWidget(self._model_btn_container)
+        self.settings_btn.setObjectName("settingsEffortBtn")
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setStyleSheet(f"""
+            QWidget#settingsEffortBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+            }}
+            QWidget#settingsEffortBtn:hover {{
+                background: {Colors.HOVER_BG_STRONG};
+            }}
+        """)
         self.settings_btn.setToolTip("模型参数配置")
-        self.settings_btn.clicked.connect(self._toggle_model_config_card)
+        self.settings_btn.mousePressEvent = lambda e: self._toggle_model_config_card()
+        settings_btn_layout = QHBoxLayout(self.settings_btn)
+        settings_btn_layout.setContentsMargins(4, 2, 6, 2)
+        settings_btn_layout.setSpacing(5)
+        self._settings_btn_icon = QLabel(self.settings_btn)
+        self._settings_btn_icon.setFixedSize(16, 16)
+        self._settings_btn_icon.setScaledContents(True)
+        self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
+        settings_btn_layout.addWidget(self._settings_btn_icon)
+        # 思考强度胶囊：模型支持 reasoning_effort 且思考模式开启时显示当前等级
+        self._settings_effort_label = QLabel("", self.settings_btn)
+        self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
+        settings_btn_layout.addWidget(self._settings_effort_label)
         model_layout.addWidget(self.settings_btn)
 
         # 余额/用量/上下文放入模型选择胶囊内
@@ -7165,6 +7188,57 @@ class OpenAIChatToolWindow(ToolWindow):
             self.current_model_btn.setToolTip("")
 
         self._update_balance_display()
+        self._update_settings_effort_btn()
+
+    def _get_settings_effort_style(self) -> str:
+        """思考强度胶囊样式（主题感知：背景/文字色随主题刷新）"""
+        Colors.refresh()
+        return f"""
+            QLabel {{
+                background: rgba(90, 169, 255, 0.10);
+                color: {Colors.RING_NORMAL};
+                border: 1px solid rgba(90, 169, 255, 0.30);
+                border-radius: 9px;
+                padding: 1px 7px;
+                {font_size_css(10)}
+                font-weight: 600;
+                {get_font_family_css()}
+            }}
+        """
+
+    def _update_settings_effort_btn(self):
+        """参数配置按钮显示当前思考强度（模型支持 reasoning_effort 且思考开启时）。
+
+        显示条件：模型能力 thinking_param == "reasoning_effort"（可调强度等级）、
+        当前配置里有"思考等级"值、且思考模式为开启。
+        开关型思考（thinking）/ 无等级模型 / 思考模式关闭 → 只显图标。
+        """
+        if not hasattr(self, "_settings_effort_label") or not hasattr(self, "settings_btn"):
+            return
+        text = ""
+        tooltip = "模型参数配置"
+        try:
+            if self._current_model_name:
+                caps = get_model_capabilities(self._current_model_name)
+                if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
+                    config = self._get_current_model_config()
+                    effort = config.get("思考等级", "")
+                    thinking_mode = config.get("思考模式", True)
+                    # 思考模式关闭 → reasoning_effort 不会随请求发送，不显示强度
+                    if effort and self._is_thinking_enabled(thinking_mode):
+                        text = str(effort)
+                        tooltip = f"模型参数配置 · 思考强度: {effort}"
+        finally:
+            self._settings_effort_label.setText(text)
+            self._settings_effort_label.setVisible(bool(text))
+            self.settings_btn.setToolTip(tooltip)
+
+    @staticmethod
+    def _is_thinking_enabled(value) -> bool:
+        """思考模式开关是否开启（兼容 bool 与字符串存储形态）"""
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "disabled")
 
     def _on_context_selection_changed(self, _selected_keys=None):
         self._refresh_context_usage_indicator()
@@ -8001,7 +8075,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ]:
             config.pop(pop_key, None)
 
-        self._model_config_popup.set_config(current_name, config)
+        self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
@@ -8740,6 +8814,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._load_model_configs()
         logger.debug(f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}")
+
+        # 思考等级可能已变更 → 刷新参数配置按钮上的思考强度显示
+        self._update_settings_effort_btn()
 
         # ★ 用量聚合（T6）：配置字段（API_KEY/cookie 等）变更后失效用量/余额缓存，
         # 下次请求强制重拉（幂等，可重复调用）。
@@ -9617,6 +9694,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
+        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感）
+        if hasattr(self, "_settings_effort_label"):
+            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
         # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
