@@ -1719,6 +1719,15 @@ class HistoryManager:
         logger.debug(f"[HistoryManager] 保存会话: pending_id={pending_id[:8]}...")
         for session in self._history_sessions:
             if session.get("session_id") == pending_id:
+                # 🛡️ 空消息守卫：内存记录 messages 已被释放置空
+                # （_release_inactive_session_messages / remove_session
+                # release_messages_only）时跳过写库。若照常保存会用
+                # serialize([]) 覆盖 DB 中已有完整消息的会话（preview/
+                # message_count 保留、messages 变空 → 历史会话加载后
+                # 消息列表为空且无任何报错，根因）。
+                if not session.get("messages"):
+                    logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
+                    break
                 self._session_store.save_session(session)
                 break
 

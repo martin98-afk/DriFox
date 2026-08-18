@@ -10278,11 +10278,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "session_manager") or not self.session_manager:
             return
         active_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
+        # 🛡️ 竞态守卫：延迟保存（_schedule_save → QTimer 1000ms → _do_save）
+        # 窗口内若本方法把 pending 会话的 messages 置空，_do_save 会用
+        # serialize([]) 覆盖 SQLite 中该会话的完整消息（历史消息丢失、
+        # 加载后列表为空的根因之一）。pending 会话跳过释放，等落库后再回收。
+        pending_id = getattr(self.history_manager, "_pending_save_session_id", None)
         released = 0
         try:
             for session in self.history_manager._history_sessions:
                 sid = session.get("session_id")
                 if sid and sid not in active_ids and session.get("messages"):
+                    if pending_id and sid == pending_id:
+                        continue  # 跳过 pending 会话，避免空消息覆盖 DB
                     session["messages"] = []
                     released += 1
             if released:
