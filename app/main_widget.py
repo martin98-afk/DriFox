@@ -3457,11 +3457,29 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_btn_icon.setScaledContents(True)
         self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
         settings_btn_layout.addWidget(self._settings_btn_icon)
-        # 思考强度胶囊：模型支持 reasoning_effort 且思考模式开启时显示当前等级
-        self._settings_effort_label = QLabel("", self.settings_btn)
-        self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
-        settings_btn_layout.addWidget(self._settings_effort_label)
         model_layout.addWidget(self.settings_btn)
+
+        # 思考强度胶囊（独立控件，与配置卡片按钮分离）：模型支持 reasoning_effort
+        # 且思考模式开启时显示当前等级；点击直接循环轮换等级（方便快速调强度）
+        self.effort_btn = QWidget(self._model_btn_container)
+        self.effort_btn.setObjectName("effortCycleBtn")
+        self.effort_btn.setCursor(Qt.PointingHandCursor)
+        self.effort_btn.setStyleSheet("""
+            QWidget#effortCycleBtn {
+                background: transparent;
+                border: none;
+            }
+        """)
+        self.effort_btn.setToolTip("点击切换思考强度等级")
+        self.effort_btn.mousePressEvent = lambda e: self._cycle_effort_level(e)
+        effort_btn_layout = QHBoxLayout(self.effort_btn)
+        effort_btn_layout.setContentsMargins(0, 0, 0, 0)
+        effort_btn_layout.setSpacing(0)
+        self._settings_effort_label = QLabel("", self.effort_btn)
+        self._settings_effort_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 点击穿透到外层轮换按钮
+        self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
+        effort_btn_layout.addWidget(self._settings_effort_label)
+        model_layout.addWidget(self.effort_btn)
 
         # 余额/用量/上下文放入模型选择胶囊内
         model_layout.addSpacing(4)
@@ -7300,7 +7318,11 @@ class OpenAIChatToolWindow(ToolWindow):
         等级会经 normalize_reasoning_effort 强制校验：保存值不在该模型
         reasoning_effort_values 中时回退到中间值，胶囊颜色随等级变化。
         """
-        if not hasattr(self, "_settings_effort_label") or not hasattr(self, "settings_btn"):
+        if (
+            not hasattr(self, "_settings_effort_label")
+            or not hasattr(self, "settings_btn")
+            or not hasattr(self, "effort_btn")
+        ):
             return
         text = ""
         effort = ""
@@ -7317,12 +7339,14 @@ class OpenAIChatToolWindow(ToolWindow):
                         # 强制校验：无效等级回退到该模型可选值的中间配置
                         effort = normalize_reasoning_effort(raw_effort, caps.get("reasoning_effort_values"))
                         text = effort
-                        tooltip = f"模型参数配置 · 思考强度: {effort}"
+                        tooltip = f"点击切换思考强度等级 · 当前: {effort}"
         finally:
             self._settings_effort_label.setText(text)
             self._settings_effort_label.setVisible(bool(text))
+            self.effort_btn.setVisible(bool(text))
             self._settings_effort_label.setStyleSheet(self._get_settings_effort_style(effort))
-            self.settings_btn.setToolTip(tooltip)
+            self.effort_btn.setToolTip(tooltip)
+            self.settings_btn.setToolTip("模型参数配置")
 
     @staticmethod
     def _is_thinking_enabled(value) -> bool:
@@ -7330,6 +7354,43 @@ class OpenAIChatToolWindow(ToolWindow):
         if isinstance(value, bool):
             return value
         return str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "disabled")
+
+    def _cycle_effort_level(self, _event=None):
+        """点击思考强度胶囊 → 在模型支持的等级间循环轮换（low→medium→high→…→low）。
+
+        轮换顺序取 models.dev 的 reasoning_effort_values（强度升序），
+        新等级写入 model_overrides 持久化，下次请求自动生效。
+        """
+        if not self._current_model_name:
+            return
+        caps = get_model_capabilities(self._current_model_name)
+        values = [str(v) for v in (caps.get("reasoning_effort_values") or [])]
+        if not values:
+            # 无等级可选值 → 无可轮换，忽略点击
+            return
+        config = self._get_current_model_config()
+        current = str(config.get("思考等级", "") or "")
+        lowers = [v.lower() for v in values]
+        try:
+            idx = lowers.index(current.lower())
+        except ValueError:
+            idx = (len(values) - 1) // 2  # 保存值无效 → 从中间等级开始轮换
+        next_effort = values[(idx + 1) % len(values)]
+        self._save_model_override("思考等级", next_effort)
+        self._update_settings_effort_btn()
+        logger.info(f"[EffortCycle] {self._current_model_name}: {current or '?'} -> {next_effort}")
+
+    def _save_model_override(self, key: str, value):
+        """写模型级参数覆盖（model_overrides[服务商名||模型名]），持久化保存。"""
+        provider_name = self._valid_configs.get(self._current_provider_name, {}).get(
+            "provider_name", self._current_provider_name
+        )
+        override_key = f"{provider_name}||{self._current_model_name}"
+        model_overrides = copy.deepcopy(self.cfg.llm_model_overrides.value) or {}
+        existing = model_overrides.get(override_key, {}).copy()
+        existing[key] = value
+        model_overrides[override_key] = existing
+        self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
 
     def _on_context_selection_changed(self, _selected_keys=None):
         self._refresh_context_usage_indicator()
@@ -9785,9 +9846,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
-        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感）
-        if hasattr(self, "_settings_effort_label"):
-            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
+        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感，走完整刷新保留等级色）
+        if hasattr(self, "effort_btn"):
+            self._update_settings_effort_btn()
         # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
