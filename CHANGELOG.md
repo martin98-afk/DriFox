@@ -119,6 +119,26 @@ All notable changes to this project will be documented in this file.
 - **插件市场自动生成** (`plugins/plugin-marketplace/`): 由 GitHub Actions 依据 `plugin.json` 自动重新生成 [skip ci]（`c1d79b24`）
 - **插件市场版本** (`plugins/plugin-marketplace/`): 升级至 0.3.1（`a0584068`）
 
+### 🚑 Hotfix (2026-08-18 第五次重发布)
+
+> **自上一 tag (v0.5.2 `23c2c93`) 以来的变更** | 提交数：10 · 文件变更：23 · +1048/-47 | 贡献者：mading
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **历史会话空消息覆盖** (`app/utils/history_manager.py` + `app/widgets/`): 修复内存消息释放与延迟保存竞态导致历史会话被空消息覆盖（`ce75a506`）
+- **思考强度徽章配色区分** (`app/widgets/cards/settings/model_selector_card.py` + `model_config_card.py`): 思考强度徽章改紫色与多模态青蓝彻底区分，low 等级用饱和绿提对比度（`b482e0d3`）
+- **compact 短会话覆盖** (`app/widgets/` + `tests/widgets/test_auto_compact_clear.py`): 调整消息清理阈值，避免短会话中被清空覆盖（`026ab08d`）
+- **团队 workdir 重置** (`app/core/team/` + `tests/core/test_team_workdir_reset.py`): 新团队加载时 `team_workdir` 重置回源目录（`c3ee8bb8`）
+- **团队新建任务死锁** (`app/core/team/` + `tests/core/test_team_new_task_interrupt.py`): 修复"团队新建任务"打断流式导致的收发死锁 + `run_id` 成员数据回写（`418b7232`）
+
+#### 🎨 样式改进 (Style)
+
+- **Badge 主题自适应配色** (`app/widgets/cards/settings/`): 根据主题动态调整 badge 颜色提升可见性（`19c035d0`）
+- **模型胶囊纵向分隔** (`app/widgets/tab_panel.py`): 模型胶囊内增加纵向分隔线区分布局（`bafca7af`）
+- **思考强度胶囊可点轮换** (`app/widgets/cards/settings/model_selector_card.py`): 思考强度胶囊独立可点，点击直接循环轮换等级（`db907099`）
+- **思考强度胶囊按等级变色** (`app/core/model_capabilities.py` + `app/widgets/cards/settings/` + `app/core/workers/`): 思考强度胶囊按等级变色 + 等级强制校验回退中间值（`a47a8077`）
+- **分支/新建标签按钮字号** (`app/widgets/tab_panel.py`): 统一分支与新建标签按钮字号提升一致性（`58d48041`）
+
 ## [v0.5.1] - 2026-08-14
 
 自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading
