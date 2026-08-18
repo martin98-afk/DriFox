@@ -7266,7 +7266,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         Colors.refresh()
         palette = {
-            "low": (Colors.TAG_GREEN_TEXT, "rgba(52,211,153,0.10)", "rgba(52,211,153,0.30)"),
+            # low 用饱和绿（SUCCESS）替代淡绿，浅色主题下仍清晰可读
+            "low": (Colors.SUCCESS, "rgba(34,197,94,0.14)", "rgba(34,197,94,0.35)"),
             "medium": (Colors.RING_NORMAL, "rgba(90,169,255,0.10)", "rgba(90,169,255,0.30)"),
             "high": (Colors.TAG_ORANGE_TEXT, "rgba(255,179,102,0.12)", "rgba(255,179,102,0.30)"),
             "max": (Colors.TAG_PURPLE_TEXT, "rgba(179,136,255,0.12)", "rgba(179,136,255,0.30)"),

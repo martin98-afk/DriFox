@@ -117,13 +117,13 @@ class ModelItem(QWidget):
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-蓝）
+    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-紫）
     _THINK_TEXT = Colors.TAG_ORANGE_TEXT  # #ffc999
     _THINK_BG = "rgba(255,179,102,0.18)"
     _VISION_TEXT = Colors.TAG_ACCENT_TEXT  # #aae0ff
     _VISION_BG = "rgba(102,198,255,0.18)"
-    _EFFORT_TEXT = Colors.RING_NORMAL  # #5aa9ff
-    _EFFORT_BG = "rgba(90,169,255,0.15)"
+    _EFFORT_TEXT = Colors.TAG_PURPLE_TEXT  # #d1b3ff（与多模态的青靛彻底分离，避免同色系混淆）
+    _EFFORT_BG = "rgba(179,136,255,0.15)"
 
     def __init__(
         self,
