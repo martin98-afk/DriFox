@@ -5209,6 +5209,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
                 for win in member_windows:
                     win._team_run_id = new_run_id
+                #    🛡️ 修复：新 run_id 必须回写 TeamManager 成员数据两处
+                #    run_id（members[wid] / team_members[wid]）。仅更新窗口
+                #    实例 _team_run_id 而成员表仍旧，会使窗口实例(new)、
+                #    顶层 run_id(new)、成员数据 run_id(旧) 三方不一致——
+                #    多团队严格匹配（M1-r'/M1）按 run_id 查询成员
+                #    （get_members(run_id=new) / get_team_member_snapshot(new)）
+                #    查不到成员，表现为团队收发/添加成员/历史合并断裂。
+                    try:
+                        tm_mgr.update_member_team(
+                            win._window_id,
+                            run_id=new_run_id,
+                            team_label=getattr(win, "_team_name", "") or "",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[_handle_team_new_task] 同步成员 run_id 失败: {e}")
                 # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
                 try:
                     from app.widgets.tab_manager_window import TabManagerWindow
@@ -10020,6 +10035,17 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 新建会话停止流式失败: {e}")
             self._set_ai_state("idle")
+            # 🐛 修复：新建任务打断流式时收尾团队邮件，避免 _team_processing 死锁。
+            # 取消路径下 worker 不发射 finished_with_content → 绑定其的 _on_stream_finished
+            # 永不触发 → _team_processing 卡 True、正在处理的邮件卡 running、A 后续发来
+            # 的新邮件被 _check_and_process_pending 的 _team_processing 守卫跳过，B 完全
+            # 收不到。复用手动停止的成熟收尾逻辑（必须在 create_session 前，旧 session
+            # 判定口径正确）。非团队窗口 _current_team_mail 为 None 且 get_running_tasks
+            # 返回空，调用安全。
+            try:
+                self._sync_team_mail_on_stop()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[MainWidget] 新建会话收尾团队邮件失败: {e}")
 
         # 🛡️ 标记会话切换：stop_streaming 后 worker 仍可能在跨线程事件循环里
         # 投递 _on_messages_updated / _on_stream_finished / _do_post_stream_cleanup
