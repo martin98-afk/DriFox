@@ -17002,11 +17002,12 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 🛡️ 压缩守卫（P-Compact）：自动压缩清空会话后，被 stop_streaming 取消的旧 worker
         # 其 finished_with_messages（旧消息快照）可能延迟到达，全量覆写会把已清空的会话
-        # 恢复成旧消息（压缩失效 + 反复触发）。判定：消息数远多于当前 session（压缩后
-        # 仅少量新消息）→ 旧 worker 快照，丢弃。新 worker 消息数≈session 消息数，不误拦。
+        # 恢复成旧消息（压缩失效 + 反复触发）。判定：消息数 > 当前 session → 旧 worker
+        # 快照，丢弃。新 worker 长度与 session 长度一致时不误拦（+0 容差）。
+        # 修复：原阈值 `+10` 在短对话（≤10 条）下失效，会被覆盖回旧消息。
         if getattr(self, "_post_compact_guard", False):
             _cur_session = self.session_manager.get_current_session() if self.session_manager else None
-            if _cur_session and messages and len(messages) > len(_cur_session.messages) + 10:
+            if _cur_session and messages and len(messages) > len(_cur_session.messages):
                 self._post_compact_guard = False
                 from loguru import logger
 
