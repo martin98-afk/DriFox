@@ -117,11 +117,13 @@ class ModelItem(QWidget):
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛）
+    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-蓝）
     _THINK_TEXT = Colors.TAG_ORANGE_TEXT  # #ffc999
     _THINK_BG = "rgba(255,179,102,0.18)"
     _VISION_TEXT = Colors.TAG_ACCENT_TEXT  # #aae0ff
     _VISION_BG = "rgba(102,198,255,0.18)"
+    _EFFORT_TEXT = Colors.RING_NORMAL  # #5aa9ff
+    _EFFORT_BG = "rgba(90,169,255,0.15)"
 
     def __init__(
         self,
@@ -150,6 +152,11 @@ class ModelItem(QWidget):
         from app.core.model_capabilities import get_model_capabilities
 
         return get_model_capabilities(self.model_name)
+
+    def _effort_values(self) -> list:
+        """思考强度可选值（models.dev reasoning_effort values，如 ["high","max"]）"""
+        values = self._caps.get("reasoning_effort_values")
+        return [str(v) for v in values] if values else []
 
     def _cost_text(self) -> str:
         """组装成本文本：{in}/{out}/{cache_read} · $/M。三值全无返回空串。"""
@@ -188,6 +195,9 @@ class ModelItem(QWidget):
         # 能力信息
         if self._caps.get("supports_thinking"):
             parts.append("开关思考")
+        effort_values = self._effort_values()
+        if effort_values:
+            parts.append(f"思考强度: {'/'.join(effort_values)}")
         if self._caps.get("supports_vision"):
             parts.append("多模态")
         return "  ".join(parts)
@@ -220,7 +230,11 @@ class ModelItem(QWidget):
         # 模型名（第一位的文本；组内有 trailing 信息时固定宽度 = 组内最长名，成本列对齐）
         self.name_label = QLabel(self.model_name, self)
         has_trailing = bool(
-            self._cost_text() or self._caps.get("supports_thinking") or self._caps.get("supports_vision") or self._note
+            self._cost_text()
+            or self._caps.get("supports_thinking")
+            or self._effort_values()
+            or self._caps.get("supports_vision")
+            or self._note
         )
         if has_trailing and self._name_width:
             self.name_label.setFixedWidth(self._name_width)
@@ -249,6 +263,14 @@ class ModelItem(QWidget):
         if self._caps.get("supports_thinking"):
             self.think_label = self._make_cap_badge("开关思考", self._THINK_TEXT, self._THINK_BG, "支持思考开关")
             layout.addWidget(self.think_label, 0)
+        # 思考强度徽章：模型有 reasoning_effort 可选值（如 high/max）→ 可调强度
+        effort_values = self._effort_values()
+        if effort_values:
+            effort_text = "/".join(effort_values)
+            self.effort_label = self._make_cap_badge(
+                "思考强度", self._EFFORT_TEXT, self._EFFORT_BG, f"支持的思考强度: {effort_text}"
+            )
+            layout.addWidget(self.effort_label, 0)
         if self._caps.get("supports_vision"):
             self.vision_label = self._make_cap_badge("多模态", self._VISION_TEXT, self._VISION_BG, "支持多模态输入")
             layout.addWidget(self.vision_label, 0)

@@ -1136,6 +1136,107 @@ class TestPerToolPolicy:
         finally:
             self._restore_settings(snap)
 
+    def test_restore_user_skips_agent_template_check(self, qt_app):
+        """方案 B：restore_user()(取消 agent 激活)后，执行层不再用
+        _current_agent(团队角色/UI 切换角色)的 permission 模板拦截，
+        权限完全由用户开关(user toggles)控制。
+
+        团队场景根因：apply_agent 注入后模板 deny 生效；用户点「↺ 恢复」
+        只复位了 controller 开关状态，但 engine 模板检查仍用团队角色
+        permission → 恢复前后工具权限行为一致，用户感觉「权限没生效」。
+        """
+        from unittest.mock import MagicMock
+
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.engines.ui.engine import UIEngine
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            # 团队角色激活：模板 deny write（用户偏好未关闭 write）
+            pc.apply_agent(
+                agent_name="build",
+                agent_tools={},
+                agent_permission={"write": "deny", "*": "allow"},
+            )
+            # 构造最小 engine（绕过 __init__，仅测 _check_tool_permission）
+            engine = UIEngine.__new__(UIEngine)
+            engine._current_agent = "build"
+            backend = MagicMock()
+            backend.tool_permission_controller = pc
+            engine._backend = backend
+            agent_manager = MagicMock()
+            agent = MagicMock()
+            agent.permission = {"write": "deny", "*": "allow"}
+            agent.tools = {}
+            agent_manager.get_agent.return_value = agent
+            engine._get_agent_manager = lambda: agent_manager
+
+            # 1. agent 激活期间：模板 deny → 拦截
+            assert pc.is_agent_active()
+            assert engine._check_tool_permission("write", {}) == "deny"
+            # 2. 用户点「↺ 恢复」→ 取消激活
+            pc.restore_user()
+            assert not pc.is_agent_active()
+            # 3. 恢复后：跳过模板检查 → 用户开关(write 开)放行
+            #    （修复前此处仍返回 deny → 权限控制不生效）
+            assert engine._check_tool_permission("write", {}) == "allow"
+            # 4. 用户显式关闭 write → 恢复后仍受用户开关控制
+            pc.set_user_toggle("write", False)
+            assert engine._check_tool_permission("write", {}) == "deny"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
+    def test_agent_active_template_still_blocks(self, qt_app):
+        """防回归：agent 命令激活期间模板 deny 仍然拦截（方案 B 只放开
+        非激活态，不破坏 agent 权限注入语义）。"""
+        from unittest.mock import MagicMock
+
+        from app.tools.registry import ToolRegistry
+        from app.core.tool_permission_controller import ToolPermissionController
+        from app.core.engines.ui.engine import UIEngine
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        load_plugin_tools(registry=reg)
+
+        snap = self._snapshot_settings()
+        try:
+            pc = ToolPermissionController()
+            pc.apply_agent(
+                agent_name="build",
+                agent_tools={},
+                agent_permission={"bash": "deny", "*": "allow"},
+            )
+            engine = UIEngine.__new__(UIEngine)
+            engine._current_agent = "build"
+            backend = MagicMock()
+            backend.tool_permission_controller = pc
+            engine._backend = backend
+            agent_manager = MagicMock()
+            agent = MagicMock()
+            agent.permission = {"bash": "deny", "*": "allow"}
+            agent.tools = {}
+            agent_manager.get_agent.return_value = agent
+            engine._get_agent_manager = lambda: agent_manager
+
+            # 激活中：bash 模板 deny → 拦截
+            assert pc.is_agent_active()
+            assert engine._check_tool_permission("bash", {}) == "deny"
+            # 模板 allow 的工具放行
+            assert engine._check_tool_permission("read", {}) == "allow"
+            pc.deleteLater()
+            qt_app.processEvents()
+        finally:
+            self._restore_settings(snap)
+
 
 class TestWebToolsEnvKey:
     """T8:web_tools._api_key 仅读环境变量(主程序不再注入 token)"""

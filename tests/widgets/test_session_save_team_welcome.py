@@ -368,6 +368,97 @@ class TestTeamDisbandBlankSessionGuard:
 
         inst.history_manager.save_session.assert_called_once()
 
+    def test_save_current_session_carries_team_members_snapshot(self):
+        """M1-r：高频保存路径（_save_current_session_to_history）必须携带
+        team_members 快照。
+
+        背景（2026-08-17）：_save_current_session_to_history 的 team_kwargs
+        此前缺 team_members（仅 _auto_save_current_session 有）——团队会话
+        运行中每轮消息走高频保存，历史合并条目 _merge_team_lightweight 的快照
+        成员并入依赖会话记录里的 team_members；缺失时没对话过的成员
+        （无自身会话、仅靠快照找回）在历史面板不显示。
+        """
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "任务", "_hook_event": "TeamMail"},
+            {"role": "assistant", "content": "收到"},
+        ]
+        session.system_prompt = ""
+        session.topic_summary = "任务"
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = None
+        inst._session_dirty = True
+        inst._current_session_id = "mail_2"
+        inst._current_project = "默认项目"
+        inst._team_run_id = "run_2"
+        inst._team_name = "team"
+        inst._team_agent_name = "build"
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_toggle_panel = None
+        inst._update_node_preview = MagicMock()
+        # 模拟快照生成：含本团队全部成员（含没对话的 review）
+        inst._get_team_members_snapshot_json = lambda: (
+            '[{"agent_name": "build", "window_id": "win_1"}, {"agent_name": "review", "window_id": "win_2"}]'
+        )
+
+        inst._save_current_session_to_history()
+
+        inst.history_manager.save_session.assert_called_once()
+        _, kwargs = inst.history_manager.save_session.call_args
+        assert kwargs.get("team_members") == (
+            '[{"agent_name": "build", "window_id": "win_1"}, {"agent_name": "review", "window_id": "win_2"}]'
+        ), f"高频保存必须携带 team_members 快照，实际 {kwargs.get('team_members')!r}"
+
+    def test_auto_save_carries_team_members_snapshot(self):
+        """M1-r：_auto_save_current_session 落库路径（关闭窗口/退出）同样携带
+        按 run_id 过滤后的 team_members 快照（对照基线，防止回归）。
+
+        验证 _auto_save_current_session 在团队模式下调用
+        _get_team_members_snapshot_json() 并透传给 history_manager。
+        """
+        from app.main_widget import OpenAIChatToolWindow
+
+        inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+        session = MagicMock()
+        session.messages = [
+            {"role": "user", "content": "真实问题"},
+        ]
+        session.system_prompt = ""
+        inst.session_manager = MagicMock()
+        inst.session_manager.get_current_session.return_value = session
+        inst.history_manager = MagicMock()
+        inst.history_manager.find_index_by_session_id.return_value = 0
+        inst._session_dirty = True
+        inst._current_session_id = "auto_1"
+        inst._current_project = "默认项目"
+        inst._team_run_id = "run_3"
+        inst._team_name = "team"
+        inst._team_agent_name = "plan"
+        inst._get_team_members_snapshot_json = lambda: '[{"agent_name": "plan", "window_id": "win_1"}]'
+        inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
+        inst._get_current_worktree_path = lambda: ""
+        inst._history_card = None
+        inst._refresh_history_toggle_panel = None
+        inst._update_node_preview = MagicMock()
+        # PyQt 子类用 __new__ 构造时访问普通属性触发 super 检查，用 __dict__ 注入
+        inst.__dict__["_current_provider_name"] = ""
+        inst.__dict__["_valid_configs"] = {}
+
+        inst._auto_save_current_session()
+
+        inst.history_manager.update_session.assert_called_once()
+        _, kwargs = inst.history_manager.update_session.call_args
+        assert kwargs.get("team_members") == '[{"agent_name": "plan", "window_id": "win_1"}]', (
+            f"_auto_save 必须携带 team_members 快照，实际 {kwargs.get('team_members')!r}"
+        )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

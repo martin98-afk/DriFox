@@ -3417,10 +3417,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
-        self.settings_btn = TransparentToolButton(get_icon("模型选择"), self._model_btn_container)
-        self.settings_btn.setFixedSize(22, 22)
+        self.settings_btn = QWidget(self._model_btn_container)
+        self.settings_btn.setObjectName("settingsEffortBtn")
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setStyleSheet(f"""
+            QWidget#settingsEffortBtn {{
+                background: transparent;
+                border: none;
+                border-radius: 8px;
+            }}
+            QWidget#settingsEffortBtn:hover {{
+                background: {Colors.HOVER_BG_STRONG};
+            }}
+        """)
         self.settings_btn.setToolTip("模型参数配置")
-        self.settings_btn.clicked.connect(self._toggle_model_config_card)
+        self.settings_btn.mousePressEvent = lambda e: self._toggle_model_config_card()
+        settings_btn_layout = QHBoxLayout(self.settings_btn)
+        settings_btn_layout.setContentsMargins(4, 2, 6, 2)
+        settings_btn_layout.setSpacing(5)
+        self._settings_btn_icon = QLabel(self.settings_btn)
+        self._settings_btn_icon.setFixedSize(16, 16)
+        self._settings_btn_icon.setScaledContents(True)
+        self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
+        settings_btn_layout.addWidget(self._settings_btn_icon)
+        # 思考强度胶囊：模型支持 reasoning_effort 且思考模式开启时显示当前等级
+        self._settings_effort_label = QLabel("", self.settings_btn)
+        self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
+        settings_btn_layout.addWidget(self._settings_effort_label)
         model_layout.addWidget(self.settings_btn)
 
         # 余额/用量/上下文放入模型选择胶囊内
@@ -4838,6 +4861,7 @@ class OpenAIChatToolWindow(ToolWindow):
         agent_name: str,
         run_id: str = "",
         team_label: str = "",
+        team_name: str = "",
     ) -> Optional["OpenAIChatToolWindow"]:
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
@@ -4854,7 +4878,10 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 应用团队级统一项目（若已设置，否则继承执行构建的源窗口项目）
         4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
            就绪；C3：该回调退化为纯 UI 补注册，不再重复 join 写盘），
-           join 完成递减 _pending_arrange_count
+           join 完成递减 _pending_arrange_count。
+           🛡️ M2：延迟回调传 keep_team_name=True——保留本方法前置写入的
+           权威归属（透传 run_id/team_name），防止回调内 get_team_run_id()
+           取到 team.json 顶层 run_id（其他团队/新 run）覆盖导致分组漂移。
 
         ⚠️ run_id 关键约束：**复用现有 run_id**（get_team_run_id()），
         禁止 start_team_run(force=True) 生成新 run_id——否则新窗口按
@@ -4862,12 +4889,21 @@ class OpenAIChatToolWindow(ToolWindow):
         （T3 坑 1）。仅"开新团队"路径（/team --load）与"新建任务"
         （_handle_team_new_task）先行 force 生成 run_id。
 
+        🛡️ M1：调用方透传的 run_id / team_label / team_name 优先——多团队
+        并存场景下，team.json 顶层 run_id 可能不是调用方期望的归属（典型：
+        快速添加成员时 team.json 顶层是其他团队的 run_id，导致新窗口
+        "漂"到错误团队框）。_handle_team_load / _handle_team_add_member
+        必须各自透传自身期望的目标 run_id。
+
         ⚠️ 角色重复：**允许同 agent_name 多窗口**（F14 快速新建成员可重复角色）。
         TeamManager.join_team 以 window_id 为 key，同角色多窗口互不冲突；
         Tab 分组 key 为 run_id，同组多 TabItem 渲染正常。
 
         Args:
             agent_name: 要创建的角色名
+            run_id: 目标团队 run_id；空串时回退到 team.json 顶层
+            team_label: 团队显示名（写入快照）；空串时回退到当前 TeamManager 推断值
+            team_name: 团队名（窗口实例 _team_name）；空串时回退到当前模板名
 
         Returns:
             新建窗口；创建失败返回 None（调用方负责计数与提示）
@@ -4877,8 +4913,12 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ D2 根治：团队标记前置传入 _create_fresh_window（add_window
             # 之前写入），Tab 管理器 add_window 时直接命中团队分组，消除
             # "tab 先落独立区、依赖 300ms 后置 refresh 补救"的竞态窗口期。
-            team_name = (tm_mgr.get_template() or {}).get("name") or "default"
-            team_run_id = tm_mgr.get_team_run_id()
+            # 🛡️ M1：调用方透传的 team_name 优先（_handle_team_add_member 透传
+            # self._team_name 锁定目标团队）；空串回退到模板名（_handle_team_load 场景）。
+            team_name = team_name or (tm_mgr.get_template() or {}).get("name") or "default"
+            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
+            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
+            team_run_id = run_id or tm_mgr.get_team_run_id()
             win = self._create_fresh_window(
                 team_agent=agent_name,
                 team_name=team_name,
@@ -4893,13 +4933,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
             # 🛡️ M1：把 run_id / team_label 透传到 join_team——**仅当调用方
-            # 显式传参（非空）时才追加到 kwargs**，避免老路径（如
-            # _handle_team_add_member / 测试 mock 严格断言）收到意外 kwargs。
-            # _handle_team_load 路径透传 run_id/team_label → 写入归属字段；
-            # _handle_team_add_member 路径不传 → 走 TeamManager 默认空归属（向后兼容）。
+            # 显式传参（非空）时才追加到 kwargs**，避免老路径（如测试 mock
+            # 严格断言）收到意外 kwargs。
+            # 🆕 M1'：_handle_team_add_member 也透传 self._team_run_id/
+            # team_label，避免新成员加入错误的团队（多团队并存场景）；
+            # _handle_team_load 路径透传 new_run_id/team_label → 写入归属字段。
+            # _do_join_team 等其他"老路径"调用不传 → 走 TeamManager 默认空归属
+            # （向后兼容）。
             join_kwargs = {"window_id": win._window_id, "agent_name": agent_name}
-            if run_id:
-                join_kwargs["run_id"] = run_id
+            if team_run_id:
+                join_kwargs["run_id"] = team_run_id
             if team_label:
                 join_kwargs["team_label"] = team_label
             tm_mgr.join_team(**join_kwargs)
@@ -4925,9 +4968,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
             wid = getattr(win, "_window_id", "?")
+            # 🛡️ M2（快速新建成员分组漂移根治）：延迟补注册必须传
+            # keep_team_name=True——本方法已在创建时前置写入权威归属
+            # （_team_run_id/_team_name，透传自调用方，M1/M1' 约定），
+            # _join_new_window_for_template 默认 keep_team_name=False 会在
+            # 300ms 后用 team.json **顶层** run_id（get_team_run_id()）与
+            # 当前模板名无条件覆盖：多团队并存时顶层 run_id 是其他团队的
+            # （或期间 /team --load force 生成的新 run_id），新成员窗口
+            # 归属被改写 → refresh_capsule_for_window 重分组时落入错误的
+            # / 全新的团队框（"快速添加成员漂到独立新团队"bug 根因）。
+            # 与恢复路径（_on_team_restore_requested 传 keep_team_name=True）
+            # 语义对齐：保留调用方已设的归属字段。
             QTimer.singleShot(
                 self._TEMPLATE_JOIN_DELAY_MS,
-                lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
+                lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid, keep_team_name=True),
             )
             return win
         except Exception as e:  # noqa: BLE001
@@ -4943,6 +4997,7 @@ class OpenAIChatToolWindow(ToolWindow):
         agent_names: List[str],
         run_id: str = "",
         team_label: str = "",
+        team_name: str = "",
     ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
@@ -4951,6 +5006,9 @@ class OpenAIChatToolWindow(ToolWindow):
             run_id: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
                 （_spawn_team_member_window 回退到 tm_mgr.get_team_run_id()）
             team_label: 🛡️ M1 多团队归属——透传给 join_team；缺省时空串
+            team_name: 🛡️ M1' 透传给 _spawn_team_member_window 的窗口实例
+                _team_name（_handle_team_add_member 锁定当前团队名，
+                避免 team.json 模板名覆盖为别的团队）
 
         Returns:
             成功创建的窗口数
@@ -4966,10 +5024,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for agent_name in agent_names:
                 # 🛡️ M1：run_id / team_label 透传到 join_team，保证一次 /team --load
                 # 生成的所有新窗口共享同一团队归属（多团队分组基础）。
+                # 🛡️ M1'：team_name 同样透传，避免窗口实例 _team_name 被 team.json
+                # 模板名覆盖为别的团队（多团队并存下模板可能不是当前团队）。
                 win = self._spawn_team_member_window(
                     agent_name,
                     run_id=run_id,
                     team_label=team_label,
+                    team_name=team_name,
                 )
                 if win is not None:
                     new_windows.append(win)
@@ -5010,7 +5071,15 @@ class OpenAIChatToolWindow(ToolWindow):
         template = tm_mgr.get_template()
         if template and template.get("agents"):
             all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
-        member_agents = [m.get("agent_name") for m in tm_mgr.get_members() if m.get("agent_name")]
+        # 🛡️ M1'：get_members 必须按当前 run_id 过滤——多团队并存下 tm_mgr 全量
+        # get_members() 含所有 run 的成员，会把别的团队成员混入快速新建弹窗
+        # （"弹窗全部团队显示最新新建的团队的成员"bug 根因）。ref_win 的
+        # _team_run_id 即为目标 run_id（团队框 UI 上下文）；空串时回退到
+        # team.json 顶层（兼容历史单团队语义）。
+        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
+        member_agents = [
+            m.get("agent_name") for m in tm_mgr.get_members(run_id=_target_run_id or None) if m.get("agent_name")
+        ]
         for name in member_agents:
             if name not in all_agents:
                 all_agents.append(name)
@@ -5054,7 +5123,16 @@ class OpenAIChatToolWindow(ToolWindow):
         if chosen is None:
             return
         agent_name = chosen.text()
-        created = self._spawn_team_members([agent_name])
+        # 🛡️ M1：透传调用方窗口所属团队的 run_id / team_name / team_label，
+        # 避免新成员落到 team.json 顶层 run_id 的错误团队框（多团队并存场景：
+        # team.json 顶层 run_id 是其他团队时，新成员会"漂"到那个团队）。
+        # _handle_team_load 路径透传 new_run_id 同理。
+        created = self._spawn_team_members(
+            [agent_name],
+            run_id=self._team_run_id or "",
+            team_label=self._team_name or "",
+            team_name=self._team_name or "",
+        )
         if created:
             InfoBar.success(
                 "已创建成员",
@@ -7110,6 +7188,57 @@ class OpenAIChatToolWindow(ToolWindow):
             self.current_model_btn.setToolTip("")
 
         self._update_balance_display()
+        self._update_settings_effort_btn()
+
+    def _get_settings_effort_style(self) -> str:
+        """思考强度胶囊样式（主题感知：背景/文字色随主题刷新）"""
+        Colors.refresh()
+        return f"""
+            QLabel {{
+                background: rgba(90, 169, 255, 0.10);
+                color: {Colors.RING_NORMAL};
+                border: 1px solid rgba(90, 169, 255, 0.30);
+                border-radius: 9px;
+                padding: 1px 7px;
+                {font_size_css(10)}
+                font-weight: 600;
+                {get_font_family_css()}
+            }}
+        """
+
+    def _update_settings_effort_btn(self):
+        """参数配置按钮显示当前思考强度（模型支持 reasoning_effort 且思考开启时）。
+
+        显示条件：模型能力 thinking_param == "reasoning_effort"（可调强度等级）、
+        当前配置里有"思考等级"值、且思考模式为开启。
+        开关型思考（thinking）/ 无等级模型 / 思考模式关闭 → 只显图标。
+        """
+        if not hasattr(self, "_settings_effort_label") or not hasattr(self, "settings_btn"):
+            return
+        text = ""
+        tooltip = "模型参数配置"
+        try:
+            if self._current_model_name:
+                caps = get_model_capabilities(self._current_model_name)
+                if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
+                    config = self._get_current_model_config()
+                    effort = config.get("思考等级", "")
+                    thinking_mode = config.get("思考模式", True)
+                    # 思考模式关闭 → reasoning_effort 不会随请求发送，不显示强度
+                    if effort and self._is_thinking_enabled(thinking_mode):
+                        text = str(effort)
+                        tooltip = f"模型参数配置 · 思考强度: {effort}"
+        finally:
+            self._settings_effort_label.setText(text)
+            self._settings_effort_label.setVisible(bool(text))
+            self.settings_btn.setToolTip(tooltip)
+
+    @staticmethod
+    def _is_thinking_enabled(value) -> bool:
+        """思考模式开关是否开启（兼容 bool 与字符串存储形态）"""
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "disabled")
 
     def _on_context_selection_changed(self, _selected_keys=None):
         self._refresh_context_usage_indicator()
@@ -7946,7 +8075,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ]:
             config.pop(pop_key, None)
 
-        self._model_config_popup.set_config(current_name, config)
+        self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
         """切换历史会话卡片的显示"""
@@ -8182,107 +8311,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
         self._card_manager.hide_card("history", self._window_id)
 
-    def _disband_current_team_for_restore(self):
-        """恢复团队会话前解散当前团队 + 关闭所有团队窗口（用户确认语义 D1）。
-
-        语义：恢复操作会重建团队窗口并共享同一 run_id，先清理现有团队
-        状态，避免新旧团队会话/邮箱目录/成员登记互相串扰。
-        - 遍历 OpenAIChatToolWindow._instances 快照，跳过已销毁窗口及非团队窗口
-        - 每个团队窗口：停 watcher（幂等）→ leave_team（清成员登记+邮箱目录）
-          → 清空 _team_agent_name/_team_name/_team_run_id
-        - 主窗口（self）：保留，刷新为独立模式 UI + 新建空白会话
-          （_create_new_session 自动保存旧会话；必须在 _team_run_id 清空后
-          调用，避免新会话污染旧团队会话记录）
-        - 其他团队窗口：从 Tab 管理器移除（remove_window 只移除 tab）+
-          close()（closeEvent 自动保存+清理+从 _instances 移除）
-        """
-        tm_mgr = self._get_team_manager()
-        for win in list(getattr(OpenAIChatToolWindow, "_instances", [])):
-            try:
-                if getattr(win, "_is_destroyed", False):
-                    continue
-                if getattr(win, "windowClosed", False):
-                    continue
-                if not getattr(win, "_team_agent_name", ""):
-                    continue
-
-                # 1) 停 watcher（幂等），避免 leave_team rmtree 邮箱目录时触发重建
-                stop_watcher = getattr(win, "_stop_team_watcher", None)
-                if callable(stop_watcher):
-                    try:
-                        stop_watcher()
-                    except Exception:
-                        pass
-
-                # 2) 离开团队（清理成员登记 + 邮箱目录）
-                # 🛡️ W3b-2 1c：批量 leave 循环内挂起落盘（save_now=False），
-                # 循环结束后统一 flush 一次写盘，避免 n 次 json.dump+os.replace。
-                wid = getattr(win, "_window_id", "")
-                try:
-                    if wid:
-                        tm_mgr.leave_team(wid, save_now=False)
-                except Exception:
-                    pass
-
-                # 3) 清空团队标记（必须在 _create_new_session 之前，
-                #    避免新会话仍带旧团队 run_id）
-                win._team_agent_name = ""
-                win._team_name = ""
-                win._team_run_id = ""
-
-                if win is self:
-                    # 主窗口保留：刷新独立模式 UI + 新建空白会话
-                    refresh_ui = getattr(win, "_refresh_team_ui", None)
-                    if callable(refresh_ui):
-                        try:
-                            refresh_ui(is_team=False)
-                        except Exception:
-                            pass
-                    create_session = getattr(win, "_create_new_session", None)
-                    if callable(create_session):
-                        try:
-                            create_session()
-                        except Exception:
-                            pass
-                else:
-                    # 其他团队窗口：从 Tab 管理器移除 + 关闭
-                    try:
-                        from app.widgets.tab_manager_window import TabManagerWindow
-
-                        tab_mgr = TabManagerWindow.get_instance()
-                        if tab_mgr is not None:
-                            tab_mgr.remove_window(win)
-                    except Exception:
-                        pass
-                    close_win = getattr(win, "close", None)
-                    if callable(close_win):
-                        try:
-                            close_win()
-                        except Exception:
-                            pass
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[_disband_current_team_for_restore] 处理窗口异常: {e}")
-
-        # 🛡️ W3b-2 1c：批量 leave_team(save_now=False) 循环结束后统一落盘一次
-        # （合并 n 次 json.dump+os.replace → 1 次）。try/except 包裹——flush
-        # 失败静默，不破坏恢复流程（内存态已更新，下次写盘以最新内存态为准）。
-        try:
-            TeamManager.get_instance().flush_pending_saves()
-        except Exception:
-            pass
-
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
 
         按 run_id 收集该团队全部成员会话（直接查 SQLite，绕开
         _history_limit=500 截断）→ 按 agent_name 去重（每组取最新会话，
         空消息 agent 也建窗口）→ 为每个角色新建全新窗口、加载对应历史
-        会话内容、重新登记为团队成员（join_team）并共享同一 run_id
-        （优先复用当前团队已有 run_id——用户期望恢复后新对话归属原 run_id
-        的团队会话；无 run_id 时才生成新值），Tab 分组按 run_id 同组。
+        会话内容、重新登记为团队成员（join_team）→ 全部共享**全新** run_id
+        （独立团队：现有团队不被动，Tab 上独立成另一团队框；多团队并存）。
 
-        恢复语义：内容恢复 + 新 session_id（恢复是一次新的团队运行，
-        产生新会话记录，不覆盖原历史记录）。
+        恢复语义：内容恢复 + 新 session_id + 新 run_id（恢复是一次新的团队
+        运行，产生新会话记录，不覆盖原历史记录）。
 
         Args:
             run_id: 要恢复的团队运行标识（来自 history_card.teamRestoreRequested）
@@ -8312,17 +8351,18 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        # 2) 用户确认语义（D1）：恢复前解散现有团队 + 关闭所有团队窗口。
-        #    主窗口保留并新建空白会话（_create_new_session 自动保存旧会话）。
-        #    仅在收集成功校验通过后调用——失败恢复不白解散。
-        self._disband_current_team_for_restore()
-
-        # 3) 团队运行标识：优先复用当前 team.json 顶层已有 run_id（用户期望——
-        #    恢复团队会话后新对话归属原 run_id 的团队会话，历史面板分组不分裂）；
-        #    无 run_id（全新团队 / 历史遗留无 run_id）时才生成新值
-        #    （start_team_run 幂等，无 run_id 时生成并落盘）。
+        # 2) 多团队并存（M1）：恢复 = 创建**独立**新团队，不动现有团队——
+        #    - 不再调用 disband：现有团队的成员窗口 / 邮箱 / 成员登记全保留，
+        #      Tab 上原团队框继续存在；
+        #    - 不复用现有 team.json 顶层 run_id：start_team_run(force=True)
+        #      会改写顶层 run_id → 后续 /team --join 等读取 get_team_run_id()
+        #      的入口会"漂"到新团队，破坏现有团队。
+        #    → 改为直接生成 UUID 作为本次恢复的 run_id，仅写入新成员记录
+        #      （join_team 透传），不动 team.json 顶层 run_id；恢复窗口的
+        #      _team_run_id / members.run_id / team_members.run_id 三处一致
+        #      用这个 UUID → Tab 分组 key 唯一，落到独立的新团队框。
         tm_mgr = self._get_team_manager()
-        new_run_id = tm_mgr.get_team_run_id() or tm_mgr.start_team_run()
+        new_run_id = uuid.uuid4().hex
 
         # 4) 按 agent_name 去重：每组取 last_time 最新一条会话，
         #    避免同 agent 多轮会话建重复窗口（恢复成员 4→1 的修复之一）。
@@ -8474,10 +8514,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 在 join_team 写入 + 重建确认）。
         try:
             tm_mgr.rebuild_team_members_snapshot(
-                [
-                    (w._window_id, w._team_agent_name, new_run_id, team_display_name)
-                    for w in restored_windows
-                ]
+                [(w._window_id, w._team_agent_name, new_run_id, team_display_name) for w in restored_windows]
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[_on_team_restore_requested] 重建成员快照失败: {e}")
@@ -8514,12 +8551,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
         else:
-            # 🛡️ S-3：恢复失败但现有团队已被解散（_disband_current_team_for_restore
-            # 在 start_team_run 前执行），必须明确提示用户，避免"旧团队已解散
-            # 但恢复失败"无反馈。
+            # 🛡️ S-3：恢复失败（无可建窗）但未触碰现有团队——独立新团队语义下
+            # 现有团队完整保留，无需"重新发起恢复"措辞；只提示本次未恢复。
             InfoBar.warning(
                 "团队会话恢复失败",
-                "未创建任何恢复窗口（可能为空会话）\n当前团队已解散，可重新发起恢复",
+                "未创建任何恢复窗口（可能为空会话）",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
@@ -8778,6 +8814,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self._load_model_configs()
         logger.debug(f"[_on_config_applied] saved: conn={list(conn_fields.keys())}, model={list(model_fields.keys())}")
+
+        # 思考等级可能已变更 → 刷新参数配置按钮上的思考强度显示
+        self._update_settings_effort_btn()
 
         # ★ 用量聚合（T6）：配置字段（API_KEY/cookie 等）变更后失效用量/余额缓存，
         # 下次请求强制重拉（幂等，可重复调用）。
@@ -9442,8 +9481,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
-            # 输入区字体
-            if hasattr(self, "input_area"):
+            # 输入区字体：QSS 中 font-family/font-size 声明优先级高于 setFont，
+            # 仅 setFont 无法让字体变化生效，必须重建 QSS（refresh_style）。
+            # is_color 时 5a 块已调 refresh_style，这里跳过避免重复重建。
+            if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
+                if not is_color:
+                    self.input_area.refresh_style()
+            elif hasattr(self, "input_area"):
                 setFont(self.input_area, scale_font_size(15))
 
             # 递归刷新所有 qfluentwidgets 组件字体大小
@@ -9650,6 +9694,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
+        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感）
+        if hasattr(self, "_settings_effort_label"):
+            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
         # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
@@ -16745,12 +16792,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 与 _auto_save_current_session 语义一致：仅当本窗口处于团队模式
         # （_team_run_id 非空）才传团队字段；非团队窗口不传（None →
         # update 保留现值 / INSERT 落空值），避免普通编辑篡改团队元数据。
+        # 🛡️ M1-r：team_members 快照也随高频保存落库（与 _auto_save
+        # _current_session 同口径）——否则仅靠关闭窗口时的 _auto_save 落库，
+        # 没对话过的成员（无自身会话、仅靠快照找回）在历史合并条目中不显示
+        # （_merge_team_lightweight 快照成员并入依赖会话记录里的 team_members）。
         team_kwargs = {}
         if getattr(self, "_team_run_id", None):
             team_kwargs = {
                 "team_run_id": self._team_run_id,
                 "team_name": getattr(self, "_team_name", "") or "",
                 "agent_name": getattr(self, "_team_agent_name", "") or "",
+                "team_members": self._get_team_members_snapshot_json(),
             }
 
         system_prompt = getattr(session, "system_prompt", "") or ""
@@ -19169,12 +19221,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """获取团队成员快照 JSON 字符串（供会话落库，F3 第 2 层）。
 
         仅团队模式有值；非团队窗口返回空串（避免普通会话写入团队字段）。
+
+        🛡️ M1-r：快照按当前 run_id 过滤——M1 多团队并存时 default team.json
+        的 team_members 含所有 run 的成员，不过滤会把其他团队的成员写进
+        本团队会话快照（会话保存"成员污染"）；传入 run_id 后仅保存
+        当前团队的成员，且含没对话过的成员（join 即入快照）。
         """
         if not getattr(self, "_team_run_id", ""):
             return ""
         try:
             tm = self._get_team_manager()
-            snapshot = tm.get_team_member_snapshot()
+            snapshot = tm.get_team_member_snapshot(run_id=self._team_run_id or "")
             import json as _json
 
             return _json.dumps(snapshot, ensure_ascii=False)
@@ -19351,7 +19408,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # （windowTitleChanged → _tab_title_changed_slot、ai_state_changed →
         # _tab_ai_state_slot）。tab_manager_window._close_window_at 已断开
         # 一次（覆盖 Tab 关闭路径），此处兜底覆盖非 Tab 路径/窗口直接 close
-        # （如 _disband_current_team_for_restore 的批量关闭），防止闭包
+        # （如 _on_team_close_requested 的批量关闭），防止闭包
         # __defaults__ 持有窗口引用导致整树泄漏。须在 C++ 对象存活时
         # disconnect 安全执行。
         for _slot_attr, _signal in (

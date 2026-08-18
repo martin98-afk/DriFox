@@ -122,3 +122,27 @@ def test_poll_tick_tail_backstop(monkeypatch):
     svc._poll_timer.stop()
     svc._on_poll_tick()
     assert svc._poll_timer.isActive()
+
+
+def test_failed_fetch_registers_active_key_for_retry(monkeypatch):
+    """核心回归：fetcher 返回 None（网络失败/配置缺失）也必须注册 active key，
+    否则 key 脱离轮询集合 → tick 永不重试 → 圆环停止更新直到新建标签页。"""
+    calls = []
+
+    def flaky_fetcher(config):
+        calls.append(1)
+        return None  # 模拟抓取失败
+
+    svc = _make_svc(monkeypatch, flaky_fetcher)
+
+    svc.request_coding_plan(PROVIDER, CONFIG_ID, CONFIG)
+    _wait(lambda: (PROVIDER, CONFIG_ID) in svc._active_plan_keys)
+    assert len(calls) == 1
+    assert (PROVIDER, CONFIG_ID) not in svc._plan_cache, "失败不写缓存（保持可重拉）"
+    assert svc._poll_timer.isActive(), "失败后轮询 timer 必须存活"
+
+    # 下一轮 tick：key 在轮询集合中 → 再次发起抓取（自动重试）
+    svc._poll_timer.stop()
+    svc._on_poll_tick()
+    _wait(lambda: len(calls) == 2)
+    assert svc._poll_timer.isActive(), "重试路径轮询继续"

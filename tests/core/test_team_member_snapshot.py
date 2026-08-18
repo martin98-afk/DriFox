@@ -98,6 +98,88 @@ class TestTeamMemberSnapshot:
         by_wid = {r["window_id"]: r["agent_name"] for r in records if r.get("window_id")}
         assert by_wid == {"win_01": "build", "win_02": "perf-tester"}, "手动快照记录应带 window_id"
 
+    def test_snapshot_filter_by_run_id_excludes_other_team(self, tm):
+        """M1-r：get_team_member_snapshot(run_id=...) 只返回该 run 的成员。
+
+        多团队并存时 default team.json 的 team_members 含所有 run 的成员
+        （M1 join_team 按 run_id 归属），不过滤会把其他团队的成员混入
+        会话快照（保存"成员污染"）；指定 run_id 后仅保留本团队成员。
+        """
+        tm.set_active_window_ids({"win_01", "win_02", "win_03"})
+        tm.join_team("win_01", "leader", run_id="run_a", team_label="team-a")
+        tm.join_team("win_02", "build", run_id="run_a", team_label="team-a")
+        tm.join_team("win_03", "review", run_id="run_b", team_label="team-b")
+
+        # 指定 run_a：只含 run_a 成员（win_01/win_02），不含 run_b 的 review
+        snap_a = tm.get_team_member_snapshot(run_id="run_a")
+        assert {r["window_id"] for r in snap_a} == {"win_01", "win_02"}, f"run_a 快照应只含本 run 成员，实际 {snap_a}"
+        assert all(r["agent_name"] != "review" for r in snap_a), "其他团队（run_b）成员不得混入"
+
+        # 指定 run_b：只含 review
+        snap_b = tm.get_team_member_snapshot(run_id="run_b")
+        assert [r["agent_name"] for r in snap_b] == ["review"], f"run_b 快照应只含 review，实际 {snap_b}"
+
+        # 不指定 run_id：兼容旧语义（全部返回）
+        snap_all = tm.get_team_member_snapshot()
+        assert {r["window_id"] for r in snap_all} == {"win_01", "win_02", "win_03"}
+
+    def test_snapshot_run_filter_excludes_template_agents(self, tm):
+        """M1-r：指定 run_id 时不包含模板 agents（模板全局、可能被其他团队覆盖）。
+
+        模板 agents 无 run 归属——多团队并存时模板是最后加载团队的，若混入
+        快照会污染其他 run 的成员集合。模板加载路径所有角色都会 join_team
+        写入 team_members（带 run_id），该 run 的模板角色必然在快照记录中，
+        模板 agents 兜底仅用于不指定 run 的旧语义。
+        """
+        tm.set_template(
+            {
+                "name": "team-a",
+                "agents": [
+                    {"agent_name": "leader"},
+                    {"agent_name": "build"},
+                ],
+            }
+        )
+        tm.set_active_window_ids({"win_01", "win_02"})
+        tm.join_team("win_01", "leader", run_id="run_a")
+        tm.join_team("win_02", "build", run_id="run_a")
+
+        snap = tm.get_team_member_snapshot(run_id="run_a")
+        # 模板 leader/build 已 join（带 run_id）→ 以 wid 记录出现，模板 agents 不重复
+        assert {r["window_id"] for r in snap} == {"win_01", "win_02"}, (
+            f"指定 run 时模板 agents 不应额外混入（无 wid 兜底），实际 {snap}"
+        )
+        assert len(snap) == 2, f"run 过滤后成员数 = 该 run join 成员数，实际 {snap}"
+
+    def test_snapshot_run_filter_strict_match_no_run_records_excluded(self, tm):
+        """M1-r'：多团队并存下 run_id 过滤严格匹配，**不**保留无 run_id 遗留记录。
+
+        历史（M1-r）行为："无 run_id 记录保留兜底"——单团队时代兼容设计，
+        但多团队并存下若保留会把"无主"成员算入所有 run 的快照，污染合并条目
+        成员列表（"多了其他团队的成员"bug 根因）。新行为：run_id 非空时
+        rec_run 必须严格匹配；空 rec_run 视为"无主"，不算入任何 run。
+
+        老成员找回路径改走：①get_team_member_snapshot() 不传 run_id（兼容旧语义）；
+        ②恢复路径的 rebuild_team_members_snapshot 显式重置。两者均不依赖
+        本方法的"无主兜底"。
+        """
+        tm.set_active_window_ids({"win_01", "win_02"})
+        tm.join_team("win_01", "plan")  # 无 run_id（遗留 / 其他路径未传）
+        tm.join_team("win_02", "build", run_id="run_a")
+
+        snap = tm.get_team_member_snapshot(run_id="run_a")
+        wids = {r["window_id"] for r in snap}
+        assert "win_01" not in wids, (
+            "多团队并存下无 run_id 记录不应再兜底到任意 run（污染合并条目）"
+        )
+        assert "win_02" in wids, "run 匹配记录应保留"
+
+        # 兼容：get_team_member_snapshot() 不传 run_id 时仍返回全部（兜底入口）
+        snap_all = tm.get_team_member_snapshot()
+        all_wids = {r["window_id"] for r in snap_all}
+        assert "win_01" in all_wids, "不传 run_id 时无主记录仍可见（兼容旧语义）"
+        assert "win_02" in all_wids
+
     def test_cleanup_stale_members_preserves_team_members(self, tm):
         """_cleanup_stale_members 清理失效成员时保留顶层 team_members（活跃窗口）。
 

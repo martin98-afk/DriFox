@@ -756,17 +756,36 @@ class TeamManager:
             data["team_members"] = snapshot
             self._save_team_data(team_name)
 
-    def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM) -> List[Dict[str, Any]]:
+    def get_team_member_snapshot(self, team_name: str = DEFAULT_TEAM, run_id: str = "") -> List[Dict[str, Any]]:
         """获取团队成员快照（去重有序）：模板 agents ∪ 手动 join 快照 team_members。
 
         🛡️ F3（T2-P3 第 1 层）：手动 /team --join 的成员记录在 team.json 顶层
         team_members 键（不受 _cleanup_stale_members 清理、不依赖当前活跃窗口），
         恢复会话时用本方法找回"无会话记录但确实加入过"的成员。
 
+        🛡️ M1-r（run 过滤）：传入 run_id 时只返回该团队运行（run）的成员——
+        M1 多团队并存时多个 run 的成员同存于 default team.json 的 team_members，
+        不过滤会把其他团队的成员混入会话快照（会话保存"成员污染"根因）。
+        模板 agents 无 run 归属（模板是全局的，可能已被其他团队覆盖），
+        指定 run_id 时**不包含**模板 agents——模板加载路径所有角色都会
+        join_team 写入 team_members（带 run_id），该 run 的模板角色必然在
+        快照记录中；模板 agents 兜底仅用于不指定 run 的旧语义（F3 找回）。
+
+        🛡️ M1-r'（多团队并存严格匹配）：run_id 非空时**严格匹配** rec_run，
+        空 rec_run（无归属字段，常见于 M1 前老数据 / 其他路径未传 run_id 的
+        join_team）不再兜底——多团队并存下若不过滤会把"无主"成员算入所有
+        run 的快照，污染合并条目的成员列表（"多了其他团队的成员"bug 根因）。
+        老成员找回路径改走 `rebuild_team_members_snapshot` 或 `get_members()`，
+        不再依赖本方法的"无主兜底"。
+
         T3：返回成员记录列表（含 window_id），支持同角色多成员（两个 build
         各占一条记录）。team_members 兼容双形态 key：
         - 新格式：key = window_id，value 含 agent_name 字段
         - 老格式：key = agent_name，value 无 agent_name 字段（T3 前落库数据）
+
+        Args:
+            run_id: 可选。指定时仅返回该 run 的成员（rec_run 必须严格匹配；
+                空串时不过滤，兼容旧语义——单团队时代"无 run_id 即本团队"）。
 
         Returns:
             成员记录列表 [{"agent_name": ..., "window_id": ...}]（模板 agents 在前，
@@ -785,13 +804,25 @@ class TeamManager:
                     seen.add(key)
                     records.append({"agent_name": agent_name, "window_id": window_id})
 
-            # 1. 模板 agents（模板定义的角色优先，无 window_id）
-            template = data.get("template") or {}
-            for item in template.get("agents") or []:
-                if isinstance(item, dict) and item.get("agent_name"):
-                    _add(item["agent_name"])
+            # 1. 模板 agents（模板定义的角色优先，无 window_id）。
+            #    仅不指定 run_id 时包含（模板无 run 归属，多团队并存时可能
+            #    是其他团队覆盖后的模板——指定 run 时混入会污染本 run 快照）。
+            if not run_id:
+                template = data.get("template") or {}
+                for item in template.get("agents") or []:
+                    if isinstance(item, dict) and item.get("agent_name"):
+                        _add(item["agent_name"])
             # 2. 手动 join 快照（补充模板之外的成员；兼容新老 key 形态）
             for key, value in (data.get("team_members") or {}).items():
+                # 🛡️ M1-r'：run_id 非空时严格匹配 rec_run——
+                # 空 rec_run（无主成员）不算入任何 run 的快照，避免污染合并条目。
+                rec_run = ""
+                if isinstance(value, dict):
+                    rec_run = str(value.get("run_id") or "").strip()
+                if run_id:
+                    if rec_run != run_id:
+                        continue
+                # rec_run == run_id（或 run_id 为空）时保留
                 if isinstance(value, dict) and value.get("agent_name"):
                     # 新格式：key = window_id，value 含 agent_name
                     _add(value["agent_name"], key)

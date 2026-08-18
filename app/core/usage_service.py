@@ -128,7 +128,10 @@ class UsageService(QObject):
                 result = None
             if result is not None:
                 self._plan_cache[key] = (time.monotonic(), result)
-                self._active_plan_keys.add(key)
+            # 无论成败都注册 active key：失败不写缓存（不污染），但必须进入
+            # 轮询集合让 60s tick 持续重试——否则首次抓取失败后 key 永远不在
+            # 集合里，轮询 timer 因集合为空而死亡，圆环停止更新直到新建标签页。
+            self._active_plan_keys.add(key)
             self._in_flight.discard(key)
             # 跨线程信号：接收者（窗口槽）在主线程 → Qt 自动 queued 投递
             self.coding_plan_ready.emit(provider_name, config_id, result)
@@ -179,7 +182,9 @@ class UsageService(QObject):
                 # 后台线程只读写内存态（GIL 原子）；QTimer 保活统一由主线程
                 # request_balance 路径 / tick 兜底负责，禁止跨线程操作 QTimer。
                 self._balance_cache[key] = (time.monotonic(), result)
-                self._active_balance_keys.add(key)
+            # 同 plan：失败也注册 active key，由 60s 轮询持续重试（防首次
+            # 失败后 key 脱离轮询集合、timer 死亡、余额显示永久停止更新）
+            self._active_balance_keys.add(key)
             self._in_flight.discard(key)
             # 跨线程信号：接收者（窗口槽）在主线程 → Qt 自动 queued 投递
             self.balance_ready.emit(provider_name, config_id, result)
