@@ -391,6 +391,28 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
     return result
 
 
+def normalize_reasoning_effort(effort, values=None) -> str:
+    """校验思考等级：不在模型支持的 values 中时回退到中间值。
+
+    不同模型的 reasoning_effort_values 不同（如 ["low","medium","high"]、
+    ["high","max"]），用户保存的等级切模型后可能失效（如 "high" 对仅支持
+    low/medium 的模型无效）。统一在此收敛：
+
+    - values 为空（模型无该能力数据）→ 原样返回，保持默认兜底
+    - effort 在 values 中 → 返回（保留原大小写）
+    - effort 不在 values 中 → 取 values 中间值（models.dev 顺序即强度升序，
+      偶数个取偏保守项，如 ["high","max"] → "high"）
+    """
+    values = [str(v) for v in (values or [])]
+    if not values:
+        return str(effort) if effort else "medium"
+    eff = str(effort or "")
+    lowers = [v.lower() for v in values]
+    if eff.lower() in lowers:
+        return values[lowers.index(eff.lower())]
+    return values[(len(values) - 1) // 2]
+
+
 def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> int:
     """统一查找上下文窗口（tokens）。
 

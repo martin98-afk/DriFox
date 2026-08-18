@@ -311,7 +311,12 @@ class ModelConfigCard(QWidget):
             if current in options:
                 widget.setCurrentText(current)
             elif options:
-                widget.setCurrentText(options[0])
+                # 保存值不在当前模型可选值中（切模型后残留）→ 强制回退中间配置
+                # （仅思考等级按此规则；其余 combobox 字段保持回退首项）
+                if key == "思考等级":
+                    widget.setCurrentText(options[(len(options) - 1) // 2])
+                else:
+                    widget.setCurrentText(options[0])
             widget.setMinimumWidth(280)
             widget.currentTextChanged.connect(lambda: self._on_field_changed())
             return widget

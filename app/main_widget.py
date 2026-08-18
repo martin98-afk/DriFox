@@ -84,7 +84,7 @@ from app.core import (
 )
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
-from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
 from app.core.tool_permission_controller import ToolPermissionController
 
 
@@ -7259,14 +7259,28 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_balance_display()
         self._update_settings_effort_btn()
 
-    def _get_settings_effort_style(self) -> str:
-        """思考强度胶囊样式（主题感知：背景/文字色随主题刷新）"""
+    def _effort_capsule_colors(self, effort: str):
+        """思考强度等级 → 胶囊配色 (text, bg, border)。
+
+        色阶语义：low 绿 / medium 蓝 / high 琥珀 / max 紫；未知等级默认蓝。
+        """
         Colors.refresh()
+        palette = {
+            "low": (Colors.TAG_GREEN_TEXT, "rgba(52,211,153,0.10)", "rgba(52,211,153,0.30)"),
+            "medium": (Colors.RING_NORMAL, "rgba(90,169,255,0.10)", "rgba(90,169,255,0.30)"),
+            "high": (Colors.TAG_ORANGE_TEXT, "rgba(255,179,102,0.12)", "rgba(255,179,102,0.30)"),
+            "max": (Colors.TAG_PURPLE_TEXT, "rgba(179,136,255,0.12)", "rgba(179,136,255,0.30)"),
+        }
+        return palette.get(str(effort or "").lower(), palette["medium"])
+
+    def _get_settings_effort_style(self, effort: str = "") -> str:
+        """思考强度胶囊样式（主题感知：背景/文字色随主题与等级刷新）"""
+        text_color, bg_color, border_color = self._effort_capsule_colors(effort)
         return f"""
             QLabel {{
-                background: rgba(90, 169, 255, 0.10);
-                color: {Colors.RING_NORMAL};
-                border: 1px solid rgba(90, 169, 255, 0.30);
+                background: {bg_color};
+                color: {text_color};
+                border: 1px solid {border_color};
                 border-radius: 9px;
                 padding: 1px 7px;
                 {font_size_css(10)}
@@ -7281,25 +7295,32 @@ class OpenAIChatToolWindow(ToolWindow):
         显示条件：模型能力 thinking_param == "reasoning_effort"（可调强度等级）、
         当前配置里有"思考等级"值、且思考模式为开启。
         开关型思考（thinking）/ 无等级模型 / 思考模式关闭 → 只显图标。
+
+        等级会经 normalize_reasoning_effort 强制校验：保存值不在该模型
+        reasoning_effort_values 中时回退到中间值，胶囊颜色随等级变化。
         """
         if not hasattr(self, "_settings_effort_label") or not hasattr(self, "settings_btn"):
             return
         text = ""
+        effort = ""
         tooltip = "模型参数配置"
         try:
             if self._current_model_name:
                 caps = get_model_capabilities(self._current_model_name)
                 if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
                     config = self._get_current_model_config()
-                    effort = config.get("思考等级", "")
+                    raw_effort = config.get("思考等级", "")
                     thinking_mode = config.get("思考模式", True)
                     # 思考模式关闭 → reasoning_effort 不会随请求发送，不显示强度
-                    if effort and self._is_thinking_enabled(thinking_mode):
-                        text = str(effort)
+                    if raw_effort and self._is_thinking_enabled(thinking_mode):
+                        # 强制校验：无效等级回退到该模型可选值的中间配置
+                        effort = normalize_reasoning_effort(raw_effort, caps.get("reasoning_effort_values"))
+                        text = effort
                         tooltip = f"模型参数配置 · 思考强度: {effort}"
         finally:
             self._settings_effort_label.setText(text)
             self._settings_effort_label.setVisible(bool(text))
+            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style(effort))
             self.settings_btn.setToolTip(tooltip)
 
     @staticmethod

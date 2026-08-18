@@ -47,7 +47,7 @@ from app.core.message_content import (
     to_api_message,
 )
 
-from app.core.model_capabilities import get_model_capabilities
+from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
@@ -1452,9 +1452,12 @@ class OpenAIChatWorker(QThread):
                     extra_body.pop("thinking", None)
                 elif t_param == "reasoning_effort":
                     # reasoning_effort 由 思考等级 的 api_param 映射自动流入
-                    # 这里确保兜底值并清理冲突参数
+                    # 这里确保兜底值并清理冲突参数；等级经 normalize 强制校验
+                    # （保存值不在该模型可选值中时回退中间配置，防止无效值发到 API）
                     if "reasoning_effort" not in extra_body:
-                        extra_body["reasoning_effort"] = self.llm_config.get("思考等级", "medium")
+                        extra_body["reasoning_effort"] = normalize_reasoning_effort(
+                            self.llm_config.get("思考等级", "medium"), caps.get("reasoning_effort_values")
+                        )
                     extra_body.pop("thinking", None)
                     extra_body.pop("thinking_budget", None)
             else:  # False - 关闭思考
