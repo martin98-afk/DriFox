@@ -4855,7 +4855,10 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 应用团队级统一项目（若已设置，否则继承执行构建的源窗口项目）
         4. 300ms 延迟 _join_new_window_for_template（等 backend.agent_manager
            就绪；C3：该回调退化为纯 UI 补注册，不再重复 join 写盘），
-           join 完成递减 _pending_arrange_count
+           join 完成递减 _pending_arrange_count。
+           🛡️ M2：延迟回调传 keep_team_name=True——保留本方法前置写入的
+           权威归属（透传 run_id/team_name），防止回调内 get_team_run_id()
+           取到 team.json 顶层 run_id（其他团队/新 run）覆盖导致分组漂移。
 
         ⚠️ run_id 关键约束：**复用现有 run_id**（get_team_run_id()），
         禁止 start_team_run(force=True) 生成新 run_id——否则新窗口按
@@ -4942,9 +4945,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
             wid = getattr(win, "_window_id", "?")
+            # 🛡️ M2（快速新建成员分组漂移根治）：延迟补注册必须传
+            # keep_team_name=True——本方法已在创建时前置写入权威归属
+            # （_team_run_id/_team_name，透传自调用方，M1/M1' 约定），
+            # _join_new_window_for_template 默认 keep_team_name=False 会在
+            # 300ms 后用 team.json **顶层** run_id（get_team_run_id()）与
+            # 当前模板名无条件覆盖：多团队并存时顶层 run_id 是其他团队的
+            # （或期间 /team --load force 生成的新 run_id），新成员窗口
+            # 归属被改写 → refresh_capsule_for_window 重分组时落入错误的
+            # / 全新的团队框（"快速添加成员漂到独立新团队"bug 根因）。
+            # 与恢复路径（_on_team_restore_requested 传 keep_team_name=True）
+            # 语义对齐：保留调用方已设的归属字段。
             QTimer.singleShot(
                 self._TEMPLATE_JOIN_DELAY_MS,
-                lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid),
+                lambda w=win, a=agent_name, wid=wid: self._join_new_window_for_template(w, a, wid, keep_team_name=True),
             )
             return win
         except Exception as e:  # noqa: BLE001
@@ -5041,9 +5055,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # team.json 顶层（兼容历史单团队语义）。
         _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
         member_agents = [
-            m.get("agent_name")
-            for m in tm_mgr.get_members(run_id=_target_run_id or None)
-            if m.get("agent_name")
+            m.get("agent_name") for m in tm_mgr.get_members(run_id=_target_run_id or None) if m.get("agent_name")
         ]
         for name in member_agents:
             if name not in all_agents:

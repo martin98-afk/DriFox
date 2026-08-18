@@ -460,12 +460,49 @@ def test_spawn_team_member_window_reuses_run_id(qapp):
     assert fake_win._team_name == "default-team"
     # 禁止 force 新 run_id
     assert not fake_tm.start_team_run.called, "新建成员不得 start_team_run(force=True)"
-    # 同步 join（前置登记成员身份）
-    fake_tm.join_team.assert_called_once_with(window_id="win-99", agent_name="build")
+    # 同步 join（前置登记成员身份；M1：透传 run_id 归属）
+    fake_tm.join_team.assert_called_once_with(window_id="win-99", agent_name="build", run_id="run-ABC")
     # 300ms 延迟 join 已安排
     assert m_single_shot.called
     delay = m_single_shot.call_args.args[0]
     assert delay == 300
+
+
+def test_spawn_team_member_window_keep_team_name_preserves_run_id(qapp):
+    """🐛 回归（快速新建成员漂移 bug）：延迟补注册必须传 keep_team_name=True，
+    防止 _join_new_window_for_template 用 team.json 顶层 run_id / 当前模板名
+    覆盖 _spawn_team_member_window 前置写入的权威归属（多团队并存时顶层 run_id
+    是其他团队或新 run，新成员会被重分组进错误的 / 全新的团队框）。"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    fake_win = MagicMock()
+    fake_win._window_id = "win-77"
+    fake_tm = MagicMock()
+    fake_tm.get_template.return_value = {"name": "other-template", "agents": []}
+    fake_tm.get_team_run_id.return_value = "run-TOP"  # 顶层 run_id（其他团队/新 run）
+    fake_tm.get_team_project.return_value = ""
+
+    inst._create_fresh_window = MagicMock(return_value=fake_win)
+    inst._get_team_manager = MagicMock(return_value=fake_tm)
+    inst._join_new_window_for_template = MagicMock()
+
+    with patch.object(mw.QTimer, "singleShot") as m_single_shot:
+        inst._spawn_team_member_window("build", run_id="run-A", team_label="团队A", team_name="团队A")
+
+    # 创建时前置写入透传的权威归属（而非顶层 run_id）
+    assert fake_win._team_run_id == "run-A"
+    assert fake_win._team_name == "团队A"
+    # 同步 join 透传权威 run_id（M1）
+    fake_tm.join_team.assert_called_once_with(
+        window_id="win-77", agent_name="build", run_id="run-A", team_label="团队A"
+    )
+    # 延迟回调必须 keep_team_name=True：执行回调后不应覆盖窗口归属
+    assert m_single_shot.called
+    delay, callback = m_single_shot.call_args.args[:2]
+    assert delay == 300
+    callback()
+    inst._join_new_window_for_template.assert_called_once_with(fake_win, "build", "win-77", keep_team_name=True)
 
 
 def test_spawn_team_member_window_allows_duplicate_role(qapp):
@@ -645,6 +682,7 @@ def test_handle_team_add_member_no_template_no_member_warns(qapp):
     from qfluentwidgets import InfoBar
 
     inst = _make_main_widget_instance()
+    inst.__dict__["_team_run_id"] = "run-A"  # ref_win 团队归属（M1'）
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = None
     fake_tm.get_members.return_value = []
@@ -663,6 +701,8 @@ def test_handle_team_add_member_menu_lists_template_and_members(qapp):
     from qfluentwidgets import InfoBar
 
     inst = _make_main_widget_instance()
+    inst.__dict__["_team_run_id"] = "run-A"
+    inst.__dict__["_team_name"] = "团队A"
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = {
         "name": "t",
@@ -678,7 +718,8 @@ def test_handle_team_add_member_menu_lists_template_and_members(qapp):
         inst._handle_team_add_member()
 
     # 已加入角色也可选（重复创建）：菜单含 build + plan，点击 build 创建
-    inst._spawn_team_members.assert_called_once_with(["build"])
+    # M1'：透传 ref_win 的 run_id / team_name，锁定目标团队（防漂移）
+    inst._spawn_team_members.assert_called_once_with(["build"], run_id="run-A", team_label="团队A", team_name="团队A")
     assert "build" in actions and "plan" in actions
 
 
@@ -687,6 +728,8 @@ def test_handle_team_add_member_no_template_uses_member_roles(qapp):
     from qfluentwidgets import InfoBar
 
     inst = _make_main_widget_instance()
+    inst.__dict__["_team_run_id"] = "run-A"
+    inst.__dict__["_team_name"] = "团队A"
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = None
     fake_tm.get_members.return_value = [{"agent_name": "build"}, {"agent_name": "build"}]  # 重复成员
@@ -697,7 +740,7 @@ def test_handle_team_add_member_no_template_uses_member_roles(qapp):
     with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
         inst._handle_team_add_member()
 
-    inst._spawn_team_members.assert_called_once_with(["build"])
+    inst._spawn_team_members.assert_called_once_with(["build"], run_id="run-A", team_label="团队A", team_name="团队A")
     assert "build" in actions
 
 
@@ -730,6 +773,8 @@ def test_handle_team_add_member_single_create(qapp):
     from qfluentwidgets import InfoBar
 
     inst = _make_main_widget_instance()
+    inst.__dict__["_team_run_id"] = "run-A"
+    inst.__dict__["_team_name"] = "团队A"
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = {
         "name": "t",
@@ -743,7 +788,7 @@ def test_handle_team_add_member_single_create(qapp):
     with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success") as m_success:
         inst._handle_team_add_member()
 
-    inst._spawn_team_members.assert_called_once_with(["plan"])
+    inst._spawn_team_members.assert_called_once_with(["plan"], run_id="run-A", team_label="团队A", team_name="团队A")
     m_success.assert_called_once()
 
 
@@ -752,6 +797,8 @@ def test_handle_team_add_member_no_batch_fill_action(qapp):
     from qfluentwidgets import InfoBar
 
     inst = _make_main_widget_instance()
+    inst.__dict__["_team_run_id"] = "run-A"
+    inst.__dict__["_team_name"] = "团队A"
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = {
         "name": "t",
