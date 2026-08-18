@@ -1267,6 +1267,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 压缩守卫：自动压缩清空会话后置 True，拦截旧 worker 延迟到达的
+        # finished_with_messages 全量覆写（防止清空被恢复导致压缩失效+反复触发）。
+        # 在 _on_send_clicked 发起新 AI 请求时清零；守卫拦截到旧快照后自清零。
+        self._post_compact_guard = False
         # 🛡️ 会话脏标记：会话 messages 自上次保存后是否有过变更。
         # 用于跳过无实际变更的重复持久化（如：流式完成后 _do_post_stream_cleanup
         # 再次调用 _save_current_session_to_history、或新建会话/关闭窗口时
@@ -2651,6 +2655,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info("[Branch] 开始创建分支会话")
 
+        # 🛡️ 与 _create_new_session 对齐：切换前先保存被分支的旧会话，
+        # 否则旧会话可能未落库，历史面板刷新后仍缺失该条目。
+        try:
+            self._auto_save_current_session()
+        except Exception:
+            logger.exception("Failed to auto-save current session before creating a branched session")
+
         # 停止当前对话并清理
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
@@ -2717,6 +2728,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不受影响，保持原"无变更不保存"语义。
         if getattr(self, "_team_run_id", ""):
             self._session_dirty = True
+
+        # 🆕 刷新历史面板：分支创建新会话后，历史面板 UI 需同步最新数据
+        # （被分支的旧会话已 autosave 入库；分支新会话尚未落库不显示，属预期）。
+        # 仅历史卡片可见时执行（不可见时 0 开销），下次打开面板仍走
+        # _toggle_history_card → _refresh_history_toggle_panel 拉取最新数据。
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     def _refresh_cache_stats(self):
         """刷新缓存统计显示（对话完成后调用）"""
@@ -4846,6 +4863,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if src_project:
             tm_mgr.set_team_project(src_project)
 
+        # 🐛 构建团队默认工作目录继承：与团队级项目同理，team_workdir 也是
+        # 持久化的（team.json 顶层，用户切换工作目录/git worktree 即写入），
+        # 若不在此重置，新团队会沿用上次构建残留的旧工作目录，导致新成员窗口
+        # 左上角分支标签显示旧工作目录（其他项目/worktree）的分支，而非当前
+        # 团队项目。修复：开新团队时把团队级工作目录重置为源标签页当前工作目录，
+        # 使本次所有新成员窗口在 _apply_team_workdir 时共享同一工作树。
+        src_workdir = self._resolve_project_workdir() or ""
+        tm_mgr.set_team_workdir(src_workdir)
+
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
         # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
@@ -5207,8 +5233,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 2) 生成新 run_id（force：每次新建任务都是独立运行）
                 new_run_id = tm_mgr.start_team_run(force=True)
                 # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
-                for win in member_windows:
-                    win._team_run_id = new_run_id
                 #    🛡️ 修复：新 run_id 必须回写 TeamManager 成员数据两处
                 #    run_id（members[wid] / team_members[wid]）。仅更新窗口
                 #    实例 _team_run_id 而成员表仍旧，会使窗口实例(new)、
@@ -5216,6 +5240,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 #    多团队严格匹配（M1-r'/M1）按 run_id 查询成员
                 #    （get_members(run_id=new) / get_team_member_snapshot(new)）
                 #    查不到成员，表现为团队收发/添加成员/历史合并断裂。
+                for win in member_windows:
+                    win._team_run_id = new_run_id
                     try:
                         tm_mgr.update_member_team(
                             win._window_id,
@@ -6461,6 +6487,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_compact_in_progress = False
 
         if getattr(self, "_is_destroyed", False):
+            logger.info(f"[DEBUG-cc] _on_compact_clear_finished early-return: _is_destroyed (task={task_id[:8]})")
             return
         # 校验执行结果：仅在无错误时清空
         sub_agent_mgr = self.backend.sub_agent_manager
@@ -6472,14 +6499,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 task_info = sub_agent_mgr._finished_tasks.get(task_id, {})
                 if task_info.get("error"):
                     # 有明确错误（agent 缺失 / mode 不允许 / staled / timeout）— 不清空
+                    logger.info(
+                        f"[DEBUG-cc] early-return: finished_tasks error (task={task_id[:8]}, "
+                        f"error={str(task_info.get('error'))[:80]})"
+                    )
                     return
                 # 无错误：可能是竞态条件，继续尝试清空
             else:
                 # 无任何记录 — 任务从未启动 / 已被丢弃，不清空
+                logger.info(
+                    f"[DEBUG-cc] early-return: no record (task={task_id[:8]}, "
+                    f"running={sub_agent_mgr is not None and task_id in sub_agent_mgr._running_tasks}, "
+                    f"finished_keys={list(sub_agent_mgr._finished_tasks.keys())[-5:] if sub_agent_mgr else None})"
+                )
                 return
         else:
             execution_error = getattr(executor, "_execution_error", None)
             if execution_error:
+                logger.info(
+                    f"[DEBUG-cc] early-return: execution_error (task={task_id[:8]}, "
+                    f"error={str(execution_error)[:80]})"
+                )
                 return
 
         # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
@@ -6490,11 +6530,25 @@ class OpenAIChatToolWindow(ToolWindow):
                 target_session = s
                 break
         if not target_session or not target_session.messages:
+            logger.info(
+                f"[DEBUG-cc] early-return: session missing/empty (task={task_id[:8]}, sid={session_id[:8]}, "
+                f"target={target_session is not None}, msg_len={len(target_session.messages) if target_session else -1}, "
+                f"sessions={len(self.session_manager.sessions)})"
+            )
             return
+        logger.info(
+            f"[DEBUG-cc] 即将清空 (task={task_id[:8]}, sid={session_id[:8]}, "
+            f"msg_len={len(target_session.messages)}, result_len={len(result) if result else 0})"
+        )
 
         # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
         # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
         target_session.set_messages([], preserve_compaction=False)
+        # 🛡️ 压缩守卫：清空后旧 worker 的 finished_with_messages（取消时 emit 的
+        # 旧消息快照）可能延迟到达主线程，_on_messages_updated 全量覆写会恢复
+        # 已清空的会话 → 压缩失效 + 反复触发。守卫拦截"消息数远多于当前 session"
+        # 的旧快照，新 worker（压缩后启动）消息数≈session 消息数，不受影响。
+        self._post_compact_guard = True
         # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
         self._session_card_cache.pop(target_session.session_id, None)
 
@@ -11873,6 +11927,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_chat_area()
             self.node_preview.clear_nodes()
             self._current_assistant_card = None
+            # 🛡️ 失效欢迎卡片缓存：会话被改空（撤销/截断）后历史数据已变化，
+            # 否则 _get_or_create_welcome_card 命中旧缓存 → "最近会话" 停留在旧快照。
+            self._invalidate_welcome_card()
             logger.info("[DEBUG-diagnose-welcome] Before _show_initial_welcome")
             self._show_initial_welcome()
             logger.info("[DEBUG-diagnose-welcome] After _show_initial_welcome")
@@ -11891,6 +11948,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_clear_shortcut(self):
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛡️ 失效欢迎卡片缓存：清空会话后历史数据已变化，避免 _get_or_create_welcome_card
+        # 命中旧缓存导致"最近会话"停留在清空前的旧快照（与 _create_new_session 一致）。
+        self._invalidate_welcome_card()
         # 使用辅助函数清空并显示欢迎
         clear_and_show_welcome(
             session=self.session_manager.get_current_session(),
@@ -15078,6 +15138,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 清零会话切换哨兵：用户即将发起新 AI 请求，worker 的旧回调通道已无意义，
         # 后续 _on_messages_updated / _do_post_stream_cleanup 应正常处理新会话。
         self._session_switched = False
+        # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
+        self._post_compact_guard = False
 
         if self._is_auto_loop_running:
             InfoBar.warning(
@@ -16938,6 +17000,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # 这里无需再 set_messages，避免 UI 副作用（set_meta_info/ring 刷新）访问已销毁的 widget。
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛡️ 压缩守卫（P-Compact）：自动压缩清空会话后，被 stop_streaming 取消的旧 worker
+        # 其 finished_with_messages（旧消息快照）可能延迟到达，全量覆写会把已清空的会话
+        # 恢复成旧消息（压缩失效 + 反复触发）。判定：消息数远多于当前 session（压缩后
+        # 仅少量新消息）→ 旧 worker 快照，丢弃。新 worker 消息数≈session 消息数，不误拦。
+        if getattr(self, "_post_compact_guard", False):
+            _cur_session = self.session_manager.get_current_session() if self.session_manager else None
+            if _cur_session and messages and len(messages) > len(_cur_session.messages) + 10:
+                self._post_compact_guard = False
+                from loguru import logger
+
+                logger.info(
+                    f"[MessagesUpdated] 压缩守卫拦截旧 worker 延迟消息: "
+                    f"msg_count={len(messages)}, current_len={len(_cur_session.messages)}"
+                )
+                return
         # 🛡️ 会话切换哨兵：_create_new_session 会创建新会话并 stop_streaming，
         # 但 worker 跨线程的 _on_messages_updated 可能延迟到达，此时
         # get_current_session() 返回的是新会话（旧会话已被替换），

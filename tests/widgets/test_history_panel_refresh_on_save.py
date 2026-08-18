@@ -36,6 +36,7 @@ TARGET_METHODS = (
     "_save_current_session_to_history",
     "_auto_save_current_session",
     "_create_new_session",
+    "_create_branched_session",
 )
 
 
