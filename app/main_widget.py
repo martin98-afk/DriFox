@@ -3418,6 +3418,15 @@ class OpenAIChatToolWindow(ToolWindow):
         model_layout = QHBoxLayout(self._model_btn_container)
         model_layout.setContentsMargins(8, 0, 4, 0)
         model_layout.setSpacing(0)
+        # 模型胶囊内竖向分隔线：把 [模型名] | [思考强度+配置] | [用量上下文] 三组分开
+        self._model_sep_name = QWidget(self._model_btn_container)
+        self._model_sep_name.setFixedSize(1, 16)
+        self._model_sep_name.setStyleSheet(f"background: {Colors.BORDER};")
+        self._model_sep_name.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._model_sep_usage = QWidget(self._model_btn_container)
+        self._model_sep_usage.setFixedSize(1, 16)
+        self._model_sep_usage.setStyleSheet(f"background: {Colors.BORDER};")
+        self._model_sep_usage.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.current_model_btn = QWidget(self._model_btn_container)
         self.current_model_btn.setCursor(Qt.PointingHandCursor)
         self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
@@ -3434,6 +3443,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
+        model_layout.addSpacing(6)
+        model_layout.addWidget(self._model_sep_name)
+        model_layout.addSpacing(6)
         self.settings_btn = QWidget(self._model_btn_container)
         self.settings_btn.setObjectName("settingsEffortBtn")
         self.settings_btn.setCursor(Qt.PointingHandCursor)
@@ -3457,7 +3469,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_btn_icon.setScaledContents(True)
         self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
         settings_btn_layout.addWidget(self._settings_btn_icon)
-        model_layout.addWidget(self.settings_btn)
 
         # 思考强度胶囊（独立控件，与配置卡片按钮分离）：模型支持 reasoning_effort
         # 且思考模式开启时显示当前等级；点击直接循环轮换等级（方便快速调强度）
@@ -3480,9 +3491,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
         effort_btn_layout.addWidget(self._settings_effort_label)
         model_layout.addWidget(self.effort_btn)
+        model_layout.addWidget(self.settings_btn)
+        model_layout.addWidget(self._model_sep_usage)
 
         # 余额/用量/上下文放入模型选择胶囊内
-        model_layout.addSpacing(4)
+        model_layout.addSpacing(6)
         model_layout.addWidget(self.balance_display)
         model_layout.addWidget(self.coding_plan_ring)
         model_layout.addWidget(self.context_usage_ring)
@@ -7300,8 +7313,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: {bg_color};
                 color: {text_color};
                 border: 1px solid {border_color};
-                border-radius: 9px;
-                padding: 1px 7px;
+                border-radius: 5px;
+                padding: 1px 3px;
                 {font_size_css(10)}
                 font-weight: 600;
                 {get_font_family_css()}
@@ -9736,6 +9749,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     border: none;
                     border-radius: 8px;
                 """)
+                # 同步刷新模型胶囊内竖向分隔线（主题色跟随 BORDER）
+                for _sep in (getattr(self, "_model_sep_name", None), getattr(self, "_model_sep_usage", None)):
+                    if _sep is not None:
+                        _sep.setStyleSheet(f"background: {Colors.BORDER};")
             if hasattr(self, "_toolbar_capsule"):
                 self._toolbar_capsule.setStyleSheet(f"""
                     background: {Colors.TOOLBAR_BG};
@@ -9849,6 +9866,23 @@ class OpenAIChatToolWindow(ToolWindow):
         # 参数配置按钮的思考强度胶囊（颜色+字体双敏感，走完整刷新保留等级色）
         if hasattr(self, "effort_btn"):
             self._update_settings_effort_btn()
+        # 模型参数配置按钮（settings_btn）：hover 背景 + 图标随主题刷新。
+        # 其 styleSheet 在构建时把 Colors.HOVER_BG_STRONG 写死进 f-string，
+        # 图标也用 .pixmap() 渲染成静态图，主题切换后不会自动更新 —— 这里用
+        # 当前主题 Colors 重设，恢复"随主题变化"能力。
+        if hasattr(self, "settings_btn"):
+            self.settings_btn.setStyleSheet(f"""
+                QWidget#settingsEffortBtn {{
+                    background: transparent;
+                    border: none;
+                    border-radius: 8px;
+                }}
+                QWidget#settingsEffortBtn:hover {{
+                    background: {Colors.HOVER_BG_STRONG};
+                }}
+            """)
+        if hasattr(self, "_settings_btn_icon"):
+            self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
         # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
