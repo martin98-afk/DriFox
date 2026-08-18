@@ -369,6 +369,10 @@ class HistoryManager:
         # 内存缓存
         self._history_sessions: List[Dict] = []
         self._history_loaded = False  # 懒加载标记：首次访问 _history_sessions 时从 SQLite 加载
+        # 跨进程一致性：底层 SQLite（db + -wal）的变更签名（mtime 元组）。
+        # 其他 OS 进程提交后签名变化 → _reload_if_db_changed 触发重载，
+        # 避免各窗口历史卡片/欢迎卡片互相陈旧、且重开也无法刷新。
+        self._db_signature_stored: Optional[tuple] = None
         # 🛡️ H1（T4-TOP8）：保护懒加载"检查-加载"原子性的锁。
         # 后台预热线程与主线程首次访问可能并发进入 _ensure_history_loaded，
         # 必须串行化防止双重加载/读到半初始化 _history_sessions。
@@ -764,6 +768,8 @@ class HistoryManager:
                     self._deduplicate_history_sessions()
                     self._migrate_if_needed()
                     self._history_loaded = True
+                    # 记录初始变更签名，避免首次读取时误判为"外部变更"触发冗余重载
+                    self._db_signature_stored = self._db_signature()
             except Exception as e:
                 logger.warning(f"[HistoryManager] 懒加载历史会话异常: {e}")
 
@@ -814,6 +820,63 @@ class HistoryManager:
 
         threading.Thread(target=_delayed_start, daemon=True, name="history-prewarm").start()
 
+    def _db_signature(self) -> Optional[tuple]:
+        """底层 SQLite 变更签名（db + -wal 文件的 mtime 元组）。
+
+        跨进程一致性用：SQLite 默认 WAL 模式，其他进程的提交写入 -wal 文件
+        （主库文件 mtime 不一定变），故同时取 db 与 -wal 的 mtime 作为签名。
+        任一文件不存在/不可访问时返回 None（调用方跳过重载）。
+        """
+        if not self._use_sqlite or self._session_store is None:
+            return None
+        db_path = getattr(self._session_store, "_db_path", None)
+        if not db_path:
+            return None
+        try:
+            sig = [os.path.getmtime(db_path)]
+            wal_path = db_path + "-wal"
+            if os.path.exists(wal_path):
+                sig.append(os.path.getmtime(wal_path))
+            return tuple(sig)
+        except OSError:
+            return None
+
+    def _reload_if_db_changed(self):
+        """跨进程一致性：检测 SQLite 被其他 OS 进程修改后，把本进程内存缓存与
+        SQLite 重新对齐，避免各窗口的历史卡片/欢迎卡片互相陈旧、且重开也无法刷新。
+
+        安全策略：重载前先 flush 本进程挂起写（确保本进程状态已落盘），再整体从
+        SQLite 重载内存缓存，杜绝「重载覆盖其他进程保存」的数据丢失。
+        仅应在读取路径（get_history_list 等）调用，不破坏写入路径的权威状态。
+        """
+        if not self._use_sqlite or self._session_store is None:
+            return
+        sig = self._db_signature()
+        if sig is None:
+            return
+        if self._db_signature_stored is not None and sig == self._db_signature_stored:
+            return  # 未变化，跳过（含本进程自身写入后已对齐的情况）
+
+        # 文件变化 → 先 flush 本进程挂起写，再整体重载
+        try:
+            self.flush()
+        except Exception:
+            logger.exception("[HistoryManager] 跨进程重载前 flush 失败")
+
+        with self._history_load_lock:
+            try:
+                self._history_sessions = self._session_store.get_sessions_lightweight(
+                    limit=self._history_limit
+                )
+                self._deduplicate_history_sessions()
+                self._migrate_if_needed()
+                self._history_loaded = True
+            except Exception as e:
+                logger.warning(f"[HistoryManager] 跨进程重载失败: {e}")
+                return
+        self._db_signature_stored = sig
+        self._mark_cache_dirty()
+
     def get_history_list(
         self, project: str = None, with_messages: bool = False, merge_team: bool = False
     ) -> List[Dict]:
@@ -827,6 +890,8 @@ class HistoryManager:
                 仅在 with_messages=False（轻量列表）时生效。
         """
         self._ensure_history_loaded()
+        # 跨进程一致性：若其他 OS 进程已提交（WAL 模式写入 -wal），重载本进程内存缓存
+        self._reload_if_db_changed()
         # 先去重
         self._deduplicate_history_sessions()
 
@@ -1654,6 +1719,15 @@ class HistoryManager:
         logger.debug(f"[HistoryManager] 保存会话: pending_id={pending_id[:8]}...")
         for session in self._history_sessions:
             if session.get("session_id") == pending_id:
+                # 🛡️ 空消息守卫：内存记录 messages 已被释放置空
+                # （_release_inactive_session_messages / remove_session
+                # release_messages_only）时跳过写库。若照常保存会用
+                # serialize([]) 覆盖 DB 中已有完整消息的会话（preview/
+                # message_count 保留、messages 变空 → 历史会话加载后
+                # 消息列表为空且无任何报错，根因）。
+                if not session.get("messages"):
+                    logger.warning(f"[HistoryManager] 跳过空消息会话保存（内存已释放）: session_id={pending_id[:8]}...")
+                    break
                 self._session_store.save_session(session)
                 break
 

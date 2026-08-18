@@ -1430,6 +1430,10 @@ class TabPanel(QWidget):
             self._custom_plugin_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
             )
+        # ── 顶部：分支 + 新建按钮字体随字号设置刷新 ──
+        for _btn in (getattr(self, "_branch_btn", None), getattr(self, "_new_btn", None)):
+            if _btn is not None:
+                _btn.setFont(get_unified_font(9))
 
     def begin_batch_add(self):
         """开始批量添加 tab：期间 add_tab 跳过 _rebuild_team_layout，end_batch_add 统一重建。

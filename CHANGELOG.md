@@ -87,13 +87,14 @@ All notable changes to this project will be documented in this file.
 
 - **README + leader.md 表述优化** (`README.md` + `docs/leader.md`): 文档表述优化与功能描述补充（`57f885eb`）
 
-### 🚑 Hotfix (2026-08-18 第三次重发布)
+### 🚑 Hotfix (2026-08-18 第四次重发布)
 
-> **自上一 tag (v0.5.2 `d5f65d33`) 以来的变更** | 提交数：9 · 文件变更：20 · +1947/-2147 | 贡献者：dingma, mading, drifox-bot
+> **自上一 tag (v0.5.2 `d5f65d33`) 以来的变更** | 提交数：12 · 文件变更：28 · +2449/-2182 | 贡献者：dingma, mading, drifox-bot
 
 #### ✨ 新功能 (New Features)
 
 - **Marketplace 探索模式（网格卡片）** (`plugins/plugin-marketplace/`): 新增 `_ExploreCard`（固定宽度垂直布局网格展示插件）+ `_ExploreGridSection`（分类插件网格分组）；`MarketplaceCard` 默认打开 featured explore 页并带刷新随机化分类；列表/探索视图插件状态同步（安装/更新时 UI 一致更新）（`2ef28807`）
+- **模型推理能力动态支持（reasoning_effort_values）** (`app/core/model_capabilities.py` + `app/core/models_dev_sync.py` + `app/core/usage_service.py` + `app/widgets/cards/settings/model_config_card.py` + `app/widgets/cards/settings/model_selector_card.py`): 模型能力表新增 `reasoning_effort_values` 字段，动态读取每个模型支持的推理档位（下拉枚举）；`models_dev` 同步、`usage_service` 轮询、模型选择器/配置卡片均接入；新增 `test_models_dev_sync` 与 `test_usage_service_poll` 覆盖（`0c7256b3`）
 
 #### ♻️ 代码重构 (Refactoring)
 
@@ -106,11 +107,37 @@ All notable changes to this project will be documented in this file.
 - **Explore 网格文字颜色** (`plugins/plugin-marketplace/`): 修正 Explore 网格区标题与工具提示文字颜色，提升浅色/深色主题可见性（`550705e5`）
 - **消息卡片与欢迎卡片** (`app/widgets/message_card.py` + `app/widgets/welcome_card.py`): 修复消息卡片渲染与欢迎卡片幽灵窗口问题（`1a1d9baa`）
 - **Marketplace featured 空数据** (`plugins/plugin-marketplace/`): 修复 featured 无数据场景处理（`1a1d9baa`）
+- **团队延迟注册保留权威 run_id** (`app/main_widget.py`): 延迟注册新成员时强制 `keep_team_name=True`，确保权威 `run_id` 不被覆盖（`aeb15f9e`）
+- **多团队成员归属严格匹配 + 批量建标签页幽灵窗口** (`app/core/team_manager.py` + `app/main_widget.py` + `app/widgets/message_card.py`):
+    - `get_team_member_snapshot` 多团队并存下严格按 `run_id` 匹配，不再兜底无 `run_id` 的遗留记录（修复合并条目混入其他团队成员）
+    - `new_team_member_window` 透传 `run_id`/`team_label`/`team_name`，由调用方锁定目标团队，避免新成员窗口漂移到错误团队框
+    - `MessageCard` 新增 `_is_effectively_visible` 守卫，按 `QStackedWidget` 当前页判断真实可见性，修复批量建标签页时 `QWebEngineView` 弹出幽灵窗口
+    - 同步更新 `test_team_member_snapshot` 与 `test_welcome_card_ghost_window`（`21307e72`）
 
 #### 🔧 其他 (Chores & Build)
 
 - **插件市场自动生成** (`plugins/plugin-marketplace/`): 由 GitHub Actions 依据 `plugin.json` 自动重新生成 [skip ci]（`c1d79b24`）
 - **插件市场版本** (`plugins/plugin-marketplace/`): 升级至 0.3.1（`a0584068`）
+
+### 🚑 Hotfix (2026-08-18 第五次重发布)
+
+> **自上一 tag (v0.5.2 `23c2c93`) 以来的变更** | 提交数：10 · 文件变更：23 · +1048/-47 | 贡献者：mading
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **历史会话空消息覆盖** (`app/utils/history_manager.py` + `app/widgets/`): 修复内存消息释放与延迟保存竞态导致历史会话被空消息覆盖（`ce75a506`）
+- **思考强度徽章配色区分** (`app/widgets/cards/settings/model_selector_card.py` + `model_config_card.py`): 思考强度徽章改紫色与多模态青蓝彻底区分，low 等级用饱和绿提对比度（`b482e0d3`）
+- **compact 短会话覆盖** (`app/widgets/` + `tests/widgets/test_auto_compact_clear.py`): 调整消息清理阈值，避免短会话中被清空覆盖（`026ab08d`）
+- **团队 workdir 重置** (`app/core/team/` + `tests/core/test_team_workdir_reset.py`): 新团队加载时 `team_workdir` 重置回源目录（`c3ee8bb8`）
+- **团队新建任务死锁** (`app/core/team/` + `tests/core/test_team_new_task_interrupt.py`): 修复"团队新建任务"打断流式导致的收发死锁 + `run_id` 成员数据回写（`418b7232`）
+
+#### 🎨 样式改进 (Style)
+
+- **Badge 主题自适应配色** (`app/widgets/cards/settings/`): 根据主题动态调整 badge 颜色提升可见性（`19c035d0`）
+- **模型胶囊纵向分隔** (`app/widgets/tab_panel.py`): 模型胶囊内增加纵向分隔线区分布局（`bafca7af`）
+- **思考强度胶囊可点轮换** (`app/widgets/cards/settings/model_selector_card.py`): 思考强度胶囊独立可点，点击直接循环轮换等级（`db907099`）
+- **思考强度胶囊按等级变色** (`app/core/model_capabilities.py` + `app/widgets/cards/settings/` + `app/core/workers/`): 思考强度胶囊按等级变色 + 等级强制校验回退中间值（`a47a8077`）
+- **分支/新建标签按钮字号** (`app/widgets/tab_panel.py`): 统一分支与新建标签按钮字号提升一致性（`58d48041`）
 
 ## [v0.5.1] - 2026-08-14
 

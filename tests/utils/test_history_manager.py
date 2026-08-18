@@ -100,6 +100,47 @@ def test_lazy_load_cannot_overwrite_a_pending_new_session(monkeypatch, tmp_path)
     assert store.saved_session_ids == ["new-session"]
 
 
+def test_do_save_does_not_overwrite_db_with_released_empty_messages(monkeypatch, tmp_path):
+    """⚠️ 回归：内存记录 messages 被置空（_release_inactive_session_messages /
+    remove_session release_messages_only）后，_do_save 不得用空消息覆盖
+    DB 中已有完整消息的会话。
+
+    根因：_schedule_save 延迟保存（1000ms）与内存消息释放形成竞态——
+    释放逻辑把 _history_sessions 里该会话的 messages 置为 []（保留
+    preview/message_count），_do_save 到时遍历捡到空记录直接写库，
+    导致历史会话 messages 被覆写为 []（DB 证据：zstd([])+preview 保留）。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    store = _FakeSessionStore([_lightweight_session(1)])
+    manager._use_sqlite = True
+    manager._session_store = store
+    manager._history_loaded = True
+    manager._history_sessions = [
+        {
+            "session_id": "session-1",
+            "title": "会话 1",
+            "project": "默认项目",
+            "messages": [
+                {"role": "user", "content": "真实消息", "timestamp": "2026-08-18 16:00:00"},
+                {"role": "assistant", "content": "真实回复", "timestamp": "2026-08-18 16:00:01"},
+            ],
+            "preview": "真实消息",
+            "message_count": 1,
+            "last_time": "2026-08-18 16:00:01",
+        }
+    ]
+
+    # 模拟内存消息被释放置空（发生在 _schedule_save 的延迟窗口内）
+    manager._history_sessions[0]["messages"] = []
+    manager._pending_save_session_id = "session-1"
+
+    manager._do_save()
+
+    # DB 不得收到空 messages 的覆盖写；pending 需正常清空
+    assert store.saved_session_ids == []
+    assert manager._pending_save_session_id is None
+
+
 def test_import_before_first_history_load_survives_immediate_refresh(monkeypatch, tmp_path):
     """首次历史加载不能覆盖导入后尚在延迟保存窗口内的会话。"""
     manager = _make_manager(monkeypatch, tmp_path)

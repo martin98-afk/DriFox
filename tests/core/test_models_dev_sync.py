@@ -468,6 +468,35 @@ def test_is_cache_valid_schema_mismatch(tmp_path: Path):
     assert sync._is_cache_valid(old) is False
 
 
+# ============================================================
+# normalize_reasoning_effort（等级校验：无效回退中间值）
+# ============================================================
+def test_normalize_reasoning_effort_valid_kept():
+    from app.core.model_capabilities import normalize_reasoning_effort
+
+    assert normalize_reasoning_effort("high", ["low", "medium", "high"]) == "high"
+    assert normalize_reasoning_effort("MAX", ["high", "max"]) == "max"  # 大小写不敏感，保留 values 原大小写
+
+
+def test_normalize_reasoning_effort_invalid_fallback_middle():
+    from app.core.model_capabilities import normalize_reasoning_effort
+
+    # 保存值不在可选值中 → 回退 values 中间配置（models.dev 顺序即强度升序）
+    assert normalize_reasoning_effort("high", ["low", "medium"]) == "low"
+    assert normalize_reasoning_effort("deep", ["low", "medium", "high"]) == "medium"
+    assert normalize_reasoning_effort("", ["low", "medium", "high"]) == "medium"
+    # 偶数个可选值取偏保守项（下中位）
+    assert normalize_reasoning_effort("low", ["high", "max"]) == "high"
+
+
+def test_normalize_reasoning_effort_no_values_passthrough():
+    from app.core.model_capabilities import normalize_reasoning_effort
+
+    # 模型无 reasoning_effort_values 数据 → 不拦截，保持原值/默认
+    assert normalize_reasoning_effort("high", None) == "high"
+    assert normalize_reasoning_effort("", []) == "medium"
+
+
 def test_save_and_load_cache(tmp_path: Path):
     path = tmp_path / "cache.json"
     data = {

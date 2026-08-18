@@ -84,7 +84,7 @@ from app.core import (
 )
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
-from app.core.model_capabilities import apply_model_defaults, get_model_capabilities
+from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
 from app.core.tool_permission_controller import ToolPermissionController
 
 
@@ -1267,6 +1267,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # / _on_finalize_complete），防止把旧会话消息写到新会话再被 save 到新项目。
         # 在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = False
+        # 🛡️ 压缩守卫：自动压缩清空会话后置 True，拦截旧 worker 延迟到达的
+        # finished_with_messages 全量覆写（防止清空被恢复导致压缩失效+反复触发）。
+        # 在 _on_send_clicked 发起新 AI 请求时清零；守卫拦截到旧快照后自清零。
+        self._post_compact_guard = False
         # 🛡️ 会话脏标记：会话 messages 自上次保存后是否有过变更。
         # 用于跳过无实际变更的重复持久化（如：流式完成后 _do_post_stream_cleanup
         # 再次调用 _save_current_session_to_history、或新建会话/关闭窗口时
@@ -2651,6 +2655,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.info("[Branch] 开始创建分支会话")
 
+        # 🛡️ 与 _create_new_session 对齐：切换前先保存被分支的旧会话，
+        # 否则旧会话可能未落库，历史面板刷新后仍缺失该条目。
+        try:
+            self._auto_save_current_session()
+        except Exception:
+            logger.exception("Failed to auto-save current session before creating a branched session")
+
         # 停止当前对话并清理
         if self._is_streaming and self.backend.chat_engine:
             self.backend.stop_streaming()
@@ -2717,6 +2728,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 不受影响，保持原"无变更不保存"语义。
         if getattr(self, "_team_run_id", ""):
             self._session_dirty = True
+
+        # 🆕 刷新历史面板：分支创建新会话后，历史面板 UI 需同步最新数据
+        # （被分支的旧会话已 autosave 入库；分支新会话尚未落库不显示，属预期）。
+        # 仅历史卡片可见时执行（不可见时 0 开销），下次打开面板仍走
+        # _toggle_history_card → _refresh_history_toggle_panel 拉取最新数据。
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
 
     def _refresh_cache_stats(self):
         """刷新缓存统计显示（对话完成后调用）"""
@@ -3401,6 +3418,15 @@ class OpenAIChatToolWindow(ToolWindow):
         model_layout = QHBoxLayout(self._model_btn_container)
         model_layout.setContentsMargins(8, 0, 4, 0)
         model_layout.setSpacing(0)
+        # 模型胶囊内竖向分隔线：把 [模型名] | [思考强度+配置] | [用量上下文] 三组分开
+        self._model_sep_name = QWidget(self._model_btn_container)
+        self._model_sep_name.setFixedSize(1, 16)
+        self._model_sep_name.setStyleSheet(f"background: {Colors.BORDER};")
+        self._model_sep_name.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._model_sep_usage = QWidget(self._model_btn_container)
+        self._model_sep_usage.setFixedSize(1, 16)
+        self._model_sep_usage.setStyleSheet(f"background: {Colors.BORDER};")
+        self._model_sep_usage.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.current_model_btn = QWidget(self._model_btn_container)
         self.current_model_btn.setCursor(Qt.PointingHandCursor)
         self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
@@ -3417,6 +3443,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
         btn_layout.addWidget(self._model_btn_text)
         model_layout.addWidget(self.current_model_btn, 1)
+        model_layout.addSpacing(6)
+        model_layout.addWidget(self._model_sep_name)
+        model_layout.addSpacing(6)
         self.settings_btn = QWidget(self._model_btn_container)
         self.settings_btn.setObjectName("settingsEffortBtn")
         self.settings_btn.setCursor(Qt.PointingHandCursor)
@@ -3440,14 +3469,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._settings_btn_icon.setScaledContents(True)
         self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
         settings_btn_layout.addWidget(self._settings_btn_icon)
-        # 思考强度胶囊：模型支持 reasoning_effort 且思考模式开启时显示当前等级
-        self._settings_effort_label = QLabel("", self.settings_btn)
+
+        # 思考强度胶囊（独立控件，与配置卡片按钮分离）：模型支持 reasoning_effort
+        # 且思考模式开启时显示当前等级；点击直接循环轮换等级（方便快速调强度）
+        self.effort_btn = QWidget(self._model_btn_container)
+        self.effort_btn.setObjectName("effortCycleBtn")
+        self.effort_btn.setCursor(Qt.PointingHandCursor)
+        self.effort_btn.setStyleSheet("""
+            QWidget#effortCycleBtn {
+                background: transparent;
+                border: none;
+            }
+        """)
+        self.effort_btn.setToolTip("点击切换思考强度等级")
+        self.effort_btn.mousePressEvent = lambda e: self._cycle_effort_level(e)
+        effort_btn_layout = QHBoxLayout(self.effort_btn)
+        effort_btn_layout.setContentsMargins(0, 0, 0, 0)
+        effort_btn_layout.setSpacing(0)
+        self._settings_effort_label = QLabel("", self.effort_btn)
+        self._settings_effort_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 点击穿透到外层轮换按钮
         self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
-        settings_btn_layout.addWidget(self._settings_effort_label)
+        effort_btn_layout.addWidget(self._settings_effort_label)
+        model_layout.addWidget(self.effort_btn)
         model_layout.addWidget(self.settings_btn)
+        model_layout.addWidget(self._model_sep_usage)
 
         # 余额/用量/上下文放入模型选择胶囊内
-        model_layout.addSpacing(4)
+        model_layout.addSpacing(6)
         model_layout.addWidget(self.balance_display)
         model_layout.addWidget(self.coding_plan_ring)
         model_layout.addWidget(self.context_usage_ring)
@@ -4846,6 +4894,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if src_project:
             tm_mgr.set_team_project(src_project)
 
+        # 🐛 构建团队默认工作目录继承：与团队级项目同理，team_workdir 也是
+        # 持久化的（team.json 顶层，用户切换工作目录/git worktree 即写入），
+        # 若不在此重置，新团队会沿用上次构建残留的旧工作目录，导致新成员窗口
+        # 左上角分支标签显示旧工作目录（其他项目/worktree）的分支，而非当前
+        # 团队项目。修复：开新团队时把团队级工作目录重置为源标签页当前工作目录，
+        # 使本次所有新成员窗口在 _apply_team_workdir 时共享同一工作树。
+        src_workdir = self._resolve_project_workdir() or ""
+        tm_mgr.set_team_workdir(src_workdir)
+
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
         # 注意：这是"开新团队"路径，run_id 已在上方 force 生成，
@@ -5207,8 +5264,23 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 2) 生成新 run_id（force：每次新建任务都是独立运行）
                 new_run_id = tm_mgr.start_team_run(force=True)
                 # 3) 更新所有成员窗口的 run_id（后续会话保存落新 run_id）
+                #    🛡️ 修复：新 run_id 必须回写 TeamManager 成员数据两处
+                #    run_id（members[wid] / team_members[wid]）。仅更新窗口
+                #    实例 _team_run_id 而成员表仍旧，会使窗口实例(new)、
+                #    顶层 run_id(new)、成员数据 run_id(旧) 三方不一致——
+                #    多团队严格匹配（M1-r'/M1）按 run_id 查询成员
+                #    （get_members(run_id=new) / get_team_member_snapshot(new)）
+                #    查不到成员，表现为团队收发/添加成员/历史合并断裂。
                 for win in member_windows:
                     win._team_run_id = new_run_id
+                    try:
+                        tm_mgr.update_member_team(
+                            win._window_id,
+                            run_id=new_run_id,
+                            team_label=getattr(win, "_team_name", "") or "",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[_handle_team_new_task] 同步成员 run_id 失败: {e}")
                 # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
                 try:
                     from app.widgets.tab_manager_window import TabManagerWindow
@@ -6446,6 +6518,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._auto_compact_in_progress = False
 
         if getattr(self, "_is_destroyed", False):
+            logger.info(f"[DEBUG-cc] _on_compact_clear_finished early-return: _is_destroyed (task={task_id[:8]})")
             return
         # 校验执行结果：仅在无错误时清空
         sub_agent_mgr = self.backend.sub_agent_manager
@@ -6457,14 +6530,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 task_info = sub_agent_mgr._finished_tasks.get(task_id, {})
                 if task_info.get("error"):
                     # 有明确错误（agent 缺失 / mode 不允许 / staled / timeout）— 不清空
+                    logger.info(
+                        f"[DEBUG-cc] early-return: finished_tasks error (task={task_id[:8]}, "
+                        f"error={str(task_info.get('error'))[:80]})"
+                    )
                     return
                 # 无错误：可能是竞态条件，继续尝试清空
             else:
                 # 无任何记录 — 任务从未启动 / 已被丢弃，不清空
+                logger.info(
+                    f"[DEBUG-cc] early-return: no record (task={task_id[:8]}, "
+                    f"running={sub_agent_mgr is not None and task_id in sub_agent_mgr._running_tasks}, "
+                    f"finished_keys={list(sub_agent_mgr._finished_tasks.keys())[-5:] if sub_agent_mgr else None})"
+                )
                 return
         else:
             execution_error = getattr(executor, "_execution_error", None)
             if execution_error:
+                logger.info(
+                    f"[DEBUG-cc] early-return: execution_error (task={task_id[:8]}, "
+                    f"error={str(execution_error)[:80]})"
+                )
                 return
 
         # 按 ID 找到触发压缩时的那个 session（不依赖 session_manager.get_current_session，
@@ -6475,11 +6561,25 @@ class OpenAIChatToolWindow(ToolWindow):
                 target_session = s
                 break
         if not target_session or not target_session.messages:
+            logger.info(
+                f"[DEBUG-cc] early-return: session missing/empty (task={task_id[:8]}, sid={session_id[:8]}, "
+                f"target={target_session is not None}, msg_len={len(target_session.messages) if target_session else -1}, "
+                f"sessions={len(self.session_manager.sessions)})"
+            )
             return
+        logger.info(
+            f"[DEBUG-cc] 即将清空 (task={task_id[:8]}, sid={session_id[:8]}, "
+            f"msg_len={len(target_session.messages)}, result_len={len(result) if result else 0})"
+        )
 
         # 清空目标 session 的 messages（保留 session 自身，topic_summary / name 不变）
         # 用 set_messages 而非 session.clear()，避免把 topic_summary 重置为 ""
         target_session.set_messages([], preserve_compaction=False)
+        # 🛡️ 压缩守卫：清空后旧 worker 的 finished_with_messages（取消时 emit 的
+        # 旧消息快照）可能延迟到达主线程，_on_messages_updated 全量覆写会恢复
+        # 已清空的会话 → 压缩失效 + 反复触发。守卫拦截"消息数远多于当前 session"
+        # 的旧快照，新 worker（压缩后启动）消息数≈session 消息数，不受影响。
+        self._post_compact_guard = True
         # 弹出卡片缓存，避免对已 deleteLater 的 widget 残留引用
         self._session_card_cache.pop(target_session.session_id, None)
 
@@ -7190,16 +7290,31 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_balance_display()
         self._update_settings_effort_btn()
 
-    def _get_settings_effort_style(self) -> str:
-        """思考强度胶囊样式（主题感知：背景/文字色随主题刷新）"""
+    def _effort_capsule_colors(self, effort: str):
+        """思考强度等级 → 胶囊配色 (text, bg, border)。
+
+        色阶语义：low 绿 / medium 蓝 / high 琥珀 / max 紫；未知等级默认蓝。
+        """
         Colors.refresh()
+        palette = {
+            # low 用饱和绿（SUCCESS）替代淡绿，浅色主题下仍清晰可读
+            "low": (Colors.SUCCESS, "rgba(34,197,94,0.14)", "rgba(34,197,94,0.35)"),
+            "medium": (Colors.RING_NORMAL, "rgba(90,169,255,0.10)", "rgba(90,169,255,0.30)"),
+            "high": (Colors.TAG_ORANGE_TEXT, "rgba(255,179,102,0.12)", "rgba(255,179,102,0.30)"),
+            "max": (Colors.TAG_PURPLE_TEXT, "rgba(179,136,255,0.12)", "rgba(179,136,255,0.30)"),
+        }
+        return palette.get(str(effort or "").lower(), palette["medium"])
+
+    def _get_settings_effort_style(self, effort: str = "") -> str:
+        """思考强度胶囊样式（主题感知：背景/文字色随主题与等级刷新）"""
+        text_color, bg_color, border_color = self._effort_capsule_colors(effort)
         return f"""
             QLabel {{
-                background: rgba(90, 169, 255, 0.10);
-                color: {Colors.RING_NORMAL};
-                border: 1px solid rgba(90, 169, 255, 0.30);
-                border-radius: 9px;
-                padding: 1px 7px;
+                background: {bg_color};
+                color: {text_color};
+                border: 1px solid {border_color};
+                border-radius: 5px;
+                padding: 1px 3px;
                 {font_size_css(10)}
                 font-weight: 600;
                 {get_font_family_css()}
@@ -7212,26 +7327,39 @@ class OpenAIChatToolWindow(ToolWindow):
         显示条件：模型能力 thinking_param == "reasoning_effort"（可调强度等级）、
         当前配置里有"思考等级"值、且思考模式为开启。
         开关型思考（thinking）/ 无等级模型 / 思考模式关闭 → 只显图标。
+
+        等级会经 normalize_reasoning_effort 强制校验：保存值不在该模型
+        reasoning_effort_values 中时回退到中间值，胶囊颜色随等级变化。
         """
-        if not hasattr(self, "_settings_effort_label") or not hasattr(self, "settings_btn"):
+        if (
+            not hasattr(self, "_settings_effort_label")
+            or not hasattr(self, "settings_btn")
+            or not hasattr(self, "effort_btn")
+        ):
             return
         text = ""
+        effort = ""
         tooltip = "模型参数配置"
         try:
             if self._current_model_name:
                 caps = get_model_capabilities(self._current_model_name)
                 if caps.get("supports_thinking") and caps.get("thinking_param") == "reasoning_effort":
                     config = self._get_current_model_config()
-                    effort = config.get("思考等级", "")
+                    raw_effort = config.get("思考等级", "")
                     thinking_mode = config.get("思考模式", True)
                     # 思考模式关闭 → reasoning_effort 不会随请求发送，不显示强度
-                    if effort and self._is_thinking_enabled(thinking_mode):
-                        text = str(effort)
-                        tooltip = f"模型参数配置 · 思考强度: {effort}"
+                    if raw_effort and self._is_thinking_enabled(thinking_mode):
+                        # 强制校验：无效等级回退到该模型可选值的中间配置
+                        effort = normalize_reasoning_effort(raw_effort, caps.get("reasoning_effort_values"))
+                        text = effort
+                        tooltip = f"点击切换思考强度等级 · 当前: {effort}"
         finally:
             self._settings_effort_label.setText(text)
             self._settings_effort_label.setVisible(bool(text))
-            self.settings_btn.setToolTip(tooltip)
+            self.effort_btn.setVisible(bool(text))
+            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style(effort))
+            self.effort_btn.setToolTip(tooltip)
+            self.settings_btn.setToolTip("模型参数配置")
 
     @staticmethod
     def _is_thinking_enabled(value) -> bool:
@@ -7239,6 +7367,43 @@ class OpenAIChatToolWindow(ToolWindow):
         if isinstance(value, bool):
             return value
         return str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "disabled")
+
+    def _cycle_effort_level(self, _event=None):
+        """点击思考强度胶囊 → 在模型支持的等级间循环轮换（low→medium→high→…→low）。
+
+        轮换顺序取 models.dev 的 reasoning_effort_values（强度升序），
+        新等级写入 model_overrides 持久化，下次请求自动生效。
+        """
+        if not self._current_model_name:
+            return
+        caps = get_model_capabilities(self._current_model_name)
+        values = [str(v) for v in (caps.get("reasoning_effort_values") or [])]
+        if not values:
+            # 无等级可选值 → 无可轮换，忽略点击
+            return
+        config = self._get_current_model_config()
+        current = str(config.get("思考等级", "") or "")
+        lowers = [v.lower() for v in values]
+        try:
+            idx = lowers.index(current.lower())
+        except ValueError:
+            idx = (len(values) - 1) // 2  # 保存值无效 → 从中间等级开始轮换
+        next_effort = values[(idx + 1) % len(values)]
+        self._save_model_override("思考等级", next_effort)
+        self._update_settings_effort_btn()
+        logger.info(f"[EffortCycle] {self._current_model_name}: {current or '?'} -> {next_effort}")
+
+    def _save_model_override(self, key: str, value):
+        """写模型级参数覆盖（model_overrides[服务商名||模型名]），持久化保存。"""
+        provider_name = self._valid_configs.get(self._current_provider_name, {}).get(
+            "provider_name", self._current_provider_name
+        )
+        override_key = f"{provider_name}||{self._current_model_name}"
+        model_overrides = copy.deepcopy(self.cfg.llm_model_overrides.value) or {}
+        existing = model_overrides.get(override_key, {}).copy()
+        existing[key] = value
+        model_overrides[override_key] = existing
+        self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
 
     def _on_context_selection_changed(self, _selected_keys=None):
         self._refresh_context_usage_indicator()
@@ -9584,6 +9749,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     border: none;
                     border-radius: 8px;
                 """)
+                # 同步刷新模型胶囊内竖向分隔线（主题色跟随 BORDER）
+                for _sep in (getattr(self, "_model_sep_name", None), getattr(self, "_model_sep_usage", None)):
+                    if _sep is not None:
+                        _sep.setStyleSheet(f"background: {Colors.BORDER};")
             if hasattr(self, "_toolbar_capsule"):
                 self._toolbar_capsule.setStyleSheet(f"""
                     background: {Colors.TOOLBAR_BG};
@@ -9694,9 +9863,26 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
-        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感）
-        if hasattr(self, "_settings_effort_label"):
-            self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
+        # 参数配置按钮的思考强度胶囊（颜色+字体双敏感，走完整刷新保留等级色）
+        if hasattr(self, "effort_btn"):
+            self._update_settings_effort_btn()
+        # 模型参数配置按钮（settings_btn）：hover 背景 + 图标随主题刷新。
+        # 其 styleSheet 在构建时把 Colors.HOVER_BG_STRONG 写死进 f-string，
+        # 图标也用 .pixmap() 渲染成静态图，主题切换后不会自动更新 —— 这里用
+        # 当前主题 Colors 重设，恢复"随主题变化"能力。
+        if hasattr(self, "settings_btn"):
+            self.settings_btn.setStyleSheet(f"""
+                QWidget#settingsEffortBtn {{
+                    background: transparent;
+                    border: none;
+                    border-radius: 8px;
+                }}
+                QWidget#settingsEffortBtn:hover {{
+                    background: {Colors.HOVER_BG_STRONG};
+                }}
+            """)
+        if hasattr(self, "_settings_btn_icon"):
+            self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
         # 项目新建输入框（含 font_size_css + 颜色）
         if hasattr(self, "_project_new_edit"):
             self._project_new_edit.setStyleSheet(f"""
@@ -10020,6 +10206,17 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 新建会话停止流式失败: {e}")
             self._set_ai_state("idle")
+            # 🐛 修复：新建任务打断流式时收尾团队邮件，避免 _team_processing 死锁。
+            # 取消路径下 worker 不发射 finished_with_content → 绑定其的 _on_stream_finished
+            # 永不触发 → _team_processing 卡 True、正在处理的邮件卡 running、A 后续发来
+            # 的新邮件被 _check_and_process_pending 的 _team_processing 守卫跳过，B 完全
+            # 收不到。复用手动停止的成熟收尾逻辑（必须在 create_session 前，旧 session
+            # 判定口径正确）。非团队窗口 _current_team_mail 为 None 且 get_running_tasks
+            # 返回空，调用安全。
+            try:
+                self._sync_team_mail_on_stop()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[MainWidget] 新建会话收尾团队邮件失败: {e}")
 
         # 🛡️ 标记会话切换：stop_streaming 后 worker 仍可能在跨线程事件循环里
         # 投递 _on_messages_updated / _on_stream_finished / _do_post_stream_cleanup
@@ -10115,11 +10312,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "session_manager") or not self.session_manager:
             return
         active_ids = {s.session_id for s in self.session_manager.get_all_sessions()}
+        # 🛡️ 竞态守卫：延迟保存（_schedule_save → QTimer 1000ms → _do_save）
+        # 窗口内若本方法把 pending 会话的 messages 置空，_do_save 会用
+        # serialize([]) 覆盖 SQLite 中该会话的完整消息（历史消息丢失、
+        # 加载后列表为空的根因之一）。pending 会话跳过释放，等落库后再回收。
+        pending_id = getattr(self.history_manager, "_pending_save_session_id", None)
         released = 0
         try:
             for session in self.history_manager._history_sessions:
                 sid = session.get("session_id")
                 if sid and sid not in active_ids and session.get("messages"):
+                    if pending_id and sid == pending_id:
+                        continue  # 跳过 pending 会话，避免空消息覆盖 DB
                     session["messages"] = []
                     released += 1
             if released:
@@ -11847,6 +12051,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._clear_chat_area()
             self.node_preview.clear_nodes()
             self._current_assistant_card = None
+            # 🛡️ 失效欢迎卡片缓存：会话被改空（撤销/截断）后历史数据已变化，
+            # 否则 _get_or_create_welcome_card 命中旧缓存 → "最近会话" 停留在旧快照。
+            self._invalidate_welcome_card()
             logger.info("[DEBUG-diagnose-welcome] Before _show_initial_welcome")
             self._show_initial_welcome()
             logger.info("[DEBUG-diagnose-welcome] After _show_initial_welcome")
@@ -11865,6 +12072,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_clear_shortcut(self):
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛡️ 失效欢迎卡片缓存：清空会话后历史数据已变化，避免 _get_or_create_welcome_card
+        # 命中旧缓存导致"最近会话"停留在清空前的旧快照（与 _create_new_session 一致）。
+        self._invalidate_welcome_card()
         # 使用辅助函数清空并显示欢迎
         clear_and_show_welcome(
             session=self.session_manager.get_current_session(),
@@ -15052,6 +15262,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 清零会话切换哨兵：用户即将发起新 AI 请求，worker 的旧回调通道已无意义，
         # 后续 _on_messages_updated / _do_post_stream_cleanup 应正常处理新会话。
         self._session_switched = False
+        # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
+        self._post_compact_guard = False
 
         if self._is_auto_loop_running:
             InfoBar.warning(
@@ -16912,6 +17124,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # 这里无需再 set_messages，避免 UI 副作用（set_meta_info/ring 刷新）访问已销毁的 widget。
         if getattr(self, "_is_destroyed", False):
             return
+        # 🛡️ 压缩守卫（P-Compact）：自动压缩清空会话后，被 stop_streaming 取消的旧 worker
+        # 其 finished_with_messages（旧消息快照）可能延迟到达，全量覆写会把已清空的会话
+        # 恢复成旧消息（压缩失效 + 反复触发）。判定：消息数 > 当前 session → 旧 worker
+        # 快照，丢弃。新 worker 长度与 session 长度一致时不误拦（+0 容差）。
+        # 修复：原阈值 `+10` 在短对话（≤10 条）下失效，会被覆盖回旧消息。
+        if getattr(self, "_post_compact_guard", False):
+            _cur_session = self.session_manager.get_current_session() if self.session_manager else None
+            if _cur_session and messages and len(messages) > len(_cur_session.messages):
+                self._post_compact_guard = False
+                from loguru import logger
+
+                logger.info(
+                    f"[MessagesUpdated] 压缩守卫拦截旧 worker 延迟消息: "
+                    f"msg_count={len(messages)}, current_len={len(_cur_session.messages)}"
+                )
+                return
         # 🛡️ 会话切换哨兵：_create_new_session 会创建新会话并 stop_streaming，
         # 但 worker 跨线程的 _on_messages_updated 可能延迟到达，此时
         # get_current_session() 返回的是新会话（旧会话已被替换），

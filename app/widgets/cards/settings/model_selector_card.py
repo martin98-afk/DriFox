@@ -49,6 +49,41 @@ def _measure_name_width(names) -> int:
     return (max(widths) if widths else 0) + 12
 
 
+def _lighten_hex(hex_color: str, amount: float) -> str:
+    """将 6 位 hex 颜色向白色提亮 amount（0~1），用于深色底上的标签文字更醒目。"""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r = int(r + (255 - r) * amount)
+    g = int(g + (255 - g) * amount)
+    b = int(b + (255 - b) * amount)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _cap_badge_colors() -> Tuple[str, str, str, str, str, str]:
+    """能力徽章配色（开关思考 / 多模态 / 思考强度）。
+
+    深色主题下整体提亮——文字向白提亮、背景 alpha 略增，避免颜色在深底上显得过深；
+    浅色主题保持主题 token 原值（深色文字配合浅底，避免亮字看不清）。
+    返回：(think_text, think_bg, vision_text, vision_bg, effort_text, effort_bg)
+    """
+    Colors.refresh()
+    from app.utils.theme_manager import theme_manager
+
+    if theme_manager.is_light_theme():
+        return (
+            Colors.TAG_ORANGE_TEXT, "rgba(255,179,102,0.18)",
+            Colors.TAG_ACCENT_TEXT, "rgba(102,198,255,0.18)",
+            Colors.TAG_PURPLE_TEXT, "rgba(179,136,255,0.15)",
+        )
+    return (
+        _lighten_hex(Colors.TAG_ORANGE_TEXT, 0.22), "rgba(255,179,102,0.28)",
+        _lighten_hex(Colors.TAG_ACCENT_TEXT, 0.22), "rgba(102,198,255,0.28)",
+        _lighten_hex(Colors.TAG_PURPLE_TEXT, 0.22), "rgba(179,136,255,0.24)",
+    )
+
+
 # item 高度常量
 _ITEM_HEIGHT = 34  # ModelItem 高度
 _HEADER_HEIGHT = 36  # ProviderHeader 高度
@@ -117,13 +152,8 @@ class ModelItem(QWidget):
 
     clicked = pyqtSignal(str, str)  # provider_name, model_name
 
-    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-蓝）
-    _THINK_TEXT = Colors.TAG_ORANGE_TEXT  # #ffc999
-    _THINK_BG = "rgba(255,179,102,0.18)"
-    _VISION_TEXT = Colors.TAG_ACCENT_TEXT  # #aae0ff
-    _VISION_BG = "rgba(102,198,255,0.18)"
-    _EFFORT_TEXT = Colors.RING_NORMAL  # #5aa9ff
-    _EFFORT_BG = "rgba(90,169,255,0.15)"
+    # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-紫）
+    # 颜色不再硬编码：由 _cap_badge_colors() 按主题明暗动态计算（深色提亮）。
 
     def __init__(
         self,
@@ -259,20 +289,26 @@ class ModelItem(QWidget):
                 self.cost_label.setToolTip(cost_tooltip)
             layout.addWidget(self.cost_label, 0)
 
-        # 能力徽章（交互：思考 / 多模态），替换 emoji
+        # 能力徽章（交互：思考 / 多模态 / 思考强度），替换 emoji
+        # 颜色随主题明暗动态调整（深色主题下提亮，避免颜色在深底上显得过深）
+        (
+            think_text, think_bg,
+            vision_text, vision_bg,
+            effort_text_c, effort_bg,
+        ) = _cap_badge_colors()
         if self._caps.get("supports_thinking"):
-            self.think_label = self._make_cap_badge("开关思考", self._THINK_TEXT, self._THINK_BG, "支持思考开关")
+            self.think_label = self._make_cap_badge("开关思考", think_text, think_bg, "支持思考开关")
             layout.addWidget(self.think_label, 0)
         # 思考强度徽章：模型有 reasoning_effort 可选值（如 high/max）→ 可调强度
         effort_values = self._effort_values()
         if effort_values:
             effort_text = "/".join(effort_values)
             self.effort_label = self._make_cap_badge(
-                "思考强度", self._EFFORT_TEXT, self._EFFORT_BG, f"支持的思考强度: {effort_text}"
+                "思考强度", effort_text_c, effort_bg, f"支持的思考强度: {effort_text}"
             )
             layout.addWidget(self.effort_label, 0)
         if self._caps.get("supports_vision"):
-            self.vision_label = self._make_cap_badge("多模态", self._VISION_TEXT, self._VISION_BG, "支持多模态输入")
+            self.vision_label = self._make_cap_badge("多模态", vision_text, vision_bg, "支持多模态输入")
             layout.addWidget(self.vision_label, 0)
 
         # 描述 info（SVG question 图标，紧跟内容区，悬停显示完整描述）

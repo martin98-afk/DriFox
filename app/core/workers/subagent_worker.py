@@ -17,6 +17,7 @@ from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
 from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
+    normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
@@ -856,7 +857,11 @@ class SubAgentExecutor(QThread):
                     extra_body.pop("thinking", None)
                 elif t_param == "reasoning_effort":
                     if "reasoning_effort" not in extra_body:
-                        extra_body["reasoning_effort"] = config.get("思考等级", "medium")
+                        # 等级经 normalize 强制校验：保存值不在该模型可选值中时
+                        # 回退中间配置，防止无效值发到 API
+                        extra_body["reasoning_effort"] = normalize_reasoning_effort(
+                            config.get("思考等级", "medium"), caps.get("reasoning_effort_values")
+                        )
                     extra_body.pop("thinking", None)
                     extra_body.pop("thinking_budget", None)
             else:  # False - 关闭思考
