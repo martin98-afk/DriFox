@@ -2742,11 +2742,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_team_run_id", ""):
             self._session_dirty = True
 
-        # 🆕 刷新历史面板：分支创建新会话后，历史面板 UI 需同步最新数据
-        # （被分支的旧会话已 autosave 入库；分支新会话尚未落库不显示，属预期）。
-        # 仅历史卡片可见时执行（不可见时 0 开销），下次打开面板仍走
-        # _toggle_history_card → _refresh_history_toggle_panel 拉取最新数据。
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 🆕 会话数据变更统一通知：分支创建新会话后历史面板 UI 需同步最新数据
+        # （被分支的旧会话已 autosave 入库）+ 欢迎卡片失效 + 跨窗口广播
+        self._notify_history_data_changed()
 
     def _refresh_cache_stats(self):
         """刷新缓存统计显示（对话完成后调用）"""
@@ -8412,6 +8410,65 @@ class OpenAIChatToolWindow(ToolWindow):
             # 刷新归档会话
             self._refresh_archived_sessions()
 
+    def _notify_history_data_changed(self, broadcast: bool = True):
+        """会话数据变更统一通知：刷新历史卡片 + 失效欢迎卡片 + Tab 模式广播其他窗口
+
+        收敛所有「会话状态变化 → 历史卡片/欢迎卡片同步」路径：
+        1. 本窗口历史卡片可见时刷新（_refresh_history_toggle_panel 内部按
+           current_tab 分流历史/归档列表）
+        2. 本窗口欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）时交错调度重建，
+           确保 recent_sessions/top_by_count 拿到最新数据
+        3. broadcast=True 时广播 Tab 管理器其他窗口（接收方 broadcast=False
+           防递归），修复跨窗口会话状态不即时同步
+
+        调用点（会话数据变更处）：
+        - _save_current_session_to_history / _auto_save_current_session
+        - _rename_history_session / _archive_history_session / 团队归档
+        - _on_session_imported / _on_archived_session_restored/deleted/renamed
+        - _on_history_project_selected / _on_session_dropped_on_project
+        - TabManagerWindow._on_tab_selected（切回窗口补刷新，broadcast=False）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        # 1. 历史卡片可见时刷新
+        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 2. 欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）且窗口可见 →
+        #    同步重建（摘除旧卡后立即补位，避免延迟空白）；
+        #    窗口不可见（Tab 后台）→ 仅失效缓存，切回时 _on_tab_selected 补刷；
+        #    已有 pending 渲染（_create_new_session 的 schedule）→ 由槽位回调重建，
+        #    避免双渲染 QWebEngineView。
+        self._invalidate_welcome_card()
+        if self._displayed_session_id is None and self.isVisible() and not getattr(
+            self, "_welcome_render_pending", False
+        ):
+            self._show_initial_welcome()
+        # 3. Tab 模式广播其他窗口
+        if broadcast:
+            self._broadcast_history_data_changed()
+
+    def _broadcast_history_data_changed(self):
+        """Tab 模式广播会话数据变更给其他窗口（接收方走 _notify_history_data_changed）
+
+        遍历 TabManagerWindow._windows，跳过自身与已销毁窗口。仅广播不刷新本窗口
+        （本窗口刷新由调用方完成），避免递归。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return
+            for win in list(tm._windows):
+                if win is self or getattr(win, "_is_destroyed", False):
+                    continue
+                if hasattr(win, "_notify_history_data_changed"):
+                    try:
+                        win._notify_history_data_changed(broadcast=False)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _build_team_groups(self, history_list: List[Dict]) -> List[Dict]:
         """从历史会话列表组装团队对话分组（方案 A）
 
@@ -8459,7 +8516,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self.backend._current_project = project
         self._current_history_project = project
         self._history_popup_card.set_current_project(project)
-        self._refresh_history_toggle_panel()
+        # 会话数据变更统一通知：项目切换后历史列表按新项目过滤 +
+        # 欢迎卡片失效（recent_sessions/top_by_count 依赖 _current_project）
+        self._notify_history_data_changed()
         # 团队模式：历史面板项目切换同样触发团队级同步
         self._broadcast_team_project(project, prev_project)
 
@@ -8477,8 +8536,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 idx = self.history_manager.find_index_by_session_id(session_id)
                 if idx is not None:
                     self.history_manager.move_to_project(idx, project)
-                    # 刷新
-                    self._history_popup_card.refreshRequested.emit()
+                    # 会话数据变更统一通知：会话项目归属变化影响历史列表
+                    # 过滤 + 欢迎卡片（按项目过滤）+ 跨窗口广播
+                    self._notify_history_data_changed()
                     InfoBar.success(
                         "已移动",
                         f"会话已移至「{project}」项目",
@@ -8838,6 +8898,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=4000,
                 position=InfoBarPosition.BOTTOM,
             )
+        # 会话数据变更统一通知：恢复团队会话产生新会话记录（新 run_id），
+        # 历史面板/欢迎卡片需同步 + 跨窗口广播
+        self._notify_history_data_changed()
         # 关闭历史会话卡片
         self._card_manager.hide_card("history", self._window_id)
 
@@ -10411,10 +10474,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 并发新建 N 个会话时避免 N 个 welcome 在同一事件批次连续渲染卡死 UI（C2）。
         self._schedule_initial_welcome()
         self._refresh_context_usage_indicator()
-        # 🆕 刷新历史面板：建新会话时旧会话已被 _auto_save_current_session 入库，
-        # 但历史面板 UI 未收到信号 → 列表停留在保存前快照（旧会话缺失）。
-        # 仅历史卡片可见时执行（不可见时 0 开销）。
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 🆕 会话数据变更统一通知：建新会话时旧会话已被 _auto_save_current_session
+        # 入库，历史面板 UI 需同步最新数据（旧会话缺失修复）+ 欢迎卡片失效
+        # （_schedule_initial_welcome 已调度重建，notify 只补历史卡片与跨窗口广播）
+        self._notify_history_data_changed()
 
     def _release_inactive_session_messages(self):
         """释放非活跃会话在 HistoryManager 中的消息数据。
@@ -10513,12 +10576,26 @@ class OpenAIChatToolWindow(ToolWindow):
         做法：类级计数器分配 0/50/100/.../950ms 槽位（模 20 轮转），让 N 个
         窗口的渲染请求均匀散开。单窗场景槽位为 0ms（立即，与原来 singleShot(0)
         无感知差异）；类级而非实例级，确保不同窗口拿到递增槽位。
+
+        🛡️ pending 守卫：同一窗口已有待执行的 welcome 渲染时跳过本次调度。
+        会话数据变更统一入口（_notify_history_data_changed）与 _create_new_session
+        在同事件批次内可能连续调度，无守卫会双次重建 QWebEngineView（100-500ms×2）。
+        渲染回调读 _get_or_create_welcome_card 时缓存已被 invalidate，合并调度
+        仍拿到最新数据，不丢失更新。
         """
+        if getattr(self, "_welcome_render_pending", False):
+            return
+        self._welcome_render_pending = True
         cls = type(self)
         slot = getattr(cls, "_welcome_slot", 0) + 1
         setattr(cls, "_welcome_slot", slot)
         delay = ((slot - 1) % self._WELCOME_SLOT_COUNT) * self._WELCOME_SLOT_MS
-        QTimer.singleShot(delay, lambda: self._safe_timer_call(self._show_initial_welcome))
+        QTimer.singleShot(delay, lambda: self._safe_timer_call(self._on_welcome_render_slot))
+
+    def _on_welcome_render_slot(self):
+        """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
+        self._welcome_render_pending = False
+        self._show_initial_welcome()
 
     def _hide_welcome_cards(self):
         """从布局中移除所有欢迎卡片（widget 不删除，由 _welcome_card_cache 管理）"""
@@ -12302,21 +12379,12 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if archived_current:
             # 归档的是当前会话 → UI 变化大（新会话创建、活跃标记变更），需要全量刷新
-            if current_tab == "archived":
-                refresh_history_card_if_visible(
-                    self._history_card,
-                    lambda: self._refresh_history_toggle_panel(is_archived=True),
-                )
-            else:
-                refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+            self._notify_history_data_changed()
         else:
             # 归档的是非当前会话 → 可以直接手术式删除卡片，避免全量刷新
             if current_tab == "archived":
                 # 归档标签页下，需要刷新归档列表
-                refresh_history_card_if_visible(
-                    self._history_card,
-                    lambda: self._refresh_history_toggle_panel(is_archived=True),
-                )
+                self._notify_history_data_changed()
             else:
                 # 历史标签页下，手术式删除卡片
                 removed = (
@@ -12326,7 +12394,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
                 if not removed:
                     # 回退：手术式删除失败，走全量刷新
-                    refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+                    self._notify_history_data_changed()
 
         # 操作完成，恢复正常状态
         if self.pixel_pet:
@@ -12392,8 +12460,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._show_initial_welcome,
             )
 
-        # 刷新历史面板（团队合并条目消失 / 成员卡片移除）
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 会话数据变更统一通知：刷新历史面板（团队合并条目消失 / 成员卡片移除）
+        # + 欢迎卡片失效 + 跨窗口广播
+        self._notify_history_data_changed()
 
         if count > 0:
             InfoBar.success(
@@ -12442,8 +12511,9 @@ class OpenAIChatToolWindow(ToolWindow):
             current_session.set_user_edited_title(True)
             # 4. 同步窗口标题 → Tab 标题（windowTitleChanged 信号自动传播）
             self._sync_dialog_title()
-        # 5. 刷新历史会话卡片
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 5. 会话数据变更统一通知：刷新历史卡片 + 失效欢迎卡片（recent_sessions
+        #    标题会变化）+ 跨窗口广播（其他窗口的欢迎卡片也展示该标题）
+        self._notify_history_data_changed()
 
     def _on_session_imported(self, data: dict):
         """处理导入的会话文件"""
@@ -12456,8 +12526,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         imported_session = self.history_manager.import_from_json(file_path)
         if imported_session:
-            # 刷新历史会话卡片
-            self._refresh_history_toggle_panel()
+            # 会话数据变更统一通知：刷新历史卡片 + 失效欢迎卡片（新导入会话
+            # 应出现在 recent_sessions/top_by_count）+ 跨窗口广播
+            self._notify_history_data_changed()
             # 显示提示信息
             InfoBar.success(
                 title="导入成功",
@@ -12494,8 +12565,11 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[恢复会话] 删除归档文件失败: {e}")
 
-            # 刷新归档列表
+            # 刷新归档列表（归档 tab 下立即生效；历史 tab 下由 notify 兜底）
             self._refresh_archived_sessions()
+            # 会话数据变更统一通知：刷新历史卡片（恢复的会话重新出现在
+            # 历史列表）+ 失效欢迎卡片（recent_sessions 变化）+ 跨窗口广播
+            self._notify_history_data_changed()
 
             InfoBar.success(
                 title="恢复成功",
@@ -12557,10 +12631,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 刷新归档列表
             self._refresh_archived_sessions()
-            # 🛡️ 失效欢迎卡片：归档删除会让 recent_sessions / top_by_count 顺序变化
-            self._invalidate_welcome_card()
-            if self._displayed_session_id is None:
-                self._show_initial_welcome()
+            # 会话数据变更统一通知：失效欢迎卡片（归档删除会让 recent_sessions
+            # / top_by_count 顺序变化）+ 历史卡片刷新 + 跨窗口广播
+            self._notify_history_data_changed()
 
             InfoBar.success(
                 title="删除成功",
@@ -12602,10 +12675,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # 刷新归档列表
             self._refresh_archived_sessions()
-            # 🛡️ 失效欢迎卡片：归档重命名会让 recent_sessions 标题变化
-            self._invalidate_welcome_card()
-            if self._displayed_session_id is None:
-                self._show_initial_welcome()
+            # 会话数据变更统一通知：失效欢迎卡片（归档重命名会让 recent_sessions
+            # 标题变化）+ 历史卡片刷新 + 跨窗口广播
+            self._notify_history_data_changed()
 
             InfoBar.success(
                 title="重命名成功",
@@ -12816,9 +12888,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._display_current_session()
         self._release_inactive_session_messages()
 
-        # 刷新历史会话卡片（P0-1：卡片懒创建，需判空）
-        if getattr(self, "_history_card", None) and self._history_card.isVisible():
-            self._refresh_history_toggle_panel()
+        # 会话数据变更统一通知：加载历史会话后当前会话高亮/最近列表变化
+        # （P0-1：卡片懒创建，需判空；notify 内部已判空）
+        self._notify_history_data_changed()
 
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
         try:
@@ -17214,11 +17286,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 成功保存后清除脏标记，后续无变更的重复 save 将被跳过
         self._session_dirty = False
         self._update_node_preview()
-        # 🆕 历史面板刷新：保存后同步内存缓存到历史面板 UI，
-        # 避免「历史面板已展开但列表停在保存前快照」bug。
-        # 仅历史卡片可见时执行（不可见时 0 开销），下次打开面板仍走
-        # _toggle_history_card → _refresh_history_toggle_panel 拉取最新数据。
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 🆕 会话数据变更统一通知：历史面板刷新（可见时）+ 欢迎卡片缓存失效 +
+        # Tab 模式广播其他窗口（跨窗口即时同步）。原实现仅 refresh_history_card_if_visible，
+        # 缺失欢迎卡片失效与跨窗口广播 → 历史/欢迎卡片会话 tab 显示陈旧快照。
+        self._notify_history_data_changed()
 
     @staticmethod
     def _count_user_messages(messages: List[Dict]) -> int:
@@ -18301,7 +18372,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._current_history_project = project
         if getattr(self, "_history_popup_card", None):
             self._history_popup_card.set_current_project(project)
-            self._refresh_history_toggle_panel()
+            self._notify_history_data_changed()
         # Tab 模式下同步更新 Tab 图标
         if self.cfg.enable_tab_manager.value:
             try:
@@ -18460,7 +18531,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
         self._history_popup_card.set_current_project(project)
-        self._refresh_history_toggle_panel()
+        self._notify_history_data_changed()
         # 自动触发新建会话，避免原会话与切换后的项目不匹配
         self._create_new_session()
         # 隐藏项目选择卡片
@@ -18627,7 +18698,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._broadcast_team_project(default_project, project_name)
         else:
             self._current_history_project = self._current_project
-            self._refresh_history_toggle_panel()
+            self._notify_history_data_changed()
 
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
@@ -18880,7 +18951,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if success_count > 0:
             # 刷新项目列表和历史面板
             self._refresh_project_selector()
-            self._refresh_history_toggle_panel()
+            self._notify_history_data_changed()
             InfoBar.success(
                 title="",
                 content=f"成功导入 {success_count} 个项目",
@@ -18943,7 +19014,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         if self._do_import_project_archive(file_path):
             self._refresh_project_selector()
-            self._refresh_history_toggle_panel()
+            self._notify_history_data_changed()
 
     def _do_import_project_archive(self, zip_path: str) -> bool:
         """执行项目压缩包导入，含项目文件的自动恢复"""
@@ -19095,7 +19166,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         if self._do_import_project_archive(file_path):
             self._refresh_project_selector()
-            self._refresh_history_toggle_panel()
+            self._notify_history_data_changed()
 
     def _refresh_project_selector(self):
         """刷新项目选择器列表"""
@@ -19757,10 +19828,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.history_manager:
             self.history_manager.flush()
 
-        # 🆕 刷新历史面板：自动保存路径同样需要触发 UI 同步
-        # （关闭窗口/项目切换等触发此函数时，历史面板可能已展开）。
-        # 仅历史卡片可见时执行（不可见时 0 开销）。
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 🆕 会话数据变更统一通知：历史面板刷新 + 欢迎卡片失效 + 跨窗口广播
+        # （自动保存路径同样需要触发 UI 同步：关闭窗口/项目切换等触发此函数时，
+        # 历史面板可能已展开；且欢迎卡片 recent_sessions 依赖 last_time/message_count）
+        self._notify_history_data_changed()
 
         if self._current_session_id:
             idx = self.history_manager.find_index_by_session_id(self._current_session_id)
