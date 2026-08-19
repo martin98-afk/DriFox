@@ -188,6 +188,7 @@ class OpenAIChatWorker(QThread):
     # 同样的消息序列重试仍会被拒，必须客户端主动中断。
     # 阈值设为 3：与 AutoLoopWorker 的"连续失败 3 次"语义对齐；给模型 1-2 轮自我修正机会。
     _TOOL_LOOP_THRESHOLD = 3
+    _model_adapter = None  # 懒解析缓存（首查时 resolve）
 
     def __init__(
         self,
@@ -2639,59 +2640,36 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _adapter_flags(self):
+        """经 ModelAdapterRegistry 解析协议开关（插件可覆盖内置判定）"""
+        if self._model_adapter is None:
+            from app.plugins.builtin_runtime import ensure_builtin_adapters
+            from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+            ensure_builtin_adapters()  # 冷启动防御（正常路径由 backend warmup 注册）
+            self._model_adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
+        return self._model_adapter.protocol_flags(self.llm_config or {})
+
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        deepseek 系模型（含 opencode.ai 等中转平台承载的 deepseek-v4 系列）在
-        thinking mode 下要求 tool_calls assistant 消息必须携带 reasoning_content
-        字段（可为空串），否则上游 Console 报 400。
+        实现已迁移 builtin_runtime.OpenAIAdapter._requires_reasoning（插件可覆盖）。
         """
-        if self.llm_config.get("思考模式") is not True:
-            return False
-        family = detect_provider_family(self.llm_config)
-        if family == "deepseek":
-            return True
-        # opencode 等中转平台承载 deepseek 系模型时（模型名以 deepseek 开头），
-        # 上游协议与官方 Console 一致，同样需要 reasoning_content 回传
-        model = str(self.llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("deepseek")
+        return self._adapter_flags().requires_reasoning_content
 
     def _is_gemini_model(self) -> bool:
-        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
-        try:
-            if detect_provider_family(self.llm_config) == "gemini":
-                return True
-        except Exception:
-            pass
-        # 兜底：模型名含 gemini（如 models/gemini-3-flash-preview 的 startswith 判断会漏）
-        try:
-            model = str((self.llm_config or {}).get("模型名称", "") or "").lower()
-            if "gemini" in model:
-                return True
-        except Exception:
-            pass
-        return False
+        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。
+
+        实现已迁移 builtin_runtime.OpenAIAdapter._is_gemini（插件可覆盖）。
+        """
+        return self._adapter_flags().is_gemini
 
     def _use_responses_api(self) -> bool:
         """当前模型是否走 Responses API（/v1/responses）。
 
-        GPT-5.x 系列（gpt-5.6-luna 等）的思考内容只在 Responses API 的
-        reasoning_summary_text 事件中返回；chat/completions 端点的流式 delta
-        不含任何 reasoning 字段（OpenCode Go 网关实测剥离），导致思考不渲染。
-        对该系列模型自动切换 Responses API 以获取并渲染思考内容。
-
-        判断规则（可被配置覆盖）：
-        - llm_config["使用ResponsesAPI"] 显式 True/False → 强制开关
-        - 否则模型名小写以 gpt-5 开头 → True
+        实现已迁移 builtin_runtime.OpenAIAdapter._use_responses（插件可覆盖）。
         """
-        try:
-            override = self.llm_config.get("使用ResponsesAPI")
-            if override is not None:
-                return bool(override)
-            model = str(self.llm_config.get("模型名称", "") or "").lower()
-            return model.startswith("gpt-5")
-        except Exception:
-            return False
+        return self._adapter_flags().use_responses_api
 
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """

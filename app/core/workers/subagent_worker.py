@@ -595,19 +595,18 @@ class SubAgentExecutor(QThread):
         return _THINKING_PATTERN.sub("", content)
 
     def _requires_reasoning_content(self, llm_config: Dict) -> bool:
-        """thinking 模式下，deepseek 系模型要求 tool-call assistant 保留 reasoning_content 字段。
+        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        与 chat_worker._requires_reasoning_content 保持一致：deepseek 官方及
-        opencode 等中转平台承载的 deepseek 系模型，上游 Console 均要求
-        tool_calls assistant 消息携带 reasoning_content 字段（可为空串）。
+        通过 ModelAdapterRegistry 解析（插件可覆盖内置判定）。每调用解析一次
+        ——该方法每轮对话仅调用数次，开销可忽略；不缓存避免 worker 生命周期与
+        热重载不一致。
         """
-        if not isinstance(llm_config, dict) or llm_config.get("思考模式") is not True:
-            return False
-        family = detect_provider_family(llm_config)
-        if family == "deepseek":
-            return True
-        model = str(llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("deepseek")
+        from app.plugins.builtin_runtime import ensure_builtin_adapters
+        from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+        ensure_builtin_adapters()
+        adapter = ModelAdapterRegistry.get_instance().resolve(llm_config or {})
+        return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
 
     # ========== Hook 集成（让子智能体也能应用所有 hook） ==========
     # 设计目标：与 chat_worker 对齐，让子智能体也能触发/消费以下 hook：
