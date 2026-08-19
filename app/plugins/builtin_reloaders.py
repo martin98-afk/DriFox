@@ -36,8 +36,6 @@ def _reload_agents(ctx: ReloadContext) -> Any:
         return False
     count = am.reload_plugin_agents(ctx.plugin_name)
     try:
-        from app.core.builtin_commands import reload_agent_commands
-
         reload_agent_commands()
     except Exception as e:
         logger.error(f"[builtin_reloaders] Failed to reload commands after agent change: {e}")
@@ -55,8 +53,6 @@ def _reload_hooks(ctx: ReloadContext) -> Any:
 
 def _reload_commands(ctx: ReloadContext) -> Any:
     """commands 分支：backend.py:2036-2044 原样迁入"""
-    from app.core.builtin_commands import reload_all_commands
-
     reload_all_commands()
     return True
 

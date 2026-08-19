@@ -185,6 +185,18 @@ def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
     return cleaned, image_paths
 
 
+def _safe_agent_manager(backend: "ChatBackend") -> Any:
+    """安全读取 _agent_manager：未 __init__ 时返回 None 而不触发 super().__init__ 异常
+
+    ChatBackend.__new__(...) 路径（测试场景）下，self._agent_manager 是 descriptor，
+    任何属性访问会触发 QObject.__init__() 链校验。bind_runtime 需 None 而非异常。
+    """
+    try:
+        return object.__getattribute__(backend, "_agent_manager")
+    except (AttributeError, RuntimeError):
+        return None
+
+
 class ChatBackend(QObject):
     """
     聊天后端 - 自己创建所有核心组件，暴露统一接口给前端
@@ -918,6 +930,17 @@ class ChatBackend(QObject):
         from PyQt5.QtCore import QTimer
 
         def _do_deferred():
+            # 内置组件 reloader 注册（幂等，进程一次 — chat_backend.py 顶层注册表
+            # 可能在 ChatBackend 之前已被其他模块 import kernel 注册过，幂等保护）
+            try:
+                from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
+                from app.plugins.kernel import get_reloader_registry
+
+                bind_runtime(_safe_agent_manager(self))
+                register_builtin_reloaders(get_reloader_registry())
+            except Exception as e:
+                logger.error(f"[ChatBackend] 内置 reloader 注册失败: {e}")
+
             # 刷新主题
             try:
                 self._reload_themes_from_plugins()
@@ -1603,12 +1626,7 @@ class ChatBackend(QObject):
         if not plugin_path:
             return set()
 
-        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
-        # 插件根目录的关键文件 → 映射到对应组件
-        ROOT_FILE_COMPONENTS = {
-            ".mcp.json": "mcp",
-            ".lsp.json": "lsp",
-        }
+        from app.plugins.kernel import KNOWN_COMPONENTS, ROOT_FILE_COMPONENTS
 
         components: set = set()
         for _, change_path in changes:
@@ -1649,11 +1667,7 @@ class ChatBackend(QObject):
             return []
 
         plugin_path = str(plugin.path.resolve()).lower().rstrip("\\/")
-        KNOWN_COMPONENTS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
-        ROOT_FILE_COMPONENTS = {
-            ".mcp.json": "mcp",
-            ".lsp.json": "lsp",
-        }
+        from app.plugins.kernel import KNOWN_COMPONENTS, ROOT_FILE_COMPONENTS
 
         components: set = set()
         for _, change_path in changes:
@@ -1874,7 +1888,8 @@ class ChatBackend(QObject):
 
         Returns:
             {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
-             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool}
+             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool,
+             "tools": bool, "providers": bool, "team_templates": bool}
         """
         result: dict = {
             "agents": 0,
@@ -1885,7 +1900,14 @@ class ChatBackend(QObject):
             "mcp": False,
             "lsp": False,
             "ui": False,
+            "tools": False,
+            "providers": False,
+            "team_templates": False,
         }
+
+        # 表分派：原 8 分支 if 已在 builtin_reloaders（commit 0e141cd9）— 此处仅查注册表
+        result_keys = ("agents", "commands", "hooks", "themes", "skills",
+                       "mcp", "lsp", "ui", "tools", "providers", "team_templates")
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -2012,105 +2034,52 @@ class ChatBackend(QObject):
 
                 return result
 
-            # 2. 智能体：仅当变更在 agents/ 目录（含 hooks 重载一并完成）
-            if component == "agents" and self._agent_manager:
-                result["agents"] = self._agent_manager.reload_plugin_agents(plugin_name)
-                result["hooks"] = True  # agents 组件包含 hooks 重载
-                # 智能体变更后同步重载命令注册（agent 文件同时也是 /agent_name 命令源）
-                # 确保 CommandManager 中的 agent 命令同步更新，否则 /silent-failure-hunter 等命令无法识别
-                # 局部重注册：只更新 AGENT 命令，不触发全量 reload_all_commands（避免 2500ms 全量重载）
-                try:
-                    from app.core.builtin_commands import reload_agent_commands
+            # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
+            from app.plugins.builtin_reloaders import bind_runtime
+            from app.plugins.kernel import ReloadContext, get_reloader_registry
 
-                    reload_agent_commands()
-                    result["commands"] = True
-                    logger.debug(f"[ChatBackend] Agent commands reloaded after agent change for plugin: {plugin_name}")
-                except (ImportError, Exception) as e:
-                    logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
+            # 注入 runtime 句柄（agent_manager）— 幂等可重复调用
+            bind_runtime(_safe_agent_manager(self))
+            registry = get_reloader_registry()
 
-            # 3. Hooks：仅当变更在 hooks/ 目录（只重载 hooks，不碰 agents）
-            if component == "hooks" and self._agent_manager:
-                self._agent_manager.reload_plugin_hooks(plugin_name)
-                result["hooks"] = True
-                logger.debug(f"[ChatBackend] Hooks reloaded for plugin: {plugin_name}")
-
-            # 4. 命令：仅变更在 commands 目录才触发
-            if component == "commands" and plugin.has_component("commands"):
-                try:
-                    from app.core.builtin_commands import reload_all_commands
-
-                    reload_all_commands()
-                    result["commands"] = True
-                except (ImportError, Exception) as e:
-                    logger.error(f"[ChatBackend] Failed to reload commands: {e}")
-
-            # 5. 主题：watchfiles 已通过路径识别为 themes 组件变更
-            #    不依赖 plugin.has_component("themes")，因为：
-            #    - .drifox-plugin 格式 rescan 不会自动检测新增的 themes 目录
-            #    - 实际文件在 themes/ 下变更，theme_manager 必须 reload 才能反映新主题
-            if component == "themes":
-                try:
-                    from app.utils.config import update_theme_options
-                    from app.utils.theme_manager import theme_manager
-
-                    theme_manager.reload()
-                    update_theme_options()
-                    result["themes"] = True
-                    logger.debug(f"[ChatBackend] Themes reloaded for plugin: {plugin_name}")
-                except (ImportError, Exception) as e:
-                    logger.error(f"[ChatBackend] Failed to reload themes: {e}")
-
-            # 6. 技能：PluginManager 已在 rescan_plugin 中更新
-            #    UI 通过 get_local_skills() 懒加载，下次打开命令面板时自动生效
-            if component == "skills":
-                result["skills"] = True
-                # 🛡️ 强制失效技能缓存，确保下次 get_local_skills() 返回最新数据
-                # 虽然 mtime 缓存 key 能检测文件变更，但文件系统时间精度不足时可能漏检
-                invalidate_skills_cache()
-                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' skills reloaded (lazy)")
-
-            # 7. MCP 配置：PluginManager 已在 rescan_plugin 中更新
-            #    MCP 设置面板通过 pm.get_mcp_servers() 读取，下次刷新时自动生效
-            if component == "mcp":
-                result["mcp"] = True
-                logger.debug(f"[ChatBackend] Plugin '{plugin_name}' MCP config reloaded (lazy)")
-
-            # 8. LSP 配置：热重载 LSP 服务器
-            #    使用增量 API：先移除该插件旧的所有 LSP 服务器，再注册新的
-            #    不走 LspManager.initialize 全量重建路径
-            if component == "lsp":
-                try:
-                    from app.core.lsp.lsp_manager import get_lsp_manager
-
-                    lsp_mgr = get_lsp_manager()
-                    # 先移除旧服务器（如果 .lsp.json 被删除也需要清理）
-                    lsp_mgr.remove_plugin_servers(plugin_name)
-                    # 再注册并启动新服务器（如果 .lsp.json 还存在）
-                    lsp_config = pm.get_plugin_lsp_config(plugin_name)
-                    if lsp_config:
-                        count = lsp_mgr.add_plugin_servers(plugin_name, lsp_config["config"])
-                        result["lsp"] = count > 0
-                    logger.info(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载完成")
-                except Exception as e:
-                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 增量重载失败: {e}")
-
-            # 9. UI 组件：热重载 UI 组件（先卸载后加载）
-            if component == "ui" and plugin.has_component("ui"):
-                try:
-                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-                    UIPluginRegistry.get_instance().reload_plugin(plugin_name, plugin.path)
-                    result["ui"] = True
-                    logger.info(f"[ChatBackend] Plugin '{plugin_name}' UI 组件已重载")
-                except Exception as e:
-                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' UI 重载失败: {e}")
+            if component:
+                # 统一守卫层：plugin 缺失或无该组件时跳过（对齐原 commands/ui 分支的 has_component 前置）
+                if plugin is not None and not plugin.has_component(component):
+                    logger.debug(
+                        f"[ChatBackend] Plugin '{plugin_name}' has no '{component}' component, skip"
+                    )
+                else:
+                    reloaded = registry.reload(
+                        ReloadContext(
+                            plugin_name=plugin_name,
+                            plugin=plugin,
+                            component=component,
+                            is_new_plugin=False,
+                        )
+                    )
+                    if component in result_keys:
+                        result[component] = reloaded if reloaded is not None else False
+                    # agents 联动标记保持旧行为：agents 变更 → hooks/commands 视为已处理
+                    if component == "agents":
+                        result["hooks"] = True
+                        result["commands"] = True
+                    logger.info(
+                        f"[ChatBackend] Plugin [{plugin_name}] reloaded via kernel: "
+                        f"component={component}, outcome={reloaded} → {result}"
+                    )
+            else:
+                logger.debug(
+                    f"[ChatBackend] Plugin [{plugin_name}] root change, skip component reload"
+                )
 
             logger.info(
                 f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
                 f"agents={result['agents']}, commands={result['commands']}, "
                 f"themes={result['themes']}, skills={result['skills']}, "
                 f"mcp={result['mcp']}, lsp={result.get('lsp', False)}, "
-                f"ui={result.get('ui', False)}"
+                f"ui={result.get('ui', False)}, tools={result.get('tools', False)}, "
+                f"providers={result.get('providers', False)}, "
+                f"team_templates={result.get('team_templates', False)}"
             )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin '{plugin_name}': {e}")
@@ -2125,7 +2094,8 @@ class ChatBackend(QObject):
 
         Returns:
             {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
-             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool}
+             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool,
+             "tools": bool, "providers": bool, "team_templates": bool}
             各子系统的重载结果
         """
         result: dict = {
@@ -2137,7 +2107,25 @@ class ChatBackend(QObject):
             "mcp": False,
             "lsp": False,
             "ui": False,
+            "tools": False,
+            "providers": False,
+            "team_templates": False,
         }
+
+        # 表分派：内置 reloader 注册（幂等）+ runtime 句柄注入
+        try:
+            from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
+            from app.plugins.kernel import ReloadContext, get_reloader_registry
+
+            bind_runtime(_safe_agent_manager(self))
+            registry = get_reloader_registry()
+            register_builtin_reloaders(registry)
+        except Exception as e:
+            logger.error(f"[ChatBackend] 内置 reloader 注册失败: {e}")
+            registry = None
+
+        result_keys = ("agents", "commands", "hooks", "themes", "skills",
+                       "mcp", "lsp", "ui", "tools", "providers", "team_templates")
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -2171,92 +2159,41 @@ class ChatBackend(QObject):
             is_single_addition = len(added) == 1 and not removed and not changed
 
             if is_single_addition:
-                # ── 增量重载：只加载新增插件的组件 ──
+                # ── 增量重载：只加载新增插件的组件 — 表分派 ──
                 plugin = added[0]
                 name = plugin.name
                 comps = plugin.components  # {"agents": True, "commands": True, ...}
 
                 logger.info(f"[ChatBackend] 检测到新插件「{name}」，执行增量重载")
 
-                # 智能体 + hooks（agents 组件同时处理 hooks）
-                if comps.get("agents") and self._agent_manager:
-                    result["agents"] = self._agent_manager.reload_plugin_agents(name)
-                    result["hooks"] = True  # agents 组件包含 hooks 重载
-                    # 智能体文件同时也是命令源（/agent_name）
-                    try:
-                        from app.core.builtin_commands import reload_all_commands
-
-                        reload_all_commands()
-                        result["commands"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload commands after agent change: {e}")
-
-                # hooks-only（没有 agents 但有 hooks）
-                if comps.get("hooks") and not comps.get("agents") and self._agent_manager:
-                    self._agent_manager.reload_plugin_hooks(name)
-                    result["hooks"] = True
-
-                # 命令（非 agents 触发的独立命令目录）
-                if comps.get("commands") and not result["commands"]:
-                    try:
-                        from app.core.builtin_commands import reload_all_commands
-
-                        reload_all_commands()
-                        result["commands"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload commands: {e}")
-
-                # 主题
-                if comps.get("themes"):
-                    try:
-                        from app.utils.config import update_theme_options
-                        from app.utils.theme_manager import theme_manager
-
-                        theme_manager.reload()
-                        update_theme_options()
-                        result["themes"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload themes: {e}")
-
-                # 技能：PluginManager 已更新，UI 懒加载
-                if comps.get("skills"):
-                    invalidate_skills_cache()
-                result["skills"] = bool(comps.get("skills"))
-
-                # MCP：PluginManager 已更新，UI 懒加载
-                result["mcp"] = bool(comps.get("mcp"))
-
-                # LSP：新增插件带 lsp 组件时，使用增量 API 只注册该新增插件的服务器
-                # 不重启已有服务器，不走 LspManager.initialize 全量重建路径
-                if comps.get("lsp"):
-                    try:
-                        from app.core.lsp.lsp_manager import get_lsp_manager
-
-                        lsp_mgr = get_lsp_manager()
-                        lsp_config = pm.get_plugin_lsp_config(name)
-                        if lsp_config:
-                            count = lsp_mgr.add_plugin_servers(name, lsp_config["config"])
-                            result["lsp"] = count > 0
-                        logger.info(f"[ChatBackend] Plugin '{name}' LSP 增量加载完成")
-                    except Exception as e:
-                        logger.error(f"[ChatBackend] Plugin '{name}' LSP 增量加载失败: {e}")
-
-                # UI 组件
-                if comps.get("ui"):
-                    try:
-                        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-                        UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
-                        result["ui"] = True
-                        logger.info(f"[ChatBackend] Plugin '{name}' UI 组件已加载")
-                    except Exception as e:
-                        logger.error(f"[ChatBackend] Plugin '{name}' UI 加载失败: {e}")
+                # 遍历该新插件的组件，统一经 reloader 注册表分派
+                # agents → hooks/commands 联动标记由 _reload_agents 内部完成并回写 result
+                if registry is not None:
+                    for comp in (c for c in comps if c):
+                        if not comps.get(comp):
+                            continue
+                        reloaded = registry.reload(
+                            ReloadContext(
+                                plugin_name=name,
+                                plugin=plugin,
+                                component=comp,
+                                is_new_plugin=True,
+                            )
+                        )
+                        if comp in result_keys:
+                            result[comp] = reloaded if reloaded is not None else False
+                        # agents 联动标记（与 _reload_single_plugin 一致）
+                        if comp == "agents":
+                            result["hooks"] = True
+                            result["commands"] = True
 
                 logger.info(
                     f"[ChatBackend] 增量重载「{name}」完成: "
                     f"agents={result['agents']}, commands={result['commands']}, "
                     f"themes={result['themes']}, skills={result['skills']}, "
-                    f"mcp={result['mcp']}, lsp={result['lsp']}, ui={result['ui']}"
+                    f"mcp={result['mcp']}, lsp={result['lsp']}, ui={result['ui']}, "
+                    f"tools={result.get('tools', False)}, providers={result.get('providers', False)}, "
+                    f"team_templates={result.get('team_templates', False)}"
                 )
                 return result
 
@@ -2317,7 +2254,9 @@ class ChatBackend(QObject):
                 f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
                 f"commands={result['commands']}, themes={result['themes']}, "
                 f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}, "
-                f"ui={result['ui']}"
+                f"ui={result['ui']}, tools={result.get('tools', False)}, "
+                f"providers={result.get('providers', False)}, "
+                f"team_templates={result.get('team_templates', False)}"
             )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
