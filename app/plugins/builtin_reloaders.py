@@ -33,6 +33,9 @@ RELOADED_COMPONENTS = {
     "tools",
     "providers",
     "team_templates",
+    "model_adapters",
+    "loop_policies",
+    "storages",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -173,6 +176,48 @@ def _reload_team_templates(ctx: ReloadContext) -> Any:
     return True
 
 
+def _reload_model_adapters(ctx: ReloadContext) -> Any:
+    """model_adapters 分支：全量重扫运行时组件（幂等，删除路径靠重扫自然清理）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_model_adapter_watcher
+
+        watcher = ensure_model_adapter_watcher()
+        if watcher is not None:
+            watcher.scan_now()
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] model_adapters 重载失败: {e}")
+    return False
+
+
+def _reload_loop_policies(ctx: ReloadContext) -> Any:
+    """loop_policies 分支：同 model_adapters"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_loop_policy_watcher
+
+        watcher = ensure_loop_policy_watcher()
+        if watcher is not None:
+            watcher.scan_now()
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] loop_policies 重载失败: {e}")
+    return False
+
+
+def _reload_storages(ctx: ReloadContext) -> Any:
+    """storages 分支：同 model_adapters"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_storage_watcher
+
+        watcher = ensure_storage_watcher()
+        if watcher is not None:
+            watcher.scan_now()
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] storages 重载失败: {e}")
+    return False
+
+
 # 运行时句柄：backend 初始化后注入（避免循环 import — reloader 不能 import backend）
 _RUNTIME: dict = {"agent_manager": None}
 
@@ -199,6 +244,9 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "tools": _reload_tools,
         "providers": _reload_providers,
         "team_templates": _reload_team_templates,
+        "model_adapters": _reload_model_adapters,
+        "loop_policies": _reload_loop_policies,
+        "storages": _reload_storages,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

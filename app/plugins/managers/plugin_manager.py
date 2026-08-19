@@ -62,6 +62,9 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "tools": lambda d: (d / "tools").exists() and any((d / "tools").glob("*.py")),
     "providers": lambda d: (d / "providers").exists() and any((d / "providers").glob("*.py")),
     "team_templates": lambda d: (d / "team_templates").exists() and any((d / "team_templates").glob("*.yaml")),
+    "model_adapters": lambda d: (d / "model_adapters").exists() and any((d / "model_adapters").glob("*.py")),
+    "loop_policies": lambda d: (d / "loop_policies").exists() and any((d / "loop_policies").glob("*.py")),
+    "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
 }
 
 

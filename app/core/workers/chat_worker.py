@@ -188,6 +188,8 @@ class OpenAIChatWorker(QThread):
     # 同样的消息序列重试仍会被拒，必须客户端主动中断。
     # 阈值设为 3：与 AutoLoopWorker 的"连续失败 3 次"语义对齐；给模型 1-2 轮自我修正机会。
     _TOOL_LOOP_THRESHOLD = 3
+    _model_adapter = None  # 懒解析缓存（首查时 resolve）
+    _loop_policy_obj = None  # 懒解析缓存（激活策略）
 
     def __init__(
         self,
@@ -1631,8 +1633,28 @@ class OpenAIChatWorker(QThread):
             # [MEM] 启动快照
             self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
 
+            # LoopPolicy：每轮循环计数（默认策略不限轮数 → 零行为变化）
+            self._loop_round_count = 0
+
             while not self._is_cancelled:
                 if self._is_cancelled:
+                    return
+
+                # LoopPolicy：轮数上限（默认策略不限 → 零行为变化）
+                if self._check_loop_round_limit():
+                    # 对齐正常完成路径（约 :1850-1857）的四行式信号序列：
+                    # 先发 finished_with_messages(current_session_messages) →
+                    # 存 final_response=self.full_response →
+                    # _clear_pending_response_state()（清理 state 防覆盖）→
+                    # 再发 finished_with_content(final_response)
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback(
+                        "finished_with_content", self.finished_with_content, final_response
+                    )
                     return
 
                 # 每次 API 调用前：1. 清理中间状态  2. 检查压缩
@@ -1653,6 +1675,31 @@ class OpenAIChatWorker(QThread):
                 # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
                 loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
                 if loop_detected:
+                    # LoopPolicy 门控：策略要求终止则走完成路径（默认 CONTINUE → 零变化）
+                    from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                    try:
+                        _lp_decision = self._loop_policy().should_continue(
+                            LoopState(round_count=self._loop_round_count, repetitive_loop_detected=True)
+                        )
+                    except Exception as exc:
+                        # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                        logger.warning(
+                            f"[LoopPolicy] should_continue 调用异常（重复循环门控），回退 CONTINUE: {exc!r}"
+                        )
+                        _lp_decision = LoopDecision.CONTINUE
+                    if _lp_decision is LoopDecision.STOP:
+                        logger.warning("[LoopPolicy] 策略要求终止重复工具循环")
+                        # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
+                        self._emit_with_callback(
+                            "finished_with_messages", self.finished_with_messages, current_session_messages
+                        )
+                        final_response = self.full_response
+                        self._clear_pending_response_state()
+                        self._emit_with_callback(
+                            "finished_with_content", self.finished_with_content, final_response
+                        )
+                        return
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
                         f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，静默清理重复轮次后继续。"
@@ -1783,24 +1830,57 @@ class OpenAIChatWorker(QThread):
                         # 如果有注入且未触发过续命（_stop_hook_active=False），则继续一轮工具迭代
                         stop_injected = len(current_messages) - before_stop_count
                         if stop_injected > 0:
-                            # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
-                            self._stop_hook_active = True
-                            # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
-                            self._emit_with_callback(
-                                "finished_with_messages",
-                                self.finished_with_messages,
-                                current_session_messages,
-                            )
-                            logger.info(
-                                f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
-                            )
-                            # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
-                            # _clear_pending_response_state 会清空 _response_chunks，
-                            # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
-                            self._prev_stophook_response = self.full_response
-                            # 3. 清理 pending state 后回到 while 顶部重跑 API
-                            self._clear_pending_response_state()
-                            continue  # 跳回 while 顶部，再来一轮
+                            # LoopPolicy 门控：策略拒绝续命则直接走完成路径（默认策略恒 CONTINUE → 零行为变化）
+                            from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                            try:
+                                _lp_decision = self._loop_policy().should_continue(
+                                    LoopState(round_count=self._loop_round_count, stop_hook_injected=True)
+                                )
+                            except Exception as exc:
+                                # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                                logger.warning(
+                                    f"[LoopPolicy] should_continue 调用异常（Stop hook 门控），回退 CONTINUE: {exc!r}"
+                                )
+                                _lp_decision = LoopDecision.CONTINUE
+                            if _lp_decision is LoopDecision.STOP:
+                                # 策略拒绝续命 → 直接走完成路径（默认策略恒 CONTINUE → 不进入）
+                                # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
+                                logger.warning(
+                                    "[LoopPolicy] 策略拒绝 Stop hook 续命，走完成路径"
+                                )
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                final_response = self.full_response
+                                self._clear_pending_response_state()
+                                self._emit_with_callback(
+                                    "finished_with_content",
+                                    self.finished_with_content,
+                                    final_response,
+                                )
+                                return
+                            if _lp_decision is LoopDecision.CONTINUE:
+                                # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
+                                self._stop_hook_active = True
+                                # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                logger.info(
+                                    f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
+                                )
+                                # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
+                                # _clear_pending_response_state 会清空 _response_chunks，
+                                # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
+                                self._prev_stophook_response = self.full_response
+                                # 3. 清理 pending state 后回到 while 顶部重跑 API
+                                self._clear_pending_response_state()
+                                continue  # 跳回 while 顶部，再来一轮
 
                     # 真正结束：重置状态
                     self._stop_hook_active = False
@@ -2639,59 +2719,68 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _adapter_flags(self):
+        """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）"""
+        if self._model_adapter is None:
+            from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+            adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
+            if adapter is None:
+                raise RuntimeError(
+                    "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                    "请确认 plugins/system/model_adapters/ 已启用"
+                )
+            self._model_adapter = adapter
+        return self._model_adapter.protocol_flags(self.llm_config or {})
+
+    def _loop_policy(self):
+        """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
+        if self._loop_policy_obj is None:
+            from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
+        return self._loop_policy_obj
+
+    def _check_loop_round_limit(self) -> bool:
+        """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化。
+
+        异常安全：策略 max_rounds 拖异常时回退 None（不限），与 _adapter_flags 防御风格一致。
+        """
+        self._loop_round_count = getattr(self, "_loop_round_count", 0) + 1
+        try:
+            max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
+        except Exception as exc:
+            logger.warning(
+                f"[LoopPolicy] max_rounds 调用异常，回退默认（不限）: {exc!r}"
+            )
+            max_rounds = None
+        if max_rounds is not None and self._loop_round_count > max_rounds:
+            logger.warning(
+                f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话"
+            )
+            return True
+        return False
+
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        deepseek 系模型（含 opencode.ai 等中转平台承载的 deepseek-v4 系列）在
-        thinking mode 下要求 tool_calls assistant 消息必须携带 reasoning_content
-        字段（可为空串），否则上游 Console 报 400。
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
-        if self.llm_config.get("思考模式") is not True:
-            return False
-        family = detect_provider_family(self.llm_config)
-        if family == "deepseek":
-            return True
-        # opencode 等中转平台承载 deepseek 系模型时（模型名以 deepseek 开头），
-        # 上游协议与官方 Console 一致，同样需要 reasoning_content 回传
-        model = str(self.llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("deepseek")
+        return self._adapter_flags().requires_reasoning_content
 
     def _is_gemini_model(self) -> bool:
-        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
-        try:
-            if detect_provider_family(self.llm_config) == "gemini":
-                return True
-        except Exception:
-            pass
-        # 兜底：模型名含 gemini（如 models/gemini-3-flash-preview 的 startswith 判断会漏）
-        try:
-            model = str((self.llm_config or {}).get("模型名称", "") or "").lower()
-            if "gemini" in model:
-                return True
-        except Exception:
-            pass
-        return False
+        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。
+
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
+        """
+        return self._adapter_flags().is_gemini
 
     def _use_responses_api(self) -> bool:
         """当前模型是否走 Responses API（/v1/responses）。
 
-        GPT-5.x 系列（gpt-5.6-luna 等）的思考内容只在 Responses API 的
-        reasoning_summary_text 事件中返回；chat/completions 端点的流式 delta
-        不含任何 reasoning 字段（OpenCode Go 网关实测剥离），导致思考不渲染。
-        对该系列模型自动切换 Responses API 以获取并渲染思考内容。
-
-        判断规则（可被配置覆盖）：
-        - llm_config["使用ResponsesAPI"] 显式 True/False → 强制开关
-        - 否则模型名小写以 gpt-5 开头 → True
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
-        try:
-            override = self.llm_config.get("使用ResponsesAPI")
-            if override is not None:
-                return bool(override)
-            model = str(self.llm_config.get("模型名称", "") or "").lower()
-            return model.startswith("gpt-5")
-        except Exception:
-            return False
+        return self._adapter_flags().use_responses_api
 
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """

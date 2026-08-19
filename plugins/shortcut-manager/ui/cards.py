@@ -213,7 +213,7 @@ def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") ->
 def _load_all_items() -> list:
     """获取系统内建命令 + UI 插件命令列表"""
     from app.core.command_manager import CommandManager
-    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     items = []
     cmd_mgr = CommandManager.get_instance()
