@@ -603,13 +603,29 @@ class SubAgentExecutor(QThread):
         """
         from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
-        adapter = ModelAdapterRegistry.get_instance().resolve(llm_config or {})
+        registry = ModelAdapterRegistry.get_instance()
+        adapter = registry.resolve(llm_config or {})
+        if adapter is None:
+            adapter = self._resolve_adapter_with_warmup(registry, llm_config)
         if adapter is None:
             raise RuntimeError(
                 "未注册任何 ModelAdapter 插件（含系统插件 openai），"
                 "请确认 plugins/system/model_adapters/ 已启用"
             )
         return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
+
+    def _resolve_adapter_with_warmup(self, registry, llm_config: Dict) -> Optional[Any]:
+        """冷启动兜底：注册表为空时幂等加载系统插件再 resolve（同 chat_worker._adapter_flags 防御）"""
+        try:
+            if registry.adapters():
+                return None
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception as e:
+            logger.warning(f"[SubAgentWorker] 冷启动 ModelAdapter 加载失败: {e}")
+            return None
+        return registry.resolve(llm_config or {})
 
     # ========== Hook 集成（让子智能体也能应用所有 hook） ==========
     # 设计目标：与 chat_worker 对齐，让子智能体也能触发/消费以下 hook：

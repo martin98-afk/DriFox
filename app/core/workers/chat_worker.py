@@ -2720,11 +2720,18 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _adapter_flags(self):
-        """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）"""
+        """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）
+
+        冷启动防御：worker 可能在 backend warmup 之前被构造（测试/延迟初始化路径），
+        resolve 为空时先幂等触发一次系统插件扫描再重试；仍为空才是真实配置错误。
+        """
         if self._model_adapter is None:
             from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
-            adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
+            registry = ModelAdapterRegistry.get_instance()
+            adapter = registry.resolve(self.llm_config or {})
+            if adapter is None:
+                adapter = self._resolve_with_cold_start_warmup(registry)
             if adapter is None:
                 raise RuntimeError(
                     "未注册任何 ModelAdapter 插件（含系统插件 openai），"
@@ -2732,6 +2739,23 @@ class OpenAIChatWorker(QThread):
                 )
             self._model_adapter = adapter
         return self._model_adapter.protocol_flags(self.llm_config or {})
+
+    def _resolve_with_cold_start_warmup(self, registry) -> Optional[Any]:
+        """冷启动兜底：注册表为空时幂等加载系统插件（scan_roots 幂等持锁），再 resolve。
+
+        仅当注册表确实为空才触发扫描，避免热重载后 resolve 短暂为空时重复全量重扫；
+        多线程并发构造 worker 时 scan_roots 内部 _scan_lock 串行化，结果一致。
+        """
+        try:
+            if registry.adapters():
+                return None
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception as e:
+            logger.warning(f"[ChatWorker] 冷启动 ModelAdapter 加载失败: {e}")
+            return None
+        return registry.resolve(self.llm_config or {})
 
     def _loop_policy(self):
         """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
