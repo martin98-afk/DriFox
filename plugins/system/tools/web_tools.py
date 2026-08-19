@@ -41,17 +41,73 @@ def _get_client() -> httpx.Client:
 _DEFAULT_TAVILY_KEY = "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"
 _DEFAULT_TINYFISH_KEY = "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU"
 
+# 插件自包含配置：用户数据目录 tools/web_search_keys.json（主程序零改动，
+# 插件自己读写自己的配置，不占用主程序配置存储空间）
+_CONFIG_FILENAME = "web_search_keys.json"
+
+
+def _config_path() -> "Path":
+    """插件配置文件路径：<app_data_dir>/tools/web_search_keys.json"""
+    from pathlib import Path
+
+    from app.utils.utils import get_app_data_dir
+
+    return Path(get_app_data_dir()) / "tools" / _CONFIG_FILENAME
+
+
+def get_api_key_config() -> dict:
+    """读取插件配置（两个搜索服务 key，空串=未注册）"""
+    try:
+        path = _config_path()
+        if path.exists():
+            import json
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return {
+                "tavily_api_key": str(data.get("tavily_api_key", "") or ""),
+                "tinyfish_api_key": str(data.get("tinyfish_api_key", "") or ""),
+            }
+    except Exception as e:
+        logger.warning(f"[WebTools] 配置读取失败: {e}")
+    return {"tavily_api_key": "", "tinyfish_api_key": ""}
+
+
+def set_api_key_config(tavily_api_key: str = "", tinyfish_api_key: str = "") -> bool:
+    """注册插件配置：持久化两个搜索服务 key 到用户数据目录（幂等覆盖）"""
+    try:
+        import json
+
+        path = _config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "tavily_api_key": tavily_api_key or "",
+            "tinyfish_api_key": tinyfish_api_key or "",
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as e:
+        logger.warning(f"[WebTools] 配置写入失败: {e}")
+        return False
+
 
 def _api_key(tool_ctx, name: str) -> str:
-    """读取搜索服务 API key：环境变量优先，未设置时回退插件内置默认值
+    """读取搜索服务 API key：环境变量 → 插件配置 → 插件内置默认值
 
-    - 环境变量：TAVILY_API_KEY / TINYFISH_API_KEY
-    - 默认常量：_DEFAULT_TAVILY_KEY / _DEFAULT_TINYFISH_KEY
-    - 主程序不再注入（tool_ctx.env.api_keys 已移除）
+    - 环境变量：TAVILY_API_KEY / TINYFISH_API_KEY（最高优先级）
+    - 插件配置：get_api_key_config()（set_api_key_config 注册，用户数据目录持久化）
+    - 默认常量：_DEFAULT_TAVILY_KEY / _DEFAULT_TINYFISH_KEY（内置兜底）
     """
     env_key = os.environ.get(name)
     if env_key:
         return env_key
+    cfg = get_api_key_config()
+    saved = (
+        cfg["tavily_api_key"]
+        if name == "TAVILY_API_KEY"
+        else cfg["tinyfish_api_key"]
+    )
+    if saved:
+        return saved
     return _DEFAULT_TAVILY_KEY if name == "TAVILY_API_KEY" else _DEFAULT_TINYFISH_KEY
 
 
