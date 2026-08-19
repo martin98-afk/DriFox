@@ -12,8 +12,8 @@ import json
 import pytest
 
 from app.core.backend import ChatBackend
-from app.core.plugin_manager import PluginManager
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.managers.plugin_manager import PluginManager
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -258,7 +258,7 @@ class TestDedupCacheCleanupOnRemove:
             type("P", (), {"name": "gone-b"})(),
         ]
         monkeypatch.setattr(
-            "app.core.plugin_manager.PluginManager.rescan",
+            "app.plugins.managers.plugin_manager.PluginManager.rescan",
             lambda self: {"added": [], "removed": fake_removed, "changed": []},
         )
         # reload_plugin_subsystems 前置条件：agent_manager 等为 None 时分支跳过

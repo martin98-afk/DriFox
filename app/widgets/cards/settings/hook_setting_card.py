@@ -471,7 +471,7 @@ class HookEditCard(QWidget):
             am = AgentManager.get_instance()
             # 确保所有插件 agent 都已加载（避免初始化时序问题）
             try:
-                from app.core.plugin_manager import PluginManager as _PM
+                from app.plugins.managers.plugin_manager import PluginManager as _PM
 
                 _pm = _PM.get_instance()
                 if _pm.is_initialized() and not getattr(am, "_agents", {}):
@@ -1083,7 +1083,7 @@ class HookListSettingCard(ExpandSettingCard):
     def _get_global_hooks_file(self) -> Path:
         """获取全局 hooks 文件路径"""
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():

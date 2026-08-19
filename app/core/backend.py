@@ -544,7 +544,7 @@ class ChatBackend(QObject):
         logger.info(f"[ChatBackend] AgentManager 就绪，{len(self._agent_manager.list_agents())} 个 Agent")
 
         # 加载全局 hooks（从 PluginManager 获取路径）
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if pm.is_initialized():
@@ -867,7 +867,7 @@ class ChatBackend(QObject):
         - 非关键路径：主题刷新 + 热更新监听 + LSP 初始化 → 延迟到窗口就绪后执行
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
             from app.utils.utils import get_app_data_dir
 
             pm = PluginManager.get_instance()
@@ -935,7 +935,7 @@ class ChatBackend(QObject):
             # 新装插件工具被过滤；pm.initialize 已在此前完成，重扫后
             # 新安装插件工具注册、被禁用插件工具注销，两边同时正确。
             try:
-                from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+                from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
                 watcher = ensure_plugin_tool_watcher()
                 if watcher is not None:
@@ -1054,7 +1054,7 @@ class ChatBackend(QObject):
             return
 
         # 收集需要监听的插件目录
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
 
@@ -1323,7 +1323,7 @@ class ChatBackend(QObject):
                                 f"[ChatBackend] 检测到 {len(new_names)} 个新插件文件变更"
                                 f"「{', '.join(sorted(new_names))}」，逐一请求增量重载..."
                             )
-                            from app.core.plugin_manager import PluginManager as _PM
+                            from app.plugins.managers.plugin_manager import PluginManager as _PM
 
                             for new_name in sorted(new_names):
                                 # 已注册插件（索引未及时重建导致路径识别失败）：
@@ -1460,7 +1460,7 @@ class ChatBackend(QObject):
         Returns:
             {小写路径: 插件名}
         """
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         prefixes = {}
@@ -1628,7 +1628,7 @@ class ChatBackend(QObject):
         Returns:
             list[str]: 按优先级排序的组件名列表；空列表表示无组件变更
         """
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         plugin = pm.get_plugin(plugin_name)
@@ -1740,7 +1740,7 @@ class ChatBackend(QObject):
         }
 
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
@@ -1821,7 +1821,7 @@ class ChatBackend(QObject):
             # 7. UI 组件：增量加载，不重复加载已存在的插件
             if comps.get("ui"):
                 try:
-                    from app.core.ui_plugin_registry import UIPluginRegistry
+                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                     UIPluginRegistry.get_instance().load_plugin(plugin_name, plugin.path)
                     result["ui"] = True
@@ -1875,7 +1875,7 @@ class ChatBackend(QObject):
         }
 
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
@@ -1972,7 +1972,7 @@ class ChatBackend(QObject):
                 # UI 组件：卸载该插件在 UIPluginRegistry 中的注册
                 if removed_components.get("ui"):
                     try:
-                        from app.core.ui_plugin_registry import UIPluginRegistry
+                        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                         UIPluginRegistry.get_instance().unload_plugin(plugin_name)
                         result["ui"] = True
@@ -2084,7 +2084,7 @@ class ChatBackend(QObject):
             # 9. UI 组件：热重载 UI 组件（先卸载后加载）
             if component == "ui" and plugin.has_component("ui"):
                 try:
-                    from app.core.ui_plugin_registry import UIPluginRegistry
+                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                     UIPluginRegistry.get_instance().reload_plugin(plugin_name, plugin.path)
                     result["ui"] = True
@@ -2127,7 +2127,7 @@ class ChatBackend(QObject):
         }
 
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
@@ -2231,7 +2231,7 @@ class ChatBackend(QObject):
                 # UI 组件
                 if comps.get("ui"):
                     try:
-                        from app.core.ui_plugin_registry import UIPluginRegistry
+                        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                         UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
                         result["ui"] = True
@@ -2315,7 +2315,7 @@ class ChatBackend(QObject):
 
     def _discover_mcp_servers(self):
         """自动发现其他工具的 MCP 配置并保存到 user-custom 插件（仅首次运行生效）"""
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
@@ -2347,7 +2347,7 @@ class ChatBackend(QObject):
 
         MCP 配置完全由插件驱动，从 PluginManager 获取。
         """
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         from app.utils.config import Settings
 
         mcp_manager = self._tool_executor._builtin_tools._mcp_manager

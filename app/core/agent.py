@@ -368,7 +368,7 @@ class AgentManager:
     def _load_agents_from_plugins(self):
         """从所有已启用插件加载智能体（跟踪每个智能体的来源插件）"""
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
@@ -400,7 +400,7 @@ class AgentManager:
         Returns:
             加载的智能体数量（0 表示插件无 agents 目录或不存在）
         """
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
 
@@ -446,7 +446,7 @@ class AgentManager:
         """
         if self._hook_manager is None:
             return False
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if not pm.is_enabled(plugin_name):
@@ -486,7 +486,7 @@ class AgentManager:
     def _unload_plugin_hooks(self):
         """注销所有插件级 hooks（reload 时调用）"""
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
@@ -523,7 +523,7 @@ class AgentManager:
     def _load_plugin_hooks(self):
         """加载插件顶层 hooks/ 目录中的 hooks（使用插件名作为 skill key）"""
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():

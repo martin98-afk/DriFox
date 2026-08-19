@@ -792,7 +792,7 @@ class UIPluginRow(QFrame):
         # 重新获取主题相关图标（浅/深色主题图标不同）
         if self._plugin_name:
             try:
-                from app.core.plugin_manager import PluginManager
+                from app.plugins.managers.plugin_manager import PluginManager
 
                 pm = PluginManager.get_instance()
                 plugin = pm.get_plugin(self._plugin_name)
@@ -1149,13 +1149,13 @@ class TabPanel(QWidget):
         自定义 UI 插件（~/.drifox/plugins/ 用户安装）→ 默认折叠，展开后可滚轮滚动。
         """
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             cards = UIPluginRegistry.get_instance().get_floating_cards()
         except Exception:
             cards = {}
 
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
 
@@ -1370,7 +1370,7 @@ class TabPanel(QWidget):
             logger.warning(f"[TabPanel] UI 插件 {card_id} 点击：当前窗口为空")
             return
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             UIPluginRegistry.get_instance().toggle_floating_card(card_id, main_widget=current_window)
         except Exception as e:
@@ -1389,7 +1389,7 @@ class TabPanel(QWidget):
             logger.warning(f"[TabPanel] UI 插件 {card_id} 定位：当前窗口为空")
             return
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             registry = UIPluginRegistry.get_instance()
             if not registry.move_floating_card(card_id, container, main_widget=current_window):

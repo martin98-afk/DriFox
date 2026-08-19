@@ -1603,7 +1603,7 @@ class TestHistorySessionRestoreRegistersTeamMember:
         monkeypatch.setattr(mw, "init_after_loading_session", lambda *a, **k: None)
 
         import app.core.command_manager as cm_mod
-        import app.core.ui_plugin_registry as uipr_mod
+        import app.plugins.registries.ui_plugin_registry as uipr_mod
 
         monkeypatch.setattr(cm_mod.CommandManager, "get_instance", staticmethod(lambda: MagicMock()))
         monkeypatch.setattr(uipr_mod.UIPluginRegistry, "get_instance", staticmethod(lambda: MagicMock()))

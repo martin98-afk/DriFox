@@ -3,7 +3,7 @@
 
 import sys
 import pytest
-from app.core.ui_plugin_registry import (
+from app.plugins.registries.ui_plugin_registry import (
     UIPluginRegistry,
     ContentRendererInfo,
     MessageFactoryInfo,
@@ -212,7 +212,7 @@ def test_load_plugin_invokes_register_ui(tmp_path):
     ui_dir.mkdir(parents=True)
     (ui_dir / "__init__.py").write_text(
         """
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 def register_ui(registry: UIPluginRegistry):
     registry.register_content_renderer(

@@ -67,7 +67,7 @@ class ThemeManager:
 
         # 3. 插件主题（PluginManager 提供，仅已启用插件，可覆盖 #2）
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():
@@ -542,7 +542,7 @@ class ThemeManager:
 
         # 3. PluginManager 已启用插件主题路径
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():

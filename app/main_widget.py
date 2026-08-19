@@ -3222,7 +3222,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
         # 让窗口外壳尽快出现，压缩首次启动感知耗时
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             ui_registry = UIPluginRegistry.get_instance()
             ui_registry.set_main_widget(self)
@@ -4003,7 +4003,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _init_ui_plugins_deferred(self):
         """延迟加载 UI 插件（首帧渲染后执行，避免阻塞窗口出现）"""
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             ui_registry = UIPluginRegistry.get_instance()
             # 加载所有已启用的 UI 插件
@@ -4030,8 +4030,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if not pm.is_initialized():
@@ -4145,7 +4145,7 @@ class OpenAIChatToolWindow(ToolWindow):
             QWidget 实例（可能是 MessageCard 或插件自定义 widget），
             无工厂处理时返回 None（调用方应使用默认逻辑）
         """
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         message_data = {
             "role": role,
@@ -6870,7 +6870,7 @@ class OpenAIChatToolWindow(ToolWindow):
         供命令卡片枚举值模式显示当前插件描述。
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if not pm.is_initialized():
@@ -9223,7 +9223,7 @@ class OpenAIChatToolWindow(ToolWindow):
         OpenAIChatToolWindow._tool_reload_notice_registered = True
         global _tool_reload_notice_bridge
         try:
-            from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+            from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is None:
@@ -11292,7 +11292,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 模式：sessions（默认）/ changelog / 插件注册 tab
         from app.utils.config import Settings
 
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         cfg = Settings.get_instance()
         welcome_mode = resolve_initial_welcome_mode(
@@ -12703,7 +12703,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 刷新 UI 插件命令卡片缓存（插件可能注册了新命令）
         try:
             from app.core.command_manager import CommandManager
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             CommandManager.get_instance().reload_all_commands()
             UIPluginRegistry.get_instance().re_register_all_commands()
@@ -19763,7 +19763,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # provider 闭包、_window_main_widgets、_card_widget_instances 均按
         # window_id 持有窗口引用，不清理则窗口对象树被全局单例持续持有。
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             UIPluginRegistry.get_instance().unregister_window(self._window_id)
         except Exception:

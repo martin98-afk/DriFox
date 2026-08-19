@@ -44,7 +44,7 @@ class TestDuplicateRegistration:
 
     def _proxy(self, registry, plugin_name, root=None):
         """构造插件注册代理（与 loader 注入一致：source 强制 plugin:<name>）"""
-        from app.tools.plugin_tool_loader import _PluginRegistryProxy
+        from app.plugins.loaders.plugin_tool_loader import _PluginRegistryProxy
 
         return _PluginRegistryProxy(registry, plugin_name, root=root, root_tracker={})
 

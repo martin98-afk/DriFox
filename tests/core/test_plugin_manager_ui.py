@@ -14,7 +14,7 @@ import json
 
 def test_ui_component_auto_detected(tmp_path):
     """包含 ui/ 目录的插件自动声明 ui 组件"""
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     pm.reset()
@@ -36,7 +36,7 @@ def test_ui_component_auto_detected(tmp_path):
 
 def test_ui_component_not_detected_without_dir():
     """没有 ui/ 目录则不声明 ui 组件"""
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     pm.reset()
@@ -72,8 +72,8 @@ def test_enable_plugin_loads_ui(tmp_path):
     必须重新 ``get_instance()``，否则后续断言查询的不是 enable_plugin 内部
     引用到的那个实例。
     """
-    from app.core.plugin_manager import PluginManager
-    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.managers.plugin_manager import PluginManager
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     pm = PluginManager.get_instance()
     pm.reset()
@@ -92,7 +92,7 @@ def test_enable_plugin_loads_ui(tmp_path):
     (plugin_dir / "ui").mkdir()
     (plugin_dir / "ui" / "__init__.py").write_text(
         """
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 def register_ui(r: UIPluginRegistry):
     r.register_content_renderer('plug-ui-load', 'hello', lambda d, c: 'world', priority=0)
 """,
@@ -130,8 +130,8 @@ def test_rescan_new_plugin_loads_ui(tmp_path):
 
     同上：reset() 后需重新拿单例。
     """
-    from app.core.plugin_manager import PluginManager
-    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.managers.plugin_manager import PluginManager
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     pm = PluginManager.get_instance()
     pm.reset()
@@ -156,7 +156,7 @@ def test_rescan_new_plugin_loads_ui(tmp_path):
     (target / "ui").mkdir()
     (target / "ui" / "__init__.py").write_text(
         """
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 def register_ui(r: UIPluginRegistry):
     r.register_content_renderer('new-plug', 'x', lambda d, c: '1', priority=0)
 """,

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """测试 PluginInfo.icon_config 属性"""
 from pathlib import Path
-from app.core.plugin_manager import PluginInfo
+from app.plugins.managers.plugin_manager import PluginInfo
 
 
 def test_icon_config_string(tmp_path: Path):

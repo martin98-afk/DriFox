@@ -79,7 +79,7 @@ class UsageService(QObject):
     @staticmethod
     def _resolve_fetcher(provider_name: str) -> Optional[Callable]:
         """按服务商名精确匹配，回退按 family 前缀匹配，返回 fetcher 或 None"""
-        from app.core.coding_plan_fetcher import _fetchers, get
+        from app.plugins.registries.coding_plan_fetcher import _fetchers, get
 
         fetcher = get(provider_name)
         if fetcher:

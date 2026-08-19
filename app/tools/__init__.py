@@ -198,7 +198,7 @@ def _ensure_plugin_tools_loaded() -> None:
         return
     _plugin_tools_loaded = True
     try:
-        from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher, load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher, load_plugin_tools
 
         load_plugin_tools()
         ensure_plugin_tool_watcher()

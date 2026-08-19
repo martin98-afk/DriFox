@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from app.core.plugin_manager import PluginManager
+from app.plugins.managers.plugin_manager import PluginManager
 
 PLUGIN_ROOT = Path("/Users/test/.drifox/plugins/test-plugin")
 PLUGIN_DATA = PLUGIN_ROOT / "data"

@@ -46,7 +46,7 @@ _ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
 
 def _plugin_roots() -> List[Path]:
     """插件工具扫描根：项目 plugins/（含 system）+ 用户插件目录"""
-    roots = [Path(__file__).resolve().parent.parent.parent / "plugins"]
+    roots = [Path(__file__).resolve().parent.parent.parent.parent / "plugins"]
     try:
         from app.utils.utils import get_app_data_dir
 
@@ -237,7 +237,7 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
       对齐 _restore_enabled_from_settings「新发现插件默认启用」语义
     """
     try:
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if pm.is_initialized():

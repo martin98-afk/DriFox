@@ -132,7 +132,7 @@ class PluginManager:
 
     # 插件搜索路径（按优先级）
     # 系统插件：项目根目录 plugins/（打包在 exe 中）
-    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins"
+    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent.parent / "plugins"
     # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
     # Claude Code 插件目录（同时支持两种生态）
@@ -451,7 +451,7 @@ class PluginManager:
         enabled 状态重新注册（scan_now 幂等 + 锁保护；watcher 未启动/异常时跳过）。
         """
         try:
-            from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+            from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is not None:
@@ -462,7 +462,7 @@ class PluginManager:
     def _load_plugin_ui(self, name: str):
         """加载指定插件的 UI 组件"""
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         except ImportError:
             return
         plugin = self._plugins.get(name)
@@ -473,7 +473,7 @@ class PluginManager:
     def _unload_plugin_ui(self, name: str):
         """卸载指定插件的 UI 组件"""
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         except ImportError:
             return
         UIPluginRegistry.get_instance().unload_plugin(name)
@@ -576,6 +576,9 @@ class PluginManager:
                 # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
                 if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
                     components["ui"] = True
+                # 服务商组件：检测 providers/ 目录（含 .py 文件才标记，与 tools 一致）
+                if (item / "providers").exists() and any((item / "providers").glob("*.py")):
+                    components["providers"] = True
                 # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
                 # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
                 # 但无 commands/ 目录）导致热更新触发全量命令重载
@@ -644,6 +647,9 @@ class PluginManager:
             # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
             if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
                 detected_components["ui"] = True
+            # 服务商组件：检测 providers/ 目录（含 .py 文件才标记，与 tools 一致）
+            if (plugin_dir / "providers").exists() and any((plugin_dir / "providers").glob("*.py")):
+                detected_components["providers"] = True
 
             # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
             # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
