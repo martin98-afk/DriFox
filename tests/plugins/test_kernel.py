@@ -2,6 +2,7 @@
 """kernel 组件常量与 reloader 注册表测试（不触碰真实插件目录）"""
 
 from app.plugins import kernel
+from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext, get_reloader_registry
 
 
 def test_known_components_complete():
@@ -29,9 +30,6 @@ def test_root_file_components():
 def test_validate_component():
     assert kernel.validate_component("tools") is True
     assert kernel.validate_component("not-a-component") is False
-
-
-from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext, get_reloader_registry
 
 
 def test_reloader_registry_dispatch():
