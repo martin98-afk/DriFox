@@ -104,7 +104,7 @@ class DefaultLoopPolicy:
         try:
             v = llm_config.get("最大循环轮数") if llm_config else None
             return int(v) if v else None
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return None
 
 
