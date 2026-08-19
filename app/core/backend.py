@@ -193,7 +193,7 @@ def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """
     try:
         return object.__getattribute__(backend, "_agent_manager")
-    except AttributeError, RuntimeError:
+    except (AttributeError, RuntimeError):
         return None
 
 
