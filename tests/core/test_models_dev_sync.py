@@ -453,7 +453,11 @@ def test_apply_model_defaults_effort_values_first_as_default(monkeypatch):
 # cache helpers
 # ============================================================
 def test_is_cache_valid(tmp_path: Path):
-    valid = {"_cached_at": time.time(), "_schema_version": sync.CACHE_SCHEMA_VERSION}
+    valid = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
+    }
     invalid = {"_cached_at": time.time() - sync.CACHE_TTL_SECONDS - 1, "_schema_version": sync.CACHE_SCHEMA_VERSION}
     missing = {}
     assert sync._is_cache_valid(valid) is True
@@ -463,9 +467,89 @@ def test_is_cache_valid(tmp_path: Path):
 
 
 def test_is_cache_valid_schema_mismatch(tmp_path: Path):
-    """schema 版本不匹配 → 缓存无效，触发重拉（让旧缓存带上新字段）。"""
+    """schema 版本不匹配 → 缓存结构无效，触发重拉（让旧缓存带上新字段）。"""
     old = {"_cached_at": time.time(), "_schema_version": 1}
     assert sync._is_cache_valid(old) is False
+
+
+def test_is_cache_valid_ignores_content_version(tmp_path: Path):
+    """_is_cache_valid 只判结构（schema + TTL），内容版本由刷新决策单独处理。
+
+    这样旧缓存（内容版本偏低）仍可临时服务主线程，不会让 UI 短暂空白。
+    """
+    # 内容版本偏低：结构仍有效
+    stale = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION - 1,
+    }
+    assert sync._is_cache_valid(stale) is True
+    # 完全没有 content_version 的旧缓存：结构仍有效
+    legacy = {"_cached_at": time.time(), "_schema_version": sync.CACHE_SCHEMA_VERSION}
+    assert sync._is_cache_valid(legacy) is True
+    # 内容版本匹配：有效
+    fresh = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
+    }
+    assert sync._is_cache_valid(fresh) is True
+
+
+def test_is_content_version_stale(tmp_path: Path):
+    """_is_content_version_stale：内容版本偏低或缺缺失 → 视为需刷新。"""
+    fresh = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
+    }
+    stale = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION - 1,
+    }
+    legacy = {"_cached_at": time.time(), "_schema_version": sync.CACHE_SCHEMA_VERSION}
+    assert sync._is_content_version_stale(fresh) is False
+    assert sync._is_content_version_stale(stale) is True
+    # 上线前的旧缓存（无 _content_version）→ 视为偏低，需强制重拉
+    assert sync._is_content_version_stale(legacy) is True
+    assert sync._is_content_version_stale(None) is False
+
+
+def test_load_dynamic_models_refetches_when_content_stale(monkeypatch, tmp_path: Path):
+    """内容版本偏低（schema 仍有效）→ 仍触发网络重拉，及时用上新逻辑。
+
+    解决：开发者改了产出逻辑（映射/解析/免费模型源等），用户 24h 内的旧
+    缓存不会自动重拉、看不到新效果的问题。
+    """
+    cache = {
+        "_cached_at": time.time(),
+        "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION - 1,
+        "provider_models": {"OpenAI": ["gpt-old"]},
+        "model_capabilities": {},
+    }
+    sync._save_cache(cache, tmp_path / "cache.json")
+
+    remote_data = {
+        "openai": {
+            "models": {
+                "gpt-new": {
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                    "limit": {"context": 128000},
+                    "reasoning": False,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(sync, "_fetch_remote", lambda: remote_data)
+    result = sync.load_dynamic_models(cache_path=tmp_path / "cache.json")
+    # 内容版本偏低 → 忽略旧缓存、拉取远程新数据
+    assert result.provider_models["OpenAI"] == ["gpt-new"]
+    assert result.from_cache is False
+    # 重拉后落盘缓存带上最新内容版本
+    saved = sync._load_cache(tmp_path / "cache.json")
+    assert saved["_content_version"] == sync.CACHE_CONTENT_VERSION
 
 
 # ============================================================
@@ -502,6 +586,7 @@ def test_save_and_load_cache(tmp_path: Path):
     data = {
         "_cached_at": time.time(),
         "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
         "provider_models": {},
         "model_capabilities": {},
     }
@@ -519,6 +604,7 @@ def test_load_dynamic_models_uses_cache_when_valid(monkeypatch, tmp_path: Path):
     cache = {
         "_cached_at": time.time(),
         "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
         "provider_models": {"OpenAI": ["gpt-cached"]},
         "model_capabilities": {"gpt-cached": {"context_limit": 123}},
     }
@@ -873,6 +959,7 @@ def test_get_dynamic_models_reads_valid_file_cache(monkeypatch, tmp_path: Path):
     cache = {
         "_cached_at": time.time(),
         "_schema_version": sync.CACHE_SCHEMA_VERSION,
+        "_content_version": sync.CACHE_CONTENT_VERSION,
         "provider_models": {"OpenAI": ["gpt-file-cached"]},
         "model_capabilities": {"gpt-file-cached": {"context_limit": 123}},
     }
