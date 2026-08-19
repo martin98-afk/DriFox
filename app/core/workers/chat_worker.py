@@ -189,6 +189,7 @@ class OpenAIChatWorker(QThread):
     # 阈值设为 3：与 AutoLoopWorker 的"连续失败 3 次"语义对齐；给模型 1-2 轮自我修正机会。
     _TOOL_LOOP_THRESHOLD = 3
     _model_adapter = None  # 懒解析缓存（首查时 resolve）
+    _loop_policy_obj = None  # 懒解析缓存（激活策略）
 
     def __init__(
         self,
@@ -1632,8 +1633,18 @@ class OpenAIChatWorker(QThread):
             # [MEM] 启动快照
             self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
 
+            # LoopPolicy：每轮循环计数（默认策略不限轮数 → 零行为变化）
+            self._loop_round_count = 0
+
             while not self._is_cancelled:
                 if self._is_cancelled:
+                    return
+
+                # LoopPolicy：轮数上限（默认策略不限 → 零行为变化）
+                if self._check_loop_round_limit():
+                    self._emit_with_callback(
+                        "finished_with_content", self.finished_with_content, self.full_response or ""
+                    )
                     return
 
                 # 每次 API 调用前：1. 清理中间状态  2. 检查压缩
@@ -1654,6 +1665,18 @@ class OpenAIChatWorker(QThread):
                 # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
                 loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
                 if loop_detected:
+                    # LoopPolicy 门控：策略要求终止则走完成路径（默认 CONTINUE → 零变化）
+                    from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                    _lp_decision = self._loop_policy().should_continue(
+                        LoopState(round_count=self._loop_round_count, repetitive_loop_detected=True)
+                    )
+                    if _lp_decision is LoopDecision.STOP:
+                        logger.warning("[LoopPolicy] 策略要求终止重复工具循环")
+                        self._emit_with_callback(
+                            "finished_with_content", self.finished_with_content, self.full_response or ""
+                        )
+                        return
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
                         f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，静默清理重复轮次后继续。"
@@ -1784,24 +1807,31 @@ class OpenAIChatWorker(QThread):
                         # 如果有注入且未触发过续命（_stop_hook_active=False），则继续一轮工具迭代
                         stop_injected = len(current_messages) - before_stop_count
                         if stop_injected > 0:
-                            # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
-                            self._stop_hook_active = True
-                            # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
-                            self._emit_with_callback(
-                                "finished_with_messages",
-                                self.finished_with_messages,
-                                current_session_messages,
+                            # LoopPolicy 门控：策略拒绝续命则直接走完成路径（默认策略恒 CONTINUE → 零行为变化）
+                            from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                            _lp_decision = self._loop_policy().should_continue(
+                                LoopState(round_count=self._loop_round_count, stop_hook_injected=True)
                             )
-                            logger.info(
-                                f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
-                            )
-                            # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
-                            # _clear_pending_response_state 会清空 _response_chunks，
-                            # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
-                            self._prev_stophook_response = self.full_response
-                            # 3. 清理 pending state 后回到 while 顶部重跑 API
-                            self._clear_pending_response_state()
-                            continue  # 跳回 while 顶部，再来一轮
+                            if _lp_decision is LoopDecision.CONTINUE:
+                                # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
+                                self._stop_hook_active = True
+                                # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                logger.info(
+                                    f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
+                                )
+                                # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
+                                # _clear_pending_response_state 会清空 _response_chunks，
+                                # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
+                                self._prev_stophook_response = self.full_response
+                                # 3. 清理 pending state 后回到 while 顶部重跑 API
+                                self._clear_pending_response_state()
+                                continue  # 跳回 while 顶部，再来一轮
 
                     # 真正结束：重置状态
                     self._stop_hook_active = False
@@ -2649,6 +2679,27 @@ class OpenAIChatWorker(QThread):
             ensure_builtin_adapters()  # 冷启动防御（正常路径由 backend warmup 注册）
             self._model_adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
         return self._model_adapter.protocol_flags(self.llm_config or {})
+
+    def _loop_policy(self):
+        """当前激活的循环策略（默认 default，插件可 set_active 覆盖）"""
+        if self._loop_policy_obj is None:
+            from app.plugins.builtin_runtime import ensure_builtin_runtime
+            from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+            ensure_builtin_runtime()
+            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
+        return self._loop_policy_obj
+
+    def _check_loop_round_limit(self) -> bool:
+        """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化"""
+        self._loop_round_count = getattr(self, "_loop_round_count", 0) + 1
+        max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
+        if max_rounds is not None and self._loop_round_count > max_rounds:
+            logger.warning(
+                f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话"
+            )
+            return True
+        return False
 
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
