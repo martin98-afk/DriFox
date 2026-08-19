@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""存储引擎注册表 — set_active 激活插件引擎，回落 sqlite。"""
+"""存储引擎注册表 — set_active 激活插件引擎。
+
+零硬编码兜底：active id 不在 _engines 时不再 new SqliteStorageEngine()。
+- 先尝试 _engines["sqlite"]（由系统插件 plugins/system/storages/sqlite.py 注册）
+- 仍不在则抛 RuntimeError，让调用方/启动器明确报错（引导启用 system 插件）
+"""
 
 from __future__ import annotations
 
@@ -37,11 +42,11 @@ class StorageRegistry:
     def get_active(self) -> SessionStorageEngine:
         with self._lock:
             item = self._engines.get(self._active) or self._engines.get("sqlite")
-        if item is not None:
-            return item[0]
-        from app.plugins.builtin_runtime import SqliteStorageEngine
-
-        return SqliteStorageEngine()
+        if item is None:
+            raise RuntimeError(
+                "未加载任何 StorageEngine 插件（含 sqlite），请确认 system 插件已启用"
+            )
+        return item[0]
 
     @staticmethod
     def get_instance() -> "StorageRegistry":

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""模型协议适配器注册表 — 单例，resolve 按 matches 优先级取最优，空表走兜底。"""
+"""模型协议适配器注册表 — 单例，resolve 按 matches 优先级取最优，无匹配返回 None。
+
+零硬编码兜底：registry 不自带 fallback adapter。无注册时 resolve 返回 None，
+调用方（worker）须显式抛错或引导加载系统插件 openai。
+"""
 
 from __future__ import annotations
 
@@ -11,20 +15,8 @@ from loguru import logger
 from app.plugins.contracts.model_adapter import ModelAdapter, ProtocolFlags
 
 
-class _FallbackAdapter:
-    """兜底适配器：无任何注册时的保守行为（全 False = OpenAI 标准路径）"""
-
-    id = "__fallback__"
-
-    def matches(self, llm_config: Dict[str, Any]) -> int:
-        return 1
-
-    def protocol_flags(self, llm_config: Dict[str, Any]) -> ProtocolFlags:
-        return ProtocolFlags()
-
-
 class ModelAdapterRegistry:
-    """适配器注册表：register 覆盖同名；resolve 取 matches 最大者"""
+    """适配器注册表：register 覆盖同名；resolve 取 matches 最大者，无匹配返回 None"""
 
     def __init__(self) -> None:
         self._adapters: Dict[str, Tuple[ModelAdapter, str]] = {}  # id -> (adapter, source)
@@ -40,9 +32,15 @@ class ModelAdapterRegistry:
             for k in dead:
                 del self._adapters[k]
 
-    def resolve(self, llm_config: Dict[str, Any]) -> ModelAdapter:
+    def resolve(self, llm_config: Dict[str, Any]) -> Optional[ModelAdapter]:
+        """按 matches 优先级取最优。无注册或最高分=0 → 返回 None。
+
+        返回 None 表示无匹配（调用方需引导加载系统插件或自定义实现）。
+        """
         with self._lock:
             items = list(self._adapters.values())
+        if not items:
+            return None
         best: Optional[ModelAdapter] = None
         best_score = 0
         for adapter, _src in items:
@@ -53,7 +51,7 @@ class ModelAdapterRegistry:
                 continue
             if score > best_score:
                 best, best_score = adapter, score
-        return best if best is not None else _FallbackAdapter()
+        return best
 
     def adapters(self) -> Dict[str, ModelAdapter]:
         with self._lock:

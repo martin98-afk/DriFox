@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""循环策略注册表 — set_active 激活插件策略，卸载自动回落 default。"""
+"""循环策略注册表 — set_active 激活插件策略。
+
+零硬编码兜底：active id 不在 _policies 时不再 new DefaultLoopPolicy()。
+- 先尝试 _policies["default"]（由系统插件 plugins/system/loop_policies/default.py 注册）
+- 仍不在则抛 RuntimeError，让调用方/启动器明确报错（引导启用 system 插件）
+"""
 
 from __future__ import annotations
 
@@ -40,9 +45,9 @@ class LoopPolicyRegistry:
         with self._lock:
             item = self._policies.get(self._active) or self._policies.get("default")
         if item is None:
-            from app.plugins.builtin_runtime import DefaultLoopPolicy
-
-            return DefaultLoopPolicy()
+            raise RuntimeError(
+                "未加载任何 LoopPolicy 插件（含 default），请确认 system 插件已启用"
+            )
         return item[0]
 
     def policies(self) -> Dict[str, LoopPolicy]:
