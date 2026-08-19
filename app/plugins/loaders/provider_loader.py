@@ -302,26 +302,14 @@ class ProviderWatcher:
                 logger.warning(f"[ProviderWatcher] 全量重扫失败: {e}")
 
     def start(self, poll_interval: float = 2.0) -> None:
-        """后台线程轮询监听"""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop = False
+        """[已退役] 轮询线程不再启动。
 
-        def _loop():
-            last_sig = self._signature()
-            while not self._stop:
-                time.sleep(poll_interval)
-                sig = self._signature()
-                if sig != last_sig:
-                    logger.info("[ProviderWatcher] 检测到服务商插件目录变更，重扫")
-                    try:
-                        self.scan_now()
-                    except Exception as e:
-                        logger.warning(f"[ProviderWatcher] 重扫失败: {e}")
-                    last_sig = self._signature()
-
-        self._thread = threading.Thread(target=_loop, daemon=True, name="provider-watcher")
-        self._thread.start()
+        providers 组件变更改由 backend watchfiles 主链驱动：kernel
+        KNOWN_COMPONENTS 已含 providers → _identify_all_components_from_changes
+        识别 → builtin_reloaders._reload_providers 调 scan_now。本方法
+        保留是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
+        """
+        return
 
     def stop(self) -> None:
         self._stop = True

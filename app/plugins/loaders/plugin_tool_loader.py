@@ -418,28 +418,14 @@ class PluginToolWatcher:
                 logger.warning(f"[PluginToolWatcher] 热重载监听回调失败: {e}")
 
     def start(self, poll_interval: float = 2.0) -> None:
-        """后台线程轮询监听（轻量轮询，避免线程模型冲突）"""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop = False
+        """[已退役] 轮询线程不再启动。
 
-        def _loop():
-            last_sig = self._signature()
-            while not self._stop:
-                time.sleep(poll_interval)
-                sig = self._signature()
-                if sig != last_sig:
-                    logger.info("[PluginToolWatcher] 检测到插件工具目录变更，重扫")
-                    try:
-                        self.scan_now()
-                    except Exception as e:
-                        logger.warning(f"[PluginToolWatcher] 重扫失败: {e}")
-                    # 重扫完成后通知监听者（无论成败，工具定义变更事实已发生）
-                    self._notify_reloaded()
-                    last_sig = self._signature()
-
-        self._thread = threading.Thread(target=_loop, daemon=True, name="plugin-tool-watcher")
-        self._thread.start()
+        tools 组件变更改由 backend watchfiles 主链驱动：kernel
+        KNOWN_COMPONENTS 已含 tools → _identify_all_components_from_changes
+        识别 → builtin_reloaders._reload_tools 调 scan_now。本方法保留
+        是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
+        """
+        return
 
     def stop(self) -> None:
         self._stop = True
