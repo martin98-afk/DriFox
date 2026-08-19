@@ -143,6 +143,44 @@ class TestInvalidationCallSites:
             "_on_archived_session_renamed 未调用 _invalidate_welcome_card()"
         )
 
+    def test_display_current_session_empty_branch_invalidates(self):
+        """_display_current_session 切到空会话（显示欢迎卡片）前必须失效缓存
+
+        修复背景（2026-08-19）：该分支是所有「显示欢迎卡片」路径的汇聚点
+        （_switch_to_session_by_id 切到空会话、撤销至空等最终都落到这里）。
+        此前此处未调用 _invalidate_welcome_card，导致命中旧缓存返回陈旧
+        recent_sessions 列表——即「刚对话的新会话在欢迎卡片里显示不出来」。
+        在汇聚点失效即可覆盖全部调用方，无需在每处重复失效。
+        """
+        cls = _get_target_class()
+        method = _get_method(cls, "_display_current_session")
+        assert method is not None
+        assert _method_calls(method, "_invalidate_welcome_card"), (
+            "_display_current_session 显示欢迎卡片前未调用 _invalidate_welcome_card()"
+        )
+        # 失效必须在 _show_initial_welcome 之前（消除 sip.isdeleted 竞态）
+        src = ast.unparse(method)
+        invalidate_pos = src.find("_invalidate_welcome_card")
+        show_pos = src.find("_show_initial_welcome")
+        assert invalidate_pos != -1 and show_pos != -1
+        assert invalidate_pos < show_pos, (
+            "失效必须在 _show_initial_welcome 之前，否则仍可能命中旧缓存"
+        )
+
+    def test_switch_to_session_by_id_reaches_display(self):
+        """_switch_to_session_by_id 切到空会话最终走 _display_current_session
+
+        间接保证：_switch_to_session_by_id 通过调用 _display_current_session
+        触发空会话分支的缓存失效（本文件 test_display_current_session_*
+        已断言该分支失效），无需在该方法内重复失效。
+        """
+        cls = _get_target_class()
+        method = _get_method(cls, "_switch_to_session_by_id")
+        assert method is not None
+        assert _method_calls(method, "_display_current_session"), (
+            "_switch_to_session_by_id 未调用 _display_current_session"
+        )
+
 
 # ─── 2. 功能单元测试 ─────────────────────────────────────────
 
@@ -198,6 +236,48 @@ class TestInvalidationBehavior:
         widget._invalidate_welcome_card()
         # 缓存必然被 pop
         assert widget._window_id not in widget._welcome_card_cache
+
+    def test_display_empty_session_pops_stale_cache(self):
+        """切到空会话时，_display_current_session 必须 pop 旧欢迎卡片缓存。
+
+        回归背景（2026-08-19）：修复前 _display_current_session 空会话分支
+        未调用 _invalidate_welcome_card，导致切换/撤销到空会话时命中旧缓存，
+        返回陈旧的 recent_sessions 列表（「刚对话的新会话显示不出来」）。
+
+        直接驱动真实 _display_current_session，仅 mock 外部依赖，验证
+        「显示欢迎卡片」路径前旧缓存被弹出、欢迎卡片被重新显示。
+        """
+        widget = self._make_widget()
+        # 预置一个"陈旧"欢迎卡片（模拟上一个会话留下的旧快照）
+        stale = MagicMock()
+        stale.parent.return_value = None
+        widget._welcome_card_cache[widget._window_id] = stale
+
+        # 构造一个空会话（无消息），让 _display_current_session 走空会话分支
+        session = MagicMock()
+        session.topic_summary = None
+        session.name = "空会话"
+        session.session_id = "s_empty"
+        session.messages = []
+
+        widget.session_manager = MagicMock()
+        widget.session_manager.get_current_session.return_value = session
+        widget.title_edit = MagicMock()
+        widget._sync_dialog_title = MagicMock()
+        widget._restore_cached_session_cards = MagicMock(return_value=False)
+        widget._clear_chat_area = MagicMock()
+        widget._build_user_prefix_cache = MagicMock()
+        widget._initial_visible_batch_count = 20
+        widget._show_initial_welcome = MagicMock()
+
+        widget._display_current_session()
+
+        # 关键断言：旧缓存被弹出（下次 _get_or_create_welcome_card 必重建），
+        # 且欢迎卡片被重新显示
+        assert widget._window_id not in widget._welcome_card_cache
+        widget._show_initial_welcome.assert_called_once()
+        # _invalidate_welcome_card 的副作用：陈旧卡片被 deleteLater
+        assert stale.deleteLater.called
 
 
 # ─── 3. workdir 同步后看板重渲染（project-dashboard 修复回归） ─────

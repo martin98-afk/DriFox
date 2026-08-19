@@ -10478,6 +10478,13 @@ class OpenAIChatToolWindow(ToolWindow):
         self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
 
         if not self._message_batch:
+            # 🛡️ 关键修复：切到空会话（含撤销至空 / _switch_to_session_by_id 切到空会话）
+            # 时，卡片内的 recent_sessions 列表可能已变化（如刚新建的会话尚未进入旧快照）。
+            # 必须主动失效缓存，否则 _get_or_create_welcome_card 命中旧缓存返回陈旧
+            # 「最近会话」列表（见 _invalidate_welcome_card 契约）。
+            # 该分支是所有「显示欢迎卡片」路径的汇聚点，在此失效即可覆盖
+            # _switch_to_session_by_id 等全部调用方，无需在每处重复失效。
+            self._invalidate_welcome_card()
             self._show_initial_welcome()
             return
 
