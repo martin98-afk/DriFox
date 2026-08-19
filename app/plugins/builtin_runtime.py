@@ -7,9 +7,10 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.core.provider_profile import detect_provider_family
+from app.plugins.contracts.loop_policy import LoopDecision, LoopPolicy, LoopState
 from app.plugins.contracts.model_adapter import ProtocolFlags
 
 
@@ -82,12 +83,46 @@ def register_builtin_runtime_adapters(registry) -> None:
     registry.register(OpenAIAdapter(), source="builtin")
 
 
-def ensure_builtin_adapters() -> None:
-    """幂等注册进全局单例（worker 冷启动防御，正常路径由 warmup 覆盖）"""
+# ── LoopPolicy 内置默认实现 ────────────────────────────────
+class DefaultLoopPolicy:
+    """默认循环策略 — 与现有 chat_worker.run() 行为逐点等价"""
+
+    id = "default"
+
+    def should_continue(self, state: LoopState) -> LoopDecision:
+        if state.repetitive_loop_detected:
+            return LoopDecision.CONTINUE  # 现状：静默清理后继续
+        if state.tool_calls_found:
+            return LoopDecision.CONTINUE
+        if state.stop_hook_injected:
+            return LoopDecision.CONTINUE  # 现状：Stop hook 续命一轮
+        return LoopDecision.STOP
+
+    def max_rounds(self, llm_config: Dict[str, Any]) -> Optional[int]:
+        """默认不限轮数（现状 while 无上限）；配置键可设上限"""
+        try:
+            v = llm_config.get("最大循环轮数") if llm_config else None
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+
+def register_builtin_loop_policies(registry) -> None:
+    registry.register(DefaultLoopPolicy(), source="builtin")
+
+
+def ensure_builtin_runtime() -> None:
+    """幂等注册全部内置运行时实现（adapters + loop policies）"""
     global _adapter_registered
+    from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
     if _adapter_registered:
         return
     register_builtin_runtime_adapters(ModelAdapterRegistry.get_instance())
+    register_builtin_loop_policies(LoopPolicyRegistry.get_instance())
     _adapter_registered = True
+
+
+# 向后兼容 Task 2/3 已用的入口名
+ensure_builtin_adapters = ensure_builtin_runtime
