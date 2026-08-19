@@ -909,21 +909,6 @@ def _extract_screenshot_image_path(result: str) -> str:
     return ""
 
 
-def _to_rel_path(path: str) -> str:
-    """将绝对路径转为相对项目根目录的路径（便于预览展示）"""
-    if not path or not os.path.isabs(path):
-        return path
-    try:
-        cwd = os.getcwd()
-        # normpath 统一分隔符后再比较
-        if os.path.normpath(path).startswith(os.path.normpath(cwd)):
-            rel = os.path.relpath(path, cwd)
-            return rel.replace("\\", "/")
-    except (ValueError, OSError):
-        pass
-    return path
-
-
 # 参数展示型工具（render_mode="inline"）→ 紧凑单行卡片（无折叠、无 body、无工具结果）
 # 注意：不再有工具名白名单 —— 是否 inline 完全由插件注册的 render_mode 决定。
 
