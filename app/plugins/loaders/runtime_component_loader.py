@@ -8,11 +8,17 @@ user 根可覆盖 system 根同名实现（user > system，对齐 provider_loade
 from __future__ import annotations
 
 import importlib.util
+import sys
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
+
+# 插件根等级：system < user（对齐 provider_loader._ROOT_KIND_PRIORITY）
+_ROOT_KIND_SYSTEM = "system"
+_ROOT_KIND_USER = "user"
+_ROOT_KIND_PRIORITY: Dict[str, int] = {_ROOT_KIND_SYSTEM: 0, _ROOT_KIND_USER: 1}
 
 
 def _plugin_roots() -> List[Path]:
@@ -28,48 +34,66 @@ def _plugin_roots() -> List[Path]:
 
 
 def _root_kind(root: Optional[Path]) -> str:
+    """识别 root 等级：项目工作树 → system；app_data/plugins → user"""
+    if root is None:
+        return _ROOT_KIND_SYSTEM
     try:
         from app.utils.utils import get_app_data_dir
 
-        if root == (get_app_data_dir() / "plugins"):
-            return "user"
+        user_root = get_app_data_dir() / "plugins"
+        if root == user_root:
+            return _ROOT_KIND_USER
     except Exception:
         pass
-    return "system"
+    return _ROOT_KIND_SYSTEM
 
 
 def _is_plugin_enabled(plugin_name: str) -> bool:
-    """运行时组件启用过滤（与 provider_loader 语义略有差异）
+    """按插件启用状态过滤运行时组件加载（对齐 provider_loader._is_plugin_enabled）。
 
-    provider_loader 严格匹配 enabled_plugins 列表；运行时组件是 builtin 基础设施
-    的扩展面，默认应当开放（pm 未初始化时只查 disabled 列表，不强制要求在
-    enabled 中）— 与 builtin runtime（OpenAIAdapter/DefaultLoopPolicy/SqliteStorageEngine）
-    并列承担 worker 行为，按禁用列表过滤即可。
+    统一以 Settings.enabled_plugins 为准。pm 未初始化时（真实启动链中
+    app.plugins 可能在 backend.initialize 之前被导入）直接读 Settings。
     """
     try:
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if pm.is_initialized():
-            if pm.has_plugin(plugin_name) and not pm.is_enabled(plugin_name):
-                return False
-            return True
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_enabled(plugin_name)
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
+        saved = cfg.enabled_plugins.value or []
         disabled = cfg.disabled_plugins.value or []
-        if plugin_name in disabled:
-            return False
-        return True
+        if not saved and not disabled:
+            return True
+        return plugin_name in saved
     except Exception as e:
         logger.warning(f"[RuntimeLoader] 启用状态检查失败，默认加载 {plugin_name}: {e}")
         return True
 
 
 class _RegistryProxy:
-    """注册代理 — 强制 source + 覆盖规则（user > system，同根先注册优先）"""
+    """注册代理 — 强制 source + 跨根覆盖规则（user > system，对齐 provider_loader）
 
-    def __init__(self, registry, plugin_name: str, kind: str, occupied: Dict[str, str], lock: threading.Lock):
+    插件代码的 `register(registry)` 收到的是本代理而非裸 registry：
+    - source 强制为 `plugin:<plugin_name>`（热重载清理依赖）
+    - 跨根覆盖规则（root_kind 优先级）：
+        * 同 kind：已被同根其他插件占用时跳过（先注册者优先）
+        * 跨 kind：本 proxy 优先级高 → 覆盖（更新 occupied + registry.register）
+        * 跨 kind：本 proxy 优先级低 → 跳过（防低等级覆盖高等级）
+    """
+
+    def __init__(
+        self,
+        registry,
+        plugin_name: str,
+        kind: str,
+        occupied: Dict[str, str],
+        lock: threading.Lock,
+    ):
         object.__setattr__(self, "_registry", registry)
         object.__setattr__(self, "_source", f"plugin:{plugin_name}")
         object.__setattr__(self, "_kind", kind)
@@ -84,9 +108,20 @@ class _RegistryProxy:
         if item_id is not None:
             with self._lock:
                 held = self._occupied.get(item_id)
-                if held == self._kind:
-                    logger.debug(f"[RuntimeLoader] {item_id} 已被同根实现占用，跳过覆盖")
-                    return
+                if held is not None:
+                    if held == self._kind:
+                        logger.debug(
+                            f"[RuntimeLoader] {item_id} 已被同根实现占用，跳过覆盖"
+                        )
+                        return
+                    held_pri = _ROOT_KIND_PRIORITY.get(held, 0)
+                    self_pri = _ROOT_KIND_PRIORITY.get(self._kind, 0)
+                    if self_pri <= held_pri:
+                        logger.debug(
+                            f"[RuntimeLoader] {item_id} 已被高/同优先级根占用"
+                            f"（held={held}, self={self._kind}），跳过覆盖"
+                        )
+                        return
                 self._occupied[item_id] = self._kind
         self._registry.register(item, source=self._source)
 
@@ -108,44 +143,55 @@ class RuntimeComponentLoader:
         self._occupied: Dict[str, str] = {}
         self._sources: Set[str] = set()
         self._lock = threading.Lock()
+        # scan_roots 整体互斥：防并发 scan 双重 unregister / 重复注册
+        # （对齐 ProviderWatcher.scan_now 的 _scan_lock 模式）
+        self._scan_lock = threading.Lock()
 
     def scan_roots(self, roots: Optional[List[Path]] = None) -> Set[str]:
-        """全量重扫（幂等）：先逐源 unregister 已注册过的 plugin:* 来源，再按 root 顺序注册"""
+        """全量重扫（幂等，整体持锁）：先注销 loader 记录过的 plugin:* 来源，再按 root 顺序注册。
+
+        与 ProviderWatcher.scan_now 同构：清理 → 注册 全程在 _scan_lock 内串行执行。
+        """
         roots = roots if roots is not None else _plugin_roots()
         unregister = getattr(self._registry, self._unregister_attr)
-        with self._lock:
+        with self._scan_lock:
+            # 1) 清理上一次扫描记录过的 plugin:* 来源
             sources = set(self._sources)
             self._sources.clear()
             self._occupied.clear()
-        for s in sources:
-            unregister(s)
-        loaded: Set[str] = set()
-        for root in roots:
-            kind = _root_kind(root)
-            if not root.is_dir():
-                continue
-            for plugin_dir in sorted(root.iterdir()):
-                if not plugin_dir.is_dir():
+            for s in sources:
+                unregister(s)
+            # 2) 全量重扫注册
+            loaded: Set[str] = set()
+            for root in roots:
+                kind = _root_kind(root)
+                if not root.is_dir():
                     continue
-                comp = plugin_dir / self._comp_dir
-                if not comp.is_dir():
-                    continue
-                if not _is_plugin_enabled(plugin_dir.name):
-                    continue
-                for py in sorted(comp.glob("*.py")):
-                    if py.name.startswith("_"):
+                for plugin_dir in sorted(root.iterdir()):
+                    if not plugin_dir.is_dir():
                         continue
-                    if self._load_module(py, plugin_dir.name, kind):
-                        loaded.add(plugin_dir.name)
-        return loaded
+                    comp = plugin_dir / self._comp_dir
+                    if not comp.is_dir():
+                        continue
+                    if not _is_plugin_enabled(plugin_dir.name):
+                        continue
+                    for py in sorted(comp.glob("*.py")):
+                        if py.name.startswith("_"):
+                            continue
+                        if self._load_module(py, plugin_dir.name, kind):
+                            loaded.add(plugin_dir.name)
+            return loaded
 
     def _load_module(self, py: Path, plugin_name: str, kind: str) -> bool:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
+        # 防模块 GC 回收导致插件类定义丢失（对齐 provider_loader._load_module）
+        sys.modules.pop(mod_name, None)
         try:
             spec = importlib.util.spec_from_file_location(mod_name, py)
             if spec is None or spec.loader is None:
                 return False
             mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
             spec.loader.exec_module(mod)
             register = getattr(mod, "register", None)
             if not callable(register):
@@ -159,6 +205,7 @@ class RuntimeComponentLoader:
             return True
         except Exception as e:
             logger.error(f"[RuntimeLoader] 加载 {py} 失败: {e}")
+            sys.modules.pop(mod_name, None)
             return False
 
 
