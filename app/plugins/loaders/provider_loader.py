@@ -264,17 +264,6 @@ def load_providers(
     return loaded
 
 
-def unload_provider_source(plugin_name: str, provider_names: Set[str], registry: Optional[ProviderRegistry] = None) -> None:
-    """注销指定插件的服务商（热重载/插件卸载时调用，幂等）"""
-    registry = registry or ProviderRegistry.get_instance()
-    source = f"plugin:{plugin_name}"
-    for name in provider_names:
-        p = registry.get(name)
-        if p is not None and p.source == source:
-            registry.clear_source(source)
-            logger.info(f"[ProviderLoader] 注销服务商: {name} ({plugin_name})")
-
-
 class ProviderWatcher:
     """服务商插件热重载 watcher：轮询签名检测变更，变更时全量重扫（幂等）。
 
@@ -284,22 +273,27 @@ class ProviderWatcher:
     def __init__(self, registry: Optional[ProviderRegistry] = None, roots: Optional[List[Path]] = None):
         self._registry = registry or ProviderRegistry.get_instance()
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
-        self._loaded: Dict[str, Set[str]] = {}  # plugin_name -> provider_names
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
         self._thread = None
         self._stop = False
 
     def scan_now(self) -> None:
-        """全量重扫：先注销已加载插件的全部服务商，再全量重新注册（幂等）"""
+        """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
+
+        卸载以注册表实际内容为准（而非 watcher 自身的加载记忆）：
+        启动链 warmup_providers() 直接注册不经 watcher，且重扫时同名保护
+        会拒绝重复注册使记忆失真（永远为空），按记忆卸载会漏清已删除
+        文件对应的服务商（残留 bug 回归点，见 tests/core/test_provider_watcher.py）。
+        """
         with self._scan_lock:
-            # 1) 注销已加载插件的全部服务商
-            for plugin_name, old_names in self._loaded.items():
-                unload_provider_source(plugin_name, old_names, self._registry)
-                self._root_tracker = {}
+            # 1) 按注册表实际内容注销全部插件来源
+            for source in self._registry.provider_sources():
+                self._registry.clear_source(source)
+            self._root_tracker = {}
             # 2) 全量重扫注册
             try:
-                self._loaded = load_providers(
+                load_providers(
                     registry=self._registry,
                     plugin_roots=self._roots,
                     root_tracker=self._root_tracker,

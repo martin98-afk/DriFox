@@ -1,5 +1,5 @@
 ---
-description: 8 類組件的詳細開發指南與代碼模板
+description: 10 類組件的詳細開發指南與代碼模板
 ---
 
 # 組件開發詳細指南
@@ -562,3 +562,135 @@ ws["delete"]("my_state")         # 刪除
 - 系統工具真實案例：\`plugins/system/tools/\`（file_tools 自包含、subagent_tools 平台服務）
 - 註冊表實現：\`app/tools/registry.py\`
 - 掃描/熱重載：\`app/tools/plugin_tool_loader.py\`
+
+## Providers（服務商插件化）
+
+> 服務商支持已全面插件化（萬物為插件）：服務商的一切——圖標、API URL、默認參數、
+> 模型列表、models.dev 白名單、family 能力、用量查詢額外配置、餘額/套餐用量查詢——
+> 全部由 providers 插件聲明，主程序不再硬編碼任何服務商數據。
+
+### 文件位置
+
+```
+plugins/<name>/
+├── providers/
+│   ├── deepseek.py          # 一個文件註冊一個（或多個）服務商
+│   ├── icons/               # 深色主題圖標（<icon>.svg / <icon>.png）
+│   └── icons_light/         # 淺色主題圖標（可選；缺省回退深色）
+└── .drifox-plugin/
+    └── plugin.json          # components 聲明 "providers": true（自動檢測，可選）
+```
+
+- 系統內置服務商：`plugins/system/providers/*.py`
+- 用戶插件：`<app_data>/plugins/<name>/providers/*.py`
+- 熱重載：ProviderWatcher 後台輪詢（path, mtime, size），變更全量重掃；user 插件可覆蓋 system 同名服務商
+
+### 最小模板
+
+```python
+# providers/deepseek.py
+from app.plugins.registries.provider_registry import (
+    ProviderDef,
+    make_bearer_balance_fetcher,
+)
+
+
+def register(registry):
+    registry.register(
+        ProviderDef(
+            name="DeepSeek",
+            icon="deepseek",
+            api_url="https://api.deepseek.com",
+            auth_type="bearer",                 # bearer / bce / none / anthropic
+            default_model="deepseek-chat",
+            default_params={"溫度": 0.7, "最大Token": 200000, "思考等級": "high"},
+            register_url="https://platform.deepseek.com/api_keys",
+            models=["deepseek-v4-flash", "deepseek-v4-pro"],
+            models_dev_id="deepseek",
+            family="deepseek",
+            capabilities={
+                "context_limit": 320000,
+                "supports_thinking": True,
+                "thinking_param": "thinking",
+            },
+            extra_quota_fields=[                # 用量查詢額外配置（可選）
+                QuotaField(key="server_id", label="Server ID:", placeholder="..."),
+            ],
+            balance_fetcher=make_bearer_balance_fetcher(   # 餘額查詢（可選）
+                url="https://api.deepseek.com/user/balance",
+                balance_key="total_balance",
+                currency="¥",
+            ),
+            coding_plan_fetcher=_fetch_coding_plan,        # 套餐用量查詢（可選）
+        )
+    )
+```
+
+### ProviderDef 字段
+
+| 字段 | 說明 | 對應舊硬編碼 |
+|------|------|------------|
+| `name` | 服務商唯一名 | `FREE_PROVIDERS` key |
+| `icon` | 圖標 key（icons/ 文件名或 qrc） | `PROVIDER_ICONS` |
+| `icon_dir` / `icon_dir_light` | 插件圖標目錄（**自動注入**，勿手寫） | — |
+| `api_url` | 默認 API URL | `FREE_PROVIDERS.API_URL` |
+| `auth_type` | 認證方式 bearer/bce/none/anthropic | `FREE_PROVIDERS` 認證方式 |
+| `default_model` | 默認模型名 | `FREE_PROVIDERS` 模型名稱 |
+| `default_params` | 溫度/最大Token/思考模式等 | `FREE_PROVIDERS` 其餘鍵 |
+| `register_url` | 獲取 API Key 地址 | `FREE_PROVIDERS` 獲取地址 |
+| `models` | 模型列表 | `PROVIDER_MODELS` |
+| `models_dev_id` | models.dev provider id | `MODELS_DEV_PROVIDER_MAP` |
+| `family` | 能力族 | `detect_provider_family` |
+| `capabilities` | family 能力 | `PROVIDER_CAPABILITIES` |
+| `extra_quota_fields` | 用量查詢額外字段（不進 API 請求） | `QUOTA_EXCLUDE_KEYS` + 編輯卡片硬編碼 |
+| `balance_fetcher` | 餘額查詢函數 | `BALANCE_APIS` |
+| `coding_plan_fetcher` | 套餐用量查詢函數 | coding_plan_fetcher 註冊表 |
+
+### 查詢函數簽名
+
+**餘額 fetcher**：`(config: dict) -> dict | None`
+
+```python
+{"balance": 123.4, "currency": "¥"}     # 成功
+{"hide": True, "tooltip": "失敗原因"}   # 失敗/無餘額
+None                                    # 無 API key 等（不請求）
+```
+
+簡單 Bearer GET 場景直接用工廠 `make_bearer_balance_fetcher(url, balance_key, currency="¥")`
+（自動處理 `balance_infos[0][key]` / `data.data[key]` / `data[key]` 層級）。
+
+**套餐用量 fetcher**：`(config: dict) -> dict | None`
+
+```python
+{"rolling": {"percent": 60, "reset_sec": 123}, "weekly": ..., "monthly": ...}
+```
+
+返回 None 表示該服務商暫不支持用量查詢。
+
+### extra_quota_fields 與 QUOTA_EXCLUDE_KEYS
+
+`extra_quota_fields` 聲明的 key 會：
+
+1. 匯入 `ProviderRegistry.quota_exclude_keys()`（全局聚合），這些字段**不會**被當作模型參數發送到 API
+   （chat_worker / subagent_worker / model_config_card 均按該集合排除）。
+2. 在服務商編輯卡片「套餐用量查詢（可選）」區動態渲染（label + placeholder）。
+
+### 熱插拔
+
+- \`providers/*.py\` 增/刪/改 → ProviderWatcher 後台輪詢（path, mtime, size）變更全量重掃（1-3 秒生效）
+- 同名服務商：user 插件優先於 system 內置（覆蓋是預期行為）
+- 修改 providers 後重啟或等 watcher 生效；manifest 更新 components.providers = true
+
+### 關鍵約束
+
+- 每個 `providers/*.py` 必須暴露 `register(registry)`，否則 loader 不掃描
+- `name` 必須唯一；重複會導致後加載者覆蓋先加載者
+- `icon_dir` / `icon_dir_light` 由 loader 自動注入，**勿手寫**
+- 修改 providers 後重啟或等 watcher 生效；manifest 更新 components.providers = true
+
+### 參考
+
+- 完整開發指南：\`plugins/system/providers/README.md\`
+- 系統服務商真實案例：\`plugins/system/providers/*.py\`
+- 註冊表實現：\`app/plugins/registries/provider_registry.py\`
+- 測試：\`python -m pytest tests/core/test_provider_registry.py -v\`

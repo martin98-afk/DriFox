@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: "DriFox 插件全生命周期开发技能。涵盖全部 8 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。"
+description: "DriFox 插件全生命周期开发技能。涵盖全部 10 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。"
 ---
 
 # plugin-creator — DriFox 插件開發技能
@@ -98,13 +98,17 @@ your-plugin/
 │   ├── my_tool.py           ← 每個工具文件暴露 register(registry)
 │   └── icons/               ← 工具自帶圖標（深色）+ icons_light/（淺色）
 │
+├── providers/               ← 服務商組件（可選 AI 模型/API 服務商，providers 插件化）
+│   ├── deepseek.py          ← 每個文件暴露 register(registry)
+│   └── icons/               ← 服務商自帶圖標（深色）+ icons_light/（淺色）
+│
 ├── .mcp.json                ← MCP 伺服器配置（插件根目錄）
 ├── .lsp.json                ← LSP 語言伺服器配置（插件根目錄）
 ├── README.md                ← 插件說明
 └── __init__.py              ← Python 包標記（可選）
 ```
 
-### 2.2 9 類組件速查
+### 2.2 10 類組件速查
 
 | # | 組件 | manifest flag | 必備文件 | 觸發方式 | 適用場景 |
 |---|------|--------------|---------|---------|---------|
@@ -117,6 +121,7 @@ your-plugin/
 | 7 | **Themes** | `themes: true` | `themes/<name>/*.yaml` | 用戶 `/theme xx` | 配色方案 |
 | 8 | **UI** | `ui: true` | `ui/__init__.py` + widgets | DriFox 啟動 + 命令 | 浮動卡片/內容渲染器/消息工廠 |
 | 9 | **Tools** | `tools: true` | `tools/*.py`（register 入口） | AI 工具調用 | 擴展 AI 可用的工具（schema/impl/圖標/權限元數據） |
+| 10 | **Providers** | `providers: true` | `providers/*.py`（register 入口） | 選擇模型/API 服務商 | 擴展可選 AI 服務商（icon/url/模型/餘額/用量/額外配置由插件聲明） |
 
 ### 2.3 官方資源
 
@@ -149,6 +154,7 @@ your-plugin/
 | "做個主題""改配色" | **Themes** | §5.7 或 `references/components.md §Themes` |
 | "做個 UI 插件""浮動卡片" | **UI** | → **調用 `ui-plugin-creator` 技能** |
 | "加個工具""做個 AI 工具" | **Tools** | §5.9 或 `references/components.md §Tools` |
+| "加個服務商""接新模型廠商" | **Providers** | §5.10 或 `references/components.md §Providers` |
 | "改 plugin.json" | **Manifest** | `references/manifest.md` |
 | "驗證""跑測試" | **驗證** | §6 或 `references/testing.md` |
 | "發布到市場""提 PR" | **發布** | §7 或 `references/publishing.md` |
@@ -167,7 +173,7 @@ your-plugin/
 
 所有插件建立在 `~/.drifox/plugins/` 下，DriFox 的 watchfiles 會自動熱加載。
 
-最快的起點是下載 `example-plugin`，它展示了全部 8 類組件的標準寫法：
+最快的起點是下載 `example-plugin`，它展示了全部 10 類組件的標準寫法：
 
 ```
 ① 從官方市場 GitHub 倉庫獲取 example-plugin：
@@ -480,6 +486,100 @@ def register(registry):
 - `app/tools/registry.py`（ToolRegistration 字段定義）
 - `app/tools/plugin_tool_loader.py`（掃描/熱重載實現）
 
+### 5.10 Providers（服務商插件化）
+
+> 服務商支持已全面插件化（萬物為插件）：服務商的一切——**圖標、API URL、默認參數、
+> 模型列表、models.dev 白名單、family 能力、用量查詢額外配置、餘額/套餐用量查詢**——
+> 全部由 providers 插件聲明，主程序不再硬編碼任何服務商數據。
+
+```
+providers/
+├── deepseek.py          ← 每個文件暴露 register(registry)
+└── icons/               ← 服務商自帶圖標（深色）+ icons_light/（淺色）
+```
+
+**關鍵約束**：
+- 每個 `providers/*.py` 必須暴露 `register(registry)` 函數（ProviderWatcher 掃描調用）
+- 內部調用 `registry.register(ProviderDef(...))` 註冊 `name` / `icon` / `api_url` /
+  `auth_type` / `default_model` / `models` / `family` / `capabilities` 等
+- `icon_dir` / `icon_dir_light` 由 loader **自動注入**，勿手寫
+- manifest：`"components": { "providers": true }`（聲明可選，loader 自動檢測目錄）
+- 熱重載：ProviderWatcher 後台輪詢（path, mtime, size），變更全量重掃；
+  user 插件可覆蓋 system 同名服務商
+
+**註冊模板**：
+
+```python
+# providers/deepseek.py
+from app.plugins.registries.provider_registry import (
+    ProviderDef,
+    make_bearer_balance_fetcher,
+)
+
+
+def register(registry):
+    registry.register(
+        ProviderDef(
+            name="DeepSeek",                    # 服務商唯一名
+            icon="deepseek",                    # 圖標 key（icons/ 目錄文件名或 qrc）
+            api_url="https://api.deepseek.com",
+            auth_type="bearer",                 # bearer / bce / none / anthropic
+            default_model="deepseek-chat",
+            default_params={"溫度": 0.7, "最大Token": 200000, "思考等級": "high"},
+            register_url="https://platform.deepseek.com/api_keys",
+            models=["deepseek-v4-flash", "deepseek-v4-pro"],
+            models_dev_id="deepseek",           # models.dev provider id（可選）
+            family="deepseek",                  # 能力族（detect 探測同 key）
+            capabilities={                      # family 能力（可覆蓋默認）
+                "context_limit": 320000,
+                "supports_thinking": True,
+                "thinking_param": "thinking",
+            },
+            extra_quota_fields=[                # 用量查詢額外配置（可選，不進 API 請求）
+                QuotaField(key="server_id", label="Server ID:", placeholder="..."),
+            ],
+            balance_fetcher=make_bearer_balance_fetcher(   # 餘額查詢（可選）
+                url="https://api.deepseek.com/user/balance",
+                balance_key="total_balance",
+                currency="¥",
+            ),
+            coding_plan_fetcher=_fetch_coding_plan,        # 套餐用量查詢（可選）
+        )
+    )
+```
+
+**ProviderDef 核心字段**：
+
+| 字段 | 說明 | 對應舊硬編碼 |
+|------|------|------------|
+| `name` | 服務商唯一名 | `FREE_PROVIDERS` key |
+| `icon` | 圖標 key（icons/ 文件名或 qrc） | `PROVIDER_ICONS` |
+| `api_url` | 默認 API URL | `FREE_PROVIDERS.API_URL` |
+| `auth_type` | 認證方式 bearer/bce/none/anthropic | `FREE_PROVIDERS` 認證方式 |
+| `default_model` | 默認模型名 | `FREE_PROVIDERS` 模型名稱 |
+| `default_params` | 溫度/最大Token/思考模式等 | `FREE_PROVIDERS` 其餘鍵 |
+| `register_url` | 獲取 API Key 地址 | `FREE_PROVIDERS` 獲取地址 |
+| `models` | 模型列表 | `PROVIDER_MODELS` |
+| `models_dev_id` | models.dev provider id | `MODELS_DEV_PROVIDER_MAP` |
+| `family` | 能力族 | `detect_provider_family` |
+| `capabilities` | family 能力 | `PROVIDER_CAPABILITIES` |
+| `extra_quota_fields` | 用量查詢額外字段（不進 API 請求） | `QUOTA_EXCLUDE_KEYS` + 編輯卡片硬編碼 |
+| `balance_fetcher` | 餘額查詢函數 | `BALANCE_APIS` |
+| `coding_plan_fetcher` | 套餐用量查詢函數 | coding_plan_fetcher 註冊表 |
+
+**查詢函數簽名**：
+- 餘額 fetcher：`(config: dict) -> dict | None`
+  `{"balance": 123.4, "currency": "¥"}`（成功）/ `{"hide": True, "tooltip": "原因"}`（失敗）/ `None`（無 key 不請求）
+  簡單 Bearer GET 直接用工廠 `make_bearer_balance_fetcher(url, balance_key, currency="¥")`
+- 套餐用量 fetcher：`(config: dict) -> dict | None`
+  `{"rolling": {...}, "weekly": ..., "monthly": ...}`；返回 None 表示暫不支持
+
+**參考**：
+- `plugins/system/providers/README.md`（服務商插件完整開發指南）
+- `plugins/system/providers/*.py`（15+ 系統服務商真實案例）
+- `app/plugins/registries/provider_registry.py`（ProviderDef / ProviderRegistry 字段定義）
+- 測試：`python -m pytest tests/core/test_provider_registry.py -v`
+
 ---
 
 ## 6. 測試與驗證
@@ -522,6 +622,7 @@ rm -rf /tmp/dfp
 - [ ] `components` 中每個 `true` 的 flag 都有對應目錄與文件
 - [ ] 每個 `commands/*.md` 有完整 frontmatter（description + type）
 - [ ] 每個 `skills/*/SKILL.md` 有 frontmatter（name + description）
+- [ ] 每個 `providers/*.py` 暴露 `register(registry)` 且 `ProviderDef.name` 唯一
 - [ ] hooks 的 Python 文件能 `python -m py_compile` 通過
 - [ ] 已跑過 `validate_plugins.py` 全部 OK
 - [ ] 已跑過 `generate_marketplace.py` 更新 marketplace.json
@@ -615,6 +716,14 @@ marketplace.json 中每條記錄的結構由 `tools/generate_marketplace.py` 自
 # ✅ registry.register(..., danger="safe")  # 插件工具必須顯式聲明
 ```
 
+### 🚫 Providers 沒暴露 register / name 重複
+```python
+# ❌ providers/foo.py 只定義了函數，沒暴露 register(registry) → loader 不掃描
+# ❌ 兩個 provider 用了相同 name="DeepSeek" → 後加載者覆蓋先加載者
+# ✅ 每個 providers/*.py 必須暴露 register(registry)，name 唯一
+#    user 插件同名服務商會覆蓋 system 內置（覆蓋是預期行為，非 bug）
+```
+
 ### 🚫 UI 插件走了本技能
 UI 插件開發請調用 `ui-plugin-creator` 技能。
 
@@ -635,7 +744,7 @@ UI 插件開發請調用 `ui-plugin-creator` 技能。
 
 | 文件 | 何時讀 | 內容 |
 |------|-------|------|
-| `references/components.md` | 開發各類組件時 | 8 類組件的詳細開發指南 + 代碼模板 |
+| `references/components.md` | 開發各類組件時 | 10 類組件的詳細開發指南 + 代碼模板 |
 | `references/manifest.md` | 新建/修改 plugin.json 時 | manifest 字段定義、校驗規則、完整示例 |
 | `references/workflow.md` | 需要完整開發流程時 | 從需求→scaffold→開發→測試→發布的完整指引 |
 | `references/testing.md` | 驗證/除錯時 | validate_plugins.py 用法、熱更新測試、除錯技巧 |

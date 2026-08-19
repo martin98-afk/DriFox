@@ -256,6 +256,11 @@ class ProviderRegistry:
                 del self._providers[name]
                 logger.debug(f"[ProviderRegistry] 已卸载服务商: {name} (source={source})")
 
+    def provider_sources(self) -> List[str]:
+        """全部插件来源标记（去重排序，热重载全量重建时逐个清理用）"""
+        with self._lock:
+            return sorted({p.source for p in self._providers.values() if p.source.startswith("plugin:")})
+
     def get(self, name: str) -> Optional[ProviderDef]:
         self.ensure_loaded()
         with self._lock:
