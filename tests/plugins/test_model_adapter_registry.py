@@ -55,3 +55,28 @@ def test_unregister_source(fresh_registry):
 
 def test_protocol_runtime_checkable():
     assert isinstance(_FakeAdapter("x", 1), ModelAdapter)
+
+
+def test_register_overrides_same_id(fresh_registry):
+    """同 id 重复注册 → 后者覆盖前者（spec 明文语义）"""
+    first = _FakeAdapter("a", 9, ProtocolFlags(is_gemini=True))
+    second = _FakeAdapter("a", 9, ProtocolFlags(is_gemini=False))
+    fresh_registry.register(first)
+    fresh_registry.register(second)
+    assert fresh_registry.adapters()["a"] is second
+    assert fresh_registry.resolve({}).protocol_flags({}).is_gemini is False
+
+
+def test_matches_exception_skipped(fresh_registry):
+    """matches 拖异常 → 该 adapter 被跳过不拖垮 resolve"""
+    class _BrokenAdapter:
+        id = "broken"
+        def matches(self, llm_config):
+            raise RuntimeError("boom")
+        def protocol_flags(self, llm_config):
+            return ProtocolFlags()
+
+    fresh_registry.register(_BrokenAdapter())
+    fresh_registry.register(_FakeAdapter("good", 2, ProtocolFlags(use_responses_api=True)))
+    # broken 拖异常被跳过，good 生效
+    assert fresh_registry.resolve({}).protocol_flags({}).use_responses_api is True
