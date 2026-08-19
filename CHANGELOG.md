@@ -139,6 +139,14 @@ All notable changes to this project will be documented in this file.
 - **思考强度胶囊按等级变色** (`app/core/model_capabilities.py` + `app/widgets/cards/settings/` + `app/core/workers/`): 思考强度胶囊按等级变色 + 等级强制校验回退中间值（`a47a8077`）
 - **分支/新建标签按钮字号** (`app/widgets/tab_panel.py`): 统一分支与新建标签按钮字号提升一致性（`58d48041`）
 
+### 🚑 Hotfix (2026-08-19 第六次重发布)
+
+> **自上一 tag (v0.5.2 `70b78cff`) 以来的变更** | 提交数：1 · 文件变更：2 · +132/-9 | 贡献者：mading
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **缓存内容版本机制** (`app/core/models_dev_sync.py` + `tests/core/test_models_dev_sync.py`): 将"内容版本"从 schema 结构版本中分离，新增 `CACHE_CONTENT_VERSION` 与 `_is_content_version_stale`；开发者改了产出内容代码（解析/映射逻辑、服务商白名单、免费模型源、默认值、合并规则等非结构变更）后将该值 +1，本地缓存即便仍在 24h TTL 内也判定为内容过期、后台强制重拉 models.dev，让用户及时用上新逻辑而无需等 TTL 自然到期（`a1b3468b`）
+
 ## [v0.5.1] - 2026-08-14
 
 自上一版本以来的变更 | 提交数：22 · 文件变更：22 · +3472/-380 | 贡献者：mading
