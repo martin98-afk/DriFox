@@ -74,7 +74,11 @@ class SubAgentSessionCard(BaseSettingsCard):
     """内嵌子智能体会话卡片 - 左侧导览栏 + 右侧详细消息布局"""
 
     def __init__(self, parent=None):
-        super().__init__("子智能体会话", "🤖", parent=parent)
+        super().__init__("子智能体会话", "", parent=parent)
+        # 标题图标改用 subagent 图形图标（设置-subagent.svg），不用 emoji
+        _icon_label = QLabel()
+        _icon_label.setPixmap(get_icon("设置-subagent").pixmap(20, 20))
+        self.set_icon_widget(_icon_label)
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
 
