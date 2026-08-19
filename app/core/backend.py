@@ -979,6 +979,15 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[ChatBackend] 服务商插件初始化失败: {e}")
 
+            # 运行时组件（model_adapters / loop_policies / storages）：
+            # 内置实现先注册，插件目录可覆盖内置
+            try:
+                from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+                warmup_runtime_components()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 运行时组件 warmup 失败: {e}")
+
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
                 from app.core.lsp.lsp_manager import get_lsp_manager
