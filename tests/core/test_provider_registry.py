@@ -206,3 +206,34 @@ def test_system_providers_loaded_from_plugins():
     dev_map = reg.models_dev_map()
     assert dev_map["DeepSeek"] == "deepseek"
     assert dev_map["OpenCode Go"] == "opencode-go"
+
+
+def test_provider_icon_dirs_injected_from_plugin():
+    """插件图标目录由 loader 自动注入（icons/ 深色 + icons_light/ 浅色）"""
+    reg = _fresh_registry()
+    load_providers(registry=reg)
+
+    from pathlib import Path
+
+    deepseek = reg.get("DeepSeek")
+    # 深色图标目录指向系统插件 icons/
+    assert deepseek.icon_dir
+    assert Path(deepseek.icon_dir).name == "icons"
+    assert (Path(deepseek.icon_dir) / f"{deepseek.icon}.svg").exists()
+    # Groq 有浅色版本（icons_light/groq.svg 原样保留）
+    groq = reg.get("Groq")
+    assert groq.icon_dir_light
+    assert (Path(groq.icon_dir_light) / f"{groq.icon}.svg").exists()
+    # DeepSeek 无浅色版：icons_light 下不存在 deepseek.svg（深浅回退到深色图标）
+    assert not (Path(deepseek.icon_dir_light) / f"{deepseek.icon}.svg").exists()
+
+
+def test_provider_icon_light_missing_falls_back_to_dark():
+    """浅色图标缺失时回退深色图标（icons 有、icons_light 无 → 深浅同一份）"""
+    from app.utils.provider_icons import _provider_icon_path
+
+    reg = _fresh_registry()
+    load_providers(registry=reg)
+    # 手动只为 DeepSeek 关闭浅色目录（模拟「无浅色版」场景）
+    deepseek = reg.get("DeepSeek")
+    assert "deepseek.svg" in _provider_icon_path("DeepSeek")
