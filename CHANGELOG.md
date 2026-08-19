@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **序列化单入口（Phase C）** (`app/plugins/contracts/message_serializer.py` + `app/core/workers/chat_worker.py` + `subagent_worker.py`): 新增 `SerializeResult`（messages/input_items/instructions）+ `MessageSerializer.serialize` 单入口（内部按 `ctx.flags.use_responses_api` 路由 chat/responses 形态）；worker 从「按协议形态调 3 个函数」收敛为 1 个入口，`ProtocolFlags.serializer_id` 真正被消费（adapter 可指定专属序列化器，默认 openai）；薄壳函数内部转发单入口（导出与调用形态不变）。
+- **协议家族适配器拆分（Phase C）** (`plugins/system/model_adapters/`): 单适配器拆为三家族——`openai-family`（matches=1 兜底）/ `gemini-family`（2）/ `deepseek-family`（3），判定器共享 `_detectors.py`（`_` 前缀不当作插件），`resolve` 取最高分；flags 与拆分前逐点等价（等价矩阵 13 用例全过）。
+- **UI 层存储收口（Phase C）** (`app/core/backend.py` + `plugins/system/storages/sqlite.py`): `backend.session_store` 切到 `StorageRegistry.get_active()`（冷启动防御复用门面 warmup）；SQLite 引擎补 SessionStore 兼容方法集（`clear_old_subagent_tasks / force_cleanup_project / record_file_operation` 等，委托内部 SessionStore 单例），main_widget 与 FileOperationRecorder 调用点零改动迁移，db 连接不分叉。
 - **消息序列化插件化（Phase B）** (`app/plugins/contracts/message_serializer.py` + `app/plugins/registries/serializer_registry.py` + `plugins/system/serializers/openai.py`): 新增 `MessageSerializer` 契约（`serialize_messages` ≡ 旧 `messages_to_api` / `serialize_responses` ≡ 旧 `messages_to_responses_input`）+ `SerializeContext` + `SerializerRegistry` 单例（按 id 解析，回退 `openai`）；`message_content` 三函数变薄壳委托（签名与导出不变，调用点零改动，行为逐点等价）；`ProtocolFlags` 扩展 `serializer_id` 字段（本阶段只立不消费，走覆盖式替换）；kernel/plugin_manager/reloaders/plugin.json 登记 serializers 组件（热重载 watcher 生效）。插件可替换消息序列化行为（E2E 验收：user 根覆盖 system 默认 openai）。
 - **存储契约能力接口（Phase B）** (`app/plugins/contracts/storage.py` + `plugins/system/storages/sqlite.py`): 新增可选能力接口 `SessionTitleCapability` / `SessionCountsCapability` / `InputHistoryCapability`（消费方 `isinstance` 探测，无能力安全降级）；SQLite 引擎声明实现并覆盖消费方方法（`save_session/get_sessions_lightweight/get_session_count/update_session_project/archive_sessions_by_project` 等委托 SessionStore，行为零变化）；backend 新增 `get_session_storage()` 门面（注册表空时幂等加载系统插件），history_manager / memory_manager / session_handler 改走门面（UI 层消费点迁移属 Phase C）。
 - **冷启动回归修复（Phase B）** (`app/core/workers/chat_worker.py` + `subagent_worker.py`): ModelAdapter resolve 空注册表时幂等触发系统插件扫描再重试（仍空才抛错），`tests/test_reasoning_content_required.py` 恢复全绿。
@@ -16,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### ♻️ 代码重构 (Refactoring)
 
+- **openai 适配器拆协议家族（Phase C）** (`plugins/system/model_adapters/`): 旧单适配器 `openai.py` 删除，拆为 `openai_family.py / gemini_family.py / deepseek_family.py` + 共享判定器 `_detectors.py`；worker 序列化调用全部收敛到 `_serialize_for_api` 单入口（chat_worker 9 处 + subagent_worker 2 处）。
 - **openai 适配器判定器拆分（Phase B 铺路）** (`plugins/system/model_adapters/openai.py`): 三个 `_method` 拆为模块级纯函数 `detect_is_gemini / detect_requires_reasoning / detect_use_responses`（逻辑逐字搬运，行为零变化），`protocol_flags` 组合之，为协议家族适配器铺路。
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): 插件相关代码从 `app/core/` 与 `app/tools/` 迁入 `app/plugins/managers/`（PluginManager）、`registries/`（ProviderRegistry/UIPluginRegistry/coding_plan_fetcher）、`loaders/`（plugin_tool_loader/provider_loader），按职责分子目录
 - **服务商硬编码全部移除** (`app/constants.py` 等): 删除 `PROVIDER_MODELS`/`FREE_PROVIDERS`/`PROVIDER_ICONS`/`QUOTA_EXCLUDE_KEYS` 常量（保留函数委托）；`MODELS_DEV_PROVIDER_MAP`/`PROVIDER_CAPABILITIES`/`BALANCE_APIS`/`coding_plan_fetcher` 注册表全部迁移至 ProviderRegistry 聚合（后两者变薄壳委托）；消费方（usage_service/balance_display/model_capabilities/models_dev_sync/provider_profile/workers/UI 卡片/main_widget/config/cli）全部改读注册表
