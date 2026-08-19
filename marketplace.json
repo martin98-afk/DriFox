@@ -152,7 +152,8 @@
                 "providers": true,
                 "loop_policies": true,
                 "model_adapters": true,
-                "storages": true
+                "storages": true,
+                "serializers": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
