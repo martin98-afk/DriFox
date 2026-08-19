@@ -39,7 +39,7 @@ git push origin develop
 | `app/widgets/` | UI 组件、设置卡片、像素宠物 |
 | `app/plugins/contracts/` | 运行时契约层：ModelAdapter / LoopPolicy / SessionStorageEngine 接口（Protocol） |
 | `app/plugins/registries/` | 运行时注册表：adapter / loop policy / storage 三注册表（单例，插件可覆盖） |
-| `app/plugins/builtin_runtime.py` | 内置默认实现（openai 适配 / default 循环策略 / sqlite 存储），行为与旧实现逐点等价 |
+| `plugins/system/{model_adapters,loop_policies,storages}/` | 系统插件默认运行时实现（openai 适配 / default 循环策略 / sqlite 存储），行为与旧实现逐点等价，插件可覆盖 |
 | `plugins/system/tools/` | 系统内置工具插件（33 个工具，register(registry) 注册 schema/impl/icon/cn_name/danger/group） |
 | `.drifox/plugins/` | 社区插件目录（用户级，watchfiles 自动扫描）：如 `codegraph-tools/`（codegraph_explore 引擎） |
 | `plugins/system/` | 插件：hooks、skills、themes、commands、tools |
