@@ -156,6 +156,11 @@ class GlobalCardController:
             mgr = self._card_manager
             mgr.register_card(GLOBAL_WINDOW_ID, ContainerType.TOP, "settings", self._settings_popup, system_card=True)
             self._global_card_container.add_card("settings", self._settings_popup)
+            # Phase D：构建插件设置分区（无注册卡片时整体隐藏，存量布局零变化）
+            try:
+                self._settings_popup.rebuild_plugin_cards()
+            except Exception as e:
+                logger.warning(f"[GlobalCard] 插件设置分区初始化失败: {e}")
         finally:
             self._settings_popup_building = False
 
@@ -166,6 +171,11 @@ class GlobalCardController:
     def toggle_settings(self):
         """切换设置卡片的显示"""
         self.ensure_settings_popup()
+        # Phase D：每次打开重建插件分区（插件增删/热重载后内容最新）
+        try:
+            self._settings_popup.rebuild_plugin_cards()
+        except Exception as e:
+            logger.warning(f"[GlobalCard] 插件设置分区重建失败: {e}")
         self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
 
     def open_settings(self):
