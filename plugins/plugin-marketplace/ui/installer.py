@@ -328,7 +328,7 @@ class PluginInstaller:
         不触碰 Qt 控件。
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.get_plugin(name) is None:

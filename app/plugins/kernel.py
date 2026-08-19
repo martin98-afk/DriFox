@@ -54,6 +54,10 @@ COMPONENT_ORDER: tuple = (
 ROOT_FILE_COMPONENTS: Dict[str, str] = {
     ".mcp.json": "mcp",
     ".lsp.json": "lsp",
+    # .drifox-plugin/ 是插件清单目录（plugin.json 等），其变更意味着组件清单可能增删
+    # → 映射到 sentinel "__manifest__"，触发 backend 遍历该插件全部已声明 components 全量重载
+    # （不在 KNOWN_COMPONENTS 内，registry 无对应 reloader — 特殊值由 _reload_single_plugin 拦截处理）
+    ".drifox-plugin": "__manifest__",
 }
 
 

@@ -4018,13 +4018,13 @@ class MarketplaceCard(QWidget):
         卸载再加载，幂等；重复调用无副作用。
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             pm.rescan_plugin(name)
             plugin = pm.get_plugin(name)
             if plugin is not None and plugin.has_component("ui"):
-                from app.core.ui_plugin_registry import UIPluginRegistry
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                 UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
         except Exception as e:
@@ -4043,7 +4043,7 @@ class MarketplaceCard(QWidget):
         调用方保证：在启动删除目录的后台线程之前调用本方法。
         """
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             UIPluginRegistry.get_instance().unload_plugin(name)
         except Exception as e:

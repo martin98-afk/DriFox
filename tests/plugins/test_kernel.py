@@ -24,7 +24,14 @@ def test_known_components_complete():
 
 
 def test_root_file_components():
-    assert kernel.ROOT_FILE_COMPONENTS == {".mcp.json": "mcp", ".lsp.json": "lsp"}
+    """根目录关键文件映射 — 必须含 .mcp.json/.lsp.json/.drifox-plugin
+
+    .drifox-plugin 是清单目录（plugin.json），其变更意味着组件清单可能增删，
+    映射到 sentinel "__manifest__" 触发 backend 全组件重载（Task 8）。
+    """
+    assert kernel.ROOT_FILE_COMPONENTS[".mcp.json"] == "mcp"
+    assert kernel.ROOT_FILE_COMPONENTS[".lsp.json"] == "lsp"
+    assert kernel.ROOT_FILE_COMPONENTS[".drifox-plugin"] == "__manifest__"
 
 
 def test_validate_component():

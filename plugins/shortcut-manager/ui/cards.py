@@ -58,7 +58,7 @@ def _ensure_user_custom_plugin():
     """
     import json
 
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
     from app.utils.utils import get_app_data_dir
 
     custom_dir = get_app_data_dir() / "plugins" / "user-custom"
@@ -95,7 +95,7 @@ def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
 
     Windows 兼容：同时尝试原始命令名和安全文件名（: → __）进行匹配。
     """
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     if not pm.is_initialized():

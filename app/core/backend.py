@@ -1850,11 +1850,33 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' UI 加载失败: {e}")
 
+            # 8. tools/providers/team_templates：与 builtin_reloaders 同构的 kernel 分派
+            # 走内核注册表而非硬编码 if，保持单源真理（新增组件类型零改动）。
+            from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
+            from app.plugins.kernel import ReloadContext, get_reloader_registry
+
+            bind_runtime(self._agent_manager)
+            registry = get_reloader_registry()
+            register_builtin_reloaders(registry)  # 幂等
+            for comp in ("tools", "providers", "team_templates"):
+                if comps.get(comp):
+                    reloaded = registry.reload(
+                        ReloadContext(
+                            plugin_name=plugin_name,
+                            plugin=plugin,
+                            component=comp,
+                            is_new_plugin=True,
+                        )
+                    )
+                    result[comp] = reloaded if reloaded is not None else False
+
             logger.info(
                 f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
                 f"agents={result['agents']}, commands={result['commands']}, "
                 f"themes={result['themes']}, skills={result['skills']}, "
-                f"mcp={result['mcp']}, lsp={result['lsp']}, ui={result['ui']}"
+                f"mcp={result['mcp']}, lsp={result['lsp']}, ui={result['ui']}, "
+                f"tools={result['tools']}, providers={result['providers']}, "
+                f"team_templates={result['team_templates']}"
             )
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload new plugin '{plugin_name}': {e}")
@@ -1972,7 +1994,34 @@ class ChatBackend(QObject):
 
             registry = get_reloader_registry()
 
-            if component:
+            if component == "__manifest__":
+                # manifest 变更 = 组件清单可能增删，必须全组件重载以重新探测差异
+                # rescan 已在函数前置（pm.rescan_plugin(plugin_name)）保证 plugin.components 是最新
+                # 遍历按 COMPONENT_ORDER：agents 先 → tools/providers/team_templates 后（保 hooks/commands 联动标记自然置位）
+                from app.plugins.kernel import COMPONENT_ORDER
+
+                for comp in COMPONENT_ORDER:
+                    if not plugin.has_component(comp):
+                        continue
+                    reloaded = registry.reload(
+                        ReloadContext(
+                            plugin_name=plugin_name,
+                            plugin=plugin,
+                            component=comp,
+                            is_new_plugin=False,
+                        )
+                    )
+                    if comp in result_keys:
+                        result[comp] = reloaded if reloaded is not None else False
+                    # agents 联动标记保持旧行为
+                    if comp == "agents":
+                        result["hooks"] = True
+                        result["commands"] = True
+                logger.info(
+                    f"[ChatBackend] Plugin '{plugin_name}' manifest changed, reloaded all components: "
+                    f"{ {k: result[k] for k in result_keys} }"
+                )
+            elif component:
                 # 统一守卫层：plugin 缺失或无该组件时跳过（对齐原 commands/ui 分支的 has_component 前置）
                 if plugin is not None and not plugin.has_component(component):
                     logger.debug(f"[ChatBackend] Plugin '{plugin_name}' has no '{component}' component, skip")
