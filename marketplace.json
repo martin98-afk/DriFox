@@ -131,6 +131,7 @@
                 "theme",
                 "mcp",
                 "lsp",
+                "ui",
                 "agent",
                 "tool"
             ],
@@ -153,7 +154,8 @@
                 "loop_policies": true,
                 "model_adapters": true,
                 "storages": true,
-                "serializers": true
+                "serializers": true,
+                "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
