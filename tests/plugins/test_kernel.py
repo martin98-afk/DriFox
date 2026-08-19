@@ -6,7 +6,7 @@ from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext, get_rel
 
 
 def test_known_components_complete():
-    """10 类组件 + team_templates 全部在册（缺一类 watchfiles 就识别不到）"""
+    """组件常量与 KNOWN_COMPONENTS 一致（缺一类 watchfiles 就识别不到）"""
     expected = {
         "agents",
         "hooks",
@@ -19,6 +19,9 @@ def test_known_components_complete():
         "tools",
         "providers",
         "team_templates",
+        "model_adapters",
+        "loop_policies",
+        "storages",
     }
     assert kernel.KNOWN_COMPONENTS == expected
 
@@ -92,11 +95,11 @@ def test_component_order_explicit_tuple():
     assert isinstance(kernel.COMPONENT_ORDER, tuple), (
         "COMPONENT_ORDER 必须是 tuple 类型，避免 set 顺序不确定性"
     )
-    # 包含全部 11 类组件（与 KNOWN_COMPONENTS 一致 — 单源真理）
+    # 包含全部组件（与 KNOWN_COMPONENTS 一致 — 单源真理）
     assert set(kernel.COMPONENT_ORDER) == kernel.KNOWN_COMPONENTS
     # 不重复
     assert len(kernel.COMPONENT_ORDER) == len(set(kernel.COMPONENT_ORDER))
-    # 顺序：agents → hooks → commands → themes → skills → mcp → lsp → ui → tools → providers → team_templates
+    # 顺序：agents → hooks → commands → themes → skills → mcp → lsp → ui → tools → providers → team_templates → model_adapters → loop_policies → storages
     assert kernel.COMPONENT_ORDER == (
         "agents",
         "hooks",
@@ -109,4 +112,7 @@ def test_component_order_explicit_tuple():
         "tools",
         "providers",
         "team_templates",
+        "model_adapters",
+        "loop_policies",
+        "storages",
     )
