@@ -112,17 +112,57 @@ def register_builtin_loop_policies(registry) -> None:
 
 
 def ensure_builtin_runtime() -> None:
-    """幂等注册全部内置运行时实现（adapters + loop policies）"""
+    """幂等注册全部内置运行时实现（adapters + loop policies + storages）"""
     global _adapter_registered
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+    from app.plugins.registries.storage_registry import StorageRegistry
 
     if _adapter_registered:
         return
     register_builtin_runtime_adapters(ModelAdapterRegistry.get_instance())
     register_builtin_loop_policies(LoopPolicyRegistry.get_instance())
+    register_builtin_storages(StorageRegistry.get_instance())
     _adapter_registered = True
 
 
 # 向后兼容 Task 2/3 已用的入口名
 ensure_builtin_adapters = ensure_builtin_runtime
+
+
+# ── SessionStorageEngine 内置实现 ──────────────────────────
+class SqliteStorageEngine:
+    """SQLite 存储引擎 — 薄包装现有 SessionRepository（行为零变化）"""
+
+    id = "sqlite"
+
+    def __init__(self, db_dir: str = None):
+        from app.core.store.session_store import SessionStore
+
+        store = SessionStore(db_dir=db_dir) if db_dir is not None else SessionStore.get_instance()
+        # 复用 SessionStore 内部已初始化的 SessionRepository，避免重复构造连接池；
+        # SessionRepository 期望的是 DatabaseManager，而非 SessionStore 本身。
+        self._repo = store._session_repo
+
+    def save(self, session: dict) -> bool:
+        return self._repo.save(session)
+
+    def get(self, session_id: str):
+        return self._repo.get(session_id)
+
+    def get_all(self, limit: int = 100, offset: int = 0):
+        return self._repo.get_all(limit=limit, offset=offset)
+
+    def get_by_project(self, project: str, limit: int = 100):
+        return self._repo.get_by_project(project, limit=limit)
+
+    def get_projects(self):
+        return self._repo.get_projects()
+
+    def delete(self, session_id: str) -> bool:
+        return self._repo.delete(session_id)
+
+
+def register_builtin_storages(registry) -> None:
+    """把内置 sqlite 引擎注册进指定 registry（幂等由调用方/registry 覆盖语义保证）"""
+    registry.register(SqliteStorageEngine(), source="builtin")
