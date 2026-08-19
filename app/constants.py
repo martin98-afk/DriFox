@@ -308,7 +308,7 @@ FREE_PROVIDERS = {
         "获取地址": "https://cloud.siliconflow.cn/account/ak",
     },
     "阿里云 (DashScope)": {
-        "API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "API_URL": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         "API_KEY": "",
         "模型名称": "qwen3.5-plus",
         "温度": 0.7,
@@ -317,7 +317,7 @@ FREE_PROVIDERS = {
         "获取地址": "https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key",
     },
     "智谱AI": {
-        "API_URL": "https://open.bigmodel.cn/api/paas/v4",
+        "API_URL": "https://open.bigmodel.cn/api/coding/paas/v4",
         "API_KEY": "",
         "思考模式": True,
         "模型名称": "glm-4-flash",

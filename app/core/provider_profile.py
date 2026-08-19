@@ -252,7 +252,7 @@ def detect_provider_family(llm_config: Dict[str, Any]) -> str:
         return "anthropic"
     if "generativelanguage.googleapis.com" in api_url or model.startswith("gemini"):
         return "gemini"
-    if "dashscope.aliyuncs.com" in api_url or model.startswith("qwen"):
+    if "dashscope.aliyuncs.com" in api_url or "maas.aliyuncs.com" in api_url or model.startswith("qwen"):
         return "dashscope"
     if "bigmodel.cn" in api_url or model.startswith("glm"):
         return "zhipu"

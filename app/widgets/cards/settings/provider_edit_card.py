@@ -447,13 +447,13 @@ class ProviderEditCard(QWidget):
                 ]
             elif provider_name == "阿里云 (DashScope)":
                 preset_urls = [
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    "https://dashscope.aliyuncs.com/api/v1",
+                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    "https://llm-liz0icd5zqudfrqm.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
                 ]
             elif provider_name == "智谱AI":
                 preset_urls = [
-                    "https://open.bigmodel.cn/api/paas/v4",
                     "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "https://open.bigmodel.cn/api/paas/v4",
                 ]
             elif provider_name == "百度千帆":
                 preset_urls = [
