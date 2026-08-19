@@ -78,6 +78,20 @@ git push origin develop
 > （Phase C 已切到 `StorageRegistry.get_active()`，引擎提供 SessionStore 兼容视图）获取
 > 活跃引擎，能力用 `isinstance` 探测（SessionTitleCapability / SessionCountsCapability /
 > InputHistoryCapability）。
+>
+> **UI 插件扩展点约定**（Phase D，8 个扩展点全区域可插拔）：插件 `ui/__init__.py`
+> 导出 `register_ui(registry)`，可注册：
+> - 内容块渲染器 `register_content_renderer`（custom 块）
+> - 欢迎卡片 tab `register_welcome_tab` / 消息元素工厂 `register_message_factory`
+> - 浮动卡片 `register_floating_card`（top/bottom/left/right/full 容器 + 侧边栏派生）
+> - 侧边栏项 `register_sidebar_item`（独立扩展点，与 floating card 解耦；插件同时
+>   注册 sidebar 项与卡片时以 sidebar 为准）
+> - 输入区按钮 `register_input_button`（工具栏胶囊末尾，热重载自动重建）
+> - 右键菜单项 `register_context_menu_action`（target ∈ message_card/tab；
+>   `action_func(context)` 返回 False = 处理完成关菜单；`enabled_func` 置灰）
+> - 设置卡片 `register_settings_card`（LLMSettingsCard 末尾插件分区，打开时重建）
+> 回调 context 含 `window_id / main_widget / item_id / button_id / tab_index` 等；
+> 卸载/热重载自动清理全部注册（`unregister_plugin` 幂等）。
 
 ---
 
