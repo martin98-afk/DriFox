@@ -10583,8 +10583,11 @@ class OpenAIChatToolWindow(ToolWindow):
         渲染回调读 _get_or_create_welcome_card 时缓存已被 invalidate，合并调度
         仍拿到最新数据，不丢失更新。
         """
-        if getattr(self, "_welcome_render_pending", False):
-            return
+        try:
+            if self._welcome_render_pending:
+                return
+        except (AttributeError, RuntimeError):
+            pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
         cls = type(self)
         slot = getattr(cls, "_welcome_slot", 0) + 1
@@ -10594,7 +10597,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_welcome_render_slot(self):
         """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
-        self._welcome_render_pending = False
+        try:
+            self._welcome_render_pending = False
+        except (AttributeError, RuntimeError):
+            pass
         self._show_initial_welcome()
 
     def _hide_welcome_cards(self):

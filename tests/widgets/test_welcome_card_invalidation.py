@@ -126,21 +126,23 @@ class TestInvalidationCallSites:
         assert _method_calls(method, "_invalidate_welcome_card"), "_on_agent_changed 未调用 _invalidate_welcome_card()"
 
     def test_on_archived_session_deleted_invalidates(self):
-        """_on_archived_session_deleted 归档删除后失效"""
+        """_on_archived_session_deleted 归档删除后失效（经统一入口
+        _notify_history_data_changed，内部含 _invalidate_welcome_card）"""
         cls = _get_target_class()
         method = _get_method(cls, "_on_archived_session_deleted")
         assert method is not None
-        assert _method_calls(method, "_invalidate_welcome_card"), (
-            "_on_archived_session_deleted 未调用 _invalidate_welcome_card()"
+        assert _method_calls(method, "_notify_history_data_changed"), (
+            "_on_archived_session_deleted 未调用 _notify_history_data_changed()"
         )
 
     def test_on_archived_session_renamed_invalidates(self):
-        """_on_archived_session_renamed 归档重命名后失效"""
+        """_on_archived_session_renamed 归档重命名后失效（经统一入口
+        _notify_history_data_changed，内部含 _invalidate_welcome_card）"""
         cls = _get_target_class()
         method = _get_method(cls, "_on_archived_session_renamed")
         assert method is not None
-        assert _method_calls(method, "_invalidate_welcome_card"), (
-            "_on_archived_session_renamed 未调用 _invalidate_welcome_card()"
+        assert _method_calls(method, "_notify_history_data_changed"), (
+            "_on_archived_session_renamed 未调用 _notify_history_data_changed()"
         )
 
     def test_display_current_session_empty_branch_invalidates(self):

@@ -221,6 +221,9 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst._safe_timer_call = MagicMock()
     inst.session_manager = MagicMock()
     inst.history_manager = MagicMock()
+    # 🆕 会话数据变更统一入口 mock 掉：本测试焦点是 streaming 中断保存链路，
+    # 历史刷新/欢迎卡片失效由 test_history_panel_refresh_on_save 覆盖
+    inst._notify_history_data_changed = MagicMock()
     # 🆕 历史面板刷新链路的 stub（_create_new_session 末尾会调用
     # refresh_history_card_if_visible）：设 None 走短路，避免 QWidget
     # 未初始化访问属性触发 RuntimeError
