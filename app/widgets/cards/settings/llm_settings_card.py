@@ -206,6 +206,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ("common", "通用设置"),
                 ("appearance", "外观样式"),
                 ("update", "版本更新"),
+                ("plugins", "插件设置"),
             ],
             default_tab="llm",
         )
@@ -427,6 +428,7 @@ class LLMSettingsCard(SystemCardFrame):
 
         # ---- Phase D: 插件设置分区（初始隐藏，有注册卡片时显示）----
         self._plugin_cards_label = self._make_sep_label("插件设置")
+        self._section_anchors["plugins"] = self._plugin_cards_label
         self._plugin_cards_label.setVisible(False)
         content_layout.addWidget(self._plugin_cards_label)
         self._plugin_cards_widget = QWidget(self)
@@ -435,6 +437,11 @@ class LLMSettingsCard(SystemCardFrame):
         self._plugin_cards_layout.setSpacing(6)
         content_layout.addWidget(self._plugin_cards_widget)
         self._plugin_cards_widget.setVisible(False)
+        # 右上角 tab：初始隐藏（rebuild_plugin_cards 按注册卡片显隐）
+        try:
+            self._tab_buttons["plugins"].setVisible(False)
+        except Exception:
+            pass
 
         content_layout.addStretch(1)
 
@@ -480,6 +487,10 @@ class LLMSettingsCard(SystemCardFrame):
         if not cards:
             self._plugin_cards_label.setVisible(False)
             self._plugin_cards_widget.setVisible(False)
+            try:
+                self._tab_buttons["plugins"].setVisible(False)
+            except Exception:
+                pass
             return
         for info in cards:
             try:
@@ -489,6 +500,10 @@ class LLMSettingsCard(SystemCardFrame):
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
         self._plugin_cards_label.setVisible(True)
         self._plugin_cards_widget.setVisible(True)
+        try:
+            self._tab_buttons["plugins"].setVisible(True)
+        except Exception:
+            pass
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
