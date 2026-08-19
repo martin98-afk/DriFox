@@ -142,7 +142,7 @@ class SqliteStorageEngine:
         store = SessionStore(db_dir=db_dir) if db_dir is not None else SessionStore.get_instance()
         # 复用 SessionStore 内部已初始化的 SessionRepository，避免重复构造连接池；
         # SessionRepository 期望的是 DatabaseManager，而非 SessionStore 本身。
-        self._repo = store._session_repo
+        self._repo = store.session_repo
 
     def save(self, session: dict) -> bool:
         return self._repo.save(session)
