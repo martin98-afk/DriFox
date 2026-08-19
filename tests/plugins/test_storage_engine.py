@@ -6,7 +6,7 @@ import pytest
 
 def test_sqlite_engine_interface(tmp_path, monkeypatch):
     """SqliteStorageEngine 暴露契约全部方法（空库基本读写）"""
-    from app.plugins.builtin_runtime import SqliteStorageEngine
+    from plugins.system.storages.sqlite import SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     # 隔离全局单例：SessionStore 是 _instance 单例（非 _instances dict）；
@@ -23,15 +23,18 @@ def test_sqlite_engine_interface(tmp_path, monkeypatch):
 
 
 def test_registry_fallback_default(monkeypatch):
-    """未注册任何插件引擎 → get_active 回落 sqlite"""
+    """注册 sqlite 插件引擎（系统插件路径）→ get_active 回落 sqlite"""
+    from plugins.system.storages.sqlite import SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
 
     reg = StorageRegistry()
     monkeypatch.setattr(StorageRegistry, "get_instance", staticmethod(lambda: reg))
+    reg.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
     assert reg.get_active().id == "sqlite"
 
 
 def test_plugin_engine_override(monkeypatch):
+    from plugins.system.storages.sqlite import SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
 
     class _MemEngine:
@@ -57,6 +60,7 @@ def test_plugin_engine_override(monkeypatch):
 
     reg = StorageRegistry()
     monkeypatch.setattr(StorageRegistry, "get_instance", staticmethod(lambda: reg))
+    reg.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
     reg.register(_MemEngine(), source="plugin:demo")
     reg.set_active("memory")
     assert reg.get_active().id == "memory"

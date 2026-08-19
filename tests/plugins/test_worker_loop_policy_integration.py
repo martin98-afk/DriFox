@@ -6,12 +6,12 @@ import pytest
 
 @pytest.fixture()
 def fresh_loop_registry(monkeypatch):
-    from app.plugins.builtin_runtime import DefaultLoopPolicy, ensure_builtin_runtime
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
-    ensure_builtin_runtime()
+    warmup_runtime_components()
     reg = LoopPolicyRegistry.get_instance()
-    # 保证干净基线：仅 builtin default
+    # 保证干净基线：仅系统插件 default
     yield reg
 
 

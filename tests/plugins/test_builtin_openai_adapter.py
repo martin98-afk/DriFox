@@ -1,11 +1,22 @@
 # -*- coding: utf-8 -*-
-"""OpenAIAdapter 与 chat_worker 旧协议检测方法行为逐点等价"""
+"""OpenAIAdapter 与 chat_worker 旧协议检测方法行为逐点等价。
+
+适配器实现已从 builtin_runtime 迁入系统插件 plugins/system/model_adapters/openai.py。
+"""
 
 import pytest
 
-from app.plugins.builtin_runtime import OpenAIAdapter, ensure_builtin_adapters
+from plugins.system.model_adapters.openai import OpenAIAdapter
 from app.plugins.contracts.model_adapter import ProtocolFlags
 from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _warmup_runtime():
+    """注册表去兜底后，等价性基准需真实注册系统插件 openai（替代旧 ensure_builtin_adapters）"""
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+    warmup_runtime_components()
 
 
 def _worker_flags(llm_config: dict):
@@ -42,8 +53,14 @@ def test_matches_always_positive():
     assert OpenAIAdapter().matches({}) >= 1
 
 
-def test_ensure_idempotent_registration():
-    ensure_builtin_adapters()
-    ensure_builtin_adapters()  # 二次调用不报错不重复
-    reg = ModelAdapterRegistry.get_instance()
+def test_system_plugin_registers_openai(monkeypatch):
+    """warmup_runtime_components() 后注册表含系统插件 openai（替代旧的 ensure_idempotent 断言）"""
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+    from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+    # 隔离全局单例：fresh registry + 替换 get_instance
+    reg = ModelAdapterRegistry()
+    monkeypatch.setattr(ModelAdapterRegistry, "get_instance", staticmethod(lambda: reg))
+    warmup_runtime_components()
+    # 注册表含系统插件 openai（不再调 ensure_builtin_adapters）
     assert "openai" in reg.adapters()

@@ -49,11 +49,9 @@ def test_scan_and_register_loop_policy_plugin(tmp_path, plugin_enabled):
 
 
 def test_warmup_registers_system_builtin_first():
-    """warmup 后全局单例含内置实现（openai/default/sqlite 不丢）"""
-    from app.plugins.builtin_runtime import ensure_builtin_runtime
+    """warmup 后全局单例含系统插件实现（openai/default/sqlite 不丢）"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
-    ensure_builtin_runtime()
     warmup_runtime_components()
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry

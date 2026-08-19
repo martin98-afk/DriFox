@@ -9,10 +9,10 @@ from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 @pytest.fixture()
 def fresh_registry(monkeypatch):
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
-    from app.plugins.builtin_runtime import DefaultLoopPolicy
+    from plugins.system.loop_policies.default import DefaultLoopPolicy
 
     reg = LoopPolicyRegistry()
-    reg.register(DefaultLoopPolicy(), source="builtin")
+    reg.register(DefaultLoopPolicy(), source="plugin:system")
     monkeypatch.setattr(LoopPolicyRegistry, "get_instance", staticmethod(lambda: reg))
     return reg
 

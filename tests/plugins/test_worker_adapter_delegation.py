@@ -6,11 +6,11 @@ import pytest
 
 def test_plugin_adapter_overrides_worker_detection(monkeypatch):
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
-    from app.plugins.builtin_runtime import ensure_builtin_adapters
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
     from app.plugins.contracts.model_adapter import ModelAdapter, ProtocolFlags
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
-    ensure_builtin_adapters()
+    warmup_runtime_components()
 
     class _ForceGeminiAdapter:
         id = "force-gemini"
@@ -34,11 +34,11 @@ def test_plugin_adapter_overrides_worker_detection(monkeypatch):
 
 
 def test_worker_defaults_to_builtin(monkeypatch):
-    """无插件覆盖时走内置 openai adapter，判定与旧逻辑一致"""
+    """无插件覆盖时走系统插件 openai adapter，判定与旧逻辑一致"""
     worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
-    from app.plugins.builtin_runtime import ensure_builtin_adapters
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
-    ensure_builtin_adapters()
+    warmup_runtime_components()
     w = worker_cls.__new__(worker_cls)
     w.llm_config = {"API_URL": "https://api.deepseek.com/v1", "模型名称": "deepseek-chat", "思考模式": True}
     w._model_adapter = None
@@ -49,9 +49,9 @@ def test_worker_defaults_to_builtin(monkeypatch):
 def test_subagent_worker_delegates():
     """subagent_worker 版的检测方法不依赖 self.llm_config，传参走 adapter registry"""
     executor_cls = pytest.importorskip("app.core.workers.subagent_worker").SubAgentExecutor
-    from app.plugins.builtin_runtime import ensure_builtin_adapters
+    from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
-    ensure_builtin_adapters()
+    warmup_runtime_components()
     e = executor_cls.__new__(executor_cls)
     # subagent 版方法不带 self.llm_config，直接传参
     assert (

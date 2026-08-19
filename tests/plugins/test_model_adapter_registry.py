@@ -30,9 +30,8 @@ def fresh_registry(monkeypatch):
 
 
 def test_fallback_when_empty(fresh_registry):
-    """空注册表 → 兜底 adapter（全 False flags），不抛异常"""
-    ad = fresh_registry.resolve({"模型名称": "gemini-2.5-pro"})
-    assert ad.protocol_flags({}) == ProtocolFlags()
+    """空注册表 → resolve 返回 None（去硬编码兜底，调用方显式引导加载系统插件）"""
+    assert fresh_registry.resolve({"模型名称": "gemini-2.5-pro"}) is None
 
 
 def test_highest_score_wins(fresh_registry):
@@ -43,15 +42,15 @@ def test_highest_score_wins(fresh_registry):
 
 
 def test_zero_score_not_matched(fresh_registry):
-    """matches 返回 0 = 不匹配 → 走兜底"""
+    """matches 返回 0 = 不匹配 → resolve 返回 None"""
     fresh_registry.register(_FakeAdapter("a", 0, ProtocolFlags(is_gemini=True)))
-    assert fresh_registry.resolve({}).protocol_flags({}) == ProtocolFlags()
+    assert fresh_registry.resolve({}) is None
 
 
 def test_unregister_source(fresh_registry):
     fresh_registry.register(_FakeAdapter("a", 5), source="plugin:demo")
     fresh_registry.unregister_source("plugin:demo")
-    assert fresh_registry.resolve({}).protocol_flags({}) == ProtocolFlags()
+    assert fresh_registry.resolve({}) is None
 
 
 def test_protocol_runtime_checkable():
