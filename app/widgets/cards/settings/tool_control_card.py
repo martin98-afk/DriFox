@@ -38,7 +38,7 @@ OFF_BEHAVIOR_OPTIONS = [
 ]
 
 # 预设下拉最多直接展示的项数（超出滚动查看）
-MAX_TEMPLATE_VISIBLE_ITEMS = 20
+MAX_TEMPLATE_VISIBLE_ITEMS = 8
 
 # 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
 MIXED_OPTION = ("__mixed__", "未统一")
@@ -782,7 +782,7 @@ class ToolControlCardFrame(SystemCardFrame):
 
         # 智能体 SVG 图标（主题感知,替代原 emoji）
         self._active_agent_icon = QLabel(self)
-        self._active_agent_icon.setPixmap(get_icon("智能体").pixmap(16, 16))
+        self._active_agent_icon.setPixmap(get_icon("设置-subagent").pixmap(16, 16))
         self._active_agent_icon.setFixedSize(16, 16)
         self._active_agent_icon.setVisible(False)
         self._active_agent_icon.setToolTip("当前工具权限由智能体命令注入")
@@ -855,7 +855,7 @@ class ToolControlCardFrame(SystemCardFrame):
         super().refresh_style()
         # 刷新主题感知图标（浅色/深色切换后更新图标颜色）
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
-        self._active_agent_icon.setPixmap(get_icon("智能体").pixmap(16, 16))
+        self._active_agent_icon.setPixmap(get_icon("设置-subagent").pixmap(16, 16))
         self.update()
 
     def _sync_behavior_combo(self):
@@ -937,13 +937,13 @@ class ToolControlCardFrame(SystemCardFrame):
         try:
             from app.core.agent import AgentManager
 
-            agents = AgentManager.get_instance().list_primary_agents()
+            agents = AgentManager.get_instance().list_agents()
         except Exception:
             agents = []
         for agent in agents:
             name = getattr(agent, "name", "") or ""
             if name:
-                self._template_combo.addItem(name, get_icon("智能体"), userData=name)
+                self._template_combo.addItem(name, get_icon("设置-subagent"), userData=name)
 
     def _on_template_selected(self, idx: int):
         """套用选中智能体的工具权限预设(仅作用于当前标签页)"""
