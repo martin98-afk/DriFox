@@ -22,6 +22,8 @@
         "lsp": true,
         "tools": true,
         "providers": true,
-        "loop_policies": true
+        "loop_policies": true,
+        "model_adapters": true,
+        "storages": true
     }
 }
