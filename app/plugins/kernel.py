@@ -9,13 +9,16 @@ _reload_single_plugin 的 8 分支 if 全部改为查本模块。
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Set
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from loguru import logger
 
 # 组件名集合：插件目录下的物理子目录/根文件 → 组件类型。
-# ⚠️ 与 plugin_manager._scan_plugins 的目录探测保持一致，
-#    新增组件类型时两处同步（后续 Task 会把 plugin_manager 也改为引用此处）。
+# ⚠️ KNOWN_COMPONENTS 为超集：_scan_plugins 检测集 ∪ backend 路径识别集 ∪
+#    独立 loader（tools 由 plugin_tool_loader 独立扫描，不在 _scan_plugins 检测集内）。
+#    新增组件类型时按来源在对应处登记（后续 Task 会把 plugin_manager 也改为引用此处）。
 KNOWN_COMPONENTS: Set[str] = {
     "agents",
     "hooks",
@@ -40,3 +43,68 @@ ROOT_FILE_COMPONENTS: Dict[str, str] = {
 def validate_component(name: str) -> bool:
     """校验组件名是否在册（未知组件返回 False，调用方跳过重载）"""
     return name in KNOWN_COMPONENTS
+
+
+@dataclass
+class ReloadContext:
+    """一次组件重载的上下文（reloader 的唯一入参）
+
+    plugin: PluginInfo | None — 重载后插件信息；插件被删除时为 None
+    （reloader 据此走清理分支而非重载分支）
+    """
+
+    plugin_name: str
+    plugin: Any
+    component: str
+    is_new_plugin: bool
+
+
+class ComponentReloaderRegistry:
+    """组件 reloader 注册表 — 组件名 → 重载函数
+
+    backend 的 _reload_single_plugin 8 分支 if 将重构为查本表分派。
+    新增组件类型 = 注册一个 reloader，backend 零改动（万物为插件的骨架扩展点）。
+    reloader 返回 bool | int（agents 返回数量，其余 True/False），仅用于结果上报。
+    """
+
+    def __init__(self) -> None:
+        self._reloaders: Dict[str, Callable[[ReloadContext], Any]] = {}
+        self._lock = threading.Lock()
+
+    def register(self, component: str, reloader: Callable[[ReloadContext], Any]) -> None:
+        """注册组件 reloader（重复注册覆盖 — 支持插件替换内置 reloader）"""
+        with self._lock:
+            if component in self._reloaders:
+                logger.warning(f"[kernel] reloader 覆盖注册: {component}")
+            self._reloaders[component] = reloader
+
+    def reload(self, ctx: ReloadContext) -> Any:
+        """按组件名分派重载；未注册返回 False（调用方记入 result 跳过）"""
+        with self._lock:
+            reloader = self._reloaders.get(ctx.component)
+        if reloader is None:
+            return False
+        try:
+            return reloader(ctx)
+        except Exception as e:
+            logger.error(f"[kernel] reloader '{ctx.component}' 执行失败 ({ctx.plugin_name}): {e}")
+            return False
+
+    def known_components(self) -> Set[str]:
+        with self._lock:
+            return set(self._reloaders.keys())
+
+
+_registry: Optional[ComponentReloaderRegistry] = None
+_registry_lock = threading.Lock()
+
+
+def get_reloader_registry() -> ComponentReloaderRegistry:
+    """进程级单例（backend 主线程分派用）"""
+    global _registry
+    if _registry is not None:
+        return _registry
+    with _registry_lock:
+        if _registry is None:
+            _registry = ComponentReloaderRegistry()
+        return _registry
