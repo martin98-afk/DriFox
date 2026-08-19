@@ -15909,7 +15909,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
 
             # 保存显示名
-            provider_display = llm_config.get("provider_name", "")
+            # 用 display_name 作为保存的服务商标识（与命令卡枚举 value 一致且唯一），
+            # 避免同 provider_name 多个配置时歧义匹配到错误的 config
+            provider_display = llm_config.get("display_name", llm_config.get("provider_name", ""))
             model_display = llm_config.get("模型名称", model_value)
             display_value = f"{provider_display}:{model_display}" if provider_display else model_display
 
@@ -16014,7 +16016,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if llm_config is None:
                 return
 
-            provider_display = llm_config.get("provider_name", "")
+            # 用 display_name 作为保存的服务商标识（与命令卡枚举 value 一致且唯一），
+            # 避免同 provider_name 多个配置时歧义匹配到错误的 config
+            provider_display = llm_config.get("display_name", llm_config.get("provider_name", ""))
             model_display = llm_config.get("模型名称", model_value)
             display_value = f"{provider_display}:{model_display}" if provider_display else model_display
 

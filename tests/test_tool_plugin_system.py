@@ -1079,8 +1079,13 @@ class TestPerToolPolicy:
         try:
             s = Settings.get_instance()
             pc = ToolPermissionController()
-            # 模拟外部变更(ConfigSync 下载新配置):直接写 Settings 触发 valueChanged
+            # 模拟外部变更(ConfigSync 下载新配置):写 Settings 后由
+            # ConfigSyncService.settingsRestored 驱动刷新。控制器不再监听
+            # Settings.valueChanged,避免兄弟 tab 本地编辑互相广播刷新。
+            from app.core.config_sync import ConfigSyncService
+
             s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
+            ConfigSyncService.get_instance().settingsRestored.emit()
             qt_app.processEvents()
             # 已存在 controller 自动刷新(双相等性检查通过后应用)
             assert pc.get_user_tool_policy("read") == "ask"

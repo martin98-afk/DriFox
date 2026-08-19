@@ -51,6 +51,7 @@ All notable changes to this project will be documented in this file.
 - **message_card finished tool id 误判** (`app/widgets/message_card.py`): 停止将已完成的 tool id 视为 active tool DOM，恢复流式 diff-render
 - **context/tools pruned_tokens 联动** (`app/core/context_builder.py` + `app/widgets/context_usage_ring.py`): 将 pruned_tokens 接入环形图 tooltip；后台任务 completed 状态守卫
 - **pty session 生命周期挂靠** (`app/tools/pty_session.py`): pty 会话生命周期挂靠 ProcessJob kill-on-close（S5）
+- **subagent/title 默认模型服务商记录歧义** (`app/main_widget.py`): 修复通过命令卡枚举选择「服务商名+模型名」配置 `/subagents`、`/title-gen` 默认模型时，保存的是 `provider_name` 而非 `display_name`；存在两个同 `provider_name` 的配置（如两个 OpenCode Zen：`df810bab` 与当前主用 `68ea6d92`）时，重新解析因 `_resolve_service_provider` 按 `display_name` 优先匹配，歧义命中错误的 config——表现为「用的服务商与保存记录的不一致」。保存改为使用 `display_name`（与枚举 value 一致且唯一），闭环无歧义
 
 ### ♻️ 代码重构 (Refactoring)
 
