@@ -1752,19 +1752,13 @@ class ChatBackend(QObject):
             plugin_name: 新增插件名
 
         Returns:
-            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
-             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool}
+            dict: 各组件重载结果；key 集合基于 kernel.KNOWN_COMPONENTS 动态生成，
+            agents → int（数量），其余 → bool。新增组件类型时无需改此处。
         """
-        result: dict = {
-            "agents": 0,
-            "commands": False,
-            "hooks": False,
-            "themes": False,
-            "skills": False,
-            "mcp": False,
-            "lsp": False,
-            "ui": False,
-        }
+        from app.plugins.kernel import KNOWN_COMPONENTS as _KC
+
+        # result 基于 KNOWN_COMPONENTS 动态生成：新增组件类型零改动（Task 7）
+        result: dict = {k: (0 if k == "agents" else False) for k in _KC}
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -1887,38 +1881,15 @@ class ChatBackend(QObject):
             component: 变更的组件名
 
         Returns:
-            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
-             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool,
-             "tools": bool, "providers": bool, "team_templates": bool}
+            dict: 各组件重载结果；key 集合基于 kernel.KNOWN_COMPONENTS 动态生成，
+            agents → int（数量），其余 → bool。新增组件类型时无需改此处。
         """
-        result: dict = {
-            "agents": 0,
-            "commands": False,
-            "hooks": False,
-            "themes": False,
-            "skills": False,
-            "mcp": False,
-            "lsp": False,
-            "ui": False,
-            "tools": False,
-            "providers": False,
-            "team_templates": False,
-        }
+        from app.plugins.kernel import KNOWN_COMPONENTS as _KC
 
         # 表分派：原 8 分支 if 已在 builtin_reloaders（commit 0e141cd9）— 此处仅查注册表
-        result_keys = (
-            "agents",
-            "commands",
-            "hooks",
-            "themes",
-            "skills",
-            "mcp",
-            "lsp",
-            "ui",
-            "tools",
-            "providers",
-            "team_templates",
-        )
+        # result / result_keys 基于 KNOWN_COMPONENTS 动态生成：新增组件类型零改动（Task 7）
+        result: dict = {k: (0 if k == "agents" else False) for k in _KC}
+        result_keys = tuple(_KC)
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -2048,24 +2019,14 @@ class ChatBackend(QObject):
         由 main_widget 或设置面板中的"应用"操作触发。
 
         Returns:
-            {"agents": int, "commands": bool, "hooks": bool, "themes": bool,
-             "skills": bool, "mcp": bool, "lsp": bool, "ui": bool,
-             "tools": bool, "providers": bool, "team_templates": bool}
-            各子系统的重载结果
+            dict: 各子系统的重载结果；key 集合基于 kernel.KNOWN_COMPONENTS 动态生成，
+            agents → int（数量），其余 → bool。新增组件类型时无需改此处。
         """
-        result: dict = {
-            "agents": 0,
-            "commands": False,
-            "hooks": False,
-            "themes": False,
-            "skills": False,
-            "mcp": False,
-            "lsp": False,
-            "ui": False,
-            "tools": False,
-            "providers": False,
-            "team_templates": False,
-        }
+        from app.plugins.kernel import KNOWN_COMPONENTS as _KC
+
+        # result / result_keys 基于 KNOWN_COMPONENTS 动态生成：新增组件类型零改动（Task 7）
+        result: dict = {k: (0 if k == "agents" else False) for k in _KC}
+        result_keys = tuple(_KC)
 
         # 表分派：内置 reloader 注册（幂等）+ runtime 句柄注入
         try:
@@ -2078,20 +2039,6 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] 内置 reloader 注册失败: {e}")
             registry = None
-
-        result_keys = (
-            "agents",
-            "commands",
-            "hooks",
-            "themes",
-            "skills",
-            "mcp",
-            "lsp",
-            "ui",
-            "tools",
-            "providers",
-            "team_templates",
-        )
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
