@@ -42,18 +42,16 @@ def _reload_agents(ctx: ReloadContext) -> Any:
     """agents 分支（删除路径 ctx.plugin is None → cleanup_plugin_artifacts）
 
     含 agent 命令局部重载（reload 路径），hooks 重载由 reload_plugin_agents 一并完成。
-    删除路径：cleanup_plugin_artifacts 已包 hooks 清扫 + reload_agent_commands。
+    删除路径：cleanup_plugin_artifacts 已包 hooks 清扫；命令清理由 _reload_commands 统一处理
+    （删除分支不再调 reload_agent_commands，避免与 commands reloader 双触发，对齐旧 elif 语义：
+    agents 命中后不走 commands 分支）。
     """
     am = _RUNTIME.get("agent_manager")
     if am is None:
         return False
     if ctx.plugin is None:
-        # 删除路径：清理 agents + hooks + 缓存；命令由 _reload_commands 统一重载
+        # 删除路径：清理 agents + hooks + 缓存；命令清理由 _reload_commands 统一处理
         am.cleanup_plugin_artifacts(ctx.plugin_name)
-        try:
-            reload_agent_commands()
-        except Exception as e:
-            logger.error(f"[builtin_reloaders] Failed to reload agent commands after removal: {e}")
         return 0
     count = am.reload_plugin_agents(ctx.plugin_name)
     try:

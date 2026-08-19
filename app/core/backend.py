@@ -2108,12 +2108,12 @@ class ChatBackend(QObject):
                 logger.info(f"[ChatBackend] 检测到新插件「{name}」，执行增量重载")
 
                 # 遍历该新插件的组件，统一经 reloader 注册表分派
-                # 按 kernel.KNOWN_COMPONENTS 优先级排序（不依赖 dict 插入序）
+                # 按 kernel.COMPONENT_ORDER 元组显式排序（避免 set 遍历时序不确定）
                 # agents → hooks/commands 联动标记由 _reload_agents 内部完成并回写 result
-                from app.plugins.kernel import KNOWN_COMPONENTS as _KNOWN_COMPS
+                from app.plugins.kernel import COMPONENT_ORDER
 
                 if registry is not None:
-                    for comp in (c for c in _KNOWN_COMPS if comps.get(c)):
+                    for comp in (c for c in COMPONENT_ORDER if comps.get(c)):
                         reloaded = registry.reload(
                             ReloadContext(
                                 plugin_name=name,

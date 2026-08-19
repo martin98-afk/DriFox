@@ -74,3 +74,32 @@ def test_plugin_manager_uses_kernel_constants():
     assert ("from app.plugins.kernel import" in src) or ("from app.plugins import kernel" in src), (
         "plugin_manager 必须显式 import kernel 常量以保持探测规则单一事实源"
     )
+
+
+def test_component_order_explicit_tuple():
+    """COMPONENT_ORDER 必须为显式 tuple，避免 set 遍历时序不确定。
+
+    backend 的 reload_plugin_subsystems 增量段按它排序遍历——若漏掉类型，
+    必出现某组件在删除清理时被跳过。顺序对齐旧 backend._COMPONENT_ORDER dict。
+    """
+    assert isinstance(kernel.COMPONENT_ORDER, tuple), (
+        "COMPONENT_ORDER 必须是 tuple 类型，避免 set 顺序不确定性"
+    )
+    # 包含全部 11 类组件（与 KNOWN_COMPONENTS 一致 — 单源真理）
+    assert set(kernel.COMPONENT_ORDER) == kernel.KNOWN_COMPONENTS
+    # 不重复
+    assert len(kernel.COMPONENT_ORDER) == len(set(kernel.COMPONENT_ORDER))
+    # 顺序：agents → hooks → commands → themes → skills → mcp → lsp → ui → tools → providers → team_templates
+    assert kernel.COMPONENT_ORDER == (
+        "agents",
+        "hooks",
+        "commands",
+        "themes",
+        "skills",
+        "mcp",
+        "lsp",
+        "ui",
+        "tools",
+        "providers",
+        "team_templates",
+    )

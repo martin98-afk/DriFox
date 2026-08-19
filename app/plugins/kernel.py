@@ -33,6 +33,23 @@ KNOWN_COMPONENTS: Set[str] = {
     "team_templates",
 }
 
+# 组件优先级元组（用于多组件批处理中决定先后顺序，与旧 backend._COMPONENT_ORDER dict 数值一致）
+# 必须为 tuple 而非 set：set 遍历时序不确定，backend.reload_plugin_subsystems 增量段按此排序遍历，
+# 漏掉类型会导致删除清理段跳过组件。agents 最先：它会影响 commands 和 hooks 同步。
+COMPONENT_ORDER: tuple = (
+    "agents",
+    "hooks",
+    "commands",
+    "themes",
+    "skills",
+    "mcp",
+    "lsp",
+    "ui",
+    "tools",
+    "providers",
+    "team_templates",
+)
+
 # 插件根目录的关键文件 → 组件类型（.mcp.json/.lsp.json 位于插件根而非子目录）
 ROOT_FILE_COMPONENTS: Dict[str, str] = {
     ".mcp.json": "mcp",
