@@ -101,7 +101,7 @@
         {
             "name": "shortcut-manager",
             "description": "管理系统命令的快捷键，支持自定义快捷键覆盖系统配置",
-            "version": "0.1.0",
+            "version": "0.1.1",
             "author": "DriFox Contributors",
             "license": "MIT",
             "categories": [
@@ -123,7 +123,7 @@
         },
         {
             "name": "system",
-            "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置和内置工具（工具插件化：schema/图标/中文名/危险/分组注册）",
+            "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置、内置工具（工具插件化：schema/图标/中文名/危险/分组注册）和服务商（providers 插件化：icon/url/模型/余额/用量/额外配置由插件声明）",
             "version": "2.0.0",
             "author": "DriFoxx Team",
             "license": "MIT",
@@ -131,6 +131,7 @@
                 "theme",
                 "mcp",
                 "lsp",
+                "ui",
                 "agent",
                 "tool"
             ],
@@ -148,7 +149,13 @@
                 "hooks": true,
                 "mcp": true,
                 "lsp": true,
-                "tools": true
+                "tools": true,
+                "providers": true,
+                "loop_policies": true,
+                "model_adapters": true,
+                "storages": true,
+                "serializers": true,
+                "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {

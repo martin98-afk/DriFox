@@ -36,16 +36,11 @@ from openai import (
 from PyQt5.QtCore import QBuffer, QIODevice, QThread, QByteArray, pyqtSignal
 from PyQt5.QtGui import QImage
 
-from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
+from app.constants import PARAM_SCHEMA
+from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import PermissionCache
-from app.core.message_content import (
-    append_text_block,
-    consolidate_messages,
-    messages_to_api,
-    messages_to_responses_input,
-    to_api_message,
-)
+from app.core.message_content import append_text_block, consolidate_messages
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.provider_profile import detect_provider_family, get_provider_profile
@@ -187,6 +182,8 @@ class OpenAIChatWorker(QThread):
     # 同样的消息序列重试仍会被拒，必须客户端主动中断。
     # 阈值设为 3：与 AutoLoopWorker 的"连续失败 3 次"语义对齐；给模型 1-2 轮自我修正机会。
     _TOOL_LOOP_THRESHOLD = 3
+    _model_adapter = None  # 懒解析缓存（首查时 resolve）
+    _loop_policy_obj = None  # 懒解析缓存（激活策略）
 
     def __init__(
         self,
@@ -500,6 +497,22 @@ class OpenAIChatWorker(QThread):
         s.api_cache.cache = self._api_messages_cache
         s.api_cache.built = self._api_messages_built
 
+    def _serialize_for_api(self, messages: List[Dict[str, Any]], supports_vision: bool = True):
+        """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
+
+        worker 不再按协议形态直接调 messages_to_api / messages_to_responses_input，
+        统一经本入口：序列化器内部按 flags.use_responses_api 路由到 chat/responses 形态，
+        serializer_id 由 adapter 解析（默认 openai，插件可指定专属序列化器）。
+        """
+        from app.plugins.contracts.message_serializer import SerializeContext
+        from app.plugins.registries.serializer_registry import SerializerRegistry
+
+        flags = self._adapter_flags()
+        serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
+        return serializer.serialize(
+            messages, SerializeContext(supports_vision=supports_vision, flags=flags)
+        )
+
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
         构建 API 消息缓存。
@@ -512,9 +525,7 @@ class OpenAIChatWorker(QThread):
             return self._api_messages_cache
 
         # 首次构建：处理所有历史消息
-        self._api_messages_cache = messages_to_api(
-            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-        )
+        self._api_messages_cache = self._serialize_for_api(self.messages).messages
         self._api_messages_built = True
         return self._api_messages_cache
 
@@ -527,18 +538,12 @@ class OpenAIChatWorker(QThread):
             new_messages: 新增的消息列表
         """
         if self._api_messages_cache is None:
-            self._api_messages_cache = messages_to_api(
-                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(new_messages).messages
             return
 
-        # 只转换新消息并追加
-        for msg in new_messages:
-            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content())
-            if api_msg:
-                if api_msg.get("role") == "user" and not api_msg.get("content"):
-                    continue
-                self._api_messages_cache.append(api_msg)
+        # 只转换新消息并追加（serialize_messages 已过滤空 user 消息）
+        for api_msg in self._serialize_for_api(new_messages).messages:
+            self._api_messages_cache.append(api_msg)
 
     def _inject_pending_hook_messages(
         self, session_messages_target: List = None, include_team_mail: bool = True
@@ -1406,7 +1411,7 @@ class OpenAIChatWorker(QThread):
                 "模型列表",
             }:
                 continue
-            if cn_key in QUOTA_EXCLUDE_KEYS:
+            if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
             # 从 PARAM_SCHEMA 查找 API 参数名
             meta = PARAM_SCHEMA.get(cn_key, {})
@@ -1529,8 +1534,13 @@ class OpenAIChatWorker(QThread):
         return out
 
     def _build_responses_kwargs(self, messages: List[Dict]) -> Dict[str, Any]:
-        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。"""
-        input_items, instructions = messages_to_responses_input(messages, supports_vision=self._supports_vision)
+        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。
+
+        Phase C：消息转换走序列化器单入口（flags.use_responses_api 已由调用方保证），
+        取 result.input_items / instructions。
+        """
+        result = self._serialize_for_api(messages)
+        input_items, instructions = result.input_items, result.instructions
         model = str(self.llm_config.get("模型名称", "") or "")
         kwargs: Dict[str, Any] = {
             "model": model,
@@ -1616,9 +1626,7 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
-            self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(current_messages).messages
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
             self._accumulated_tokens = 0  # 重置 token 累加，每个新的对话从零开始
@@ -1630,8 +1638,28 @@ class OpenAIChatWorker(QThread):
             # [MEM] 启动快照
             self._mem_snapshot("start", msg_count=len(current_messages), session_count=len(current_session_messages))
 
+            # LoopPolicy：每轮循环计数（默认策略不限轮数 → 零行为变化）
+            self._loop_round_count = 0
+
             while not self._is_cancelled:
                 if self._is_cancelled:
+                    return
+
+                # LoopPolicy：轮数上限（默认策略不限 → 零行为变化）
+                if self._check_loop_round_limit():
+                    # 对齐正常完成路径（约 :1850-1857）的四行式信号序列：
+                    # 先发 finished_with_messages(current_session_messages) →
+                    # 存 final_response=self.full_response →
+                    # _clear_pending_response_state()（清理 state 防覆盖）→
+                    # 再发 finished_with_content(final_response)
+                    self._emit_with_callback(
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback(
+                        "finished_with_content", self.finished_with_content, final_response
+                    )
                     return
 
                 # 每次 API 调用前：1. 清理中间状态  2. 检查压缩
@@ -1652,6 +1680,31 @@ class OpenAIChatWorker(QThread):
                 # tool_call 签名是否完全一致；连续达到阈值就主动终止并提示用户。
                 loop_detected = OpenAIChatWorker._detect_repetitive_tool_loop(current_messages)
                 if loop_detected:
+                    # LoopPolicy 门控：策略要求终止则走完成路径（默认 CONTINUE → 零变化）
+                    from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                    try:
+                        _lp_decision = self._loop_policy().should_continue(
+                            LoopState(round_count=self._loop_round_count, repetitive_loop_detected=True)
+                        )
+                    except Exception as exc:
+                        # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                        logger.warning(
+                            f"[LoopPolicy] should_continue 调用异常（重复循环门控），回退 CONTINUE: {exc!r}"
+                        )
+                        _lp_decision = LoopDecision.CONTINUE
+                    if _lp_decision is LoopDecision.STOP:
+                        logger.warning("[LoopPolicy] 策略要求终止重复工具循环")
+                        # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
+                        self._emit_with_callback(
+                            "finished_with_messages", self.finished_with_messages, current_session_messages
+                        )
+                        final_response = self.full_response
+                        self._clear_pending_response_state()
+                        self._emit_with_callback(
+                            "finished_with_content", self.finished_with_content, final_response
+                        )
+                        return
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
                         f"[ToolLoop] 检测到连续 {self._TOOL_LOOP_THRESHOLD} 轮重复工具调用，静默清理重复轮次后继续。"
@@ -1782,24 +1835,57 @@ class OpenAIChatWorker(QThread):
                         # 如果有注入且未触发过续命（_stop_hook_active=False），则继续一轮工具迭代
                         stop_injected = len(current_messages) - before_stop_count
                         if stop_injected > 0:
-                            # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
-                            self._stop_hook_active = True
-                            # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
-                            self._emit_with_callback(
-                                "finished_with_messages",
-                                self.finished_with_messages,
-                                current_session_messages,
-                            )
-                            logger.info(
-                                f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
-                            )
-                            # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
-                            # _clear_pending_response_state 会清空 _response_chunks，
-                            # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
-                            self._prev_stophook_response = self.full_response
-                            # 3. 清理 pending state 后回到 while 顶部重跑 API
-                            self._clear_pending_response_state()
-                            continue  # 跳回 while 顶部，再来一轮
+                            # LoopPolicy 门控：策略拒绝续命则直接走完成路径（默认策略恒 CONTINUE → 零行为变化）
+                            from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+                            try:
+                                _lp_decision = self._loop_policy().should_continue(
+                                    LoopState(round_count=self._loop_round_count, stop_hook_injected=True)
+                                )
+                            except Exception as exc:
+                                # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                                logger.warning(
+                                    f"[LoopPolicy] should_continue 调用异常（Stop hook 门控），回退 CONTINUE: {exc!r}"
+                                )
+                                _lp_decision = LoopDecision.CONTINUE
+                            if _lp_decision is LoopDecision.STOP:
+                                # 策略拒绝续命 → 直接走完成路径（默认策略恒 CONTINUE → 不进入）
+                                # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
+                                logger.warning(
+                                    "[LoopPolicy] 策略拒绝 Stop hook 续命，走完成路径"
+                                )
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                final_response = self.full_response
+                                self._clear_pending_response_state()
+                                self._emit_with_callback(
+                                    "finished_with_content",
+                                    self.finished_with_content,
+                                    final_response,
+                                )
+                                return
+                            if _lp_decision is LoopDecision.CONTINUE:
+                                # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
+                                self._stop_hook_active = True
+                                # 2. 发射 finished_with_messages 让 UI 看到注入的消息（可选）
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                logger.info(
+                                    f"[Stop hook] {stop_injected} message(s) injected via hook, force continuation."
+                                )
+                                # 🔧 修复：保存本轮 full_response，避免 next round 被覆盖
+                                # _clear_pending_response_state 会清空 _response_chunks，
+                                # 下一轮 API 调用后 full_response 仅保留新文本，上一轮文本丢失。
+                                self._prev_stophook_response = self.full_response
+                                # 3. 清理 pending state 后回到 while 顶部重跑 API
+                                self._clear_pending_response_state()
+                                continue  # 跳回 while 顶部，再来一轮
 
                     # 真正结束：重置状态
                     self._stop_hook_active = False
@@ -1977,10 +2063,7 @@ class OpenAIChatWorker(QThread):
                     # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = messages_to_api(
-                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                        requires_reasoning_content=self._requires_reasoning_content()
-                    )
+                    self._api_messages_cache = self._serialize_for_api(current_messages).messages
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
                 else:
@@ -2482,10 +2565,7 @@ class OpenAIChatWorker(QThread):
         # 但 _api_messages_cache 仍是旧版本（无图片）。
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
-            self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(current_messages).messages
             self._api_messages_built = True
         except Exception as cache_e:
             logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
@@ -2638,59 +2718,92 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
+    def _adapter_flags(self):
+        """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）
+
+        冷启动防御：worker 可能在 backend warmup 之前被构造（测试/延迟初始化路径），
+        resolve 为空时先幂等触发一次系统插件扫描再重试；仍为空才是真实配置错误。
+        """
+        if self._model_adapter is None:
+            from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+            registry = ModelAdapterRegistry.get_instance()
+            adapter = registry.resolve(self.llm_config or {})
+            if adapter is None:
+                adapter = self._resolve_with_cold_start_warmup(registry)
+            if adapter is None:
+                raise RuntimeError(
+                    "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                    "请确认 plugins/system/model_adapters/ 已启用"
+                )
+            self._model_adapter = adapter
+        return self._model_adapter.protocol_flags(self.llm_config or {})
+
+    def _resolve_with_cold_start_warmup(self, registry) -> Optional[Any]:
+        """冷启动兜底：注册表为空时幂等加载系统插件（scan_roots 幂等持锁），再 resolve。
+
+        仅当注册表确实为空才触发扫描，避免热重载后 resolve 短暂为空时重复全量重扫；
+        多线程并发构造 worker 时 scan_roots 内部 _scan_lock 串行化，结果一致。
+        """
+        try:
+            if registry.adapters():
+                return None
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception as e:
+            logger.warning(f"[ChatWorker] 冷启动 ModelAdapter 加载失败: {e}")
+            return None
+        return registry.resolve(self.llm_config or {})
+
+    def _loop_policy(self):
+        """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
+        if self._loop_policy_obj is None:
+            from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
+        return self._loop_policy_obj
+
+    def _check_loop_round_limit(self) -> bool:
+        """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化。
+
+        异常安全：策略 max_rounds 拖异常时回退 None（不限），与 _adapter_flags 防御风格一致。
+        """
+        self._loop_round_count = getattr(self, "_loop_round_count", 0) + 1
+        try:
+            max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
+        except Exception as exc:
+            logger.warning(
+                f"[LoopPolicy] max_rounds 调用异常，回退默认（不限）: {exc!r}"
+            )
+            max_rounds = None
+        if max_rounds is not None and self._loop_round_count > max_rounds:
+            logger.warning(
+                f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话"
+            )
+            return True
+        return False
+
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        deepseek 系模型（含 opencode.ai 等中转平台承载的 deepseek-v4 系列）在
-        thinking mode 下要求 tool_calls assistant 消息必须携带 reasoning_content
-        字段（可为空串），否则上游 Console 报 400。
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
-        if self.llm_config.get("思考模式") is not True:
-            return False
-        family = detect_provider_family(self.llm_config)
-        if family == "deepseek":
-            return True
-        # opencode 等中转平台承载 deepseek 系模型时（模型名以 deepseek 开头），
-        # 上游协议与官方 Console 一致，同样需要 reasoning_content 回传
-        model = str(self.llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("deepseek")
+        return self._adapter_flags().requires_reasoning_content
 
     def _is_gemini_model(self) -> bool:
-        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。"""
-        try:
-            if detect_provider_family(self.llm_config) == "gemini":
-                return True
-        except Exception:
-            pass
-        # 兜底：模型名含 gemini（如 models/gemini-3-flash-preview 的 startswith 判断会漏）
-        try:
-            model = str((self.llm_config or {}).get("模型名称", "") or "").lower()
-            if "gemini" in model:
-                return True
-        except Exception:
-            pass
-        return False
+        """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。
+
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
+        """
+        return self._adapter_flags().is_gemini
 
     def _use_responses_api(self) -> bool:
         """当前模型是否走 Responses API（/v1/responses）。
 
-        GPT-5.x 系列（gpt-5.6-luna 等）的思考内容只在 Responses API 的
-        reasoning_summary_text 事件中返回；chat/completions 端点的流式 delta
-        不含任何 reasoning 字段（OpenCode Go 网关实测剥离），导致思考不渲染。
-        对该系列模型自动切换 Responses API 以获取并渲染思考内容。
-
-        判断规则（可被配置覆盖）：
-        - llm_config["使用ResponsesAPI"] 显式 True/False → 强制开关
-        - 否则模型名小写以 gpt-5 开头 → True
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
-        try:
-            override = self.llm_config.get("使用ResponsesAPI")
-            if override is not None:
-                return bool(override)
-            model = str(self.llm_config.get("模型名称", "") or "").lower()
-            return model.startswith("gpt-5")
-        except Exception:
-            return False
+        return self._adapter_flags().use_responses_api
 
     def _make_api_call(self, messages: List[Dict], use_cache: bool = True) -> (bool, bool):
         """
@@ -2713,9 +2826,7 @@ class OpenAIChatWorker(QThread):
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
         else:
-            sanitized = messages_to_api(
-                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            sanitized = self._serialize_for_api(messages).messages
             if use_cache:
                 self._api_messages_cache = sanitized
                 self._api_messages_built = True
@@ -2818,9 +2929,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages, was_fixed = self._fix_tool_result_order(req_kwargs["messages"])
 
                     if was_fixed:
-                        fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-                        )
+                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -2846,10 +2955,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages = self._try_recover_tool_arguments(req_kwargs["messages"])
 
                     if fixed_messages is not None:
-                        fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                            requires_reasoning_content=self._requires_reasoning_content()
-                        )
+                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:

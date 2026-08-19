@@ -1,5 +1,5 @@
 ---
-description: 8 類組件的詳細開發指南與代碼模板
+description: 11 類組件的詳細開發指南與代碼模板
 ---
 
 # 組件開發詳細指南
@@ -562,3 +562,222 @@ ws["delete"]("my_state")         # 刪除
 - 系統工具真實案例：\`plugins/system/tools/\`（file_tools 自包含、subagent_tools 平台服務）
 - 註冊表實現：\`app/tools/registry.py\`
 - 掃描/熱重載：\`app/tools/plugin_tool_loader.py\`
+
+## Providers（服務商插件化）
+
+> 服務商支持已全面插件化（萬物為插件）：服務商的一切——圖標、API URL、默認參數、
+> 模型列表、models.dev 白名單、family 能力、用量查詢額外配置、餘額/套餐用量查詢——
+> 全部由 providers 插件聲明，主程序不再硬編碼任何服務商數據。
+
+### 文件位置
+
+```
+plugins/<name>/
+├── providers/
+│   ├── deepseek.py          # 一個文件註冊一個（或多個）服務商
+│   ├── icons/               # 深色主題圖標（<icon>.svg / <icon>.png）
+│   └── icons_light/         # 淺色主題圖標（可選；缺省回退深色）
+└── .drifox-plugin/
+    └── plugin.json          # components 聲明 "providers": true（自動檢測，可選）
+```
+
+- 系統內置服務商：`plugins/system/providers/*.py`
+- 用戶插件：`<app_data>/plugins/<name>/providers/*.py`
+- 熱重載：ProviderWatcher 後台輪詢（path, mtime, size），變更全量重掃；user 插件可覆蓋 system 同名服務商
+
+### 最小模板
+
+```python
+# providers/deepseek.py
+from app.plugins.registries.provider_registry import (
+    ProviderDef,
+    make_bearer_balance_fetcher,
+)
+
+
+def register(registry):
+    registry.register(
+        ProviderDef(
+            name="DeepSeek",
+            icon="deepseek",
+            api_url="https://api.deepseek.com",
+            auth_type="bearer",                 # bearer / bce / none / anthropic
+            default_model="deepseek-chat",
+            default_params={"溫度": 0.7, "最大Token": 200000, "思考等級": "high"},
+            register_url="https://platform.deepseek.com/api_keys",
+            models=["deepseek-v4-flash", "deepseek-v4-pro"],
+            models_dev_id="deepseek",
+            family="deepseek",
+            capabilities={
+                "context_limit": 320000,
+                "supports_thinking": True,
+                "thinking_param": "thinking",
+            },
+            extra_quota_fields=[                # 用量查詢額外配置（可選）
+                QuotaField(key="server_id", label="Server ID:", placeholder="..."),
+            ],
+            balance_fetcher=make_bearer_balance_fetcher(   # 餘額查詢（可選）
+                url="https://api.deepseek.com/user/balance",
+                balance_key="total_balance",
+                currency="¥",
+            ),
+            coding_plan_fetcher=_fetch_coding_plan,        # 套餐用量查詢（可選）
+        )
+    )
+```
+
+### ProviderDef 字段
+
+| 字段 | 說明 | 對應舊硬編碼 |
+|------|------|------------|
+| `name` | 服務商唯一名 | `FREE_PROVIDERS` key |
+| `icon` | 圖標 key（icons/ 文件名或 qrc） | `PROVIDER_ICONS` |
+| `icon_dir` / `icon_dir_light` | 插件圖標目錄（**自動注入**，勿手寫） | — |
+| `api_url` | 默認 API URL | `FREE_PROVIDERS.API_URL` |
+| `auth_type` | 認證方式 bearer/bce/none/anthropic | `FREE_PROVIDERS` 認證方式 |
+| `default_model` | 默認模型名 | `FREE_PROVIDERS` 模型名稱 |
+| `default_params` | 溫度/最大Token/思考模式等 | `FREE_PROVIDERS` 其餘鍵 |
+| `register_url` | 獲取 API Key 地址 | `FREE_PROVIDERS` 獲取地址 |
+| `models` | 模型列表 | `PROVIDER_MODELS` |
+| `models_dev_id` | models.dev provider id | `MODELS_DEV_PROVIDER_MAP` |
+| `family` | 能力族 | `detect_provider_family` |
+| `capabilities` | family 能力 | `PROVIDER_CAPABILITIES` |
+| `extra_quota_fields` | 用量查詢額外字段（不進 API 請求） | `QUOTA_EXCLUDE_KEYS` + 編輯卡片硬編碼 |
+| `balance_fetcher` | 餘額查詢函數 | `BALANCE_APIS` |
+| `coding_plan_fetcher` | 套餐用量查詢函數 | coding_plan_fetcher 註冊表 |
+
+### 查詢函數簽名
+
+**餘額 fetcher**：`(config: dict) -> dict | None`
+
+```python
+{"balance": 123.4, "currency": "¥"}     # 成功
+{"hide": True, "tooltip": "失敗原因"}   # 失敗/無餘額
+None                                    # 無 API key 等（不請求）
+```
+
+簡單 Bearer GET 場景直接用工廠 `make_bearer_balance_fetcher(url, balance_key, currency="¥")`
+（自動處理 `balance_infos[0][key]` / `data.data[key]` / `data[key]` 層級）。
+
+**套餐用量 fetcher**：`(config: dict) -> dict | None`
+
+```python
+{"rolling": {"percent": 60, "reset_sec": 123}, "weekly": ..., "monthly": ...}
+```
+
+返回 None 表示該服務商暫不支持用量查詢。
+
+### extra_quota_fields 與 QUOTA_EXCLUDE_KEYS
+
+`extra_quota_fields` 聲明的 key 會：
+
+1. 匯入 `ProviderRegistry.quota_exclude_keys()`（全局聚合），這些字段**不會**被當作模型參數發送到 API
+   （chat_worker / subagent_worker / model_config_card 均按該集合排除）。
+2. 在服務商編輯卡片「套餐用量查詢（可選）」區動態渲染（label + placeholder）。
+
+### 熱插拔
+
+- \`providers/*.py\` 增/刪/改 → ProviderWatcher 後台輪詢（path, mtime, size）變更全量重掃（1-3 秒生效）
+- 同名服務商：user 插件優先於 system 內置（覆蓋是預期行為）
+- 修改 providers 後重啟或等 watcher 生效；manifest 更新 components.providers = true
+
+### 關鍵約束
+
+- 每個 `providers/*.py` 必須暴露 `register(registry)`，否則 loader 不掃描
+- `name` 必須唯一；重複會導致後加載者覆蓋先加載者
+- `icon_dir` / `icon_dir_light` 由 loader 自動注入，**勿手寫**
+- 修改 providers 後重啟或等 watcher 生效；manifest 更新 components.providers = true
+
+### 參考
+
+- 完整開發指南：\`plugins/system/providers/README.md\`
+- 系統服務商真實案例：\`plugins/system/providers/*.py\`
+- 註冊表實現：\`app/plugins/registries/provider_registry.py\`
+- 測試：\`python -m pytest tests/core/test_provider_registry.py -v\`
+
+---
+
+## Team Templates（團隊模板組件）
+
+> 團隊模板讓插件預置一組 @角色組合（如「統籌 + 構建 + 審查 + 計劃」），
+> 用戶透過 `/team --load=<name>` 一鍵拉起多智能體團隊。
+> 模板文件由插件聲明，主程序不再硬編碼預設團隊。
+
+### 文件位置
+
+```
+<plugin>/
+├── team_templates/
+│   └── my-team.yaml        # 一個文件即一個模板（可多個）
+└── .drifox-plugin/
+    └── plugin.json         # components 可聲明 "team_templates": true（物理自動檢測，可選）
+```
+
+### 最小模板
+
+```yaml
+# team_templates/my-team.yaml
+# 用法：/team --load=my-team
+schema_version: 1
+template_name: my-team
+description: 一句話描述這個團隊組合
+agents:
+  - agent_name: leader
+    description: 團隊統籌 Leader，負責組隊與任務分發
+  - agent_name: build
+    description: 構建智能體，負責讀寫代碼與驗證
+```
+
+### 字段說明
+
+| 字段 | 必填 | 說明 |
+|------|------|------|
+| `schema_version` | ✅ | 當前固定為 `1`（非 1 會拋 TemplateError） |
+| `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
+| `description` | 選填 | 一句話描述（列出時展示） |
+| `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
+| `agents[].agent_name` | ✅ | 引用 `plugins/system/agents/` 下的角色名（如 build、review） |
+| `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
+
+### 關鍵約束
+
+- **文件名規範**：首字符為字母/數字（含中文），後續允許 `\w` 與 `-`，長度 1-64；
+  禁止 `.`/`/`/反斜槓/`..`（防路徑穿越，避免與擴展名衝突）
+- `agents` 至少 1 個；同一模板內 `agent_name` 必須唯一
+- `agent_name` 必須引用**已存在**的 @角色（加載時語義校驗，缺失報 TemplateError）
+- **探測謂詞**：目錄 `team_templates/` 存在且含 `*.yaml` 即被識別為該插件的組件
+  （`app/plugins/managers/plugin_manager.py` 的 `_COMPONENT_PROBES` 定義）
+- 建議在 manifest `components` 顯式聲明 `"team_templates": true`（與 tools/providers 一致；
+  system 內置插件基於物理目錄自動識別，不強制）
+
+### 來源優先級與覆蓋
+
+模板按以下優先級載入（同名時高優先級覆蓋低優先級）：
+
+1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
+2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
+3. **system** — `plugins/system/team_templates/`（唯讀，內置 `default-team`）
+
+> 覆蓋語義與 tools/providers 同構：user 插件同名模板優先於 system 內置。
+
+### 使用方式
+
+| 命令 | 說明 |
+|------|------|
+| `/team --load=<name>` | 載入指定模板，一鍵拉起多智能體團隊 |
+| `/team` | 列出所有可用模板（標示 用戶/插件/系統 來源） |
+| `/team --save=<name>` | 將當前團隊另存為用戶模板 |
+| `/team --delete=<name>` | 刪除用戶模板（僅 user-custom 可刪） |
+
+### 熱插拔
+
+- `team_templates/*.yaml` 新增/修改 → 懶加載、無緩存，下次 `/team` 列出或
+  `--load` 即生效（`builtin_reloaders._reload_team_templates` 為 lazy，記日誌即成功）
+- 與 tools/providers 同構：kernel 分派時 skip 刷新鏈，僅標記組件已變更
+
+### 參考
+
+- 模板結構與校驗：`app/core/team/template_schema.py`
+- 文件存儲層（來源解析/優先級）：`app/core/team/template_manager.py`
+- 系統模板案例：`plugins/system/team_templates/default-team.yaml`
+- 測試：`python -m pytest tests/core/test_team_template.py -v`

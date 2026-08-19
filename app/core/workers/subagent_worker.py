@@ -13,7 +13,8 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
-from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
+from app.constants import PARAM_SCHEMA
+from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
@@ -593,20 +594,67 @@ class SubAgentExecutor(QThread):
             return content
         return _THINKING_PATTERN.sub("", content)
 
-    def _requires_reasoning_content(self, llm_config: Dict) -> bool:
-        """thinking 模式下，deepseek 系模型要求 tool-call assistant 保留 reasoning_content 字段。
+    def _serialize_for_api(self, messages: List[Dict], llm_config: Dict = None):
+        """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
 
-        与 chat_worker._requires_reasoning_content 保持一致：deepseek 官方及
-        opencode 等中转平台承载的 deepseek 系模型，上游 Console 均要求
-        tool_calls assistant 消息携带 reasoning_content 字段（可为空串）。
+        与 chat_worker._serialize_for_api 对称；supports_vision 默认 True（subagent 无视觉注入）。
         """
-        if not isinstance(llm_config, dict) or llm_config.get("思考模式") is not True:
-            return False
-        family = detect_provider_family(llm_config)
-        if family == "deepseek":
-            return True
-        model = str(llm_config.get("模型名称", "") or "").lower()
-        return model.startswith("deepseek")
+        from app.plugins.contracts.message_serializer import SerializeContext
+        from app.plugins.registries.serializer_registry import SerializerRegistry
+
+        config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
+        flags = self._protocol_flags(config)
+        serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
+        return serializer.serialize(messages, SerializeContext(flags=flags))
+
+    def _protocol_flags(self, llm_config: Dict = None):
+        """经 ModelAdapterRegistry 解析完整协议开关（含 serializer_id，冷启动防御同 Task 1）"""
+        from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+        registry = ModelAdapterRegistry.get_instance()
+        config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
+        adapter = registry.resolve(config or {})
+        if adapter is None:
+            adapter = self._resolve_adapter_with_warmup(registry, config or {})
+        if adapter is None:
+            raise RuntimeError(
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                "请确认 plugins/system/model_adapters/ 已启用"
+            )
+        return adapter.protocol_flags(config or {})
+
+    def _requires_reasoning_content(self, llm_config: Dict) -> bool:
+        """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
+
+        通过 ModelAdapterRegistry 解析（系统插件 openai 兜底，可被插件覆盖）。
+        每调用解析一次 ——该方法每轮对话仅调用数次，开销可忽略；
+        不缓存避免 worker 生命周期与热重载不一致。
+        """
+        from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+        registry = ModelAdapterRegistry.get_instance()
+        adapter = registry.resolve(llm_config or {})
+        if adapter is None:
+            adapter = self._resolve_adapter_with_warmup(registry, llm_config)
+        if adapter is None:
+            raise RuntimeError(
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                "请确认 plugins/system/model_adapters/ 已启用"
+            )
+        return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
+
+    def _resolve_adapter_with_warmup(self, registry, llm_config: Dict) -> Optional[Any]:
+        """冷启动兜底：注册表为空时幂等加载系统插件再 resolve（同 chat_worker._adapter_flags 防御）"""
+        try:
+            if registry.adapters():
+                return None
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception as e:
+            logger.warning(f"[SubAgentWorker] 冷启动 ModelAdapter 加载失败: {e}")
+            return None
+        return registry.resolve(llm_config or {})
 
     # ========== Hook 集成（让子智能体也能应用所有 hook） ==========
     # 设计目标：与 chat_worker 对齐，让子智能体也能触发/消费以下 hook：
@@ -815,7 +863,7 @@ class SubAgentExecutor(QThread):
                 "模型列表",
             }:
                 continue
-            if cn_key in QUOTA_EXCLUDE_KEYS:
+            if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
 
             meta = PARAM_SCHEMA.get(cn_key, {})
@@ -983,7 +1031,8 @@ class SubAgentExecutor(QThread):
 
     def _make_responses_api_call(self, client, messages, tools, config) -> tuple:
         """非流式 Responses API 调用：解析 output 数组 → (content, tool_calls, reasoning)。"""
-        input_items, instructions = messages_to_responses_input(messages)
+        result = self._serialize_for_api(messages, config)
+        input_items, instructions = result.input_items, result.instructions
         model = str(config.get("模型名称", "") or "")
         kwargs: Dict[str, Any] = {
             "model": model,
@@ -1246,7 +1295,8 @@ class SubAgentExecutor(QThread):
                 "anchors": getattr(result, "anchors", None) if result else None,
             }
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
-            tool_results.append(to_api_message(raw_result) or raw_result)
+            serialized = self._serialize_for_api([raw_result]).messages
+            tool_results.append(serialized[0] if serialized else raw_result)
 
             # 消费 PostToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             posttool_msgs = self._drain_posttool_queue()

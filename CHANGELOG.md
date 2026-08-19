@@ -1,6 +1,40 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **UI 扩展点补全（Phase D）** (`app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_panel.py` + `app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/cards/settings/llm_settings_card.py`): 新增四类 UI 扩展点——侧边栏项（`SidebarItemInfo`，与 floating card 解耦，存量兼容映射）/ 输入区按钮（`InputButtonInfo`，per-window 实例化 + 热重载经 `_on_plugin_hot_reload` 重建）/ 右键菜单项（`ContextMenuActionInfo`，统一聚合器注入 message_card/tab 菜单，enabled_func 置灰 + 返回 False 关菜单语义）/ 设置卡片（`SettingsCardInfo`，LLMSettingsCard 末尾插件分区滚动区，初始隐藏，打开时重建）。`unregister_plugin` 清理四类新注册（幂等）。UI 插件生态从「卡片 + 渲染」升级为「全区域可插拔」（E2E：临时插件文件注册四类 → 卸载全清）。
+- **序列化单入口（Phase C）** (`app/plugins/contracts/message_serializer.py` + `app/core/workers/chat_worker.py` + `subagent_worker.py`): 新增 `SerializeResult`（messages/input_items/instructions）+ `MessageSerializer.serialize` 单入口（内部按 `ctx.flags.use_responses_api` 路由 chat/responses 形态）；worker 从「按协议形态调 3 个函数」收敛为 1 个入口，`ProtocolFlags.serializer_id` 真正被消费（adapter 可指定专属序列化器，默认 openai）；薄壳函数内部转发单入口（导出与调用形态不变）。
+- **协议家族适配器拆分（Phase C）** (`plugins/system/model_adapters/`): 单适配器拆为三家族——`openai-family`（matches=1 兜底）/ `gemini-family`（2）/ `deepseek-family`（3），判定器共享 `_detectors.py`（`_` 前缀不当作插件），`resolve` 取最高分；flags 与拆分前逐点等价（等价矩阵 13 用例全过）。
+- **UI 层存储收口（Phase C）** (`app/core/backend.py` + `plugins/system/storages/sqlite.py`): `backend.session_store` 切到 `StorageRegistry.get_active()`（冷启动防御复用门面 warmup）；SQLite 引擎补 SessionStore 兼容方法集（`clear_old_subagent_tasks / force_cleanup_project / record_file_operation` 等，委托内部 SessionStore 单例），main_widget 与 FileOperationRecorder 调用点零改动迁移，db 连接不分叉。
+- **消息序列化插件化（Phase B）** (`app/plugins/contracts/message_serializer.py` + `app/plugins/registries/serializer_registry.py` + `plugins/system/serializers/openai.py`): 新增 `MessageSerializer` 契约（`serialize_messages` ≡ 旧 `messages_to_api` / `serialize_responses` ≡ 旧 `messages_to_responses_input`）+ `SerializeContext` + `SerializerRegistry` 单例（按 id 解析，回退 `openai`）；`message_content` 三函数变薄壳委托（签名与导出不变，调用点零改动，行为逐点等价）；`ProtocolFlags` 扩展 `serializer_id` 字段（本阶段只立不消费，走覆盖式替换）；kernel/plugin_manager/reloaders/plugin.json 登记 serializers 组件（热重载 watcher 生效）。插件可替换消息序列化行为（E2E 验收：user 根覆盖 system 默认 openai）。
+- **存储契约能力接口（Phase B）** (`app/plugins/contracts/storage.py` + `plugins/system/storages/sqlite.py`): 新增可选能力接口 `SessionTitleCapability` / `SessionCountsCapability` / `InputHistoryCapability`（消费方 `isinstance` 探测，无能力安全降级）；SQLite 引擎声明实现并覆盖消费方方法（`save_session/get_sessions_lightweight/get_session_count/update_session_project/archive_sessions_by_project` 等委托 SessionStore，行为零变化）；backend 新增 `get_session_storage()` 门面（注册表空时幂等加载系统插件），history_manager / memory_manager / session_handler 改走门面（UI 层消费点迁移属 Phase C）。
+- **冷启动回归修复（Phase B）** (`app/core/workers/chat_worker.py` + `subagent_worker.py`): ModelAdapter resolve 空注册表时幂等触发系统插件扫描再重试（仍空才抛错），`tests/test_reasoning_content_required.py` 恢复全绿。
+- **运行时三接口插件化（Phase A）** (`app/plugins/` + `app/core/workers/chat_worker.py`): 「万物即插件」运行时层——新增 `contracts/`（ModelAdapter / LoopPolicy / SessionStorageEngine 契约）+ 三注册表 + 系统插件默认实现（`plugins/system/{model_adapters,loop_policies,storages}/`，行为与旧 `builtin_runtime` 逐点等价）；chat_worker 协议检测与循环判定委托注册表（行为零变化）；kernel 登记三个新组件类型，插件可替换模型适配/循环策略/存储引擎（附 minimal 极简策略验收插件）。
+- **服务商插件化（providers 组件）** (`app/plugins/` + `plugins/system/providers/`): 「万物为插件」——服务商支持全面插件化。新增 `app/plugins/registries/provider_registry.py`（ProviderDef + ProviderRegistry 单例，聚合 models/icon/default_config/quota_keys/models_dev_map/family_caps/余额/套餐用量查询）+ `app/plugins/loaders/provider_loader.py`（扫描 `plugins/*/providers/*.py` + 热重载 watcher + user 覆盖 system + 插件启用过滤 + 插件图标目录注入）。PluginManager 组件检测新增 providers 组件
+- **14 家内置服务商迁移为系统插件** (`plugins/system/providers/`): DeepSeek/SiliconFlow（余额查询 fetcher）、MiniMax/智谱AI/OpenAI/火山方舟/OpenCode Zen/OpenCode Go（套餐用量 fetcher 逻辑迁入插件），Anthropic/Gemini/Groq/Ollama/百度千帆/阿里云 纯数据声明；用量查询额外字段（server_id/cookie/workspace_id/csrf_token/x_web_id）随插件声明并在编辑卡片动态渲染
+- **服务商图标插件化** (`app/utils/provider_icons.py`): 新增 `get_provider_icon`——插件自带图标目录（`providers/icons/` 深色 + `icons_light/` 浅色，主题感知）优先，缺省回退 qrc；与 tools 图标机制对称
+- **服务商注册表懒加载预热** (`app/plugins/registries/provider_registry.py`): `ensure_loaded()` 幂等预热，兼容启动早期 Settings → opencode 免费模型注入链路
+
+### ♻️ 代码重构 (Refactoring)
+
+- **openai 适配器拆协议家族（Phase C）** (`plugins/system/model_adapters/`): 旧单适配器 `openai.py` 删除，拆为 `openai_family.py / gemini_family.py / deepseek_family.py` + 共享判定器 `_detectors.py`；worker 序列化调用全部收敛到 `_serialize_for_api` 单入口（chat_worker 9 处 + subagent_worker 2 处）。
+- **openai 适配器判定器拆分（Phase B 铺路）** (`plugins/system/model_adapters/openai.py`): 三个 `_method` 拆为模块级纯函数 `detect_is_gemini / detect_requires_reasoning / detect_use_responses`（逻辑逐字搬运，行为零变化），`protocol_flags` 组合之，为协议家族适配器铺路。
+- **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): 插件相关代码从 `app/core/` 与 `app/tools/` 迁入 `app/plugins/managers/`（PluginManager）、`registries/`（ProviderRegistry/UIPluginRegistry/coding_plan_fetcher）、`loaders/`（plugin_tool_loader/provider_loader），按职责分子目录
+- **服务商硬编码全部移除** (`app/constants.py` 等): 删除 `PROVIDER_MODELS`/`FREE_PROVIDERS`/`PROVIDER_ICONS`/`QUOTA_EXCLUDE_KEYS` 常量（保留函数委托）；`MODELS_DEV_PROVIDER_MAP`/`PROVIDER_CAPABILITIES`/`BALANCE_APIS`/`coding_plan_fetcher` 注册表全部迁移至 ProviderRegistry 聚合（后两者变薄壳委托）；消费方（usage_service/balance_display/model_capabilities/models_dev_sync/provider_profile/workers/UI 卡片/main_widget/config/cli）全部改读注册表
+- **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过
+
+### 📚 文档 (Documentation)
+
+- **服务商插件开发指南** (`plugins/system/providers/README.md`): ProviderDef 字段、查询函数签名、额外配置字段机制、旧硬编码迁移对照表
+- **系统插件声明 providers 组件** (`plugins/system/.drifox-plugin/plugin.json`)
+
+### 🔧 其他 (Chores & Build)
+
+- **测试**: 新增 `tests/core/test_provider_registry.py`（8 用例：注册/聚合/余额/用量/系统 14 家加载）；更新 `test_models_dev_sync.py`/`test_default_opencode_provider.py`/`test_provider_icon_widget.py`
+
 ## [v0.5.2] - 2026-08-17
 
 自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
@@ -51,6 +85,7 @@ All notable changes to this project will be documented in this file.
 - **message_card finished tool id 误判** (`app/widgets/message_card.py`): 停止将已完成的 tool id 视为 active tool DOM，恢复流式 diff-render
 - **context/tools pruned_tokens 联动** (`app/core/context_builder.py` + `app/widgets/context_usage_ring.py`): 将 pruned_tokens 接入环形图 tooltip；后台任务 completed 状态守卫
 - **pty session 生命周期挂靠** (`app/tools/pty_session.py`): pty 会话生命周期挂靠 ProcessJob kill-on-close（S5）
+- **subagent/title 默认模型服务商记录歧义** (`app/main_widget.py`): 修复通过命令卡枚举选择「服务商名+模型名」配置 `/subagents`、`/title-gen` 默认模型时，保存的是 `provider_name` 而非 `display_name`；存在两个同 `provider_name` 的配置（如两个 OpenCode Zen：`df810bab` 与当前主用 `68ea6d92`）时，重新解析因 `_resolve_service_provider` 按 `display_name` 优先匹配，歧义命中错误的 config——表现为「用的服务商与保存记录的不一致」。保存改为使用 `display_name`（与枚举 value 一致且唯一），闭环无歧义
 
 ### ♻️ 代码重构 (Refactoring)
 
@@ -138,6 +173,14 @@ All notable changes to this project will be documented in this file.
 - **思考强度胶囊可点轮换** (`app/widgets/cards/settings/model_selector_card.py`): 思考强度胶囊独立可点，点击直接循环轮换等级（`db907099`）
 - **思考强度胶囊按等级变色** (`app/core/model_capabilities.py` + `app/widgets/cards/settings/` + `app/core/workers/`): 思考强度胶囊按等级变色 + 等级强制校验回退中间值（`a47a8077`）
 - **分支/新建标签按钮字号** (`app/widgets/tab_panel.py`): 统一分支与新建标签按钮字号提升一致性（`58d48041`）
+
+### 🚑 Hotfix (2026-08-19 第六次重发布)
+
+> **自上一 tag (v0.5.2 `70b78cff`) 以来的变更** | 提交数：1 · 文件变更：2 · +132/-9 | 贡献者：mading
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **缓存内容版本机制** (`app/core/models_dev_sync.py` + `tests/core/test_models_dev_sync.py`): 将"内容版本"从 schema 结构版本中分离，新增 `CACHE_CONTENT_VERSION` 与 `_is_content_version_stale`；开发者改了产出内容代码（解析/映射逻辑、服务商白名单、免费模型源、默认值、合并规则等非结构变更）后将该值 +1，本地缓存即便仍在 24h TTL 内也判定为内容过期、后台强制重拉 models.dev，让用户及时用上新逻辑而无需等 TTL 自然到期（`a1b3468b`）
 
 ## [v0.5.1] - 2026-08-14
 

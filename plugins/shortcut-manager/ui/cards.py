@@ -58,7 +58,7 @@ def _ensure_user_custom_plugin():
     """
     import json
 
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
     from app.utils.utils import get_app_data_dir
 
     custom_dir = get_app_data_dir() / "plugins" / "user-custom"
@@ -95,7 +95,7 @@ def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
 
     Windows 兼容：同时尝试原始命令名和安全文件名（: → __）进行匹配。
     """
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     if not pm.is_initialized():
@@ -213,7 +213,7 @@ def _find_conflicts(shortcut: str, all_commands: list, exclude_cmd: str = "") ->
 def _load_all_items() -> list:
     """获取系统内建命令 + UI 插件命令列表"""
     from app.core.command_manager import CommandManager
-    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     items = []
     cmd_mgr = CommandManager.get_instance()

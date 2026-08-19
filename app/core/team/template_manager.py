@@ -110,7 +110,7 @@ class TemplateManager:
             插件 team_templates/ 目录列表（按插件优先级排序）。
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             return pm.get_plugin_dirs("team_templates")

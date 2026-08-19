@@ -9,6 +9,8 @@ from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QFontComboBox,
+    QVBoxLayout,
+    QWidget,
 )
 from qfluentwidgets import (
     ComboBox,
@@ -204,6 +206,7 @@ class LLMSettingsCard(SystemCardFrame):
                 ("common", "通用设置"),
                 ("appearance", "外观样式"),
                 ("update", "版本更新"),
+                ("plugins", "插件设置"),
             ],
             default_tab="llm",
         )
@@ -423,6 +426,23 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.manualUpdateCard)
 
+        # ---- Phase D: 插件设置分区（初始隐藏，有注册卡片时显示）----
+        self._plugin_cards_label = self._make_sep_label("插件设置")
+        self._section_anchors["plugins"] = self._plugin_cards_label
+        self._plugin_cards_label.setVisible(False)
+        content_layout.addWidget(self._plugin_cards_label)
+        self._plugin_cards_widget = QWidget(self)
+        self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
+        self._plugin_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._plugin_cards_layout.setSpacing(6)
+        content_layout.addWidget(self._plugin_cards_widget)
+        self._plugin_cards_widget.setVisible(False)
+        # 右上角 tab：初始隐藏（rebuild_plugin_cards 按注册卡片显隐）
+        try:
+            self._tab_buttons["plugins"].setVisible(False)
+        except Exception:
+            pass
+
         content_layout.addStretch(1)
 
         # 连接信号
@@ -444,6 +464,46 @@ class LLMSettingsCard(SystemCardFrame):
             self.gatewayCard,
         ]
         self._apply_list_accordion()
+
+    def rebuild_plugin_cards(self):
+        """重建插件设置分区（Phase D，幂等）
+
+        按 UIPluginRegistry.get_settings_cards() 实例化插件卡片 widget_class；
+        无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
+        保证插件增删/热重载后分区内容最新。
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            cards = UIPluginRegistry.get_instance().get_settings_cards()
+        except Exception:
+            cards = []
+        # 清空旧卡片
+        while self._plugin_cards_layout.count():
+            item = self._plugin_cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not cards:
+            self._plugin_cards_label.setVisible(False)
+            self._plugin_cards_widget.setVisible(False)
+            try:
+                self._tab_buttons["plugins"].setVisible(False)
+            except Exception:
+                pass
+            return
+        for info in cards:
+            try:
+                card = info.widget_class(parent=self._plugin_cards_widget)
+                self._plugin_cards_layout.addWidget(card)
+            except Exception as e:
+                logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
+        self._plugin_cards_label.setVisible(True)
+        self._plugin_cards_widget.setVisible(True)
+        try:
+            self._tab_buttons["plugins"].setVisible(True)
+        except Exception:
+            pass
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果

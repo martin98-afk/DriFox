@@ -24,6 +24,35 @@ from typing import Dict, List, Optional
 
 from app.tools.result import ToolResult
 
+# ========== 共享路径工具（同目录 _path_utils.py，下划线前缀 → loader 跳过） ==========
+_path_utils_module = None
+
+
+def _to_rel_path_loader():
+    """加载共享路径工具（进程级缓存一次；失败回退原样返回）"""
+    global _path_utils_module
+    if _path_utils_module is not None:
+        return _path_utils_module
+    import importlib.util
+
+    plugin_path = Path(__file__).resolve().parent / "_path_utils.py"
+    if not plugin_path.exists():
+        def _fallback(path: str) -> str:
+            return path
+        _path_utils_module = _fallback
+        return _path_utils_module
+    spec = importlib.util.spec_from_file_location("_plugin_path_utils", plugin_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        _path_utils_module = mod.to_rel_path
+    except Exception:
+        def _fallback(path: str) -> str:
+            return path
+        _path_utils_module = _fallback
+    return _path_utils_module
+
+
 GROUP_READ = "文件读取"
 GROUP_WRITE = "文件写入"
 
@@ -811,7 +840,7 @@ def _make_file_preview(tool_name: str):
     """
 
     def _preview(tool_args: dict) -> str:
-        from app.widgets.render_helpers import _to_rel_path
+        to_rel_path = _to_rel_path_loader()
 
         tool_args = tool_args or {}
         if not tool_args:
@@ -819,7 +848,7 @@ def _make_file_preview(tool_name: str):
         desc = ""
         if tool_name == "read":
             raw = tool_args.get("path") or tool_args.get("file_path") or ""
-            path = _to_rel_path(raw.rstrip("/").rstrip("\\")) if raw else ""
+            path = to_rel_path(raw.rstrip("/").rstrip("\\")) if raw else ""
             if path:
                 desc = f'读取 "{path}"'
             else:
@@ -834,7 +863,7 @@ def _make_file_preview(tool_name: str):
                 desc += f" (前 {endline} 行)"
         elif tool_name == "grep":
             pattern = tool_args.get("pattern", "")
-            path = _to_rel_path(tool_args.get("path", ""))
+            path = to_rel_path(tool_args.get("path", ""))
             include = tool_args.get("include", "")
             desc = f'搜索 "{pattern}"'
             parts = []
@@ -846,15 +875,15 @@ def _make_file_preview(tool_name: str):
                 desc += " (" + ", ".join(parts) + ")"
         elif tool_name == "glob":
             pattern = tool_args.get("pattern", "")
-            path = _to_rel_path(tool_args.get("path", ""))
+            path = to_rel_path(tool_args.get("path", ""))
             desc = f'匹配 "{pattern}"' if pattern else "文件匹配"
             if path:
                 desc += f" ({path})"
         elif tool_name == "list":
-            path = _to_rel_path(tool_args.get("path", "."))
+            path = to_rel_path(tool_args.get("path", "."))
             desc = f"{path}"
         elif tool_name == "scan_repo":
-            path = _to_rel_path(tool_args.get("path", "."))
+            path = to_rel_path(tool_args.get("path", "."))
             desc = f"扫描仓库 {path}" if path != "." else "扫描仓库"
             max_depth = tool_args.get("max_depth")
             if max_depth is not None:
@@ -862,7 +891,7 @@ def _make_file_preview(tool_name: str):
         elif tool_name == "stage_files":
             files = tool_args.get("files", [])
             if files and isinstance(files, (list, tuple)):
-                names = [_to_rel_path(f) if os.path.isabs(f) else f for f in files[:3]]
+                names = [to_rel_path(f) if os.path.isabs(f) else f for f in files[:3]]
                 names = [os.path.basename(n) if "/" in n or "\\" in n else n for n in names]
                 names = [n[:30] for n in names]
                 if len(files) > 3:
@@ -872,14 +901,14 @@ def _make_file_preview(tool_name: str):
             else:
                 desc = "标记文件"
         elif tool_name == "get_diagnostics":
-            path = _to_rel_path(tool_args.get("path", ""))
+            path = to_rel_path(tool_args.get("path", ""))
             language = tool_args.get("language", "")
             desc = f"诊断 {path}" if path else "代码诊断"
             if language:
                 desc += f" ({language})"
         elif tool_name in ("write", "edit", "multi_edit"):
             raw = tool_args.get("path") or tool_args.get("file_path") or ""
-            path = _to_rel_path(raw) if raw else ""
+            path = to_rel_path(raw) if raw else ""
             fname = path or "文件"
             if tool_name == "write":
                 desc = f'写入 "{fname}"'

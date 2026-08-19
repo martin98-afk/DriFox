@@ -2,30 +2,20 @@
 <RCC version="1.0">
 <qresource prefix="/icons">
     <file>233键盘-线性.svg</file>
-    <file>Anthropic.svg</file>
     <file>MCP.svg</file>
-    <file>MiniMax.svg</file>
-    <file>Ollama.svg</file>
     <file>Search.svg</file>
     <file>Telegram.svg</file>
-    <file>baidu.svg</file>
-    <file>deepseek.svg</file>
     <file>discord.svg</file>
     <file>drifox.ico</file>
     <file>folder.svg</file>
     <file>fox_bg.png</file>
-    <file>gemini-ai.svg</file>
     <file>gitee.svg</file>
-    <file>groq.svg</file>
     <file>hooks.svg</file>
     <file>lsp.svg</file>
-    <file>opencode.svg</file>
     <file>pet.png</file>
     <file>question.svg</file>
-    <file>qwen.svg</file>
     <file>read.svg</file>
     <file>shell.svg</file>
-    <file>siliconflow.png</file>
     <file>slack.svg</file>
     <file>tab切换.svg</file>
     <file>todo.svg</file>
@@ -65,13 +55,11 @@
     <file>无限.svg</file>
     <file>日志.svg</file>
     <file>智能体.svg</file>
-    <file>智谱.svg</file>
     <file>更多.svg</file>
     <file>最大化.svg</file>
     <file>最小化.svg</file>
     <file>根目录.svg</file>
     <file>模型选择.svg</file>
-    <file>火山引擎.svg</file>
     <file>用户.svg</file>
     <file>编辑.svg</file>
     <file>裁剪.svg</file>

@@ -22,12 +22,13 @@ from qfluentwidgets import (
 )
 
 from app.constants import (
-    FREE_PROVIDERS,
-    PROVIDER_ICONS,
     get_merged_provider_models,
+    provider_default_config,
 )
+from app.plugins.registries.provider_registry import ProviderRegistry
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.provider_icons import get_provider_icon
+from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.model_list_edit_dialog import ModelListEditDialog
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
@@ -180,9 +181,8 @@ class ProviderEditCard(QWidget):
             self.nameCombo = SearchableEditableComboBox()
             self._searchable_combos.append(self.nameCombo)
             self.nameCombo.setMaxVisibleItems(10)
-            for provider_name in FREE_PROVIDERS.keys():
-                icon_name = PROVIDER_ICONS.get(provider_name, "大模型")
-                icon = get_icon(icon_name)
+            for provider_name in ProviderRegistry.get_instance().names():
+                icon = get_provider_icon(provider_name)
                 self.nameCombo.addItem(provider_name, icon=icon)
             self.nameCombo.setDisabled(False)
             self.nameCombo.setCurrentIndex(0)
@@ -195,12 +195,12 @@ class ProviderEditCard(QWidget):
 
             main_layout.addLayout(name_row)
             first_provider = self.nameCombo.currentText()
-            template = FREE_PROVIDERS.get(first_provider, {})
+            template = provider_default_config(first_provider) or {}
             current_provider = first_provider
             template_url = template.get("API_URL", "")
         else:
-            if self.provider_name in FREE_PROVIDERS:
-                template = FREE_PROVIDERS[self.provider_name]
+            if provider_default_config(self.provider_name) is not None:
+                template = provider_default_config(self.provider_name) or {}
             else:
                 template = self.provider_info
             current_provider = self.provider_name
@@ -280,8 +280,8 @@ class ProviderEditCard(QWidget):
                 self.modelCombo.addItems(saved_models)
             elif self.provider_name in merged_provider_models:
                 self.modelCombo.addItems(merged_provider_models[self.provider_name])
-            elif self.provider_name in FREE_PROVIDERS:
-                default_model = FREE_PROVIDERS[self.provider_name].get("模型名称", "")
+            elif provider_default_config(self.provider_name) is not None:
+                default_model = (provider_default_config(self.provider_name) or {}).get("模型名称", "")
                 if default_model:
                     self.modelCombo.addItem(default_model)
 
@@ -322,7 +322,7 @@ class ProviderEditCard(QWidget):
         config_name_row.addWidget(self.configNameEdit, 1)
         main_layout.addLayout(config_name_row)
 
-        # ── 套餐用量查询额外配置（可选） ────────────────
+        # 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）
         self._extra_config_section = QWidget()
         extra_layout = QVBoxLayout(self._extra_config_section)
         extra_layout.setContentsMargins(4, 2, 0, 4)
@@ -332,54 +332,29 @@ class ProviderEditCard(QWidget):
         section_title = BodyLabel("套餐用量查询（可选）")
         extra_layout.addWidget(section_title)
 
-        # 所有可能的额外字段定义（按服务商显示不同组合）
-        # 注意：不同组如果共享同一配置 key（如 "cookie"），内部 key 需加前缀避免冲突
-        self._extra_field_defs = {
-            "opencode": [
-                ("opencode_server_id", "Server ID:", "opencode.ai/_server 请求中的 X-Server-Id"),
-                ("opencode_cookie", "Cookie:", "oc_locale=zh; auth=Fe26.2**... （从浏览器复制完整的 Cookie 值）"),
-                ("opencode_workspace_id", "Workspace ID:", "wrk_xxxxxxxxxxxx （无需可留空）"),
-            ],
-            "火山方舟": [
-                ("volc_cookie", "Cookie:", "console.volcengine.com 浏览器 Cookie（完整值）"),
-                ("volc_csrf_token", "CSRF Token:", "x-csrf-token（从请求头复制）"),
-                ("volc_x_web_id", "X-Web-ID:", "x-web-id（可选）"),
-            ],
-        }
+        # (provider_name, config_key) -> row widget；字段定义全部来自插件
+        self._extra_field_rows: dict = {}
 
-        # 内部 key → 实际存储的配置 key 映射
-        self._extra_key_map = {
-            "opencode_server_id": "server_id",
-            "opencode_cookie": "cookie",
-            "opencode_workspace_id": "workspace_id",
-            "volc_cookie": "cookie",
-            "volc_csrf_token": "csrf_token",
-            "volc_x_web_id": "x_web_id",
-        }
-
-        # 记录每个字段属于哪个组，以及对应的行 widget
-        self._extra_field_rows: dict = {}  # internal_key -> QWidget (row container)
-        self._field_to_group: dict = {}  # internal_key -> group name
-
-        for group_name, fields in self._extra_field_defs.items():
-            for internal_key, label, placeholder in fields:
-                config_key = self._extra_key_map.get(internal_key, internal_key)
+        registry = ProviderRegistry.get_instance()
+        for provider in registry.all():
+            for field in provider.extra_quota_fields:
+                config_key = field.key
                 row_widget = QWidget()
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
-                lbl = BodyLabel(label)
+                lbl = BodyLabel(field.label)
                 lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 row_layout.addWidget(lbl)
                 editor = LineEdit()
-                editor.setPlaceholderText(placeholder)
+                editor.setPlaceholderText(field.placeholder)
                 existing = self.provider_info.get(config_key, "")
                 if existing:
                     editor.setText(existing)
-                setattr(self, f"{internal_key}_edit", editor)
+                edit_attr = f"quota_edit_{provider.name}_{config_key}"
+                setattr(self, edit_attr, editor)
                 row_layout.addWidget(editor, 1)
                 extra_layout.addWidget(row_widget)
-                self._extra_field_rows[internal_key] = row_widget
-                self._field_to_group[internal_key] = group_name
+                self._extra_field_rows[(provider.name, config_key)] = (row_widget, edit_attr)
 
         main_layout.addWidget(self._extra_config_section)
 
@@ -447,13 +422,13 @@ class ProviderEditCard(QWidget):
                 ]
             elif provider_name == "阿里云 (DashScope)":
                 preset_urls = [
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                    "https://dashscope.aliyuncs.com/api/v1",
+                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                    "https://llm-liz0icd5zqudfrqm.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
                 ]
             elif provider_name == "智谱AI":
                 preset_urls = [
-                    "https://open.bigmodel.cn/api/paas/v4",
                     "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "https://open.bigmodel.cn/api/paas/v4",
                 ]
             elif provider_name == "百度千帆":
                 preset_urls = [
@@ -477,10 +452,12 @@ class ProviderEditCard(QWidget):
                 preset_urls = [
                     "https://opencode.ai/zen/go/v1",
                 ]
-            elif provider_name in FREE_PROVIDERS:
-                url = FREE_PROVIDERS[provider_name].get("API_URL", "")
-                if url:
-                    preset_urls.append(url)
+            else:
+                default_cfg = provider_default_config(provider_name)
+                if default_cfg:
+                    url = default_cfg.get("API_URL", "")
+                    if url:
+                        preset_urls.append(url)
 
         all_urls = list(dict.fromkeys(preset_urls + [template_url]))
 
@@ -496,8 +473,8 @@ class ProviderEditCard(QWidget):
             if not current_config_name.strip() or current_config_name == self._auto_config_name:
                 self.configNameEdit.setText(name)
                 self._auto_config_name = name
-        if name in FREE_PROVIDERS:
-            template = FREE_PROVIDERS[name]
+        if provider_default_config(name) is not None:
+            template = provider_default_config(name) or {}
             template_url = template.get("API_URL", "")
             self._load_preset_urls(name, template_url)
 
@@ -523,39 +500,38 @@ class ProviderEditCard(QWidget):
         self._update_extra_config_visibility()
 
     def _update_extra_config_visibility(self):
-        """根据当前服务商名称显示/隐藏套餐配置区"""
+        """根据当前服务商名称显示/隐藏套餐配置区（字段由插件声明）"""
         if not hasattr(self, "_extra_config_section"):
             return
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
-        is_opencode = "opencode" in provider.lower()
-        is_volc = "火山方舟" in provider
+
+        # 当前服务商的额外字段定义（providers 插件）
+        current_fields = {}
+        registry = ProviderRegistry.get_instance()
+        p = registry.get(provider)
+        if p is not None:
+            current_fields = {f.key for f in p.extra_quota_fields}
 
         # 先全部隐藏
-        for row_widget in self._extra_field_rows.values():
+        for row_widget, _ in self._extra_field_rows.values():
             row_widget.setVisible(False)
 
-        # 确定当前组
-        if is_opencode:
-            group = "opencode"
-        elif is_volc:
-            group = "火山方舟"
-        else:
-            group = None
+        # 只显示当前服务商声明的字段行
+        shown = 0
+        for (pname, config_key), (row_widget, _) in self._extra_field_rows.items():
+            if pname == provider and config_key in current_fields:
+                row_widget.setVisible(True)
+                shown += 1
 
-        if group:
-            for internal_key, _, _ in self._extra_field_defs.get(group, []):
-                row = self._extra_field_rows.get(internal_key)
-                if row:
-                    row.setVisible(True)
-
-        self._extra_config_section.setVisible(group is not None)
+        self._extra_config_section.setVisible(shown > 0)
 
     def _open_help_url(self, name: str):
         """打开帮助链接"""
-        if name in FREE_PROVIDERS:
+        default_cfg = provider_default_config(name)
+        if default_cfg:
             import webbrowser
 
-            url = FREE_PROVIDERS[name].get("获取地址", "")
+            url = default_cfg.get("获取地址", "")
             if url:
                 webbrowser.open(url)
 
@@ -655,8 +631,11 @@ class ProviderEditCard(QWidget):
         existing_config_id = self.provider_info.get("config_id", "")
         # 先提取套餐用量额外字段（在覆盖 self.provider_info 之前）
         extra_fields = {}
-        for internal_key, config_key in self._extra_key_map.items():
-            editor = getattr(self, f"{internal_key}_edit", None)
+        provider_key = provider_name
+        for (pname, config_key), (_row, edit_attr) in self._extra_field_rows.items():
+            if pname != provider_key:
+                continue
+            editor = getattr(self, edit_attr, None)
             if editor is not None:
                 val = editor.text().strip()
                 if val:

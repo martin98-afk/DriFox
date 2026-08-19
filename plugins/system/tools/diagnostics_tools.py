@@ -26,6 +26,35 @@ import orjson as json
 from app.tools.result import ToolResult
 from app.tools.registry import make_summarize_from_preview
 
+# ========== 共享路径工具（同目录 _path_utils.py，下划线前缀 → loader 跳过） ==========
+_path_utils_module = None
+
+
+def _to_rel_path_loader():
+    """加载共享路径工具（进程级缓存一次；失败回退原样返回）"""
+    global _path_utils_module
+    if _path_utils_module is not None:
+        return _path_utils_module
+    import importlib.util
+
+    plugin_path = Path(__file__).resolve().parent / "_path_utils.py"
+    if not plugin_path.exists():
+        def _fallback(path: str) -> str:
+            return path
+        _path_utils_module = _fallback
+        return _path_utils_module
+    spec = importlib.util.spec_from_file_location("_plugin_path_utils", plugin_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        _path_utils_module = mod.to_rel_path
+    except Exception:
+        def _fallback(path: str) -> str:
+            return path
+        _path_utils_module = _fallback
+    return _path_utils_module
+
+
 # pyright Python 模块可用性检测
 try:
     from pyright import cli as pyright_cli
@@ -325,9 +354,9 @@ def _lsp_impl(tool_ctx, **kwargs):
 
 
 def _preview_get_diagnostics(tool_args: dict) -> str:
-    from app.widgets.render_helpers import _to_rel_path
+    to_rel_path = _to_rel_path_loader()
 
-    path = _to_rel_path(tool_args.get("path", ""))
+    path = to_rel_path(tool_args.get("path", ""))
     language = tool_args.get("language", "")
     desc = f"诊断 {path}" if path else "代码诊断"
     if language:
@@ -336,11 +365,11 @@ def _preview_get_diagnostics(tool_args: dict) -> str:
 
 
 def _preview_lsp(tool_args: dict) -> str:
-    from app.widgets.render_helpers import _to_rel_path
+    to_rel_path = _to_rel_path_loader()
 
     operation = tool_args.get("operation", "")
     raw = tool_args.get("path", "")
-    path = _to_rel_path(raw) if raw else ""
+    path = to_rel_path(raw) if raw else ""
     op_labels = {
         "diagnostics": "诊断",
         "documentSymbols": "符号列表",

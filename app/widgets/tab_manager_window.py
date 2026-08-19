@@ -1323,6 +1323,15 @@ class TabManagerWindow(QWidget):
             self.activeTabChanged.emit(index)
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
+            # 🆕 会话数据即时同步：切回窗口时历史卡片/欢迎卡片可能已过期
+            # （切走期间其他窗口对话/删除/重命名会话 → 本窗口 isVisible=False
+            # 期间 refresh_history_card_if_visible 被跳过，且欢迎卡片缓存未失效）。
+            # 仅刷新本窗口（broadcast=False），避免切换动作广播全窗口风暴。
+            try:
+                if hasattr(win, "_notify_history_data_changed"):
+                    win._notify_history_data_changed(broadcast=False)
+            except Exception:
+                pass
             # 补刷新延迟的主题变更（Tab 模式下主题刷新跳过非可见窗口）
             if getattr(win, "_theme_needs_refresh", False):
                 try:

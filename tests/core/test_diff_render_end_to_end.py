@@ -36,7 +36,7 @@ from app.widgets.render_helpers import render_tool_block
 def fresh_registry_with_plugins():
     """重置 registry 并加载系统插件（edit/write 的 render 闭包来自插件）"""
     ToolRegistry.reset_instance()
-    from app.tools.plugin_tool_loader import load_plugin_tools
+    from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
 
     load_plugin_tools()
     yield

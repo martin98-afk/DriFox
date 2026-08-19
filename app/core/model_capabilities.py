@@ -18,7 +18,7 @@
     L1: 用户在 llm_config 显式填的最大Token / context_limit / 上下文长度
     L2: models.dev 动态数据（覆盖 L3 同名 key）
     L3: MODEL_CAPABILITIES[模型名].context_limit      ← 本模块硬编码
-    L4: FREE_PROVIDERS[provider_name].最大Token       ← 服务商默认
+    L4: providers 插件声明默认 最大Token       ← 服务商默认
     L5: PROVIDER_CAPABILITIES[family].context_limit   ← family 兜底
 
 get_model_capabilities 返回值的优先级：
@@ -32,7 +32,7 @@ get_model_capabilities 返回值的优先级：
 
 from typing import Any, Dict, Optional
 
-from app.constants import FREE_PROVIDERS
+from app.constants import provider_default_config
 from app.core.provider_profile import get_provider_profile
 
 # =============================================================================
@@ -42,7 +42,7 @@ _CONTEXT_LIMIT_KEYS = ("最大Token", "context_limit", "上下文长度", "max_c
 
 # =============================================================================
 # 硬编码兜底默认值
-# 当 FREE_PROVIDERS 没有这个服务商、MODEL_CAPABILITIES 也没覆盖该字段时，用这里
+# 当 providers 插件没有这个服务商、MODEL_CAPABILITIES 也没覆盖该字段时，用这里
 # =============================================================================
 DEFAULT_MODEL_PARAMS: Dict[str, Any] = {
     "温度": 0.7,
@@ -245,7 +245,7 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
     # ========== DeepSeek（官方 API） ==========
     # 注意：2026-04-24 DeepSeek V4 已经发布（deepseek-v4-flash / deepseek-v4-pro，1M context）。
     # deepseek-chat（原 V3）和 deepseek-reasoner（原 R1）在当前 API 中的映射关系不明确，
-    # 不在此录入，让它们走 L3（FREE_PROVIDERS["DeepSeek"]["最大Token"]=40960）或
+    # 不在此录入，让它们走 L3（providers 插件声明 DeepSeek 默认值）或
     # L4（PROVIDER_CAPABILITIES["deepseek"]["context_limit"]=320000）兜底。
     # ========== 智谱 AI GLM-4 系列 ==========
     "glm-4-flash": {
@@ -419,7 +419,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     优先级（高 -> 低）：
         L1: llm_config 显式填的 最大Token / context_limit / 上下文长度 / max_context_tokens
         L2: MODEL_CAPABILITIES[模型名].context_limit
-        L3: FREE_PROVIDERS[provider_name].最大Token
+        L3: providers 插件声明默认 最大Token
         L4: PROVIDER_CAPABILITIES[family].context_limit（由 get_provider_profile 提供）
         兜底: default
 
@@ -448,13 +448,15 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
 
     # L3: 服务商默认
     provider = str(llm_config.get("provider_name", "") or "").strip()
-    if provider and provider in FREE_PROVIDERS:
-        v = FREE_PROVIDERS[provider].get("最大Token")
-        if v not in (None, ""):
-            try:
-                return max(1, int(v))
-            except ValueError, TypeError:
-                pass
+    if provider:
+        default_config = provider_default_config(provider)
+        if default_config:
+            v = default_config.get("最大Token")
+            if v not in (None, ""):
+                try:
+                    return max(1, int(v))
+                except ValueError, TypeError:
+                    pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
@@ -499,20 +501,20 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
 
     合并顺序（低 → 高）：
         L1: DEFAULT_MODEL_PARAMS        （硬编码兜底）
-        L2: config 中已有的值           （已保存/saved_providers/FREE_PROVIDERS 默认）
+        L2: config 中已有的值           （已保存/saved_providers/插件默认）
         L3: MODEL_CAPABILITIES[模型名]  （模型固有能力，覆盖 L1/L2 中对应的键）
         ─ 后续在 _load_model_config_to_card 中还有 model_overrides（最高）
 
     所以最终优先级：model_overrides > 模型能力 > config > 硬编码兜底
 
-    用途：当服务商不在 FREE_PROVIDERS（自定义服务商）时，
+    用途：当服务商不在 providers 插件（自定义服务商）时，
     确保 UI 能看到合理的默认值（温度 0.7、top_p 1.0 等）。
     当服务商已知但模型能力更强时，模型能力会覆盖服务商默认（最大Token 等）。
     """
     result = {}
     # L1: 硬编码兜底
     result.update(DEFAULT_MODEL_PARAMS)
-    # L2: config 已有值（saved_providers + FREE_PROVIDERS 默认）
+    # L2: config 已有值（saved_providers + 插件默认）
     result.update(config)
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
     caps = get_model_capabilities(model_name)

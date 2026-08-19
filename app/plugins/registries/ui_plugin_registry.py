@@ -97,6 +97,108 @@ class FloatingCardInfo:
     context_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
+@dataclass(frozen=True)
+class SidebarItemInfo:
+    """侧边栏插件项注册信息（Phase D：与 floating card 解耦的独立扩展点）
+
+    Attributes:
+        plugin_name: 所属插件名
+        item_id: 项唯一 ID
+        label: 侧边栏显示文本
+        icon_path: 图标路径（可选，缺省用 label 首字）
+        group: 分组 "system"（系统组，在前）| "custom"（自定义组，在后）
+        default_visible: 默认是否可见
+        priority: 优先级（同 item_id 时高者覆盖低者）
+        on_click: 点击回调，签名 (context: dict) -> None
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    item_id: str
+    label: str
+    icon_path: str = ""
+    group: str = "custom"
+    default_visible: bool = True
+    priority: int = 0
+    on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InputButtonInfo:
+    """输入区插件按钮注册信息（Phase D）
+
+    Attributes:
+        plugin_name: 所属插件名
+        button_id: 按钮唯一 ID
+        icon_path: 图标路径
+        tooltip: 悬停提示
+        group: 分组（默认 "plugin"，用于与系统按钮分隔线区分）
+        priority: 优先级（同 button_id 时高者覆盖低者）
+        on_click: 点击回调，签名 (context: dict) -> None（context 含 window_id 等）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    button_id: str
+    icon_path: str = ""
+    tooltip: str = ""
+    group: str = "plugin"
+    priority: int = 0
+    on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ContextMenuActionInfo:
+    """右键菜单插件项注册信息（Phase D）
+
+    Attributes:
+        plugin_name: 所属插件名
+        action_id: 菜单项唯一 ID（同 target 内唯一）
+        target: 注入目标 "message_card"（消息卡片菜单）| "tab"（tab 标签菜单）
+        label: 菜单显示文本
+        action_func: 点击处理，签名 (context: dict) -> bool（False=处理完成关菜单）
+        enabled_func: 可选置灰判断，签名 (context: dict) -> bool
+        separator_before: 是否在本项前插入分隔线
+        priority: 优先级（同 target+action_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    action_id: str
+    target: str
+    label: str
+    action_func: Callable[[Dict[str, Any]], bool]
+    enabled_func: Optional[Callable[[Dict[str, Any]], bool]] = None
+    separator_before: bool = False
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SettingsCardInfo:
+    """设置面板插件卡片注册信息（Phase D）
+
+    Attributes:
+        plugin_name: 所属插件名
+        card_id: 卡片唯一 ID
+        title: 卡片标题（分区内显示）
+        widget_class: QWidget 子类（构造时无参，或支持 parent 参数）
+        group: 分组（默认 "plugin"）
+        priority: 优先级（同 card_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    card_id: str
+    title: str
+    widget_class: type
+    group: str = "plugin"
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 class UIPluginRegistry:
     """UI 插件注册表（单例）"""
 
@@ -107,6 +209,11 @@ class UIPluginRegistry:
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
+        # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
+        self._sidebar_items: Dict[str, SidebarItemInfo] = {}
+        self._input_buttons: Dict[str, InputButtonInfo] = {}
+        self._context_actions: Dict[str, ContextMenuActionInfo] = {}
+        self._settings_cards: Dict[str, SettingsCardInfo] = {}
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
@@ -246,6 +353,8 @@ class UIPluginRegistry:
         """注册浮动卡片
 
         Args:
+
+        Args:
             plugin_name: 所属插件名
             card_id: 卡片唯一 ID
             widget_class: QWidget 子类
@@ -278,6 +387,143 @@ class UIPluginRegistry:
         self._floating_cards[card_id] = info
         # 联动注册命令
         self._register_command_for_card(info)
+
+    def register_sidebar_item(
+        self,
+        plugin_name: str,
+        item_id: str,
+        label: str,
+        icon_path: str = "",
+        group: str = "custom",
+        default_visible: bool = True,
+        priority: int = 0,
+        on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册侧边栏插件项（Phase D 独立扩展点，与 floating card 解耦）"""
+        if metadata is None:
+            metadata = {}
+        info = SidebarItemInfo(
+            plugin_name=plugin_name,
+            item_id=item_id,
+            label=label,
+            icon_path=icon_path,
+            group=group,
+            default_visible=default_visible,
+            priority=priority,
+            on_click=on_click,
+            metadata=metadata,
+        )
+        existing = self._sidebar_items.get(item_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._sidebar_items[item_id] = info
+
+    def get_sidebar_items(self) -> List[SidebarItemInfo]:
+        """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按注册序）"""
+        system = [v for v in self._sidebar_items.values() if v.group == "system"]
+        custom = [v for v in self._sidebar_items.values() if v.group != "system"]
+        return system + custom
+
+    def register_input_button(
+        self,
+        plugin_name: str,
+        button_id: str,
+        icon_path: str = "",
+        tooltip: str = "",
+        group: str = "plugin",
+        priority: int = 0,
+        on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册输入区插件按钮（Phase D）"""
+        if metadata is None:
+            metadata = {}
+        info = InputButtonInfo(
+            plugin_name=plugin_name,
+            button_id=button_id,
+            icon_path=icon_path,
+            tooltip=tooltip,
+            group=group,
+            priority=priority,
+            on_click=on_click,
+            metadata=metadata,
+        )
+        existing = self._input_buttons.get(button_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._input_buttons[button_id] = info
+
+    def get_input_buttons(self) -> List[InputButtonInfo]:
+        """获取全部输入区插件按钮（注册序）"""
+        return list(self._input_buttons.values())
+
+    def register_context_menu_action(
+        self,
+        plugin_name: str,
+        action_id: str,
+        target: str,
+        label: str,
+        action_func: Callable[[Dict[str, Any]], bool],
+        enabled_func: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        separator_before: bool = False,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册右键菜单插件项（Phase D，target ∈ {"message_card", "tab"}）"""
+        if metadata is None:
+            metadata = {}
+        key = f"{target}:{action_id}"
+        info = ContextMenuActionInfo(
+            plugin_name=plugin_name,
+            action_id=action_id,
+            target=target,
+            label=label,
+            action_func=action_func,
+            enabled_func=enabled_func,
+            separator_before=separator_before,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._context_actions.get(key)
+        if existing is not None and existing.priority > priority:
+            return
+        self._context_actions[key] = info
+
+    def get_context_actions(self, target: str) -> List[ContextMenuActionInfo]:
+        """获取指定 target 的菜单插件项（注册序；separator_before 为渲染标记）"""
+        return [v for k, v in self._context_actions.items() if k.startswith(f"{target}:")]
+
+    def register_settings_card(
+        self,
+        plugin_name: str,
+        card_id: str,
+        title: str,
+        widget_class: type,
+        group: str = "plugin",
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册设置面板插件卡片（Phase D）"""
+        if metadata is None:
+            metadata = {}
+        info = SettingsCardInfo(
+            plugin_name=plugin_name,
+            card_id=card_id,
+            title=title,
+            widget_class=widget_class,
+            group=group,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._settings_cards.get(card_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._settings_cards[card_id] = info
+
+    def get_settings_cards(self) -> List[SettingsCardInfo]:
+        """获取全部设置面板插件卡片（注册序）"""
+        return list(self._settings_cards.values())
 
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
@@ -641,6 +887,11 @@ class UIPluginRegistry:
                 widget = win_instances.pop(cid, None)
                 if widget is not None:
                     self._remove_widget_from_container(win_id, cid, widget)
+        # 清理 Phase D 四类扩展点注册
+        self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
+        self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
+        self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
+        self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
@@ -882,7 +1133,7 @@ class UIPluginRegistry:
 
         # 注入插件图标路径（供卡片在头部/标题等位置展示）
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             pi = pm.get_plugin(card_info.plugin_name)

@@ -6788,7 +6788,74 @@ class CodeWebViewer(QWebEngineView):
         export_action = menu.addAction(get_icon("导入"), "导出")
         export_action.triggered.connect(self._export_message)
 
-        menu.exec_(self.mapToGlobal(pos))
+        # Phase D：插件右键菜单项（target="message_card"）
+        context = {
+            "round_index": getattr(self, "_round_index", None),
+            "message_index": getattr(self, "_message_index", None),
+            "window_id": self._resolve_window_id(),
+        }
+        self._current_context_menu = menu  # 供 action_func 返回 False 时关闭菜单
+        self._inject_plugin_context_actions(menu, context)
+
+        try:
+            menu.exec_(self.mapToGlobal(pos))
+        finally:
+            self._current_context_menu = None
+
+    def _resolve_window_id(self):
+        """沿父链查找窗口 window_id（注入插件菜单 context 用）"""
+        parent = self.parent()
+        while parent is not None:
+            wid = getattr(parent, "_window_id", None)
+            if wid:
+                return wid
+            parent = parent.parent()
+        return None
+
+    def _inject_plugin_context_actions(self, menu: QMenu, context: dict):
+        """注入消息卡片右键菜单插件项（Phase D，target="message_card"）
+
+        action_func 返回 False 表示"处理完成关菜单"——与现有菜单项行为对齐：
+        action_func 由插件实现，返回 False 时此处自动关闭菜单（menu.close()）。
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            actions = UIPluginRegistry.get_instance().get_context_actions("message_card")
+        except Exception:
+            return
+        for info in actions:
+            try:
+                if info.separator_before:
+                    menu.addSeparator()
+                action = menu.addAction(info.label)
+                enabled = True
+                if info.enabled_func is not None:
+                    try:
+                        enabled = bool(info.enabled_func(context))
+                    except Exception:
+                        enabled = True
+                action.setEnabled(enabled)
+                action.triggered.connect(
+                    lambda checked=False, i=info: self._run_plugin_context_action(i, context)
+                )
+            except Exception as e:
+                logger.warning(f"[MessageCard] 插件菜单项 {info.action_id} 注入失败：{e}")
+
+    def _run_plugin_context_action(self, info, context: dict):
+        """执行插件菜单项：action_func(context)；返回 False → 关闭菜单（保持现有语义）"""
+        try:
+            close_menu = info.action_func(context) is False
+        except Exception as e:
+            logger.error(f"[MessageCard] 插件菜单项 {info.action_id} 执行失败：{e}")
+            close_menu = True
+        if close_menu:
+            try:
+                menu = self._current_context_menu
+                if menu is not None:
+                    menu.close()
+            except Exception:
+                pass
 
     def _request_view_diff(self):
         """请求查看差异 - 向上查找 MessageCard 并发出 cardDiffRequested 信号"""
@@ -8283,7 +8350,7 @@ class MessageCard(SimpleCardWidget):
             seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
         # 插件注册的欢迎 tab 动态追加（系统项之后）
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
                 seg.addItem(
@@ -10860,7 +10927,7 @@ def _render_welcome_body(
         return _render_changelog_body()
     # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
     try:
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         tab = UIPluginRegistry.get_instance().get_welcome_tabs().get(mode)
         if tab is not None:

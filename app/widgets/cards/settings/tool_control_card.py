@@ -5,7 +5,7 @@
 数据源:ToolPermissionController(per-window,多窗口隔离)
 - 卡片显示 controller 的 active_tool_toggles(智能体激活时显示 agent 权限)
 - 用户编辑写入 user_tool_toggles(智能体模式下不影响 active)
-- "↺ 恢复"按钮调用 controller.restore_user()
+- "恢复"按钮(撤销图标)调用 controller.restore_user()
 """
 
 import time as _time
@@ -36,6 +36,9 @@ OFF_BEHAVIOR_OPTIONS = [
     ("deny", "直接拒绝"),
     ("ask", "询问用户"),
 ]
+
+# 预设下拉最多直接展示的项数（超出滚动查看）
+MAX_TEMPLATE_VISIBLE_ITEMS = 8
 
 # 右上角下拉占位项：各工具关闭策略不一致时显示，仅作展示、不可选中
 MIXED_OPTION = ("__mixed__", "未统一")
@@ -749,6 +752,14 @@ class ToolControlCardFrame(SystemCardFrame):
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
         self.icon_label.setFixedSize(18, 18)
 
+        # ========== 右上角下拉框:智能体权限预设(仅作用于当前标签页) ==========
+        self._template_combo = ComboBox(self)
+        self._template_combo.setFixedHeight(26)
+        self._template_combo.setToolTip("套用智能体的工具权限预设(仅作用于当前标签)")
+        self._template_combo.setMaxVisibleItems(MAX_TEMPLATE_VISIBLE_ITEMS)
+        self._populate_template_combo()
+        self._template_combo.currentIndexChanged.connect(self._on_template_selected)
+
         # ========== 右上角下拉框:关闭时行为(统一策略视图 + 强制统一入口) ==========
         self._behavior_combo = ComboBox(self)
         for value, label in OFF_BEHAVIOR_OPTIONS:
@@ -759,17 +770,24 @@ class ToolControlCardFrame(SystemCardFrame):
         self._sync_behavior_combo()
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
 
-        # ========== 智能体徽章 + 恢复按钮(仅 agent 激活时显示) ==========
-        self._active_agent_label = QLabel(self)
-        self._active_agent_label.setStyleSheet(
-            f"color: #ff9500; font-weight: 600; "
-            f"background: rgba(255,149,0,0.12); border: 1px solid rgba(255,149,0,0.3); "
-            f"border-radius: 6px; padding: 2px 8px; {font_size_css(12)} {get_font_family_css()}"
+        # 标题栏右侧文字提示标签
+        self._behavior_label = QLabel("关闭时：", self)
+        self._behavior_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {font_size_css(12)} {get_font_family_css()}"
         )
-        self._active_agent_label.setVisible(False)
-        self._active_agent_label.setToolTip("当前工具权限由智能体命令注入,点击「恢复」可回到用户设置")
+        self._preset_label = QLabel("预设：", self)
+        self._preset_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {font_size_css(12)} {get_font_family_css()}")
 
-        self._restore_btn = QPushButton("↺ 恢复", self)
+        # ========== 智能体图标(常驻右侧) + 恢复按钮(仅覆盖时显示) ==========
+
+        # 智能体 SVG 图标（主题感知,替代原 emoji）
+        self._active_agent_icon = QLabel(self)
+        self._active_agent_icon.setPixmap(get_icon("设置-subagent").pixmap(16, 16))
+        self._active_agent_icon.setFixedSize(16, 16)
+        self._active_agent_icon.setToolTip("智能体工具权限预设")
+
+        self._restore_btn = QPushButton("恢复", self)
+        self._restore_btn.setIcon(get_icon("撤销"))
         self._restore_btn.setFixedHeight(26)
         self._restore_btn.setCursor(Qt.PointingHandCursor)
         self._restore_btn.setStyleSheet(
@@ -784,11 +802,14 @@ class ToolControlCardFrame(SystemCardFrame):
         self._restore_btn.setToolTip("恢复用户自定义的工具权限设置")
         self._restore_btn.clicked.connect(self._on_restore_clicked)
 
-        # ========== 标题栏布局(下拉框 → 徽章 → 恢复按钮) ==========
+        # ========== 标题栏布局(关闭时：行为下拉 → 预设：图标 套用预设下拉 → 恢复按钮) ==========
         insert_idx = max(0, self._header_layout.count() - 2)
-        self._header_layout.insertWidget(insert_idx, self._behavior_combo)
-        self._header_layout.insertWidget(insert_idx + 1, self._active_agent_label)
-        self._header_layout.insertWidget(insert_idx + 2, self._restore_btn)
+        self._header_layout.insertWidget(insert_idx, self._behavior_label)
+        self._header_layout.insertWidget(insert_idx + 1, self._behavior_combo)
+        self._header_layout.insertWidget(insert_idx + 2, self._preset_label)
+        self._header_layout.insertWidget(insert_idx + 3, self._active_agent_icon)
+        self._header_layout.insertWidget(insert_idx + 4, self._template_combo)
+        self._header_layout.insertWidget(insert_idx + 5, self._restore_btn)
 
         # ========== 内容区 ==========
         self._card = ToolControlCardContent(self, controller)
@@ -814,6 +835,8 @@ class ToolControlCardFrame(SystemCardFrame):
         self._sync_behavior_combo()
         # 注入到 content
         self._card.set_controller(controller)
+        # 延迟注入时智能体可能已就绪,刷新预设下拉
+        self._populate_template_combo()
         # 监听 controller 信号
         controller.activeAgentChanged.connect(self._on_agent_changed)
         controller.policiesChanged.connect(lambda _: self._sync_behavior_combo())
@@ -832,6 +855,7 @@ class ToolControlCardFrame(SystemCardFrame):
         super().refresh_style()
         # 刷新主题感知图标（浅色/深色切换后更新图标颜色）
         self.icon_label.setPixmap(get_icon("工具").pixmap(18, 18))
+        self._active_agent_icon.setPixmap(get_icon("设置-subagent").pixmap(16, 16))
         self.update()
 
     def _sync_behavior_combo(self):
@@ -893,14 +917,88 @@ class ToolControlCardFrame(SystemCardFrame):
         self.update()
 
     def _on_agent_changed(self, agent_name: str):
-        """智能体激活状态变化时,显示/隐藏徽章和恢复按钮"""
+        """智能体激活/预设套用变化时,同步下拉当前项 + 显示/隐藏恢复按钮。
+
+        - 有当前智能体(套用预设 或 输入框 agent 命令覆盖):下拉显示该 agent + 显示恢复
+        - 无(用户模式):下拉回到占位项 + 隐藏恢复
+        智能体图标常驻右侧,不随状态显隐。
+        """
         if agent_name:
-            self._active_agent_label.setText(f"🤖 {agent_name}")
-            self._active_agent_label.setVisible(True)
+            idx = self._template_combo.findData(agent_name)
+            if idx >= 0:
+                self._template_combo.blockSignals(True)
+                self._template_combo.setCurrentIndex(idx)
+                self._template_combo.blockSignals(False)
             self._restore_btn.setVisible(True)
         else:
-            self._active_agent_label.setVisible(False)
+            idx0 = self._template_combo.findData("")
+            if idx0 >= 0:
+                self._template_combo.blockSignals(True)
+                self._template_combo.setCurrentIndex(idx0)
+                self._template_combo.blockSignals(False)
             self._restore_btn.setVisible(False)
+
+    # ========== 智能体权限预设下拉 ==========
+    def _populate_template_combo(self):
+        """填充智能体权限预设下拉(占位项 + 所有已注册 agent)"""
+        self._template_combo.clear()
+        # 占位项:默认显示"用户自定义"(无 agent 覆盖),作为动作入口
+        self._template_combo.addItem("用户自定义", userData="")
+        try:
+            from app.core.agent import AgentManager
+
+            agents = AgentManager.get_instance().list_agents()
+        except Exception:
+            agents = []
+        for agent in agents:
+            name = getattr(agent, "name", "") or ""
+            if name:
+                self._template_combo.addItem(name, get_icon("设置-subagent"), userData=name)
+
+    def _on_template_selected(self, idx: int):
+        """套用选中智能体的工具权限预设(仅作用于当前标签页)"""
+        if self._controller is None:
+            return
+        name = self._template_combo.itemData(idx)
+        if not name:
+            return
+        from qfluentwidgets import InfoBar, InfoBarPosition
+
+        try:
+            from loguru import logger
+
+            from app.core.agent import AgentManager
+
+            agent = AgentManager.get_instance().get_agent(name)
+            if agent is None:
+                # 占位/无效:复位下拉 + 隐藏恢复,不触发 apply
+                self._on_agent_changed("")
+                return
+            self._controller.apply_agent(
+                agent.name,
+                agent_tools=getattr(agent, "tools", None),
+                agent_permission=dict(getattr(agent, "permission", {}) or {}),
+            )
+            # apply_agent 已同步 emit activeAgentChanged → _on_agent_changed 会
+            # 把下拉当前项设为该 agent 并显示恢复;此处不再复位下拉。
+            InfoBar.success(
+                title="",
+                content=f"已套用 {agent.name} 预设",
+                parent=self.window(),
+                duration=2000,
+                position=InfoBarPosition.BOTTOM,
+            )
+        except Exception as e:
+            logger.warning(f"[ToolControlCard] 套用智能体预设失败: {e}")
+            InfoBar.error(
+                title="",
+                content=f"套用 {name} 预设失败",
+                parent=self.window(),
+                duration=2500,
+                position=InfoBarPosition.BOTTOM,
+            )
+            # 套用失败:复位下拉 + 隐藏恢复
+            self._on_agent_changed("")
 
     def set_toggles(self, toggles: dict):
         """兼容旧 API:仅用于初始化占位,实际数据来自 controller"""

@@ -782,7 +782,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def _get_pm(self):
         """获取 PluginManager 实例"""
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         return PluginManager.get_instance()
 
@@ -1244,7 +1244,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def add_server(self, server_data: dict):
         """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         from app.widgets.tab_manager_window import TabManagerWindow
 
         pm = PluginManager.get_instance()
@@ -1268,7 +1268,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
     def update_server(self, name: str, server_data: dict):
         """更新 MCP 服务器配置（实际由 PluginManager 管理）"""
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         pm.update_mcp_server(name, server_data)

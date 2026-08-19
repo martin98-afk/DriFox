@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import QApplication
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
 from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
-from app.tools.plugin_tool_loader import load_plugin_tools, unload_plugin_tools
+from app.plugins.loaders.plugin_tool_loader import load_plugin_tools, unload_plugin_tools
 
 
 @pytest.fixture(autouse=True)
@@ -355,7 +355,7 @@ def register(registry):
 
     def test_root_kind_priority_constants(self):
         """_ROOT_KIND_PRIORITY 必须为 system < user"""
-        from app.tools.plugin_tool_loader import (
+        from app.plugins.loaders.plugin_tool_loader import (
             _ROOT_KIND_PRIORITY,
             _ROOT_KIND_SYSTEM,
             _ROOT_KIND_USER,
@@ -365,7 +365,7 @@ def register(registry):
 
     def test_root_kind_recognizes_user_root(self, tmp_path, monkeypatch):
         """_root_kind 必须把 <app_data>/plugins 识别为 user（前置条件）"""
-        from app.tools.plugin_tool_loader import _root_kind, _ROOT_KIND_USER
+        from app.plugins.loaders.plugin_tool_loader import _root_kind, _ROOT_KIND_USER
 
         monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
         assert _root_kind(tmp_path / "plugins") == _ROOT_KIND_USER
@@ -412,7 +412,7 @@ def register(registry):
         system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
         reg = ToolRegistry.get_instance()
 
-        from app.tools.plugin_tool_loader import PluginToolWatcher
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
 
         watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
         watcher.scan_now()  # 触发首次扫描 + user 覆盖
@@ -489,7 +489,7 @@ def register(registry):
         + unload 时清理 root_tracker 残留。
         """
         system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
-        from app.tools.plugin_tool_loader import PluginToolWatcher
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
 
         reg = ToolRegistry.get_instance()
         watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
@@ -519,7 +519,7 @@ def register(registry):
         from app.utils.config import Settings
 
         system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
-        from app.tools.plugin_tool_loader import PluginToolWatcher
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
 
         cfg = Settings.get_instance()
         old = list(cfg.enabled_plugins.value or [])
@@ -664,8 +664,16 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 30 个系统插件工具 + codegraph_explore（社区插件 codegraph-tools 可选）
-        assert len(toggles) == 30 or (len(toggles) == 31 and "codegraph_explore" in toggles)
+        # 系统插件工具基线 30；workbuddy 插件新增 wb_plan/present_files/wb_read_me/wb_tool_search
+        # 共 4 个工具 → 基线 34。codegraph_explore 来自社区插件 codegraph-tools，
+        # 未安装时不注册。用动态下界兼容未来新增：>= 30；精确 34 仅在无 codegraph 时成立。
+        assert len(toggles) >= 30
+        assert (
+            len(toggles) == 34
+            or (len(toggles) == 35 and "codegraph_explore" in toggles)
+            or (len(toggles) == 31 and "codegraph_explore" in toggles)  # 仅 codegraph，无 workbuddy
+            or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
+        ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
@@ -1079,8 +1087,13 @@ class TestPerToolPolicy:
         try:
             s = Settings.get_instance()
             pc = ToolPermissionController()
-            # 模拟外部变更(ConfigSync 下载新配置):直接写 Settings 触发 valueChanged
+            # 模拟外部变更(ConfigSync 下载新配置):写 Settings 后由
+            # ConfigSyncService.settingsRestored 驱动刷新。控制器不再监听
+            # Settings.valueChanged,避免兄弟 tab 本地编辑互相广播刷新。
+            from app.core.config_sync import ConfigSyncService
+
             s.tool_permission_policy.value = {"read": "ask", "stale_tool": "ask"}
+            ConfigSyncService.get_instance().settingsRestored.emit()
             qt_app.processEvents()
             # 已存在 controller 自动刷新(双相等性检查通过后应用)
             assert pc.get_user_tool_policy("read") == "ask"
@@ -1296,7 +1309,7 @@ class TestSelfContained:
 
     def test_file_impl_executes_without_bt(self):
         """自包含 impl 执行：只注入 workdir 也能跑（不依赖 BuiltinTools 实例）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -1320,7 +1333,7 @@ class TestSelfContained:
 
     def test_icon_dir_injected(self):
         """插件自带图标目录注入 + data URI 渲染"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
         from app.widgets.render_helpers import _get_tool_icon_html, _get_tool_icon_name
 
@@ -1340,7 +1353,7 @@ class TestSelfContained:
         import base64
         from unittest.mock import patch
 
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
         from app.utils.theme_manager import theme_manager
         from app.widgets.render_helpers import _get_tool_icon_html, _get_tool_icon_name
@@ -1362,7 +1375,7 @@ class TestSelfContained:
 
     def test_render_closure(self):
         """工具完成框渲染闭包：插件注册 render → 渲染层优先调用；无注册回退默认"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
         from app.widgets.render_helpers import _render_text_output
 
@@ -1383,7 +1396,7 @@ class TestSelfContained:
         """subagent_dag 的 echarts 渲染走插件 render 闭包"""
         import json
 
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
         from app.widgets.render_helpers import render_tool_block
 
@@ -1399,7 +1412,7 @@ class TestSelfContained:
 
     def test_render_mode_and_closures(self):
         """render_mode（inline/none）+ 渲染闭包（edit diff/bash/question）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
         from app.widgets.render_helpers import render_tool_block
 
@@ -1459,7 +1472,7 @@ class TestSelfContained:
 
     def test_team_tools_danger(self):
         """团队工具/标记文件为安全操作（非危险）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -1471,7 +1484,7 @@ class TestSelfContained:
 
     def test_services_injected(self):
         """平台服务工具：services 缺失优雅降级；todo 自包含（不依赖 services）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -1628,7 +1641,7 @@ class TestRegistryMetadata:
 
     def test_subagent_task_keep_in_content(self):
         """subagent_para/subagent_dag 因 metadata[subagent_task] 常驻正文（keep_in_content_tools）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -1644,7 +1657,7 @@ class TestPluginLoadFaultTolerance:
     """插件 register 抛异常 → load_plugin_tools 跳过该插件继续加载其他插件"""
 
     def test_broken_plugin_skipped_others_loaded(self, tmp_path):
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import DANGER_SAFE, ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -1681,7 +1694,7 @@ class TestPluginLoadFaultTolerance:
 
     def test_partial_register_rolls_back(self, tmp_path):
         """插件 register 注册 2 个后第 3 个抛异常 → 前 2 个回滚（无半套工具残留）"""
-        from app.tools.plugin_tool_loader import PluginToolWatcher, load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher, load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()

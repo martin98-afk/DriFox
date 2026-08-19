@@ -202,7 +202,7 @@ class TestContextUsageStatsCardRegistry:
 
     def test_plugin_registers_floating_card(self):
         """register_ui 正确注册浮动卡片到 registry"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
         registry.reset()
@@ -228,7 +228,7 @@ class TestContextUsageStatsCardRegistry:
 
     def test_plugin_unload_cleans_card(self):
         """卸载插件时浮动卡片注册被清理"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
         registry.reset()
@@ -251,7 +251,7 @@ class TestContextUsageStatsCardRegistry:
 
     def test_card_context_provider_contract(self):
         """验证 context provider 返回值的契约（字段完整性）"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
         registry.reset()
@@ -295,7 +295,7 @@ class TestContextUsageStatsCardRegistry:
 
     def test_context_provider_to_chart_colors(self):
         """完整链路：context provider → _make_chart_colors_from_context"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         registry = UIPluginRegistry.get_instance()
         registry.reset()

@@ -68,7 +68,7 @@ def test_content_to_markdown_renders_custom_via_registry():
     ``get_instance()``，否则后续注册会落到旧实例上，而 ``content_to_markdown``
     内部再次 ``get_instance()`` 时拿到的是全新空实例，导致无法命中注册器。
     """
-    from app.core.ui_plugin_registry import UIPluginRegistry
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
     reg = UIPluginRegistry.get_instance()
     reg.reset()

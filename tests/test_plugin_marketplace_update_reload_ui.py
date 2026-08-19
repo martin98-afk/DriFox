@@ -18,8 +18,8 @@ PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))
 
-from app.core import plugin_manager as pm_mod  # noqa: E402
-from app.core import ui_plugin_registry as reg_mod  # noqa: E402
+from app.plugins.managers import plugin_manager as pm_mod  # noqa: E402
+from app.plugins.registries import ui_plugin_registry as reg_mod  # noqa: E402
 
 
 def test_update_reload_reloads_plugin_ui(monkeypatch):

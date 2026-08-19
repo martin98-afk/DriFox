@@ -348,6 +348,7 @@ class TestUIPluginRowPositionMenu:
         fake_pm.get_plugin.side_effect = lambda name: sys_plugin if name == "sys_plugin" else custom_plugin
         fake_registry = MagicMock()
         fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []  # Phase D：独立侧边栏项为空
 
         cm = MagicMock()
         cm.is_card_visible.return_value = True
@@ -365,8 +366,8 @@ class TestUIPluginRowPositionMenu:
         panel.setParent(host)
 
         with (
-            patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
-            patch("app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+            patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
         ):
             panel.refresh_ui_plugins()
             # 真实 emit 信号 → 已连接的 handler → move_floating_card 被调用
@@ -400,7 +401,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
+        with patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "right")
 
         registry.move_floating_card.assert_called_once_with("card_1", "right", main_widget=fake_win)
@@ -425,7 +426,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
+        with patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "full")
 
         registry.move_floating_card.assert_called_once_with("card_1", "full", main_widget=fake_win)
@@ -450,7 +451,7 @@ class TestUIPluginRowPositionMenu:
         panel._test_host = host
         panel.setParent(host)
 
-        with patch("app.core.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
+        with patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=registry):
             panel._on_ui_plugin_position_requested("card_1", "invalid")
 
         registry.move_floating_card.assert_called_once_with("card_1", "invalid", main_widget=fake_win)
@@ -462,7 +463,7 @@ class TestRefreshUIPluginsPoisonIsolation:
 
     def test_poison_row_skipped_others_kept(self, panel):
         """UIPluginRow 构造对特定卡片抛异常 → 该行跳过，其余按钮仍生成，整体不抛异常"""
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         reg = UIPluginRegistry.get_instance()
         reg.reset()
@@ -479,14 +480,14 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         real_init = UIPluginRow.__init__
 
-        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id=""):
+        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True):
             if card_id == "poison-card":
                 raise RuntimeError("poison row construction")
-            real_init(self, title, icon, parent, plugin_name, card_id)
+            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu)
 
         with (
             patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init),
-            patch("app.core.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+            patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
         ):
             # 修复前：毒条目抛异常中断整个 refresh_ui_plugins → 这里会 propagate
             panel.refresh_ui_plugins()
