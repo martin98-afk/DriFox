@@ -770,22 +770,21 @@ class ToolControlCardFrame(SystemCardFrame):
         self._sync_behavior_combo()
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
 
-        # ========== 智能体徽章 + 恢复按钮(仅 agent 激活时显示) ==========
-        self._active_agent_label = QLabel(self)
-        self._active_agent_label.setStyleSheet(
-            f"color: #ff9500; font-weight: 600; "
-            f"background: rgba(255,149,0,0.12); border: 1px solid rgba(255,149,0,0.3); "
-            f"border-radius: 6px; padding: 2px 8px; {font_size_css(12)} {get_font_family_css()}"
+        # 标题栏右侧文字提示标签
+        self._behavior_label = QLabel("关闭时：", self)
+        self._behavior_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {font_size_css(12)} {get_font_family_css()}"
         )
-        self._active_agent_label.setVisible(False)
-        self._active_agent_label.setToolTip("当前工具权限由智能体命令注入,点击「恢复」可回到用户设置")
+        self._preset_label = QLabel("预设：", self)
+        self._preset_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {font_size_css(12)} {get_font_family_css()}")
+
+        # ========== 智能体图标(常驻右侧) + 恢复按钮(仅覆盖时显示) ==========
 
         # 智能体 SVG 图标（主题感知,替代原 emoji）
         self._active_agent_icon = QLabel(self)
         self._active_agent_icon.setPixmap(get_icon("设置-subagent").pixmap(16, 16))
         self._active_agent_icon.setFixedSize(16, 16)
-        self._active_agent_icon.setVisible(False)
-        self._active_agent_icon.setToolTip("当前工具权限由智能体命令注入")
+        self._active_agent_icon.setToolTip("智能体工具权限预设")
 
         self._restore_btn = QPushButton("恢复", self)
         self._restore_btn.setIcon(get_icon("撤销"))
@@ -803,13 +802,14 @@ class ToolControlCardFrame(SystemCardFrame):
         self._restore_btn.setToolTip("恢复用户自定义的工具权限设置")
         self._restore_btn.clicked.connect(self._on_restore_clicked)
 
-        # ========== 标题栏布局(模板下拉 → 行为下拉 → 徽章 → 恢复按钮) ==========
+        # ========== 标题栏布局(关闭时：行为下拉 → 预设：图标 套用预设下拉 → 恢复按钮) ==========
         insert_idx = max(0, self._header_layout.count() - 2)
-        self._header_layout.insertWidget(insert_idx, self._template_combo)
+        self._header_layout.insertWidget(insert_idx, self._behavior_label)
         self._header_layout.insertWidget(insert_idx + 1, self._behavior_combo)
-        self._header_layout.insertWidget(insert_idx + 2, self._active_agent_icon)
-        self._header_layout.insertWidget(insert_idx + 3, self._active_agent_label)
-        self._header_layout.insertWidget(insert_idx + 4, self._restore_btn)
+        self._header_layout.insertWidget(insert_idx + 2, self._preset_label)
+        self._header_layout.insertWidget(insert_idx + 3, self._active_agent_icon)
+        self._header_layout.insertWidget(insert_idx + 4, self._template_combo)
+        self._header_layout.insertWidget(insert_idx + 5, self._restore_btn)
 
         # ========== 内容区 ==========
         self._card = ToolControlCardContent(self, controller)
@@ -917,23 +917,33 @@ class ToolControlCardFrame(SystemCardFrame):
         self.update()
 
     def _on_agent_changed(self, agent_name: str):
-        """智能体激活状态变化时,显示/隐藏徽章和恢复按钮"""
+        """智能体激活/预设套用变化时,同步下拉当前项 + 显示/隐藏恢复按钮。
+
+        - 有当前智能体(套用预设 或 输入框 agent 命令覆盖):下拉显示该 agent + 显示恢复
+        - 无(用户模式):下拉回到占位项 + 隐藏恢复
+        智能体图标常驻右侧,不随状态显隐。
+        """
         if agent_name:
-            self._active_agent_label.setText(agent_name)
-            self._active_agent_label.setVisible(True)
-            self._active_agent_icon.setVisible(True)
+            idx = self._template_combo.findData(agent_name)
+            if idx >= 0:
+                self._template_combo.blockSignals(True)
+                self._template_combo.setCurrentIndex(idx)
+                self._template_combo.blockSignals(False)
             self._restore_btn.setVisible(True)
         else:
-            self._active_agent_label.setVisible(False)
-            self._active_agent_icon.setVisible(False)
+            idx0 = self._template_combo.findData("")
+            if idx0 >= 0:
+                self._template_combo.blockSignals(True)
+                self._template_combo.setCurrentIndex(idx0)
+                self._template_combo.blockSignals(False)
             self._restore_btn.setVisible(False)
 
     # ========== 智能体权限预设下拉 ==========
     def _populate_template_combo(self):
         """填充智能体权限预设下拉(占位项 + 所有已注册 agent)"""
         self._template_combo.clear()
-        # 占位项:作为"动作"入口,选中后复位到此
-        self._template_combo.addItem("套用预设…", userData="")
+        # 占位项:默认显示"用户自定义"(无 agent 覆盖),作为动作入口
+        self._template_combo.addItem("用户自定义", userData="")
         try:
             from app.core.agent import AgentManager
 
@@ -953,6 +963,7 @@ class ToolControlCardFrame(SystemCardFrame):
         if not name:
             return
         from qfluentwidgets import InfoBar, InfoBarPosition
+
         try:
             from loguru import logger
 
@@ -960,12 +971,16 @@ class ToolControlCardFrame(SystemCardFrame):
 
             agent = AgentManager.get_instance().get_agent(name)
             if agent is None:
+                # 占位/无效:复位下拉 + 隐藏恢复,不触发 apply
+                self._on_agent_changed("")
                 return
             self._controller.apply_agent(
                 agent.name,
                 agent_tools=getattr(agent, "tools", None),
                 agent_permission=dict(getattr(agent, "permission", {}) or {}),
             )
+            # apply_agent 已同步 emit activeAgentChanged → _on_agent_changed 会
+            # 把下拉当前项设为该 agent 并显示恢复;此处不再复位下拉。
             InfoBar.success(
                 title="",
                 content=f"已套用 {agent.name} 预设",
@@ -982,11 +997,8 @@ class ToolControlCardFrame(SystemCardFrame):
                 duration=2500,
                 position=InfoBarPosition.BOTTOM,
             )
-        finally:
-            # 复位到占位项(纯动作下拉,不保留选中态)
-            self._template_combo.blockSignals(True)
-            self._template_combo.setCurrentIndex(0)
-            self._template_combo.blockSignals(False)
+            # 套用失败:复位下拉 + 隐藏恢复
+            self._on_agent_changed("")
 
     def set_toggles(self, toggles: dict):
         """兼容旧 API:仅用于初始化占位,实际数据来自 controller"""
