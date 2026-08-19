@@ -1432,7 +1432,7 @@ def discover_and_merge() -> Tuple[List[dict], List[dict]]:
     Returns:
         (all_servers, newly_discovered) — 所有服务器（含已有的）+ 新发现的列表
     """
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     existing = pm.get_mcp_servers() if pm.is_initialized() else []

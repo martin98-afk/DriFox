@@ -40,9 +40,39 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from loguru import logger
+
+# 组件探测规则表（单一事实源在 kernel.KNOWN_COMPONENTS，此处只定义物理探测谓词）
+from app.plugins.kernel import KNOWN_COMPONENTS
+
+# 组件物理探测谓词：按 kernel.KNOWN_COMPONENTS 顺序遍历，物理目录/根文件命中即标记
+# 探测规则差异：hooks 需 hooks.json、ui 需 __init__.py、tools/providers 需 *.py、
+# team_templates 需 *.yaml、其余只看子目录是否存在
+_COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
+    "commands": lambda d: (d / "commands").exists(),
+    "agents": lambda d: (d / "agents").exists(),
+    "skills": lambda d: (d / "skills").exists(),
+    "themes": lambda d: (d / "themes").exists(),
+    "hooks": lambda d: (d / "hooks").exists() and (d / "hooks" / "hooks.json").exists(),
+    "mcp": lambda d: (d / ".mcp.json").exists(),
+    "lsp": lambda d: (d / ".lsp.json").exists(),
+    "ui": lambda d: (d / "ui").exists() and (d / "ui" / "__init__.py").exists(),
+    "tools": lambda d: (d / "tools").exists() and any((d / "tools").glob("*.py")),
+    "providers": lambda d: (d / "providers").exists() and any((d / "providers").glob("*.py")),
+    "team_templates": lambda d: (d / "team_templates").exists() and any((d / "team_templates").glob("*.yaml")),
+}
+
+
+def _detect_components(plugin_dir: Path) -> Dict[str, bool]:
+    """按 kernel.KNOWN_COMPONENTS 优先级探测插件目录实际组件（物理目录为准）
+
+    返回 {component_name: True} 子集。新增组件类型只需在 kernel.KNOWN_COMPONENTS 登记
+    并在 _COMPONENT_PROBES 加一条谓词即可，无需改动扫描逻辑。
+    """
+    return {name: True for name in KNOWN_COMPONENTS if _COMPONENT_PROBES[name](plugin_dir)}
+
 
 # ============================================================
 # 插件信息数据类
@@ -132,7 +162,7 @@ class PluginManager:
 
     # 插件搜索路径（按优先级）
     # 系统插件：项目根目录 plugins/（打包在 exe 中）
-    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins"
+    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent.parent / "plugins"
     # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
     # Claude Code 插件目录（同时支持两种生态）
@@ -451,7 +481,7 @@ class PluginManager:
         enabled 状态重新注册（scan_now 幂等 + 锁保护；watcher 未启动/异常时跳过）。
         """
         try:
-            from app.tools.plugin_tool_loader import ensure_plugin_tool_watcher
+            from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is not None:
@@ -462,7 +492,7 @@ class PluginManager:
     def _load_plugin_ui(self, name: str):
         """加载指定插件的 UI 组件"""
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         except ImportError:
             return
         plugin = self._plugins.get(name)
@@ -473,7 +503,7 @@ class PluginManager:
     def _unload_plugin_ui(self, name: str):
         """卸载指定插件的 UI 组件"""
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         except ImportError:
             return
         UIPluginRegistry.get_instance().unload_plugin(name)
@@ -557,29 +587,11 @@ class PluginManager:
                     manifest.setdefault("version", manifest.get("version", "0.0.0"))
 
                 # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
-                # hooks 组件需同时存在 hooks/ 目录和 hooks/hooks.json 文件
-                components = {}
-                for comp_name in ("commands", "agents", "skills", "themes"):
-                    if (item / comp_name).exists():
-                        components[comp_name] = True
-                # 团队模板：检测 team_templates/ 目录（含 .yaml 文件才标记）
-                if (item / "team_templates").exists():
-                    has_yaml = any((item / "team_templates").glob("*.yaml"))
-                    if has_yaml:
-                        components["team_templates"] = True
-                if (item / "hooks").exists() and (item / "hooks" / "hooks.json").exists():
-                    components["hooks"] = True
-                if (item / ".mcp.json").exists():
-                    components["mcp"] = True
-                if (item / ".lsp.json").exists():
-                    components["lsp"] = True
-                # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
-                if (item / "ui").exists() and (item / "ui" / "__init__.py").exists():
-                    components["ui"] = True
+                # 探测规则见 _COMPONENT_PROBES，按 kernel.KNOWN_COMPONENTS 顺序遍历
                 # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
                 # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
                 # 但无 commands/ 目录）导致热更新触发全量命令重载
-                manifest["components"] = components
+                manifest["components"] = _detect_components(item)
 
                 discovered.append(
                     PluginInfo(
@@ -625,30 +637,11 @@ class PluginManager:
 
             # 自动检测插件目录中实际存在的组件子目录，补充到 manifest 的 components 中
             # 两种格式都做 auto-detect，确保新增目录（如 themes/）能被热更新识别
-            # hooks 组件需同时存在 hooks/ 目录和 hooks/hooks.json 文件
-            detected_components = {}
-            for comp_name in ("commands", "agents", "skills", "themes"):
-                if (plugin_dir / comp_name).exists():
-                    detected_components[comp_name] = True
-            # 团队模板：检测 team_templates/ 目录（含 .yaml 文件才标记）
-            if (plugin_dir / "team_templates").exists():
-                has_yaml = any((plugin_dir / "team_templates").glob("*.yaml"))
-                if has_yaml:
-                    detected_components["team_templates"] = True
-            if (plugin_dir / "hooks").exists() and (plugin_dir / "hooks" / "hooks.json").exists():
-                detected_components["hooks"] = True
-            if (plugin_dir / ".mcp.json").exists():
-                detected_components["mcp"] = True
-            if (plugin_dir / ".lsp.json").exists():
-                detected_components["lsp"] = True
-            # UI 组件需同时存在 ui/ 目录和 ui/__init__.py
-            if (plugin_dir / "ui").exists() and (plugin_dir / "ui" / "__init__.py").exists():
-                detected_components["ui"] = True
-
+            # 探测规则见 _COMPONENT_PROBES，按 kernel.KNOWN_COMPONENTS 顺序遍历
             # 组件以物理目录检测结果为准（覆盖 manifest 声明）：
             # 防止 manifest 声明了实际不存在的组件（如 browser 声明 commands
             # 但无 commands/ 目录）导致热更新触发全量命令重载
-            manifest["components"] = detected_components
+            manifest["components"] = _detect_components(plugin_dir)
 
             info = PluginInfo(
                 name=plugin_name,

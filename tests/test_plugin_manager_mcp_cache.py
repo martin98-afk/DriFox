@@ -15,7 +15,7 @@ import pytest
 
 def _make_pm():
     """构造一个最小化、不依赖真实文件系统的 PluginManager 实例。"""
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.__new__(PluginManager)
     pm._initialized = True

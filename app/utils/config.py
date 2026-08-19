@@ -165,11 +165,12 @@ class Settings(QConfig):
           启动时自动清空 API_KEY 升级为免 key 配置（无共享 key 概念后，
           内置 key 已失效且免 key 端点不接受假 key）。
         """
-        from app.constants import FREE_PROVIDERS
+        from app.constants import provider_default_config
         from app.core.provider_profile import compute_provider_config_id
 
         provider_name = "OpenCode Zen"
-        default_config = FREE_PROVIDERS.get(provider_name)
+        # 数据源从硬编码 FREE_PROVIDERS 迁移到 providers 插件（OpenCode Zen 插件注册表）
+        default_config = provider_default_config(provider_name)
         if not default_config:
             return
 
@@ -198,9 +199,9 @@ class Settings(QConfig):
             "模型名称": model_name,
         }
         # 不写 模型列表 —— 空列表会让模型选择器显示为空，
-        # 不写此键则回退到 merged_provider_models（硬编码 + models.dev + 异步刷新），
+        # 不写此键则回退到 merged_provider_models（插件模型 + models.dev + 异步刷新），
         # 等异步刷新完成后才写入实际列表。
-        # 继承 FREE_PROVIDERS 中的其他默认参数（温度、最大Token、认证方式等）
+        # 继承 providers 插件默认配置中的其他默认参数（温度、最大Token、认证方式等）
         for key, value in default_config.items():
             if key not in provider_info:
                 provider_info[key] = value

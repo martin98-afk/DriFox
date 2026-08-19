@@ -488,7 +488,7 @@ def content_to_markdown(content: Any) -> str:
         block_type = block.get("type")
         if block_type == "custom":
             # 调用注册渲染器获取 HTML
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
             custom_type = block.get("custom_type", "")
             data = block.get("data", {}) or {}
             try:

@@ -3,11 +3,9 @@
 <qresource prefix="/icons_light">
     <file>233键盘-线性.svg</file>
     <file>MCP.svg</file>
-    <file>Ollama.svg</file>
     <file>Search.svg</file>
     <file>folder.svg</file>
     <file>gitee.svg</file>
-    <file>groq.svg</file>
     <file>hooks.svg</file>
     <file>lsp.svg</file>
     <file>question.svg</file>

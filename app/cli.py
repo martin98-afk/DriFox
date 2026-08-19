@@ -645,7 +645,7 @@ def _run_status():
 def _run_providers(args):
     """列出已配置的模型服务商"""
     try:
-        from app.constants import FREE_PROVIDERS
+        from app.plugins.registries.provider_registry import ProviderRegistry
         from app.utils.config import Settings
 
         settings = Settings.get_instance()
@@ -674,8 +674,9 @@ def _run_providers(args):
             print("  (暂无已保存的服务商配置)")
             print()
             print("  可用内置服务商:")
-            for pname in FREE_PROVIDERS:
-                default_model = FREE_PROVIDERS[pname].get("模型名称", "")
+            registry = ProviderRegistry.get_instance()
+            for pname in registry.names():
+                default_model = registry.get(pname).default_model
                 print(f"    \033[33m{pname}\033[0m  \033[90m({default_model})\033[0m")
             print()
             print("  使用方式: drifox chat -p \"服务商名称\" -z \"你好\"")

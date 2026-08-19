@@ -8283,7 +8283,7 @@ class MessageCard(SimpleCardWidget):
             seg.insertItem(i, key, label, onClick=lambda checked=False, k=key: self._on_welcome_mode_tab_clicked(k))
         # 插件注册的欢迎 tab 动态追加（系统项之后）
         try:
-            from app.core.ui_plugin_registry import UIPluginRegistry
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             for key, info in UIPluginRegistry.get_instance().get_welcome_tabs().items():
                 seg.addItem(
@@ -10860,7 +10860,7 @@ def _render_welcome_body(
         return _render_changelog_body()
     # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
     try:
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         tab = UIPluginRegistry.get_instance().get_welcome_tabs().get(mode)
         if tab is not None:

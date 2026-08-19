@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.widgets import message_card as mc
 
 

@@ -24,7 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.tools.plugin_tool_loader import load_plugin_tools
+from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
 from app.tools.registry import ToolRegistry
 
 

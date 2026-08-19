@@ -2578,7 +2578,7 @@ class HookManager:
         用于卡片 _save_hooks() 后同步插件 hooks 的最新文件内容。
         """
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if not pm.is_initialized():

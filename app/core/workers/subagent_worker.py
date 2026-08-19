@@ -13,7 +13,8 @@ import orjson as json
 from loguru import logger
 from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
-from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
+from app.constants import PARAM_SCHEMA
+from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
@@ -815,7 +816,7 @@ class SubAgentExecutor(QThread):
                 "模型列表",
             }:
                 continue
-            if cn_key in QUOTA_EXCLUDE_KEYS:
+            if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
 
             meta = PARAM_SCHEMA.get(cn_key, {})

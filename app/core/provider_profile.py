@@ -115,132 +115,9 @@ def apply_provider_save(
 # 合理的输出 token 上限（基于各模型已知的 API 限制）
 # 这些值作为用户未指定 max_tokens 时的默认值，
 # 不再作为硬性截断上限（具体截断逻辑在 chat_worker 中处理）
-PROVIDER_CAPABILITIES = {
-    "anthropic": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": True,
-        "thinking_param": "thinking",         # extra_body.thinking = {type: enabled|disabled|adaptive}
-    },
-    "openai": {
-        "context_limit": 200000,
-        "max_output_tokens": 16384,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "gemini": {
-        "context_limit": 1000000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": True,
-        "thinking_param": "thinking_budget",  # generationConfig.thinkingBudget / extra_body.thinking_budget
-    },
-    "dashscope": {
-        "context_limit": 1000000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "zhipu": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": True,
-        "thinking_param": "thinking",         # extra_body.thinking = {type}
-        "reasoning_effort_param": None,
-    },
-    "deepseek": {
-        "context_limit": 320000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": True,
-        "thinking_param": "thinking",         # extra_body.thinking = {type}
-        "reasoning_effort_param": "reasoning_effort",
-    },
-    "groq": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "minimax": {
-        "context_limit": 1000000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "siliconflow": {
-        "context_limit": 131072,
-        "max_output_tokens": 16384,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": True,
-        "thinking_param": "thinking_budget",  # 硅基流动用 thinking_budget 控制推理长度
-        "reasoning_effort_param": None,
-    },
-    "baidu_qianfan": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "ollama": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "volcengine": {
-        "context_limit": 1000000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "lmstudio": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-    "opencode": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": True,
-        "supports_thinking": True,
-        "thinking_param": "reasoning_effort",   # OpenCode 多数模型（deepseek-v4 系）走 reasoning_effort
-        "reasoning_effort_param": "reasoning_effort",
-    },
-    "custom": {
-        "context_limit": 200000,
-        "max_output_tokens": 8192,
-        "absolute_limit": 65536,
-        "supports_vision": False,
-        "supports_thinking": False,
-        "thinking_param": None,
-    },
-}
+# 注：PROVIDER_CAPABILITIES 已迁移至 providers 插件
+# （ProviderDef.capabilities / family 字段），运行时经 ProviderRegistry
+# 的 family_capabilities() 聚合，不再存在硬编码能力表。
 
 
 def detect_provider_family(llm_config: Dict[str, Any]) -> str:
@@ -252,7 +129,7 @@ def detect_provider_family(llm_config: Dict[str, Any]) -> str:
         return "anthropic"
     if "generativelanguage.googleapis.com" in api_url or model.startswith("gemini"):
         return "gemini"
-    if "dashscope.aliyuncs.com" in api_url or model.startswith("qwen"):
+    if "dashscope.aliyuncs.com" in api_url or "maas.aliyuncs.com" in api_url or model.startswith("qwen"):
         return "dashscope"
     if "bigmodel.cn" in api_url or model.startswith("glm"):
         return "zhipu"
@@ -281,7 +158,16 @@ def detect_provider_family(llm_config: Dict[str, Any]) -> str:
 
 def get_provider_profile(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     family = detect_provider_family(llm_config)
-    profile = dict(PROVIDER_CAPABILITIES.get(family, PROVIDER_CAPABILITIES["custom"]))
+
+    # family 能力由 providers 插件聚合（ProviderRegistry.family_capabilities），
+    # 插件未声明的 family（如自定义 lmstudio）回退内置 custom 兜底
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    try:
+        capabilities = ProviderRegistry.get_instance().family_capabilities(family)
+    except Exception:
+        capabilities = {}
+    profile = dict(capabilities)
     profile["family"] = family
     profile["auth_type"] = str(llm_config.get("认证方式", "bearer") or "bearer").lower()
     return profile

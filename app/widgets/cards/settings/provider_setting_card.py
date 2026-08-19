@@ -20,11 +20,9 @@ from qfluentwidgets import (
     qconfig,
 )
 
-from app.constants import (
-    PROVIDER_ICONS,
-)
 from app.utils.design_tokens import ButtonStyles, Colors, Sizes, font_size_css, scale_font_size, scale_icon_size
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font
+from app.utils.provider_icons import get_provider_icon
+from app.utils.utils import get_font_family_css, get_unified_font
 
 
 def _is_text_chat_model(model_id: str) -> bool:
@@ -154,13 +152,13 @@ class ProviderIconWidget(IconWidget):
         self._init_icon()
 
     def _init_icon(self):
-        icon_name = PROVIDER_ICONS.get(self.provider_name, "")
-        if icon_name:
-            icon = get_icon(icon_name)
-            if icon:
-                self.setIcon(icon)
-                self._text = ""  # 清空回退文本，避免 paintEvent 在图标模式下走自定义绘制
-                return
+        # 插件图标优先（<插件>/providers/icons/ 主题感知 + 回退 qrc），
+        # 找不到再走字母回退
+        icon = get_provider_icon(self.provider_name)
+        if icon and not icon.isNull():
+            self.setIcon(icon)
+            self._text = ""  # 清空回退文本，避免 paintEvent 在图标模式下走自定义绘制
+            return
         # 字母回退：取每个有内容 part 的首个字母/汉字字符，
         # 跳过 #/&/数字 等非字母字符，避免出现 "C#"/"A&" 之类难看的首字母
         letters = ""

@@ -114,7 +114,7 @@ class SkillListSettingCard(ExpandSettingCard):
 
         # ---- Phase 1: PluginManager 路径（带插件上下文，最高优先级） ----
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             if pm.is_initialized():

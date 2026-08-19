@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
-from app.core.ui_plugin_registry import UIPluginRegistry
+from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.cards.card_container import CardContainer

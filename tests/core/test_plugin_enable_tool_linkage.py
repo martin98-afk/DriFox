@@ -28,8 +28,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.core.plugin_manager import PluginManager
-from app.tools.plugin_tool_loader import PluginToolWatcher
+from app.plugins.managers.plugin_manager import PluginManager
+from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
 from app.tools.registry import ToolRegistry
 
 # 临时插件名：需在 enabled_plugins 白名单，否则被加载过滤跳过
@@ -98,7 +98,7 @@ class TestEnableDisableToolLinkage:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         # 禁用状态 → 工具未注册
@@ -119,7 +119,7 @@ class TestEnableDisableToolLinkage:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         # 先启用 → 工具注册
@@ -138,7 +138,7 @@ class TestEnableDisableToolLinkage:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         pm.enable_plugin(_TEST_PLUGIN)
@@ -156,7 +156,7 @@ class TestEnableDisableToolLinkage:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         pm.enable_plugin(_TEST_PLUGIN)
@@ -197,7 +197,7 @@ class TestPersistAcrossRestart:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         # 先确保启用（工具注册），再禁用
@@ -235,7 +235,7 @@ class TestPersistAcrossRestart:
 
         watcher = _make_watcher(tmp_path)
         monkeypatch.setattr(
-            "app.tools.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
+            "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher", lambda: watcher
         )
 
         # disable → enable 恢复

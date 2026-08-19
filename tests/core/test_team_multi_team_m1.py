@@ -16,7 +16,7 @@ import pytest
 from app.core import team_manager as tm_mod
 
 try:
-    from app.tools.plugin_tool_loader import load_plugin_tools
+    from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
 except Exception:  # pragma: no cover
     load_plugin_tools = None
 

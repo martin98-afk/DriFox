@@ -569,7 +569,7 @@ class GlobalCardController:
         if self._settings_popup is None:
             return
         mcp_card = self._settings_popup.mcpListCard
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         new_name = server_data.get("name", "")

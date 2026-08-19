@@ -421,7 +421,7 @@ def get_local_skills() -> list:
 
     # ---- Phase 1: PluginManager 路径（带插件上下文） ----
     try:
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             for item in pm.get_skills_with_plugin():
@@ -486,7 +486,7 @@ def _compute_skills_cache_key() -> tuple:
     scan_dirs: list[Path] = []
 
     try:
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             for item in pm.get_skills_with_plugin():
@@ -630,7 +630,7 @@ def load_skill(name: str) -> tuple[bool, str, str]:
 
     # 插件路径（PluginManager 已初始化时添加为最高优先级）
     try:
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             if target_plugin:
@@ -683,7 +683,7 @@ def list_skills_with_intro() -> str:
     # 从插件路径查找 SKILLS.md（优先使用优先级最高的）
     skills_intro = ""
     try:
-        from app.core.plugin_manager import PluginManager
+        from app.plugins.managers.plugin_manager import PluginManager
         pm = PluginManager.get_instance()
         if pm.is_initialized():
             for item in pm.get_skills_with_plugin():

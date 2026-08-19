@@ -72,7 +72,7 @@ class TestCodeGraphContract:
         """测试后恢复系统插件注册（防顺序污染：reset 后不恢复会清空 registry，
         导致后续测试（如 test_agent_smoke 的 tools 解析）查 registry 失败——T22 实测）。"""
         yield
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -80,7 +80,7 @@ class TestCodeGraphContract:
 
     def test_load_without_codegraph_plugin_no_error(self, tmp_path):
         """临时空插件根（无 codegraph）→ load_plugin_tools 不报错"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -93,7 +93,7 @@ class TestCodeGraphContract:
 
     def test_no_codegraph_tool_registered_when_missing(self, tmp_path):
         """缺 codegraph 插件 → registry 无 codegraph_explore（不误注册）"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -107,7 +107,7 @@ class TestCodeGraphContract:
 
     def test_broken_plugin_dir_does_not_kill_loader(self, tmp_path):
         """损坏的插件目录（无 register 函数）→ 加载器容错跳过，不崩溃"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
         ToolRegistry.reset_instance()
@@ -141,7 +141,7 @@ class TestCodeGraphModule:
     def test_tool_classifier(self):
         from app.tools.registry import ToolRegistry
         from app.tools.tool_classifier import get_safe_tools, classify_tool_danger
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
 
         load_plugin_tools()
         assert "codegraph_explore" in get_safe_tools()

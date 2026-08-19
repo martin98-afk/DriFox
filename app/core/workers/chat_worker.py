@@ -36,7 +36,8 @@ from openai import (
 from PyQt5.QtCore import QBuffer, QIODevice, QThread, QByteArray, pyqtSignal
 from PyQt5.QtGui import QImage
 
-from app.constants import PARAM_SCHEMA, QUOTA_EXCLUDE_KEYS
+from app.constants import PARAM_SCHEMA
+from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import PermissionCache
 from app.core.message_content import (
@@ -1406,7 +1407,7 @@ class OpenAIChatWorker(QThread):
                 "模型列表",
             }:
                 continue
-            if cn_key in QUOTA_EXCLUDE_KEYS:
+            if cn_key in QUOTA_EXCLUDE_KEYS():
                 continue
             # 从 PARAM_SCHEMA 查找 API 参数名
             meta = PARAM_SCHEMA.get(cn_key, {})

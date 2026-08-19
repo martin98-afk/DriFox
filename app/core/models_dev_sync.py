@@ -28,6 +28,12 @@ CACHE_TTL_SECONDS = 24 * 3600  # 24 小时
 # 缓存数据结构版本：字段新增（如 cost）或语义变更（如 supports_thinking
 # 改为"有明确 reasoning_options 才为 True"）时 +1，旧版本缓存视为无效触发重拉
 CACHE_SCHEMA_VERSION = 3
+# 缓存「内容版本」：与 schema 版本（数据结构）分离。
+# 当你改了"产出内容"的代码——解析/映射逻辑、服务商白名单、免费模型源、
+# 默认值或合并规则等非结构变更——就把本值 +1。任何本地缓存的 _content_version
+# 低于此值的，即便仍在 24h TTL 内也视为过期、强制向 models.dev 重新拉取，
+# 让用户及时用上新逻辑，而不必等 TTL 自然到期。
+CACHE_CONTENT_VERSION = 1
 
 
 def _default_cache_path() -> Path:
@@ -46,20 +52,8 @@ def _default_cache_path() -> Path:
 
 
 # DriFox 服务商名 -> models.dev provider id
-MODELS_DEV_PROVIDER_MAP = {
-    "OpenAI": "openai",
-    "Anthropic (Claude)": "anthropic",
-    "Google Gemini": "google",
-    "DeepSeek": "deepseek",
-    "智谱AI": "zhipuai",
-    "MiniMax": "minimax",
-    "阿里云 (DashScope)": "alibaba",
-    "SiliconFlow (硅基流动)": "siliconflow",
-    "Groq": "groq",
-    "Ollama": "ollama-cloud",
-    "OpenCode Zen": "opencode",
-    "OpenCode Go": "opencode-go",
-}
+# 已迁移至 providers 插件（ProviderDef.models_dev_id），运行时从注册表动态获取：
+# 见 _get_models_dev_map()。此处仅保留 reasoning type 映射常量。
 
 # models.dev reasoning_options type -> DriFox thinking_param
 REASONING_TYPE_TO_THINKING_PARAM = {
@@ -105,16 +99,34 @@ def _save_cache(data: Dict[str, Any], cache_path: Optional[Path] = None) -> None
 
 
 def _is_cache_valid(cache: Optional[Dict[str, Any]]) -> bool:
-    """检查缓存是否存在、schema 版本匹配且未过期。"""
+    """检查缓存结构是否有效（schema 版本匹配且未超过 24h TTL）。
+
+    只管"本地能否安全服务"，不管内容版本。内容版本偏低由刷新决策
+    （_is_content_version_stale + load_dynamic_models 的重拉判定）单独处理，
+    这样旧缓存仍可临时服务主线程，后台刷新再把它升级到最新内容。
+    """
     if not cache:
         return False
     if cache.get("_schema_version") != CACHE_SCHEMA_VERSION:
-        # schema 升级（如新增 cost 字段）→ 旧缓存视为无效，触发一次重拉
+        # schema 升级（如新增 cost 字段）→ 旧缓存结构失效
         return False
     timestamp = cache.get("_cached_at")
     if not isinstance(timestamp, (int, float)):
         return False
     return (time.time() - timestamp) < CACHE_TTL_SECONDS
+
+
+def _is_content_version_stale(cache: Optional[Dict[str, Any]]) -> bool:
+    """缓存内容版本是否低于当前代码。
+
+    开发者改了"产出内容"的代码（解析/映射/免费模型源/默认值等）→ 把
+    CACHE_CONTENT_VERSION +1，所有本地缓存的 _content_version 偏低者即便仍在
+    24h TTL 内也判定为"内容过期"，触发后台强制重拉，让用户及时体验最新效果。
+    完全缺失 _content_version 的旧缓存（本功能上线前的缓存）同样视为偏低。
+    """
+    if not cache:
+        return False
+    return cache.get("_content_version") != CACHE_CONTENT_VERSION
 
 
 # ============================================================
@@ -462,15 +474,30 @@ def _fetch_instance_free_models(client, base_url: str, key: str) -> List[str]:
     return [m.strip() for m in raw_ids if m.strip().endswith("-free")]
 
 
+def _get_models_dev_map() -> Dict[str, str]:
+    """运行时从 ProviderRegistry 获取 服务商名 -> models.dev provider id。
+
+    models.dev 白名单由 providers 插件声明（models_dev_id 字段），
+    插件卸载/热重载后本映射随之变化（每次调用动态读取）。
+    """
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    try:
+        return ProviderRegistry.get_instance().models_dev_map()
+    except Exception:
+        return {}
+
+
 def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """解析 models.dev 数据，返回 (provider_models, model_capabilities)。
 
-    只处理 MODELS_DEV_PROVIDER_MAP 白名单内的服务商。
+    只处理 providers 插件声明的 models.dev 白名单内的服务商。
     """
-    provider_models: Dict[str, List[str]] = {name: [] for name in MODELS_DEV_PROVIDER_MAP}
+    provider_map = _get_models_dev_map()
+    provider_models: Dict[str, List[str]] = {name: [] for name in provider_map}
     model_capabilities: Dict[str, Dict[str, Any]] = {}
 
-    for dfox_name, provider_id in MODELS_DEV_PROVIDER_MAP.items():
+    for dfox_name, provider_id in provider_map.items():
         provider_info = data.get(provider_id)
         if not isinstance(provider_info, dict):
             continue
@@ -537,13 +564,18 @@ def load_dynamic_models(
     """加载 models.dev 动态模型配置（含 OpenCode Zen 免费模型同步）。
 
     逻辑：
-      1. 若 force=True 或缓存不存在/过期，尝试远程拉取（allow_network=False
-         时跳过网络，直接走步骤 4/5，保证调用线程零阻塞）。
+      1. 重拉判定（need_refresh）：force=True / 缓存缺失或结构失效（schema 不符
+         或超 24h TTL）/ 内容版本偏低（CACHE_CONTENT_VERSION 已 +1，开发者更新了
+         产出逻辑）。满足其一则尝试远程拉取（allow_network=False 时跳过网络，
+         直接走步骤 4/5，保证调用线程零阻塞）。
       2. 远程拉取成功：解析 models.dev 数据，再叠加 OpenCode Zen 免费模型，
          合入缓存后返回。
       3. 远程拉取失败：若缓存存在（即使过期），用缓存；否则返回空结果。
-      4. 若 force=False 且缓存有效：直接读取缓存。
+      4. 若 force=False 且缓存结构有效且内容版本匹配：直接读取缓存。
       5. 无网络且缓存无效：返回空结果。
+
+    注意：内容版本偏低只驱动"重拉"，不使本地缓存"不可用"——结构有效的旧缓存
+    仍可临时服务主线程，后台刷新再把它升级到最新内容，避免 UI 短暂空白。
 
     allow_network=False 用于主线程安全读取（只读文件缓存，毫秒级）；
     真正的网络刷新应通过 refresh_dynamic_models_async() 在后台线程执行。
@@ -552,9 +584,12 @@ def load_dynamic_models(
     path = cache_path or _get_cache_path()
     cache = _load_cache(path)
 
-    if (not allow_network) or (force or not _is_cache_valid(cache)):
+    # 重拉判定：force / 结构失效 / 内容版本偏低（开发者更新了产出逻辑）
+    need_refresh = force or (not _is_cache_valid(cache)) or _is_content_version_stale(cache)
+
+    if (not allow_network) or need_refresh:
         if allow_network:
-            logger.info("[models.dev] 尝试同步最新模型元数据...")
+            logger.info(f"[models.dev] 尝试同步最新模型元数据... (content_version={CACHE_CONTENT_VERSION})")
             remote_data = _fetch_remote()
             if remote_data is not None:
                 provider_models, model_capabilities = _parse_models_dev_data(remote_data)
@@ -578,6 +613,7 @@ def load_dynamic_models(
                     "_cached_at": time.time(),
                     "_url": MODELS_DEV_API_URL,
                     "_schema_version": CACHE_SCHEMA_VERSION,
+                    "_content_version": CACHE_CONTENT_VERSION,
                     "provider_models": provider_models,
                     "model_capabilities": model_capabilities,
                 }
@@ -595,6 +631,9 @@ def load_dynamic_models(
                 logger.warning("[models.dev] 远程拉取失败且无缓存，返回空动态数据")
 
     if cache is not None:
+        logger.info(
+            f"[models.dev] 使用本地缓存 (content_version={cache.get('_content_version')}, code={CACHE_CONTENT_VERSION})"
+        )
         return DynamicModelsResult(
             provider_models=cache.get("provider_models", {}),
             model_capabilities=cache.get("model_capabilities", {}),

@@ -882,7 +882,7 @@ class UIPluginRegistry:
 
         # 注入插件图标路径（供卡片在头部/标题等位置展示）
         try:
-            from app.core.plugin_manager import PluginManager
+            from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
             pi = pm.get_plugin(card_info.plugin_name)

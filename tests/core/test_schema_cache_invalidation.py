@@ -174,7 +174,7 @@ class TestAgentDimensionIsolation:
     @pytest.fixture(autouse=True)
     def _load_system_plugins(self):
         """subagent_para 是系统插件工具：reset 后需重新加载"""
-        from app.tools.plugin_tool_loader import load_plugin_tools
+        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
 
         load_plugin_tools()
         yield

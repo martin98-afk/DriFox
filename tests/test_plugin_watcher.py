@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from app.tools.plugin_tool_loader import PluginToolWatcher
+from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
 from app.tools.registry import ToolRegistry
 
 

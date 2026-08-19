@@ -524,7 +524,7 @@ def register_all_commands():
         else:
             # 🛡️ 恢复 UI 插件命令（register_all_commands 清空了所有命令）
             try:
-                from app.core.ui_plugin_registry import UIPluginRegistry
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                 UIPluginRegistry.get_instance().re_register_all_commands()
             except Exception:
@@ -568,7 +568,7 @@ def register_all_commands():
 
     # 🛡️ 恢复 UI 插件命令
     try:
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         UIPluginRegistry.get_instance().re_register_all_commands()
     except Exception:
@@ -650,7 +650,7 @@ def reload_all_commands():
 
     # 🛡️ 恢复 UI 插件命令（reload 会清空所有命令，UI 插件使用独立注册表）
     try:
-        from app.core.ui_plugin_registry import UIPluginRegistry
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
         UIPluginRegistry.get_instance().re_register_all_commands()
     except ImportError, Exception:
@@ -738,7 +738,7 @@ def reload_agent_commands() -> int:
 
 def _get_command_sources() -> list:
     """获取命令文件源列表"""
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     if pm.is_initialized():
@@ -751,7 +751,7 @@ def _get_command_sources() -> list:
 
 def _get_agent_files() -> list:
     """获取智能体文件列表"""
-    from app.core.plugin_manager import PluginManager
+    from app.plugins.managers.plugin_manager import PluginManager
 
     pm = PluginManager.get_instance()
     if pm.is_initialized():
