@@ -597,15 +597,18 @@ class SubAgentExecutor(QThread):
     def _requires_reasoning_content(self, llm_config: Dict) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        通过 ModelAdapterRegistry 解析（插件可覆盖内置判定）。每调用解析一次
-        ——该方法每轮对话仅调用数次，开销可忽略；不缓存避免 worker 生命周期与
-        热重载不一致。
+        通过 ModelAdapterRegistry 解析（系统插件 openai 兜底，可被插件覆盖）。
+        每调用解析一次 ——该方法每轮对话仅调用数次，开销可忽略；
+        不缓存避免 worker 生命周期与热重载不一致。
         """
-        from app.plugins.builtin_runtime import ensure_builtin_adapters
         from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
-        ensure_builtin_adapters()
         adapter = ModelAdapterRegistry.get_instance().resolve(llm_config or {})
+        if adapter is None:
+            raise RuntimeError(
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                "请确认 plugins/system/model_adapters/ 已启用"
+            )
         return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
 
     # ========== Hook 集成（让子智能体也能应用所有 hook） ==========

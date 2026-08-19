@@ -2720,22 +2720,24 @@ class OpenAIChatWorker(QThread):
             return None
 
     def _adapter_flags(self):
-        """经 ModelAdapterRegistry 解析协议开关（插件可覆盖内置判定）"""
+        """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）"""
         if self._model_adapter is None:
-            from app.plugins.builtin_runtime import ensure_builtin_adapters
             from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
-            ensure_builtin_adapters()  # 冷启动防御（正常路径由 backend warmup 注册）
-            self._model_adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
+            adapter = ModelAdapterRegistry.get_instance().resolve(self.llm_config or {})
+            if adapter is None:
+                raise RuntimeError(
+                    "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                    "请确认 plugins/system/model_adapters/ 已启用"
+                )
+            self._model_adapter = adapter
         return self._model_adapter.protocol_flags(self.llm_config or {})
 
     def _loop_policy(self):
-        """当前激活的循环策略（默认 default，插件可 set_active 覆盖）"""
+        """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
         if self._loop_policy_obj is None:
-            from app.plugins.builtin_runtime import ensure_builtin_runtime
             from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
-            ensure_builtin_runtime()
             self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
         return self._loop_policy_obj
 
@@ -2762,21 +2764,21 @@ class OpenAIChatWorker(QThread):
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        实现已迁移 builtin_runtime.OpenAIAdapter._requires_reasoning（插件可覆盖）。
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().requires_reasoning_content
 
     def _is_gemini_model(self) -> bool:
         """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。
 
-        实现已迁移 builtin_runtime.OpenAIAdapter._is_gemini（插件可覆盖）。
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().is_gemini
 
     def _use_responses_api(self) -> bool:
         """当前模型是否走 Responses API（/v1/responses）。
 
-        实现已迁移 builtin_runtime.OpenAIAdapter._use_responses（插件可覆盖）。
+        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().use_responses_api
 

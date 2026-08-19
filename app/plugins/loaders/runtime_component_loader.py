@@ -317,10 +317,12 @@ def ensure_storage_watcher() -> Optional[_RuntimeWatcher]:
 
 
 def warmup_runtime_components() -> Dict[str, Set[str]]:
-    """启动期一次性加载三类运行时组件（内置实现先注册，插件可覆盖）"""
-    from app.plugins.builtin_runtime import ensure_builtin_runtime
+    """启动期一次性加载三类运行时组件（系统插件 plugins/system 提供默认实现）。
 
-    ensure_builtin_runtime()
+    三类运行时组件（model_adapters / loop_policies / storages）的默认实现
+    现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages}/），
+    不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
+    """
     result: Dict[str, Set[str]] = {}
     result["model_adapters"] = _make_adapters_loader().scan_roots()
     result["loop_policies"] = _make_loop_loader().scan_roots()
