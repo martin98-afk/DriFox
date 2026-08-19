@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **消息序列化插件化（Phase B）** (`app/plugins/contracts/message_serializer.py` + `app/plugins/registries/serializer_registry.py` + `plugins/system/serializers/openai.py`): 新增 `MessageSerializer` 契约（`serialize_messages` ≡ 旧 `messages_to_api` / `serialize_responses` ≡ 旧 `messages_to_responses_input`）+ `SerializeContext` + `SerializerRegistry` 单例（按 id 解析，回退 `openai`）；`message_content` 三函数变薄壳委托（签名与导出不变，调用点零改动，行为逐点等价）；`ProtocolFlags` 扩展 `serializer_id` 字段（本阶段只立不消费，走覆盖式替换）；kernel/plugin_manager/reloaders/plugin.json 登记 serializers 组件（热重载 watcher 生效）。插件可替换消息序列化行为（E2E 验收：user 根覆盖 system 默认 openai）。
+- **存储契约能力接口（Phase B）** (`app/plugins/contracts/storage.py` + `plugins/system/storages/sqlite.py`): 新增可选能力接口 `SessionTitleCapability` / `SessionCountsCapability` / `InputHistoryCapability`（消费方 `isinstance` 探测，无能力安全降级）；SQLite 引擎声明实现并覆盖消费方方法（`save_session/get_sessions_lightweight/get_session_count/update_session_project/archive_sessions_by_project` 等委托 SessionStore，行为零变化）；backend 新增 `get_session_storage()` 门面（注册表空时幂等加载系统插件），history_manager / memory_manager / session_handler 改走门面（UI 层消费点迁移属 Phase C）。
+- **冷启动回归修复（Phase B）** (`app/core/workers/chat_worker.py` + `subagent_worker.py`): ModelAdapter resolve 空注册表时幂等触发系统插件扫描再重试（仍空才抛错），`tests/test_reasoning_content_required.py` 恢复全绿。
 - **运行时三接口插件化（Phase A）** (`app/plugins/` + `app/core/workers/chat_worker.py`): 「万物即插件」运行时层——新增 `contracts/`（ModelAdapter / LoopPolicy / SessionStorageEngine 契约）+ 三注册表 + 系统插件默认实现（`plugins/system/{model_adapters,loop_policies,storages}/`，行为与旧 `builtin_runtime` 逐点等价）；chat_worker 协议检测与循环判定委托注册表（行为零变化）；kernel 登记三个新组件类型，插件可替换模型适配/循环策略/存储引擎（附 minimal 极简策略验收插件）。
 - **服务商插件化（providers 组件）** (`app/plugins/` + `plugins/system/providers/`): 「万物为插件」——服务商支持全面插件化。新增 `app/plugins/registries/provider_registry.py`（ProviderDef + ProviderRegistry 单例，聚合 models/icon/default_config/quota_keys/models_dev_map/family_caps/余额/套餐用量查询）+ `app/plugins/loaders/provider_loader.py`（扫描 `plugins/*/providers/*.py` + 热重载 watcher + user 覆盖 system + 插件启用过滤 + 插件图标目录注入）。PluginManager 组件检测新增 providers 组件
 - **14 家内置服务商迁移为系统插件** (`plugins/system/providers/`): DeepSeek/SiliconFlow（余额查询 fetcher）、MiniMax/智谱AI/OpenAI/火山方舟/OpenCode Zen/OpenCode Go（套餐用量 fetcher 逻辑迁入插件），Anthropic/Gemini/Groq/Ollama/百度千帆/阿里云 纯数据声明；用量查询额外字段（server_id/cookie/workspace_id/csrf_token/x_web_id）随插件声明并在编辑卡片动态渲染
@@ -13,6 +16,7 @@ All notable changes to this project will be documented in this file.
 
 ### ♻️ 代码重构 (Refactoring)
 
+- **openai 适配器判定器拆分（Phase B 铺路）** (`plugins/system/model_adapters/openai.py`): 三个 `_method` 拆为模块级纯函数 `detect_is_gemini / detect_requires_reasoning / detect_use_responses`（逻辑逐字搬运，行为零变化），`protocol_flags` 组合之，为协议家族适配器铺路。
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): 插件相关代码从 `app/core/` 与 `app/tools/` 迁入 `app/plugins/managers/`（PluginManager）、`registries/`（ProviderRegistry/UIPluginRegistry/coding_plan_fetcher）、`loaders/`（plugin_tool_loader/provider_loader），按职责分子目录
 - **服务商硬编码全部移除** (`app/constants.py` 等): 删除 `PROVIDER_MODELS`/`FREE_PROVIDERS`/`PROVIDER_ICONS`/`QUOTA_EXCLUDE_KEYS` 常量（保留函数委托）；`MODELS_DEV_PROVIDER_MAP`/`PROVIDER_CAPABILITIES`/`BALANCE_APIS`/`coding_plan_fetcher` 注册表全部迁移至 ProviderRegistry 聚合（后两者变薄壳委托）；消费方（usage_service/balance_display/model_capabilities/models_dev_sync/provider_profile/workers/UI 卡片/main_widget/config/cli）全部改读注册表
 - **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过

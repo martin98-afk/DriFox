@@ -37,9 +37,9 @@ git push origin develop
 | `app/gateway/` | 多平台网关（钉钉/Telegram/Discord/飞书） |
 | `app/tools/` | 工具框架（registry/plugin_tool_loader/tool_classifier/tool_name_mapper）+ 共享服务（task/team/mcp）+ 基础设施（command_safety/process_job/pty_session） |
 | `app/widgets/` | UI 组件、设置卡片、像素宠物 |
-| `app/plugins/contracts/` | 运行时契约层：ModelAdapter / LoopPolicy / SessionStorageEngine 接口（Protocol） |
-| `app/plugins/registries/` | 运行时注册表：adapter / loop policy / storage 三注册表（单例，插件可覆盖） |
-| `plugins/system/{model_adapters,loop_policies,storages}/` | 系统插件默认运行时实现（openai 适配 / default 循环策略 / sqlite 存储），行为与旧实现逐点等价，插件可覆盖 |
+| `app/plugins/contracts/` | 运行时契约层：ModelAdapter / LoopPolicy / SessionStorageEngine / MessageSerializer 接口（Protocol） |
+| `app/plugins/registries/` | 运行时注册表：adapter / loop policy / storage / serializer 四注册表（单例，插件可覆盖） |
+| `plugins/system/{model_adapters,loop_policies,storages,serializers}/` | 系统插件默认运行时实现（openai 适配 / default 循环策略 / sqlite 存储 / openai 序列化器），行为与旧实现逐点等价，插件可覆盖 |
 | `plugins/system/tools/` | 系统内置工具插件（33 个工具，register(registry) 注册 schema/impl/icon/cn_name/danger/group） |
 | `.drifox/plugins/` | 社区插件目录（用户级，watchfiles 自动扫描）：如 `codegraph-tools/`（codegraph_explore 引擎） |
 | `plugins/system/` | 插件：hooks、skills、themes、commands、tools |
@@ -59,11 +59,18 @@ git push origin develop
 > ToolNameMapper 别名。第三方插件同理放在 `plugins/<name>/tools/*.py`，
 > 文件增删改自动热生效。
 >
-> **运行时组件插件化约定**（万物即插件 Phase A）：插件目录可放置
-> `model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`，每文件暴露
-> `register(registry)`（与 tools/providers 对称）。注册项带 `id` 属性与策略方法，
+> **运行时组件插件化约定**（万物即插件 Phase A/B）：插件目录可放置
+> `model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`、`serializers/*.py`，
+> 每文件暴露 `register(registry)`（与 tools/providers 对称）。注册项带 `id` 属性与策略方法，
 > user 根可覆盖 system 根同名实现。循环策略经
 > `LoopPolicyRegistry.get_instance().set_active(<id>)` 激活。
+> 序列化器（Phase B）：`message_content` 的 `to_api_message / messages_to_api /
+> messages_to_responses_input` 已变薄壳委托 `SerializerRegistry`（`serialize_messages`
+> 等价 `messages_to_api`、`serialize_responses` 等价 `messages_to_responses_input`）；
+> 存储消费方（history_manager / memory_manager / session_handler）经
+> `ChatBackend.get_session_storage()` 门面获取活跃引擎，引擎能力用 `isinstance` 探测
+> （SessionTitleCapability / SessionCountsCapability / InputHistoryCapability），UI 层
+> 存储消费点迁移属 Phase C。
 
 ---
 
