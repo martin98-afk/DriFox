@@ -22,8 +22,17 @@ from app.utils.utils import invalidate_skills_cache
 
 # 本模块注册的组件全集（= kernel.KNOWN_COMPONENTS）
 RELOADED_COMPONENTS = {
-    "agents", "hooks", "commands", "themes", "skills",
-    "mcp", "lsp", "ui", "tools", "providers", "team_templates",
+    "agents",
+    "hooks",
+    "commands",
+    "themes",
+    "skills",
+    "mcp",
+    "lsp",
+    "ui",
+    "tools",
+    "providers",
+    "team_templates",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -104,12 +113,18 @@ def _reload_ui(ctx: ReloadContext) -> Any:
 
 
 def _reload_tools(ctx: ReloadContext) -> Any:
-    """tools 分支：轮询 watcher 退役后的正式路径 — 全量重扫（幂等，含 enabled 过滤）"""
+    """tools 分支：轮询 watcher 退役后的正式路径 — 全量重扫（幂等，含 enabled 过滤）
+
+    scan_now 后调 _notify_reloaded()，与原 _loop 内 scan_now+_notify_reloaded
+    顺序一致；恢复 UI 工具面板/权限卡片刷新链（main_widget on_tools_reloaded
+    桥接靠此信号触发）。
+    """
     from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
     watcher = ensure_plugin_tool_watcher()
     if watcher is not None:
         watcher.scan_now()
+        watcher._notify_reloaded()
         return True
     return False
 

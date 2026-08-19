@@ -671,6 +671,7 @@ class TestPermissionLinkage:
         assert (
             len(toggles) == 34
             or (len(toggles) == 35 and "codegraph_explore" in toggles)
+            or (len(toggles) == 31 and "codegraph_explore" in toggles)  # 仅 codegraph，无 workbuddy
             or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
         ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
         assert toggles["read"] is True
