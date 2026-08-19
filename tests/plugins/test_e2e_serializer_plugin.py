@@ -10,13 +10,20 @@
 import pytest
 
 from app.core import message_content as mc
-from app.plugins.contracts.message_serializer import SerializeContext
+from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 
 
 class _UpperSerializer:
     """自定义 serializer（同 id="openai" 覆盖 system 默认）"""
 
     id = "openai"
+
+    def serialize(self, messages, ctx: SerializeContext):
+        """单入口（Phase C 契约）"""
+        if ctx.flags.use_responses_api:
+            input_items, instructions = self.serialize_responses(messages, ctx)
+            return SerializeResult(input_items=input_items, instructions=instructions)
+        return SerializeResult(messages=self.serialize_messages(messages, ctx))
 
     def serialize_messages(self, messages, ctx: SerializeContext):
         return [{"role": "user", "content": "CUSTOM-OVERRIDE"}]

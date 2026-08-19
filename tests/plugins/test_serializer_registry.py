@@ -12,6 +12,14 @@ class _FakeSerializer:
         self.id = id
         self.calls = []
 
+    def serialize(self, messages, ctx: SerializeContext):
+        if ctx.flags.use_responses_api:
+            input_items, instructions = self.serialize_responses(messages, ctx)
+            from app.plugins.contracts.message_serializer import SerializeResult
+
+            return SerializeResult(input_items=input_items, instructions=instructions)
+        return self.serialize_messages(messages, ctx)
+
     def serialize_messages(self, messages, ctx: SerializeContext):
         self.calls.append(("messages", ctx))
         return [{"role": "user", "content": f"fake-{self.id}"}]

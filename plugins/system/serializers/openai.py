@@ -21,6 +21,18 @@ class OpenAIChatSerializer:
 
     id = "openai"
 
+    def serialize(self, messages: List[Dict[str, Any]], ctx: SerializeContext):
+        """单入口：按 ctx.flags.use_responses_api 路由到 chat/responses 形态。
+
+        Phase C：worker 从「按协议形态调 3 个函数」收敛为 1 个入口 + 1 个结果对象。
+        """
+        from app.plugins.contracts.message_serializer import SerializeResult
+
+        if ctx.flags.use_responses_api:
+            input_items, instructions = self.serialize_responses(messages, ctx)
+            return SerializeResult(input_items=input_items, instructions=instructions)
+        return SerializeResult(messages=self.serialize_messages(messages, ctx))
+
     def serialize_messages(self, messages: List[Dict[str, Any]], ctx: SerializeContext) -> List[Dict[str, Any]]:
         """内部消息列表 → chat/completions API 消息列表（等价旧 messages_to_api）"""
         api_messages: List[Dict[str, Any]] = []

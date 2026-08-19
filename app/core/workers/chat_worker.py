@@ -40,13 +40,7 @@ from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import PermissionCache
-from app.core.message_content import (
-    append_text_block,
-    consolidate_messages,
-    messages_to_api,
-    messages_to_responses_input,
-    to_api_message,
-)
+from app.core.message_content import append_text_block, consolidate_messages
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.provider_profile import detect_provider_family, get_provider_profile
@@ -503,6 +497,22 @@ class OpenAIChatWorker(QThread):
         s.api_cache.cache = self._api_messages_cache
         s.api_cache.built = self._api_messages_built
 
+    def _serialize_for_api(self, messages: List[Dict[str, Any]], supports_vision: bool = True):
+        """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
+
+        worker 不再按协议形态直接调 messages_to_api / messages_to_responses_input，
+        统一经本入口：序列化器内部按 flags.use_responses_api 路由到 chat/responses 形态，
+        serializer_id 由 adapter 解析（默认 openai，插件可指定专属序列化器）。
+        """
+        from app.plugins.contracts.message_serializer import SerializeContext
+        from app.plugins.registries.serializer_registry import SerializerRegistry
+
+        flags = self._adapter_flags()
+        serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
+        return serializer.serialize(
+            messages, SerializeContext(supports_vision=supports_vision, flags=flags)
+        )
+
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
         构建 API 消息缓存。
@@ -515,9 +525,7 @@ class OpenAIChatWorker(QThread):
             return self._api_messages_cache
 
         # 首次构建：处理所有历史消息
-        self._api_messages_cache = messages_to_api(
-            self.messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-        )
+        self._api_messages_cache = self._serialize_for_api(self.messages).messages
         self._api_messages_built = True
         return self._api_messages_cache
 
@@ -530,18 +538,12 @@ class OpenAIChatWorker(QThread):
             new_messages: 新增的消息列表
         """
         if self._api_messages_cache is None:
-            self._api_messages_cache = messages_to_api(
-                new_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(new_messages).messages
             return
 
-        # 只转换新消息并追加
-        for msg in new_messages:
-            api_msg = to_api_message(msg, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content())
-            if api_msg:
-                if api_msg.get("role") == "user" and not api_msg.get("content"):
-                    continue
-                self._api_messages_cache.append(api_msg)
+        # 只转换新消息并追加（serialize_messages 已过滤空 user 消息）
+        for api_msg in self._serialize_for_api(new_messages).messages:
+            self._api_messages_cache.append(api_msg)
 
     def _inject_pending_hook_messages(
         self, session_messages_target: List = None, include_team_mail: bool = True
@@ -1532,8 +1534,13 @@ class OpenAIChatWorker(QThread):
         return out
 
     def _build_responses_kwargs(self, messages: List[Dict]) -> Dict[str, Any]:
-        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。"""
-        input_items, instructions = messages_to_responses_input(messages, supports_vision=self._supports_vision)
+        """构造 Responses API 请求参数（input/instructions/tools/reasoning）。
+
+        Phase C：消息转换走序列化器单入口（flags.use_responses_api 已由调用方保证），
+        取 result.input_items / instructions。
+        """
+        result = self._serialize_for_api(messages)
+        input_items, instructions = result.input_items, result.instructions
         model = str(self.llm_config.get("模型名称", "") or "")
         kwargs: Dict[str, Any] = {
             "model": model,
@@ -1619,9 +1626,7 @@ class OpenAIChatWorker(QThread):
             self._current_session_messages = list(current_session_messages)
 
             # 用当前消息初始化 API 缓存（使 _inject_pending_hook_messages 能正确追加）
-            self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(current_messages).messages
             self._state.api_cache.cache = self._api_messages_cache  # 同步到 state，防止 _sync_state_from_state 覆盖
             self._api_messages_built = False
             self._accumulated_tokens = 0  # 重置 token 累加，每个新的对话从零开始
@@ -2058,10 +2063,7 @@ class OpenAIChatWorker(QThread):
                     # 注意：需要通过 messages_to_api() 转换格式，否则后续 API 调用读到内部格式对象
                     # 🛡️ 先清理 orphan，再设缓存，避免缓存带脏数据
                     current_messages, _ = self._fix_tool_result_order(current_messages)
-                    self._api_messages_cache = messages_to_api(
-                        current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                        requires_reasoning_content=self._requires_reasoning_content()
-                    )
+                    self._api_messages_cache = self._serialize_for_api(current_messages).messages
                     # 它的增长会在 worker 结束时由 _on_messages_updated 的
                     # preserve_compaction=False 清空缓存，下轮发送时由 ContextBudgetAllocator 统一压缩。
                 else:
@@ -2563,10 +2565,7 @@ class OpenAIChatWorker(QThread):
         # 但 _api_messages_cache 仍是旧版本（无图片）。
         # 此处立即重建完整缓存，确保后续 append 操作在正确基线上增量更新。
         try:
-            self._api_messages_cache = messages_to_api(
-                current_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                requires_reasoning_content=self._requires_reasoning_content()
-            )
+            self._api_messages_cache = self._serialize_for_api(current_messages).messages
             self._api_messages_built = True
         except Exception as cache_e:
             logger.warning(f"[Vision] Failed to rebuild API cache: {cache_e}")
@@ -2827,9 +2826,7 @@ class OpenAIChatWorker(QThread):
         if use_cache and self._api_messages_cache is not None:
             sanitized = self._api_messages_cache
         else:
-            sanitized = messages_to_api(
-                messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-            )
+            sanitized = self._serialize_for_api(messages).messages
             if use_cache:
                 self._api_messages_cache = sanitized
                 self._api_messages_built = True
@@ -2932,9 +2929,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages, was_fixed = self._fix_tool_result_order(req_kwargs["messages"])
 
                     if was_fixed:
-                        fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(), requires_reasoning_content=self._requires_reasoning_content()
-                        )
+                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:
@@ -2960,10 +2955,7 @@ class OpenAIChatWorker(QThread):
                     fixed_messages = self._try_recover_tool_arguments(req_kwargs["messages"])
 
                     if fixed_messages is not None:
-                        fixed_sanitized = messages_to_api(
-                            fixed_messages, supports_vision=self._supports_vision, is_gemini=self._is_gemini_model(),
-                            requires_reasoning_content=self._requires_reasoning_content()
-                        )
+                        fixed_sanitized = self._serialize_for_api(fixed_messages).messages
                         req_kwargs["messages"] = fixed_sanitized
                         # 更新 API 消息缓存，修复结果持久化，避免下一轮迭代重复修复
                         if use_cache:

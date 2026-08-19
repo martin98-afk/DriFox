@@ -1075,11 +1075,11 @@ def to_api_message(
     （normalize 失败 → {}；空 user → {"role":"user","content":""}），保证逐点等价。
     """
     serializer = _resolve_serializer()
-    result = serializer.serialize_messages(
+    result = serializer.serialize(
         [message], _default_ctx(supports_vision, is_gemini, requires_reasoning_content)
     )
-    if result:
-        return result[0]
+    if result.messages:
+        return result.messages[0]
     # 空 user 消息被列表语义过滤 → 复刻旧 to_api_message 单条语义
     normalized = normalize_message(message)
     if normalized and normalized.get("role") == "user":
@@ -1093,16 +1093,16 @@ def messages_to_api(
     is_gemini: bool = False,
     requires_reasoning_content: bool = False,
 ) -> List[Dict[str, Any]]:
-    """将内部消息列表转换为标准API请求格式列表（薄壳：委托默认序列化器）。
+    """将内部消息列表转换为标准API请求格式列表（薄壳：委托默认序列化器单入口）。
 
-    签名与导出不变；返回形态 List[Dict] 不变；逻辑与旧实现逐点等价
-    （system/user+multimodal/assistant+tool_calls+reasoning/tool 分支，
-    空 user 消息过滤）。
+    签名与导出不变；返回形态 List[Dict] 不变；内部转发序列化器单入口
+    serialize() → result.messages（与旧实现逐点等价）。
     """
     serializer = _resolve_serializer()
-    return serializer.serialize_messages(
+    result = serializer.serialize(
         messages, _default_ctx(supports_vision, is_gemini, requires_reasoning_content)
     )
+    return result.messages
 
 
 def _build_api_tool_call(tc: Dict[str, Any], is_gemini: bool = False) -> Dict[str, Any]:
@@ -1230,4 +1230,5 @@ def messages_to_responses_input(
     serializer = _resolve_serializer()
     ctx = _default_ctx(supports_vision)
     ctx.flags.use_responses_api = True
-    return serializer.serialize_responses(messages, ctx)
+    result = serializer.serialize(messages, ctx)
+    return result.input_items, result.instructions

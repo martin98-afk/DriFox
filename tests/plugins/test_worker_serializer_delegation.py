@@ -10,7 +10,7 @@ messages_to_responses_input 经 SerializerRegistry 委托，调用点零改动�
 import pytest
 
 from app.core import message_content as mc
-from app.plugins.contracts.message_serializer import SerializeContext
+from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 from app.plugins.contracts.model_adapter import ProtocolFlags
 
 
@@ -20,6 +20,13 @@ class _MockSerializer:
     def __init__(self):
         self.messages_calls = []
         self.responses_calls = []
+
+    def serialize(self, messages, ctx: SerializeContext):
+        """单入口（Phase C 契约）：按 use_responses_api 路由"""
+        if ctx.flags.use_responses_api:
+            input_items, instructions = self.serialize_responses(messages, ctx)
+            return SerializeResult(input_items=input_items, instructions=instructions)
+        return SerializeResult(messages=self.serialize_messages(messages, ctx))
 
     def serialize_messages(self, messages, ctx: SerializeContext):
         self.messages_calls.append((messages, ctx))

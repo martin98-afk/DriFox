@@ -594,6 +594,35 @@ class SubAgentExecutor(QThread):
             return content
         return _THINKING_PATTERN.sub("", content)
 
+    def _serialize_for_api(self, messages: List[Dict], llm_config: Dict = None):
+        """序列化单入口（Phase C）：adapter flags → serializer_id → 序列化器 → SerializeResult。
+
+        与 chat_worker._serialize_for_api 对称；supports_vision 默认 True（subagent 无视觉注入）。
+        """
+        from app.plugins.contracts.message_serializer import SerializeContext
+        from app.plugins.registries.serializer_registry import SerializerRegistry
+
+        config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
+        flags = self._protocol_flags(config)
+        serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
+        return serializer.serialize(messages, SerializeContext(flags=flags))
+
+    def _protocol_flags(self, llm_config: Dict = None):
+        """经 ModelAdapterRegistry 解析完整协议开关（含 serializer_id，冷启动防御同 Task 1）"""
+        from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+        registry = ModelAdapterRegistry.get_instance()
+        config = llm_config if llm_config is not None else getattr(self, "llm_config", None)
+        adapter = registry.resolve(config or {})
+        if adapter is None:
+            adapter = self._resolve_adapter_with_warmup(registry, config or {})
+        if adapter is None:
+            raise RuntimeError(
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
+                "请确认 plugins/system/model_adapters/ 已启用"
+            )
+        return adapter.protocol_flags(config or {})
+
     def _requires_reasoning_content(self, llm_config: Dict) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
@@ -1002,7 +1031,8 @@ class SubAgentExecutor(QThread):
 
     def _make_responses_api_call(self, client, messages, tools, config) -> tuple:
         """非流式 Responses API 调用：解析 output 数组 → (content, tool_calls, reasoning)。"""
-        input_items, instructions = messages_to_responses_input(messages)
+        result = self._serialize_for_api(messages, config)
+        input_items, instructions = result.input_items, result.instructions
         model = str(config.get("模型名称", "") or "")
         kwargs: Dict[str, Any] = {
             "model": model,
@@ -1265,7 +1295,8 @@ class SubAgentExecutor(QThread):
                 "anchors": getattr(result, "anchors", None) if result else None,
             }
             # 用 to_api_message 标准化：仅保留 role/tool_call_id/name/content，避免非标字段混淆API
-            tool_results.append(to_api_message(raw_result) or raw_result)
+            serialized = self._serialize_for_api([raw_result]).messages
+            tool_results.append(serialized[0] if serialized else raw_result)
 
             # 消费 PostToolUse 队列（role="user" 消息），放入 hook_messages 而非 tool_results
             posttool_msgs = self._drain_posttool_queue()
