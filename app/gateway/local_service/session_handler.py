@@ -81,11 +81,15 @@ class APIHistoryManager:
         self._load_from_sqlite()
 
     def _init_sqlite(self):
-        """初始化 SQLite 存储"""
+        """初始化 SQLite 存储（经 backend 门面获取活跃引擎，行为等价 SessionStore）"""
         try:
-            from app.core.store import SessionStore
-            self._session_store = SessionStore.get_instance()
-            if self._session_store.is_initialized:
+            # 函数体内延迟 import：避免与 backend 循环导入
+            from app.core.backend import get_session_storage
+
+            engine = get_session_storage()
+            # hasattr 降级：引擎无 is_initialized（第三方实现）→ 视为未初始化
+            if getattr(engine, "is_initialized", False):
+                self._session_store = engine
                 logger.info("[APIHistoryManager] SQLite 存储已启用")
             else:
                 logger.warning("[APIHistoryManager] SQLite 初始化失败")

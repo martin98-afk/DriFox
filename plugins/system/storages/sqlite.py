@@ -23,9 +23,25 @@ class SqliteStorageEngine:
         # 复用 SessionStore 内部已初始化的 SessionRepository，避免重复构造连接池；
         # SessionRepository 期望的是 DatabaseManager，而非 SessionStore 本身。
         self._repo = store.session_repo
-        # 持有 store 引用：可选能力方法（标题/计数/输入历史）委托 SessionStore 同名方法，
-        # 保持 get_instance() 全局单例语义（db 路径/连接/线程模型不变）。
+        # 持有 store 引用：可选能力方法（标题/计数/输入历史）与消费方方法
+        # 委托 SessionStore 同名方法，保持 get_instance() 全局单例语义
+        # （db 路径/连接/线程模型不变，不产生第二个连接）。
         self._store = store
+
+    @property
+    def store(self):
+        """底层 SessionStore（消费方底层访问：db 签名 / repo 构造等）"""
+        return self._store
+
+    @property
+    def is_initialized(self) -> bool:
+        """底层存储是否已初始化（消费方 hasattr 探测的降级判据）"""
+        return self._store.is_initialized
+
+    @property
+    def _db_path(self):
+        """底层 db 文件路径（history_manager 跨进程签名检查用，getattr 兼容）"""
+        return getattr(self._store, "_db_path", None)
 
     def save(self, session: dict) -> bool:
         return self._repo.save(session)
@@ -44,6 +60,36 @@ class SqliteStorageEngine:
 
     def delete(self, session_id: str) -> bool:
         return self._repo.delete(session_id)
+
+    # ---------- 消费方方法（history_manager / memory_manager / session_handler 调用集，
+    # 委托 SessionStore 同名方法，行为零变化） ----------
+
+    def save_session(self, session: dict) -> bool:
+        return self._store.save_session(session)
+
+    def get_session(self, session_id: str):
+        return self._store.get_session(session_id)
+
+    def get_sessions(self, limit: int = 100, offset: int = 0):
+        return self._store.get_sessions(limit=limit, offset=offset)
+
+    def get_sessions_lightweight(self, limit: int = 100, offset: int = 0):
+        return self._store.get_sessions_lightweight(limit=limit, offset=offset)
+
+    def get_sessions_by_team_run_id(self, run_id: str):
+        return self._store.get_sessions_by_team_run_id(run_id)
+
+    def delete_session(self, session_id: str) -> bool:
+        return self._store.delete_session(session_id)
+
+    def get_session_count(self) -> int:
+        return self._store.get_session_count()
+
+    def update_session_project(self, session_id: str, project: str) -> bool:
+        return self._store.update_session_project(session_id, project)
+
+    def archive_sessions_by_project(self, project: str) -> int:
+        return self._store.archive_sessions_by_project(project)
 
     # ---------- 可选能力：标题 / 计数 / 输入历史（委托 SessionStore 同名方法） ----------
 

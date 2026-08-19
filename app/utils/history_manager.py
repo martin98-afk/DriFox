@@ -26,7 +26,6 @@ from loguru import logger
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from app.core.message_content import consolidate_messages, content_to_text
-from app.core.store import SessionStore
 from app.core.token_estimator import count_messages_tokens
 from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
 
@@ -363,7 +362,7 @@ class HistoryManager:
         self._pending_save_session_id: Optional[str] = None
 
         # SQLite 存储层
-        self._session_store: Optional[SessionStore] = None
+        self._session_store: Optional[Any] = None
         self._use_sqlite = False
 
         # 内存缓存
@@ -435,13 +434,18 @@ class HistoryManager:
             self._history_sessions = unique_sessions
 
     def _init_storage(self):
-        """初始化存储层"""
+        """初始化存储层（经 backend 门面获取活跃引擎，行为等价 SessionStore）"""
         use_sqlite = os.environ.get("LLM_SESSION_SQLITE", "1") == "1"
 
         if use_sqlite:
             try:
-                self._session_store = SessionStore.get_instance()
-                if self._session_store.is_initialized:
+                # 函数体内延迟 import：避免与 backend 循环导入
+                from app.core.backend import get_session_storage
+
+                engine = get_session_storage()
+                # hasattr 降级：引擎无 is_initialized（第三方实现）→ 视为未启用 SQLite
+                if getattr(engine, "is_initialized", False):
+                    self._session_store = engine
                     self._use_sqlite = True
                     logger.info("[HistoryManager] SQLite 存储已启用")
 

@@ -24,6 +24,28 @@ from app.utils.utils import invalidate_skills_cache
 _AUTO_COMPACT_COOLDOWN = 30.0
 
 
+def get_session_storage():
+    """全局存储门面：返回 StorageRegistry 活跃引擎（非 UI 消费方统一入口）。
+
+    冷启动防御（同 chat_worker._adapter_flags）：注册表为空（backend warmup
+    尚未执行/测试环境）时幂等触发系统插件扫描再重试；仍失败（真实配置错误）
+    让 RuntimeError 显式传播。registry 零硬编码兜底原则不变——兜底在门面侧。
+    """
+    from app.plugins.registries.storage_registry import StorageRegistry
+
+    registry = StorageRegistry.get_instance()
+    try:
+        return registry.get_active()
+    except RuntimeError:
+        try:
+            from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
+
+            warmup_runtime_components()
+        except Exception:
+            pass
+        return registry.get_active()
+
+
 def _callback_holds_backend(callback, backend) -> bool:
     """判断异步闭包是否捕获了指定 ChatBackend 实例（泄漏修复 6d 辅助）。
 
@@ -380,6 +402,10 @@ class ChatBackend(QObject):
     @property
     def session_store(self):
         return self._session_store
+
+    def get_session_storage(self):
+        """实例门面：获取活跃存储引擎（委托模块级 get_session_storage）"""
+        return get_session_storage()
 
     @property
     def history_manager(self):
