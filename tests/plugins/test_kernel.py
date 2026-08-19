@@ -59,3 +59,18 @@ def test_reloader_registry_duplicate_overwrite():
 
 def test_global_registry_singleton():
     assert get_reloader_registry() is get_reloader_registry()
+
+
+def test_plugin_manager_uses_kernel_constants():
+    """plugin_manager 目录探测不再自带组件名清单，统一引用 kernel.KNOWN_COMPONENTS
+
+    万物为插件：新增组件类型时 plugin_manager 应通过 KNOWN_COMPONENTS 自动感知，
+    而非在 _scan_plugins/_scan_one_plugin_dir 内硬编码探测组件清单。
+    """
+    import inspect
+    from app.plugins.managers import plugin_manager as pm_mod
+
+    src = inspect.getsource(pm_mod)
+    assert ("from app.plugins.kernel import" in src) or ("from app.plugins import kernel" in src), (
+        "plugin_manager 必须显式 import kernel 常量以保持探测规则单一事实源"
+    )

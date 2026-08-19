@@ -1925,8 +1925,8 @@ class ChatBackend(QObject):
 
             plugin = pm.get_plugin(plugin_name)
             if not plugin:
-                # 插件已被删除（目录或 manifest 已不存在）
-                # 仅清理该插件实际含有的组件
+                # 插件已被删除（目录或 manifest 已不存在）—— 删除清理段并入 reloader 分派
+                # 仅清理该插件实际含有的组件（按 kernel.KNOWN_COMPONENTS 优先级遍历）
                 logger.info(
                     f"[ChatBackend] Plugin '{plugin_name}' removed, "
                     f"components={ {k for k, v in removed_components.items() if v} or {'(unknown)'} }, "
@@ -1945,101 +1945,42 @@ class ChatBackend(QObject):
                             f"[ChatBackend] 插件 [{plugin_name}] 移除，清空 {len(stale_keys)} 个 watcher 去重键"
                         )
 
-                # 智能体（Agent 清理包含 hooks 清扫）
-                if removed_components.get("agents") and self._agent_manager:
-                    self._agent_manager.cleanup_plugin_artifacts(plugin_name)
+                # 表分派：遍历该插件原有组件 → registry.reload(plugin=None) 走清理语义
+                # agents→cleanup_plugin_artifacts、hooks-only→unregister、commands→reload_all、
+                # themes→reload、skills→invalidate、ui→unload、lsp→remove_only、tools/providers/team_templates 跳过
+                from app.plugins.kernel import KNOWN_COMPONENTS, ReloadContext, get_reloader_registry
 
-                # Hooks-only 插件：无 agents 时需单独清理 hooks 注册
-                if removed_components.get("hooks") and not removed_components.get("agents"):
-                    if self._hook_manager:
-                        self._hook_manager.unregister_skill_hooks(plugin_name)
-                        logger.debug(
-                            f"[ChatBackend] Plugin '{plugin_name}' hooks-only cleanup: unregistered skill hooks"
+                registry = get_reloader_registry()
+                for comp in KNOWN_COMPONENTS:
+                    if not removed_components.get(comp):
+                        continue
+                    reloaded = registry.reload(
+                        ReloadContext(
+                            plugin_name=plugin_name,
+                            plugin=None,
+                            component=comp,
+                            is_new_plugin=False,
                         )
-
-                # 命令（agents 发布的命令也需反注册）——commands 优先分派：
-                # 1) 含 commands 组件 → 命令+快捷键必须全量重建（避免残留命令条目与快捷键）；
-                # 2) 纯 agents 插件 → AGENT 命令注册时不绑 shortcut（_register_builtin_agents_
-                #    as_commands 的 register 调用无 shortcut 参数），局部重载即可，消灭卸载后
-                #    主线程 ~2500ms 全量命令重解析的卡顿根因；result["commands"]=True 保持，
-                #    走 plugin_changed 广播 → 窗口侧 _on_plugin_hot_reload 重建快捷键（双保险）。
-                if removed_components.get("commands"):
-                    try:
-                        from app.core.builtin_commands import reload_all_commands
-
-                        reload_all_commands()
+                    )
+                    if comp in result_keys:
+                        # agents 返回 int(数量)，其余 True/False — agents 删除归零
+                        result[comp] = reloaded if reloaded is not None else False
+                    # agents 联动标记：删除时仍走 plugin_changed 广播 → 窗口侧重建快捷键
+                    if comp == "agents":
+                        result["hooks"] = True
                         result["commands"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload commands after plugin removal: {e}")
-                elif removed_components.get("agents"):
-                    try:
-                        from app.core.builtin_commands import reload_agent_commands
 
-                        reload_agent_commands()
-                        result["commands"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload agent commands after plugin removal: {e}")
-
-                # 主题
-                if removed_components.get("themes"):
-                    try:
-                        from app.utils.config import update_theme_options
-                        from app.utils.theme_manager import theme_manager
-
-                        theme_manager.reload()
-                        update_theme_options()
-                        result["themes"] = True
-                    except (ImportError, Exception) as e:
-                        logger.error(f"[ChatBackend] Failed to reload themes after plugin removal: {e}")
-
-                # Hooks：仅当插件原有 hooks 组件时触发 UI 刷新
-                # agents-only 插件的 hooks 清理由 cleanup_plugin_artifacts 完成，
-                # 但若插件本身无 hooks 目录则无需刷新 UI
-                result["hooks"] = removed_components.get("hooks", False)
-
-                # 技能 / MCP：PluginManager 已移除该插件的目录，
-                # UI 通过 get_local_skills() / get_mcp_servers() 懒加载，下次访问时自动排除
-                if removed_components.get("skills", False):
-                    invalidate_skills_cache()
-                result["skills"] = removed_components.get("skills", False)
-                result["mcp"] = removed_components.get("mcp", False)
-
-                # UI 组件：卸载该插件在 UIPluginRegistry 中的注册
-                if removed_components.get("ui"):
-                    try:
-                        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-                        UIPluginRegistry.get_instance().unload_plugin(plugin_name)
-                        result["ui"] = True
-                        logger.info(f"[ChatBackend] Plugin '{plugin_name}' UI 组件已卸载")
-                    except Exception as e:
-                        logger.error(f"[ChatBackend] Plugin '{plugin_name}' UI 卸载失败: {e}")
-
-                # LSP：增量移除该插件的 LSP 服务器（如有），不重启已有服务器
-                try:
-                    from app.core.lsp.lsp_manager import get_lsp_manager
-
-                    lsp_mgr = get_lsp_manager()
-                    removed = lsp_mgr.remove_plugin_servers(plugin_name)
-                    result["lsp"] = True
-                    if removed:
-                        logger.info(
-                            f"[ChatBackend] Plugin '{plugin_name}' LSP 已清理，"
-                            f"移除了 {removed} 个服务器，剩余 {len(lsp_mgr._clients)} 个"
-                        )
-                    else:
-                        logger.debug(f"[ChatBackend] Plugin '{plugin_name}' 无 LSP 配置，无需清理")
-                except Exception as e:
-                    logger.error(f"[ChatBackend] Plugin '{plugin_name}' LSP 清理失败: {e}")
-
+                logger.info(
+                    f"[ChatBackend] Plugin '{plugin_name}' cleanup done via kernel: "
+                    f"{ {k: result[k] for k in result_keys} }"
+                )
                 return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
-            from app.plugins.builtin_reloaders import bind_runtime
+            # 注册 / 注入 runtime 句柄由 _do_deferred + reload_plugin_subsystems 集中完成
+            # （builtin_reloaders._BUILTIN_REGISTERED 幂等保护，此处不重复）
             from app.plugins.kernel import ReloadContext, get_reloader_registry
 
-            # 注入 runtime 句柄（agent_manager）— 幂等可重复调用
-            bind_runtime(_safe_agent_manager(self))
             registry = get_reloader_registry()
 
             if component:
@@ -2167,11 +2108,12 @@ class ChatBackend(QObject):
                 logger.info(f"[ChatBackend] 检测到新插件「{name}」，执行增量重载")
 
                 # 遍历该新插件的组件，统一经 reloader 注册表分派
+                # 按 kernel.KNOWN_COMPONENTS 优先级排序（不依赖 dict 插入序）
                 # agents → hooks/commands 联动标记由 _reload_agents 内部完成并回写 result
+                from app.plugins.kernel import KNOWN_COMPONENTS as _KNOWN_COMPS
+
                 if registry is not None:
-                    for comp in (c for c in comps if c):
-                        if not comps.get(comp):
-                            continue
+                    for comp in (c for c in _KNOWN_COMPS if comps.get(c)):
                         reloaded = registry.reload(
                             ReloadContext(
                                 plugin_name=name,
