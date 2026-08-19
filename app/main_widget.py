@@ -35,7 +35,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import QColor, QDesktopServices, QPainter
+from PyQt5.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -3644,6 +3644,10 @@ class OpenAIChatToolWindow(ToolWindow):
         for _tb in [self.auto_loop_btn, self.memory_btn, self.history_btn, self.new_session_btn]:
             install_hover_tooltip(_tb)
 
+        # Phase D：输入区插件按钮（_init_ui_plugins_deferred 加载插件后再构建一次）
+        self._plugin_input_buttons: list = []
+        self._build_plugin_input_buttons()
+
         toolbar_layout.addWidget(self._toolbar_capsule)
 
         # 工具栏挂到独立 strip（不在 _input_card 里了）
@@ -4036,8 +4040,83 @@ class OpenAIChatToolWindow(ToolWindow):
                     return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
 
                 self._function_command_handlers[cmd_name] = _make_handler()
+            # Phase D：插件加载完成后构建输入区插件按钮（首帧时注册表为空不渲染）
+            try:
+                self._build_plugin_input_buttons()
+            except Exception as e:
+                logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
+
+    def _on_plugin_input_button_clicked(self, info):
+        """输入区插件按钮点击：组上下文（window_id + button_id）派发 info.on_click"""
+        try:
+            if info.on_click is None:
+                return
+            context = {
+                "button_id": info.button_id,
+                "plugin_name": info.plugin_name,
+                "window_id": getattr(self, "_window_id", None),
+                "main_widget": self,
+            }
+            info.on_click(context)
+        except Exception as e:
+            logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 回调失败：{e}")
+
+    def _build_plugin_input_buttons(self):
+        """重建输入区插件按钮（Phase D 扩展点，幂等）
+
+        先清空本方法构建的按钮 + 分隔线，再按 UIPluginRegistry.get_input_buttons()
+        重新构建；未注册任何按钮时不渲染任何东西（行为零变化）。
+        热重载/卸载经 _on_plugin_hot_reload 触发重建。
+        """
+        if not hasattr(self, "_toolbar_capsule"):
+            return
+        # 幂等：清空旧的插件按钮/分隔线
+        for w in getattr(self, "_plugin_input_buttons", []):
+            try:
+                w.setParent(None)
+                w.deleteLater()
+            except RuntimeError:
+                pass
+        self._plugin_input_buttons = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            buttons = UIPluginRegistry.get_instance().get_input_buttons()
+        except Exception:
+            return
+        if not buttons:
+            return
+        capsule_layout = self._toolbar_capsule.layout()
+        if capsule_layout is None:
+            return
+
+        Colors.refresh()
+        btn_capsule_style = f"""
+            TransparentToolButton {{ background: transparent; border: none; }}
+            TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
+        """
+        # 分隔线：系统按钮与插件按钮区分
+        separator = QFrame(self._toolbar_capsule)
+        separator.setFrameShape(QFrame.VLine)
+        separator.setStyleSheet(f"color: {Colors.DIVIDER_COLOR};")
+        separator.setFixedHeight(16)
+        capsule_layout.addWidget(separator)
+        self._plugin_input_buttons.append(separator)
+
+        for info in buttons:
+            try:
+                icon = QIcon(str(info.icon_path)) if info.icon_path else QIcon()
+                btn = TransparentToolButton(icon, self._toolbar_capsule)
+                btn.setFixedSize(24, 24)
+                btn.setToolTip(info.tooltip or info.button_id)
+                btn.setStyleSheet(btn_capsule_style)
+                btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
+                capsule_layout.addWidget(btn)
+                self._plugin_input_buttons.append(btn)
+            except Exception as e:
+                logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -9513,6 +9592,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts()
+                except RuntimeError, AttributeError:
+                    pass
+        # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
+        if result.get("ui"):
+            for win in OpenAIChatToolWindow._instances:
+                if win._is_destroyed:
+                    continue
+                try:
+                    win._build_plugin_input_buttons()
                 except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
