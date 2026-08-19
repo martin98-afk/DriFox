@@ -1642,8 +1642,18 @@ class OpenAIChatWorker(QThread):
 
                 # LoopPolicy：轮数上限（默认策略不限 → 零行为变化）
                 if self._check_loop_round_limit():
+                    # 对齐正常完成路径（约 :1850-1857）的四行式信号序列：
+                    # 先发 finished_with_messages(current_session_messages) →
+                    # 存 final_response=self.full_response →
+                    # _clear_pending_response_state()（清理 state 防覆盖）→
+                    # 再发 finished_with_content(final_response)
                     self._emit_with_callback(
-                        "finished_with_content", self.finished_with_content, self.full_response or ""
+                        "finished_with_messages", self.finished_with_messages, current_session_messages
+                    )
+                    final_response = self.full_response
+                    self._clear_pending_response_state()
+                    self._emit_with_callback(
+                        "finished_with_content", self.finished_with_content, final_response
                     )
                     return
 
@@ -1668,13 +1678,26 @@ class OpenAIChatWorker(QThread):
                     # LoopPolicy 门控：策略要求终止则走完成路径（默认 CONTINUE → 零变化）
                     from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
-                    _lp_decision = self._loop_policy().should_continue(
-                        LoopState(round_count=self._loop_round_count, repetitive_loop_detected=True)
-                    )
+                    try:
+                        _lp_decision = self._loop_policy().should_continue(
+                            LoopState(round_count=self._loop_round_count, repetitive_loop_detected=True)
+                        )
+                    except Exception as exc:
+                        # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                        logger.warning(
+                            f"[LoopPolicy] should_continue 调用异常（重复循环门控），回退 CONTINUE: {exc!r}"
+                        )
+                        _lp_decision = LoopDecision.CONTINUE
                     if _lp_decision is LoopDecision.STOP:
                         logger.warning("[LoopPolicy] 策略要求终止重复工具循环")
+                        # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
                         self._emit_with_callback(
-                            "finished_with_content", self.finished_with_content, self.full_response or ""
+                            "finished_with_messages", self.finished_with_messages, current_session_messages
+                        )
+                        final_response = self.full_response
+                        self._clear_pending_response_state()
+                        self._emit_with_callback(
+                            "finished_with_content", self.finished_with_content, final_response
                         )
                         return
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
@@ -1810,9 +1833,35 @@ class OpenAIChatWorker(QThread):
                             # LoopPolicy 门控：策略拒绝续命则直接走完成路径（默认策略恒 CONTINUE → 零行为变化）
                             from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
-                            _lp_decision = self._loop_policy().should_continue(
-                                LoopState(round_count=self._loop_round_count, stop_hook_injected=True)
-                            )
+                            try:
+                                _lp_decision = self._loop_policy().should_continue(
+                                    LoopState(round_count=self._loop_round_count, stop_hook_injected=True)
+                                )
+                            except Exception as exc:
+                                # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
+                                logger.warning(
+                                    f"[LoopPolicy] should_continue 调用异常（Stop hook 门控），回退 CONTINUE: {exc!r}"
+                                )
+                                _lp_decision = LoopDecision.CONTINUE
+                            if _lp_decision is LoopDecision.STOP:
+                                # 策略拒绝续命 → 直接走完成路径（默认策略恒 CONTINUE → 不进入）
+                                # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
+                                logger.warning(
+                                    "[LoopPolicy] 策略拒绝 Stop hook 续命，走完成路径"
+                                )
+                                self._emit_with_callback(
+                                    "finished_with_messages",
+                                    self.finished_with_messages,
+                                    current_session_messages,
+                                )
+                                final_response = self.full_response
+                                self._clear_pending_response_state()
+                                self._emit_with_callback(
+                                    "finished_with_content",
+                                    self.finished_with_content,
+                                    final_response,
+                                )
+                                return
                             if _lp_decision is LoopDecision.CONTINUE:
                                 # 1. 翻转 _stop_hook_active：下一轮 Stop 时直接跳过 hook 执行
                                 self._stop_hook_active = True
@@ -2691,9 +2740,18 @@ class OpenAIChatWorker(QThread):
         return self._loop_policy_obj
 
     def _check_loop_round_limit(self) -> bool:
-        """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化"""
+        """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化。
+
+        异常安全：策略 max_rounds 拖异常时回退 None（不限），与 _adapter_flags 防御风格一致。
+        """
         self._loop_round_count = getattr(self, "_loop_round_count", 0) + 1
-        max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
+        try:
+            max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
+        except Exception as exc:
+            logger.warning(
+                f"[LoopPolicy] max_rounds 调用异常，回退默认（不限）: {exc!r}"
+            )
+            max_rounds = None
         if max_rounds is not None and self._loop_round_count > max_rounds:
             logger.warning(
                 f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话"

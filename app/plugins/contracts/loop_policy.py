@@ -7,6 +7,7 @@
 - repetitive_loop_detected → 静默清理后继续（_detect_repetitive_tool_loop 路径）
 - 全否 → 自然完成退出
 max_rounds 返回 None 表示不限（与现状一致），插件可返回小值实现极简模式。
+max_rounds 计的是 while 迭代次数（含流式 pending/续命 continue），N 实际允许 N 次 API 调用。
 """
 from __future__ import annotations
 
