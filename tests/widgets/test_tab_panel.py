@@ -348,6 +348,7 @@ class TestUIPluginRowPositionMenu:
         fake_pm.get_plugin.side_effect = lambda name: sys_plugin if name == "sys_plugin" else custom_plugin
         fake_registry = MagicMock()
         fake_registry.get_floating_cards.return_value = cards
+        fake_registry.get_sidebar_items.return_value = []  # Phase D：独立侧边栏项为空
 
         cm = MagicMock()
         cm.is_card_visible.return_value = True
@@ -479,10 +480,10 @@ class TestRefreshUIPluginsPoisonIsolation:
 
         real_init = UIPluginRow.__init__
 
-        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id=""):
+        def poison_init(self, title, icon=None, parent=None, plugin_name="", card_id="", enable_position_menu=True):
             if card_id == "poison-card":
                 raise RuntimeError("poison row construction")
-            real_init(self, title, icon, parent, plugin_name, card_id)
+            real_init(self, title, icon, parent, plugin_name, card_id, enable_position_menu)
 
         with (
             patch("app.widgets.tab_panel.UIPluginRow.__init__", poison_init),

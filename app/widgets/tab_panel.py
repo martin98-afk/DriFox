@@ -733,11 +733,12 @@ class UIPluginRow(QFrame):
     clicked = pyqtSignal()
     positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
 
-    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = "", card_id: str = ""):
+    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = "", card_id: str = "", enable_position_menu: bool = True):
         super().__init__(parent)
         self._title = title  # 存储标题，图标 tooltip 使用（侧边栏收起时只剩图标）
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
         self._card_id = card_id  # 存储卡片 ID，右键菜单定位用
+        self._enable_position_menu = enable_position_menu  # 独立 sidebar 项无卡片方位概念，禁用右键菜单
         self._icon_label = QLabel(self)
         self._icon_label.setFixedSize(scale_icon_size(16), scale_icon_size(16))
         # 图标 tooltip：收起态只有图标时悬浮可见插件名（与 TabItem 一致）
@@ -754,8 +755,9 @@ class UIPluginRow(QFrame):
         self.setObjectName("uiPluginRow")
         self.set_icon(icon)
         # 右键菜单：选择卡片插入方位（仅内存生效，不持久化）
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_position_menu)
+        if enable_position_menu:
+            self.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._show_position_menu)
         # 初始应用字体和颜色，避免在 refresh_style() 被调用前显示默认 Qt 字体
         from app.utils.utils import get_unified_font
 
@@ -867,7 +869,7 @@ class TabPanel(QWidget):
         #    _team_groups 缓存 team_id → QFrame 容器（避免反复创建）
         self._item_team: Dict[int, str] = {}
         self._team_groups: Dict[str, "QFrame"] = {}
-        self._plugin_infos: list[tuple[str, str, str]] = []
+        self._plugin_infos: list[tuple[str, str, str, str]] = []  # (kind, key, title, plugin_name)
         self._system_plugin_layout: Optional[QVBoxLayout] = None
         self._system_plugin_buttons: list[UIPluginRow] = []
         self._custom_plugin_layout: Optional[QVBoxLayout] = None
@@ -1145,37 +1147,56 @@ class TabPanel(QWidget):
     def refresh_ui_plugins(self):
         """刷新 Tab 模式顶部的 UI 插件按钮列表
 
+        数据源（Phase D）：
+        1. 独立侧边栏项（UIPluginRegistry.get_sidebar_items()）——与 floating card 解耦
+        2. 存量 floating card（container="left"）——兼容派生；若插件已注册
+           独立 sidebar 项，则以 sidebar 为准（避免同一插件重复渲染两行）
+
         系统 UI 插件（plugins/ 目录下自带）→ 常驻显示，无滚动。
         自定义 UI 插件（~/.drifox/plugins/ 用户安装）→ 默认折叠，展开后可滚轮滚动。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            cards = UIPluginRegistry.get_instance().get_floating_cards()
+            registry = UIPluginRegistry.get_instance()
+            sidebar_items = registry.get_sidebar_items()
+            cards = registry.get_floating_cards()
         except Exception:
-            cards = {}
+            sidebar_items, cards = [], {}
 
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
 
-        # 按 plugin_type 分组
-        system_infos: list[tuple[str, str, str]] = []
-        custom_infos: list[tuple[str, str, str]] = []
+        # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
+        sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
+
+        # 统一条目：(kind, key, title, plugin_name)；kind ∈ {"sidebar", "card"}
+        system_infos: list[tuple[str, str, str, str]] = []
+        custom_infos: list[tuple[str, str, str, str]] = []
+        for info in sidebar_items:
+            entry = ("sidebar", info.item_id, (info.label or "").strip() or info.item_id, info.plugin_name)
+            if info.group == "system":
+                system_infos.append(entry)
+            else:
+                custom_infos.append(entry)
         for card_id, info in cards.items():
+            # 兼容映射：插件已注册独立 sidebar 项 → 跳过其卡片派生（sidebar 优先）
+            if info.plugin_name in sidebar_plugin_names:
+                continue
             try:
                 title = (info.title or "").strip() or card_id
                 plugin_info = pm.get_plugin(info.plugin_name)
                 is_system = plugin_info.is_system if plugin_info else False
-                entry = (card_id, title, info.plugin_name)
+                entry = ("card", card_id, title, info.plugin_name)
                 if is_system:
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)
             except Exception:
                 continue
-        system_infos.sort(key=lambda item: item[1].lower())
-        custom_infos.sort(key=lambda item: item[1].lower())
+        system_infos.sort(key=lambda item: item[2].lower())
+        custom_infos.sort(key=lambda item: item[2].lower())
         self._plugin_infos = system_infos + custom_infos
 
         # ── 系统插件区 ──
@@ -1185,7 +1206,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
-        for card_id, title, plugin_name in system_infos:
+        for kind, key, title, plugin_name in system_infos:
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
             # UI 插件按钮全部不显示）。
@@ -1195,13 +1216,18 @@ class TabPanel(QWidget):
                     self._get_plugin_icon(pm, plugin_name),
                     self._system_plugin_section,
                     plugin_name=plugin_name,
-                    card_id=card_id,
+                    card_id=key,
+                    enable_position_menu=(kind == "card"),
                 )
             except Exception as e:
                 logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
                 continue
-            row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
-            row.positionRequested.connect(self._on_ui_plugin_position_requested)
+            if kind == "sidebar":
+                info = next((s for s in sidebar_items if s.item_id == key), None)
+                row.clicked.connect(lambda cid=key, sid=info: self._on_sidebar_item_clicked(sid))
+            else:
+                row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
+                row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._system_plugin_layout.addWidget(row)
             self._system_plugin_buttons.append(row)
         has_system = bool(system_infos)
@@ -1214,7 +1240,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._custom_plugin_buttons = []
-        for card_id, title, plugin_name in custom_infos:
+        for kind, key, title, plugin_name in custom_infos:
             # ★ T3 修复：单行构造异常不中断整体刷新（同系统插件区）。
             try:
                 row = UIPluginRow(
@@ -1222,13 +1248,18 @@ class TabPanel(QWidget):
                     self._get_plugin_icon(pm, plugin_name),
                     self._custom_plugin_section,
                     plugin_name=plugin_name,
-                    card_id=card_id,
+                    card_id=key,
+                    enable_position_menu=(kind == "card"),
                 )
             except Exception as e:
                 logger.warning("[refresh_ui_plugins] 跳过异常插件 %s: %s", plugin_name, e)
                 continue
-            row.clicked.connect(lambda cid=card_id: self._on_ui_plugin_clicked(cid))
-            row.positionRequested.connect(self._on_ui_plugin_position_requested)
+            if kind == "sidebar":
+                info = next((s for s in sidebar_items if s.item_id == key), None)
+                row.clicked.connect(lambda cid=key, sid=info: self._on_sidebar_item_clicked(sid))
+            else:
+                row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
+                row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._custom_plugin_layout.addWidget(row)
             self._custom_plugin_buttons.append(row)
         has_custom = bool(custom_infos)
@@ -1243,6 +1274,29 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(has_system or has_custom)
 
         self._refresh_plugin_style()
+
+    def _on_sidebar_item_clicked(self, info):
+        """独立侧边栏项点击：组上下文（当前窗口 + item_id）派发 info.on_click"""
+        parent = self.parent()
+        while parent is not None and not hasattr(parent, "get_current_window"):
+            parent = parent.parent()
+        if parent is None or info.on_click is None:
+            logger.warning(f"[TabPanel] 侧边栏插件项 {info.item_id} 点击：无宿主窗口或未定义回调")
+            return
+        current_window = parent.get_current_window()
+        if current_window is None:
+            logger.warning(f"[TabPanel] 侧边栏插件项 {info.item_id} 点击：当前窗口为空")
+            return
+        try:
+            context = {
+                "item_id": info.item_id,
+                "plugin_name": info.plugin_name,
+                "window_id": getattr(current_window, "_window_id", None),
+                "main_widget": current_window,
+            }
+            info.on_click(context)
+        except Exception as e:
+            logger.error(f"[TabPanel] 侧边栏插件项 {info.item_id} 回调失败：{e}")
 
     def _on_branch_clicked(self):
         """分支按钮点击：从当前活动 Tab 分支"""
