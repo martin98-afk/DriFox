@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
-"""OpenAI 标准协议适配器 — 系统插件实现（id="openai"，兜底优先级 1）。
+"""协议判定器共享模块（非插件，loader 跳过 _ 前缀文件）。
 
-行为零变化原则：判定逻辑从 chat_worker 旧 _requires_reasoning_content /
-_is_gemini_model / _use_responses_api 逐字搬运，仅做 self.llm_config → llm_config
-的机械变换。判定器拆为模块级纯函数（detect_*），供协议家族适配器复用，
-protocol_flags 组合之。
+判定逻辑从旧单适配器 plugins/system/model_adapters/openai.py 逐字搬运，
+供 openai-family / gemini-family / deepseek-family 三家族复用（行为零变化）。
 """
 
 from __future__ import annotations
@@ -12,7 +10,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from app.core.provider_profile import detect_provider_family
-from app.plugins.contracts.model_adapter import ProtocolFlags
 
 
 def detect_requires_reasoning(llm_config: Dict[str, Any]) -> bool:
@@ -61,28 +58,3 @@ def detect_use_responses(llm_config: Dict[str, Any]) -> bool:
         return model.startswith("gpt-5")
     except Exception:
         return False
-
-
-class OpenAIAdapter:
-    """OpenAI 标准协议适配器（含 gemini/reasoning/responses 分支检测，兜底优先级 1）"""
-
-    id = "openai"
-
-    def matches(self, llm_config: Dict[str, Any]) -> int:
-        return 1  # 兜底：任何 llm_config 都可走本适配器
-
-    def protocol_flags(self, llm_config: Dict[str, Any]) -> ProtocolFlags:
-        return ProtocolFlags(
-            is_gemini=detect_is_gemini(llm_config),
-            requires_reasoning_content=detect_requires_reasoning(llm_config),
-            use_responses_api=detect_use_responses(llm_config),
-        )
-
-
-def register(registry):
-    """系统插件注册入口 — 被 runtime_component_loader.scan_roots 调用。
-
-    source 由 loader 的 _RegistryProxy 强制为 "plugin:system"，
-    本函数不显式传入，保持与 tools/providers 插件约定一致。
-    """
-    registry.register(OpenAIAdapter())

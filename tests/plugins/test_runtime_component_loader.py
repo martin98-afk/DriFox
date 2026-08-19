@@ -49,7 +49,7 @@ def test_scan_and_register_loop_policy_plugin(tmp_path, plugin_enabled):
 
 
 def test_warmup_registers_system_builtin_first():
-    """warmup 后全局单例含系统插件实现（openai/default/sqlite 不丢）"""
+    """warmup 后全局单例含系统插件实现（三家族/default/sqlite 不丢）"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
     warmup_runtime_components()
@@ -57,7 +57,8 @@ def test_warmup_registers_system_builtin_first():
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
     from app.plugins.registries.storage_registry import StorageRegistry
 
-    assert "openai" in ModelAdapterRegistry.get_instance().adapters()
+    adapters = ModelAdapterRegistry.get_instance().adapters()
+    assert {"openai-family", "gemini-family", "deepseek-family"} <= set(adapters)
     assert "default" in LoopPolicyRegistry.get_instance().policies()
     assert StorageRegistry.get_instance().get_active().id in ("sqlite",)
 

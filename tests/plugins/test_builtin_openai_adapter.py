@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
-"""OpenAIAdapter 与 chat_worker 旧协议检测方法行为逐点等价。
+"""协议家族适配器与 chat_worker 旧协议检测方法行为逐点等价。
 
-适配器实现已从 builtin_runtime 迁入系统插件 plugins/system/model_adapters/openai.py。
+实现已从旧单适配器迁入系统插件三家族 plugins/system/model_adapters/：
+openai-family（兜底）/ gemini-family / deepseek-family。
 """
 
 import pytest
 
-from plugins.system.model_adapters.openai import OpenAIAdapter
 from app.plugins.contracts.model_adapter import ProtocolFlags
-from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _warmup_runtime():
-    """注册表去兜底后，等价性基准需真实注册系统插件 openai（替代旧 ensure_builtin_adapters）"""
+    """注册表去兜底后，等价性基准需真实注册系统插件（替代旧的 ensure_builtin_adapters）"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
     warmup_runtime_components()
@@ -45,16 +44,27 @@ _CASES = [
 
 @pytest.mark.parametrize("llm_config", _CASES)
 def test_flags_equivalent_to_legacy(llm_config):
-    adapter = OpenAIAdapter()
+    """resolve 选中的家族返回的 flags == 旧 worker 方法（逐点等价）"""
+    from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
+
+    adapter = ModelAdapterRegistry.get_instance().resolve(llm_config)
+    assert adapter is not None, f"无家族命中: {llm_config}"
     assert adapter.protocol_flags(llm_config) == _worker_flags(llm_config), f"不等价: {llm_config}"
 
 
-def test_matches_always_positive():
-    assert OpenAIAdapter().matches({}) >= 1
+def test_family_adapters_always_positive():
+    """三家族 matches 恒正/条件正：openai-family 恒 1，其余按命中条件"""
+    from plugins.system.model_adapters.deepseek_family import DeepSeekFamilyAdapter
+    from plugins.system.model_adapters.gemini_family import GeminiFamilyAdapter
+    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+
+    assert OpenAIFamilyAdapter().matches({}) >= 1
+    assert GeminiFamilyAdapter().matches({"模型名称": "gemini-2.5-pro"}) >= 1
+    assert DeepSeekFamilyAdapter().matches({"模型名称": "deepseek-chat", "思考模式": True}) >= 1
 
 
-def test_system_plugin_registers_openai(monkeypatch):
-    """warmup_runtime_components() 后注册表含系统插件 openai（替代旧的 ensure_idempotent 断言）"""
+def test_system_plugin_registers_families(monkeypatch):
+    """warmup_runtime_components() 后注册表含三家族（替代旧的 ensure_idempotent 断言）"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
@@ -62,5 +72,7 @@ def test_system_plugin_registers_openai(monkeypatch):
     reg = ModelAdapterRegistry()
     monkeypatch.setattr(ModelAdapterRegistry, "get_instance", staticmethod(lambda: reg))
     warmup_runtime_components()
-    # 注册表含系统插件 openai（不再调 ensure_builtin_adapters）
-    assert "openai" in reg.adapters()
+    # 注册表含三家族（不再有旧单适配器 openai）
+    adapters = reg.adapters()
+    assert {"openai-family", "gemini-family", "deepseek-family"} <= set(adapters)
+    assert "openai" not in adapters
