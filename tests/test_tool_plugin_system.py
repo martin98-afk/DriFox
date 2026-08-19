@@ -664,8 +664,15 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 30 个系统插件工具 + codegraph_explore（社区插件 codegraph-tools 可选）
-        assert len(toggles) == 30 or (len(toggles) == 31 and "codegraph_explore" in toggles)
+        # 系统插件工具基线 30；workbuddy 插件新增 wb_plan/present_files/wb_read_me/wb_tool_search
+        # 共 4 个工具 → 基线 34。codegraph_explore 来自社区插件 codegraph-tools，
+        # 未安装时不注册。用动态下界兼容未来新增：>= 30；精确 34 仅在无 codegraph 时成立。
+        assert len(toggles) >= 30
+        assert (
+            len(toggles) == 34
+            or (len(toggles) == 35 and "codegraph_explore" in toggles)
+            or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
+        ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
