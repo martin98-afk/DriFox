@@ -1,6 +1,30 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **服务商插件化（providers 组件）** (`app/plugins/` + `plugins/system/providers/`): 「万物为插件」——服务商支持全面插件化。新增 `app/plugins/registries/provider_registry.py`（ProviderDef + ProviderRegistry 单例，聚合 models/icon/default_config/quota_keys/models_dev_map/family_caps/余额/套餐用量查询）+ `app/plugins/loaders/provider_loader.py`（扫描 `plugins/*/providers/*.py` + 热重载 watcher + user 覆盖 system + 插件启用过滤 + 插件图标目录注入）。PluginManager 组件检测新增 providers 组件
+- **14 家内置服务商迁移为系统插件** (`plugins/system/providers/`): DeepSeek/SiliconFlow（余额查询 fetcher）、MiniMax/智谱AI/OpenAI/火山方舟/OpenCode Zen/OpenCode Go（套餐用量 fetcher 逻辑迁入插件），Anthropic/Gemini/Groq/Ollama/百度千帆/阿里云 纯数据声明；用量查询额外字段（server_id/cookie/workspace_id/csrf_token/x_web_id）随插件声明并在编辑卡片动态渲染
+- **服务商图标插件化** (`app/utils/provider_icons.py`): 新增 `get_provider_icon`——插件自带图标目录（`providers/icons/` 深色 + `icons_light/` 浅色，主题感知）优先，缺省回退 qrc；与 tools 图标机制对称
+- **服务商注册表懒加载预热** (`app/plugins/registries/provider_registry.py`): `ensure_loaded()` 幂等预热，兼容启动早期 Settings → opencode 免费模型注入链路
+
+### ♻️ 代码重构 (Refactoring)
+
+- **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): 插件相关代码从 `app/core/` 与 `app/tools/` 迁入 `app/plugins/managers/`（PluginManager）、`registries/`（ProviderRegistry/UIPluginRegistry/coding_plan_fetcher）、`loaders/`（plugin_tool_loader/provider_loader），按职责分子目录
+- **服务商硬编码全部移除** (`app/constants.py` 等): 删除 `PROVIDER_MODELS`/`FREE_PROVIDERS`/`PROVIDER_ICONS`/`QUOTA_EXCLUDE_KEYS` 常量（保留函数委托）；`MODELS_DEV_PROVIDER_MAP`/`PROVIDER_CAPABILITIES`/`BALANCE_APIS`/`coding_plan_fetcher` 注册表全部迁移至 ProviderRegistry 聚合（后两者变薄壳委托）；消费方（usage_service/balance_display/model_capabilities/models_dev_sync/provider_profile/workers/UI 卡片/main_widget/config/cli）全部改读注册表
+- **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过
+
+### 📚 文档 (Documentation)
+
+- **服务商插件开发指南** (`plugins/system/providers/README.md`): ProviderDef 字段、查询函数签名、额外配置字段机制、旧硬编码迁移对照表
+- **系统插件声明 providers 组件** (`plugins/system/.drifox-plugin/plugin.json`)
+
+### 🔧 其他 (Chores & Build)
+
+- **测试**: 新增 `tests/core/test_provider_registry.py`（8 用例：注册/聚合/余额/用量/系统 14 家加载）；更新 `test_models_dev_sync.py`/`test_default_opencode_provider.py`/`test_provider_icon_widget.py`
+
 ## [v0.5.2] - 2026-08-17
 
 自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
