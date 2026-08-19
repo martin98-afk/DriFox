@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: "DriFox 插件全生命周期开发技能。涵盖全部 10 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。"
+description: "DriFox 插件全生命周期开发技能。涵盖全部 11 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。"
 ---
 
 # plugin-creator — DriFox 插件開發技能
@@ -102,13 +102,16 @@ your-plugin/
 │   ├── deepseek.py          ← 每個文件暴露 register(registry)
 │   └── icons/               ← 服務商自帶圖標（深色）+ icons_light/（淺色）
 │
+├── team_templates/          ← 團隊模板組件（預設 @角色組合，/team 一鍵載入）
+│   └── my-team.yaml         ← 每個文件一個模板（schema_version/template_name/agents）
+│
 ├── .mcp.json                ← MCP 伺服器配置（插件根目錄）
 ├── .lsp.json                ← LSP 語言伺服器配置（插件根目錄）
 ├── README.md                ← 插件說明
 └── __init__.py              ← Python 包標記（可選）
 ```
 
-### 2.2 10 類組件速查
+### 2.2 11 類組件速查
 
 | # | 組件 | manifest flag | 必備文件 | 觸發方式 | 適用場景 |
 |---|------|--------------|---------|---------|---------|
@@ -122,6 +125,7 @@ your-plugin/
 | 8 | **UI** | `ui: true` | `ui/__init__.py` + widgets | DriFox 啟動 + 命令 | 浮動卡片/內容渲染器/消息工廠 |
 | 9 | **Tools** | `tools: true` | `tools/*.py`（register 入口） | AI 工具調用 | 擴展 AI 可用的工具（schema/impl/圖標/權限元數據） |
 | 10 | **Providers** | `providers: true` | `providers/*.py`（register 入口） | 選擇模型/API 服務商 | 擴展可選 AI 服務商（icon/url/模型/餘額/用量/額外配置由插件聲明） |
+| 11 | **Team Templates** | `team_templates: true`（物理自動檢測，可選） | `team_templates/*.yaml` | `/team --load=<name>` | 預設 @角色組合，一鍵拉起多智能體團隊 |
 
 ### 2.3 官方資源
 
@@ -155,6 +159,7 @@ your-plugin/
 | "做個 UI 插件""浮動卡片" | **UI** | → **調用 `ui-plugin-creator` 技能** |
 | "加個工具""做個 AI 工具" | **Tools** | §5.9 或 `references/components.md §Tools` |
 | "加個服務商""接新模型廠商" | **Providers** | §5.10 或 `references/components.md §Providers` |
+| "做團隊模板""加預設@角色組合" | **TeamTemplates** | §5.11 或 `references/components.md §Team Templates` |
 | "改 plugin.json" | **Manifest** | `references/manifest.md` |
 | "驗證""跑測試" | **驗證** | §6 或 `references/testing.md` |
 | "發布到市場""提 PR" | **發布** | §7 或 `references/publishing.md` |
@@ -173,7 +178,7 @@ your-plugin/
 
 所有插件建立在 `~/.drifox/plugins/` 下，DriFox 的 watchfiles 會自動熱加載。
 
-最快的起點是下載 `example-plugin`，它展示了全部 10 類組件的標準寫法：
+最快的起點是下載 `example-plugin`，它展示了各類組件的標準寫法（team_templates 為新增組件，見 §5.11）：
 
 ```
 ① 從官方市場 GitHub 倉庫獲取 example-plugin：
@@ -582,6 +587,90 @@ def register(registry):
 
 ---
 
+### 5.11 Team Templates（團隊模板組件）
+
+> 團隊模板讓插件預置一組 @角色組合（如「統籌 + 構建 + 審查 + 計劃」），
+> 用戶透過 `/team --load=<name>` 一鍵拉起多智能體團隊。
+> 模板文件由插件聲明，主程序不再硬編碼預設團隊。
+
+#### 文件位置
+
+```
+<plugin>/
+├── team_templates/
+│   └── my-team.yaml        # 一個文件即一個模板（可多個）
+└── .drifox-plugin/
+    └── plugin.json         # components 可聲明 "team_templates": true（物理自動檢測，可選）
+```
+
+#### 最小模板
+
+```yaml
+# team_templates/my-team.yaml
+# 用法：/team --load=my-team
+schema_version: 1
+template_name: my-team
+description: 一句話描述這個團隊組合
+agents:
+  - agent_name: leader
+    description: 團隊統籌 Leader，負責組隊與任務分發
+  - agent_name: build
+    description: 構建智能體，負責讀寫代碼與驗證
+```
+
+#### 字段說明
+
+| 字段 | 必填 | 說明 |
+|------|------|------|
+| `schema_version` | ✅ | 當前固定為 `1`（非 1 會拋 TemplateError） |
+| `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
+| `description` | 選填 | 一句話描述（列出時展示） |
+| `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
+| `agents[].agent_name` | ✅ | 引用 `plugins/system/agents/` 下的角色名（如 build、review） |
+| `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
+
+#### 關鍵約束
+
+- 文件名規範：首字符為字母/數字（含中文），後續允許 `\w` 與 `-`，長度 1-64；
+  禁止 `.`/`/`/反斜槓/`..`（防路徑穿越）
+- `agents` 至少 1 個；同一模板內 `agent_name` 必須唯一
+- `agent_name` 必須引用**已存在**的 @角色（加載時語義校驗，缺失報 TemplateError）
+- 探測謂詞：目錄 `team_templates/` 存在且含 `*.yaml` 即被識別為該插件的組件
+- 建議在 manifest `components` 顯式聲明 `"team_templates": true`（與 tools/providers 一致；
+  system 內置插件基於物理目錄自動識別，不強制）
+
+#### 來源優先級與覆蓋
+
+模板按以下優先級載入（同名時高優先級覆蓋低優先級）：
+
+1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
+2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
+3. **system** — `plugins/system/team_templates/`（唯讀，內置 default-team）
+
+#### 使用方式
+
+| 命令 | 說明 |
+|------|------|
+| `/team --load=<name>` | 載入指定模板，一鍵拉起多智能體團隊 |
+| `/team` | 列出所有可用模板（標示 用戶/插件/系統 來源） |
+| `/team --save=<name>` | 將當前團隊另存為用戶模板 |
+| `/team --delete=<name>` | 刪除用戶模板（僅 user-custom 可刪） |
+
+#### 熱插拔
+
+- `team_templates/*.yaml` 新增/修改 → 懶加載、無緩存，下次 `/team` 列出或
+  `--load` 即生效（builtin_reloaders 對 team_templates 為 lazy，記日誌即成功）
+- 與 tools/providers 同構：kernel 分派時 skip 刷新鏈，僅標記組件已變更
+
+#### 參考
+
+- 模板結構與校驗：`app/core/team/template_schema.py`
+- 文件存儲層：`app/core/team/template_manager.py`
+- 系統模板案例：`plugins/system/team_templates/default-team.yaml`
+- 測試：`python -m pytest tests/core/test_team_template.py -v`
+
+---
+
 ## 6. 測試與驗證
 
 ### 6.1 本地快速測試
@@ -623,6 +712,7 @@ rm -rf /tmp/dfp
 - [ ] 每個 `commands/*.md` 有完整 frontmatter（description + type）
 - [ ] 每個 `skills/*/SKILL.md` 有 frontmatter（name + description）
 - [ ] 每個 `providers/*.py` 暴露 `register(registry)` 且 `ProviderDef.name` 唯一
+- [ ] `team_templates/*.yaml` 含 schema_version/template_name/非空 agents，且 agent_name 引用已存在 @角色
 - [ ] hooks 的 Python 文件能 `python -m py_compile` 通過
 - [ ] 已跑過 `validate_plugins.py` 全部 OK
 - [ ] 已跑過 `generate_marketplace.py` 更新 marketplace.json
@@ -736,6 +826,11 @@ UI 插件開發請調用 `ui-plugin-creator` 技能。
 ### 🚫 version 忘記更新
 每次修改後記得更新 `plugin.json` 的 `version` 字段。
 
+### 🚫 團隊模板 YAML 不合法
+`team_templates/*.yaml` 必須含 `schema_version`(固定 1)、`template_name`、非空 `agents`；
+`agents[].agent_name` 必須引用已存在的 @角色，否則 `/team --load` 報 TemplateError。
+文件名禁止 `.`/`/`/反斜槓/`..`（防路徑穿越）。
+
 ---
 
 ## 9. references/ 索引
@@ -744,7 +839,7 @@ UI 插件開發請調用 `ui-plugin-creator` 技能。
 
 | 文件 | 何時讀 | 內容 |
 |------|-------|------|
-| `references/components.md` | 開發各類組件時 | 10 類組件的詳細開發指南 + 代碼模板 |
+| `references/components.md` | 開發各類組件時 | 11 類組件的詳細開發指南 + 代碼模板 |
 | `references/manifest.md` | 新建/修改 plugin.json 時 | manifest 字段定義、校驗規則、完整示例 |
 | `references/workflow.md` | 需要完整開發流程時 | 從需求→scaffold→開發→測試→發布的完整指引 |
 | `references/testing.md` | 驗證/除錯時 | validate_plugins.py 用法、熱更新測試、除錯技巧 |

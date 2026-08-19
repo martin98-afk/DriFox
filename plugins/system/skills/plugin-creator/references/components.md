@@ -1,5 +1,5 @@
 ---
-description: 10 類組件的詳細開發指南與代碼模板
+description: 11 類組件的詳細開發指南與代碼模板
 ---
 
 # 組件開發詳細指南
@@ -694,3 +694,90 @@ None                                    # 無 API key 等（不請求）
 - 系統服務商真實案例：\`plugins/system/providers/*.py\`
 - 註冊表實現：\`app/plugins/registries/provider_registry.py\`
 - 測試：\`python -m pytest tests/core/test_provider_registry.py -v\`
+
+---
+
+## Team Templates（團隊模板組件）
+
+> 團隊模板讓插件預置一組 @角色組合（如「統籌 + 構建 + 審查 + 計劃」），
+> 用戶透過 `/team --load=<name>` 一鍵拉起多智能體團隊。
+> 模板文件由插件聲明，主程序不再硬編碼預設團隊。
+
+### 文件位置
+
+```
+<plugin>/
+├── team_templates/
+│   └── my-team.yaml        # 一個文件即一個模板（可多個）
+└── .drifox-plugin/
+    └── plugin.json         # components 可聲明 "team_templates": true（物理自動檢測，可選）
+```
+
+### 最小模板
+
+```yaml
+# team_templates/my-team.yaml
+# 用法：/team --load=my-team
+schema_version: 1
+template_name: my-team
+description: 一句話描述這個團隊組合
+agents:
+  - agent_name: leader
+    description: 團隊統籌 Leader，負責組隊與任務分發
+  - agent_name: build
+    description: 構建智能體，負責讀寫代碼與驗證
+```
+
+### 字段說明
+
+| 字段 | 必填 | 說明 |
+|------|------|------|
+| `schema_version` | ✅ | 當前固定為 `1`（非 1 會拋 TemplateError） |
+| `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
+| `description` | 選填 | 一句話描述（列出時展示） |
+| `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
+| `agents[].agent_name` | ✅ | 引用 `plugins/system/agents/` 下的角色名（如 build、review） |
+| `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
+
+### 關鍵約束
+
+- **文件名規範**：首字符為字母/數字（含中文），後續允許 `\w` 與 `-`，長度 1-64；
+  禁止 `.`/`/`/反斜槓/`..`（防路徑穿越，避免與擴展名衝突）
+- `agents` 至少 1 個；同一模板內 `agent_name` 必須唯一
+- `agent_name` 必須引用**已存在**的 @角色（加載時語義校驗，缺失報 TemplateError）
+- **探測謂詞**：目錄 `team_templates/` 存在且含 `*.yaml` 即被識別為該插件的組件
+  （`app/plugins/managers/plugin_manager.py` 的 `_COMPONENT_PROBES` 定義）
+- 建議在 manifest `components` 顯式聲明 `"team_templates": true`（與 tools/providers 一致；
+  system 內置插件基於物理目錄自動識別，不強制）
+
+### 來源優先級與覆蓋
+
+模板按以下優先級載入（同名時高優先級覆蓋低優先級）：
+
+1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
+2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
+3. **system** — `plugins/system/team_templates/`（唯讀，內置 `default-team`）
+
+> 覆蓋語義與 tools/providers 同構：user 插件同名模板優先於 system 內置。
+
+### 使用方式
+
+| 命令 | 說明 |
+|------|------|
+| `/team --load=<name>` | 載入指定模板，一鍵拉起多智能體團隊 |
+| `/team` | 列出所有可用模板（標示 用戶/插件/系統 來源） |
+| `/team --save=<name>` | 將當前團隊另存為用戶模板 |
+| `/team --delete=<name>` | 刪除用戶模板（僅 user-custom 可刪） |
+
+### 熱插拔
+
+- `team_templates/*.yaml` 新增/修改 → 懶加載、無緩存，下次 `/team` 列出或
+  `--load` 即生效（`builtin_reloaders._reload_team_templates` 為 lazy，記日誌即成功）
+- 與 tools/providers 同構：kernel 分派時 skip 刷新鏈，僅標記組件已變更
+
+### 參考
+
+- 模板結構與校驗：`app/core/team/template_schema.py`
+- 文件存儲層（來源解析/優先級）：`app/core/team/template_manager.py`
+- 系統模板案例：`plugins/system/team_templates/default-team.yaml`
+- 測試：`python -m pytest tests/core/test_team_template.py -v`
