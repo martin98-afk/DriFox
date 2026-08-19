@@ -101,7 +101,7 @@
         {
             "name": "shortcut-manager",
             "description": "管理系统命令的快捷键，支持自定义快捷键覆盖系统配置",
-            "version": "0.1.0",
+            "version": "0.1.1",
             "author": "DriFox Contributors",
             "license": "MIT",
             "categories": [
@@ -149,7 +149,10 @@
                 "mcp": true,
                 "lsp": true,
                 "tools": true,
-                "providers": true
+                "providers": true,
+                "loop_policies": true,
+                "model_adapters": true,
+                "storages": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
