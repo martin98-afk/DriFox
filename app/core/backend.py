@@ -193,7 +193,7 @@ def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """
     try:
         return object.__getattribute__(backend, "_agent_manager")
-    except (AttributeError, RuntimeError):
+    except AttributeError, RuntimeError:
         return None
 
 
@@ -1906,8 +1906,19 @@ class ChatBackend(QObject):
         }
 
         # 表分派：原 8 分支 if 已在 builtin_reloaders（commit 0e141cd9）— 此处仅查注册表
-        result_keys = ("agents", "commands", "hooks", "themes", "skills",
-                       "mcp", "lsp", "ui", "tools", "providers", "team_templates")
+        result_keys = (
+            "agents",
+            "commands",
+            "hooks",
+            "themes",
+            "skills",
+            "mcp",
+            "lsp",
+            "ui",
+            "tools",
+            "providers",
+            "team_templates",
+        )
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -1948,10 +1959,12 @@ class ChatBackend(QObject):
                 # 表分派：遍历该插件原有组件 → registry.reload(plugin=None) 走清理语义
                 # agents→cleanup_plugin_artifacts、hooks-only→unregister、commands→reload_all、
                 # themes→reload、skills→invalidate、ui→unload、lsp→remove_only、tools/providers/team_templates 跳过
-                from app.plugins.kernel import KNOWN_COMPONENTS, ReloadContext, get_reloader_registry
+                # 遍历序按 COMPONENT_ORDER（tuple）— KNOWN_COMPONENTS 是 set 序不确定，
+                # 漏遍历会跳过某组件的清理。agents 置首：先于 hooks/commands 处理以保留其联动标记语义。
+                from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
 
                 registry = get_reloader_registry()
-                for comp in KNOWN_COMPONENTS:
+                for comp in COMPONENT_ORDER:
                     if not removed_components.get(comp):
                         continue
                     reloaded = registry.reload(
@@ -1965,7 +1978,12 @@ class ChatBackend(QObject):
                     if comp in result_keys:
                         # agents 返回 int(数量)，其余 True/False — agents 删除归零
                         result[comp] = reloaded if reloaded is not None else False
-                    # agents 联动标记：删除时仍走 plugin_changed 广播 → 窗口侧重建快捷键
+                    # agents 联动标记：与旧 backend elif 语义一致 — agents 命中后置 commands=True 走 plugin_changed 广播
+                    # 重建快捷键（agents-only 插件无 commands 组件时也置，触发 _on_plugin_hot_reload 双保险）。
+                    # hooks 是否置位由下方 _reload_hooks 遍历按 removed_components.get("hooks") 自然决定，
+                    # 对齐旧代码 `result["hooks"] = removed_components.get("hooks", False)`。
+                    # 此处显式置 True 是保守保留旧行为：删除段可能由 watchfiles 单点事件触发而非完整
+                    # 遍历原 components，强制 hooks=True 保证窗口侧 UI 刷新链不漏。
                     if comp == "agents":
                         result["hooks"] = True
                         result["commands"] = True
@@ -1986,9 +2004,7 @@ class ChatBackend(QObject):
             if component:
                 # 统一守卫层：plugin 缺失或无该组件时跳过（对齐原 commands/ui 分支的 has_component 前置）
                 if plugin is not None and not plugin.has_component(component):
-                    logger.debug(
-                        f"[ChatBackend] Plugin '{plugin_name}' has no '{component}' component, skip"
-                    )
+                    logger.debug(f"[ChatBackend] Plugin '{plugin_name}' has no '{component}' component, skip")
                 else:
                     reloaded = registry.reload(
                         ReloadContext(
@@ -2009,9 +2025,7 @@ class ChatBackend(QObject):
                         f"component={component}, outcome={reloaded} → {result}"
                     )
             else:
-                logger.debug(
-                    f"[ChatBackend] Plugin [{plugin_name}] root change, skip component reload"
-                )
+                logger.debug(f"[ChatBackend] Plugin [{plugin_name}] root change, skip component reload")
 
             logger.info(
                 f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
@@ -2065,8 +2079,19 @@ class ChatBackend(QObject):
             logger.error(f"[ChatBackend] 内置 reloader 注册失败: {e}")
             registry = None
 
-        result_keys = ("agents", "commands", "hooks", "themes", "skills",
-                       "mcp", "lsp", "ui", "tools", "providers", "team_templates")
+        result_keys = (
+            "agents",
+            "commands",
+            "hooks",
+            "themes",
+            "skills",
+            "mcp",
+            "lsp",
+            "ui",
+            "tools",
+            "providers",
+            "team_templates",
+        )
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager

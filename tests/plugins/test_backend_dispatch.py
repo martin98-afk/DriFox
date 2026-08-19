@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""backend 表分派测试 — 验证 _reload_single_plugin 走 kernel 注册表而非 8 分支
-"""
+"""backend 表分派测试 — 验证 _reload_single_plugin 走 kernel 注册表而非 8 分支"""
 
 from unittest.mock import MagicMock
 
@@ -147,3 +146,47 @@ def test_agents_dispatch_marks_hooks_and_commands(kernel_env, monkeypatch):
     assert result["agents"] == 3
     assert result["hooks"] is True  # 联动标记
     assert result["commands"] is True  # 联动标记
+
+
+def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
+    """删除段遍历必须按 COMPONENT_ORDER（tuple）— 防止 KNOWN_COMPONENTS set 序不确定漏清理。
+
+    Task 6 Fix Round 2：旧代码用 set 遍历，漏遍历某组件会跳过其清理分支（如 agents 后置 commands 顺序错了，
+    会让 commands reloader 误跑在 cleanup 之后导致状态漂移）。本测试断言删除段遍历序与
+    kernel.COMPONENT_ORDER 一致，且所有声明组件都收到 ctx.plugin is None 的清理调用。
+    """
+    from app.plugins import builtin_reloaders
+    from app.plugins import kernel as kernel_mod
+
+    reg, fake_pm = kernel_env
+    # 关键：禁用 builtin 内置 reloader（避免 agents→commands 等副作用污染 seen 列表）
+    builtin_reloaders._BUILTIN_REGISTERED.discard(id(reg))
+
+    fake_plugin = MagicMock()
+    # 声明全部 11 类组件（含 team_templates 末尾），模拟复杂插件
+    fake_plugin.components = {c: True for c in kernel_mod.COMPONENT_ORDER}
+    fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
+    fake_plugin.path = MagicMock()
+    # 第一次 get_plugin（取 plugin_before）→ fake_plugin；第二次（rescan 后）→ None
+    fake_pm.get_plugin.side_effect = [fake_plugin, None]
+
+    # 用本地 seen 收集所有 reloader 实际触发顺序
+    seen: list[str] = []
+    for comp in kernel_mod.COMPONENT_ORDER:
+        reg.register(comp, lambda ctx, _c=comp: seen.append(_c) or True)
+
+    from app.core.backend import ChatBackend
+
+    backend = ChatBackend.__new__(ChatBackend)
+    backend._watcher_dedup_cache = {}
+    monkeypatch.setattr(
+        "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+        staticmethod(lambda: fake_pm),
+    )
+
+    backend._reload_single_plugin("p", "")  # component 空走删除段
+
+    # 遍历序必须严格等于 COMPONENT_ORDER — 任何 set 序漂移都会让 assert 失败
+    assert seen == list(kernel_mod.COMPONENT_ORDER), f"删除段遍历序应等于 COMPONENT_ORDER，实际 {seen}"
+    # 所有声明组件都被处理
+    assert set(seen) == kernel_mod.KNOWN_COMPONENTS
