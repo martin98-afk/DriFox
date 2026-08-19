@@ -5,6 +5,7 @@ matches(llm_config) 返回匹配优先级：0 = 不匹配；正整数越大越�
 protocol_flags(llm_config) 返回消息序列化与 API 形态的全部协议开关，
 与 message_content.messages_to_api / to_api_message 的 kwargs 一一对应。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

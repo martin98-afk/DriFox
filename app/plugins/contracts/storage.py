@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """会话存储引擎契约 — 会话持久化后端可插拔（Phase A 只交付接口与 SQLite 默认实现，
 消费方迁移在 Phase B）。方法签名与 SessionRepository 对齐。"""
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Protocol, runtime_checkable

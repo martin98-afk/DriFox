@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """ModelAdapterRegistry：注册/解析/覆盖/清理 + 兜底行为"""
+
 import pytest
 
 from app.plugins.contracts.model_adapter import ModelAdapter, ProtocolFlags
@@ -69,10 +70,13 @@ def test_register_overrides_same_id(fresh_registry):
 
 def test_matches_exception_skipped(fresh_registry):
     """matches 拖异常 → 该 adapter 被跳过不拖垮 resolve"""
+
     class _BrokenAdapter:
         id = "broken"
+
         def matches(self, llm_config):
             raise RuntimeError("boom")
+
         def protocol_flags(self, llm_config):
             return ProtocolFlags()
 

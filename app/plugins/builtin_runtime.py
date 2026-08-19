@@ -5,6 +5,7 @@
 仅做 self.llm_config → llm_config 的机械变换。插件目录可注册高优先级
 实现覆盖这些默认值（见 Task 8 加载器）。
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -103,7 +104,7 @@ class DefaultLoopPolicy:
         try:
             v = llm_config.get("最大循环轮数") if llm_config else None
             return int(v) if v else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
 

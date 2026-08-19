@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **运行时三接口插件化（Phase A）** (`app/plugins/` + `app/core/workers/chat_worker.py`): 「万物即插件」运行时层——新增 `contracts/`（ModelAdapter / LoopPolicy / SessionStorageEngine 契约）+ 三注册表 + `builtin_runtime.py` 内置实现；chat_worker 协议检测与循环判定委托注册表（行为零变化）；kernel 登记三个新组件类型，插件可替换模型适配/循环策略/存储引擎（附 minimal 极简策略验收插件）。
 - **服务商插件化（providers 组件）** (`app/plugins/` + `plugins/system/providers/`): 「万物为插件」——服务商支持全面插件化。新增 `app/plugins/registries/provider_registry.py`（ProviderDef + ProviderRegistry 单例，聚合 models/icon/default_config/quota_keys/models_dev_map/family_caps/余额/套餐用量查询）+ `app/plugins/loaders/provider_loader.py`（扫描 `plugins/*/providers/*.py` + 热重载 watcher + user 覆盖 system + 插件启用过滤 + 插件图标目录注入）。PluginManager 组件检测新增 providers 组件
 - **14 家内置服务商迁移为系统插件** (`plugins/system/providers/`): DeepSeek/SiliconFlow（余额查询 fetcher）、MiniMax/智谱AI/OpenAI/火山方舟/OpenCode Zen/OpenCode Go（套餐用量 fetcher 逻辑迁入插件），Anthropic/Gemini/Groq/Ollama/百度千帆/阿里云 纯数据声明；用量查询额外字段（server_id/cookie/workspace_id/csrf_token/x_web_id）随插件声明并在编辑卡片动态渲染
 - **服务商图标插件化** (`app/utils/provider_icons.py`): 新增 `get_provider_icon`——插件自带图标目录（`providers/icons/` 深色 + `icons_light/` 浅色，主题感知）优先，缺省回退 qrc；与 tools 图标机制对称

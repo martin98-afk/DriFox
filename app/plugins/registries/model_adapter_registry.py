@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """模型协议适配器注册表 — 单例，resolve 按 matches 优先级取最优，空表走兜底。"""
+
 from __future__ import annotations
 
 import threading

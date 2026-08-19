@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """存储引擎注册表 — set_active 激活插件引擎，回落 sqlite。"""
+
 from __future__ import annotations
 
 import threading

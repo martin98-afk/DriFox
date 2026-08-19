@@ -21,6 +21,7 @@
         "mcp": true,
         "lsp": true,
         "tools": true,
-        "providers": true
+        "providers": true,
+        "loop_policies": true
     }
 }

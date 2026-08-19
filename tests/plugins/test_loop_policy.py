@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """LoopPolicy：默认策略语义（与现有 worker 行为逐点对应）+ 注册表激活"""
+
 import pytest
 
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState

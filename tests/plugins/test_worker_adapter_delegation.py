@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """worker 协议检测委托 adapter registry — 高优先级插件 adapter 可覆盖判定"""
+
 import pytest
 
 
@@ -53,9 +54,10 @@ def test_subagent_worker_delegates():
     ensure_builtin_adapters()
     e = executor_cls.__new__(executor_cls)
     # subagent 版方法不带 self.llm_config，直接传参
-    assert e._requires_reasoning_content(
-        {"API_URL": "https://api.deepseek.com/v1", "模型名称": "deepseek-chat", "思考模式": True}
-    ) is True
-    assert e._requires_reasoning_content(
-        {"API_URL": "", "模型名称": "gpt-4o", "思考模式": True}
-    ) is False
+    assert (
+        e._requires_reasoning_content(
+            {"API_URL": "https://api.deepseek.com/v1", "模型名称": "deepseek-chat", "思考模式": True}
+        )
+        is True
+    )
+    assert e._requires_reasoning_content({"API_URL": "", "模型名称": "gpt-4o", "思考模式": True}) is False

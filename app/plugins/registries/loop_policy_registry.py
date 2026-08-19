@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """循环策略注册表 — set_active 激活插件策略，卸载自动回落 default。"""
+
 from __future__ import annotations
 
 import threading

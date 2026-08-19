@@ -34,3 +34,8 @@ def test_loader_picks_up_system_plugin():
     loaded = loader.scan_roots(roots)
     if "system" in loaded:  # system 插件目录含 loop_policies 时
         assert "minimal" in reg.policies()
+        try:
+            assert reg.set_active("minimal") is True
+            assert reg.get_active().id == "minimal"
+        finally:
+            reg.set_active("default")

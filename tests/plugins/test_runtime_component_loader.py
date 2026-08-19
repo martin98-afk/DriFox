@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """运行时组件加载器：扫描插件目录三类组件 → register(registry) → source 清理"""
+
 import shutil
 import sys
 import threading

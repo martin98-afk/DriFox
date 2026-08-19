@@ -92,9 +92,7 @@ def test_component_order_explicit_tuple():
     backend 的 reload_plugin_subsystems 增量段按它排序遍历——若漏掉类型，
     必出现某组件在删除清理时被跳过。顺序对齐旧 backend._COMPONENT_ORDER dict。
     """
-    assert isinstance(kernel.COMPONENT_ORDER, tuple), (
-        "COMPONENT_ORDER 必须是 tuple 类型，避免 set 顺序不确定性"
-    )
+    assert isinstance(kernel.COMPONENT_ORDER, tuple), "COMPONENT_ORDER 必须是 tuple 类型，避免 set 顺序不确定性"
     # 包含全部组件（与 KNOWN_COMPONENTS 一致 — 单源真理）
     assert set(kernel.COMPONENT_ORDER) == kernel.KNOWN_COMPONENTS
     # 不重复

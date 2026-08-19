@@ -5,6 +5,7 @@
 插件注册代理强制 source="plugin:<name>"（热重载清理依赖）；
 user 根可覆盖 system 根同名实现（user > system，对齐 provider_loader）。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -110,9 +111,7 @@ class _RegistryProxy:
                 held = self._occupied.get(item_id)
                 if held is not None:
                     if held == self._kind:
-                        logger.debug(
-                            f"[RuntimeLoader] {item_id} 已被同根实现占用，跳过覆盖"
-                        )
+                        logger.debug(f"[RuntimeLoader] {item_id} 已被同根实现占用，跳过覆盖")
                         return
                     held_pri = _ROOT_KIND_PRIORITY.get(held, 0)
                     self_pri = _ROOT_KIND_PRIORITY.get(self._kind, 0)
@@ -250,9 +249,7 @@ class _RuntimeWatcher:
 
     def start(self) -> None:
         if self._thread is None:
-            self._thread = threading.Thread(
-                target=self._loop, daemon=True, name=f"rt-watcher-{self._name}"
-            )
+            self._thread = threading.Thread(target=self._loop, daemon=True, name=f"rt-watcher-{self._name}")
             self._thread.start()
 
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """E2E：三个运行时组件类型进入 kernel 体系（KNOWN_COMPONENTS / PROBES / reloader 分派）"""
+
 from unittest.mock import MagicMock
 
 import pytest

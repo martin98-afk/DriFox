@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """OpenAIAdapter 与 chat_worker 旧协议检测方法行为逐点等价"""
+
 import pytest
 
 from app.plugins.builtin_runtime import OpenAIAdapter, ensure_builtin_adapters
