@@ -401,7 +401,16 @@ class ChatBackend(QObject):
 
     @property
     def session_store(self):
-        return self._session_store
+        """活跃存储引擎（StorageRegistry.get_active()，Phase C UI 收口）。
+
+        冷启动防御：warmup 未执行时幂等加载系统插件（复用模块级门面）。
+        多窗口共享同一引擎实例（registry 单例），db 连接与 SessionStore 单例一致。
+        """
+        try:
+            return get_session_storage()
+        except Exception as e:
+            logger.warning(f"[ChatBackend] 存储引擎获取失败，回退 SessionStore: {e}")
+            return self._session_store
 
     def get_session_storage(self):
         """实例门面：获取活跃存储引擎（委托模块级 get_session_storage）"""

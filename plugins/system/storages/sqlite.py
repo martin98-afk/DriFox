@@ -91,6 +91,27 @@ class SqliteStorageEngine:
     def archive_sessions_by_project(self, project: str) -> int:
         return self._store.archive_sessions_by_project(project)
 
+    def clear_old_subagent_tasks(self, days: int = 7) -> int:
+        return self._store.clear_old_subagent_tasks(days)
+
+    def force_cleanup_project(self, project_name: str) -> bool:
+        return self._store.force_cleanup_project(project_name)
+
+    def record_file_operation(self, session_id: str, call_id: str, tool_name: str, file_path: str, backup_path: str) -> bool:
+        return self._store.record_file_operation(session_id, call_id, tool_name, file_path, backup_path)
+
+    def get_file_operations_by_call_id(self, session_id: str, call_id: str):
+        return self._store.get_file_operations_by_call_id(session_id, call_id)
+
+    def get_all_file_operations(self, session_id: str):
+        return self._store.get_all_file_operations(session_id)
+
+    def clear_session_file_operations(self, session_id: str):
+        return self._store.clear_session_file_operations(session_id)
+
+    def remove_file_operation(self, session_id: str, call_id: str) -> int:
+        return self._store.remove_file_operation(session_id, call_id)
+
     # ---------- 可选能力：标题 / 计数 / 输入历史（委托 SessionStore 同名方法） ----------
 
     def update_session_title(self, session_id: str, title: str) -> bool:
