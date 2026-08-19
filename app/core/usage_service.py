@@ -26,11 +26,10 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-import requests
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
-from app.widgets.balance_display import BALANCE_APIS
+from app.plugins.registries.provider_registry import ProviderRegistry
 
 
 class UsageService(QObject):
@@ -78,16 +77,13 @@ class UsageService(QObject):
 
     @staticmethod
     def _resolve_fetcher(provider_name: str) -> Optional[Callable]:
-        """按服务商名精确匹配，回退按 family 前缀匹配，返回 fetcher 或 None"""
-        from app.plugins.registries.coding_plan_fetcher import _fetchers, get
+        """套餐用量 fetcher：优先精确匹配，回退按 family 前缀匹配（注册表替身。
 
-        fetcher = get(provider_name)
-        if fetcher:
-            return fetcher
-        for registered_name in _fetchers:
-            if registered_name in provider_name:
-                return _fetchers[registered_name]
-        return None
+        服务商插件通过 ProviderDef.coding_plan_fetcher 注册；
+        无插件声明时返回 None。
+        """
+        registry = ProviderRegistry.get_instance()
+        return registry._resolve_coding_plan_fetcher(provider_name)
 
     def request_coding_plan(self, provider_name: str, config_id: str, config: dict) -> None:
         """请求套餐用量：缓存命中→广播缓存；in_flight→跳过；否则后台抓取后广播。
@@ -152,7 +148,7 @@ class UsageService(QObject):
         if config_id:
             self._configs[config_id] = dict(config or {})
 
-        if provider_name not in BALANCE_APIS:
+        if not ProviderRegistry.get_instance().has_balance_support(provider_name):
             self.balance_ready.emit(provider_name, config_id, None)
             return
 
@@ -192,45 +188,23 @@ class UsageService(QObject):
         threading.Thread(target=_run, daemon=True, name="usage-balance-fetch").start()
 
     def _fetch_balance_sync(self, provider_name: str, config: dict) -> Optional[dict]:
-        """同步查询余额（worker 线程执行，迁移自 BalanceDisplay._BalanceFetchThread.run）。
+        """同步查询余额（worker 线程执行，fetcher 由 providers 插件提供）。
 
         返回：
         - {"balance": float, "currency": str, "provider": str}  成功
         - {"hide": True, "provider": str, "tooltip": str|省略}  失败/无余额
         - None                                                 非白名单/无 API key
         """
-        api_cfg = BALANCE_APIS.get(provider_name)
-        if not api_cfg:
+        result = ProviderRegistry.get_instance().balance_fetch(provider_name, config)
+        if result is None:
             return None
-        api_key = (config.get("API_KEY", "") or "").strip()
-        if not api_key:
-            return None
-        try:
-            resp = requests.get(
-                api_cfg["url"], headers={"Authorization": f"Bearer {api_key}"}, timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if api_cfg["balance_key"] == "total_balance":
-                    infos = data.get("balance_infos", [])
-                    balance_str = infos[0].get("total_balance", "") if infos else ""
-                else:
-                    data_obj = data.get("data", data)
-                    balance_str = data_obj.get(api_cfg["balance_key"], "")
-                if balance_str:
-                    return {
-                        "balance": float(balance_str),
-                        "currency": api_cfg["currency"],
-                        "provider": provider_name,
-                    }
-                return {"hide": True, "provider": provider_name}
-            return {"hide": True, "provider": provider_name, "tooltip": f"余额查询失败 (HTTP {resp.status_code})"}
-        except requests.exceptions.Timeout:
-            return {"hide": True, "provider": provider_name, "tooltip": "余额查询超时"}
-        except requests.exceptions.ConnectionError:
-            return {"hide": True, "provider": provider_name, "tooltip": "连接失败"}
-        except Exception as e:
-            return {"hide": True, "provider": provider_name, "tooltip": f"余额查询异常: {e}"}
+        if isinstance(result, dict) and "balance" in result:
+            result = dict(result)
+            result.setdefault("provider", provider_name)
+        elif isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("provider", provider_name)
+        return result
 
     # ========== 生命周期 ==========
 

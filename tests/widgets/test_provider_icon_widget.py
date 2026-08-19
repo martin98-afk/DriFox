@@ -111,12 +111,12 @@ class TestProviderIconWidgetInitIconClearText:
             return QIcon(pix)
 
         monkeypatch.setattr(
-            "app.widgets.cards.settings.provider_setting_card.get_icon",
+            "app.widgets.cards.settings.provider_setting_card.get_provider_icon",
             fake_get_icon,
         )
 
         w = ProviderIconWidget("DeepSeek", 32)
-        assert captured["called"], "内置服务商应当调用 get_icon 走图标分支"
+        assert captured["called"], "内置服务商应当调用 get_provider_icon 走图标分支"
         assert w._text == "", f"内置图标应清空 _text，实际 {w._text!r}"
 
 

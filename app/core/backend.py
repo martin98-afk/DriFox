@@ -943,6 +943,19 @@ class ChatBackend(QObject):
             except Exception as e:
                 logger.error(f"[ChatBackend] 插件工具启用状态对齐重扫失败: {e}")
 
+            # 服务商插件（providers）：延迟初始化加载 + 热重载 watcher
+            # （与工具插件并列；服务商核心数据在 UI 初始化前就绪）
+            try:
+                from app.plugins.loaders.provider_loader import ensure_provider_watcher
+                from app.plugins.registries.provider_registry import ProviderRegistry
+
+                ProviderRegistry.get_instance().ensure_loaded()
+                pwatcher = ensure_provider_watcher()
+                if pwatcher is not None:
+                    pwatcher.scan_now()
+            except Exception as e:
+                logger.error(f"[ChatBackend] 服务商插件初始化失败: {e}")
+
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
                 from app.core.lsp.lsp_manager import get_lsp_manager

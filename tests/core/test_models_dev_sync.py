@@ -681,16 +681,20 @@ def test_get_merged_provider_models_deduplicates_and_keeps_static_first(monkeypa
     )
     monkeypatch.setattr(sync, "get_dynamic_models", lambda: dynamic)
     from app.constants import get_merged_provider_models
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    # 静态模型来自 providers 插件（OpenAI 插件注册表）
+    static_models = ProviderRegistry.get_instance().provider_models()["OpenAI"]
 
     merged = get_merged_provider_models()
     openai_models = merged["OpenAI"]
     # 静态模型在前
-    assert openai_models[0] == "gpt-4o"
+    assert openai_models[0] == static_models[0]
     # 去重：gpt-4o 只出现一次
     assert openai_models.count("gpt-4o") == 1
     assert "gpt-new" in openai_models
     # 静态模型顺序不变
-    assert openai_models[:5] == ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"]
+    assert openai_models[:5] == static_models[:5]
 
 
 def test_get_merged_provider_models_fallback_on_sync_exception(monkeypatch):
@@ -698,10 +702,12 @@ def test_get_merged_provider_models_fallback_on_sync_exception(monkeypatch):
         raise RuntimeError("sync broken")
 
     monkeypatch.setattr(sync, "get_dynamic_models", _raise)
-    from app.constants import get_merged_provider_models, PROVIDER_MODELS
+    from app.constants import get_merged_provider_models
+    from app.plugins.registries.provider_registry import ProviderRegistry
 
     merged = get_merged_provider_models()
-    assert merged == PROVIDER_MODELS
+    # 回退到 providers 插件声明的模型（不再有常量 PROVIDER_MODELS）
+    assert merged == ProviderRegistry.get_instance().provider_models()
 
 
 # ============================================================

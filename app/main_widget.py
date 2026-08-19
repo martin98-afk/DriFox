@@ -66,12 +66,11 @@ from qfluentwidgets import (
 )
 
 from app.constants import (
-    FREE_PROVIDERS,
     IMAGE_EXTENSIONS,
     MODEL_LEVEL_KEYS,
-    PROVIDER_ICONS,
-    QUOTA_EXCLUDE_KEYS,
     get_merged_provider_models,
+    provider_default_config,
+    provider_quota_exclude_keys,
 )
 from app.core import (
     ChatBackend,
@@ -98,6 +97,7 @@ from app.utils.design_tokens import (
     scale_icon_size,
 )
 from app.utils.theme_manager import theme_manager
+from app.utils.provider_icons import get_provider_icon
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
@@ -2329,7 +2329,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 确保使用当前窗口选中的模型名称，而非全局配置中的模型名称（多窗口隔离）
             if self._current_model_name:
                 config["模型名称"] = self._current_model_name
-            # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 FREE_PROVIDERS 的部分默认值）
+            # 叠加模型默认值（硬编码兜底 + 模型能力，会覆盖 providers 插件的部分默认值）
             config = apply_model_defaults(config, self._current_model_name)
             # 叠加用户按模型名覆盖的参数（最高优先级）
             # key = "服务商名||模型名"，按服务商隔离同名模型
@@ -7240,12 +7240,10 @@ class OpenAIChatToolWindow(ToolWindow):
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
-        # 设置图标（按 provider_name 查 PROVIDER_ICONS，不按 UUID 查）
+        # 设置图标（按 provider_name 查插件图标注册表，不按 UUID 查）
         icon = None
         if pname:
-            icon_name = PROVIDER_ICONS.get(pname, "")
-            if icon_name:
-                icon = get_icon(icon_name)
+            icon = get_provider_icon(pname)
 
         if icon and not icon.isNull():
             pm = icon.pixmap(15, 15)
@@ -8194,14 +8192,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._ensure_model_config_popup()
         current_name = self._current_provider_name if self._current_provider_name else "无"
 
-        # 关键修复：从 _valid_configs 读取（已通过 _load_model_configs 合并了 FREE_PROVIDERS 默认参数）
+        # 关键修复：从 _valid_configs 读取（已通过 _load_model_configs 合并了 providers 插件默认参数）
         # 而不是从 saved_providers 直接读（绕过默认值合并，会丢"温度"、"最大Token"等字段）
         config = {}
         if current_name in self._valid_configs:
             config = self._valid_configs[current_name].copy()
 
         # 叠加模型默认值（三层兜底：硬编码 > 模型能力 > 已有配置）
-        # 当服务商不在 FREE_PROVIDERS（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
+        # 当服务商不在 providers 插件（自定义服务商）时，温度/top_p 等参数仍能有合理默认值
         config = apply_model_defaults(config, self._current_model_name)
 
         # 叠加用户按模型名保存的覆盖值（最高优先级）
@@ -8236,7 +8234,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "config_id",
             "display_name",
             "认证方式",
-            *QUOTA_EXCLUDE_KEYS,  # 套餐用量查询字段不应出现在模型参数配置中
+            *provider_quota_exclude_keys(),  # 套餐用量查询字段不应出现在模型参数配置中
         ]:
             config.pop(pop_key, None)
 
@@ -9961,7 +9959,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 关键修复：用 provider_name 字段（人类可读名）合并默认配置，
             # 而不是用 config_id（UUID）—— 否则新字段（如思考模式）无法被默认配置补充
             pname = config.get("provider_name", config_id)
-            default_config = FREE_PROVIDERS.get(pname, {})
+            default_config = provider_default_config(pname) or {}
             for default_key, default_value in default_config.items():
                 if default_key not in config:
                     config[default_key] = default_value

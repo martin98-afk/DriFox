@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-余额显示组件 - 支持 DeepSeek 和 SiliconFlow
+余额显示组件 - 显示层
 
-用量聚合（T6）：余额查询逻辑迁移至 app/core/usage_service.py 进程级单例，
+用量聚合（T6）：余额查询逻辑在 app/core/usage_service.py 进程级单例，
 本组件只负责显示——set_provider 仅更新显示状态，请求/缓存/轮询由
 UsageService 统一驱动，结果经 balance_ready 信号广播回来。
+
+服务商余额支持（url 白名单）由 providers 插件声明（ProviderDef.balance_fetcher），
+本组件不再持有 BALANCE_APIS 硬编码表。
 """
 
 from typing import Optional
@@ -14,23 +17,6 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_font_family_css
-
-# 支持余额查询的服务商及其接口
-BALANCE_APIS = {
-    "DeepSeek": {
-        "url": "https://api.deepseek.com/user/balance",
-        "balance_key": "total_balance",  # 从 balance_infos[0] 中获取
-        "currency": "¥",
-    },
-    "SiliconFlow (硅基流动)": {
-        "url": "https://api.siliconflow.cn/v1/user/info",
-        "balance_key": "totalBalance",  # 从 data 对象中获取
-        "currency": "¥",
-    },
-}
-
-# 余额显示的服务商列表
-SUPPORTED_PROVIDERS = list(BALANCE_APIS.keys())
 
 
 class BalanceDisplay(QWidget):
@@ -88,6 +74,15 @@ class BalanceDisplay(QWidget):
 
         self.setToolTip("余额查询")
 
+    def _has_balance_support(self, provider_name: str) -> bool:
+        """服务商是否支持余额查询（providers 插件声明 balance_fetcher）"""
+        try:
+            from app.plugins.registries.provider_registry import ProviderRegistry
+
+            return ProviderRegistry.get_instance().has_balance_support(provider_name)
+        except Exception:
+            return False
+
     def set_provider(self, provider_name: str, config_id: str = ""):
         """设置当前服务商（仅更新显示状态；请求由 UsageService 统一驱动）
 
@@ -95,8 +90,8 @@ class BalanceDisplay(QWidget):
             provider_name: 真实服务商名（白名单判断）
             config_id: 当前配置 ID（UUID，用于结果竞态校验）
         """
-        # 如果不是支持的服务商，隐藏组件
-        if provider_name not in SUPPORTED_PROVIDERS:
+        # 如果不是支持的服务商（providers 插件未声明余额 fetcher），隐藏组件
+        if not self._has_balance_support(provider_name):
             self.setVisible(False)
             self._balance = None
             self._current_provider = ""

@@ -52,20 +52,8 @@ def _default_cache_path() -> Path:
 
 
 # DriFox 服务商名 -> models.dev provider id
-MODELS_DEV_PROVIDER_MAP = {
-    "OpenAI": "openai",
-    "Anthropic (Claude)": "anthropic",
-    "Google Gemini": "google",
-    "DeepSeek": "deepseek",
-    "智谱AI": "zhipuai",
-    "MiniMax": "minimax",
-    "阿里云 (DashScope)": "alibaba",
-    "SiliconFlow (硅基流动)": "siliconflow",
-    "Groq": "groq",
-    "Ollama": "ollama-cloud",
-    "OpenCode Zen": "opencode",
-    "OpenCode Go": "opencode-go",
-}
+# 已迁移至 providers 插件（ProviderDef.models_dev_id），运行时从注册表动态获取：
+# 见 _get_models_dev_map()。此处仅保留 reasoning type 映射常量。
 
 # models.dev reasoning_options type -> DriFox thinking_param
 REASONING_TYPE_TO_THINKING_PARAM = {
@@ -486,15 +474,30 @@ def _fetch_instance_free_models(client, base_url: str, key: str) -> List[str]:
     return [m.strip() for m in raw_ids if m.strip().endswith("-free")]
 
 
+def _get_models_dev_map() -> Dict[str, str]:
+    """运行时从 ProviderRegistry 获取 服务商名 -> models.dev provider id。
+
+    models.dev 白名单由 providers 插件声明（models_dev_id 字段），
+    插件卸载/热重载后本映射随之变化（每次调用动态读取）。
+    """
+    from app.plugins.registries.provider_registry import ProviderRegistry
+
+    try:
+        return ProviderRegistry.get_instance().models_dev_map()
+    except Exception:
+        return {}
+
+
 def _parse_models_dev_data(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]:
     """解析 models.dev 数据，返回 (provider_models, model_capabilities)。
 
-    只处理 MODELS_DEV_PROVIDER_MAP 白名单内的服务商。
+    只处理 providers 插件声明的 models.dev 白名单内的服务商。
     """
-    provider_models: Dict[str, List[str]] = {name: [] for name in MODELS_DEV_PROVIDER_MAP}
+    provider_map = _get_models_dev_map()
+    provider_models: Dict[str, List[str]] = {name: [] for name in provider_map}
     model_capabilities: Dict[str, Dict[str, Any]] = {}
 
-    for dfox_name, provider_id in MODELS_DEV_PROVIDER_MAP.items():
+    for dfox_name, provider_id in provider_map.items():
         provider_info = data.get(provider_id)
         if not isinstance(provider_info, dict):
             continue

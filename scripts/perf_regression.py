@@ -91,7 +91,7 @@ def _counting_fetch(provider_name, config, callback):
     callback(None)
 
 
-import app.core.coding_plan_fetcher as cpf  # noqa: E402
+import app.plugins.registries.coding_plan_fetcher as cpf  # noqa: E402
 
 cpf.fetch_async = _counting_fetch  # 运行时替换
 

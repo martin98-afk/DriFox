@@ -55,7 +55,9 @@ class ProviderDef:
     """一个服务商插件的完整定义（数据 + 可选查询逻辑）"""
 
     name: str  # 服务商唯一名（历史 FREE_PROVIDERS key，如 "DeepSeek"）
-    icon: str = ""  # 图标 key（历史 PROVIDER_ICONS 值）
+    icon: str = ""  # 图标 key（历史 PROVIDER_ICONS 值；亦为插件 icons/ 目录下的文件名）
+    icon_dir: str = ""  # 插件自带深色图标目录（绝对路径；空 → 渲染回退主程序 qrc 资源）
+    icon_dir_light: str = ""  # 插件自带浅色图标目录（主题感知；空 → 回退深色/qrc）
     api_url: str = ""  # 默认 API URL
     auth_type: str = "bearer"  # 认证方式：bearer / bce / none / anthropic
     default_model: str = ""  # 默认模型名（"模型名称"）
@@ -190,6 +192,7 @@ class ProviderRegistry:
     def __init__(self):
         self._providers: Dict[str, ProviderDef] = {}
         self._lock = threading.RLock()
+        self._warmup_done = False
         # 内置 family 兜底（仅用于没有任何插件声明该 family 时，如自定义服务商）。
         # custom 不是"服务商"，而是通用默认能力，不属于可迁移的服务商硬编码。
         self._builtin_family_capabilities: Dict[str, Dict[str, Any]] = {
@@ -202,6 +205,30 @@ class ProviderRegistry:
                 "thinking_param": None,
             }
         }
+
+    # ── 懒加载预热 ─────────────────────────────────────────
+
+    def ensure_loaded(self) -> None:
+        """确保服务商插件已加载（幂等）。
+
+        启动早期（Settings.get_instance → _ensure_default_opencode_provider）
+        先于 backend 的 warmup_providers 调用，故任何读取入口都需先走本方法
+        触发一次插件扫描；backend 的显式 warmup 也会被本标志去重。
+        """
+        if self._warmup_done:
+            return
+        with self._lock:
+            if self._warmup_done:
+                return
+            self._warmup_done = True
+        try:
+            from app.plugins.loaders.provider_loader import warmup_providers
+
+            warmup_providers()
+        except Exception as e:
+            logger.warning(f"[ProviderRegistry] 服务商插件懒加载失败: {e}")
+            with self._lock:
+                self._warmup_done = False  # 失败允许下次重试
 
     # ── 注册 / 查询 ─────────────────────────────────────────
 
@@ -230,14 +257,17 @@ class ProviderRegistry:
                 logger.debug(f"[ProviderRegistry] 已卸载服务商: {name} (source={source})")
 
     def get(self, name: str) -> Optional[ProviderDef]:
+        self.ensure_loaded()
         with self._lock:
             return self._providers.get(name)
 
     def names(self) -> List[str]:
+        self.ensure_loaded()
         with self._lock:
             return sorted(self._providers.keys())
 
     def all(self) -> List[ProviderDef]:
+        self.ensure_loaded()
         with self._lock:
             return list(self._providers.values())
 
@@ -252,6 +282,16 @@ class ProviderRegistry:
         """服务商 → 图标 key（PROVIDER_ICONS 替代）"""
         with self._lock:
             return {name: p.icon for name, p in self._providers.items() if p.icon}
+
+    def get_icon_dir(self, name: str) -> str:
+        """服务商插件的深色图标目录（绝对路径），无则返回空串"""
+        p = self.get(name)
+        return p.icon_dir if p else ""
+
+    def get_icon_dir_light(self, name: str) -> str:
+        """服务商插件的浅色图标目录（绝对路径），无则返回空串"""
+        p = self.get(name)
+        return p.icon_dir_light if p else ""
 
     def default_config(self, name: str) -> Optional[Dict[str, Any]]:
         """服务商默认配置 dict（FREE_PROVIDERS[name] 替代），不存在返回 None"""

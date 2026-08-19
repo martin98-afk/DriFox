@@ -67,6 +67,33 @@ def _root_kind(root: Optional[Path]) -> str:
 _PLUGIN_ROOTS: List[Path] = _plugin_roots()
 
 
+def _is_plugin_enabled(plugin_name: str) -> bool:
+    """按插件启用状态过滤服务商加载（对齐 PluginToolLoader._is_plugin_enabled）。
+
+    统一以 Settings.enabled_plugins 为准。pm 未初始化时（真实启动链中
+    app.plugins 可能在 backend.initialize 之前被导入）直接读 Settings。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_enabled(plugin_name)
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        saved = cfg.enabled_plugins.value or []
+        disabled = cfg.disabled_plugins.value or []
+        if not saved and not disabled:
+            return True
+        return plugin_name in saved
+    except Exception as e:
+        logger.warning(f"[ProviderLoader] 插件启用状态检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
 def _iter_provider_modules(plugin_root: Path):
     """遍历插件目录下所有 providers/*.py"""
     if not plugin_root.is_dir():
@@ -120,6 +147,17 @@ class _ProviderRegistryProxy:
         else:
             logger.warning(f"[ProviderLoader] 非法服务商定义（缺少 name）: {provider}")
             return False
+
+        # 插件自带图标目录：<plugin>/providers/icons/（深色）+ providers/icons_light/
+        # （浅色，icon 自包含，与 tools 机制对称）
+        if isinstance(provider, ProviderDef):
+            if self._root is not None:
+                _icons = Path(self._root) / self._plugin_name / "providers" / "icons"
+                if _icons.is_dir():
+                    provider.icon_dir = str(_icons)
+                _icons_light = Path(self._root) / self._plugin_name / "providers" / "icons_light"
+                if _icons_light.is_dir():
+                    provider.icon_dir_light = str(_icons_light)
 
         # 同名覆盖判定（root_kind 优先级）
         src_root = self._root_tracker.get(name) if self._root is not None else None
@@ -214,6 +252,10 @@ def load_providers(
 
     for root in roots:
         for plugin_name, py_path in _iter_provider_modules(Path(root)):
+            # 对齐插件工具：插件被 Settings 禁用后其服务商不再注册
+            if not _is_plugin_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
+                continue
             try:
                 new_names = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
                 loaded.setdefault(plugin_name, set()).update(new_names)
