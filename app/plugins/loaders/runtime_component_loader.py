@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""运行时组件加载器 — 扫描 plugins/*/{model_adapters,loop_policies,storages}/*.py
+"""运行时组件加载器 — 扫描 plugins/*/{model_adapters,loop_policies,storages,serializers}/*.py
 的 register(registry) 入口（与 tools/providers 插件完全对称的约定）。
 
 插件注册代理强制 source="plugin:<name>"（热重载清理依赖）；
@@ -256,9 +256,11 @@ class _RuntimeWatcher:
 _adapters_loader: Optional[RuntimeComponentLoader] = None
 _loop_loader: Optional[RuntimeComponentLoader] = None
 _storage_loader: Optional[RuntimeComponentLoader] = None
+_serializer_loader: Optional[RuntimeComponentLoader] = None
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
 _storage_watcher: Optional[_RuntimeWatcher] = None
+_serializer_watcher: Optional[_RuntimeWatcher] = None
 _watchers_lock = threading.Lock()
 
 
@@ -278,6 +280,12 @@ def _make_storage_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.storage_registry import StorageRegistry
 
     return RuntimeComponentLoader("storages", StorageRegistry.get_instance())
+
+
+def _make_serializer_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.serializer_registry import SerializerRegistry
+
+    return RuntimeComponentLoader("serializers", SerializerRegistry.get_instance())
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -316,15 +324,28 @@ def ensure_storage_watcher() -> Optional[_RuntimeWatcher]:
         return _storage_watcher
 
 
-def warmup_runtime_components() -> Dict[str, Set[str]]:
-    """启动期一次性加载三类运行时组件（系统插件 plugins/system 提供默认实现）。
+def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
+    global _serializer_loader, _serializer_watcher
+    with _watchers_lock:
+        if _serializer_watcher is not None:
+            return _serializer_watcher
+        _serializer_loader = _serializer_loader or _make_serializer_loader()
+        _serializer_watcher = _RuntimeWatcher(_serializer_loader, "serializers")
+        _serializer_watcher.scan_now()
+        _serializer_watcher.start()
+        return _serializer_watcher
 
-    三类运行时组件（model_adapters / loop_policies / storages）的默认实现
-    现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages}/），
+
+def warmup_runtime_components() -> Dict[str, Set[str]]:
+    """启动期一次性加载四类运行时组件（系统插件 plugins/system 提供默认实现）。
+
+    四类运行时组件（model_adapters / loop_policies / storages / serializers）的默认实现
+    现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages,serializers}/），
     不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
     """
     result: Dict[str, Set[str]] = {}
     result["model_adapters"] = _make_adapters_loader().scan_roots()
     result["loop_policies"] = _make_loop_loader().scan_roots()
     result["storages"] = _make_storage_loader().scan_roots()
+    result["serializers"] = _make_serializer_loader().scan_roots()
     return result

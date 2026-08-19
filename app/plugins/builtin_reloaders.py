@@ -36,6 +36,7 @@ RELOADED_COMPONENTS = {
     "model_adapters",
     "loop_policies",
     "storages",
+    "serializers",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -218,6 +219,20 @@ def _reload_storages(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_serializers(ctx: ReloadContext) -> Any:
+    """serializers 分支：同 model_adapters"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_serializer_watcher
+
+        watcher = ensure_serializer_watcher()
+        if watcher is not None:
+            watcher.scan_now()
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] serializers 重载失败: {e}")
+    return False
+
+
 # 运行时句柄：backend 初始化后注入（避免循环 import — reloader 不能 import backend）
 _RUNTIME: dict = {"agent_manager": None}
 
@@ -247,6 +262,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "model_adapters": _reload_model_adapters,
         "loop_policies": _reload_loop_policies,
         "storages": _reload_storages,
+        "serializers": _reload_serializers,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

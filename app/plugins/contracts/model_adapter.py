@@ -14,11 +14,17 @@ from typing import Any, Dict, Protocol, runtime_checkable
 
 @dataclass
 class ProtocolFlags:
-    """协议行为开关（messages_to_api / to_api_message 的全部决策参数）"""
+    """协议行为开关（messages_to_api / to_api_message 的全部决策参数）
+
+    serializer_id：序列化器选择（默认 "openai"）。Phase B 只立不消费——
+    薄壳统一解析 openai + 覆盖式替换机制；留给 Phase C「worker 单入口 +
+    adapter 指定序列化策略」时消费。默认值 openai 保证零变化。
+    """
 
     is_gemini: bool = False
     requires_reasoning_content: bool = False
     use_responses_api: bool = False
+    serializer_id: str = "openai"
 
 
 @runtime_checkable
