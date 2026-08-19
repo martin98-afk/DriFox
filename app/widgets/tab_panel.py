@@ -2368,6 +2368,57 @@ class TabPanel(QWidget):
     def active_index(self) -> int:
         return self._active_index
 
+    def _resolve_tab_host(self):
+        """沿父链查找 TabManagerWindow（window_id 来源）"""
+        parent = self.parent()
+        while parent is not None and not hasattr(parent, "get_current_window"):
+            parent = parent.parent()
+        return parent
+
+    def _inject_plugin_tab_actions(self, menu: QMenu, context: dict):
+        """注入 tab 右键菜单插件项（Phase D，target="tab"）
+
+        与消息卡片注入同语义：action_func 返回 False → 关闭菜单。
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            actions = UIPluginRegistry.get_instance().get_context_actions("tab")
+        except Exception:
+            return
+        for info in actions:
+            try:
+                if info.separator_before:
+                    menu.addSeparator()
+                action = menu.addAction(info.label)
+                enabled = True
+                if info.enabled_func is not None:
+                    try:
+                        enabled = bool(info.enabled_func(context))
+                    except Exception:
+                        enabled = True
+                action.setEnabled(enabled)
+                action.triggered.connect(
+                    lambda checked=False, i=info: self._run_plugin_tab_action(i, context)
+                )
+            except Exception as e:
+                logger.warning(f"[TabPanel] 插件菜单项 {info.action_id} 注入失败：{e}")
+
+    def _run_plugin_tab_action(self, info, context: dict):
+        """执行插件菜单项：action_func(context)；返回 False → 关闭菜单（保持现有语义）"""
+        try:
+            close_menu = info.action_func(context) is False
+        except Exception as e:
+            logger.error(f"[TabPanel] 插件菜单项 {info.action_id} 执行失败：{e}")
+            close_menu = True
+        if close_menu:
+            try:
+                menu = self._current_context_menu
+                if menu is not None:
+                    menu.close()
+            except Exception:
+                pass
+
     def contextMenuEvent(self, event):
         """显示右键菜单
 
@@ -2410,7 +2461,18 @@ class TabPanel(QWidget):
         if clicked_index >= 0:
             close_action = menu.addAction("关闭标签页")
 
-        action = menu.exec_(event.globalPos())
+        # Phase D：插件右键菜单项（target="tab"）
+        context = {
+            "tab_index": clicked_index,
+            "window_id": getattr(self._resolve_tab_host(), "_window_id", None),
+        }
+        self._current_context_menu = menu  # 供 action_func 返回 False 时关闭菜单
+        self._inject_plugin_tab_actions(menu, context)
+
+        try:
+            action = menu.exec_(event.globalPos())
+        finally:
+            self._current_context_menu = None
         if action == new_action:
             self.newTabRequested.emit()
         elif clicked_index >= 0:
