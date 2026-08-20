@@ -12,7 +12,7 @@
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QSizePolicy, QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout
 from qfluentwidgets import BodyLabel, MaskDialogBase
 
 from app.utils.design_tokens import Colors, font_size_css
@@ -41,7 +41,7 @@ class ConfirmDialog(MaskDialogBase):
     cancelled = pyqtSignal()
 
     DEFAULT_WIDTH = 400
-    DEFAULT_HEIGHT = 200  # 最小高度；高度按内容自适应（防止长文本被遮挡）
+    DEFAULT_HEIGHT = 140  # 最小高度=标题+12+1行内容+按钮+边距；高度按内容自适应
     DEFAULT_MAX_WIDTH = 600
     DEFAULT_MAX_HEIGHT = 720
 
@@ -101,7 +101,8 @@ class ConfirmDialog(MaskDialogBase):
         )
         layout.addWidget(content_label)
 
-        layout.addStretch()
+        # 注：不在内容/按钮间加 addStretch()，否则短内容时按钮贴底中间留白。
+        # 高度完全由标题+内容+按钮+边距决定（minSize 保底，maxSize 防撑爆）。
 
         # 按钮行
         btn_layout = QHBoxLayout()
@@ -171,17 +172,24 @@ class ConfirmDialog(MaskDialogBase):
     def _fit_widget_to_content(self):
         """让 widget 高度按内容自适应，宽度仍居中且不超过上限。
 
-        关键修复：原实现 setFixedSize(W, H) 把 widget 锁死，导致长文本
-        （如 /team --load 角色列表、InfoBar 多行提示）溢出后被按钮行遮挡。
+        关键修复：
+        1. 原 setFixedSize(W, H) 锁死尺寸 → 长文本（/team --load 角色列表、
+           InfoBar 多行 bullet）溢出后被按钮行遮挡。
+        2. MaskDialogBase 用 QHBoxLayout(self).addWidget(self.widget)，
+           QHBoxLayout 默认会让 child 高度 = layout 高度（=dialog 全屏），
+           任何 sizePolicy / maxSize 都无法阻止 widget 被拉伸到全屏高度。
+           必须把 widget 从 layout 中取出，自己用 move + adjustSize 管理。
+
+        流程：
+        - 从 MaskDialogBase 的 _hBoxLayout 取出 widget（layout 仍占位但不影响 widget 几何）
+        - 设 maxSize 防极端撑爆
+        - adjustSize() 让 widget 按内容 sizeHint 撑到合适尺寸
+        - _center_widget 居中；后续 dialog.resizeEvent 仍自动重新居中
         """
+        self.layout().removeWidget(self.widget)  # 关键：从 QHBoxLayout 取出
+        self.widget.setParent(self)  # 确保 parent 是 dialog（addWidget 时已是）
         self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
-        # 防止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏
-        sp = self.widget.sizePolicy()
-        sp.setHorizontalPolicy(QSizePolicy.Fixed)
-        sp.setVerticalPolicy(QSizePolicy.Preferred)
-        self.widget.setSizePolicy(sp)
-        # 让 layout 按内容计算 sizeHint 并把 widget 撑到合适尺寸
         self.widget.adjustSize()
         self._center_widget()
 
@@ -207,7 +215,7 @@ class InfoDialog(MaskDialogBase):
     dismissed = pyqtSignal()
 
     DEFAULT_WIDTH = 400
-    DEFAULT_HEIGHT = 180  # 最小高度；高度按内容自适应（防止长文本被遮挡）
+    DEFAULT_HEIGHT = 120  # 最小高度=标题+12+1行内容+按钮+边距；高度按内容自适应
     DEFAULT_MAX_WIDTH = 600
     DEFAULT_MAX_HEIGHT = 720
 
@@ -267,7 +275,7 @@ class InfoDialog(MaskDialogBase):
         )
         layout.addWidget(content_label)
 
-        layout.addStretch()
+        # 注：不在内容/按钮间加 addStretch()，短内容时按钮紧贴内容更紧凑。
 
         # 按钮行（可选：次级「不再提醒」按钮 + 主确认按钮）
         btn_layout = QHBoxLayout()
@@ -324,14 +332,13 @@ class InfoDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         layout.addLayout(btn_layout)
 
-        # 内容自适应：设最小尺寸保底 + 最大尺寸防撑爆 + 水平 Fixed 防止
-        # MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏
+        # 内容自适应：minSize 保底 + maxSize 防撑爆
+        # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+        # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
         self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.widget.setMaximumSize(self.DEFAULT_MAX_WIDTH, self.DEFAULT_MAX_HEIGHT)
-        sp = self.widget.sizePolicy()
-        sp.setHorizontalPolicy(QSizePolicy.Fixed)
-        sp.setVerticalPolicy(QSizePolicy.Preferred)
-        self.widget.setSizePolicy(sp)
         self.widget.adjustSize()
         self._center_widget()
 

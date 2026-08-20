@@ -190,3 +190,132 @@ def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
     assert seen == list(kernel_mod.COMPONENT_ORDER), f"删除段遍历序应等于 COMPONENT_ORDER，实际 {seen}"
     # 所有声明组件都被处理
     assert set(seen) == kernel_mod.KNOWN_COMPONENTS
+
+
+def test_reload_plugin_targeted_dispatches_manifest(kernel_env, monkeypatch):
+    """reload_plugin_targeted(非空名) → _reload_single_plugin(name, "__manifest__")
+
+    回归锁定：UI 安装/更新/启停后若调全量 reload_plugin_subsystems，
+    会重载全部插件的 hooks/agents/commands；targeted 门面必须走精准路径。
+    """
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    backend = ChatBackend.__new__(ChatBackend)
+    calls: list = []
+    monkeypatch.setattr(backend, "_reload_single_plugin", lambda n, c: calls.append((n, c)) or {})
+    backend.reload_plugin_targeted("workbuddy")
+    assert calls == [("workbuddy", "__manifest__")], f"应分派到 _reload_single_plugin(name, __manifest__)，实际 {calls}"
+
+
+def test_reload_plugin_targeted_empty_falls_back_to_full(kernel_env, monkeypatch):
+    """reload_plugin_targeted(空名) → 回退全量 reload_plugin_subsystems（防御）"""
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    backend = ChatBackend.__new__(ChatBackend)
+    calls: list = []
+    monkeypatch.setattr(backend, "reload_plugin_subsystems", lambda: calls.append(True) or {})
+    backend.reload_plugin_targeted("")
+    assert calls == [True], "空名应回退全量重载"
+
+
+def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
+    """reload_plugin_subsystems 默认 diff 精准：added/changed 走 __manifest__，removed 走精准清理
+
+    回归锁定：旧实现除"单一新增"外全部走全量（重载所有 agents/hooks/commands），
+    卸载一个插件会波及全部插件；现改为逐插件精准处理。
+    """
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    class _FakeDiffPlugin:
+        def __init__(self, name, components):
+            self.name = name
+            self.components = components
+
+    fake_pm.rescan.return_value = {
+        "added": [_FakeDiffPlugin("new-plug", {"agents": True, "tools": True})],
+        "removed": [_FakeDiffPlugin("dead-plug", {"hooks": True, "ui": True})],
+        "changed": [_FakeDiffPlugin("touched-plug", {"commands": True})],
+    }
+
+    backend = ChatBackend.__new__(ChatBackend)
+    backend._watcher_dedup_cache = {}
+    seen: list = []
+    cleanup_calls: list = []
+    monkeypatch.setattr(
+        "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+        staticmethod(lambda: fake_pm),
+    )
+
+    def _fake_single(name, comp):
+        seen.append((name, comp))
+        return {}
+
+    def _fake_cleanup(name, comps, res, keys):
+        cleanup_calls.append((name, dict(comps)))
+        return res
+
+    monkeypatch.setattr(backend, "_reload_single_plugin", _fake_single)
+    monkeypatch.setattr(backend, "_cleanup_removed_plugin_components", _fake_cleanup)
+
+    result = backend.reload_plugin_subsystems()
+
+    # added/changed → 精准 __manifest__ 重载
+    assert seen == [("new-plug", "__manifest__"), ("touched-plug", "__manifest__")], (
+        f"added/changed 应走 __manifest__ 精准重载，实际 {seen}"
+    )
+    # removed → 精准清理（组件信息取自 diff 对象，而非已移出索引的 get_plugin）
+    assert cleanup_calls == [("dead-plug", {"hooks": True, "ui": True})], (
+        f"removed 应走精准清理，实际 {cleanup_calls}"
+    )
+    # 不触发全量子系统重载
+    assert result["agents"] == 0 and result["commands"] is False
+
+
+def test_reload_plugin_subsystems_no_diff_skips(kernel_env, monkeypatch):
+    """reload_plugin_subsystems 无变更时不重载任何子系统（零浪费）"""
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    fake_pm.rescan.return_value = {"added": [], "removed": [], "changed": []}
+    monkeypatch.setattr(
+        "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+        staticmethod(lambda: fake_pm),
+    )
+
+    backend = ChatBackend.__new__(ChatBackend)
+    backend._watcher_dedup_cache = {}
+    reloaded: list = []
+    monkeypatch.setattr(backend, "_reload_single_plugin", lambda n, c: reloaded.append(n) or {})
+    monkeypatch.setattr(
+        backend,
+        "_cleanup_removed_plugin_components",
+        lambda n, comps, res, keys: reloaded.append(n) or res,
+    )
+
+    result = backend.reload_plugin_subsystems()
+
+    assert reloaded == [], "无变更不应触发任何重载"
+    assert result["agents"] == 0 and result["commands"] is False
+
+
+def test_reload_plugin_subsystems_force_full(kernel_env, monkeypatch):
+    """reload_plugin_subsystems(force_full=True) 保留全量语义（设置按钮显式操作）"""
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    fake_pm.rescan.return_value = {"added": [], "removed": [], "changed": []}
+    monkeypatch.setattr(
+        "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+        staticmethod(lambda: fake_pm),
+    )
+
+    backend = ChatBackend.__new__(ChatBackend)
+    backend._watcher_dedup_cache = {}
+    called: list = []
+    monkeypatch.setattr(backend, "_reload_all_subsystems", lambda pm, res, keys: called.append(True) or res)
+
+    backend.reload_plugin_subsystems(force_full=True)
+    assert called == [True], "force_full=True 应走全量重载"

@@ -8509,8 +8509,10 @@ class OpenAIChatToolWindow(ToolWindow):
         #    已有 pending 渲染（_create_new_session 的 schedule）→ 由槽位回调重建，
         #    避免双渲染 QWebEngineView。
         self._invalidate_welcome_card()
-        if self._displayed_session_id is None and self.isVisible() and not getattr(
-            self, "_welcome_render_pending", False
+        if (
+            self._displayed_session_id is None
+            and self.isVisible()
+            and not getattr(self, "_welcome_render_pending", False)
         ):
             self._show_initial_welcome()
         # 3. Tab 模式广播其他窗口
@@ -9443,7 +9445,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _reload_plugin_system(self):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
         if hasattr(self, "backend") and self.backend:
-            result = self.backend.reload_plugin_subsystems()
+            # force_full=True：按钮显式语义——无论是否有变更都全量重载所有子系统
+            result = self.backend.reload_plugin_subsystems(force_full=True)
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.success(
@@ -10666,7 +10669,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if self._welcome_render_pending:
                 return
-        except (AttributeError, RuntimeError):
+        except AttributeError, RuntimeError:
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
         cls = type(self)
@@ -10679,7 +10682,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
         try:
             self._welcome_render_pending = False
-        except (AttributeError, RuntimeError):
+        except AttributeError, RuntimeError:
             pass
         self._show_initial_welcome()
 

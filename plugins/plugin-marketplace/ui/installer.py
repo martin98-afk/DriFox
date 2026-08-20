@@ -267,9 +267,7 @@ class PluginInstaller:
                     if manifest is not None and manifest.get("type") == "system":
                         result[entry.name] = "system"
                     else:
-                        result[entry.name] = (
-                            "builtin_disabled" if entry.name in disabled_set else "builtin_enabled"
-                        )
+                        result[entry.name] = "builtin_disabled" if entry.name in disabled_set else "builtin_enabled"
             except OSError:
                 pass
 
@@ -637,8 +635,8 @@ class PluginInstaller:
             logger.info(f"[Installer] Installed plugin {name} -> {target}")
             # 安装/更新成功 → 上报下载量（后台线程，失败不影响安装结果）
             report_plugin_install(name)
-            # 恢复 backend watcher 并主动触发一次插件重载，使新插件立即可用
-            self._resume_backend_watcher(reload=True)
+            # 恢复 backend watcher 并精准重载目标插件（仅加载该插件，不触发全量）
+            self._resume_backend_watcher(reload=True, plugin_name=name)
             return True
 
         except Exception as e:
@@ -732,10 +730,7 @@ class PluginInstaller:
                     isinstance(e, OSError) and getattr(e, "winerror", None) == 5
                 )
                 if is_locked and attempt < retries - 1:
-                    logger.warning(
-                        f"[Installer] move 被外部锁阻塞（{e}），{delay}s 后重试 "
-                        f"({attempt + 1}/{retries})"
-                    )
+                    logger.warning(f"[Installer] move 被外部锁阻塞（{e}），{delay}s 后重试 ({attempt + 1}/{retries})")
                     time.sleep(delay)
                     continue
                 # 最终失败：源仍在说明 dst 是 copytree 残骸，清理之
@@ -758,8 +753,13 @@ class PluginInstaller:
         except Exception as e:
             logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
 
-    def _resume_backend_watcher(self, reload: bool = False) -> None:
-        """恢复 backend watcher；安装成功时主动触发一次插件重载，使新插件立即可用。"""
+    def _resume_backend_watcher(self, reload: bool = False, plugin_name: Optional[str] = None) -> None:
+        """恢复 backend watcher；安装/启停成功时精准重载目标插件（不触发全量）
+
+        旧实现 reload=True 时调 reload_plugin_subsystems() 全量重载——卸载/安装
+        一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载（数十个插件
+        联动抖动）。现改为 reload_plugin_targeted(plugin_name) 只处理目标插件。
+        """
         try:
             from app.core.backend import ChatBackend
 
@@ -777,9 +777,9 @@ class PluginInstaller:
             try:
                 from PyQt5.QtCore import QTimer
 
-                QTimer.singleShot(0, inst.reload_plugin_subsystems)
+                QTimer.singleShot(0, lambda: inst.reload_plugin_targeted(plugin_name))
             except Exception:
-                inst.reload_plugin_subsystems()
+                inst.reload_plugin_targeted(plugin_name)
         except Exception as e:
             logger.warning(f"[Installer] 触发插件重载失败（不影响安装）: {e}")
 
@@ -876,11 +876,7 @@ class PluginInstaller:
                 for token in (name, safe):
                     head = f"drifox_rt_{comp}_{token}"
                     for mod_name in list(sys.modules.keys()):
-                        if (
-                            mod_name == head
-                            or mod_name.startswith(head + "_")
-                            or mod_name.startswith(head + ".")
-                        ):
+                        if mod_name == head or mod_name.startswith(head + "_") or mod_name.startswith(head + "."):
                             del sys.modules[mod_name]
 
             # 兜底：按 __file__ 落在插件目录内清理（含 deps/ 顶层模块）。
@@ -902,7 +898,7 @@ class PluginInstaller:
                     try:
                         if plugin_dir_str in str(Path(mod_file).resolve()).lower():
                             del sys.modules[mod_name]
-                    except (OSError, ValueError):
+                    except OSError, ValueError:
                         continue
             importlib.invalidate_caches()
             gc.collect()
@@ -971,8 +967,8 @@ class PluginInstaller:
                 self._robust_move(str(src), str(self._disabled_dir / name))
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Disabled plugin {name}")
-                # 恢复 watcher 并触发一次重载，使禁用后的插件状态立即可见
-                self._resume_backend_watcher(reload=True)
+                # 恢复 watcher 并精准重载目标插件（仅清理该插件，不触发全量）
+                self._resume_backend_watcher(reload=True, plugin_name=name)
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Disable {name} failed: {e}")
@@ -1007,8 +1003,8 @@ class PluginInstaller:
                 self._robust_move(str(src), str(self._plugins_dir / name))
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Enabled plugin {name}")
-                # 恢复 watcher 并主动触发一次重载，使启用的插件立即可用
-                self._resume_backend_watcher(reload=True)
+                # 恢复 watcher 并精准重载目标插件（仅加载该插件，不触发全量）
+                self._resume_backend_watcher(reload=True, plugin_name=name)
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Enable {name} failed: {e}")

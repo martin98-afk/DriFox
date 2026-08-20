@@ -100,6 +100,9 @@ class _RegistryProxy:
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_occupied", occupied)  # id -> kind
         object.__setattr__(self, "_lock", lock)
+        # 本次 register 成功占据（含覆盖）的 item id 集——loader 用于精准卸载时
+        # 释放 _occupied 条目（否则低等级根恢复扫描会被残留占用挡住）
+        object.__setattr__(self, "_occupied_items", set())
 
     def __getattr__(self, name):
         return getattr(self._registry, name)
@@ -122,6 +125,7 @@ class _RegistryProxy:
                         )
                         return
                 self._occupied[item_id] = self._kind
+                self._occupied_items.add(item_id)
         self._registry.register(item, source=self._source)
 
 
@@ -142,6 +146,12 @@ class RuntimeComponentLoader:
         self._occupied: Dict[str, str] = {}
         self._sources: Set[str] = set()
         self._lock = threading.Lock()
+        # 精准卸载状态：source -> 占据的 item id 集（_occupied 反向索引）
+        self._occupied_by_source: Dict[str, Set[str]] = {}
+        # source -> root kind（磁盘目录被移走后仍能判定优先级，用于覆盖恢复）
+        self._source_kind: Dict[str, str] = {}
+        # 最近一次 scan_roots 的扫描根（精准方法复用；未扫过时回退全局根）
+        self._scan_roots_cache: Optional[List[Path]] = None
         # scan_roots 整体互斥：防并发 scan 双重 unregister / 重复注册
         # （对齐 ProviderWatcher.scan_now 的 _scan_lock 模式）
         self._scan_lock = threading.Lock()
@@ -154,10 +164,13 @@ class RuntimeComponentLoader:
         roots = roots if roots is not None else _plugin_roots()
         unregister = getattr(self._registry, self._unregister_attr)
         with self._scan_lock:
+            self._scan_roots_cache = list(roots)
             # 1) 清理上一次扫描记录过的 plugin:* 来源
             sources = set(self._sources)
             self._sources.clear()
             self._occupied.clear()
+            self._occupied_by_source.clear()
+            self._source_kind.clear()
             for s in sources:
                 unregister(s)
             # 2) 全量重扫注册
@@ -181,6 +194,88 @@ class RuntimeComponentLoader:
                             loaded.add(plugin_dir.name)
             return loaded
 
+    def _rescan_roots_below(self, rank: int) -> None:
+        """覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖组件
+
+        仅重扫低等级根（如 user 插件卸载后重扫 system 根），其模块的 register
+        经 _RegistryProxy 的「高/同优先级根占用跳过」保护：已存在的他插件组件
+        不被覆盖，仅补注册因目标插件注销而缺失的同名组件（跨根覆盖恢复）。
+        """
+        roots = self._scan_roots_cache or _plugin_roots()
+        for root in roots:
+            if _ROOT_KIND_PRIORITY.get(_root_kind(root), 0) >= rank:
+                continue
+            if not root.is_dir():
+                continue
+            for plugin_dir in sorted(root.iterdir()):
+                comp = plugin_dir / self._comp_dir
+                if not comp.is_dir():
+                    continue
+                if not _is_plugin_enabled(plugin_dir.name):
+                    continue
+                for py in sorted(comp.glob("*.py")):
+                    if py.name.startswith("_"):
+                        continue
+                    self._load_module(py, plugin_dir.name, _root_kind(root))
+
+    def _unload_source(self, plugin_name: str) -> int:
+        """注销单插件来源并释放其占据的 item（_occupied 反向索引），返回移除的 item 数"""
+        source = f"plugin:{plugin_name}"
+        items = self._occupied_by_source.pop(source, set())
+        for it in items:
+            self._occupied.pop(it, None)
+        unregister = getattr(self._registry, self._unregister_attr)
+        unregister(source)
+        self._sources.discard(source)
+        self._source_kind.pop(source, None)
+        return len(items)
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        """精准卸载单个插件的运行时组件（删除/禁用路径），不波及他插件
+
+        与 scan_roots 的区别：scan_roots 先注销全部 plugin:* 来源再全量重注册，
+        会波及 system 等无关插件。本方法只注销目标插件来源，并对更低等级根
+        重扫一次恢复被其覆盖的同名组件（_rescan_roots_below）。
+        """
+        with self._scan_lock:
+            # 先捕获来源等级（_unload_source 会清除 _source_kind 记录）
+            removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(f"plugin:{plugin_name}", "system"), 0)
+            removed_items = self._unload_source(plugin_name)
+            if removed_items:
+                logger.info(f"[RuntimeLoader] 注销插件组件: {plugin_name}（{removed_items} 项）")
+            # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
+            self._rescan_roots_below(removed_rank)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        """精准重载单个插件的运行时组件（安装/更新/启用路径），不波及他插件
+
+        语义：注销该插件旧组件 → 恢复被其覆盖的低等级根同名组件 → 重新注册
+        该插件当前模块（高等级根再次覆盖）→ 最终状态与全量重扫一致。
+        """
+        with self._scan_lock:
+            # 先捕获来源等级（_unload_source 会清除 _source_kind 记录）
+            removed_rank = _ROOT_KIND_PRIORITY.get(self._source_kind.get(f"plugin:{plugin_name}", "system"), 0)
+            removed_items = self._unload_source(plugin_name)
+            if removed_items:
+                logger.info(f"[RuntimeLoader] 重载前注销插件组件: {plugin_name}（{removed_items} 项）")
+            # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
+            self._rescan_roots_below(removed_rank)
+            # 重注册该插件当前模块（enabled 过滤与 scan_roots 一致）
+            if not _is_plugin_enabled(plugin_name):
+                logger.info(f"[RuntimeLoader] 跳过已禁用插件的组件: {plugin_name}")
+                return
+            roots = self._scan_roots_cache or _plugin_roots()
+            for root in roots:
+                if not (root / plugin_name).is_dir():
+                    continue
+                comp = root / plugin_name / self._comp_dir
+                if not comp.is_dir():
+                    continue
+                for py in sorted(comp.glob("*.py")):
+                    if py.name.startswith("_"):
+                        continue
+                    self._load_module(py, plugin_name, _root_kind(root))
+
     def _load_module(self, py: Path, plugin_name: str, kind: str) -> bool:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
         # 防模块 GC 回收导致插件类定义丢失（对齐 provider_loader._load_module）
@@ -201,6 +296,8 @@ class RuntimeComponentLoader:
             # 注册成功（即使代理内部跳过）即记录 source，便于下次重扫清理
             with self._lock:
                 self._sources.add(f"plugin:{plugin_name}")
+                self._occupied_by_source.setdefault(f"plugin:{plugin_name}", set()).update(proxy._occupied_items)
+                self._source_kind[f"plugin:{plugin_name}"] = kind
             return True
         except Exception as e:
             logger.error(f"[RuntimeLoader] 加载 {py} 失败: {e}")
@@ -238,14 +335,58 @@ class _RuntimeWatcher:
         self._loader.scan_roots()
         self._sigs = self._snapshot()
 
+    def unload_plugin(self, plugin_name: str) -> None:
+        """精准卸载单插件（透传 loader，不触发全量重扫）"""
+        self._loader.unload_plugin(plugin_name)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        """精准重载单插件（透传 loader，不触发全量重扫）"""
+        self._loader.reload_plugin(plugin_name)
+
     def _loop(self) -> None:
         while not self._stop.wait(5.0):
             try:
-                if self._snapshot() != self._sigs:
-                    self.scan_now()
-                    logger.info(f"[RuntimeWatcher:{self._name}] 变更触发重扫")
+                new_sigs = self._snapshot()
+                if new_sigs == self._sigs:
+                    continue
+                # 精准重扫：按快照 diff 识别变更文件所属插件，逐个精准重载/卸载，
+                # 不再全量注销+重注册全部插件（避免「改一个插件波及全部同类组件」）
+                old_paths = set(self._sigs)
+                new_paths = set(new_sigs)
+                changed_plugins: Set[str] = set()
+                removed_paths = old_paths - new_paths
+                for p in removed_paths:
+                    name = self._plugin_name_of(p)
+                    if name:
+                        changed_plugins.add(name)
+                for p in old_paths & new_paths:
+                    if self._sigs[p] != new_sigs[p]:
+                        name = self._plugin_name_of(p)
+                        if name:
+                            changed_plugins.add(name)
+                for p in new_paths - old_paths:
+                    name = self._plugin_name_of(p)
+                    if name:
+                        changed_plugins.add(name)
+                for name in changed_plugins:
+                    # 插件目录仍存在 → 精准重载；已删除 → 精准卸载
+                    if any((Path(root) / name).is_dir() for root in _plugin_roots()):
+                        self._loader.reload_plugin(name)
+                    else:
+                        self._loader.unload_plugin(name)
+                    logger.info(f"[RuntimeWatcher:{self._name}] 精准重载插件 {name}")
+                self._sigs = new_sigs
             except Exception as e:
                 logger.warning(f"[RuntimeWatcher:{self._name}] 轮询异常: {e}")
+
+    @staticmethod
+    def _plugin_name_of(py_path: Path) -> str:
+        """从快照路径提取插件名（结构：<root>/<plugin>/<comp_dir>/*.py）"""
+        try:
+            parts = Path(py_path).parts
+            return parts[-3] if len(parts) >= 3 else ""
+        except Exception:
+            return ""
 
     def start(self) -> None:
         if self._thread is None:

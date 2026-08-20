@@ -445,7 +445,7 @@ class PluginManager:
         # 联动加载 UI 组件
         self._load_plugin_ui(name)
         # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
-        self._rescan_plugin_tools()
+        self._rescan_plugin_tools(name, enabled=True)
 
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
@@ -482,20 +482,24 @@ class PluginManager:
         # 联动卸载 UI 组件
         self._unload_plugin_ui(name)
         # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
-        self._rescan_plugin_tools()
+        self._rescan_plugin_tools(name, enabled=False)
 
-    def _rescan_plugin_tools(self) -> None:
-        """插件启停后对齐工具注册（工具插件随启停热生效）。
+    def _rescan_plugin_tools(self, name: str, enabled: bool) -> None:
+        """插件启停后精准对齐工具注册（工具插件随启停热生效）。
 
-        触发 PluginToolWatcher 全量重扫：注销全部已加载插件工具后按
-        enabled 状态重新注册（scan_now 幂等 + 锁保护；watcher 未启动/异常时跳过）。
+        - enabled=True（启用）→ watcher.reload_plugin(name)：只重载该插件工具
+        - enabled=False（禁用）→ watcher.unload_plugin(name)：只注销该插件工具
+        均不触发 scan_now 全量重扫（旧实现会把全部插件工具注销再重注册）。
         """
         try:
             from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is not None:
-                watcher.scan_now()
+                if enabled:
+                    watcher.reload_plugin(name)
+                else:
+                    watcher.unload_plugin(name)
         except Exception as e:
             logger.warning(f"[PluginManager] 插件工具重扫失败: {e}")
 

@@ -297,15 +297,14 @@ class _StyledCleanerDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         layout.addLayout(btn_layout)
 
-        # 内容自适应：设最小尺寸保底（420×220）、最大尺寸防撑爆（620×720）、
-        # 水平 Fixed 阻止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏，
-        # 垂直 Preferred 让 layout 按文本行数自适应（原 setFixedSize 长文本被遮挡）
+        # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+        # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        # 内容自适应：minSize 保底（420×220）、maxSize 防撑爆（620×720）、
+        # adjustSize 让 widget 按内容 sizeHint 自适应（原 setFixedSize 长文本被遮挡）
         self.widget.setMinimumSize(420, 220)
         self.widget.setMaximumSize(620, 720)
-        sp = self.widget.sizePolicy()
-        sp.setHorizontalPolicy(QSizePolicy.Fixed)
-        sp.setVerticalPolicy(QSizePolicy.Preferred)
-        self.widget.setSizePolicy(sp)
         self.widget.adjustSize()
 
     def _on_confirm(self):
@@ -394,13 +393,13 @@ class _StyledCleanerInfoDialog(MaskDialogBase):
         btn_layout.addWidget(ok_btn)
         layout.addLayout(btn_layout)
 
-        # 内容自适应：最小 400×180，最大 600×720；水平 Fixed 防拉伸，垂直 Preferred 跟内容
+        # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+        # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        # 内容自适应：minSize 保底（400×180），maxSize 防撑爆（600×720）
         self.widget.setMinimumSize(400, 180)
         self.widget.setMaximumSize(600, 720)
-        sp = self.widget.sizePolicy()
-        sp.setHorizontalPolicy(QSizePolicy.Fixed)
-        sp.setVerticalPolicy(QSizePolicy.Preferred)
-        self.widget.setSizePolicy(sp)
         self.widget.adjustSize()
 
 

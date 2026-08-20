@@ -240,13 +240,13 @@ def _styled_message_box(
                     )
 
             layout.addLayout(btn_layout)
-            # 内容自适应：最小 420×200，最大 620×720；水平 Fixed 防拉伸，垂直 Preferred 跟内容
+            # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+            # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+            self.layout().removeWidget(self.widget)
+            self.widget.setParent(self)
+            # 内容自适应：minSize 保底（420×200），maxSize 防撑爆（620×720）
             self.widget.setMinimumSize(420, 200)
             self.widget.setMaximumSize(620, 720)
-            sp = self.widget.sizePolicy()
-            sp.setHorizontalPolicy(QSizePolicy.Fixed)
-            sp.setVerticalPolicy(QSizePolicy.Preferred)
-            self.widget.setSizePolicy(sp)
             self.widget.adjustSize()
 
     dialog = _Dialog(parent_widget)

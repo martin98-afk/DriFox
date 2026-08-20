@@ -123,3 +123,68 @@ def test_enable_uses_robust_move_after_fix(tmp_path, monkeypatch):
     ok = installer.enable("gateway-feishu")
     assert ok is True
     assert called["robust"] is True, "enable 必须走 _robust_move"
+
+
+def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
+    """禁用后重载走 reload_plugin_targeted（精准），不再全量 reload_plugin_subsystems
+
+    回归：旧实现 _resume_backend_watcher(reload=True) 固定调 reload_plugin_subsystems，
+    卸载/禁用一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载。
+    """
+    from app.core.backend import ChatBackend
+    from ui.installer import PluginInstaller
+
+    installer = _make_installer(tmp_path)
+    _build_fake_plugin(installer._plugins_dir, "gateway-feishu")
+
+    monkeypatch.setattr("ui.installer.time.sleep", lambda *_: None)
+    monkeypatch.setattr(ChatBackend, "_suppress_watcher_until", 0.0, raising=False)
+
+    targeted: list = []
+    full: list = []
+
+    class _FakeInst:
+        def reload_plugin_targeted(self, name):
+            targeted.append(name)
+
+        def reload_plugin_subsystems(self):
+            full.append(True)
+
+    monkeypatch.setattr(ChatBackend, "_active_instances", {_FakeInst()})
+    # 测试无事件循环：QTimer.singleShot 改为立即执行
+    monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+
+    ok = installer.disable("gateway-feishu")
+    assert ok is True
+    assert targeted == ["gateway-feishu"], "禁用后应精准重载目标插件，实际: {targeted}"
+    assert full == [], "不应触发全量 reload_plugin_subsystems"
+
+
+def test_enable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
+    """启用后重载同样走 reload_plugin_targeted（精准），不触发全量"""
+    from app.core.backend import ChatBackend
+    from ui.installer import PluginInstaller
+
+    installer = _make_installer(tmp_path)
+    _build_fake_plugin(installer._disabled_dir, "gateway-feishu")
+
+    monkeypatch.setattr("ui.installer.time.sleep", lambda *_: None)
+    monkeypatch.setattr(ChatBackend, "_suppress_watcher_until", 0.0, raising=False)
+
+    targeted: list = []
+    full: list = []
+
+    class _FakeInst:
+        def reload_plugin_targeted(self, name):
+            targeted.append(name)
+
+        def reload_plugin_subsystems(self):
+            full.append(True)
+
+    monkeypatch.setattr(ChatBackend, "_active_instances", {_FakeInst()})
+    monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
+
+    ok = installer.enable("gateway-feishu")
+    assert ok is True
+    assert targeted == ["gateway-feishu"], "启用后应精准重载目标插件，实际: {targeted}"
+    assert full == [], "不应触发全量 reload_plugin_subsystems"

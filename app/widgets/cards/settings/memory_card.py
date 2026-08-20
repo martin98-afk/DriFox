@@ -446,16 +446,15 @@ class SingleInputDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         self.vBoxLayout.addLayout(btn_layout)
 
+        # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+        # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
         # 阻止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏：
-        # 设最小尺寸保底（DEFAULT_W/DEFAULT_H）、最大尺寸防撑爆、
-        # 水平 Fixed 阻止拉伸，垂直 Preferred 让 layout 按内容自适应。
+        # minSize 保底，maxSize 防撑爆，adjustSize 让 widget 按内容尺寸自适应。
         # 原 setFixedSize 会让 hint/输入说明等长文本溢出被按钮遮挡。
         self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.widget.setMaximumSize(self.DEFAULT_WIDTH + 200, self.DEFAULT_HEIGHT + 320)
-        sp = self.widget.sizePolicy()
-        sp.setHorizontalPolicy(QSizePolicy.Fixed)
-        sp.setVerticalPolicy(QSizePolicy.Preferred)
-        self.widget.setSizePolicy(sp)
         self.widget.adjustSize()
         # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
         self._center_widget()
