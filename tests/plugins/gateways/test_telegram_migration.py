@@ -1,103 +1,102 @@
 # -*- coding: utf-8 -*-
-"""Telegram 试点迁移：def 注册齐备 + manager/config 查表 + 行为等价。
+"""Telegram 试点迁移收官后验证：manager/config 零平台分支 + 6 def 齐备（社区仓）。
 
 E2 Task 4：TelegramAdapter 迁出 app/gateway/adapters/telegram.py 至
 plugins/system/gateways/telegram.py（register 暴露 GatewayPlatformDef）。
 manager/config 仅对 Telegram 走 registry 优先；其余 5 平台保留旧内置段。
+
+E2 Task 5：6 平台全部迁至 plugins/system/gateways/<id>.py。
+
+E2 Task 6（主仓清理）：
+- 6 platform 模块已迁至社区仓 drifox-plugins2/plugins/gateway-*/。
+- 平台模块具体断言（TelegramAdapter 类、register 流程、display_name 全字段）
+  随 platform 模块迁出；这些断言在 drifox-plugins2 仓 tests/ 下复刻。
+- 本文件保留：
+  - manager / config 零硬编码「if platform == Platform.X」分支断言
+    （inspect.getsource 锁，与 platform 模块所在位置无关）
+  - 「6 def 齐备」断言：默认 skip；环境变量 DRIFOX_GATEWAY_PLUGINS2 指向
+    drifox-plugins2 仓根时启用，从该路径 sys.path 注入后再验证。
 """
+
 from __future__ import annotations
+
+import importlib
+import inspect
+import os
 
 import pytest
 
 
-class _FakeSettings:
-    """Settings 桩：gateway_<platform>_<field> → .value 访问"""
+class TestNoHardcodedPlatformBranches:
+    """manager / config 不再硬编码 if/elif platform == Platform.<X> 段。"""
 
-    def __init__(self, gateway: dict):
-        self._gw = gateway
+    def test_manager_no_platform_if_chain(self):
+        """manager.py 不再硬编码 'if/elif platform == Platform.<X>' 段"""
+        src = inspect.getsource(__import__("app.gateway.manager", fromlist=["x"]))
+        assert "if platform == Platform." not in src, "manager.py 仍存在 'if platform == Platform.X' 硬编码分支"
+        assert "elif platform == Platform." not in src, "manager.py 仍存在 'elif platform == Platform.X' 硬编码分支"
 
-    def __getattr__(self, item: str):
-        if item.startswith("gateway_"):
-            rest = item[len("gateway_"):]
-            platform, _, field = rest.partition("_")
-            val = self._gw.get(f"{platform}_{field}")
-            return _Val(val)
-        raise AttributeError(item)
-
-
-class _Val:
-    def __init__(self, v):
-        self.value = v
+    def test_config_no_platform_if_chain(self):
+        """config.py 不再硬编码 'if/elif platform == Platform.<X>' 段"""
+        src = inspect.getsource(__import__("app.gateway.config", fromlist=["x"]))
+        assert "if platform == Platform." not in src, "config.py 仍存在 'if platform == Platform.X' 硬编码分支"
+        assert "elif platform == Platform." not in src, "config.py 仍存在 'elif platform == Platform.X' 硬编码分支"
 
 
-@pytest.fixture()
-def telegram_def_registered():
-    """手动执行 system 插件 telegram 注册（集成环境由 loader 自动完成）"""
-    import plugins.system.gateways.telegram as tg
+class TestAdaptersPackageDeleted:
+    """adapters/ 整目录删除（E2 Task 5 收官）"""
+
+    def test_adapters_package_deleted(self):
+        import os
+
+        assert not os.path.exists("app/gateway/adapters"), "app/gateway/adapters/ 仍存在——Task 5 须整目录删除"
+
+
+# 6 个内置平台 id（与 drifox-plugins2/plugins/gateway-*/ 一一对应）
+BUILTIN_IDS = ["wecom", "dingtalk", "telegram", "discord", "feishu", "slack"]
+
+
+def _load_all_from_plugins2(plugins2_root: str):
+    """从社区仓根加载 6 个 platform 模块并注册到 fresh registry"""
     from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
 
-    reg = GatewayPlatformRegistry.get_instance()
-    tg.register(reg)
-    yield reg
-    # 清理：手动 register 用 source="" 注册（未走 proxy），按当前实现
-    # unregister_source("") 会清掉所有 source 为空的项；为避免误清其他
-    # 第三方平台 def（理论不应存在），这里改为按 id 移除。
-    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
-    # 直接重置：frozen dataclass 的 dict 替换
-    with reg._lock:
-        reg._defs.pop("telegram", None)
+    if plugins2_root not in sys.path:
+        sys.path.insert(0, plugins2_root)
+
+    reg = GatewayPlatformRegistry()
+    for pid in BUILTIN_IDS:
+        mod = importlib.import_module(f"plugins.gateway_{pid}")
+        mod.register(reg)
+    return reg
 
 
-class TestTelegramDef:
-    def test_def_registered_with_full_callbacks(self, telegram_def_registered):
-        d = telegram_def_registered.get("telegram")
-        assert d is not None
-        assert d.display_name == "Telegram"
-        assert d.config_builder is not None
-        assert d.config_writer is not None
-        assert d.build_config_values is not None
-        assert d.check_requirements is not None
-        # 手动 register 时 source 仍为空字符串（未走 loader proxy 强制）
-        assert d.source == ""
+import sys  # noqa: E402
 
 
-class TestConfigEquivalent:
-    def test_build_reads_settings(self, telegram_def_registered, monkeypatch, tmp_path):
-        """config_builder 等价于旧 config.py TELEGRAM 段（读 Settings）"""
-        from app.gateway.base import Platform, PlatformConfig
-        from app.gateway.config import GatewayConfigHelper
+@pytest.mark.skipif(
+    not os.environ.get("DRIFOX_GATEWAY_PLUGINS2"),
+    reason=(
+        "6 platform 模块已迁至社区仓 drifox-plugins2。"
+        "设置环境变量 DRIFOX_GATEWAY_PLUGINS2=<社区仓根绝对路径> 启用此断言。"
+    ),
+)
+class TestAllDefsRegistered:
+    """6 def 齐备 + 全字段断言（依赖 DRIFOX_GATEWAY_PLUGINS2 指向社区仓根）"""
 
-        monkeypatch.setattr(
-            "app.utils.config.Settings.get_instance",
-            lambda: _FakeSettings(
-                gateway={
-                    "telegram_enabled": True,
-                    "telegram_token": "T123",
-                    "telegram_require_mention": False,
-                }
-            ),
-        )
-        cfg = GatewayConfigHelper.get_platform_config(Platform.TELEGRAM)
-        assert isinstance(cfg, PlatformConfig)
-        assert cfg.platform == Platform.TELEGRAM
-        assert cfg.enabled is True
-        assert cfg.token == "T123"
-        assert cfg.extra["require_mention"] is False
-
-
-class TestManagerRegistryPriority:
-    """manager._load_adapters 对已注册平台走 registry 优先（不再读旧 adapters 段）"""
-
-    def test_telegram_registered_yields_def_path(self, telegram_def_registered, monkeypatch):
-        """telegram 已注册 → manager 头部循环命中 platform_id='telegram'，
-        不依赖 adapters 模块的 TelegramAdapter 符号（迁移后该符号为 None）。
-        本测试验：def 已注册且 platform_id 可被 registry 路由查找到。
-        """
-        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
-
-        d = GatewayPlatformRegistry.get_instance().get("telegram")
-        assert d is not None
-        assert d.adapter_factory is not None
-        # adapter_factory 必须是可调用的（lambda cfg: TelegramAdapter(cfg)）
-        # 直接调用工厂会触发 import — 这里仅验存在
-        assert callable(d.adapter_factory)
+    def test_six_defs_with_full_callbacks(self):
+        plugins2_root = os.environ["DRIFOX_GATEWAY_PLUGINS2"]
+        reg = _load_all_from_plugins2(plugins2_root)
+        try:
+            for pid in BUILTIN_IDS:
+                d = reg.get(pid)
+                assert d is not None, f"{pid} 未注册"
+                assert d.adapter_factory is not None, f"{pid} 缺 adapter_factory"
+                assert d.config_builder is not None, f"{pid} 缺 config_builder"
+                assert d.config_writer is not None, f"{pid} 缺 config_writer"
+                assert d.build_config_values is not None, f"{pid} 缺 build_config_values"
+                assert d.check_requirements is not None, f"{pid} 缺 check_requirements"
+                assert d.display_name, f"{pid} 缺 display_name"
+        finally:
+            with reg._lock:
+                for pid in BUILTIN_IDS:
+                    reg._defs.pop(pid, None)
