@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -296,7 +297,16 @@ class _StyledCleanerDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(420, 220)
+        # 内容自适应：设最小尺寸保底（420×220）、最大尺寸防撑爆（620×720）、
+        # 水平 Fixed 阻止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏，
+        # 垂直 Preferred 让 layout 按文本行数自适应（原 setFixedSize 长文本被遮挡）
+        self.widget.setMinimumSize(420, 220)
+        self.widget.setMaximumSize(620, 720)
+        sp = self.widget.sizePolicy()
+        sp.setHorizontalPolicy(QSizePolicy.Fixed)
+        sp.setVerticalPolicy(QSizePolicy.Preferred)
+        self.widget.setSizePolicy(sp)
+        self.widget.adjustSize()
 
     def _on_confirm(self):
         self._result = True
@@ -384,7 +394,14 @@ class _StyledCleanerInfoDialog(MaskDialogBase):
         btn_layout.addWidget(ok_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(400, 180)
+        # 内容自适应：最小 400×180，最大 600×720；水平 Fixed 防拉伸，垂直 Preferred 跟内容
+        self.widget.setMinimumSize(400, 180)
+        self.widget.setMaximumSize(600, 720)
+        sp = self.widget.sizePolicy()
+        sp.setHorizontalPolicy(QSizePolicy.Fixed)
+        sp.setVerticalPolicy(QSizePolicy.Preferred)
+        self.widget.setSizePolicy(sp)
+        self.widget.adjustSize()
 
 
 # ── 弹窗工厂函数 ──────────────────────────────────────

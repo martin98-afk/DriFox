@@ -240,7 +240,14 @@ def _styled_message_box(
                     )
 
             layout.addLayout(btn_layout)
-            self.widget.setFixedSize(420, 200)
+            # 内容自适应：最小 420×200，最大 620×720；水平 Fixed 防拉伸，垂直 Preferred 跟内容
+            self.widget.setMinimumSize(420, 200)
+            self.widget.setMaximumSize(620, 720)
+            sp = self.widget.sizePolicy()
+            sp.setHorizontalPolicy(QSizePolicy.Fixed)
+            sp.setVerticalPolicy(QSizePolicy.Preferred)
+            self.widget.setSizePolicy(sp)
+            self.widget.adjustSize()
 
     dialog = _Dialog(parent_widget)
     dialog.exec_()
