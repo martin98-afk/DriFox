@@ -4994,6 +4994,74 @@ class OpenAIChatToolWindow(ToolWindow):
         team_label = template.template_name or tm_mgr.get_team_label()
         self._spawn_team_members(agents_needed, run_id=new_run_id, team_label=team_label)
 
+    def _apply_model_selection_to_window(self, win, model_name: str = "", provider_name: str = ""):
+        """把模型选择应用到团队新窗口（构建继承 / 恢复还原）。
+
+        - model_name 非空（团队恢复路径）：按成员历史会话消息还原其最后
+          使用的模型——provider_name（display_name 或 config_id）优先直查，
+          其次遍历 _valid_configs 按模型名唯一匹配（多匹配不明确则跳过）；
+        - model_name 空（团队构建路径）：继承构建者标签页（self）当前选中的
+          模型，保证模板各角色默认与发起构建的标签页一致。
+
+        同时把构建者（self）的 _valid_configs / _display_to_config_id 配置
+        视图复制给新窗口：新窗口 _load_model_configs 异步（1500ms）完成前
+        即可完成匹配与按钮渲染；异步加载 force_global=False 保留窗口已有
+        选择（old_provider 分支），不会覆盖此处设置。
+        """
+        try:
+            if not getattr(win, "_is_destroyed", False) and self._valid_configs:
+                win._valid_configs = dict(self._valid_configs)
+                win._display_to_config_id = dict(getattr(self, "_display_to_config_id", {}))
+
+            def _inherit_builder_selection():
+                """回退/构建路径：继承构建者标签页当前选中的模型"""
+                if getattr(self, "_current_provider_name", ""):
+                    win._current_provider_name = self._current_provider_name
+                    win._current_model_name = getattr(self, "_current_model_name", "")
+                    win._user_manually_selected_model = getattr(self, "_user_manually_selected_model", False)
+
+            if model_name:
+                config_id = ""
+                # 1) provider_name 优先：display_name 反查 / config_id 直通
+                if provider_name:
+                    cid = getattr(win, "_display_to_config_id", {}).get(provider_name, provider_name)
+                    if cid in win._valid_configs:
+                        config_id = cid
+                # 2) 兜底：遍历按模型名唯一匹配（与 _auto_save_current_session
+                #    回填 provider 的匹配语义一致）
+                if not config_id:
+                    matched = None
+                    for cid, info in win._valid_configs.items():
+                        model_list = info.get("模型列表") or []
+                        if isinstance(model_list, str):
+                            try:
+                                import ast
+
+                                model_list = ast.literal_eval(model_list) or []
+                            except Exception:
+                                model_list = []
+                        if info.get("模型名称") == model_name or model_name in model_list:
+                            if matched is None:
+                                matched = cid
+                            else:
+                                matched = ""  # 多匹配不明确，跳过
+                                break
+                    config_id = matched or ""
+                if config_id:
+                    win._current_provider_name = config_id
+                    win._current_model_name = model_name
+                    win._user_manually_selected_model = True
+                else:
+                    # 恢复的模型无法匹配任何配置 → 回退继承构建者当前模型
+                    _inherit_builder_selection()
+            else:
+                # 团队构建：继承构建者标签页当前选中的模型
+                _inherit_builder_selection()
+            if hasattr(win, "_update_model_selector_btn"):
+                win._update_model_selector_btn()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_apply_model_selection_to_window] 应用模型选择失败: {e}")
+
     def _spawn_team_member_window(
         self,
         agent_name: str,
@@ -5070,6 +5138,10 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_name = team_name
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
+            # 🆕 团队构建模型继承：成员窗口默认使用「发起构建的标签页」当前
+            # 选中的模型（_apply_model_selection_to_window 内部处理配置视图
+            # 复制 + 按钮刷新；异步 _load_model_configs 不会覆盖）。
+            self._apply_model_selection_to_window(win)
             # 🛡️ M1：把 run_id / team_label 透传到 join_team——**仅当调用方
             # 显式传参（非空）时才追加到 kwargs**，避免老路径（如测试 mock
             # 严格断言）收到意外 kwargs。
@@ -8909,6 +8981,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     if win is None:
                         continue
+                    # 🆕 恢复成员最后使用的模型：从该成员最新会话消息提取
+                    # assistant 消息的 model_name/provider_name 还原到窗口
+                    # （无 assistant 消息 → 回退继承构建者标签页模型）。
+                    _last_model, _last_provider = "", ""
+                    for _m in reversed(messages):
+                        if _m.get("role") == "assistant" and _m.get("model_name"):
+                            _last_model = _m["model_name"]
+                            _last_provider = _m.get("provider_name", "") or ""
+                            break
+                    self._apply_model_selection_to_window(win, _last_model, _last_provider)
                     # 团队标记 + 重新登记成员（join_team 幂等；标记由 D2 前置赋值，
                     # 此处幂等重写保持与 _spawn_team_member_window 一致的防御语义）
                     win._team_agent_name = agent_name
