@@ -9626,6 +9626,25 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[ToolReloadNotice] 弹框失败: {e}")
 
+    @classmethod
+    def _win_alive(cls, win, attr: str = "") -> bool:
+        """热重载广播循环的窗口存活探测（防残骸实例阻断整个广播）
+
+        _instances 可能残留两类残骸：C++ 对象已 deleteLater 但 wrapper 仍在列表、
+        以及未完成 super().__init__ 的半成品。对它们做属性探测（hasattr /
+        读 _is_destroyed）会抛 RuntimeError——而广播循环的存活判断位于 try 之外，
+        一个残骸即中断 _on_plugin_hot_reload 整个槽，后续所有刷新分支（命令
+        卡片/快捷键/输入区插件按钮/内容块重绘/各设置卡）静默失效（PyQt slot
+        吞异常无感知）。统一在此拦截，残骸仅跳过自身，不影响其余窗口。
+        attr 非空时附带探测该属性存在性（hasattr 对残骸同样会炸）。
+        """
+        try:
+            if win._is_destroyed:
+                return False
+            return not attr or hasattr(win, attr)
+        except (RuntimeError, AttributeError):
+            return False
+
     def _on_plugin_hot_reload(self, result: dict):
         """插件热更新完成时的回调（watchfiles 自动触发）
 
@@ -9660,10 +9679,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         # 广播给所有窗口实例
-        for win in OpenAIChatToolWindow._instances:
-            if not hasattr(win, "_command_card"):
-                continue
-            if win._is_destroyed:
+        for win in list(OpenAIChatToolWindow._instances):
+            if not OpenAIChatToolWindow._win_alive(win, "_command_card"):
                 continue
 
             if needs_invalidation:
@@ -9683,8 +9700,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if result.get("commands"):
             # 清除窗口级快捷键缓存，允许重新注册
             OpenAIChatToolWindow._window_shortcut_cache.clear()
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     win._register_command_shortcuts()
@@ -9692,11 +9709,27 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         if result.get("ui"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     win._build_plugin_input_buttons()
+                except RuntimeError, AttributeError:
+                    pass
+            # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
+            # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
+            # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
+            # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
+            _ui_plugin_name = result.get("_plugin_name") or ""
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
+                    continue
+                try:
+                    for _card in win.findChildren(MessageCard):
+                        try:
+                            _card.rerender_custom_blocks(_ui_plugin_name)
+                        except RuntimeError, AttributeError:
+                            pass
                 except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
@@ -9713,8 +9746,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
         # 遍历窗口时每个窗口都会命中同一实例 → 只处理一次即 break，避免重复刷新。
         if result.get("skills"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9730,8 +9763,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # Hooks 变更：刷新 hook 设置卡片（settings popup 全局单例 → 只刷一次）
         if result.get("hooks"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9750,8 +9783,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 主题变更：刷新主题下拉列表（settings popup 全局单例，只刷一次）
         if result.get("themes"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9780,8 +9813,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if _mcp_reload:
             mcp_card = None
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9828,8 +9861,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # LSP 配置变更：刷新 LSP 状态列表（settings popup 全局单例 → 只刷一次）
         if result.get("lsp"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9847,8 +9880,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
         if result.get("ui"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not getattr(win, "_system_cards_open", False):

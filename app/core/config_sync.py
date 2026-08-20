@@ -657,10 +657,7 @@ class ConfigSyncService(QObject):
                 return
             result = target.reload_plugin_subsystems()
             logger.info(f"[ConfigSync] 合并插件重载完成: {result}")
-            try:
-                target.plugin_changed.emit(result)
-            except RuntimeError:
-                pass
+            target.emit_plugin_changed(result)
         except Exception as e:
             logger.warning(f"[ConfigSync] 合并插件重载失败: {e}")
 

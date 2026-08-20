@@ -220,6 +220,44 @@ def test_reload_plugin_targeted_empty_falls_back_to_full(kernel_env, monkeypatch
     assert calls == [True], "空名应回退全量重载"
 
 
+def test_reload_plugin_targeted_emits_plugin_changed(kernel_env, monkeypatch):
+    """安装/更新/启停路径必须广播 plugin_changed（回归：twin-chat 安装后已开标签页不刷新）
+
+    Installer 直接调 reload_plugin_targeted（非 watcher 链路），若无 emit，
+    窗口收不到 ui=True → 已打开标签页输入区按钮/内容块不刷新；
+    watcher 抑制解除后的 fallback 事件组件归类常为 root（ui=False）顶替不了。
+    """
+    reg, fake_pm = kernel_env
+    from app.core.backend import ChatBackend
+
+    fake_plugin = fake_pm.get_plugin.return_value
+    fake_plugin.components = {"ui": True}
+    fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
+
+    backend = ChatBackend.__new__(ChatBackend)
+    # __new__ 实例无 C++ 对象，访问 Qt 信号必抛 RuntimeError →
+    # 在 emit_plugin_changed 层断言（信号→窗口槽链路由 test_input_button_hot_reload 覆盖）
+    emitted: list = []
+    monkeypatch.setattr(backend, "emit_plugin_changed", lambda r, n="": emitted.append((dict(r), n)))
+    monkeypatch.setattr(ChatBackend, "_active_instances", [])
+    monkeypatch.setattr(
+        "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+        staticmethod(lambda: fake_pm),
+    )
+    # 隔离 UI 注册表单例：ui reloader 的 reload_plugin 不做真实加载
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: MagicMock()))
+
+    result = backend.reload_plugin_targeted("plug")
+
+    assert result.get("ui") is True, f"manifest 分派应置 ui=True，实际 {result}"
+    assert len(emitted) == 1, "targeted 重载后必须广播 plugin_changed 到窗口"
+    annotated, name = emitted[0]
+    assert annotated.get("ui") is True
+    assert name == "plug"
+
+
 def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
     """reload_plugin_subsystems 默认 diff 精准：added/changed 走 __manifest__，removed 走精准清理
 

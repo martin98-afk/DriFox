@@ -227,6 +227,12 @@ class UIPluginRegistry:
         # 避免 N 个 welcome tab 插件逐个触发 N 次欢迎卡片重建（QWebEngineView
         # 每次 100-500ms 主线程占用）导致启动/热重载卡顿
         self._welcome_refresh_pending: bool = False
+        # 热重载恢复队列：unload 时记录「卸载前可见」的浮动卡片 (plugin_name, window_id, card_id)，
+        # 重新加载成功后在对应窗口按新 widget_class 重建并恢复显示（否则旧标签页中
+        # 已打开的卡片只能等用户手动重开才看到新版）。
+        # 条目按 plugin_name 作用域：仅被同插件的 load_plugin 消费——插件删除路径
+        # （standalone unload，无后续 load）的过期条目不会泄漏给其他插件的加载。
+        self._pending_card_restore: list[tuple[str, str, str]] = []
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -769,21 +775,29 @@ class UIPluginRegistry:
         if not ui_init.exists():
             return False
 
-        # 先卸载旧版本
+        # 先卸载旧版本。卸载前备份旧模块引用：register 失败时回滚恢复旧注册
+        # （避免插件陷入「已卸载未加载」且 result[ui]=False 导致窗口零刷新的黑洞态）。
+        import sys as _sys_backup
+
+        safe_name = plugin_name.replace("-", "_").replace(":", "_")
+        module_name = f"ui_plugin_{safe_name}"
+        old_module = _sys_backup.modules.get(module_name) if self.is_loaded(plugin_name) else None
         if self.is_loaded(plugin_name):
             self.unload_plugin(plugin_name)
+        # 丢弃本插件残留的过期恢复条目（上一轮 standalone unload / 回滚失败的残留），
+        # 仅保留其他插件的条目——避免跨插件泄漏导致已删除卡片的错误恢复。
+        self._pending_card_restore = [
+            e for e in self._pending_card_restore if e[0] != plugin_name
+        ]
 
         try:
             import importlib.util
             import sys
 
-            # 将连字符替换为下划线（Python 模块名不允许连字符）
-            safe_name = plugin_name.replace("-", "_").replace(":", "_")
             ui_path = str(plugin_path / "ui")
             # 添加 ui 目录到 sys.path 以支持 from .renderers 等相对导入
             if ui_path not in sys.path:
                 sys.path.insert(0, ui_path)
-            module_name = f"ui_plugin_{safe_name}"
 
             # 清理字节码缓存（__pycache__），确保修改后的 .py 文件被重新编译，
             # 而不是使用旧的 .pyc 缓存（Python 的 mtime 检查在同一秒内可能失效）
@@ -826,19 +840,50 @@ class UIPluginRegistry:
                     f"[UIPluginRegistry] Plugin {plugin_name} ui/__init__.py missing register_ui(registry) function"
                 )
                 return False
-            # 仅当该插件注册了欢迎卡片 tab 时才刷新欢迎卡片；
-            # 普通 UI 插件（渲染器/悬浮卡/命令）不触碰欢迎卡片缓存，
-            # 避免每次加载/刷新 UI 插件都重建欢迎卡片。
+            # 刷新欢迎卡片：只要该插件注册过/注册着 welcome tab 就失效缓存——
+            # 仅改渲染函数实现（tab 集合不变）也须刷新已打开窗口的快照，
+            # 否则「热重载前打开的标签页」永远显示旧 tab 内容。
             before_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             register_func(self)
             self._loaded_plugins.add(plugin_name)
             logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
             after_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
-            if before_tabs != after_tabs:
+            if before_tabs or after_tabs:
                 self._schedule_welcome_refresh()
+            # 热重载恢复：卸载前可见的浮动卡片 → 按新 widget_class 重建并恢复显示
+            # （旧实例已在 unload 中销毁，_show_floating_card 会创建新实例 + toggle 显示）
+            restore = [
+                (win_id, cid)
+                for (pname, win_id, cid) in self._pending_card_restore
+                if pname == plugin_name
+            ]
+            self._pending_card_restore = [
+                e for e in self._pending_card_restore if e[0] != plugin_name
+            ]
+            for win_id, cid in restore:
+                try:
+                    mw = self._window_main_widgets.get(win_id)
+                    if mw is None:
+                        continue
+                    self._show_floating_card(cid, main_widget=mw)
+                except Exception as re:
+                    logger.warning(f"[UIPluginRegistry] 恢复可见卡片 {cid} 失败: {re}")
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
+            # 回滚：恢复旧模块与旧注册，保持插件上一版本状态可用
+            if old_module is not None:
+                try:
+                    import sys as _sys_rollback
+
+                    _sys_rollback.modules[module_name] = old_module
+                    reg = getattr(old_module, "register_ui", None)
+                    if callable(reg):
+                        reg(self)
+                    self._loaded_plugins.add(plugin_name)
+                    logger.warning(f"[UIPluginRegistry] 已回滚 {plugin_name} 至上一版本 UI 注册")
+                except Exception as re:
+                    logger.error(f"[UIPluginRegistry] 回滚失败 {plugin_name}: {re}")
             return False
 
     def reload_plugin(self, plugin_name: str, plugin_path) -> bool:
@@ -909,7 +954,25 @@ class UIPluginRegistry:
             for win_id, win_instances in list(self._card_widget_instances.items()):
                 widget = win_instances.pop(cid, None)
                 if widget is not None:
+                    # 记录卸载前可见状态：热重载（unload→load）后按新 widget_class 重建恢复，
+                    # 避免「已打开标签页中的卡片视图不更新，必须重开标签页」
+                    mw = self._window_main_widgets.get(win_id)
+                    cm = getattr(mw, "_card_manager", None) if mw is not None else None
+                    was_visible = False
+                    if cm is not None:
+                        try:
+                            was_visible = cm.is_card_visible(cid, win_id)
+                        except (RuntimeError, AttributeError):
+                            was_visible = False
                     self._remove_widget_from_container(win_id, cid, widget)
+                    # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
+                    # 不 deleteLater 会残留旧模块闭包/信号槽引用（Qt 父对象引用链）
+                    try:
+                        widget.deleteLater()
+                    except RuntimeError:
+                        pass
+                    if was_visible:
+                        self._pending_card_restore.append((plugin_name, win_id, cid))
         # 清理 Phase D 四类扩展点注册
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}

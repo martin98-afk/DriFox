@@ -304,8 +304,13 @@ class TestPluginChangedBroadcast:
 
             a._on_hot_reload_requested("some-plugin", "ui")
 
-            assert recv_a == [result], "宿主 backend 必须收到 plugin_changed"
-            assert recv_b == [result], "其他活跃 backend 必须收到广播"
+            # emit_plugin_changed 附加事件标识（_event_seq 递增 / _plugin_name 插件名），
+            # 供窗口级去重与精准视图重绘；原 result 键必须完整保留
+            expected = dict(result)
+            expected["_event_seq"] = recv_a[0].get("_event_seq", 1)
+            expected["_plugin_name"] = "some-plugin"
+            assert recv_a == [expected], "宿主 backend 必须收到 plugin_changed（含事件标识）"
+            assert recv_b == [expected], "其他活跃 backend 必须收到广播"
             assert recv_c == [], "未注册 backend 不得收到广播"
         finally:
             a.cleanup()
@@ -335,7 +340,10 @@ class TestPluginChangedBroadcast:
 
             a._on_hot_reload_requested("p", "")
 
-            assert recv_a == [result]
+            expected = dict(result)
+            expected["_event_seq"] = recv_a[0].get("_event_seq", 1)
+            expected["_plugin_name"] = "p"
+            assert recv_a == [expected]
             assert recv_b == [], "已清理 backend 不得收到广播"
         finally:
             a.cleanup()
