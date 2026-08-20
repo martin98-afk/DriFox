@@ -963,14 +963,21 @@ class PluginInstaller:
             # 用户插件：move 到 plugins-disabled
             # 清理模块缓存（UI 注册表卸载由主线程先行完成，此处不碰 GUI）
             self._purge_plugin_module_cache(name)
+            # 抑制 backend watcher：避免移动期间 watcher 抢跑 import 插件的 deps
+            # （如 gateway 插件的 Crypto 等 .pyd），造成 WinError 5 拒绝访问
+            self._suppress_backend_watcher()
             try:
                 self._disabled_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(self._disabled_dir / name))
+                self._robust_move(str(src), str(self._disabled_dir / name))
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Disabled plugin {name}")
+                # 恢复 watcher 并触发一次重载，使禁用后的插件状态立即可见
+                self._resume_backend_watcher(reload=True)
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Disable {name} failed: {e}")
+                # 恢复 watcher（不重载），避免抑制窗口残留
+                self._resume_backend_watcher(reload=False)
                 return False
         # 内置非 system 插件（项目根 plugins/ 且 type != system）→ 配置禁用
         system_dir = getattr(self, "_system_dir", None)
@@ -989,14 +996,24 @@ class PluginInstaller:
         """
         src = self._disabled_dir / name
         if src.exists():
+            # 释放 deps 模块句柄（gateway 插件 vendor 的 Crypto 等 .pyd 被进程
+            # 加载后会占用文件，移动前清理可降低 WinError 5 概率）
+            self._purge_plugin_module_cache(name)
+            # 抑制 backend watcher：避免移动期间 watcher 抢跑 import 插件的 deps
+            # （如 gateway 插件的 Crypto 等 .pyd），造成 WinError 5 拒绝访问
+            self._suppress_backend_watcher()
             try:
                 self._plugins_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(self._plugins_dir / name))
+                self._robust_move(str(src), str(self._plugins_dir / name))
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Enabled plugin {name}")
+                # 恢复 watcher 并主动触发一次重载，使启用的插件立即可用
+                self._resume_backend_watcher(reload=True)
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Enable {name} failed: {e}")
+                # 恢复 watcher（不重载），避免抑制窗口残留
+                self._resume_backend_watcher(reload=False)
                 return False
         # 内置非 system 插件 → 配置启用
         system_dir = getattr(self, "_system_dir", None)
