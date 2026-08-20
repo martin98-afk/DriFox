@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """声明式插件配置自动渲染卡（E1）。
 
-由 PluginConfigSchema 驱动：text→LineEdit / password→PasswordLineEdit /
-bool→SwitchButton，末尾统一保存按钮。保存后回显当前生效值
-（空输入=清除→回默认，对齐 websearch 旧卡语义）。
+折叠卡 + 字段独立保存（重写）：
+- 一张 ExpandSettingCard，标题 = schema.title，副标题 = 字段数概览
+- 展开后内部用表单：每行 label + LineEdit（password → PasswordLineEdit）
+- bool 字段以 SwitchButton 形式挂到 header 右侧（快速切换）
+- 每个字段 editingFinished / checkedChanged 触发即时保存，无需底部「保存配置」按钮
+- 字体大小 / 字族由 _apply_runtime_ui_settings → apply_font_size_to_widget
+  递归处理（保持与全站一致；不再在控件构造期 setFont，避免 pointSize/pixelSize
+  错位导致的"字体未应用系统字号 / 密码字体过大"问题）
+- 回显当前生效值（空输入=清除→回默认，对齐 websearch 旧卡语义）
+
 注册方式：PluginManager 扫描 config_schema 后调
 register_settings_card(..., make_card_class(plugin_name))，插件零 UI 代码。
 """
@@ -13,14 +20,12 @@ from __future__ import annotations
 from typing import Dict
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import (
+    ExpandSettingCard,
     FluentIcon,
     LineEdit,
     PasswordLineEdit,
-    PrimaryPushButton,
-    SettingCard,
-    StrongBodyLabel,
     SwitchButton,
 )
 
@@ -28,71 +33,68 @@ from app.plugins.managers.plugin_config_store import PluginConfigStore
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
 
-def _unified_font(size: int = 13):
-    from app.utils.utils import get_unified_font
+class _FieldRow(QWidget):
+    """字段行：左侧 label，右侧输入控件。"""
 
-    return get_unified_font(size)
+    def __init__(self, label_text: str, control: QWidget, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(12)
+
+        self._label = QLabel(label_text, self)
+        self._label.setObjectName("fieldLabel")
+        self._label.setMinimumWidth(120)
+        layout.addWidget(self._label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(control, 1, Qt.AlignRight)
 
 
-class _ConfigRow(SettingCard):
-    """通用配置行：控件由调用方创建并加入右侧"""
+class PluginConfigCard(ExpandSettingCard):
+    """schema 驱动的折叠式插件配置卡（无 schema 时渲染为空，不报错）。
 
-    def __init__(self, title: str, content: str, control: QWidget, parent=None):
-        super().__init__(FluentIcon.SETTING, title, content, parent)
-        self.setFont(_unified_font())
-        control.setFont(_unified_font())
-        self.hBoxLayout.addWidget(control, 0, Qt.AlignRight)
-
-
-class PluginConfigCard(QWidget):
-    """schema 驱动的插件配置卡（无 schema 时渲染为空，不报错）"""
+    继承 ExpandSettingCard 复用标题/折叠/header 样式；通过 viewLayout
+    把行添加到内部 view；bool 字段挂到 header 右侧作为 SwitchButton。
+    """
 
     def __init__(self, plugin_name: str, parent=None):
-        super().__init__(parent)
         self._plugin_name = plugin_name
-        self._rows: Dict[str, QWidget] = {}  # key → 输入控件
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        self.setFont(_unified_font())
+        self._rows: Dict[str, QWidget] = {}  # key → 输入控件（兼容旧测试）
+        self._bool_switches: Dict[str, SwitchButton] = {}  # key → switch 实例
 
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
+        title_text = schema.title if schema else "插件配置"
+        # 副标题：字段数概览（无 schema 时给空串，避免占位）
+        if schema and schema.fields:
+            content_text = f"共 {len(schema.fields)} 项配置，点开展开"
+        else:
+            content_text = ""
+
+        super().__init__(FluentIcon.SETTING, title_text, content_text, parent)
+        # viewLayout 边距收紧，让多行表单更紧凑
+        self.viewLayout.setContentsMargins(48, 8, 48, 8)
+        self.viewLayout.setSpacing(4)
+
         if schema is None:
             return
 
-        title = StrongBodyLabel(schema.title, self)
-        title.setFont(_unified_font(14))
-        layout.addWidget(title)
-
         for f in schema.fields:
             if f.type == "bool":
-                switch = SwitchButton()
-                row = _ConfigRow(f.label, f.description, switch)
+                switch = SwitchButton(self.card)
+                self._bool_switches[f.key] = switch
                 self._rows[f.key] = switch
+                self.card.addWidget(switch)
+                switch.setOnText(f.label)
+                switch.setOffText(f.label)
+                switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
             else:
                 edit = PasswordLineEdit() if f.type == "password" else LineEdit()
                 edit.setClearButtonEnabled(True)
                 if f.placeholder:
                     edit.setPlaceholderText(f.placeholder)
-                edit.setFixedWidth(320)
-                row = _ConfigRow(f.label, f.description or f.placeholder, edit)
+                row = _FieldRow(f.label, edit, self.view)
                 self._rows[f.key] = edit
-            layout.addWidget(row)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self.save_btn = PrimaryPushButton("保存配置", self)
-        from app.widgets.cards.settings.llm_settings_card import ButtonStyles
-
-        self.save_btn.setStyleSheet(ButtonStyles.primary_action())
-        self.save_btn.setFixedWidth(120)
-        self.save_btn.setFont(_unified_font())
-        self.save_btn.clicked.connect(self._save)
-        btn_row.addWidget(self.save_btn)
-        layout.addLayout(btn_row)
+                edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
+                self.viewLayout.addWidget(row)
 
         self._echo()
 
@@ -112,23 +114,50 @@ class PluginConfigCard(QWidget):
             else:
                 control.setText(str(val if val is not None else ""))
 
-    def _save(self):
-        """保存：空文本=清除（回默认）；保存后刷新回显"""
+    def _on_field_changed(self, key: str):
+        """单字段即时保存：空文本=清除（回默认），保存后刷新回显。
+
+        用 editingFinished / checkedChanged 触发，自动持久化，无需底部"保存配置"按钮。
+        """
         store = PluginConfigStore()
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         if schema is None:
             return
-        values = {}
-        for f in schema.fields:
-            control = self._rows.get(f.key)
-            if control is None:
-                continue
-            if f.type == "bool":
-                values[f.key] = control.isChecked()
-            else:
-                values[f.key] = control.text().strip()
-        store.set_values(self._plugin_name, values)
-        self._echo()
+        target_field = next((f for f in schema.fields if f.key == key), None)
+        if target_field is None:
+            return
+        control = self._rows.get(key)
+        if control is None:
+            return
+        if target_field.type == "bool":
+            value: object = control.isChecked()
+        else:
+            value = control.text().strip()
+        store.set_values(self._plugin_name, {key: value})
+        # 文本字段保存后回显（清除 → 默认值显式可见）；bool 无需回显
+        if target_field.type != "bool":
+            self._echo_field(key)
+
+    def _echo_field(self, key: str):
+        """单字段回显（仅文本字段，避免循环触发）"""
+        store = PluginConfigStore()
+        schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
+        if schema is None:
+            return
+        target_field = next((f for f in schema.fields if f.key == key), None)
+        if target_field is None or target_field.type == "bool":
+            return
+        control = self._rows.get(key)
+        if control is None:
+            return
+        val = store.get(self._plugin_name, key)
+        # 阻断 editingFinished 循环：临时 disconnect
+        try:
+            control.editingFinished.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        control.setText(str(val if val is not None else ""))
+        control.editingFinished.connect(lambda _k=key: self._on_field_changed(_k))
 
 
 def make_card_class(plugin_name: str) -> type:

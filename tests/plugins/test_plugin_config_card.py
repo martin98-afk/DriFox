@@ -45,11 +45,21 @@ def schema_env(tmp_path, monkeypatch):
 
 def test_card_renders_all_field_rows(qapp, schema_env):
     card = PluginConfigCard("plug-ui")
-    # 三行字段控件 + 标题 + 保存按钮
+    # 三个字段控件全部注册（折叠卡结构，去掉底部 save_btn）
     assert card._rows["name"] is not None
     assert card._rows["secret"] is not None
     assert card._rows["on"] is not None
-    assert card.save_btn is not None
+    assert not hasattr(card, "save_btn")
+
+
+def test_card_is_single_expand_card(qapp, schema_env):
+    """一插件一项：整个 schema 合并为一张 ExpandSettingCard"""
+    from qfluentwidgets import ExpandSettingCard
+
+    card = PluginConfigCard("plug-ui")
+    assert isinstance(card, ExpandSettingCard)
+    # 卡片默认折叠（点开才看到字段）
+    assert card.isExpand is False
 
 
 def test_card_echoes_effective_values(qapp, schema_env):
@@ -59,11 +69,45 @@ def test_card_echoes_effective_values(qapp, schema_env):
     assert card._rows["on"].isChecked() is False
 
 
-def test_card_save_persists(qapp, schema_env):
+def test_text_field_persists_on_editing_finished(qapp, schema_env):
+    """文本字段：editingFinished 信号触发即时保存（无需手动保存按钮）"""
     card = PluginConfigCard("plug-ui")
     card._rows["name"].setText("changed")
-    card._save()
+    # editingFinished 通常在失焦时触发，模拟信号发射
+    card._rows["name"].editingFinished.emit()
     assert PluginConfigStore().get("plug-ui", "name") == "changed"
+
+
+def test_bool_field_persists_on_toggle(qapp, schema_env):
+    """bool 字段：checkedChanged 信号触发即时保存"""
+    card = PluginConfigCard("plug-ui")
+    card._rows["on"].setChecked(True)
+    # checkedChanged 信号已在 setChecked 时自动发射（lambda 已连）
+    assert PluginConfigStore().get("plug-ui", "on") is True
+
+
+def test_password_field_uses_password_line_edit(qapp, schema_env):
+    """password 字段使用 PasswordLineEdit（继承 QLineEdit.Password echoMode）"""
+    from qfluentwidgets import PasswordLineEdit
+
+    card = PluginConfigCard("plug-ui")
+    assert isinstance(card._rows["secret"], PasswordLineEdit)
+    # 默认 Password echo mode（不显示明文）
+    from PyQt5.QtWidgets import QLineEdit
+
+    assert card._rows["secret"].echoMode() == QLineEdit.Password
+
+
+def test_clear_text_saves_empty_and_echoes_default(qapp, schema_env):
+    """清空输入 → editingFinished → store 清除 → 字段回显 schema default（对齐旧语义）"""
+    card = PluginConfigCard("plug-ui")
+    # 先存一个临时值
+    PluginConfigStore().set_values("plug-ui", {"name": "tmp"})
+    card._rows["name"].setText("")
+    card._rows["name"].editingFinished.emit()
+    # 回退到 schema default "abc"
+    assert PluginConfigStore().get("plug-ui", "name") == "abc"
+    assert card._rows["name"].text() == "abc"
 
 
 def test_make_card_class_zero_arg_construction(qapp, schema_env):

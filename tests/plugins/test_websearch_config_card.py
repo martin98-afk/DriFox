@@ -90,8 +90,9 @@ def test_auto_card_save_persists_via_store(qapp, fresh_registry, isolated_config
     PluginConfigRegistry.get_instance().register(schema)
     card = PluginConfigCard("system")
     card._rows["tavily_api_key"].setText("tvly-ui-key")
+    card._rows["tavily_api_key"].editingFinished.emit()
     card._rows["tinyfish_api_key"].setText("tf-ui-key")
-    card.save_btn.click()
+    card._rows["tinyfish_api_key"].editingFinished.emit()
     store = PluginConfigStore()
     assert store.get("system", "tavily_api_key") == "tvly-ui-key"
     assert store.get("system", "tinyfish_api_key") == "tf-ui-key"
@@ -110,7 +111,7 @@ def test_save_empty_clears_back_to_default(qapp, fresh_registry, isolated_config
     PluginConfigStore().set_values("system", {"tavily_api_key": "tvly-tmp"})
     card = PluginConfigCard("system")
     card._rows["tavily_api_key"].setText("")
-    card.save_btn.click()
+    card._rows["tavily_api_key"].editingFinished.emit()
     defaults = {f.key: f.default for f in schema.fields}
     assert card._rows["tavily_api_key"].text() == defaults["tavily_api_key"]
     assert PluginConfigStore().get("system", "tavily_api_key") == defaults["tavily_api_key"]
