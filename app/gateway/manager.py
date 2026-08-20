@@ -310,32 +310,33 @@ class PlatformManager:
         pids = GatewayPlatformRegistry.get_instance().get_platform_ids_by_source(f"plugin:{plugin_name}")
         futures = []
         for pid in pids:
-            adapter = self._adapters.get(pid)
+            adapter = self._adapters.pop(pid, None)
             if adapter is not None:
                 try:
-                    if getattr(adapter, "is_connected", False):
-                        # 直接调度 adapter.stop()（持实例引用），不经过
-                        # _stop_platform_async 的 _adapters 二次查找 —— 后者会因
-                        # 下方立即 pop 而查到 None，导致 stop 永不执行（连接泄漏，
-                        # 且 adapter 依赖的 SDK/.pyd 句柄不释放 → 卸载残留 deps）。
-                        futures.append(asyncio.run_coroutine_threadsafe(self._stop_adapter_async(adapter), self._loop))
+                    # 无条件调度 stop（不再检查 is_connected）：历史 bug 泄漏实例
+                    # _running/_connected=False 但连接线程还活着，is_connected 前置
+                    # 检查会跳过 stop → 连接永久泄漏；stop 内部幂等（_running 防护
+                    # + disconnect 幂等），对干净实例无副作用。
+                    futures.append(asyncio.run_coroutine_threadsafe(self._stop_adapter_async(adapter), self._loop))
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[PlatformManager] stop {pid} 失败: {e}")
-                self._adapters.pop(pid, None)
         if pids:
             logger.info(f"[PlatformManager] 已停止并摘除插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
         if wait:
             for fut in futures:
                 try:
-                    fut.result(timeout=5)
+                    fut.result(timeout=8)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[PlatformManager] 等待平台 stop 超时/失败: {e}")
 
     async def _stop_adapter_async(self, adapter: BasePlatformAdapter) -> None:
-        """停止单个 adapter 实例（引用已捕获，不查 _adapters，避免 pop 竞态）"""
+        """停止单个 adapter 实例（引用已捕获，不查 _adapters，避免 pop 竞态）
+
+        无条件调 stop（不查 is_connected）：泄漏实例（_running=False 但连接/线程
+        还活着）也必须走 stop 清理；base.stop 幂等，重复调用无害。
+        """
         try:
-            if adapter.is_connected:
-                await adapter.stop()
+            await adapter.stop()
         except Exception as e:  # noqa: BLE001
             logger.error(f"[PlatformManager] adapter stop error: {e}")
         self._notify_status()

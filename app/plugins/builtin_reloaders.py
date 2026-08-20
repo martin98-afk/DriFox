@@ -301,9 +301,12 @@ def _reload_gateways(ctx: ReloadContext) -> Any:
         from app.plugins.loaders.runtime_component_loader import ensure_gateway_watcher
 
         # 1. 先关闭该插件的 gateway（卸载/热更新都应先断连）
+        #    wait=True：等待 stop 协程完成（含 ws 线程 join）再走后续 purge/rebuild，
+        #    否则非阻塞 stop 与 rebuild 的 start 并发交错 → 同插件双连接 +
+        #    旧 ws 线程持 deps .pyd 引用导致卸载文件占用（历史 bug）
         mgr = get_platform_manager()
         if mgr is not None:
-            mgr.stop_plugin_platforms(ctx.plugin_name)
+            mgr.stop_plugin_platforms(ctx.plugin_name, wait=True)
 
         # 2. 清理 module 引用（彻底去除依赖）
         _purge_gateway_plugin_modules(ctx.plugin_name)

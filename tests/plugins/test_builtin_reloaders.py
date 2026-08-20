@@ -224,8 +224,8 @@ class _FakeGatewayManager:
         self.stopped: list[str] = []
         self.rebuilt: list[tuple] = []
 
-    def stop_plugin_platforms(self, plugin_name: str) -> None:
-        self.stopped.append(plugin_name)
+    def stop_plugin_platforms(self, plugin_name: str, wait: bool = False) -> None:
+        self.stopped.append((plugin_name, wait))
 
     def rebuild_plugin_platforms(self, plugin_name: str, restart_if_running: bool = True) -> None:
         self.rebuilt.append((plugin_name, restart_if_running))
@@ -266,7 +266,7 @@ def test_delete_gateways_path_stops_and_unregisters(monkeypatch):
     ok = reg.reload(ReloadContext("gwplug", plugin=None, component="gateways", is_new_plugin=False))
 
     assert ok is True
-    assert mgr.stopped == ["gwplug"]  # 先关闭 gateway
+    assert mgr.stopped == [("gwplug", True)]  # 先关闭 gateway（wait=True 等 stop 完成再 purge/rebuild，防双连接竞态）
     assert watcher.unloaded == ["gwplug"], "删除路径应精准 unload_plugin"
     assert watcher.scans == 0, "删除路径不应全量 scan_now"
     assert mgr.rebuilt == []  # 删除路径不重建
@@ -291,7 +291,7 @@ def test_update_gateways_path_stops_and_rebuilds(monkeypatch):
     ok = reg.reload(ReloadContext("gwplug", plugin=_FakePlugin(), component="gateways", is_new_plugin=False))
 
     assert ok is True
-    assert mgr.stopped == ["gwplug"]  # 先关闭
+    assert mgr.stopped == [("gwplug", True)]  # 先关闭（wait=True，防旧连接泄漏）
     assert watcher.reloaded == ["gwplug"], "更新路径应精准 reload_plugin"
     assert watcher.scans == 0, "更新路径不应全量 scan_now"
     assert mgr.rebuilt == [("gwplug", True)]  # 更新路径重建（restart_if_running=True）
