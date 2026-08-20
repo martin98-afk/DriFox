@@ -23,9 +23,24 @@ from loguru import logger
 
 
 def _drifox_dir() -> Path:
-    """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）"""
+    """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致，开发环境解析为绝对路径）
+
+    开发环境: 仓库根/.drifox（基于 __file__ 定位，脱离可变 cwd）
+    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox
+
+    注意：相对路径 Path(".drifox") 会在每次文件操作时按当前 cwd 解析；
+    Windows 原生 QFileDialog 会静默改变进程 cwd，导致相对路径被解析到
+    错误目录而 FileNotFoundError。开发环境改为基于 __file__ 定位仓库根，
+    返回绝对路径，彻底脱离 cwd 依赖。
+    """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
-        return Path(".drifox")
+        here = Path(__file__).resolve()
+        root = here.parent
+        for _ in range(8):
+            if (root / ".git").exists():
+                return root / ".drifox"
+        return here.parents[3] / ".drifox"
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
