@@ -1999,25 +1999,32 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' UI 加载失败: {e}")
 
-            # 8. tools/providers/team_templates：与 builtin_reloaders 同构的 kernel 分派
+            # 8. 其余组件：与 builtin_reloaders 同构的 kernel 分派
             # 走内核注册表而非硬编码 if，保持单源真理（新增组件类型零改动）。
+            # 遍历 COMPONENT_ORDER（排除上方 1-7 已手工处理的组件），覆盖
+            # tools/providers/team_templates/model_adapters/loop_policies/
+            # storages/serializers/gateways 全部 registry 分派组件——
+            # 历史 bug：此处曾硬编码 3 项漏掉 gateways，卸载重装（__NEW__ 路径）
+            # 后 gateway 平台 def 不注册/adapter 不建/连接不启 → 机器人无响应。
             from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
-            from app.plugins.kernel import ReloadContext, get_reloader_registry
+            from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
 
             bind_runtime(self._agent_manager)
             registry = get_reloader_registry()
             register_builtin_reloaders(registry)  # 幂等
-            for comp in ("tools", "providers", "team_templates"):
-                if comps.get(comp):
-                    reloaded = registry.reload(
-                        ReloadContext(
-                            plugin_name=plugin_name,
-                            plugin=plugin,
-                            component=comp,
-                            is_new_plugin=True,
-                        )
+            _MANUAL_STEPS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
+            for comp in COMPONENT_ORDER:
+                if comp in _MANUAL_STEPS or not comps.get(comp):
+                    continue
+                reloaded = registry.reload(
+                    ReloadContext(
+                        plugin_name=plugin_name,
+                        plugin=plugin,
+                        component=comp,
+                        is_new_plugin=True,
                     )
-                    result[comp] = reloaded if reloaded is not None else False
+                )
+                result[comp] = reloaded if reloaded is not None else False
 
             logger.info(
                 f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
