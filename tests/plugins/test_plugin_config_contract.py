@@ -76,3 +76,42 @@ class TestParseConfigSchema:
         raw = {"title": "t", "fields": [{"key": "a", "label": "A"}]}
         schema = parse_config_schema("p", raw)
         assert schema is not None and schema.fields[0].type == "text"
+
+
+class TestPluginConfigRegistry:
+    def _make_schema(self, plugin_name="p1"):
+        return parse_config_schema(
+            plugin_name,
+            {"title": "T", "fields": [{"key": "a", "label": "A", "type": "text"}]},
+        )
+
+    def test_register_and_get(self):
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        reg = PluginConfigRegistry()
+        schema = self._make_schema()
+        reg.register(schema)
+        assert reg.get("p1") is schema
+        assert [s.plugin_name for s in reg.list_schemas()] == ["p1"]
+
+    def test_register_overwrites_same_plugin(self):
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        reg = PluginConfigRegistry()
+        reg.register(self._make_schema("p1"))
+        reg.register(self._make_schema("p1"))  # 幂等覆盖（rescan 重复注册）
+        assert len(reg.list_schemas()) == 1
+
+    def test_unregister_plugin(self):
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        reg = PluginConfigRegistry()
+        reg.register(self._make_schema("p1"))
+        reg.unregister_plugin("p1")
+        assert reg.get("p1") is None
+        reg.unregister_plugin("p1")  # 幂等
+
+    def test_get_instance_singleton(self):
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        assert PluginConfigRegistry.get_instance() is PluginConfigRegistry.get_instance()
