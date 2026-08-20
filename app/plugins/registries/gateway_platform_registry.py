@@ -50,6 +50,15 @@ class GatewayPlatformRegistry:
                 self._defs.pop(pid, None)
             return removed
 
+    def get_platform_ids_by_source(self, source: str) -> List[str]:
+        """查询某来源（如 plugin:<name>）注册的全部 platform_id
+
+        卸载/热更新清理前调用：先在 unregister 之前拿到 platform_id 列表，
+        才能精确 stop 这些平台的连接并从 manager._adapters 移除实例。
+        """
+        with self._lock:
+            return [pid for pid, (_, src) in self._defs.items() if src == source]
+
     @staticmethod
     def get_instance() -> "GatewayPlatformRegistry":
         global _instance

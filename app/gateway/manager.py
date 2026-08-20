@@ -256,6 +256,70 @@ class PlatformManager:
 
         self._schedule_coro(self._stop_platform_async(_platform_key(platform)))
 
+    def stop_plugin_platforms(self, plugin_name: str) -> None:
+        """停止并移除某插件注册的全部 gateway 平台（卸载/热更新清理前置）
+
+        1. 从 registry 查出 source=plugin:<name> 的 platform_id 列表（unregister 前查）
+        2. 逐个停止连接（异步调度到后台事件循环，不阻塞调用线程）
+        3. 立即从 _adapters 摘除实例引用，使其不再被消息路由命中
+        """
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
+        )
+
+        pids = GatewayPlatformRegistry.get_instance().get_platform_ids_by_source(
+            f"plugin:{plugin_name}"
+        )
+        for pid in pids:
+            adapter = self._adapters.get(pid)
+            if adapter is not None and getattr(adapter, "is_connected", False):
+                try:
+                    self._schedule_coro(self._stop_platform_async(pid))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[PlatformManager] stop {pid} 失败: {e}")
+            self._adapters.pop(pid, None)
+        if pids:
+            logger.info(
+                f"[PlatformManager] 已停止并摘除插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}"
+            )
+
+    def rebuild_plugin_platforms(
+        self, plugin_name: str, restart_if_running: bool = True
+    ) -> None:
+        """用 registry 当前 def 重建某插件的 adapter（热更新后用新 adapter_factory）
+
+        热重载路径在 stop_plugin_platforms + scan_now(unregister 旧/注册新) 之后调用：
+        从 registry 读取最新 def（含新 adapter_factory），重建 adapter 实例放入
+        _adapters；若此前整个 gateway 在运行且平台启用，则重新 start 使新代码生效。
+        """
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
+        )
+
+        reg = GatewayPlatformRegistry.get_instance()
+        pids = reg.get_platform_ids_by_source(f"plugin:{plugin_name}")
+        for pid in pids:
+            d = reg.get(pid)
+            if d is None or not d.check_requirements():
+                logger.info(f"[PlatformManager] {pid} 重建跳过（def 缺失/依赖不满足）")
+                continue
+            cfg = d.config_builder() if d.config_builder else None
+            try:
+                self._adapters[pid] = d.adapter_factory(cfg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[PlatformManager] {pid} adapter 重建失败: {e}")
+                continue
+            if self._message_handler:
+                self._adapters[pid].set_message_handler(self._message_handler.handle)
+            if restart_if_running and self._running:
+                config = self._config.get_platform_config(pid)
+                if config and getattr(config, "enabled", False):
+                    self._schedule_coro(self._start_platform_async(pid))
+        if pids:
+            logger.info(
+                f"[PlatformManager] 已重建插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}"
+            )
+
     async def _start_platform_async(self, platform: str) -> bool:
         """在后台事件循环上启动平台（registry 驱动，无平台 if-elif）"""
         adapter = self._adapters.get(platform)

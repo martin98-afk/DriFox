@@ -219,3 +219,86 @@ def test_delete_commands_path_reloads_all_commands(monkeypatch):
 
     assert all_calls == [1]
     assert ok is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gateways 分支：卸载/热更新路径（先关闭 gateway → 清 module → unregister/重建）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeGatewayManager:
+    """最小化 PlatformManager fake：捕获 stop / rebuild 调用"""
+
+    def __init__(self):
+        self.stopped: list[str] = []
+        self.rebuilt: list[tuple] = []
+
+    def stop_plugin_platforms(self, plugin_name: str) -> None:
+        self.stopped.append(plugin_name)
+
+    def rebuild_plugin_platforms(self, plugin_name: str, restart_if_running: bool = True) -> None:
+        self.rebuilt.append((plugin_name, restart_if_running))
+
+
+class _FakeGatewayWatcher:
+    def __init__(self):
+        self.scans: int = 0
+
+    def scan_now(self) -> None:
+        self.scans += 1
+
+
+def test_delete_gateways_path_stops_and_unregisters(monkeypatch):
+    """gateways 删除分支：先 stop 该插件平台 + 清 module + scan_now(unregister)；
+    不触发 rebuild（删除路径用旧 def 无法重建）。"""
+    mgr = _FakeGatewayManager()
+    watcher = _FakeGatewayWatcher()
+    monkeypatch.setattr(
+        "app.gateway.manager.get_platform_manager", lambda: mgr
+    )
+    monkeypatch.setattr(
+        "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
+        lambda: watcher,
+    )
+    # 注入待清理的 module 引用，验证 _purge_gateway_plugin_modules 生效
+    import sys
+
+    sys.modules["drifox_rt_gateways_gwplug_wecom"] = object()
+
+    reg = _make_reg()
+    ok = reg.reload(
+        ReloadContext("gwplug", plugin=None, component="gateways", is_new_plugin=False)
+    )
+
+    assert ok is True
+    assert mgr.stopped == ["gwplug"]          # 先关闭 gateway
+    assert watcher.scans == 1                  # scan_now 完成 unregister
+    assert mgr.rebuilt == []                   # 删除路径不重建
+    assert "drifox_rt_gateways_gwplug_wecom" not in sys.modules  # module 已清
+
+
+def test_update_gateways_path_stops_and_rebuilds(monkeypatch):
+    """gateways 更新分支：先 stop + 清 module + scan_now(重注册) + 用新 def 重建 adapter。"""
+    mgr = _FakeGatewayManager()
+    watcher = _FakeGatewayWatcher()
+    monkeypatch.setattr(
+        "app.gateway.manager.get_platform_manager", lambda: mgr
+    )
+    monkeypatch.setattr(
+        "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
+        lambda: watcher,
+    )
+
+    class _FakePlugin:
+        def has_component(self, c):
+            return False
+
+    reg = _make_reg()
+    ok = reg.reload(
+        ReloadContext("gwplug", plugin=_FakePlugin(), component="gateways", is_new_plugin=False)
+    )
+
+    assert ok is True
+    assert mgr.stopped == ["gwplug"]          # 先关闭
+    assert watcher.scans == 1                  # scan_now 重注册
+    assert mgr.rebuilt == [("gwplug", True)]   # 更新路径重建（restart_if_running=True）

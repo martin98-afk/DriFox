@@ -234,15 +234,65 @@ def _reload_serializers(ctx: ReloadContext) -> Any:
     return False
 
 
+def _purge_gateway_plugin_modules(plugin_name: str) -> None:
+    """从 sys.modules 摘除 gateway runtime loader 加载的模块及其依赖引用
+
+    runtime loader 以 `drifox_rt_gateways_{plugin_name}_{py.stem}` 命名并常驻
+    sys.modules。卸载/热更新若不清理，旧模块（及其 import 的第三方 SDK 等依赖）
+    会残留在进程中，导致依赖无法去除、热更新代码不生效。
+    """
+    import gc
+    import sys
+
+    prefix = f"drifox_rt_gateways_{plugin_name}"
+    removed = [
+        m
+        for m in list(sys.modules.keys())
+        if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+    ]
+    for m in removed:
+        sys.modules.pop(m, None)
+    if removed:
+        import importlib
+
+        importlib.invalidate_caches()
+        gc.collect()
+        logger.debug(
+            f"[builtin_reloaders] 已清理 gateway 模块 {len(removed)} 个: {plugin_name}"
+        )
+
+
 def _reload_gateways(ctx: ReloadContext) -> Any:
-    """gateways 分支：同 serializers（scan_now 全量重扫幂等，删除场景靠 unregister_source 自然清理）"""
+    """gateways 分支
+
+    正确顺序（解决卸载依赖残留 + 热更新不生效）：
+    1. 关闭该插件的 gateway 平台（stop 连接 + 摘除 manager._adapters 实例）
+    2. 清理 sys.modules 中 runtime loader 加载的模块引用
+    3. 删除路径(ctx.plugin is None)：scan_now 自然 unregister_source 完成卸载
+       更新路径(ctx.plugin 非 None)：scan_now 重新注册最新 def → 用新
+       adapter_factory 重建 adapter（此前在运行则重启），使热更新生效
+    """
     try:
+        from app.gateway.manager import get_platform_manager
         from app.plugins.loaders.runtime_component_loader import ensure_gateway_watcher
 
+        # 1. 先关闭该插件的 gateway（卸载/热更新都应先断连）
+        mgr = get_platform_manager()
+        if mgr is not None:
+            mgr.stop_plugin_platforms(ctx.plugin_name)
+
+        # 2. 清理 module 引用（彻底去除依赖）
+        _purge_gateway_plugin_modules(ctx.plugin_name)
+
+        # 3. 全量重扫：删除路径自然 unregister；更新路径重新注册最新 def
         watcher = ensure_gateway_watcher()
         if watcher is not None:
             watcher.scan_now()
-            return True
+
+        # 4. 更新路径：用新 def 重建 adapter（热更新生效）
+        if ctx.plugin is not None and mgr is not None:
+            mgr.rebuild_plugin_platforms(ctx.plugin_name, restart_if_running=True)
+        return True
     except Exception as e:
         logger.warning(f"[builtin_reloaders] gateways 重载失败: {e}")
     return False

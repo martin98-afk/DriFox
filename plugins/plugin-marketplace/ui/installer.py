@@ -764,6 +764,29 @@ class PluginInstaller:
             for mod_name in list(sys.modules.keys()):
                 if mod_name == head or mod_name.startswith(head + "."):
                     del sys.modules[mod_name]
+
+            # runtime 组件 loader 模块（model_adapters / loop_policies / storages /
+            # serializers / gateways）：命名规则 drifox_rt_{comp}_{plugin}_{stem}，
+            # 用原始插件名（可能含 -），与 ui_plugin 不同，必须单独清理。
+            # 不清理会导致第三方依赖（如 gateway 平台的 SDK）残留在 sys.modules，
+            # Windows 上还可能因 .pyc 句柄占用导致 rmtree 失败（WinError 32）。
+            _RT_COMPS = (
+                "model_adapters",
+                "loop_policies",
+                "storages",
+                "serializers",
+                "gateways",
+            )
+            for comp in _RT_COMPS:
+                for token in (name, safe):
+                    head = f"drifox_rt_{comp}_{token}"
+                    for mod_name in list(sys.modules.keys()):
+                        if (
+                            mod_name == head
+                            or mod_name.startswith(head + "_")
+                            or mod_name.startswith(head + ".")
+                        ):
+                            del sys.modules[mod_name]
             importlib.invalidate_caches()
             gc.collect()
         except Exception as e:
