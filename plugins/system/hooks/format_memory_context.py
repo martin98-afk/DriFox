@@ -459,7 +459,6 @@ _GITIGNORE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "__pycache__/",
             "*.pyc",
             "*.pyo",
-            "*.pyd",
             ".venv/",
             "venv/",
             "*.egg-info/",
