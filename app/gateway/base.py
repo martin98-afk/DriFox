@@ -20,8 +20,8 @@ from app.utils.utils import get_app_data_dir
 T = TypeVar("T")
 
 
-class Platform(Enum):
-    """支持的通讯平台"""
+class Platform(str, Enum):
+    """支持的通讯平台（str-mixin：第三方平台 id 可不经枚举直接以 str 互通）。"""
     WECOM = "wecom"
     DINGTALK = "dingtalk"
     TELEGRAM = "telegram"
