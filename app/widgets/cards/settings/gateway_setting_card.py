@@ -39,6 +39,7 @@ from qfluentwidgets import (
     ToolButton,
 )
 
+from app.plugins.contracts.gateway_platform import GatewayPlatformDef
 from app.utils.design_tokens import (
     ButtonStyles,
     CardStyles,
@@ -81,66 +82,128 @@ QLabel {{
 
 
 # ═══════════════════════════════════════════════════════════
-# 平台定义
+# 平台定义 — registry 驱动（E2 Task 6）
 # ═══════════════════════════════════════════════════════════
 
-PLATFORM_DEFS = {
-    "wecom": {
-        "name": "企业微信",
-        "icon": "企业微信",
-        "fields": [
-            ("bot_id", "Bot ID", "", "企业微信机器人 BotID"),
-            ("secret", "Secret", "password", "机器人密钥 Secret"),
-            ("websocket_url", "WebSocket", "", "wss://openws.work.weixin.qq.com"),
-        ],
-        "hint": "💡 需要在企业微信管理后台创建 AI 机器人。",
-    },
-    "dingtalk": {
-        "name": "钉钉",
-        "icon": "钉钉",
-        "fields": [
-            ("client_id", "AppKey", "", "钉钉应用 AppKey"),
-            ("client_secret", "AppSecret", "password", "钉钉应用 AppSecret"),
-        ],
-        "hint": "💡 需要在钉钉开放平台创建应用并启用 Stream Mode。",
-    },
-    "feishu": {
-        "name": "飞书",
-        "icon": "飞书",
-        "fields": [
-            ("app_id", "App ID", "", "飞书开放平台 App ID"),
-            ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
-        ],
-        "hint": "💡 需要在飞书开放平台创建企业自建应用，配置事件订阅（长连接模式）。",
-    },
-    "telegram": {
-        "name": "Telegram",
-        "icon": "Telegram",
-        "fields": [
-            ("token", "Bot Token", "password", "BotFather 获取的 Token"),
-            ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
-        ],
-        "hint": "💡 通过 @BotFather 创建机器人获取 Token。",
-    },
-    "discord": {
-        "name": "Discord",
-        "icon": "discord",
-        "fields": [
-            ("token", "Bot Token", "password", "Discord Developer Portal 获取"),
-            ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
-        ],
-        "hint": "💡 需要在 Discord Developer Portal 创建 Bot 并开启 Message Content Intent。",
-    },
-    "slack": {
-        "name": "Slack",
-        "icon": "slack",
-        "fields": [
-            ("bot_token", "Bot Token", "password", "Slack App Bot Token (xoxb-)"),
-            ("app_token", "App Token", "password", "Slack App Token (xapp-)"),
-        ],
-        "hint": "💡 需要在 Slack API 创建 App 并启用 Socket Mode。",
-    },
+# def.fields 契约尚未提供表单字段描述（task 6 改造点不变契约字段）：
+# 内置六平台的 fields 元组硬编码到 _FALLBACK_FIELDS，第三方平台/未来插件
+# 若在 def 上提供 config_schema 字段则优先采用，否则空表（仅开关行可编辑
+# 启用开关，凭证字段需插件自身提供表单）。模块 import 时 gateway loader
+# 已预热，registry 单例 list_platforms() 已可见。
+_FALLBACK_FIELDS = {
+    "wecom": [
+        ("bot_id", "Bot ID", "", "企业微信机器人 BotID"),
+        ("secret", "Secret", "password", "机器人密钥 Secret"),
+        ("websocket_url", "WebSocket", "", "wss://openws.work.weixin.qq.com"),
+    ],
+    "dingtalk": [
+        ("client_id", "AppKey", "", "钉钉应用 AppKey"),
+        ("client_secret", "AppSecret", "password", "钉钉应用 AppSecret"),
+    ],
+    "feishu": [
+        ("app_id", "App ID", "", "飞书开放平台 App ID"),
+        ("app_secret", "App Secret", "password", "飞书开放平台 App Secret"),
+    ],
+    "telegram": [
+        ("token", "Bot Token", "password", "BotFather 获取的 Token"),
+        ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
+    ],
+    "discord": [
+        ("token", "Bot Token", "password", "Discord Developer Portal 获取"),
+        ("require_mention", "@校验", "", "群聊需要 @才回复 (true/false)"),
+    ],
+    "slack": [
+        ("bot_token", "Bot Token", "password", "Slack App Bot Token (xoxb-)"),
+        ("app_token", "App Token", "password", "Slack App Token (xapp-)"),
+    ],
 }
+
+
+def _build_platform_defs_from_registry():
+    """遍历 GatewayPlatformRegistry 构造平台元数据 dict。
+
+    返回：{platform_id: {name, icon, fields, hint}} —— 字段名沿用旧
+    PLATFORM_DEFS 形态以保持模块内部消费点不变。
+    """
+    from app.plugins.registries.gateway_platform_registry import (
+        GatewayPlatformRegistry,
+    )
+
+    defs: dict = {}
+    for d in GatewayPlatformRegistry.get_instance().list_platforms():
+        # icon_hint 回退：内置六平台 def 暂未声明 icon_hint；当前 get_icon 仍
+        # 接受平台名作为资源键（"Telegram" / "企业微信" 等），统一约定：
+        # def.icon_hint 非空直接用，否则回退到平台 display_name（get_icon
+        # 资源查找沿用旧字符串键）。
+        icon = d.icon_hint or d.display_name
+        # fields：优先 def 上声明的 config_schema；否则内置平台走 _FALLBACK_FIELDS；
+        # 第三方平台无 fallback → 空表（仅启用开关可编辑）。
+        fields = _def_fields_from_schema(d) or _FALLBACK_FIELDS.get(d.platform_id, [])
+        defs[d.platform_id] = {
+            "name": d.display_name,
+            "icon": icon,
+            "fields": fields,
+            "hint": _def_hint(d),
+        }
+    return defs
+
+
+def _def_fields_from_schema(d: "GatewayPlatformDef") -> list:
+    """从 def 上声明的 config_schema（若提供）解析表单字段元组。
+
+    形态：(key, label, echo_mode, placeholder)。当前 GatewayPlatformDef 契约
+    未声明该属性，本函数保留扩展点：未来 def 携带 config_schema 时按
+    PluginConfigField 转表单列（password → echo_mode='password'）。
+    """
+    schema = getattr(d, "config_schema", None)
+    if not schema:
+        return []
+    out = []
+    for f in getattr(schema, "fields", []):
+        ftype = getattr(f, "type", "text")
+        echo = "password" if ftype == "password" else ""
+        out.append((f.key, f.label, echo, getattr(f, "placeholder", "")))
+    return out
+
+
+def _def_hint(d: "GatewayPlatformDef") -> str:
+    """平台提示文本（未来 def.description 接入时优先）。"""
+    desc = getattr(d, "description", "") or ""
+    return f"💡 {desc}" if desc else ""
+
+
+def _save_platform_values(platform_id: str, values: dict, old_config) -> object:
+    """表单值 → def.build_config_values → GatewayConfigHelper.set_platform_config。
+
+    返回：写入后的 PlatformConfig；def 缺失 build_config_values 或注册表为空
+    时返回 None（UI 据此报「该平台不支持配置编辑」）。
+    """
+    from app.gateway.config import get_gateway_config
+
+    from app.plugins.registries.gateway_platform_registry import (
+        GatewayPlatformRegistry,
+    )
+
+    d = GatewayPlatformRegistry.get_instance().get(platform_id)
+    if d is None or d.build_config_values is None:
+        return None
+    config_obj = d.build_config_values(values, old_config)
+    if config_obj is None:
+        return None
+    get_gateway_config().set_platform_config(platform_id, config_obj)
+    return config_obj
+
+
+def _truthy_str(v) -> bool:
+    """文本字段 truthy 判定（UI 全 QLineEdit，bool 字段以 'true'/'false' 文本表达）。"""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+# 模块级平台 def 缓存（registry 已预热）。消费点（GatewaySettingCard /
+# PlatformEditCard）继续以 PLATFORM_DEFS 名字引用即可。
+PLATFORM_DEFS = _build_platform_defs_from_registry()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -207,17 +270,9 @@ class PlatformStatusRow(CardWidget):
         layout.addWidget(self.edit_btn)
 
     def _resolve_enum(self):
-        from app.gateway.base import Platform
-
-        mapping = {
-            "wecom": Platform.WECOM,
-            "dingtalk": Platform.DINGTALK,
-            "telegram": Platform.TELEGRAM,
-            "discord": Platform.DISCORD,
-            "feishu": Platform.FEISHU,
-            "slack": Platform.SLACK,
-        }
-        return mapping.get(self._platform, Platform.WECOM)
+        """平台 id 直传：str-mixin 后 Platform(str) 即可构造，第三方 id 不在
+        枚举闭集时 manager / config 已兼容 str 入参（_platform_key 统一归一化）。"""
+        return self._platform
 
     def _load_config(self):
         try:
@@ -436,26 +491,12 @@ class PlatformEditCard(QWidget):
         self._init_ui()
         self.refresh_style()
 
-    def _resolve_enum(self, platform_name: str):
-        """将平台名转为 Platform 枚举"""
-        from app.gateway.base import Platform
-
-        mapping = {
-            "wecom": Platform.WECOM,
-            "dingtalk": Platform.DINGTALK,
-            "telegram": Platform.TELEGRAM,
-            "discord": Platform.DISCORD,
-            "feishu": Platform.FEISHU,
-            "slack": Platform.SLACK,
-        }
-        return mapping.get(platform_name, Platform.WECOM)
-
     def _load_config(self):
-        """加载配置"""
+        """加载配置（平台 id 直传，str-mixin 已兼容第三方 id）"""
         try:
             from app.gateway.config import get_gateway_config
 
-            self._config = get_gateway_config().get_platform_config(self._resolve_enum(self._platform))
+            self._config = get_gateway_config().get_platform_config(self._platform)
         except Exception:
             self._config = None
 
@@ -546,72 +587,52 @@ class PlatformEditCard(QWidget):
         return None
 
     def _on_save(self):
-        """保存配置"""
+        """保存配置（registry 分派：表单值 → def.build_config_values → 持久化）
+
+        行为对齐 task 5 收官后的契约：所有平台一律走 def.build_config_values，
+        主仓不再 if-elif Platform.X。表单字段列表来自 _FALLBACK_FIELDS 或
+        def.config_schema；旧 _val 缺省回退仍存在（仅当字段不在 inputs 时
+        从 existing 读），保证 schema 缺失场景不会丢已有凭证。
+        """
         try:
-            from app.gateway.base import Platform, PlatformConfig
             from app.gateway.config import get_gateway_config
 
-            config_helper = get_gateway_config()
-            platform_enum = self._resolve_enum(self._platform)
-            existing = config_helper.get_platform_config(platform_enum)
+            existing = get_gateway_config().get_platform_config(self._platform)
 
-            # 提取字段值
             def _val(key):
                 if key in self._inputs:
                     return self._inputs[key].text().strip()
-                return getattr(existing, key, None)
+                if existing is None:
+                    return None
+                if hasattr(existing, key):
+                    return getattr(existing, key)
+                if existing.extra:
+                    return existing.extra.get(key)
+                return None
 
-            # 构建 PlatformConfig
-            if self._platform == "wecom":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.WECOM,
-                    bot_id=_val("bot_id"),
-                    secret=_val("secret"),
-                    websocket_url=_val("websocket_url") or "wss://openws.work.weixin.qq.com",
-                )
-            elif self._platform == "dingtalk":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.DINGTALK,
-                    client_id=_val("client_id"),
-                    client_secret=_val("client_secret"),
-                )
-            elif self._platform == "telegram":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.TELEGRAM,
-                    token=_val("token"),
-                    extra={"require_mention": _val("require_mention") or "true"},
-                )
-            elif self._platform == "discord":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.DISCORD,
-                    token=_val("token"),
-                    extra={"require_mention": _val("require_mention") or "true"},
-                )
-            elif self._platform == "feishu":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.FEISHU,
-                    extra={"app_id": _val("app_id"), "app_secret": _val("app_secret")},
-                )
-            elif self._platform == "slack":
-                config_obj = PlatformConfig(
-                    enabled=existing.enabled if existing else False,
-                    platform=Platform.SLACK,
-                    extra={"bot_token": _val("bot_token"), "app_token": _val("app_token")},
-                )
-            else:
-                config_obj = PlatformConfig(enabled=False, platform=platform_enum)
+            # 收集所有 schema 字段（def 未提供时 _FALLBACK_FIELDS 兜底）。
+            values: dict = {}
+            for key, *_ in self._def.get("fields", []):
+                v = _val(key)
+                if v is not None:
+                    values[key] = v
 
-            config_helper.set_platform_config(platform_enum, config_obj)
+            config_obj = _save_platform_values(self._platform, values, existing)
 
             name = PLATFORM_DEFS.get(self._platform, {}).get("name", self._platform)
             from app.widgets.tab_manager_window import TabManagerWindow
 
             parent = TabManagerWindow.get_instance() or self.window()
+            if config_obj is None:
+                InfoBar.warning(
+                    title="该平台不支持配置编辑",
+                    content=f"{name} 缺少 build_config_values 回调，请在插件仓库补充表单字段",
+                    parent=parent,
+                    duration=3000,
+                    position=InfoBarPosition.BOTTOM,
+                )
+                return
+
             InfoBar.success(
                 title="保存成功",
                 content=f"{name} 配置已保存",
@@ -720,25 +741,16 @@ class GatewaySettingCard(ExpandSettingCard):
         self.gatewayToggled.emit()
 
     def _refresh(self):
-        """刷新状态"""
+        """刷新状态（直接以 str 平台 id 读取，str-mixin 兼容第三方 id）"""
         try:
-            from app.gateway.base import Platform
             from app.gateway.config import get_gateway_config
 
             config_helper = get_gateway_config()
-            mapping = {
-                "wecom": Platform.WECOM,
-                "dingtalk": Platform.DINGTALK,
-                "telegram": Platform.TELEGRAM,
-                "discord": Platform.DISCORD,
-                "feishu": Platform.FEISHU,
-                "slack": Platform.SLACK,
-            }
-            for key, enum in mapping.items():
+            for key in PLATFORM_DEFS:
                 row = self._rows.get(key)
                 if row:
                     try:
-                        pc = config_helper.get_platform_config(enum)
+                        pc = config_helper.get_platform_config(key)
                         row.set_enabled(pc.enabled)
                     except Exception:
                         pass
