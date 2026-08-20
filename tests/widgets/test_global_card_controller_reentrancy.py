@@ -89,7 +89,6 @@ def test_ensure_settings_popup_no_duplicate_on_reentry(qtbot, monkeypatch):
             self.hookListCard = _SignalStub()
             self.llmProviderCard = _SignalStub()
             self.mcpListCard = _SignalStub()
-            self.gatewayCard = _SignalStub()
 
         def setVisible(self, v):
             pass
@@ -148,7 +147,6 @@ def test_ensure_settings_popup_reentry_after_build_is_noop(qtbot, monkeypatch):
             self.hookListCard = _SignalStub()
             self.llmProviderCard = _SignalStub()
             self.mcpListCard = _SignalStub()
-            self.gatewayCard = _SignalStub()
 
         def setVisible(self, v):
             pass

@@ -2,7 +2,7 @@
 """Gateway 平台插件契约（万物即插件 Phase E）。
 
 plugins/<name>/gateways/<platform>.py 暴露 register(registry)，注册本 def。
-主程序 PlatformManager / GatewayConfigHelper / gateway_setting_card 全部
+主程序 PlatformManager / GatewayConfigHelper 全部
 查 GatewayPlatformRegistry，不再出现平台 if-elif 分支。
 内置平台插件（plugins/system/gateways/）config_builder 闭包读主程序
 Settings（存量用户配置零迁移）；第三方平台建议经 E1 config_schema +

@@ -37,7 +37,6 @@ from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
-from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
@@ -304,16 +303,6 @@ class LLMSettingsCard(SystemCardFrame):
         self._section_anchors["common"] = self._sep_common_label
         content_layout.addWidget(self._sep_common_label)
 
-        # Gateway 通讯平台接入
-        self.gatewayCard = GatewaySettingCard(
-            icon=get_icon("云通信"),
-            title="通讯平台接入",
-            content="接入企业微信/钉钉",
-            parent=self,
-            home=self,
-        )
-        content_layout.addWidget(self.gatewayCard)
-
         # 锁屏远程
         self.lockRemoteCard = SwitchSettingCard(
             FluentIcon.SYNC,
@@ -461,7 +450,6 @@ class LLMSettingsCard(SystemCardFrame):
             self.hookListCard,
             self.mcpListCard,
             self.lspListCard,
-            self.gatewayCard,
         ]
         self._apply_list_accordion()
 

@@ -8011,14 +8011,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if cc is not None:
             cc._on_mcp_servers_toggled()
 
-    def _on_gateway_toggled(self):
-        """（委托全局卡片控制器 GlobalCardController）"""
-        from app.widgets.cards.global_card_controller import get_global_card_controller
-
-        cc = get_global_card_controller()
-        if cc is not None:
-            cc._on_gateway_toggled()
-
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
 

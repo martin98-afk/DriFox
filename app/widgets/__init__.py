@@ -11,8 +11,6 @@ from app.widgets.cards.floating.question_floating_widget import QuestionFloating
 from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
-# Gateway
-from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.history_card import HistoryCard, get_message_preview
 from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 from app.widgets.cards.settings.memory_card import MemoryCardContent
@@ -49,6 +47,4 @@ __all__ = [
     "MemoryCardContent",
     # 对话框
     "FileUndoPreviewDialog",
-    # Gateway
-    "GatewaySettingCard",
 ]

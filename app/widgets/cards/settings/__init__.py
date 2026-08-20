@@ -2,7 +2,6 @@
 
 from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard, AutoLoopRunningCard
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
-from app.widgets.cards.settings.gateway_setting_card import GatewaySettingCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.history_card import HistoryCard
 from app.widgets.cards.settings.hook_setting_card import HookEditCard, HookListSettingCard
@@ -32,7 +31,6 @@ __all__ = [
     "ProviderListSettingCard",
     "ProviderEditCard",
     "ProjectSelectorCardContent",
-    "GatewaySettingCard",
     "GiteeCard",
     "SystemCardFrame",
 ]
