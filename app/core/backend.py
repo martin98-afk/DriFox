@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
+from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer, QCoreApplication
 
 from app.constants import IMAGE_EXTENSIONS
 from app.utils.utils import invalidate_skills_cache
@@ -1133,6 +1133,39 @@ class ChatBackend(QObject):
             logger.warning("[ChatBackend] watchfiles 未安装，插件热更新不可用。pip install watchfiles")
             return
 
+        # 自定义监听过滤器：在 watchfiles 默认 DefaultFilter（已排除 .git/__pycache__/
+        # .pyc/.swp 等）基础上，额外排除插件内的“易变 / vendored”目录与产物文件。
+        # 这是“文件多”插件（如带 lark_oapi SDK deps 的 gateway-feishu，deps 含数千 .py）
+        # 热重载卡顿的根因：clone / 导入时成千上万的文件变更事件被 watchfiles 与后续
+        # 分类逻辑处理，拖垮 watcher 线程并诱发主线程重载风暴。排除后事件量降 ~95%，
+        # 且不影响各组件目录（agents/hooks/commands/... 与 deps 平级，不被排除）的热更新。
+        from watchfiles import DefaultFilter
+
+        class _PluginWatchFilter(DefaultFilter):
+            # 额外排除的目录段（任意层级命中即忽略其下全部变更）
+            _EXTRA_SKIP_DIRS = {
+                "deps", "node_modules", ".venv", "venv", "build", "dist",
+                "install_tmp", "__pycache__", ".git", ".hg", ".svn",
+                ".mypy_cache", ".pytest_cache", ".ruff_cache", "tmp", "temp",
+            }
+            # 额外排除的产物 / 缓存文件
+            _EXTRA_SKIP_EXTS = (
+                ".pyc", ".pyo", ".pyd", ".so", ".egg-info",
+                ".log", ".tmp", ".bak", ".swp",
+            )
+
+            def __call__(self, change, path):
+                if not super().__call__(change, path):
+                    return False
+                norm = str(path).replace("\\", "/").lower()
+                if any(seg in self._EXTRA_SKIP_DIRS for seg in norm.split("/")):
+                    return False
+                if norm.endswith(self._EXTRA_SKIP_EXTS):
+                    return False
+                return True
+
+        watch_filter = _PluginWatchFilter()
+
         # 收集需要监听的插件目录
         from app.plugins.managers.plugin_manager import PluginManager
 
@@ -1249,6 +1282,8 @@ class ChatBackend(QObject):
             线程随之结束，闭包对 self（ChatBackend 实例）的引用被释放。
             """
             logger.debug("[ChatBackend] watchfiles 监听线程已启动")
+            # 跟踪抑制窗口状态，用于“退出抑制时消费 pending 触发一次兜底重载”
+            _prev_suppressed = False
             try:
                 for changes in watch(
                     *watch_paths,
@@ -1256,6 +1291,7 @@ class ChatBackend(QObject):
                     debounce=2000,  # 2秒防抖
                     yield_on_timeout=False,
                     stop_event=ChatBackend._plugin_watcher_stop,
+                    watch_filter=watch_filter,  # 排除 deps/node_modules 等易变目录
                 ):
                     # changes: set of (Change, Path)
                     if not changes:
@@ -1299,7 +1335,19 @@ class ChatBackend(QObject):
                             f"[ChatBackend] 抑制窗口内收到 {len(relevant_changes)} 处变更，"
                             f"标记 pending 待合并重载"
                         )
+                        _prev_suppressed = True
                         continue
+
+                    # 刚退出抑制窗口：若窗口内累积了 pending 变更，触发一次兜底重载
+                    # （经 _on_hot_reload_requested 去抖合并，仅 reload 一次），
+                    # 使被抑制的变更不丢失，且避免窗口结束后每批真实 emit 形成风暴。
+                    if _prev_suppressed and ChatBackend._watcher_pending_reload:
+                        ChatBackend._watcher_pending_reload = False
+                        logger.info(
+                            "[ChatBackend] 抑制窗口结束，合并触发一次兜底重载（消费 pending）"
+                        )
+                        self._hot_reload_requested.emit("", "")  # 空名 → reload_plugin_subsystems
+                    _prev_suppressed = False
 
                     current_prefixes = _prefixes_ref[0]
 
@@ -1733,6 +1781,12 @@ class ChatBackend(QObject):
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
         """主线程中执行的插件热更新
 
+        单次请求同步执行（保持原有增量语义与单元测试同步断言）；300ms 内的
+        重复 / 风暴请求走去抖合并：首次立即执行，窗口内的后续请求不再逐个触发
+        主线程重载（reload_agents / reload_all_commands ~2500ms），改为计划一次
+        合并的 reload_plugin_subsystems，避免“文件多”的插件在批量写入 / clone 时
+        每批都重载阻塞 UI。
+
         Args:
             plugin_name: 插件名
                 - "" (空) → 全量重载（走 reload_plugin_subsystems）
@@ -1740,19 +1794,15 @@ class ChatBackend(QObject):
                 - 其他 → 已知插件的增量重载（component 为具体组件名或 "" 表示根目录变更）
             component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp/lsp）
         """
+        now = time.time()
+        last = getattr(self, "_last_reload_at", 0.0)
+        if now - last < 0.3:
+            # 去抖窗口内：不立即重载，改为计划一次合并兜底（仅执行一次）
+            self._schedule_debounced_reload()
+            return
+        self._last_reload_at = now
         try:
-            if plugin_name == self._NEW_PLUGIN_SENTINEL:
-                # 新增插件：只扫描这一个插件目录，增量加载其组件。
-                # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
-                # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
-                # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
-                # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
-                # UI/LSP 先卸载后加载），可直接复用。
-                result = self._reload_new_plugin(component)
-            elif plugin_name:
-                result = self._reload_single_plugin(plugin_name, component)
-            else:
-                result = self.reload_plugin_subsystems()
+            result = self._do_single_reload(plugin_name, component)
             self.plugin_changed.emit(result)
             # ★ T3 修复：广播到所有活跃 backend 的 plugin_changed。
             # watcher 由首个 backend 驱动，_on_hot_reload_requested 只在该实例的
@@ -1770,11 +1820,50 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
         finally:
-            # 重载完成后重建 watchfiles 路径索引，确保新注册的插件路径可被后续变更识别
-            # 注意：不能提前重建（在 _watch_loop 的 else 分支），因为那时 pm.rescan() 还没执行
-            # finally 保证即使重载/emit 抛异常，索引也必然更新（否则已注册插件会被
-            # 反复识别为"新插件"，触发 bridge.json 自触发循环）
+            # 重载完成后重建 watchfiles 路径索引（finally 保证异常路径也更新，
+            # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
+
+    def _schedule_debounced_reload(self):
+        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
+        if getattr(self, "_reload_timer", None) is None:
+            self._reload_timer = QTimer()
+            self._reload_timer.setSingleShot(True)
+            self._reload_timer.timeout.connect(self._do_debounced_reload)
+        if not self._reload_timer.isActive():
+            self._reload_timer.start(300)
+
+    def _do_debounced_reload(self):
+        """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        self._last_reload_at = time.time()
+        try:
+            result = self.reload_plugin_subsystems()
+            self.plugin_changed.emit(result)
+            for _b in list(ChatBackend._active_instances):
+                if _b is not self:
+                    try:
+                        _b.plugin_changed.emit(result)
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+        finally:
+            self._rebuild_watcher_prefixes()
+
+    def _do_single_reload(self, plugin_name: str, component: str) -> dict:
+        """执行单条增量重载（不含 emit / 广播 / 索引重建，由 _flush_reload_intents 统一处理）"""
+        if plugin_name == self._NEW_PLUGIN_SENTINEL:
+            # 新增插件：只扫描这一个插件目录，增量加载其组件。
+            # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
+            # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
+            # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
+            # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
+            # UI/LSP 先卸载后加载），可直接复用。
+            return self._reload_new_plugin(component)
+        elif plugin_name:
+            return self._reload_single_plugin(plugin_name, component)
+        else:
+            return self.reload_plugin_subsystems()
 
     def _rebuild_watcher_prefixes(self):
         """重建 watchfiles 线程的插件路径索引（主线程调用）"""

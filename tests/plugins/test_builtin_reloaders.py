@@ -302,3 +302,73 @@ def test_update_gateways_path_stops_and_rebuilds(monkeypatch):
     assert mgr.stopped == ["gwplug"]          # 先关闭
     assert watcher.scans == 1                  # scan_now 重注册
     assert mgr.rebuilt == [("gwplug", True)]   # 更新路径重建（restart_if_running=True）
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tools 分支：删除路径精准卸载（unload_plugin），更新路径全量重扫（scan_now）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeToolWatcher:
+    """最小化 PluginToolWatcher fake：捕获 unload_plugin / scan_now / _notify_reloaded"""
+
+    def __init__(self):
+        self.unloaded: list[str] = []
+        self.scans: int = 0
+        self.notified: int = 0
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        self.unloaded.append(plugin_name)
+
+    def scan_now(self) -> None:
+        self.scans += 1
+
+    def _notify_reloaded(self) -> None:
+        self.notified += 1
+
+
+def test_delete_tools_path_calls_unload_not_scan_now(monkeypatch):
+    """tools 删除分支：精准 unload_plugin，不调 scan_now
+
+    回归锁定：此前 _reload_tools 对删除路径也调 scan_now 全量重扫，
+    导致删一个插件却卸载并重载全部工具（含 system）。
+    """
+    watcher = _FakeToolWatcher()
+    monkeypatch.setattr(
+        "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
+        lambda: watcher,
+    )
+
+    reg = _make_reg()
+    ok = reg.reload(
+        ReloadContext("workbuddy", plugin=None, component="tools", is_new_plugin=False)
+    )
+
+    assert ok is True
+    assert watcher.unloaded == ["workbuddy"], "删除路径应调 unload_plugin(plugin_name)"
+    assert watcher.scans == 0, "删除路径不应调 scan_now（避免全量重载）"
+    assert watcher.notified == 0, "删除路径（非轮询）不应通知监听"
+
+
+def test_update_tools_path_calls_scan_now(monkeypatch):
+    """tools 更新/新增分支：仍 scan_now + _notify_reloaded（内容/跨根覆盖需重算）"""
+
+    watcher = _FakeToolWatcher()
+    monkeypatch.setattr(
+        "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
+        lambda: watcher,
+    )
+
+    class _FakePlugin:
+        def has_component(self, c):
+            return False
+
+    reg = _make_reg()
+    ok = reg.reload(
+        ReloadContext("workbuddy", plugin=_FakePlugin(), component="tools", is_new_plugin=False)
+    )
+
+    assert ok is True
+    assert watcher.scans == 1, "更新路径应 scan_now 重算"
+    assert watcher.notified == 1, "更新路径应通知监听"
+    assert watcher.unloaded == [], "更新路径不应调 unload_plugin"

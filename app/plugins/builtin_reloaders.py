@@ -146,19 +146,25 @@ def _reload_ui(ctx: ReloadContext) -> Any:
 
 
 def _reload_tools(ctx: ReloadContext) -> Any:
-    """tools 分支：轮询 watcher 退役后的正式路径 — 全量重扫（幂等，含 enabled 过滤）
+    """tools 分支：轮询 watcher 退役后的正式路径
 
-    删除路径无意义（PluginManager 已移除，watcher.scan_now 重读自然不包含该插件）。
+    - 删除路径(ctx.plugin is None)：精准卸载该插件工具（unload_plugin），
+      不波及 system 等其他插件；跨根覆盖由 watcher 内部恢复。不再走
+      scan_now 全量重扫，避免「删一个插件卸载并重载全部工具」的抖动。
+    - 更新/新增路径(ctx.plugin 非 None)：内容变更/跨根覆盖需重算 →
+      仍走 scan_now 全量重扫（含 enabled 过滤），并通知监听。
     """
     from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
     watcher = ensure_plugin_tool_watcher()
-    if watcher is not None:
+    if watcher is None:
+        return False
+    if ctx.plugin is None:
+        watcher.unload_plugin(ctx.plugin_name)
+    else:
         watcher.scan_now()
-        if ctx.plugin is not None:
-            watcher._notify_reloaded()
-        return True
-    return False
+        watcher._notify_reloaded()
+    return True
 
 
 def _reload_providers(ctx: ReloadContext) -> Any:

@@ -511,6 +511,57 @@ def register(registry):
         assert r.source == "plugin:system", f"system 应恢复，实际: {r.source}"
         assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
 
+    def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
+        """场景 6b：unload_plugin 精准卸载单插件，不波及他插件
+
+        回归：此前 _reload_tools 删除路径调 scan_now 全量重扫，
+        会先注销全部插件工具再重注册——删一个插件却卸载并重载全部工具。
+        修复后 unload_plugin 只注销目标插件名下工具，且跨根覆盖由
+        低等级根重扫恢复（不注销他插件）。
+        """
+        import shutil
+
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+        # user 覆盖 read 生效
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        # 捕获删除前 user 插件工具集
+        pre_loaded = set(watcher._loaded.get("user-override-plug", set()))
+        assert pre_loaded, "watcher 应记录 user 插件工具"
+
+        # spy：记录所有被 unregister 的工具名
+        unregistered: list[str] = []
+        orig_unregister = reg.unregister
+
+        def _spy(name):
+            unregistered.append(name)
+            return orig_unregister(name)
+
+        monkeypatch.setattr(reg, "unregister", _spy)
+
+        # 删除 user 插件目录 → 精准卸载
+        shutil.rmtree(user_root / "user-override-plug", ignore_errors=True)
+        watcher.unload_plugin("user-override-plug")
+
+        # 1) 只注销了 user 插件名下工具（精准）
+        assert set(unregistered) == pre_loaded, (
+            f"应只注销 user 插件工具 {pre_loaded}，实际注销 {set(unregistered)}"
+        )
+        # 2) 他插件（system）工具未被注销——write 是独立 system 工具
+        assert "write" not in unregistered, "system 工具 write 不应被 unregister"
+        # 3) 跨根覆盖恢复：read 恢复为 system
+        r = reg.get("read")
+        assert r is not None and r.source == "plugin:system", (
+            f"system 应恢复，实际: {r.source if r else None}"
+        )
+        # 4) watcher._loaded 已移除该插件记录
+        assert "user-override-plug" not in watcher._loaded
+
     def test_disabling_user_plugin_restores_system(self, tmp_path, monkeypatch):
         """场景 7：覆盖 system 的用户插件被禁用 → 系统插件恢复
 

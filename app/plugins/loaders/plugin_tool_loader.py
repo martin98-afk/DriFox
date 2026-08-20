@@ -405,6 +405,49 @@ class PluginToolWatcher:
                     logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
                     # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
 
+    def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
+        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        for name in self._loaded.get(plugin_name, set()):
+            r = self._root_tracker.get(name)
+            if r is not None:
+                return Path(r)
+        return None
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        """精准卸载单个插件工具（删除路径专用，不注销他插件工具）
+
+        与 scan_now 的区别：scan_now 先注销 _loaded 全部插件再全量重注册，
+        会波及 system 等无关插件（造成全量卸载+重载抖动）。本方法只注销
+        目标插件名下的工具，并从 _loaded 移除其记录。
+
+        跨根覆盖恢复：若被删插件位于高等级根（如 user 覆盖 system 同名工具），
+        仅精准注销会使被覆盖的低级根工具永久消失。故在注销后，对**所有更低
+        等级根**重扫一次（load_plugin_tools 内部按 root_kind 优先级恢复同名工具，
+        已存在的他插件工具被「先注册者优先」保护跳过，无副作用）。
+        """
+        with self._scan_lock:
+            with self._registry.notify_batch():
+                tool_names = set(self._loaded.get(plugin_name, set()))
+                # 在 unload 前（root_tracker 尚未被 pop）捕获被删插件所属根
+                removed_root = self._root_of_plugin(plugin_name)
+                removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+                if tool_names:
+                    unload_plugin_tools(
+                        plugin_name, tool_names, self._registry, root_tracker=self._root_tracker
+                    )
+                self._loaded.pop(plugin_name, None)
+                # 跨根覆盖恢复：仅重扫比被删根更低等级的根（被覆盖方）
+                for root in self._roots:
+                    if _ROOT_KIND_PRIORITY.get(_root_kind(root), 0) >= removed_rank:
+                        continue
+                    low_loaded = load_plugin_tools(
+                        registry=self._registry,
+                        plugin_roots=[Path(root)],
+                        root_tracker=self._root_tracker,
+                    )
+                    for pname, names in low_loaded.items():
+                        self._loaded.setdefault(pname, set()).update(names)
+
     def on_tools_reloaded(self, listener: Callable[[], None]) -> None:
         """注册热重载完成监听（后台线程回调；仅 watcher 轮询检测到变更时触发）"""
         self._reload_listeners.append(listener)
