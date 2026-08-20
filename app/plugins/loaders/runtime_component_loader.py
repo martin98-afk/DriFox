@@ -257,10 +257,12 @@ _adapters_loader: Optional[RuntimeComponentLoader] = None
 _loop_loader: Optional[RuntimeComponentLoader] = None
 _storage_loader: Optional[RuntimeComponentLoader] = None
 _serializer_loader: Optional[RuntimeComponentLoader] = None
+_gateway_loader: Optional[RuntimeComponentLoader] = None
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
 _storage_watcher: Optional[_RuntimeWatcher] = None
 _serializer_watcher: Optional[_RuntimeWatcher] = None
+_gateway_watcher: Optional[_RuntimeWatcher] = None
 _watchers_lock = threading.Lock()
 
 
@@ -286,6 +288,12 @@ def _make_serializer_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
     return RuntimeComponentLoader("serializers", SerializerRegistry.get_instance())
+
+
+def _make_gateway_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+    return RuntimeComponentLoader("gateways", GatewayPlatformRegistry.get_instance())
 
 
 def ensure_model_adapter_watcher() -> Optional[_RuntimeWatcher]:
@@ -336,16 +344,29 @@ def ensure_serializer_watcher() -> Optional[_RuntimeWatcher]:
         return _serializer_watcher
 
 
-def warmup_runtime_components() -> Dict[str, Set[str]]:
-    """启动期一次性加载四类运行时组件（系统插件 plugins/system 提供默认实现）。
+def ensure_gateway_watcher() -> Optional[_RuntimeWatcher]:
+    global _gateway_loader, _gateway_watcher
+    with _watchers_lock:
+        if _gateway_watcher is not None:
+            return _gateway_watcher
+        _gateway_loader = _gateway_loader or _make_gateway_loader()
+        _gateway_watcher = _RuntimeWatcher(_gateway_loader, "gateways")
+        _gateway_watcher.scan_now()
+        _gateway_watcher.start()
+        return _gateway_watcher
 
-    四类运行时组件（model_adapters / loop_policies / storages / serializers）的默认实现
-    现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages,serializers}/），
-    不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
+
+def warmup_runtime_components() -> Dict[str, Set[str]]:
+    """启动期一次性加载五类运行时组件（系统插件 plugins/system 提供默认实现）。
+
+    五类运行时组件（model_adapters / loop_policies / storages / serializers / gateways）
+    的默认实现现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages,
+    serializers,gateways}/），不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
     """
     result: Dict[str, Set[str]] = {}
     result["model_adapters"] = _make_adapters_loader().scan_roots()
     result["loop_policies"] = _make_loop_loader().scan_roots()
     result["storages"] = _make_storage_loader().scan_roots()
     result["serializers"] = _make_serializer_loader().scan_roots()
+    result["gateways"] = _make_gateway_loader().scan_roots()
     return result

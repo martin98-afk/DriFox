@@ -37,6 +37,7 @@ RELOADED_COMPONENTS = {
     "loop_policies",
     "storages",
     "serializers",
+    "gateways",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -233,6 +234,20 @@ def _reload_serializers(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_gateways(ctx: ReloadContext) -> Any:
+    """gateways 分支：同 serializers（scan_now 全量重扫幂等，删除场景靠 unregister_source 自然清理）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_gateway_watcher
+
+        watcher = ensure_gateway_watcher()
+        if watcher is not None:
+            watcher.scan_now()
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] gateways 重载失败: {e}")
+    return False
+
+
 # 运行时句柄：backend 初始化后注入（避免循环 import — reloader 不能 import backend）
 _RUNTIME: dict = {"agent_manager": None}
 
@@ -263,6 +278,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "loop_policies": _reload_loop_policies,
         "storages": _reload_storages,
         "serializers": _reload_serializers,
+        "gateways": _reload_gateways,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

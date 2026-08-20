@@ -26,7 +26,8 @@
         "model_adapters": true,
         "storages": true,
         "serializers": true,
-        "ui": true
+        "ui": true,
+        "gateways": true
     },
     "config_schema": {
         "title": "网页搜索 API Key",
