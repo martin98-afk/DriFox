@@ -15,11 +15,14 @@
 - 修复：ensure_rendered 加可见性门控（不可见→_render_deferred=True 并 return，
   viewer 创建延后）；MessageCard.showEvent 在窗口切回可见时补渲（此时父 HWND 已就绪）。
 
-测试策略（纯 AST，不实例化 Qt，可在无头/CI 环境运行）：
+测试策略（纯 AST + 行为测试，可在无头/CI 环境运行）：
 - 断言 ensure_rendered 的 _do_ensure_rendered 在创建 viewer 前检查 self.isVisible()，
   不可见时设置 _render_deferred=True 并 return。
 - 断言 MessageCard.showEvent 在 _render_deferred 且未渲染时调用 self.ensure_rendered() 补渲。
 - 断言 _schedule_render 同样具备可见性门控（对称性，防回归）。
+- 行为测试：嵌套两层 QStackedWidget（窗口级 + 覆盖层级）时，外层覆盖层打开
+  必须判定不可见（2026-08-20 修复：_is_effectively_visible 原先只检查第一个
+  QStackedWidget，覆盖层打开时误判可见 → 切换项目/新建标签页弹幽灵窗口）。
 """
 
 import ast
@@ -141,3 +144,57 @@ def test_schedule_render_also_guards_invisible():
             found = _branch_sets_flag_and_returns(node)
             break
     assert found, "_schedule_render 缺少 isVisible 可见性门控（与 ensure_rendered 不一致）"
+
+
+# ══════════════════════════════════════════════════════════
+# 行为测试：多层 QStackedWidget 嵌套（窗口级 + 覆盖层级）
+# ══════════════════════════════════════════════════════════
+
+
+def _build_tab_manager_like_tree():
+    """模拟 Tab 管理器结构：外层覆盖层堆栈（_content_stack）⊃ 内层窗口堆栈（_content_area）。
+
+    返回 (content_stack, content_area, overlay_page, window_page, card)。
+    """
+    from PyQt5.QtWidgets import QStackedWidget, QWidget
+
+    from app.widgets.message_card import MessageCard
+
+    content_stack = QStackedWidget()  # 外层：覆盖层堆栈（index 0 对话区 / index 1 覆盖层）
+    content_area = QStackedWidget()  # 内层：窗口堆栈（index 0 空状态 / index 1 窗口）
+    overlay_page = QWidget()  # 覆盖层页（系统卡片，如项目选择器）
+    window_page = QWidget()  # 对话区页（承载欢迎卡片）
+    content_stack.addWidget(content_area)  # index 0
+    content_stack.addWidget(overlay_page)  # index 1
+    content_area.addWidget(QWidget())  # index 0: 空状态
+    content_area.addWidget(window_page)  # index 1: 窗口
+
+    card = MessageCard(role="assistant", parent=window_page)
+    content_area.setCurrentWidget(window_page)
+    content_stack.setCurrentWidget(content_area)
+    content_stack.show()
+    return content_stack, content_area, overlay_page, window_page, card
+
+
+def test_effectively_visible_all_stacked_layers_must_pass(_qt_app):
+    """多层 QStackedWidget 嵌套时，`_is_effectively_visible` 必须遍历全部层级。
+
+    回归：切换项目/新建标签页出现幽灵窗口（2026-08-20）。根因：原实现沿父链
+    找到**第一个** QStackedWidget（窗口级 _content_area）即返回，未检查外层
+    覆盖层堆栈（_content_stack）。当系统卡片覆盖层打开（index 1）时对话区被
+    隐藏，但窗口级 currentWidget 仍是当前窗口 → 误判可见 → 创建 QWebEngineView
+    弹出幽灵窗口。
+    """
+    content_stack, content_area, overlay_page, _window_page, card = _build_tab_manager_like_tree()
+
+    # 两层都是当前页 → 可见
+    assert card._is_effectively_visible() is True
+
+    # 覆盖层打开（如项目选择卡片）→ 对话区实际不可见 → 必须判定不可见
+    content_stack.setCurrentWidget(overlay_page)
+    assert card._is_effectively_visible() is False
+
+    # 覆盖层关闭 → 恢复可见
+    content_stack.setCurrentWidget(content_area)
+    assert card._is_effectively_visible() is True
+    content_stack.deleteLater()

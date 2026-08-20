@@ -9479,11 +9479,17 @@ class MessageCard(SimpleCardWidget):
         隐藏页在某些时序下 isVisible() 仍返回 True，导致 QWebEngineView（Windows 上
         创建原生 HWND 子窗口）在缺少有效父句柄时弹出独立原生窗口（幽灵窗口/白窗一闪而过）。
         故直接检查本卡片是否在其所在 QStackedWidget 的当前页子树中。
+
+        注意：必须遍历**所有**父链上的 QStackedWidget，而不是只检查第一个。
+        Tab 管理器有嵌套两层 QStackedWidget——窗口级 _content_area 与外层覆盖级
+        _content_stack（index 0 对话区 / index 1 系统卡片覆盖层）。若只检查第一层，
+        覆盖层打开时（如项目选择卡片）对话区实际隐藏，但窗口级 currentWidget 仍是
+        当前窗口 → 误判可见 → 创建 QWebEngineView 弹出幽灵窗口。
         """
         top = self.window()
         if top is None or not top.isVisible():
             return False
-        # 沿父链查找 QStackedWidget（duck-typing，避免强依赖导入）
+        # 沿父链查找 QStackedWidget（duck-typing，避免强依赖导入），逐层检查全部层级
         p = self.parentWidget()
         while p is not None:
             cur = getattr(p, "currentWidget", None)
@@ -9491,7 +9497,7 @@ class MessageCard(SimpleCardWidget):
                 current = cur()
                 if current is None or not current.isAncestorOf(self):
                     return False
-                return True
+                # 本层通过，继续向上检查外层 QStackedWidget（覆盖层级）
             p = p.parentWidget()
         return True
 
