@@ -66,6 +66,7 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "loop_policies": lambda d: (d / "loop_policies").exists() and any((d / "loop_policies").glob("*.py")),
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
+    "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
 }
 
 

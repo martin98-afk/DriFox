@@ -6,7 +6,7 @@ Gateway 配置管理
 """
 from __future__ import annotations
 
-from app.gateway.base import Platform, PlatformConfig
+from app.gateway.base import Platform, PlatformConfig, _platform_key
 
 
 def get_gateway_config() -> "GatewayConfigHelper":
@@ -25,13 +25,21 @@ class GatewayConfigHelper:
     def get_platform_config(platform: Platform) -> PlatformConfig:
         """
         获取平台配置
-        
+
         Args:
             platform: 平台枚举
-            
+
         Returns:
             PlatformConfig
         """
+        # Phase E：已注册平台优先走 def.config_builder（闭包读主程序 Settings）
+        # — Task 4 暂只对 telegram 等已迁平台生效，其余 6 段仍走旧 elif
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+        d = GatewayPlatformRegistry.get_instance().get(_platform_key(platform))
+        if d is not None and d.config_builder is not None:
+            return d.config_builder()
+
         from app.utils.config import Settings
         cfg = Settings.get_instance()
 
@@ -103,11 +111,19 @@ class GatewayConfigHelper:
     def set_platform_config(platform: Platform, config: PlatformConfig) -> None:
         """
         设置平台配置
-        
+
         Args:
             platform: 平台枚举
             config: 平台配置
         """
+        # Phase E：已注册平台优先走 def.config_writer
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+        d = GatewayPlatformRegistry.get_instance().get(_platform_key(platform))
+        if d is not None and d.config_writer is not None:
+            d.config_writer(config)
+            return
+
         from app.utils.config import Settings
         cfg = Settings.get_instance()
 

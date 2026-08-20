@@ -31,6 +31,17 @@ class Platform(str, Enum):
     SLACK = "slack"
 
 
+def _platform_key(platform) -> str:
+    """统一平台入参为字符串 id（兼容 Platform 枚举与第三方 str 直传）。
+
+    Phase E 引入：manager / config 走 registry 查表时，第三方平台 id 不一定在
+    Platform 枚举闭集内，故统一以 .value / str(p) 转 str 作为 registry.get 的 key。
+    """
+    if isinstance(platform, Platform):
+        return platform.value
+    return str(platform)
+
+
 class MessageType(Enum):
     """消息类型"""
     TEXT = "text"

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Telegram 平台适配器
+Telegram 平台适配器（系统插件，万物即插件 Phase E）
 
 使用 python-telegram-bot 库进行消息收发。
+
+本文件原位于 app/gateway/adapters/telegram.py（E2 Task 4 迁入）。
+适配器实现保持原状（SDK 延迟导入纪律：模块顶层不 eager import 平台 SDK）。
 """
 from __future__ import annotations
 
@@ -398,3 +401,71 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error(f"[Telegram] get_chat_info failed: {e}")
             return {"name": str(chat_id), "type": "dm"}
+
+
+# ── Phase E 插件注册 ────────────────────────────────────
+# 配置读写回调走主程序 Settings（存量用户配置零迁移；Task 5 统一切 E1
+# PluginConfigStore 时仅改本块闭包，调用方不动）。闭包内延迟 import
+# Settings/PlatformConfig，避免模块顶层触发 PyQt5 / Settings 副作用。
+
+
+def _build_config() -> "PlatformConfig":
+    """读主程序 Settings 构造 Telegram 配置（存量用户配置零迁移）"""
+    from app.gateway.base import Platform, PlatformConfig
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    return PlatformConfig(
+        enabled=cfg.gateway_telegram_enabled.value,
+        platform=Platform.TELEGRAM,
+        token=cfg.gateway_telegram_token.value,
+        extra={"require_mention": cfg.gateway_telegram_require_mention.value},
+    )
+
+
+def _write_config(config: "PlatformConfig") -> None:
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.set(cfg.gateway_telegram_enabled, config.enabled, save=True)
+    if config.token is not None:
+        cfg.set(cfg.gateway_telegram_token, config.token, save=True)
+    if config.extra:
+        cfg.set(
+            cfg.gateway_telegram_require_mention,
+            config.extra.get("require_mention", True),
+            save=True,
+        )
+
+
+def _build_config_values(values: dict, old_config) -> "PlatformConfig":
+    """设置卡保存回调：表单值 → PlatformConfig（对齐旧 _on_save TELEGRAM 分支）"""
+    from app.gateway.base import Platform, PlatformConfig
+
+    extra = dict(old_config.extra) if old_config and old_config.extra else {}
+    if "require_mention" in values:
+        extra["require_mention"] = bool(values["require_mention"])
+    return PlatformConfig(
+        enabled=bool(values.get("enabled", False)),
+        platform=Platform.TELEGRAM,
+        token=values.get("token") or "",
+        extra=extra,
+    )
+
+
+def register(registry) -> None:
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="telegram",
+            display_name="Telegram",
+            adapter_factory=lambda cfg: TelegramAdapter(cfg),
+            check_requirements=check_telegram_requirements,
+            config_builder=_build_config,
+            config_writer=_write_config,
+            build_config_values=_build_config_values,
+            validate_config=lambda cfg: (bool(cfg.token), "Token 未配置"),
+            ui_order=30,
+        )
+    )

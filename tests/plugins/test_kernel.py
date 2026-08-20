@@ -23,6 +23,7 @@ def test_known_components_complete():
         "loop_policies",
         "storages",
         "serializers",
+        "gateways",
     }
     assert kernel.KNOWN_COMPONENTS == expected
 
@@ -98,7 +99,7 @@ def test_component_order_explicit_tuple():
     assert set(kernel.COMPONENT_ORDER) == kernel.KNOWN_COMPONENTS
     # 不重复
     assert len(kernel.COMPONENT_ORDER) == len(set(kernel.COMPONENT_ORDER))
-    # 顺序：agents → hooks → commands → themes → skills → mcp → lsp → ui → tools → providers → team_templates → model_adapters → loop_policies → storages → serializers
+    # 顺序：agents → hooks → commands → themes → skills → mcp → lsp → ui → tools → providers → team_templates → model_adapters → loop_policies → storages → serializers → gateways
     assert kernel.COMPONENT_ORDER == (
         "agents",
         "hooks",
@@ -115,4 +116,5 @@ def test_component_order_explicit_tuple():
         "loop_policies",
         "storages",
         "serializers",
+        "gateways",
     )

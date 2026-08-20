@@ -60,14 +60,9 @@ def _try_import(platform_name: str, module_path: str, names: list) -> list:
     ["DingTalkAdapter", "check_dingtalk_requirements"],
 )
 
-# Telegram
-(
-    TelegramAdapter,
-    check_telegram_requirements,
-) = _try_import(
-    "Telegram", "app.gateway.adapters.telegram",
-    ["TelegramAdapter", "check_telegram_requirements"],
-)
+# Telegram（E2 Task 4：适配器迁出至 plugins/system/gateways/telegram.py；
+# 此处仍占位 None 以保持 __all__ 符号稳定 — Task 5 统一清理）
+(TelegramAdapter, check_telegram_requirements,) = (None, None)
 
 # Discord
 (
