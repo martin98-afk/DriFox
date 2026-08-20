@@ -5,6 +5,7 @@
 2. 项目笔记 - Markdown 编辑器
 3. 关键文档 - 列表 + 拖拽添加
 """
+
 import os
 from typing import Dict, Optional
 
@@ -65,6 +66,7 @@ TAB_KEY_DOCUMENTS = "docs"
 
 class DocDropListWidget(ListWidget):
     """支持拖拽文件的列表控件"""
+
     files_dropped = pyqtSignal(list)
 
     def __init__(self, parent=None):
@@ -160,6 +162,7 @@ class EntryMemoryItemWidget(QWidget):
         edit_layout.setSpacing(0)
 
         from qfluentwidgets import TextEdit
+
         self.edit_text = TextEdit(self.edit_widget)
         self.edit_text.setText(self._content)
         self.edit_text.setPlaceholderText("编辑条目记忆...")
@@ -195,10 +198,9 @@ class EntryMemoryItemWidget(QWidget):
         self.switch = SwitchButton(self)
         self.switch.setChecked(enabled)
         from app.utils.design_tokens import SwitchStyles
+
         SwitchStyles.configure(self.switch)
-        self.switch.checkedChanged.connect(
-            lambda checked: self.toggled.emit(self.memory_id, checked)
-        )
+        self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.memory_id, checked))
 
         # 按钮直接加入（text_widget stretch=1 自然将按钮推到右侧）
         main_layout.addWidget(self.edit_btn)
@@ -265,6 +267,7 @@ class EntryMemoryItemWidget(QWidget):
     def _get_item(self):
         """反向查找当前 widget 所在的 QListWidgetItem"""
         from qfluentwidgets import ListWidget
+
         lst = self.parent()
         while lst and not isinstance(lst, ListWidget):
             lst = lst.parent()
@@ -443,10 +446,16 @@ class SingleInputDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         self.vBoxLayout.addLayout(btn_layout)
 
-        # 固定 widget 大小，避免被 MaskDialogBase 拉伸到与父窗口同步
-        # （MaskDialogBase 强制 dialog 大小 = parent 大小，无 setMaximumSize 时
-        #   QFrame 默认 sizePolicy 允许拉伸，widget 会被撑成全屏）
-        self.widget.setFixedSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
+        # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        # 阻止 MaskDialogBase 的 QHBoxLayout 把 widget 拉伸到全屏：
+        # minSize 保底，maxSize 防撑爆，adjustSize 让 widget 按内容尺寸自适应。
+        # 原 setFixedSize 会让 hint/输入说明等长文本溢出被按钮遮挡。
+        self.widget.setMinimumSize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        self.widget.setMaximumSize(self.DEFAULT_WIDTH + 200, self.DEFAULT_HEIGHT + 320)
+        self.widget.adjustSize()
         # 初始居中显示；后续 dialog resize 时通过 _center_widget 保持居中
         self._center_widget()
 
@@ -493,7 +502,7 @@ class KeyDocumentItemWidget(QWidget):
     @staticmethod
     def _is_url(path: str) -> bool:
         """判断路径是否为 URL"""
-        return bool(path and (path.startswith('http://') or path.startswith('https://')))
+        return bool(path and (path.startswith("http://") or path.startswith("https://")))
 
     def __init__(
         self,
@@ -508,13 +517,14 @@ class KeyDocumentItemWidget(QWidget):
         self.doc_id = doc_id
         self.file_path = file_path
         self._is_url = self._is_url(file_path)
-        self._is_folder = (os.path.isdir(file_path) if file_path and not self._is_url else False)
+        self._is_folder = os.path.isdir(file_path) if file_path and not self._is_url else False
         self._is_working_dir = is_working_dir and self._is_folder
         self._init_ui(file_name, file_path, added_by)
 
     def _get_icon(self, file_name: str, file_path: str) -> str:
         """根据文件类型获取对应图标，文件夹单独处理"""
         import os
+
         # URL 链接
         if self._is_url:
             return "🔗"
@@ -522,59 +532,86 @@ class KeyDocumentItemWidget(QWidget):
         if os.path.isdir(file_path):
             return "📁"
 
-        ext = file_name.lower().split('.')[-1] if '.' in file_name else ''
+        ext = file_name.lower().split(".")[-1] if "." in file_name else ""
 
         icon_map = {
             # 代码文件
-            'py': '🐍', 'python': '🐍',
-            'js': '🟨', 'javascript': '🟨',
-            'ts': '🔷', 'typescript': '🔷',
-            'jsx': '⚛️', 'tsx': '⚛️',
-            'java': '☕',
-            'go': '🐹',
-            'rs': '🦀', 'rust': '🦀',
-            'c': '🔶', 'cpp': '🔶', 'h': '🔶',
-            'cs': '🔷',
-            'php': '🐘',
-            'rb': '💎',
-            'swift': '🍎',
-            'kt': '🤖',
+            "py": "🐍",
+            "python": "🐍",
+            "js": "🟨",
+            "javascript": "🟨",
+            "ts": "🔷",
+            "typescript": "🔷",
+            "jsx": "⚛️",
+            "tsx": "⚛️",
+            "java": "☕",
+            "go": "🐹",
+            "rs": "🦀",
+            "rust": "🦀",
+            "c": "🔶",
+            "cpp": "🔶",
+            "h": "🔶",
+            "cs": "🔷",
+            "php": "🐘",
+            "rb": "💎",
+            "swift": "🍎",
+            "kt": "🤖",
             # 文档
-            'md': '📝', 'markdown': '📝',
-            'txt': '📄',
-            'rtf': '📄',
-            'pdf': '📕',
-            'doc': '📘', 'docx': '📘',
-            'xls': '📊', 'xlsx': '📊', 'csv': '📊',
-            'ppt': '📙', 'pptx': '📙',
-            'html': '🌐', 'htm': '🌐',
-            'css': '🎨',
-            'scss': '🎨', 'less': '🎨',
-            'json': '🔧',
-            'yaml': '🔧', 'yml': '🔧',
-            'toml': '🔧',
-            'ini': '🔧',
-            'cfg': '🔧',
-            'conf': '🔧',
-            'xml': '🔧',
+            "md": "📝",
+            "markdown": "📝",
+            "txt": "📄",
+            "rtf": "📄",
+            "pdf": "📕",
+            "doc": "📘",
+            "docx": "📘",
+            "xls": "📊",
+            "xlsx": "📊",
+            "csv": "📊",
+            "ppt": "📙",
+            "pptx": "📙",
+            "html": "🌐",
+            "htm": "🌐",
+            "css": "🎨",
+            "scss": "🎨",
+            "less": "🎨",
+            "json": "🔧",
+            "yaml": "🔧",
+            "yml": "🔧",
+            "toml": "🔧",
+            "ini": "🔧",
+            "cfg": "🔧",
+            "conf": "🔧",
+            "xml": "🔧",
             # 图片
-            'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️',
-            'gif': '🖼️', 'bmp': '🖼️', 'svg': '🖼️',
-            'webp': '🖼️',
+            "png": "🖼️",
+            "jpg": "🖼️",
+            "jpeg": "🖼️",
+            "gif": "🖼️",
+            "bmp": "🖼️",
+            "svg": "🖼️",
+            "webp": "🖼️",
             # 视频音频
-            'mp4': '🎬', 'webm': '🎬',
-            'mp3': '🎵', 'wav': '🎵', 'ogg': '🎵',
+            "mp4": "🎬",
+            "webm": "🎬",
+            "mp3": "🎵",
+            "wav": "🎵",
+            "ogg": "🎵",
             # 存档
-            'zip': '📦', 'rar': '📦', '7z': '📦',
-            'tar': '📦', 'gz': '📦',
+            "zip": "📦",
+            "rar": "📦",
+            "7z": "📦",
+            "tar": "📦",
+            "gz": "📦",
             # git
-            'gitignore': '🌱',
+            "gitignore": "🌱",
             # license/readme
-            'license': '📜', 'licence': '📜',
-            'readme': '📖', 'readme.md': '📖',
+            "license": "📜",
+            "licence": "📜",
+            "readme": "📖",
+            "readme.md": "📖",
         }
 
-        return icon_map.get(ext, icon_map.get(file_name.lower(), '📄'))
+        return icon_map.get(ext, icon_map.get(file_name.lower(), "📄"))
 
     def _init_ui(self, file_name, file_path, added_by):
         self.setFixedHeight(44)
@@ -605,6 +642,7 @@ class KeyDocumentItemWidget(QWidget):
         display_name = file_name
         if self._is_url and file_path:
             from urllib.parse import urlparse
+
             parsed = urlparse(file_path)
             domain = parsed.netloc or file_path
             display_name = domain
@@ -612,9 +650,7 @@ class KeyDocumentItemWidget(QWidget):
         name_label.setWordWrap(False)
         name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         name_label.setMinimumWidth(0)
-        name_label.setStyleSheet(
-            f"{get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
-        )
+        name_label.setStyleSheet(f"{get_font_family_css()} {font_size_css(12)} padding: 0 4px;")
 
         main_layout.addWidget(icon_label)
         main_layout.addWidget(name_label)
@@ -629,9 +665,7 @@ class KeyDocumentItemWidget(QWidget):
                 f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
             )
         else:
-            self._path_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
-            )
+            self._path_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}")
         self._path_label.setToolTip(self.file_path)  # 悬浮显示完整路径
         self._path_label.setWordWrap(False)
         self._path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -660,6 +694,7 @@ class KeyDocumentItemWidget(QWidget):
         self._repo_info = None
         if self._is_folder and self._is_working_dir:
             from app.utils.git_worktree import GitWorktreeDetector
+
             self._repo_info = GitWorktreeDetector.get_repo_info(self.file_path)
 
         self.open_btn = TransparentToolButton(FluentIcon.FOLDER, self)
@@ -682,7 +717,7 @@ class KeyDocumentItemWidget(QWidget):
 
     def _update_path_elision(self):
         """根据可用宽度自动省略路径（中间截断），窗口缩小时优先压缩路径"""
-        if not hasattr(self, '_path_label') or self._path_label is None:
+        if not hasattr(self, "_path_label") or self._path_label is None:
             return
         full_path = self.file_path
         available_width = self._path_label.width()
@@ -732,9 +767,7 @@ class DropZoneWidget(QWidget):
 
         label = BodyLabel("拖拽文件到此处 或 点击选择文件", self)
         label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
+        label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         layout.addWidget(label)
 
         self._is_drag_over = False
@@ -767,10 +800,7 @@ class DropZoneWidget(QWidget):
         """点击打开文件选择对话框"""
         if event.button() == Qt.LeftButton:
             files, _ = QFileDialog.getOpenFileNames(
-                self,
-                "选择关键文档",
-                "",
-                "所有文件 (*.*);;文本文件 (*.txt *.md);;代码文件 (*.py *.js *.ts)"
+                self, "选择关键文档", "", "所有文件 (*.*);;文本文件 (*.txt *.md);;代码文件 (*.py *.js *.ts)"
             )
             if files:
                 self.files_dropped.emit(files)
@@ -800,7 +830,7 @@ class MemoryCardContent(QWidget):
             return self._memory_manager
         parent = self.parent()
         while parent:
-            if hasattr(parent, '_memory_manager'):
+            if hasattr(parent, "_memory_manager"):
                 return parent._memory_manager
             parent = parent.parent()
         return None
@@ -980,9 +1010,7 @@ class MemoryCardContent(QWidget):
 
         # 项目方形 icon（缩写字母，18px 小尺寸）
         self._notes_project_avatar = _SquareAvatar(
-            extract_project_initials(self._current_project),
-            get_project_color(self._current_project),
-            self, size=18
+            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=18
         )
         top_layout.addWidget(self._notes_project_avatar)
 
@@ -1035,7 +1063,7 @@ class MemoryCardContent(QWidget):
     def _on_notes_changed(self):
         """内容变化时触发自动保存（带节流）"""
         # 重置定时器，用户持续输入时不会保存，停止 1 秒后才保存
-        if hasattr(self, '_auto_save_timer') and self._auto_save_timer:
+        if hasattr(self, "_auto_save_timer") and self._auto_save_timer:
             self._auto_save_timer.start()
 
     def _create_docs_tab(self) -> QWidget:
@@ -1145,24 +1173,16 @@ class MemoryCardContent(QWidget):
     def _on_add_file_clicked(self):
         """点击添加文件按钮"""
         from PyQt5.QtWidgets import QFileDialog
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "选择关键文档",
-            "",
-            "所有文件 (*.*)"
-        )
+
+        files, _ = QFileDialog.getOpenFileNames(self, "选择关键文档", "", "所有文件 (*.*)")
         if files:
             self._on_files_dropped(files)
 
     def _on_add_folder_clicked(self):
         """点击添加文件夹按钮"""
         from PyQt5.QtWidgets import QFileDialog
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "选择文件夹",
-            "",
-            QFileDialog.ShowDirsOnly
-        )
+
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹", "", QFileDialog.ShowDirsOnly)
         if folder:
             self._on_files_dropped([folder])
 
@@ -1184,19 +1204,18 @@ class MemoryCardContent(QWidget):
         """URL 确认后的处理"""
         url = url.strip()
         # 补全协议前缀
-        if not (url.startswith('http://') or url.startswith('https://')):
-            url = 'https://' + url
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = "https://" + url
         # 验证 URL 基本格式
-        if '.' not in url.replace('https://', '').replace('http://', ''):
+        if "." not in url.replace("https://", "").replace("http://", ""):
             from qfluentwidgets import InfoBar
+
             # 挂到 tab 管理器顶层窗口（未就绪时兜底卡片所在窗口）
             from app.widgets.tab_manager_window import TabManagerWindow
 
             bar_parent = TabManagerWindow.get_instance() or self.window()
             InfoBar.warning(
-                title='URL 格式不正确',
-                content='请输入有效的网页链接（如 https://example.com）',
-                parent=bar_parent
+                title="URL 格式不正确", content="请输入有效的网页链接（如 https://example.com）", parent=bar_parent
             )
             return
         memory_mgr = self._get_memory_manager()
@@ -1265,7 +1284,7 @@ class MemoryCardContent(QWidget):
         """刷新各个子组件独立样式（不继承自父级的）"""
         Colors.refresh()
         # 条目列表
-        if hasattr(self, 'entries_list'):
+        if hasattr(self, "entries_list"):
             self.entries_list.setStyleSheet(f"""
                 QListWidget {{
                     background-color: {Colors.CARD_BG.format(alpha=180)};
@@ -1280,7 +1299,7 @@ class MemoryCardContent(QWidget):
                 }}
             """)
         # 条目输入框
-        if hasattr(self, 'entry_input'):
+        if hasattr(self, "entry_input"):
             self.entry_input.setStyleSheet(f"""
                 QLineEdit {{
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -1292,7 +1311,7 @@ class MemoryCardContent(QWidget):
                     {get_font_family_css()} {font_size_css(12)}
                 }}
             """)
-        if hasattr(self, 'entry_add_btn'):
+        if hasattr(self, "entry_add_btn"):
             self.entry_add_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {Colors.INFO};
@@ -1306,11 +1325,11 @@ class MemoryCardContent(QWidget):
                 }}
             """)
         # 项目笔记标签
-        if hasattr(self, 'project_name_label'):
+        if hasattr(self, "project_name_label"):
             self.project_name_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
-        if hasattr(self, 'notes_stats_label'):
+        if hasattr(self, "notes_stats_label"):
             self.notes_stats_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
             )
@@ -1325,7 +1344,7 @@ class MemoryCardContent(QWidget):
                 }}
             """)
         # 文档列表（无边框，透明背景）
-        if hasattr(self, 'docs_list'):
+        if hasattr(self, "docs_list"):
             self.docs_list.setStyleSheet(f"""
                 QListWidget {{
                     background: transparent;
@@ -1339,11 +1358,11 @@ class MemoryCardContent(QWidget):
                 }}
             """)
         # 文档工具栏标题
-        if hasattr(self, '_docs_header_label'):
+        if hasattr(self, "_docs_header_label"):
             self._docs_header_label.setStyleSheet(
                 f"color: {Colors.TEXT_PRIMARY}; background: transparent; {font_size_css(12)}"
             )
-        if hasattr(self, '_docs_count_label'):
+        if hasattr(self, "_docs_count_label"):
             self._docs_count_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
             )
@@ -1374,6 +1393,7 @@ class MemoryCardContent(QWidget):
     def _get_entry_item_size(self, content: str):
         """仅作为 fallback 使用"""
         from PyQt5.QtCore import QSize
+
         return QSize(0, 44)
 
     def set_search_filter(self, text: str):
@@ -1391,6 +1411,7 @@ class MemoryCardContent(QWidget):
         if not self._search_filter:
             return
         from PyQt5.QtGui import QTextCursor
+
         # 查找文本并选中
         cursor = self.notes_editor.textCursor()
         cursor.movePosition(QTextCursor.Start)
@@ -1460,11 +1481,8 @@ class MemoryCardContent(QWidget):
         )
         self.project_name_label.setText(f" {self._current_project}")
         # 同步更新方形 avatar
-        if hasattr(self, '_notes_project_avatar'):
-            self._notes_project_avatar.set_project(
-                self._current_project,
-                get_project_color(self._current_project)
-            )
+        if hasattr(self, "_notes_project_avatar"):
+            self._notes_project_avatar.set_project(self._current_project, get_project_color(self._current_project))
 
         if not workdir:
             # 未设定工作目录时，编辑器只读并显示提示
@@ -1478,9 +1496,7 @@ class MemoryCardContent(QWidget):
         self.notes_editor.setReadOnly(False)
         self.notes_editor.setPlaceholderText("在此记录项目笔记，支持 Markdown 格式...")
 
-        note = memory_mgr.get_or_create_project_note(
-            self._current_project, workdir=workdir
-        )
+        note = memory_mgr.get_or_create_project_note(self._current_project, workdir=workdir)
         content = note.get("content", "") if note else ""
         # 临时阻止 textChanged 信号（避免去抖保存触发）
         self.notes_editor.blockSignals(True)
@@ -1499,9 +1515,7 @@ class MemoryCardContent(QWidget):
             return  # 无工作目录时跳过保存
 
         content = self.notes_editor.toPlainText()
-        success = memory_mgr.save_project_note(
-            self._current_project, content, workdir=workdir
-        )
+        success = memory_mgr.save_project_note(self._current_project, content, workdir=workdir)
         if success:
             self.projectNoteChanged.emit(self._current_project, content)
 
@@ -1531,8 +1545,7 @@ class MemoryCardContent(QWidget):
         is_worktree_active = False
         if actual_wd:
             is_worktree_active = any(
-                d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree"
-                for d in all_docs
+                d.get("file_path") == actual_wd and d.get("added_by") == "git_worktree" for d in all_docs
             )
 
         # 查找原始 git 仓库路径（用于 worktree 模式下的显示和恢复）
@@ -1570,7 +1583,11 @@ class MemoryCardContent(QWidget):
         # 搜索过滤
         if self._search_filter:
             keyword = self._search_filter.lower()
-            docs = [d for d in docs if keyword in d.get("file_name", "").lower() or keyword in d.get("file_path", "").lower()]
+            docs = [
+                d
+                for d in docs
+                if keyword in d.get("file_name", "").lower() or keyword in d.get("file_path", "").lower()
+            ]
 
         # 工作目录置顶（如果 worktree 激活则原始仓库置顶，否则按 DB 标记）
         if is_worktree_active and original_repo_path:
@@ -1592,7 +1609,10 @@ class MemoryCardContent(QWidget):
             item = QListWidgetItem()
             item.setSizeHint(self._get_doc_item_size())
             widget = KeyDocumentItemWidget(
-                doc_id, file_name, file_path, added_by,
+                doc_id,
+                file_name,
+                file_path,
+                added_by,
                 is_working_dir=show_as_wd,
             )
             # worktree 激活时：原仓库虽不是根目录，但需要 _repo_info 来显示 worktree 区域
@@ -1613,14 +1633,18 @@ class MemoryCardContent(QWidget):
                 wt_item = QListWidgetItem()
                 wt_item.setSizeHint(self._get_worktree_section_size(widget._repo_info))
                 wt_widget = WorktreeSectionWidget(
-                    widget._repo_info, file_path, self,
+                    widget._repo_info,
+                    file_path,
+                    self,
                     current_workdir=actual_wd,
                     project=self._current_project,
                 )
-                wt_widget.sizeChanged.connect(lambda h, item=wt_item: (
-                    item.setSizeHint(QSize(0, h)),
-                    self.docs_list.update(),
-                ))
+                wt_widget.sizeChanged.connect(
+                    lambda h, item=wt_item: (
+                        item.setSizeHint(QSize(0, h)),
+                        self.docs_list.update(),
+                    )
+                )
                 wt_widget.worktreeSwitched.connect(self._on_worktree_changed)
                 wt_widget.worktreeDeleted.connect(self._on_worktree_deleted)
                 wt_widget.workingDirRestored.connect(self._on_workdir_restored)
@@ -1630,13 +1654,14 @@ class MemoryCardContent(QWidget):
         # 更新文件计数
         has_visible_items = self.docs_list.count() > 0
         self._docs_empty_hint.setVisible(not has_visible_items)
-        if hasattr(self, '_docs_count_label'):
+        if hasattr(self, "_docs_count_label"):
             count = len(docs)
             self._docs_count_label.setText(f"({count})" if count > 0 else "")
 
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""
         from PyQt5.QtCore import QSize
+
         # 宽度随列表自适应，不设定固定宽度避免溢出
         wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
         height = wt_count * 24 + 24 + 4
@@ -1644,6 +1669,7 @@ class MemoryCardContent(QWidget):
 
     def _get_doc_item_size(self):
         from PyQt5.QtCore import QSize
+
         # 宽度随列表自适应，不设定固定宽度避免溢出
         return QSize(0, 44)
 
@@ -1671,14 +1697,16 @@ class MemoryCardContent(QWidget):
         for i in range(self.docs_list.count()):
             item = self.docs_list.item(i)
             widget = self.docs_list.itemWidget(item)
-            if hasattr(widget, 'doc_id') and widget.doc_id == doc_id:
+            if hasattr(widget, "doc_id") and widget.doc_id == doc_id:
                 # 检查是否为工作目录
-                if getattr(widget, '_is_working_dir', False) or getattr(widget, 'file_path', '') == self._get_effective_workdir(self._current_project):
+                if getattr(widget, "_is_working_dir", False) or getattr(
+                    widget, "file_path", ""
+                ) == self._get_effective_workdir(self._current_project):
                     is_removed_wd = True
                 taken = self.docs_list.takeItem(i)
                 if taken:
                     widget.deleteLater()  # 主动释放 widget
-                    del taken             # 释放 item
+                    del taken  # 释放 item
                 break
 
         # 如果移除了工作目录，同步清除 workdir 状态
@@ -1746,9 +1774,7 @@ class MemoryCardContent(QWidget):
         # 恢复原有根目录的 is_working_dir 标记（set_working_directory 会先清除所有标记）
         # 这样 _load_key_documents 才能正确识别哪个是用户真正设定的根目录
         if db_wd and db_wd != worktree_path and db_wd != "clear":
-            memory_mgr.restore_working_directory_mark(
-                self._current_project, db_wd
-            )
+            memory_mgr.restore_working_directory_mark(self._current_project, db_wd)
 
         self._instance_workdir[self._current_project] = worktree_path
         self.workingDirChanged.emit(worktree_path)
@@ -1796,25 +1822,27 @@ class MemoryCardContent(QWidget):
         import os
         import subprocess
         import webbrowser
+
         try:
             # URL 链接：在浏览器中打开
-            if path and (path.startswith('http://') or path.startswith('https://')):
+            if path and (path.startswith("http://") or path.startswith("https://")):
                 webbrowser.open(path)
                 return
             # 优先判断路径类型
             if os.path.isdir(path):
                 # 文件夹：直接打开
-                os.startfile(path) if os.name == 'nt' else subprocess.Popen(['xdg-open', path])
+                os.startfile(path) if os.name == "nt" else subprocess.Popen(["xdg-open", path])
             elif os.path.isfile(path):
                 # 文件：直接打开
-                os.startfile(path) if os.name == 'nt' else subprocess.Popen(['open', path])
+                os.startfile(path) if os.name == "nt" else subprocess.Popen(["open", path])
             else:
                 # 路径不存在，尝试打开父目录
                 folder = os.path.dirname(path)
                 if folder and os.path.exists(folder):
-                    subprocess.Popen(['explorer', '/select,', path])
+                    subprocess.Popen(["explorer", "/select,", path])
         except Exception as e:
             from loguru import logger
+
             logger.error(f"Failed to open: {e}")
 
     def refresh(self):

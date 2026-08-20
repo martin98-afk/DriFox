@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal
+from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer, QCoreApplication
 
 from app.constants import IMAGE_EXTENSIONS
 from app.utils.utils import invalidate_skills_cache
@@ -215,7 +215,7 @@ def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """
     try:
         return object.__getattribute__(backend, "_agent_manager")
-    except (AttributeError, RuntimeError):
+    except AttributeError, RuntimeError:
         return None
 
 
@@ -1133,6 +1133,59 @@ class ChatBackend(QObject):
             logger.warning("[ChatBackend] watchfiles 未安装，插件热更新不可用。pip install watchfiles")
             return
 
+        # 自定义监听过滤器：在 watchfiles 默认 DefaultFilter（已排除 .git/__pycache__/
+        # .pyc/.swp 等）基础上，额外排除插件内的“易变 / vendored”目录与产物文件。
+        # 这是“文件多”插件（如带 lark_oapi SDK deps 的 gateway-feishu，deps 含数千 .py）
+        # 热重载卡顿的根因：clone / 导入时成千上万的文件变更事件被 watchfiles 与后续
+        # 分类逻辑处理，拖垮 watcher 线程并诱发主线程重载风暴。排除后事件量降 ~95%，
+        # 且不影响各组件目录（agents/hooks/commands/... 与 deps 平级，不被排除）的热更新。
+        from watchfiles import DefaultFilter
+
+        class _PluginWatchFilter(DefaultFilter):
+            # 额外排除的目录段（任意层级命中即忽略其下全部变更）
+            _EXTRA_SKIP_DIRS = {
+                "deps",
+                "node_modules",
+                ".venv",
+                "venv",
+                "build",
+                "dist",
+                "install_tmp",
+                "__pycache__",
+                ".git",
+                ".hg",
+                ".svn",
+                ".mypy_cache",
+                ".pytest_cache",
+                ".ruff_cache",
+                "tmp",
+                "temp",
+            }
+            # 额外排除的产物 / 缓存文件
+            _EXTRA_SKIP_EXTS = (
+                ".pyc",
+                ".pyo",
+                ".pyd",
+                ".so",
+                ".egg-info",
+                ".log",
+                ".tmp",
+                ".bak",
+                ".swp",
+            )
+
+            def __call__(self, change, path):
+                if not super().__call__(change, path):
+                    return False
+                norm = str(path).replace("\\", "/").lower()
+                if any(seg in self._EXTRA_SKIP_DIRS for seg in norm.split("/")):
+                    return False
+                if norm.endswith(self._EXTRA_SKIP_EXTS):
+                    return False
+                return True
+
+        watch_filter = _PluginWatchFilter()
+
         # 收集需要监听的插件目录
         from app.plugins.managers.plugin_manager import PluginManager
 
@@ -1249,6 +1302,8 @@ class ChatBackend(QObject):
             线程随之结束，闭包对 self（ChatBackend 实例）的引用被释放。
             """
             logger.debug("[ChatBackend] watchfiles 监听线程已启动")
+            # 跟踪抑制窗口状态，用于“退出抑制时消费 pending 触发一次兜底重载”
+            _prev_suppressed = False
             try:
                 for changes in watch(
                     *watch_paths,
@@ -1256,6 +1311,7 @@ class ChatBackend(QObject):
                     debounce=2000,  # 2秒防抖
                     yield_on_timeout=False,
                     stop_event=ChatBackend._plugin_watcher_stop,
+                    watch_filter=watch_filter,  # 排除 deps/node_modules 等易变目录
                 ):
                     # changes: set of (Change, Path)
                     if not changes:
@@ -1285,22 +1341,30 @@ class ChatBackend(QObject):
                     if not relevant_changes:
                         continue
 
-                    # 🚀 P5e：gitee 同步（config_sync 下载解压 user-custom）期间抑制
-                    # watcher 热重载链。同步窗口内 user-custom 变更不 emit（跳过），
-                    # 仅标记 pending，由 config_sync 下载完成 + Settings 重载后合并
-                    # 触发一次 reload_plugin_subsystems 兜底加载——避免 watcher 链
-                    # （rescan + agents 重载 + reload_all_commands ~2500ms + LSP 子进程
-                    # + plugin_changed 广播）与 config_sync 应用链同时爆发叠加阻塞主线程。
-                    # 抑制窗口外行为不变（正常热重载）；窗口内事件由 pending 兜底不丢。
-                    if time.time() < ChatBackend._suppress_watcher_until and any(
-                        "user-custom" in str(cp).lower() for _, cp in relevant_changes
-                    ):
+                    # 🚀 P5e：外部批量变更期间（gitee 同步解压 user-custom、或插件市场
+                    # installer 落盘 plugins/ 目录）抑制 watcher 热重载链。窗口内所有
+                    # 变更先标记 pending 并跳过 emit，避免 watcher 链（rescan + agents
+                    # 重载 + reload_all_commands ~2500ms + LSP 子进程 + plugin_changed
+                    # 广播）与「clone/解压期间成百上千文件涌入」同时爆发叠加阻塞主线程；
+                    # 也避免半安装插件被提前 import 报错。窗口结束后由调用方
+                    # （config_sync 下载完成 / installer 安装完成）主动触发一次
+                    # reload_plugin_subsystems 兜底加载，pending 事件不丢失。
+                    if time.time() < ChatBackend._suppress_watcher_until:
                         ChatBackend._watcher_pending_reload = True
                         logger.info(
-                            f"[ChatBackend] gitee 同步抑制窗口内收到 user-custom 变更 "
-                            f"({len(relevant_changes)} 处)，标记 pending 待合并重载"
+                            f"[ChatBackend] 抑制窗口内收到 {len(relevant_changes)} 处变更，标记 pending 待合并重载"
                         )
+                        _prev_suppressed = True
                         continue
+
+                    # 刚退出抑制窗口：若窗口内累积了 pending 变更，触发一次兜底重载
+                    # （经 _on_hot_reload_requested 去抖合并，仅 reload 一次），
+                    # 使被抑制的变更不丢失，且避免窗口结束后每批真实 emit 形成风暴。
+                    if _prev_suppressed and ChatBackend._watcher_pending_reload:
+                        ChatBackend._watcher_pending_reload = False
+                        logger.info("[ChatBackend] 抑制窗口结束，合并触发一次兜底重载（消费 pending）")
+                        self._hot_reload_requested.emit("", "")  # 空名 → reload_plugin_subsystems
+                    _prev_suppressed = False
 
                     current_prefixes = _prefixes_ref[0]
 
@@ -1734,6 +1798,12 @@ class ChatBackend(QObject):
     def _on_hot_reload_requested(self, plugin_name: str, component: str):
         """主线程中执行的插件热更新
 
+        单次请求同步执行（保持原有增量语义与单元测试同步断言）；300ms 内的
+        重复 / 风暴请求走去抖合并：首次立即执行，窗口内的后续请求不再逐个触发
+        主线程重载（reload_agents / reload_all_commands ~2500ms），改为计划一次
+        合并的 reload_plugin_subsystems，避免“文件多”的插件在批量写入 / clone 时
+        每批都重载阻塞 UI。
+
         Args:
             plugin_name: 插件名
                 - "" (空) → 全量重载（走 reload_plugin_subsystems）
@@ -1741,19 +1811,15 @@ class ChatBackend(QObject):
                 - 其他 → 已知插件的增量重载（component 为具体组件名或 "" 表示根目录变更）
             component: 组件名（"" 表示该插件的全部组件，否则为 agents/hooks/commands/themes/skills/mcp/lsp）
         """
+        now = time.time()
+        last = getattr(self, "_last_reload_at", 0.0)
+        if now - last < 0.3:
+            # 去抖窗口内：不立即重载，改为计划一次合并兜底（仅执行一次）
+            self._schedule_debounced_reload()
+            return
+        self._last_reload_at = now
         try:
-            if plugin_name == self._NEW_PLUGIN_SENTINEL:
-                # 新增插件：只扫描这一个插件目录，增量加载其组件。
-                # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
-                # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
-                # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
-                # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
-                # UI/LSP 先卸载后加载），可直接复用。
-                result = self._reload_new_plugin(component)
-            elif plugin_name:
-                result = self._reload_single_plugin(plugin_name, component)
-            else:
-                result = self.reload_plugin_subsystems()
+            result = self._do_single_reload(plugin_name, component)
             self.plugin_changed.emit(result)
             # ★ T3 修复：广播到所有活跃 backend 的 plugin_changed。
             # watcher 由首个 backend 驱动，_on_hot_reload_requested 只在该实例的
@@ -1771,11 +1837,50 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
         finally:
-            # 重载完成后重建 watchfiles 路径索引，确保新注册的插件路径可被后续变更识别
-            # 注意：不能提前重建（在 _watch_loop 的 else 分支），因为那时 pm.rescan() 还没执行
-            # finally 保证即使重载/emit 抛异常，索引也必然更新（否则已注册插件会被
-            # 反复识别为"新插件"，触发 bridge.json 自触发循环）
+            # 重载完成后重建 watchfiles 路径索引（finally 保证异常路径也更新，
+            # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
+
+    def _schedule_debounced_reload(self):
+        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
+        if getattr(self, "_reload_timer", None) is None:
+            self._reload_timer = QTimer()
+            self._reload_timer.setSingleShot(True)
+            self._reload_timer.timeout.connect(self._do_debounced_reload)
+        if not self._reload_timer.isActive():
+            self._reload_timer.start(300)
+
+    def _do_debounced_reload(self):
+        """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        self._last_reload_at = time.time()
+        try:
+            result = self.reload_plugin_subsystems()
+            self.plugin_changed.emit(result)
+            for _b in list(ChatBackend._active_instances):
+                if _b is not self:
+                    try:
+                        _b.plugin_changed.emit(result)
+                    except RuntimeError:
+                        pass
+        except Exception as e:
+            logger.error(f"[ChatBackend] 插件热更新失败: {e}")
+        finally:
+            self._rebuild_watcher_prefixes()
+
+    def _do_single_reload(self, plugin_name: str, component: str) -> dict:
+        """执行单条增量重载（不含 emit / 广播 / 索引重建，由 _flush_reload_intents 统一处理）"""
+        if plugin_name == self._NEW_PLUGIN_SENTINEL:
+            # 新增插件：只扫描这一个插件目录，增量加载其组件。
+            # 不再"已注册则降级为空组件跳过"——watch 线程可能在 emit 前
+            # 对全新安装的插件做过 rescan 注册（组件尚未加载），此时
+            # 降级为空组件（""）会全 False 跳过，导致重装后的插件组件
+            # 永不生效。_reload_new_plugin 对已注册插件幂等（组件错重载，
+            # UI/LSP 先卸载后加载），可直接复用。
+            return self._reload_new_plugin(component)
+        elif plugin_name:
+            return self._reload_single_plugin(plugin_name, component)
+        else:
+            return self.reload_plugin_subsystems()
 
     def _rebuild_watcher_prefixes(self):
         """重建 watchfiles 线程的插件路径索引（主线程调用）"""
@@ -1894,25 +1999,32 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.error(f"[ChatBackend] Plugin '{plugin_name}' UI 加载失败: {e}")
 
-            # 8. tools/providers/team_templates：与 builtin_reloaders 同构的 kernel 分派
+            # 8. 其余组件：与 builtin_reloaders 同构的 kernel 分派
             # 走内核注册表而非硬编码 if，保持单源真理（新增组件类型零改动）。
+            # 遍历 COMPONENT_ORDER（排除上方 1-7 已手工处理的组件），覆盖
+            # tools/providers/team_templates/model_adapters/loop_policies/
+            # storages/serializers/gateways 全部 registry 分派组件——
+            # 历史 bug：此处曾硬编码 3 项漏掉 gateways，卸载重装（__NEW__ 路径）
+            # 后 gateway 平台 def 不注册/adapter 不建/连接不启 → 机器人无响应。
             from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
-            from app.plugins.kernel import ReloadContext, get_reloader_registry
+            from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
 
             bind_runtime(self._agent_manager)
             registry = get_reloader_registry()
             register_builtin_reloaders(registry)  # 幂等
-            for comp in ("tools", "providers", "team_templates"):
-                if comps.get(comp):
-                    reloaded = registry.reload(
-                        ReloadContext(
-                            plugin_name=plugin_name,
-                            plugin=plugin,
-                            component=comp,
-                            is_new_plugin=True,
-                        )
+            _MANUAL_STEPS = {"agents", "hooks", "commands", "themes", "skills", "mcp", "lsp", "ui"}
+            for comp in COMPONENT_ORDER:
+                if comp in _MANUAL_STEPS or not comps.get(comp):
+                    continue
+                reloaded = registry.reload(
+                    ReloadContext(
+                        plugin_name=plugin_name,
+                        plugin=plugin,
+                        component=comp,
+                        is_new_plugin=True,
                     )
-                    result[comp] = reloaded if reloaded is not None else False
+                )
+                result[comp] = reloaded if reloaded is not None else False
 
             logger.info(
                 f"[ChatBackend] 新插件增量加载「{plugin_name}」完成: "
@@ -1925,6 +2037,67 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload new plugin '{plugin_name}': {e}")
 
+        return result
+
+    def _cleanup_removed_plugin_components(
+        self,
+        plugin_name: str,
+        removed_components: dict,
+        result: dict,
+        result_keys: tuple,
+    ) -> dict:
+        """精准清理已移除插件的全部组件（删除段核心，供两处复用）
+
+        - `_reload_single_plugin` 删除段（rescan 前捕获的 removed_components）
+        - `reload_plugin_subsystems` diff 的 removed 分支（rescan 后插件已不在索引，
+          components 取自 rescan 返回的 Plugin 对象，避免「索引已移除 → 捕获为空 → 卸载不干净」）
+
+        只处理该插件实际含有的组件：agents→cleanup_plugin_artifacts、hooks-only→unregister、
+        commands→reload_all、themes→reload、skills→invalidate、ui→unload、lsp→remove_only。
+        """
+        # 清空该插件的 watcher 去重缓存键（review B3）：
+        # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
+        dedup_cache = getattr(self, "_watcher_dedup_cache", None)
+        if dedup_cache is not None:
+            stale_keys = [k for k in dedup_cache.keys() if k[0] == plugin_name]
+            for k in stale_keys:
+                dedup_cache.pop(k, None)
+            if stale_keys:
+                logger.debug(f"[ChatBackend] 插件 [{plugin_name}] 移除，清空 {len(stale_keys)} 个 watcher 去重键")
+
+        # 表分派：遍历该插件原有组件 → registry.reload(plugin=None) 走清理语义
+        # 遍历序按 COMPONENT_ORDER（tuple）— KNOWN_COMPONENTS 是 set 序不确定，
+        # 漏遍历会跳过某组件的清理。agents 置首：先于 hooks/commands 处理以保留其联动标记语义。
+        from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
+
+        registry = get_reloader_registry()
+        for comp in COMPONENT_ORDER:
+            if not removed_components.get(comp):
+                continue
+            reloaded = registry.reload(
+                ReloadContext(
+                    plugin_name=plugin_name,
+                    plugin=None,
+                    component=comp,
+                    is_new_plugin=False,
+                )
+            )
+            if comp in result_keys:
+                # agents 返回 int(数量)，其余 True/False — agents 删除归零
+                result[comp] = reloaded if reloaded is not None else False
+            # agents 联动标记：与旧 backend elif 语义一致 — agents 命中后置 commands=True 走 plugin_changed 广播
+            # 重建快捷键（agents-only 插件无 commands 组件时也置，触发 _on_plugin_hot_reload 双保险）。
+            # hooks 是否置位由下方 _reload_hooks 遍历按 removed_components.get("hooks") 自然决定，
+            # 对齐旧代码 `result["hooks"] = removed_components.get("hooks", False)`。
+            # 此处显式置 True 是保守保留旧行为：删除段可能由 watchfiles 单点事件触发而非完整
+            # 遍历原 components，强制 hooks=True 保证窗口侧 UI 刷新链不漏。
+            if comp == "agents":
+                result["hooks"] = True
+                result["commands"] = True
+
+        logger.info(
+            f"[ChatBackend] Plugin '{plugin_name}' cleanup done via kernel: { {k: result[k] for k in result_keys} }"
+        )
         return result
 
     def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
@@ -1980,56 +2153,7 @@ class ChatBackend(QObject):
                     f"components={ {k for k, v in removed_components.items() if v} or {'(unknown)'} }, "
                     f"cleaning up artifacts..."
                 )
-
-                # 清空该插件的 watcher 去重缓存键（review B3）：
-                # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
-                dedup_cache = getattr(self, "_watcher_dedup_cache", None)
-                if dedup_cache is not None:
-                    stale_keys = [k for k in dedup_cache.keys() if k[0] == plugin_name]
-                    for k in stale_keys:
-                        dedup_cache.pop(k, None)
-                    if stale_keys:
-                        logger.debug(
-                            f"[ChatBackend] 插件 [{plugin_name}] 移除，清空 {len(stale_keys)} 个 watcher 去重键"
-                        )
-
-                # 表分派：遍历该插件原有组件 → registry.reload(plugin=None) 走清理语义
-                # agents→cleanup_plugin_artifacts、hooks-only→unregister、commands→reload_all、
-                # themes→reload、skills→invalidate、ui→unload、lsp→remove_only、tools/providers/team_templates 跳过
-                # 遍历序按 COMPONENT_ORDER（tuple）— KNOWN_COMPONENTS 是 set 序不确定，
-                # 漏遍历会跳过某组件的清理。agents 置首：先于 hooks/commands 处理以保留其联动标记语义。
-                from app.plugins.kernel import COMPONENT_ORDER, ReloadContext, get_reloader_registry
-
-                registry = get_reloader_registry()
-                for comp in COMPONENT_ORDER:
-                    if not removed_components.get(comp):
-                        continue
-                    reloaded = registry.reload(
-                        ReloadContext(
-                            plugin_name=plugin_name,
-                            plugin=None,
-                            component=comp,
-                            is_new_plugin=False,
-                        )
-                    )
-                    if comp in result_keys:
-                        # agents 返回 int(数量)，其余 True/False — agents 删除归零
-                        result[comp] = reloaded if reloaded is not None else False
-                    # agents 联动标记：与旧 backend elif 语义一致 — agents 命中后置 commands=True 走 plugin_changed 广播
-                    # 重建快捷键（agents-only 插件无 commands 组件时也置，触发 _on_plugin_hot_reload 双保险）。
-                    # hooks 是否置位由下方 _reload_hooks 遍历按 removed_components.get("hooks") 自然决定，
-                    # 对齐旧代码 `result["hooks"] = removed_components.get("hooks", False)`。
-                    # 此处显式置 True 是保守保留旧行为：删除段可能由 watchfiles 单点事件触发而非完整
-                    # 遍历原 components，强制 hooks=True 保证窗口侧 UI 刷新链不漏。
-                    if comp == "agents":
-                        result["hooks"] = True
-                        result["commands"] = True
-
-                logger.info(
-                    f"[ChatBackend] Plugin '{plugin_name}' cleanup done via kernel: "
-                    f"{ {k: result[k] for k in result_keys} }"
-                )
-                return result
+                return self._cleanup_removed_plugin_components(plugin_name, removed_components, result, result_keys)
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
             # 注册 / 注入 runtime 句柄由 _do_deferred + reload_plugin_subsystems 集中完成
@@ -2105,11 +2229,35 @@ class ChatBackend(QObject):
 
         return result
 
-    def reload_plugin_subsystems(self) -> dict:
-        """运行时重载所有插件子系统
+    def reload_plugin_targeted(self, plugin_name: str) -> dict:
+        """精准重载单个插件（UI 安装/更新/启用/禁用专用），不触发全量子系统重载
 
-        当插件启用/禁用或新增/删除后调用，统一触发所有子系统的重载。
-        由 main_widget 或设置面板中的"应用"操作触发。
+        与 reload_plugin_subsystems（全量：rescan + 所有 agents/hooks/commands/
+        themes/skills/mcp/lsp/ui 重载）的区别：只处理目标插件，避免
+        「卸载一个插件却把全部插件的 hooks 注销重注册、全部 agents 重载」。
+
+        实现：复用 _reload_single_plugin 的 __manifest__ 分派——
+        - 插件已不存在（禁用/卸载，目录已移走）→ rescan 后走删除段，仅清理该插件
+          原有组件（agents/hooks/commands/lsp/ui/tools 按需精准清理）
+        - 插件存在（安装/启用/更新）→ 遍历该插件全部组件精准加载
+          （agents/hooks 按插件名精准，仅 commands 因全局注册表需全量重建）
+        """
+        if not plugin_name:
+            return self.reload_plugin_subsystems()
+        return self._reload_single_plugin(plugin_name, "__manifest__")
+
+    def reload_plugin_subsystems(self, force_full: bool = False) -> dict:
+        """重载插件子系统（默认 diff 精准；force_full=True 走全量）
+
+        默认行为（新增/移除/变更场景，全部调用方自动受益）：
+        rescan 对比出 added/removed/changed 插件后**逐个精准处理**——
+        - removed → 精准清理该插件实际含有的组件（agents/hooks/commands/lsp/ui/tools）
+        - added/changed → 精准重载该插件全部组件（_reload_single_plugin "__manifest__"）
+        不触碰无关插件的 agents/hooks/commands，避免「卸载一个插件却把全部插件的
+        hooks 注销重注册、全部 agents 重载」的性能浪费；无变更时不重载任何子系统。
+
+        force_full=True：设置面板「重载插件」按钮的显式语义——无论是否有变更，
+        全量重载所有子系统（agents/hooks/commands/themes/skills/mcp/lsp/ui）。
 
         Returns:
             dict: 各子系统的重载结果；key 集合基于 kernel.KNOWN_COMPONENTS 动态生成，
@@ -2124,14 +2272,12 @@ class ChatBackend(QObject):
         # 表分派：内置 reloader 注册（幂等）+ runtime 句柄注入
         try:
             from app.plugins.builtin_reloaders import bind_runtime, register_builtin_reloaders
-            from app.plugins.kernel import ReloadContext, get_reloader_registry
+            from app.plugins.kernel import get_reloader_registry
 
             bind_runtime(_safe_agent_manager(self))
-            registry = get_reloader_registry()
-            register_builtin_reloaders(registry)
+            register_builtin_reloaders(get_reloader_registry())
         except Exception as e:
             logger.error(f"[ChatBackend] 内置 reloader 注册失败: {e}")
-            registry = None
 
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -2147,127 +2293,111 @@ class ChatBackend(QObject):
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
 
-            # 清空被移除插件的 watcher 去重缓存键（review B3）：
-            # 防止"删除 → 3s 内重装"被 _is_duplicate 误判为重复而吞掉重装加载
-            if removed:
-                dedup_cache = getattr(self, "_watcher_dedup_cache", None)
-                if dedup_cache is not None:
-                    removed_names = {p.name for p in removed}
-                    stale_keys = [k for k in dedup_cache.keys() if k[0] in removed_names]
-                    for k in stale_keys:
-                        dedup_cache.pop(k, None)
-                    if stale_keys:
-                        logger.debug(f"[ChatBackend] 全量重载移除插件，清空 {len(stale_keys)} 个 watcher 去重键")
+            if force_full:
+                # ── 全量路径：设置面板「重载插件」显式语义 ──
+                return self._reload_all_subsystems(pm, result, result_keys)
 
-            # 2. 判断是否为"单一新增"——只有新增一个插件，无移除/变更
-            #    watchfiles 检测到新插件目录时，路径索引尚未包含它，
-            #    会触发全量重扫，但实际只需加载这一个新插件
-            is_single_addition = len(added) == 1 and not removed and not changed
-
-            if is_single_addition:
-                # ── 增量重载：只加载新增插件的组件 — 表分派 ──
-                plugin = added[0]
-                name = plugin.name
-                comps = plugin.components  # {"agents": True, "commands": True, ...}
-
-                logger.info(f"[ChatBackend] 检测到新插件「{name}」，执行增量重载")
-
-                # 遍历该新插件的组件，统一经 reloader 注册表分派
-                # 按 kernel.COMPONENT_ORDER 元组显式排序（避免 set 遍历时序不确定）
-                # agents → hooks/commands 联动标记由 _reload_agents 内部完成并回写 result
-                from app.plugins.kernel import COMPONENT_ORDER
-
-                if registry is not None:
-                    for comp in (c for c in COMPONENT_ORDER if comps.get(c)):
-                        reloaded = registry.reload(
-                            ReloadContext(
-                                plugin_name=name,
-                                plugin=plugin,
-                                component=comp,
-                                is_new_plugin=True,
-                            )
-                        )
-                        if comp in result_keys:
-                            result[comp] = reloaded if reloaded is not None else False
-                        # agents 联动标记（与 _reload_single_plugin 一致）
-                        if comp == "agents":
-                            result["hooks"] = True
-                            result["commands"] = True
-
-                logger.info(
-                    f"[ChatBackend] 增量重载「{name}」完成: "
-                    f"agents={result['agents']}, commands={result['commands']}, "
-                    f"themes={result['themes']}, skills={result['skills']}, "
-                    f"mcp={result['mcp']}, lsp={result['lsp']}, ui={result['ui']}, "
-                    f"tools={result.get('tools', False)}, providers={result.get('providers', False)}, "
-                    f"team_templates={result.get('team_templates', False)}"
-                )
+            # ── 精准路径：无变更不重载任何子系统 ──
+            if not added and not removed and not changed:
+                logger.debug("[ChatBackend] 无插件变更，跳过子系统重载")
                 return result
 
-            # ── 全量重载（多插件变更/移除/覆盖，或非 watchfiles 触发） ──
-            # 2. 重载 AgentManager（智能体 + hooks）
-            if self._agent_manager:
-                self._agent_manager.reload_agents()
-                result["agents"] = len(self._agent_manager.list_agents(include_hidden=True))
-                result["hooks"] = True
-
-            # 3. 重载命令
-            try:
-                from app.core.builtin_commands import reload_all_commands
-
-                reload_all_commands()
-                result["commands"] = True
-            except (ImportError, Exception) as e:
-                logger.error(f"[ChatBackend] Failed to reload commands: {e}")
-
-            # 4. 重载主题
-            try:
-                from app.utils.config import update_theme_options
-                from app.utils.theme_manager import theme_manager
-
-                theme_manager.reload()
-                update_theme_options()
-                result["themes"] = True
-            except (ImportError, Exception) as e:
-                logger.error(f"[ChatBackend] Failed to reload themes: {e}")
-
-            # 5. 技能：PluginManager 已更新，UI 通过 get_local_skills() 懒加载
-            result["skills"] = True
-
-            # 6. MCP 配置：PluginManager 已更新，UI 通过 get_mcp_servers() 懒加载
-            result["mcp"] = True
-
-            # 7. LSP 配置：重新初始化 LspManager（停止旧服务 → 加载新配置 → 启动新服务）
-            try:
-                from app.core.lsp.lsp_manager import get_lsp_manager
-
-                lsp_mgr = get_lsp_manager()
-                lsp_configs = pm.get_lsp_configs()
-                workdir = os.getcwd()
-                if self._tool_executor and getattr(self._tool_executor, "_workdir", None):
-                    workdir = str(self._tool_executor._workdir)
-                lsp_mgr.initialize(workdir, lsp_configs)
-                lsp_mgr.start_all_background()
-                result["lsp"] = True
-                logger.info(f"[ChatBackend] LSP 全量重载完成，已注册 {len(lsp_mgr._clients)} 个服务器")
-            except Exception as e:
-                logger.error(f"[ChatBackend] LSP 全量重载失败: {e}")
-
-            # 8. UI 组件：全量 rescan 已在 _load_plugin_ui/_unload_plugin_ui 中处理，
-            #    此处标记为 True 以通知 UI 刷新
-            result["ui"] = True
-
             logger.info(
-                f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
-                f"commands={result['commands']}, themes={result['themes']}, "
-                f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}, "
-                f"ui={result['ui']}, tools={result.get('tools', False)}, "
-                f"providers={result.get('providers', False)}, "
-                f"team_templates={result.get('team_templates', False)}"
+                f"[ChatBackend] 插件变更 diff: added={[p.name for p in added]}, "
+                f"removed={[p.name for p in removed]}, changed={[p.name for p in changed]}"
             )
+
+            # 2. removed：精准清理。注意 rescan 已把插件移出索引，
+            #    组件信息必须取自 rescan 返回的 Plugin 对象（get_plugin 已反查不到，
+            #    否则 removed_components 为空 → 卸载不干净）。
+            for plugin in removed:
+                self._cleanup_removed_plugin_components(plugin.name, dict(plugin.components), result, result_keys)
+
+            # 3. added/changed：逐插件精准加载全部组件（__manifest__ 语义）
+            for plugin in list(added) + list(changed):
+                sub = self._reload_single_plugin(plugin.name, "__manifest__")
+                self._merge_reload_result(result, sub, result_keys)
+
+            logger.info(f"[ChatBackend] 插件精准重载完成: { {k: result[k] for k in result_keys} }")
         except Exception as e:
             logger.error(f"[ChatBackend] Failed to reload plugin subsystems: {e}")
 
+        return result
+
+    @staticmethod
+    def _merge_reload_result(result: dict, sub: dict, result_keys: tuple) -> None:
+        """合并单插件重载结果到汇总 result（agents 计数累加，其余置 True）"""
+        for k in result_keys:
+            v = sub.get(k)
+            if not v:
+                continue
+            if k == "agents":
+                result[k] = result.get(k, 0) + v
+            else:
+                result[k] = True
+
+    def _reload_all_subsystems(self, pm, result: dict, result_keys: tuple) -> dict:
+        """全量重载所有子系统（设置面板「重载插件」显式语义，force_full=True）"""
+        # 2. 重载 AgentManager（智能体 + hooks）
+        if self._agent_manager:
+            self._agent_manager.reload_agents()
+            result["agents"] = len(self._agent_manager.list_agents(include_hidden=True))
+            result["hooks"] = True
+
+        # 3. 重载命令
+        try:
+            from app.core.builtin_commands import reload_all_commands
+
+            reload_all_commands()
+            result["commands"] = True
+        except (ImportError, Exception) as e:
+            logger.error(f"[ChatBackend] Failed to reload commands: {e}")
+
+        # 4. 重载主题
+        try:
+            from app.utils.config import update_theme_options
+            from app.utils.theme_manager import theme_manager
+
+            theme_manager.reload()
+            update_theme_options()
+            result["themes"] = True
+        except (ImportError, Exception) as e:
+            logger.error(f"[ChatBackend] Failed to reload themes: {e}")
+
+        # 5. 技能：PluginManager 已更新，UI 通过 get_local_skills() 懒加载
+        result["skills"] = True
+
+        # 6. MCP 配置：PluginManager 已更新，UI 通过 get_mcp_servers() 懒加载
+        result["mcp"] = True
+
+        # 7. LSP 配置：重新初始化 LspManager（停止旧服务 → 加载新配置 → 启动新服务）
+        try:
+            from app.core.lsp.lsp_manager import get_lsp_manager
+
+            lsp_mgr = get_lsp_manager()
+            lsp_configs = pm.get_lsp_configs()
+            workdir = os.getcwd()
+            if self._tool_executor and getattr(self._tool_executor, "_workdir", None):
+                workdir = str(self._tool_executor._workdir)
+            lsp_mgr.initialize(workdir, lsp_configs)
+            lsp_mgr.start_all_background()
+            result["lsp"] = True
+            logger.info(f"[ChatBackend] LSP 全量重载完成，已注册 {len(lsp_mgr._clients)} 个服务器")
+        except Exception as e:
+            logger.error(f"[ChatBackend] LSP 全量重载失败: {e}")
+
+        # 8. UI 组件：全量 rescan 已在 _load_plugin_ui/_unload_plugin_ui 中处理，
+        #    此处标记为 True 以通知 UI 刷新
+        result["ui"] = True
+
+        logger.info(
+            f"[ChatBackend] Plugin subsystems reloaded: agents={result['agents']}, "
+            f"commands={result['commands']}, themes={result['themes']}, "
+            f"skills={result['skills']}, mcp={result['mcp']}, lsp={result.get('lsp', False)}, "
+            f"ui={result['ui']}, tools={result.get('tools', False)}, "
+            f"providers={result.get('providers', False)}, "
+            f"team_templates={result.get('team_templates', False)}"
+        )
         return result
 
     # ========== MCP 自动发现 ==========
@@ -3161,7 +3291,9 @@ class ChatBackend(QObject):
             )
 
         except Exception as e:
-            logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
+            import traceback
+
+            logger.error(f"[Gateway] Processing error: {e}\n{traceback.format_exc()}")
             try:
                 if not future.done():
                     future.set_exception(e)
@@ -3244,7 +3376,9 @@ class ChatBackend(QObject):
             # 所以这里返回空字符串，避免 message_handler 重复发送
             return ""
         except Exception as e:
-            logger.error(f"[Gateway] AI processing error: {e}")
+            import traceback
+
+            logger.error(f"[Gateway] AI processing error: {e}\n{traceback.format_exc()}")
             return ""
 
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:

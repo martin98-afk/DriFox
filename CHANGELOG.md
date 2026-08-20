@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.3] - 2026-08-20
+
+自上一版本以来的变更 | 提交数：122 · 文件变更：255 · +23117/-10591 | 贡献者：dingma, mading, drifox-bot, builder
+
 ### ✨ 新功能 (New Features)
 
 - **UI 扩展点补全（Phase D）** (`app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_panel.py` + `app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/cards/settings/llm_settings_card.py`): 新增四类 UI 扩展点——侧边栏项（`SidebarItemInfo`，与 floating card 解耦，存量兼容映射）/ 输入区按钮（`InputButtonInfo`，per-window 实例化 + 热重载经 `_on_plugin_hot_reload` 重建）/ 右键菜单项（`ContextMenuActionInfo`，统一聚合器注入 message_card/tab 菜单，enabled_func 置灰 + 返回 False 关菜单语义）/ 设置卡片（`SettingsCardInfo`，LLMSettingsCard 末尾插件分区滚动区，初始隐藏，打开时重建）。`unregister_plugin` 清理四类新注册（幂等）。UI 插件生态从「卡片 + 渲染」升级为「全区域可插拔」（E2E：临时插件文件注册四类 → 卸载全清）。
@@ -17,6 +21,18 @@ All notable changes to this project will be documented in this file.
 - **14 家内置服务商迁移为系统插件** (`plugins/system/providers/`): DeepSeek/SiliconFlow（余额查询 fetcher）、MiniMax/智谱AI/OpenAI/火山方舟/OpenCode Zen/OpenCode Go（套餐用量 fetcher 逻辑迁入插件），Anthropic/Gemini/Groq/Ollama/百度千帆/阿里云 纯数据声明；用量查询额外字段（server_id/cookie/workspace_id/csrf_token/x_web_id）随插件声明并在编辑卡片动态渲染
 - **服务商图标插件化** (`app/utils/provider_icons.py`): 新增 `get_provider_icon`——插件自带图标目录（`providers/icons/` 深色 + `icons_light/` 浅色，主题感知）优先，缺省回退 qrc；与 tools 图标机制对称
 - **服务商注册表懒加载预热** (`app/plugins/registries/provider_registry.py`): `ensure_loaded()` 幂等预热，兼容启动早期 Settings → opencode 免费模型注入链路
+- **Gateway 平台插件化（E2）** (`app/gateway/` + `plugins/system/gateways/` + 社区仓 drifox-plugins2): 6 个内置平台适配器迁出主程序，新增 `GatewayPlatformDef` 契约与 `GatewayPlatformRegistry` 注册表（零平台 if 分支）；Platform 枚举 str-mixin 化打通第三方平台 id；设置卡 registry 驱动自动渲染；Telegram 试点全链路迁出主程序，行为等价
+- **插件配置契约（E1）** (`app/plugins/` + `plugins/system/`): 新增 `PluginConfigStore`（env→存储→默认三级链）+ `PluginConfigRegistry`（`config_schema` 声明式渲染卡）+ 统一存储 `<app_data>/plugins/<plugin>/config.json`；websearch 工具/配置卡零主程序改动迁移到自包含配置
+- **性能基准测试套件** (`benchmarks/`): 新增 memory/import/startup/session-leak 基准脚本，用于回归对比与性能监控
+
+### 🐛 Bug 修复 (Bug Fixes)
+
+- **file-tree 右键「在资源管理器中打开」层级错位** (`plugins/file-tree/ui/cards.py`): 目录原本用 `explorer /select,` 会打开父目录并高亮（层级往外多一层），改为 `explorer <dir>` 直接打开该目录；文件仍用 `/select,` 打开所在文件夹并选中；上层对文件不再取 `dirname`（否则传入目录再次退回父目录）。macOS/Linux 同步按目录/文件分派。
+- **Gateway 连接泄漏修复** (`app/manager/` + `app/core/`): 卸载/重装 gateway 插件先关闭平台连接并清理模块引用，热更新重建 adapter 生效；adapter 实例清理防连接泄漏；builtin_reloaders 等待平台 stop 再 purge/rebuild
+- **幽灵窗口根因修复** (`app/widgets/`): 卡片销毁路径 `setParent(None)` 前先 `hide`；欢迎卡片 `_is_effectively_visible` 遍历全部 QStackedWidget 层级解决幽灵窗口
+- **团队 auto-compact 竞态** (`app/core/team/`): 修复 auto-compact 清空与团队邮件重发/子智能体回调竞态导致回复丢失
+- **安装器锁定文件处理** (`app/plugins/marketplace/` + installer): 卸载/安装时 robust_move 重定位被锁 `.pyd` 文件并抑制 watcher，修复首次 WinError 5；plugin-marketplace 修复 QFileDialog 改变 cwd 致缓存写入 FileNotFoundError
+- **对话框自适应与插件精确加载** (`app/widgets/dialogs.py` + `app/plugins/`): 对话框自适应尺寸与内容拟合；单插件 unload/reload 不影响其余工具，轮询 watcher 退役并入 watchfiles 主链
 
 ### ♻️ 代码重构 (Refactoring)
 
@@ -25,15 +41,24 @@ All notable changes to this project will be documented in this file.
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): 插件相关代码从 `app/core/` 与 `app/tools/` 迁入 `app/plugins/managers/`（PluginManager）、`registries/`（ProviderRegistry/UIPluginRegistry/coding_plan_fetcher）、`loaders/`（plugin_tool_loader/provider_loader），按职责分子目录
 - **服务商硬编码全部移除** (`app/constants.py` 等): 删除 `PROVIDER_MODELS`/`FREE_PROVIDERS`/`PROVIDER_ICONS`/`QUOTA_EXCLUDE_KEYS` 常量（保留函数委托）；`MODELS_DEV_PROVIDER_MAP`/`PROVIDER_CAPABILITIES`/`BALANCE_APIS`/`coding_plan_fetcher` 注册表全部迁移至 ProviderRegistry 聚合（后两者变薄壳委托）；消费方（usage_service/balance_display/model_capabilities/models_dev_sync/provider_profile/workers/UI 卡片/main_widget/config/cli）全部改读注册表
 - **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过
+- **Gateways 其余 5 平台迁出主程序** (`app/gateway/`): manager/config 零平台分支，平台插件定居社区仓 drifox-plugins2
+- **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): backend/worker 去 `ensure_builtin_*` 调用，依赖系统插件加载；轮询 watcher 退役，tools/providers 变更并入 watchfiles 主链
+
+### ⚡ 性能优化 (Performance)
+
+- **模块懒加载** (`app/`): 实施模块懒加载降低导入耗时，改善启动与冷启动性能
 
 ### 📚 文档 (Documentation)
 
 - **服务商插件开发指南** (`plugins/system/providers/README.md`): ProviderDef 字段、查询函数签名、额外配置字段机制、旧硬编码迁移对照表
 - **系统插件声明 providers 组件** (`plugins/system/.drifox-plugin/plugin.json`)
+- **Gateway 断连纪律** (`docs/gateway/`): 适配器断连清理协议——lark SDK 无停止机制的泄漏教训与连接泄漏修复记录
+- **AGENTS.md 同步** (`AGENTS.md`): 同步插件配置契约（E1）与 Gateway 平台插件化（E2）说明；hooks caveman 压缩追问预测 prompt 降 token
 
 ### 🔧 其他 (Chores & Build)
 
 - **测试**: 新增 `tests/core/test_provider_registry.py`（8 用例：注册/聚合/余额/用量/系统 14 家加载）；更新 `test_models_dev_sync.py`/`test_default_opencode_provider.py`/`test_provider_icon_widget.py`
+- **插件市场自动重建** (`plugins/`): `chore(marketplace): auto-regenerate from plugin.json [skip ci]` 重复提交
 
 ## [v0.5.2] - 2026-08-17
 

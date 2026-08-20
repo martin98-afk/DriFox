@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 import PyInstaller.__main__
+from PyInstaller.utils.hooks import collect_submodules
 
 # 1. 基础路径配置
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -171,8 +172,9 @@ elif platform.system() == "Darwin":
 
 # 需显式声明的隐藏导入（因 importlib.import_module() 动态加载而无法被 PyInstaller 自动检测）
 _hidden_imports = [
-    # app.core.__getattr__ 懒加载导入（importlib.import_module 动态调用，PyInstaller 无法自动发现）
-    "app.core.backend",
+    # app.core 全量子模块：PEP 562 懒加载（__getattr__ + importlib.import_module 动态字符串导入），
+    # PyInstaller 静态分析无法发现。collect_submodules 一次性收集，后续新增懒加载模块也自动覆盖。
+    *collect_submodules("app.core"),
     # gateway adapter 模块（也是 importlib.import_module 动态加载）
     "app.gateway.adapters.wecom",
     "app.gateway.adapters.dingtalk",

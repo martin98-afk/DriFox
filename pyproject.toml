@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.5.2"
+version = "0.5.3"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -80,13 +80,7 @@ linux-build = [
     "pyinstaller>=6.16.0",
 ]
 gateway = [
-    "dingtalk-stream>=0.20",
-    # 临时注释：缩小 gateway 范围以便调试 CI（pywin32 实际来自 mcp，非 gateway）
-    # "python-telegram-bot>=20.0",
-    # "discord.py>=2.0",
-    # "slack-sdk>=3.0",
-    # "lark-oapi>=1.0",
-    # "aiohttp>=3.9.0",  # aiohttp 已在 [project] dependencies
+    # 平台 SDK 已 vendor 到社区插件 drifox-plugins2/plugins/gateway-*/deps/，主程序不携带
 ]
 all = [
     {include-group = "dev"},

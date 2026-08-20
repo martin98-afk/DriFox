@@ -150,7 +150,6 @@ class GlobalCardController:
             # 更新（开关=行级更新，增删改=局部 _refresh），此处不再把 serversChanged 接到
             # _on_mcp_servers_toggled 做全量重建，否则开关 MCP 时整卡闪烁/列表重建。
             # 跨窗口同步由 .mcp.json 热重载广播负责（见 main_widget HotReload 的 mcp 分支）。
-            self._settings_popup.gatewayCard.gatewayToggled.connect(self._on_gateway_toggled)
 
             # 注册到 CardManager 与全局容器（system_card=True 仅做全局互斥，不隐藏输入区）
             mgr = self._card_manager
@@ -791,11 +790,6 @@ class GlobalCardController:
         .mcp.json 热重载广播触发（main_widget HotReload mcp 分支）。
         """
         return
-
-    def _on_gateway_toggled(self):
-        """Gateway 平台开关/配置变更 → 刷新全局列表"""
-        if self._settings_popup is not None:
-            self._settings_popup.gatewayCard._refresh()
 
     # ───────────────────────────────────────────────────────────
     # Gitee 绑定提醒（原 main_widget 逻辑，迁移到全局作用域）

@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -296,7 +297,14 @@ class _StyledCleanerDialog(MaskDialogBase):
         btn_layout.addWidget(confirm_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(420, 220)
+        # 布局管理 + 居中：MaskDialogBase 默认 addWidget 无对齐参数导致
+        # widget 高度 = layout 高度（dialog 全屏）；显式 AlignCenter 让 widget
+        # 按内容自适应并居中于 dialog（勿 removeWidget——脱离布局后位置固定 (0,0)，
+        # 弹窗会钉在主窗口左上角）
+        self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)
+        # 内容自适应：minSize 保底（420×220）、maxSize 防撑爆（620×720）
+        self.widget.setMinimumSize(420, 220)
+        self.widget.setMaximumSize(620, 720)
 
     def _on_confirm(self):
         self._result = True
@@ -384,7 +392,13 @@ class _StyledCleanerInfoDialog(MaskDialogBase):
         btn_layout.addWidget(ok_btn)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(400, 180)
+        # 布局管理 + 居中：显式 AlignCenter 避免默认无对齐导致的
+        # widget 高度 = layout 高度（dialog 全屏）；勿 removeWidget——
+        # 脱离布局后位置固定 (0,0)，弹窗会钉在主窗口左上角
+        self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)
+        # 内容自适应：minSize 保底（400×180），maxSize 防撑爆（600×720）
+        self.widget.setMinimumSize(400, 180)
+        self.widget.setMaximumSize(600, 720)
 
 
 # ── 弹窗工厂函数 ──────────────────────────────────────

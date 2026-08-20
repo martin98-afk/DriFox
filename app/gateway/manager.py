@@ -4,6 +4,7 @@ Gateway 平台管理器
 
 管理所有平台适配器。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,15 +13,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from app.gateway.adapters import (
-    DingTalkAdapter,
-    DiscordAdapter,
-    SlackAdapter,
-    TelegramAdapter,
-    WeComAdapter,
-    check_dingtalk_requirements,
-    check_wecom_requirements,
-)
 from app.gateway.base import (
     BasePlatformAdapter,
     Platform,
@@ -34,7 +26,7 @@ from app.gateway.session_manager import GatewaySession, GatewaySessionManager
 class PlatformManager:
     """
     平台管理器
-    
+
     负责：
     1. 加载和创建平台适配器
     2. 启动/停止平台连接
@@ -49,14 +41,14 @@ class PlatformManager:
     ):
         """
         初始化平台管理器
-        
+
         Args:
             config: Gateway 配置
             process_message_callback: 处理消息回调
             send_message_callback: 发送消息回调
         """
         self._config = config
-        self._adapters: Dict[Platform, BasePlatformAdapter] = {}
+        self._adapters: Dict[str, BasePlatformAdapter] = {}
         self._running = False
 
         # 持久事件循环（后台线程运行）
@@ -90,6 +82,7 @@ class PlatformManager:
     def _run_coro(self, coro) -> Any:
         """在后台事件循环上执行协程，返回结果"""
         import concurrent.futures
+
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
             return future.result(timeout=30)
@@ -102,74 +95,61 @@ class PlatformManager:
         asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _load_adapters(self) -> None:
-        """加载平台适配器"""
-        from app.gateway.adapters import (
-            check_discord_requirements,
-            check_feishu_requirements,
-            check_telegram_requirements,
+        """加载平台适配器（Phase E / E2 Task 5：纯 registry 分派，无内置回退段）"""
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+        for d in GatewayPlatformRegistry.get_instance().list_platforms():
+            try:
+                if not d.check_requirements():
+                    logger.info(f"[PlatformManager] {d.display_name} adapter skipped (missing dependencies)")
+                    continue
+                cfg = d.config_builder() if d.config_builder else None
+                self._adapters[d.platform_id] = d.adapter_factory(cfg)
+                logger.info(f"[PlatformManager] {d.display_name} adapter loaded (plugin)")
+            except Exception as e:
+                logger.warning(f"[PlatformManager] {d.display_name} 插件加载失败: {e}")
+
+    def _ensure_adapter(self, platform: str) -> Optional[BasePlatformAdapter]:
+        """确保某平台 adapter 已加载到 _adapters；缺失则按 registry def 动态加载。
+
+        解决“热安装/热注册平台晚于 manager 单例创建”时 _adapters 不更新、
+        start 静默失败（必须重启 manager 才生效）的根因：启用即加载即启动。
+        adapter 已存在时直接返回（不重建，保留热更新重建的实例）。
+        """
+        existing = self._adapters.get(platform)
+        if existing is not None:
+            return existing
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
         )
 
-        # 企业微信
-        if check_wecom_requirements and check_wecom_requirements():
-            wecom_config = self._config.get_platform_config(Platform.WECOM)
-            self._adapters[Platform.WECOM] = WeComAdapter(wecom_config)
-            logger.info("[PlatformManager] WeCom adapter loaded")
-        else:
-            logger.info("[PlatformManager] WeCom adapter skipped (missing dependencies)")
-
-        # 钉钉
-        if check_dingtalk_requirements and check_dingtalk_requirements():
-            dingtalk_config = self._config.get_platform_config(Platform.DINGTALK)
-            self._adapters[Platform.DINGTALK] = DingTalkAdapter(dingtalk_config)
-            logger.info("[PlatformManager] DingTalk adapter loaded")
-        else:
-            logger.info("[PlatformManager] DingTalk adapter skipped (missing dependencies)")
-
-        # Telegram
-        if check_telegram_requirements and check_telegram_requirements():
-            telegram_config = self._config.get_platform_config(Platform.TELEGRAM)
-            self._adapters[Platform.TELEGRAM] = TelegramAdapter(telegram_config)
-            logger.info("[PlatformManager] Telegram adapter loaded")
-        else:
-            logger.info("[PlatformManager] Telegram adapter skipped (missing dependencies)")
-
-        # Discord
-        if check_discord_requirements and check_discord_requirements():
-            discord_config = self._config.get_platform_config(Platform.DISCORD)
-            self._adapters[Platform.DISCORD] = DiscordAdapter(discord_config)
-            logger.info("[PlatformManager] Discord adapter loaded")
-        else:
-            logger.info("[PlatformManager] Discord adapter skipped (missing dependencies)")
-
-        # # WhatsApp
-        # from app.gateway.adapters.extra import check_whatsapp_requirements
-        # if check_whatsapp_requirements():
-        #     whatsapp_config = self._config.get_platform_config(Platform.WHATSAPP)
-        #     self._adapters[Platform.WHATSAPP] = WhatsAppAdapter(whatsapp_config)
-        #     logger.info("[PlatformManager] WhatsApp adapter loaded")
-        # else:
-        #     logger.info("[PlatformManager] WhatsApp adapter skipped (missing dependencies)")
-
-        # 飞书
-        from app.gateway.adapters.feishu import FeishuAdapter, check_feishu_requirements
-        if check_feishu_requirements and check_feishu_requirements():
-            feishu_config = self._config.get_platform_config(Platform.FEISHU)
-            self._adapters[Platform.FEISHU] = FeishuAdapter(feishu_config)
-            logger.info("[PlatformManager] Feishu adapter loaded")
-        else:
-            logger.info("[PlatformManager] Feishu adapter skipped (missing lark-oapi)")
-
-        # Slack
-        slack_config = self._config.get_platform_config(Platform.SLACK)
-        self._adapters[Platform.SLACK] = SlackAdapter(slack_config)
-        logger.info("[PlatformManager] Slack adapter loaded")
+        d = GatewayPlatformRegistry.get_instance().get(platform)
+        if d is None:
+            logger.warning(f"[PlatformManager] {platform} 未注册，无法动态加载 adapter")
+            return None
+        if not d.check_requirements():
+            logger.warning(f"[PlatformManager] {platform} 依赖不满足，跳过加载")
+            return None
+        cfg = d.config_builder() if d.config_builder else None
+        try:
+            adapter = d.adapter_factory(cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[PlatformManager] {platform} adapter 动态加载失败: {e}")
+            return None
+        if self._message_handler is not None:
+            adapter.set_message_handler(self._message_handler.handle)
+        self._adapters[platform] = adapter
+        logger.info(f"[PlatformManager] {platform} adapter 已动态加载（热注册自愈）")
+        return adapter
 
     def get_adapter(self, platform: Platform) -> Optional[BasePlatformAdapter]:
         """获取平台适配器"""
-        return self._adapters.get(platform)
+        from app.gateway.base import _platform_key
+
+        return self._adapters.get(_platform_key(platform))
 
     @property
-    def adapters(self) -> Dict[Platform, BasePlatformAdapter]:
+    def adapters(self) -> Dict[str, BasePlatformAdapter]:
         """所有适配器"""
         return self._adapters.copy()
 
@@ -216,92 +196,46 @@ class PlatformManager:
         self._schedule_coro(self._stop_all_async())
 
     async def _start_all_async(self) -> Dict[Platform, bool]:
-        """
-        后台启动所有启用的平台
-        """
+        """后台启动所有启用的平台（registry 驱动，无平台 if-elif）"""
         if self._running:
             logger.warning("[PlatformManager] Already running")
             return {p: True for p in self._adapters}
 
         self._running = True
-        results = {}
+        results: Dict[Platform, bool] = {}
 
         # 设置消息处理器
         if self._message_handler:
             for adapter in self._adapters.values():
                 adapter.set_message_handler(self._message_handler.handle)
 
-        # 启动每个启用的平台
-        all_platforms = [
-            Platform.WECOM,
-            Platform.DINGTALK,
-            Platform.TELEGRAM,
-            Platform.DISCORD,
-            Platform.WHATSAPP,
-            Platform.FEISHU,
-            Platform.SLACK,
-        ]
+        # 启动列表 = registry（不再硬编码 7 项）
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+        all_platforms = [d.platform_id for d in GatewayPlatformRegistry.get_instance().list_platforms()]
 
         for platform in all_platforms:
-            adapter = self._adapters.get(platform)
-            if not adapter:
+            adapter = self._ensure_adapter(platform)
+            if adapter is None:
+                results[platform] = False
                 continue
 
             config = self._config.get_platform_config(platform)
             if not config.enabled:
-                logger.info(f"[PlatformManager] {platform.value} not enabled, skipping")
+                logger.info(f"[PlatformManager] {platform} not enabled, skipping")
                 continue
 
-            # 检查配置
-            if platform == Platform.WECOM:
-                if not config.bot_id or not config.secret:
-                    logger.error("[PlatformManager] WeCom bot_id and secret are required")
-                    adapter._last_error = "bot_id and secret are required"
-                    results[platform] = False
-                    continue
-                adapter._bot_id = config.bot_id
-                adapter._secret = config.secret
-            elif platform == Platform.DINGTALK:
-                if not config.client_id or not config.client_secret:
-                    logger.error("[PlatformManager] DingTalk client_id and client_secret are required")
-                    adapter._last_error = "client_id and client_secret are required"
-                    results[platform] = False
-                    continue
-                adapter._client_id = config.client_id
-                adapter._client_secret = config.client_secret
-            elif platform == Platform.TELEGRAM:
-                if not config.token:
-                    logger.error("[PlatformManager] Telegram token is required")
-                    adapter._last_error = "token is required"
-                    results[platform] = False
-                    continue
-            elif platform == Platform.DISCORD:
-                if not config.token:
-                    logger.error("[PlatformManager] Discord bot token is required")
-                    adapter._last_error = "bot token is required"
-                    results[platform] = False
-                    continue
-            elif platform == Platform.WHATSAPP:
-                if not config.extra.get("account_sid") or not config.extra.get("auth_token"):
-                    logger.error("[PlatformManager] WhatsApp Twilio credentials are required")
-                    adapter._last_error = "account_sid and auth_token are required"
-                    results[platform] = False
-                    continue
-            elif platform == Platform.FEISHU:
-                if not config.extra.get("app_id") or not config.extra.get("app_secret"):
-                    logger.error("[PlatformManager] Feishu app_id and app_secret are required")
-                    adapter._last_error = "app_id and app_secret are required"
-                    results[platform] = False
-                    continue
-                # 更新配置到适配器
-                adapter._app_id = config.extra.get("app_id")
-                adapter._app_secret = config.extra.get("app_secret")
-                adapter._encrypt_key = config.extra.get("encrypt_key", "")
-                adapter._verification_token = config.extra.get("verification_token", "")
-            elif platform == Platform.SLACK:
-                if not config.extra.get("bot_token"):
-                    logger.error("[PlatformManager] Slack bot_token is required")
-                    adapter._last_error = "bot_token is required"
+            # 配置校验：各 adapter 自带 validate_config（registry 分派，无平台分支）
+            from app.plugins.registries.gateway_platform_registry import (
+                GatewayPlatformRegistry as _Reg,
+            )
+
+            d = _Reg.get_instance().get(platform)
+            if d is not None and d.validate_config is not None:
+                ok, err = d.validate_config(config)
+                if not ok:
+                    logger.error(f"[PlatformManager] {platform} 配置校验失败: {err}")
+                    adapter._last_error = err
                     results[platform] = False
                     continue
 
@@ -310,12 +244,12 @@ class PlatformManager:
                 results[platform] = success
 
                 if success:
-                    logger.info(f"[PlatformManager] {platform.value} started",)
+                    logger.info(f"[PlatformManager] {platform} started")
                 else:
-                    logger.warning(f"[PlatformManager] {platform.value} failed to start",)
+                    logger.warning(f"[PlatformManager] {platform} failed to start")
 
             except Exception as e:
-                logger.error(f"[PlatformManager] {platform.value} start error: {e}")
+                logger.error(f"[PlatformManager] {platform} start error: {e}")
                 results[platform] = False
 
         self._notify_status()
@@ -332,49 +266,136 @@ class PlatformManager:
             if adapter.is_connected:
                 try:
                     await adapter.stop()
-                    logger.info(f"[PlatformManager] {platform.value} stopped")
+                    logger.info(f"[PlatformManager] {platform} stopped")
                 except Exception as e:
-                    logger.error(f"[PlatformManager] {platform.value} stop error: {e}", exc_info=True)
+                    logger.error(f"[PlatformManager] {platform} stop error: {e}", exc_info=True)
 
         self._notify_status()
 
     def start_platform(self, platform: Platform) -> bool:
         """启动指定平台（同步，等待结果）"""
-        return self._run_coro(self._start_platform_async(platform))
+        from app.gateway.base import _platform_key
+
+        return self._run_coro(self._start_platform_async(_platform_key(platform)))
 
     def start_platform_async(self, platform: Platform) -> None:
         """启动指定平台（异步，不等待结果）"""
-        self._schedule_coro(self._start_platform_async(platform))
+        from app.gateway.base import _platform_key
+
+        self._schedule_coro(self._start_platform_async(_platform_key(platform)))
 
     def stop_platform(self, platform: Platform) -> None:
         """停止指定平台"""
-        self._schedule_coro(self._stop_platform_async(platform))
+        from app.gateway.base import _platform_key
 
-    async def _start_platform_async(self, platform: Platform) -> bool:
-        """在后台事件循环上启动平台"""
-        adapter = self._adapters.get(platform)
-        if not adapter:
-            logger.error(f"[PlatformManager] No adapter for {platform.value}")
+        self._schedule_coro(self._stop_platform_async(_platform_key(platform)))
+
+    def stop_plugin_platforms(self, plugin_name: str, wait: bool = False) -> None:
+        """停止并移除某插件注册的全部 gateway 平台（卸载/热更新清理前置）
+
+        1. 从 registry 查出 source=plugin:<name> 的 platform_id 列表（unregister 前查）
+        2. 逐个停止连接（异步调度到后台事件循环，不阻塞调用线程）
+        3. 立即从 _adapters 摘除实例引用，使其不再被消息路由命中
+
+        Args:
+            plugin_name: 插件名
+            wait: True 时阻塞等待 stop 协程完成（调用方需要确保 SDK/依赖
+                释放后再删文件时使用，如市场卸载/残留清理）；默认 False 保持
+                热重载路径的非阻塞行为。
+        """
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
+        )
+
+        pids = GatewayPlatformRegistry.get_instance().get_platform_ids_by_source(f"plugin:{plugin_name}")
+        futures = []
+        for pid in pids:
+            adapter = self._adapters.pop(pid, None)
+            if adapter is not None:
+                try:
+                    # 无条件调度 stop（不再检查 is_connected）：历史 bug 泄漏实例
+                    # _running/_connected=False 但连接线程还活着，is_connected 前置
+                    # 检查会跳过 stop → 连接永久泄漏；stop 内部幂等（_running 防护
+                    # + disconnect 幂等），对干净实例无副作用。
+                    futures.append(asyncio.run_coroutine_threadsafe(self._stop_adapter_async(adapter), self._loop))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[PlatformManager] stop {pid} 失败: {e}")
+        if pids:
+            logger.info(f"[PlatformManager] 已停止并摘除插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
+        if wait:
+            for fut in futures:
+                try:
+                    fut.result(timeout=8)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[PlatformManager] 等待平台 stop 超时/失败: {e}")
+
+    async def _stop_adapter_async(self, adapter: BasePlatformAdapter) -> None:
+        """停止单个 adapter 实例（引用已捕获，不查 _adapters，避免 pop 竞态）
+
+        无条件调 stop（不查 is_connected）：泄漏实例（_running=False 但连接/线程
+        还活着）也必须走 stop 清理；base.stop 幂等，重复调用无害。
+        """
+        try:
+            await adapter.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[PlatformManager] adapter stop error: {e}")
+        self._notify_status()
+
+    def rebuild_plugin_platforms(self, plugin_name: str, restart_if_running: bool = True) -> None:
+        """用 registry 当前 def 重建某插件的 adapter（热更新后用新 adapter_factory）
+
+        热重载路径在 stop_plugin_platforms + scan_now(unregister 旧/注册新) 之后调用：
+        从 registry 读取最新 def（含新 adapter_factory），重建 adapter 实例放入
+        _adapters；若此前整个 gateway 在运行且平台启用，则重新 start 使新代码生效。
+        """
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
+        )
+
+        reg = GatewayPlatformRegistry.get_instance()
+        pids = reg.get_platform_ids_by_source(f"plugin:{plugin_name}")
+        for pid in pids:
+            d = reg.get(pid)
+            if d is None or not d.check_requirements():
+                logger.info(f"[PlatformManager] {pid} 重建跳过（def 缺失/依赖不满足）")
+                continue
+            cfg = d.config_builder() if d.config_builder else None
+            try:
+                self._adapters[pid] = d.adapter_factory(cfg)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[PlatformManager] {pid} adapter 重建失败: {e}")
+                continue
+            if self._message_handler:
+                self._adapters[pid].set_message_handler(self._message_handler.handle)
+            if restart_if_running and self._running:
+                config = self._config.get_platform_config(pid)
+                if config and getattr(config, "enabled", False):
+                    self._schedule_coro(self._start_platform_async(pid))
+        if pids:
+            logger.info(f"[PlatformManager] 已重建插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
+
+    async def _start_platform_async(self, platform: str) -> bool:
+        """在后台事件循环上启动平台（registry 驱动，无平台 if-elif）"""
+        adapter = self._ensure_adapter(platform)
+        if adapter is None:
+            logger.error(f"[PlatformManager] No adapter for {platform}")
             return False
 
         config = self._config.get_platform_config(platform)
 
-        if platform == Platform.WECOM:
-            if not config.bot_id or not config.secret:
-                logger.error("[PlatformManager] WeCom bot_id and secret are required")
-                adapter._last_error = "bot_id and secret are required"
+        # 配置校验：registry def.validate_config（无则跳过）
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry as _Reg,
+        )
+
+        d = _Reg.get_instance().get(platform)
+        if d is not None and d.validate_config is not None:
+            ok, err = d.validate_config(config)
+            if not ok:
+                logger.error(f"[PlatformManager] {platform} 配置校验失败: {err}")
+                adapter._last_error = err
                 self._notify_status()
                 return False
-            adapter._bot_id = config.bot_id
-            adapter._secret = config.secret
-        elif platform == Platform.DINGTALK:
-            if not config.client_id or not config.client_secret:
-                logger.error("[PlatformManager] DingTalk client_id and client_secret are required")
-                adapter._last_error = "client_id and client_secret are required"
-                self._notify_status()
-                return False
-            adapter._client_id = config.client_id
-            adapter._client_secret = config.client_secret
 
         if self._message_handler:
             adapter.set_message_handler(self._message_handler.handle)
@@ -383,7 +404,7 @@ class PlatformManager:
         self._notify_status()
         return success
 
-    async def _stop_platform_async(self, platform: Platform) -> None:
+    async def _stop_platform_async(self, platform: str) -> None:
         """在后台事件循环上停止平台"""
         adapter = self._adapters.get(platform)
         if adapter and adapter.is_connected:
@@ -393,27 +414,22 @@ class PlatformManager:
     def get_status(self) -> Dict[str, Any]:
         """
         获取状态
-        
+
         Returns:
             状态信息
         """
         platforms = {}
 
-        all_platforms = [
-            Platform.WECOM,
-            Platform.DINGTALK,
-            Platform.TELEGRAM,
-            Platform.DISCORD,
-            Platform.WHATSAPP,
-            Platform.FEISHU,
-            Platform.SLACK,
-        ]
+        # 启动列表 = registry（不再硬编码 7 项）
+        from app.plugins.registries.gateway_platform_registry import GatewayPlatformRegistry
+
+        all_platforms = [d.platform_id for d in GatewayPlatformRegistry.get_instance().list_platforms()]
 
         for platform in all_platforms:
             adapter = self._adapters.get(platform)
             config = self._config.get_platform_config(platform)
 
-            platforms[platform.value] = {
+            platforms[platform] = {
                 "enabled": config.enabled,
                 "connected": adapter.is_connected if adapter else False,
                 "error": adapter.last_error if adapter else None,
@@ -458,11 +474,11 @@ def create_platform_manager(
 ) -> PlatformManager:
     """
     创建或获取平台管理器（全局单例）
-    
+
     Args:
         process_message: 处理消息回调
         send_message: 发送消息回调
-        
+
     Returns:
         PlatformManager
     """

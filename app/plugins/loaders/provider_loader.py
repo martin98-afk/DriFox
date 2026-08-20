@@ -207,7 +207,9 @@ def _load_module(plugin_name: str, path: Path):
     return module
 
 
-def _run_register(registry: ProviderRegistry, plugin_name: str, py_path: Path, root: Path, root_tracker: dict) -> Set[str]:
+def _run_register(
+    registry: ProviderRegistry, plugin_name: str, py_path: Path, root: Path, root_tracker: dict
+) -> Set[str]:
     """执行单个 providers/*.py 的 register(registry)，返回注册成功的服务商名集合"""
     module = _load_module(plugin_name, py_path)
     if module is None:
@@ -300,6 +302,76 @@ class ProviderWatcher:
                 )
             except Exception as e:
                 logger.warning(f"[ProviderWatcher] 全量重扫失败: {e}")
+
+    def _plugin_provider_names(self, plugin_name: str) -> Set[str]:
+        """按注册表实际内容反查某插件注册的服务商名（对齐 scan_now 的"以注册表为准"）"""
+        source = f"plugin:{plugin_name}"
+        return {n for n in self._registry.names() if self._registry.get(n).source == source}
+
+    def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
+        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        for name in self._plugin_provider_names(plugin_name):
+            r = self._root_tracker.get(name)
+            if r is not None:
+                return Path(r)
+        return None
+
+    def _restore_lower_roots(self, removed_rank: int) -> None:
+        """跨根覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖服务商"""
+        for root in self._roots:
+            if _ROOT_KIND_PRIORITY.get(_root_kind(root), 0) >= removed_rank:
+                continue
+            load_providers(
+                registry=self._registry,
+                plugin_roots=[Path(root)],
+                root_tracker=self._root_tracker,
+            )
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        """精准卸载单个插件的服务商（删除/禁用路径），不波及他插件
+
+        与 scan_now 的区别：只注销目标插件来源的服务商，并对更低等级根重扫
+        一次恢复被其覆盖的同名服务商（跨根覆盖恢复），不触发全量重扫。
+        """
+        with self._scan_lock:
+            names = self._plugin_provider_names(plugin_name)
+            removed_root = self._root_of_plugin(plugin_name)
+            removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+            if names:
+                self._registry.clear_source(f"plugin:{plugin_name}")
+                for n in names:
+                    self._root_tracker.pop(n, None)
+                logger.info(f"[ProviderWatcher] 注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
+            self._restore_lower_roots(removed_rank)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        """精准重载单个插件的服务商（安装/更新/启用路径），不波及他插件
+
+        语义：注销该插件旧服务商 → 恢复被其覆盖的低等级根同名服务商 →
+        重新注册该插件当前模块（高等级根再次覆盖）→ 最终状态与全量重扫一致。
+        """
+        with self._scan_lock:
+            names = self._plugin_provider_names(plugin_name)
+            removed_root = self._root_of_plugin(plugin_name)
+            removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+            if names:
+                self._registry.clear_source(f"plugin:{plugin_name}")
+                for n in names:
+                    self._root_tracker.pop(n, None)
+                logger.info(f"[ProviderWatcher] 重载前注销插件服务商: {sorted(names)} ({plugin_name})")
+            # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
+            self._restore_lower_roots(removed_rank)
+            # 重注册该插件当前模块（enabled 过滤与 load_providers 一致）
+            if not _is_plugin_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
+                return
+            for root in self._roots:
+                root_path = Path(root)
+                for pname, py in _iter_provider_modules(root_path):
+                    if pname != plugin_name:
+                        continue
+                    _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
 
     def start(self, poll_interval: float = 2.0) -> None:
         """[已退役] 轮询线程不再启动。

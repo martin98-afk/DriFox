@@ -371,22 +371,33 @@ class ConfigSyncService(QObject):
     def _watch_loop(self):
         from watchfiles import watch
 
-        cfg_dir = str(self._config_path.parent)
         cfg_name = self._config_path.name
         records_name = self._records_path.name
 
-        # 构建监听路径列表（app.config 目录 + user-custom 目录）
-        watch_dirs = [cfg_dir]
+        # 构建精确监听路径列表。
+        # 关键修复：旧实现直接递归监听整个 .drifox 根目录（self._config_path.parent），
+        # 导致 cache/install_tmp、plugins 等子目录的千级文件变更全部被 watchfiles 计入，
+        # 既产出大量 [INFO] N changes detected 噪声、徒增 CPU，又让 plugins 目录被 backend
+        # 与 config_sync 双重监听。改为精确监听业务真正关心的三个目标：
+        #   1) app.config 单文件（存在时；否则退守父目录，待首次写入后下次启动生效）
+        #   2) plugins/user-custom 目录（用户插件热重载，合理保留）
+        #   3) share/records.json 单文件（存在时；否则监听 share 目录兜底）
+        watch_dirs = []
+        if self._config_path.exists():
+            watch_dirs.append(str(self._config_path))
+        else:
+            watch_dirs.append(str(self._config_path.parent))
+
         uc_path_str = str(self._user_custom_path)
         if self._user_custom_path.exists():
             watch_dirs.append(uc_path_str)
 
-        # 如果 share 目录存在，监听 records.json 所在的 share 目录
-        records_dir = str(self._records_path.parent)
-        if self._records_path.parent.exists():
-            watch_dirs.append(records_dir)
+        if self._records_path.exists():
+            watch_dirs.append(str(self._records_path))
+        elif self._records_path.parent.exists():
+            watch_dirs.append(str(self._records_path.parent))
 
-        logger.info(f"[ConfigSync] watch 线程已启动，监控目录={watch_dirs}")
+        logger.info(f"[ConfigSync] watch 线程已启动，监控路径={watch_dirs}")
         try:
             for changes in watch(*watch_dirs, stop_event=self._watch_stop):
                 if self._watch_stop and self._watch_stop.is_set():

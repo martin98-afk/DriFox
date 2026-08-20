@@ -7,6 +7,7 @@
 3. 量化：同会话 token 用量可测下降（截断前后对比）
 4. 边界：不超阈值 / 非字符串 / 空串不受影响
 """
+
 import pytest
 
 from app.core.context_builder import (
@@ -14,7 +15,9 @@ from app.core.context_builder import (
     TOOL_RESULT_MAX_LEN,
     TOOL_RESULT_TAIL_KEEP,
     ContextBudgetAllocator,
+    PRUNE_SKIP_TOOLS,
     prune_tool_result,
+    resolve_tool_result_max_len,
 )
 from app.core.token_estimator import count_messages_tokens
 
@@ -61,6 +64,74 @@ class TestPruneToolResultUnit:
         assert len(out) <= 150
 
 
+class TestPruneStructuredHints:
+    """分层截断（A/B/D）：省略标记必须可操作，避免 LLM 盲目重查"""
+
+    def _read_output(self, start=100, end=800, total=5000, width=26):
+        lines = [("def func_%04d(self, arg):  # c%04d" % (i, i))[:width] for i in range(1, total + 1)]
+        return f"#File: src/main.py (Lines {start}-{end} of {total})\n" + "\n".join(lines[: end - start + 1])
+
+    def test_read_result_gives_line_range_hint(self):
+        """A: read 结果截断后标记含文件行号区间 + read 取回指引"""
+        out = prune_tool_result(self._read_output())
+        assert "已截断中间" in out
+        assert "文件第" in out
+        assert "read src/main.py startline=" in out
+
+    def test_read_result_line_range_reasonable(self):
+        """A: 行号区间应落在原始区间 (100-800) 内"""
+        out = prune_tool_result(self._read_output())
+        import re
+
+        m = re.search(r"startline=(\d+) endline=(\d+)", out)
+        assert m, "应给出 read 取回指引"
+        start, end = int(m.group(1)), int(m.group(2))
+        assert 100 <= start <= end <= 800
+
+    def test_read_result_head_tail_intact(self):
+        """A: 头部 header 与尾部内容必须保留"""
+        out = prune_tool_result(self._read_output())
+        assert out.startswith("#File: src/main.py (Lines 100-800")
+        assert "func_0700" in out  # 尾部内容
+
+    def test_grep_result_keeps_entry_index(self):
+        """B: 行式条目结果按行保留头尾条目，标记含条目区间"""
+        content = "匹配文件: src/a.py\n" + "\n".join(f"{i}:match line {i}" for i in range(1, 3000))
+        out = prune_tool_result(content)
+        assert "已省略中间第" in out
+        assert "个条目" in out
+        # 头尾条目保留（索引不丢）
+        assert out.startswith("匹配文件: src/a.py\n1:match line 1")
+        assert "2999:match line 2999" in out
+
+    def test_glob_result_keeps_entry_index(self):
+        """B: glob 文件列表按行保留头尾"""
+        content = "找到 5000 个文件:\n" + "\n".join(f"src/mod{i}.py" for i in range(1, 5001))
+        out = prune_tool_result(content)
+        assert "已省略中间第" in out
+        assert out.startswith("找到 5000 个文件:\nsrc/mod1.py")
+        assert out.endswith("src/mod5000.py")
+
+    def test_dynamic_threshold_scales_with_context(self):
+        """D: 截断阈值随模型上下文容量动态放大"""
+        assert resolve_tool_result_max_len(None) == TOOL_RESULT_MAX_LEN
+        assert resolve_tool_result_max_len({"上下文长度": 32000}) == TOOL_RESULT_MAX_LEN * 1.5
+        assert resolve_tool_result_max_len({"上下文长度": 64000}) == TOOL_RESULT_MAX_LEN * 2
+        assert resolve_tool_result_max_len({"上下文长度": 128000}) == TOOL_RESULT_MAX_LEN * 3
+
+    def test_dynamic_threshold_skips_truncate_for_large_context(self):
+        """D: 长上下文模型下中等结果不再被截断"""
+        s = "y" * 10000  # 超过基础 8192，但低于 128K 模型阈值 24576
+        out = prune_tool_result(s, llm_config={"上下文长度": 128000})
+        assert out == s
+
+    def test_skip_tools_untouched(self):
+        """受保护工具（question/skill/todoread）结果永不截断"""
+        s = "q" * 90000
+        for name in PRUNE_SKIP_TOOLS:
+            assert prune_tool_result(s, tool_name=name) == s
+
+
 # ==================== 集成测试 ====================
 class _FakeAgentManager:
     def get_agent_system_prompt(self, *a, **k):
@@ -100,11 +171,12 @@ def _allocator():
 def _tool_history(long_content: str):
     return [
         {"role": "user", "content": "请执行命令"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "call_1", "type": "function",
-             "function": {"name": "bash", "arguments": "{}"}}]},
-        {"role": "tool", "tool_call_id": "call_1", "name": "bash",
-         "content": long_content, "success": True},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": long_content, "success": True},
         {"role": "assistant", "content": "完成"},
     ]
 

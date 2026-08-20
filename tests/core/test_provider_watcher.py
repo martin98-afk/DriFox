@@ -11,6 +11,7 @@ ProviderWatcher 服务商插件热重载测试（文件删除残留清理回归�
 
 运行: python -m pytest tests/core/test_provider_watcher.py -v
 """
+
 import os
 import sys
 from pathlib import Path
@@ -98,3 +99,38 @@ class TestScanRemovesDeletedProvider:
         watcher.scan_now()
         watcher.scan_now()
         assert reg.names() == ["Alpha"], f"重复重扫应保持唯一注册，实际: {reg.names()}"
+
+
+class TestPreciseUnloadReload:
+    """unload_plugin / reload_plugin 精准路径：只处理目标插件，不波及他插件"""
+
+    def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path):
+        """卸载单插件：只注销其服务商，他插件服务商保留"""
+        _make_provider(tmp_path, "Alpha")
+        _make_provider(tmp_path, "Beta")
+        reg = ProviderRegistry()
+        watcher = _make_watcher(tmp_path, reg)
+        watcher.scan_now()
+        assert reg.names() == ["Alpha", "Beta"]
+
+        watcher.unload_plugin(_TEST_PLUGIN)
+        assert reg.names() == [], f"该插件服务商应全部注销，实际: {reg.names()}"
+
+    def test_reload_plugin_updates_and_preserves_others(self, tmp_path):
+        """重载单插件：新内容生效，他插件服务商不被注销重注册（以 source 验证）"""
+        _make_provider(tmp_path, "Alpha")
+        _make_provider(tmp_path, "Beta")
+        reg = ProviderRegistry()
+        watcher = _make_watcher(tmp_path, reg)
+        watcher.scan_now()
+        assert "Alpha" in reg.names()
+
+        # 热更新：Alpha 改名 Alpha2
+        (tmp_path / _TEST_PLUGIN / "providers" / "Alpha.py").unlink()
+        _make_provider(tmp_path, "Alpha2")
+
+        watcher.reload_plugin(_TEST_PLUGIN)
+        assert reg.get("Alpha") is None, "旧服务商应被注销"
+        assert reg.get("Alpha2") is not None, "新服务商应注册"
+        assert reg.get("Beta") is not None, "他插件服务商应保留"
+        assert reg.get("Beta").source == f"plugin:{_TEST_PLUGIN}", "Beta source 应不变"

@@ -27,5 +27,26 @@
         "storages": true,
         "serializers": true,
         "ui": true
+    },
+    "config_schema": {
+        "title": "网页搜索 API Key",
+        "fields": [
+            {
+                "key": "tavily_api_key",
+                "label": "Tavily 搜索",
+                "type": "password",
+                "default": "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",
+                "env": "TAVILY_API_KEY",
+                "placeholder": "TAVILY_API_KEY"
+            },
+            {
+                "key": "tinyfish_api_key",
+                "label": "TinyFish 搜索",
+                "type": "password",
+                "default": "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU",
+                "env": "TINYFISH_API_KEY",
+                "placeholder": "TINYFISH_API_KEY"
+            }
+        ]
     }
 }

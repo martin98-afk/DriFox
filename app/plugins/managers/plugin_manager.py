@@ -66,6 +66,7 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "loop_policies": lambda d: (d / "loop_policies").exists() and any((d / "loop_policies").glob("*.py")),
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
+    "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
 }
 
 
@@ -314,6 +315,7 @@ class PluginManager:
         for name in removed_names:
             result["removed"].append(self._plugins[name])
             self._unload_plugin_ui(name)
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Rescan: plugin '{name}' removed")
 
@@ -348,6 +350,8 @@ class PluginManager:
 
         plugin_dir = old.path
         if not plugin_dir.exists():
+            self._unload_plugin_ui(name)
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
             # 插件被移除，其 MCP 配置需从缓存中剔除
@@ -361,6 +365,8 @@ class PluginManager:
             logger.debug(f"[PluginManager] Rescanned plugin: {name}")
         else:
             # manifest 已不存在
+            self._unload_plugin_ui(name)
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
         # 无论更新还是移除，MCP 配置都可能变化，失效缓存
@@ -439,7 +445,7 @@ class PluginManager:
         # 联动加载 UI 组件
         self._load_plugin_ui(name)
         # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
-        self._rescan_plugin_tools()
+        self._rescan_plugin_tools(name, enabled=True)
 
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
@@ -476,20 +482,24 @@ class PluginManager:
         # 联动卸载 UI 组件
         self._unload_plugin_ui(name)
         # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
-        self._rescan_plugin_tools()
+        self._rescan_plugin_tools(name, enabled=False)
 
-    def _rescan_plugin_tools(self) -> None:
-        """插件启停后对齐工具注册（工具插件随启停热生效）。
+    def _rescan_plugin_tools(self, name: str, enabled: bool) -> None:
+        """插件启停后精准对齐工具注册（工具插件随启停热生效）。
 
-        触发 PluginToolWatcher 全量重扫：注销全部已加载插件工具后按
-        enabled 状态重新注册（scan_now 幂等 + 锁保护；watcher 未启动/异常时跳过）。
+        - enabled=True（启用）→ watcher.reload_plugin(name)：只重载该插件工具
+        - enabled=False（禁用）→ watcher.unload_plugin(name)：只注销该插件工具
+        均不触发 scan_now 全量重扫（旧实现会把全部插件工具注销再重注册）。
         """
         try:
             from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
             watcher = ensure_plugin_tool_watcher()
             if watcher is not None:
-                watcher.scan_now()
+                if enabled:
+                    watcher.reload_plugin(name)
+                else:
+                    watcher.unload_plugin(name)
         except Exception as e:
             logger.warning(f"[PluginManager] 插件工具重扫失败: {e}")
 
@@ -597,6 +607,9 @@ class PluginManager:
                 # 但无 commands/ 目录）导致热更新触发全量命令重载
                 manifest["components"] = _detect_components(item)
 
+                # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
+                self._register_config_schema(plugin_name, manifest)
+
                 discovered.append(
                     PluginInfo(
                         name=plugin_name,
@@ -647,6 +660,9 @@ class PluginManager:
             # 但无 commands/ 目录）导致热更新触发全量命令重载
             manifest["components"] = _detect_components(plugin_dir)
 
+            # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
+            self._register_config_schema(plugin_name, manifest)
+
             info = PluginInfo(
                 name=plugin_name,
                 manifest=manifest,
@@ -660,6 +676,53 @@ class PluginManager:
         except Exception as e:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
             return None
+
+    def _register_config_schema(self, plugin_name: str, manifest: dict) -> None:
+        """E1：解析 plugin.json config_schema 并注册到 PluginConfigRegistry + 自动设置卡。
+
+        幂等：同名插件重复注册由 PluginConfigRegistry 与 UIPluginRegistry 内部
+        覆盖（PluginManager 全量扫描天然幂等；热重载 rescan 同样无害）。
+        任一异常均降级为 warning，不影响插件本体的扫描加载。
+        """
+        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底
+        from app.plugins.contracts.plugin_config import parse_config_schema
+
+        raw_schema = manifest.get("config_schema")
+        config_schema = parse_config_schema(plugin_name, raw_schema)
+        if config_schema is None:
+            return
+
+        # 注册表（必需）
+        try:
+            from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+            PluginConfigRegistry.get_instance().register(config_schema)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 注册失败({plugin_name}): {e}")
+            return
+
+        # 自动设置卡（可选，挂 Phase D 扩展点）
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            from app.widgets.cards.settings.plugin_config_card import make_card_class
+
+            UIPluginRegistry.get_instance().register_settings_card(
+                plugin_name,
+                f"{plugin_name}-config",
+                config_schema.title,
+                make_card_class(plugin_name),
+            )
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+
+    def _unregister_config_schema(self, plugin_name: str) -> None:
+        """E1：插件移除时清理 config_schema 注册（设置卡由 UIPluginRegistry.unload_plugin 清理）。"""
+        try:
+            from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+            PluginConfigRegistry.get_instance().unregister_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 清理失败({plugin_name}): {e}")
 
     def _discover_system_plugins(self):
         """扫描系统插件目录 app/plugins/"""

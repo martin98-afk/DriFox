@@ -39,6 +39,7 @@ def test_themes_reloader_calls_theme_manager(monkeypatch):
             called["reload"] = True
 
     import app.utils.theme_manager as tm_mod
+
     monkeypatch.setattr(tm_mod, "theme_manager", _FakeThemeManager())
     monkeypatch.setattr("app.utils.config.update_theme_options", lambda: called.update(options=True))
 
@@ -50,6 +51,7 @@ def test_themes_reloader_calls_theme_manager(monkeypatch):
 def test_skills_reloader_invalidates_cache(monkeypatch):
     called = []
     import app.plugins.builtin_reloaders as br
+
     monkeypatch.setattr(br, "invalidate_skills_cache", lambda: called.append(1))
 
     reg = _make_reg()
@@ -118,17 +120,13 @@ def test_delete_agents_path_calls_cleanup_not_reload_agent_commands(monkeypatch)
     _bind_runtime(monkeypatch, am)
 
     reg = _make_reg()
-    result = reg.reload(
-        ReloadContext("p1", plugin=None, component="agents", is_new_plugin=False)
-    )
+    result = reg.reload(ReloadContext("p1", plugin=None, component="agents", is_new_plugin=False))
 
     # 副作用：仅 cleanup_plugin_artifacts 被调用
     assert am.cleanup_calls == ["p1"]
     assert am.reload_agents_calls == []  # 删除分支不调 reload_plugin_agents
     # 关键断言：删除分支不调 reload_agent_commands
-    assert agent_calls == [], (
-        f"agents 删除分支不应触发 reload_agent_commands，实际调用 {len(agent_calls)} 次"
-    )
+    assert agent_calls == [], f"agents 删除分支不应触发 reload_agent_commands，实际调用 {len(agent_calls)} 次"
     # 返回值：agents 删除归零
     assert result == 0
 
@@ -139,9 +137,7 @@ def test_delete_hooks_only_path_unregisters_skill_hooks(monkeypatch):
     _bind_runtime(monkeypatch, am)
 
     reg = _make_reg()
-    ok = reg.reload(
-        ReloadContext("p2", plugin=None, component="hooks", is_new_plugin=False)
-    )
+    ok = reg.reload(ReloadContext("p2", plugin=None, component="hooks", is_new_plugin=False))
 
     # hooks-only 路径：不调 cleanup（避免与 agents 重叠），仅 unregister
     assert am.unregister_calls == ["p2"]
@@ -172,9 +168,7 @@ def test_delete_ui_path_unloads_plugin(monkeypatch):
     )
 
     reg = _make_reg()
-    ok = reg.reload(
-        ReloadContext("p3", plugin=None, component="ui", is_new_plugin=False)
-    )
+    ok = reg.reload(ReloadContext("p3", plugin=None, component="ui", is_new_plugin=False))
 
     assert unloaded == ["p3"]
     assert ok is True
@@ -190,12 +184,11 @@ def test_delete_lsp_path_removes_plugin_servers(monkeypatch):
             return 2  # 假设该插件有 2 个 LSP 服务器
 
     import app.core.lsp.lsp_manager as lsp_mod
+
     monkeypatch.setattr(lsp_mod, "get_lsp_manager", lambda: _FakeLSPManager())
 
     reg = _make_reg()
-    ok = reg.reload(
-        ReloadContext("p4", plugin=None, component="lsp", is_new_plugin=False)
-    )
+    ok = reg.reload(ReloadContext("p4", plugin=None, component="lsp", is_new_plugin=False))
 
     assert removed == ["p4"]
     assert ok is True  # removed > 0
@@ -213,9 +206,167 @@ def test_delete_commands_path_reloads_all_commands(monkeypatch):
     )
 
     reg = _make_reg()
-    ok = reg.reload(
-        ReloadContext("p5", plugin=None, component="commands", is_new_plugin=False)
-    )
+    ok = reg.reload(ReloadContext("p5", plugin=None, component="commands", is_new_plugin=False))
 
     assert all_calls == [1]
     assert ok is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# gateways 分支：卸载/热更新路径（先关闭 gateway → 清 module → unregister/重建）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeGatewayManager:
+    """最小化 PlatformManager fake：捕获 stop / rebuild 调用"""
+
+    def __init__(self):
+        self.stopped: list[str] = []
+        self.rebuilt: list[tuple] = []
+
+    def stop_plugin_platforms(self, plugin_name: str, wait: bool = False) -> None:
+        self.stopped.append((plugin_name, wait))
+
+    def rebuild_plugin_platforms(self, plugin_name: str, restart_if_running: bool = True) -> None:
+        self.rebuilt.append((plugin_name, restart_if_running))
+
+
+class _FakeGatewayWatcher:
+    def __init__(self):
+        self.scans: int = 0
+        self.unloaded: list[str] = []
+        self.reloaded: list[str] = []
+
+    def scan_now(self) -> None:
+        self.scans += 1
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        self.unloaded.append(plugin_name)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        self.reloaded.append(plugin_name)
+
+
+def test_delete_gateways_path_stops_and_unregisters(monkeypatch):
+    """gateways 删除分支：先 stop 该插件平台 + 清 module + unload_plugin(精准注销)；
+    不触发 rebuild（删除路径用旧 def 无法重建）。"""
+    mgr = _FakeGatewayManager()
+    watcher = _FakeGatewayWatcher()
+    monkeypatch.setattr("app.gateway.manager.get_platform_manager", lambda: mgr)
+    monkeypatch.setattr(
+        "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
+        lambda: watcher,
+    )
+    # 注入待清理的 module 引用，验证 _purge_gateway_plugin_modules 生效
+    import sys
+
+    sys.modules["drifox_rt_gateways_gwplug_wecom"] = object()
+
+    reg = _make_reg()
+    ok = reg.reload(ReloadContext("gwplug", plugin=None, component="gateways", is_new_plugin=False))
+
+    assert ok is True
+    assert mgr.stopped == [("gwplug", True)]  # 先关闭 gateway（wait=True 等 stop 完成再 purge/rebuild，防双连接竞态）
+    assert watcher.unloaded == ["gwplug"], "删除路径应精准 unload_plugin"
+    assert watcher.scans == 0, "删除路径不应全量 scan_now"
+    assert mgr.rebuilt == []  # 删除路径不重建
+    assert "drifox_rt_gateways_gwplug_wecom" not in sys.modules  # module 已清
+
+
+def test_update_gateways_path_stops_and_rebuilds(monkeypatch):
+    """gateways 更新分支：先 stop + 清 module + reload_plugin(精准重载) + 用新 def 重建 adapter。"""
+    mgr = _FakeGatewayManager()
+    watcher = _FakeGatewayWatcher()
+    monkeypatch.setattr("app.gateway.manager.get_platform_manager", lambda: mgr)
+    monkeypatch.setattr(
+        "app.plugins.loaders.runtime_component_loader.ensure_gateway_watcher",
+        lambda: watcher,
+    )
+
+    class _FakePlugin:
+        def has_component(self, c):
+            return False
+
+    reg = _make_reg()
+    ok = reg.reload(ReloadContext("gwplug", plugin=_FakePlugin(), component="gateways", is_new_plugin=False))
+
+    assert ok is True
+    assert mgr.stopped == [("gwplug", True)]  # 先关闭（wait=True，防旧连接泄漏）
+    assert watcher.reloaded == ["gwplug"], "更新路径应精准 reload_plugin"
+    assert watcher.scans == 0, "更新路径不应全量 scan_now"
+    assert mgr.rebuilt == [("gwplug", True)]  # 更新路径重建（restart_if_running=True）
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tools 分支：删除路径精准卸载（unload_plugin），更新路径精准重载（reload_plugin）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeToolWatcher:
+    """最小化 PluginToolWatcher fake：捕获 unload_plugin / reload_plugin / scan_now / _notify_reloaded"""
+
+    def __init__(self):
+        self.unloaded: list[str] = []
+        self.reloaded: list[str] = []
+        self.scans: int = 0
+        self.notified: int = 0
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        self.unloaded.append(plugin_name)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        self.reloaded.append(plugin_name)
+
+    def scan_now(self) -> None:
+        self.scans += 1
+
+    def _notify_reloaded(self) -> None:
+        self.notified += 1
+
+
+def test_delete_tools_path_calls_unload_not_scan_now(monkeypatch):
+    """tools 删除分支：精准 unload_plugin，不调 scan_now
+
+    回归锁定：此前 _reload_tools 对删除路径也调 scan_now 全量重扫，
+    导致删一个插件却卸载并重载全部工具（含 system）。
+    """
+    watcher = _FakeToolWatcher()
+    monkeypatch.setattr(
+        "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
+        lambda: watcher,
+    )
+
+    reg = _make_reg()
+    ok = reg.reload(ReloadContext("workbuddy", plugin=None, component="tools", is_new_plugin=False))
+
+    assert ok is True
+    assert watcher.unloaded == ["workbuddy"], "删除路径应调 unload_plugin(plugin_name)"
+    assert watcher.scans == 0, "删除路径不应调 scan_now（避免全量重载）"
+    assert watcher.reloaded == [], "删除路径不应调 reload_plugin"
+    assert watcher.notified == 0, "删除路径（非轮询）不应通知监听"
+
+
+def test_update_tools_path_calls_reload_not_scan_now(monkeypatch):
+    """tools 更新/新增分支：精准 reload_plugin + _notify_reloaded，不调 scan_now
+
+    回归锁定：此前更新路径也调 scan_now 全量重扫（装/改一个插件同样
+    卸载并重载全部工具），现改为只重载目标插件。
+    """
+    watcher = _FakeToolWatcher()
+    monkeypatch.setattr(
+        "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
+        lambda: watcher,
+    )
+
+    class _FakePlugin:
+        def has_component(self, c):
+            return False
+
+    reg = _make_reg()
+    ok = reg.reload(ReloadContext("workbuddy", plugin=_FakePlugin(), component="tools", is_new_plugin=False))
+
+    assert ok is True
+    assert watcher.reloaded == ["workbuddy"], "更新路径应调 reload_plugin(plugin_name)"
+    assert watcher.scans == 0, "更新路径不应调 scan_now（避免全量重载）"
+    assert watcher.notified == 1, "更新路径应通知监听"
+    assert watcher.unloaded == [], "更新路径不应调 unload_plugin"

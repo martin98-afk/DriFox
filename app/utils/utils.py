@@ -10,7 +10,8 @@
 - 异步更新检查器
 - JSON 序列化/反序列化
 """
-import asyncio  # 用于 AsyncUpdateChecker
+# [PERF] asyncio/httpx/requests/yaml 均为重导入（requests 95ms/httpx 75ms/asyncio 62ms），
+# 且仅在各自动态检查/更新路径用到，全部延迟到使用点导入（见各函数内 import）
 import os
 import re
 import socket
@@ -18,11 +19,8 @@ import sys
 import weakref
 from pathlib import Path
 
-import httpx
 import orjson as json
 import psutil
-import requests
-import yaml
 from loguru import logger
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QIconEngine
@@ -556,6 +554,8 @@ def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
     # 解析 frontmatter
     if content.startswith("---"):
         try:
+            import yaml  # [PERF] 延迟导入
+
             frontmatter = content.split("---", 2)[1]
             meta = yaml.safe_load(frontmatter)
             if meta:
@@ -824,6 +824,8 @@ class DownloadThread(QThread):
         self.file_path = file_path
         self.headers = {"Authorization": token} if token else {}
         self.is_canceled = False  # 取消标志位
+        import requests  # [PERF] 延迟导入：仅下载检查路径需要
+
         self.session = requests.Session()  # 使用 Session 以便关闭连接
 
     def run(self):
@@ -908,6 +910,8 @@ class AsyncUpdateChecker(QThread):
         }
         headers = headers | {"Authorization": f"token {self.token}"} if self.token else headers
         url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+        import httpx  # [PERF] 延迟导入：仅更新检查路径需要
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
@@ -921,6 +925,8 @@ class AsyncUpdateChecker(QThread):
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}
         url = f"https://gitee.com/api/v5/repos/{self.repo}/releases/latest"
+        import httpx  # [PERF] 延迟导入
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
@@ -932,6 +938,8 @@ class AsyncUpdateChecker(QThread):
     async def fetch_gitcode(self):
         headers = {"Authorization": self.token} if self.token else {}
         url = f"https://gitcode.com/api/v5/repos/{self.repo}/releases/latest"
+        import httpx  # [PERF] 延迟导入
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
@@ -941,6 +949,8 @@ class AsyncUpdateChecker(QThread):
                 return None
 
     def run(self):
+        import asyncio  # [PERF] 延迟导入：仅更新检查路径需要
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 

@@ -434,6 +434,15 @@ class GatewayEngine(QObject, BaseEngine):
         # 添加用户消息
         session.add_user_message(content=text)
 
+        # 引擎可能已被窗口关闭时 cleanup（多窗口共享全局单例，cleanup 会置 None），
+        # 此时消息仍可能经 PlatformManager 残留回调路由过来 → 直接崩溃 None 调用。
+        if self._get_model_config is None:
+            logger.error("[GatewayEngine] 引擎已停用（窗口关闭后 cleanup），拒绝处理消息")
+            cb = callbacks.get("error")
+            if cb:
+                cb("Gateway 引擎已停用，请重新打开应用窗口后重试。")
+            return False
+
         # 获取模型配置
         llm_config = self._get_model_config()
         if not llm_config:
@@ -557,6 +566,7 @@ class GatewayEngine(QObject, BaseEngine):
         agent_name = session.metadata.get("agent") or self._current_agent or "plan"
         messages = []
 
+        system_prompt = ""
         if self._agent_manager:
             system_prompt = self._agent_manager.get_agent_system_prompt(agent_name)
             if system_prompt:
@@ -631,7 +641,7 @@ class GatewayEngine(QObject, BaseEngine):
         try:
             msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return (datetime.now() - msg_time).total_seconds() < threshold_seconds
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return False
 
     def _save_to_store(self, session: ChatSession) -> None:

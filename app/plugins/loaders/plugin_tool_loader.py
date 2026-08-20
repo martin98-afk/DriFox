@@ -352,13 +352,16 @@ def unload_plugin_tools(
 
 
 class PluginToolWatcher:
-    """插件工具热重载 watcher：轮询签名检测变更，变更时全量重扫（幂等）。
+    """插件工具热重载 watcher：全量重扫 + 单插件精准卸载/重载。
 
     用法：:
         watcher = PluginToolWatcher()
-        watcher.start()          # 后台线程轮询
-        watcher.stop()
-        watcher.scan_now()       # 手动触发一次全量重扫
+        watcher.scan_now()          # 全量重扫（启动对齐 / 插件启停）
+        watcher.unload_plugin("x")  # 精准卸载单插件（删除路径，不波及他插件）
+        watcher.reload_plugin("x")  # 精准重载单插件（安装/更新路径，不波及他插件）
+
+    单插件精准路径的跨根覆盖恢复：注销目标插件工具后，对更低等级根重扫
+    一次，被其覆盖的同名工具按 root_kind 优先级自然恢复（见 _restore_lower_roots）。
     """
 
     def __init__(self, registry: Optional[ToolRegistry] = None, roots: Optional[List[Path]] = None):
@@ -404,6 +407,105 @@ class PluginToolWatcher:
                 except Exception as e:
                     logger.warning(f"[PluginToolWatcher] 全量重扫失败: {e}")
                     # 重扫失败：registry 可能已被部分修改，下次 scan 会重新注销+重扫
+
+    def _root_of_plugin(self, plugin_name: str) -> Optional[Path]:
+        """从 root_tracker 反推某插件名所属扫描根（磁盘目录可能已删除）"""
+        for name in self._loaded.get(plugin_name, set()):
+            r = self._root_tracker.get(name)
+            if r is not None:
+                return Path(r)
+        return None
+
+    def _restore_lower_roots(self, removed_rank: int) -> None:
+        """跨根覆盖恢复：重扫比目标根更低等级的所有根（被覆盖方），补注册被覆盖工具
+
+        仅重扫低等级根（如 user 插件卸载后重扫 system 根），其模块的 register
+        经 _PluginRegistryProxy 的「先注册者优先」保护：已存在的他插件工具
+        不被覆盖，仅补注册因目标插件注销而缺失的同名工具（跨根覆盖恢复）。
+        """
+        for root in self._roots:
+            if _ROOT_KIND_PRIORITY.get(_root_kind(root), 0) >= removed_rank:
+                continue
+            low_loaded = load_plugin_tools(
+                registry=self._registry,
+                plugin_roots=[Path(root)],
+                root_tracker=self._root_tracker,
+            )
+            for pname, names in low_loaded.items():
+                self._loaded.setdefault(pname, set()).update(names)
+
+    def unload_plugin(self, plugin_name: str) -> None:
+        """精准卸载单个插件工具（删除路径专用，不注销他插件工具）
+
+        与 scan_now 的区别：scan_now 先注销 _loaded 全部插件再全量重注册，
+        会波及 system 等无关插件（造成全量卸载+重载抖动）。本方法只注销
+        目标插件名下的工具，并从 _loaded 移除其记录。
+
+        跨根覆盖恢复：若被删插件位于高等级根（如 user 覆盖 system 同名工具），
+        仅精准注销会使被覆盖的低级根工具永久消失。故在注销后，对**所有更低
+        等级根**重扫一次（load_plugin_tools 内部按 root_kind 优先级恢复同名工具，
+        已存在的他插件工具被「先注册者优先」保护跳过，无副作用）。
+        """
+        with self._scan_lock:
+            with self._registry.notify_batch():
+                tool_names = set(self._loaded.get(plugin_name, set()))
+                # 兜底：_loaded 未跟踪但 registry 残留的同源工具（防御状态漂移）
+                for reg in self._registry.list():
+                    if reg.source == f"plugin:{plugin_name}":
+                        tool_names.add(reg.name)
+                # 在 unload 前（root_tracker 尚未被 pop）捕获被删插件所属根
+                removed_root = self._root_of_plugin(plugin_name)
+                removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+                if tool_names:
+                    unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
+                self._loaded.pop(plugin_name, None)
+                # 跨根覆盖恢复：仅重扫比被删根更低等级的根（被覆盖方）
+                self._restore_lower_roots(removed_rank)
+
+    def reload_plugin(self, plugin_name: str) -> None:
+        """精准重载单个插件工具（安装/更新路径专用，不注销他插件工具）
+
+        语义与 scan_now 的区别：只处理目标插件——注销其旧工具 → 恢复被其
+        覆盖的低等级根同名工具 → 重新注册该插件当前模块。不波及 system 等
+        其他插件（避免「装/改一个插件全量卸载+重载全部工具」的抖动）。
+
+        跨根覆盖恢复：与 unload_plugin 相同，注销后对更低等级根重扫一次，
+        被覆盖工具按 root_kind 优先级自然恢复；随后重注册本插件（高等级根）
+        再次按优先级覆盖 → 最终状态与全量重扫一致。
+        """
+        with self._scan_lock:
+            with self._registry.notify_batch():
+                tool_names = set(self._loaded.get(plugin_name, set()))
+                # 兜底：_loaded 未跟踪但 registry 残留的同源工具（防御状态漂移）
+                for reg in self._registry.list():
+                    if reg.source == f"plugin:{plugin_name}":
+                        tool_names.add(reg.name)
+                # 在 unload 前（root_tracker 尚未被 pop）捕获目标插件所属根
+                removed_root = self._root_of_plugin(plugin_name)
+                removed_rank = _ROOT_KIND_PRIORITY.get(_root_kind(removed_root), 0)
+                if tool_names:
+                    unload_plugin_tools(plugin_name, tool_names, self._registry, root_tracker=self._root_tracker)
+                self._loaded.pop(plugin_name, None)
+                # 跨根覆盖恢复：仅重扫比目标根更低等级的根（被覆盖方）
+                self._restore_lower_roots(removed_rank)
+                # 重注册该插件当前模块（enabled 过滤与 load_plugin_tools 一致）
+                if not _is_plugin_enabled(plugin_name):
+                    logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                    return
+                new_names: Set[str] = set()
+                for root in self._roots:
+                    root_path = Path(root)
+                    for pname, py in _iter_tool_modules(root_path):
+                        if pname != plugin_name:
+                            continue
+                        try:
+                            new_names.update(
+                                _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
+                            )
+                        except Exception as e:
+                            logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
+                if new_names:
+                    self._loaded[plugin_name] = new_names
 
     def on_tools_reloaded(self, listener: Callable[[], None]) -> None:
         """注册热重载完成监听（后台线程回调；仅 watcher 轮询检测到变更时触发）"""

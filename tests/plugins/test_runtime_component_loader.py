@@ -226,3 +226,155 @@ def test_scan_lock_concurrent(tmp_path, plugin_enabled):
     assert "minimal" in policies
     assert len(policies) == 1, f"并发 scan 后注册表应仅一份，实际 {len(policies)} 条"
     restore()
+
+
+def test_unload_plugin_precise_no_other_plugin_touched(tmp_path, monkeypatch, plugin_enabled):
+    """unload_plugin 精准卸载单插件组件，不波及他插件（含跨根覆盖恢复）"""
+    from app.plugins.loaders import runtime_component_loader as rcl
+    from app.plugins.loaders.runtime_component_loader import RuntimeComponentLoader
+    from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+    system_root = tmp_path / "system"
+    user_root = tmp_path / "user"
+    # system 插件：shared（基线）+ other（无关）
+    for name in ("shared-plugin", "other-plugin"):
+        (system_root / name / "loop_policies").mkdir(parents=True)
+    (system_root / "shared-plugin" / "loop_policies" / "shared.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.loop_policy import LoopDecision\n\n"
+        "class S:\n"
+        '    id = "shared"\n'
+        '    tag = "system"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "def register(registry):\n"
+        "    registry.register(S())\n",
+        encoding="utf-8",
+    )
+    (system_root / "other-plugin" / "loop_policies" / "other.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.loop_policy import LoopDecision\n\n"
+        "class O:\n"
+        '    id = "other"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "def register(registry):\n"
+        "    registry.register(O())\n",
+        encoding="utf-8",
+    )
+    # user 插件覆盖 shared
+    (user_root / "shared-plugin" / "loop_policies").mkdir(parents=True)
+    (user_root / "shared-plugin" / "loop_policies" / "shared.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.loop_policy import LoopDecision\n\n"
+        "class U:\n"
+        '    id = "shared"\n'
+        '    tag = "user"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "def register(registry):\n"
+        "    registry.register(U())\n",
+        encoding="utf-8",
+    )
+
+    kind_map = {system_root: "system", user_root: "user"}
+
+    def fake_root_kind(root):
+        return kind_map.get(root, "system")
+
+    monkeypatch.setattr(rcl, "_root_kind", fake_root_kind)
+    restore1 = plugin_enabled("shared-plugin")
+    restore2 = plugin_enabled("other-plugin")
+
+    reg = LoopPolicyRegistry()
+    loader = RuntimeComponentLoader(
+        comp_dir="loop_policies",
+        registry=reg,
+        register_attr="register",
+        unregister_attr="unregister_source",
+    )
+    loader.scan_roots([system_root, user_root])
+    assert reg.policies()["shared"].tag == "user", "user 应覆盖 system"
+
+    # 删除 user 插件目录 → 精准卸载
+    import shutil
+
+    shutil.rmtree(user_root / "shared-plugin", ignore_errors=True)
+    loader.unload_plugin("shared-plugin")
+
+    # 1) shared 恢复为 system（跨根覆盖恢复）
+    assert reg.policies()["shared"].tag == "system", f"system 应恢复，实际 {reg.policies()['shared'].tag}"
+    # 2) 无关插件 other 未被波及
+    assert "other" in reg.policies(), "无关插件 other 不应被卸载"
+    restore1()
+    restore2()
+
+
+def test_reload_plugin_precise_no_other_plugin_touched(tmp_path, monkeypatch, plugin_enabled):
+    """reload_plugin 精准重载单插件（更新路径），不波及他插件"""
+    from app.plugins.loaders import runtime_component_loader as rcl
+    from app.plugins.loaders.runtime_component_loader import RuntimeComponentLoader
+    from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+    plugin_dir = tmp_path / "demo-plugin"
+    (plugin_dir / "loop_policies").mkdir(parents=True)
+    (plugin_dir / "loop_policies" / "minimal.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.loop_policy import LoopDecision\n\n"
+        "class MinimalLoopPolicy:\n"
+        '    id = "minimal"\n'
+        '    tag = "v1"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "def register(registry):\n"
+        "    registry.register(MinimalLoopPolicy())\n",
+        encoding="utf-8",
+    )
+    restore = plugin_enabled("demo-plugin")
+
+    reg = LoopPolicyRegistry()
+    loader = RuntimeComponentLoader(
+        comp_dir="loop_policies",
+        registry=reg,
+        register_attr="register",
+        unregister_attr="unregister_source",
+    )
+    loader.scan_roots([tmp_path])
+    assert reg.policies()["minimal"].tag == "v1"
+
+    # 热更新：tag 改 v2 + 新增 second 实现
+    (plugin_dir / "loop_policies" / "minimal.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.loop_policy import LoopDecision\n\n"
+        "class MinimalLoopPolicy:\n"
+        '    id = "minimal"\n'
+        '    tag = "v2"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "class SecondLoopPolicy:\n"
+        '    id = "second"\n\n'
+        "    def should_continue(self, state):\n"
+        "        return LoopDecision.STOP\n\n"
+        "    def max_rounds(self, llm_config):\n"
+        "        return 1\n\n"
+        "def register(registry):\n"
+        "    registry.register(MinimalLoopPolicy())\n"
+        "    registry.register(SecondLoopPolicy())\n",
+        encoding="utf-8",
+    )
+    loader.reload_plugin("demo-plugin")
+
+    # 新代码生效 + 新增实现注册
+    assert reg.policies()["minimal"].tag == "v2", "热更新后 tag 应生效"
+    assert "second" in reg.policies(), "新增实现应注册"
+    restore()

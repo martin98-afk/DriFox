@@ -20,8 +20,8 @@ from app.utils.utils import get_app_data_dir
 T = TypeVar("T")
 
 
-class Platform(Enum):
-    """支持的通讯平台"""
+class Platform(str, Enum):
+    """支持的通讯平台（str-mixin：第三方平台 id 可不经枚举直接以 str 互通）。"""
     WECOM = "wecom"
     DINGTALK = "dingtalk"
     TELEGRAM = "telegram"
@@ -29,6 +29,17 @@ class Platform(Enum):
     WHATSAPP = "whatsapp"
     FEISHU = "feishu"
     SLACK = "slack"
+
+
+def _platform_key(platform) -> str:
+    """统一平台入参为字符串 id（兼容 Platform 枚举与第三方 str 直传）。
+
+    Phase E 引入：manager / config 走 registry 查表时，第三方平台 id 不一定在
+    Platform 枚举闭集内，故统一以 .value / str(p) 转 str 作为 registry.get 的 key。
+    """
+    if isinstance(platform, Platform):
+        return platform.value
+    return str(platform)
 
 
 class MessageType(Enum):

@@ -5,7 +5,7 @@
 websearch / webfetch 完全自包含：httpx/html2text/bs4 直接实现，
 API key 优先读环境变量，未设置时使用插件内置默认值（主程序不再注入）。
 """
-import os
+
 import re
 from typing import Optional
 
@@ -37,78 +37,42 @@ def _get_client() -> httpx.Client:
     return _http_client
 
 
-# 插件内置默认 key（用户配置值迁入插件；环境变量优先，未设置时回退此处）
-_DEFAULT_TAVILY_KEY = "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"
-_DEFAULT_TINYFISH_KEY = "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU"
-
-# 插件自包含配置：用户数据目录 tools/web_search_keys.json（主程序零改动，
-# 插件自己读写自己的配置，不占用主程序配置存储空间）
-_CONFIG_FILENAME = "web_search_keys.json"
+# ── E1 插件配置契约：schema 声明在 plugin.json（config_schema），存储走 PluginConfigStore ──
 
 
-def _config_path() -> "Path":
-    """插件配置文件路径：<app_data_dir>/tools/web_search_keys.json"""
+def _ensure_migrated() -> None:
+    """旧 <app_data>/tools/web_search_keys.json 一次性迁移到统一存储（幂等）。
+
+    旧文件存在且新存储为空 → 迁移并改名 .bak；否则静默跳过。
+    """
     from pathlib import Path
 
+    from app.plugins.managers.plugin_config_store import PluginConfigStore
     from app.utils.utils import get_app_data_dir
 
-    return Path(get_app_data_dir()) / "tools" / _CONFIG_FILENAME
-
-
-def get_api_key_config() -> dict:
-    """读取插件配置（两个搜索服务 key，空串=未注册）"""
-    try:
-        path = _config_path()
-        if path.exists():
-            import json
-
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return {
-                "tavily_api_key": str(data.get("tavily_api_key", "") or ""),
-                "tinyfish_api_key": str(data.get("tinyfish_api_key", "") or ""),
-            }
-    except Exception as e:
-        logger.warning(f"[WebTools] 配置读取失败: {e}")
-    return {"tavily_api_key": "", "tinyfish_api_key": ""}
-
-
-def set_api_key_config(tavily_api_key: str = "", tinyfish_api_key: str = "") -> bool:
-    """注册插件配置：持久化两个搜索服务 key 到用户数据目录（幂等覆盖）"""
-    try:
-        import json
-
-        path = _config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "tavily_api_key": tavily_api_key or "",
-            "tinyfish_api_key": tinyfish_api_key or "",
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True
-    except Exception as e:
-        logger.warning(f"[WebTools] 配置写入失败: {e}")
-        return False
+    legacy = Path(get_app_data_dir()) / "tools" / "web_search_keys.json"
+    if not legacy.exists():
+        return
+    PluginConfigStore().migrate(
+        "system",
+        legacy,
+        key_map={"tavily_api_key": "tavily_api_key", "tinyfish_api_key": "tinyfish_api_key"},
+    )
 
 
 def _api_key(tool_ctx, name: str) -> str:
-    """读取搜索服务 API key：环境变量 → 插件配置 → 插件内置默认值
+    """读取搜索服务 API key：环境变量 → 插件配置 → schema 默认（E1 三级链）
 
     - 环境变量：TAVILY_API_KEY / TINYFISH_API_KEY（最高优先级）
-    - 插件配置：get_api_key_config()（set_api_key_config 注册，用户数据目录持久化）
-    - 默认常量：_DEFAULT_TAVILY_KEY / _DEFAULT_TINYFISH_KEY（内置兜底）
+    - 插件配置：PluginConfigStore（plugin.json config_schema 声明，设置面板自动渲染）
+    - 默认值：plugin.json config_schema.default（内置兜底）
     """
-    env_key = os.environ.get(name)
-    if env_key:
-        return env_key
-    cfg = get_api_key_config()
-    saved = (
-        cfg["tavily_api_key"]
-        if name == "TAVILY_API_KEY"
-        else cfg["tinyfish_api_key"]
-    )
-    if saved:
-        return saved
-    return _DEFAULT_TAVILY_KEY if name == "TAVILY_API_KEY" else _DEFAULT_TINYFISH_KEY
+    _ensure_migrated()
+    from app.plugins.managers.plugin_config_store import PluginConfigStore
+
+    key = "tavily_api_key" if name == "TAVILY_API_KEY" else "tinyfish_api_key"
+    val = PluginConfigStore().get("system", key)
+    return str(val or "")
 
 
 _WEBSEARCH_SCHEMA = {
@@ -269,18 +233,28 @@ def _preview_webfetch(tool_args: dict) -> str:
 
 def register(registry):
     registry.register(
-        "websearch", _WEBSEARCH_SCHEMA, impl=_websearch_impl,
-        danger="safe", icon="websearch", cn_name="网页搜索",
-        group=GROUP_NETWORK, description="网络关键词搜索",
+        "websearch",
+        _WEBSEARCH_SCHEMA,
+        impl=_websearch_impl,
+        danger="safe",
+        icon="websearch",
+        cn_name="网页搜索",
+        group=GROUP_NETWORK,
+        description="网络关键词搜索",
         aliases=["WebSearch", "web_search", "Search", "SearchWeb"],
         preview=_preview_websearch,
         summarize=make_summarize_from_preview(_preview_websearch),
         metadata={"permission_arg": "query"},
     )
     registry.register(
-        "webfetch", _WEBFETCH_SCHEMA, impl=_webfetch_impl,
-        danger="safe", icon="websearch", cn_name="抓取网页",
-        group=GROUP_NETWORK, description="获取网页内容",
+        "webfetch",
+        _WEBFETCH_SCHEMA,
+        impl=_webfetch_impl,
+        danger="safe",
+        icon="websearch",
+        cn_name="抓取网页",
+        group=GROUP_NETWORK,
+        description="获取网页内容",
         aliases=["WebFetch", "Fetch", "FetchPage", "FetchUrl"],
         preview=_preview_webfetch,
         summarize=make_summarize_from_preview(_preview_webfetch),

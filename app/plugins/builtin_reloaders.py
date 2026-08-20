@@ -37,6 +37,7 @@ RELOADED_COMPONENTS = {
     "loop_policies",
     "storages",
     "serializers",
+    "gateways",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -145,30 +146,45 @@ def _reload_ui(ctx: ReloadContext) -> Any:
 
 
 def _reload_tools(ctx: ReloadContext) -> Any:
-    """tools 分支：轮询 watcher 退役后的正式路径 — 全量重扫（幂等，含 enabled 过滤）
+    """tools 分支：轮询 watcher 退役后的正式路径 — 精准卸载/重载单插件
 
-    删除路径无意义（PluginManager 已移除，watcher.scan_now 重读自然不包含该插件）。
+    - 删除路径(ctx.plugin is None)：精准卸载该插件工具（unload_plugin），
+      不波及 system 等其他插件；跨根覆盖由 watcher 内部恢复。不再走
+      scan_now 全量重扫，避免「删一个插件卸载并重载全部工具」的抖动。
+    - 更新/新增路径(ctx.plugin 非 None)：reload_plugin 精准重载该插件
+      （注销旧工具 → 恢复被覆盖 → 重注册当前模块，含 enabled 过滤），
+      同样不波及他插件；完成后通知监听。
     """
     from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
     watcher = ensure_plugin_tool_watcher()
-    if watcher is not None:
-        watcher.scan_now()
-        if ctx.plugin is not None:
-            watcher._notify_reloaded()
-        return True
-    return False
+    if watcher is None:
+        return False
+    if ctx.plugin is None:
+        watcher.unload_plugin(ctx.plugin_name)
+    else:
+        watcher.reload_plugin(ctx.plugin_name)
+        watcher._notify_reloaded()
+    return True
 
 
 def _reload_providers(ctx: ReloadContext) -> Any:
-    """providers 分支：同 tools，全量重扫（幂等，user 覆盖 system 语义在 loader 内）"""
+    """providers 分支：精准卸载/重载单插件（不触发全量重扫，幂等）
+
+    - 删除路径(ctx.plugin is None)：unload_plugin 只注销该插件服务商，
+      跨根覆盖由 watcher 内部恢复（重扫低等级根补注册）。
+    - 更新路径(ctx.plugin 非 None)：reload_plugin 注销旧 + 恢复覆盖 + 重注册。
+    """
     from app.plugins.loaders.provider_loader import ensure_provider_watcher
 
     watcher = ensure_provider_watcher()
-    if watcher is not None:
-        watcher.scan_now()
-        return True
-    return False
+    if watcher is None:
+        return False
+    if ctx.plugin is None:
+        watcher.unload_plugin(ctx.plugin_name)
+    else:
+        watcher.reload_plugin(ctx.plugin_name)
+    return True
 
 
 def _reload_team_templates(ctx: ReloadContext) -> Any:
@@ -178,13 +194,16 @@ def _reload_team_templates(ctx: ReloadContext) -> Any:
 
 
 def _reload_model_adapters(ctx: ReloadContext) -> Any:
-    """model_adapters 分支：全量重扫运行时组件（幂等，删除路径靠重扫自然清理）"""
+    """model_adapters 分支：精准卸载/重载单插件（删除路径靠精准注销，不触发全量重扫）"""
     try:
         from app.plugins.loaders.runtime_component_loader import ensure_model_adapter_watcher
 
         watcher = ensure_model_adapter_watcher()
         if watcher is not None:
-            watcher.scan_now()
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
             return True
     except Exception as e:
         logger.warning(f"[builtin_reloaders] model_adapters 重载失败: {e}")
@@ -192,13 +211,16 @@ def _reload_model_adapters(ctx: ReloadContext) -> Any:
 
 
 def _reload_loop_policies(ctx: ReloadContext) -> Any:
-    """loop_policies 分支：同 model_adapters"""
+    """loop_policies 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
         from app.plugins.loaders.runtime_component_loader import ensure_loop_policy_watcher
 
         watcher = ensure_loop_policy_watcher()
         if watcher is not None:
-            watcher.scan_now()
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
             return True
     except Exception as e:
         logger.warning(f"[builtin_reloaders] loop_policies 重载失败: {e}")
@@ -206,13 +228,16 @@ def _reload_loop_policies(ctx: ReloadContext) -> Any:
 
 
 def _reload_storages(ctx: ReloadContext) -> Any:
-    """storages 分支：同 model_adapters"""
+    """storages 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
         from app.plugins.loaders.runtime_component_loader import ensure_storage_watcher
 
         watcher = ensure_storage_watcher()
         if watcher is not None:
-            watcher.scan_now()
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
             return True
     except Exception as e:
         logger.warning(f"[builtin_reloaders] storages 重载失败: {e}")
@@ -220,16 +245,86 @@ def _reload_storages(ctx: ReloadContext) -> Any:
 
 
 def _reload_serializers(ctx: ReloadContext) -> Any:
-    """serializers 分支：同 model_adapters"""
+    """serializers 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
         from app.plugins.loaders.runtime_component_loader import ensure_serializer_watcher
 
         watcher = ensure_serializer_watcher()
         if watcher is not None:
-            watcher.scan_now()
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
             return True
     except Exception as e:
         logger.warning(f"[builtin_reloaders] serializers 重载失败: {e}")
+    return False
+
+
+def _purge_gateway_plugin_modules(plugin_name: str) -> None:
+    """从 sys.modules 摘除 gateway runtime loader 加载的模块及其依赖引用
+
+    runtime loader 以 `drifox_rt_gateways_{plugin_name}_{py.stem}` 命名并常驻
+    sys.modules。卸载/热更新若不清理，旧模块（及其 import 的第三方 SDK 等依赖）
+    会残留在进程中，导致依赖无法去除、热更新代码不生效。
+    """
+    import gc
+    import sys
+
+    prefix = f"drifox_rt_gateways_{plugin_name}"
+    removed = [
+        m for m in list(sys.modules.keys()) if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+    ]
+    for m in removed:
+        sys.modules.pop(m, None)
+    if removed:
+        import importlib
+
+        importlib.invalidate_caches()
+        gc.collect()
+        logger.debug(f"[builtin_reloaders] 已清理 gateway 模块 {len(removed)} 个: {plugin_name}")
+
+
+def _reload_gateways(ctx: ReloadContext) -> Any:
+    """gateways 分支
+
+    正确顺序（解决卸载依赖残留 + 热更新不生效）：
+    1. 关闭该插件的 gateway 平台（stop 连接 + 摘除 manager._adapters 实例）
+    2. 清理 sys.modules 中 runtime loader 加载的模块引用
+    3. 删除路径(ctx.plugin is None)：unload_plugin 精准注销该插件 gateway 组件
+       更新路径(ctx.plugin 非 None)：reload_plugin 注销旧 + 恢复覆盖 + 重注册最新 def
+       （均不触发全量重扫，不波及他插件 gateway）
+    4. 更新路径：用新 def 重建 adapter（热更新生效）
+    """
+    try:
+        from app.gateway.manager import get_platform_manager
+        from app.plugins.loaders.runtime_component_loader import ensure_gateway_watcher
+
+        # 1. 先关闭该插件的 gateway（卸载/热更新都应先断连）
+        #    wait=True：等待 stop 协程完成（含 ws 线程 join）再走后续 purge/rebuild，
+        #    否则非阻塞 stop 与 rebuild 的 start 并发交错 → 同插件双连接 +
+        #    旧 ws 线程持 deps .pyd 引用导致卸载文件占用（历史 bug）
+        mgr = get_platform_manager()
+        if mgr is not None:
+            mgr.stop_plugin_platforms(ctx.plugin_name, wait=True)
+
+        # 2. 清理 module 引用（彻底去除依赖）
+        _purge_gateway_plugin_modules(ctx.plugin_name)
+
+        # 3. 精准注销/重载：删除路径 unload_plugin；更新路径 reload_plugin
+        watcher = ensure_gateway_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+
+        # 4. 更新路径：用新 def 重建 adapter（热更新生效）
+        if ctx.plugin is not None and mgr is not None:
+            mgr.rebuild_plugin_platforms(ctx.plugin_name, restart_if_running=True)
+        return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] gateways 重载失败: {e}")
     return False
 
 
@@ -263,6 +358,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "loop_policies": _reload_loop_policies,
         "storages": _reload_storages,
         "serializers": _reload_serializers,
+        "gateways": _reload_gateways,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

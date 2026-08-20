@@ -511,6 +511,127 @@ def register(registry):
         assert r.source == "plugin:system", f"system 应恢复，实际: {r.source}"
         assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
 
+    def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
+        """场景 6b：unload_plugin 精准卸载单插件，不波及他插件
+
+        回归：此前 _reload_tools 删除路径调 scan_now 全量重扫，
+        会先注销全部插件工具再重注册——删一个插件却卸载并重载全部工具。
+        修复后 unload_plugin 只注销目标插件名下工具，且跨根覆盖由
+        低等级根重扫恢复（不注销他插件）。
+        """
+        import shutil
+
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+        # user 覆盖 read 生效
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        # 捕获删除前 user 插件工具集
+        pre_loaded = set(watcher._loaded.get("user-override-plug", set()))
+        assert pre_loaded, "watcher 应记录 user 插件工具"
+
+        # spy：记录所有被 unregister 的工具名
+        unregistered: list[str] = []
+        orig_unregister = reg.unregister
+
+        def _spy(name):
+            unregistered.append(name)
+            return orig_unregister(name)
+
+        monkeypatch.setattr(reg, "unregister", _spy)
+
+        # 删除 user 插件目录 → 精准卸载
+        shutil.rmtree(user_root / "user-override-plug", ignore_errors=True)
+        watcher.unload_plugin("user-override-plug")
+
+        # 1) 只注销了 user 插件名下工具（精准）
+        assert set(unregistered) == pre_loaded, f"应只注销 user 插件工具 {pre_loaded}，实际注销 {set(unregistered)}"
+        # 2) 他插件（system）工具未被注销——write 是独立 system 工具
+        assert "write" not in unregistered, "system 工具 write 不应被 unregister"
+        # 3) 跨根覆盖恢复：read 恢复为 system
+        r = reg.get("read")
+        assert r is not None and r.source == "plugin:system", f"system 应恢复，实际: {r.source if r else None}"
+        # 4) watcher._loaded 已移除该插件记录
+        assert "user-override-plug" not in watcher._loaded
+
+    def test_reload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
+        """场景 6c：reload_plugin 精准重载单插件（更新/安装路径），不波及他插件
+
+        回归：此前更新路径调 scan_now 全量重扫——装/改一个插件同样
+        卸载并重载全部工具。reload_plugin 只注销目标插件旧工具 →
+        恢复被覆盖的 system 同名工具 → 重注册目标插件当前模块。
+        """
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        pre_loaded = set(watcher._loaded.get("user-override-plug", set()))
+        assert pre_loaded, "watcher 应记录 user 插件工具"
+
+        # spy：记录所有被 unregister 的工具名
+        unregistered: list[str] = []
+        orig_unregister = reg.unregister
+
+        def _spy(name):
+            unregistered.append(name)
+            return orig_unregister(name)
+
+        monkeypatch.setattr(reg, "unregister", _spy)
+
+        # 模拟热更新：read 改 cn_name + 新增 readme 工具
+        (user_root / "user-override-plug" / "tools" / "override.py").write_text(
+            """
+def register(registry):
+    registry.register(
+        "read",
+        {"type": "function", "function": {"name": "read"}},
+        impl=lambda **kw: "USER-VERSION-2",
+        danger="safe",
+        cn_name="读取（用户覆盖 2）",
+        description="由用户插件覆盖",
+    )
+    registry.register(
+        "readme",
+        {"type": "function", "function": {"name": "readme"}},
+        impl=lambda **kw: "README",
+        danger="safe",
+        cn_name="说明（用户）",
+    )
+""",
+            encoding="utf-8",
+        )
+        watcher.reload_plugin("user-override-plug")
+
+        # 1) 只注销了 user 插件名下旧工具（精准）
+        assert set(unregistered) == pre_loaded, f"应只注销 user 插件旧工具 {pre_loaded}，实际注销 {set(unregistered)}"
+        # 2) 他插件（system）工具未被注销——write 是独立 system 工具
+        assert "write" not in unregistered, "system 工具 write 不应被 unregister"
+        # 3) read 仍由 user 覆盖且内容更新（跨根覆盖保持 + 新代码生效）
+        r = reg.get("read")
+        assert r is not None and r.source == "plugin:user-override-plug", (
+            f"read 应仍由 user 覆盖，实际: {r.source if r else None}"
+        )
+        assert r.cn_name == "读取（用户覆盖 2）", "热更新后的 cn_name 应生效"
+        # 4) 新增工具已注册
+        r2 = reg.get("readme")
+        assert r2 is not None and r2.source == "plugin:user-override-plug", "新工具 readme 应注册"
+        # 5) watcher._loaded 更新为新工具集
+        assert watcher._loaded.get("user-override-plug") == {"read", "readme"}, (
+            f"_loaded 应更新为新工具集，实际: {watcher._loaded.get('user-override-plug')}"
+        )
+        # 6) 再触发一次全量重扫：状态应与 reload_plugin 结果一致（无漂移）
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+        assert reg.get("readme").source == "plugin:user-override-plug"
+
     def test_disabling_user_plugin_restores_system(self, tmp_path, monkeypatch):
         """场景 7：覆盖 system 的用户插件被禁用 → 系统插件恢复
 
@@ -1265,24 +1386,69 @@ class TestWebToolsEnvKey:
         spec.loader.exec_module(module)
         return module
 
+    @staticmethod
+    def _schema_defaults():
+        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）"""
+        import json
+
+        manifest = json.loads(
+            (Path(__file__).parent.parent / "plugins" / "system" / ".drifox-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return {f["key"]: f["default"] for f in manifest["config_schema"]["fields"]}
+
     def test_api_key_reads_env_only(self, monkeypatch):
         mod = self._load_web_tools()
-        # 插件内置默认 key 非空(用户配置值已迁入插件)
-        assert mod._DEFAULT_TAVILY_KEY
-        assert mod._DEFAULT_TINYFISH_KEY
-        monkeypatch.setenv("TAVILY_API_KEY", "env-test-key")
-        # 无 tool_ctx / 无 env.api_keys → 仍能读到(os.environ 优先)
-        assert mod._api_key({}, "TAVILY_API_KEY") == "env-test-key"
-        assert mod._api_key(None, "TAVILY_API_KEY") == "env-test-key"
-        # 未设置环境变量 → 回退插件内置默认常量(非空)
-        monkeypatch.delenv("TAVILY_API_KEY")
-        assert mod._api_key({}, "TAVILY_API_KEY") == mod._DEFAULT_TAVILY_KEY
-        # TINYFISH 同样:环境变量优先
-        monkeypatch.setenv("TINYFISH_API_KEY", "tiny-test-key")
-        assert mod._api_key({}, "TINYFISH_API_KEY") == "tiny-test-key"
-        # TINYFISH 未设置 → 回退内置默认
-        monkeypatch.delenv("TINYFISH_API_KEY")
-        assert mod._api_key({}, "TINYFISH_API_KEY") == mod._DEFAULT_TINYFISH_KEY
+        defaults = self._schema_defaults()
+        # 插件内置默认 key 非空(用户配置值由 schema 声明)
+        assert defaults["tavily_api_key"]
+        assert defaults["tinyfish_api_key"]
+        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）
+        from app.plugins.contracts.plugin_config import parse_config_schema
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        reg = PluginConfigRegistry.get_instance()
+        reg.register(
+            parse_config_schema(
+                "system",
+                {
+                    "title": "T",
+                    "fields": [
+                        {
+                            "key": "tavily_api_key",
+                            "label": "T",
+                            "type": "password",
+                            "default": defaults["tavily_api_key"],
+                            "env": "TAVILY_API_KEY",
+                        },
+                        {
+                            "key": "tinyfish_api_key",
+                            "label": "T",
+                            "type": "password",
+                            "default": defaults["tinyfish_api_key"],
+                            "env": "TINYFISH_API_KEY",
+                        },
+                    ],
+                },
+            )
+        )
+        try:
+            monkeypatch.setenv("TAVILY_API_KEY", "env-test-key")
+            # 无 tool_ctx / 无 env.api_keys → 仍能读到(os.environ 优先)
+            assert mod._api_key({}, "TAVILY_API_KEY") == "env-test-key"
+            assert mod._api_key(None, "TAVILY_API_KEY") == "env-test-key"
+            # 未设置环境变量 → 回退 schema default(非空)
+            monkeypatch.delenv("TAVILY_API_KEY")
+            assert mod._api_key({}, "TAVILY_API_KEY") == defaults["tavily_api_key"]
+            # TINYFISH 同样:环境变量优先
+            monkeypatch.setenv("TINYFISH_API_KEY", "tiny-test-key")
+            assert mod._api_key({}, "TINYFISH_API_KEY") == "tiny-test-key"
+            # TINYFISH 未设置 → 回退 schema default
+            monkeypatch.delenv("TINYFISH_API_KEY")
+            assert mod._api_key({}, "TINYFISH_API_KEY") == defaults["tinyfish_api_key"]
+        finally:
+            reg.unregister_plugin("system")
 
 
 class TestSelfContained:

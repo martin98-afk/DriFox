@@ -55,6 +55,16 @@ git push origin develop
 > - **icon 自包含**：图标放 `<插件>/tools/icons/*.svg`（深色）+ `tools/icons_light/*.svg`
 >   （浅色），渲染按主题选择（浅色优先 icons_light，缺省回退深色/qrc），
 >   以 data URI 加载
+>
+> **插件配置契约**（E1）：插件在 `.drifox-plugin/plugin.json` 声明 `config_schema`
+> （title + fields[{key,label,type∈text|password|bool,default,env,placeholder,description}]），
+> 主程序自动提供：统一存储 `<app_data_dir>/plugins/<plugin>/config.json`
+> （读取三级链：环境变量→存储值→默认值）、设置面板插件分区自动配置卡
+> （PluginConfigCard 声明式渲染，经 register_settings_card 扩展点注入）。
+> 插件代码内读取：`PluginConfigStore().get(plugin_name, key)`。
+> 需要动态默认值/复杂 UI 的插件仍可手写 Phase D 设置卡（两者不冲突，同 plugin
+> 可并存：自动卡 card_id 固定为 `<plugin>-config`）。
+>
 > registry 为单一数据源，驱动 LLM schema、渲染图标/中文名、权限卡片分组、
 > ToolNameMapper 别名。第三方插件同理放在 `plugins/<name>/tools/*.py`，
 > 文件增删改自动热生效。
@@ -78,6 +88,32 @@ git push origin develop
 > （Phase C 已切到 `StorageRegistry.get_active()`，引擎提供 SessionStore 兼容视图）获取
 > 活跃引擎，能力用 `isinstance` 探测（SessionTitleCapability / SessionCountsCapability /
 > InputHistoryCapability）。
+>
+> **Gateway 平台插件**（Phase E）：插件目录放置 `gateways/<platform>.py`，
+> 暴露 `register(registry)`，注册 `GatewayPlatformDef`（platform_id / display_name /
+> adapter_factory / check_requirements / config_builder / config_writer /
+> build_config_values / validate_config / ui_order / icon_hint / source）。
+> 主程序 `PlatformManager._load_adapters`、`GatewayConfigHelper`（4 方法）、
+> Gateway 设置卡全部查 `GatewayPlatformRegistry.get_instance()`，零平台 if 分支。
+>
+> **内置 6 平台已迁至社区仓** `drifox-plugins2`（非主仓 `plugins/system/`）：
+> wecom / dingtalk / telegram / discord / feishu / slack 各自的
+> `gateway-<id>/gateways/<id>.py` 实现 Adapter + register，配置闭包读主程序
+> Settings（存量用户配置零迁移）。
+> 第三方平台在社区仓（或 user 根 `~/.drifox/plugins/`）新建 `gateway-<id>/` 即可，
+> `platform_id` 为任意 `str`（`Platform` 已 str-mixin 化 + `_platform_key` 统一归一），
+> 与内置 6 平台不冲突。
+>
+> **配置走 E1 契约**：第三方平台在 `.drifox-plugin/plugin.json` 声明
+> `config_schema`，主程序自动渲染设置卡 + `PluginConfigStore` 统一存储
+> （不依赖主程序 Settings，与内置 6 平台闭包桥接 Settings 区分）。
+> def.config_builder 经 `PluginConfigStore().get(plugin_name, key)` 读取用户配置，
+> 三级链：环境变量 → 存储值 → schema 默认。
+>
+> **SDK 自包含**（deps 注入纪律）：平台 SDK（含传递依赖）vendor 到
+> `<插件>/deps/`，模块顶层用 `sys.path.insert(0, _deps)` 优先加载本插件 SDK，
+> **SDK 本体仍函数内延迟导入**（历史教训 2026-06-16：dingtalk_stream 顶层导入
+> 曾致 gateway 包加载失败）。详见 `docs/plugins/gateway-platforms.md`。
 >
 > **UI 插件扩展点约定**（Phase D，8 个扩展点全区域可插拔）：插件 `ui/__init__.py`
 > 导出 `register_ui(registry)`，可注册：

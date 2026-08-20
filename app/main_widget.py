@@ -139,23 +139,11 @@ from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+# [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
+# 延迟构建（_ensure_*）与运行时回调使用的卡片全部在使用点函数内导入，
+# 避免启动链拉起 mcp(~750ms)/requests/engines 等重依赖。
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
-)
-from app.widgets.cards.settings.history_card import (
-    HistoryCard,
-    get_message_preview,
-)
-from app.widgets.cards.settings.memory_card import (
-    TAB_KEY_DOCUMENTS,
-    MemoryCardContent,
-)
-from app.widgets.cards.settings.model_config_card import (
-    ModelConfigCard,
-)
-from app.widgets.cards.settings.model_selector_card import (
-    ModelSelectorCardContent,
-    _format_cost_number,
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent,
@@ -163,13 +151,7 @@ from app.widgets.cards.settings.project_selector_card import (
     extract_project_initials,
     get_project_color,
 )
-from app.widgets.cards.settings.hook_setting_card import HookEditCard
-from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
-from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
-from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
-from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
-from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
 )
@@ -1789,6 +1771,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._model_config_popup is not None:
             return
+        from app.widgets.cards.settings.model_config_card import ModelConfigCard
+
         self._ensure_model_config_card()
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
@@ -1821,6 +1805,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._model_selector_card_content is not None:
             return
+        from app.widgets.cards.settings.model_selector_card import ModelSelectorCardContent
+
         self._ensure_model_selector_card()
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
@@ -1883,6 +1869,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_history(self):
         """── ① 历史会话卡片 ──"""
         try:
+            from app.widgets.cards.settings.history_card import HistoryCard
+
             self._ensure_history_card()  # P0-1：框架惰性创建
             self._history_popup_card = HistoryCard()
             self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
@@ -1939,6 +1927,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_memory(self):
         """── ④ 记忆管理卡片 ──"""
         try:
+            from app.widgets.cards.settings.memory_card import MemoryCardContent
+
             self._ensure_memory_card()  # P0-1：框架惰性创建
             self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
             self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
@@ -7266,6 +7256,8 @@ class OpenAIChatToolWindow(ToolWindow):
         标题用 display_name（人类可读），图标按 provider_name 查找。
         """
         if self._current_provider_name and self._current_provider_name in self._valid_configs:
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
@@ -7284,6 +7276,8 @@ class OpenAIChatToolWindow(ToolWindow):
         provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
         """
         if provider_name:
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             self._model_selector_card.set_title_text(provider_name)
             # 用 display_name → config_id → provider_name 链反查，找图标
             config_id = getattr(self, "_display_to_config_id", {}).get(provider_name)
@@ -7294,6 +7288,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.set_icon_widget(icon_widget)
         elif self._current_provider_name and self._current_provider_name in self._valid_configs:
             # 滚到顶部时恢复显示当前选中的服务商
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
@@ -7423,6 +7419,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
+        from app.widgets.cards.settings.model_selector_card import _format_cost_number
+
         if not hasattr(self, "current_model_btn"):
             return
         # 当前服务商的显示名 + provider_name（用于找 icon）
@@ -7752,6 +7750,19 @@ class OpenAIChatToolWindow(ToolWindow):
             ring.clear()
             self._coding_plan_hidden = True
             return
+        # ★ 去重：同 payload 短窗口（5s）内不重复打 INFO 日志，避免上游多次
+        # request_coding_plan 缓存命中或 _update_balance_display 重复触发时刷屏。
+        # UI 仍每次都 ring.set_usage() 更新（视觉无影响，仅压制重复 INFO）。
+        sig = (str(rolling), str(weekly), str(monthly))
+        last = getattr(self, "_coding_plan_last_log", None)
+        if last is not None and time.monotonic() - last[0] < 5.0 and last[1] == sig:
+            ring.set_usage(
+                rolling=rolling,
+                weekly=weekly,
+                monthly=monthly,
+            )
+            self._coding_plan_hidden = False
+            return
         logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(
             rolling=rolling,
@@ -7759,6 +7770,7 @@ class OpenAIChatToolWindow(ToolWindow):
             monthly=monthly,
         )
         self._coding_plan_hidden = False
+        self._coding_plan_last_log = (time.monotonic(), sig)
         # 轮询由 UsageService 单例统一驱动（60s 周期），窗口不再自建定时器
 
     def _open_settings_popup(self):
@@ -8010,14 +8022,6 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc._on_mcp_servers_toggled()
-
-    def _on_gateway_toggled(self):
-        """（委托全局卡片控制器 GlobalCardController）"""
-        from app.widgets.cards.global_card_controller import get_global_card_controller
-
-        cc = get_global_card_controller()
-        if cc is not None:
-            cc._on_gateway_toggled()
 
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
@@ -8517,8 +8521,10 @@ class OpenAIChatToolWindow(ToolWindow):
         #    已有 pending 渲染（_create_new_session 的 schedule）→ 由槽位回调重建，
         #    避免双渲染 QWebEngineView。
         self._invalidate_welcome_card()
-        if self._displayed_session_id is None and self.isVisible() and not getattr(
-            self, "_welcome_render_pending", False
+        if (
+            self._displayed_session_id is None
+            and self.isVisible()
+            and not getattr(self, "_welcome_render_pending", False)
         ):
             self._show_initial_welcome()
         # 3. Tab 模式广播其他窗口
@@ -8657,6 +8663,8 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 # 缓存过期或不存在，读取文件
                 try:
+                    from app.widgets.cards.settings.history_card import get_message_preview
+
                     with open(fp, "r", encoding="utf-8") as f:
                         data = json.loads(f.read())
                     messages = data.get("messages", [])
@@ -9451,7 +9459,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _reload_plugin_system(self):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
         if hasattr(self, "backend") and self.backend:
-            result = self.backend.reload_plugin_subsystems()
+            # force_full=True：按钮显式语义——无论是否有变更都全量重载所有子系统
+            result = self.backend.reload_plugin_subsystems(force_full=True)
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.success(
@@ -9855,6 +9864,8 @@ class OpenAIChatToolWindow(ToolWindow):
             _worktree_widgets = [w for w in _all_widgets if isinstance(w, WorktreeSectionWidget)]
         else:
             _worktree_widgets = []
+        from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
         ThemeRefreshCoordinator.timer_end("findChildren")
 
@@ -10189,7 +10200,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 本窗口从未手动选过模型 → 跟随云端：force_global 跳过"窗口自身优先"，
             # 改从云端 llm_selected_model 取默认（无效则由 _load_model_configs 回退列表第一项）。
             self._load_model_configs(force_global=True)
-        self._update_model_selector_btn()
+        # ★ 去重：上方 _load_model_configs 末尾已调 _update_model_selector_btn，
+        # 再调一次会经 _update_balance_display → _refresh_coding_plan 重复触发
+        # request_coding_plan（缓存命中立即 emit），造成 [CodingPlan] 日志刷屏。
         self._refresh_context_usage_indicator()
 
     def _load_model_configs(self, force_global: bool = False):
@@ -10674,7 +10687,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             if self._welcome_render_pending:
                 return
-        except (AttributeError, RuntimeError):
+        except AttributeError, RuntimeError:
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
         cls = type(self)
@@ -10687,7 +10700,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
         try:
             self._welcome_render_pending = False
-        except (AttributeError, RuntimeError):
+        except AttributeError, RuntimeError:
             pass
         self._show_initial_welcome()
 
@@ -10767,8 +10780,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
         # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
         # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
+        # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView 原生
+        # HWND）若直接脱离父窗口树会变成独立顶层窗口 → Chromium 弹出原生窗口
+        # （白窗一闪），deleteLater 之后才销毁。先隐藏摘除可见性，再断父引用。
         try:
             if cached.parent() is not None:
+                cached.hide()
                 cached.setParent(None)
         except Exception:
             pass
@@ -11350,11 +11367,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if delete_widgets:
                 # cleanup 释放 WebEngine renderer（viewer.cleanup → setHtml("")）；
                 # removeWidget + 解除父引用后 deleteLater 才能让 renderer 自然退出
+                # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView
+                # 原生 HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目
+                # /新建标签页清理旧卡片时 Chromium 弹出原生窗口）。
                 if hasattr(widget, "cleanup"):
                     try:
                         widget.cleanup()
                     except Exception:
                         pass
+                widget.hide()
                 self.chat_layout.removeWidget(widget)
                 try:
                     widget.setParent(None)
@@ -11426,7 +11447,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 解除父引用：takeAt 仅摘除布局项，widget 仍挂在父控件树下，
             # QWebEngineView 的 renderer 进程不会自然退出；setParent(None)
             # 结束父引用后 deleteLater 才能释放 renderer
+            # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView
+            # 原生 HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪。
             try:
+                widget.hide()
                 if widget.parent() is not None:
                     widget.setParent(None)
             except Exception:
