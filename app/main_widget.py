@@ -139,6 +139,7 @@ from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
 # 延迟构建（_ensure_*）与运行时回调使用的卡片全部在使用点函数内导入，
 # 避免启动链拉起 mcp(~750ms)/requests/engines 等重依赖。
@@ -18752,7 +18753,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
                 self._toggle_memory_card()
             # 卡片弹出后，再切换到关键文档标签
+            # 🐛 修复：TAB_KEY_DOCUMENTS 必须局部导入（此前未导入导致 NameError，
+            # 中断后续 _create_new_session / _update_tab_icon，新建会话与 Tab 图标
+            # 同步全部失效）；同时显式 switch_tab 内容层（对齐 _on_branch_label_clicked，
+            # 不依赖 set_current_tab → tabChanged 信号链）。
             if hasattr(self, "_memory_card") and self._memory_card:
+                from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
+
+                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+                    self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
                 self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()
