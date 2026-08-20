@@ -110,6 +110,24 @@ def test_clear_text_saves_empty_and_echoes_default(qapp, schema_env):
     assert card._rows["name"].text() == "abc"
 
 
+def test_noop_editing_finished_keeps_external_changes(qapp, schema_env):
+    """聚焦→失焦但内容未改：不写盘，保留外部/其他实例对 config.json 的修改
+
+    回归：editingFinished 在聚焦→失焦（未编辑）时也会触发；若输入框内容与
+    回显基线一致（用户没真正修改），写回会把外部手动编辑的值覆盖掉。
+    """
+    store = PluginConfigStore()
+    card = PluginConfigCard("plug-ui")
+    assert card._rows["name"].text() == "abc"  # 回显基线
+    # 外部修改（模拟用户手动编辑 config.json / 另一 DriFox 实例写入）
+    store.set_values("plug-ui", {"name": "external"})
+    # 用户点击输入框后失焦：editingFinished 触发，但输入框内容仍是旧回显 abc
+    card._rows["name"].editingFinished.emit()
+    # 外部修改未被覆盖
+    assert store.get("plug-ui", "name") == "external"
+    assert card._rows["name"].text() == "abc"  # UI 仍显示旧值，下次真正编辑才保存
+
+
 def test_make_card_class_zero_arg_construction(qapp, schema_env):
     cls = make_card_class("plug-ui")
     widget = cls()  # register_settings_card 的 widget_class 约定：无参构造

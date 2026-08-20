@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Dict
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import (
     ExpandSettingCard,
@@ -27,6 +28,7 @@ from qfluentwidgets import (
     LineEdit,
     PasswordLineEdit,
     SwitchButton,
+    isDarkTheme,
 )
 
 from app.plugins.managers.plugin_config_store import PluginConfigStore
@@ -60,6 +62,8 @@ class PluginConfigCard(ExpandSettingCard):
         self._plugin_name = plugin_name
         self._rows: Dict[str, QWidget] = {}  # key → 输入控件（兼容旧测试）
         self._bool_switches: Dict[str, SwitchButton] = {}  # key → switch 实例
+        # 文本字段回显基线：记录最近一次 setText 的值，用于判断"内容是否真正变化"
+        self._echoed: Dict[str, str] = {}
 
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         title_text = schema.title if schema else "插件配置"
@@ -69,7 +73,8 @@ class PluginConfigCard(ExpandSettingCard):
         else:
             content_text = ""
 
-        super().__init__(FluentIcon.SETTING, title_text, content_text, parent)
+        icon = self._resolve_plugin_icon() or FluentIcon.SETTING
+        super().__init__(icon, title_text, content_text, parent)
         # viewLayout 边距收紧，让多行表单更紧凑
         self.viewLayout.setContentsMargins(48, 8, 48, 8)
         self.viewLayout.setSpacing(4)
@@ -98,6 +103,27 @@ class PluginConfigCard(ExpandSettingCard):
 
         self._echo()
 
+    def _resolve_plugin_icon(self):
+        """读取插件自身 icon（按当前主题取 light/dark），失败回退 None。
+
+        对齐 tab_panel._get_plugin_icon：经 PluginManager 拿 icon_config，
+        主题图标缺失/读取失败时静默回退 FluentIcon.SETTING。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return None
+            plugin = pm.get_plugin(self._plugin_name)
+            icon_config = getattr(plugin, "icon_config", None) if plugin else None
+            if not icon_config:
+                return None
+            icon_path = icon_config.get("dark" if isDarkTheme() else "light")
+            return QIcon(str(icon_path)) if icon_path else None
+        except Exception:
+            return None
+
     def _echo(self):
         """回显当前生效值（默认兜底可见）"""
         store = PluginConfigStore()
@@ -112,12 +138,17 @@ class PluginConfigCard(ExpandSettingCard):
             if f.type == "bool":
                 control.setChecked(bool(val))
             else:
-                control.setText(str(val if val is not None else ""))
+                text = str(val if val is not None else "")
+                control.setText(text)
+                self._echoed[f.key] = text
 
     def _on_field_changed(self, key: str):
         """单字段即时保存：空文本=清除（回默认），保存后刷新回显。
 
         用 editingFinished / checkedChanged 触发，自动持久化，无需底部"保存配置"按钮。
+        仅当内容真正变化时才写盘：editingFinished 在聚焦→失焦（未修改）时
+        也会触发，若此时无脑写回输入框回显值，会覆盖用户手动编辑 config.json
+        或其他实例的修改（双实例共享配置场景）。
         """
         store = PluginConfigStore()
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
@@ -133,6 +164,11 @@ class PluginConfigCard(ExpandSettingCard):
             value: object = control.isChecked()
         else:
             value = control.text().strip()
+            # 无变化 → 跳过写盘：editingFinished 在聚焦→失焦（未修改）时也会触发，
+            # 若输入框内容与回显基线一致（用户没真正编辑），写回会覆盖
+            # 外部/其他实例对 config.json 的手动修改（双实例共享配置场景）。
+            if value == self._echoed.get(key, ""):
+                return
         store.set_values(self._plugin_name, {key: value})
         # 文本字段保存后回显（清除 → 默认值显式可见）；bool 无需回显
         if target_field.type != "bool":
@@ -154,9 +190,11 @@ class PluginConfigCard(ExpandSettingCard):
         # 阻断 editingFinished 循环：临时 disconnect
         try:
             control.editingFinished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
-        control.setText(str(val if val is not None else ""))
+        text = str(val if val is not None else "")
+        control.setText(text)
+        self._echoed[key] = text
         control.editingFinished.connect(lambda _k=key: self._on_field_changed(_k))
 
 
