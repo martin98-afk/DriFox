@@ -215,6 +215,32 @@ if _deps not in _sys.path:
 - 平台 SDK 通常差异不大，社区仓 6 内置平台 vendor 模式（`gateway-dingtalk/deps/`、
   `gateway-discord/deps/` 等）已验证可行。
 
+### 4.5 适配器断连纪律（历史教训：2026-08-20 连接泄漏）
+
+**`disconnect()` 必须真正关闭连接/线程/loop，且幂等可重入**。反面教材：
+gateway-feishu 曾靠 `hasattr(client, "stop"/"close"/"_running")` 探测 SDK 停止
+方法——lark_oapi ws `Client` 三者皆无（`start()` 永久阻塞于
+`run_until_complete(_select())`，ping/receive 均 `while True`，`auto_reconnect`
+默认无限重连），三分支全部落空 → 连接/线程/loop 永生，每次 stop/热重载泄漏
+一条长连接 + deps `.pyd` 句柄不释放（卸载失败）。
+
+纪律清单（见 `gateway-feishu/gateways/feishu.py::disconnect` 范本）：
+
+1. **禁 SDK 自动重连**（`client._auto_reconnect = False`），否则断连后 SDK 自己连回来
+2. **经 SDK 线程自己的 loop** 调度断连（`run_coroutine_threadsafe(client._disconnect(), ws_loop)`），
+   不能跨 loop 直接 await
+3. **cancel loop 全部任务 + 停 loop**（`call_soon_threadsafe` 回调内 `task.cancel()` + `loop.stop()`），
+   阻塞中的 `run_until_complete` 才会返回、线程才会退出
+4. **join 线程带超时**（防 SDK 卡死拖垮 stop 协程），join 后再清引用
+5. **connect 重入防御**：connect 开头若上一轮线程仍存活，先 `await self.disconnect()`
+   再重连，防连接叠加
+6. 主程序侧配合（已内置）：`PlatformManager.stop_plugin_platforms` 无条件调度 stop
+   （不查 `is_connected`——泄漏实例 `_running=False` 但连接活着，前置检查会跳过清理）；
+   热重载路径 `_reload_gateways` 以 `wait=True` 等 stop 完成再 purge/rebuild，防双连接竞态
+
+回归测试：社区仓 `tests/test_gateway_feishu_lifecycle.py`（FakeWSClient 走真实
+`_run_feishu_client` 线程协议，断言线程退出/loop 停止/幂等/防御清理）。
+
 ---
 
 ## 5. 新增平台三步
