@@ -350,6 +350,7 @@ class PluginManager:
 
         plugin_dir = old.path
         if not plugin_dir.exists():
+            self._unload_plugin_ui(name)
             self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
@@ -364,6 +365,7 @@ class PluginManager:
             logger.debug(f"[PluginManager] Rescanned plugin: {name}")
         else:
             # manifest 已不存在
+            self._unload_plugin_ui(name)
             self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")

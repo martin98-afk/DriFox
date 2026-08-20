@@ -31,6 +31,8 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from loguru import logger
+
 from app.plugins.managers.plugin_config_store import PluginConfigStore
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
@@ -173,6 +175,50 @@ class PluginConfigCard(ExpandSettingCard):
         # 文本字段保存后回显（清除 → 默认值显式可见）；bool 无需回显
         if target_field.type != "bool":
             self._echo_field(key)
+        # 网关插件 enabled 开关：切换即触发平台连接启停（Phase E 删 GatewaySettingCard
+        # 后补回交互——旧卡开关联动 manager.start/stop_platform，通用卡只写配置会导致
+        # “开启没反应”）。仅对该插件注册的网关平台生效；manager 未初始化时交由启动期
+        # start_all_async 读取最新配置兜底。
+        if target_field.type == "bool" and self._is_gateway_plugin():
+            self._apply_gateway_toggle(bool(value))
+
+    def _is_gateway_plugin(self) -> bool:
+        """本插件是否注册了 gateway 平台（按 def.source == 'plugin:<name>' 判定）"""
+        try:
+            from app.plugins.registries.gateway_platform_registry import (
+                GatewayPlatformRegistry,
+            )
+
+            src = f"plugin:{self._plugin_name}"
+            return any(d.source == src for d in GatewayPlatformRegistry.get_instance().list_platforms())
+        except Exception:
+            return False
+
+    def _apply_gateway_toggle(self, enabled: bool) -> None:
+        """enabled 切换 → 对插件注册的每个网关平台启停连接。
+
+        manager 未初始化（网关后台线程尚未建单例）时静默跳过：启动期
+        start_all_async 会读最新配置自动连接。
+        """
+        try:
+            from app.gateway.manager import get_platform_manager
+            from app.plugins.registries.gateway_platform_registry import (
+                GatewayPlatformRegistry,
+            )
+
+            mgr = get_platform_manager()
+            if mgr is None:
+                return
+            src = f"plugin:{self._plugin_name}"
+            for d in GatewayPlatformRegistry.get_instance().list_platforms():
+                if d.source != src:
+                    continue
+                if enabled:
+                    mgr.start_platform_async(d.platform_id)
+                else:
+                    mgr.stop_platform(d.platform_id)
+        except Exception as e:
+            logger.warning(f"[PluginConfigCard] 网关启停失败 {self._plugin_name}: {e}")
 
     def _echo_field(self, key: str):
         """单字段回显（仅文本字段，避免循环触发）"""

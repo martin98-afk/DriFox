@@ -845,6 +845,24 @@ class UIPluginRegistry:
         """重新加载插件 UI（先卸载后加载）"""
         return self.load_plugin(plugin_name, plugin_path)
 
+    def _has_any_registration(self, plugin_name: str) -> bool:
+        """该插件是否在任何 UI 扩展点注册表中留有条目。
+
+        用于 unload_plugin 的幂等判定：无 ui/ 组件但注册过 config_schema
+        自动设置卡的插件（如 gateway 平台插件）不在 _loaded_plugins，
+        但其 settings card 须能被卸载清理，故不能仅凭 _loaded_plugins 拦截。
+        """
+        return (
+            any(v.plugin_name == plugin_name for v in self._content_renderers.values())
+            or any(f.plugin_name == plugin_name for f in self._message_factories)
+            or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
+            or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
+            or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
+            or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
+            or any(v.plugin_name == plugin_name for v in self._context_actions.values())
+            or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
+        )
+
     def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件 UI，清理所有该插件的注册
 
@@ -855,7 +873,12 @@ class UIPluginRegistry:
         """
         from loguru import logger
 
-        if plugin_name not in self._loaded_plugins:
+        # 原逻辑以 ``not in _loaded_plugins`` 为前置拦截；但 config_schema 的
+        # 自动设置卡（E1）在扫描阶段即注册，独立于 ui/ 组件加载——gateway 平台
+        # 插件无 ui/ 目录、从不在 _loaded_plugins，卸载时若仅凭此拦截会零清理，
+        # 残留空卡片「插件配置」。故改为：仅当确无任何注册项且未 loaded 时才
+        # 视为已卸载（幂等返回 False）。
+        if plugin_name not in self._loaded_plugins and not self._has_any_registration(plugin_name):
             return False
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:

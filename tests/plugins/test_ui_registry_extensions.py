@@ -151,6 +151,26 @@ class TestUnregisterCleanup:
         assert fresh_registry.unload_plugin("demo") is True
         assert fresh_registry.unload_plugin("demo") is False  # 已卸载
 
+    def test_unload_plugin_clears_config_schema_autocard(self, fresh_registry):
+        """回归：无 ui/ 组件但注册了 config_schema 自动设置卡的插件（如 gateway
+        平台插件）卸载时其 settings card 必须被清理，否则残留空卡片「插件配置」。
+
+        此类插件从未走 load_plugin，不在 _loaded_plugins，旧逻辑在此早退零清理。
+        """
+        class _Card:
+            pass
+
+        # 仅注册 settings card，不加入 _loaded_plugins（模拟无 ui/ 组件的插件）
+        fresh_registry.register_settings_card("gw-feishu", "gw-feishu-config", "飞书配置", _Card)
+        assert "gw-feishu" not in fresh_registry._loaded_plugins
+
+        # 卸载（插件市场卸载流程最终走此路径）
+        assert fresh_registry.unload_plugin("gw-feishu") is True
+        assert fresh_registry.get_settings_cards() == []
+
+        # 幂等：二次卸载无残留，返回 False
+        assert fresh_registry.unload_plugin("gw-feishu") is False
+
 
 if __name__ == "__main__":
     import sys
