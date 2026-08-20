@@ -109,6 +109,39 @@ class PlatformManager:
             except Exception as e:
                 logger.warning(f"[PlatformManager] {d.display_name} 插件加载失败: {e}")
 
+    def _ensure_adapter(self, platform: str) -> Optional[BasePlatformAdapter]:
+        """确保某平台 adapter 已加载到 _adapters；缺失则按 registry def 动态加载。
+
+        解决“热安装/热注册平台晚于 manager 单例创建”时 _adapters 不更新、
+        start 静默失败（必须重启 manager 才生效）的根因：启用即加载即启动。
+        adapter 已存在时直接返回（不重建，保留热更新重建的实例）。
+        """
+        existing = self._adapters.get(platform)
+        if existing is not None:
+            return existing
+        from app.plugins.registries.gateway_platform_registry import (
+            GatewayPlatformRegistry,
+        )
+
+        d = GatewayPlatformRegistry.get_instance().get(platform)
+        if d is None:
+            logger.warning(f"[PlatformManager] {platform} 未注册，无法动态加载 adapter")
+            return None
+        if not d.check_requirements():
+            logger.warning(f"[PlatformManager] {platform} 依赖不满足，跳过加载")
+            return None
+        cfg = d.config_builder() if d.config_builder else None
+        try:
+            adapter = d.adapter_factory(cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[PlatformManager] {platform} adapter 动态加载失败: {e}")
+            return None
+        if self._message_handler is not None:
+            adapter.set_message_handler(self._message_handler.handle)
+        self._adapters[platform] = adapter
+        logger.info(f"[PlatformManager] {platform} adapter 已动态加载（热注册自愈）")
+        return adapter
+
     def get_adapter(self, platform: Platform) -> Optional[BasePlatformAdapter]:
         """获取平台适配器"""
         from app.gateway.base import _platform_key
@@ -182,8 +215,9 @@ class PlatformManager:
         all_platforms = [d.platform_id for d in GatewayPlatformRegistry.get_instance().list_platforms()]
 
         for platform in all_platforms:
-            adapter = self._adapters.get(platform)
-            if not adapter:
+            adapter = self._ensure_adapter(platform)
+            if adapter is None:
+                results[platform] = False
                 continue
 
             config = self._config.get_platform_config(platform)
@@ -322,8 +356,8 @@ class PlatformManager:
 
     async def _start_platform_async(self, platform: str) -> bool:
         """在后台事件循环上启动平台（registry 驱动，无平台 if-elif）"""
-        adapter = self._adapters.get(platform)
-        if not adapter:
+        adapter = self._ensure_adapter(platform)
+        if adapter is None:
             logger.error(f"[PlatformManager] No adapter for {platform}")
             return False
 
