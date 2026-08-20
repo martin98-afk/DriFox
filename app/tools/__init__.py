@@ -16,11 +16,10 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject
 
-from app.core.lsp.lsp_manager import get_lsp_manager
-from app.core.lsp.lsp_tools import LspToolsIntegration
-
-# Import all tool modules（工具插件化：file/web/automation/codegraph/terminal/diagnostics 工具实现已迁插件）
-from app.tools.mcp_tools import MCPClientManager
+# [PERF] 以下重依赖导入全部延迟到实例化/调用点，避免 import app.tools 时拉起
+# mcp(247ms)/lsprotocol(255ms)/plugin_tool_loader(262ms) 三条重链：
+# - get_lsp_manager / LspToolsIntegration → BuiltinTools._register_tools() 内导入
+# - MCPClientManager → BuiltinTools.__init__() 内导入
 from app.tools.result import ToolResult
 
 
@@ -56,6 +55,9 @@ class BuiltinTools(QObject):
         self._register_tools()
 
         # MCP 客户端管理器（全局单例，多窗口共享连接）
+        # [PERF] 延迟导入：mcp SDK 仅在 BuiltinTools 实例化（backend 延迟段）时加载
+        from app.tools.mcp_tools import MCPClientManager
+
         self._mcp_manager = MCPClientManager.get_instance()
         self._mcp_manager.acquire()
 
@@ -74,6 +76,10 @@ class BuiltinTools(QObject):
         """Register all tool modules - add new tools here"""
         # 工具插件化：工具实现（含 task/team 服务）已全部迁插件，
         # 此处仅保留主程序平台服务：LSP 集成（lsp 工具 impl 经 services 调用）。
+        # [PERF] 延迟导入：lsprotocol/pygls 链仅在实际注册 LSP 工具时加载
+        from app.core.lsp.lsp_manager import get_lsp_manager
+        from app.core.lsp.lsp_tools import LspToolsIntegration
+
         # LSP 工具集成
         self._lsp_tools = LspToolsIntegration(get_lsp_manager(), owner=self)
         self._tools["lsp"] = self._lsp_tools
@@ -220,8 +226,12 @@ try:
 except Exception:
     pass
 
-# 模块导入即加载系统插件工具（早于任何 schema/权限/渲染读取）
-_ensure_plugin_tools_loaded()
+# [PERF] 插件工具全量扫描（load_plugin_tools，含 bs4 等重依赖 ~230ms）
+# 不再在模块导入时同步执行，改由消费方入口惰性触发：
+# - get_builtin_tools_schema()（本文件，已内置）
+# - tool_classifier._registry()（权限控制器/危险分类）
+# - tool_name_mapper 各 registry 读取点
+# 语义等价：任何 ToolRegistry 消费者首次读取前插件必已加载（幂等）。
 
 
 def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dict]:

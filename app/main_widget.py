@@ -139,23 +139,11 @@ from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+# [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
+# 延迟构建（_ensure_*）与运行时回调使用的卡片全部在使用点函数内导入，
+# 避免启动链拉起 mcp(~750ms)/requests/engines 等重依赖。
 from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
-)
-from app.widgets.cards.settings.history_card import (
-    HistoryCard,
-    get_message_preview,
-)
-from app.widgets.cards.settings.memory_card import (
-    TAB_KEY_DOCUMENTS,
-    MemoryCardContent,
-)
-from app.widgets.cards.settings.model_config_card import (
-    ModelConfigCard,
-)
-from app.widgets.cards.settings.model_selector_card import (
-    ModelSelectorCardContent,
-    _format_cost_number,
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent,
@@ -163,13 +151,7 @@ from app.widgets.cards.settings.project_selector_card import (
     extract_project_initials,
     get_project_color,
 )
-from app.widgets.cards.settings.hook_setting_card import HookEditCard
-from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
-from app.widgets.cards.settings.mcp_setting_card import MCPEditCard
-from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
-from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
-from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 from app.widgets.coding_plan_ring import (
     CodingPlanRing,
 )
@@ -1789,6 +1771,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._model_config_popup is not None:
             return
+        from app.widgets.cards.settings.model_config_card import ModelConfigCard
+
         self._ensure_model_config_card()
         self._model_config_popup = ModelConfigCard()
         self._model_config_popup.configApplied.connect(self._on_config_applied)
@@ -1821,6 +1805,8 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if self._model_selector_card_content is not None:
             return
+        from app.widgets.cards.settings.model_selector_card import ModelSelectorCardContent
+
         self._ensure_model_selector_card()
         self._model_selector_card_content = ModelSelectorCardContent()
         self._model_selector_card_content.modelSelected.connect(self._on_model_selected_from_popup)
@@ -1883,6 +1869,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_history(self):
         """── ① 历史会话卡片 ──"""
         try:
+            from app.widgets.cards.settings.history_card import HistoryCard
+
             self._ensure_history_card()  # P0-1：框架惰性创建
             self._history_popup_card = HistoryCard()
             self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
@@ -1939,6 +1927,8 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_deferred_card_memory(self):
         """── ④ 记忆管理卡片 ──"""
         try:
+            from app.widgets.cards.settings.memory_card import MemoryCardContent
+
             self._ensure_memory_card()  # P0-1：框架惰性创建
             self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
             self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
@@ -7266,6 +7256,8 @@ class OpenAIChatToolWindow(ToolWindow):
         标题用 display_name（人类可读），图标按 provider_name 查找。
         """
         if self._current_provider_name and self._current_provider_name in self._valid_configs:
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
@@ -7284,6 +7276,8 @@ class OpenAIChatToolWindow(ToolWindow):
         provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
         """
         if provider_name:
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             self._model_selector_card.set_title_text(provider_name)
             # 用 display_name → config_id → provider_name 链反查，找图标
             config_id = getattr(self, "_display_to_config_id", {}).get(provider_name)
@@ -7294,6 +7288,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.set_icon_widget(icon_widget)
         elif self._current_provider_name and self._current_provider_name in self._valid_configs:
             # 滚到顶部时恢复显示当前选中的服务商
+            from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
+
             config = self._valid_configs[self._current_provider_name]
             display = config.get("display_name", self._current_provider_name)
             pname = config.get("provider_name", display)
@@ -7423,6 +7419,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
+        from app.widgets.cards.settings.model_selector_card import _format_cost_number
+
         if not hasattr(self, "current_model_btn"):
             return
         # 当前服务商的显示名 + provider_name（用于找 icon）
@@ -8665,6 +8663,8 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 # 缓存过期或不存在，读取文件
                 try:
+                    from app.widgets.cards.settings.history_card import get_message_preview
+
                     with open(fp, "r", encoding="utf-8") as f:
                         data = json.loads(f.read())
                     messages = data.get("messages", [])
@@ -9864,6 +9864,8 @@ class OpenAIChatToolWindow(ToolWindow):
             _worktree_widgets = [w for w in _all_widgets if isinstance(w, WorktreeSectionWidget)]
         else:
             _worktree_widgets = []
+        from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
         ThemeRefreshCoordinator.timer_end("findChildren")
 

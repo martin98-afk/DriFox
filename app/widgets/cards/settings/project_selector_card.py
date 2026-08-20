@@ -25,7 +25,9 @@ from qfluentwidgets import FluentIcon, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
-from app.widgets.cards.settings.mcp_setting_card import _ElidedLabel
+# [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
+# 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
+from app.widgets.elided_label import _ElidedLabel
 
 
 def extract_project_initials(name: str) -> str:

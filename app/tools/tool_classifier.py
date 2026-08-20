@@ -13,7 +13,15 @@ from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
 
 
 def _registry() -> ToolRegistry:
-    """惰性获取 registry（避免模块导入时序问题）"""
+    """惰性获取 registry（避免模块导入时序问题）
+
+    [PERF] 首次读取前确保系统插件工具已加载（幂等）：app.tools.__init__ 不再
+    在导入时全量扫描插件，改由此处触发，保证权限控制器等消费方读到的
+    registry 与旧行为一致（import 即加载）。
+    """
+    from app.tools import _ensure_plugin_tools_loaded
+
+    _ensure_plugin_tools_loaded()
     return ToolRegistry.get_instance()
 
 

@@ -43,8 +43,10 @@ class ToolNameMapper(metaclass=_ToolNameMapperMeta):
     def _build_alias_map(cls) -> Dict[str, List[str]]:
         """从 registry 聚合全部工具的别名映射"""
         try:
+            from app.tools import _ensure_plugin_tools_loaded
             from app.tools.registry import ToolRegistry
 
+            _ensure_plugin_tools_loaded()  # [PERF] 首读前确保插件工具已加载（幂等）
             result: Dict[str, List[str]] = {}
             for reg in ToolRegistry.get_instance().list():
                 aliases = list(reg.aliases)
@@ -82,8 +84,10 @@ class ToolNameMapper(metaclass=_ToolNameMapperMeta):
     def known_names(cls) -> List[str]:
         """获取全部已知工具名（registry 驱动，供 hook 设置卡片下拉等使用）"""
         try:
+            from app.tools import _ensure_plugin_tools_loaded
             from app.tools.registry import ToolRegistry
 
+            _ensure_plugin_tools_loaded()  # [PERF] 首读前确保插件工具已加载（幂等）
             return ToolRegistry.get_instance().names()
         except Exception:
             return sorted(cls._build_alias_map().keys())
