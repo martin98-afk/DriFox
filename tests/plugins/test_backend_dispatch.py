@@ -267,9 +267,7 @@ def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
         f"added/changed 应走 __manifest__ 精准重载，实际 {seen}"
     )
     # removed → 精准清理（组件信息取自 diff 对象，而非已移出索引的 get_plugin）
-    assert cleanup_calls == [("dead-plug", {"hooks": True, "ui": True})], (
-        f"removed 应走精准清理，实际 {cleanup_calls}"
-    )
+    assert cleanup_calls == [("dead-plug", {"hooks": True, "ui": True})], f"removed 应走精准清理，实际 {cleanup_calls}"
     # 不触发全量子系统重载
     assert result["agents"] == 0 and result["commands"] is False
 
