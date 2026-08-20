@@ -55,6 +55,16 @@ git push origin develop
 > - **icon 自包含**：图标放 `<插件>/tools/icons/*.svg`（深色）+ `tools/icons_light/*.svg`
 >   （浅色），渲染按主题选择（浅色优先 icons_light，缺省回退深色/qrc），
 >   以 data URI 加载
+>
+> **插件配置契约**（E1）：插件在 `.drifox-plugin/plugin.json` 声明 `config_schema`
+> （title + fields[{key,label,type∈text|password|bool,default,env,placeholder,description}]），
+> 主程序自动提供：统一存储 `<app_data_dir>/plugins/<plugin>/config.json`
+> （读取三级链：环境变量→存储值→默认值）、设置面板插件分区自动配置卡
+> （PluginConfigCard 声明式渲染，经 register_settings_card 扩展点注入）。
+> 插件代码内读取：`PluginConfigStore().get(plugin_name, key)`。
+> 需要动态默认值/复杂 UI 的插件仍可手写 Phase D 设置卡（两者不冲突，同 plugin
+> 可并存：自动卡 card_id 固定为 `<plugin>-config`）。
+>
 > registry 为单一数据源，驱动 LLM schema、渲染图标/中文名、权限卡片分组、
 > ToolNameMapper 别名。第三方插件同理放在 `plugins/<name>/tools/*.py`，
 > 文件增删改自动热生效。
