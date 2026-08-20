@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 Bug 修复 (Bug Fixes)
 
+- **PyInstaller 打包缺失懒加载模块致启动崩溃** (`build.py`): `app.core` 使用 PEP 562 懒加载（`__getattr__` + `importlib.import_module` 动态字符串导入），PyInstaller 静态分析无法发现，需在 `build.py` 的 `_hidden_imports` 用 `collect_submodules("app.core")` 显式收集（含 `app.core.workers.topic_summary` 等）。修复前打包后运行报 `ModuleNotFoundError: No module named 'app.core.workers.topic_summary'`。已补入 build.py 并重发 v0.5.3。
 - **file-tree 右键「在资源管理器中打开」层级错位** (`plugins/file-tree/ui/cards.py`): 目录原本用 `explorer /select,` 会打开父目录并高亮（层级往外多一层），改为 `explorer <dir>` 直接打开该目录；文件仍用 `/select,` 打开所在文件夹并选中；上层对文件不再取 `dirname`（否则传入目录再次退回父目录）。macOS/Linux 同步按目录/文件分派。
 - **Gateway 连接泄漏修复** (`app/manager/` + `app/core/`): 卸载/重装 gateway 插件先关闭平台连接并清理模块引用，热更新重建 adapter 生效；adapter 实例清理防连接泄漏；builtin_reloaders 等待平台 stop 再 purge/rebuild
 - **幽灵窗口根因修复** (`app/widgets/`): 卡片销毁路径 `setParent(None)` 前先 `hide`；欢迎卡片 `_is_effectively_visible` 遍历全部 QStackedWidget 层级解决幽灵窗口
