@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-企业微信平台适配器
+企业微信平台适配器（系统插件，万物即插件 Phase E）
 
 使用企业微信 AI Bot WebSocket Gateway 进行消息收发。
+
+本文件原位于 app/gateway/adapters/wecom.py（E2 Task 5 迁入）。
+适配器实现保持原状（SDK 延迟导入纪律：模块顶层不 eager import 平台 SDK）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,9 +52,9 @@ MAX_MESSAGE_LENGTH = 4000
 class WeComAdapter(BasePlatformAdapter):
     """
     企业微信 AI Bot 适配器
-    
+
     通过 WebSocket 长连接与企业微信 AI Bot Gateway 通信。
-    
+
     配置项:
         - bot_id: 机器人 ID
         - secret: 密钥
@@ -120,15 +124,17 @@ class WeComAdapter(BasePlatformAdapter):
 
             # 订阅
             req_id = self._new_req_id("subscribe")
-            await self._send_json({
-                "cmd": CMD_SUBSCRIBE,
-                "headers": {"req_id": req_id},
-                "body": {
-                    "bot_id": self._bot_id,
-                    "secret": self._secret,
-                    "device_id": self._device_id,
+            await self._send_json(
+                {
+                    "cmd": CMD_SUBSCRIBE,
+                    "headers": {"req_id": req_id},
+                    "body": {
+                        "bot_id": self._bot_id,
+                        "secret": self._secret,
+                        "device_id": self._device_id,
+                    },
                 }
-            })
+            )
 
             # 等待订阅确认
             response = await self._wait_response(req_id, timeout=CONNECT_TIMEOUT)
@@ -404,7 +410,9 @@ class WeComAdapter(BasePlatformAdapter):
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 if self._ws and not self._ws.closed:
                     try:
-                        await self._send_json({"cmd": CMD_PING, "headers": {"req_id": self._new_req_id("ping")}, "body": {}})
+                        await self._send_json(
+                            {"cmd": CMD_PING, "headers": {"req_id": self._new_req_id("ping")}, "body": {}}
+                        )
                     except Exception as e:
                         logger.debug("[WeCom] Heartbeat failed: %s", e)
         except asyncio.CancelledError:
@@ -429,12 +437,15 @@ class WeComAdapter(BasePlatformAdapter):
 
             for i, chunk in enumerate(chunks):
                 # 企业微信使用 markdown 格式
-                response = await self._send_request(CMD_SEND, {
-                    "bot_id": self._bot_id,
-                    "chat_id": chat_id,
-                    "msg_type": "markdown",
-                    "content": chunk,
-                })
+                response = await self._send_request(
+                    CMD_SEND,
+                    {
+                        "bot_id": self._bot_id,
+                        "chat_id": chat_id,
+                        "msg_type": "markdown",
+                        "content": chunk,
+                    },
+                )
 
                 if i == 0 and response:
                     errcode = response.get("errcode", 0)
@@ -488,23 +499,29 @@ class WeComAdapter(BasePlatformAdapter):
                 file_data = f.read()
 
             # 上传到企业微信
-            upload_response = await self._send_request("aibot_upload_media", {
-                "bot_id": self._bot_id,
-                "file_name": Path(image_path).name,
-                "file_size": len(file_data),
-            })
+            upload_response = await self._send_request(
+                "aibot_upload_media",
+                {
+                    "bot_id": self._bot_id,
+                    "file_name": Path(image_path).name,
+                    "file_size": len(file_data),
+                },
+            )
 
             media_id = upload_response.get("body", {}).get("media_id")
             if not media_id:
                 return SendResult(success=False, error="Failed to upload media")
 
             # 发送图片消息
-            result = await self._send_request(CMD_SEND, {
-                "bot_id": self._bot_id,
-                "chat_id": chat_id,
-                "msg_type": "image",
-                "media_id": media_id,
-            })
+            result = await self._send_request(
+                CMD_SEND,
+                {
+                    "bot_id": self._bot_id,
+                    "chat_id": chat_id,
+                    "msg_type": "image",
+                    "media_id": media_id,
+                },
+            )
 
             send_ok = result.get("errcode", 0) == 0
 
@@ -538,6 +555,7 @@ class WeComAdapter(BasePlatformAdapter):
             if file_path.startswith("http"):
                 # 下载远程文件
                 import httpx
+
                 cache_dir = get_cache_dir("files")
                 cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -554,23 +572,29 @@ class WeComAdapter(BasePlatformAdapter):
                 file_data = f.read()
 
             # 上传媒体
-            upload_response = await self._send_request("aibot_upload_media", {
-                "bot_id": self._bot_id,
-                "file_name": Path(file_path).name,
-                "file_size": len(file_data),
-            })
+            upload_response = await self._send_request(
+                "aibot_upload_media",
+                {
+                    "bot_id": self._bot_id,
+                    "file_name": Path(file_path).name,
+                    "file_size": len(file_data),
+                },
+            )
 
             media_id = upload_response.get("body", {}).get("media_id")
             if not media_id:
                 return SendResult(success=False, error="Failed to upload media")
 
             # 发送文件消息
-            result = await self._send_request(CMD_SEND, {
-                "bot_id": self._bot_id,
-                "chat_id": chat_id,
-                "msg_type": "file",
-                "media_id": media_id,
-            })
+            result = await self._send_request(
+                CMD_SEND,
+                {
+                    "bot_id": self._bot_id,
+                    "chat_id": chat_id,
+                    "msg_type": "file",
+                    "media_id": media_id,
+                },
+            )
 
             send_ok = result.get("errcode", 0) == 0
 
@@ -611,6 +635,75 @@ def check_wecom_requirements() -> bool:
     try:
         import aiohttp
         import httpx
+
         return True
     except ImportError:
         return False
+
+
+# ── Phase E 插件注册 ────────────────────────────────────
+# 配置读写回调走主程序 Settings（存量用户配置零迁移；Task 5 统一切 E1
+# PluginConfigStore 时仅改本块闭包，调用方不动）。闭包内延迟 import
+# Settings/PlatformConfig，避免模块顶层触发 PyQt5 / Settings 副作用。
+
+
+def _build_config() -> "PlatformConfig":
+    """读主程序 Settings 构造企业微信配置（存量用户配置零迁移）"""
+    from app.gateway.base import Platform, PlatformConfig
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    return PlatformConfig(
+        enabled=cfg.gateway_wecom_enabled.value,
+        platform=Platform.WECOM,
+        bot_id=cfg.gateway_wecom_bot_id.value,
+        secret=cfg.gateway_wecom_secret.value,
+        websocket_url=cfg.gateway_wecom_websocket_url.value,
+    )
+
+
+def _write_config(config: "PlatformConfig") -> None:
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.set(cfg.gateway_wecom_enabled, config.enabled, save=True)
+    if config.bot_id is not None:
+        cfg.set(cfg.gateway_wecom_bot_id, config.bot_id, save=True)
+    if config.secret is not None:
+        cfg.set(cfg.gateway_wecom_secret, config.secret, save=True)
+    if config.websocket_url is not None:
+        cfg.set(cfg.gateway_wecom_websocket_url, config.websocket_url, save=True)
+
+
+def _build_config_values(values: dict, old_config) -> "PlatformConfig":
+    """设置卡保存回调：表单值 → PlatformConfig（对齐旧 _on_save WECOM 分支）"""
+    from app.gateway.base import Platform, PlatformConfig
+
+    return PlatformConfig(
+        enabled=bool(values.get("enabled", False)),
+        platform=Platform.WECOM,
+        bot_id=values.get("bot_id") or "",
+        secret=values.get("secret") or "",
+        websocket_url=values.get("websocket_url") or "wss://openws.work.weixin.qq.com",
+    )
+
+
+def register(registry) -> None:
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="wecom",
+            display_name="企业微信",
+            adapter_factory=lambda cfg: WeComAdapter(cfg),
+            check_requirements=check_wecom_requirements,
+            config_builder=_build_config,
+            config_writer=_write_config,
+            build_config_values=_build_config_values,
+            validate_config=lambda cfg: (
+                bool(cfg.bot_id and cfg.secret),
+                "BotID/Secret 未配置",
+            ),
+            ui_order=10,
+        )
+    )

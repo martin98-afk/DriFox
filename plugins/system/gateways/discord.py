@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Discord 平台适配器
+Discord 平台适配器（系统插件，万物即插件 Phase E）
 
 使用 discord.py 库进行消息收发。
+
+本文件原位于 app/gateway/adapters/discord.py（E2 Task 5 迁入）。
+适配器实现保持原状（SDK 延迟导入纪律：模块顶层不 eager import 平台 SDK）。
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -30,6 +34,7 @@ def check_discord_requirements() -> bool:
         return True
     try:
         import discord
+
         DISCORD_AVAILABLE = True
         return True
     except ImportError:
@@ -40,7 +45,7 @@ def check_discord_requirements() -> bool:
 class DiscordAdapter(BasePlatformAdapter):
     """
     Discord 机器人适配器
-    
+
     支持：
     - 私聊和服务器频道
     - 线程 (Threads)
@@ -119,10 +124,10 @@ class DiscordAdapter(BasePlatformAdapter):
             return
 
         # 确定消息类型
-        if message.content and message.content.startswith('/'):
+        if message.content and message.content.startswith("/"):
             msg_type = MessageType.COMMAND
         elif message.attachments:
-            if any(a.content_type and a.content_type.startswith('image/') for a in message.attachments):
+            if any(a.content_type and a.content_type.startswith("image/") for a in message.attachments):
                 msg_type = MessageType.IMAGE
             else:
                 msg_type = MessageType.FILE
@@ -155,48 +160,34 @@ class DiscordAdapter(BasePlatformAdapter):
         return False
 
     def _build_message_event(self, message, msg_type: MessageType) -> MessageEvent:
-        """从 Discord 消息构建 MessageEvent"""
-        channel = message.channel
-
-        # 确定聊天类型
-        if isinstance(channel, discord.DMChannel):
-            chat_type = "dm"
-            chat_id = str(channel.id)
-        elif isinstance(channel, discord.Thread):
-            chat_type = "thread"
-            chat_id = str(channel.parent_id)
-        else:
-            chat_type = "group"
-            chat_id = str(channel.id)
-
-        # 提取媒体 URL
+        """构建消息事件"""
+        # 提取媒体
         media_urls = []
         media_types = []
-        for attachment in message.attachments:
-            if attachment.content_type:
-                media_types.append(attachment.content_type)
-                media_urls.append(attachment.url)
 
-        # 线程 ID
-        thread_id = None
-        if isinstance(channel, discord.Thread):
-            thread_id = str(channel.id)
+        for attachment in message.attachments:
+            if attachment.url:
+                media_urls.append(attachment.url)
+                media_types.append(attachment.content_type or "file")
+
+        # 用户名
+        user_name = message.author.display_name or message.author.name
 
         return MessageEvent(
             text=message.content or "",
             message_type=msg_type,
             message_id=str(message.id),
-            chat_id=chat_id,
+            chat_id=str(message.channel.id),
             user_id=str(message.author.id),
-            user_name=str(message.author),
+            user_name=user_name,
             platform=Platform.DISCORD,
-            chat_type=chat_type,
+            chat_type="dm" if isinstance(message.channel, discord.DMChannel) else "group",
             media_urls=media_urls,
             media_types=media_types,
             metadata={
-                "thread_id": thread_id,
-                "guild_id": str(message.guild.id) if message.guild else None,
-            } if thread_id or message.guild else {},
+                "guild_id": str(message.guild.id) if message.guild else "",
+                "channel_name": message.channel.name,
+            },
         )
 
     async def disconnect(self) -> None:
@@ -222,31 +213,24 @@ class DiscordAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-
-            # 获取频道
             channel = self._client.get_channel(int(chat_id))
             if not channel:
-                return SendResult(success=False, error="Channel not found")
+                return SendResult(success=False, error=f"Channel {chat_id} not found")
 
             # 分割长消息
-            chunks = self._split_message(content)
+            if len(content) > self.MAX_MESSAGE_LENGTH:
+                chunks = self._split_message(content)
+            else:
+                chunks = [content]
 
             message_ids = []
-            prev_msg = None
 
             for i, chunk in enumerate(chunks):
-                kwargs = {"content": chunk}
+                if len(chunks) > 1:
+                    chunk = f"[{i + 1}/{len(chunks)}] {chunk}"
 
-                # 如果是第一条消息且有回复目标
-                if i == 0 and reply_to:
-                    try:
-                        kwargs["reference"] = await channel.fetch_message(int(reply_to))
-                    except Exception:
-                        pass
-
-                msg = await channel.send(**kwargs)
+                msg = await channel.send(content=chunk)
                 message_ids.append(str(msg.id))
-                prev_msg = msg
 
             return SendResult(
                 success=True,
@@ -254,7 +238,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
         except Exception as e:
-            logger.error(f"[Discord] Send failed: {e}")
+            logger.error(f"[Discord] Send failed: {e}", exc_info=True)
             return SendResult(success=False, error=str(e))
 
     def _split_message(self, content: str) -> List[str]:
@@ -263,20 +247,16 @@ class DiscordAdapter(BasePlatformAdapter):
             return [content]
 
         chunks = []
-        lines = content.split('\n')
+        paragraphs = content.split("\n\n")
         current = ""
 
-        for line in lines:
-            if len(current) + len(line) + 1 <= self.MAX_MESSAGE_LENGTH:
-                current += ("\n" if current else "") + line
+        for para in paragraphs:
+            if len(current) + len(para) + 2 <= self.MAX_MESSAGE_LENGTH:
+                current += ("\n\n" if current else "") + para
             else:
                 if current:
                     chunks.append(current)
-                # 如果单行超过限制，强制分割
-                while len(line) > self.MAX_MESSAGE_LENGTH:
-                    chunks.append(line[:self.MAX_MESSAGE_LENGTH])
-                    line = line[self.MAX_MESSAGE_LENGTH:]
-                current = line
+                current = para
 
         if current:
             chunks.append(current)
@@ -296,26 +276,36 @@ class DiscordAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
+            import discord
+
             channel = self._client.get_channel(int(chat_id))
             if not channel:
-                return SendResult(success=False, error="Channel not found")
+                return SendResult(success=False, error=f"Channel {chat_id} not found")
 
-            kwargs = {}
+            # Discord embed 格式
+            embed = discord.Embed()
+            if image_url.startswith("http"):
+                embed.set_image(url=image_url)
+            else:
+                # 本地路径
+                embed.set_image(url=f"attachment://{image_url.split('/')[-1]}")
+
             if caption:
-                kwargs["content"] = caption
+                embed.description = caption
 
             if image_url.startswith("http"):
-                kwargs["files"] = []  # 需要下载后发送
+                msg = await channel.send(embed=embed)
             else:
-                # 本地文件
-                import discord
-                kwargs["file"] = discord.File(image_url)
+                # 本地文件 - 上传为附件
+                import discord as dc
 
-            msg = await channel.send(**kwargs)
+                file = dc.File(image_url)
+                msg = await channel.send(file=file, embed=embed)
+
             return SendResult(success=True, message_id=str(msg.id))
 
         except Exception as e:
-            logger.error(f"[Discord] Send image failed: {e}")
+            logger.error(f"[Discord] Send image failed: {e}", exc_info=True)
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -335,6 +325,8 @@ class DiscordAdapter(BasePlatformAdapter):
             return {"name": "Unknown", "type": "dm"}
 
         try:
+            import discord
+
             channel = self._client.get_channel(int(chat_id))
             if channel:
                 return {
@@ -345,3 +337,71 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.error(f"[Discord] get_chat_info failed: {e}")
 
         return {"name": str(chat_id), "type": "dm"}
+
+
+# ── Phase E 插件注册 ────────────────────────────────────
+# 配置读写回调走主程序 Settings（存量用户配置零迁移；Task 5 统一切 E1
+# PluginConfigStore 时仅改本块闭包，调用方不动）。闭包内延迟 import
+# Settings/PlatformConfig，避免模块顶层触发 PyQt5 / Settings 副作用。
+
+
+def _build_config() -> "PlatformConfig":
+    """读主程序 Settings 构造 Discord 配置（存量用户配置零迁移）"""
+    from app.gateway.base import Platform, PlatformConfig
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    return PlatformConfig(
+        enabled=cfg.gateway_discord_enabled.value,
+        platform=Platform.DISCORD,
+        token=cfg.gateway_discord_token.value,
+        extra={"require_mention": cfg.gateway_discord_require_mention.value},
+    )
+
+
+def _write_config(config: "PlatformConfig") -> None:
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.set(cfg.gateway_discord_enabled, config.enabled, save=True)
+    if config.token is not None:
+        cfg.set(cfg.gateway_discord_token, config.token, save=True)
+    if config.extra:
+        cfg.set(
+            cfg.gateway_discord_require_mention,
+            config.extra.get("require_mention", True),
+            save=True,
+        )
+
+
+def _build_config_values(values: dict, old_config) -> "PlatformConfig":
+    """设置卡保存回调：表单值 → PlatformConfig（对齐旧 _on_save DISCORD 分支）"""
+    from app.gateway.base import Platform, PlatformConfig
+
+    extra = dict(old_config.extra) if old_config and old_config.extra else {}
+    if "require_mention" in values:
+        extra["require_mention"] = bool(values["require_mention"])
+    return PlatformConfig(
+        enabled=bool(values.get("enabled", False)),
+        platform=Platform.DISCORD,
+        token=values.get("token") or "",
+        extra=extra,
+    )
+
+
+def register(registry) -> None:
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="discord",
+            display_name="Discord",
+            adapter_factory=lambda cfg: DiscordAdapter(cfg),
+            check_requirements=check_discord_requirements,
+            config_builder=_build_config,
+            config_writer=_write_config,
+            build_config_values=_build_config_values,
+            validate_config=lambda cfg: (bool(cfg.token), "Token 未配置"),
+            ui_order=40,
+        )
+    )

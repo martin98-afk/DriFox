@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-飞书 (Feishu/Lark) 适配器
+飞书 (Feishu/Lark) 适配器（系统插件，万物即插件 Phase E）
 
 使用 lark_oapi SDK WebSocket 模式进行消息收发。
+
+本文件原位于 app/gateway/adapters/feishu.py（E2 Task 5 迁入）。
+适配器实现保持原状（SDK 延迟导入纪律：模块顶层不 eager import 平台 SDK）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,6 +40,7 @@ def check_feishu_requirements() -> bool:
         import lark_oapi
         from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
         from lark_oapi.ws import Client as FeishuWSClient
+
         LARK_AVAILABLE = True
         return True
     except ImportError:
@@ -46,7 +51,7 @@ def check_feishu_requirements() -> bool:
 class FeishuAdapter(BasePlatformAdapter):
     """
     飞书 (Feishu/Lark) 适配器
-    
+
     使用飞书开放平台 WebSocket 模式进行消息收发。
     需要安装 lark-oapi: pip install lark-oapi
     """
@@ -93,6 +98,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         # 从配置重新获取（确保最新）
         from app.gateway.config import get_gateway_config
+
         cfg = get_gateway_config().get_platform_config(Platform.FEISHU)
         self._app_id = cfg.extra.get("app_id") or ""
         self._app_secret = cfg.extra.get("app_secret") or ""
@@ -114,43 +120,34 @@ class FeishuAdapter(BasePlatformAdapter):
             # 关键：直接传递 encrypt_key 和 verification_token（即使是空字符串）
             # 不要传 dummy 值！SDK 的 _do_without_validation 方法（WebSocket 使用）
             # 会跳过验证/解密，所以空值完全 OK
-            handler = EventDispatcherHandler.builder(
-                self._encrypt_key or "",
-                self._verification_token or "",
-            ).register_p2_im_message_receive_v1(
-                self._on_feishu_message
-            ).build()
+            handler = (
+                EventDispatcherHandler.builder(
+                    self._encrypt_key or "",
+                    self._verification_token or "",
+                )
+                .register_p2_im_message_receive_v1(self._on_feishu_message)
+                .build()
+            )
 
             # 创建 WebSocket 客户端 - 传入 domain 参数
             self._ws_client = FeishuWSClient(
                 app_id=self._app_id,
                 app_secret=self._app_secret,
-                log_level=lark.LogLevel.INFO,
                 event_handler=handler,
-                domain=FEISHU_DOMAIN,  # 明确指定域名
+                domain=FEISHU_DOMAIN,
+                log_level=lark.LogLevel.DEBUG,
             )
 
-            # 启动独立的事件循环线程，用于执行消息处理回调
-            # 注意：WS client 的 on_message 回调在 WS 线程的事件循环中执行，
-            # 不能直接在回调里调用 asyncio.run()（会冲突），
-            # 所以需要独立的 loop 来执行 message_handler
+            # 启动独立 handler loop
             self._start_handler_loop()
 
-            # 在独立线程中启动 WS client
-            self._stop_event.clear()
+            # 在独立线程中运行客户端
             self._feishu_thread = threading.Thread(
                 target=self._run_feishu_client,
                 name="FeishuWSClient",
-                daemon=True
+                daemon=True,
             )
             self._feishu_thread.start()
-
-            # 等待连接建立
-            await asyncio.sleep(2)
-
-            # 创建共享 HTTP 客户端（连接复用，避免每次 send 新建 AsyncClient）
-            if self._http_client is None:
-                self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
             self._running = True
             self._connected = True
@@ -161,6 +158,7 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[Feishu] Failed to connect: %s", e)
             import traceback
+
             traceback.print_exc()
             return False
 
@@ -230,27 +228,27 @@ class FeishuAdapter(BasePlatformAdapter):
         """
         try:
             # 获取 event 包装层 (P2ImMessageReceiveV1Data)
-            event_wrapper = getattr(data, 'event', None)
+            event_wrapper = getattr(data, "event", None)
             if event_wrapper is None:
                 logger.debug("[Feishu] No event wrapper in callback data")
                 return
 
             # 获取消息对象
-            message = getattr(event_wrapper, 'message', None)
-            sender = getattr(event_wrapper, 'sender', None)
+            message = getattr(event_wrapper, "message", None)
+            sender = getattr(event_wrapper, "sender", None)
 
             if message is None:
                 logger.debug("[Feishu] No message in callback data")
                 return
 
             # 提取字段
-            message_id = str(getattr(message, 'message_id', '') or '')
-            chat_id = str(getattr(message, 'chat_id', '') or '')
-            chat_type = str(getattr(message, 'chat_type', 'p2p') or 'p2p')
+            message_id = str(getattr(message, "message_id", "") or "")
+            chat_id = str(getattr(message, "chat_id", "") or "")
+            chat_type = str(getattr(message, "chat_type", "p2p") or "p2p")
 
             # EventMessage 使用 message_type（而不是 msg_type），content 是 JSON 字符串
-            msg_type = str(getattr(message, 'message_type', 'text') or 'text')
-            content_str = str(getattr(message, 'content', '') or '')
+            msg_type = str(getattr(message, "message_type", "text") or "text")
+            content_str = str(getattr(message, "content", "") or "")
 
             # 解析 content JSON 字符串
             text = ""
@@ -259,44 +257,41 @@ class FeishuAdapter(BasePlatformAdapter):
                     content_data = json.loads(content_str)
                     if isinstance(content_data, dict):
                         text = content_data.get("text", "") or content_data.get("content", "") or ""
-            except (json.JSONDecodeError, TypeError):
+            except json.JSONDecodeError, TypeError:
                 # 如果不是 JSON，直接作为文本
                 text = content_str
 
-            # 获取发送者信息
-            user_id = ""
-            user_name = ""
-            if sender:
-                sender_id = getattr(sender, 'sender_id', None)
-                if sender_id:
-                    user_id = str(getattr(sender_id, 'open_id', '') or getattr(sender_id, 'user_id', '') or '')
-                # EventSender 没有 sender_name，用 user_id 代替
-                user_name = user_id
+            # 提取 sender_id
+            sender_id = ""
+            if sender is not None:
+                sender_id_obj = getattr(sender, "sender_id", None)
+                if sender_id_obj is not None:
+                    sender_id = (
+                        getattr(sender_id_obj, "open_id", "")
+                        or getattr(sender_id_obj, "user_id", "")
+                        or getattr(sender_id_obj, "union_id", "")
+                        or ""
+                    )
 
-            # 确定消息类型
-            if text.startswith('/'):
-                event_msg_type = MessageType.COMMAND
-            elif msg_type == "image":
-                event_msg_type = MessageType.IMAGE
-            elif msg_type == "file":
-                event_msg_type = MessageType.FILE
-            else:
-                event_msg_type = MessageType.TEXT
+            # 跳过空消息
+            if not text and not message_id:
+                logger.debug("[Feishu] Empty message skipped")
+                return
 
-            # 构建事件
+            # 构建 MessageEvent
             event = MessageEvent(
                 text=text,
-                message_type=event_msg_type,
+                message_type=MessageType.TEXT if msg_type == "text" else MessageType.FILE,
                 message_id=message_id,
                 chat_id=chat_id,
-                user_id=user_id,
-                user_name=user_name,
+                user_id=sender_id,
+                user_name=sender_id,
                 platform=Platform.FEISHU,
-                chat_type="dm" if chat_type == "p2p" else "group",
-                metadata={"chat_id": chat_id},
+                chat_type="group" if chat_type == "group" else "dm",
+                media_urls=[],
+                media_types=[],
             )
 
-            # 处理消息
             if self._message_handler:
                 try:
                     # 重要：WS client 回调运行在 WS 线程的事件循环中，
@@ -316,6 +311,7 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[Feishu] Parse message error: %s", e)
             import traceback
+
             traceback.print_exc()
 
     async def disconnect(self) -> None:
@@ -328,13 +324,13 @@ class FeishuAdapter(BasePlatformAdapter):
             try:
                 # 飞书 SDK 的 Client 可能使用不同方法停止
                 # 方法1: stop() 方法
-                if hasattr(self._ws_client, 'stop'):
+                if hasattr(self._ws_client, "stop"):
                     self._ws_client.stop()
                 # 方法2: close() 方法
-                elif hasattr(self._ws_client, 'close'):
+                elif hasattr(self._ws_client, "close"):
                     self._ws_client.close()
                 # 方法3: 直接设置运行标志
-                elif hasattr(self._ws_client, '_running'):
+                elif hasattr(self._ws_client, "_running"):
                     self._ws_client._running = False
             except AttributeError:
                 # Client 对象可能没有这些属性，忽略
@@ -393,11 +389,12 @@ class FeishuAdapter(BasePlatformAdapter):
             client = self._http_client
             if client is None:
                 import httpx
+
                 client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
             for i, chunk in enumerate(chunks):
                 if len(chunks) > 1:
-                    chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
+                    chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
 
                 headers = {
                     "Authorization": f"Bearer {token}",
@@ -439,6 +436,7 @@ class FeishuAdapter(BasePlatformAdapter):
     async def _get_access_token(self) -> Optional[str]:
         """获取 tenant access token（带缓存，有效期 2 小时，提前 5 分钟刷新）"""
         import time
+
         now = time.time()
         if self._token and (now < self._token_expiry - 300):
             return self._token
@@ -447,6 +445,7 @@ class FeishuAdapter(BasePlatformAdapter):
             client = self._http_client
             if client is None:
                 import httpx
+
                 client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
             response = await client.post(
@@ -476,7 +475,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return [content]
 
         chunks = []
-        paragraphs = content.split('\n\n')
+        paragraphs = content.split("\n\n")
         current = ""
 
         for para in paragraphs:
@@ -492,24 +491,85 @@ class FeishuAdapter(BasePlatformAdapter):
 
         return chunks if chunks else [content]
 
-    async def send_image(
-        self,
-        chat_id: str,
-        image_path: str,
-        **kwargs
-    ) -> SendResult:
+    async def send_image(self, chat_id: str, image_path: str, **kwargs) -> SendResult:
         """发送图片"""
         return SendResult(success=False, error="Not implemented")
 
-    async def send_file(
-        self,
-        chat_id: str,
-        file_path: str,
-        **kwargs
-    ) -> SendResult:
+    async def send_file(self, chat_id: str, file_path: str, **kwargs) -> SendResult:
         """发送文件"""
         return SendResult(success=False, error="Not implemented")
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """获取聊天信息"""
         return {"name": chat_id, "type": "dm"}
+
+
+# ── Phase E 插件注册 ────────────────────────────────────
+# 配置读写回调走主程序 Settings（存量用户配置零迁移；Task 5 统一切 E1
+# PluginConfigStore 时仅改本块闭包，调用方不动）。闭包内延迟 import
+# Settings/PlatformConfig，避免模块顶层触发 PyQt5 / Settings 副作用。
+
+
+def _build_config() -> "PlatformConfig":
+    """读主程序 Settings 构造飞书配置（存量用户配置零迁移）"""
+    from app.gateway.base import Platform, PlatformConfig
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    return PlatformConfig(
+        enabled=cfg.gateway_feishu_enabled.value,
+        platform=Platform.FEISHU,
+        extra={
+            "app_id": cfg.gateway_feishu_app_id.value,
+            "app_secret": cfg.gateway_feishu_app_secret.value,
+        },
+    )
+
+
+def _write_config(config: "PlatformConfig") -> None:
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.set(cfg.gateway_feishu_enabled, config.enabled, save=True)
+    if config.extra:
+        if config.extra.get("app_id") is not None:
+            cfg.set(cfg.gateway_feishu_app_id, config.extra["app_id"], save=True)
+        if config.extra.get("app_secret") is not None:
+            cfg.set(cfg.gateway_feishu_app_secret, config.extra["app_secret"], save=True)
+
+
+def _build_config_values(values: dict, old_config) -> "PlatformConfig":
+    """设置卡保存回调：表单值 → PlatformConfig（对齐旧 _on_save FEISHU 分支）"""
+    from app.gateway.base import Platform, PlatformConfig
+
+    extra = dict(old_config.extra) if old_config and old_config.extra else {}
+    if "app_id" in values:
+        extra["app_id"] = values.get("app_id") or ""
+    if "app_secret" in values:
+        extra["app_secret"] = values.get("app_secret") or ""
+    return PlatformConfig(
+        enabled=bool(values.get("enabled", False)),
+        platform=Platform.FEISHU,
+        extra=extra,
+    )
+
+
+def register(registry) -> None:
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="feishu",
+            display_name="飞书",
+            adapter_factory=lambda cfg: FeishuAdapter(cfg),
+            check_requirements=check_feishu_requirements,
+            config_builder=_build_config,
+            config_writer=_write_config,
+            build_config_values=_build_config_values,
+            validate_config=lambda cfg: (
+                bool(cfg.extra.get("app_id") and cfg.extra.get("app_secret")),
+                "AppID/Secret 未配置",
+            ),
+            ui_order=50,
+        )
+    )

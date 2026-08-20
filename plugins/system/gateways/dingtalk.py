@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-钉钉平台适配器
+钉钉平台适配器（系统插件，万物即插件 Phase E）
 
 使用钉钉 Stream Mode SDK 进行实时消息接收。
+
+本文件原位于 app/gateway/adapters/dingtalk.py（E2 Task 5 迁入）。
+适配器实现保持原状（SDK 延迟导入纪律：模块顶层不 eager import 平台 SDK）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +40,7 @@ IncomingHandler = None
 def _patch_dingtalk_stream_logging():
     """
     Monkey-patch dingtalk_stream.stream.DingTalkStreamClient.start()
-    
+
     修复三方库 stream.py:89 的日志错误：
         self.logger.exception('unknown exception', e)
             # TypeError: not all arguments converted during string formatting
@@ -58,12 +62,12 @@ def _patch_dingtalk_stream_logging():
             try:
                 connection = self.open_connection()
                 if not connection:
-                    self.logger.error('open connection failed')
+                    self.logger.error("open connection failed")
                     await asyncio.sleep(10)
                     continue
-                self.logger.info('endpoint is %s', connection)
+                self.logger.info("endpoint is %s", connection)
 
-                uri = f'{connection["endpoint"]}?ticket={quote_plus(connection["ticket"])}'
+                uri = f"{connection['endpoint']}?ticket={quote_plus(connection['ticket'])}"
                 async with websockets.connect(uri) as websocket:
                     self.websocket = websocket
                     asyncio.create_task(self.keepalive(websocket))
@@ -72,15 +76,14 @@ def _patch_dingtalk_stream_logging():
                         asyncio.create_task(self.background_task(json_message))
             except KeyboardInterrupt:
                 break
-            except (asyncio.exceptions.CancelledError,
-                    websockets.exceptions.ConnectionClosedError) as e:
-                self.logger.error('[start] network exception, error=%s', e)
+            except (asyncio.exceptions.CancelledError, websockets.exceptions.ConnectionClosedError) as e:
+                self.logger.error("[start] network exception, error=%s", e)
                 await asyncio.sleep(10)
                 continue
             except Exception as e:
                 await asyncio.sleep(3)
                 # 🔧 FIXED: exc_info=e 而非作为位置参数传入
-                self.logger.exception('unknown exception', exc_info=e)
+                self.logger.exception("unknown exception", exc_info=e)
                 continue
             finally:
                 pass
@@ -107,9 +110,9 @@ MAX_MESSAGE_LENGTH = 20000
 class DingTalkAdapter(BasePlatformAdapter):
     """
     钉钉 chatbot 适配器 (Stream Mode)
-    
+
     使用 dingtalk-stream SDK 维持 WebSocket 长连接。
-    
+
     配置项:
         - client_id: 应用 AppKey
         - client_secret: 应用 AppSecret
@@ -137,25 +140,20 @@ class DingTalkAdapter(BasePlatformAdapter):
         self._backoff_idx = 0
 
     async def connect(self) -> bool:
-        """连接到钉钉 Stream Mode"""
-        try:
-            from dingtalk_stream import Credential, DingTalkStreamClient
-        except ImportError:
-            logger.error("[DingTalk] dingtalk-stream not installed. Run: pip install 'drifox[gateway]'")
-            self._last_error = "依赖不可用"
-            return False
-
-        # 修复三方库 dingtalk-stream 的日志 bug（TypeError 噪声）
-        # 仅在 connect() 调用一次，避免 import 期与运行时双重 patch
-        _patch_dingtalk_stream_logging()
-
+        """连接到钉钉 Stream"""
         if not self._client_id or not self._client_secret:
             logger.error("[DingTalk] client_id and client_secret are required")
-            self._last_error = "缺少 client_id 或 client_secret"
             return False
 
         try:
             import httpx
+            from dingtalk_stream import (
+                Credential,
+                DingTalkStreamClient,
+            )
+
+            # 应用 monkey-patch 修复（仅在 SDK 已确认可用后执行一次）
+            _patch_dingtalk_stream_logging()
 
             from app.gateway.platforms._http_client_limits import platform_httpx_limits
 
@@ -178,7 +176,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             handler = IncomingHandler(self)
             self._stream_client.register_callback_handler(
                 "/v1.0/im/bot/messages/get",  # 机器人消息 topic
-                handler
+                handler,
             )
 
             # 启动
@@ -239,7 +237,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             self._stream_task.cancel()
             try:
                 await asyncio.wait_for(self._stream_task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except asyncio.CancelledError, asyncio.TimeoutError:
                 pass
 
         await self._cleanup()
@@ -251,7 +249,7 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         if self._http_client:
             await self._http_client.aclose()
-            self._http_client = None
+        self._http_client = None
 
         self._stream_client = None
 
@@ -358,6 +356,7 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         # 在已有或新的事件循环中运行异步处理
         import asyncio
+
         try:
             loop = asyncio.get_running_loop()
             # 当前线程已有运行中的事件循环 → 创建任务
@@ -432,7 +431,11 @@ class DingTalkAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id: str, content: str, **kwargs) -> SendResult:
         """发送消息"""
-        logger.debug("[DingTalk] send() called, chat_id=" + chat_id[:20] + f", content_len={len(content)}, webhooks={list(self._session_webhooks.keys())}")
+        logger.debug(
+            "[DingTalk] send() called, chat_id="
+            + chat_id[:20]
+            + f", content_len={len(content)}, webhooks={list(self._session_webhooks.keys())}"
+        )
 
         webhook_info = self._session_webhooks.get(chat_id)
         if not webhook_info:
@@ -446,13 +449,7 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         try:
             # 钉钉 session_webhook API 格式
-            payload = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "title": "DriFox",
-                    "text": content
-                }
-            }
+            payload = {"msg": {"msgtype": "markdown", "markdown": {"title": "DriFox", "text": content}}}
 
             response = await self._http_client.post(webhook, json=payload)
 
@@ -462,7 +459,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 return SendResult(
                     success=False,
                     error=f"HTTP {response.status_code}: {response.text}",
-                    retryable=response.status_code >= 500
+                    retryable=response.status_code >= 500,
                 )
 
         except asyncio.TimeoutError:
@@ -510,14 +507,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             # 上传文件获取 media_id，再构造 msgtype=image 的消息体。
             # 当前实现是降级占位：直接发文本消息显示文件名。
             # 参考文档: https://open.dingtalk.com/document/orgapp-server/upload-media-files
-            payload = {
-                "msg": {
-                    "msgtype": "text",
-                    "text": {
-                        "content": f"🖼️ Image: {Path(image_path).name}"
-                    }
-                }
-            }
+            payload = {"msg": {"msgtype": "text", "text": {"content": f"🖼️ Image: {Path(image_path).name}"}}}
 
             response = await self._http_client.post(webhook, json=payload)
 
@@ -525,9 +515,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 return SendResult(success=True)
             else:
                 return SendResult(
-                    success=False,
-                    error=f"HTTP {response.status_code}",
-                    retryable=response.status_code >= 500
+                    success=False, error=f"HTTP {response.status_code}", retryable=response.status_code >= 500
                 )
 
         except Exception as e:
@@ -545,14 +533,7 @@ class DingTalkAdapter(BasePlatformAdapter):
         try:
             from pathlib import Path
 
-            payload = {
-                "msg": {
-                    "msgtype": "text",
-                    "text": {
-                        "content": f"📎 File: {Path(file_path).name}"
-                    }
-                }
-            }
+            payload = {"msg": {"msgtype": "text", "text": {"content": f"📎 File: {Path(file_path).name}"}}}
 
             response = await self._http_client.post(webhook, json=payload)
 
@@ -562,7 +543,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=f"HTTP {response.status_code}")
 
         except Exception as e:
-            logger.error(f"[DingTalk] Send file failed: {e}", exc_info=True)
+            logger.error("[DingTalk] Send file failed: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
 
     async def get_chat_info(self, chat_id: str) -> ChatInfo:
@@ -600,6 +581,7 @@ def _build_incoming_handler_class():
 
         def __init__(self, adapter: "DingTalkAdapter"):
             from dingtalk_stream import ChatbotMessage
+
             super().__init__()
             self._adapter = adapter
             self._ChatbotMessage = ChatbotMessage
@@ -618,7 +600,7 @@ def _build_incoming_handler_class():
                 from dingtalk_stream import AckMessage
 
                 # 获取消息数据
-                data = callback.data if hasattr(callback, 'data') else callback
+                data = callback.data if hasattr(callback, "data") else callback
 
                 # 创建 ChatbotMessage
                 message = self._ChatbotMessage.from_dict(data)
@@ -627,11 +609,12 @@ def _build_incoming_handler_class():
                 await self._adapter._on_message(message)
 
                 # 返回成功状态
-                return AckMessage.STATUS_OK, 'OK'
+                return AckMessage.STATUS_OK, "OK"
 
             except Exception as e:
                 logger.error("[DingTalk] Handler process error: %s", e, exc_info=True)
                 from dingtalk_stream import AckMessage
+
                 return AckMessage.STATUS_FAIL, str(e)
 
     IncomingHandler = _IncomingHandler
@@ -662,14 +645,76 @@ def check_dingtalk_requirements() -> bool:
         from dingtalk_stream import (
             ChatbotMessage as CM,
         )
+
         ChatbotHandler = CH
         ChatbotMessage = CM
         AckMessage = AM
         _build_incoming_handler_class()
         return True
     except ImportError:
-        logger.error(
-            "[DingTalk] dingtalk-stream not installed. "
-            "Run: pip install 'drifox[gateway]'"
-        )
+        logger.error("[DingTalk] dingtalk-stream not installed. Run: pip install 'drifox[gateway]'")
         return False
+
+
+# ── Phase E 插件注册 ────────────────────────────────────
+# 配置读写回调走主程序 Settings（存量用户配置零迁移；Task 5 统一切 E1
+# PluginConfigStore 时仅改本块闭包，调用方不动）。闭包内延迟 import
+# Settings/PlatformConfig，避免模块顶层触发 PyQt5 / Settings 副作用。
+
+
+def _build_config() -> "PlatformConfig":
+    """读主程序 Settings 构造钉钉配置（存量用户配置零迁移）"""
+    from app.gateway.base import Platform, PlatformConfig
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    return PlatformConfig(
+        enabled=cfg.gateway_dingtalk_enabled.value,
+        platform=Platform.DINGTALK,
+        client_id=cfg.gateway_dingtalk_client_id.value,
+        client_secret=cfg.gateway_dingtalk_client_secret.value,
+    )
+
+
+def _write_config(config: "PlatformConfig") -> None:
+    from app.utils.config import Settings
+
+    cfg = Settings.get_instance()
+    cfg.set(cfg.gateway_dingtalk_enabled, config.enabled, save=True)
+    if config.client_id is not None:
+        cfg.set(cfg.gateway_dingtalk_client_id, config.client_id, save=True)
+    if config.client_secret is not None:
+        cfg.set(cfg.gateway_dingtalk_client_secret, config.client_secret, save=True)
+
+
+def _build_config_values(values: dict, old_config) -> "PlatformConfig":
+    """设置卡保存回调：表单值 → PlatformConfig（对齐旧 _on_save DINGTALK 分支）"""
+    from app.gateway.base import Platform, PlatformConfig
+
+    return PlatformConfig(
+        enabled=bool(values.get("enabled", False)),
+        platform=Platform.DINGTALK,
+        client_id=values.get("client_id") or "",
+        client_secret=values.get("client_secret") or "",
+    )
+
+
+def register(registry) -> None:
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+
+    registry.register(
+        GatewayPlatformDef(
+            platform_id="dingtalk",
+            display_name="钉钉",
+            adapter_factory=lambda cfg: DingTalkAdapter(cfg),
+            check_requirements=check_dingtalk_requirements,
+            config_builder=_build_config,
+            config_writer=_write_config,
+            build_config_values=_build_config_values,
+            validate_config=lambda cfg: (
+                bool(cfg.client_id and cfg.client_secret),
+                "ClientID/Secret 未配置",
+            ),
+            ui_order=20,
+        )
+    )
