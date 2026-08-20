@@ -484,6 +484,15 @@ class LLMSettingsCard(SystemCardFrame):
             try:
                 card = info.widget_class(parent=self._plugin_cards_widget)
                 self._plugin_cards_layout.addWidget(card)
+                # 动态创建的新卡片不在 _apply_runtime_ui_settings 上一轮 apply 范围
+                # 内（首次启动 / 每次重建都未跑 apply），主动触发字号 / 字族应用，
+                # 与全局设置弹窗其他卡片一致
+                try:
+                    from app.utils.design_tokens import apply_font_size_to_widget
+
+                    apply_font_size_to_widget(card, 14)
+                except Exception as e:
+                    logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
         self._plugin_cards_label.setVisible(True)
