@@ -139,6 +139,7 @@ from app.widgets.cards.floating.todo_floating_widget import (
     TodoFloatingWidget,
 )
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
 # 延迟构建（_ensure_*）与运行时回调使用的卡片全部在使用点函数内导入，
 # 避免启动链拉起 mcp(~750ms)/requests/engines 等重依赖。
@@ -4993,6 +4994,74 @@ class OpenAIChatToolWindow(ToolWindow):
         team_label = template.template_name or tm_mgr.get_team_label()
         self._spawn_team_members(agents_needed, run_id=new_run_id, team_label=team_label)
 
+    def _apply_model_selection_to_window(self, win, model_name: str = "", provider_name: str = ""):
+        """把模型选择应用到团队新窗口（构建继承 / 恢复还原）。
+
+        - model_name 非空（团队恢复路径）：按成员历史会话消息还原其最后
+          使用的模型——provider_name（display_name 或 config_id）优先直查，
+          其次遍历 _valid_configs 按模型名唯一匹配（多匹配不明确则跳过）；
+        - model_name 空（团队构建路径）：继承构建者标签页（self）当前选中的
+          模型，保证模板各角色默认与发起构建的标签页一致。
+
+        同时把构建者（self）的 _valid_configs / _display_to_config_id 配置
+        视图复制给新窗口：新窗口 _load_model_configs 异步（1500ms）完成前
+        即可完成匹配与按钮渲染；异步加载 force_global=False 保留窗口已有
+        选择（old_provider 分支），不会覆盖此处设置。
+        """
+        try:
+            if not getattr(win, "_is_destroyed", False) and self._valid_configs:
+                win._valid_configs = dict(self._valid_configs)
+                win._display_to_config_id = dict(getattr(self, "_display_to_config_id", {}))
+
+            def _inherit_builder_selection():
+                """回退/构建路径：继承构建者标签页当前选中的模型"""
+                if getattr(self, "_current_provider_name", ""):
+                    win._current_provider_name = self._current_provider_name
+                    win._current_model_name = getattr(self, "_current_model_name", "")
+                    win._user_manually_selected_model = getattr(self, "_user_manually_selected_model", False)
+
+            if model_name:
+                config_id = ""
+                # 1) provider_name 优先：display_name 反查 / config_id 直通
+                if provider_name:
+                    cid = getattr(win, "_display_to_config_id", {}).get(provider_name, provider_name)
+                    if cid in win._valid_configs:
+                        config_id = cid
+                # 2) 兜底：遍历按模型名唯一匹配（与 _auto_save_current_session
+                #    回填 provider 的匹配语义一致）
+                if not config_id:
+                    matched = None
+                    for cid, info in win._valid_configs.items():
+                        model_list = info.get("模型列表") or []
+                        if isinstance(model_list, str):
+                            try:
+                                import ast
+
+                                model_list = ast.literal_eval(model_list) or []
+                            except Exception:
+                                model_list = []
+                        if info.get("模型名称") == model_name or model_name in model_list:
+                            if matched is None:
+                                matched = cid
+                            else:
+                                matched = ""  # 多匹配不明确，跳过
+                                break
+                    config_id = matched or ""
+                if config_id:
+                    win._current_provider_name = config_id
+                    win._current_model_name = model_name
+                    win._user_manually_selected_model = True
+                else:
+                    # 恢复的模型无法匹配任何配置 → 回退继承构建者当前模型
+                    _inherit_builder_selection()
+            else:
+                # 团队构建：继承构建者标签页当前选中的模型
+                _inherit_builder_selection()
+            if hasattr(win, "_update_model_selector_btn"):
+                win._update_model_selector_btn()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_apply_model_selection_to_window] 应用模型选择失败: {e}")
+
     def _spawn_team_member_window(
         self,
         agent_name: str,
@@ -5069,6 +5138,10 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_name = team_name
             # 复用现有 run_id（不 start_team_run，避免新成员分组漂移）
             win._team_run_id = team_run_id
+            # 🆕 团队构建模型继承：成员窗口默认使用「发起构建的标签页」当前
+            # 选中的模型（_apply_model_selection_to_window 内部处理配置视图
+            # 复制 + 按钮刷新；异步 _load_model_configs 不会覆盖）。
+            self._apply_model_selection_to_window(win)
             # 🛡️ M1：把 run_id / team_label 透传到 join_team——**仅当调用方
             # 显式传参（非空）时才追加到 kwargs**，避免老路径（如测试 mock
             # 严格断言）收到意外 kwargs。
@@ -8515,18 +8588,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 1. 历史卡片可见时刷新
         refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
-        # 2. 欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）且窗口可见 →
-        #    同步重建（摘除旧卡后立即补位，避免延迟空白）；
-        #    窗口不可见（Tab 后台）→ 仅失效缓存，切回时 _on_tab_selected 补刷；
-        #    已有 pending 渲染（_create_new_session 的 schedule）→ 由槽位回调重建，
-        #    避免双渲染 QWebEngineView。
-        self._invalidate_welcome_card()
-        if (
-            self._displayed_session_id is None
-            and self.isVisible()
-            and not getattr(self, "_welcome_render_pending", False)
-        ):
-            self._show_initial_welcome()
+        # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
+        #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
+        #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
+        #    主线程卡顿）；缓存无活卡片时退回旧逻辑：失效缓存，当前正显示
+        #    欢迎卡片（空会话）且窗口可见 → 同步重建（摘除旧卡后立即补位，
+        #    避免延迟空白）；窗口不可见（Tab 后台）→ 仅失效缓存，切回时
+        #    _on_tab_selected 补刷；已有 pending 渲染（_create_new_session 的
+        #    schedule）→ 由槽位回调重建，避免双渲染 QWebEngineView。
+        if not self._refresh_welcome_card_data():
+            self._invalidate_welcome_card()
+            if (
+                self._displayed_session_id is None
+                and self.isVisible()
+                and not getattr(self, "_welcome_render_pending", False)
+            ):
+                self._show_initial_welcome()
         # 3. Tab 模式广播其他窗口
         if broadcast:
             self._broadcast_history_data_changed()
@@ -8908,6 +8985,16 @@ class OpenAIChatToolWindow(ToolWindow):
                     )
                     if win is None:
                         continue
+                    # 🆕 恢复成员最后使用的模型：从该成员最新会话消息提取
+                    # assistant 消息的 model_name/provider_name 还原到窗口
+                    # （无 assistant 消息 → 回退继承构建者标签页模型）。
+                    _last_model, _last_provider = "", ""
+                    for _m in reversed(messages):
+                        if _m.get("role") == "assistant" and _m.get("model_name"):
+                            _last_model = _m["model_name"]
+                            _last_provider = _m.get("provider_name", "") or ""
+                            break
+                    self._apply_model_selection_to_window(win, _last_model, _last_provider)
                     # 团队标记 + 重新登记成员（join_team 幂等；标记由 D2 前置赋值，
                     # 此处幂等重写保持与 _spawn_team_member_window 一致的防御语义）
                     win._team_agent_name = agent_name
@@ -9539,6 +9626,25 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[ToolReloadNotice] 弹框失败: {e}")
 
+    @classmethod
+    def _win_alive(cls, win, attr: str = "") -> bool:
+        """热重载广播循环的窗口存活探测（防残骸实例阻断整个广播）
+
+        _instances 可能残留两类残骸：C++ 对象已 deleteLater 但 wrapper 仍在列表、
+        以及未完成 super().__init__ 的半成品。对它们做属性探测（hasattr /
+        读 _is_destroyed）会抛 RuntimeError——而广播循环的存活判断位于 try 之外，
+        一个残骸即中断 _on_plugin_hot_reload 整个槽，后续所有刷新分支（命令
+        卡片/快捷键/输入区插件按钮/内容块重绘/各设置卡）静默失效（PyQt slot
+        吞异常无感知）。统一在此拦截，残骸仅跳过自身，不影响其余窗口。
+        attr 非空时附带探测该属性存在性（hasattr 对残骸同样会炸）。
+        """
+        try:
+            if win._is_destroyed:
+                return False
+            return not attr or hasattr(win, attr)
+        except (RuntimeError, AttributeError):
+            return False
+
     def _on_plugin_hot_reload(self, result: dict):
         """插件热更新完成时的回调（watchfiles 自动触发）
 
@@ -9573,10 +9679,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         # 广播给所有窗口实例
-        for win in OpenAIChatToolWindow._instances:
-            if not hasattr(win, "_command_card"):
-                continue
-            if win._is_destroyed:
+        for win in list(OpenAIChatToolWindow._instances):
+            if not OpenAIChatToolWindow._win_alive(win, "_command_card"):
                 continue
 
             if needs_invalidation:
@@ -9596,8 +9700,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if result.get("commands"):
             # 清除窗口级快捷键缓存，允许重新注册
             OpenAIChatToolWindow._window_shortcut_cache.clear()
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     win._register_command_shortcuts()
@@ -9605,11 +9709,27 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         if result.get("ui"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     win._build_plugin_input_buttons()
+                except RuntimeError, AttributeError:
+                    pass
+            # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
+            # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
+            # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
+            # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
+            _ui_plugin_name = result.get("_plugin_name") or ""
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
+                    continue
+                try:
+                    for _card in win.findChildren(MessageCard):
+                        try:
+                            _card.rerender_custom_blocks(_ui_plugin_name)
+                        except RuntimeError, AttributeError:
+                            pass
                 except RuntimeError, AttributeError:
                     pass
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
@@ -9626,8 +9746,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
         # 遍历窗口时每个窗口都会命中同一实例 → 只处理一次即 break，避免重复刷新。
         if result.get("skills"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9643,8 +9763,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # Hooks 变更：刷新 hook 设置卡片（settings popup 全局单例 → 只刷一次）
         if result.get("hooks"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9663,8 +9783,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 主题变更：刷新主题下拉列表（settings popup 全局单例，只刷一次）
         if result.get("themes"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9693,8 +9813,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if _mcp_reload:
             mcp_card = None
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9741,8 +9861,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # LSP 配置变更：刷新 LSP 状态列表（settings popup 全局单例 → 只刷一次）
         if result.get("lsp"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not hasattr(win, "_settings_popup") or not win._settings_popup:
@@ -9760,8 +9880,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
         if result.get("ui"):
-            for win in OpenAIChatToolWindow._instances:
-                if win._is_destroyed:
+            for win in list(OpenAIChatToolWindow._instances):
+                if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     if not getattr(win, "_system_cards_open", False):
@@ -11551,26 +11671,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(0, lambda c=card: self._update_card_diff_stats(c))
         return True
 
-    def _get_or_create_welcome_card(self) -> MessageCard:
-        # P1-4：按 _window_id 缓存 welcome 卡片（窗口维度复用，同窗口重复调用不重建）。
-        # 不能做跨窗口全局单例：recent_sessions/top_by_count 按当前项目过滤，
-        # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
-        cached = self._welcome_card_cache.get(self._window_id)
-        if cached is not None:
-            try:
-                from PyQt5 import sip
+    def _collect_welcome_sessions(self):
+        """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
 
-                if not sip.isdeleted(cached):
-                    return cached
-            except Exception:
-                pass
-            self._welcome_card_cache.pop(self._window_id, None)
-
-        agent = self.backend.get_agent(self._current_agent)
-        agent_name = agent.name if agent else ""
-        agent_desc = agent.description if agent else ""
-
-        # 获取最近会话和最多消息的会话用于欢迎卡片（按当前项目过滤）
+        返回 (recent_sessions, top_by_count)，供 _get_or_create_welcome_card
+        构建与 _refresh_welcome_card_data 软更新共用，保证两路径数据口径一致。
+        """
         history_list = self.history_manager.get_history_list(self._current_project)
         # 🛡️ 过滤团队会话：欢迎卡片展示的是"可继续的独立对话"，团队会话
         # （team_run_id 非空）由历史面板团队分组/合并条目统一管理，逐条混入
@@ -11602,6 +11708,57 @@ class OpenAIChatToolWindow(ToolWindow):
                     "message_count": session.get("message_count", 0),
                 }
             )
+        return recent_sessions, top_by_count
+
+    def _refresh_welcome_card_data(self) -> bool:
+        """软更新欢迎卡片会话列表数据（缓存命中时，不销毁 QWebEngineView）
+
+        会话数据变更（如其他标签页对话完成 → 广播）时，欢迎卡片 recent/top
+        列表需同步最新数据。旧实现 _invalidate_welcome_card 销毁卡片后重建
+        QWebEngineView（100-500ms 主线程占用 + 视觉闪烁「重新加载一下」）；
+        此处保留卡片实例，仅重渲染 body。
+
+        返回 True = 已软更新（调用方无需再走销毁重建路径）；False = 缓存无
+        活卡片（已销毁/未创建），调用方应退回旧逻辑（失效 + 按需补建）。
+        """
+        cached = self._welcome_card_cache.get(self._window_id)
+        if cached is None:
+            return False
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(cached):
+                return False
+        except Exception:
+            pass
+        try:
+            recent_sessions, top_by_count = self._collect_welcome_sessions()
+            cached.refresh_welcome_data(recent_sessions, top_by_count)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_refresh_welcome_card_data] soft refresh failed: {e}")
+            return False
+
+    def _get_or_create_welcome_card(self) -> MessageCard:
+        # P1-4：按 _window_id 缓存 welcome 卡片（窗口维度复用，同窗口重复调用不重建）。
+        # 不能做跨窗口全局单例：recent_sessions/top_by_count 按当前项目过滤，
+        # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
+        cached = self._welcome_card_cache.get(self._window_id)
+        if cached is not None:
+            try:
+                from PyQt5 import sip
+
+                if not sip.isdeleted(cached):
+                    return cached
+            except Exception:
+                pass
+            self._welcome_card_cache.pop(self._window_id, None)
+
+        agent = self.backend.get_agent(self._current_agent)
+        agent_name = agent.name if agent else ""
+        agent_desc = agent.description if agent else ""
+
+        recent_sessions, top_by_count = self._collect_welcome_sessions()
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
         # 模式：sessions（默认）/ changelog / 插件注册 tab
@@ -18752,7 +18909,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
                 self._toggle_memory_card()
             # 卡片弹出后，再切换到关键文档标签
+            # 🐛 修复：TAB_KEY_DOCUMENTS 必须局部导入（此前未导入导致 NameError，
+            # 中断后续 _create_new_session / _update_tab_icon，新建会话与 Tab 图标
+            # 同步全部失效）；同时显式 switch_tab 内容层（对齐 _on_branch_label_clicked，
+            # 不依赖 set_current_tab → tabChanged 信号链）。
             if hasattr(self, "_memory_card") and self._memory_card:
+                from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
+
+                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
+                    self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
                 self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
         # 自动触发新建会话
         self._create_new_session()

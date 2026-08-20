@@ -1820,26 +1820,43 @@ class ChatBackend(QObject):
         self._last_reload_at = now
         try:
             result = self._do_single_reload(plugin_name, component)
-            self.plugin_changed.emit(result)
-            # ★ T3 修复：广播到所有活跃 backend 的 plugin_changed。
-            # watcher 由首个 backend 驱动，_on_hot_reload_requested 只在该实例的
-            # 槽上执行；若仅 emit 宿主实例的信号，宿主窗口关闭（信号断开）后其他
-            # 窗口的 UI 收不到刷新通知（热加载数据成功但列表不刷新）。广播后
-            # 每个活跃窗口的 backend 都通知自己的 UI 刷新。
-            for _b in list(ChatBackend._active_instances):
-                if _b is not self:
-                    # 窗口关闭竞态防护：backend 已 deleteLater 但未 cleanup 时
-                    # emit 可能触发 RuntimeError，跳过该实例不影响正常广播
-                    try:
-                        _b.plugin_changed.emit(result)
-                    except RuntimeError:
-                        pass
+            self.emit_plugin_changed(result, plugin_name)
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
         finally:
             # 重载完成后重建 watchfiles 路径索引（finally 保证异常路径也更新，
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
+
+    def emit_plugin_changed(self, result: dict, plugin_name: str = "") -> None:
+        """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
+
+        附加事件标识（仅广播用，不污染业务 result 消费方）：
+        - _event_seq：实例级递增序号——同一事件广播到多 backend/多窗口时
+          指纹一致可去重；不同事件即使 result 相同（如 10s 内连续热重载
+          两个插件均为 {ui: True}）也不会被窗口级指纹短窗误吞。
+        - _plugin_name：本次变更的插件名（"" = 全量/合并路径），UI 据此
+          精准重绘该插件已挂载的视图（消息内容块 / 浮动卡片 / 欢迎卡片）。
+        """
+        seq = getattr(self, "_hot_reload_seq", 0) + 1
+        self._hot_reload_seq = seq
+        annotated = dict(result)
+        annotated["_event_seq"] = seq
+        annotated["_plugin_name"] = plugin_name
+        self.plugin_changed.emit(annotated)
+        # ★ T3 修复：广播到所有活跃 backend 的 plugin_changed。
+        # watcher 由首个 backend 驱动，_on_hot_reload_requested 只在该实例的
+        # 槽上执行；若仅 emit 宿主实例的信号，宿主窗口关闭（信号断开）后其他
+        # 窗口的 UI 收不到刷新通知（热加载数据成功但列表不刷新）。广播后
+        # 每个活跃窗口的 backend 都通知自己的 UI 刷新。
+        for _b in list(ChatBackend._active_instances):
+            if _b is not self:
+                # 窗口关闭竞态防护：backend 已 deleteLater 但未 cleanup 时
+                # emit 可能触发 RuntimeError，跳过该实例不影响正常广播
+                try:
+                    _b.plugin_changed.emit(annotated)
+                except RuntimeError:
+                    pass
 
     def _schedule_debounced_reload(self):
         """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
@@ -1855,13 +1872,7 @@ class ChatBackend(QObject):
         self._last_reload_at = time.time()
         try:
             result = self.reload_plugin_subsystems()
-            self.plugin_changed.emit(result)
-            for _b in list(ChatBackend._active_instances):
-                if _b is not self:
-                    try:
-                        _b.plugin_changed.emit(result)
-                    except RuntimeError:
-                        pass
+            self.emit_plugin_changed(result)
         except Exception as e:
             logger.error(f"[ChatBackend] 插件热更新失败: {e}")
         finally:
@@ -2241,10 +2252,22 @@ class ChatBackend(QObject):
           原有组件（agents/hooks/commands/lsp/ui/tools 按需精准清理）
         - 插件存在（安装/启用/更新）→ 遍历该插件全部组件精准加载
           （agents/hooks 按插件名精准，仅 commands 因全局注册表需全量重建）
+
+        ★ 重载完成后主动 emit_plugin_changed：本方法由插件市场 Installer 调用
+        （安装/更新/启停），不走 watcher 的 _on_hot_reload_requested（那条链路
+        自己 emit）——若此处不广播，窗口收不到 ui=True，已打开标签页的输入区
+        插件按钮/消息内容块全部不刷新（watcher 抑制解除后的 fallback 事件组件
+        归类常为 root → ui=False，顶替不了本事件的刷新语义）。
         """
         if not plugin_name:
-            return self.reload_plugin_subsystems()
-        return self._reload_single_plugin(plugin_name, "__manifest__")
+            result = self.reload_plugin_subsystems()
+        else:
+            result = self._reload_single_plugin(plugin_name, "__manifest__")
+        try:
+            self.emit_plugin_changed(result, plugin_name)
+        except Exception as e:
+            logger.warning(f"[ChatBackend] reload_plugin_targeted 广播失败: {e}")
+        return result
 
     def reload_plugin_subsystems(self, force_full: bool = False) -> dict:
         """重载插件子系统（默认 diff 精准；force_full=True 走全量）

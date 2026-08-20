@@ -8505,6 +8505,37 @@ class MessageCard(SimpleCardWidget):
         greeting = get_random_greeting()
         self._pending_welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
 
+    def refresh_welcome_data(self, recent_sessions: list, top_by_count: list) -> None:
+        """会话数据变更后的轻量刷新：更新列表数据并重渲染 body（保留卡片实例）。
+
+        与 set_welcome_content 的区别：set_welcome_content 只写
+        _pending_welcome_md（懒渲染消费），已渲染的卡片调用后 UI 不更新；
+        本方法在卡片已渲染时直接重渲染 DOM，避免调用方走「销毁缓存卡片 +
+        重建 QWebEngineView」路径（100-500ms 主线程占用 + 视觉闪烁）。
+
+        仅 sessions 类 body 展示会话列表，changelog / 插件 tab 不依赖该数据，
+        跳过重渲染（插件 tab 的 render_func 也不应因会话变更被反复调用）。
+        """
+        old_recent, old_top = self._welcome_recent, self._welcome_top
+        new_recent = list(recent_sessions or [])
+        new_top = list(top_by_count or [])
+        # 数据无变化时跳过重渲染：其他标签页对话完成广播到本窗口时，
+        # 若新会话不在本窗口当前项目下（按项目过滤），recent/top 完全不变，
+        # 重渲染会白播一遍 stagger fade-in 动画。
+        if new_recent == old_recent and new_top == old_top:
+            return
+        self._welcome_recent = new_recent
+        self._welcome_top = new_top
+        if self._welcome_mode != "sessions":
+            return
+        body_html = _render_welcome_body(
+            self._welcome_mode,
+            self._welcome_recent,
+            self._welcome_top,
+            self._get_welcome_window_context(),
+        )
+        self._render_welcome_with_body(body_html)
+
     def _setup_ui(self):
         main = QVBoxLayout(self)
         main.setContentsMargins(4, 4, 4, 4)
@@ -9610,6 +9641,53 @@ class MessageCard(SimpleCardWidget):
         elif hasattr(self.viewer, "set_text"):
             self.viewer.set_text(rendered)
         self._content_just_loaded = True
+
+    def rerender_custom_blocks(self, plugin_name: str = "") -> bool:
+        """插件热重载后重绘该插件渲染的自定义内容块（custom block）
+
+        已渲染消息的 HTML 是加载时刻的快照：content renderer 的 render_func
+        在 content_to_markdown 时执行一次，热重载不会自动重绘。本方法
+        检测本卡片是否包含属于该插件的 custom 块（plugin_name 为空 = 全部），
+        命中则用最新 render_func 重新生成 markdown 并刷新视图；未命中零开销。
+
+        Returns:
+            True 表示已重绘；False 表示本卡片无该插件的 custom 块（无需处理）。
+        """
+        blocks = getattr(self, "_content_data", None)
+        if self.role != "assistant" or not blocks:
+            return False
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        registry = UIPluginRegistry.get_instance()
+        hit = False
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "custom":
+                continue
+            custom_type = block.get("custom_type", "")
+            if not custom_type:
+                continue
+            info = registry.get_content_renderer(custom_type)
+            if info is not None and (not plugin_name or info.plugin_name == plugin_name):
+                hit = True
+                break
+        if not hit:
+            return False
+        rendered = content_to_markdown(blocks)
+        if not self._lazy_rendered:
+            # 懒渲染尚未执行：无需主动重绘，下次 ensure_rendered 自然用新 render_func
+            return True
+        if hasattr(self.viewer, "_markdown_text"):
+            self.viewer._markdown_text = rendered
+            # 内容整体替换：失效差量渲染缓存，强制全量渲染建立新基线（同 set_content）
+            self.viewer._needs_full_render = True
+            self.viewer._stable_html = ""
+            self.viewer._stable_md_len = 0
+            if hasattr(self.viewer, "_tool_md_cache"):
+                self.viewer._tool_md_cache.clear()
+            self.viewer._schedule_render(immediate=True)
+        elif hasattr(self.viewer, "set_text"):
+            self.viewer.set_text(rendered)
+        return True
 
     # ── 增量 markdown 構建（性能優化）───────────────
     def _build_incremental_md(self) -> str:

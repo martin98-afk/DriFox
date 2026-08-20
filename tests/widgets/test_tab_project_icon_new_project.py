@@ -79,6 +79,35 @@ class TestNewProjectSyncsTabIcon:
                     break
         assert found, "_update_tab_icon 调用必须位于 enable_tab_manager 守卫内"
 
+    def test_tab_key_documents_imported_before_use(self):
+        """新建项目后切关键文档 Tab 不得 NameError
+
+        回归：TAB_KEY_DOCUMENTS 曾在方法内未导入即使用 → NameError 中断方法，
+        导致 _create_new_session（新建会话）与 _update_tab_icon（Tab 图标）不执行。
+        方法体内必须存在 memory_card 的局部导入（模块级无该名字）。
+        """
+        method = _get_method_src("_on_new_project_created")
+        imported = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "app.widgets.cards.settings.memory_card"
+            and any(alias.name == "TAB_KEY_DOCUMENTS" for alias in node.names)
+            for node in ast.walk(method)
+        )
+        assert imported, (
+            "新建项目缺少 TAB_KEY_DOCUMENTS 局部导入：会 NameError 中断 _create_new_session"
+            " 与 _update_tab_icon，新建会话与 Tab 图标同步失效"
+        )
+
+    def test_tab_key_documents_switch_on_popup(self):
+        """切关键文档必须显式调用 popup.switch_tab（不依赖 tabChanged 信号链）"""
+        method = _get_method_src("_on_new_project_created")
+        calls = [
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "switch_tab"
+        ]
+        assert calls, "新建项目后必须显式调用 _memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)"
+
 
 def _find_parent(root: ast.AST, target: ast.AST):
     """查找 target 在 root 中的直接父节点"""

@@ -1022,3 +1022,115 @@ def test_abort_team_window_removes_from_tab_and_closes(qapp):
     with patch.object(TabManagerWindow, "get_instance", return_value=None):
         mw._abort_team_window(fake_win2)
     fake_win2.close.assert_called_once(), "未注册 Tab 时兜底 close"
+
+
+# ══════════════════════════════════════════════════════════
+# ⑨ 团队模型继承：构建继承构建者标签页模型 / 恢复还原成员最后使用的模型
+# ══════════════════════════════════════════════════════════
+
+
+def _make_builder_with_model(inst):
+    """给 __new__ 实例补模型选择上下文（构建者标签页）"""
+    inst._current_provider_name = "prov-1"
+    inst._current_model_name = "gpt-4o"
+    inst._user_manually_selected_model = True
+    inst._valid_configs = {
+        "prov-1": {"provider_name": "Provider A", "模型名称": "gpt-4o"},
+        "prov-2": {"provider_name": "Provider B", "模型名称": "claude-3.5"},
+    }
+    inst._display_to_config_id = {"Provider A": "prov-1", "Provider B": "prov-2"}
+
+
+def test_spawn_team_member_window_inherits_builder_model(qapp):
+    """需求 1：团队构建时成员窗口继承构建者标签页当前选中的模型"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+    fake_win._window_id = "win-99"
+    fake_tm = MagicMock()
+    fake_tm.get_template.return_value = {"name": "dev-team", "agents": []}
+    fake_tm.get_team_run_id.return_value = "run-ABC"
+    fake_tm.get_team_project.return_value = ""
+    inst._create_fresh_window = MagicMock(return_value=fake_win)
+    inst._get_team_manager = MagicMock(return_value=fake_tm)
+    inst._join_new_window_for_template = MagicMock()
+    with patch.object(mw.QTimer, "singleShot"):
+        inst._spawn_team_member_window("build")
+
+    # 成员窗口继承构建者模型选择
+    assert fake_win._current_provider_name == "prov-1"
+    assert fake_win._current_model_name == "gpt-4o"
+    assert fake_win._user_manually_selected_model is True
+    # 配置视图复制：异步 _load_model_configs 完成前即可匹配/渲染按钮
+    assert fake_win._valid_configs == inst._valid_configs
+    assert fake_win._display_to_config_id == {"Provider A": "prov-1", "Provider B": "prov-2"}
+    fake_win._update_model_selector_btn.assert_called_once()
+
+
+def test_spawn_team_member_window_without_builder_model_keeps_default(qapp):
+    """构建者未选模型（__new__ 实例无模型属性）→ 不覆盖新窗口、不抛异常"""
+    import app.main_widget as mw
+
+    inst = _make_main_widget_instance()
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+    fake_win._window_id = "win-99"
+    fake_tm = MagicMock()
+    fake_tm.get_template.return_value = {"name": "dev-team", "agents": []}
+    fake_tm.get_team_run_id.return_value = "run-ABC"
+    fake_tm.get_team_project.return_value = ""
+    inst._create_fresh_window = MagicMock(return_value=fake_win)
+    inst._get_team_manager = MagicMock(return_value=fake_tm)
+    inst._join_new_window_for_template = MagicMock()
+    with patch.object(mw.QTimer, "singleShot"):
+        result = inst._spawn_team_member_window("build")
+
+    assert result is fake_win
+    # 未设置 provider → 不写 _current_provider_name（__new__ 实例无模型属性，
+    # 方法内部 self._valid_configs 访问抛 RuntimeError 被静默兜底）
+    assert "_current_provider_name" not in fake_win.__dict__
+
+
+def test_apply_model_selection_restores_member_model(qapp):
+    """辅助方法：按 provider_name（display_name）还原成员最后使用的模型"""
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(fake_win, model_name="claude-3.5", provider_name="Provider B")
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"
+    assert fake_win._user_manually_selected_model is True
+    fake_win._update_model_selector_btn.assert_called_once()
+
+
+def test_apply_model_selection_falls_back_to_model_name_match(qapp):
+    """provider 无法匹配 → 遍历 _valid_configs 按模型名唯一匹配"""
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(fake_win, model_name="claude-3.5", provider_name="Unknown-Provider")
+
+    assert fake_win._current_provider_name == "prov-2"
+    assert fake_win._current_model_name == "claude-3.5"
+
+
+def test_apply_model_selection_no_match_falls_back_to_builder(qapp):
+    """消息模型无法匹配任何配置 → 回退继承构建者标签页当前模型"""
+    inst = _make_main_widget_instance()
+    _make_builder_with_model(inst)
+    fake_win = MagicMock()
+    fake_win._is_destroyed = False
+
+    inst._apply_model_selection_to_window(fake_win, model_name="nonexistent-model", provider_name="Nonexistent")
+
+    assert fake_win._current_provider_name == "prov-1"
+    assert fake_win._current_model_name == "gpt-4o"

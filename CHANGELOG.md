@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.3] - 2026-08-20
 
-自上一版本以来的变更 | 提交数：122 · 文件变更：255 · +23117/-10591 | 贡献者：dingma, mading, drifox-bot, builder
+自上一版本以来的变更 | 提交数：132 · 文件变更：262 · +24155/-10747 | 贡献者：dingma, mading, drifox-bot, builder
 
 ### ✨ 新功能 (New Features)
 
@@ -25,8 +25,14 @@ All notable changes to this project will be documented in this file.
 - **插件配置契约（E1）** (`app/plugins/` + `plugins/system/`): 新增 `PluginConfigStore`（env→存储→默认三级链）+ `PluginConfigRegistry`（`config_schema` 声明式渲染卡）+ 统一存储 `<app_data>/plugins/<plugin>/config.json`；websearch 工具/配置卡零主程序改动迁移到自包含配置
 - **性能基准测试套件** (`benchmarks/`): 新增 memory/import/startup/session-leak 基准脚本，用于回归对比与性能监控
 
+- **插件热重载增强（事件编排 + 活跃窗口 UI 刷新）** (`app/core/backend.py` + `app/main_widget.py` + `app/plugins/registries/ui_plugin_registry.py` + `app/widgets/message_card.py` + `tests/`): 热重载事件按序编排（event sequencing），重建后主动刷新活跃窗口 UI（输入区按钮/右键菜单/设置卡经 `_on_plugin_hot_reload` 重建）；backend 调度与 config_sync 协同；新增 `tests/plugins/test_input_button_hot_reload.py`（117 行）等收敛热重载回归
+
 ### 🐛 Bug 修复 (Bug Fixes)
 
+- **PyInstaller 打包缺失懒加载模块致启动崩溃** (`build.py`): `app.core` 使用 PEP 562 懒加载（`__getattr__` + `importlib.import_module` 动态字符串导入），PyInstaller 静态分析无法发现，需在 `build.py` 的 `_hidden_imports` 用 `collect_submodules("app.core")` 显式收集（含 `app.core.workers.topic_summary` 等）。修复前打包后运行报 `ModuleNotFoundError: No module named 'app.core.workers.topic_summary'`。已补入 build.py 并重发 v0.5.3。
+- **新建项目 NameError 中断链** (`app/main_widget.py`): 补 `TAB_KEY_DOCUMENTS` 局部导入，恢复新建会话/Tab 图标同步。
+- **关键文档项根目录按钮位置** (`app/widgets/`): 根目录按钮从行尾移到行首（icon 之前）。
+- **团队构建继承构建者标签页模型** (`app/main_widget.py`): 恢复时还原成员最后使用的模型。
 - **file-tree 右键「在资源管理器中打开」层级错位** (`plugins/file-tree/ui/cards.py`): 目录原本用 `explorer /select,` 会打开父目录并高亮（层级往外多一层），改为 `explorer <dir>` 直接打开该目录；文件仍用 `/select,` 打开所在文件夹并选中；上层对文件不再取 `dirname`（否则传入目录再次退回父目录）。macOS/Linux 同步按目录/文件分派。
 - **Gateway 连接泄漏修复** (`app/manager/` + `app/core/`): 卸载/重装 gateway 插件先关闭平台连接并清理模块引用，热更新重建 adapter 生效；adapter 实例清理防连接泄漏；builtin_reloaders 等待平台 stop 再 purge/rebuild
 - **幽灵窗口根因修复** (`app/widgets/`): 卡片销毁路径 `setParent(None)` 前先 `hide`；欢迎卡片 `_is_effectively_visible` 遍历全部 QStackedWidget 层级解决幽灵窗口
@@ -43,6 +49,8 @@ All notable changes to this project will be documented in this file.
 - **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过
 - **Gateways 其余 5 平台迁出主程序** (`app/gateway/`): manager/config 零平台分支，平台插件定居社区仓 drifox-plugins2
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): backend/worker 去 `ensure_builtin_*` 调用，依赖系统插件加载；轮询 watcher 退役，tools/providers 变更并入 watchfiles 主链
+
+- **gitignore 处理简化与用户配置尊重** (`plugins/system/hooks/format_memory_context.py`): 重写 `.gitignore` 处理逻辑，尊重用户既有配置，移除冗余分支（净 -82 行）
 
 ### ⚡ 性能优化 (Performance)
 

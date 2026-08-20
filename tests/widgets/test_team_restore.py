@@ -1275,6 +1275,108 @@ class TestTeamRestoreIndependence:
                 )
                 assert rid_in_snap != "existing-run"
 
+    def test_restore_applies_member_last_model(self):
+        """需求 2：恢复时还原成员最后使用的模型——从该成员最新会话消息
+        提取 assistant 的 model_name/provider_name 传给 _apply_model_selection_to_window"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            s for s in _history_samples() if s["team_run_id"] == "run-1"
+        ]
+        # 会话消息：最后一条 assistant 带模型信息（恢复应取最后使用的模型）
+        win.history_manager.get_session_messages.side_effect = lambda sid: [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a1", "model_name": "old-model", "provider_name": "Old"},
+            {"role": "assistant", "content": "a2", "model_name": "gpt-4o", "provider_name": "Provider A"},
+        ]
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-1"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+        # 记录模型应用调用（真实逻辑在 _apply_model_selection_to_window 单测覆盖）
+        win._apply_model_selection_to_window = MagicMock()
+
+        class _FakeWin:
+            _window_id = "w1"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+
+        fake = _FakeWin()
+
+        def _fake_create(branch_data=None, **kw):
+            fake._branch_session_data = branch_data
+            return fake
+
+        win._create_fresh_window.side_effect = _fake_create
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        # 每个恢复窗口都应用了模型还原，参数取消息中最后一条 assistant 的模型
+        assert win._apply_model_selection_to_window.call_count == 2
+        for call in win._apply_model_selection_to_window.call_args_list:
+            args = call.args
+            assert args[1] == "gpt-4o", f"应传最后使用的 model_name，实际: {args[1]!r}"
+            assert args[2] == "Provider A", f"应传最后使用的 provider_name，实际: {args[2]!r}"
+
+    def test_restore_applies_model_fallback_when_no_assistant(self):
+        """恢复窗口消息无 assistant（空会话）→ 模型参数为空串（构建者继承兜底）"""
+        _ensure_qapp()
+        from unittest.mock import MagicMock, patch
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        win = MagicMock()
+        win._is_destroyed = False
+        win.history_manager = MagicMock()
+        win.history_manager.get_team_sessions_by_run_id.return_value = [
+            s for s in _history_samples() if s["team_run_id"] == "run-1"
+        ]
+        win.history_manager.get_session_messages.return_value = [{"role": "user", "content": "q"}]
+        win._get_team_manager = MagicMock()
+        tm = MagicMock()
+        tm.get_team_run_id.return_value = "run-1"
+        win._get_team_manager.return_value = tm
+        win._card_manager = MagicMock()
+        win._apply_model_selection_to_window = MagicMock()
+
+        class _FakeWin:
+            _window_id = "w1"
+
+            def __init__(self, branch_data=None):
+                self._branch_session_data = branch_data
+                self._team_agent_name = None
+                self._team_name = None
+                self._team_run_id = None
+
+        fake = _FakeWin()
+
+        def _fake_create(branch_data=None, **kw):
+            fake._branch_session_data = branch_data
+            return fake
+
+        win._create_fresh_window.side_effect = _fake_create
+
+        with patch("app.main_widget.InfoBar") as _mock_infobar:
+            OpenAIChatToolWindow._on_team_restore_requested(win, "run-1")
+
+        assert win._apply_model_selection_to_window.call_count == 2
+        for call in win._apply_model_selection_to_window.call_args_list:
+            args = call.args
+            assert args[1] == "", "无 assistant 消息 → model_name 应为空串"
+            assert args[2] == "", "无 assistant 消息 → provider_name 应为空串"
+
     def test_join_template_track_arrange_false_keeps_count(self):
         """恢复路径 track_arrange=False：完整初始化但不递减 _pending_arrange_count。"""
         _ensure_qapp()

@@ -688,7 +688,8 @@ class KeyDocumentItemWidget(QWidget):
                     }
                 """)
             self.wd_btn.clicked.connect(lambda: self.setAsWorkingDir.emit(self.file_path))
-            main_layout.addWidget(self.wd_btn)
+            # 根目录 icon 置于行首（图标/名称之前），操作按钮（打开/删除）留在右侧
+            main_layout.insertWidget(0, self.wd_btn)
 
         # 检测 git worktree（仅当是文件夹且被标记为根目录时才检测）
         self._repo_info = None
