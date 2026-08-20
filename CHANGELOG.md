@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.3] - 2026-08-20
 
-自上一版本以来的变更 | 提交数：122 · 文件变更：255 · +23117/-10591 | 贡献者：dingma, mading, drifox-bot, builder
+自上一版本以来的变更 | 提交数：132 · 文件变更：262 · +24155/-10747 | 贡献者：dingma, mading, drifox-bot, builder
 
 ### ✨ 新功能 (New Features)
 
@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file.
 - **Gateway 平台插件化（E2）** (`app/gateway/` + `plugins/system/gateways/` + 社区仓 drifox-plugins2): 6 个内置平台适配器迁出主程序，新增 `GatewayPlatformDef` 契约与 `GatewayPlatformRegistry` 注册表（零平台 if 分支）；Platform 枚举 str-mixin 化打通第三方平台 id；设置卡 registry 驱动自动渲染；Telegram 试点全链路迁出主程序，行为等价
 - **插件配置契约（E1）** (`app/plugins/` + `plugins/system/`): 新增 `PluginConfigStore`（env→存储→默认三级链）+ `PluginConfigRegistry`（`config_schema` 声明式渲染卡）+ 统一存储 `<app_data>/plugins/<plugin>/config.json`；websearch 工具/配置卡零主程序改动迁移到自包含配置
 - **性能基准测试套件** (`benchmarks/`): 新增 memory/import/startup/session-leak 基准脚本，用于回归对比与性能监控
+
+- **插件热重载增强（事件编排 + 活跃窗口 UI 刷新）** (`app/core/backend.py` + `app/main_widget.py` + `app/plugins/registries/ui_plugin_registry.py` + `app/widgets/message_card.py` + `tests/`): 热重载事件按序编排（event sequencing），重建后主动刷新活跃窗口 UI（输入区按钮/右键菜单/设置卡经 `_on_plugin_hot_reload` 重建）；backend 调度与 config_sync 协同；新增 `tests/plugins/test_input_button_hot_reload.py`（117 行）等收敛热重载回归
 
 ### 🐛 Bug 修复 (Bug Fixes)
 
@@ -47,6 +49,8 @@ All notable changes to this project will be documented in this file.
 - **opencode 免费模型注入保留** (`app/utils/config.py`): `_ensure_default_opencode_provider` 逻辑不变，数据源从 `FREE_PROVIDERS` 改为注册表 `OpenCode Zen` 插件定义，回归测试通过
 - **Gateways 其余 5 平台迁出主程序** (`app/gateway/`): manager/config 零平台分支，平台插件定居社区仓 drifox-plugins2
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): backend/worker 去 `ensure_builtin_*` 调用，依赖系统插件加载；轮询 watcher 退役，tools/providers 变更并入 watchfiles 主链
+
+- **gitignore 处理简化与用户配置尊重** (`plugins/system/hooks/format_memory_context.py`): 重写 `.gitignore` 处理逻辑，尊重用户既有配置，移除冗余分支（净 -82 行）
 
 ### ⚡ 性能优化 (Performance)
 
