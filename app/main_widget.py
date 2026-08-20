@@ -10767,8 +10767,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
         # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
         # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
+        # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView 原生
+        # HWND）若直接脱离父窗口树会变成独立顶层窗口 → Chromium 弹出原生窗口
+        # （白窗一闪），deleteLater 之后才销毁。先隐藏摘除可见性，再断父引用。
         try:
             if cached.parent() is not None:
+                cached.hide()
                 cached.setParent(None)
         except Exception:
             pass
@@ -11350,11 +11354,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if delete_widgets:
                 # cleanup 释放 WebEngine renderer（viewer.cleanup → setHtml("")）；
                 # removeWidget + 解除父引用后 deleteLater 才能让 renderer 自然退出
+                # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView
+                # 原生 HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目
+                # /新建标签页清理旧卡片时 Chromium 弹出原生窗口）。
                 if hasattr(widget, "cleanup"):
                     try:
                         widget.cleanup()
                     except Exception:
                         pass
+                widget.hide()
                 self.chat_layout.removeWidget(widget)
                 try:
                     widget.setParent(None)
@@ -11426,7 +11434,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 解除父引用：takeAt 仅摘除布局项，widget 仍挂在父控件树下，
             # QWebEngineView 的 renderer 进程不会自然退出；setParent(None)
             # 结束父引用后 deleteLater 才能释放 renderer
+            # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView
+            # 原生 HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪。
             try:
+                widget.hide()
                 if widget.parent() is not None:
                     widget.setParent(None)
             except Exception:

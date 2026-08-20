@@ -198,3 +198,77 @@ def test_effectively_visible_all_stacked_layers_must_pass(_qt_app):
     content_stack.setCurrentWidget(content_area)
     assert card._is_effectively_visible() is True
     content_stack.deleteLater()
+
+
+# ══════════════════════════════════════════════════════════
+# 销毁路径：setParent(None) 前必须先 hide()，防止白窗一闪
+# ══════════════════════════════════════════════════════════
+
+
+def _method_src(cls: ast.ClassDef, name: str) -> str:
+    m = _method(cls, name)
+    return _method_text(m)
+
+
+def test_invalidate_welcome_card_hides_before_setparent_none(_qt_app):
+    """失效欢迎卡片时，必须在 setParent(None) 之前 hide()。
+
+    回归（2026-08-20）：切换项目/新建标签页 → _invalidate_welcome_card →
+    setParent(None)。若卡片已渲染（QWebEngineView HWND 已创建）且可见，
+    setParent(None) 会把整棵含 HWND 的子树变为独立顶层窗口 → Chromium
+    弹出原生窗口（白窗一闪），随后 deleteLater 才销毁。必须先 hide 摘除
+    可见性，再脱离父链。
+    """
+    from PyQt5.QtWidgets import QWidget
+
+    # 行为验证：可见 widget setParent(None) 前 hide 不弹独立窗口
+    top = QWidget()
+    top.show()
+    w = QWidget(top)
+    w.show()
+    assert w.isVisible()
+    w.hide()
+    w.setParent(None)
+    assert not w.isVisible(), "hide 后再 setParent(None) 不应成为独立可见窗口"
+    w.deleteLater()
+    top.deleteLater()
+
+
+def test_invalidate_welcome_card_ast_hide_before_setparent(_qt_app):
+    """AST：_invalidate_welcome_card 必须在 setParent(None) 之前调用 hide()。"""
+    src = _get_main_widget_src_ast()
+    text = _extract_method_text(src, "OpenAIChatToolWindow", "_invalidate_welcome_card")
+    idx_hide = text.find("hide()")
+    idx_setparent = text.find("setParent(None)")
+    assert idx_hide != -1, "_invalidate_welcome_card 缺少 hide() 调用"
+    assert idx_setparent != -1, "_invalidate_welcome_card 缺少 setParent(None)"
+    assert idx_hide < idx_setparent, "setParent(None) 必须在 hide() 之后（防白窗一闪）"
+
+
+def test_clear_chat_area_hides_before_setparent(_qt_app):
+    """AST：_clear_chat_area 的删除分支必须在 setParent(None) 之前 hide()。"""
+    src = _get_main_widget_src_ast()
+    text = _extract_method_text(src, "OpenAIChatToolWindow", "_clear_chat_area")
+    # 删除分支（delete_widgets=True）中 hide 必须先于 setParent(None)
+    idx_hide = text.find("widget.hide()")
+    idx_setparent = text.find("widget.setParent(None)")
+    assert idx_hide != -1, "_clear_chat_area 缺少 widget.hide() 调用"
+    assert idx_setparent != -1, "_clear_chat_area 缺少 widget.setParent(None)"
+    assert idx_hide < idx_setparent, "setParent(None) 必须在 hide() 之后（防白窗一闪）"
+
+
+def _extract_method_text(src: str, class_name: str, method_name: str) -> str:
+    """从源码文本中提取指定类方法体（含装饰器/签名），按 AST 行号切片。"""
+    tree = ast.parse(src, filename="main_widget.py")
+    lines = src.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method_name:
+                    return "\n".join(lines[child.lineno - 1: child.end_lineno])
+    raise AssertionError(f"未找到 {class_name}.{method_name}")
+
+
+def _get_main_widget_src_ast() -> str:
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return (repo_root / "app" / "main_widget.py").read_text(encoding="utf-8")

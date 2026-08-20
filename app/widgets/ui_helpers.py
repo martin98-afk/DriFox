@@ -1698,10 +1698,14 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         # 从 layout 移除：removeWidget + 解除父引用（removeItem/takeAt 仅摘除
         # 布局 item，widget 仍挂在父控件树下，QWebEngineView 的 renderer 进程
         # 不会自然退出；removeWidget 结束父引用后 deleteLater 才能释放 renderer）
+        # 🛡️ 必须先 hide() 再 setParent(None)：可见卡片（含 QWebEngineView 原生
+        # HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目/新建
+        # 标签页清理旧卡片时 Chromium 弹出原生窗口）。
         layout_removed = False
         for i in range(chat_layout.count()):
             item = chat_layout.itemAt(i)
             if item and item.widget() is widget:
+                widget.hide()
                 chat_layout.removeWidget(widget)
                 try:
                     widget.setParent(None)
