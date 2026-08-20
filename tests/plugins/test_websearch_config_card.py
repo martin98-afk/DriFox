@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
-"""websearch 配置设置卡测试：注册到设置面板插件分区 + 保存闭环
+"""websearch 自动配置卡测试（E1 契约化后）。
 
-链路（与真实 UI 一致）：
-- plugins/system/ui/__init__.py register_ui → UIPluginRegistry.load_plugin("system")
-  → get_settings_cards() 含 websearch-keys
-- 卡片实例化：输入两个 key → 保存 → set_api_key_config 持久化 → 读回
+替代原手写 WebSearchKeySettingsCard 测试：
+- 不再 import plugins.system.ui（手写卡已删除）
+- 验证 plugin.json config_schema 声明后，UIPluginRegistry 注册了 system-config 自动卡
+- 卡片回显走 PluginConfigStore（与 PluginConfigCard 一致）
 """
+
+import json
 
 import pytest
 
+from app.plugins.contracts.plugin_config import parse_config_schema
+from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
@@ -29,73 +33,88 @@ def isolated_config(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _system_ui_path():
-    from pathlib import Path
-
-    return Path(__file__).resolve().parent.parent.parent / "plugins" / "system"
-
-
-def test_register_ui_loads_settings_card(fresh_registry):
-    """load_plugin("system") → 设置卡片注册到插件分区"""
-    assert fresh_registry.load_plugin("system", _system_ui_path()) is True
-    cards = fresh_registry.get_settings_cards()
-    assert [c.card_id for c in cards] == ["websearch-keys"]
-    assert cards[0].title == "网页搜索 API Key"
-    assert cards[0].plugin_name == "system"
+def _load_system_manifest():
+    with open("plugins/system/.drifox-plugin/plugin.json", encoding="utf-8") as fp:
+        return json.load(fp)
 
 
-def test_settings_card_save_flow(qtbot, fresh_registry, isolated_config):
-    """卡片输入两个 key → 保存 → 配置持久化 → 读回（UI 闭环）"""
-    from plugins.system.ui import WebSearchKeySettingsCard
+def test_plugin_json_declares_config_schema():
+    """system 插件 plugin.json 必须声明 config_schema（E1 契约面）"""
+    manifest = _load_system_manifest()
+    schema = parse_config_schema("system", manifest.get("config_schema"))
+    assert schema is not None
+    assert {f.key for f in schema.fields} == {"tavily_api_key", "tinyfish_api_key"}
 
-    card = WebSearchKeySettingsCard()
-    qtbot.addWidget(card)
-    card._tavily_row.line_edit.setText("tvly-ui-key")
-    card._tinyfish_row.line_edit.setText("tf-ui-key")
+
+def test_auto_card_registered_for_system(fresh_registry, monkeypatch):
+    """plugin.json config_schema 声明后，自动卡 system-config 出现在设置卡注册表。"""
+    # 清掉已有 schema（其它用例可能已注册 system）
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+    manifest = _load_system_manifest()
+    schema = parse_config_schema("system", manifest.get("config_schema"))
+    assert schema is not None
+    PluginConfigRegistry.get_instance().register(schema)
+    from app.widgets.cards.settings.plugin_config_card import make_card_class
+
+    UIPluginRegistry.get_instance().register_settings_card(
+        "system", "system-config", schema.title, make_card_class("system")
+    )
+    cards = [c for c in fresh_registry.get_settings_cards() if c.card_id == "system-config"]
+    assert cards and cards[0].plugin_name == "system"
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+
+
+def test_auto_card_echo_falls_back_to_schema_default(qapp, fresh_registry, isolated_config):
+    """未注册任何值时，卡片输入框回显 schema default（用户可见真实在用 key）"""
+    from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
+
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+    manifest = _load_system_manifest()
+    schema = parse_config_schema("system", manifest.get("config_schema"))
+    PluginConfigRegistry.get_instance().register(schema)
+    card = PluginConfigCard("system")
+    defaults = {f.key: f.default for f in schema.fields}
+    assert card._rows["tavily_api_key"].text() == defaults["tavily_api_key"]
+    assert card._rows["tinyfish_api_key"].text() == defaults["tinyfish_api_key"]
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+
+
+def test_auto_card_save_persists_via_store(qapp, fresh_registry, isolated_config):
+    """卡片输入新 key → 保存 → PluginConfigStore 读回一致（UI 闭环）"""
+    from app.plugins.managers.plugin_config_store import PluginConfigStore
+    from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
+
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+    manifest = _load_system_manifest()
+    schema = parse_config_schema("system", manifest.get("config_schema"))
+    PluginConfigRegistry.get_instance().register(schema)
+    card = PluginConfigCard("system")
+    card._rows["tavily_api_key"].setText("tvly-ui-key")
+    card._rows["tinyfish_api_key"].setText("tf-ui-key")
     card.save_btn.click()
-
-    from plugins.system.tools.web_tools import get_api_key_config
-
-    cfg = get_api_key_config()
-    assert cfg == {"tavily_api_key": "tvly-ui-key", "tinyfish_api_key": "tf-ui-key"}
-
-
-def test_settings_card_loads_existing(qtbot, fresh_registry, isolated_config):
-    """已注册配置 → 打开卡片回显配置值（优先于内置默认）"""
-    from plugins.system.tools.web_tools import set_api_key_config
-    from plugins.system.ui import WebSearchKeySettingsCard
-
-    set_api_key_config(tavily_api_key="tvly-existing", tinyfish_api_key="tf-existing")
-    card = WebSearchKeySettingsCard()
-    qtbot.addWidget(card)
-    assert card._tavily_row.line_edit.text() == "tvly-existing"
-    assert card._tinyfish_row.line_edit.text() == "tf-existing"
+    store = PluginConfigStore()
+    assert store.get("system", "tavily_api_key") == "tvly-ui-key"
+    assert store.get("system", "tinyfish_api_key") == "tf-ui-key"
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
 
 
-def test_settings_card_empty_default(qtbot, fresh_registry, isolated_config):
-    """未注册配置 → 输入框回显内置默认 key（用户可见真实在用 key）"""
-    from plugins.system.tools.web_tools import _DEFAULT_TAVILY_KEY, _DEFAULT_TINYFISH_KEY
-    from plugins.system.ui import WebSearchKeySettingsCard
+def test_save_empty_clears_back_to_default(qapp, fresh_registry, isolated_config):
+    """清空输入保存 → 清除配置项 → 卡片回显 schema default（回退路径）"""
+    from app.plugins.managers.plugin_config_store import PluginConfigStore
+    from app.widgets.cards.settings.plugin_config_card import PluginConfigCard
 
-    card = WebSearchKeySettingsCard()
-    qtbot.addWidget(card)
-    assert card._tavily_row.line_edit.text() == _DEFAULT_TAVILY_KEY
-    assert card._tinyfish_row.line_edit.text() == _DEFAULT_TINYFISH_KEY
-
-
-def test_save_empty_falls_back(qtbot, fresh_registry, isolated_config):
-    """清空输入保存 → 配置清除 → 回显内置默认（回退路径）"""
-    from plugins.system.tools.web_tools import _DEFAULT_TAVILY_KEY, get_api_key_config, set_api_key_config
-    from plugins.system.ui import WebSearchKeySettingsCard
-
-    set_api_key_config(tavily_api_key="tvly-tmp")
-    card = WebSearchKeySettingsCard()
-    qtbot.addWidget(card)
-    card._tavily_row.line_edit.setText("")
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
+    manifest = _load_system_manifest()
+    schema = parse_config_schema("system", manifest.get("config_schema"))
+    PluginConfigRegistry.get_instance().register(schema)
+    PluginConfigStore().set_values("system", {"tavily_api_key": "tvly-tmp"})
+    card = PluginConfigCard("system")
+    card._rows["tavily_api_key"].setText("")
     card.save_btn.click()
-    # 保存后回显内置默认 + 配置已清除
-    assert card._tavily_row.line_edit.text() == _DEFAULT_TAVILY_KEY
-    assert get_api_key_config()["tavily_api_key"] == ""
+    defaults = {f.key: f.default for f in schema.fields}
+    assert card._rows["tavily_api_key"].text() == defaults["tavily_api_key"]
+    assert PluginConfigStore().get("system", "tavily_api_key") == defaults["tavily_api_key"]
+    PluginConfigRegistry.get_instance().unregister_plugin("system")
 
 
 if __name__ == "__main__":

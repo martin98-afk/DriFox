@@ -1265,24 +1265,69 @@ class TestWebToolsEnvKey:
         spec.loader.exec_module(module)
         return module
 
+    @staticmethod
+    def _schema_defaults():
+        """E1：默认 key 由 plugin.json config_schema 声明（迁移后单一来源）"""
+        import json
+
+        manifest = json.loads(
+            (Path(__file__).parent.parent / "plugins" / "system" / ".drifox-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return {f["key"]: f["default"] for f in manifest["config_schema"]["fields"]}
+
     def test_api_key_reads_env_only(self, monkeypatch):
         mod = self._load_web_tools()
-        # 插件内置默认 key 非空(用户配置值已迁入插件)
-        assert mod._DEFAULT_TAVILY_KEY
-        assert mod._DEFAULT_TINYFISH_KEY
-        monkeypatch.setenv("TAVILY_API_KEY", "env-test-key")
-        # 无 tool_ctx / 无 env.api_keys → 仍能读到(os.environ 优先)
-        assert mod._api_key({}, "TAVILY_API_KEY") == "env-test-key"
-        assert mod._api_key(None, "TAVILY_API_KEY") == "env-test-key"
-        # 未设置环境变量 → 回退插件内置默认常量(非空)
-        monkeypatch.delenv("TAVILY_API_KEY")
-        assert mod._api_key({}, "TAVILY_API_KEY") == mod._DEFAULT_TAVILY_KEY
-        # TINYFISH 同样:环境变量优先
-        monkeypatch.setenv("TINYFISH_API_KEY", "tiny-test-key")
-        assert mod._api_key({}, "TINYFISH_API_KEY") == "tiny-test-key"
-        # TINYFISH 未设置 → 回退内置默认
-        monkeypatch.delenv("TINYFISH_API_KEY")
-        assert mod._api_key({}, "TINYFISH_API_KEY") == mod._DEFAULT_TINYFISH_KEY
+        defaults = self._schema_defaults()
+        # 插件内置默认 key 非空(用户配置值由 schema 声明)
+        assert defaults["tavily_api_key"]
+        assert defaults["tinyfish_api_key"]
+        # E1 契约：_api_key 调用前需注册 schema（模块级常量已迁出）
+        from app.plugins.contracts.plugin_config import parse_config_schema
+        from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+        reg = PluginConfigRegistry.get_instance()
+        reg.register(
+            parse_config_schema(
+                "system",
+                {
+                    "title": "T",
+                    "fields": [
+                        {
+                            "key": "tavily_api_key",
+                            "label": "T",
+                            "type": "password",
+                            "default": defaults["tavily_api_key"],
+                            "env": "TAVILY_API_KEY",
+                        },
+                        {
+                            "key": "tinyfish_api_key",
+                            "label": "T",
+                            "type": "password",
+                            "default": defaults["tinyfish_api_key"],
+                            "env": "TINYFISH_API_KEY",
+                        },
+                    ],
+                },
+            )
+        )
+        try:
+            monkeypatch.setenv("TAVILY_API_KEY", "env-test-key")
+            # 无 tool_ctx / 无 env.api_keys → 仍能读到(os.environ 优先)
+            assert mod._api_key({}, "TAVILY_API_KEY") == "env-test-key"
+            assert mod._api_key(None, "TAVILY_API_KEY") == "env-test-key"
+            # 未设置环境变量 → 回退 schema default(非空)
+            monkeypatch.delenv("TAVILY_API_KEY")
+            assert mod._api_key({}, "TAVILY_API_KEY") == defaults["tavily_api_key"]
+            # TINYFISH 同样:环境变量优先
+            monkeypatch.setenv("TINYFISH_API_KEY", "tiny-test-key")
+            assert mod._api_key({}, "TINYFISH_API_KEY") == "tiny-test-key"
+            # TINYFISH 未设置 → 回退 schema default
+            monkeypatch.delenv("TINYFISH_API_KEY")
+            assert mod._api_key({}, "TINYFISH_API_KEY") == defaults["tinyfish_api_key"]
+        finally:
+            reg.unregister_plugin("system")
 
 
 class TestSelfContained:
