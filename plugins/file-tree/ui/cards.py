@@ -240,14 +240,13 @@ def _styled_message_box(
                     )
 
             layout.addLayout(btn_layout)
-            # 关键：必须把 widget 从 MaskDialogBase 的 QHBoxLayout 取出，
-            # 否则 QHBoxLayout 默认让 widget 高度 = layout 高度（dialog 全屏）
-            self.layout().removeWidget(self.widget)
-            self.widget.setParent(self)
+            # 布局管理 + 居中：显式 AlignCenter 避免默认无对齐导致
+            # widget 高度 = layout 高度（dialog 全屏）；勿 removeWidget——
+            # 脱离布局后位置固定 (0,0)，弹窗会钉在主窗口左上角
+            self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)
             # 内容自适应：minSize 保底（420×200），maxSize 防撑爆（620×720）
             self.widget.setMinimumSize(420, 200)
             self.widget.setMaximumSize(620, 720)
-            self.widget.adjustSize()
 
     dialog = _Dialog(parent_widget)
     dialog.exec_()
