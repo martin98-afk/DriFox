@@ -46,7 +46,47 @@ def _make_installer(tmp_path: Path):
     installer._status_map_ts = 0.0
     installer._manifest_cache = {}
     installer.last_error = ""
+    installer._quarantine_dir = tmp_path / ".plugin_quarantine"
     return installer
+
+
+def test_remove_relocates_locked_pyd(tmp_path, monkeypatch):
+    """卸载时 deps 的 .pyd 被进程占用删不掉，应改名移出隔离目录让空插件目录
+
+    复现问题：gateway 插件 vendor 的 Crypto .pyd 被加载后无法删除，导致 remove
+    残留、install 也装不上。修复后 _rmtree_relocate 把占用文件同卷 rename 到
+    隔离目录，插件目录被完全清空，卸载/重装不再死锁。
+    """
+    from ui.installer import PluginInstaller, _rmtree_relocate
+
+    installer = _make_installer(tmp_path)
+    plugin = installer._plugins_dir / "gateway-feishu"
+    pyd = plugin / "deps" / "Crypto" / "Cipher" / "_raw_aes.pyd"
+    pyd.parent.mkdir(parents=True)
+    pyd.write_text("fake-pyd")
+    (plugin / "readme.txt").write_text("x")
+
+    # 模拟 Windows：.pyd 被锁时 rmtree 删不掉、记为 failure 且不删；否则删整棵树
+    def fake_rmtree_readonly(path, failures_out=None):
+        failures = [] if failures_out is None else failures_out
+        if pyd.exists():
+            failures.append(str(pyd))
+            return False
+        if path.exists():
+            shutil.rmtree(path)
+        return True
+
+    monkeypatch.setattr("ui.installer._rmtree_readonly", fake_rmtree_readonly)
+
+    leftover: list = []
+    ok = _rmtree_relocate(installer, plugin, leftover)
+    assert ok is True, "被锁 .pyd 应被移出隔离目录，插件目录应清空"
+    assert not plugin.exists(), "插件目录应被完全删除"
+    assert leftover == [], f"应无残留，实际: {leftover}"
+    # .pyd 应出现在隔离目录（同卷 rename 成功）
+    relocated = list(installer._quarantine_dir.rglob("_raw_aes.pyd"))
+    assert relocated, "被锁 .pyd 应被移到隔离目录"
+    assert not pyd.exists()
 
 
 def test_enable_retries_on_locked_move(tmp_path, monkeypatch):

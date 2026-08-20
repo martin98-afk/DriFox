@@ -7752,6 +7752,19 @@ class OpenAIChatToolWindow(ToolWindow):
             ring.clear()
             self._coding_plan_hidden = True
             return
+        # ★ 去重：同 payload 短窗口（5s）内不重复打 INFO 日志，避免上游多次
+        # request_coding_plan 缓存命中或 _update_balance_display 重复触发时刷屏。
+        # UI 仍每次都 ring.set_usage() 更新（视觉无影响，仅压制重复 INFO）。
+        sig = (str(rolling), str(weekly), str(monthly))
+        last = getattr(self, "_coding_plan_last_log", None)
+        if last is not None and time.monotonic() - last[0] < 5.0 and last[1] == sig:
+            ring.set_usage(
+                rolling=rolling,
+                weekly=weekly,
+                monthly=monthly,
+            )
+            self._coding_plan_hidden = False
+            return
         logger.info(f"[CodingPlan] 收到数据: rolling={rolling}, weekly={weekly}, monthly={monthly}")
         ring.set_usage(
             rolling=rolling,
@@ -7759,6 +7772,7 @@ class OpenAIChatToolWindow(ToolWindow):
             monthly=monthly,
         )
         self._coding_plan_hidden = False
+        self._coding_plan_last_log = (time.monotonic(), sig)
         # 轮询由 UsageService 单例统一驱动（60s 周期），窗口不再自建定时器
 
     def _open_settings_popup(self):
@@ -10184,7 +10198,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 本窗口从未手动选过模型 → 跟随云端：force_global 跳过"窗口自身优先"，
             # 改从云端 llm_selected_model 取默认（无效则由 _load_model_configs 回退列表第一项）。
             self._load_model_configs(force_global=True)
-        self._update_model_selector_btn()
+        # ★ 去重：上方 _load_model_configs 末尾已调 _update_model_selector_btn，
+        # 再调一次会经 _update_balance_display → _refresh_coding_plan 重复触发
+        # request_coding_plan（缓存命中立即 emit），造成 [CodingPlan] 日志刷屏。
         self._refresh_context_usage_indicator()
 
     def _load_model_configs(self, force_global: bool = False):

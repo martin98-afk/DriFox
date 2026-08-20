@@ -62,3 +62,20 @@ def test_apply_skips_destroyed_window():
     stub._is_destroyed = True
     _apply(stub)
     assert calls == [], "已销毁窗口不应触发任何刷新"
+
+
+def test_apply_does_not_re_call_update_model_selector_btn():
+    """回归：gitee 同步后 _update_model_selector_btn 只通过 _load_model_configs
+    末尾调用一次（之前同步末尾又会冗余调一次 → 重复触发 _refresh_coding_plan
+    → request_coding_plan 缓存命中 emit → [CodingPlan] 收到数据 日志刷屏）。
+
+    注：测试使用 stub，_load_model_configs 不会真实调 _update_model_selector_btn；
+    只能断言 _apply_synced_model_selection 自身不直接调用 _update_model_selector_btn。
+    """
+    stub, calls = _make_stub(manually_selected=False)
+    _apply(stub)
+    direct_btn_calls = [c for c in calls if c[0] == "update_model_selector_btn"]
+    assert direct_btn_calls == [], (
+        f"_apply_synced_model_selection 不应直接调用 _update_model_selector_btn"
+        f"（_load_model_configs 末尾已调一次），实际调用: {direct_btn_calls}"
+    )

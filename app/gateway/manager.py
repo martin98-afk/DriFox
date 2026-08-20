@@ -290,36 +290,57 @@ class PlatformManager:
 
         self._schedule_coro(self._stop_platform_async(_platform_key(platform)))
 
-    def stop_plugin_platforms(self, plugin_name: str) -> None:
+    def stop_plugin_platforms(self, plugin_name: str, wait: bool = False) -> None:
         """停止并移除某插件注册的全部 gateway 平台（卸载/热更新清理前置）
 
         1. 从 registry 查出 source=plugin:<name> 的 platform_id 列表（unregister 前查）
         2. 逐个停止连接（异步调度到后台事件循环，不阻塞调用线程）
         3. 立即从 _adapters 摘除实例引用，使其不再被消息路由命中
+
+        Args:
+            plugin_name: 插件名
+            wait: True 时阻塞等待 stop 协程完成（调用方需要确保 SDK/依赖
+                释放后再删文件时使用，如市场卸载/残留清理）；默认 False 保持
+                热重载路径的非阻塞行为。
         """
         from app.plugins.registries.gateway_platform_registry import (
             GatewayPlatformRegistry,
         )
 
-        pids = GatewayPlatformRegistry.get_instance().get_platform_ids_by_source(
-            f"plugin:{plugin_name}"
-        )
+        pids = GatewayPlatformRegistry.get_instance().get_platform_ids_by_source(f"plugin:{plugin_name}")
+        futures = []
         for pid in pids:
             adapter = self._adapters.get(pid)
-            if adapter is not None and getattr(adapter, "is_connected", False):
+            if adapter is not None:
                 try:
-                    self._schedule_coro(self._stop_platform_async(pid))
+                    if getattr(adapter, "is_connected", False):
+                        # 直接调度 adapter.stop()（持实例引用），不经过
+                        # _stop_platform_async 的 _adapters 二次查找 —— 后者会因
+                        # 下方立即 pop 而查到 None，导致 stop 永不执行（连接泄漏，
+                        # 且 adapter 依赖的 SDK/.pyd 句柄不释放 → 卸载残留 deps）。
+                        futures.append(asyncio.run_coroutine_threadsafe(self._stop_adapter_async(adapter), self._loop))
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[PlatformManager] stop {pid} 失败: {e}")
-            self._adapters.pop(pid, None)
+                self._adapters.pop(pid, None)
         if pids:
-            logger.info(
-                f"[PlatformManager] 已停止并摘除插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}"
-            )
+            logger.info(f"[PlatformManager] 已停止并摘除插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
+        if wait:
+            for fut in futures:
+                try:
+                    fut.result(timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[PlatformManager] 等待平台 stop 超时/失败: {e}")
 
-    def rebuild_plugin_platforms(
-        self, plugin_name: str, restart_if_running: bool = True
-    ) -> None:
+    async def _stop_adapter_async(self, adapter: BasePlatformAdapter) -> None:
+        """停止单个 adapter 实例（引用已捕获，不查 _adapters，避免 pop 竞态）"""
+        try:
+            if adapter.is_connected:
+                await adapter.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[PlatformManager] adapter stop error: {e}")
+        self._notify_status()
+
+    def rebuild_plugin_platforms(self, plugin_name: str, restart_if_running: bool = True) -> None:
         """用 registry 当前 def 重建某插件的 adapter（热更新后用新 adapter_factory）
 
         热重载路径在 stop_plugin_platforms + scan_now(unregister 旧/注册新) 之后调用：
@@ -350,9 +371,7 @@ class PlatformManager:
                 if config and getattr(config, "enabled", False):
                     self._schedule_coro(self._start_platform_async(pid))
         if pids:
-            logger.info(
-                f"[PlatformManager] 已重建插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}"
-            )
+            logger.info(f"[PlatformManager] 已重建插件 [{plugin_name}] 的 {len(pids)} 个平台: {pids}")
 
     async def _start_platform_async(self, platform: str) -> bool:
         """在后台事件循环上启动平台（registry 驱动，无平台 if-elif）"""

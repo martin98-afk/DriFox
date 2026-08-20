@@ -3284,7 +3284,9 @@ class ChatBackend(QObject):
             )
 
         except Exception as e:
-            logger.error(f"[Gateway] Processing error: {e}", exc_info=True)
+            import traceback
+
+            logger.error(f"[Gateway] Processing error: {e}\n{traceback.format_exc()}")
             try:
                 if not future.done():
                     future.set_exception(e)
@@ -3367,7 +3369,9 @@ class ChatBackend(QObject):
             # 所以这里返回空字符串，避免 message_handler 重复发送
             return ""
         except Exception as e:
-            logger.error(f"[Gateway] AI processing error: {e}")
+            import traceback
+
+            logger.error(f"[Gateway] AI processing error: {e}\n{traceback.format_exc()}")
             return ""
 
     async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:

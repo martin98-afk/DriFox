@@ -8,6 +8,7 @@
 - 支持多种 source 类型（兼容 Claude Code marketplace 格式）
 """
 
+import ctypes
 import json
 import os
 import shutil
@@ -60,7 +61,7 @@ def report_plugin_install(plugin_name: str):
 # ── 删除辅助 ──────────────────────────────────────────────
 
 
-def _rmtree_readonly(path: Path) -> bool:
+def _rmtree_readonly(path: Path, failures_out: list = None) -> bool:
     """强制删除目录树（含只读文件）
 
     git clone 生成的 ``.git/objects/pack/*.idx|pack|rev`` 默认带只读属性，
@@ -68,27 +69,119 @@ def _rmtree_readonly(path: Path) -> bool:
     抛出 ``WinError 5 拒绝访问``。本方法在 ``onexc`` 回调里先 chmod 清除
     只读属性，再重试删除。
 
+    Windows 上被进程加载的 .pyd/.dll（如 gateway 插件 deps 的 Crypto）即使
+    chmod 也无法删除；onexc 中重试失败会记录到 failures，**不静默吞掉**，
+    调用方可据此感知"部分残留"并走兜底（pending-delete 下次启动清理）。
+
     Args:
         path: 要删除的目录
+        failures_out: 可选；传入 list 时把删除失败的路径追加进去（供调用方
+            感知具体残留，用于 pending-delete 记录）
 
     Returns:
-        True 删除成功；False 失败（保留原始异常日志）
+        True 全部删除成功（或目录不存在）；False 有文件残留或整体失败
     """
+    failures: list = [] if failures_out is None else failures_out
+
+    if not path.exists():
+        return True
 
     def _onerror(func, failed_path, excinfo):
         try:
             os.chmod(failed_path, stat.S_IWRITE)
             func(failed_path)
         except OSError:
-            pass
+            failures.append(str(failed_path))
 
     try:
         # Python 3.12+ 新 API；项目要求 3.14+
         shutil.rmtree(path, onexc=_onerror)
-        return True
     except Exception as e:
         logger.error(f"[Installer] rmtree {path} failed: {e}")
+        failures.append(str(path))
         return False
+    if failures_out is None and failures:
+        logger.warning(f"[Installer] rmtree {path} 残留 {len(failures)} 个文件（可能被占用）: {failures[:5]}")
+        return False
+    return True
+
+
+def _move_file_delayed_delete(path_str: str) -> None:
+    """排队在下次系统重启时删除文件（MoveFileExW + MOVEFILE_DELAY_UNTIL_REBOOT）
+
+    仅 Windows 可用；被其它进程永久独占、连 rename 都失败时的最后兜底。
+    可能因权限（需管理员/SE_RESTORE_NAME）失败，调用方应吞掉异常交回 pending-delete。
+    """
+    if sys.platform != "win32":
+        raise OSError("仅 Windows 支持重启删除")
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
+    ok = kernel32.MoveFileExW(ctypes.c_wchar_p(path_str), None, MOVEFILE_DELAY_UNTIL_REBOOT)
+    if not ok:
+        raise ctypes.WinError()  # type: ignore[attr-defined]
+
+
+def _relocate_locked_file(installer: "PluginInstaller", src: Path) -> bool:
+    """把被进程占用（已加载的原生 .pyd/.dll）文件改名移出插件目录。
+
+    Windows 上已加载的原生模块在进程存活期间**无法删除**，但其目录项可被同卷
+    rename（映射视图不受影响），故 move 到隔离目录通常成功，从而把插件目录让空、
+    解决「删不掉也装不上」的死锁。rename 仍失败（被其它进程独占）时退化到
+    MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT) 排队重启删除。
+    """
+    try:
+        qdir: Path = installer._quarantine_dir
+        qdir.mkdir(parents=True, exist_ok=True)
+        # 保留相对层级，避免跨插件同名 .pyd 冲突（如多个 gateway 都 vendor Crypto）
+        try:
+            if src.is_relative_to(installer._plugins_dir):
+                rel = src.relative_to(installer._plugins_dir)
+            elif src.is_relative_to(installer._disabled_dir):
+                rel = src.relative_to(installer._disabled_dir)
+            else:
+                rel = Path(src.name)
+        except Exception:
+            rel = Path(src.name)
+        dst = qdir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        logger.info(f"[Installer] 占用文件已移出插件目录（重启后清理）: {src} -> {dst}")
+        return True
+    except Exception as e:
+        try:
+            _move_file_delayed_delete(str(src))
+            logger.info(f"[Installer] 占用文件已排队重启删除: {src}")
+            return True
+        except Exception as e2:
+            logger.debug(f"[Installer] 占用文件无法移出: {src}: {e} | {e2}")
+            return False
+
+
+def _rmtree_relocate(installer: "PluginInstaller", path: Path, failures_out: Optional[list] = None) -> bool:
+    """rmtree 失败时把被占用的 .pyd/.dll 改名移出，再二次 rmtree 清空。
+
+    解决 Windows 下已加载原生模块无法删除、导致插件目录删不掉也装不上的死锁。
+    Returns: True 目标已清空/消失（占用文件已被移出隔离目录）。
+    """
+    failures: list = []
+    if _rmtree_readonly(path, failures):
+        return True
+    # 第一轮失败：把锁定的文件（多为 .pyd/.dll）改名移出插件目录
+    for f in list(failures):
+        fp = Path(f)
+        if fp.is_file() and _relocate_locked_file(installer, fp):
+            failures.remove(f)
+    # 文件移出后，残留多为空目录，二次 rmtree 清掉
+    if path.exists():
+        rem: list = []
+        if _rmtree_readonly(path, rem):
+            return True
+        failures.extend(rem)
+    else:
+        return True
+    if failures_out is not None:
+        failures_out.extend(sorted(set(failures)))
+    return False
 
 
 # ── 环境检测 ──────────────────────────────────────────────
@@ -147,6 +240,9 @@ class PluginInstaller:
         self._plugins_dir = drifox / "plugins"
         self._disabled_dir = drifox / "plugins-disabled"
         self._cache_dir = drifox / "cache" / "install_tmp"
+        # 被占用（已加载原生 .pyd/.dll）文件的隔离目录：rmtree 删不掉时
+        # 把文件同卷 rename 到这里，让插件目录让空；重启后由 _cleanup_pending_delete 清掉。
+        self._quarantine_dir = drifox / ".plugin_quarantine"
         # 项目根 plugins/ 目录（系统插件）
         self._system_dir = Path(__file__).resolve().parent.parent.parent.parent / "plugins"
         # 已安装插件状态缓存（{name: version|None}），TTL 防频繁磁盘扫描
@@ -160,6 +256,8 @@ class PluginInstaller:
         self._manifest_cache: dict = {}
         # 最近一次安装/更新失败原因（供 UI 记录区展示；成功/未执行时为空）
         self.last_error: str = ""
+        # 清理上次卸载残留（进程重启后 DLL/.pyd 句柄已释放，可正常删除）
+        self._cleanup_pending_delete()
 
     # 缓存字段组锁：worker 线程写（invalidate/预填充）、GUI 主线程读
     # （get_installed_map/get_status_map）。多字段（_inst_map_cache /
@@ -199,6 +297,10 @@ class PluginInstaller:
                         if not entry.is_dir():
                             continue
                         version, manifest = self._read_version_full(Path(entry.path))
+                        if manifest is None:
+                            # 非插件目录（卸载残留/无关文件夹）：无 plugin.json
+                            # 不视为已安装插件，避免市场显示"禁用/卸载"残留。
+                            continue
                         result[entry.name] = version
                         manifest_cache[entry.name] = manifest
                 except OSError:
@@ -212,6 +314,8 @@ class PluginInstaller:
                     if not entry.is_dir() or entry.name in result:
                         continue
                     version, manifest = self._read_version_full(Path(entry.path))
+                    if manifest is None:
+                        continue
                     result[entry.name] = version
                     manifest_cache[entry.name] = manifest
             except OSError:
@@ -242,14 +346,14 @@ class PluginInstaller:
         if self._plugins_dir.is_dir():
             try:
                 for entry in os.scandir(self._plugins_dir):
-                    if entry.is_dir():
+                    if entry.is_dir() and self._read_manifest_at(Path(entry.path)) is not None:
                         result[entry.name] = "enabled"
             except OSError:
                 pass
         if self._disabled_dir.is_dir():
             try:
                 for entry in os.scandir(self._disabled_dir):
-                    if entry.is_dir():
+                    if entry.is_dir() and self._read_manifest_at(Path(entry.path)) is not None:
                         result[entry.name] = "disabled"
             except OSError:
                 pass
@@ -388,8 +492,30 @@ class PluginInstaller:
 
         target = self._plugins_dir / name
         if target.exists():
-            logger.info(f"[Installer] Plugin {name} already exists, skipping install")
-            return True
+            if self._read_manifest_at(target) is not None:
+                logger.info(f"[Installer] Plugin {name} already exists, skipping install")
+                return True
+            # 残留目录（卸载不净/无关文件夹，无 plugin.json）→ 不视为已安装，
+            # 先清理再安装，否则点「安装」会一直跳过、永远装不上。
+            logger.info(f"[Installer] 插件 {name} 存在残留目录（无 manifest），先清理再安装")
+            # 等待 adapter 完全停止 + 摘除 registry def，释放 SDK/.pyd 句柄
+            self._stop_gateway_platforms(name, wait=True)
+            self._purge_plugin_module_cache(name)
+            # 被进程加载的 .pyd/.dll 无法在运行中删除：_rmtree_relocate 会把它们
+            # 同卷 rename 到隔离目录（让空插件目录），再二次 rmtree 清空；
+            # 仍失败则 gc + 短暂等待后重试（给 stop 协程/GC 释放句柄的窗口）。
+            import gc
+
+            cleaned = False
+            for _attempt in range(3):
+                if _rmtree_relocate(self, target):
+                    cleaned = True
+                    break
+                gc.collect()
+                time.sleep(0.5)
+            if not cleaned:
+                logger.warning(f"[Installer] 残留目录清理失败（文件被占用），安装中止: {target}")
+                return False
 
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
@@ -911,6 +1037,84 @@ class PluginInstaller:
             if pc.exists():
                 _rmtree_readonly(pc)
 
+    # ── 卸载残留兜底（pending-delete） ────────────────────
+    # Windows 上被进程加载的 .pyd/.dll（gateway 插件 deps 的 Crypto 等）无法
+    # 在运行中删除：rmtree 删掉其余文件后该文件残留。记录到清单，进程重启后
+    # 句柄释放，下次访问 installer 时自动清理。
+
+    _PENDING_DELETE_FILE = ".pending-delete.json"
+
+    def _pending_delete_path(self) -> Path:
+        return self._plugins_dir / self._PENDING_DELETE_FILE
+
+    def _load_pending_delete(self) -> dict:
+        """读取残留清单 {path_str: timestamp}"""
+        try:
+            p = self._pending_delete_path()
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.debug(f"[Installer] 读取残留清单失败: {e}")
+        return {}
+
+    def _record_pending_delete(self, paths) -> None:
+        """记录卸载残留目录（进程重启后清理）"""
+        try:
+            self._plugins_dir.mkdir(parents=True, exist_ok=True)
+            existing = self._load_pending_delete()
+            existing.update({str(p): time.time() for p in paths})
+            self._pending_delete_path().write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"[Installer] 记录残留目录失败: {e}")
+
+    def _cleanup_pending_delete(self) -> int:
+        """清理上次卸载残留（进程重启后 DLL/.pyd 句柄已释放）
+
+        Returns:
+            成功清理的残留目录数
+        """
+        pending = self._load_pending_delete()
+        if not pending:
+            return 0
+        cleaned = 0
+        remaining: dict = {}
+        for path_str, ts in pending.items():
+            p = Path(path_str)
+            if not p.exists():
+                cleaned += 1
+                continue
+            if p.is_file() or p.is_symlink():
+                # rmtree 只接受目录；清单可能含文件级残留（rmtree 报告的失败文件）
+                try:
+                    p.unlink()
+                    cleaned += 1
+                except OSError:
+                    remaining[path_str] = ts
+            else:
+                if _rmtree_readonly(p):
+                    cleaned += 1
+                else:
+                    remaining[path_str] = ts
+        try:
+            if remaining:
+                self._pending_delete_path().write_text(
+                    json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            else:
+                self._pending_delete_path().unlink(missing_ok=True)
+        except Exception:
+            pass
+        # 隔离目录（上次卸载时被锁 .pyd/.dll rename 到此；重启后句柄已释放）一并清掉
+        try:
+            if self._quarantine_dir.exists():
+                _rmtree_readonly(self._quarantine_dir)
+        except Exception:
+            pass
+        if cleaned:
+            logger.info(f"[Installer] 启动清理 {cleaned} 个卸载残留目录")
+        return cleaned
+
     # ── 卸载 ─────────────────────────────────────────────
 
     def remove(self, name: str) -> bool:
@@ -922,20 +1126,64 @@ class PluginInstaller:
         Returns:
             True 删除成功或目录不存在
         """
+        # 0. 停止并摘除该插件注册的 gateway 平台 adapter：adapter 依赖的 SDK
+        #    （如 lark_oapi → Crypto）被进程加载后 .pyd/.dll 句柄占用，不摘除
+        #    会导致 rmtree 删不干净（残留 deps 目录）。stop_plugin_platforms
+        #    内部先调度 stop（释放 WS 连接线程）再 pop 摘除实例引用；
+        #    wait=True 确保 stop 完成后再删，最大限度避免 .pyd 占用。
+        self._stop_gateway_platforms(name, wait=True)
         # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
         self._purge_plugin_module_cache(name)
         removed = False
+        leftover: list = []
         for base in (self._plugins_dir, self._disabled_dir):
             target = base / name
             if target.exists():
-                if _rmtree_readonly(target):
+                # _rmtree_relocate：先正常删，删不掉的被锁 .pyd/.dll 同卷改名移出
+                # 插件目录（让空），再二次 rmtree 清空；仅当文件被其它进程永久独占、
+                # 连 rename 都不行时才残留到 leftover（记录待重启清理）。
+                if _rmtree_relocate(self, target, leftover):
                     removed = True
                     logger.info(f"[Installer] Removed plugin {name}")
-                else:
-                    return False
+        if leftover:
+            # 部分文件被其它进程永久独占、连 rename 都失败 → 记录待下次启动/重启清理。
+            # 占用文件已被尽可能移出，目录通常已让空，市场侧不再显示为插件，
+            # 用户视角卸载已完成；残留仅占磁盘，重启后自动清掉。
+            self._record_pending_delete(leftover)
+            logger.warning(
+                f"[Installer] 插件 {name} 部分文件残留（可能被其它进程占用），已记录待下次启动清理: {leftover[:5]}"
+            )
         if removed:
             self.invalidate_installed_cache()
         return True
+
+    @staticmethod
+    def _stop_gateway_platforms(name: str, wait: bool = False) -> None:
+        """卸载/清理前停止插件注册的 gateway 平台（摘除 adapter 引用 + 停止连接）
+
+        Args:
+            name: 插件名
+            wait: True 时阻塞等待 adapter.stop() 完成（释放 SDK/WS 线程引用，
+                避免随后 rmtree 时 deps 的 .pyd/.dll 仍被占用）
+        """
+        try:
+            from app.gateway.manager import get_platform_manager
+
+            pm = get_platform_manager()
+            if pm is not None:
+                pm.stop_plugin_platforms(name, wait=wait)
+        except Exception as e:
+            logger.warning(f"[Installer] 停止 gateway 平台({name})失败: {e}")
+        # registry 中的 def 持有 adapter_factory（插件模块函数引用），不摘除
+        # 则模块链（→ SDK → Crypto）无法 GC，deps 的 .pyd 句柄不释放。
+        try:
+            from app.plugins.registries.gateway_platform_registry import (
+                GatewayPlatformRegistry,
+            )
+
+            GatewayPlatformRegistry.get_instance().unregister_source(f"plugin:{name}")
+        except Exception as e:
+            logger.debug(f"[Installer] unregister gateway source({name})失败（忽略）: {e}")
 
     def uninstall(self, name: str) -> bool:
         """卸载插件（删除本地目录）"""
