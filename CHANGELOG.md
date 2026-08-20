@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
 - **服务商图标插件化** (`app/utils/provider_icons.py`): 新增 `get_provider_icon`——插件自带图标目录（`providers/icons/` 深色 + `icons_light/` 浅色，主题感知）优先，缺省回退 qrc；与 tools 图标机制对称
 - **服务商注册表懒加载预热** (`app/plugins/registries/provider_registry.py`): `ensure_loaded()` 幂等预热，兼容启动早期 Settings → opencode 免费模型注入链路
 
+### 🐛 Bug 修复 (Bug Fixes)
+
+- **file-tree 右键「在资源管理器中打开」层级错位** (`plugins/file-tree/ui/cards.py`): 目录原本用 `explorer /select,` 会打开父目录并高亮（层级往外多一层），改为 `explorer <dir>` 直接打开该目录；文件仍用 `/select,` 打开所在文件夹并选中；上层对文件不再取 `dirname`（否则传入目录再次退回父目录）。macOS/Linux 同步按目录/文件分派。
+
 ### ♻️ 代码重构 (Refactoring)
 
 - **openai 适配器拆协议家族（Phase C）** (`plugins/system/model_adapters/`): 旧单适配器 `openai.py` 删除，拆为 `openai_family.py / gemini_family.py / deepseek_family.py` + 共享判定器 `_detectors.py`；worker 序列化调用全部收敛到 `_serialize_for_api` 单入口（chat_worker 9 处 + subagent_worker 2 处）。

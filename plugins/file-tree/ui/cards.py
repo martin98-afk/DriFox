@@ -1114,7 +1114,7 @@ class FileTreeCard(QWidget):
                 action_explorer.triggered.connect(lambda: self._open_in_explorer(item_path))
             else:
                 action_explorer = menu.addAction("📂 打开所在文件夹")
-                action_explorer.triggered.connect(lambda: self._open_in_explorer(os.path.dirname(item_path)))
+                action_explorer.triggered.connect(lambda: self._open_in_explorer(item_path))
                 action_open = menu.addAction("📄 用默认程序打开")
                 action_open.triggered.connect(lambda: self._open_file(item_path))
 
@@ -1144,13 +1144,29 @@ class FileTreeCard(QWidget):
 
     @staticmethod
     def _open_in_explorer(path: str):
+        """在系统文件管理器中打开路径
+
+        - 目录：直接打开并展示其内容（explorer /select 会打开父目录，
+          导致层级往外多一层）
+        - 文件：打开所在文件夹并选中该文件（/select 对文件行为正确）
+        """
+        norm = os.path.normpath(path)
         try:
             if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                if os.path.isdir(norm):
+                    subprocess.Popen(["explorer", norm])
+                else:
+                    subprocess.Popen(["explorer", "/select,", norm])
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", path])
+                if os.path.isdir(norm):
+                    subprocess.Popen(["open", norm])
+                else:
+                    subprocess.Popen(["open", "-R", norm])
             else:
-                subprocess.Popen(["xdg-open", os.path.dirname(path)])
+                if os.path.isdir(norm):
+                    subprocess.Popen(["xdg-open", norm])
+                else:
+                    subprocess.Popen(["xdg-open", os.path.dirname(norm)])
         except Exception as e:
             logger.error(f"[FileTree] 打开资源管理器失败: {e}")
 
