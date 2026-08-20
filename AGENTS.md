@@ -89,6 +89,32 @@ git push origin develop
 > 活跃引擎，能力用 `isinstance` 探测（SessionTitleCapability / SessionCountsCapability /
 > InputHistoryCapability）。
 >
+> **Gateway 平台插件**（Phase E）：插件目录放置 `gateways/<platform>.py`，
+> 暴露 `register(registry)`，注册 `GatewayPlatformDef`（platform_id / display_name /
+> adapter_factory / check_requirements / config_builder / config_writer /
+> build_config_values / validate_config / ui_order / icon_hint / source）。
+> 主程序 `PlatformManager._load_adapters`、`GatewayConfigHelper`（4 方法）、
+> Gateway 设置卡全部查 `GatewayPlatformRegistry.get_instance()`，零平台 if 分支。
+>
+> **内置 6 平台已迁至社区仓** `drifox-plugins2`（非主仓 `plugins/system/`）：
+> wecom / dingtalk / telegram / discord / feishu / slack 各自的
+> `gateway-<id>/gateways/<id>.py` 实现 Adapter + register，配置闭包读主程序
+> Settings（存量用户配置零迁移）。
+> 第三方平台在社区仓（或 user 根 `~/.drifox/plugins/`）新建 `gateway-<id>/` 即可，
+> `platform_id` 为任意 `str`（`Platform` 已 str-mixin 化 + `_platform_key` 统一归一），
+> 与内置 6 平台不冲突。
+>
+> **配置走 E1 契约**：第三方平台在 `.drifox-plugin/plugin.json` 声明
+> `config_schema`，主程序自动渲染设置卡 + `PluginConfigStore` 统一存储
+> （不依赖主程序 Settings，与内置 6 平台闭包桥接 Settings 区分）。
+> def.config_builder 经 `PluginConfigStore().get(plugin_name, key)` 读取用户配置，
+> 三级链：环境变量 → 存储值 → schema 默认。
+>
+> **SDK 自包含**（deps 注入纪律）：平台 SDK（含传递依赖）vendor 到
+> `<插件>/deps/`，模块顶层用 `sys.path.insert(0, _deps)` 优先加载本插件 SDK，
+> **SDK 本体仍函数内延迟导入**（历史教训 2026-06-16：dingtalk_stream 顶层导入
+> 曾致 gateway 包加载失败）。详见 `docs/plugins/gateway-platforms.md`。
+>
 > **UI 插件扩展点约定**（Phase D，8 个扩展点全区域可插拔）：插件 `ui/__init__.py`
 > 导出 `register_ui(registry)`，可注册：
 > - 内容块渲染器 `register_content_renderer`（custom 块）
