@@ -10,6 +10,7 @@
 
 import asyncio
 import sys
+import time
 
 import pytest
 
@@ -56,13 +57,22 @@ class _FakeConfig:
 
 @pytest.fixture
 def fake_manager(clean_registry, monkeypatch):
-    """真实 PlatformManager 实例；用 asyncio.run 同步驱动协程，避免 daemon loop 时序"""
+    """真实 PlatformManager 实例；保留生产 _schedule_coro（run_coroutine_threadsafe
+    异步调度），测试用轮询等待后台 loop 执行完成——monkeypatch 成同步 asyncio.run
+    会掩盖 pop 先于协程执行的竞态（stop 永不调用却断言通过）"""
     mgr = PlatformManager(_FakeConfig())
-    # 默认 _schedule_coro 用 run_coroutine_threadsafe 调度到后台 loop，
-    # 测试里改为同步 asyncio.run 驱动，结果确定可控
-    monkeypatch.setattr(mgr, "_schedule_coro", lambda coro: asyncio.run(coro))
     yield mgr
     mgr._adapters.clear()
+
+
+def _wait_stopped(adapters, timeout=5.0):
+    """轮询等待后台 loop 完成 stop（生产 _schedule_coro 为异步调度）"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if all(a.stopped for a in adapters):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _make_def(platform_id: str, source: str, factory) -> GatewayPlatformDef:
@@ -108,7 +118,11 @@ def test_stop_plugin_platforms_stops_and_removes(fake_manager, clean_registry):
 
     fake_manager.stop_plugin_platforms("gwplug")
 
-    # 仅 gwplug 名下的 adapter 被 stop + 摘除
+    # 生产路径为异步调度（run_coroutine_threadsafe），轮询等待 stop 真正执行。
+    # 关键回归点：stop_plugin_platforms 先 pop _adapters 再由后台 loop 执行 stop
+    # 协程——若 stop 协程二次查 _adapters（旧实现 _stop_platform_async），pop 后
+    # 查到 None，stop 永不执行 → 连接泄漏（卸载后 WS 仍收消息）。
+    assert _wait_stopped([ad1, ad2]), "stop 未在超时内执行（pop 竞态回归）"
     assert ad1.stopped is True and ad2.stopped is True
     assert "gw1" not in fake_manager._adapters
     assert "gw2" not in fake_manager._adapters

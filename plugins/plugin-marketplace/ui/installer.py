@@ -565,6 +565,7 @@ class PluginInstaller:
             target: 目标安装目录
         """
         try:
+            self._suppress_backend_watcher()
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
             self._cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,9 +614,9 @@ class PluginInstaller:
                 backup = self._cache_dir / f"{name}_old_{int(time.time())}"
                 # 释放旧目录的模块/字节码句柄（Windows 下 move 可能失败）
                 self._purge_plugin_module_cache(name)
-                shutil.move(str(target), str(backup))
+                self._robust_move(str(target), str(backup))
                 try:
-                    shutil.move(str(sub_src), str(target))
+                    self._robust_move(str(sub_src), str(target))
                 except Exception:
                     # 替换失败 → 回滚旧版
                     try:
@@ -628,7 +629,7 @@ class PluginInstaller:
                 if not _rmtree_readonly(backup):
                     logger.warning(f"[Installer] 旧版备份清理失败（残留 cache）: {backup}")
             else:
-                shutil.move(str(sub_src), str(target))
+                self._robust_move(str(sub_src), str(target))
 
             # === 3. 清理 cache ===
             shutil.rmtree(cache_tmp, ignore_errors=True)
@@ -636,9 +637,21 @@ class PluginInstaller:
             logger.info(f"[Installer] Installed plugin {name} -> {target}")
             # 安装/更新成功 → 上报下载量（后台线程，失败不影响安装结果）
             report_plugin_install(name)
+            # 恢复 backend watcher 并主动触发一次插件重载，使新插件立即可用
+            self._resume_backend_watcher(reload=True)
             return True
 
         except Exception as e:
+            # 恢复 backend watcher（失败不重载），并清理下载缓存与半安装残骸
+            try:
+                self._resume_backend_watcher(reload=False)
+            except Exception:
+                pass
+            try:
+                if "cache_tmp" in dir() and cache_tmp.exists():
+                    shutil.rmtree(cache_tmp, ignore_errors=True)
+            except Exception:
+                pass
             self.last_error = self._format_git_err(e)
             logger.error(f"[Installer] Download {name} failed: {self.last_error}")
             return False
@@ -687,6 +700,88 @@ class PluginInstaller:
                 return f"exit={e.returncode} stderr={'; '.join(lines)}"
             return f"exit={e.returncode} (no stderr)"
         return f"{type(e).__name__}: {e}"
+
+    def _robust_move(self, src: str, dst: str, *, retries: int = 3, delay: float = 2.0) -> None:
+        """带 Windows 句柄锁重试的目录/文件移动。
+
+        针对 Windows 下杀软实时扫描刚 clone 的文件、或 git 子进程句柄未释放导致的
+        PermissionError [WinError 5] / OSError，做有限次重试给外部释放锁的窗口。每次
+        重试前清理目标端可能残留的半成品（copytree 中途失败会在 dst 留下不完整目录），
+        避免二次 copytree 因 dst 已存在而报错。最终仍失败且源仍在时，清理 dst 残骸后
+        上抛，交由调用方回滚 / 清理 cache_tmp。
+        """
+        last: Optional[Exception] = None
+        for attempt in range(retries):
+            if attempt > 0 and os.path.exists(dst):
+                # 清掉上次可能残留的半成品目标，确保重试干净
+                try:
+                    if os.path.isdir(dst) and not os.path.islink(dst):
+                        _rmtree_readonly(Path(dst))
+                    else:
+                        os.remove(dst)
+                except OSError:
+                    pass
+            try:
+                shutil.move(src, dst)
+                return
+            except (PermissionError, OSError) as e:
+                last = e
+                # 仅对「文件被外部进程锁住」类错误重试（WinError 5 = 拒绝访问）；
+                # 路径不存在等其它 OSError 直接上抛，避免无效重试
+                is_locked = isinstance(e, PermissionError) or (
+                    isinstance(e, OSError) and getattr(e, "winerror", None) == 5
+                )
+                if is_locked and attempt < retries - 1:
+                    logger.warning(
+                        f"[Installer] move 被外部锁阻塞（{e}），{delay}s 后重试 "
+                        f"({attempt + 1}/{retries})"
+                    )
+                    time.sleep(delay)
+                    continue
+                # 最终失败：源仍在说明 dst 是 copytree 残骸，清理之
+                if os.path.exists(src) and os.path.exists(dst):
+                    try:
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            _rmtree_readonly(Path(dst))
+                    except OSError:
+                        pass
+                raise
+        if last is not None:
+            raise last
+
+    def _suppress_backend_watcher(self, duration: float = 180.0) -> None:
+        """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。"""
+        try:
+            from app.core.backend import ChatBackend
+
+            ChatBackend._suppress_watcher_until = time.time() + duration
+        except Exception as e:
+            logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
+
+    def _resume_backend_watcher(self, reload: bool = False) -> None:
+        """恢复 backend watcher；安装成功时主动触发一次插件重载，使新插件立即可用。"""
+        try:
+            from app.core.backend import ChatBackend
+
+            ChatBackend._suppress_watcher_until = 0.0
+        except Exception:
+            return
+        if not reload:
+            return
+        try:
+            inst = next(iter(ChatBackend._active_instances), None)
+            if inst is None:
+                return
+            # 尽量在主线程执行重载（与 backend watcher 的 _hot_reload_requested 信号同效）；
+            # 失败则直接调用，异常被吞掉不影响安装结果
+            try:
+                from PyQt5.QtCore import QTimer
+
+                QTimer.singleShot(0, inst.reload_plugin_subsystems)
+            except Exception:
+                inst.reload_plugin_subsystems()
+        except Exception as e:
+            logger.warning(f"[Installer] 触发插件重载失败（不影响安装）: {e}")
 
     @staticmethod
     def _toggle_git_suffix(url: str) -> str:
@@ -787,6 +882,28 @@ class PluginInstaller:
                             or mod_name.startswith(head + ".")
                         ):
                             del sys.modules[mod_name]
+
+            # 兜底：按 __file__ 落在插件目录内清理（含 deps/ 顶层模块）。
+            # gateway 等插件把 SDK vendor 到 deps/ 并 sys.path.insert 后以顶层名
+            # import（如 lark_oapi），上述前缀匹配清不掉；模块常驻 sys.modules
+            # 会持有 .pyd/.pyc 句柄，Windows 上 rmtree 失败 → 卸载残留 deps 目录。
+            for base in (_drifox_dir() / "plugins", _drifox_dir() / "plugins-disabled"):
+                plugin_dir = base / name
+                if not plugin_dir.is_dir():
+                    continue
+                try:
+                    plugin_dir_str = str(plugin_dir.resolve()).lower()
+                except OSError:
+                    continue
+                for mod_name, mod in list(sys.modules.items()):
+                    mod_file = getattr(mod, "__file__", None)
+                    if not mod_file:
+                        continue
+                    try:
+                        if plugin_dir_str in str(Path(mod_file).resolve()).lower():
+                            del sys.modules[mod_name]
+                    except (OSError, ValueError):
+                        continue
             importlib.invalidate_caches()
             gc.collect()
         except Exception as e:

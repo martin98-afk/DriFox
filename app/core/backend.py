@@ -1285,20 +1285,19 @@ class ChatBackend(QObject):
                     if not relevant_changes:
                         continue
 
-                    # 🚀 P5e：gitee 同步（config_sync 下载解压 user-custom）期间抑制
-                    # watcher 热重载链。同步窗口内 user-custom 变更不 emit（跳过），
-                    # 仅标记 pending，由 config_sync 下载完成 + Settings 重载后合并
-                    # 触发一次 reload_plugin_subsystems 兜底加载——避免 watcher 链
-                    # （rescan + agents 重载 + reload_all_commands ~2500ms + LSP 子进程
-                    # + plugin_changed 广播）与 config_sync 应用链同时爆发叠加阻塞主线程。
-                    # 抑制窗口外行为不变（正常热重载）；窗口内事件由 pending 兜底不丢。
-                    if time.time() < ChatBackend._suppress_watcher_until and any(
-                        "user-custom" in str(cp).lower() for _, cp in relevant_changes
-                    ):
+                    # 🚀 P5e：外部批量变更期间（gitee 同步解压 user-custom、或插件市场
+                    # installer 落盘 plugins/ 目录）抑制 watcher 热重载链。窗口内所有
+                    # 变更先标记 pending 并跳过 emit，避免 watcher 链（rescan + agents
+                    # 重载 + reload_all_commands ~2500ms + LSP 子进程 + plugin_changed
+                    # 广播）与「clone/解压期间成百上千文件涌入」同时爆发叠加阻塞主线程；
+                    # 也避免半安装插件被提前 import 报错。窗口结束后由调用方
+                    # （config_sync 下载完成 / installer 安装完成）主动触发一次
+                    # reload_plugin_subsystems 兜底加载，pending 事件不丢失。
+                    if time.time() < ChatBackend._suppress_watcher_until:
                         ChatBackend._watcher_pending_reload = True
                         logger.info(
-                            f"[ChatBackend] gitee 同步抑制窗口内收到 user-custom 变更 "
-                            f"({len(relevant_changes)} 处)，标记 pending 待合并重载"
+                            f"[ChatBackend] 抑制窗口内收到 {len(relevant_changes)} 处变更，"
+                            f"标记 pending 待合并重载"
                         )
                         continue
 
