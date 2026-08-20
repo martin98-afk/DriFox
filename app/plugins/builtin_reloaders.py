@@ -146,13 +146,14 @@ def _reload_ui(ctx: ReloadContext) -> Any:
 
 
 def _reload_tools(ctx: ReloadContext) -> Any:
-    """tools 分支：轮询 watcher 退役后的正式路径
+    """tools 分支：轮询 watcher 退役后的正式路径 — 精准卸载/重载单插件
 
     - 删除路径(ctx.plugin is None)：精准卸载该插件工具（unload_plugin），
       不波及 system 等其他插件；跨根覆盖由 watcher 内部恢复。不再走
       scan_now 全量重扫，避免「删一个插件卸载并重载全部工具」的抖动。
-    - 更新/新增路径(ctx.plugin 非 None)：内容变更/跨根覆盖需重算 →
-      仍走 scan_now 全量重扫（含 enabled 过滤），并通知监听。
+    - 更新/新增路径(ctx.plugin 非 None)：reload_plugin 精准重载该插件
+      （注销旧工具 → 恢复被覆盖 → 重注册当前模块，含 enabled 过滤），
+      同样不波及他插件；完成后通知监听。
     """
     from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
 
@@ -162,7 +163,7 @@ def _reload_tools(ctx: ReloadContext) -> Any:
     if ctx.plugin is None:
         watcher.unload_plugin(ctx.plugin_name)
     else:
-        watcher.scan_now()
+        watcher.reload_plugin(ctx.plugin_name)
         watcher._notify_reloaded()
     return True
 
@@ -252,9 +253,7 @@ def _purge_gateway_plugin_modules(plugin_name: str) -> None:
 
     prefix = f"drifox_rt_gateways_{plugin_name}"
     removed = [
-        m
-        for m in list(sys.modules.keys())
-        if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
+        m for m in list(sys.modules.keys()) if m == prefix or m.startswith(prefix + "_") or m.startswith(prefix + ".")
     ]
     for m in removed:
         sys.modules.pop(m, None)
@@ -263,9 +262,7 @@ def _purge_gateway_plugin_modules(plugin_name: str) -> None:
 
         importlib.invalidate_caches()
         gc.collect()
-        logger.debug(
-            f"[builtin_reloaders] 已清理 gateway 模块 {len(removed)} 个: {plugin_name}"
-        )
+        logger.debug(f"[builtin_reloaders] 已清理 gateway 模块 {len(removed)} 个: {plugin_name}")
 
 
 def _reload_gateways(ctx: ReloadContext) -> Any:

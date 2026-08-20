@@ -549,18 +549,88 @@ def register(registry):
         watcher.unload_plugin("user-override-plug")
 
         # 1) 只注销了 user 插件名下工具（精准）
-        assert set(unregistered) == pre_loaded, (
-            f"应只注销 user 插件工具 {pre_loaded}，实际注销 {set(unregistered)}"
-        )
+        assert set(unregistered) == pre_loaded, f"应只注销 user 插件工具 {pre_loaded}，实际注销 {set(unregistered)}"
         # 2) 他插件（system）工具未被注销——write 是独立 system 工具
         assert "write" not in unregistered, "system 工具 write 不应被 unregister"
         # 3) 跨根覆盖恢复：read 恢复为 system
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system", (
-            f"system 应恢复，实际: {r.source if r else None}"
-        )
+        assert r is not None and r.source == "plugin:system", f"system 应恢复，实际: {r.source if r else None}"
         # 4) watcher._loaded 已移除该插件记录
         assert "user-override-plug" not in watcher._loaded
+
+    def test_reload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
+        """场景 6c：reload_plugin 精准重载单插件（更新/安装路径），不波及他插件
+
+        回归：此前更新路径调 scan_now 全量重扫——装/改一个插件同样
+        卸载并重载全部工具。reload_plugin 只注销目标插件旧工具 →
+        恢复被覆盖的 system 同名工具 → 重注册目标插件当前模块。
+        """
+        system_root, user_root = self._setup_user_root(tmp_path, monkeypatch)
+        from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+
+        reg = ToolRegistry.get_instance()
+        watcher = PluginToolWatcher(registry=reg, roots=[system_root, user_root])
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+
+        pre_loaded = set(watcher._loaded.get("user-override-plug", set()))
+        assert pre_loaded, "watcher 应记录 user 插件工具"
+
+        # spy：记录所有被 unregister 的工具名
+        unregistered: list[str] = []
+        orig_unregister = reg.unregister
+
+        def _spy(name):
+            unregistered.append(name)
+            return orig_unregister(name)
+
+        monkeypatch.setattr(reg, "unregister", _spy)
+
+        # 模拟热更新：read 改 cn_name + 新增 readme 工具
+        (user_root / "user-override-plug" / "tools" / "override.py").write_text(
+            """
+def register(registry):
+    registry.register(
+        "read",
+        {"type": "function", "function": {"name": "read"}},
+        impl=lambda **kw: "USER-VERSION-2",
+        danger="safe",
+        cn_name="读取（用户覆盖 2）",
+        description="由用户插件覆盖",
+    )
+    registry.register(
+        "readme",
+        {"type": "function", "function": {"name": "readme"}},
+        impl=lambda **kw: "README",
+        danger="safe",
+        cn_name="说明（用户）",
+    )
+""",
+            encoding="utf-8",
+        )
+        watcher.reload_plugin("user-override-plug")
+
+        # 1) 只注销了 user 插件名下旧工具（精准）
+        assert set(unregistered) == pre_loaded, f"应只注销 user 插件旧工具 {pre_loaded}，实际注销 {set(unregistered)}"
+        # 2) 他插件（system）工具未被注销——write 是独立 system 工具
+        assert "write" not in unregistered, "system 工具 write 不应被 unregister"
+        # 3) read 仍由 user 覆盖且内容更新（跨根覆盖保持 + 新代码生效）
+        r = reg.get("read")
+        assert r is not None and r.source == "plugin:user-override-plug", (
+            f"read 应仍由 user 覆盖，实际: {r.source if r else None}"
+        )
+        assert r.cn_name == "读取（用户覆盖 2）", "热更新后的 cn_name 应生效"
+        # 4) 新增工具已注册
+        r2 = reg.get("readme")
+        assert r2 is not None and r2.source == "plugin:user-override-plug", "新工具 readme 应注册"
+        # 5) watcher._loaded 更新为新工具集
+        assert watcher._loaded.get("user-override-plug") == {"read", "readme"}, (
+            f"_loaded 应更新为新工具集，实际: {watcher._loaded.get('user-override-plug')}"
+        )
+        # 6) 再触发一次全量重扫：状态应与 reload_plugin 结果一致（无漂移）
+        watcher.scan_now()
+        assert reg.get("read").source == "plugin:user-override-plug"
+        assert reg.get("readme").source == "plugin:user-override-plug"
 
     def test_disabling_user_plugin_restores_system(self, tmp_path, monkeypatch):
         """场景 7：覆盖 system 的用户插件被禁用 → 系统插件恢复
