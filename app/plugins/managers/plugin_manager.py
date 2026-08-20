@@ -314,6 +314,7 @@ class PluginManager:
         for name in removed_names:
             result["removed"].append(self._plugins[name])
             self._unload_plugin_ui(name)
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Rescan: plugin '{name}' removed")
 
@@ -348,6 +349,7 @@ class PluginManager:
 
         plugin_dir = old.path
         if not plugin_dir.exists():
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan: {name}")
             # 插件被移除，其 MCP 配置需从缓存中剔除
@@ -361,6 +363,7 @@ class PluginManager:
             logger.debug(f"[PluginManager] Rescanned plugin: {name}")
         else:
             # manifest 已不存在
+            self._unregister_config_schema(name)
             del self._plugins[name]
             logger.info(f"[PluginManager] Plugin removed during rescan (manifest gone): {name}")
         # 无论更新还是移除，MCP 配置都可能变化，失效缓存
@@ -597,6 +600,9 @@ class PluginManager:
                 # 但无 commands/ 目录）导致热更新触发全量命令重载
                 manifest["components"] = _detect_components(item)
 
+                # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
+                self._register_config_schema(plugin_name, manifest)
+
                 discovered.append(
                     PluginInfo(
                         name=plugin_name,
@@ -647,6 +653,9 @@ class PluginManager:
             # 但无 commands/ 目录）导致热更新触发全量命令重载
             manifest["components"] = _detect_components(plugin_dir)
 
+            # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
+            self._register_config_schema(plugin_name, manifest)
+
             info = PluginInfo(
                 name=plugin_name,
                 manifest=manifest,
@@ -660,6 +669,53 @@ class PluginManager:
         except Exception as e:
             logger.error(f"[PluginManager] Failed to rescan plugin at {plugin_dir}: {e}")
             return None
+
+    def _register_config_schema(self, plugin_name: str, manifest: dict) -> None:
+        """E1：解析 plugin.json config_schema 并注册到 PluginConfigRegistry + 自动设置卡。
+
+        幂等：同名插件重复注册由 PluginConfigRegistry 与 UIPluginRegistry 内部
+        覆盖（PluginManager 全量扫描天然幂等；热重载 rescan 同样无害）。
+        任一异常均降级为 warning，不影响插件本体的扫描加载。
+        """
+        # 解析阶段：非法 schema 走 parse_config_schema 内部 warning 兜底
+        from app.plugins.contracts.plugin_config import parse_config_schema
+
+        raw_schema = manifest.get("config_schema")
+        config_schema = parse_config_schema(plugin_name, raw_schema)
+        if config_schema is None:
+            return
+
+        # 注册表（必需）
+        try:
+            from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+            PluginConfigRegistry.get_instance().register(config_schema)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 注册失败({plugin_name}): {e}")
+            return
+
+        # 自动设置卡（可选，挂 Phase D 扩展点）
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            from app.widgets.cards.settings.plugin_config_card import make_card_class
+
+            UIPluginRegistry.get_instance().register_settings_card(
+                plugin_name,
+                f"{plugin_name}-config",
+                config_schema.title,
+                make_card_class(plugin_name),
+            )
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
+
+    def _unregister_config_schema(self, plugin_name: str) -> None:
+        """E1：插件移除时清理 config_schema 注册（设置卡由 UIPluginRegistry.unload_plugin 清理）。"""
+        try:
+            from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+            PluginConfigRegistry.get_instance().unregister_plugin(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 清理失败({plugin_name}): {e}")
 
     def _discover_system_plugins(self):
         """扫描系统插件目录 app/plugins/"""
