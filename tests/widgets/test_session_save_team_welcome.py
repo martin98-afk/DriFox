@@ -88,19 +88,30 @@ class TestWelcomeCardTeamFilter:
     """欢迎卡片推荐列表必须过滤团队会话"""
 
     def test_get_or_create_welcome_card_filters_team(self):
-        """_get_or_create_welcome_card 构造推荐列表前过滤 team_run_id"""
+        """欢迎卡片推荐列表构造路径必须过滤 team_run_id（_collect_welcome_sessions）"""
         tree = _load_module_ast()
         cls = _get_class(tree, "OpenAIChatToolWindow")
-        method = _get_method(cls, "_get_or_create_welcome_card")
-        assert _source_contains(method, "team_run_id"), (
-            "_get_or_create_welcome_card 必须过滤 team_run_id 非空的团队会话，否则团队会话逐条混入欢迎卡片推荐列表。"
+        # 过滤逻辑已抽取到 _collect_welcome_sessions（_get_or_create_welcome_card
+        # 与 _refresh_welcome_card_data 软更新共用同一数据口径）
+        collector = _get_method(cls, "_collect_welcome_sessions")
+        assert _source_contains(collector, "team_run_id"), (
+            "_collect_welcome_sessions 必须过滤 team_run_id 非空的团队会话，否则团队会话逐条混入欢迎卡片推荐列表。"
         )
         # 过滤必须发生在 recent_sessions 构造之前
-        src = ast.unparse(method)
+        src = ast.unparse(collector)
         filter_pos = src.find("team_run_id")
         recent_pos = src.find("recent_sessions = []")
         assert filter_pos != -1 and recent_pos != -1
         assert filter_pos < recent_pos, "团队会话过滤必须在 recent_sessions 构造之前"
+        # 构建与软更新两条路径都必须走该 helper，防止绕过过滤
+        method = _get_method(cls, "_get_or_create_welcome_card")
+        assert _source_contains(method, "_collect_welcome_sessions"), (
+            "_get_or_create_welcome_card 必须经 _collect_welcome_sessions 收集推荐列表。"
+        )
+        refresher = _get_method(cls, "_refresh_welcome_card_data")
+        assert _source_contains(refresher, "_collect_welcome_sessions"), (
+            "_refresh_welcome_card_data 必须经 _collect_welcome_sessions 收集推荐列表。"
+        )
 
     def test_switch_to_session_syncs_team_markers(self):
         """_switch_to_session_by_id 加载会话后必须同步团队标记（F4）"""

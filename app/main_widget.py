@@ -8588,18 +8588,22 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         # 1. 历史卡片可见时刷新
         refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
-        # 2. 欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）且窗口可见 →
-        #    同步重建（摘除旧卡后立即补位，避免延迟空白）；
-        #    窗口不可见（Tab 后台）→ 仅失效缓存，切回时 _on_tab_selected 补刷；
-        #    已有 pending 渲染（_create_new_session 的 schedule）→ 由槽位回调重建，
-        #    避免双渲染 QWebEngineView。
-        self._invalidate_welcome_card()
-        if (
-            self._displayed_session_id is None
-            and self.isVisible()
-            and not getattr(self, "_welcome_render_pending", False)
-        ):
-            self._show_initial_welcome()
+        # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
+        #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
+        #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
+        #    主线程卡顿）；缓存无活卡片时退回旧逻辑：失效缓存，当前正显示
+        #    欢迎卡片（空会话）且窗口可见 → 同步重建（摘除旧卡后立即补位，
+        #    避免延迟空白）；窗口不可见（Tab 后台）→ 仅失效缓存，切回时
+        #    _on_tab_selected 补刷；已有 pending 渲染（_create_new_session 的
+        #    schedule）→ 由槽位回调重建，避免双渲染 QWebEngineView。
+        if not self._refresh_welcome_card_data():
+            self._invalidate_welcome_card()
+            if (
+                self._displayed_session_id is None
+                and self.isVisible()
+                and not getattr(self, "_welcome_render_pending", False)
+            ):
+                self._show_initial_welcome()
         # 3. Tab 模式广播其他窗口
         if broadcast:
             self._broadcast_history_data_changed()
@@ -11634,26 +11638,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 QTimer.singleShot(0, lambda c=card: self._update_card_diff_stats(c))
         return True
 
-    def _get_or_create_welcome_card(self) -> MessageCard:
-        # P1-4：按 _window_id 缓存 welcome 卡片（窗口维度复用，同窗口重复调用不重建）。
-        # 不能做跨窗口全局单例：recent_sessions/top_by_count 按当前项目过滤，
-        # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
-        cached = self._welcome_card_cache.get(self._window_id)
-        if cached is not None:
-            try:
-                from PyQt5 import sip
+    def _collect_welcome_sessions(self):
+        """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
 
-                if not sip.isdeleted(cached):
-                    return cached
-            except Exception:
-                pass
-            self._welcome_card_cache.pop(self._window_id, None)
-
-        agent = self.backend.get_agent(self._current_agent)
-        agent_name = agent.name if agent else ""
-        agent_desc = agent.description if agent else ""
-
-        # 获取最近会话和最多消息的会话用于欢迎卡片（按当前项目过滤）
+        返回 (recent_sessions, top_by_count)，供 _get_or_create_welcome_card
+        构建与 _refresh_welcome_card_data 软更新共用，保证两路径数据口径一致。
+        """
         history_list = self.history_manager.get_history_list(self._current_project)
         # 🛡️ 过滤团队会话：欢迎卡片展示的是"可继续的独立对话"，团队会话
         # （team_run_id 非空）由历史面板团队分组/合并条目统一管理，逐条混入
@@ -11685,6 +11675,57 @@ class OpenAIChatToolWindow(ToolWindow):
                     "message_count": session.get("message_count", 0),
                 }
             )
+        return recent_sessions, top_by_count
+
+    def _refresh_welcome_card_data(self) -> bool:
+        """软更新欢迎卡片会话列表数据（缓存命中时，不销毁 QWebEngineView）
+
+        会话数据变更（如其他标签页对话完成 → 广播）时，欢迎卡片 recent/top
+        列表需同步最新数据。旧实现 _invalidate_welcome_card 销毁卡片后重建
+        QWebEngineView（100-500ms 主线程占用 + 视觉闪烁「重新加载一下」）；
+        此处保留卡片实例，仅重渲染 body。
+
+        返回 True = 已软更新（调用方无需再走销毁重建路径）；False = 缓存无
+        活卡片（已销毁/未创建），调用方应退回旧逻辑（失效 + 按需补建）。
+        """
+        cached = self._welcome_card_cache.get(self._window_id)
+        if cached is None:
+            return False
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(cached):
+                return False
+        except Exception:
+            pass
+        try:
+            recent_sessions, top_by_count = self._collect_welcome_sessions()
+            cached.refresh_welcome_data(recent_sessions, top_by_count)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[_refresh_welcome_card_data] soft refresh failed: {e}")
+            return False
+
+    def _get_or_create_welcome_card(self) -> MessageCard:
+        # P1-4：按 _window_id 缓存 welcome 卡片（窗口维度复用，同窗口重复调用不重建）。
+        # 不能做跨窗口全局单例：recent_sessions/top_by_count 按当前项目过滤，
+        # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
+        cached = self._welcome_card_cache.get(self._window_id)
+        if cached is not None:
+            try:
+                from PyQt5 import sip
+
+                if not sip.isdeleted(cached):
+                    return cached
+            except Exception:
+                pass
+            self._welcome_card_cache.pop(self._window_id, None)
+
+        agent = self.backend.get_agent(self._current_agent)
+        agent_name = agent.name if agent else ""
+        agent_desc = agent.description if agent else ""
+
+        recent_sessions, top_by_count = self._collect_welcome_sessions()
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
         # 模式：sessions（默认）/ changelog / 插件注册 tab

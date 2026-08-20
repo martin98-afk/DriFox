@@ -8505,6 +8505,37 @@ class MessageCard(SimpleCardWidget):
         greeting = get_random_greeting()
         self._pending_welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
 
+    def refresh_welcome_data(self, recent_sessions: list, top_by_count: list) -> None:
+        """会话数据变更后的轻量刷新：更新列表数据并重渲染 body（保留卡片实例）。
+
+        与 set_welcome_content 的区别：set_welcome_content 只写
+        _pending_welcome_md（懒渲染消费），已渲染的卡片调用后 UI 不更新；
+        本方法在卡片已渲染时直接重渲染 DOM，避免调用方走「销毁缓存卡片 +
+        重建 QWebEngineView」路径（100-500ms 主线程占用 + 视觉闪烁）。
+
+        仅 sessions 类 body 展示会话列表，changelog / 插件 tab 不依赖该数据，
+        跳过重渲染（插件 tab 的 render_func 也不应因会话变更被反复调用）。
+        """
+        old_recent, old_top = self._welcome_recent, self._welcome_top
+        new_recent = list(recent_sessions or [])
+        new_top = list(top_by_count or [])
+        # 数据无变化时跳过重渲染：其他标签页对话完成广播到本窗口时，
+        # 若新会话不在本窗口当前项目下（按项目过滤），recent/top 完全不变，
+        # 重渲染会白播一遍 stagger fade-in 动画。
+        if new_recent == old_recent and new_top == old_top:
+            return
+        self._welcome_recent = new_recent
+        self._welcome_top = new_top
+        if self._welcome_mode != "sessions":
+            return
+        body_html = _render_welcome_body(
+            self._welcome_mode,
+            self._welcome_recent,
+            self._welcome_top,
+            self._get_welcome_window_context(),
+        )
+        self._render_welcome_with_body(body_html)
+
     def _setup_ui(self):
         main = QVBoxLayout(self)
         main.setContentsMargins(4, 4, 4, 4)
