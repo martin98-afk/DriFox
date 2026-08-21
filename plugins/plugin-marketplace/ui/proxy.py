@@ -245,13 +245,13 @@ class ProxyConfig:
             preview = resp.content[:4]
             if not preview.startswith(b"00"):
                 return False, (
-                    f"✗ 失败: 返回非 git 协议响应（前4字节 {preview!r}），"
+                    f"失败: 返回非 git 协议响应（前4字节 {preview!r}），"
                     "加速站可能未代理 github.com"
                 )
             ms = int((time.time() - start) * 1000)
-            return True, f"✓ 通过（{ms} ms）"
+            return True, f"通过（{ms} ms）"
         except Exception as e:
-            return False, f"✗ 失败: {e}"
+            return False, f"失败: {e}"
 
 
 # ── 单例 ──

@@ -172,6 +172,61 @@ class TestUnregisterCleanup:
         assert fresh_registry.unload_plugin("gw-feishu") is False
 
 
+class TestHideFloatingCardGlobally:
+    """EP6 公开 API：插件可经此方法隐藏浮动卡片（无需触碰 _card_manager/_window_id）。"""
+
+    def _register_card(self, fresh_registry, card_id="autoloop-config"):
+        class _FakeCard:
+            pass
+
+        fresh_registry.register_floating_card(
+            plugin_name="autoloop",
+            card_id=card_id,
+            widget_class=_FakeCard,
+            container="full",
+            title="AutoLoop 配置",
+        )
+
+    def test_returns_false_when_no_host(self, fresh_registry, monkeypatch):
+        """TabManagerWindow 不可用时返回 False，由调用方回退"""
+        self._register_card(fresh_registry)
+        # 强制 _resolve_global_host 返回 None
+        monkeypatch.setattr(fresh_registry, "_resolve_global_host", lambda: None)
+        assert fresh_registry.hide_floating_card_globally("autoloop-config") is False
+
+    def test_returns_false_for_unregistered_card(self, fresh_registry, monkeypatch):
+        """未注册的 card_id 不报错，返回 False（保护性 API）"""
+        fake_host = type("Host", (), {"_card_manager": _FakeCardManager(), "_window_id": "global"})()
+        monkeypatch.setattr(fresh_registry, "_resolve_global_host", lambda: fake_host)
+        assert fresh_registry.hide_floating_card_globally("not-registered") is False
+
+    def test_calls_card_manager_hide_when_host_available(self, fresh_registry, monkeypatch):
+        """Tab host 可用 + 卡片已注册 → 走 CardManager.hide_card(card_id, host_wid)"""
+        self._register_card(fresh_registry)
+        cm = _FakeCardManager()
+        fake_host = type("Host", (), {"_card_manager": cm, "_window_id": "global-tab"})()
+        monkeypatch.setattr(fresh_registry, "_resolve_global_host", lambda: fake_host)
+        assert fresh_registry.hide_floating_card_globally("autoloop-config") is True
+        assert cm.calls == [("autoloop-config", "global-tab")]
+
+    def test_returns_false_when_card_manager_missing(self, fresh_registry, monkeypatch):
+        """host 在但 _card_manager 缺失 → 返回 False（极端回退场景）"""
+        self._register_card(fresh_registry)
+        fake_host = type("Host", (), {})()  # 无 _card_manager/_window_id
+        monkeypatch.setattr(fresh_registry, "_resolve_global_host", lambda: fake_host)
+        assert fresh_registry.hide_floating_card_globally("autoloop-config") is False
+
+
+class _FakeCardManager:
+    """记录 hide_card 调用，最小 stub（避免 PyQt5 真实构造开销）"""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def hide_card(self, card_id, window_id):
+        self.calls.append((card_id, window_id))
+
+
 if __name__ == "__main__":
     import sys
 

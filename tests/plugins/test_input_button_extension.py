@@ -43,6 +43,81 @@ def test_registry_input_buttons(fresh_registry):
     assert buttons[0].button_id == "btn-1" and buttons[0].tooltip == "提示"
 
 
+def test_registry_input_button_light_icon(fresh_registry):
+    """注册时可带 icon_light_path（浅色主题图标），缺省为空字符串"""
+    fresh_registry.register_input_button(
+        "demo", "btn-1", icon_path="dark.svg", icon_light_path="light.svg", on_click=lambda ctx: None
+    )
+    buttons = fresh_registry.get_input_buttons()
+    assert buttons[0].icon_path == "dark.svg"
+    assert buttons[0].icon_light_path == "light.svg"
+
+
+def test_resolve_icon_theme_aware(qtbot, widget, fresh_registry, monkeypatch):
+    """_resolve_input_button_icon 随主题选择图标：浅色用 icon_light_path，深色用 icon_path"""
+    import os
+    import tempfile
+
+    from app.main_widget import OpenAIChatToolWindow
+    from app.plugins.registries.ui_plugin_registry import InputButtonInfo
+    from PyQt5.QtGui import QIcon
+
+    tmp = tempfile.mkdtemp()
+    dark = os.path.join(tmp, "dark.svg")
+    light = os.path.join(tmp, "light.svg")
+    with open(dark, "w", encoding="utf-8") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="#fff"/></svg>')
+    with open(light, "w", encoding="utf-8") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="#000"/></svg>')
+
+    info = InputButtonInfo(plugin_name="demo", button_id="b", icon_path=dark, icon_light_path=light)
+
+    import app.utils.theme_manager as tm_mod
+
+    # 深色主题 → icon_path
+    monkeypatch.setattr(tm_mod.theme_manager, "is_light_theme", lambda: False)
+    icon = OpenAIChatToolWindow._resolve_input_button_icon(info)
+    assert isinstance(icon, QIcon) and not icon.isNull()
+
+    # 浅色主题 → icon_light_path
+    monkeypatch.setattr(tm_mod.theme_manager, "is_light_theme", lambda: True)
+    icon2 = OpenAIChatToolWindow._resolve_input_button_icon(info)
+    assert isinstance(icon2, QIcon) and not icon2.isNull()
+
+    # 浅色主题缺 icon_light_path → 回退 icon_path
+    info_fallback = InputButtonInfo(plugin_name="demo", button_id="b", icon_path=dark)
+    icon3 = OpenAIChatToolWindow._resolve_input_button_icon(info_fallback)
+    assert isinstance(icon3, QIcon) and not icon3.isNull()
+
+
+def test_refresh_icons_updates_button(qtbot, widget, fresh_registry, monkeypatch):
+    """_refresh_plugin_input_button_icons 遍历按钮按新主题重设图标"""
+    import os
+    import tempfile
+
+    from PyQt5.QtWidgets import QToolButton
+
+    tmp = tempfile.mkdtemp()
+    dark = os.path.join(tmp, "dark.svg")
+    light = os.path.join(tmp, "light.svg")
+    with open(dark, "w", encoding="utf-8") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="#fff"/></svg>')
+    with open(light, "w", encoding="utf-8") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="#000"/></svg>')
+
+    fresh_registry.register_input_button(
+        "demo", "btn-1", icon_path=dark, icon_light_path=light, tooltip="主题按钮", on_click=lambda ctx: None
+    )
+    widget._build_plugin_input_buttons()
+    btn = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "主题按钮"][0]
+
+    # 主题切换后刷新：不重建控件（引用一致），图标重设
+    old_btn = btn
+    widget._refresh_plugin_input_button_icons()
+    assert btn is old_btn  # 控件未重建
+    assert not btn.icon().isNull()
+
+
 def test_build_buttons_renders(qtbot, widget, fresh_registry):
     """注册按钮 → 构建出 QToolButton（tooltip 正确）"""
     from PyQt5.QtWidgets import QToolButton
@@ -91,6 +166,7 @@ def test_no_buttons_renders_nothing(qtbot, widget, fresh_registry):
 
 def test_click_exception_safe(qtbot, widget, fresh_registry):
     """on_click 抛异常不炸 UI（日志兜底）"""
+
     def _boom(ctx):
         raise RuntimeError("boom")
 

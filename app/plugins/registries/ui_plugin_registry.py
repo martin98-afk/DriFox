@@ -132,7 +132,8 @@ class InputButtonInfo:
     Attributes:
         plugin_name: 所属插件名
         button_id: 按钮唯一 ID
-        icon_path: 图标路径
+        icon_path: 图标路径（深色主题默认图标）
+        icon_light_path: 浅色主题图标路径（可选，缺省回退 icon_path）
         tooltip: 悬停提示
         group: 分组（默认 "plugin"，用于与系统按钮分隔线区分）
         priority: 优先级（同 button_id 时高者覆盖低者）
@@ -143,6 +144,7 @@ class InputButtonInfo:
     plugin_name: str
     button_id: str
     icon_path: str = ""
+    icon_light_path: str = ""
     tooltip: str = ""
     group: str = "plugin"
     priority: int = 0
@@ -448,19 +450,25 @@ class UIPluginRegistry:
         plugin_name: str,
         button_id: str,
         icon_path: str = "",
+        icon_light_path: str = "",
         tooltip: str = "",
         group: str = "plugin",
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册输入区插件按钮（Phase D）"""
+        """注册输入区插件按钮（Phase D）
+
+        icon_path 为深色主题默认图标；icon_light_path 为浅色主题图标
+        （可选，缺省时浅色主题回退 icon_path）。主题切换时主程序自动刷新。
+        """
         if metadata is None:
             metadata = {}
         info = InputButtonInfo(
             plugin_name=plugin_name,
             button_id=button_id,
             icon_path=icon_path,
+            icon_light_path=icon_light_path,
             tooltip=tooltip,
             group=group,
             priority=priority,
@@ -659,6 +667,42 @@ class UIPluginRegistry:
                          ``self._main_widget``（单例兼容路径）。
         """
         self._show_floating_card(card_id, main_widget=main_widget)
+
+    def hide_floating_card_globally(self, card_id: str) -> bool:
+        """隐藏浮动卡片（公开 API — EP6 公开面，给插件调用）
+
+        插件（尤其是 ``full`` 容器卡片，如 autoloop config/running）需要从
+        自身业务逻辑隐藏卡片时，不应触碰 main_widget 私有属性
+        ``_card_manager`` / ``_window_id``，而应调用此方法。
+
+        行为：
+            - Tab 模式：经 ``_resolve_global_host()`` 取 TabManagerWindow，
+              调 ``CardManager.hide_card(card_id, host_wid)``。
+            - 回退模式：无 host 时返回 ``False``，由调用方决定后续
+              （例如 fallback 到 services["hide_card"]）。
+            - 已注册到本注册表的 card_id 才会被处理；未注册的 card_id
+              不报错，但返回 ``False`` 以便调用方判断。
+
+        Args:
+            card_id: 卡片唯一 ID（与 ``FloatingCardInfo.card_id`` 一致）
+
+        Returns:
+            True 隐藏成功（Tab host 路径）；False 不可用或卡片未注册。
+        """
+        host = self._resolve_global_host()
+        if host is None:
+            return False
+        card_manager = getattr(host, "_card_manager", None)
+        host_wid = getattr(host, "_window_id", None)
+        if card_manager is None or not host_wid:
+            return False
+        if card_id not in self._floating_cards:
+            return False
+        try:
+            card_manager.hide_card(card_id, host_wid)
+        except Exception:
+            return False
+        return True
 
     def _show_floating_card(self, card_id: str, main_widget=None) -> None:
         """显示浮动卡片

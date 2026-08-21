@@ -19,15 +19,19 @@ from __future__ import annotations
 
 from typing import Dict
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QWidget
 from qfluentwidgets import (
+    BodyLabel,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     LineEdit,
     PasswordLineEdit,
+    SpinBox,
     SwitchButton,
+    TextEdit,
     isDarkTheme,
 )
 
@@ -35,6 +39,19 @@ from loguru import logger
 
 from app.plugins.managers.plugin_config_store import PluginConfigStore
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
+
+
+class _PlainEdit(TextEdit):
+    """带 editingFinished 信号的多行输入（focus 离开时触发，与 LineEdit 语义一致）。
+
+    继承 qfluentwidgets TextEdit（QSS 随深浅主题），而非 Qt 原生 QPlainTextEdit。
+    """
+
+    editingFinished = pyqtSignal()
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        self.editingFinished.emit()
 
 
 class _FieldRow(QWidget):
@@ -46,7 +63,7 @@ class _FieldRow(QWidget):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(12)
 
-        self._label = QLabel(label_text, self)
+        self._label = BodyLabel(label_text, self)
         self._label.setObjectName("fieldLabel")
         self._label.setMinimumWidth(120)
         layout.addWidget(self._label, 0, Qt.AlignLeft | Qt.AlignVCenter)
@@ -66,6 +83,8 @@ class PluginConfigCard(ExpandSettingCard):
         self._bool_switches: Dict[str, SwitchButton] = {}  # key → switch 实例
         # 文本字段回显基线：记录最近一次 setText 的值，用于判断"内容是否真正变化"
         self._echoed: Dict[str, str] = {}
+        # 回显/程序化设值期间置位，阻断信号触发 _on_field_changed（防循环写盘）
+        self._echoing = False
 
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         title_text = schema.title if schema else "插件配置"
@@ -93,6 +112,32 @@ class PluginConfigCard(ExpandSettingCard):
                 switch.setOnText(f.label)
                 switch.setOffText(f.label)
                 switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
+            elif f.type == "select":
+                combo = ComboBox(self.view)
+                for _value, _label in f.options:
+                    # qfluentwidgets ComboBox 自绘：addItem(text, icon=None, userData=value)
+                    combo.addItem(_label, None, _value)
+                combo.currentIndexChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, combo, self.view)
+                self._rows[f.key] = combo
+                self.viewLayout.addWidget(row)
+            elif f.type == "number":
+                spin = SpinBox(self.view)
+                spin.setRange(f.min if f.min is not None else 0, f.max if f.max is not None else 2147483647)
+                spin.setSingleStep(max(1, f.step))
+                spin.valueChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, spin, self.view)
+                self._rows[f.key] = spin
+                self.viewLayout.addWidget(row)
+            elif f.type == "textarea":
+                edit = _PlainEdit(self.view)
+                if f.placeholder:
+                    edit.setPlaceholderText(f.placeholder)
+                edit.setFixedHeight(max(2, f.rows) * 22 + 8)
+                edit.editingFinished.connect(lambda _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, edit, self.view)
+                self._rows[f.key] = edit
+                self.viewLayout.addWidget(row)
             else:
                 edit = PasswordLineEdit() if f.type == "password" else LineEdit()
                 edit.setClearButtonEnabled(True)
@@ -127,31 +172,56 @@ class PluginConfigCard(ExpandSettingCard):
             return None
 
     def _echo(self):
-        """回显当前生效值（默认兜底可见）"""
+        """回显当前生效值（默认兜底可见）；程序化设值期间置 _echoing 阻断信号循环"""
         store = PluginConfigStore()
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         if schema is None:
             return
-        for f in schema.fields:
-            control = self._rows.get(f.key)
-            if control is None:
-                continue
-            val = store.get(self._plugin_name, f.key)
-            if f.type == "bool":
-                control.setChecked(bool(val))
-            else:
-                text = str(val if val is not None else "")
-                control.setText(text)
-                self._echoed[f.key] = text
+        self._echoing = True
+        try:
+            for f in schema.fields:
+                control = self._rows.get(f.key)
+                if control is None:
+                    continue
+                val = store.get(self._plugin_name, f.key)
+                self._apply_value(control, f, val)
+        finally:
+            self._echoing = False
+
+    def _apply_value(self, control: QWidget, f, val) -> None:
+        """按字段类型把存储值设置到控件 + 记录回显基线（_echoing 置位期间调用）"""
+        if f.type == "bool":
+            control.setChecked(bool(val))
+        elif f.type == "select":
+            idx = control.findData(val)
+            control.setCurrentIndex(idx if idx >= 0 else 0)
+            self._echoed[f.key] = control.currentData()
+        elif f.type == "number":
+            try:
+                control.setValue(int(val))
+            except (TypeError, ValueError):
+                control.setValue(f.min if f.min is not None else 0)
+            self._echoed[f.key] = str(control.value())
+        elif f.type == "textarea":
+            text = str(val if val is not None else "")
+            control.setPlainText(text)
+            self._echoed[f.key] = text
+        else:
+            text = str(val if val is not None else "")
+            control.setText(text)
+            self._echoed[f.key] = text
 
     def _on_field_changed(self, key: str):
         """单字段即时保存：空文本=清除（回默认），保存后刷新回显。
 
-        用 editingFinished / checkedChanged 触发，自动持久化，无需底部"保存配置"按钮。
+        用 editingFinished / checkedChanged / currentIndexChanged / valueChanged 触发，
+        自动持久化，无需底部"保存配置"按钮。
         仅当内容真正变化时才写盘：editingFinished 在聚焦→失焦（未修改）时
         也会触发，若此时无脑写回输入框回显值，会覆盖用户手动编辑 config.json
         或其他实例的修改（双实例共享配置场景）。
         """
+        if self._echoing:
+            return
         store = PluginConfigStore()
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         if schema is None:
@@ -164,6 +234,12 @@ class PluginConfigCard(ExpandSettingCard):
             return
         if target_field.type == "bool":
             value: object = control.isChecked()
+        elif target_field.type == "select":
+            value = control.currentData()
+        elif target_field.type == "number":
+            value = str(control.value())
+        elif target_field.type == "textarea":
+            value = control.toPlainText().strip()
         else:
             value = control.text().strip()
             # 无变化 → 跳过写盘：editingFinished 在聚焦→失焦（未修改）时也会触发，
@@ -172,7 +248,7 @@ class PluginConfigCard(ExpandSettingCard):
             if value == self._echoed.get(key, ""):
                 return
         store.set_values(self._plugin_name, {key: value})
-        # 文本字段保存后回显（清除 → 默认值显式可见）；bool 无需回显
+        # 非 bool 字段保存后回显（清除 → 默认值显式可见）
         if target_field.type != "bool":
             self._echo_field(key)
         # 网关插件 enabled 开关：切换即触发平台连接启停（Phase E 删 GatewaySettingCard
@@ -221,7 +297,7 @@ class PluginConfigCard(ExpandSettingCard):
             logger.warning(f"[PluginConfigCard] 网关启停失败 {self._plugin_name}: {e}")
 
     def _echo_field(self, key: str):
-        """单字段回显（仅文本字段，避免循环触发）"""
+        """单字段回显（保存后刷新显示；_echoing 阻断信号循环）"""
         store = PluginConfigStore()
         schema = PluginConfigRegistry.get_instance().get(self._plugin_name)
         if schema is None:
@@ -233,15 +309,11 @@ class PluginConfigCard(ExpandSettingCard):
         if control is None:
             return
         val = store.get(self._plugin_name, key)
-        # 阻断 editingFinished 循环：临时 disconnect
+        self._echoing = True
         try:
-            control.editingFinished.disconnect()
-        except (TypeError, RuntimeError):
-            pass
-        text = str(val if val is not None else "")
-        control.setText(text)
-        self._echoed[key] = text
-        control.editingFinished.connect(lambda _k=key: self._on_field_changed(_k))
+            self._apply_value(control, target_field, val)
+        finally:
+            self._echoing = False
 
 
 def make_card_class(plugin_name: str) -> type:

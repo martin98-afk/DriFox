@@ -38,6 +38,7 @@ RELOADED_COMPONENTS = {
     "storages",
     "serializers",
     "gateways",
+    "engines",
 }
 
 _BUILTIN_REGISTERED: set = set()
@@ -261,6 +262,23 @@ def _reload_serializers(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_engines(ctx: ReloadContext) -> Any:
+    """engines 分支：同 model_adapters（精准卸载/重载单插件）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_engine_watcher
+
+        watcher = ensure_engine_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] engines 重载失败: {e}")
+    return False
+
+
 def _purge_gateway_plugin_modules(plugin_name: str) -> None:
     """从 sys.modules 摘除 gateway runtime loader 加载的模块及其依赖引用
 
@@ -359,6 +377,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "storages": _reload_storages,
         "serializers": _reload_serializers,
         "gateways": _reload_gateways,
+        "engines": _reload_engines,
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)

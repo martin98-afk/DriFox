@@ -179,3 +179,137 @@ def test_plugin_manager_registers_config_schema(tmp_path, monkeypatch):
         reg.unregister_plugin("plug-cfg")
         # 清理自动卡注册（保持 UI registry 干净）
         UIPluginRegistry.get_instance()._settings_cards.pop("plug-cfg-config", None)
+
+
+# ── L2 扩展类型：select / number / textarea ──
+
+
+@pytest.fixture()
+def rich_schema(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: str(tmp_path))
+    reg = PluginConfigRegistry.get_instance()
+    reg.register(
+        parse_config_schema(
+            "plug-rich",
+            {
+                "title": "富配置",
+                "fields": [
+                    {
+                        "key": "mode",
+                        "label": "模式",
+                        "type": "select",
+                        "default": "a",
+                        "options": {"a": "模式A", "b": "模式B"},
+                    },
+                    {
+                        "key": "retry",
+                        "label": "重试次数",
+                        "type": "number",
+                        "default": 3,
+                        "min": 1,
+                        "max": 10,
+                        "step": 1,
+                    },
+                    {"key": "note", "label": "备注", "type": "textarea", "placeholder": "选填", "rows": 4},
+                ],
+            },
+        )
+    )
+    yield tmp_path
+    reg.unregister_plugin("plug-rich")
+
+
+def test_select_options_parse_variants():
+    """select options 三种声明形态解析一致（dict / list[str] / list[dict]）"""
+    from app.plugins.contracts.plugin_config import _parse_select_options
+
+    assert _parse_select_options({"a": "A", "b": "B"}) == (("a", "A"), ("b", "B"))
+    assert _parse_select_options(["a", "b"]) == (("a", "a"), ("b", "b"))
+    assert _parse_select_options([{"value": "a", "label": "A"}]) == (("a", "A"),)
+    assert _parse_select_options(None) == ()
+    assert _parse_select_options("bad") == ()
+
+
+def test_rich_types_parse_metadata():
+    """number/textarea 元数据解析（字符串数字宽容转 int）"""
+    schema = parse_config_schema(
+        "plug-meta",
+        {
+            "title": "元数据",
+            "fields": [
+                {"key": "n", "type": "number", "min": "1", "max": "9", "step": "2"},
+                {"key": "t", "type": "textarea", "rows": "6"},
+            ],
+        },
+    )
+    f_n = schema.get_field("n")
+    assert (f_n.min, f_n.max, f_n.step) == (1, 9, 2)
+    assert schema.get_field("t").rows == 6
+
+
+def test_select_without_options_rejects_schema():
+    """select 缺 options → 整个 schema 忽略（容错，不影响插件加载）"""
+    schema = parse_config_schema(
+        "plug-bad",
+        {"title": "坏", "fields": [{"key": "m", "label": "模式", "type": "select"}]},
+    )
+    assert schema is None
+
+
+def test_rich_types_render(qapp, rich_schema):
+    """select/number/textarea 渲染为对应控件"""
+    from PyQt5.QtWidgets import QTextEdit
+    from qfluentwidgets import ComboBox, SpinBox
+
+    card = PluginConfigCard("plug-rich")
+    assert isinstance(card._rows["mode"], ComboBox)
+    assert isinstance(card._rows["retry"], SpinBox)
+    assert isinstance(card._rows["note"], QTextEdit)
+    # textarea 行高按 rows 声明（4 行）
+    assert card._rows["note"].height() >= 4 * 22
+
+
+def test_rich_types_echo_defaults(qapp, rich_schema):
+    """回显：select 按 value 选中、number 取 int、textarea 取文本"""
+    card = PluginConfigCard("plug-rich")
+    assert card._rows["mode"].currentData() == "a"
+    assert card._rows["retry"].value() == 3
+    assert card._rows["note"].toPlainText() == ""
+
+
+def test_select_persists_on_change(qapp, rich_schema):
+    """select 切换 → currentIndexChanged 即时保存存储 value（非 label）"""
+    card = PluginConfigCard("plug-rich")
+    card._rows["mode"].setCurrentIndex(1)
+    assert PluginConfigStore().get("plug-rich", "mode") == "b"
+
+
+def test_number_persists_on_change(qapp, rich_schema):
+    """number 改值 → valueChanged 即时保存（存储为 str，与 text 字段一致）"""
+    card = PluginConfigCard("plug-rich")
+    card._rows["retry"].setValue(7)
+    assert PluginConfigStore().get("plug-rich", "retry") == "7"
+
+
+def test_number_uses_schema_range(qapp, rich_schema):
+    """number 应用 schema 的 min/max 范围"""
+    card = PluginConfigCard("plug-rich")
+    spin = card._rows["retry"]
+    assert (spin.minimum(), spin.maximum()) == (1, 10)
+
+
+def test_textarea_persists_on_focus_out(qapp, rich_schema):
+    """textarea → editingFinished（focusOut 触发）即时保存"""
+    card = PluginConfigCard("plug-rich")
+    card._rows["note"].setPlainText("hello world")
+    card._rows["note"].editingFinished.emit()
+    assert PluginConfigStore().get("plug-rich", "note") == "hello world"
+
+
+def test_echo_flag_blocks_signal_loop(qapp, rich_schema):
+    """回显期间置 _echoing：setCurrentIndex/setValue 不触发写盘（防循环/误写）"""
+    store = PluginConfigStore()
+    store.set_values("plug-rich", {"mode": "b", "retry": "9"})
+    PluginConfigCard("plug-rich")  # 构造回显不应写盘
+    assert store.get("plug-rich", "mode") == "b"
+    assert store.get("plug-rich", "retry") == "9"

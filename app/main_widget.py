@@ -2677,24 +2677,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._notify_history_data_changed()
 
     def _refresh_cache_stats(self):
-        """刷新缓存统计显示（对话完成后调用）"""
+        """刷新缓存统计显示
+
+        优先级：活 worker 实时数据（工具循环中每轮 usage 已记录）→ backend 缓存
+        （worker 已清理）。⚠️ 不能倒过来：backend 里存的是上一轮对话的旧快照，
+        worker 活着时优先读它会工具循环期间永远显示旧值（不及时 Bug）。
+        """
         ring = getattr(self, "context_usage_ring", None)
         if not ring:
             return
 
-        stats_dict = self.backend.get_last_cache_stats()
+        stats_dict = None
+        worker = self.backend.get_current_worker()
+        if worker:
+            try:
+                raw = worker.get_cache_stats()
+                if hasattr(raw, "to_dict"):
+                    stats_dict = raw.to_dict()
+                elif isinstance(raw, dict):
+                    stats_dict = raw
+            except Exception:
+                pass
+            # worker 刚建还没收到 usage 时（requests=0），不覆盖上一轮的旧值
+            if not stats_dict or stats_dict.get("requests", 0) == 0:
+                stats_dict = None
 
         if not stats_dict:
-            worker = self.backend.get_current_worker()
-            if worker:
-                try:
-                    raw = worker.get_cache_stats()
-                    if hasattr(raw, "to_dict"):
-                        stats_dict = raw.to_dict()
-                    elif isinstance(raw, dict):
-                        stats_dict = raw
-                except Exception:
-                    pass
+            stats_dict = self.backend.get_last_cache_stats()
 
         if not stats_dict:
             return
@@ -4022,16 +4031,44 @@ class OpenAIChatToolWindow(ToolWindow):
 
         for info in buttons:
             try:
-                icon = QIcon(str(info.icon_path)) if info.icon_path else QIcon()
+                icon = self._resolve_input_button_icon(info)
                 btn = TransparentToolButton(icon, self._toolbar_capsule)
                 btn.setFixedSize(24, 24)
                 btn.setToolTip(info.tooltip or info.button_id)
                 btn.setStyleSheet(btn_capsule_style)
+                btn._plugin_input_info = info  # 供主题切换时刷新图标
                 btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
                 capsule_layout.addWidget(btn)
                 self._plugin_input_buttons.append(btn)
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
+
+    @staticmethod
+    def _resolve_input_button_icon(info) -> "QIcon":
+        """按当前主题解析插件输入按钮图标（浅色优先 icon_light_path，回退 icon_path）"""
+        from PyQt5.QtGui import QIcon
+
+        try:
+            is_light = theme_manager.is_light_theme()
+        except Exception:
+            is_light = False
+        if is_light and info.icon_light_path:
+            icon = QIcon(str(info.icon_light_path))
+            if not icon.isNull():
+                return icon
+        icon = QIcon(str(info.icon_path)) if info.icon_path else QIcon()
+        return icon
+
+    def _refresh_plugin_input_button_icons(self):
+        """主题切换时刷新输入区插件按钮图标（不重建按钮，保留控件引用）"""
+        for w in getattr(self, "_plugin_input_buttons", []):
+            info = getattr(w, "_plugin_input_info", None)
+            if info is None:
+                continue
+            try:
+                w.setIcon(self._resolve_input_button_icon(info))
+            except Exception as e:
+                logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 图标刷新失败：{e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -9966,6 +10003,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             refresh_all_tooltips()
 
+            # 输入区插件按钮图标随主题切换（浅色/深色图标）
+            self._refresh_plugin_input_button_icons()
+
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:
             # 输入区字体：QSS 中 font-family/font-size 声明优先级高于 setFont，
@@ -10498,15 +10538,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 可能因项目切换 / 智能体切换而变化，必须重建。
         self._invalidate_welcome_card()
 
-        if self._exclusive_ui_modes:
-            InfoBar.warning(
-                "运行中",
-                "独占模式运行中（如 AutoLoop），无法新建会话",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
+        # 独占模式拦截已移除（用户决策 2026-08-21）：autoloop 运行卡（full 覆盖层）
+        # 已物理替换发起 tab 的对话框，其他标签页不应被软件级限制阻断。
         if self._is_streaming and self.backend.chat_engine:
             # 🐛 修复（切换项目/新建会话打断对话）：
             # 1) stop_streaming 返回的中断消息（partial 回复快照）必须应用回 session，
@@ -15654,17 +15687,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
 
-        if self._exclusive_ui_modes:
-            InfoBar.warning(
-                "运行中",
-                "独占模式运行中（如 AutoLoop），无法发送消息",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            if not preserve_input:
-                self.input_area.clear()
-            return
+        # 独占模式拦截已移除（用户决策 2026-08-21）：同新建会话——其他标签页
+        # 对话不受 autoloop 运行影响（运行卡仅物理覆盖发起 tab 的对话区）。
 
         if not user_text:
             user_text = self.input_area.toPlainText().strip()
@@ -16926,6 +16950,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if tool_call_id in self._processed_tool_result_ids:
             return
         self._processed_tool_result_ids.add(tool_call_id)
+
+        # 实时刷新缓存统计：工具结果到达时本轮 LLM usage 必已记录，
+        # 环形图无需等整轮对话结束才更新（不及时 Bug 修复）
+        self._refresh_cache_stats()
 
         if self._exclusive_ui_modes:
             # 独占模式（如 AutoLoop）：只记录日志，不操作 UI
@@ -20645,6 +20673,9 @@ class OpenAIChatToolWindow(ToolWindow):
         经 _build_ui_context 的 "services" 字段注入插件浮动卡片，
         插件（如 autoloop）据此驱动自建的 ConversationCore 执行栈，
         无需触碰 main_widget 内部结构。
+
+        服务键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol），
+        新增/删改服务必须同步该契约与 tests/plugins/test_engine_host_contract.py。
         """
         backend = self.backend
 
@@ -20666,6 +20697,16 @@ class OpenAIChatToolWindow(ToolWindow):
             ce = backend.chat_engine if backend else None
             return getattr(ce, "_compactor", None) if ce else None
 
+        def _conversation_stack():
+            """对话执行栈工厂（懒加载 ConversationCore/Executor 构建面）。
+
+            EP2：插件（autoloop）经此入口取执行栈，撤销对 app.core.conversation 的
+            deep import。契约见 app/plugins/contracts/conversation_stack.py。
+            """
+            from app.core.conversation.stack_factory import ConversationStackImpl
+
+            return ConversationStackImpl()
+
         return {
             "get_model_config": self._get_current_model_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
@@ -20675,6 +20716,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "set_workdir": _set_workdir,
             "get_workdir": lambda: self._resolve_project_workdir() or "",
             "get_compactor": _get_compactor,
+            "conversation_stack": _conversation_stack,
             "save_messages_to_session": self._save_messages_to_session,
             "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
             "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,

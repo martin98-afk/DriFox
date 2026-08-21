@@ -51,13 +51,17 @@ def _install_pm(monkeypatch, components: dict):
 
 
 def test_reload_new_plugin_invokes_providers_watcher_scan(monkeypatch):
-    """新插件含 providers 组件 → ensure_provider_watcher().scan_now() 被调一次"""
+    """新插件含 providers 组件 → provider watcher 对该插件执行精准 reload_plugin
+
+    builtin_reloaders 走精准 reload 路径（不再触发 scan_now 全量重扫），
+    见 app/plugins/builtin_reloaders.py::_reload_providers。
+    """
     backend = _build_backend()
     _install_pm(monkeypatch, {"providers": True})
 
-    scan_calls = []
+    reload_calls = []
     fake_watcher = MagicMock()
-    fake_watcher.scan_now = lambda: scan_calls.append(1)
+    fake_watcher.reload_plugin = lambda name: reload_calls.append(name)
 
     monkeypatch.setattr(
         "app.plugins.loaders.provider_loader.ensure_provider_watcher",
@@ -66,19 +70,26 @@ def test_reload_new_plugin_invokes_providers_watcher_scan(monkeypatch):
 
     result = backend._reload_new_plugin("my-provider-plugin")
 
-    assert scan_calls == [1], f"providers scan_now 应被调用一次，实际 {len(scan_calls)} 次"
+    assert reload_calls == ["my-provider-plugin"], (
+        f"providers reload_plugin 应被调用一次针对该插件，实际 {reload_calls}"
+    )
     assert result["providers"] is True, f"result['providers'] 应为 True，实际 {result.get('providers')}"
 
 
 def test_reload_new_plugin_invokes_tools_watcher_scan(monkeypatch):
-    """新插件含 tools 组件 → ensure_plugin_tool_watcher().scan_now() 被调一次"""
+    """新插件含 tools 组件 → tool watcher 对该插件执行精准 reload_plugin + 通知
+
+    builtin_reloaders 走精准 reload 路径（不再触发 scan_now 全量重扫），
+    见 app/plugins/builtin_reloaders.py::_reload_tools。
+    """
     backend = _build_backend()
     _install_pm(monkeypatch, {"tools": True})
 
-    scan_calls = []
+    reload_calls = []
+    notify_calls = []
     fake_watcher = MagicMock()
-    fake_watcher.scan_now = lambda: scan_calls.append(1)
-    fake_watcher._notify_reloaded = lambda: None
+    fake_watcher.reload_plugin = lambda name: reload_calls.append(name)
+    fake_watcher._notify_reloaded = lambda: notify_calls.append(1)
 
     monkeypatch.setattr(
         "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
@@ -87,7 +98,10 @@ def test_reload_new_plugin_invokes_tools_watcher_scan(monkeypatch):
 
     result = backend._reload_new_plugin("my-tools-plugin")
 
-    assert scan_calls == [1], f"tools scan_now 应被调用一次，实际 {len(scan_calls)} 次"
+    assert reload_calls == ["my-tools-plugin"], (
+        f"tools reload_plugin 应被调用一次针对该插件，实际 {reload_calls}"
+    )
+    assert notify_calls == [1], f"_notify_reloaded 应被调用一次，实际 {notify_calls}"
     assert result["tools"] is True, f"result['tools'] 应为 True，实际 {result.get('tools')}"
 
 
@@ -104,19 +118,22 @@ def test_reload_new_plugin_marks_team_templates(monkeypatch):
 
 
 def test_reload_new_plugin_skips_components_when_absent(monkeypatch):
-    """新插件不声明 providers/tools/team_templates → 三个组件均不触发 scan"""
+    """新插件不声明 providers/tools/team_templates → 三个组件均不触发 reload_plugin"""
     backend = _build_backend()
     _install_pm(monkeypatch, {"agents": True})
 
-    provider_scan = []
-    tool_scan = []
+    provider_reload = []
+    tool_reload = []
     monkeypatch.setattr(
         "app.plugins.loaders.provider_loader.ensure_provider_watcher",
-        lambda: MagicMock(scan_now=lambda: provider_scan.append(1)),
+        lambda: MagicMock(reload_plugin=lambda name: provider_reload.append(name)),
     )
     monkeypatch.setattr(
         "app.plugins.loaders.plugin_tool_loader.ensure_plugin_tool_watcher",
-        lambda: MagicMock(scan_now=lambda: tool_scan.append(1), _notify_reloaded=lambda: None),
+        lambda: MagicMock(
+            reload_plugin=lambda name: tool_reload.append(name),
+            _notify_reloaded=lambda: None,
+        ),
     )
 
     # agents 路径会触发 reload_plugin_agents → 给 fake agent_manager 桩
@@ -126,8 +143,8 @@ def test_reload_new_plugin_skips_components_when_absent(monkeypatch):
 
     result = backend._reload_new_plugin("agents-only")
 
-    assert provider_scan == [], f"无 providers 组件不应调 scan，实际 {provider_scan}"
-    assert tool_scan == [], f"无 tools 组件不应调 scan，实际 {tool_scan}"
+    assert provider_reload == [], f"无 providers 组件不应调 reload_plugin，实际 {provider_reload}"
+    assert tool_reload == [], f"无 tools 组件不应调 reload_plugin，实际 {tool_reload}"
     assert result["providers"] is False
     assert result["tools"] is False
     assert result["team_templates"] is False

@@ -248,6 +248,18 @@ class OpenAIChatWorker(QThread):
         self._cached_model_name = model_name  # 缓存，避免 _build_response_message_sequence 重复 get
         if model_name:
             self._cache_tracker.set_model(model_name)
+        # 服务商插件缓存 usage 钩子：ProviderDef.usage_semantics / usage_normalizer
+        # （非注册表服务商/无钩子 → 空钩子，tracker 走内置自动解析）
+        provider_name = str(self.llm_config.get("provider_name", "") or "")
+        if provider_name:
+            try:
+                from app.plugins.registries.provider_registry import get_registry
+
+                pdef = get_registry().get(provider_name)
+                if pdef and (pdef.usage_semantics or pdef.usage_normalizer):
+                    self._cache_tracker.set_provider_hooks(pdef.usage_semantics, pdef.usage_normalizer)
+            except Exception as e:
+                logger.debug(f"[CacheTracker] 注入服务商 usage 钩子失败（回退内置解析）: {e}")
 
         # 缓存模型是否支持视觉，用于过滤 image_url 块
         self._supports_vision = bool(get_model_capabilities(model_name).get("supports_vision"))
@@ -509,9 +521,7 @@ class OpenAIChatWorker(QThread):
 
         flags = self._adapter_flags()
         serializer = SerializerRegistry.get_instance().resolve(flags.serializer_id)
-        return serializer.serialize(
-            messages, SerializeContext(supports_vision=supports_vision, flags=flags)
-        )
+        return serializer.serialize(messages, SerializeContext(supports_vision=supports_vision, flags=flags))
 
     def _build_api_messages_cache(self) -> List[Dict[str, Any]]:
         """
@@ -843,7 +853,7 @@ class OpenAIChatWorker(QThread):
                     ratio = float(data.get("ratio", 0.0))
                     backend.request_auto_compact(ratio)
                     return  # 只触发一次
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except json.JSONDecodeError, ValueError, TypeError:
                 pass
 
     @staticmethod
@@ -878,7 +888,7 @@ class OpenAIChatWorker(QThread):
                 # 优先级 3: additionalContext
                 if data.get("additionalContext"):
                     return str(data["additionalContext"])
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except json.JSONDecodeError, TypeError, ValueError:
             pass
 
         # 优先级 4: raw output 兜底
@@ -1657,9 +1667,7 @@ class OpenAIChatWorker(QThread):
                     )
                     final_response = self.full_response
                     self._clear_pending_response_state()
-                    self._emit_with_callback(
-                        "finished_with_content", self.finished_with_content, final_response
-                    )
+                    self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
                     return
 
                 # 每次 API 调用前：1. 清理中间状态  2. 检查压缩
@@ -1689,9 +1697,7 @@ class OpenAIChatWorker(QThread):
                         )
                     except Exception as exc:
                         # 异常安全：策略 should_continue 拖异常时回退 CONTINUE 维持现状
-                        logger.warning(
-                            f"[LoopPolicy] should_continue 调用异常（重复循环门控），回退 CONTINUE: {exc!r}"
-                        )
+                        logger.warning(f"[LoopPolicy] should_continue 调用异常（重复循环门控），回退 CONTINUE: {exc!r}")
                         _lp_decision = LoopDecision.CONTINUE
                     if _lp_decision is LoopDecision.STOP:
                         logger.warning("[LoopPolicy] 策略要求终止重复工具循环")
@@ -1701,9 +1707,7 @@ class OpenAIChatWorker(QThread):
                         )
                         final_response = self.full_response
                         self._clear_pending_response_state()
-                        self._emit_with_callback(
-                            "finished_with_content", self.finished_with_content, final_response
-                        )
+                        self._emit_with_callback("finished_with_content", self.finished_with_content, final_response)
                         return
                     # 静默清理：不报错、不退出，清掉重复轮次后让模型带着干净历史继续
                     logger.warning(
@@ -1753,7 +1757,7 @@ class OpenAIChatWorker(QThread):
                         # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
                         ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
-                    except (ValueError, TypeError, RuntimeError):
+                    except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 self._last_context_token_count = ctx_count
                 if ctx_count > 0 and budget > 0:
@@ -1851,9 +1855,7 @@ class OpenAIChatWorker(QThread):
                             if _lp_decision is LoopDecision.STOP:
                                 # 策略拒绝续命 → 直接走完成路径（默认策略恒 CONTINUE → 不进入）
                                 # 对齐正常完成路径（约 :1850-1857）的四行式信号序列
-                                logger.warning(
-                                    "[LoopPolicy] 策略拒绝 Stop hook 续命，走完成路径"
-                                )
+                                logger.warning("[LoopPolicy] 策略拒绝 Stop hook 续命，走完成路径")
                                 self._emit_with_callback(
                                     "finished_with_messages",
                                     self.finished_with_messages,
@@ -2478,7 +2480,7 @@ class OpenAIChatWorker(QThread):
                             d = ast.literal_eval(content)
                             if isinstance(d, dict):
                                 img_path = d.get("absolute_path") or d.get("path")
-                        except (ValueError, SyntaxError):
+                        except ValueError, SyntaxError:
                             pass
                     if not img_path:
                         m = re.search(r"路径[：:]\s*(\S+\.\w+)", content)
@@ -2733,8 +2735,7 @@ class OpenAIChatWorker(QThread):
                 adapter = self._resolve_with_cold_start_warmup(registry)
             if adapter is None:
                 raise RuntimeError(
-                    "未注册任何 ModelAdapter 插件（含系统插件 openai），"
-                    "请确认 plugins/system/model_adapters/ 已启用"
+                    "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
                 )
             self._model_adapter = adapter
         return self._model_adapter.protocol_flags(self.llm_config or {})
@@ -2773,14 +2774,10 @@ class OpenAIChatWorker(QThread):
         try:
             max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
         except Exception as exc:
-            logger.warning(
-                f"[LoopPolicy] max_rounds 调用异常，回退默认（不限）: {exc!r}"
-            )
+            logger.warning(f"[LoopPolicy] max_rounds 调用异常，回退默认（不限）: {exc!r}")
             max_rounds = None
         if max_rounds is not None and self._loop_round_count > max_rounds:
-            logger.warning(
-                f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话"
-            )
+            logger.warning(f"[LoopPolicy] 达到最大轮数 {max_rounds}（{self._loop_policy().id}），主动结束本轮对话")
             return True
         return False
 
@@ -2894,7 +2891,7 @@ class OpenAIChatWorker(QThread):
                     if use_responses:
                         return self._process_responses_stream(response)
                     return self._process_response(response)
-                except (httpx.ReadError, httpcore.ReadError):
+                except httpx.ReadError, httpcore.ReadError:
                     # ⚠️ ReadError 不一定是用户取消：
                     # - cancel() 关闭 HTTP 连接 → 抛 ReadError（用户取消，静默返回）
                     # - 真实网络断流（服务端/代理断开、网络抖动）→ 同样抛 ReadError
@@ -3664,8 +3661,7 @@ class OpenAIChatWorker(QThread):
                 has_reasoning = bool(self._get_reasoning_content())
                 if not has_text and not has_reasoning:
                     raise StreamInterruptedError(
-                        "[空响应] 模型返回了空响应（未生成任何内容），"
-                        "可能是服务端过载或网络异常。请稍后重试。"
+                        "[空响应] 模型返回了空响应（未生成任何内容），可能是服务端过载或网络异常。请稍后重试。"
                     )
 
         # 🔧 修复：流式结束后立即回收临时对象（ChatCompletionChunk/Choice/Delta 链）

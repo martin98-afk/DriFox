@@ -52,6 +52,25 @@ gateway-teams/
 `runtime_component_loader` 扫描 `gateways/*.py`；看到 `config_schema` 即自动
 注册 `PluginConfigRegistry` + 渲染 `PluginConfigCard` 设置面板。
 
+### config_schema 字段类型（通用契约，所有插件共用）
+
+| type | 控件 | 附加属性 |
+|---|---|---|
+| `text` | 单行输入 | `placeholder` |
+| `password` | 密码输入 | `placeholder` |
+| `bool` | 开关 | — |
+| `select` | 下拉选择 | **必填** `options`（见下） |
+| `number` | 整数输入 | `min` / `max` / `step`（默认 0 / 2^31-1 / 1） |
+| `textarea` | 多行文本 | `rows`（显示行数，默认 3）、`placeholder` |
+
+`select` 的 `options` 三种声明形态（value 为存储值，label 为显示名）：
+
+```json
+"options": {"a": "模式A", "b": "模式B"}            // dict: value → label
+"options": ["a", "b"]                              // list[str]: value=label
+"options": [{"value": "a", "label": "模式A"}]      // list[dict]
+```
+
 ---
 
 ## 2. `GatewayPlatformDef` 字段一览

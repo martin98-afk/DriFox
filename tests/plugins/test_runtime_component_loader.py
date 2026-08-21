@@ -8,6 +8,53 @@ import threading
 import pytest
 
 
+def test_scan_and_register_engine_plugin(tmp_path, plugin_enabled):
+    """engines 目录扫描：plugins/<name>/engines/*.py 的 register(registry) → EngineRegistry.factories()
+
+    与 LoopPolicy 测试同构：临时插件目录 → scan_roots → 断言 factories() 含工厂 → 删除插件目录重扫 → 断言清理。
+    """
+    from app.plugins.loaders.runtime_component_loader import RuntimeComponentLoader
+    from app.plugins.registries.engine_registry import EngineRegistry
+
+    plugin_dir = tmp_path / "demo-engine-plugin"
+    (plugin_dir / "engines").mkdir(parents=True)
+    (plugin_dir / "engines" / "minimal.py").write_text(
+        "# -*- coding: utf-8 -*-\n"
+        "from app.plugins.contracts.dialogue_engine import ENGINE_SLOT_UI\n\n"
+        "class MinimalEngineFactory:\n"
+        '    id = ENGINE_SLOT_UI  # 槽位 = "ui"\n'
+        '    tag = "minimal"\n\n'
+        "    def create(self, **kwargs):\n"
+        "        # 测试不触发 create（构造真实 UIEngine 依赖 Qt），仅验证工厂注册与 source 清理\n"
+        "        raise NotImplementedError('test factory: create 不应被调用')\n\n"
+        "def register(registry):\n"
+        "    registry.register(MinimalEngineFactory())\n",
+        encoding="utf-8",
+    )
+    restore = plugin_enabled("demo-engine-plugin")
+
+    # 隔离本测试：新建临时 EngineRegistry 实例（不影响全局单例——避免污染其它测试）
+    reg = EngineRegistry()
+    loader = RuntimeComponentLoader(
+        comp_dir="engines",
+        registry=reg,
+        register_attr="register",
+        unregister_attr="unregister_source",
+    )
+    loaded = loader.scan_roots([tmp_path])  # 显式传入扫描根（测试不依赖全局 plugins/）
+    assert loaded == {"demo-engine-plugin"}
+
+    factories = reg.factories()
+    assert "ui" in factories, f"应注册 'ui' 槽位工厂，实际 {list(factories)}"
+    assert factories["ui"].tag == "minimal"
+
+    # 卸载语义：重扫时源插件已删除 → 注册清理
+    shutil.rmtree(plugin_dir)
+    loader.scan_roots([tmp_path])
+    assert "ui" not in reg.factories(), f"插件目录删除后工厂应清理，实际 {list(reg.factories())}"
+    restore()
+
+
 def test_scan_and_register_loop_policy_plugin(tmp_path, plugin_enabled):
     from app.plugins.loaders.runtime_component_loader import RuntimeComponentLoader
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
