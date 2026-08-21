@@ -83,7 +83,8 @@ class FloatingCardInfo:
                   "full" 表示完整覆盖对话区（与系统配置卡片一致，走覆盖层）
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
-        metadata: 附加元数据
+        metadata: 附加元数据；支持 hide_sidebar=True（卡片不进 Tab 侧边栏
+                  插件列表，仅经命令/输入按钮/代码弹出——如 autoloop 双卡）
         context_provider: 可选，卡片专属上下文提供者。不传则使用全局 context_provider。
     """
 
@@ -233,6 +234,17 @@ class UIPluginRegistry:
         # 条目按 plugin_name 作用域：仅被同插件的 load_plugin 消费——插件删除路径
         # （standalone unload，无后续 load）的过期条目不会泄漏给其他插件的加载。
         self._pending_card_restore: list[tuple[str, str, str]] = []
+        # ── Tab 模式浮动卡片按标签页隔离（per-tab 可见集合）──
+        # 卡片 widget 单实例挂 TabManagerWindow 全局容器；CardManager 的
+        # GLOBAL 可见记录是「当前活跃标签页可见集合」的投影。切换标签时按
+        # 目标标签页的记录 show/hide（走 CardManager 标准路径，互斥/容器
+        # 展开/覆盖层切换自动生效）。
+        # {tab_window_id: {card_id, ...}}
+        self._tab_card_visibility: Dict[str, set] = {}
+        # 当前投影的标签页 window_id（None 时按需解析活跃窗口）
+        self._active_tab_scope: Optional[str] = None
+        # 投影同步中标志：切换标签触发的 hide 不清除当前标签可见集合
+        self._tab_sync_in_progress: bool = False
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -735,6 +747,20 @@ class UIPluginRegistry:
             if hasattr(widget, "closed"):
                 widget.closed.connect(lambda c=card_id, w=window_id: card_manager.hide_card(c, w))
 
+            # Tab 模式 per-tab 隔离：卡片被关闭（用户点关闭 / 全局系统卡互斥）时，
+            # 从当前标签页的可见集合移除（切回该标签不再自动恢复）；切换标签
+            # 投影期间触发的 hide 是「其他标签的状态切换」，不清除集合。
+            if host is not None:
+
+                def _on_hidden_for_tab(cid=card_id):
+                    if self._tab_sync_in_progress:
+                        return
+                    scope = self._active_tab_scope or self._resolve_tab_scope()
+                    if scope:
+                        self._tab_card_visibility.get(scope, set()).discard(cid)
+
+                card_manager.on_card_hidden(window_id, card_id, _on_hidden_for_tab)
+
             # 注册为系统卡片：显示时自动隐藏输入区域（与系统配置卡片行为一致）。
             # 仅当 main_widget 暴露该 API 时调用（旧版本/测试 stub 可安全降级）。
             # 幂等：register_system_card 内部用 set 去重，重复注册不会重复绑定回调。
@@ -756,6 +782,84 @@ class UIPluginRegistry:
 
         # toggle：显示/隐藏切换
         card_manager.toggle_card(card_id, window_id)
+
+        # Tab 模式：按标签页记录可见状态（切换标签时投影恢复/隐藏）
+        if host is not None:
+            self._record_tab_card_state(card_id, card_manager, window_id)
+
+    def _record_tab_card_state(self, card_id: str, card_manager, host_window_id: str) -> None:
+        """把卡片当前可见状态记录到活跃标签页的可见集合（Tab 模式）
+
+        toggle 后调用：可见 → 加入集合；不可见 → 移出。
+        """
+        scope = self._resolve_tab_scope()
+        if scope is None:
+            return
+        try:
+            visible = card_manager.is_card_visible(card_id, host_window_id)
+        except Exception:
+            return
+        cards = self._tab_card_visibility.setdefault(scope, set())
+        if visible:
+            cards.add(card_id)
+        else:
+            cards.discard(card_id)
+
+    def _resolve_tab_scope(self) -> Optional[str]:
+        """解析浮动卡片可见状态的当前标签页作用域（活跃对话窗口 window_id）"""
+        if self._active_tab_scope is not None:
+            return self._active_tab_scope
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                active = tm.get_current_window()
+                wid = getattr(active, "_window_id", None)
+                if wid:
+                    return wid
+        except Exception:
+            pass
+        return None
+
+    def sync_floating_cards_to_tab(self, scope: str) -> None:
+        """切换标签页时把浮动卡片显隐投影到目标标签页（Tab 模式 per-tab 隔离）
+
+        卡片 widget 单实例挂全局容器；CardManager 的 GLOBAL 可见记录
+        视为「当前活跃标签页可见集合」的投影。切换标签时按目标标签页的
+        记录 show/hide（走 CardManager 标准路径：互斥、容器展开/折叠、
+        覆盖层 QStackedWidget 切换自动生效）。
+
+        Args:
+            scope: 目标标签页（对话窗口）的 window_id
+        """
+        host = self._resolve_global_host()
+        if host is None:
+            return
+        cm = getattr(host, "_card_manager", None)
+        host_wid = getattr(host, "_window_id", None)
+        if cm is None or host_wid is None or not scope:
+            return
+        self._active_tab_scope = scope
+        target = self._tab_card_visibility.get(scope, set())
+        instances = self._card_widget_instances.get(host_wid, {})
+        self._tab_sync_in_progress = True
+        try:
+            for card_id in list(self._floating_cards.keys()):
+                if card_id not in instances:
+                    # 从未实例化的卡片无需投影（首次打开时才创建）
+                    continue
+                try:
+                    want = card_id in target
+                    now = cm.is_card_visible(card_id, host_wid)
+                    if want and not now:
+                        cm.show_card(card_id, host_wid)
+                    elif not want and now:
+                        cm.hide_card(card_id, host_wid)
+                except Exception:
+                    continue
+        finally:
+            self._tab_sync_in_progress = False
 
     def load_plugin(self, plugin_name: str, plugin_path) -> bool:
         """加载插件的 ui 组件
@@ -786,9 +890,7 @@ class UIPluginRegistry:
             self.unload_plugin(plugin_name)
         # 丢弃本插件残留的过期恢复条目（上一轮 standalone unload / 回滚失败的残留），
         # 仅保留其他插件的条目——避免跨插件泄漏导致已删除卡片的错误恢复。
-        self._pending_card_restore = [
-            e for e in self._pending_card_restore if e[0] != plugin_name
-        ]
+        self._pending_card_restore = [e for e in self._pending_card_restore if e[0] != plugin_name]
 
         try:
             import importlib.util
@@ -852,14 +954,8 @@ class UIPluginRegistry:
                 self._schedule_welcome_refresh()
             # 热重载恢复：卸载前可见的浮动卡片 → 按新 widget_class 重建并恢复显示
             # （旧实例已在 unload 中销毁，_show_floating_card 会创建新实例 + toggle 显示）
-            restore = [
-                (win_id, cid)
-                for (pname, win_id, cid) in self._pending_card_restore
-                if pname == plugin_name
-            ]
-            self._pending_card_restore = [
-                e for e in self._pending_card_restore if e[0] != plugin_name
-            ]
+            restore = [(win_id, cid) for (pname, win_id, cid) in self._pending_card_restore if pname == plugin_name]
+            self._pending_card_restore = [e for e in self._pending_card_restore if e[0] != plugin_name]
             for win_id, cid in restore:
                 try:
                     mw = self._window_main_widgets.get(win_id)
@@ -950,6 +1046,10 @@ class UIPluginRegistry:
         for cid in cards_to_remove:
             self._unregister_command_for_card(cid)
             self._floating_cards.pop(cid, None)
+            # per-tab 可见集合同步清理（插件卸载后卡片不再存在，残留条目
+            # 会在重新安装同名插件时误恢复显示）
+            for tab_cards in self._tab_card_visibility.values():
+                tab_cards.discard(cid)
             # 清理所有窗口中该 card_id 的 widget 实例（含容器布局移除 + CardManager 注销）
             for win_id, win_instances in list(self._card_widget_instances.items()):
                 widget = win_instances.pop(cid, None)
@@ -962,7 +1062,7 @@ class UIPluginRegistry:
                     if cm is not None:
                         try:
                             was_visible = cm.is_card_visible(cid, win_id)
-                        except (RuntimeError, AttributeError):
+                        except RuntimeError, AttributeError:
                             was_visible = False
                     self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
@@ -1146,6 +1246,20 @@ class UIPluginRegistry:
     def get_floating_cards(self) -> Dict[str, FloatingCardInfo]:
         return dict(self._floating_cards)
 
+    def get_card_widget(self, card_id: str, window_id: str = "") -> Optional[Any]:
+        """获取浮动卡在某窗口的实例（懒创建：未显示过则 None）
+
+        供插件在 toggle 显示后取回实例（如 autoloop 运行卡绑定控制器）。
+        window_id 为空时回退全局兼容缓存（单窗口模式）。
+        """
+        if window_id and window_id in self._card_widget_instances:
+            return self._card_widget_instances[window_id].get(card_id)
+        for instances in self._card_widget_instances.values():
+            w = instances.get(card_id)
+            if w is not None:
+                return w
+        return None
+
     def is_loaded(self, plugin_name: str) -> bool:
         return plugin_name in self._loaded_plugins
 
@@ -1321,6 +1435,10 @@ class UIPluginRegistry:
         self._context_providers.pop(window_id, None)
         self._window_main_widgets.pop(window_id, None)
         self._card_widget_instances.pop(window_id, None)
+        # per-tab 可见集合随窗口销毁清理；若被关闭的是当前投影标签，重置作用域
+        self._tab_card_visibility.pop(window_id, None)
+        if self._active_tab_scope == window_id:
+            self._active_tab_scope = None
         if self._main_widget is not None:
             try:
                 wid = getattr(self._main_widget, "_window_id", None)
@@ -1343,6 +1461,9 @@ class UIPluginRegistry:
         self._window_main_widgets.clear()
         self._context_providers.clear()
         self._welcome_refresh_pending = False
+        self._tab_card_visibility.clear()
+        self._active_tab_scope = None
+        self._tab_sync_in_progress = False
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None

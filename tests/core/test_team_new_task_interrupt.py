@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归：新建任务打断流式时团队邮件锁不可死锁（_team_processing 必须复位）。
 
 复现场景：成员 B 正在处理任务邮件（_team_processing=True + running 邮件），
@@ -80,7 +80,7 @@ def test_new_task_interrupt_unblocks_team_mail(qapp, team_manager):
     )
     win = _Stub(
         _is_destroyed=False,
-        _is_auto_loop_running=False,
+        _exclusive_ui_modes=set(),
         _is_streaming=True,  # 触发打断分支
         _team_processing=True,  # 正在处理邮件（卡锁前置状态）
         _current_team_mail={"mail": running_mail},

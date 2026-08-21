@@ -176,7 +176,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     try:
         context_limit = int(context_limit)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
     if context_limit <= 0:
         return None
@@ -214,7 +214,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
             max_output_tokens = int(max_output_tokens)
             if max_output_tokens <= 0:
                 max_output_tokens = None
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             max_output_tokens = None
 
     # cost（$/M tokens，原样保留不换算；缺失字段为 None）

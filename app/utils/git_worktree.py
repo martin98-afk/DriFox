@@ -122,7 +122,7 @@ class GitWorktreeDetector:
                 creationflags=_CREATION_FLAGS,
             )
             GitWorktreeDetector._git_available = True
-        except FileNotFoundError, OSError:
+        except (FileNotFoundError, OSError):
             GitWorktreeDetector._git_available = False
             logger.info("[GitWorktree] git 未安装，跳过 git 检测")
         return GitWorktreeDetector._git_available

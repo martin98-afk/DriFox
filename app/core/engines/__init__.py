@@ -8,14 +8,10 @@
 import typing as _typing
 
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
-    "BaseEngine":               ("app.core.engines.base", "BaseEngine"),
-    "UIEngine":                 ("app.core.engines.ui", "UIEngine"),
-    "ChatEngine":               ("app.core.engines.ui", "ChatEngine"),
-    "GatewayEngine":            ("app.core.engines.gateway", "GatewayEngine"),
-    "AutoLoopEngine":           ("app.core.engines.auto_loop", "AutoLoopEngine"),
-    "LoopState":                ("app.core.engines.auto_loop", "LoopState"),
-    "AutoLoopConfig":           ("app.core.engines.auto_loop", "AutoLoopConfig"),
-    "AutoLoopPromptComposer":   ("app.core.engines.auto_loop", "AutoLoopPromptComposer"),
+    "BaseEngine": ("app.core.engines.base", "BaseEngine"),
+    "UIEngine": ("app.core.engines.ui", "UIEngine"),
+    "ChatEngine": ("app.core.engines.ui", "ChatEngine"),
+    "GatewayEngine": ("app.core.engines.gateway", "GatewayEngine"),
 }
 
 __all__ = list(_LAZY_IMPORTS.keys())

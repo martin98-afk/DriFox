@@ -501,7 +501,7 @@ class HookWorker(QRunnable):
                 enc = preferred
             try:
                 result = subprocess.run(command, encoding=enc, **subprocess_kwargs)
-            except UnicodeDecodeError, LookupError:
+            except (UnicodeDecodeError, LookupError):
                 # 解码失败时回退到 UTF-8 with errors='replace'
                 result = subprocess.run(command, encoding="utf-8", **subprocess_kwargs)
             exit_code = result.returncode

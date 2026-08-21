@@ -5648,7 +5648,7 @@ class MarketplaceCard(QWidget):
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
             return not sip.isdeleted(self)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             return False
 
     def _orphan_worker_thread(self, thread):

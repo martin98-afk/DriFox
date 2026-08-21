@@ -864,9 +864,7 @@ class TabManagerWindow(QWidget):
             if not _retried:
                 QTimer.singleShot(
                     250,
-                    lambda: self._maybe_auto_expand_after_squeeze(
-                        growth_required=growth_required, _retried=True
-                    ),
+                    lambda: self._maybe_auto_expand_after_squeeze(growth_required=growth_required, _retried=True),
                 )
             return
         total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
@@ -1321,6 +1319,16 @@ class TabManagerWindow(QWidget):
             win = self._windows[index]
             self._content_area.setCurrentWidget(win)
             self.activeTabChanged.emit(index)
+            # UI 插件浮动卡片按标签页投影显隐（per-tab 隔离）：
+            # 卡片单实例挂全局容器，这里按目标标签页的可见记录 show/hide
+            try:
+                _wid = getattr(win, "_window_id", None)
+                if _wid:
+                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                    UIPluginRegistry.get_instance().sync_floating_cards_to_tab(_wid)
+            except Exception:
+                pass
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
             # 🆕 会话数据即时同步：切回窗口时历史卡片/欢迎卡片可能已过期

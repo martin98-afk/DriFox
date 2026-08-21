@@ -26,7 +26,7 @@ system/
 
 | 智能体 | 描述 |
 |--------|------|
-| `auto_loop` | 自主循环执行的调试/测试智能体 |
+（auto_loop agent 已随 autoloop 插件化迁至 plugins/autoloop/agents/）
 | `build` | 面向编码实现的构建智能体，负责读取代码、修改文件、运行验证并收敛结果 |
 | `code-reviewer` | 完成里程碑后审查代码与规范的代码审查智能体 |
 | `compaction` | 对话上下文压缩，消除冗余并保留关键信息 |

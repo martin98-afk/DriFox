@@ -434,7 +434,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     # L2: 模型名查表
@@ -443,7 +443,7 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
     if caps.get("context_limit"):
         try:
             return max(1, int(caps["context_limit"]))
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
 
     # L3: 服务商默认
@@ -455,14 +455,14 @@ def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> 
             if v not in (None, ""):
                 try:
                     return max(1, int(v))
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     pass
 
     # L4: family 兜底
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("context_limit", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
@@ -486,13 +486,13 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         if value not in (None, ""):
             try:
                 return max(1, int(value))
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 continue
 
     profile = get_provider_profile(llm_config)
     try:
         return max(1, int(profile.get("max_output_tokens", default)))
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return max(1, int(default))
 
 
