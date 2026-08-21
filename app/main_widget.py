@@ -20645,6 +20645,9 @@ class OpenAIChatToolWindow(ToolWindow):
         经 _build_ui_context 的 "services" 字段注入插件浮动卡片，
         插件（如 autoloop）据此驱动自建的 ConversationCore 执行栈，
         无需触碰 main_widget 内部结构。
+
+        服务键集契约见 app/plugins/contracts/engine_host.py（EngineHost Protocol），
+        新增/删改服务必须同步该契约与 tests/plugins/test_engine_host_contract.py。
         """
         backend = self.backend
 
