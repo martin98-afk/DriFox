@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.3] - 2026-08-20
+## [v0.5.3] - 2026-08-21
 
-自上一版本以来的变更 | 提交数：132 · 文件变更：262 · +24155/-10747 | 贡献者：dingma, mading, drifox-bot, builder
+自上一版本以来的变更 | 提交数：143 · 文件变更：652 · +29200/-19697 | 贡献者：dingma, mading, drifox-bot, builder
 
 ### ✨ 新功能 (New Features)
 
@@ -26,6 +26,9 @@ All notable changes to this project will be documented in this file.
 - **性能基准测试套件** (`benchmarks/`): 新增 memory/import/startup/session-leak 基准脚本，用于回归对比与性能监控
 
 - **插件热重载增强（事件编排 + 活跃窗口 UI 刷新）** (`app/core/backend.py` + `app/main_widget.py` + `app/plugins/registries/ui_plugin_registry.py` + `app/widgets/message_card.py` + `tests/`): 热重载事件按序编排（event sequencing），重建后主动刷新活跃窗口 UI（输入区按钮/右键菜单/设置卡经 `_on_plugin_hot_reload` 重建）；backend 调度与 config_sync 协同；新增 `tests/plugins/test_input_button_hot_reload.py`（117 行）等收敛热重载回归
+- **AutoLoop 完全插件化** (`plugins/autoloop/`): AutoLoop 对话引擎从 `app/core/` 迁移至独立插件 `plugins/autoloop/`，主程序移除 `AutoLoopController` 实现（仅保留 11 行薄壳委托），对话卡与运行卡随插件自带 UI 资源加载；运行卡生命周期（懒创建时序 + 作用域绑定）改由插件自治。
+- **浮动卡 hide_sidebar 元数据** (`app/plugins/registries/ui_plugin_registry.py`): `FloatingCardInfo` 新增 `hide_sidebar: bool` 字段，autoloop 等双卡型插件声明 `hide_sidebar=True` 后，对应的对话卡 / 运行卡不进入侧边栏聚合列表，避免侧边栏出现冗余入口。
+- **浮动卡 per-tab 可见集合投影** (`app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_panel.py`): 浮动卡可见集合按当前 tab 投影，切换 tab 时仅渲染该 tab 注册的浮动卡，避免跨 tab 状态串扰与不必要的卡片驻留。
 
 ### 🐛 Bug 修复 (Bug Fixes)
 
@@ -38,6 +41,8 @@ All notable changes to this project will be documented in this file.
 - **幽灵窗口根因修复** (`app/widgets/`): 卡片销毁路径 `setParent(None)` 前先 `hide`；欢迎卡片 `_is_effectively_visible` 遍历全部 QStackedWidget 层级解决幽灵窗口
 - **团队 auto-compact 竞态** (`app/core/team/`): 修复 auto-compact 清空与团队邮件重发/子智能体回调竞态导致回复丢失
 - **安装器锁定文件处理** (`app/plugins/marketplace/` + installer): 卸载/安装时 robust_move 重定位被锁 `.pyd` 文件并抑制 watcher，修复首次 WinError 5；plugin-marketplace 修复 QFileDialog 改变 cwd 致缓存写入 FileNotFoundError
+- **启动时运行卡未绑定即中止** (`plugins/autoloop/`): 修复启动序列中运行卡在尚未绑定到会话时即触发中止逻辑的时序 bug——改为懒创建（lazy create）+ 会话作用域（session-scoped binding），首次访问会话时才创建并绑定，避免启动期空绑定导致的误终止。
+- **用户气泡宽度与主题颜色透明度** (`app/widgets/message_card.py`): 调整用户气泡最大宽度并优化主题色透明度变量，在浅色/深色主题下均有更舒适的视觉对比度。
 - **对话框自适应与插件精确加载** (`app/widgets/dialogs.py` + `app/plugins/`): 对话框自适应尺寸与内容拟合；单插件 unload/reload 不影响其余工具，轮询 watcher 退役并入 watchfiles 主链
 
 ### ♻️ 代码重构 (Refactoring)
@@ -51,6 +56,8 @@ All notable changes to this project will be documented in this file.
 - **插件体系收口 `app/plugins` 独立包** (`app/plugins/`): backend/worker 去 `ensure_builtin_*` 调用，依赖系统插件加载；轮询 watcher 退役，tools/providers 变更并入 watchfiles 主链
 
 - **gitignore 处理简化与用户配置尊重** (`plugins/system/hooks/format_memory_context.py`): 重写 `.gitignore` 处理逻辑，尊重用户既有配置，移除冗余分支（净 -82 行）
+- **autoloop 图标统一复用主程序 `无限.svg`** (`plugins/autoloop/`): 删除插件自带的 `无限.svg` 副本，统一引用主程序 `resources/icons/`，消除图标重复维护。
+- **AGENTS.md 精简执行路径** (`AGENTS.md`): 梳理项目规范与命令速查，移除冗余描述并强化关键约束（铁律/插件化/提交规范）。
 
 ### ⚡ 性能优化 (Performance)
 
@@ -67,6 +74,8 @@ All notable changes to this project will be documented in this file.
 
 - **测试**: 新增 `tests/core/test_provider_registry.py`（8 用例：注册/聚合/余额/用量/系统 14 家加载）；更新 `test_models_dev_sync.py`/`test_default_opencode_provider.py`/`test_provider_icon_widget.py`
 - **插件市场自动重建** (`plugins/`): `chore(marketplace): auto-regenerate from plugin.json [skip ci]` 重复提交
+- **Py2 except 残留括号化** (`app/` + `plugins/`): dev 长期遗留的 Python 2 风格 `except X, Y:` 语法（52 处，零业务语义）在某些语法高亮/解析器下损坏，统一改为 `except (X, Y):` 括号写法以提升可读性与跨工具兼容性。
+- **AutoLoopController 实现移除** (`app/core/team/`): 配合 autoloop 插件化，从 `controller.py` 移除 `AutoLoopController` 实现类，逻辑全部下沉到 `plugins/autoloop/`，主程序仅保留 11 行薄壳委托。
 
 ## [v0.5.2] - 2026-08-17
 
