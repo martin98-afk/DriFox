@@ -3,11 +3,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.3] - 2026-08-21
+## [v0.5.3] - 2026-08-22
 
-自上一版本以来的变更 | 提交数：173 · 文件变更：300 · +27977/-15661 | 贡献者：dingma, mading, drifox-bot, builder
+自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder
 
 ### ✨ 新功能 (New Features)
+
+- **models.dev 数据优先从 DriFox 镜像仓库拉取** (`app/core/models_dev_sync.py`): 优先从 DriFox 镜像仓库拉取 models.dev 数据，官方源作为保底；镜像不可达时自动降级官方源，提升服务商模型列表加载的可靠性。
 
 - **UI 扩展点补全（Phase D）** (`app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_panel.py` + `app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/cards/settings/llm_settings_card.py`): 新增四类 UI 扩展点——侧边栏项（`SidebarItemInfo`，与 floating card 解耦，存量兼容映射）/ 输入区按钮（`InputButtonInfo`，per-window 实例化 + 热重载经 `_on_plugin_hot_reload` 重建）/ 右键菜单项（`ContextMenuActionInfo`，统一聚合器注入 message_card/tab 菜单，enabled_func 置灰 + 返回 False 关菜单语义）/ 设置卡片（`SettingsCardInfo`，LLMSettingsCard 末尾插件分区滚动区，初始隐藏，打开时重建）。`unregister_plugin` 清理四类新注册（幂等）。UI 插件生态从「卡片 + 渲染」升级为「全区域可插拔」（E2E：临时插件文件注册四类 → 卸载全清）。
 - **序列化单入口（Phase C）** (`app/plugins/contracts/message_serializer.py` + `app/core/workers/chat_worker.py` + `subagent_worker.py`): 新增 `SerializeResult`（messages/input_items/instructions）+ `MessageSerializer.serialize` 单入口（内部按 `ctx.flags.use_responses_api` 路由 chat/responses 形态）；worker 从「按协议形态调 3 个函数」收敛为 1 个入口，`ProtocolFlags.serializer_id` 真正被消费（adapter 可指定专属序列化器，默认 openai）；薄壳函数内部转发单入口（导出与调用形态不变）。
@@ -31,6 +33,8 @@ All notable changes to this project will be documented in this file.
 - **浮动卡 per-tab 可见集合投影** (`app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_panel.py`): 浮动卡可见集合按当前 tab 投影，切换 tab 时仅渲染该 tab 注册的浮动卡，避免跨 tab 状态串扰与不必要的卡片驻留。
 
 ### 🐛 Bug 修复 (Bug Fixes)
+
+- **system-cleaner 插件版本与缓存目录处理** (`plugins/system-cleaner/.drifox-plugin/plugin.json` + `plugins/system-cleaner/ui/scanner.py`): 插件版本升至 0.1.1，增强缓存目录处理健壮性，修复扫描器在缓存路径下的异常行为。
 
 - **PyInstaller 打包缺失懒加载模块致启动崩溃** (`build.py`): `app.core` 使用 PEP 562 懒加载（`__getattr__` + `importlib.import_module` 动态字符串导入），PyInstaller 静态分析无法发现，需在 `build.py` 的 `_hidden_imports` 用 `collect_submodules("app.core")` 显式收集（含 `app.core.workers.topic_summary` 等）。修复前打包后运行报 `ModuleNotFoundError: No module named 'app.core.workers.topic_summary'`。已补入 build.py 并重发 v0.5.3。
 - **新建项目 NameError 中断链** (`app/main_widget.py`): 补 `TAB_KEY_DOCUMENTS` 局部导入，恢复新建会话/Tab 图标同步。
