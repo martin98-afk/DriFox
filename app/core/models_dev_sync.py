@@ -2,7 +2,8 @@
 """
 models.dev 模型元数据同步模块。
 
-启动时从 https://models.dev/api.json 拉取最新模型列表与能力，
+启动时优先从 DriFox 维护的镜像仓库（models-dev）拉取最新模型列表与能力，
+镜像不可用时回退到 https://models.dev/api.json 官方源。
 按 DriFox 支持的服务商白名单解析，并转换为本地模型能力格式。
 拉取结果缓存到 config/models_dev_cache.json，TTL 24 小时。
 
@@ -23,6 +24,10 @@ from loguru import logger
 # ============================================================
 # 常量
 # ============================================================
+# 优先源：DriFox 镜像仓库（过滤版，字段与官方 api.json 兼容：
+# 剔除 id/provider 等冗余字段，description/cost/limit/modalities/reasoning 全保留）
+MODELS_DEV_MIRROR_URL = "https://raw.githubusercontent.com/martin98-afk/models-dev/master/models-dev.json"
+# 保底源：models.dev 官方 API
 MODELS_DEV_API_URL = "https://models.dev/api.json"
 CACHE_TTL_SECONDS = 24 * 3600  # 24 小时
 # 缓存数据结构版本：字段新增（如 cost）或语义变更（如 supports_thinking
@@ -132,8 +137,8 @@ def _is_content_version_stale(cache: Optional[Dict[str, Any]]) -> bool:
 # ============================================================
 # 网络拉取
 # ============================================================
-def _fetch_remote(url: str = MODELS_DEV_API_URL, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
-    """从 models.dev 拉取 API 数据。失败返回 None。"""
+def _fetch_url(url: str, timeout: float = 30.0) -> Optional[Dict[str, Any]]:
+    """从单个 URL 拉取 JSON 数据。失败返回 None。"""
     try:
         import httpx
     except ImportError:
@@ -146,12 +151,32 @@ def _fetch_remote(url: str = MODELS_DEV_API_URL, timeout: float = 30.0) -> Optio
             resp.raise_for_status()
             data = resp.json()
         if not isinstance(data, dict):
-            logger.warning("[models.dev] 返回数据格式异常")
+            logger.warning(f"[models.dev] 返回数据格式异常: {url}")
             return None
         return data
     except Exception as e:
         logger.warning(f"[models.dev] 拉取失败: {e}")
         return None
+
+
+def _fetch_remote(timeout: float = 30.0) -> Tuple[Optional[Dict[str, Any]], str]:
+    """多源顺序拉取 models.dev 数据：镜像仓库优先，官方源保底。
+
+    返回 (data, 实际来源 URL)。全部源失败返回 (None, 最后尝试的 URL)。
+    """
+    sources = [
+        (MODELS_DEV_MIRROR_URL, "镜像仓库"),
+        (MODELS_DEV_API_URL, "官方源"),
+    ]
+    last_url = MODELS_DEV_API_URL
+    for url, name in sources:
+        data = _fetch_url(url, timeout)
+        if data is not None:
+            logger.info(f"[models.dev] 从{name}拉取成功: {url}")
+            return data, url
+        logger.warning(f"[models.dev] {name}拉取失败，尝试下一个源: {url}")
+        last_url = url
+    return None, last_url
 
 
 # ============================================================
@@ -176,7 +201,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
 
     try:
         context_limit = int(context_limit)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     if context_limit <= 0:
         return None
@@ -221,7 +246,7 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
             max_output_tokens = int(max_output_tokens)
             if max_output_tokens <= 0:
                 max_output_tokens = None
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             max_output_tokens = None
 
     # cost（$/M tokens，原样保留不换算；缺失字段为 None）
@@ -597,7 +622,7 @@ def load_dynamic_models(
     if (not allow_network) or need_refresh:
         if allow_network:
             logger.info(f"[models.dev] 尝试同步最新模型元数据... (content_version={CACHE_CONTENT_VERSION})")
-            remote_data = _fetch_remote()
+            remote_data, fetched_url = _fetch_remote()
             if remote_data is not None:
                 provider_models, model_capabilities = _parse_models_dev_data(remote_data)
 
@@ -618,7 +643,7 @@ def load_dynamic_models(
 
                 cache = {
                     "_cached_at": time.time(),
-                    "_url": MODELS_DEV_API_URL,
+                    "_url": fetched_url,
                     "_schema_version": CACHE_SCHEMA_VERSION,
                     "_content_version": CACHE_CONTENT_VERSION,
                     "provider_models": provider_models,

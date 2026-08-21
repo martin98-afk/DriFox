@@ -116,3 +116,44 @@ def _find_parent(root: ast.AST, target: ast.AST):
             if child is target:
                 return node
     return None
+
+
+class TestArchiveProjectSyncsTabIcon:
+    """归档当前项目必须像切换/新建项目一样显式同步 Tab 项目图标
+
+    背景：_on_archive_project 归档当前项目会切回默认项目，但曾缺失
+    _update_tab_icon 调用，导致左侧 tab_panel 的项目 icon / 团队框 header
+    icon 停留在被归档项目（团队模式下 _broadcast_team_project 只同步其他
+    成员窗口，发送方自身依赖此处刷新，与 _on_project_selected 对齐）。
+    """
+
+    def test_on_archive_project_calls_update_tab_icon(self):
+        """_on_archive_project 方法体必须包含 _update_tab_icon 调用"""
+        method = _get_method_src("_on_archive_project")
+        assert _method_contains_call(method, "_update_tab_icon"), (
+            "归档当前项目缺少 Tab 项目图标同步：_on_archive_project 未调用 _update_tab_icon"
+        )
+
+    def test_on_archive_project_icon_sync_inside_tab_mode_guard(self):
+        """图标同步必须位于 enable_tab_manager 守卫内（与切换/新建项目写法一致）"""
+        method = _get_method_src("_on_archive_project")
+        found = False
+        for node in ast.walk(method):
+            if isinstance(node, ast.Call):
+                func = node.func
+                is_update = (isinstance(func, ast.Name) and func.id == "_update_tab_icon") or (
+                    isinstance(func, ast.Attribute) and func.attr == "_update_tab_icon"
+                )
+                if not is_update:
+                    continue
+                parent = _find_parent(method, node)
+                while parent is not None:
+                    if isinstance(parent, ast.If):
+                        test_src = ast.dump(parent.test)
+                        if "enable_tab_manager" in test_src or "cfg" in test_src:
+                            found = True
+                            break
+                    parent = _find_parent(method, parent)
+                if found:
+                    break
+        assert found, "_update_tab_icon 调用必须位于 enable_tab_manager 守卫内"
