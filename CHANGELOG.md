@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.3] - 2026-08-21
 
-自上一版本以来的变更 | 提交数：143 · 文件变更：652 · +29200/-19697 | 贡献者：dingma, mading, drifox-bot, builder
+自上一版本以来的变更 | 提交数：173 · 文件变更：300 · +27977/-15661 | 贡献者：dingma, mading, drifox-bot, builder
 
 ### ✨ 新功能 (New Features)
 
@@ -91,11 +91,14 @@ All notable changes to this project will be documented in this file.
 - **简洁模式下助手消息气泡悬浮动作按钮** (`app/widgets/message_card.py`): `reduced mode` 下 `assistant` 消息气泡 hover 浮现动作按钮
 - **移除独占模式的新建会话/发送消息软件级拦截** (`app/main_widget.py`): 移除独占模式下对新建会话/发送消息的软件级拦截，回归自然行为
 
-##### 🐛 问题修复 (Bug Fixes, 3)
+##### 🐛 问题修复 (Bug Fixes, 6)
 
 - **缓存命中率口径与服务商对齐** (`app/core/workers/cache_tracker.py` + `app/core/workers/chat_worker.py` + `app/main_widget.py` + `app/plugins/registries/provider_registry.py`): 修复启发式误判（非白名单前缀模型真实 99% 命中被估算拉低至 70%）与刷新不及时（工具循环期间显示旧快照）。根因：模型名前缀白名单误判 + 虚构 `cache_write`；`backend` 旧快照优先于活 worker。统一口径 `read / (read + uncached_input)`；`ProviderDef` 新增 `usage_semantics / usage_normalizer` 钩子供插件自定义 usage 解析
 - **deepseek-v4 思考强度不生效** (`app/core/models_dev_sync.py`): `reasoning_options` 同时含 `toggle + effort` 时 `effort` 优先，`thinking_param` 统一 `reasoning_effort`，修复参数卡/输入区无思考强度调节且请求只发 `thinking` 布尔的问题
 - **输入区插件按钮图标随深浅主题切换** (`app/main_widget.py` + `app/plugins/registries/ui_plugin_registry.py`): `InputButtonInfo` 增加 `icon_light_path`，构建/刷新按主题选图标
+- **dock 停靠区按卡片独立记忆 splitter 尺寸** (`app/widgets/cards/card_container.py`): 修复 tab 切换折叠重开后宽度恢复默认的问题。根因：横向恢复逻辑记忆 < natural 时丢弃回默认（拖窄必丢）；`_dock_last_size` 容器级单值（不同插件卡片互相覆盖）。修复：`_dock_card_sizes` 按 `card_id` 记忆，`splitterMoved` 实时写入可见卡片，折叠兜底记忆到最后可见卡片；LEFT/RIGHT 宽度 + BOTTOM 高度均生效
+- **横向 dock 最小宽度调整与异常语法修正** (`app/widgets/cards/card_container.py`): 调整水平停靠区最小宽度，修正遗留的 Python2 `except X, Y:` 异常处理语法
+- **预览模式宽度上限随尺寸更新** (`app/widgets/message_card.py`): 修复预览模式下窗口 resize 时宽度上限未及时更新导致文本截断的问题
 
 ##### ♻️ 代码重构 (Refactoring, 3)
 
