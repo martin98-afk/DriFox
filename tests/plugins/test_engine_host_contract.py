@@ -22,6 +22,7 @@ def test_services_dict_satisfies_protocol_keys():
         def set_workdir(self, path: str) -> None: ...
         def get_workdir(self) -> str: ...
         def get_compactor(self): ...
+        def conversation_stack(self): ...
         def save_messages_to_session(self, messages) -> None: ...
         def enter_exclusive_ui_mode(self, source_id: str) -> None: ...
         def exit_exclusive_ui_mode(self, source_id: str) -> None: ...
@@ -35,3 +36,21 @@ def test_services_dict_satisfies_protocol_keys():
     assert runtime_checkable(isinstance(_StubHost(), EngineHost)) if False else True
     # runtime_checkable 只查方法存在性：
     assert isinstance(_StubHost(), EngineHost)
+
+
+def test_conversation_stack_service_satisfies_contract():
+    """services["conversation_stack"]() 产出满足 ConversationStackFactory 的对象"""
+    from app.plugins.contracts.conversation_stack import ConversationStackFactory
+
+    class _StackImpl:
+        def create_core(self, get_model_config, agent_manager=None, backend=None, session_manager=None): ...
+        def create_executor(self, core, config=None, tool_executor=None, agent_manager=None): ...
+
+    assert isinstance(_StackImpl(), ConversationStackFactory)
+
+
+def test_engine_host_contract_declares_conversation_stack():
+    """EngineHost 契约包含 conversation_stack 声明（防 services/契约漂移）"""
+    from app.plugins.contracts.engine_host import EngineHost
+
+    assert "conversation_stack" in dir(EngineHost)

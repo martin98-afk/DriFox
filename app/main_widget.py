@@ -20669,6 +20669,16 @@ class OpenAIChatToolWindow(ToolWindow):
             ce = backend.chat_engine if backend else None
             return getattr(ce, "_compactor", None) if ce else None
 
+        def _conversation_stack():
+            """对话执行栈工厂（懒加载 ConversationCore/Executor 构建面）。
+
+            EP2：插件（autoloop）经此入口取执行栈，撤销对 app.core.conversation 的
+            deep import。契约见 app/plugins/contracts/conversation_stack.py。
+            """
+            from app.core.conversation.stack_factory import ConversationStackImpl
+
+            return ConversationStackImpl()
+
         return {
             "get_model_config": self._get_current_model_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
@@ -20678,6 +20688,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "set_workdir": _set_workdir,
             "get_workdir": lambda: self._resolve_project_workdir() or "",
             "get_compactor": _get_compactor,
+            "conversation_stack": _conversation_stack,
             "save_messages_to_session": self._save_messages_to_session,
             "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
             "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,

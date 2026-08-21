@@ -59,6 +59,12 @@ class EngineHost(Protocol):
         """上下文压缩器"""
         ...
 
+    # ===== 对话执行栈（EP2：插件不再 deep import app.core.conversation） =====
+    def conversation_stack(self) -> Any:
+        """对话执行栈工厂（满足 ConversationStackFactory 契约：
+        create_core / create_executor，见 contracts/conversation_stack.py）"""
+        ...
+
     # ===== 会话回写 =====
     def save_messages_to_session(self, messages: List[Dict[str, Any]]) -> None:
         """长任务消息并入当前会话（结束后调用）"""
