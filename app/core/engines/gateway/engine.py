@@ -641,7 +641,7 @@ class GatewayEngine(QObject, BaseEngine):
         try:
             msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return (datetime.now() - msg_time).total_seconds() < threshold_seconds
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return False
 
     def _save_to_store(self, session: ChatSession) -> None:

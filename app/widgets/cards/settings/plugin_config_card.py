@@ -236,7 +236,7 @@ class PluginConfigCard(ExpandSettingCard):
         # 阻断 editingFinished 循环：临时 disconnect
         try:
             control.editingFinished.disconnect()
-        except TypeError, RuntimeError:
+        except (TypeError, RuntimeError):
             pass
         text = str(val if val is not None else "")
         control.setText(text)

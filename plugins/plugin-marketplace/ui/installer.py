@@ -1024,7 +1024,7 @@ class PluginInstaller:
                     try:
                         if plugin_dir_str in str(Path(mod_file).resolve()).lower():
                             del sys.modules[mod_name]
-                    except OSError, ValueError:
+                    except (OSError, ValueError):
                         continue
             importlib.invalidate_caches()
             gc.collect()

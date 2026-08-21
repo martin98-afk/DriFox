@@ -1615,7 +1615,7 @@ class ConfigSyncService(QObject):
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
                 shutil.move(str(_tmp_extract), str(self._user_custom_path))
-            except RuntimeError, zipfile.BadZipFile:
+            except (RuntimeError, zipfile.BadZipFile):
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))

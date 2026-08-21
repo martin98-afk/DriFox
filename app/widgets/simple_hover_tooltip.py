@@ -206,7 +206,7 @@ class SimpleHoverTooltip(QWidget):
                     oldest = _tooltip_instances.pop(0)
                     if oldest is not None:
                         oldest.deleteLater()
-                except RuntimeError, IndexError:
+                except (RuntimeError, IndexError):
                     pass
             _tooltip_instances.append(self)
             # 自注销：destroyed 信号在 deleteLater + sendPostedEvents 后
@@ -402,7 +402,7 @@ class _HoverTooltipFilter(QObject):
             pass
         try:
             self._timer.stop()
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
         self._hide()
         # 🛡️ 泄漏根因修复（B7）：目标 widget 销毁时 tooltip 同步销毁。
