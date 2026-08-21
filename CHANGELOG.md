@@ -77,6 +77,40 @@ All notable changes to this project will be documented in this file.
 - **Py2 except 残留括号化** (`app/` + `plugins/`): dev 长期遗留的 Python 2 风格 `except X, Y:` 语法（52 处，零业务语义）在某些语法高亮/解析器下损坏，统一改为 `except (X, Y):` 括号写法以提升可读性与跨工具兼容性。
 - **AutoLoopController 实现移除** (`app/core/team/`): 配合 autoloop 插件化，从 `controller.py` 移除 `AutoLoopController` 实现类，逻辑全部下沉到 `plugins/autoloop/`，主程序仅保留 11 行薄壳委托。
 
+#### 📦 附加变更（v0.5.3 重发补丁 | 自初次 tag 之后 24 个新提交）
+
+> v0.5.3 初次 tag（`6a6e49c4` "re-release with autoloop plugin + late fixes"）后追加的优化与修复：对话引擎（Engines）插件化体系打通、`cache` 命中率口径与服务商对齐、`config_schema` 字段类型扩展、UI 细节优化与文档补全。
+
+##### ✨ 新功能 (New Features, 14)
+
+- **对话引擎（Engines）插件化体系打通** (`app/plugins/contracts/` + `app/core/conversation/stack_factory.py` + `app/core/backend.py` + `app/core/isolated_context.py` + `app/plugins/registries/` + `app/core/kernel.py` + `app/core/plugin_manager.py` + `app/plugins/loaders/`): 新增引擎工厂契约 `EngineFactory` + `ClassEngineFactory`、`EngineRegistry` 单例 + `create_engine_for_slot` 实例化入口（`isinstance` 安全网）、`EngineHost` Protocol 服务面语义契约 + 漂移守卫、`ConversationStackFactory` 执行栈构建面契约；后端/isolated_context 的 ChatEngine 经工厂创建（单例语义保留），加载器经 `_make_engine_loader + ensure_engine_watcher + warmup` 接入 engines 组件；kernel.PROBES + builtin_reloaders 完成组件类型登记；gateway 槽位经工厂接入（单例语义保留）。补 `plugins/runtime-engines.md` 端到端开发指南。
+- **UI 引擎槽位选择卡** (`app/widgets/cards/settings/llm_settings_card.py` + `app/utils/config.py`): 设置页展示/选择各槽位引擎（选择持久化，消费后补）
+- **ui-services 加 conversation_stack 入口（EP2 主仓前置）** (`app/core/conversation/stack_factory.py` + `app/main_widget.py` + `app/plugins/contracts/engine_host.py`): 执行栈服务面经 `EngineHost.conversation_stack` 暴露
+- **`hide_floating_card_globally` 公开 API（EP6）** (`app/plugins/registries/`): 插件隐藏浮动卡片无需再触碰 `_card_manager / _window_id` 内部细节
+- **`config_schema` 扩展 `select` / `number` / `textarea` 字段类型（L2）** (`app/plugins/contracts/plugin_config.py` + `app/widgets/cards/settings/plugin_config_card.py`): 自动卡字段文字换 `BodyLabel` 随主题刷新，`textarea` 用主题感知 `TextEdit`，`select` 用自绘 `ComboBox`；兼容旧 `text / password / bool` schema 零迁移
+- **简洁模式下助手消息气泡悬浮动作按钮** (`app/widgets/message_card.py`): `reduced mode` 下 `assistant` 消息气泡 hover 浮现动作按钮
+- **移除独占模式的新建会话/发送消息软件级拦截** (`app/main_widget.py`): 移除独占模式下对新建会话/发送消息的软件级拦截，回归自然行为
+
+##### 🐛 问题修复 (Bug Fixes, 3)
+
+- **缓存命中率口径与服务商对齐** (`app/core/workers/cache_tracker.py` + `app/core/workers/chat_worker.py` + `app/main_widget.py` + `app/plugins/registries/provider_registry.py`): 修复启发式误判（非白名单前缀模型真实 99% 命中被估算拉低至 70%）与刷新不及时（工具循环期间显示旧快照）。根因：模型名前缀白名单误判 + 虚构 `cache_write`；`backend` 旧快照优先于活 worker。统一口径 `read / (read + uncached_input)`；`ProviderDef` 新增 `usage_semantics / usage_normalizer` 钩子供插件自定义 usage 解析
+- **deepseek-v4 思考强度不生效** (`app/core/models_dev_sync.py`): `reasoning_options` 同时含 `toggle + effort` 时 `effort` 优先，`thinking_param` 统一 `reasoning_effort`，修复参数卡/输入区无思考强度调节且请求只发 `thinking` 布尔的问题
+- **输入区插件按钮图标随深浅主题切换** (`app/main_widget.py` + `app/plugins/registries/ui_plugin_registry.py`): `InputButtonInfo` 增加 `icon_light_path`，构建/刷新按主题选图标
+
+##### ♻️ 代码重构 (Refactoring, 3)
+
+- **改进短消息气泡宽度计算** (`app/widgets/message_card.py`): `bubble width calculation` 优化短消息宽度估算
+- **版本与状态标签清理 emoji** (`plugins/plugin-marketplace/ui/cards.py` + `plugins/plugin-marketplace/ui/proxy.py`): 移除版本号/状态标签中的 emoji 字符，显示更整洁
+- **删除未使用的 `EngineSlotCard`** (`app/widgets/cards/settings/engine_slot_card.py`): 已由 `LLMSettingsCard` 集成，统一设置入口
+
+##### 📚 文档 (Docs, 3)
+
+- **`runtime-engines.md` 文档补全** (`docs/plugins/runtime-engines.md`): 补 `conversation_stack` 服务入口 + `EngineHost` / `ConversationStack` 契约文件入相关表；补 gateway 槽位/契约/选择卡说明 + 修 Task 8 收尾遗留测试；对话引擎插件开发指南 + 架构文档补 engines 一行
+
+##### 🔄 其他变更 (Other, 1)
+
+- **引擎插件端到端测试** (`tests/plugins/`): 引擎插件 e2e 测试覆盖扫描/替换/安全网回退/卸载场景
+
 ## [v0.5.2] - 2026-08-17
 
 自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
