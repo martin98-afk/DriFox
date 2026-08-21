@@ -4022,16 +4022,44 @@ class OpenAIChatToolWindow(ToolWindow):
 
         for info in buttons:
             try:
-                icon = QIcon(str(info.icon_path)) if info.icon_path else QIcon()
+                icon = self._resolve_input_button_icon(info)
                 btn = TransparentToolButton(icon, self._toolbar_capsule)
                 btn.setFixedSize(24, 24)
                 btn.setToolTip(info.tooltip or info.button_id)
                 btn.setStyleSheet(btn_capsule_style)
+                btn._plugin_input_info = info  # 供主题切换时刷新图标
                 btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
                 capsule_layout.addWidget(btn)
                 self._plugin_input_buttons.append(btn)
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
+
+    @staticmethod
+    def _resolve_input_button_icon(info) -> "QIcon":
+        """按当前主题解析插件输入按钮图标（浅色优先 icon_light_path，回退 icon_path）"""
+        from PyQt5.QtGui import QIcon
+
+        try:
+            is_light = theme_manager.is_light_theme()
+        except Exception:
+            is_light = False
+        if is_light and info.icon_light_path:
+            icon = QIcon(str(info.icon_light_path))
+            if not icon.isNull():
+                return icon
+        icon = QIcon(str(info.icon_path)) if info.icon_path else QIcon()
+        return icon
+
+    def _refresh_plugin_input_button_icons(self):
+        """主题切换时刷新输入区插件按钮图标（不重建按钮，保留控件引用）"""
+        for w in getattr(self, "_plugin_input_buttons", []):
+            info = getattr(w, "_plugin_input_info", None)
+            if info is None:
+                continue
+            try:
+                w.setIcon(self._resolve_input_button_icon(info))
+            except Exception as e:
+                logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 图标刷新失败：{e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -9965,6 +9993,9 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.widgets.simple_hover_tooltip import refresh_all_tooltips
 
             refresh_all_tooltips()
+
+            # 输入区插件按钮图标随主题切换（浅色/深色图标）
+            self._refresh_plugin_input_button_icons()
 
         # ── 2. 字体相关块（font_family + font_size + 全量） ──
         if is_font:

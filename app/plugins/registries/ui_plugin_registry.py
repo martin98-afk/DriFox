@@ -132,7 +132,8 @@ class InputButtonInfo:
     Attributes:
         plugin_name: 所属插件名
         button_id: 按钮唯一 ID
-        icon_path: 图标路径
+        icon_path: 图标路径（深色主题默认图标）
+        icon_light_path: 浅色主题图标路径（可选，缺省回退 icon_path）
         tooltip: 悬停提示
         group: 分组（默认 "plugin"，用于与系统按钮分隔线区分）
         priority: 优先级（同 button_id 时高者覆盖低者）
@@ -143,6 +144,7 @@ class InputButtonInfo:
     plugin_name: str
     button_id: str
     icon_path: str = ""
+    icon_light_path: str = ""
     tooltip: str = ""
     group: str = "plugin"
     priority: int = 0
@@ -448,19 +450,25 @@ class UIPluginRegistry:
         plugin_name: str,
         button_id: str,
         icon_path: str = "",
+        icon_light_path: str = "",
         tooltip: str = "",
         group: str = "plugin",
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册输入区插件按钮（Phase D）"""
+        """注册输入区插件按钮（Phase D）
+
+        icon_path 为深色主题默认图标；icon_light_path 为浅色主题图标
+        （可选，缺省时浅色主题回退 icon_path）。主题切换时主程序自动刷新。
+        """
         if metadata is None:
             metadata = {}
         info = InputButtonInfo(
             plugin_name=plugin_name,
             button_id=button_id,
             icon_path=icon_path,
+            icon_light_path=icon_light_path,
             tooltip=tooltip,
             group=group,
             priority=priority,

@@ -42,7 +42,7 @@ git push origin dev
 
 **SDK 自包含**：平台 SDK vendor 到 `<插件>/deps/`，顶层 `sys.path.insert(0,_deps)` 优先，本体函数内延迟导入(教训 2026-06-16：dingtalk_stream 顶层导入致 gateway 包加载失败)。详见 `docs/plugins/gateway-platforms.md`。
 
-**UI 扩展点**(插件 `ui/__init__.py` 导出 `register_ui`)：`register_content_renderer`(custom 块)/`register_welcome_tab`+`register_message_factory`/`register_floating_card`(top/bottom/left/right/full+侧边栏派生)/`register_sidebar_item`(与 floating card 解耦，并存时优先)/`register_input_button`(工具栏末，热重载重建)/`register_context_menu_action`(target∈message_card/tab；`action_func` 返 False=完成关菜单)/`register_settings_card`(插件分区，打开重建)。回调 context 含 window_id/main_widget/item_id/button_id/tab_index；`unregister_plugin` 幂等清理。
+**UI 扩展点**(插件 `ui/__init__.py` 导出 `register_ui`)：`register_content_renderer`(custom 块)/`register_welcome_tab`+`register_message_factory`/`register_floating_card`(top/bottom/left/right/full+侧边栏派生)/`register_sidebar_item`(与 floating card 解耦，并存时优先)/`register_input_button`(工具栏末，热重载重建；icon_path 深色 + icon_light_path 浅色，主题切换自动刷新)/`register_context_menu_action`(target∈message_card/tab；`action_func` 返 False=完成关菜单)/`register_settings_card`(插件分区，打开重建)。回调 context 含 window_id/main_widget/item_id/button_id/tab_index；`unregister_plugin` 幂等清理。
 
 ## 5. 依赖与风格
 - **依赖**: Python 3.14+、PyQt5、PyQt-Fluent-Widgets、openai、loguru、httpx、mcp、pygls、pyright
