@@ -67,3 +67,38 @@ def test_builtin_reloaders_cover_runtime_types():
         _reload_loop_policies,
         _reload_storages,
     )
+
+
+def test_kernel_known_components_contains_engines():
+    from app.plugins.kernel import KNOWN_COMPONENTS
+
+    assert "engines" in KNOWN_COMPONENTS
+
+
+def test_component_probes_detect_engines_dir(tmp_path):
+    from app.plugins.managers.plugin_manager import _detect_components
+
+    (tmp_path / "engines").mkdir()
+    (tmp_path / "engines" / "demo.py").write_text("", encoding="utf-8")
+    comps = _detect_components(tmp_path)
+    assert "engines" in comps
+    # 仅空目录不算（与 tools/providers 探测语义一致）
+    empty = tmp_path / "engines_empty"
+    empty.mkdir()
+    assert "engines_empty" not in comps
+
+
+def test_builtin_reloaders_cover_engines():
+    """内置 reloader 注册表包含 engines — 与四类运行时组件并列"""
+    from app.plugins.builtin_reloaders import (  # noqa: F401
+        RELOADED_COMPONENTS,
+        _reload_engines,
+    )
+    from app.plugins.kernel import ComponentReloaderRegistry
+
+    assert "engines" in RELOADED_COMPONENTS
+    reg = ComponentReloaderRegistry()
+    from app.plugins import builtin_reloaders
+
+    builtin_reloaders.register_builtin_reloaders(reg)
+    assert "engines" in reg.known_components()
