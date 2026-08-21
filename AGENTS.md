@@ -48,6 +48,7 @@ git push origin dev
 - **依赖**: Python 3.14+、PyQt5、PyQt-Fluent-Widgets、openai、loguru、httpx、mcp、pygls、pyright
 - **格式化**: ruff(行宽120，双引号)；**类型**: pyright 严格(pyproject 配置)
 - **导入**: 标准→三方→本地；**命名**: 英文代码、小写中划线文件、中文注释；**设计**: 函数短小单一职责
+- **异常语法(Python 3.14+)**: 支持无括号多异常 `except A, B:`（PEP 758，等价于 `except (A, B):`），低于 3.14 会 `SyntaxError`。注意 `except A, e:` 旧式赋值语法在 3 系已移除，逗号仅用于分隔异常类型时末项须为类型而非单个标识符，避免歧义。ruff/pyright 已支持该语法，可直接使用，但勿在需兼容 <3.14 的代码中出现。
 
 ## 6. 提交规范
 `feat|fix|docs|chore|refactor|test: scope - summary`

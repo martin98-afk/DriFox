@@ -235,6 +235,7 @@ def _get_formatter_cached():
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
 
+
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
@@ -249,6 +250,8 @@ def _edit_tools() -> frozenset:
         return ToolRegistry.get_instance().keep_in_content_tools()
     except Exception:
         return frozenset()
+
+
 # =============================
 
 # ======== 欢迎卡片欢迎语（已退役：欢迎卡片不再显示 tips，已迁移至输入框 placeholder 轮播）========
@@ -438,6 +441,8 @@ def _get_think_icon_html(size: int = 18) -> str:
     prefix = get_tool_qrc_prefix()
     style = f"width:{size}px;height:{size}px;vertical-align:middle;pointer-events:none;"
     return f'<img src="{prefix}/思考过程.svg" style="{style}" />'
+
+
 def _get_think_block_styles() -> str:
     """获取思考块的全局字体样式"""
     return f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
@@ -2305,8 +2310,15 @@ _STREAMING_DOCK_JS = """
                             document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
                         }
                     }
-                    // 高度变化（110px ↔ 600px max-height）后重新报告文档高度
-                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    // 高度变化（110px ↔ 600px max-height）后报告文档高度。
+                    // 切换会触发 #tool-content 的 max-height 200ms 过渡 →
+                    // 用过渡感知报告（抑制中间态，终值单报），无内容时退回 debounced。
+                    var _tsHasContent = ts && ts.style.display !== 'none' && ts.offsetHeight > 0;
+                    if (_tsHasContent && typeof _beginToolSectionTransition === 'function') {
+                        _beginToolSectionTransition();
+                    } else if (typeof reportHeightDebounced === 'function') {
+                        reportHeightDebounced();
+                    }
                 }
 """
 
@@ -2628,7 +2640,7 @@ class _DialogEventFilter(QObject):
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
             # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
-        except (RuntimeError, TypeError):
+        except RuntimeError, TypeError:
             pass
 
     def unregister(self, viewer):
@@ -2639,7 +2651,7 @@ class _DialogEventFilter(QObject):
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
-        except (RuntimeError, TypeError):
+        except RuntimeError, TypeError:
             pass
         if not self._viewers:
             self._detach_from_application()
@@ -2946,7 +2958,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except (TypeError, RuntimeError, AttributeError):
+            except TypeError, RuntimeError, AttributeError:
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -3223,7 +3235,8 @@ class CodeWebViewer(QWebEngineView):
                 self.page().runJavaScript(
                     "var _ts=document.getElementById('tool-section');"
                     "var _sep=document.getElementById('tool-separator');"
-                    "if(_ts)_ts.setAttribute('data-collapsed','true');"
+                    "if(_ts){if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
+                    "_ts.setAttribute('data-collapsed','true');}"
                     "if(_sep)_sep.setAttribute('aria-expanded','false');"
                 )
             # 坞态同步：由 JS 读取 tool-section 的 data-collapsed 属性判断
@@ -3448,9 +3461,18 @@ class CodeWebViewer(QWebEngineView):
                 body {{
                     padding: 6px 14px 0 14px; 
                     max-height: {self.MAX_HEIGHT}px;
-                    overflow-y: auto;
+                    /* 🛡️ 稳定性修复：滚动条轨道常驻，内容可用宽度恒定。
+                       overflow-y:auto 时滚动条出现/消失会使内容宽度 ±6px 波动 →
+                       长行换行变化 → scrollHeight 波动 → 高度报告 → setFixedHeight
+                       → 滚动条再切换 → 反馈振荡（流式"一抖一抖"的主因之一）。
+                       scroll 常驻轨道后宽度恒定，斩断反馈环。track 透明无视觉噪点。 */
+                    overflow-y: scroll;
                     overflow-x: hidden;
                     overflow-anchor: auto;
+                }}
+                /* body 滚动轨道常驻但视觉隐形（覆盖全局 6px 滚动条样式的 track 底色） */
+                body::-webkit-scrollbar-track {{
+                    background: transparent;
                 }}
                 {scrollbar_css}
 
@@ -4702,6 +4724,41 @@ class CodeWebViewer(QWebEngineView):
                     _collapsibleHeightReporting = true;
                 }}
 
+                // ===== tool-section 折叠/展开过渡的高度报告抑制 =====
+                // #tool-content 有 max-height 200ms CSS 过渡，过渡期间 ResizeObserver
+                // 会上报中间态高度 → viewer setFixedHeight 连跳多次（流式抖动主因之二）。
+                // 统一模式：切换属性前先抑制报告 → transitionend（260ms 兜底）终值单报。
+                // _finishToolSectionTransition 带 guard：先到者生效，后到者 no-op
+                // （同时修复旧 _toggleToolSection transitionend+setTimeout 双报告）。
+                var _tsTransitionDone = false;
+                var _tsTransitionToken = 0;
+                function _finishToolSectionTransition() {{
+                    if (_tsTransitionDone) return;
+                    _tsTransitionDone = true;
+                    reportHeight();          // 终值直报（不经 debounced，且此时抑制已可释放）
+                    _collapsibleHeightReporting = false;
+                }}
+                function _beginToolSectionTransition() {{
+                    _collapsibleHeightReporting = true;   // 抑制 ResizeObserver + reportHeightDebounced
+                    _tsTransitionDone = false;
+                    var token = ++_tsTransitionToken;     // 轮次令牌：连续切换时旧 timer 失效
+                    var _tcEl = document.getElementById('tool-content');
+                    var _onTsEnd = function(ev) {{
+                        // 只认 max-height 过渡结束（同元素 opacity 过渡会额外触发一次）
+                        if (ev && ev.propertyName && ev.propertyName !== 'max-height') return;
+                        if (token !== _tsTransitionToken) return;
+                        if (_tcEl) _tcEl.removeEventListener('transitionend', _onTsEnd);
+                        _finishToolSectionTransition();
+                    }};
+                    if (_tcEl) _tcEl.addEventListener('transitionend', _onTsEnd);
+                    // 兜底：display:none 等场景 transitionend 不触发
+                    setTimeout(function() {{
+                        if (token !== _tsTransitionToken) return;
+                        if (_tcEl) _tcEl.removeEventListener('transitionend', _onTsEnd);
+                        _finishToolSectionTransition();
+                    }}, 260);
+                }}
+
                 function restoreCollapsibleStates(root) {{
                     root.querySelectorAll('.cm-collapsible').forEach(block => {{
                         const key = block.dataset.blockKey;
@@ -5110,6 +5167,8 @@ class CodeWebViewer(QWebEngineView):
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
                     var _tsEl = document.getElementById('tool-section');
                     if (_hasStreaming && _tsEl && _tsEl.getAttribute('data-collapsed') === 'true') {{
+                        // 过渡期间抑制中间态高度报告，结束后终值单报
+                        _beginToolSectionTransition();
                         _tsEl.setAttribute('data-collapsed', 'false');
                         separator.setAttribute('aria-expanded', 'true');
                     }}
@@ -5364,19 +5423,11 @@ class CodeWebViewer(QWebEngineView):
                     if (!sep || !toolSection) return;
                     if (evt) {{ evt.stopPropagation(); evt.preventDefault(); }}
                     var collapsed = toolSection.getAttribute('data-collapsed') === 'true';
+                    // 过渡期间抑制中间态高度报告，结束后终值单报（替代旧 transitionend+setTimeout 双报告）
+                    _beginToolSectionTransition();
                     toolSection.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
                     sep.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
                     try {{ sessionStorage.setItem('_toolSectionCollapsed', collapsed ? '0' : '1'); }} catch(_err) {{}}
-                    var tc = document.getElementById('tool-content');
-                    if (tc) {{
-                        var onEnd = function() {{
-                            tc.removeEventListener('transitionend', onEnd);
-                            reportHeight();
-                        }};
-                        tc.addEventListener('transitionend', onEnd);
-                        // 兜底：transitionend 在 display:none 时可能不触发
-                        setTimeout(function() {{ tc.removeEventListener('transitionend', onEnd); reportHeight(); }}, 260);
-                    }}
                 }}
                 document.addEventListener('click', e => {{
                     const sep = e.target.closest('#tool-separator');
@@ -5744,7 +5795,9 @@ class CodeWebViewer(QWebEngineView):
             return
         if self._streaming and len(text) > 3:
             # 差量渲染：仅在自然边界（硬/软）触发，否则靠增量文本 + 安全兜底
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
+                self._markdown_text
+            ):
                 self._schedule_render(immediate=True)
             else:
                 self._schedule_render(immediate=False)
@@ -5965,7 +6018,9 @@ class CodeWebViewer(QWebEngineView):
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
             # 流式模式下检查自然边界（硬边界空行 / 软边界句号结尾）
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(self._markdown_text):
+            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
+                self._markdown_text
+            ):
                 self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
@@ -6664,9 +6719,9 @@ class CodeWebViewer(QWebEngineView):
                     "var _ts=document.getElementById('tool-section');"
                     "var _sep=document.getElementById('tool-separator');"
                     "if(_ts&&!_ts.querySelector('[data-streaming=\"true\"]')){"
+                    "  if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
                     "  _ts.setAttribute('data-collapsed','true');"
                     "  if(_sep)_sep.setAttribute('aria-expanded','false');"
-                    "  if(typeof reportHeightDebounced==='function')reportHeightDebounced();"
                     "}"
                     "})();"
                 )
@@ -6862,9 +6917,7 @@ class CodeWebViewer(QWebEngineView):
                     except Exception:
                         enabled = True
                 action.setEnabled(enabled)
-                action.triggered.connect(
-                    lambda checked=False, i=info: self._run_plugin_context_action(i, context)
-                )
+                action.triggered.connect(lambda checked=False, i=info: self._run_plugin_context_action(i, context))
             except Exception as e:
                 logger.warning(f"[MessageCard] 插件菜单项 {info.action_id} 注入失败：{e}")
 
@@ -7414,7 +7467,7 @@ class CodeWebViewer(QWebEngineView):
             if hasattr(self, "_page"):
                 self._page.deleteLater()
                 del self._page
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             pass
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
@@ -8245,7 +8298,6 @@ class MessageCard(SimpleCardWidget):
         hb.setContentsMargins(0, 0, 0, 0)
         hb.setSpacing(2)
         for ic, tp, cb in [
-            (get_icon("差异对比"), "文档差异对比", lambda: self._emit_card_diff_requested()),
             (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
         ]:
             b = TransparentToolButton(ic, self)
@@ -8715,11 +8767,6 @@ class MessageCard(SimpleCardWidget):
         bl.setSpacing(4)
         if self.role == "assistant":
             specs = [
-                (
-                    get_icon("差异对比"),
-                    "文档差异对比",
-                    lambda: self._emit_card_diff_requested(),
-                ),
                 (
                     get_icon("复制"),
                     "复制",
@@ -9508,8 +9555,17 @@ class MessageCard(SimpleCardWidget):
         if not self._streaming:
             return
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
-        if abs(h - current_height) > 2:
-            self._apply_viewer_height(h)
+        if h >= current_height:
+            # 增长方向：小阈值立即应用，保证流式输出滚底跟随
+            if h - current_height > 2:
+                self._apply_viewer_height(h)
+        else:
+            # 收拢方向：小步回弹（<40px）流式期间不应用。
+            # 来源：流式块→完成块的 DOM 替换、滚动条出现/消失的重排噪声。
+            # 延迟到 finish_streaming 后的全量渲染统一收敛，消除"长一下又缩回去"的抖动。
+            # 大幅收拢（≥40px，折叠/展开/dock 切换）仍正常应用。
+            if current_height - h >= 40:
+                self._apply_viewer_height(h)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
@@ -10119,8 +10175,14 @@ class MessageCard(SimpleCardWidget):
             # 编辑类工具注入到 content-placeholder，跳过回调与渲染避免闪烁。
             # DOM 已通过 JS 注入到位，markdown 缓存已就绪供后续全量渲染使用。
             _is_edit_tool = tool_name in _edit_tools()
+            # 🐛 修复（停止吞框）：编辑工具结果也必须重设懒回调。finish_streaming
+            # （停止/流式结束）的非流式渲染消费 _lazy_markdown_cb 刷新 _markdown_text；
+            # 旧逻辑编辑分支跳过渲染时连 cb 一起跳过 → cb 停留 None（上一次流式渲染
+            # 已消费）→ 停止渲染用旧 md（不含工具块）→ save 移除 DOM 完成框后，
+            # restore 因 tid 已入 _finished_streaming_ids 不恢复 → 完成框被吞（永久消失）。
+            # 此处只设 cb 不触发渲染，保持"编辑工具跳过即时渲染防闪烁"设计不变。
+            self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not _is_edit_tool:
-                self.viewer._lazy_markdown_cb = self._build_incremental_md
                 self.viewer._schedule_render(immediate=True)
 
             # 简洁模式：工具块默认折叠；非简洁模式：默认展开便于查看结果
@@ -11083,7 +11145,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def cleanup(self):
@@ -11266,7 +11328,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f'<span class="session-item-body">'
             f'<span class="session-item-title">{t}</span>'
             f'<span class="session-item-meta">{meta}</span>'
-            f'</span>'
+            f"</span>"
             f'<span class="session-item-arrow">›</span>'
             f"</div>"
         )
@@ -11279,7 +11341,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
         """
         if not items:
             return ""
-        shown = items[:_SESSION_ROWS * _SESSION_COLS]
+        shown = items[: _SESSION_ROWS * _SESSION_COLS]
         rows = "".join(_render_item(s, count_mode, start_idx + i) for i, s in enumerate(shown))
         return (
             f'<div class="session-section">'
@@ -11287,13 +11349,13 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
             f'<span class="session-header-count">{len(shown)}</span>'
-            f'</div>'
+            f"</div>"
             f'<div class="session-list">{rows}</div>'
             f"</div>"
         )
 
     recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=0)
-    top_start = len(recent_sessions[:_SESSION_ROWS * _SESSION_COLS])
+    top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
     top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start)
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'

@@ -656,7 +656,6 @@ def _abort_team_window(win) -> None:
     if win is None:
         return
     try:
-        from app.widgets.tab_manager_window import TabManagerWindow
 
         tm = TabManagerWindow.get_instance()
         if tm is not None:
@@ -1427,7 +1426,6 @@ class OpenAIChatToolWindow(ToolWindow):
             False — 当前窗口不是活动标签页，应跳过焦点操作
         """
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
             if tm is not None and tm.isVisible():
@@ -2195,7 +2193,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 一律以 Tab 形式承载，禁止降级为独立 ToolPopupDialog，
             # 避免 /team --load 为每个模板角色弹出"幽灵窗口"。
             # 若单例因异常未就绪则惰性重建，保证模板窗口一定进入 Tab 容器。
-            from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance() or TabManagerWindow.create_instance()
             if not tm.isVisible():
@@ -5193,7 +5190,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         new_windows: List["OpenAIChatToolWindow"] = []
         # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
-        from app.widgets.tab_manager_window import TabManagerWindow
 
         _tmw = TabManagerWindow.get_instance()
         if _tmw is not None:
@@ -5404,7 +5400,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         logger.warning(f"[_handle_team_new_task] 同步成员 run_id 失败: {e}")
                 # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
                 try:
-                    from app.widgets.tab_manager_window import TabManagerWindow
 
                     tm_win = TabManagerWindow.get_instance()
                     if tm_win is not None:
@@ -5556,7 +5551,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ C4 兜底：异常时窗口可能已建成，至少刷新胶囊使其归入团队分组
             try:
                 if not getattr(win, "_is_destroyed", False):
-                    from app.widgets.tab_manager_window import TabManagerWindow
 
                     tm_win = TabManagerWindow.get_instance()
                     if tm_win is not None:
@@ -6213,7 +6207,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 导致 _on_win_title_changed 不触发、胶囊不显示）
         try:
             if self.cfg.enable_tab_manager.value:
-                from app.widgets.tab_manager_window import TabManagerWindow
 
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None:
@@ -8579,7 +8572,6 @@ class OpenAIChatToolWindow(ToolWindow):
         （本窗口刷新由调用方完成），避免递归。
         """
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
             if tm is None:
@@ -9870,7 +9862,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # Tab 模式下刷新共享 Launcher（热重载可能新增 / 卸载了 UI 插件）
             try:
-                from app.widgets.tab_manager_window import TabManagerWindow
 
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None and _tm.isVisible():
@@ -13097,7 +13088,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # refresh_capsule_for_window 调用；无 Tab 管理器时静默跳过）
         try:
             if self.cfg.enable_tab_manager.value:
-                from app.widgets.tab_manager_window import TabManagerWindow
 
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None:
@@ -17044,7 +17034,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # Tab 模式：计算当前窗口对应的标签页索引，点击通知时自动跳转
         tab_index = -1
         try:
-            from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
             if tm is not None:
@@ -18597,7 +18586,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # Tab 模式下同步更新 Tab 图标
         if self.cfg.enable_tab_manager.value:
             try:
-                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+                from app.widgets.tab_manager_window import _update_tab_icon
 
                 tm = TabManagerWindow.get_instance()
                 if tm and self in tm._windows:
@@ -18767,7 +18756,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # Tab 模式下同步更新 Tab 图标
         if self.cfg.enable_tab_manager.value:
             try:
-                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+                from app.widgets.tab_manager_window import _update_tab_icon
 
                 tm = TabManagerWindow.get_instance()
                 if tm and self in tm._windows:
@@ -18878,7 +18867,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 标题未变化时图标停留在旧项目）
         if self.cfg.enable_tab_manager.value:
             try:
-                from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+                from app.widgets.tab_manager_window import _update_tab_icon
 
                 tm = TabManagerWindow.get_instance()
                 if tm and self in tm._windows:
@@ -18932,7 +18921,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 发送方自身的团队框 header icon 依赖此处刷新）
             if self.cfg.enable_tab_manager.value:
                 try:
-                    from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+                    # 仅导入 _update_tab_icon；TabManagerWindow 复用模块级全局导入，
+                    # 不可在此处重导入，否则会把 TabManagerWindow 标记为函数局部变量，
+                    # 非 tab_manager 模式下 if 块不执行 → 下方 parent 表达式 UnboundLocalError。
+                    from app.widgets.tab_manager_window import _update_tab_icon
 
                     tm = TabManagerWindow.get_instance()
                     if tm and self in tm._windows:
