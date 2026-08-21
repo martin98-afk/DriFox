@@ -114,3 +114,28 @@ def test_create_engine_crash_factory_falls_back(fresh_engine_registry):
     fresh_engine_registry.register(_CrashFactory(), source="plugin:demo")
     engine = create_engine_for_slot("ui", _BaseEngine)
     assert type(engine) is _BaseEngine
+
+
+def test_gateway_slot_constant():
+    from app.plugins.contracts.dialogue_engine import ENGINE_SLOT_GATEWAY
+
+    assert ENGINE_SLOT_GATEWAY == "gateway"
+
+
+def test_create_gateway_engine_fallback(monkeypatch):
+    """gateway 槽位：无工厂 → create_engine_for_slot 返回 fallback 实例"""
+
+    class _FakeGatewayEngine:
+        _global_instance = None
+
+        def __init__(self, get_model_config=None, **kw):
+            self.model_config = get_model_config
+            type(self)._global_instance = self
+
+    from app.plugins.registries import engine_registry as er
+
+    reg = er.EngineRegistry()
+    monkeypatch.setattr(er.EngineRegistry, "get_instance", staticmethod(lambda: reg))
+
+    engine = er.create_engine_for_slot("gateway", _FakeGatewayEngine, get_model_config=lambda: {})
+    assert isinstance(engine, _FakeGatewayEngine)

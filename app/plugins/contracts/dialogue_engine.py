@@ -14,6 +14,9 @@ from typing import Any, Protocol, runtime_checkable
 
 ENGINE_SLOT_UI = "ui"
 
+# gateway = 消息平台引擎（GatewayEngine，全局单例语义）
+ENGINE_SLOT_GATEWAY = "gateway"
+
 
 @runtime_checkable
 class EngineFactory(Protocol):

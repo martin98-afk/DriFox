@@ -112,13 +112,28 @@ class GatewayEngine(QObject, BaseEngine):
         agent_manager: Any = None,
         session_store: Any = None,
     ) -> "GatewayEngine":
-        """获取全局单例"""
+        """获取全局单例（首次创建经 EngineRegistry 工厂 — 插件可替换 gateway 引擎）
+
+        插件注册 ENGINE_SLOT_GATEWAY 工厂 → 返回插件类实例（须继承 GatewayEngine，
+        isinstance 安全网同 ui 槽位）；未注册 → 内置实现，行为与之前完全一致。
+        单例语义保留：插件实例同样写回 _global_instance。
+        """
         if cls._global_instance is not None:
             return cls._global_instance
         if get_model_config is None:
             raise ValueError("First call to get_instance() must provide get_model_config")
-        instance = cls(get_model_config, tool_executor, agent_manager, session_store)
-        cls._global_instance._global_instance = cls._global_instance
+
+        from app.plugins.registries.engine_registry import create_engine_for_slot
+
+        instance = create_engine_for_slot(
+            "gateway",
+            cls,
+            get_model_config=get_model_config,
+            tool_executor=tool_executor,
+            agent_manager=agent_manager,
+            session_store=session_store,
+        )
+        GatewayEngine._global_instance = instance
         return instance
 
     def cleanup(self):
