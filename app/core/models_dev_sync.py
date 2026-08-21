@@ -33,7 +33,7 @@ CACHE_SCHEMA_VERSION = 3
 # 默认值或合并规则等非结构变更——就把本值 +1。任何本地缓存的 _content_version
 # 低于此值的，即便仍在 24h TTL 内也视为过期、强制向 models.dev 重新拉取，
 # 让用户及时用上新逻辑，而不必等 TTL 自然到期。
-CACHE_CONTENT_VERSION = 1
+CACHE_CONTENT_VERSION = 2  # +1：effort/toggle 并存时 effort 优先（deepseek-v4 思考强度修复）
 
 
 def _default_cache_path() -> Path:
@@ -199,13 +199,20 @@ def _transform_model(provider_id: str, model_id: str, model_info: Dict[str, Any]
                 continue
             reasoning_type = opt.get("type")
             # 收集 effort 可选值（如 models.dev 的 ["high", "max"]），
-            # 供 UI 渲染"思考等级"下拉框选项；首个可映射 type 决定 thinking_param
+            # 供 UI 渲染"思考等级"下拉框选项
             if reasoning_type == "effort":
                 values = opt.get("values")
                 if isinstance(values, list) and values:
                     reasoning_effort_values = [str(v) for v in values]
             if thinking_param is None:
                 thinking_param = REASONING_TYPE_TO_THINKING_PARAM.get(reasoning_type or "")
+        # effort 型优先：部分模型（如 deepseek-v4）的 reasoning_options 同时列出
+        # toggle 与 effort（toggle 在前）。effort 是可调的细粒度控制且 values 已收集，
+        # 统一走 reasoning_effort，避免 thinking_param="thinking" 与
+        # reasoning_effort_values 并存导致 UI 不显示思考等级/强度、请求只发
+        # thinking 布尔而强度不生效的自相矛盾。
+        if reasoning_effort_values:
+            thinking_param = "reasoning_effort"
 
     # 输出上限（可选）
     max_output_tokens = limit.get("output")

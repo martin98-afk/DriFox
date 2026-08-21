@@ -143,8 +143,13 @@ def test_transform_model_effort_values_empty_no_field():
         assert "reasoning_effort_values" not in result
 
 
-def test_transform_model_effort_values_after_toggle_still_collected():
-    """effort 出现在 toggle 之后 → values 仍被收集（不受 thinking_param 首个匹配 break 影响）。"""
+def test_transform_model_effort_after_toggle_effort_wins():
+    """toggle 与 effort 并存（如 deepseek-v4，toggle 在前）→ effort 优先，
+    thinking_param 统一为 reasoning_effort 并与收集的 values 一致。
+
+    旧行为：thinking_param 取首个可映射 type（toggle → "thinking"），
+    导致思考等级 UI 不显示、请求只发 thinking 布尔而强度不生效。
+    """
     info = {
         "modalities": {"input": ["text"], "output": ["text"]},
         "limit": {"context": 200000},
@@ -155,7 +160,7 @@ def test_transform_model_effort_values_after_toggle_still_collected():
         ],
     }
     result = sync._transform_model("opencode", "hybrid-model", info)
-    assert result["thinking_param"] == "thinking"
+    assert result["thinking_param"] == "reasoning_effort"
     assert result["reasoning_effort_values"] == ["low", "high"]
 
 
