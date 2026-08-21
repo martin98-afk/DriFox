@@ -58,6 +58,7 @@ class EngineFactory(Protocol):
 | 槽位常量 | 值 | 说明 |
 |---|---|---|
 | `ENGINE_SLOT_UI` | `"ui"` | 主程序 `ChatEngine`（app/core/engines/ui.py） |
+| `ENGINE_SLOT_GATEWAY` | `"gateway"` | 主程序 `GatewayEngine`（app/gateway/engines/gateway.py），平台网关侧对话引擎 |
 
 **便捷工厂 `ClassEngineFactory(slot, cls)`**：直接包装引擎类，
 `create(**kwargs) == cls(**kwargs)`。绝大多数场景用它就够了。
@@ -137,9 +138,21 @@ def register(registry):
 
 ### 5.2 多槽位
 
-首版仅 `ENGINE_SLOT_UI`。未来新增槽位（如独立流式引擎）会在
-`dialogue_engine.py` 加新常量 + `engine_registry.create_engine_for_slot` 多分支，
-插件按需切换 `factory.id`。
+`EngineRegistry` 按 `factory.id` 路由到不同 `create_engine_for_slot(slot, ...)`
+调用点。当前已开放两个槽位：
+
+| 槽位 | 创建入口 | fallback 内置类 |
+|---|---|---|
+| `ui` | `ChatBackend._deferred_create_engines` / `IsolatedContext.create_chat_engine` | `app.core.engines.ui.ChatEngine` |
+| `gateway` | `GatewayEngine.get_instance()` (单例工厂化) | `app.gateway.engines.gateway.GatewayEngine` |
+
+**单例语义保留**：`GatewayEngine.get_instance()` 仍返回进程级单例，但内部
+`create_engine_for_slot("gateway", GatewayEngine, ...)` 由 `EngineRegistry`
+接管工厂查找 —— 零插件时直接 `GatewayEngine(...)`，行为不变；
+注册了第三方工厂则产出第三方实例并赋给单例引用。
+
+未来新增槽位（如独立流式引擎）会在 `dialogue_engine.py` 加新常量 +
+`engine_registry.create_engine_for_slot` 多分支，插件按需切换 `factory.id`。
 
 ### 5.3 user 根覆盖 system 根
 
@@ -192,7 +205,26 @@ def register(registry):
 
 ---
 
-## 7. 相关文件
+## 7. 引擎槽位选择卡
+
+设置页「通用设置」section 末尾挂载 `EngineSlotCard`（`app/widgets/cards/settings/engine_slot_card.py`），
+为每个槽位提供一行 `<slot>：<下拉>`，下拉项来自 `EngineRegistry.list(slot)` 返回的
+「内置 + 各插件工厂」。用户选择后写入 `Settings.engine_slot_<slot>`（`Engine` section，
+`ConfigItem.value = str`），重启 / 重连会话后由工厂化创建入口读取并按用户选择激活源。
+
+| 槽位 | 设置键 | 来源（`register(source=...)` 时记录）|
+|---|---|---|
+| `ui` | `engine_slot_ui` | `"plugin:<name>"` 或 `"builtin"` |
+| `gateway` | `engine_slot_gateway` | `"plugin:<name>"` 或 `"builtin"` |
+
+**消费 TODO**：当前卡片只展示+持久化，`EngineRegistry.activate_source(slot, source)`
+尚未实现（与卡片同 commit 一行 TODO 标记）。下一轮在工厂化创建入口（`backend._deferred_create_engines` /
+`IsolatedContext.create_chat_engine` / `GatewayEngine.get_instance`）读
+`Settings.engine_slot_<slot>`，对工厂按 source 过滤后再创建。
+
+---
+
+## 8. 相关文件
 
 | 文件 | 职责 |
 |---|---|
@@ -203,6 +235,10 @@ def register(registry):
 | `app/core/engines/ui.py` | 内置 `ChatEngine`（替换类的基类） |
 | `app/core/backend.py` | `ChatBackend._deferred_create_engines`（工厂化创建点之一） |
 | `app/gateway/local_service/isolated_context.py` | `IsolatedContext.create_chat_engine`（工厂化创建点之二） |
+| `app/gateway/engines/gateway.py` | 内置 `GatewayEngine`（gateway 槽位替换类的基类 + 单例工厂化入口） |
+| `app/widgets/cards/settings/engine_slot_card.py` | 引擎槽位选择卡（持久化 Settings.engine_slot_<slot>） |
+| `app/utils/config.py` | `Settings.engine_slot_ui` / `engine_slot_gateway` 两个 `ConfigItem` |
 | `app/plugins/kernel.py` | `KNOWN_COMPONENTS` / `COMPONENT_ORDER` 含 `engines` 登记 |
 | `tests/plugins/test_e2e_engine_plugin.py` | 端到端测试（扫描/替换/安全网/卸载） |
 | `tests/plugins/test_engine_registry.py` | 注册表单测（register/unregister/create_engine_for_slot） |
+| `tests/widgets/test_engine_slot_card.py` | 选择卡单测（行渲染 + 选择持久化） |
