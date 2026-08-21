@@ -30,11 +30,11 @@ class CardContainer(QWidget):
     # （实测 file-tree=206、context=260），且 file-tree 在 dock 内 sizeHint=300、
     # context-usage-stats 硬编码 setMinimumWidth(300)，固定下限 300 对齐
     # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
-    _DOCK_MIN_H = 300  # 横向停靠区（LEFT/RIGHT）最小宽
+    _DOCK_MIN_H = 40  # 横向停靠区（LEFT/RIGHT）最小宽（每张卡片自身 minimumWidth 仍受尊重）
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
-    # 容器被压成极矮细条。用户已手动拖拽调过比例（_dock_last_size>0）后
+    # 容器被压成极矮细条。用户已手动拖拽调过比例（按卡片记忆 >0）后
     # 不再覆盖其设定。左右栏为横向轴、卡片天然较宽，沿用最小宽即可。
     _DOCK_DEFAULT_RATIO_V = 0.30
 
@@ -75,7 +75,12 @@ class CardContainer(QWidget):
         # 容器位于 QSplitter 中：展开后释放轴向 max、占比交给 splitter 拖拽；
         # 折叠时记忆当前尺寸并显式归还空间；重开时恢复上次拖出的占比。
         self._dock_splitter = None  # 宿主 QSplitter（None = 普通布局模式）
-        self._dock_last_size = 0  # 折叠前记忆的轴向尺寸（重开恢复用）
+        # 按卡片独立记忆的轴向尺寸（重开恢复用）。dock 容器内多卡片共享一个
+        # splitter 槽位，容器级单值会让不同卡片（如 tab 切换投影的不同插件
+        # 卡片）互相覆盖宽度记忆；改为每张卡片记忆自己的最后拖拽尺寸。
+        self._dock_card_sizes: Dict[str, int] = {}
+        # 折叠前最后一张可见卡片 id（折叠时卡片已 hidden，记忆归属用）
+        self._last_visible_dock_card: Optional[str] = None
         # ── 覆盖层模式 ──
         # 容器不在 splitter 中展开/折叠，而是作为 QStackedWidget 的覆盖层。
         # 卡片显隐时直接 show/hide 容器，发射 overlayStateChanged 信号供外部切换 stack。
@@ -195,12 +200,15 @@ class CardContainer(QWidget):
 
         协作协议（与 _do_expand / 折叠路径配合）：
         1. 展开动画结束 → 释放轴向 max、锁定停靠最小尺寸，宽/高交给 splitter；
-        2. 用户拖拽 → 容器尺寸变化不回弹（已展开分支早退）；
-        3. 折叠 → 先记忆当前尺寸（_dock_last_size），动画收到 0 后 hide()
+        2. 用户拖拽 → splitterMoved 实时把当前尺寸记忆到可见卡片（per-card）；
+        3. 折叠 → 兜底记忆当前尺寸到最后可见卡片，动画收到 0 后 hide()
            并显式把空间归还给 splitter 邻居（_release_dock_space）；
-        4. 重新展开 → show() 后动画展开，完成时若有记忆尺寸则恢复上次占比。
+        4. 重新展开 → show() 后动画展开，完成时按当前可见卡片的记忆恢复占比。
         """
         self._dock_splitter = splitter
+        # 用户拖拽把手时实时记忆到可见卡片（记忆时机不依赖折叠——折叠时
+        # 卡片已 hidden 拿不到归属；拖拽即记忆，重开按卡片恢复）
+        splitter.splitterMoved.connect(self._on_dock_splitter_moved)
         # 停靠面板样式（四角圆角独立面板，与对话区边界更清晰）
         self._apply_background_style()
         # 折叠态直接隐藏：让 splitter handle 一并消失，避免 0 宽容器留下拖拽缝
@@ -307,10 +315,44 @@ class CardContainer(QWidget):
         return self._dock_splitter.indexOf(self)
 
     def _remember_dock_size(self):
-        """折叠前记忆当前轴向尺寸，供下次展开恢复占比"""
+        """折叠前把当前轴向尺寸兜底记忆到最后可见卡片（per-card）
+
+        主记忆来自 splitterMoved 实时拖拽回调；本方法覆盖非拖拽导致的
+        尺寸变化（如 resize 压缩后关闭卡片）。折叠时卡片已全部 hidden，
+        归属取 _on_card_shown 维护的最后可见卡片 id。
+        """
         cur = self._axis_current()
-        if cur >= self._dock_min():
-            self._dock_last_size = cur
+        if cur < self._dock_min():
+            return
+        owner = self._last_visible_dock_card
+        if owner is not None:
+            self._dock_card_sizes[owner] = cur
+
+    def _visible_dock_mem_size(self) -> int:
+        """当前可见卡片记忆的轴向尺寸（共存多卡取最大），无记忆返回 0"""
+        best = 0
+        for card_id, w in self._cards.items():
+            if not w.isHidden():
+                m = self._dock_card_sizes.get(card_id, 0)
+                if m > best:
+                    best = m
+        return best
+
+    def _on_dock_splitter_moved(self, *_args):
+        """splitter 手动拖拽：把当前轴向尺寸实时记忆到可见卡片
+
+        dock 容器内卡片互斥（LEFT/RIGHT）或共存（BOTTOM），共享同一
+        splitter 槽位尺寸；写入每张可见卡片的记忆槽，重开时按当前
+        可见卡片恢复其自己的最后尺寸（拖窄/拖宽均尊重记忆）。
+        """
+        if self._dock_splitter is None or not self._is_expanded():
+            return
+        cur = self._axis_current()
+        if cur < self._dock_min():
+            return
+        for card_id, w in self._cards.items():
+            if not w.isHidden():
+                self._dock_card_sizes[card_id] = cur
 
     def _restore_dock_size(self, target: int):
         """展开完成后：把占比交还给外层 QSplitter（显式 setSizes）
@@ -459,6 +501,8 @@ class CardContainer(QWidget):
         """某张卡片被显示"""
         if card_id not in self._cards:
             return
+        # dock 折叠记忆归属：折叠时卡片已 hidden，靠这里维护最后可见卡片
+        self._last_visible_dock_card = card_id
         self._schedule_expand()
 
     def _on_card_hidden(self, card_id: str):
@@ -544,7 +588,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -625,20 +669,22 @@ class CardContainer(QWidget):
             if self._dock_splitter is not None and not follow_content:
                 # 纵向停靠区（TOP/BOTTOM）强制至少占对话区 _DOCK_DEFAULT_RATIO_V：
                 # ① 首次展开，卡片天然尺寸过小（内容未测量/空卡片/异步加载）会被压成细条；
-                # ② 更关键：二次及以后，用户拖拽/折叠时记忆的占比 _dock_last_size 也
+                # ② 更关键：二次及以后，用户拖拽/折叠时记忆的占比（按卡片）也
                 #    可能偏小，若不兜底就会缩回细条。因此无论是否拖拽过，都以下限
                 #    max(记忆占比, 最小比) 钳制，保证不存在"小于最小占比"的细条。
                 # 横向停靠区（LEFT/RIGHT）卡片天然较宽，沿用最小宽、尊重记忆占比即可。
                 chat_h = self._dock_splitter.height()
                 ratio_floor = int(chat_h * self._DOCK_DEFAULT_RATIO_V) if (not self._horizontal and chat_h > 0) else 0
+                mem = self._visible_dock_mem_size()
+                min_floor = max(self._dock_min(), self._visible_cards_min_axis())
                 if self._horizontal:
-                    target = self._dock_last_size if self._dock_last_size > natural_h else natural_h
-                    # 小窗口优先：min 锁 = max(停靠最小宽, 可见卡片最小宽)，
-                    # 窗口缩小时 splitter 优先保证卡片内容完整可见，对话区最后被压
-                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
+                    # 记忆优先（含拖窄场景——旧逻辑"记忆<natural 用 natural"会把
+                    # 用户拖窄丢弃，tab 切换折叠重开后恢复默认）；无记忆才用自然
+                    # 尺寸；clamp 下限防细条。
+                    target = max(mem, min_floor) if mem > 0 else natural_h
                 else:
-                    if self._dock_last_size > 0:
-                        target = max(self._dock_last_size, ratio_floor)
+                    if mem > 0:
+                        target = max(mem, ratio_floor)
                     else:
                         target = max(natural_h, ratio_floor)
                     # 持久下限用较小的绝对值（_dock_min），保证不缩成 1px 细条即可；
@@ -646,7 +692,6 @@ class CardContainer(QWidget):
                     # minimum 钳到 30%，QSplitter 会禁止把手柄拖回更小，导致"单向拖"。
                     # 小窗口优先：min 锁再叠加可见卡片最小高，窗口缩小时卡片内容
                     # 不被压缩（对话区最后被压矮）。
-                    min_floor = max(self._dock_min(), self._visible_cards_min_axis())
 
                 def _release_to_splitter():
                     # minimum 钳制是稳定兜底：splitter 按 sizeHint 分配空间，纵向卡片
@@ -743,7 +788,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
 
         anim.setStartValue(start_h)
@@ -758,7 +803,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
             anim.finished.connect(_on_done)

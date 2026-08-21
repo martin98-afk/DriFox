@@ -9583,8 +9583,13 @@ class MessageCard(SimpleCardWidget):
             self.setMinimumWidth(60)
             self.setMaximumWidth(target_width)
             # 上限同步给 viewer（卡内边距 4*2 + viewer 布局边距 8*2），
-            # cap 未变化时 set_width_cap 内部为 no-op
-            if not self._resize_preview_mode and self.viewer is not None:
+            # cap 未变化时 set_width_cap 内部为 no-op。
+            # 🐛 不受 _resize_preview_mode 拦截：preview 守卫是为 CodeWebViewer
+            # （WebEngine 重排昂贵）设计的，PlainTextViewer 轻量无需保护；
+            # 若在 resize 期间拦截，而退出 preview 时 user 卡片直接 return
+            # 不补同步，气泡宽度/高度将永远停留在 resize 前的旧值，
+            # 窗口缩小后固定尺寸的气泡超出可视区（文字跑到显示范围之外）。
+            if self.viewer is not None:
                 self.viewer.set_width_cap(target_width - 24)
             return
 
