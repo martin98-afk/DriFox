@@ -427,9 +427,9 @@ class _PluginDetailDialog(MaskDialogBase):
         name = self._meta.get("name", "未知")
         remote_ver = self._meta.get("version", "")
         if self._has_update and self._local_version and remote_ver:
-            ver_html = f'<span style="color:#FFA726;">🔄 v{self._local_version} → v{remote_ver}</span>'
+            ver_html = f'<span style="color:#FFA726;">v{self._local_version} → v{remote_ver}</span>'
         elif self._installed and self._local_version:
-            ver_html = f'<span style="color:#4CAF50;">✓ v{self._local_version}</span>'
+            ver_html = f'<span style="color:#4CAF50;">v{self._local_version}</span>'
         elif remote_ver:
             ver_html = f'<span style="color:{tcs};">v{remote_ver}</span>'
         else:
@@ -1018,14 +1018,14 @@ class _PluginRow(QFrame):
         """按安装状态生成状态标签文本
 
         内置非 system 插件（builtin_enabled/builtin_disabled）与用户插件
-        显示同样的启用/禁用文本；真系统插件保留「🔒 系统插件」。
+        显示同样的启用/禁用文本；真系统插件保留「系统插件」。
         """
         if self._status in ("disabled", "builtin_disabled"):
-            return "⛔ 已禁用"
+            return "已禁用"
         if self._status == "system":
-            return "🔒 系统插件"
+            return "系统插件"
         if self._status in ("enabled", "builtin_enabled"):
-            return "✅ 已启用"
+            return "已启用"
         return ""
 
     def _status_color(self) -> str:
@@ -1092,7 +1092,7 @@ class _PluginRow(QFrame):
             title_layout.addWidget(self._dl_label)
         info_layout.addWidget(title_row)
 
-        # 版本更新徽标已内嵌在标题（🔄 v1.0 → v2.0），不再单独建标签
+        # 版本更新徽标已内嵌在标题（v1.0 → v2.0），不再单独建标签
 
         desc = self._meta.get("description", "")
         self._desc_label = None
@@ -1355,17 +1355,17 @@ class _PluginRow(QFrame):
     def _refresh_title(self):
         """按当前状态重算标题：名称 + 彩色版本徽标 + 状态标签
 
-        - 有更新：🔄 v{local} → v{remote}（橙色）
-        - 已安装且最新：✓ v{local}（绿色）
+        - 有更新：v{local} → v{remote}（橙色）
+        - 已安装且最新：v{local}（绿色）
         - 未安装：v{remote}（次级色）
-        - 已安装：追加状态标签（✅ 已启用 / ⛔ 已禁用 / 🔒 系统插件）
+        - 已安装：追加状态标签（已启用 / 已禁用 / 系统插件）
         """
         remote_ver = self._meta.get("version", "")
         ver_html = ""
         if self._has_update and self._local_version and remote_ver:
-            ver_html = f' <span style="color:#FFA726;">🔄 v{self._local_version} → v{remote_ver}</span>'
+            ver_html = f' <span style="color:#FFA726;">v{self._local_version} → v{remote_ver}</span>'
         elif self._installed and self._local_version:
-            ver_html = f' <span style="color:#4CAF50;">✓ v{self._local_version}</span>'
+            ver_html = f' <span style="color:#4CAF50;">v{self._local_version}</span>'
         elif remote_ver:
             ver_html = f' <span style="color:{self._tcs};">v{remote_ver}</span>'
         status_html = ""
@@ -1582,17 +1582,17 @@ class _PluginRow(QFrame):
 
 # ── 探索模式（精选分组横滑卡片） ─────────────────────────────
 
-# 分类 → 分组标题（带 emoji，商店风格）
+# 分类 → 分组标题
 _EXPLORE_CATEGORY_LABELS = {
-    "agent": "🤖 智能体",
-    "lsp": "🛠 语言服务",
-    "language": "🌐 语言",
-    "mcp": "🔌 MCP 服务",
-    "stats": "📊 统计",
-    "theme": "🎨 主题",
-    "tool": "🧰 工具",
-    "ui": "🖥 界面",
-    "workflow": "⚙️ 工作流",
+    "agent": "智能体",
+    "lsp": "语言服务",
+    "language": "语言",
+    "mcp": "MCP 服务",
+    "stats": "统计",
+    "theme": "主题",
+    "tool": "工具",
+    "ui": "界面",
+    "workflow": "工作流",
 }
 # 分类分组展示顺序（不在表中的分类排后面，按首字母）
 _EXPLORE_CATEGORY_ORDER = ["agent", "lsp", "language", "mcp", "stats", "theme", "tool", "ui", "workflow"]
@@ -1708,7 +1708,7 @@ class _ExploreCard(QFrame):
         downloads = self._meta.get("downloads", 0)
         self._down_label = None
         if downloads:
-            self._down_label = QLabel(f"⤓ {downloads:,}", meta_row)
+            self._down_label = QLabel(f"{downloads:,} 下载", meta_row)
             self._down_label.setObjectName("exploreCardDown")  # 橙色固定，主题 re-theme 跳过
             self._down_label.setStyleSheet(
                 f"color: #FFA726; background: transparent; {self._font_qss(self._derive_size(10, -3))}"
@@ -4367,7 +4367,7 @@ class MarketplaceCard(QWidget):
         enable_row = QWidget(outer)
         enable_layout = QHBoxLayout(enable_row)
         enable_layout.setContentsMargins(0, 8, 0, 8)
-        title_lb = QLabel("⚡ 启用", enable_row)
+        title_lb = QLabel("启用", enable_row)
         title_lb.setObjectName("proxySectionTitle")
         title_lb.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
         enable_layout.addWidget(title_lb)
@@ -4401,7 +4401,7 @@ class MarketplaceCard(QWidget):
         config_layout.setContentsMargins(0, 10, 0, 8)
         config_layout.setSpacing(8)
 
-        cfg_title = QLabel("⚙ 配置", config_widget)
+        cfg_title = QLabel("配置", config_widget)
         cfg_title.setObjectName("proxySectionTitle")
         cfg_title.setStyleSheet(f"color: {tcs}; font-size: {fs_title}px; background: transparent;{ff_qss}")
         config_layout.addWidget(cfg_title)
@@ -4565,7 +4565,7 @@ class MarketplaceCard(QWidget):
 
         success = bool(rec.get("success"))
         color = "#4caf50" if success else "#ef5350"
-        dot = QLabel("✓" if success else "✗", row)
+        dot = QLabel("成功" if success else "失败", row)
         dot.setObjectName("proxyRecordRow")
         dot.setStyleSheet(f"color: {color}; font-size: {fs_row}px; background: transparent;{ff_qss}")
         lay.addWidget(dot)
@@ -4712,7 +4712,7 @@ class MarketplaceCard(QWidget):
         self._proxy_worker.moveToThread(self._proxy_thread)
         self._proxy_thread.started.connect(self._proxy_worker.run)
         self._proxy_worker.finished.connect(self._on_proxy_test_done)
-        self._proxy_worker.error.connect(lambda e: self._on_proxy_test_done(("✗ 失败", e)))
+        self._proxy_worker.error.connect(lambda e: self._on_proxy_test_done(("失败", e)))
         self._proxy_worker.finished.connect(self._proxy_thread.quit)
         self._proxy_worker.error.connect(self._proxy_thread.quit)
         self._proxy_worker.finished.connect(self._proxy_worker.deleteLater)
@@ -5352,8 +5352,8 @@ class MarketplaceCard(QWidget):
     def _create_market_row(self, src_def: dict) -> QWidget:
         """创建单个市场源的行组件（直接用缓存主题色，无需事后 re-theme）
 
-        行内显示拉取状态徽标：● 拉取成功（绿）/ ● 拉取失败（红，tooltip 原因）
-        / ● 未拉取（灰）；失败时额外显示 ⚠ 提示。右侧提供「校验」按钮
+        行内显示拉取状态徽标：拉取成功（绿）/ 拉取失败（红，tooltip 原因）
+        / 未拉取（灰）；失败时额外显示提示。右侧提供「校验」按钮
         可单独强制重拉该源。
         """
         tc = getattr(self, "_cached_tc", None) or _text_color()
@@ -5445,7 +5445,7 @@ class MarketplaceCard(QWidget):
         return row
 
     def _refresh_market_status_label(self, name: str):
-        """刷新单个市场源的状态徽标（● 成功绿 / ● 失败红 / ● 未拉取灰）
+        """刷新单个市场源的状态徽标（成功绿 / 失败红 / 未拉取灰）
 
         失败时 tooltip 展示错误原因；成功时展示插件数与时间。
         """
@@ -5455,20 +5455,20 @@ class MarketplaceCard(QWidget):
         status = get_marketplace_manager().get_source_status(name)
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
         if status is None:
-            label.setText(f'<span style="color:{tcs};">● 未拉取</span>')
+            label.setText(f'<span style="color:{tcs};">未拉取</span>')
             label.setToolTip("尚未拉取过该市场源")
             return
         plugins = status.get("plugins", 0)
         when = time.strftime("%m-%d %H:%M", time.localtime(status.get("time", 0))) if status.get("time") else "—"
         if status.get("ok"):
             if status.get("from_cache"):
-                label.setText('<span style="color:#66bb6a;">● 缓存</span>')
+                label.setText('<span style="color:#66bb6a;">缓存</span>')
                 label.setToolTip(f"缓存数据可用 · {plugins} 个插件 · {when}")
             else:
-                label.setText('<span style="color:#4caf50;">● 拉取成功</span>')
+                label.setText('<span style="color:#4caf50;">拉取成功</span>')
                 label.setToolTip(f"拉取成功 · {plugins} 个插件 · {when}")
         else:
-            label.setText('<span style="color:#ef5350;">● 拉取失败</span>')
+            label.setText('<span style="color:#ef5350;">拉取失败</span>')
             err = (status.get("error") or "未知错误").strip()
             if len(err) > 120:
                 err = err[:117] + "..."
@@ -5491,7 +5491,7 @@ class MarketplaceCard(QWidget):
         label = self._market_status_labels.get(name)
         if label is not None:
             tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
-            label.setText(f'<span style="color:{tcs};">● 校验中…</span>')
+            label.setText(f'<span style="color:{tcs};">校验中…</span>')
             label.setToolTip("正在重新拉取该市场源…")
 
         self._cleanup_check_worker()
