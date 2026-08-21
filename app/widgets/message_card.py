@@ -8237,6 +8237,27 @@ class MessageCard(SimpleCardWidget):
         self._footer_model_label = model_l
         layout.addWidget(model_l)
 
+        # 全减模式：hover 操作组（复制/差异对比），卡片 hover 时浮现（与 user 气泡一致）。
+        # 固定高度占位：按钮显隐切换时 footer 高度不变，卡片不跳动。
+        hover_btns = QWidget(self)
+        self._assistant_action_btns = hover_btns
+        hb = QHBoxLayout(hover_btns)
+        hb.setContentsMargins(0, 0, 0, 0)
+        hb.setSpacing(2)
+        for ic, tp, cb in [
+            (get_icon("差异对比"), "文档差异对比", lambda: self._emit_card_diff_requested()),
+            (get_icon("复制"), "复制", lambda: self.actionRequested.emit(self.get_plain_text(), "copy")),
+        ]:
+            b = TransparentToolButton(ic, self)
+            b.setToolTip(tp)
+            b.clicked.connect(cb)
+            b.setFixedSize(20, 20)  # 弱化处理：比原顶部按钮 32px 更小
+            install_hover_tooltip(b, delay_ms=200)
+            hb.addWidget(b)
+        hover_btns.setFixedHeight(20)
+        hover_btns.setVisible(False)  # hover 浮现，保持卡片简洁
+        layout.addWidget(hover_btns)
+
         main.addWidget(bar)
 
     def set_meta_info(self, elapsed: float = None, token_usage: dict = None):
@@ -8618,8 +8639,12 @@ class MessageCard(SimpleCardWidget):
     def _build_card_header(self, main: QVBoxLayout):
         """头部：头像 + 名称/副标题 + 时间戳/模型名 + 顶部操作按钮 + 分隔线
 
-        仅 assistant / welcome 卡片使用；user 卡片为简洁气泡（见 _setup_user_bubble）。
+        仅 welcome 卡片使用；assistant 全减模式无头部（见 _setup_ui）；
+        user 卡片为简洁气泡（见 _setup_user_bubble）。
         """
+        if self.role == "assistant":
+            # 全减模式：assistant 无头像/标题/顶部按钮/分隔线，直接进入正文
+            return
         top = QHBoxLayout()
         top.setContentsMargins(4, 0, 4, 0)
         top.setSpacing(6)
@@ -8885,7 +8910,7 @@ class MessageCard(SimpleCardWidget):
         retry_layout.addWidget(self._retry_wait_label)
         main.addWidget(self._retry_status_widget)
 
-        if self.role != "user":  # 简洁气泡不带底部装饰线
+        if self.role == "welcome":  # 全减：assistant 无底部装饰线；user 简洁气泡本就不带
             main.addWidget(CardSeparator(self))
 
         # ===== 助手卡片底部元信息栏（分割线下方） =====
@@ -8955,6 +8980,18 @@ class MessageCard(SimpleCardWidget):
                     border: none;
                     border-radius: 12px;
                 }}
+                """
+            )
+            return
+        if self.role == "assistant" and not self.error:
+            # 全减模式：assistant 纯文字流（无边框无背景）；
+            # 错误/重试/上下文丢失态仍走下方原逻辑（红框提示）
+            self.setStyleSheet(
+                """
+                CardWidget {
+                    background-color: transparent;
+                    border: none;
+                }
                 """
             )
             return
@@ -9147,9 +9184,9 @@ class MessageCard(SimpleCardWidget):
         radius = 16
 
         accent = QColor(self._theme["accent"])
-        if self.role != "user":
-            # 静态 accent 侧边竖条（user 简洁气泡不画，保持纯净）
-            accent.setAlpha(95 if self.role == "user" else 75)
+        if self.role == "welcome":
+            # 静态 accent 侧边竖条（user 简洁气泡 / assistant 全减模式不画，保持纯净）
+            accent.setAlpha(75)
             stripe_width = 4
             stripe_x = w - stripe_width - 2 if self._theme.get("side") == "right" else 2
             painter.setPen(Qt.NoPen)
@@ -9613,14 +9650,18 @@ class MessageCard(SimpleCardWidget):
             self.viewer.update_height()
 
     def enterEvent(self, event):
-        # 用户气泡：hover 浮现操作按钮（复制/撤销/删除），保持静态简洁
+        # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._user_action_btns.setVisible(True)
+        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
+            self._assistant_action_btns.setVisible(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
             self._user_action_btns.setVisible(False)
+        elif self.role == "assistant" and getattr(self, "_assistant_action_btns", None) is not None:
+            self._assistant_action_btns.setVisible(False)
         super().leaveEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
