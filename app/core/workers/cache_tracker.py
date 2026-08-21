@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-缓存命中率追踪器 - 修复版
+缓存命中率追踪器
 
-修复内容:
-  1. 修正 _parse_usage 中 cache_creation 对象的字段赋值错误
-     (ephemeral_5m_input_tokens / ephemeral_1h_input_tokens 被错误赋给
-      cache_read_tokens，导致命中率严重失真)
-  2. 修正 _parse_usage_dict 中相同的赋值错误
-  3. 增加 per_request_hit_rate (按请求计数的命中率)
-  4. 增加 total_input_hit_rate (cache_read / total_input_tokens)
-  5. 增加 hit_rate_by_model 方法支持多模型混合会话
+命中率口径（与服务商后台对齐，2026-08-21 重构）：
+
+    hit_rate = cache_read / (cache_read + uncached_input)
+
+两种 usage 语义统一到同一公式：
+  - OpenAI 兼容（prompt_tokens 含 cached_tokens，无 write 概念）：
+      uncached_input = prompt_tokens - cached_tokens
+      → hit_rate = cached / prompt，与 OpenAI/Kimi/GLM/SiliconFlow 等后台一致
+  - Anthropic（input_tokens 与缓存三段并列）：
+      uncached_input = input_tokens + cache_creation_5m + cache_creation_1h
+      → input≈0 时退化为官方公式 read / (read + write)
+      参考: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+
+历史教训：曾用「模型名前缀 + cached≥90%×prompt」判定数据可疑并对 OpenAI 兼容
+provider 强制估算（首次 read×30%，其余虚构为 cache_write），导致工具会话中
+真实 99% 命中被拉低到 70% 左右。真实高命中恰恰是缓存工作良好的表现，
+不应被改写；坏 provider 的数据以其自家后台为准，保持口径一致即可对账。
 """
 
 from dataclasses import dataclass, field
@@ -28,16 +37,16 @@ CACHE_READ_MULTIPLIER = 0.10
 
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
     # model_key: { base_input_per_mtok, output_per_mtok }
-    "claude-opus-4.7":   {"input": 5.0,  "output": 25.0},
-    "claude-opus-4.6":   {"input": 5.0,  "output": 25.0},
-    "claude-opus-4.5":   {"input": 5.0,  "output": 25.0},
-    "claude-opus-4.1":   {"input": 15.0, "output": 75.0},
-    "claude-opus-4":     {"input": 15.0, "output": 75.0},
-    "claude-sonnet-4.6": {"input": 3.0,  "output": 15.0},
-    "claude-sonnet-4.5": {"input": 3.0,  "output": 15.0},
-    "claude-sonnet-4":   {"input": 3.0,  "output": 15.0},
-    "claude-haiku-4.5":  {"input": 1.0,  "output": 5.0},
-    "claude-haiku-3.5":  {"input": 0.8,  "output": 4.0},
+    "claude-opus-4.7": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.6": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.5": {"input": 5.0, "output": 25.0},
+    "claude-opus-4.1": {"input": 15.0, "output": 75.0},
+    "claude-opus-4": {"input": 15.0, "output": 75.0},
+    "claude-sonnet-4.6": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4.5": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4.5": {"input": 1.0, "output": 5.0},
+    "claude-haiku-3.5": {"input": 0.8, "output": 4.0},
 }
 DEFAULT_INPUT_PRICE = 3.0
 DEFAULT_OUTPUT_PRICE = 15.0
@@ -60,9 +69,11 @@ def _get_pricing(model: str = "") -> Dict[str, float]:
 # CacheStats - 单次请求的缓存统计
 # ============================================================
 
+
 @dataclass
 class CacheStats:
     """单次请求的缓存统计"""
+
     request_time: str = ""
     model: str = ""
     prompt_tokens: int = 0
@@ -70,12 +81,9 @@ class CacheStats:
     cache_read_tokens: int = 0
     cache_creation_5m_tokens: int = 0
     cache_creation_1h_tokens: int = 0
-
-    # 启发式估算字段
-    is_estimated: bool = False
-    estimated_hit_rate: float = 0.0
-    context_stable: bool = False
-    consecutive_stable_count: int = 0
+    # True: OpenAI 语义（prompt_tokens 已含 cached_tokens）
+    # False: Anthropic 语义（input_tokens 与缓存三段并列，互不重叠）
+    input_includes_cache: bool = True
 
     @property
     def cache_creation_tokens(self) -> int:
@@ -89,8 +97,19 @@ class CacheStats:
 
     @property
     def total_input_tokens(self) -> int:
-        """总输入 token = read + write + non-cacheable"""
-        return self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens + self.prompt_tokens
+        """总输入 token = read + 未命中输入（两种语义下均为真实总输入）"""
+        return self.cache_read_tokens + self.uncached_input_tokens
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        """未从缓存命中的输入 token（新写入 + 非缓存部分）
+
+        - OpenAI 语义：prompt 已含 cached，未命中 = prompt - cached
+        - Anthropic 语义：input 与缓存并列，未命中 = input + write(5m/1h)
+        """
+        if self.input_includes_cache:
+            return max(0, self.prompt_tokens - self.cache_read_tokens)
+        return self.prompt_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
 
     @property
     def is_cache_hit(self) -> bool:
@@ -99,26 +118,24 @@ class CacheStats:
 
     @property
     def hit_rate(self) -> float:
-        """缓存命中率 = cache_read / (cache_read + cache_write)
-           Anthropic 官方推荐公式
-           参考: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+        """缓存命中率 = cache_read / (cache_read + 未命中输入)
+
+        OpenAI 兼容下即 cached/prompt（服务商后台口径）；
+        Anthropic 下 input≈0 时退化为官方公式 read/(read+write)。
         """
-        ca = self.cacheable_tokens
-        if ca == 0:
-            if self.is_estimated:
-                return self.estimated_hit_rate
+        denom = self.cache_read_tokens + self.uncached_input_tokens
+        if denom == 0:
             return 0.0
-        return self.cache_read_tokens / ca
+        return self.cache_read_tokens / denom
 
     @property
     def total_input_hit_rate(self) -> float:
-        """总输入命中率 = cache_read / total_input_tokens
-           衡量缓存在整个输入中的占比
+        """总输入命中率 = cache_read / 真实总输入（与 hit_rate 同口径）
+
+        旧公式 read/(read+write+prompt) 在 OpenAI 语义下 prompt 含 read
+        被双算，导致该指标系统性偏低，已随命中率口径统一修正。
         """
-        total = self.total_input_tokens
-        if total == 0:
-            return 0.0
-        return self.cache_read_tokens / total
+        return self.hit_rate
 
     def to_dict(self) -> Dict:
         return {
@@ -140,9 +157,11 @@ class CacheStats:
 # AggregatedCacheStats - 聚合的会话级缓存统计
 # ============================================================
 
+
 @dataclass
 class AggregatedCacheStats:
     """聚合的缓存统计（按 token 计算）"""
+
     requests: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
@@ -151,6 +170,7 @@ class AggregatedCacheStats:
     cache_read_tokens: int = 0
     cache_creation_5m_tokens: int = 0
     cache_creation_1h_tokens: int = 0
+    uncached_input_tokens: int = 0
 
     request_logs: List[CacheStats] = field(default_factory=list)
 
@@ -165,6 +185,7 @@ class AggregatedCacheStats:
         self.cache_read_tokens += stats.cache_read_tokens
         self.cache_creation_5m_tokens += stats.cache_creation_5m_tokens
         self.cache_creation_1h_tokens += stats.cache_creation_1h_tokens
+        self.uncached_input_tokens += stats.uncached_input_tokens
 
         if len(self.request_logs) < 100:
             self.request_logs.append(stats)
@@ -175,19 +196,16 @@ class AggregatedCacheStats:
 
     @property
     def hit_rate(self) -> float:
-        """Anthropic 官方公式：cache_read / (cache_read + cache_write)"""
-        ca = self.cacheable_tokens
-        if ca == 0:
+        """聚合命中率 = Σcache_read / (Σcache_read + Σ未命中输入)，详见类头注释"""
+        denom = self.cache_read_tokens + self.uncached_input_tokens
+        if denom == 0:
             return 0.0
-        return self.cache_read_tokens / ca
+        return self.cache_read_tokens / denom
 
     @property
     def total_input_hit_rate(self) -> float:
-        """cache_read / 总输入 token"""
-        total = self.cache_read_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens + self.prompt_tokens
-        if total == 0:
-            return 0.0
-        return self.cache_read_tokens / total
+        """与 hit_rate 同口径（旧公式在 OpenAI 语义下分母双算 read，已修正）"""
+        return self.hit_rate
 
     @property
     def per_request_hit_rate(self) -> float:
@@ -221,7 +239,9 @@ class AggregatedCacheStats:
         prices = _get_pricing(model)
         bi = prices["input"]
         ou = prices["output"]
-        total_input = self.cache_read_tokens + self.prompt_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+        total_input = (
+            self.cache_read_tokens + self.prompt_tokens + self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
+        )
         return (total_input * bi + self.completion_tokens * ou) / 1_000_000
 
     def summary(self, model: str = "") -> str:
@@ -242,7 +262,7 @@ class AggregatedCacheStats:
             f"  ├─ Cache Reads:     {self.cache_read_tokens:>10,}\n"
             f"  ├─ Cache Writes 5m: {self.cache_creation_5m_tokens:>10,}\n"
             f"  ├─ Cache Writes 1h: {self.cache_creation_1h_tokens:>10,}\n"
-            f"  ├─ Non-Cache Input: {self.prompt_tokens:>10,}\n"
+            f"  ├─ Uncached Input:  {self.uncached_input_tokens:>10,}\n"
             f"  └─ Output:          {self.completion_tokens:>10,}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Cost With Cache:    ${self.cost_usd(model):.4f}\n"
@@ -276,12 +296,14 @@ class AggregatedCacheStats:
         self.cache_read_tokens = 0
         self.cache_creation_5m_tokens = 0
         self.cache_creation_1h_tokens = 0
+        self.uncached_input_tokens = 0
         self.request_logs.clear()
 
 
 # ============================================================
 # CacheHitRateTracker - 缓存命中率追踪器
 # ============================================================
+
 
 class CacheHitRateTracker:
     """
@@ -300,18 +322,14 @@ class CacheHitRateTracker:
         print(stats.summary())
     """
 
-    # 已知缓存数据可靠的 provider 前缀
-    RELIABLE_CACHE_PROVIDERS = ("openai", "azure", "claude", "anthropic")
-
     def __init__(self, enabled: bool = True):
         self._enabled = enabled
         self._session_stats = AggregatedCacheStats()
         self._last_stats: Optional[CacheStats] = None
         self._last_model: str = ""
-
-        # 启发式估算状态（均为会话级，start_session 会重置）
-        self._last_prompt_tokens: int = 0            # 上一次 API 调用的 prompt_tokens
-        self._has_anthropic_cache: bool = False       # 是否检测到 Anthropic 缓存字段
+        # 服务商插件注入的缓存 usage 处理钩子（可选，无则走内置解析）
+        self._usage_semantics: str = ""  # ""=自动检测；openai/anthropic/prompt_excludes_cache
+        self._usage_normalizer = None  # (usage, model) -> 标准 dict | None
 
     def enable(self):
         self._enabled = True
@@ -329,10 +347,6 @@ class CacheHitRateTracker:
         self._session_stats.reset()
         self._last_stats = None
         self._last_model = ""
-        # ⚠️ 必须重置启发式状态，否则上一会话若触发过可疑缓存探测，
-        # 本会话所有请求都会被误套用估算（污染真实 read/write token → 命中率失真）。
-        self._last_prompt_tokens = 0
-        self._has_anthropic_cache = False
         logger.info("[CacheTracker] Session started")
 
     def end_session(self) -> AggregatedCacheStats:
@@ -340,69 +354,50 @@ class CacheHitRateTracker:
         logger.info(f"[CacheTracker] Session ended - {stats.summary()}")
         return stats
 
-    @staticmethod
-    def _has_anthropic_fields(usage: any) -> bool:
-        """检测 usage 是否包含 Anthropic 缓存字段"""
-        if isinstance(usage, dict):
-            return bool(
-                usage.get("cache_read_input_tokens") is not None
-                or usage.get("cache_creation_input_tokens") is not None
-                or isinstance(usage.get("cache_creation"), dict)
-            )
-        return bool(
-            getattr(usage, "cache_read_input_tokens", None) is not None
-            or getattr(usage, "cache_creation_input_tokens", None) is not None
-            or getattr(usage, "cache_creation", None) is not None
-        )
+    def set_provider_hooks(self, semantics: str = "", normalizer=None) -> None:
+        """注入服务商插件的缓存 usage 处理钩子（ProviderDef.usage_semantics/usage_normalizer）。
 
-    def _is_suspicious_openai_cache(self, stats: CacheStats, usage: any) -> bool:
+        semantics:
+          ""                     → 自动检测（有 prompt_tokens 键=OpenAI 语义，否则 Anthropic）
+          "openai"               → prompt_tokens 已含 cached_tokens
+          "anthropic"            → input_tokens 与缓存三段并列
+          "prompt_excludes_cache" → OpenAI 字段名但 prompt_tokens 不含 cached_tokens
+        normalizer: (usage: dict|对象, model: str) -> 标准 dict | None
+          标准 dict 键：prompt_tokens/completion_tokens/cached_tokens/
+          cache_creation_5m/cache_creation_1h/input_includes_cache(bool)
+          返回 None → 回退内置解析。优先级高于 semantics。
         """
-        检测 OpenAI 格式的缓存数据是否可疑。
-        
-        部分 provider（如 DeepSeek）对所有请求返回 cached_tokens == prompt_tokens
-        但不返回 cache_creation，导致命中率恒为 100%。
-        """
-        if self._has_anthropic_fields(usage):
-            self._has_anthropic_cache = True
-            return False
+        self._usage_semantics = semantics or ""
+        self._usage_normalizer = normalizer
 
-        has_suspicious_read = (
-            stats.cache_read_tokens > 0
-            and stats.cache_creation_5m_tokens == 0
-            and stats.cache_creation_1h_tokens == 0
-            and stats.prompt_tokens > 0
-            and stats.cache_read_tokens >= stats.prompt_tokens * 0.9
-        )
-        if not has_suspicious_read:
-            return False
+    def _apply_normalizer(self, usage: any) -> Optional[CacheStats]:
+        """调用插件 normalizer，返回 None 表示回退内置解析"""
+        if self._usage_normalizer is None:
+            return None
+        try:
+            normalized = self._usage_normalizer(usage, self._last_model)
+        except Exception as e:
+            logger.warning(f"[CacheTracker] usage_normalizer 异常，回退内置解析: {e}")
+            return None
+        if not normalized:
+            return None
+        stats = CacheStats()
+        stats.request_time = datetime.now().strftime("%H:%M:%S")
+        stats.prompt_tokens = int(normalized.get("prompt_tokens", 0) or 0)
+        stats.completion_tokens = int(normalized.get("completion_tokens", 0) or 0)
+        stats.cache_read_tokens = int(normalized.get("cached_tokens", 0) or 0)
+        stats.cache_creation_5m_tokens = int(normalized.get("cache_creation_5m", 0) or 0)
+        stats.cache_creation_1h_tokens = int(normalized.get("cache_creation_1h", 0) or 0)
+        stats.input_includes_cache = bool(normalized.get("input_includes_cache", True))
+        return stats
 
-        # 检查 provider 是否已知可靠
-        model_lower = self._last_model.lower()
-        is_reliable = any(model_lower.startswith(p) for p in self.RELIABLE_CACHE_PROVIDERS)
-        return not is_reliable
-
-    def _apply_cache_heuristic(self, stats: CacheStats):
-        """
-        对可疑的缓存数据应用启发式修正。
-        
-        对于 cached_tokens == prompt_tokens 的 provider（如 DeepSeek），
-        无法区分缓存读取和写入，因此用会话内的请求序列来估算：
-        
-        - 首次请求：取 cached_tokens 的 30% 视为缓存读取
-          （系统提示词等稳定前缀占比估计值）
-        - 后续请求：上次请求的 prompt_tokens 视为本次的缓存读取
-          （上次全部内容已成为稳定前缀）
-        """
-        reported_read = stats.cache_read_tokens
-        if self._last_prompt_tokens > 0:
-            estimated_read = min(reported_read, self._last_prompt_tokens)
-        else:
-            estimated_read = int(reported_read * 0.3)
-
-        stats.cache_read_tokens = estimated_read
-        stats.cache_creation_5m_tokens = reported_read - estimated_read
-        stats.is_estimated = True
-        self._last_prompt_tokens = stats.prompt_tokens
+    def _apply_semantics(self, stats: CacheStats) -> CacheStats:
+        """按插件声明的 usage 语义修正 input_includes_cache（影响 uncached_input 计算）"""
+        if self._usage_semantics == "openai":
+            stats.input_includes_cache = True
+        elif self._usage_semantics in ("anthropic", "prompt_excludes_cache"):
+            stats.input_includes_cache = False
+        return stats
 
     def record_usage(self, usage: any, model: str = "") -> Optional[CacheStats]:
         """
@@ -420,15 +415,13 @@ class CacheHitRateTracker:
 
         if model:
             self._last_model = model
-        stats = self._parse_usage(usage)
+        stats = self._apply_normalizer(usage)
+        if stats is None:
+            stats = self._parse_usage(usage)
+            if stats and self._usage_semantics:
+                self._apply_semantics(stats)
         if stats:
             stats.model = self._last_model
-            # 仅当「本次请求」本身被判定为可疑缓存数据时才套用启发式估算。
-            # ⚠️ 不再依赖持久化的 _heuristic_mode 全局开关：否则一旦某次触发，
-            # 后续来自可靠 provider（Anthropic/OpenAI 带真实 cache_creation 字段）的
-            # 请求也会被改写，导致真实 read/write token 被污染、命中率失真。
-            if self._is_suspicious_openai_cache(stats, usage):
-                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
         return stats
@@ -440,13 +433,13 @@ class CacheHitRateTracker:
 
         if model:
             self._last_model = model
-        stats = self._parse_usage_dict(usage_dict)
+        stats = self._apply_normalizer(usage_dict)
+        if stats is None:
+            stats = self._parse_usage_dict(usage_dict)
+            if stats and self._usage_semantics:
+                self._apply_semantics(stats)
         if stats:
             stats.model = self._last_model
-            # 仅当「本次请求」本身被判定为可疑缓存数据时才套用启发式估算
-            # （同 record_usage：不再用持久化 _heuristic_mode 污染可靠 provider 的真实数据）。
-            if self._is_suspicious_openai_cache(stats, usage_dict):
-                self._apply_cache_heuristic(stats)
             self._session_stats.add(stats)
             self._last_stats = stats
         return stats
@@ -464,6 +457,8 @@ class CacheHitRateTracker:
 
         stats.prompt_tokens = getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0
         stats.completion_tokens = getattr(usage, "completion_tokens", 0) or getattr(usage, "output_tokens", 0) or 0
+        # OpenAI SDK usage 有 prompt_tokens（含 cached）；Anthropic SDK 只有 input_tokens（与缓存并列）
+        stats.input_includes_cache = getattr(usage, "prompt_tokens", None) is not None
 
         # OpenAI: prompt_tokens_details.cached_tokens
         details = getattr(usage, "prompt_tokens_details", None)
@@ -506,11 +501,13 @@ class CacheHitRateTracker:
             details = usage_dict.get("prompt_tokens_details", {})
             if isinstance(details, dict):
                 stats.cache_read_tokens = details.get("cached_tokens", 0)
+            stats.input_includes_cache = True
 
         # --- Anthropic 格式 ---
         elif "input_tokens" in usage_dict:
             stats.prompt_tokens = usage_dict.get("input_tokens", 0)
             stats.completion_tokens = usage_dict.get("output_tokens", 0)
+            stats.input_includes_cache = False
 
             # Anthropic 扁平字段
             stats.cache_read_tokens = usage_dict.get("cache_read_input_tokens", 0) or 0

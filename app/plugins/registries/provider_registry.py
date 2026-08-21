@@ -73,6 +73,16 @@ class ProviderDef:
     balance_fetcher: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None
     # 套餐用量 fetcher：签名 (config: dict) -> {"rolling":...,"weekly":...,"monthly":...} | None
     coding_plan_fetcher: Optional[Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = None
+    # 缓存 usage 语义声明（空=自动检测；详见 CacheHitRateTracker）：
+    #   "openai"                → prompt_tokens 已含 cached_tokens
+    #   "anthropic"             → input_tokens 与缓存三段并列
+    #   "prompt_excludes_cache" → OpenAI 字段名但 prompt_tokens 不含 cached_tokens
+    usage_semantics: str = ""
+    # 缓存 usage 自定义解析钩子：签名 (usage: dict|对象, model: str) -> 标准 dict | None
+    # 标准 dict 键：prompt_tokens/completion_tokens/cached_tokens/
+    #   cache_creation_5m/cache_creation_1h/input_includes_cache(bool)
+    # 返回 None → 回退内置解析。非标 usage 字段的 provider 用它接入缓存统计。
+    usage_normalizer: Optional[Callable[[Any, str], Optional[Dict[str, Any]]]] = None
 
     # ── 便捷属性 ────────────────────────────────────────────
 
@@ -240,9 +250,7 @@ class ProviderRegistry:
         """
         with self._lock:
             if provider.name in self._providers:
-                logger.warning(
-                    f"[ProviderRegistry] 服务商「{provider.name}」已注册，跳过重复注册 (source={source})"
-                )
+                logger.warning(f"[ProviderRegistry] 服务商「{provider.name}」已注册，跳过重复注册 (source={source})")
                 return False
             provider.source = source
             self._providers[provider.name] = provider

@@ -2677,24 +2677,33 @@ class OpenAIChatToolWindow(ToolWindow):
         self._notify_history_data_changed()
 
     def _refresh_cache_stats(self):
-        """刷新缓存统计显示（对话完成后调用）"""
+        """刷新缓存统计显示
+
+        优先级：活 worker 实时数据（工具循环中每轮 usage 已记录）→ backend 缓存
+        （worker 已清理）。⚠️ 不能倒过来：backend 里存的是上一轮对话的旧快照，
+        worker 活着时优先读它会工具循环期间永远显示旧值（不及时 Bug）。
+        """
         ring = getattr(self, "context_usage_ring", None)
         if not ring:
             return
 
-        stats_dict = self.backend.get_last_cache_stats()
+        stats_dict = None
+        worker = self.backend.get_current_worker()
+        if worker:
+            try:
+                raw = worker.get_cache_stats()
+                if hasattr(raw, "to_dict"):
+                    stats_dict = raw.to_dict()
+                elif isinstance(raw, dict):
+                    stats_dict = raw
+            except Exception:
+                pass
+            # worker 刚建还没收到 usage 时（requests=0），不覆盖上一轮的旧值
+            if not stats_dict or stats_dict.get("requests", 0) == 0:
+                stats_dict = None
 
         if not stats_dict:
-            worker = self.backend.get_current_worker()
-            if worker:
-                try:
-                    raw = worker.get_cache_stats()
-                    if hasattr(raw, "to_dict"):
-                        stats_dict = raw.to_dict()
-                    elif isinstance(raw, dict):
-                        stats_dict = raw
-                except Exception:
-                    pass
+            stats_dict = self.backend.get_last_cache_stats()
 
         if not stats_dict:
             return
@@ -16941,6 +16950,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if tool_call_id in self._processed_tool_result_ids:
             return
         self._processed_tool_result_ids.add(tool_call_id)
+
+        # 实时刷新缓存统计：工具结果到达时本轮 LLM usage 必已记录，
+        # 环形图无需等整轮对话结束才更新（不及时 Bug 修复）
+        self._refresh_cache_stats()
 
         if self._exclusive_ui_modes:
             # 独占模式（如 AutoLoop）：只记录日志，不操作 UI
