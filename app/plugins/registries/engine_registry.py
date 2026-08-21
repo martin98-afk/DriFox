@@ -42,6 +42,12 @@ class EngineRegistry:
             item = self._factories.get(slot)
         return item[0] if item else None
 
+    def get_source(self, slot: str) -> str:
+        """获取槽位的注册来源（plugin:<name> / "" 表示内置；无注册时返回 ""）"""
+        with self._lock:
+            item = self._factories.get(slot)
+        return item[1] if item else ""
+
     def factories(self) -> Dict[str, EngineFactory]:
         with self._lock:
             return {k: v[0] for k, v in self._factories.items()}
