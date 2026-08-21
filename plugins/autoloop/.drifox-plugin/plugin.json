@@ -1,7 +1,7 @@
 {
     "icon": {
-        "light": "icons/autoloop_light.svg",
-        "dark": "icons/autoloop.svg"
+        "light": "icons/无限.svg",
+        "dark": "icons/无限_light.svg"
     },
     "name": "autoloop",
     "description": "AutoLoop 自动循环模式 — 规划→执行→归档三阶段长任务自动执行（对话引擎插件化首例，经 UI 服务门面驱动自建 ConversationCore）",

@@ -49,8 +49,8 @@ def register_ui(registry):
         default_visible=False,
         metadata={"hide_sidebar": True},
     )
-    # 输入区按钮（替代原工具栏 auto_loop_btn）
-    _icon = _PLUGIN_ROOT / "icons" / "autoloop.svg"
+    # 输入区按钮（替代原工具栏 auto_loop_btn；图标复用插件 manifest 无限.svg）
+    _icon = _PLUGIN_ROOT / "icons" / "无限.svg"
     registry.register_input_button(
         plugin_name="autoloop",
         button_id="autoloop",

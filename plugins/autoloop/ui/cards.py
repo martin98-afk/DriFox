@@ -7,6 +7,7 @@ AutoLoop 卡片组件 — 配置卡 + 运行卡
 """
 
 import time
+from pathlib import Path
 
 from PyQt5.QtCore import (
     Qt,
@@ -20,6 +21,7 @@ from PyQt5.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
+    QPixmap,
 )
 from PyQt5.QtWidgets import (
     QFrame,
@@ -170,8 +172,7 @@ class AutoLoopConfigCard(QFrame):
 
         # ---- 标题栏（含开始按钮） ----
         title_layout = QHBoxLayout()
-        icon_label = IconWidget(get_icon("无限"))
-        icon_label.setFixedSize(28, 28)
+        icon_label = self._build_title_icon(28)
         title_layout.addWidget(icon_label)
         title_layout.addSpacing(6)
         Colors.refresh()
@@ -296,6 +297,22 @@ class AutoLoopConfigCard(QFrame):
         """)
         layout.addWidget(self._prompt_edit)
 
+    def _build_title_icon(self, size: int):
+        """标题图标：优先插件 manifest 图标（plugin_icon，随主题深浅），
+        回退内置「无限」图标。"""
+        from qfluentwidgets.components.widgets.flyout import IconWidget
+
+        icon_path = (self._last_ctx.get("plugin_icon") or {}).get(
+            "dark" if self._last_ctx.get("is_dark", True) else "light"
+        )
+        if icon_path and Path(icon_path).exists():
+            label = QLabel(self)
+            pix = QPixmap(icon_path)
+            label.setPixmap(pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            label.setFixedSize(size, size)
+            return label
+        return IconWidget(get_icon("无限"))
+
     def _on_start(self):
         config = AutoLoopConfig(
             max_iterations=self._iteration_spin.value(),
@@ -379,6 +396,7 @@ class AutoLoopRunningCard(QFrame):
         super().__init__(parent)
         self.setObjectName("autoLoopRunningCard")
         self._ctx_provider = None
+        self._last_ctx = {}
 
         # 彩虹边框动画 — 60 帧/3秒 (≈20fps)，平衡流畅度与避免无谓重绘
         self._hue_offset = 0
@@ -430,6 +448,8 @@ class AutoLoopRunningCard(QFrame):
         window_id = str(ctx.get("window_id") or "")
         if not window_id:
             return
+        # 缓存最新上下文（_build_title_icon 重建用）
+        self._last_ctx = ctx
         from .controller import AutoLoopController
 
         controller = AutoLoopController.get_instance()
@@ -444,6 +464,22 @@ class AutoLoopRunningCard(QFrame):
             except TypeError, RuntimeError:
                 pass
             sig.connect(slot)
+
+    def _build_title_icon(self, size: int):
+        """标题图标：优先插件 manifest 图标（plugin_icon，随主题深浅），
+        回退内置「无限」图标。"""
+        from qfluentwidgets.components.widgets.flyout import IconWidget
+
+        icon_path = (self._last_ctx.get("plugin_icon") or {}).get(
+            "dark" if self._last_ctx.get("is_dark", True) else "light"
+        )
+        if icon_path and Path(icon_path).exists():
+            label = QLabel(self)
+            pix = QPixmap(icon_path)
+            label.setPixmap(pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            label.setFixedSize(size, size)
+            return label
+        return IconWidget(get_icon("无限"))
 
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""
@@ -517,9 +553,7 @@ class AutoLoopRunningCard(QFrame):
         # ---- 标题行 ----
         title_bar = QHBoxLayout()
         title_bar.setSpacing(8)
-        icon_label = QLabel()
-        icon_label.setPixmap(get_icon("设置-subagent").pixmap(20, 20))
-        icon_label.setFixedSize(20, 20)
+        icon_label = self._build_title_icon(20)
         title_bar.addWidget(icon_label)
         Colors.refresh()
         title = QLabel("AutoLoop 运行中")
