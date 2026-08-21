@@ -9,6 +9,7 @@
 import os
 import re
 import shutil
+import stat
 import sys
 import traceback
 from pathlib import Path
@@ -75,25 +76,14 @@ def _format_size(n: int) -> str:
 
 
 def _calc_dir_size(path: Path, dir_mode: bool) -> int:
-    """计算目录大小"""
+    """计算目录大小（含全部直接文件与子目录，递归统计）
+
+    dir_mode 保留兼容：旧实现按模式二选一（只统计子目录或只统计直接文件），
+    会漏算另一半内容；现在统一递归统计全部内容。
+    """
     if not path.exists():
         return 0
-    total = 0
-    try:
-        if dir_mode:
-            for entry in path.iterdir():
-                if entry.is_dir():
-                    total += _walk_dir_size(entry)
-        else:
-            for entry in path.iterdir():
-                if entry.is_file():
-                    try:
-                        total += entry.stat().st_size
-                    except (OSError, PermissionError):
-                        pass
-    except (OSError, PermissionError):
-        pass
-    return total
+    return _walk_dir_size(path)
 
 
 def _walk_dir_size(path: Path) -> int:
@@ -121,22 +111,51 @@ def _get_process_memory() -> Optional[int]:
         return None
 
 
+def _rmtree_force(path: Path) -> bool:
+    """强制删除目录树（含只读文件）
+
+    git clone 生成的 .git/objects/pack/* 默认带只读属性，Windows 上裸
+    shutil.rmtree 会因 WinError 5 静默失败（ignore_errors 吞掉异常，目录
+    原样残留——install_tmp 里 170+ 个历史安装残留的根因）。onexc 回调先
+    chmod 清除只读位再重试删除。
+
+    Returns:
+        True 全部删除成功；False 有残留（如 .pyd/.dll 被进程占用）
+    """
+    if not path.exists():
+        return True
+
+    def _onerror(func, failed_path, excinfo):
+        try:
+            os.chmod(failed_path, stat.S_IWRITE)
+            func(failed_path)
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(path, onexc=_onerror)
+        return True
+    except Exception:
+        return False
+
+
 def _delete_cache(path: Path, dir_mode: bool):
-    """删除缓存目录中的内容"""
+    """清空缓存目录全部内容（直接文件删除 + 子目录递归删除），目录本身保留
+
+    dir_mode 保留兼容：旧实现按模式二选一（只删子目录或只删直接文件），
+    导致另一半内容（cache 下直接文件 / logs 下子目录）永远清不掉。
+    """
     if not path.exists():
         return
     try:
-        if dir_mode:
-            for entry in path.iterdir():
+        for entry in path.iterdir():
+            try:
                 if entry.is_dir():
-                    shutil.rmtree(str(entry), ignore_errors=True)
-        else:
-            for entry in path.iterdir():
-                if entry.is_file():
-                    try:
-                        entry.unlink()
-                    except (OSError, PermissionError):
-                        pass
+                    _rmtree_force(entry)
+                else:
+                    entry.unlink()
+            except (OSError, PermissionError):
+                pass
     except (OSError, PermissionError):
         pass
 
