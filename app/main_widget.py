@@ -10498,15 +10498,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 可能因项目切换 / 智能体切换而变化，必须重建。
         self._invalidate_welcome_card()
 
-        if self._exclusive_ui_modes:
-            InfoBar.warning(
-                "运行中",
-                "独占模式运行中（如 AutoLoop），无法新建会话",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
+        # 独占模式拦截已移除（用户决策 2026-08-21）：autoloop 运行卡（full 覆盖层）
+        # 已物理替换发起 tab 的对话框，其他标签页不应被软件级限制阻断。
         if self._is_streaming and self.backend.chat_engine:
             # 🐛 修复（切换项目/新建会话打断对话）：
             # 1) stop_streaming 返回的中断消息（partial 回复快照）必须应用回 session，
@@ -15654,17 +15647,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
 
-        if self._exclusive_ui_modes:
-            InfoBar.warning(
-                "运行中",
-                "独占模式运行中（如 AutoLoop），无法发送消息",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
-            if not preserve_input:
-                self.input_area.clear()
-            return
+        # 独占模式拦截已移除（用户决策 2026-08-21）：同新建会话——其他标签页
+        # 对话不受 autoloop 运行影响（运行卡仅物理覆盖发起 tab 的对话区）。
 
         if not user_text:
             user_text = self.input_area.toPlainText().strip()
