@@ -74,7 +74,7 @@ PLACEHOLDER_TIPS = [
     "/explore 探索分析代码库结构",
     "/code-reviewer 审查代码修改并提改进建议",
     "/review 代码审查（简版）",
-    "/auto_loop 自动化规划→执行→归档循环",
+    "/autoloop:config 自动循环（插件：规划→执行→归档）",
     "/leader 统筹子智能体团队协作",
     "/compaction 手动触发上下文压缩",
     "/task-executor 执行批量预设任务",
@@ -448,12 +448,10 @@ class SendableTextEdit(TextEdit):
                 # （它会内部剥后缀），避免 display_name 后缀导致 check_name 传入带后缀的假名，
                 # 使 show_command_detail 在命令字典中找不到条目而直接 return 不显示参数。
                 cmd_mgr = CommandManager.get_instance()
-                exact_cmd_match = cmd_mgr.has_command(cmd_name)            # 精确匹配（不剥后缀）
-                exact_skill_match = bool(get_skill_by_name(cmd_name))      # 精确技能匹配
+                exact_cmd_match = cmd_mgr.has_command(cmd_name)  # 精确匹配（不剥后缀）
+                exact_skill_match = bool(get_skill_by_name(cmd_name))  # 精确技能匹配
                 exact_match = exact_cmd_match or exact_skill_match
-                raw_match = bool(raw_cmd) and (
-                    cmd_mgr.has_command(raw_cmd) or bool(get_skill_by_name(raw_cmd))
-                )
+                raw_match = bool(raw_cmd) and (cmd_mgr.has_command(raw_cmd) or bool(get_skill_by_name(raw_cmd)))
 
                 if exact_match or raw_match:
                     # 已知命令/技能 + 参数 → 切换到 detail 模式

@@ -7,6 +7,7 @@ AutoLoop 循环引擎 — 管理循环状态、迭代追踪、完成信号检测
 2. EXECUTING 阶段：按步骤执行，每步必须验证
 3. ARCHIVING 阶段：执行完成后清理文件、归档日志和笔记
 """
+
 import re
 import time
 from pathlib import Path
@@ -14,8 +15,7 @@ from typing import Optional
 
 from loguru import logger
 
-from app.core.engines.auto_loop.config import AutoLoopConfig
-from app.core.engines.base import BaseEngine
+from autoloop_core.config import AutoLoopConfig
 
 
 class LoopState:
@@ -29,7 +29,7 @@ class LoopState:
     ERROR = "error"
 
 
-class AutoLoopEngine(BaseEngine):
+class AutoLoopEngine:
     """核心循环引擎，不依赖 Qt，纯逻辑层
 
     AutoLoopEngine 是一个状态机，管理 AutoLoop 的三阶段执行流程：
@@ -37,9 +37,6 @@ class AutoLoopEngine(BaseEngine):
 
     它不直接参与 LLM 对话（由 AutoLoopWorker 通过 ConversationCore 驱动），
     而是提供状态追踪、预算控制、完成检测等逻辑能力。
-
-    注意：AutoLoopEngine 不直接使用 ConversationCore + ConversationExecutor，
-    因此 pass None 到父类构造，子类通过重写相关方法提供实现。
     """
 
     def __init__(self, config: Optional[AutoLoopConfig] = None):
@@ -66,15 +63,6 @@ class AutoLoopEngine(BaseEngine):
         # 归档阶段
         self._is_archiving_phase = False
         self._archiving_complete = False
-
-        # BaseEngine 不持有 ConversationCore，传 None
-        super().__init__(conversation_core=None, conversation_executor=None)
-
-    # ========== BaseEngine 接口实现 ==========
-
-    def get_current_session(self):
-        """AutoLoopEngine 不直接管理会话，返回 None"""
-        return None
 
     # ========== 公共属性（只读）==========
 
@@ -116,7 +104,7 @@ class AutoLoopEngine(BaseEngine):
 
     def set_step_progress(self, current: int, total: int):
         """设置步骤进度（仅用于 UI 显示，不影响步骤推进）
-        
+
         ⚡ 只修改 _display_step 和 _total_steps
         ⚡ 不修改 _current_step（它只由 advance_to_step / enter_execution_phase 控制）
         """
@@ -204,8 +192,8 @@ class AutoLoopEngine(BaseEngine):
     def parse_steps_from_notes(self, notes: str) -> tuple[int, int]:
         """从笔记中解析当前步骤和总步骤数"""
         patterns = [
-            r'[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]',
-            r'[-*]\s*\[.*?\]\s*步骤\s*(\d+)',
+            r"[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]",
+            r"[-*]\s*\[.*?\]\s*步骤\s*(\d+)",
         ]
         steps = []
         for pattern in patterns:
@@ -227,8 +215,8 @@ class AutoLoopEngine(BaseEngine):
         # 2. - [x] 步骤 1   (直接)
         # 3. - [步骤 1]     (无复选框)
         patterns = [
-            r'[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]',
-            r'[-*]\s*\[.*?\]\s*步骤\s*(\d+)',
+            r"[-*]\s*\[.*?\]\s*\[步骤\s*(\d+)\]",
+            r"[-*]\s*\[.*?\]\s*步骤\s*(\d+)",
         ]
         all_steps = []
         for pattern in patterns:
@@ -248,15 +236,15 @@ class AutoLoopEngine(BaseEngine):
 
     def parse_checked_steps_from_notes(self, notes: str) -> set[int]:
         """从笔记中解析已勾选完成的步骤 [x]
-        
+
         只匹配 [x]（已勾选），不匹配 [ ]（未勾选）。
         支持 [x] 和 [X] 两种写法。
         """
         patterns = [
-            r'[-*]\s*\[x\]\s*\[步骤\s*(\d+)\]',
-            r'[-*]\s*\[X\]\s*\[步骤\s*(\d+)\]',
-            r'[-*]\s*\[x\]\s*步骤\s*(\d+)',
-            r'[-*]\s*\[X\]\s*步骤\s*(\d+)',
+            r"[-*]\s*\[x\]\s*\[步骤\s*(\d+)\]",
+            r"[-*]\s*\[X\]\s*\[步骤\s*(\d+)\]",
+            r"[-*]\s*\[x\]\s*步骤\s*(\d+)",
+            r"[-*]\s*\[X\]\s*步骤\s*(\d+)",
         ]
         checked = set()
         for pattern in patterns:
@@ -354,7 +342,7 @@ class AutoLoopEngine(BaseEngine):
 
     def check_completion(self, response_text: str) -> bool:
         """检测响应中是否包含完成信号
-        
+
         结束只由 completion_signal 连续出现次数决定，与步骤数无关。
         步骤数可动态变化，不参与结束判断。
 
@@ -481,7 +469,8 @@ class AutoLoopEngine(BaseEngine):
         task_name = (self.config.task_prompt or "untitled")[:30]
         # 清理文件名非法字符
         import re
-        safe_name = re.sub(r'[^\w\-\u4e00-\u9fff]', '_', task_name)
+
+        safe_name = re.sub(r"[^\w\-\u4e00-\u9fff]", "_", task_name)
         return Path(self.config.project_path) / ".autoloop" / "archive" / f"{timestamp}-{safe_name}"
 
     def get_archive_meta_path(self) -> Optional[Path]:
@@ -531,7 +520,9 @@ class AutoLoopEngine(BaseEngine):
             "total_tokens": self._total_tokens,
             "max_tokens": self.config.max_tokens,
             "state": self.state,
-            "phase": "archiving" if self._is_archiving_phase else ("planning" if self._is_planning_phase else "executing"),
+            "phase": "archiving"
+            if self._is_archiving_phase
+            else ("planning" if self._is_planning_phase else "executing"),
             # UI 显示用 _display_step，内部追踪用 _current_step
             "current_step": self._display_step if not self._is_planning_phase else self._current_step,
             "total_steps": self._total_steps,
@@ -556,11 +547,11 @@ class AutoLoopEngine(BaseEngine):
             return True
 
         patterns = [
-            rf'步骤\s*{step_num}\s*(完成|已验证|验证成功)',
-            rf'step\s*{step_num}\s*(complete|verified|done)',
+            rf"步骤\s*{step_num}\s*(完成|已验证|验证成功)",
+            rf"step\s*{step_num}\s*(complete|verified|done)",
             # 注意：必须绑定 step_num，防止"步骤 3 验证成功"被步骤2的检查误匹配
-            rf'步骤\s*{step_num}.*?验证.*?成功',
-            rf'step\s*{step_num}.*?verify.*?success',
+            rf"步骤\s*{step_num}.*?验证.*?成功",
+            rf"step\s*{step_num}.*?verify.*?success",
         ]
         for p in patterns:
             if re.search(p, response, re.IGNORECASE):
@@ -568,29 +559,29 @@ class AutoLoopEngine(BaseEngine):
 
         if notes:
             # 只匹配 [x]（已勾选），不匹配 [ ]
-            pattern = rf'- \[x\]\s*步骤\s*{step_num}'
+            pattern = rf"- \[x\]\s*步骤\s*{step_num}"
             if re.search(pattern, notes, re.IGNORECASE):
                 return True
-            pattern = rf'- \[X\]\s*步骤\s*{step_num}'
+            pattern = rf"- \[X\]\s*步骤\s*{step_num}"
             if re.search(pattern, notes):
                 return True
-            if re.search(rf'步骤\s*{step_num}\s+结果', notes):
+            if re.search(rf"步骤\s*{step_num}\s+结果", notes):
                 return True
-            if re.search(rf'步骤\s*{step_num}.*完成', notes, re.DOTALL):
+            if re.search(rf"步骤\s*{step_num}.*完成", notes, re.DOTALL):
                 return True
 
         return False
 
     def get_next_step_preview(self, notes: str, step_num: int) -> str:
         """获取下一步骤的预览文本"""
-        pattern = rf'- \[.?\]?\s*\[步骤\s*{step_num}\].*?(?=\n-|\Z)'
+        pattern = rf"- \[.?\]?\s*\[步骤\s*{step_num}\].*?(?=\n-|\Z)"
         match = re.search(pattern, notes, re.DOTALL)
         if match:
             step_text = match.group(0)
-            preview = re.sub(r'^-\s*\[.?\]?\s*\[步骤\s*\d+\]\s*', '', step_text)
-            if '|' in preview:
-                preview = preview.split('|')[0].strip()
-            return preview[:60].strip() + ('...' if len(preview) > 60 else '')
+            preview = re.sub(r"^-\s*\[.?\]?\s*\[步骤\s*\d+\]\s*", "", step_text)
+            if "|" in preview:
+                preview = preview.split("|")[0].strip()
+            return preview[:60].strip() + ("..." if len(preview) > 60 else "")
         return f"步骤 {step_num}"
 
     def check_relay_doc_updated(self, iteration: int) -> bool:
@@ -613,10 +604,12 @@ class AutoLoopEngine(BaseEngine):
             # 使用最后已验证的步骤号，而不是 _current_step（它已在 advance_to_step 后前进到下一步）
             last_verified = max(self._verified_steps) if self._verified_steps else 0
             check_step = last_verified if last_verified > 0 else self._current_step
-            result_pattern = rf'步骤\s*{check_step}\s+结果|## 步骤\s*{check_step}\s+结果'
+            result_pattern = rf"步骤\s*{check_step}\s+结果|## 步骤\s*{check_step}\s+结果"
             if not re.search(result_pattern, notes, re.IGNORECASE):
                 if "## 当前状态" not in notes and "当前状态" not in notes:
-                    logger.warning(f"[AutoLoop] Iteration {iteration}: no step {check_step} result recorded (current_step={self._current_step}, verified={self._verified_steps})")
+                    logger.warning(
+                        f"[AutoLoop] Iteration {iteration}: no step {check_step} result recorded (current_step={self._current_step}, verified={self._verified_steps})"
+                    )
                     return False
 
         return True

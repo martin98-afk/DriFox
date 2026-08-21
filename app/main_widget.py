@@ -1038,8 +1038,6 @@ class OpenAIChatToolWindow(ToolWindow):
         "model_config",
         "memory",
         "history",
-        "auto_loop_config",
-        "auto_loop_running",
         # 以下四张全局卡片已迁移到 TabManagerWindow 的 GLOBAL_WINDOW_ID 作用域，
         # 不再属于 per-window 系统卡片，故不在此列表（它们不再隐藏对话输入区）。
         # "settings",
@@ -1051,11 +1049,8 @@ class OpenAIChatToolWindow(ToolWindow):
         "share",
         "history_questions",
     )
-    # AutoLoop 状态
-    _is_auto_loop_running: bool = False
-    _auto_loop_config_card: Optional[AutoLoopConfigCard] = None
-    _auto_loop_running_card: Optional[AutoLoopRunningCard] = None
-    _auto_loop_worker: Optional[AutoLoopWorker] = None
+    # AutoLoop 状态（已插件化：运行状态由插件管理，主程序仅维护独占模式计数）
+    _exclusive_ui_modes: set = set()
     _history_preview_messages: Optional[List[dict]] = None
     _history_preview_title: str = ""
 
@@ -1540,7 +1535,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         容器分配：
         - TopCardContainer (chatscroll 上方): Todo、MCP Edit、Hook Edit、Settings 等系统配置
-        - BottomCardContainer (chatscroll 下方): 长期记忆、历史会话、模型参数、AutoLoop、Tool、Question、SubAgent
+        - BottomCardContainer (chatscroll 下方): 长期记忆、历史会话、模型参数、Tool、Question、SubAgent
 
         规则：
         - 同位置互斥：Top/Bottom 各自只能显示一个卡片
@@ -1574,7 +1569,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== BottomCardContainer (chatscroll 下方) =====
         # Question: 强制覆盖所有其他卡片
         # Tool/SubAgent: 实时卡片
-        # History/Memory/ModelConfig/AutoLoop: 系统卡片
+        # History/Memory/ModelConfig: 系统卡片
         mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
@@ -1603,10 +1598,6 @@ class OpenAIChatToolWindow(ToolWindow):
             system_card=True,
         )
         self._bottom_card_container.add_card("tool_control", self._tool_control_card)
-
-        # 注：auto_loop_config / auto_loop_running 两张卡片已延迟构建（T7），
-        # 注册/入容器在 _ensure_auto_loop_config_card() /
-        # _ensure_auto_loop_running_card() 中按需执行（_deferred_card_steps 链预构建）。
 
         # 注：model_selector 卡片框架懒创建，注册/入容器见 _ensure_model_selector_card()
 
@@ -1702,47 +1693,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_id, ContainerType.BOTTOM, "memory", self._memory_card, system_card=True
         )
         self._bottom_card_container.add_card("memory", self._memory_card)
-
-    def _ensure_auto_loop_config_card(self):
-        """确保 AutoLoop 配置卡已创建（延迟构建 T7）。
-
-        原 setup_ui 同步构造（每次新建 tab ~7ms），改为惰性创建：
-        - _deferred_card_steps 链（800ms 后）预构建
-        - 打开入口 _show_auto_loop_config 兜底 ensure
-        信号/注册/容器语义与改造前完全一致。
-        """
-        if self._auto_loop_config_card is not None:
-            return
-        from app.widgets.cards.settings.auto_loop_card import AutoLoopConfigCard
-
-        self._auto_loop_config_card = AutoLoopConfigCard()
-        self._auto_loop_config_card.startRequested.connect(self._on_auto_loop_start)
-        self._auto_loop_config_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("auto_loop_config", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._auto_loop_config_card.setVisible(False)
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "auto_loop_config", self._auto_loop_config_card, system_card=True
-        )
-        self._bottom_card_container.add_card("auto_loop_config", self._auto_loop_config_card)
-
-    def _ensure_auto_loop_running_card(self):
-        """确保 AutoLoop 运行卡已创建（延迟构建 T7，与配置卡同通道）。"""
-        if self._auto_loop_running_card is not None:
-            return
-        from app.widgets.cards.settings.auto_loop_card import AutoLoopRunningCard
-
-        self._auto_loop_running_card = AutoLoopRunningCard()
-        self._auto_loop_running_card.stopRequested.connect(self._on_auto_loop_stop)
-        self._auto_loop_running_card.archiveRequested.connect(self._on_auto_loop_archive)
-        self._auto_loop_running_card.setVisible(False)
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "auto_loop_running", self._auto_loop_running_card, system_card=True
-        )
-        self._bottom_card_container.add_card("auto_loop_running", self._auto_loop_running_card)
 
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
@@ -1856,7 +1806,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._build_deferred_card_memory,
             self._build_deferred_card_model_config,
             self._build_deferred_card_model_selector,
-            self._build_deferred_card_auto_loop,
         ]
         self._schedule_next_deferred_card()
 
@@ -1962,16 +1911,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._ensure_model_selector_card_content()
         except Exception:
             logger.exception("[DeferredBuild] ModelSelectorCard 构建失败")
-        finally:
-            self._schedule_next_deferred_card()
-
-    def _build_deferred_card_auto_loop(self):
-        """── ⑦ AutoLoop 配置卡 + 运行卡（延迟构建 T7）──"""
-        try:
-            self._ensure_auto_loop_config_card()
-            self._ensure_auto_loop_running_card()
-        except Exception:
-            logger.exception("[DeferredBuild] AutoLoopCard 构建失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -3187,14 +3126,6 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         )
 
-        # AutoLoop 配置卡 / 运行卡（延迟构建 T7）
-        # 由 _deferred_card_steps 链（800ms 后）经 _ensure_auto_loop_config_card /
-        # _ensure_auto_loop_running_card 惰性创建，移除 setup_ui 同步路径开销
-        # （每次新建 tab 省 ~15ms，setup_ui 的 ~28%）。
-        # 打开入口 _show_auto_loop_config 有 ensure 兜底，行为与同步创建一致。
-        self._auto_loop_config_card = None
-        self._auto_loop_running_card = None
-
         self._question_floating_widget = QuestionFloatingWidget(self)
         self._question_floating_widget.setVisible(False)
         self._question_floating_widget.answered.connect(self._on_question_answered)
@@ -3601,13 +3532,6 @@ class OpenAIChatToolWindow(ToolWindow):
             TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
         """
 
-        self.auto_loop_btn = TransparentToolButton(get_icon("无限"), self._toolbar_capsule)
-        self.auto_loop_btn.setFixedSize(24, 24)
-        self.auto_loop_btn.setToolTip("AutoLoop")
-        self.auto_loop_btn.setStyleSheet(btn_capsule_style)
-        self.auto_loop_btn.clicked.connect(self._show_auto_loop_config)
-        capsule_layout.addWidget(self.auto_loop_btn)
-
         self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
         self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
@@ -3632,7 +3556,7 @@ class OpenAIChatToolWindow(ToolWindow):
         capsule_layout.addWidget(self.new_session_btn)
 
         # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）
-        for _tb in [self.auto_loop_btn, self.memory_btn, self.history_btn, self.new_session_btn]:
+        for _tb in [self.memory_btn, self.history_btn, self.new_session_btn]:
             install_hover_tooltip(_tb)
 
         # Phase D：输入区插件按钮（_init_ui_plugins_deferred 加载插件后再构建一次）
@@ -4137,7 +4061,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if count > 0:
             logger.info(f"[MainWidget] Loaded {count}/{len(plugin_dirs)} UI plugins")
 
-    def _build_ui_context(self) -> Dict[str, str]:
+    def _build_ui_context(self) -> Dict[str, Any]:
         """构建 UI 插件的上下文 dict
 
         UIPluginRegistry 在首次显示浮动卡片时调用此方法，
@@ -4155,6 +4079,11 @@ class OpenAIChatToolWindow(ToolWindow):
             - font_family:  全局字体
             - font_size:    UI 基础字号（px）
             - colors:       主题色字典，可直接用: colors["card_bg"]、colors["accent"]、colors["text_primary"] 等
+            - main_widget:  本窗口 MainWidget 引用（与输入区按钮 context 一致）
+            - services:     对话服务门面（get_model_config / get_tools_schema /
+                            save_messages_to_session / enter_exclusive_ui_mode 等，
+                            见 _build_ui_services；供 autoloop 等对话类插件驱动
+                            自建 ConversationCore 执行栈）
         """
         # ── 工作目录取值优先级 ──
         # 1. tool_executor.get_workdir() — 用户显式设置的项目根目录（最优先）
@@ -4217,6 +4146,8 @@ class OpenAIChatToolWindow(ToolWindow):
             "font_family": font_family,
             "font_size": font_size,
             "colors": theme_colors,
+            "main_widget": self,
+            "services": self._build_ui_services(),
         }
 
     def _create_message_widget(self, role: str, content, timestamp=None, **kwargs):
@@ -8099,7 +8030,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _hide_main_popups(self):
         """隐藏主要的悬浮面板（互斥显示）
 
-        包括：系统设置、模型配置、历史会话、记忆管理、AutoLoop
+        包括：系统设置、模型配置、历史会话、记忆管理
         现在也保存并隐藏 todo/tool/sub_agent 实时卡片
         """
         # 标记系统卡片打开状态，阻止实时卡片自行显示
@@ -8115,12 +8046,9 @@ class OpenAIChatToolWindow(ToolWindow):
             "model_config",
             "history",
             "memory",
-            "auto_loop_config",
             "undo_delete",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
-        if not self._is_auto_loop_running:
-            self._card_manager.hide_card("auto_loop_running", self._window_id)
         # 全局卡片（settings/provider_edit/hook_edit/mcp_edit）已迁移到 Tab 窗口层，统一隐藏
         from app.widgets.cards.global_card_controller import get_global_card_controller
 
@@ -8240,7 +8168,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_config_card,
             self._history_card,
             self._memory_card,
-            self._auto_loop_config_card,
         ]
         return [c for c in cards if c is not None]
 
@@ -9147,7 +9074,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 预计算各类卡片的 margin，避免 per-card 重复
         welcome_margin = 20
-        user_margin = 180
         assistant_margin = 20
 
         for i in range(self.chat_layout.count()):
@@ -9165,7 +9091,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.role == "welcome":
                 margin = welcome_margin
             elif card.role == "user":
-                margin = user_margin
+                # 用户气泡：最大宽度约容器的 78%（自适应收缩见 PlainTextViewer）
+                margin = max(120, int(viewport_width * 0.22))
             else:
                 margin = assistant_margin
 
@@ -9192,7 +9119,7 @@ class OpenAIChatToolWindow(ToolWindow):
             card = item.widget()
             try:
                 if viewport_width > 0:
-                    margin = 20 if card.role != "user" else 180
+                    margin = 20 if card.role != "user" else max(120, int(viewport_width * 0.22))
                     card.sync_width(force=True, target_width=max(320, viewport_width - margin))
                 else:
                     card.sync_width(force=True)
@@ -9241,7 +9168,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._last_chat_viewport_width = viewport_width
         try:
             if viewport_width > 0:
-                margin = 20 if card.role != "user" else 180
+                margin = 20 if card.role != "user" else max(120, int(viewport_width * 0.22))
                 card.sync_width(force=force, target_width=max(320, viewport_width - margin))
             else:
                 card.sync_width(force=force)
@@ -9642,7 +9569,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if win._is_destroyed:
                 return False
             return not attr or hasattr(win, attr)
-        except (RuntimeError, AttributeError):
+        except RuntimeError, AttributeError:
             return False
 
     def _on_plugin_hot_reload(self, result: dict):
@@ -10195,11 +10122,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     card.refresh_style()
             if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
                 self._settings_popup.refresh_style()
-            # AutoLoop 卡片
-            if self._auto_loop_config_card and hasattr(self._auto_loop_config_card, "_refresh_theme_style"):
-                self._auto_loop_config_card._refresh_theme_style()
-            if self._auto_loop_running_card and hasattr(self._auto_loop_running_card, "_refresh_theme_style"):
-                self._auto_loop_running_card._refresh_theme_style()
             # 浮动卡片
             for card in (
                 self._todo_floating_widget,
@@ -10576,10 +10498,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 可能因项目切换 / 智能体切换而变化，必须重建。
         self._invalidate_welcome_card()
 
-        if self._is_auto_loop_running:
+        if self._exclusive_ui_modes:
             InfoBar.warning(
-                "AutoLoop",
-                "运行中无法新建会话，请先停止 AutoLoop",
+                "运行中",
+                "独占模式运行中（如 AutoLoop），无法新建会话",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
@@ -15732,10 +15654,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
 
-        if self._is_auto_loop_running:
+        if self._exclusive_ui_modes:
             InfoBar.warning(
-                "AutoLoop",
-                "运行中无法发送消息，请先停止 AutoLoop",
+                "运行中",
+                "独占模式运行中（如 AutoLoop），无法发送消息",
                 parent=TabManagerWindow.get_instance() or self.window(),
                 duration=3000,
                 position=InfoBarPosition.BOTTOM,
@@ -16160,8 +16082,8 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._current_assistant_card._maybe_finish_thinking_for_tool(tool_call_id)
 
-        # AutoLoop 运行期间不显示工具调用 UI
-        if self._is_auto_loop_running:
+        # 独占模式（如 AutoLoop 运行）期间不显示工具调用 UI
+        if self._exclusive_ui_modes:
             return
 
         # 交互式工具（metadata["interactive"]=True）：由 chat_worker 的 question_asked
@@ -17005,10 +16927,9 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._processed_tool_result_ids.add(tool_call_id)
 
-        if self._is_auto_loop_running:
-            # AutoLoop 模式：只记录日志，不操作 UI
-            if self._auto_loop_running_card:
-                self._auto_loop_running_card.append_log(f"工具完成: {tool_name}")
+        if self._exclusive_ui_modes:
+            # 独占模式（如 AutoLoop）：只记录日志，不操作 UI
+            logger.debug(f"[ToolUI] 工具完成（独占模式跳过 UI）: {tool_name}")
 
         elapsed = time.time() - self._current_tool_start_time if hasattr(self, "_current_tool_start_time") else 0
 
@@ -17977,13 +17898,10 @@ class OpenAIChatToolWindow(ToolWindow):
             "settings",
             "memory",
             "provider_edit",
-            "auto_loop_config",
             "hook_edit",
             "undo_delete",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
-        if not self._is_auto_loop_running:
-            self._card_manager.hide_card("auto_loop_running", self._window_id)
 
     def _restore_after_question_close(self):
         """Question 卡片关闭后，恢复非系统卡片的显示状态"""
@@ -20226,13 +20144,6 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-        # 🔧 内存泄漏修复：清理 AutoLoop Worker
-        if getattr(self, "_is_auto_loop_running", False) or getattr(self, "_auto_loop_worker", None):
-            try:
-                self._cleanup_auto_loop_state("窗口关闭")
-            except Exception:
-                pass
-
         # 从全局实例列表中移除
         try:
             OpenAIChatToolWindow._instances.remove(self)
@@ -20725,61 +20636,63 @@ class OpenAIChatToolWindow(ToolWindow):
         self._context_menu_actions = {}
 
     # ================================================================
-    #  AutoLoop 相关方法
+    #  UI 插件对话服务（插件式对话引擎的服务门面）
     # ================================================================
 
-    def _show_auto_loop_config(self):
-        """显示/隐藏 AutoLoop 配置卡（类似记忆卡片，点击切换）"""
-        if self._is_auto_loop_running:
-            return
-        # 延迟构建（T7）兜底：确保配置卡已创建并注册（800ms 链未跑完时入口先行）
-        self._ensure_auto_loop_config_card()
-        self._card_manager.toggle_card("auto_loop_config", self._window_id)
+    def _build_ui_services(self) -> Dict[str, Any]:
+        """构建 UI 插件可调用的对话服务句柄（window 级）
 
-    def _on_auto_loop_start(self, config: "AutoLoopConfig"):
-        """开始 AutoLoop"""
-        if self._is_auto_loop_running:
-            return
+        经 _build_ui_context 的 "services" 字段注入插件浮动卡片，
+        插件（如 autoloop）据此驱动自建的 ConversationCore 执行栈，
+        无需触碰 main_widget 内部结构。
+        """
+        backend = self.backend
 
-        # 设置项目路径（工作目录）
-        import os
+        def _agent_prompt(name: str) -> str:
+            am = backend.agent_manager if backend else None
+            if not am:
+                return ""
+            agent = am.get_agent(name)
+            return agent.prompt if agent else ""
 
-        project_path = config.project_path.strip() if config.project_path else ""
-        if not project_path:
-            # 优先级：实例缓存（worktree 切换后的目录）→ tool_executor → os.getcwd() 兜底
-            project_path = self._current_workdir.get(self._current_project)
-            if not project_path and self.backend and self.backend.tool_executor:
-                project_path = self.backend.tool_executor.get_workdir()
-            if not project_path:
-                project_path = os.getcwd()
+        def _tools_schema(agent_name: str) -> List[Dict]:
+            return self._build_agent_tools_schema(agent_name)
 
-        abs_path = os.path.abspath(project_path)
-        if os.path.isdir(abs_path):
-            if self.backend.tool_executor:
-                # 通过 ToolExecutor.set_workdir 统一设置，同时更新 builtin_tools
-                self.backend.tool_executor.set_workdir(abs_path)
-            config.project_path = abs_path
-            logger.info(f"[AutoLoop] Workdir set to: {abs_path}")
-        else:
-            logger.warning(f"[AutoLoop] Project path does not exist: {abs_path}")
+        def _set_workdir(path: str):
+            if backend and backend.tool_executor and path:
+                backend.tool_executor.set_workdir(str(path))
 
-        # 隐藏配置卡（通过 CardManager 确保状态同步），显示运行卡
-        self._card_manager.hide_card("auto_loop_config", self._window_id)
-        # 延迟构建（T7）兜底：确保运行卡已创建（防止 800ms 链未跑完即 start）
-        self._ensure_auto_loop_running_card()
-        self._auto_loop_running_card.show()
-        # 确保停止按钮可见（彻底修复完成后重新运行时停止按钮消失的问题）
-        self._auto_loop_running_card.show_stop_button()
-        self._auto_loop_running_card.start_animation()
-        self._auto_loop_running_card.set_max_tokens(config.max_tokens)
-        self._auto_loop_running_card.set_task(config.task_prompt)
+        def _get_compactor():
+            ce = backend.chat_engine if backend else None
+            return getattr(ce, "_compactor", None) if ce else None
 
-        # 锁定 UI
-        self._lock_ui_for_autoloop()
+        return {
+            "get_model_config": self._get_current_model_config,
+            "get_tool_executor": lambda: backend.tool_executor if backend else None,
+            "get_agent_manager": lambda: backend.agent_manager if backend else None,
+            "get_agent_prompt": _agent_prompt,
+            "get_tools_schema": _tools_schema,
+            "set_workdir": _set_workdir,
+            "get_workdir": lambda: self._resolve_project_workdir() or "",
+            "get_compactor": _get_compactor,
+            "save_messages_to_session": self._save_messages_to_session,
+            "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
+            "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,
+            "hide_card": lambda card_id: self._card_manager.hide_card(card_id, self._window_id),
+            "sync_working_directory": self._sync_working_directory,
+            "notify": lambda title, message: InfoBar.success(
+                title,
+                message,
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=5000,
+                position=InfoBarPosition.BOTTOM,
+            ),
+        }
 
-        # 获取 auto_loop agent 的工具权限，过滤掉 deny 的工具
-        agent_manager = self.backend.agent_manager
-        agent = agent_manager.get_agent("auto_loop") if agent_manager else None
+    def _build_agent_tools_schema(self, agent_name: str) -> List[Dict]:
+        """构建指定 agent 视角的工具 schema（过滤该 agent deny 的工具）"""
+        agent_manager = self.backend.agent_manager if self.backend else None
+        agent = agent_manager.get_agent(agent_name) if agent_manager else None
         agent_perms = agent.permission if agent else {}
         denied_tools = {name for name, val in agent_perms.items() if val in ("deny", False)}
 
@@ -20787,223 +20700,24 @@ class OpenAIChatToolWindow(ToolWindow):
 
         all_tools = get_builtin_tools_schema(
             agent_manager=agent_manager,
-            builtin_tools=self.backend.tool_executor._builtin_tools if hasattr(self.backend, "tool_executor") else None,
+            builtin_tools=self.backend.tool_executor._builtin_tools if self.backend.tool_executor else None,
         )
-        tools_schema = [t for t in all_tools if t.get("function", {}).get("name", "") not in denied_tools]
+        return [t for t in all_tools if t.get("function", {}).get("name", "") not in denied_tools]
 
-        # 获取 compactor
-        compactor = None
-        if self.backend.chat_engine and hasattr(self.backend.chat_engine, "_compactor"):
-            compactor = self.backend.chat_engine._compactor
+    # ── 独占 UI 模式（插件运行期锁定会话操作）─────────────────
 
-        # 创建并启动 worker
-        from app.core.workers.auto_loop_worker import AutoLoopWorker
+    def enter_exclusive_ui_mode(self, source_id: str) -> None:
+        """进入独占模式 — 隐藏消息列表和输入框，禁止新建会话（引用计数）
 
-        self._auto_loop_worker = AutoLoopWorker()
-        self._auto_loop_worker.configure(
-            config=config,
-            model_config_getter=self._get_current_model_config,
-            tool_executor=self.backend.tool_executor,
-            tools_schema=tools_schema,
-            agent_system_prompt_getter=lambda name: (
-                self.backend.agent_manager.get_agent(name).prompt
-                if self.backend.agent_manager and self.backend.agent_manager.get_agent(name)
-                else ""
-            ),
-            permission_check_callback=(
-                self.backend.chat_engine._check_tool_permission if self.backend.chat_engine else None
-            ),
-            permission_cache=(self.backend.chat_engine._permission_cache if self.backend.chat_engine else None),
-            compactor=compactor,
-        )
-
-        # 连接信号 - 注意：tokens_updated 必须用 DirectConnection 确保实时更新
-        self._auto_loop_worker.iteration_started.connect(self._on_auto_loop_iteration_started, Qt.QueuedConnection)
-        self._auto_loop_worker.iteration_completed.connect(self._on_auto_loop_iteration_completed, Qt.QueuedConnection)
-        self._auto_loop_worker.progress_updated.connect(self._on_auto_loop_progress, Qt.QueuedConnection)
-        self._auto_loop_worker.loop_completed.connect(self._on_auto_loop_completed, Qt.QueuedConnection)
-        self._auto_loop_worker.loop_error.connect(self._on_auto_loop_error, Qt.QueuedConnection)
-        self._auto_loop_worker.loop_stopped.connect(self._on_auto_loop_stopped, Qt.QueuedConnection)
-        self._auto_loop_worker.log_signal.connect(self._on_auto_loop_log, Qt.QueuedConnection)
-        self._auto_loop_worker.log_update.connect(self._on_auto_loop_log_update, Qt.QueuedConnection)
-        self._auto_loop_worker.phase_changed.connect(self._on_auto_loop_phase_changed, Qt.QueuedConnection)
-        # tokens_updated 使用 QueuedConnection 确保 UI 更新在主线程执行（避免 DirectConnection 在 worker 线程执行导致 UI 无法更新）
-        self._auto_loop_worker.tokens_updated.connect(self._on_auto_loop_tokens_updated, Qt.QueuedConnection)
-
-        self._is_auto_loop_running = True
-        self._auto_loop_worker.start()
-
-    def _on_auto_loop_archive(self):
-        """用户点击归档按钮 — 直接跳转到归档阶段
-
-        通知 Worker 进入归档阶段，Worker 会在下一轮循环中执行自动归档。
+        供 UI 插件（如 autoloop 运行卡）在长任务运行期锁定会话操作，
+        同一 source_id 重复进入幂等（计数不叠加）。
         """
-        if not self._auto_loop_worker or not self._auto_loop_worker.isRunning():
+        if source_id in self._exclusive_ui_modes:
             return
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.set_phase("archiving")
-            self._auto_loop_running_card.set_status("📦 正在归档...")
-            self._auto_loop_running_card.hide_archive_button()
-            self._auto_loop_running_card.hide_stop_button()
-        self._auto_loop_worker.request_archive()
-
-    def _on_auto_loop_stop(self):
-        """停止 AutoLoop（用户主动停止）
-
-        不再阻塞 UI 线程！通过 loop_stopped 信号异步处理清理。
-        只在 looper 线程退出后(通过信号)才执行 _finish_auto_loop，
-        避免 UI 卡死和二次清理导致的闪退。
-        """
-        if self._auto_loop_worker and self._auto_loop_worker.isRunning():
-            # 1. 立即发送取消信号给 worker 线程
-            self._auto_loop_worker.cancel()
-            # 2. UI 立即反馈，不阻塞
-            if self._auto_loop_running_card:
-                self._auto_loop_running_card.set_status("⏹ 正在停止...")
-            # 3. 安全兜底：5 秒后如果还没停，强制清理（避免永久卡住）
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(5000, self._force_cleanup_autoloop)
-
-    def _force_cleanup_autoloop(self):
-        """兜底清理：如果 worker 线程未正常结束，强制清理"""
-        if not self._is_auto_loop_running:
-            return  # 已经通过信号正常清理了
-        logger.warning("[AutoLoop] Force cleanup after timeout")
-        if self._auto_loop_worker and self._auto_loop_worker.isRunning():
-            self._auto_loop_worker.wait(2000)
-        self._finish_auto_loop("⏹ 强制停止（超时）")
-
-    def _on_auto_loop_phase_changed(self, phase: str):
-        """AutoLoop 阶段变更"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.set_phase(phase)
-
-    def _on_auto_loop_iteration_started(self, current: int, total: int):
-        """迭代开始"""
-        if self._auto_loop_running_card:
-            progress = self._auto_loop_worker.get_current_progress()
-            phase = progress.get("phase", "planning")
-            current_step = progress.get("current_step", 0)
-            total_steps = progress.get("total_steps", 0)
-
-            if phase == "planning":
-                # 规划阶段
-                self._auto_loop_running_card.set_phase("planning")
-                self._auto_loop_running_card.set_status(f"📋 第 {current} 轮: 规划中...")
-            else:
-                # 执行阶段
-                self._auto_loop_running_card.set_phase("executing")
-                # 显示当前步骤在状态文本中
-                if total_steps > 0:
-                    self._auto_loop_running_card.set_status(
-                        f"▶ 第 {current} 轮 / 共 {total} 轮 | 步骤 {current_step}/{total_steps}"
-                    )
-                else:
-                    self._auto_loop_running_card.set_status(f"▶ 第 {current} 轮 / 共 {total} 轮")
-
-    def _on_auto_loop_iteration_completed(self, iteration: int, summary: str):
-        """迭代完成"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.append_log(f"第 {iteration} 轮完成: {summary[:40]}")
-
-    def _on_auto_loop_log(self, text: str):
-        """离散日志更新（带时间戳的事件）"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.append_log(text)
-
-    def _on_auto_loop_log_update(self, text: str):
-        """流式日志更新（实时覆盖，无时间戳）"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.update_log(text)
-
-    def _on_auto_loop_tokens_updated(self, total_tokens: int):
-        """Token 实时更新 — 直接使用信号携带的值"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.update_tokens(total_tokens)
-
-    def _on_auto_loop_progress(self, progress: dict):
-        """更新运行卡进度（不更新 token，因为 update_tokens() 会专门处理）
-
-        注意：token 更新由 update_tokens() 专门处理，避免与 progress_updated 信号的竞争条件
-        导致 token 显示被覆盖的问题。
-        """
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.update_progress_no_token(progress)
-
-    def _on_auto_loop_completed(self, message: str):
-        """AutoLoop 完成"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.set_phase("completed")
-            self._auto_loop_running_card.show_completed(message)
-        self._finish_auto_loop(message)
-
-    def _on_auto_loop_error(self, message: str):
-        """AutoLoop 出错"""
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.show_error(message)
-            self._auto_loop_running_card.append_log(f"❌ {message[:50]}")
-        self._finish_auto_loop(f"❌ {message}")
-
-    def _on_auto_loop_stopped(self):
-        """AutoLoop 已停止"""
-        self._finish_auto_loop("⏹ 已停止")
-
-    def _finish_auto_loop(self, message: str):
-        """清理 AutoLoop 状态
-
-        注意：可能被多个路径调用（loop_completed/loop_error/loop_stopped 信号 + 兜底定时器），
-        必须在顶部做防重入保护。
-        """
-        if not self._is_auto_loop_running:
-            # 防止二次清理导致 worker.deleteLater 冲突和闪退
+        first = not self._exclusive_ui_modes
+        self._exclusive_ui_modes.add(source_id)
+        if not first:
             return
-        self._is_auto_loop_running = False
-
-        # 恢复为当前项目配置的工作目录
-        self._sync_working_directory()
-
-        # 停止动画（只调用一次，移除重复调用）
-        if self._auto_loop_running_card:
-            self._auto_loop_running_card.stop_animation()
-
-        # 隐藏运行卡
-        self._auto_loop_running_card.hide()
-        self._restore_after_system_close()
-
-        # 保存 AutoLoop 消息到会话历史
-        if self._auto_loop_worker:
-            try:
-                messages = self._auto_loop_worker.get_all_messages()
-                if messages:
-                    self._save_auto_loop_messages_to_session(messages)
-            except Exception as e:
-                logger.warning(f"[AutoLoop] Failed to save messages to session: {e}")
-
-        # 清理 worker
-        if self._auto_loop_worker:
-            try:
-                self._auto_loop_worker.quit()
-                self._auto_loop_worker.wait(1000)
-            except Exception:
-                pass
-            self._auto_loop_worker.deleteLater()
-            self._auto_loop_worker = None
-
-        # 解锁 UI
-        self._unlock_ui_after_autoloop()
-
-        # 通知用户
-        InfoBar.success(
-            "AutoLoop",
-            message,
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=5000,
-            position=InfoBarPosition.BOTTOM,
-        )
-
-    def _lock_ui_for_autoloop(self):
-        """锁定 UI — 隐藏消息列表和输入框，禁止新建会话"""
         # 清空输入框内容
         self.input_area.clear()
         # 隐藏消息列表（保持滚动位置不变）
@@ -21017,15 +20731,17 @@ class OpenAIChatToolWindow(ToolWindow):
             self._input_glow_underlay.setVisible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
-
         # 窗口自适应缩小（聊天区和输入框隐藏后只保留运行卡片）
         self.adjustSize()
+        logger.info(f"[ExclusiveUI] locked by {source_id}")
 
-        # 记录原有状态，用于解锁
-        logger.info("[AutoLoop] UI locked")
-
-    def _unlock_ui_after_autoloop(self):
-        """解锁 UI — 恢复消息列表和输入框"""
+    def exit_exclusive_ui_mode(self, source_id: str) -> None:
+        """退出独占模式 — 全部 source 退出后恢复消息列表和输入框"""
+        if source_id not in self._exclusive_ui_modes:
+            return
+        self._exclusive_ui_modes.discard(source_id)
+        if self._exclusive_ui_modes:
+            return  # 还有其他 source 持有锁
         # 恢复消息列表
         self.chat_scroll_area.setVisible(True)
         # 恢复输入容器 + 工具栏
@@ -21037,46 +20753,46 @@ class OpenAIChatToolWindow(ToolWindow):
             self._input_glow_underlay.setVisible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
-
         # 重新聚焦输入框（仅当此窗口为活动 Tab 时）
         self._focus_input_if_active()
-        logger.info("[AutoLoop] UI unlocked")
-        logger.info("[AutoLoop] UI unlocked")
+        logger.info("[ExclusiveUI] unlocked")
 
-    def _save_auto_loop_messages_to_session(self, messages: List[Dict]):
-        """将 AutoLoop 执行的消息保存到当前会话"""
+    # ── 会话写回（插件长任务结果并入当前会话）────────────────
+
+    def _save_messages_to_session(self, messages: List[Dict], task_prompt: str = "") -> None:
+        """将插件执行产生的消息保存到当前会话（供 autoloop 等插件调用）
+
+        Args:
+            messages: 完整消息列表（含 user + assistant + tool_calls）
+            task_prompt: 任务描述；消息列表缺 user 消息时补插首条
+        """
         session = self.session_manager.get_current_session()
         if not session:
             return
 
-        # messages 来自 AutoLoopWorker.get_all_messages()，
-        # 包含 on_messages_updated 收集的完整消息（含 user + assistant + tool_calls）
         auto_loop_messages = list(messages or [])
 
         # 确保 user 消息存在（第一条 user 消息，排除 hook 消息）
-        # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）视为真实用户问题
-        # → mail-only AutoLoop 会话避免 task_prompt 重复插入
+        # team 邮件（_hook_event="TeamMail"）视为真实用户问题 → 避免重复插入
         has_user = any(
             msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
             for msg in auto_loop_messages
         )
-        if not has_user and self._auto_loop_worker:
-            task_prompt = self._auto_loop_worker.get_task_prompt()
-            if task_prompt:
-                from datetime import datetime
+        if not has_user and task_prompt:
+            from datetime import datetime
 
-                user_msg = {
-                    "role": "user",
-                    "content": task_prompt,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-                auto_loop_messages.insert(0, user_msg)
+            user_msg = {
+                "role": "user",
+                "content": task_prompt,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            auto_loop_messages.insert(0, user_msg)
 
         # 更新会话（preserve_compaction=True 避免压缩状态被破坏）
         session.set_messages(auto_loop_messages, preserve_compaction=True)
         self._session_dirty = True
 
-        logger.info(f"[AutoLoop] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
+        logger.info(f"[PluginSession] 保存 {len(auto_loop_messages)} 条消息到会话: {self._current_project}")
 
         # 触发 topic_summary 生成标题（如果还没有标题）
         session = self.session_manager.get_current_session()

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """团队任务邮件自动发送不得清空用户输入框（Bug 回归测试）
 
 背景：_process_team_task 复用 _on_send_clicked 走"用户完整发送流程"，
@@ -35,7 +35,7 @@ def _make_main_widget_instance():
     inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     inst._is_destroyed = False
     inst._window_id = "win_test"
-    inst._is_auto_loop_running = False
+    inst._exclusive_ui_modes = set()
     inst._attachments = []
     inst._session_switched = False
     inst._is_streaming = False

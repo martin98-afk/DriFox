@@ -12,8 +12,9 @@
 ├──────────────────────────────────────────────┤
 │  引擎层 (app/core/engines/)                  │  BaseEngine 统一接口
 │    ├── ui/engine.py      — ChatEngine (UI)   │
-│    ├── gateway/engine.py — GatewayEngine     │
-│    └── auto_loop/engine.py — 自动循环         │
+│    └── gateway/engine.py — GatewayEngine     │
+│    （AutoLoop 引擎已插件化 → plugins/autoloop/，│
+│      经 ui context services 驱动自建栈）      │
 ├──────────────────────────────────────────────┤
 │  对话执行层 (app/core/conversation/)         │  ConversationCore + Executor
 ├──────────────────────────────────────────────┤

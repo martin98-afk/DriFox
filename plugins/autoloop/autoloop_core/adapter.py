@@ -23,9 +23,7 @@ class AutoLoopConversationAdapter(BaseConversationAdapter):
     # AutoLoop 使用自己的 PromptComposer 构建消息，不是 ContextBudgetAllocator
     def build_messages(self, session, llm_config, current_agent=None):
         """AutoLoop 自建消息，不委托 ContextBudgetAllocator"""
-        raise NotImplementedError(
-            "AutoLoop 使用自己的 PromptComposer 构建消息，不经过此路径"
-        )
+        raise NotImplementedError("AutoLoop 使用自己的 PromptComposer 构建消息，不经过此路径")
 
     def on_content_received(self, piece: str):
         pass  # AutoLoop 不需要实时内容更新

@@ -262,7 +262,7 @@ python main.py
 |------|-----------|
 | **Primary** | plan（规划）、build（编码）、code-reviewer（审查）|
 | **Subagent** | explore、leader（团队领导，P0/P1/P2 三级打断）、architecture-critic、security-auditor、test-engineer、legacy-analyst、code-simplifier、deep-research、diagnose、perf-analyzer、business-rules-extractor 等 15+ |
-| **Hidden** | summary、compaction、title、auto_loop |
+| **Hidden** | summary、compaction、title、auto_loop（autoloop 插件） |
 
 支持 DAG 工作流编排、并行分发（subagent_para）、级联执行（subagent_dag）。
 

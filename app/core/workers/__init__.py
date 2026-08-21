@@ -30,7 +30,6 @@ _SYMBOL_IMPORTS: dict[str, tuple[str, str]] = {}
 for _mod, _names in _LAZY_IMPORTS.values():
     for _n in _names:
         _SYMBOL_IMPORTS[_n] = (_mod, _n)
-_SYMBOL_IMPORTS["AutoLoopWorker"] = ("app.core.workers.auto_loop_worker", "AutoLoopWorker")
 
 
 def __getattr__(name: str) -> _typing.Any:
@@ -61,7 +60,6 @@ __all__ = [
     "OpenAIChatWorker",
     "SubAgentExecutor",
     "SubAgentManager",
-    "AutoLoopWorker",
     # Tasks
     "TopicSummaryTask",
     "ShellExecutionTask",

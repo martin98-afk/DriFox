@@ -15,6 +15,7 @@ AutoLoop Worker — 后台循环工作线程
 - 执行阶段：允许所有工具，但每步必须验证通过才能前进
 - 归档阶段：仅允许 read/write 用于清理和归档
 """
+
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -23,15 +24,12 @@ from loguru import logger
 from PyQt5.QtCore import QCoreApplication, QEventLoop, QThread, QTimer, pyqtSignal
 
 from app.core.conversation import ConversationExecutor
-from app.core.conversation.adapters import AutoLoopConversationAdapter
 from app.core.conversation.config import ConversationConfig, PermissionStrategy, filter_interactive_tools
 from app.core.conversation.core import ConversationCore
-from app.core.engines.auto_loop import (
-    AutoLoopConfig,
-    AutoLoopEngine,
-    AutoLoopPromptComposer,
-    LoopState,
-)
+from autoloop_core.adapter import AutoLoopConversationAdapter
+from autoloop_core.config import AutoLoopConfig
+from autoloop_core.engine import AutoLoopEngine, LoopState
+from autoloop_core.prompt_composer import AutoLoopPromptComposer
 
 
 class AutoLoopWorker(QThread):
@@ -105,32 +103,23 @@ class AutoLoopWorker(QThread):
         # 归档阶段：仅允许 read/write/glob/list
         if self._engine.is_archiving_phase():
             allowed = {"read", "write", "glob", "list", "grep"}
-            return [
-                t for t in raw
-                if t.get("function", {}).get("name", "") in allowed
-            ]
+            return [t for t in raw if t.get("function", {}).get("name", "") in allowed]
 
         # 规划阶段：仅允许读操作和写笔记
         if self._engine and self._engine.is_planning_phase():
             allowed = {"read", "write", "scan_repo", "glob", "grep", "list"}
-            return [
-                t for t in raw
-                if t.get("function", {}).get("name", "") in allowed
-            ]
+            return [t for t in raw if t.get("function", {}).get("name", "") in allowed]
 
         return filter_interactive_tools(raw, PermissionStrategy.AUTO_ALLOW)
 
     def configure(
-            self,
-            config: AutoLoopConfig,
-            model_config_getter: Callable[[], Dict],
-            tool_executor: Any,
-            tools_schema: List[Dict],
-            agent_system_prompt_getter: Callable[[str], str],
-            agent_manager: Any = None,
-            permission_check_callback: Callable[[str, dict], str] = None,
-            permission_cache: Any = None,
-            compactor: Any = None,
+        self,
+        config: AutoLoopConfig,
+        model_config_getter: Callable[[], Dict],
+        tool_executor: Any,
+        tools_schema: List[Dict],
+        agent_system_prompt_getter: Callable[[str], str],
+        agent_manager: Any = None,
     ):
         """配置 worker（应在 start() 前调用）"""
         self._config = config
@@ -139,9 +128,6 @@ class AutoLoopWorker(QThread):
         self._tools_schema = tools_schema
         self._all_tools_schema = tools_schema  # 保存完整工具集
         self._agent_system_prompt_getter = agent_system_prompt_getter
-        self._permission_check_callback = permission_check_callback
-        self._permission_cache = permission_cache
-        self._compactor = compactor
 
         # ===== ConversationCore + AutoLoopConversationAdapter（统一执行基础设施）=====
         self._conversation_core = ConversationCore.create(
@@ -222,6 +208,7 @@ class AutoLoopWorker(QThread):
         sm = self._conversation_core.session_manager
         if not sm.get_current_session():
             from app.core.chat_session import ChatSession
+
             auto_loop_session = ChatSession(name="AutoLoop")
             sm.sessions.append(auto_loop_session)
             sm.current_index = 0
@@ -275,9 +262,7 @@ class AutoLoopWorker(QThread):
                     if msg.get("role") == "assistant":
                         content = msg.get("content", "")
                         if isinstance(content, list):
-                            content = "".join(
-                                b.get("text", "") for b in content if b.get("type") == "text"
-                            )
+                            content = "".join(b.get("text", "") for b in content if b.get("type") == "text")
                         if content:
                             response = content
                             self.log_signal.emit("⚠️ [FALLBACK] 从消息历史恢复响应文本")
@@ -293,9 +278,7 @@ class AutoLoopWorker(QThread):
             # 注意：归档阶段跳过接力文档检查，避免不必要的 LLM 对话干扰归档流程
             relay_ok = self._check_relay_doc_updated(iteration)
             self.log_signal.emit(
-                f"📋 [RELAY_CHECK] iter={iteration} "
-                f"relay_ok={relay_ok} "
-                f"is_planning={self._engine.is_planning_phase()}"
+                f"📋 [RELAY_CHECK] iter={iteration} relay_ok={relay_ok} is_planning={self._engine.is_planning_phase()}"
             )
             if not self._engine.is_archiving_phase() and not relay_ok:
                 self.log_signal.emit(
@@ -478,6 +461,7 @@ class AutoLoopWorker(QThread):
 
             # 写入 META.md
             import time
+
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             total_steps = self._engine.total_steps
             verified = self._engine.get_verified_steps()
@@ -554,7 +538,7 @@ class AutoLoopWorker(QThread):
             # → adapter.wait_for_completion 永久阻塞
             # → 5 秒兜底清理时触发 "QThread: Destroyed while thread is still running"。
             if not worker:
-                worker = getattr(self._conversation_executor, '_finalize_worker', None)
+                worker = getattr(self._conversation_executor, "_finalize_worker", None)
             if worker:
                 # 阶段 1：QEventLoop 等待 worker 完成（同时处理实时日志信号）
                 loop = QEventLoop()
@@ -577,7 +561,9 @@ class AutoLoopWorker(QThread):
                 # 强制重置 _is_streaming（防御信号处理顺序导致 _on_worker_finished 未被调用）
                 self._conversation_executor._on_worker_finished(worker)
                 QCoreApplication.processEvents()
-                logger.info(f"[AutoLoop] after wait: worker.isRunning()={worker.isRunning() if worker else 'N/A'}, _is_streaming={self._conversation_executor._is_streaming}")
+                logger.info(
+                    f"[AutoLoop] after wait: worker.isRunning()={worker.isRunning() if worker else 'N/A'}, _is_streaming={self._conversation_executor._is_streaming}"
+                )
             else:
                 self._adapter.wait_for_completion(timeout=300)
 
@@ -604,8 +590,9 @@ class AutoLoopWorker(QThread):
     #  强制接力文档更新（提取公用方法）
     # ================================================================
 
-    def _execute_force_relay_doc_update(self, task_prompt: str, iteration: int,
-                                        llm_config: Dict, current_tools: List[Dict]) -> bool:
+    def _execute_force_relay_doc_update(
+        self, task_prompt: str, iteration: int, llm_config: Dict, current_tools: List[Dict]
+    ) -> bool:
         """执行强制接力文档更新
 
         当检测到接力文档未更新时，注入强制更新提示并再次调用 LLM。
@@ -673,8 +660,8 @@ class AutoLoopWorker(QThread):
         planning_done = self._engine.check_planning_complete(response, notes)
 
         # 🔍 诊断日志（始终输出）
-        resp_tail = (response[-200:] if response else "(空)").replace('\n', '\\n')
-        notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
+        resp_tail = (response[-200:] if response else "(空)").replace("\n", "\\n")
+        notes_preview = notes[:100].replace("\n", " ") if notes else "(空)"
         self.log_signal.emit(
             f"📋 [PLANNING_DIAG] iter={self._engine.iteration} "
             f"planning_done={planning_done} "
@@ -692,7 +679,7 @@ class AutoLoopWorker(QThread):
         self._engine.on_planning_attempt()
 
         # 诊断日志
-        notes_preview = notes[:100].replace('\n', ' ') if notes else "(空)"
+        notes_preview = notes[:100].replace("\n", " ") if notes else "(空)"
         self.log_signal.emit(
             f"📋 [诊断] iteration={self._engine.iteration} phase=planning "
             f"planning_count={self._engine._planning_count} "
@@ -743,7 +730,11 @@ class AutoLoopWorker(QThread):
                 self._engine.set_step_progress(total_steps, total_steps)
                 self.log_signal.emit(f"✅ 所有 {total_steps} 个步骤已验证完成，等待 MISSION_COMPLETE 信号")
             else:
-                display_step = current_step if (self._engine.current_step == 0 or self._engine.current_step <= max_verified) else self._engine.current_step
+                display_step = (
+                    current_step
+                    if (self._engine.current_step == 0 or self._engine.current_step <= max_verified)
+                    else self._engine.current_step
+                )
                 # 防止 display_step 超过 total_steps
                 display_step = min(display_step, total_steps + 1)
                 self._engine.set_step_progress(display_step, total_steps)
@@ -768,7 +759,11 @@ class AutoLoopWorker(QThread):
 
         # 兜底保护：如果所有步骤已验证但模型迟迟不输出完成信号，
         # 强制进入归档（避免无限循环）
-        if all_done and self._engine.get_completion_count() > 0 and self._engine.get_completion_count() >= self._engine.config.completion_threshold:
+        if (
+            all_done
+            and self._engine.get_completion_count() > 0
+            and self._engine.get_completion_count() >= self._engine.config.completion_threshold
+        ):
             self._enter_archiving_phase()
             return True
 
@@ -807,7 +802,9 @@ class AutoLoopWorker(QThread):
         self._engine.sync_verified_steps_from_notes(notes)
         self._engine.set_step_progress(current_step, total)
         self.log_signal.emit(f"✅ 规划完成！共 {total} 个步骤，{max_verified} 已完成")
-        self.log_signal.emit(f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}")
+        self.log_signal.emit(
+            f"📋 开始执行步骤 {current_step}/{total}: {self._get_next_step_preview(notes, current_step)}"
+        )
         self.phase_changed.emit("executing")
         self._emit_progress()
 
@@ -837,7 +834,11 @@ class AutoLoopWorker(QThread):
     def _write_round_log(self, response: str, iteration: int):
         """写入本轮日志到独立文件"""
         timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        phase = "ARCHIVING" if self._engine.is_archiving_phase() else ("PLANNING" if self._engine.is_planning_phase() else "EXECUTING")
+        phase = (
+            "ARCHIVING"
+            if self._engine.is_archiving_phase()
+            else ("PLANNING" if self._engine.is_planning_phase() else "EXECUTING")
+        )
         messages_section = self._format_messages_for_log(self._round_messages) if self._round_messages else response
         log_content = f"""# AutoLoop 轮次 {iteration} 日志
 
@@ -881,10 +882,10 @@ class AutoLoopWorker(QThread):
 
         # 日志转发 — 流式内容预览（带节流，避免高频信号压垮 UI）
         # 分离 content/reasoning 两个独立 buffer，避免内容混淆
-        _stream_content_buf = [""]     # 主内容缓存
-        _stream_reasoning_buf = [""]   # 推理内容缓存
-        _last_emit = [0.0]             # 上次发射时间
-        _THROTTLE = 0.3                # 节流间隔（秒）
+        _stream_content_buf = [""]  # 主内容缓存
+        _stream_reasoning_buf = [""]  # 推理内容缓存
+        _last_emit = [0.0]  # 上次发射时间
+        _THROTTLE = 0.3  # 节流间隔（秒）
 
         def _on_content(piece: str):
             _stream_content_buf[0] += piece
@@ -908,15 +909,15 @@ class AutoLoopWorker(QThread):
         # 工具参数流式更新（实时显示正在接收的参数）
         # 保留原始回调（更新浮动工具窗口 UI），再叠加日志输出
         _orig_tool_args_updated = callbacks.get("tool_args_updated")
+
         def _on_tool_args_updated(i, n, a):
             if _orig_tool_args_updated:
                 _orig_tool_args_updated(i, n, a)
             self.log_update.emit(f"🔧 {n} {self._summarize_args(a)}")
+
         callbacks["tool_args_updated"] = _on_tool_args_updated
         # 工具调用最终确定（完整参数→覆盖流式预览）
-        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(
-            f"🔧 {n} {self._summarize_args(a)}"
-        )
+        callbacks["tool_call_started"] = lambda i, n, a, r: self.log_signal.emit(f"🔧 {n} {self._summarize_args(a)}")
         callbacks["tool_result_received"] = lambda i, n, a, r: self.log_signal.emit(
             f"✅ {n} → {self._summarize_result(r)}"
         )
@@ -925,7 +926,7 @@ class AutoLoopWorker(QThread):
         def on_messages_updated(messages: list):
             if messages:
                 self._all_messages = list(messages)
-                self._round_messages = list(messages[self._prev_message_count:])
+                self._round_messages = list(messages[self._prev_message_count :])
                 session = self._conversation_core.session_manager.get_current_session()
                 if session:
                     session.set_messages(messages, preserve_compaction=True)
@@ -948,9 +949,11 @@ class AutoLoopWorker(QThread):
         # 错误日志
         orig_error = callbacks.get("error")
         if orig_error:
+
             def on_error_wrapper(e):
                 self.log_signal.emit(f"错误: {e}")
                 orig_error(e)
+
             callbacks["error"] = on_error_wrapper
 
         return callbacks
@@ -992,9 +995,9 @@ class AutoLoopWorker(QThread):
                 "tool": f"【工具 {name or tool_call_id or ''}】",
             }.get(role, f"【{role}】")
 
-            lines.append(f"\n{'='*60}")
+            lines.append(f"\n{'=' * 60}")
             lines.append(f"{prefix}  #{i}")
-            lines.append(f"{'='*60}")
+            lines.append(f"{'=' * 60}")
 
             if content:
                 lines.append(content)
@@ -1062,9 +1065,13 @@ class AutoLoopWorker(QThread):
         """获取当前进度信息"""
         if not self._engine:
             return {
-                "iteration": 0, "max_iterations": 0,
-                "current_step": 0, "total_steps": 0,
-                "total_tokens": 0, "phase": "idle", "state": "idle",
+                "iteration": 0,
+                "max_iterations": 0,
+                "current_step": 0,
+                "total_steps": 0,
+                "total_tokens": 0,
+                "phase": "idle",
+                "state": "idle",
             }
         return self._engine.get_progress()
 

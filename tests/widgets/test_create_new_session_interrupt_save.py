@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归测试：切换项目/新建会话打断对话时，Tab 状态复位 + 会话完整保存
 
 == 问题描述 ==
@@ -174,7 +174,7 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst._session_switched = False
     inst._pending_session_hook = False
     inst._is_streaming = streaming
-    inst._is_auto_loop_running = False
+    inst._exclusive_ui_modes = set()
     inst._is_destroyed = False
     inst._topic_summary_cancelled = False
     inst._session_dirty = True  # 发送消息时已置脏

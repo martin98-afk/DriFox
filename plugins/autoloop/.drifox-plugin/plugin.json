@@ -1,0 +1,19 @@
+{
+    "icon": {
+        "light": "icons/autoloop_light.svg",
+        "dark": "icons/autoloop.svg"
+    },
+    "name": "autoloop",
+    "description": "AutoLoop 自动循环模式 — 规划→执行→归档三阶段长任务自动执行（对话引擎插件化首例，经 UI 服务门面驱动自建 ConversationCore）",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "user",
+    "components": {
+        "ui": true,
+        "agents": true
+    }
+}

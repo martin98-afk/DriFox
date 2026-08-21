@@ -4,6 +4,7 @@ AutoLoop Prompt 组合器 — 集中管理所有 prompt 模板
 
 三阶段：Planning → Executing → Archiving
 """
+
 import re
 import time
 
@@ -133,8 +134,7 @@ class AutoLoopPromptComposer:
 
     # ========== 工作流上下文 ==========
 
-    def build_workflow_context(self, iteration: int, project_path: str = "",
-                               force_update: bool = False) -> str:
+    def build_workflow_context(self, iteration: int, project_path: str = "", force_update: bool = False) -> str:
         """根据当前阶段构建工作流上下文"""
         is_planning = self._engine.is_planning_phase()
         is_archiving = self._engine.is_archiving_phase()
@@ -147,34 +147,40 @@ class AutoLoopPromptComposer:
             lines = self._executing_context()
 
         if force_update:
-            lines.extend([
-                "",
-                "## ⚠️ 【强制】接力文档未更新！",
-                "",
-                "你必须使用 `write` 工具更新 `SHARED_TASK_NOTES.md` 后才能继续。",
-                "**不更新接力文档就继续是违规行为！**",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "## ⚠️ 【强制】接力文档未更新！",
+                    "",
+                    "你必须使用 `write` 工具更新 `SHARED_TASK_NOTES.md` 后才能继续。",
+                    "**不更新接力文档就继续是违规行为！**",
+                ]
+            )
 
         if project_path:
-            lines.extend([
-                "",
-                "## Project Root Directory",
-                f"`WORKDIR`: {project_path}",
-                "所有文件操作使用相对路径：",
-                f"  - write(path='src/main.py', ...) → {project_path}/src/main.py",
-                f"  - read(path='src/main.py')    → 读取 {project_path}/src/main.py",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "## Project Root Directory",
+                    f"`WORKDIR`: {project_path}",
+                    "所有文件操作使用相对路径：",
+                    f"  - write(path='src/main.py', ...) → {project_path}/src/main.py",
+                    f"  - read(path='src/main.py')    → 读取 {project_path}/src/main.py",
+                ]
+            )
 
         if not is_planning and not is_archiving:
             notes = self._engine.read_shared_notes()
             if notes:
-                lines.extend([
-                    "",
-                    "## 当前 SHARED_TASK_NOTES.md 内容",
-                    "```",
-                    notes[:2000],
-                    "```" if len(notes) <= 2000 else "...[已截断]",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        "## 当前 SHARED_TASK_NOTES.md 内容",
+                        "```",
+                        notes[:2000],
+                        "```" if len(notes) <= 2000 else "...[已截断]",
+                    ]
+                )
 
         return "\n".join(lines)
 
@@ -225,13 +231,11 @@ class AutoLoopPromptComposer:
 
     # ========== 组合完整消息 ==========
 
-    def build_messages(self, task_prompt: str, iteration: int,
-                       system_prompt: str, project_path: str = "",
-                       force_update: bool = False) -> list:
+    def build_messages(
+        self, task_prompt: str, iteration: int, system_prompt: str, project_path: str = "", force_update: bool = False
+    ) -> list:
         """构建本轮对话消息"""
-        workflow_context = self.build_workflow_context(
-            iteration, project_path, force_update
-        )
+        workflow_context = self.build_workflow_context(iteration, project_path, force_update)
 
         stage_constraint = self.get_stage_constraint()
         if stage_constraint:
@@ -339,10 +343,12 @@ class AutoLoopPromptComposer:
         # 检查是否有归档文件，有则作为参考注入
         archive_notes = self._engine.read_archive_notes()
         if archive_notes:
-            lines.extend([
-                "",
-                ARCHIVE_REFERENCE_CONTEXT.format(archive_notes=archive_notes[:2000]),
-            ])
+            lines.extend(
+                [
+                    "",
+                    ARCHIVE_REFERENCE_CONTEXT.format(archive_notes=archive_notes[:2000]),
+                ]
+            )
 
         return lines
 
@@ -396,8 +402,8 @@ class AutoLoopPromptComposer:
             # 2. - [x] [步骤 N] <描述> | <文件> | <验证>  （已勾选 + 嵌套方括号）
             step_text = None
             patterns = [
-                rf'- .*?\[步骤\s*{current_step}\].*$',
-                rf'- \[.*?\]\s*步骤\s*{current_step}.*$',
+                rf"- .*?\[步骤\s*{current_step}\].*$",
+                rf"- \[.*?\]\s*步骤\s*{current_step}.*$",
             ]
             for p in patterns:
                 m = re.search(p, notes, re.MULTILINE)

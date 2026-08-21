@@ -46,7 +46,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.card_widget import CardSeparator
 from qfluentwidgets.components.widgets.flyout import IconWidget
 
-from app.core.engines.auto_loop import AutoLoopConfig
+from autoloop_core.config import AutoLoopConfig
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 
@@ -68,10 +68,30 @@ class AutoLoopConfigCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("autoLoopConfigCard")
+        self._ctx_provider = None
+        self._last_ctx = {}
         # 注意：先 _build_ui 创建控件，再 _refresh_theme_style 刷新样式
         # 确保 _refresh_component_styles 访问控件时它们已存在
         self._build_ui()
         self._refresh_theme_style()
+
+    # ── 插件上下文（拉模型，showEvent 时取最新）──
+
+    def set_context_provider(self, provider):
+        self._ctx_provider = provider
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._ctx_provider is not None:
+            try:
+                self._last_ctx = self._ctx_provider() or {}
+                # 项目路径预填（未手动填过时）
+                if not self._path_edit.text().strip():
+                    root = self._last_ctx.get("project_root") or ""
+                    if root:
+                        self._path_edit.setText(root)
+            except Exception:
+                pass
 
     def refresh_font_size(self):
         """刷新字体大小配置"""
@@ -285,7 +305,15 @@ class AutoLoopConfigCard(QFrame):
             project_path=self._path_edit.text().strip(),
             task_prompt=self._prompt_edit.toPlainText().strip(),
         )
-        self.startRequested.emit(config)
+        # 刷新最新上下文后交给控制器启动
+        if self._ctx_provider is not None:
+            try:
+                self._last_ctx = self._ctx_provider() or {}
+            except Exception:
+                pass
+        from .controller import AutoLoopController
+
+        AutoLoopController.get_instance().request_start(config, self._last_ctx)
 
     def _browse_folder(self):
         """打开文件夹选择对话框"""
@@ -350,6 +378,7 @@ class AutoLoopRunningCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("autoLoopRunningCard")
+        self._ctx_provider = None
 
         # 彩虹边框动画 — 60 帧/3秒 (≈20fps)，平衡流畅度与避免无谓重绘
         self._hue_offset = 0
@@ -384,6 +413,37 @@ class AutoLoopRunningCard(QFrame):
         # 确保 _refresh_component_styles 访问控件时它们已存在
         self._build_ui()
         self._refresh_theme_style()
+
+    # ── 插件上下文（拉模型，showEvent 时绑定控制器）──
+
+    def set_context_provider(self, provider):
+        self._ctx_provider = provider
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._ctx_provider is None:
+            return
+        try:
+            ctx = self._ctx_provider() or {}
+        except Exception:
+            ctx = {}
+        window_id = str(ctx.get("window_id") or "")
+        if not window_id:
+            return
+        from .controller import AutoLoopController
+
+        controller = AutoLoopController.get_instance()
+        controller.bind_running_card(self, ctx)
+        # 停止/归档按钮 → 控制器（幂等：断开旧连接再连）
+        for sig, slot in (
+            (self.stopRequested, lambda wid=window_id: controller.request_stop(wid)),
+            (self.archiveRequested, lambda wid=window_id: controller.request_archive(wid)),
+        ):
+            try:
+                sig.disconnect()
+            except TypeError, RuntimeError:
+                pass
+            sig.connect(slot)
 
     def _refresh_theme_style(self):
         """刷新主题色，响应全局主题切换"""

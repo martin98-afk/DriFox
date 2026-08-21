@@ -2,12 +2,14 @@
 """
 AutoLoop 配置数据类
 """
+
 from dataclasses import dataclass
 
 
 @dataclass
 class AutoLoopConfig:
     """AutoLoop 循环配置"""
+
     max_iterations: int = 50
     max_tokens: int = 5000000
     max_duration_minutes: int = 120
