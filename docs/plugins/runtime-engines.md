@@ -113,6 +113,35 @@ def register(registry):
 
 ---
 
+## 4.5 通过 `services` 获取对话执行栈（替代 deep import）
+
+引擎 / 长任务插件拿到 `ctx["services"]` 后，可以（且推荐）经
+`services["conversation_stack"]()` 拿到对话执行栈工厂，按契约产 `ConversationCore`
+/ `ConversationExecutor`，不再 `from app.core.conversation import ...` 做模块级
+deep import：
+
+```python
+# plugins/<your-plugin>/engines/worker.py
+stack = tool_ctx["services"]["conversation_stack"]()
+core = stack.create_core(policy=..., tools=..., config=...)
+executor = stack.create_executor(core=core, permission=...)
+```
+
+契约声明见 `app/plugins/contracts/conversation_stack.py`（`ConversationStackFactory`
+Protocol，`create_core` / `create_executor` 签名），`tests/plugins/test_conversation_stack_contract.py`
+防签名漂移。`EngineHost` Protocol（`app/plugins/contracts/engine_host.py`）的
+`conversation_stack()` 方法已声明，插件作者以 Protocol 为准做静态类型检查。
+
+**为什么走 services**：避免插件 `import app.core.conversation.*` 把主程序内部
+模块绑死——主程序对话栈重构 / 内部类迁移时插件不必跟改；同时便于主程序统一
+注入（如未来按窗口 / SessionLease 限定栈实例）。
+
+**autoloop 已消费**：详见 `drifox-plugins2/plugins/autoloop/autoloop_core/worker.py`
+与 `adapter.py`，撤掉了 `ConversationCore` / `ConversationExecutor` 两类模块级
+import，改为栈工厂调用。
+
+---
+
 ## 5. 高级用法
 
 ### 5.1 完全自定义工厂
@@ -234,6 +263,11 @@ def register(registry):
 | `app/widgets/cards/settings/engine_slot_card.py` | 引擎槽位选择卡（持久化 Settings.engine_slot_<slot>） |
 | `app/utils/config.py` | `Settings.engine_slot_ui` / `engine_slot_gateway` 两个 `ConfigItem` |
 | `app/plugins/kernel.py` | `KNOWN_COMPONENTS` / `COMPONENT_ORDER` 含 `engines` 登记 |
+| `app/plugins/contracts/engine_host.py` | `EngineHost` Protocol（`ctx["services"]` 14 键的语义锚点，含 `conversation_stack`） |
+| `app/plugins/contracts/conversation_stack.py` | `ConversationStackFactory` Protocol（`create_core` / `create_executor`） |
+| `app/main_widget.py` | `_build_ui_services()` 注入 services dict（含 `conversation_stack` 入口） |
 | `tests/plugins/test_e2e_engine_plugin.py` | 端到端测试（扫描/替换/安全网/卸载） |
 | `tests/plugins/test_engine_registry.py` | 注册表单测（register/unregister/create_engine_for_slot） |
+| `tests/plugins/test_engine_host_contract.py` | `EngineHost` 契约守卫（含 `conversation_stack` 服务满足 `ConversationStackFactory`） |
+| `tests/plugins/test_conversation_stack_contract.py` | `ConversationStackFactory` 契约单测（防签名漂移） |
 | `tests/widgets/test_engine_slot_card.py` | 选择卡单测（行渲染 + 选择持久化） |
