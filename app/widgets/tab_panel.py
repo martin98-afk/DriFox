@@ -1184,6 +1184,10 @@ class TabPanel(QWidget):
             # 兼容映射：插件已注册独立 sidebar 项 → 跳过其卡片派生（sidebar 优先）
             if info.plugin_name in sidebar_plugin_names:
                 continue
+            # 声明 hide_sidebar 的卡片不进侧边栏（如 autoloop 的 config/running
+            # 仅经输入按钮/控制器弹出，避免侧边栏冗余条目）
+            if info.metadata.get("hide_sidebar"):
+                continue
             try:
                 title = (info.title or "").strip() or card_id
                 plugin_info = pm.get_plugin(info.plugin_name)

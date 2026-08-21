@@ -29,7 +29,7 @@ def register_ui(registry):
 
     from .cards import AutoLoopConfigCard, AutoLoopRunningCard
 
-    # 配置卡（full 覆盖对话区，与系统配置卡一致）
+    # 配置卡（full 覆盖对话区，hide_sidebar：不进侧边栏，仅经输入按钮/命令弹出）
     registry.register_floating_card(
         plugin_name="autoloop",
         card_id="config",
@@ -37,8 +37,9 @@ def register_ui(registry):
         container="full",
         title="AutoLoop 配置",
         default_visible=False,
+        metadata={"hide_sidebar": True},
     )
-    # 运行卡（full 覆盖，运行期独占）
+    # 运行卡（full 覆盖，hide_sidebar：仅由控制器在启动时弹出）
     registry.register_floating_card(
         plugin_name="autoloop",
         card_id="running",
@@ -46,6 +47,7 @@ def register_ui(registry):
         container="full",
         title="AutoLoop 运行",
         default_visible=False,
+        metadata={"hide_sidebar": True},
     )
     # 输入区按钮（替代原工具栏 auto_loop_btn）
     _icon = _PLUGIN_ROOT / "icons" / "autoloop.svg"

@@ -83,7 +83,8 @@ class FloatingCardInfo:
                   "full" 表示完整覆盖对话区（与系统配置卡片一致，走覆盖层）
         title: 卡片标题（用于命令列表显示）
         default_visible: 默认是否可见
-        metadata: 附加元数据
+        metadata: 附加元数据；支持 hide_sidebar=True（卡片不进 Tab 侧边栏
+                  插件列表，仅经命令/输入按钮/代码弹出——如 autoloop 双卡）
         context_provider: 可选，卡片专属上下文提供者。不传则使用全局 context_provider。
     """
 
