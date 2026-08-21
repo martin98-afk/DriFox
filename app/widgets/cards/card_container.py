@@ -30,7 +30,7 @@ class CardContainer(QWidget):
     # （实测 file-tree=206、context=260），且 file-tree 在 dock 内 sizeHint=300、
     # context-usage-stats 硬编码 setMinimumWidth(300)，固定下限 300 对齐
     # 这些真实卡片的内容下限，避免窗口缩小时卡片被压扁/裁切。
-    _DOCK_MIN_H = 300  # 横向停靠区（LEFT/RIGHT）最小宽
+    _DOCK_MIN_H = 40  # 横向停靠区（LEFT/RIGHT）最小宽（每张卡片自身 minimumWidth 仍受尊重）
     _DOCK_MIN_V = 80  # 纵向停靠区（TOP/BOTTOM in splitter）最小高
     # 纵向停靠区（TOP/BOTTOM）首次展开时强制占对话区（vdock splitter）的
     # 最小比例，避免卡片天然尺寸过小（内容未测量 / 空卡片 / 异步加载）时
@@ -544,7 +544,7 @@ class CardContainer(QWidget):
             self._expand_animation.stop()
             try:
                 self._expand_animation.finished.disconnect()
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
         # 解除轴向最小尺寸限制，确保折叠动画能跑到 0
@@ -743,7 +743,7 @@ class CardContainer(QWidget):
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
             anim.finished.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
 
         anim.setStartValue(start_h)
@@ -758,7 +758,7 @@ class CardContainer(QWidget):
                     try:
                         if self._expand_animation is not None:
                             self._expand_animation.finished.disconnect(_on_done)
-                    except (TypeError, RuntimeError):
+                    except TypeError, RuntimeError:
                         pass
 
             anim.finished.connect(_on_done)
