@@ -18925,6 +18925,21 @@ class OpenAIChatToolWindow(ToolWindow):
             # P2-B：prev_project = project_name（归档前项目），此时
             # _current_project 已切到默认项目，不能靠函数内兜底取值。
             self._broadcast_team_project(default_project, project_name)
+            # Tab 模式下同步更新 Tab 项目图标（对齐 _on_project_selected /
+            # _on_new_project_created：归档当前项目切回默认项目后必须显式刷新
+            # 左侧 tab_panel 的项目 icon / 团队框 header icon，否则停留在被
+            # 归档项目——团队模式下 _broadcast_team_project 只同步其他成员窗口，
+            # 发送方自身的团队框 header icon 依赖此处刷新）
+            if self.cfg.enable_tab_manager.value:
+                try:
+                    from app.widgets.tab_manager_window import TabManagerWindow, _update_tab_icon
+
+                    tm = TabManagerWindow.get_instance()
+                    if tm and self in tm._windows:
+                        idx = tm._windows.index(self)
+                        _update_tab_icon(idx, default_project)
+                except Exception:
+                    pass
         else:
             self._current_history_project = self._current_project
             self._notify_history_data_changed()
