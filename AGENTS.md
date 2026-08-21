@@ -34,7 +34,7 @@ git push origin dev
 ## 4. 插件化硬约束
 **工具**：`plugins/system/tools/<模块>.py` 用 `register(registry)` 注册(schema+impl+danger+icon+cn_name+group+description+aliases)。逻辑自包含——纯逻辑工具独立实现；平台工具经 `tool_ctx["services"]`(todo/terminal/subagent/team/lsp/codegraph/mcp/ask_user/skills/gitee/diagnostics) 调能力，不暴露 BuiltinTools。图标 `<插件>/tools/icons/*.svg`(深)+`icons_light/*.svg`(浅)，data URI 加载。registry 为单一数据源(驱动 LLM schema/图标/分组/ToolNameMapper 别名)；第三方同理放 `plugins/<name>/tools/*.py`，增删改热生效。
 
-**配置契约 E1**：插件在 `.drifox-plugin/plugin.json` 声明 `config_schema`(title+fields[{key,label,type,default,env,placeholder,description}])；主程序自动渲染设置卡(经 `register_settings_card`)+统一存储 `<app_data_dir>/plugins/<plugin>/config.json`，三级链 环境变量→存储→默认。代码内 `PluginConfigStore().get(plugin, key)` 读取。复杂 UI 仍可手写设置卡(自动卡 card_id=`<plugin>-config`)。
+**配置契约 E1**：插件在 `.drifox-plugin/plugin.json` 声明 `config_schema`(title+fields[{key,label,type,default,env,placeholder,description}])；type 支持 `text`/`password`/`bool`/`select`(需 options)/`number`(可选 min/max/step)/`textarea`(可选 rows)，主程序自动渲染设置卡(经 `register_settings_card`)+统一存储 `<app_data_dir>/plugins/<plugin>/config.json`，三级链 环境变量→存储→默认。代码内 `PluginConfigStore().get(plugin, key)` 读取。复杂 UI 仍可手写设置卡(自动卡 card_id=`<plugin>-config`)。
 
 **运行时组件**：`model_adapters/*.py`、`loop_policies/*.py`、`storages/*.py`、`serializers/*.py` 各自 `register(registry)`，含 `id`+策略方法，user 根覆盖 system 根。激活：`LoopPolicyRegistry.get_instance().set_active(<id>)`。序列化单入口 `MessageSerializer.serialize(messages, ctx)`(按 `ctx.flags.use_responses_api` 路由，默认 openai)。协议家族(openai/gemini/deepseek)共享 `_detectors.py`，`resolve` 取最高分。存储经 `ChatBackend.get_session_storage()` 门面，能力用 `isinstance` 探测(SessionTitle/Counts/InputHistoryCapability)。
 
