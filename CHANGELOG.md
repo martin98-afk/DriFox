@@ -114,6 +114,17 @@ All notable changes to this project will be documented in this file.
 
 - **引擎插件端到端测试** (`tests/plugins/`): 引擎插件 e2e 测试覆盖扫描/替换/安全网回退/卸载场景
 
+#### 📦 附加变更（v0.5.3 二次重发补丁 | 自上一 tag d488ea4d 之后 4 个新提交）
+
+> v0.5.3 上一 tag（`d488ea4d` "docs: add v0.5.3 re-release changelog"）后追加的 bug 修复：message_card 编辑工具结果后补全框、tab_panel 手动折叠/归档后 icon 刷新、card_container 窗口缩放后 dock 记忆。
+
+##### 🐛 问题修复 (Bug Fixes, 4)
+
+- **编辑工具结果后补全框消失** (`app/widgets/message_card.py` + `app/main_widget.py`): 编辑工具结果后确保 lazy markdown 回调被重置，防止补全框消失（新增 `tests/widgets/test_message_card_edit_tool_stop_swallow.py` 回归）
+- **手动折叠后拉宽窗口自动退出折叠** (`app/widgets/tab_panel.py` + `app/widgets/tab_manager_window.py`): 修复手动折叠（点按钮）后拉宽窗口/面板自动退出折叠模式的问题（新增 `tests/widgets/test_tab_manager_window.py` 回归）
+- **归档项目后左侧 tab 项目 icon 未刷新** (`app/main_widget.py`): 归档当前项目后同步刷新左侧 tab 项目 icon（新增 `tests/widgets/test_tab_project_icon_new_project.py` 回归）
+- **窗口缩放后 dock 记忆丢失** (`app/widgets/cards/card_container.py`): splitter 几何变化补恢复记忆尺寸，修复窗口缩放后 dock 记忆丢失（新增 `tests/widgets/test_card_container_dock_card_size_memory.py` 回归）
+
 ## [v0.5.2] - 2026-08-17
 
 自上一版本以来的变更 | 提交数：50 · 文件变更：373 · +19359/-10585 | 贡献者：dingma, mading
