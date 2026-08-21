@@ -837,8 +837,10 @@ class TabManagerWindow(QWidget):
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
 
-        仅对"被外部挤压自动折叠"（_collapsed_by_squeeze=True）生效；
-        用户手动折叠/拖拽折叠（标记已清除）不自动展开，尊重手动意图。
+        窗口主动拉宽（growth_required=True）不受挤压标记限制：用户拉宽窗口
+        即视为想要展开，点击折叠按钮/拖窄把手手动折叠后拉宽也退出折叠。
+        仅 relayout/关闭卡片恢复（growth_required=False）要求挤压标记，
+        避免把用户手动折叠的面板被动撑开（尊重手动意图）。
 
         触发点：窗口 resize 结束、overlay 卡片关闭、折叠动画结束。
         空间判定（两条件都满足才展开）：
@@ -857,7 +859,12 @@ class TabManagerWindow(QWidget):
         if not hasattr(self, "_tab_panel"):
             return
         panel = self._tab_panel
-        if not panel._collapsed or not panel._collapsed_by_squeeze:
+        if not panel._collapsed:
+            return
+        # 窗口主动拉宽(growth_required=True)不受 _collapsed_by_squeeze 限制：
+        # 手动折叠(点按钮/拖窄把手)后用户拉宽窗口也应退出折叠。仅 relayout/
+        # 关闭卡片恢复(growth_required=False)要求挤压标记，避免被动撑开。
+        if not growth_required and not panel._collapsed_by_squeeze:
             return
         if panel._animating:
             # 动画中：延迟重试一次（等动画结束，覆盖快速开关卡片的时序缺口）

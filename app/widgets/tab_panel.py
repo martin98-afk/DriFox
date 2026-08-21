@@ -733,7 +733,15 @@ class UIPluginRow(QFrame):
     clicked = pyqtSignal()
     positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
 
-    def __init__(self, title: str, icon: Optional[QIcon] = None, parent=None, plugin_name: str = "", card_id: str = "", enable_position_menu: bool = True):
+    def __init__(
+        self,
+        title: str,
+        icon: Optional[QIcon] = None,
+        parent=None,
+        plugin_name: str = "",
+        card_id: str = "",
+        enable_position_menu: bool = True,
+    ):
         super().__init__(parent)
         self._title = title  # 存储标题，图标 tooltip 使用（侧边栏收起时只剩图标）
         self._plugin_name = plugin_name  # 存储插件名，主题刷新时重新获取图标
@@ -1125,17 +1133,10 @@ class TabPanel(QWidget):
             return
         # 拖宽自动展开（收起态 → 展开态）：阈值高于折叠阈值 10px 形成滞回区，
         # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹。
-        # ★ 守卫：仅"被动挤压折叠"（_collapsed_by_squeeze=True）允许布局恢复
-        # 自动展开——如关闭卡片/窗口拉宽后 splitter 把面板拉回原宽。手动折叠
-        # （按钮/拖把手，标记为 False）时布局恢复拉宽不得自动展开（尊重手动
-        # 意图）；手动拖把手拉开由 TabManagerWindow.splitterMoved 显式处理
-        # （splitterMoved 晚于 resizeEvent 触发，避免时序竞态）。
-        if (
-            self._collapsed
-            and not self._animating
-            and self._collapsed_by_squeeze
-            and self.width() >= self._auto_collapse_width + 10
-        ):
+        # 不区分折叠来源（手动/挤压）：任何收起态下拉宽超过滞回区即退出折叠，
+        # 与窗口拉宽路径(_maybe_auto_expand_after_squeeze)行为一致——用户把
+        # 面板/窗口拉宽即视为想要展开。手动拖把手拉开由 splitterMoved 显式处理。
+        if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width + 10:
             self._collapsed = False
             self._collapsed_by_squeeze = False
             self._update_toggle_button()
@@ -2402,9 +2403,7 @@ class TabPanel(QWidget):
                     except Exception:
                         enabled = True
                 action.setEnabled(enabled)
-                action.triggered.connect(
-                    lambda checked=False, i=info: self._run_plugin_tab_action(i, context)
-                )
+                action.triggered.connect(lambda checked=False, i=info: self._run_plugin_tab_action(i, context))
             except Exception as e:
                 logger.warning(f"[TabPanel] 插件菜单项 {info.action_id} 注入失败：{e}")
 

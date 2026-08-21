@@ -211,3 +211,59 @@ class TestChatWrapperWheelForward:
         )
         handled = tm.eventFilter(label, ev)
         assert handled is False
+
+
+class TestSidebarAutoExpandAfterSqueeze:
+    """回归：折叠态拉宽窗口应退出折叠（含手动按钮折叠来源）
+
+    原 bug：手动拖窄自动折叠可退出，但点击折叠按钮(_collapsed_by_squeeze=False)
+    后拉宽退不出——窗口拉宽路径(_maybe_auto_expand_after_squeeze,
+    growth_required=True) 的 _collapsed_by_squeeze 守卫把手动折叠挡掉。
+    """
+
+    def test_button_collapse_then_window_widen_expands(self, qtbot):
+        """点击折叠按钮后主动拉宽窗口应退出折叠（修复核心场景）"""
+        from unittest.mock import MagicMock, patch
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        panel = tm._tab_panel
+
+        # 模拟点击折叠按钮：手动折叠，_collapsed_by_squeeze=False
+        panel._collapsed = True
+        panel._collapsed_by_squeeze = False
+        panel._animating = False
+
+        # 折叠时窗口总宽(base)；窗口主动拉宽后 splitter 总宽增至 1300
+        # (>= base + _AUTO_EXPAND_GROWTH=200)。用 mock 隔离真实 splitter
+        # 尺寸约束，聚焦验证展开判定逻辑。
+        tm._squeeze_total_width = 1060
+        tm._splitter.sizes = MagicMock(return_value=[60, 1240])
+
+        with patch.object(tm, "_on_sidebar_toggled") as m_toggle:
+            tm._maybe_auto_expand_after_squeeze(growth_required=True)
+            qtbot.wait(20)
+
+        assert panel._collapsed is False, "点击折叠按钮后拉宽窗口应自动退出折叠"
+        m_toggle.assert_called_once_with(False)
+
+    def test_button_collapse_then_overlay_close_keeps_collapsed(self, qtbot):
+        """手动折叠 + 关闭卡片 relayout(growth_required=False) 不应被动撑开
+
+        验证修复未破坏"尊重手动折叠意图"：仅窗口主动拉宽(growth_required=True)
+        才退出，relayout/关闭卡片恢复仍保持折叠。
+        """
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        panel = tm._tab_panel
+
+        # 模拟点击折叠按钮：手动折叠，_collapsed_by_squeeze=False
+        panel._collapsed = True
+        panel._collapsed_by_squeeze = False
+        panel._animating = False
+        tm._squeeze_total_width = 1300  # 窗口总宽未变
+
+        # 关闭卡片：只 relayout，窗口总宽不变 → growth_required=False
+        tm._maybe_auto_expand_after_squeeze(growth_required=False)
+
+        assert panel._collapsed is True, "关闭卡片恢复不应被动撑开手动折叠"
