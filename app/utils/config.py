@@ -407,10 +407,6 @@ class Settings(QConfig):
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))
 
-    # ========== 对话引擎槽位选择（Task 8：UI 先行；激活源过滤消费 TODO 留给下版） ==========
-    engine_slot_ui = ConfigItem("Engine", "SlotUI", "")
-    engine_slot_gateway = ConfigItem("Engine", "SlotGateway", "")
-
     # ========== MCP 服务器配置 ==========
     mcp_servers = ConfigItem("MCP", "Servers", [], ListDictValidator())
     mcp_enabled = ConfigItem("MCP", "Enabled", True, BoolValidator())

@@ -205,22 +205,17 @@ def register(registry):
 
 ---
 
-## 7. 引擎槽位选择卡
+## 7. 引擎槽位选择（预留，暂无 UI）
 
-设置页「通用设置」section 末尾挂载 `EngineSlotCard`（`app/widgets/cards/settings/engine_slot_card.py`），
-为每个槽位提供一行 `<slot>：<下拉>`，下拉项来自 `EngineRegistry.list(slot)` 返回的
-「内置 + 各插件工厂」。用户选择后写入 `Settings.engine_slot_<slot>`（`Engine` section，
-`ConfigItem.value = str`），重启 / 重连会话后由工厂化创建入口读取并按用户选择激活源。
+按用户决策：**当前不提供设置页选择卡**，仅开放查询接口——
 
-| 槽位 | 设置键 | 来源（`register(source=...)` 时记录）|
-|---|---|---|
-| `ui` | `engine_slot_ui` | `"plugin:<name>"` 或 `"builtin"` |
-| `gateway` | `engine_slot_gateway` | `"plugin:<name>"` 或 `"builtin"` |
+- `EngineRegistry.get_source(slot) -> str`：查询槽位当前注册来源（`"plugin:<name>"` / `""` 表示内置）
+- 同槽位多插件竞争时按注册序（后者覆盖前者），无用户选择入口
 
-**消费 TODO**：当前卡片只展示+持久化，`EngineRegistry.activate_source(slot, source)`
-尚未实现（与卡片同 commit 一行 TODO 标记）。下一轮在工厂化创建入口（`backend._deferred_create_engines` /
-`IsolatedContext.create_chat_engine` / `GatewayEngine.get_instance`）读
-`Settings.engine_slot_<slot>`，对工厂按 source 过滤后再创建。
+若未来需要选择 UI：挂载 `EngineSlotCard`（已从本版移除），实现
+`activate_source(slot, source)` 激活源过滤，并在三个创建入口
+（`backend._deferred_create_engines` / `IsolatedContext.create_chat_engine` /
+`GatewayEngine.get_instance`）消费 `Settings.engine_slot_<slot>`。
 
 ---
 

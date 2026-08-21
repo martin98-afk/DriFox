@@ -356,12 +356,6 @@ class LLMSettingsCard(SystemCardFrame):
         )
         content_layout.addWidget(self.llmSoundCard)
 
-        # 对话引擎槽位选择（Task 8：UI 先行；激活源过滤消费 TODO 留给下版）
-        from app.widgets.cards.settings.engine_slot_card import EngineSlotCard
-
-        self.engineSlotCard = EngineSlotCard(self)
-        content_layout.addWidget(self.engineSlotCard)
-
         # ---- 外观样式分隔标签 ----
         self._sep_appearance_label = self._make_sep_label("外观样式")
         self._section_anchors["appearance"] = self._sep_appearance_label
