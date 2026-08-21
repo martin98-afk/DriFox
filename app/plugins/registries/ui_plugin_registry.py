@@ -660,6 +660,42 @@ class UIPluginRegistry:
         """
         self._show_floating_card(card_id, main_widget=main_widget)
 
+    def hide_floating_card_globally(self, card_id: str) -> bool:
+        """隐藏浮动卡片（公开 API — EP6 公开面，给插件调用）
+
+        插件（尤其是 ``full`` 容器卡片，如 autoloop config/running）需要从
+        自身业务逻辑隐藏卡片时，不应触碰 main_widget 私有属性
+        ``_card_manager`` / ``_window_id``，而应调用此方法。
+
+        行为：
+            - Tab 模式：经 ``_resolve_global_host()`` 取 TabManagerWindow，
+              调 ``CardManager.hide_card(card_id, host_wid)``。
+            - 回退模式：无 host 时返回 ``False``，由调用方决定后续
+              （例如 fallback 到 services["hide_card"]）。
+            - 已注册到本注册表的 card_id 才会被处理；未注册的 card_id
+              不报错，但返回 ``False`` 以便调用方判断。
+
+        Args:
+            card_id: 卡片唯一 ID（与 ``FloatingCardInfo.card_id`` 一致）
+
+        Returns:
+            True 隐藏成功（Tab host 路径）；False 不可用或卡片未注册。
+        """
+        host = self._resolve_global_host()
+        if host is None:
+            return False
+        card_manager = getattr(host, "_card_manager", None)
+        host_wid = getattr(host, "_window_id", None)
+        if card_manager is None or not host_wid:
+            return False
+        if card_id not in self._floating_cards:
+            return False
+        try:
+            card_manager.hide_card(card_id, host_wid)
+        except Exception:
+            return False
+        return True
+
     def _show_floating_card(self, card_id: str, main_widget=None) -> None:
         """显示浮动卡片
 
