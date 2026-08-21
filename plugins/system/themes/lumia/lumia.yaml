@@ -7,11 +7,11 @@ window:
 background:
   window_bg:
     image: :/icons/fox_bg.png
-    opacity: 0.04
+    opacity: 0.025
     enabled: true
   chat_list:
     image: :/icons/fox_bg.png
-    opacity: 0.04
+    opacity: 0.02
     enabled: true
 colors:
   card_bg: rgba(255, 255, 255, 242)
@@ -21,9 +21,9 @@ colors:
   border_accent: '#2563eb'
   text_primary: '#0f172a'
   text_secondary: rgba(15, 23, 42, 0.60)
-  text_muted: '#64748b'
+  text_muted: '#5b6b84'
   accent: '#2563eb'
-  accent_warm: '#d97706'
+  accent_warm: '#c2410c'
   hover_bg: rgba(37, 99, 235, 0.08)
   selected_bg: rgba(37, 99, 235, 0.18)
   capsule_bg: rgba(245, 245, 245, 220)

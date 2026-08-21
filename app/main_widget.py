@@ -9091,8 +9091,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if card.role == "welcome":
                 margin = welcome_margin
             elif card.role == "user":
-                # 用户气泡：最大宽度约容器的 78%（自适应收缩见 PlainTextViewer）
-                margin = max(120, int(viewport_width * 0.22))
+                # 用户气泡：最大宽度约容器的 94%（留少量对齐余量），自适应收缩见 PlainTextViewer
+                margin = max(24, int(viewport_width * 0.06))
             else:
                 margin = assistant_margin
 
@@ -9119,7 +9119,7 @@ class OpenAIChatToolWindow(ToolWindow):
             card = item.widget()
             try:
                 if viewport_width > 0:
-                    margin = 20 if card.role != "user" else max(120, int(viewport_width * 0.22))
+                    margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
                     card.sync_width(force=True, target_width=max(320, viewport_width - margin))
                 else:
                     card.sync_width(force=True)
@@ -9168,7 +9168,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._last_chat_viewport_width = viewport_width
         try:
             if viewport_width > 0:
-                margin = 20 if card.role != "user" else max(120, int(viewport_width * 0.22))
+                margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
                 card.sync_width(force=force, target_width=max(320, viewport_width - margin))
             else:
                 card.sync_width(force=force)

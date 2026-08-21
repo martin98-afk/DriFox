@@ -57,6 +57,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import (
     QBrush,
     QColor,
+    QFontMetrics,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -2402,6 +2403,23 @@ def _resolve_image_src(html_content: str) -> str:
     return _IMG_SRC_PATTERN.sub(_replacer, html_content)
 
 
+def _accent_rgba(accent: str, alpha: float) -> str:
+    """主题 accent hex → 指定 alpha 的 rgba() 字符串。
+
+    供消息卡 CSS 派生色（边框/微光）使用，随主题切换自动取色，
+    替代历史上按 midnight 深色主题硬编码的 rgba(100,198,255,*)。
+    """
+    h = (accent or "").strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) == 6:
+        try:
+            return f"rgba({int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}, {alpha})"
+        except ValueError:
+            pass
+    return f"rgba(100, 198, 255, {alpha})"  # 解析失败兜底：原 midnight 色
+
+
 # ======== 本地 Vendor JS 脚本（离线优先，CDN 降级） ========
 _vendor_script_tags_cache: Optional[str] = None
 
@@ -3404,6 +3422,14 @@ class CodeWebViewer(QWebEngineView):
                     --code-border: {"var(--border)" if _is_light_diff else "#2a3447"};
                     --success: #5fd18c;
                     --danger: #ff7b7b;
+                    /* 语义派生层：欢迎卡/表格等组件用，浅/深主题通吃（P0 去硬编码） */
+                    --accent-text: {theme["accent"]};
+                    --accent-soft: {theme["hover_bg"]};
+                    --accent-soft-strong: {theme["selected_bg"]};
+                    --accent-border-weak: {_accent_rgba(theme["accent"], 0.22)};
+                    --accent-glow: {_accent_rgba(theme["accent"], 0.10)};
+                    --row-alt: {"rgba(15, 23, 42, 0.03)" if _is_light else "rgba(255, 255, 255, 0.02)"};
+                    --row-hover: {"rgba(15, 23, 42, 0.05)" if _is_light else "rgba(255, 255, 255, 0.05)"};
                 }}
                 html {{
                     overflow: hidden;
@@ -3569,8 +3595,8 @@ class CodeWebViewer(QWebEngineView):
                     overflow-y: auto;
                     vertical-align: top;
                 }}
-                .table-scroll-wrapper > table tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
-                .table-scroll-wrapper > table tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
+                .table-scroll-wrapper > table tr:nth-child(even) {{ background: var(--row-alt); }}
+                .table-scroll-wrapper > table tr:hover {{ background: var(--row-hover); }}
 
                 .context-tag {{
                     display: inline-block;
@@ -3588,15 +3614,15 @@ class CodeWebViewer(QWebEngineView):
 
                 /* session 历史会话标签样式（胶囊按内容宽度自然展开） */
                 .session-tag {{
-                    background: rgba(100, 198, 255, 0.12);
-                    border-color: rgba(100, 198, 255, 0.5);
-                    color: #66c6ff;
+                    background: var(--accent-soft);
+                    border-color: var(--accent-border-weak);
+                    color: var(--accent-text);
                     margin: 4px 6px 4px 0;
                     max-width: 100%;
                 }}
                 .session-tag:hover {{
-                    background: rgba(100, 198, 255, 0.25);
-                    border-color: rgba(100, 198, 255, 0.8);
+                    background: var(--accent-soft-strong);
+                    border-color: var(--accent);
                 }}
                 /* session 时间显示在标题下方 */
                 .session-tag .session-time {{
@@ -3605,7 +3631,7 @@ class CodeWebViewer(QWebEngineView):
                     font-weight: normal;
                     opacity: 0.6;
                     margin-top: 4px;
-                    color: #88d4ff;
+                    color: var(--accent-text);
                 }}
 
                 /* 欢迎卡片历史会话：分区标题 + 卡片行列表 */
@@ -3630,9 +3656,9 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .session-header-count {{
                     font-size: {tiny_font_size}px;
-                    color: #66c6ff;
-                    background: rgba(100, 198, 255, 0.12);
-                    border: 1px solid rgba(100, 198, 255, 0.25);
+                    color: var(--accent-text);
+                    background: var(--accent-soft);
+                    border: 1px solid var(--accent-border-weak);
                     padding: 0 7px;
                     border-radius: 999px;
                     line-height: 1.7;
@@ -3653,7 +3679,7 @@ class CodeWebViewer(QWebEngineView):
                     margin: 0;
                     border-radius: 10px;
                     border: 1px solid var(--border);
-                    background: rgba(100, 198, 255, 0.05);
+                    background: var(--accent-soft);
                     font-weight: 500;
                     color: var(--text);
                     cursor: pointer;
@@ -3662,10 +3688,10 @@ class CodeWebViewer(QWebEngineView):
                     max-width: 100%;
                 }}
                 .session-item.context-tag:hover {{
-                    background: rgba(100, 198, 255, 0.12);
-                    border-color: rgba(100, 198, 255, 0.5);
+                    background: var(--accent-soft-strong);
+                    border-color: var(--accent);
                     transform: translateX(2px);
-                    box-shadow: 0 2px 10px rgba(100, 198, 255, 0.10);
+                    box-shadow: 0 2px 10px var(--accent-glow);
                 }}
                 .session-item-badge {{
                     flex: 0 0 auto;
@@ -3675,7 +3701,7 @@ class CodeWebViewer(QWebEngineView):
                     align-items: center;
                     justify-content: center;
                     border-radius: 9px;
-                    background: linear-gradient(135deg, rgba(100, 198, 255, 0.25), rgba(100, 198, 255, 0.08));
+                    background: var(--accent-soft-strong);
                     font-size: 14px;
                     line-height: 1;
                 }}
@@ -3743,7 +3769,7 @@ class CodeWebViewer(QWebEngineView):
                     margin: 0;
                     min-width: 130px;
                     max-width: 160px;
-                    border-right: 1px solid rgba(100, 198, 255, 0.2);
+                    border-right: 1px solid var(--accent-border-weak);
                     overflow-y: auto;
                     max-height: 360px;
                 }}
@@ -3755,14 +3781,14 @@ class CodeWebViewer(QWebEngineView):
                     transition: 0.15s ease;
                 }}
                 .changelog-version:hover {{
-                    background: rgba(100, 198, 255, 0.1);
+                    background: var(--accent-soft);
                 }}
                 .changelog-version.active {{
-                    background: rgba(100, 198, 255, 0.22);
+                    background: var(--accent-soft-strong);
                 }}
                 .changelog-version .ver-tag {{
                     font-weight: 600;
-                    color: #66c6ff;
+                    color: var(--accent-text);
                     font-size: {tag_font_size}px;
                 }}
                 .changelog-version .ver-date {{
@@ -3778,7 +3804,7 @@ class CodeWebViewer(QWebEngineView):
                     padding-right: 4px;
                 }}
                 .changelog-body h1, .changelog-body h2, .changelog-body h3 {{
-                    color: #66c6ff;
+                    color: var(--accent-text);
                     margin-top: 0;
                 }}
                 .changelog-body img {{ max-width: 100%; }}
@@ -3805,7 +3831,7 @@ class CodeWebViewer(QWebEngineView):
                     flex: 0 0 auto;
                     text-align: right;
                     padding-right: 12px;
-                    color: #5b6578;
+                    color: var(--text-muted);
                     border-right: 1px solid var(--code-border);
                     user-select: none; /* 关键：禁止复制行号 */
                     white-space: pre;
@@ -7422,6 +7448,10 @@ class PlainTextViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
+        # 气泡宽度自适应：未换行内容理想宽度（ChatGPT 式紧凑气泡），
+        # 由 MessageCard.sync_width 按容器宽度注入上限
+        # PyQt5 未导出 QWIDGETSIZE_MAX，16777215 即其值（未 sync 前的不限制初始态）
+        self._width_cap = 16777215
         self._init_ui()
         # 性能优化：添加 resize 防抖定时器
         self._resize_debounce_timer = QTimer(self)
@@ -7431,7 +7461,8 @@ class PlainTextViewer(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        # 底部 2：正文与时间行间距紧凑（时间行在卡片 footer，不在 viewer 内）
+        layout.setContentsMargins(8, 6, 8, 2)
         layout.setSpacing(0)
 
         self.text_edit = QTextEdit(self)
@@ -7442,6 +7473,9 @@ class PlainTextViewer(QWidget):
         self.text_edit.customContextMenuRequested.connect(self._show_context_menu)
         # 显式声明：超出可视区域时自动显示垂直滚动条
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 气泡内禁横向滚动：超宽行强制软换行（达上限自动折行，不出横向滚动条）
+        self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         self._apply_text_style()
         layout.addWidget(self.text_edit)
 
@@ -7523,8 +7557,15 @@ class PlainTextViewer(QWidget):
             self.text_edit.document().setTextWidth(vp_width)
         self._schedule_update_height()
 
+    def set_width_cap(self, cap: int):
+        """设置气泡最大宽度（由 MessageCard.sync_width 按容器宽度注入）"""
+        cap = max(60, int(cap))
+        if cap != self._width_cap:
+            self._width_cap = cap
+            self._schedule_update_height()
+
     def _update_height(self):
-        """强制 QTextEdit 重新布局后再计算高度"""
+        """宽度自适应 + 高度重算：气泡按未换行理想宽度收缩，不占满整行"""
         # 先让 QTextEdit 重新布局
         self.text_edit.update()
         self.text_edit.document().markContentsDirty(0, self.text_edit.document().characterCount())
@@ -7533,13 +7574,31 @@ class PlainTextViewer(QWidget):
         self.text_edit.ensurePolished()
 
         doc = self.text_edit.document()
-        h = int(math.ceil(doc.size().height())) + 16  # padding
+        fm = QFontMetrics(self.text_edit.font())
+
+        # ── 宽度自适应（ChatGPT 式）──
+        # 先测内容在 cap 宽下的总高度：仍超过约 3 行 → 内容多，用满上限拉宽；
+        # 短消息（≤ 2-3 行）才按最长单行收缩，避免窄气泡被迫多行换行
+        doc.setTextWidth(self._width_cap)
+        if doc.size().height() > 3.0 * fm.lineSpacing():
+            bubble_w = self._width_cap
+        else:
+            longest = max((fm.horizontalAdvance(line) for line in self._text.splitlines() or [""]), default=0)
+            bubble_w = max(80, min(longest + 32, self._width_cap))  # 最长行 + 余量
+        if self.maximumWidth() != bubble_w:
+            self.setMaximumWidth(bubble_w)
+
+        # 高度按气泡实际宽计算（viewport 在气泡收紧瞬间可能仍是旧值，不可信）
+        doc.setTextWidth(bubble_w)
+        h = int(math.ceil(doc.size().height())) + 12  # 上下边距
 
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
         h = max(40, min(h, self.MAX_HEIGHT))
 
-        if abs(self.height() - h) > 2:
-            self.setFixedHeight(h)
+        # ⚠️ 必须 setFixedSize：仅设 maximumWidth 时布局仍按 QTextEdit 的
+        # 默认 sizeHint(272px) 分配宽度，气泡实际展不开（AlignRight 下尤甚）
+        if self.width() != bubble_w or self.height() != h:
+            self.setFixedSize(bubble_w, h)
             self.contentHeightChanged.emit(h)
 
     def resizeEvent(self, event):
@@ -7979,18 +8038,24 @@ class MessageCard(SimpleCardWidget):
             )
         # 更新时间戳
         if hasattr(self, "_ts_label"):
-            self._ts_label.setStyleSheet(
-                f"""
-                QLabel {{
-                    {get_font_family_css()} font-size: {scale_font_size(11)}px;
-                    color: {self._theme["muted"]};
-                    background: rgba(255,255,255,0.03);
-                    border: 1px solid rgba(255,255,255,0.06);
-                    border-radius: 9px;
-                    padding: 2px 8px;
-                }}
-                """
-            )
+            if self.role == "user":
+                # 简洁气泡：无胶囊背景的弱化小字
+                self._ts_label.setStyleSheet(
+                    f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};"
+                )
+            else:
+                self._ts_label.setStyleSheet(
+                    f"""
+                    QLabel {{
+                        {get_font_family_css()} font-size: {scale_font_size(11)}px;
+                        color: {self._theme["muted"]};
+                        background: rgba(255,255,255,0.03);
+                        border: 1px solid rgba(255,255,255,0.06);
+                        border-radius: 9px;
+                        padding: 2px 8px;
+                    }}
+                    """
+                )
         # 刷新 viewer 主题（注入 CSS 变量 + 失效实例渲染缓存）
         # ⚠️ 顺序必须在 _refresh_viewer_font() 之前：主题变化时先让
         # refresh_theme 清掉 _cached_streaming_html 等实例缓存并注入新 CSS
@@ -8536,10 +8601,11 @@ class MessageCard(SimpleCardWidget):
         )
         self._render_welcome_with_body(body_html)
 
-    def _setup_ui(self):
-        main = QVBoxLayout(self)
-        main.setContentsMargins(4, 4, 4, 4)
-        main.setSpacing(4)
+    def _build_card_header(self, main: QVBoxLayout):
+        """头部：头像 + 名称/副标题 + 时间戳/模型名 + 顶部操作按钮 + 分隔线
+
+        仅 assistant / welcome 卡片使用；user 卡片为简洁气泡（见 _setup_user_bubble）。
+        """
         top = QHBoxLayout()
         top.setContentsMargins(4, 0, 4, 0)
         top.setSpacing(6)
@@ -8554,7 +8620,6 @@ class MessageCard(SimpleCardWidget):
             av.setFixedSize(30, 30)
             av.setAlignment(Qt.AlignCenter)
         else:
-            # user 和其他：圆形文字头像
             av_icon = get_icon("用户")
             pixmap = av_icon.pixmap(28, 28)
             av.setPixmap(pixmap)
@@ -8584,11 +8649,8 @@ class MessageCard(SimpleCardWidget):
         if self.role == "welcome":
             self._build_welcome_mode_tabs(top)
         else:
-            # 用户卡片显示时间戳，助手卡片显示模型名称
-            if self.role == "assistant" and self.model_name:
-                label_text = self.model_name
-            else:
-                label_text = self.timestamp
+            # 助手卡片显示模型名称
+            label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
             ts = QLabel(label_text, self)
             self._ts_label = ts
             ts.setVisible(bool(label_text))
@@ -8625,12 +8687,6 @@ class MessageCard(SimpleCardWidget):
                     lambda: self.actionRequested.emit(self.get_plain_text(), "copy"),
                 ),
             ]
-        elif self.role == "user":
-            specs = [
-                (get_icon("复制"), "复制", lambda: self._copy_user_message()),
-                (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
-                (get_icon("删除"), "删除", self.deleteRequested.emit),
-            ]
         else:
             specs = []
         for ic, tp, cb in specs:
@@ -8645,13 +8701,69 @@ class MessageCard(SimpleCardWidget):
         main.addLayout(top)
         main.addWidget(CardSeparator(self))
 
+    def _setup_user_bubble(self, main: QVBoxLayout):
+        """用户消息简洁气泡：纯文本 + 底部 hover 操作行（主流大模型式）
+
+        - 无头像 / "User·Prompt" 标题 / 分隔线
+        - 复制/撤销/删除按钮 hover 浮现（见 enterEvent/leaveEvent），时间戳常显弱化
+        - 宽度自适应见 PlainTextViewer._update_height（idealWidth 收缩，不占满整行）
+        """
+        self.viewer = PlainTextViewer(self)
+        self.viewer.contentHeightChanged.connect(self._update_height)
+        self._viewer_layout.addWidget(self.viewer)
+        main.addWidget(self._viewer_container)
+        self._lazy_rendered = True
+
+        # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
+        # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
+        footer_wrap = QWidget(self)
+        footer_wrap.setStyleSheet("background: transparent;")
+        footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
+        footer = QHBoxLayout(footer_wrap)
+        footer.setContentsMargins(6, 0, 6, 0)
+        footer.setSpacing(6)
+        footer.addStretch()
+
+        ts = QLabel(self.timestamp, self)
+        self._ts_label = ts
+        ts.setVisible(bool(self.timestamp))
+        ts.setStyleSheet(f"{get_font_family_css()} font-size: {scale_font_size(11)}px; color: {self._theme['muted']};")
+        footer.addWidget(ts)
+
+        btns = QWidget(self)
+        self._user_action_btns = btns
+        bl = QHBoxLayout(btns)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(2)
+        for ic, tp, cb in [
+            (get_icon("复制"), "复制", lambda: self._copy_user_message()),
+            (get_icon("撤销"), "撤销到这里", self.undoRequested.emit),
+            (get_icon("删除"), "删除", self.deleteRequested.emit),
+        ]:
+            b = TransparentToolButton(ic, self)
+            b.setToolTip(tp)
+            b.clicked.connect(cb)
+            b.setFixedSize(26, 26)  # 弱化处理：比助手卡 32px 更小
+            install_hover_tooltip(b, delay_ms=200)
+            bl.addWidget(b)
+        btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
+        footer.addWidget(btns)
+        main.addWidget(footer_wrap)
+
+    def _setup_ui(self):
+        main = QVBoxLayout(self)
+        main.setContentsMargins(4, 4, 4, 4)
+        main.setSpacing(4 if self.role != "user" else 0)  # user：正文与时间行零间隙
+
         if self.role == "user":
-            self.viewer = PlainTextViewer(self)
-            self.viewer.contentHeightChanged.connect(self._update_height)
-            self._viewer_layout.addWidget(self.viewer)
-            main.addWidget(self._viewer_container)
-            self._lazy_rendered = True
-        elif self.role == "welcome":
+            # 用户消息：ChatGPT 式简洁气泡（无头像/标题/分隔线），
+            # 右对齐由 chat_layout 的 AlignRight 控制，宽度自适应见 PlainTextViewer
+            self._setup_user_bubble(main)
+        else:
+            self._build_card_header(main)
+
+        # ── 内容区（welcome/assistant 走懒渲染，user 已在气泡方法内创建）──
+        if self.role == "welcome":
             # 欢迎卡片使用懒渲染：占位符，不立即创建 QWebEngine
             # 避免首帧 Chromium 进程创建阻塞主线程（优化前首帧卡顿 200-500ms 的根因）
             placeholder = QLabel("加载中...", self)
@@ -8663,7 +8775,7 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
-        else:
+        elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
             placeholder.setStyleSheet(
@@ -8759,20 +8871,14 @@ class MessageCard(SimpleCardWidget):
         retry_layout.addWidget(self._retry_wait_label)
         main.addWidget(self._retry_status_widget)
 
-        main.addWidget(CardSeparator(self))
+        if self.role != "user":  # 简洁气泡不带底部装饰线
+            main.addWidget(CardSeparator(self))
 
         # ===== 助手卡片底部元信息栏（分割线下方） =====
         if self.role == "assistant":
             self._build_footer_bar(main)
-        self.setStyleSheet(
-            f"""
-            CardWidget {{
-                background-color: {self._theme["bg"]};
-                border: 1px solid {self._theme["border"]};
-                border-radius: 10px;
-            }}
-            """
-        )
+        # 卡片背景/圆角：user 简洁气泡 12px 圆角无边框，其余 10px
+        self._apply_card_style()
 
         # 淡入动画：新消息微妙出现（200ms，仅透明度）
         fade_in_widget(self, 200)
@@ -8826,6 +8932,18 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _apply_card_style(self, border: str = None, bg: str = None):
+        # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
+        if self.role == "user" and not self.error:
+            self.setStyleSheet(
+                f"""
+                CardWidget {{
+                    background-color: {bg or self._base_bg};
+                    border: none;
+                    border-radius: 12px;
+                }}
+                """
+            )
+            return
         self.setStyleSheet(
             f"""
             CardWidget {{
@@ -9015,12 +9133,14 @@ class MessageCard(SimpleCardWidget):
         radius = 16
 
         accent = QColor(self._theme["accent"])
-        accent.setAlpha(95 if self.role == "user" else 75)
-        stripe_width = 4
-        stripe_x = w - stripe_width - 2 if self._theme.get("side") == "right" else 2
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(accent)
-        painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
+        if self.role != "user":
+            # 静态 accent 侧边竖条（user 简洁气泡不画，保持纯净）
+            accent.setAlpha(95 if self.role == "user" else 75)
+            stripe_width = 4
+            stripe_x = w - stripe_width - 2 if self._theme.get("side") == "right" else 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(stripe_x, 10, stripe_width, max(18, h - 20), 3, 3)
 
         if not self._streaming:
             painter.end()
@@ -9394,27 +9514,37 @@ class MessageCard(SimpleCardWidget):
             if not parent:
                 return
             parent_width = parent.width()
-            if self.role == "welcome":
-                horizontal_margin = 20
-            elif self.role == "user":
-                horizontal_margin = 180
+            if self.role == "user":
+                # 与 main_widget 的比例 margin 保持一致（约容器 94%，留少量对齐余量）
+                horizontal_margin = max(150, int(parent_width * 0.15))
             else:
                 horizontal_margin = 20
-
             target_width = max(320, parent_width - horizontal_margin)
 
-        # 性能优化：只有宽度真正变化时才更新
+        # 性能优化：只有宽度真正变化时才更新（user/非 user 统一守卫）
         if not force and target_width == self._last_synced_width:
             return
-
         self._last_synced_width = target_width
+
+        if self.role == "user":
+            # 简洁气泡：释放最小宽，只设上限，
+            # 实际宽度由 PlainTextViewer 按内容最长行自适应收缩
+            self.setMinimumWidth(60)
+            self.setMaximumWidth(target_width)
+            # 上限同步给 viewer（卡内边距 4*2 + viewer 布局边距 8*2），
+            # cap 未变化时 set_width_cap 内部为 no-op
+            if not self._resize_preview_mode and self.viewer is not None:
+                self.viewer.set_width_cap(target_width - 24)
+            return
+
+        # 非 user（assistant/welcome）：固定宽度（min=max）
         if self.minimumWidth() != target_width or self.maximumWidth() != target_width:
             self.blockSignals(True)
             self.setMinimumWidth(target_width)
             self.setMaximumWidth(target_width)
             self.blockSignals(False)
 
-        # 宽度同步后触发 viewer 高度重算（用于 user 卡片的 PlainTextViewer）
+        # 宽度同步后触发 viewer 高度重算（CodeWebViewer 内容重排）
         if not self._resize_preview_mode and hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
@@ -9467,6 +9597,17 @@ class MessageCard(SimpleCardWidget):
 
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
+
+    def enterEvent(self, event):
+        # 用户气泡：hover 浮现操作按钮（复制/撤销/删除），保持静态简洁
+        if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
+            self._user_action_btns.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
+            self._user_action_btns.setVisible(False)
+        super().leaveEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
