@@ -420,6 +420,249 @@ class _FakeCard:
         self.deleted = True
 
 
+# ═══════════════════════════════════════════════════════════════
+# Tab 模式浮动卡片按标签页隔离（per-tab 可见集合投影）
+# ═══════════════════════════════════════════════════════════════
+
+
+class _TabStatefulCard:
+    """带显隐状态跟踪的卡片 widget stub（CardManager 仿真用）"""
+
+    def __init__(self, parent=None):
+        self._parent = parent
+        self._visible = False
+
+    def parent(self):
+        return self._parent
+
+    def setParent(self, parent):
+        self._parent = parent
+
+    def setVisible(self, visible: bool):
+        self._visible = visible
+
+    def isHidden(self) -> bool:
+        return not self._visible
+
+    def windowTitle(self) -> str:
+        return ""
+
+    def deleteLater(self):
+        pass
+
+
+class _TabStatefulCardManager:
+    """带真实显隐状态的 CardManager 仿真（per window_id 记录）"""
+
+    def __init__(self):
+        # window_id -> {"containers": {}, "widgets": {}, "visible": {}, "shown_cbs": {}, "hidden_cbs": {}}
+        self.windows: dict = {}
+
+    def _win(self, window_id):
+        return self.windows.setdefault(
+            window_id,
+            {"containers": {}, "widgets": {}, "visible": {}, "shown_cbs": {}, "hidden_cbs": {}},
+        )
+
+    def register_card(self, window_id, container_type, card_id, widget, system_card=False):
+        w = self._win(window_id)
+        w["containers"][card_id] = container_type
+        w["widgets"][card_id] = widget
+
+    def on_card_shown(self, window_id, card_id, callback):
+        self._win(window_id)["shown_cbs"].setdefault(card_id, []).append(callback)
+
+    def on_card_hidden(self, window_id, card_id, callback):
+        self._win(window_id)["hidden_cbs"].setdefault(card_id, []).append(callback)
+
+    def is_card_visible(self, card_id, window_id) -> bool:
+        w = self.windows.get(window_id)
+        if not w:
+            return False
+        return w["visible"].get(card_id, False)
+
+    def show_card(self, card_id, window_id):
+        w = self._win(window_id)
+        if card_id not in w["containers"]:
+            return
+        widget = w["widgets"].get(card_id)
+        if widget is not None:
+            widget.setVisible(True)
+        w["visible"][card_id] = True
+        for cb in w["shown_cbs"].get(card_id, []):
+            cb(card_id)
+
+    def hide_card(self, card_id, window_id):
+        w = self._win(window_id)
+        if card_id not in w["containers"]:
+            return
+        widget = w["widgets"].get(card_id)
+        if widget is not None:
+            widget.setVisible(False)
+        w["visible"][card_id] = False
+        for cb in w["hidden_cbs"].get(card_id, []):
+            cb(card_id)
+
+    def toggle_card(self, card_id, window_id):
+        if self.is_card_visible(card_id, window_id):
+            self.hide_card(card_id, window_id)
+        else:
+            self.show_card(card_id, window_id)
+
+
+class _TabFakeHost:
+    """模拟 TabManagerWindow 全局卡片宿主的最小 stub"""
+
+    def __init__(self):
+        self._window_id = "__global__"
+        self._card_manager = _TabStatefulCardManager()
+        self._top_card_container = _FakeContainer()
+        self._bottom_card_container = _FakeContainer()
+        self._left_card_container = _FakeContainer()
+        self._right_card_container = _FakeContainer()
+
+
+def _setup_tab_registry(monkeypatch, host=None):
+    """构造 Tab 模式 registry：reset + mock 全局宿主，返回 (reg, host, cm)"""
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    host = host or _TabFakeHost()
+    monkeypatch.setattr(UIPluginRegistry, "_resolve_global_host", lambda self: host)
+    reg.register_floating_card(
+        plugin_name="plug-tab",
+        card_id="plug-tab:card",
+        widget_class=_TabStatefulCard,
+        container="full",
+        title="Tab 卡片",
+    )
+    return reg, host, host._card_manager
+
+
+def test_tab_card_visibility_isolated_per_tab(monkeypatch):
+    """Tab1 打开的卡片切到 Tab2 隐藏、切回 Tab1 恢复（核心隔离行为）"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    # Tab1 打开卡片（先 sync 设定作用域，再打开）
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is True
+    assert "plug-tab:card" in reg._tab_card_visibility.get("tab-1", set())
+
+    # 切到 Tab2：投影隐藏
+    reg.sync_floating_cards_to_tab("tab-2")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is False
+
+    # 切回 Tab1：投影恢复
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is True
+
+    reg.reset()
+
+
+def test_tab_card_independent_records_between_tabs(monkeypatch):
+    """两个标签页各自打开/关闭卡片互不影响对方记录"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    # Tab1 打开
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")
+    # 切到 Tab2 再打开（Tab2 有自己的记录）
+    reg.sync_floating_cards_to_tab("tab-2")
+    reg._show_floating_card("plug-tab:card")
+    assert "plug-tab:card" in reg._tab_card_visibility.get("tab-2", set())
+
+    # Tab2 关闭（toggle 关闭路径）
+    reg._show_floating_card("plug-tab:card")
+    assert "plug-tab:card" not in reg._tab_card_visibility.get("tab-2", set())
+
+    # 切回 Tab1：仍显示（Tab1 记录未受 Tab2 关闭影响）
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is True
+
+    reg.reset()
+
+
+def test_tab_card_close_clears_tab_record(monkeypatch):
+    """Tab1 打开后关闭 → 切走再切回不再自动恢复"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")  # 打开
+    reg._show_floating_card("plug-tab:card")  # toggle 关闭
+    assert "plug-tab:card" not in reg._tab_card_visibility.get("tab-1", set())
+
+    reg.sync_floating_cards_to_tab("tab-2")
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is False
+
+    reg.reset()
+
+
+def test_tab_card_hidden_callback_discards_only_active_tab(monkeypatch):
+    """卡片被外部隐藏（互斥/用户关闭）时仅清除当前标签页记录，切换投影不清除"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")
+    # 模拟互斥隐藏（直接 hide_card → hidden 回调）
+    cm.hide_card("plug-tab:card", "__global__")
+    assert "plug-tab:card" not in reg._tab_card_visibility.get("tab-1", set())
+
+    # 切换投影期间（sync 内部）触发的 hide 不清除集合：
+    # Tab2 打开 → sync(tab-2) 隐藏 → Tab2 记录保留，切回仍恢复
+    reg.sync_floating_cards_to_tab("tab-2")
+    reg._show_floating_card("plug-tab:card")
+    reg.sync_floating_cards_to_tab("tab-1")  # 隐藏（投影），Tab2 记录应保留
+    assert "plug-tab:card" in reg._tab_card_visibility.get("tab-2", set())
+
+    reg.reset()
+
+
+def test_unregister_window_clears_tab_visibility(monkeypatch):
+    """关闭标签页清理该标签的可见集合"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")
+    reg.unregister_window("tab-1")
+    assert "tab-1" not in reg._tab_card_visibility
+    assert reg._active_tab_scope is None
+
+    # 切回已关闭标签（window_id 复用场景）：无记录 → 不显示
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is False
+
+    reg.reset()
+
+
+def test_sync_skips_uninstantiated_cards(monkeypatch):
+    """从未实例化的卡片不参与投影（首次打开时才创建）"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    # 未打开过任何卡片，直接 sync：不应触发 show/hide，也不应创建实例
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert cm.is_card_visible("plug-tab:card", "__global__") is False
+    assert "plug-tab:card" not in reg._card_widget_instances.get("__global__", {})
+
+    reg.reset()
+
+
+def test_unload_plugin_clears_tab_visibility(monkeypatch):
+    """卸载插件时清理所有标签页的可见集合"""
+    reg, host, cm = _setup_tab_registry(monkeypatch)
+
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-tab:card")
+    reg.sync_floating_cards_to_tab("tab-2")
+    reg._show_floating_card("plug-tab:card")
+
+    reg._loaded_plugins.add("plug-tab")
+    reg.unload_plugin("plug-tab")
+    assert all("plug-tab:card" not in s for s in reg._tab_card_visibility.values())
+
+    reg.reset()
+
+
 def _register_move_card(reg, main_widget):
     reg.set_main_widget(main_widget)
     reg.register_floating_card(
