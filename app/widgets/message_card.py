@@ -7583,8 +7583,22 @@ class PlainTextViewer(QWidget):
         if doc.size().height() > 3.0 * fm.lineSpacing():
             bubble_w = self._width_cap
         else:
-            longest = max((fm.horizontalAdvance(line) for line in self._text.splitlines() or [""]), default=0)
-            bubble_w = max(80, min(longest + 32, self._width_cap))  # 最长行 + 余量
+            # 短消息：按最长单行收缩。
+            # 用 QTextLayout 实测行渲染宽度（含 fallback 字体/字距），而非 QFontMetrics：
+            # 特殊字符（emoji/全角标点等）fallback 渲染实际宽度常大于 QFontMetrics
+            # 测量值，旧实现 +32px 余量被 viewer 布局边距(16) + documentMargin(8)
+            # 抵消后仅剩 8px，测量一旦偏小即出现文字溢出气泡右缘。
+            longest = 0.0
+            block = doc.begin()
+            while block.isValid():
+                layout = block.layout()
+                if layout is not None:
+                    for i in range(layout.lineCount()):
+                        longest = max(longest, layout.lineAt(i).naturalTextWidth())
+                block = block.next()
+            # 可用文字宽 = 气泡宽 - 布局边距(8*2) - documentMargin(4*2)，
+            # 故最长行 + 40（16 边距 + 8 docMargin + 16 视觉余量）
+            bubble_w = max(80, min(int(math.ceil(longest)) + 40, self._width_cap))
         if self.maximumWidth() != bubble_w:
             self.setMaximumWidth(bubble_w)
 
