@@ -4,32 +4,6 @@
     "homepage": "https://github.com/martin98-afk/DriFox",
     "plugins": [
         {
-            "name": "autoloop",
-            "description": "AutoLoop 自动循环模式 — 规划→执行→归档三阶段长任务自动执行（对话引擎插件化首例，经 UI 服务门面驱动自建 ConversationCore）",
-            "version": "1.0.0",
-            "author": "DriFox Contributors",
-            "license": "MIT",
-            "categories": [
-                "ui",
-                "agent"
-            ],
-            "source": {
-                "type": "git-subdir",
-                "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/autoloop",
-                "ref": "master"
-            },
-            "components": {
-                "ui": true,
-                "agents": true
-            },
-            "homepage": "https://github.com/martin98-afk/DriFox",
-            "icon": {
-                "light": "icons/无限.svg",
-                "dark": "icons/无限_light.svg"
-            }
-        },
-        {
             "name": "context-usage-stats",
             "description": "对话上下文用量统计 — 展示最近对话的 token 用量、消息数量趋势、会话活跃度图表",
             "version": "0.1.0",
