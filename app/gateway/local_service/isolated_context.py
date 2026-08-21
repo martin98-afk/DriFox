@@ -94,7 +94,11 @@ class IsolatedChatContext:
 
     def create_chat_engine(self, worker_callbacks=None, api_mode=True):
         from app.core.engines.ui import ChatEngine
-        engine = ChatEngine(
+        from app.plugins.registries.engine_registry import create_engine_for_slot
+
+        engine = create_engine_for_slot(
+            "ui",
+            ChatEngine,
             session_manager=self._session_manager,
             get_model_config=self._get_model_config,
             get_context_provider=self._get_context_provider,

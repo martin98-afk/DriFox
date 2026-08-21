@@ -726,8 +726,14 @@ class ChatBackend(QObject):
             return
         try:
             from app.core.engines.ui import ChatEngine
+            from app.plugins.registries.engine_registry import create_engine_for_slot
+            from app.plugins.loaders.runtime_component_loader import ensure_engine_watcher
 
-            self._chat_engine = ChatEngine(
+            # 触发引擎 watcher（注册/热重载），无插件时 no-op
+            ensure_engine_watcher()
+            self._chat_engine = create_engine_for_slot(
+                "ui",
+                ChatEngine,
                 session_manager=self._session_manager,
                 get_model_config=self._get_model_config,
                 tool_executor=self._tool_executor,
