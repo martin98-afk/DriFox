@@ -252,3 +252,71 @@ class TestVerticalPerCardSizeMemory:
         mgr.show_card("card_a", w._window_id)
         _pump(300)
         assert abs(container.height() - dragged_h) <= 6, f"A 高度记忆丢失: h={container.height()}"
+
+
+class TestResizeWhileOtherCardOpen:
+    def test_resize_small_while_b_open_then_reopen_a_restores_memory(self):
+        """回归：B 展开时把窗口缩到比 A 记忆宽度还小，再重开 A、窗口拉回
+        大尺寸后，A 必须恢复到记忆宽度（而非卡在压缩值）。
+
+        根因：dock 折叠 _release_dock_space 把槽位置 0，重开 A 时窗口太小
+        _restore_dock_size 借不到空间静默失败；窗口拉大后既无 resizeEvent
+        （dock 自身尺寸未变，空间被对话区吸收）也无补恢复路径 → 记忆视觉
+        上永久丢失。修复：监听宿主 splitter 几何变化，空间富余时恢复记忆。
+        """
+        w = _MiniDockHost()
+        w.resize(900, 600)
+        w.show()
+        _pump(50)
+        container = w._left_container
+        mgr = w._card_manager
+
+        mgr.show_card("card_a", w._window_id)
+        _pump(300)
+        _drag_splitter(w._splitter, [450, 444])
+        assert abs(container.width() - 450) <= 2
+
+        # 打开 B（不同 splitter）
+        mgr.show_card("card_b", w._window_id)
+        _pump(300)
+
+        # B 展开时把窗口缩到 300（< A 记忆 450）：splitter 比例压缩 dock
+        w.resize(300, 600)
+        _pump(200)
+        assert container.width() < 450, "窗口缩小时 dock 应被压缩"
+
+        # 重开 A（窗口仍小，dock 只能缩到可用空间，记忆暂不可达）
+        mgr.show_card("card_a", w._window_id)
+        _pump(300)
+        assert container.width() <= 450
+
+        # 窗口拉回大尺寸：dock 必须恢复到记忆宽度 450
+        w.resize(900, 600)
+        _pump(300)
+        assert abs(container.width() - 450) <= 6, f"A 记忆丢失（窗口拉大未恢复）: w={container.width()} 期望≈450"
+
+    def test_resize_while_b_open_does_not_corrupt_a_memory_dict(self):
+        """B 展开时窗口缩放不应污染 A 的记忆槽（记忆 dict 始终保持 450）"""
+        w = _MiniDockHost()
+        w.resize(900, 600)
+        w.show()
+        _pump(50)
+        container = w._left_container
+        mgr = w._card_manager
+
+        mgr.show_card("card_a", w._window_id)
+        _pump(300)
+        _drag_splitter(w._splitter, [450, 444])
+        assert abs(container.width() - 450) <= 2
+
+        mgr.show_card("card_b", w._window_id)
+        _pump(300)
+        w.resize(300, 600)
+        _pump(200)
+        w.resize(900, 600)
+        _pump(200)
+
+        mgr.show_card("card_a", w._window_id)
+        _pump(300)
+        assert container._dock_card_sizes.get("card_a") == 450, f"A 记忆槽被污染: {container._dock_card_sizes}"
+        assert abs(container.width() - 450) <= 6, f"A 记忆丢失: w={container.width()}"

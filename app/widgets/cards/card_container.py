@@ -209,6 +209,10 @@ class CardContainer(QWidget):
         # 用户拖拽把手时实时记忆到可见卡片（记忆时机不依赖折叠——折叠时
         # 卡片已 hidden 拿不到归属；拖拽即记忆，重开按卡片恢复）
         splitter.splitterMoved.connect(self._on_dock_splitter_moved)
+        # 监听宿主 splitter 自身几何变化（窗口缩放 / 对话区变化时 splitter
+        # 会重排，但 dock 容器自身尺寸可能不变 → 其 resizeEvent 不触发）。
+        # 用于窗口变大后把 dock 恢复到记忆尺寸（详见 _ensure_splitter_fits）。
+        splitter.installEventFilter(self)
         # 停靠面板样式（四角圆角独立面板，与对话区边界更清晰）
         self._apply_background_style()
         # 折叠态直接隐藏：让 splitter handle 一并消失，避免 0 宽容器留下拖拽缝
@@ -440,6 +444,10 @@ class CardContainer(QWidget):
         avail = sp.width() - handle_total
         total = sum(sizes)
         if total <= avail:
+            # 无溢出：空间富余（窗口变大 / 对话区让位吸收）。把展开中的 dock
+            # 恢复到其记忆尺寸——reopen 时曾因空间不足 _restore_dock_size 借
+            # 不到空间而静默失败，窗口变宽后在此补恢复，避免记忆视觉上永久丢失。
+            self._restore_dock_memory_if_room()
             return
         overflow = total - avail
 
@@ -469,6 +477,30 @@ class CardContainer(QWidget):
                 overflow -= cut
         if new_sizes != sizes:
             sp.setSizes(new_sizes)
+        # 溢出已完全消化（空间富余）：同样补恢复 dock 记忆尺寸，保持一致
+        if overflow <= 0:
+            self._restore_dock_memory_if_room()
+
+    def _restore_dock_memory_if_room(self):
+        """空间富余时把展开中的 dock 恢复到记忆尺寸（窗口变大后补恢复记忆）
+
+        仅对非 follow_content 的 dock 生效（follow_content 卡片高度严格跟随
+        内容，不套记忆）。记忆取自当前可见卡片 _dock_card_sizes，仅当 > 当前
+        槽位时才恢复，避免无谓 setSizes / 与用户拖拽抢尺寸（拖拽时 splitterMoved
+        已先把记忆同步为拖拽值，故 mem == cur 不会触发恢复）。
+        """
+        if self._overlay_mode or self._dock_splitter is None:
+            return
+        if not self._is_expanded():
+            return
+        if self._visible_cards_follow_content():
+            return
+        if not any(not w.isHidden() for w in self._cards.values()):
+            return
+        mem = self._visible_dock_mem_size()
+        if mem <= 0 or mem <= self._axis_current():
+            return
+        self._restore_dock_size(mem)
 
     def showEvent(self, event):
         """容器从隐藏变为可见时，如果有可见卡片则重新展开
@@ -847,7 +879,15 @@ class CardContainer(QWidget):
         self._schedule_expand()
 
     def eventFilter(self, obj, event):
-        # 先判事件类型再访问 _cards：__new__ 构造的容器（测试/析构中）可能无 _cards
+        # 先判事件类型再访问属性：__new__ 构造 / 未走完 __init__ 的容器
+        # （测试或析构中）可能尚无 _dock_splitter / _cards 属性，用 getattr 防御。
+        dock_sp = getattr(self, "_dock_splitter", None)
+        if obj is dock_sp and event.type() == QEvent.Resize:
+            # 宿主 splitter 几何变化（窗口缩放 / 对话区变化）。容器自身尺寸可能未
+            # 变（空间被对话区吸收）故其 resizeEvent 不触发；此处对齐驱动
+            # _ensure_splitter_fits：溢出压缩 + 空间富余时恢复 dock 记忆尺寸。
+            QTimer.singleShot(0, self._ensure_splitter_fits)
+            return False
         if obj in getattr(self, "_cards", {}).values():
             if event.type() == QEvent.Hide:
                 # 卡片被隐藏（无论经 CardManager 与否，如 todo 关闭按钮/空列表
