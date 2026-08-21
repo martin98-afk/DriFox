@@ -166,7 +166,7 @@
         {
             "name": "system-cleaner",
             "description": "系统清理工具 — 一键清理 DriFox 缓存垃圾（备份/日志/应用缓存/截图/归档会话），释放磁盘空间与内存",
-            "version": "0.1.0",
+            "version": "0.1.1",
             "author": "DriFox Contributors",
             "license": "MIT",
             "categories": [
