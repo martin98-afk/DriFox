@@ -64,6 +64,42 @@ class AutoLoopController:
         except TypeError, RuntimeError:
             pass
 
+    def _hide_card_via_host(self, card_id: str, ctx: Dict[str, Any]):
+        """经卡片注册的 host 作用域隐藏浮动卡（Tab 模式 full 卡挂全局容器）"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        ui_registry = UIPluginRegistry.get_instance()
+        host = ui_registry._resolve_global_host() or ctx.get("main_widget")
+        card_manager = getattr(host, "_card_manager", None)
+        host_wid = getattr(host, "_window_id", None)
+        if card_manager is not None and host_wid:
+            card_manager.hide_card(card_id, host_wid)
+        else:
+            services = ctx.get("services") or {}
+            services.get("hide_card", lambda _c: None)(card_id)
+
+    def _hide_running_card_via_host(self, card, services: Dict[str, Any]):
+        """运行卡收尾隐藏：host 作用域同步 CardManager + widget 兜底 hide"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        hidden = False
+        try:
+            ui_registry = UIPluginRegistry.get_instance()
+            host = ui_registry._resolve_global_host()
+            card_manager = getattr(host, "_card_manager", None)
+            host_wid = getattr(host, "_window_id", None)
+            if card_manager is not None and host_wid:
+                card_manager.hide_card("running", host_wid)
+                hidden = True
+        except Exception:
+            pass
+        if not hidden:
+            services.get("hide_card", lambda _c: None)("running")
+        try:
+            card.hide()
+        except RuntimeError, AttributeError:
+            pass
+
     def _on_card_destroyed(self, window_id: str):
         card = self._running_cards.pop(window_id, None)
         session = self._sessions.get(window_id)
@@ -109,23 +145,33 @@ class AutoLoopController:
         else:
             logger.warning(f"[AutoLoop] Project path does not exist: {abs_path}")
 
-        # 隐藏配置卡、显示运行卡（full 覆盖层）
-        services.get("hide_card", lambda _c: None)("config")
+        # 隐藏配置卡（full 卡注册在全局作用域，须经 host 卡片管理器隐藏，
+        # 聊天窗口级的 services.hide_card 在 Tab 模式下不生效）
+        self._hide_card_via_host("config", ctx)
 
         session = self._sessions.setdefault(window_id, _WindowSession())
         session.window_id = window_id
         session.services = services
         session.finishing = False
 
-        running_card = self._running_cards.get(window_id)
-        if running_card is None:
-            logger.warning("[AutoLoop] running card not bound yet; start aborted")
-            return
-
-        # 确保运行卡显示在覆盖层（toggle：不可见 → 显示）
+        # 显示运行卡（full 覆盖层）。运行卡懒创建：首次 toggle 才构造实例，
+        # showEvent 触发 bind_running_card 完成绑定，再从注册表取回实例。
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        UIPluginRegistry.get_instance().toggle_floating_card("running", main_widget=ctx.get("main_widget"))
+        ui_registry = UIPluginRegistry.get_instance()
+        ui_registry.toggle_floating_card("running", main_widget=ctx.get("main_widget"))
+        running_card = self._running_cards.get(window_id)
+        if running_card is None:
+            # 兜底：直接从注册表实例缓存取（showEvent 绑定失败的极端场景）
+            running_card = ui_registry.get_card_widget("running")
+            if running_card is not None:
+                self._running_cards[window_id] = running_card
+                session.running_card = running_card
+        if running_card is None:
+            logger.error("[AutoLoop] running card unavailable after toggle; start aborted")
+            services.get("notify", lambda *_: None)("AutoLoop", "运行卡初始化失败")
+            services.get("exit_exclusive_ui_mode", lambda _s: None)(PLUGIN_ID)
+            return
         running_card.show_stop_button()
         running_card.start_animation()
         running_card.set_max_tokens(config.max_tokens)
@@ -308,9 +354,11 @@ class AutoLoopController:
         if card:
             try:
                 card.stop_animation()
-                card.hide()
             except RuntimeError, AttributeError:
                 pass
+            # 经 host 卡片管理器同步隐藏（Tab 模式 full 卡挂全局作用域，
+            # 直接 card.hide() 会致 CardManager 状态失步、下轮 toggle 翻转错）
+            self._hide_running_card_via_host(card, services)
 
         # 保存消息到当前会话
         worker = session.worker

@@ -1147,6 +1147,20 @@ class UIPluginRegistry:
     def get_floating_cards(self) -> Dict[str, FloatingCardInfo]:
         return dict(self._floating_cards)
 
+    def get_card_widget(self, card_id: str, window_id: str = "") -> Optional[Any]:
+        """获取浮动卡在某窗口的实例（懒创建：未显示过则 None）
+
+        供插件在 toggle 显示后取回实例（如 autoloop 运行卡绑定控制器）。
+        window_id 为空时回退全局兼容缓存（单窗口模式）。
+        """
+        if window_id and window_id in self._card_widget_instances:
+            return self._card_widget_instances[window_id].get(card_id)
+        for instances in self._card_widget_instances.values():
+            w = instances.get(card_id)
+            if w is not None:
+                return w
+        return None
+
     def is_loaded(self, plugin_name: str) -> bool:
         return plugin_name in self._loaded_plugins
 
